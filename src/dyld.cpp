@@ -116,6 +116,7 @@ static const struct mach_header*	sMainExecutableMachHeader = NULL;
 static cpu_type_t					sHostCPU;
 static cpu_subtype_t				sHostCPUsubtype;
 static ImageLoader*					sMainExecutable = NULL;
+static bool							sAllImagesMightContainUnlinkedImages;	 // necessary until will support dylib unloading
 static std::vector<ImageLoader*>	sAllImages;
 static std::vector<ImageLoader*>	sImageRoots;
 static std::vector<ImageLoader*>	sImageFilesNeedingTermination;
@@ -259,6 +260,15 @@ void removeImage(ImageLoader* image)
 		(*it)(image->machHeader(), image->getSlide());
 	}
 	
+	// tell all interested images
+	for (std::vector<ImageLoader*>::iterator it=sImagesToNotifyAboutOtherImages.begin(); it != sImagesToNotifyAboutOtherImages.end(); it++) {
+		dyld_image_info info;
+		info.imageLoadAddress = image->machHeader();
+		info.imageFilePath = image->getPath();
+		info.imageFileModDate = image->lastModified();
+		(*it)->doNotification(dyld_image_removing, 1, &info);
+	}
+
 	// remove from master list
 	for (std::vector<ImageLoader*>::iterator it=sAllImages.begin(); it != sAllImages.end(); it++) {
 		if ( *it == image ) {
@@ -503,8 +513,9 @@ void processDyldEnvironmentVarible(const char* key, const char* value)
 				sEnv.DYLD_ROOT_PATH = parseColonList(value);
 				for (int i=0; sEnv.DYLD_ROOT_PATH[i] != NULL; ++i) {
 					if ( sEnv.DYLD_ROOT_PATH[i][0] != '/' ) {
-						fprintf(stderr, "dyld: warning DYLD_ROOT_PATH not used because it contains a non-absolute path");
+						fprintf(stderr, "dyld: warning DYLD_ROOT_PATH not used because it contains a non-absolute path\n");
 						sEnv.DYLD_ROOT_PATH = NULL;
+						break;
 					}
 				}
 			}
@@ -642,7 +653,7 @@ void processDyldEnvironmentVarible(const char* key, const char* value)
 	}
 }
 
-static void checkEnvironmentVariables(const char* envp[])
+static void checkEnvironmentVariables(const char* envp[], bool ignoreEnviron)
 {
 	const char* home = NULL;
 	const char** p;
@@ -650,10 +661,10 @@ static void checkEnvironmentVariables(const char* envp[])
 		const char* keyEqualsValue = *p;
 	    if ( strncmp(keyEqualsValue, "DYLD_", 5) == 0 ) {
 			const char* equals = strchr(keyEqualsValue, '=');
-			if ( equals != NULL ) {
+			if ( (equals != NULL) && !ignoreEnviron ) {
 				const char* value = &equals[1];
 				const int keyLen = equals-keyEqualsValue;
-				char key[keyLen];
+				char key[keyLen+1];
 				strncpy(key, keyEqualsValue, keyLen);
 				key[keyLen] = '\0';
 				processDyldEnvironmentVarible(key, value);
@@ -731,15 +742,36 @@ bool validImage(ImageLoader* possibleImage)
 
 uint32_t getImageCount()
 {
-	return sAllImages.size();
+	if ( sAllImagesMightContainUnlinkedImages ) {
+		uint32_t count = 0;
+		for (std::vector<ImageLoader*>::iterator it=sAllImages.begin(); it != sAllImages.end(); it++) {
+			if ( (*it)->isLinked() )
+				++count;
+		}
+		return count;
+	}
+	else {
+		return sAllImages.size();
+	}
 }
 
 ImageLoader* getIndexedImage(unsigned int index)
 {
-	if ( index < sAllImages.size() )
-		return sAllImages[index];
-	else
-		return NULL;
+	if ( sAllImagesMightContainUnlinkedImages ) {
+		uint32_t count = 0;
+		for (std::vector<ImageLoader*>::iterator it=sAllImages.begin(); it != sAllImages.end(); it++) {
+			if ( (*it)->isLinked() ) {
+				if ( index == count )
+					return *it;
+				++count;
+			}
+		}
+	}
+	else {
+		if ( index < sAllImages.size() )
+			return sAllImages[index];
+	}
+	return NULL;
 }
 
 ImageLoader* findImageByMachHeader(const struct mach_header* target)
@@ -1142,7 +1174,7 @@ static ImageLoader* loadPhase6(int fd, struct stat& stat_buf, const char* path, 
 			pread(fd, firstPage, 4096, fileOffset);
 		}
 		else {
-			throw "no matching architecture in fat wrapper";
+			throw "no matching architecture in universal wrapper";
 		}
 	}
 	
@@ -1425,8 +1457,8 @@ static ImageLoader* loadPhase1(const char* path, const LoadContext& context, std
 	if ( image != NULL )
 		return image;
 	
-	// try fallback paths
-	if ( (sEnv.DYLD_FALLBACK_FRAMEWORK_PATH != NULL) || (sEnv.DYLD_FALLBACK_LIBRARY_PATH != NULL) ) {
+	// try fallback paths during second time (will open file)
+	if ( (exceptions != NULL) && ((sEnv.DYLD_FALLBACK_FRAMEWORK_PATH != NULL) || (sEnv.DYLD_FALLBACK_LIBRARY_PATH != NULL)) ) {
 		image = loadPhase2(path, context, sEnv.DYLD_FALLBACK_FRAMEWORK_PATH, sEnv.DYLD_FALLBACK_LIBRARY_PATH, exceptions);
 		if ( image != NULL )
 			return image;
@@ -1551,6 +1583,20 @@ ImageLoader* cloneImage(ImageLoader* image)
 
 ImageLoader* loadFromMemory(const uint8_t* mem, uint64_t len, const char* moduleName)
 {
+	// if fat wrapper, find usable sub-file
+	const fat_header* memStartAsFat = (fat_header*)mem;
+	uint64_t fileOffset = 0;
+	uint64_t fileLength = len;
+	if ( memStartAsFat->magic == OSSwapBigToHostInt32(FAT_MAGIC) ) {
+		if ( fatFindBest(memStartAsFat, &fileOffset, &fileLength) ) {
+			mem = &mem[fileOffset];
+			len = fileLength;
+		}
+		else {
+			throw "no matching architecture in universal wrapper";
+		}
+	}
+
 	// try mach-o each loader
 	if ( isCompatibleMachO(mem) ) {
 		ImageLoader* image = new ImageLoaderMachO(moduleName, (mach_header*)mem, len, gLinkContext);
@@ -1819,7 +1865,23 @@ static void setContext(int argc, const char* argv[], const char* envp[], const c
 	gLinkContext.apple					= apple;
 }
 
-
+static bool checkEmulation()
+{
+#if __i386__
+	int mib[] = { CTL_KERN, KERN_CLASSIC, getpid() };
+	int is_classic = 0;
+	size_t len = sizeof(int);
+	int ret = sysctl(mib, 3, &is_classic, &len, NULL, 0);
+	if ((ret != -1) && is_classic) {
+		// When a 32-bit ppc program is run under emulation on an Intel processor,
+		// we want any i386 dylibs (e.g. the emulator) to not load in the shared region
+		// because the shared region is being used by ppc dylibs
+		gLinkContext.sharedRegionMode = ImageLoader::kDontUseSharedRegion;
+		return true;
+	}
+#endif
+	return false;
+}
 
 void link(ImageLoader* image, ImageLoader::BindingLaziness bindness, ImageLoader::InitializerRunning runInitializers)
 {
@@ -1841,7 +1903,13 @@ void link(ImageLoader* image, ImageLoader::BindingLaziness bindness, ImageLoader
 	}
 
 	// process images
-	image->link(gLinkContext, bindness, runInitializers, sAddImageCallbacks.size());
+	try {
+		image->link(gLinkContext, bindness, runInitializers, sAddImageCallbacks.size());
+	}
+	catch (const char* msg) {
+		sAllImagesMightContainUnlinkedImages = true;
+		throw msg;
+	}
 	
 #if OLD_GDB_DYLD_INTERFACE
 	// notify gdb that loaded libraries have changed
@@ -1860,26 +1928,23 @@ uintptr_t
 _main(const struct mach_header* mainExecutableMH, int argc, const char* argv[], const char* envp[], const char* apple[])
 {	
 	// Pickup the pointer to the exec path.
-	const char* executable = apple[0];
-	if ( executable[0] == '/' ) {
-		// have full path, use it
-		sExecPath = executable;
-	}
-	else {
+	sExecPath = apple[0];
+	if ( sExecPath[0] != '/' ) {
 		// have relative path, use cwd to make absolute
 		char cwdbuff[MAXPATHLEN];
 	    if ( getcwd(cwdbuff, MAXPATHLEN) != NULL ) {
 			// maybe use static buffer to avoid calling malloc so early...
-			char* s = new char[strlen(cwdbuff) + strlen(executable) + 2];
+			char* s = new char[strlen(cwdbuff) + strlen(sExecPath) + 2];
 			strcpy(s, cwdbuff);
 			strcat(s, "/");
-			strcat(s, executable);
+			strcat(s, sExecPath);
 			sExecPath = s;
 		}
 	}
 	uintptr_t result = 0;
 	sMainExecutableMachHeader = mainExecutableMH;
-	checkEnvironmentVariables(envp);
+	bool isEmulated = checkEmulation();
+	checkEnvironmentVariables(envp, isEmulated);
 	if ( sEnv.DYLD_PRINT_OPTS ) 
 		printOptions(argv);
 	if ( sEnv.DYLD_PRINT_ENV ) 

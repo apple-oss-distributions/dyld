@@ -24,16 +24,25 @@ TESTROOT = ../..
 include ${TESTROOT}/include/common.makefile
 
 run: all
-	cd absent/  && ../${TESTROOT}/bin/exit-non-zero-pass.pl "pass message" "fail message" ./main
-	cd present/ && ./main
+	${TESTROOT}/bin/exit-zero-pass.pl "dlsym-RTLD_NEXT-missing with circular libraries" "dlsym-RTLD_NEXT-missing with circular libraries" ./main
 
-all: foo.c main.c
-	${CC} -dynamiclib -prebind -seg1addr 400000 -o libfoo.dylib foo.c
-	mkdir -p absent/
-	export MACOSX_DEPLOYMENT_TARGET=10.2 && ${CC} -prebind -I${TESTROOT}/include -L. -lfoo -DLIB_ABSENT  -o absent/main  main.c
-	mkdir -p present/
-	export MACOSX_DEPLOYMENT_TARGET=10.2 && ${CC} -prebind -I${TESTROOT}/include -L. -lfoo -DLIB_PRESENT -o present/main main.c
-	mv libfoo.dylib present/
+all: main 
 
+main : main.c foo1.dylib
+	${CC} ${CCFLAGS} -I${TESTROOT}/include -o main main.c foo1.dylib
+
+
+foo1.dylib : foo1.c foo2.dylib
+	${CC} ${CCFLAGS} -dynamiclib foo1.c -o foo1.dylib foo2.dylib
+
+foo2.dylib : foo2.c foo3.dylib
+	${CC} ${CCFLAGS} -dynamiclib foo2.c -o foo2.dylib foo3.dylib
+
+foo3.dylib : foo3.c 
+	${CC} ${CCFLAGS} -dynamiclib foo1.c -o foo1-temp.dylib -install_name foo1.dylib
+	${CC} ${CCFLAGS} -dynamiclib foo3.c -o foo3.dylib foo1-temp.dylib
+	rm foo1-temp.dylib
+	
 clean:
-	${RM} ${RMFLAGS} *~ libfoo.dylib absent present
+	${RM} ${RMFLAGS} *~ main test.bundle foo1.dylib foo2.dylib foo3.dylib
+
