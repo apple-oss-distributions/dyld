@@ -29,15 +29,15 @@ run: all
 all: main 
 
 main : main.c libfoo.dylib
-	${CC} ${CCFLAGS} -I${TESTROOT}/include -o main main.c libfoo.dylib
+	${CC} ${CCFLAGS} -I${TESTROOT}/include -o main main.c libfoo.dylib 
 
 
 libfoo.dylib : foo.c libbar.dylib
-	${CC} ${CCFLAGS} -dynamiclib foo.c -o libfoo.dylib libbar.dylib -flat_namespace -prebind -seg1addr 20000
+	export MACOSX_DEPLOYMENT_TARGET=10.2 && ${CC} ${CCFLAGS} -dynamiclib foo.c -o libfoo.dylib libbar.dylib -flat_namespace -prebind -seg1addr 20000
 
 
 libbar.dylib : bar.c
-	${CC} ${CCFLAGS} -dynamiclib bar.c -o libbar.dylib -prebind -seg1addr 30000
+	export MACOSX_DEPLOYMENT_TARGET=10.2 && ${CC} ${CCFLAGS} -dynamiclib bar.c -o libbar.dylib -prebind -seg1addr 30000
 
 
 

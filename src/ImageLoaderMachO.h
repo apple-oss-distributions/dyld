@@ -43,7 +43,7 @@ class ImageLoaderMachO : public ImageLoader {
 public:
 										ImageLoaderMachO(const char* path, int fd, const uint8_t firstPage[4096], uint64_t offset, uint64_t len, const struct stat& info, const LinkContext& context);
 										ImageLoaderMachO(const char* moduleName, const struct mach_header* mh, uint64_t len, const LinkContext& context);
-	virtual								~ImageLoaderMachO()  {}
+	virtual								~ImageLoaderMachO();
 
 	const char*							getInstallPath() const;
 	virtual void*						getMain() const;
@@ -107,13 +107,15 @@ private:
 
 			void		init();
 			void		parseLoadCmds();
+			uintptr_t	bindIndirectSymbol(uintptr_t* ptrToBind, const struct macho_section* sect, const char* symbolName, uintptr_t targetAddr, ImageLoader* targetImage, const LinkContext& context);
 			void		doBindIndirectSymbolPointers(const LinkContext& context, BindingLaziness bindness, bool onlyCoalescedSymbols);
 			void		doBindExternalRelocations(const LinkContext& context, bool onlyCoalescedSymbols);
 			uintptr_t	resolveUndefined(const LinkContext& context, const struct macho_nlist* symbol, bool twoLevel, ImageLoader **foundIn);
 			uintptr_t	getRelocBase();
+			uintptr_t	getFirstWritableSegmentAddress();
 			void		doImageInit(const LinkContext& context);
 			void		doModInitFunctions(const LinkContext& context);
-			void		setupLazyPointerHandler();
+			void		setupLazyPointerHandler(const LinkContext& context);
 			void		applyPrebindingToDATA(uint8_t* fileToPrebind);
 			void		applyPrebindingToLoadCommands(const LinkContext& context, uint8_t* fileToPrebind, time_t timestamp);
 			void		applyPrebindingToLinkEdit(const LinkContext& context, uint8_t* fileToPrebind);
@@ -128,6 +130,7 @@ private:
 			void		initMappingTable(uint64_t offsetInFat, _shared_region_mapping_np *mappingTable);
 #endif
 			bool		needsCoalescing() const;
+			bool		isAddrInSection(uintptr_t addr, uint8_t sectionIndex);
 			
 	static	bool				symbolRequiresCoalescing(const struct macho_nlist* symbol); 
 	static uintptr_t			bindLazySymbol(const mach_header*, uintptr_t* lazyPointer);
@@ -153,10 +156,11 @@ private:
 	const struct twolevel_hints_command*	fTwoLevelHints;
 	const struct dylib_command*				fDylibID;
 	const char*								fReExportThruFramework;
-	SegmentMachO*							fTextSegmentWithFixups; // NULL unless __TEXT segment has fixups
+	class SegmentMachO*						fTextSegmentWithFixups; // NULL unless __TEXT segment has fixups
 
 	static uint32_t					fgHintedBinaryTreeSearchs;
 	static uint32_t					fgUnhintedBinaryTreeSearchs;
+	static uint32_t					fgCountOfImagesWithWeakExports;
 };
 
 

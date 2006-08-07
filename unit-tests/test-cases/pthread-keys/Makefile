@@ -23,33 +23,13 @@
 TESTROOT = ../..
 include ${TESTROOT}/include/common.makefile
 
-ifeq "-arch ppc" "$(ARCH)"
-	EXTRA_FLAG = -maltivec -force_cpusubtype_ALL
-else 
-	ifeq "-arch ppc64" "$(ARCH)"
-		EXTRA_FLAG = -maltivec
-	else
-		ifeq "-arch i386" "$(ARCH)"
-			EXTRA_FLAG = ""
-		endif
-	endif
-endif
-
-
-
-run: all
+run: main
 	./main
 
-all: main 
 
-main : main.c libfoo.dylib
-	${CC} ${CCFLAGS} -I${TESTROOT}/include -o main main.c libfoo.dylib ${EXTRA_FLAG}
-
-
-libfoo.dylib : foo.c
-	${CC} ${CCFLAGS} -dynamiclib foo.c -o libfoo.dylib ${EXTRA_FLAG}
+main : main.c
+	${CC} -I${TESTROOT}/include main.c -o main
 
 
 clean:
-	${RM} ${RMFLAGS} *~ main libfoo.dylib
-
+	${RM} ${RMFLAGS} *~  main 

@@ -38,6 +38,10 @@
 	#include <mach-o/ppc/reloc.h>
 #endif
 
+#ifndef S_ATTR_SELF_MODIFYING_CODE
+  #define S_ATTR_SELF_MODIFYING_CODE 0x04000000
+#endif
+
 #include "ImageLoaderMachO.h"
 #include "mach-o/dyld_gdb.h"
 
@@ -72,9 +76,11 @@ extern "C" void sys_icache_invalidate(void *, size_t);
 	struct macho_routines_command	: public routines_command  {};	
 #endif
 
+	#define POINTER_RELOC GENERIC_RELOC_VANILLA
 
 uint32_t ImageLoaderMachO::fgHintedBinaryTreeSearchs = 0;
 uint32_t ImageLoaderMachO::fgUnhintedBinaryTreeSearchs = 0;
+uint32_t ImageLoaderMachO::fgCountOfImagesWithWeakExports = 0;
 
 
 //#define LINKEDIT_USAGE_DEBUG 1
@@ -176,6 +182,12 @@ ImageLoaderMachO::ImageLoaderMachO(const char* path, int fd, const uint8_t first
 	this->parseLoadCmds();
 }
 
+ImageLoaderMachO::~ImageLoaderMachO()
+{
+	// keep count of images with weak exports
+	if ( this->hasCoalescedExports() )
+		--fgCountOfImagesWithWeakExports;
+}
 
 
 
@@ -188,7 +200,8 @@ void ImageLoaderMachO::instantiateSegments(const uint8_t* fileData)
 	const struct load_command* cmd = cmds;
 	for (unsigned long i = 0; i < cmd_count; ++i) {
 		if ( cmd->cmd == LC_SEGMENT_COMMAND ) {
-			fSegments.push_back(new SegmentMachO((struct macho_segment_command*)cmd, this, fileData));
+			if ( (((struct macho_segment_command*)cmd)->vmsize != 0) || !fIsSplitSeg )
+				fSegments.push_back(new SegmentMachO((struct macho_segment_command*)cmd, this, fileData));
 		}
 		cmd = (const struct load_command*)(((char*)cmd)+cmd->cmdsize);
 	}
@@ -398,6 +411,8 @@ ImageLoaderMachO::sharedRegionMapFilePrivateOutside(int fd,
 					}
 					sNextAltLoadAddress += 0x00100000;  // skip ahead 1MB and try again
 					if ( (sNextAltLoadAddress & 0xF0000000) == 0x90000000 )
+						sNextAltLoadAddress = 0xB0000000;
+					if ( (sNextAltLoadAddress & 0xF0000000) == 0xF0000000 )
 						throw "can't map split seg anywhere";
 					foundRoom = false;
 					break;
@@ -895,6 +910,10 @@ void ImageLoaderMachO::parseLoadCmds()
 		}
 	}
 
+	// keep count of prebound images with weak exports
+	if ( this->hasCoalescedExports() )
+		++fgCountOfImagesWithWeakExports;
+
 	// walk load commands (mapped in at start of __TEXT segment)
 	const uint32_t cmd_count = ((macho_header*)fMachOData)->ncmds;
 	const struct load_command* const cmds = (struct load_command*)&fMachOData[sizeof(macho_header)];
@@ -1176,19 +1195,25 @@ ImageLoader::LibraryInfo ImageLoaderMachO::doGetLibraryInfo()
 	return info;
 }
 
+uintptr_t ImageLoaderMachO::getFirstWritableSegmentAddress()
+{
+	// in split segment libraries r_address is offset from first writable segment
+	for (std::vector<class Segment*>::iterator it=fSegments.begin(); it != fSegments.end(); ++it) {
+		if ( (*it)->writeable() ) {
+			return (*it)->getActualLoadAddress();
+		}
+	}
+	throw "no writable segment";
+}
 
 uintptr_t ImageLoaderMachO::getRelocBase()
 {
+#if __ppc__ || __i386__
 	if ( fIsSplitSeg ) {
 		// in split segment libraries r_address is offset from first writable segment
-		const unsigned int segmentCount = fSegments.size();
-		for(unsigned int i=0; i < segmentCount; ++i){
-			Segment* seg = fSegments[i];
-			if ( seg->writeable() ) {
-				return seg->getActualLoadAddress();
-			}
-		}
+		return getFirstWritableSegmentAddress();
 	}
+#endif
 	
 	// in non-split segment libraries r_address is offset from first segment
 	return fSegments[0]->getActualLoadAddress();
@@ -1265,6 +1290,7 @@ void ImageLoaderMachO::doRebase(const LinkContext& context)
 	const relocation_info* const relocsStart = (struct relocation_info*)(&fLinkEditBase[fDynamicInfo->locreloff]);
 	const relocation_info* const relocsEnd = &relocsStart[fDynamicInfo->nlocrel];
 	for (const relocation_info* reloc=relocsStart; reloc < relocsEnd; ++reloc) {
+	#if __ppc__ || __ppc64__ || __i386__
 		if ( (reloc->r_address & R_SCATTERED) == 0 ) {
 			if ( reloc->r_symbolnum == R_ABS ) {
 				// ignore absolute relocations
@@ -1328,6 +1354,7 @@ void ImageLoaderMachO::doRebase(const LinkContext& context)
 				throw "bad local scattered relocation length";
 			}
 		}
+	#endif 
 	}
 	
 	// if there were __TEXT fixups, restore write protection
@@ -1497,6 +1524,7 @@ const ImageLoader::Symbol* ImageLoaderMachO::findExportedSymbol(const char* name
 		}
 	}
 
+    
 	return NULL;
 }
 
@@ -1769,6 +1797,34 @@ uintptr_t ImageLoaderMachO::resolveUndefined(const LinkContext& context, const s
 	}
 }
 
+// returns if 'addr' is within the address range of section 'sectionIndex'
+// fSlide is not used.  'addr' is assumed to be a prebound address in this image 
+bool ImageLoaderMachO::isAddrInSection(uintptr_t addr, uint8_t sectionIndex)
+{
+	uint8_t currentSectionIndex = 1;
+	const uint32_t cmd_count = ((macho_header*)fMachOData)->ncmds;
+	const struct load_command* const cmds = (struct load_command*)&fMachOData[sizeof(macho_header)];
+	const struct load_command* cmd = cmds;
+	for (unsigned long i = 0; i < cmd_count; ++i) {
+		if ( cmd->cmd == LC_SEGMENT_COMMAND ) {
+			const struct macho_segment_command* seg = (struct macho_segment_command*)cmd;
+			if ( (currentSectionIndex <= sectionIndex) && (sectionIndex < currentSectionIndex+seg->nsects) ) {
+				// 'sectionIndex' is in this segment, get section info
+				const struct macho_section* const sectionsStart = (struct macho_section*)((char*)seg + sizeof(struct macho_segment_command));
+				const struct macho_section* const section = &sectionsStart[sectionIndex-currentSectionIndex];
+				return ( (section->addr <= addr) && (addr < section->addr+section->size) );
+			}
+			else {
+				// 'sectionIndex' not in this segment, skip to next segment
+				currentSectionIndex += seg->nsects;
+			}
+		}
+		cmd = (const struct load_command*)(((char*)cmd)+cmd->cmdsize);
+	}
+	
+	return false;
+}
+
 void ImageLoaderMachO::doBindExternalRelocations(const LinkContext& context, bool onlyCoalescedSymbols)
 {
 	const uintptr_t relocBase = this->getRelocBase();
@@ -1790,7 +1846,7 @@ void ImageLoaderMachO::doBindExternalRelocations(const LinkContext& context, boo
 	for (const relocation_info* reloc=relocsStart; reloc < relocsEnd; ++reloc) {
 		if (reloc->r_length == RELOC_SIZE) {
 			switch(reloc->r_type) {
-				case GENERIC_RELOC_VANILLA:
+				case POINTER_RELOC:
 					{
 						const struct macho_nlist* undefinedSymbol = &fSymbolTable[reloc->r_symbolnum];
 						// if only processing coalesced symbols and this one does not require coalesceing, skip to next
@@ -1805,10 +1861,24 @@ void ImageLoaderMachO::doBindExternalRelocations(const LinkContext& context, boo
 					#endif
 						if ( prebound ) {
 							// we are doing relocations, so prebinding was not usable
-							// in a prebound executable, the n_value field is set to the address where the symbol was found when prebound
+							// in a prebound executable, the n_value field of an undefined symbol is set to the address where the symbol was found when prebound
 							// so, subtracting that gives the initial displacement which we need to add to the newly found symbol address
-							// if mach-o relocation structs had an "addend" field this would not be necessary.
-							value -= undefinedSymbol->n_value;
+							// if mach-o relocation structs had an "addend" field this complication would not be necessary.
+							if ( ((undefinedSymbol->n_type & N_TYPE) == N_SECT) && ((undefinedSymbol->n_desc & N_WEAK_DEF) != 0) ) {
+								// weak symbols need special casing, since *location may have been prebound to a definition in another image.
+								// If *location is currently prebound to somewhere in the same section as the weak definition, we assume 
+								// that we can subtract off the weak symbol address to get the addend.
+								// If prebound elsewhere, we've lost the addend and have to assume it is zero.
+								// The prebinding to elsewhere only happens with 10.4+ update_prebinding which only operates on a small set of Apple dylibs
+								if ( (value == undefinedSymbol->n_value) || this->isAddrInSection(value, undefinedSymbol->n_sect) )
+									value -= undefinedSymbol->n_value;
+								else
+									value = 0;
+							} 
+							else {
+								// is undefined or non-weak symbol, so do subtraction to get addend
+								value -= undefinedSymbol->n_value;
+							}
 						}
 						// if undefinedSymbol is same as last time, then symbolAddr and image will resolve to the same too
 						if ( undefinedSymbol != lastUndefinedSymbol ) {
@@ -1837,10 +1907,14 @@ void ImageLoaderMachO::doBindExternalRelocations(const LinkContext& context, boo
 							*location = value - ((uintptr_t)location + 4);
 						}
 						else {
-							*location = value; 
+							// don't dirty page if prebound value was correct
+							if ( !prebound || (*location != value) )
+								*location = value; 
 						}
 					#else
-                         *location = value; 
+						// don't dirty page if prebound value was correct
+						if ( !prebound || (*location != value) )
+							*location = value; 
 					#endif
 					}
 					break;
@@ -1880,6 +1954,40 @@ const void* ImageLoaderMachO::getBaseAddress() const
 	return (const void*)seg->getActualLoadAddress();
 }
 
+uintptr_t ImageLoaderMachO::bindIndirectSymbol(uintptr_t* ptrToBind, const struct macho_section* sect, const char* symbolName, uintptr_t targetAddr, ImageLoader* targetImage, const LinkContext& context)
+{
+	if ( context.verboseBind ) {
+		const char* path = NULL;
+		if ( targetImage != NULL )
+			path = targetImage->getShortName();
+		fprintf(stderr, "dyld: bind: %s:%s$%s = %s:%s, *0x%08lx = 0x%08lx\n",
+				this->getShortName(), symbolName, (((sect->flags & SECTION_TYPE)==S_NON_LAZY_SYMBOL_POINTERS) ? "non_lazy_ptr" : "lazy_ptr"),
+				path, symbolName, (uintptr_t)ptrToBind, targetAddr);
+	}
+	if ( context.bindingHandler != NULL ) {
+		const char* path = NULL;
+		if ( targetImage != NULL )
+			path = targetImage->getShortName();
+		targetAddr = (uintptr_t)context.bindingHandler(path, symbolName, (void *)targetAddr);
+	}
+#if __i386__
+	// i386 has special self-modifying stubs that change from "CALL rel32" to "JMP rel32"
+	if ( ((sect->flags & SECTION_TYPE) == S_SYMBOL_STUBS) && ((sect->flags & S_ATTR_SELF_MODIFYING_CODE) != 0) && (sect->reserved2 == 5) ) {
+		uint8_t* const jmpTableEntryToPatch = (uint8_t*)ptrToBind;
+		uint32_t rel32 = targetAddr - (((uint32_t)ptrToBind)+5);
+		//fprintf(stderr, "rewriting stub at %p\n", jmpTableEntryToPatch);
+		jmpTableEntryToPatch[0] = 0xE9; // JMP rel32
+		jmpTableEntryToPatch[1] = rel32 & 0xFF;
+		jmpTableEntryToPatch[2] = (rel32 >> 8) & 0xFF;
+		jmpTableEntryToPatch[3] = (rel32 >> 16) & 0xFF;
+		jmpTableEntryToPatch[4] = (rel32 >> 24) & 0xFF;
+	}
+	else
+#endif
+	*ptrToBind = targetAddr;
+	return targetAddr;
+}
+
 
 uintptr_t ImageLoaderMachO::doBindLazySymbol(uintptr_t* lazyPointer, const LinkContext& context)
 {
@@ -1898,37 +2006,38 @@ uintptr_t ImageLoaderMachO::doBindLazySymbol(uintptr_t* lazyPointer, const LinkC
 					const struct macho_section* const sectionsEnd = &sectionsStart[seg->nsects];
 					for (const struct macho_section* sect=sectionsStart; sect < sectionsEnd; ++sect) {
 						const uint8_t type = sect->flags & SECTION_TYPE;
+						uint32_t symbolIndex = INDIRECT_SYMBOL_LOCAL;
 						if ( type == S_LAZY_SYMBOL_POINTERS ) {
 							const uint32_t pointerCount = sect->size / sizeof(uintptr_t);
 							uintptr_t* const symbolPointers = (uintptr_t*)(sect->addr + fSlide);
 							if ( (lazyPointer >= symbolPointers) && (lazyPointer < &symbolPointers[pointerCount]) ) {
 								const uint32_t indirectTableOffset = sect->reserved1;
 								const uint32_t lazyIndex = lazyPointer - symbolPointers;
-								uint32_t symbolIndex = indirectTable[indirectTableOffset + lazyIndex];
-								if ( symbolIndex != INDIRECT_SYMBOL_ABS && symbolIndex != INDIRECT_SYMBOL_LOCAL ) {
-									ImageLoader *image = NULL;
-									const char *path = NULL;
-									uintptr_t symbolAddr = this->resolveUndefined(context,  &fSymbolTable[symbolIndex], twoLevel, &image);
-									if ( context.verboseBind ) {
-										if(NULL == path && NULL != image) {
-											path = image->getShortName();
-										}
-										fprintf(stderr, "dyld: bind: %s:%s$%s = %s:%s, *0x%08lx = 0x%08lx\n",
-												this->getShortName(), &fStrings[fSymbolTable[symbolIndex].n_un.n_strx], "lazy_ptr",
-												path, &fStrings[fSymbolTable[symbolIndex].n_un.n_strx], (uintptr_t)&symbolPointers[lazyIndex], symbolAddr);
-									}
-									if ( NULL != context.bindingHandler ) {
-										if(NULL == path && NULL != image) {
-											path = image->getPath();
-										}
-										symbolAddr = (uintptr_t)context.bindingHandler(path, &fStrings[fSymbolTable[symbolIndex].n_un.n_strx], (void *)symbolAddr);
-									}
-									symbolPointers[lazyIndex] = symbolAddr;
-									// update stats
-									fgTotalLazyBindFixups++;
-									return symbolPointers[lazyIndex];
-								}
+								symbolIndex = indirectTable[indirectTableOffset + lazyIndex];
 							}
+						}
+					#if __i386__
+						else if ( (type == S_SYMBOL_STUBS) && (sect->flags & S_ATTR_SELF_MODIFYING_CODE) && (sect->reserved2 == 5) ) {
+							// 5 bytes stubs on i386 are new "fast stubs"
+							uint8_t* const jmpTableBase = (uint8_t*)(sect->addr + fSlide);
+							uint8_t* const jmpTableEnd = jmpTableBase + sect->size;
+							// initial CALL instruction in jump table leaves pointer to next entry, so back up
+							uint8_t* const jmpTableEntryToPatch = ((uint8_t*)lazyPointer) - 5;  
+							lazyPointer = (uintptr_t*)jmpTableEntryToPatch; 
+							if ( (jmpTableEntryToPatch >= jmpTableBase) && (jmpTableEntryToPatch < jmpTableEnd) ) {
+								const uint32_t indirectTableOffset = sect->reserved1;
+								const uint32_t entryIndex = (jmpTableEntryToPatch - jmpTableBase)/5;
+								symbolIndex = indirectTable[indirectTableOffset + entryIndex];
+							}
+						}
+					#endif
+						if ( symbolIndex != INDIRECT_SYMBOL_ABS && symbolIndex != INDIRECT_SYMBOL_LOCAL ) {
+							const char* symbolName = &fStrings[fSymbolTable[symbolIndex].n_un.n_strx];
+							ImageLoader* image = NULL;
+							uintptr_t symbolAddr = this->resolveUndefined(context,  &fSymbolTable[symbolIndex], twoLevel, &image);
+							symbolAddr = this->bindIndirectSymbol(lazyPointer, sect, symbolName, symbolAddr, image,  context);
+							++fgTotalLazyBindFixups;
+							return symbolAddr;
 						}
 					}
 				}
@@ -1938,6 +2047,7 @@ uintptr_t ImageLoaderMachO::doBindLazySymbol(uintptr_t* lazyPointer, const LinkC
 	}
 	throw "lazy pointer not found";
 }
+
 
 
 
@@ -1958,26 +2068,37 @@ void ImageLoaderMachO::doBindIndirectSymbolPointers(const LinkContext& context, 
 					const struct macho_section* const sectionsEnd = &sectionsStart[seg->nsects];
 					for (const struct macho_section* sect=sectionsStart; sect < sectionsEnd; ++sect) {
 						const uint8_t type = sect->flags & SECTION_TYPE;
-						const uint32_t pointerCount = sect->size / sizeof(uintptr_t);
+						uint32_t elementSize = sizeof(uintptr_t);
+						uint32_t elementCount = sect->size / elementSize;
 						if ( type == S_NON_LAZY_SYMBOL_POINTERS ) {
 							if ( (bindness == kLazyOnly) || (bindness == kLazyOnlyNoDependents) )
 								continue;
 						}
 						else if ( type == S_LAZY_SYMBOL_POINTERS ) {
 							// process each symbol pointer in this section
-							fgTotalPossibleLazyBindFixups += pointerCount;
+							fgTotalPossibleLazyBindFixups += elementCount;
 							if ( bindness == kNonLazyOnly )
 								continue;
 						}
+				#if __i386__
+						else if ( (type == S_SYMBOL_STUBS) && (sect->flags & S_ATTR_SELF_MODIFYING_CODE) && (sect->reserved2 == 5) ) {
+							// process each jmp entry in this section
+							elementCount = sect->size / 5;
+							elementSize = 5;
+							fgTotalPossibleLazyBindFixups += elementCount;
+							if ( bindness == kNonLazyOnly )
+								continue;
+						}
+				#endif
 						else {
 							continue;
 						}
 						const uint32_t indirectTableOffset = sect->reserved1;
-						uintptr_t* const symbolPointers = (uintptr_t*)(sect->addr + fSlide);
-						for (uint32_t j=0; j < pointerCount; ++j) {
+						uint8_t* ptrToBind = (uint8_t*)(sect->addr + fSlide);
+						for (uint32_t j=0; j < elementCount; ++j, ptrToBind += elementSize) {
 							uint32_t symbolIndex = indirectTable[indirectTableOffset + j];
 							if ( symbolIndex == INDIRECT_SYMBOL_LOCAL) {
-								symbolPointers[j] += this->fSlide;
+								*((uintptr_t*)ptrToBind) += this->fSlide;
 							}
 							else if ( symbolIndex == INDIRECT_SYMBOL_ABS) {
 								// do nothing since already has absolute address
@@ -2015,27 +2136,13 @@ void ImageLoaderMachO::doBindIndirectSymbolPointers(const LinkContext& context, 
 									continue;
 								uintptr_t symbolAddr;
 									symbolAddr = resolveUndefined(context, sym, twoLevel, &image);
-								if ( context.verboseBind ) {
-									const char *path = NULL;
-									if(NULL != image) {
-										path = image->getShortName();
-									}
-									const char *typeName;
-									if ( type == S_LAZY_SYMBOL_POINTERS ) {
-										typeName = "lazy_ptr";
-									}
-									else {
-										typeName = "non_lazy_ptr";
-									}
-									fprintf(stderr, "dyld: bind: %s:%s$%s = %s:%s, *0x%08lx = 0x%08lx\n",
-											this->getShortName(), &fStrings[sym->n_un.n_strx], typeName,
-											path, &fStrings[sym->n_un.n_strx], (uintptr_t)&symbolPointers[j], symbolAddr);
-								}
-								symbolPointers[j] = symbolAddr;
+									
+								// update pointer
+								symbolAddr = this->bindIndirectSymbol((uintptr_t*)ptrToBind, sect, &fStrings[sym->n_un.n_strx], symbolAddr, image,  context);
 							}
 						}
 						// update stats
-						fgTotalBindFixups += pointerCount;
+						fgTotalBindFixups += elementCount;
 					}
 				}
 				break;
@@ -2074,9 +2181,10 @@ struct DATAdyld {
 // These are defined in dyldStartup.s
 extern "C" void stub_binding_helper();
 extern "C" bool dyld_func_lookup(const char* name, uintptr_t* address);
+extern "C" void fast_stub_binding_helper_interface();
 
 
-void ImageLoaderMachO::setupLazyPointerHandler()
+void ImageLoaderMachO::setupLazyPointerHandler(const LinkContext& context)
 {
 	if ( fDATAdyld != NULL ) {
 		struct DATAdyld* dd = (struct DATAdyld*)(fDATAdyld->addr + fSlide);
@@ -2095,6 +2203,42 @@ void ImageLoaderMachO::setupLazyPointerHandler()
 		//	save = dd->stubBindHelper;	
 #endif
 	}
+#if __i386__
+	if ( ! this->usablePrebinding(context) || !this->usesTwoLevelNameSpace() ) {
+		// reset all "fast" stubs
+		const uint32_t cmd_count = ((macho_header*)fMachOData)->ncmds;
+		const struct load_command* const cmds = (struct load_command*)&fMachOData[sizeof(macho_header)];
+		const struct load_command* cmd = cmds;
+		for (uint32_t i = 0; i < cmd_count; ++i) {
+			switch (cmd->cmd) {
+				case LC_SEGMENT_COMMAND:
+				{
+					const struct macho_segment_command* seg = (struct macho_segment_command*)cmd;
+					const struct macho_section* const sectionsStart = (struct macho_section*)((char*)seg + sizeof(struct macho_segment_command));
+					const struct macho_section* const sectionsEnd = &sectionsStart[seg->nsects];
+					for (const struct macho_section* sect=sectionsStart; sect < sectionsEnd; ++sect) {
+						const uint8_t type = sect->flags & SECTION_TYPE;
+						if ( (type == S_SYMBOL_STUBS) && (sect->flags & S_ATTR_SELF_MODIFYING_CODE) && (sect->reserved2 == 5) ) {
+							// reset each jmp entry in this section
+							uint8_t* start = (uint8_t*)(sect->addr + this->fSlide);
+							uint8_t* end = start + sect->size;
+							uintptr_t dyldHandler = (uintptr_t)&fast_stub_binding_helper_interface;
+							for (uint8_t* entry = start; entry < end; entry += 5) {
+								uint32_t rel32 = dyldHandler - (((uint32_t)entry)+5);
+								entry[0] = 0xE8; // CALL rel32
+								entry[1] = rel32 & 0xFF;
+								entry[2] = (rel32 >> 8) & 0xFF;
+								entry[3] = (rel32 >> 16) & 0xFF;
+								entry[4] = (rel32 >> 24) & 0xFF;
+							}
+						}
+					}
+				}
+			}
+			cmd = (const struct load_command*)(((char*)cmd)+cmd->cmdsize);
+		}
+	}
+#endif
 }
 
 bool ImageLoaderMachO::usablePrebinding(const LinkContext& context) const
@@ -2121,13 +2265,13 @@ bool ImageLoaderMachO::usablePrebinding(const LinkContext& context) const
 void ImageLoaderMachO::doBind(const LinkContext& context, BindingLaziness bindness)
 {
 	// set dyld entry points in image
-	this->setupLazyPointerHandler();
+	this->setupLazyPointerHandler(context);
 
 	// if prebound and loaded at prebound address, and all libraries are same as when this was prebound, then no need to bind
 	// note: flat-namespace binaries need to be imports rebound (even if correctly prebound)
 	if ( this->usablePrebinding(context) && this->usesTwoLevelNameSpace() ) {
-		// if image has coalesced symbols, then these need to be rebound
-		if ( this->needsCoalescing() ) {
+		// if image has coalesced symbols, then these need to be rebound, unless this is the only image with weak symbols
+		if ( this->needsCoalescing() && (fgCountOfImagesWithWeakExports > 1) ) {
 			this->doBindExternalRelocations(context, true);
 			this->doBindIndirectSymbolPointers(context, kLazyAndNonLazy, true);
 		}
@@ -2232,6 +2376,7 @@ void ImageLoaderMachO::printStatistics(unsigned int imageCount)
 	ImageLoader::printStatistics(imageCount);
 	fprintf(stderr, "total hinted binary tree searches:    %d\n", fgHintedBinaryTreeSearchs);
 	fprintf(stderr, "total unhinted binary tree searches:  %d\n", fgUnhintedBinaryTreeSearchs);
+	fprintf(stderr, "total images with weak exports:  %d\n", fgCountOfImagesWithWeakExports);
 	
 #if LINKEDIT_USAGE_DEBUG
 	fprintf(stderr, "linkedit pages accessed (%lu):\n", sLinkEditPageBuckets.size());

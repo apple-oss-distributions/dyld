@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2005-2006 Apple Computer, Inc. All rights reserved.
+ * Copyright (c) 2005 Apple Computer, Inc. All rights reserved.
  *
  * @APPLE_LICENSE_HEADER_START@
  * 
@@ -20,23 +20,28 @@
  * 
  * @APPLE_LICENSE_HEADER_END@
  */
-#include <stdio.h>  // fprintf(), NULL
-#include <stdlib.h> // exit(), EXIT_SUCCESS
-#include <string.h> // strcmp(), strncmp()
+#include <stdio.h>
+#include <stdlib.h>
+#include <pthread.h>
 
-#include "test.h" // PASS(), FAIL(), XPASS(), XFAIL()
+#include "test.h"
 
-//
-// binaries set to run as some other user id never use DYLD_INSERT_LIBRARIES
-// That environment variable is cleared by dyld (its right-hand-side is set to empty)
-//
+///
+/// rdar://problem/4313830
+/// The key index for main executables starts at 4
+///
 
-int main(int argc, const char *argv[])
+int main()
 {
-	const char* rhs = getenv("DYLD_INSERT_LIBRARIES");
-	if ( (rhs != NULL) && (rhs[0] != '\0') )
-        FAIL("insert-libraries-with-suid DYLD_INSERT_LIBRARIES not cleared");
+	pthread_key_t key;
+	
+	int result = pthread_key_create(&key, NULL);
+	//printf("key=%u\n", key);
+	if ( result != 0 )
+		FAIL("pthread-keys creation failure");
+	else if ( key < 4 )
+		FAIL("pthread-keys key out of bounds");
 	else
-		PASS("insert-libraries-with-suid");
+		PASS("pthread-keys");
 	return EXIT_SUCCESS;
 }

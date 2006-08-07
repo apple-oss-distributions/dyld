@@ -1,6 +1,6 @@
 /* -*- mode: C++; c-basic-offset: 4; tab-width: 4 -*-
  *
- * Copyright (c) 2004-2005 Apple Computer, Inc. All rights reserved.
+ * Copyright (c) 2004-2006 Apple Computer, Inc. All rights reserved.
  *
  * @APPLE_LICENSE_HEADER_START@
  * 
@@ -241,10 +241,6 @@ static void addImage(ImageLoader* image)
 
 void removeImage(ImageLoader* image)
 {
-	// flush find-by-address cache
-	if ( sLastImageByAddressCache == image )
-		sLastImageByAddressCache = NULL;
-
 	// if in termination list, pull it out and run terminator
 	for (std::vector<ImageLoader*>::iterator it=sImageFilesNeedingTermination.begin(); it != sImageFilesNeedingTermination.end(); it++) {
 		if ( *it == image ) {
@@ -277,6 +273,10 @@ void removeImage(ImageLoader* image)
 		}
 	}
 	
+	// flush find-by-address cache
+	if ( sLastImageByAddressCache == image )
+		sLastImageByAddressCache = NULL;
+
 	// if in announcement list, pull it out 
 	for (std::vector<ImageLoader*>::iterator it=sImagesToNotifyAboutOtherImages.begin(); it != sImagesToNotifyAboutOtherImages.end(); it++) {
 		if ( *it == image ) {
@@ -653,6 +653,7 @@ void processDyldEnvironmentVarible(const char* key, const char* value)
 	}
 }
 
+
 static void checkEnvironmentVariables(const char* envp[], bool ignoreEnviron)
 {
 	const char* home = NULL;
@@ -679,28 +680,24 @@ static void checkEnvironmentVariables(const char* envp[], bool ignoreEnviron)
 				sEnv.LD_LIBRARY_PATH = parseColonList(path);
 		}
 	}
-	
+		
 	// default value for DYLD_FALLBACK_FRAMEWORK_PATH, if not set in environment
 	if ( sEnv.DYLD_FALLBACK_FRAMEWORK_PATH == NULL ) {
 		const char** paths = sFrameworkFallbackPaths;
-		if ( home != NULL ) {
-			if ( riskyUser() )
-				removePathWithPrefix(paths, "$HOME");
-			else
-				paths_expand_roots(paths, "$HOME", home);
-		}
+		if ( home == NULL )
+			removePathWithPrefix(paths, "$HOME");
+		else
+			paths_expand_roots(paths, "$HOME", home);
 		sEnv.DYLD_FALLBACK_FRAMEWORK_PATH = paths;
 	}
 
 	// default value for DYLD_FALLBACK_LIBRARY_PATH, if not set in environment
 	if ( sEnv.DYLD_FALLBACK_LIBRARY_PATH == NULL ) {
 		const char** paths = sLibraryFallbackPaths;
-		if ( home != NULL ) {
-			if ( riskyUser() )
-				removePathWithPrefix(paths, "$HOME");
-			else
-				paths_expand_roots(paths, "$HOME", home);
-		}
+		if ( home == NULL ) 
+			removePathWithPrefix(paths, "$HOME");
+		else
+			paths_expand_roots(paths, "$HOME", home);
 		sEnv.DYLD_FALLBACK_LIBRARY_PATH = paths;
 	}
 }
@@ -818,6 +815,20 @@ ImageLoader* findImageContainingAddress(const void* addr)
 #if FIND_STATS	
 		++cacheNotMacho;
 #endif
+	return NULL;
+}
+
+ImageLoader* findImageContainingAddressThreadSafe(const void* addr)
+{
+	// do exhastive search 
+	// todo: consider maintaining a list sorted by address ranges and do a binary search on that
+	const unsigned int imageCount = sAllImages.size();
+	for(unsigned int i=0; i < imageCount; ++i) {
+		ImageLoader* anImage = sAllImages[i];
+		if ( anImage->containsAddress(addr) ) {
+			return anImage;
+		}
+	}
 	return NULL;
 }
 
@@ -1138,7 +1149,7 @@ static ImageLoader* instantiateFromLoadedImage(const struct mach_header* mh, con
 		return image;
 	}
 	
-	return NULL;
+	throw "main executable not a known format";
 }
 
 
@@ -1221,8 +1232,18 @@ static ImageLoader* loadPhase6(int fd, struct stat& stat_buf, const char* path, 
 	
 	// try other file formats...
 	
-	throwf("unknown file type, first eight bytes: 0x%02X 0x%02X 0x%02X 0x%02X 0x%02X 0x%02X 0x%02X 0x%02X", 
-		firstPage[0], firstPage[1], firstPage[2], firstPage[3], firstPage[4], firstPage[5], firstPage[6],firstPage[7]);
+	
+	// throw error about what was found
+	switch (*(uint32_t*)firstPage) {
+		case MH_MAGIC:
+		case MH_CIGAM:
+		case MH_MAGIC_64:
+		case MH_CIGAM_64:
+			throw "mach-o, but wrong architecture";
+		default:
+		throwf("unknown file type, first eight bytes: 0x%02X 0x%02X 0x%02X 0x%02X 0x%02X 0x%02X 0x%02X 0x%02X", 
+			firstPage[0], firstPage[1], firstPage[2], firstPage[3], firstPage[4], firstPage[5], firstPage[6],firstPage[7]);
+	}
 }
 
 
@@ -1608,8 +1629,17 @@ ImageLoader* loadFromMemory(const uint8_t* mem, uint64_t len, const char* module
 	
 	// try other file formats...
 	
-	throwf("unknown file type, first eight bytes: 0x%02X 0x%02X 0x%02X 0x%02X 0x%02X 0x%02X 0x%02X 0x%02X", 
-		mem[0], mem[1], mem[2], mem[3], mem[4], mem[5], mem[6],mem[7]);
+	// throw error about what was found
+	switch (*(uint32_t*)mem) {
+		case MH_MAGIC:
+		case MH_CIGAM:
+		case MH_MAGIC_64:
+		case MH_CIGAM_64:
+			throw "mach-o, but wrong architecture";
+		default:
+		throwf("unknown file type, first eight bytes: 0x%02X 0x%02X 0x%02X 0x%02X 0x%02X 0x%02X 0x%02X 0x%02X", 
+			mem[0], mem[1], mem[2], mem[3], mem[4], mem[5], mem[6],mem[7]);
+	}
 }
 
 
@@ -1681,8 +1711,17 @@ uintptr_t bindLazySymbol(const mach_header* mh, uintptr_t* lazyPointer)
 #endif
 	// lookup and bind lazy pointer and get target address
 	try {
+		ImageLoader* target;
+	#if __i386__
+		// fast stubs pass NULL for mh and image is instead found via the location of stub (aka lazyPointer)
+		if ( mh == NULL )
+			target = dyld::findImageContainingAddressThreadSafe(lazyPointer);
+		else
+			target = dyld::findImageByMachHeader(mh);
+	#else
 		// note, target should always be mach-o, because only mach-o lazy handler wired up to this
-		ImageLoader* target = dyld::findImageByMachHeader(mh);
+		target = dyld::findImageByMachHeader(mh);
+	#endif
 		if ( target == NULL )
 			throw "image not found for lazy pointer";
 		result = target->doBindLazySymbol(lazyPointer, gLinkContext);
@@ -1919,6 +1958,17 @@ void link(ImageLoader* image, ImageLoader::BindingLaziness bindness, ImageLoader
 
 
 //
+// _pthread_keys is partitioned in a lower part that dyld will use; libSystem
+// will use the upper part.  We set __pthread_tsd_first to 1 as the start of
+// the lower part.  Libc will take #1 and c++ exceptions will take #2.  There
+// is one free key=3 left.
+//
+extern "C" {
+	extern int __pthread_tsd_first;
+}
+ 
+
+//
 // Entry point for dyld.  The kernel loads dyld and jumps to __dyld_start which
 // sets up some registers and call this function.
 //
@@ -1927,8 +1977,16 @@ void link(ImageLoader* image, ImageLoader::BindingLaziness bindness, ImageLoader
 uintptr_t
 _main(const struct mach_header* mainExecutableMH, int argc, const char* argv[], const char* envp[], const char* apple[])
 {	
+	// set pthread keys to dyld range
+	__pthread_tsd_first = 1;
+	
+	bool isEmulated = checkEmulation();
 	// Pickup the pointer to the exec path.
 	sExecPath = apple[0];
+	if (isEmulated) {
+		// under Rosetta 
+		sExecPath = strdup(apple[0] + strlen(apple[0]) + 1);
+	}
 	if ( sExecPath[0] != '/' ) {
 		// have relative path, use cwd to make absolute
 		char cwdbuff[MAXPATHLEN];
@@ -1943,7 +2001,6 @@ _main(const struct mach_header* mainExecutableMH, int argc, const char* argv[], 
 	}
 	uintptr_t result = 0;
 	sMainExecutableMachHeader = mainExecutableMH;
-	bool isEmulated = checkEmulation();
 	checkEnvironmentVariables(envp, isEmulated);
 	if ( sEnv.DYLD_PRINT_OPTS ) 
 		printOptions(argv);

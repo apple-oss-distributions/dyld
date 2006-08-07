@@ -1,5 +1,5 @@
 ##
-# Copyright (c) 2005 Apple Computer, Inc. All rights reserved.
+# Copyright (c) 2006 Apple Computer, Inc. All rights reserved.
 #
 # @APPLE_LICENSE_HEADER_START@
 # 
@@ -23,33 +23,16 @@
 TESTROOT = ../..
 include ${TESTROOT}/include/common.makefile
 
-ifeq "-arch ppc" "$(ARCH)"
-	EXTRA_FLAG = -maltivec -force_cpusubtype_ALL
-else 
-	ifeq "-arch ppc64" "$(ARCH)"
-		EXTRA_FLAG = -maltivec
-	else
-		ifeq "-arch i386" "$(ARCH)"
-			EXTRA_FLAG = ""
-		endif
-	endif
-endif
-
-
-
 run: all
-	./main
+	export DYLD_INSERT_LIBRARIES=/ && export DYLD_PRINT_LIBRARIES=/ &&  export DYLD_PREBIND_DEBUG=/ && ./main
 
-all: main 
+all: main
 
-main : main.c libfoo.dylib
-	${CC} ${CCFLAGS} -I${TESTROOT}/include -o main main.c libfoo.dylib ${EXTRA_FLAG}
-
-
-libfoo.dylib : foo.c
-	${CC} ${CCFLAGS} -dynamiclib foo.c -o libfoo.dylib ${EXTRA_FLAG}
-
+main: main.c
+	${CC} ${CCFLAGS} -I${TESTROOT}/include -o main main.c
+	sudo chown root main
+	sudo chmod 4755 main
 
 clean:
-	${RM} ${RMFLAGS} *~ main libfoo.dylib
+	${RM} ${RMFLAGS} *~ main
 
