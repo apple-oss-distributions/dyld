@@ -397,37 +397,6 @@ static const char** parseColonList(const char* list)
 	return (const char**)result;
 }
 
-/*
- * Library path searching is not done for setuid programs
- * which are not run by the real user.  Futher the
- * evironment varaible for the library path is cleared so
- * that if this program executes a non-set uid program this
- * part of the evironment will not be passed along so that
- * that program also will not have it's libraries searched
- * for.
- */
- static bool riskyUser()
- {
-	static bool checked = false;
-	static bool risky = false;
-	if ( !checked ) {
-		risky = ( getuid() != 0 && (getuid() != geteuid() || getgid() != getegid()) );
-		checked = true;
-	}
-	return risky;
- }
- 
- 
-static bool disableIfBadUser(char* rhs)
-{
-	bool didDisable = false;
-	if ( riskyUser() ) {
-		*rhs ='\0';
-		didDisable = true;
-	}
-	return didDisable;
-}
-
 static void paths_expand_roots(const char **paths, const char *key, const char *val)
 {
 // 	assert(val != NULL);
@@ -492,42 +461,34 @@ static void printEnvironmentVariables(const char* envp[])
 void processDyldEnvironmentVarible(const char* key, const char* value)
 {
 	if ( strcmp(key, "DYLD_FRAMEWORK_PATH") == 0 ) {
-		if ( !disableIfBadUser((char*)value) )
-			sEnv.DYLD_FRAMEWORK_PATH = parseColonList(value);
+		sEnv.DYLD_FRAMEWORK_PATH = parseColonList(value);
 	}
 	else if ( strcmp(key, "DYLD_FALLBACK_FRAMEWORK_PATH") == 0 ) {
-		if ( !disableIfBadUser((char*)value) )
-			sEnv.DYLD_FALLBACK_FRAMEWORK_PATH = parseColonList(value);
+		sEnv.DYLD_FALLBACK_FRAMEWORK_PATH = parseColonList(value);
 	}
 	else if ( strcmp(key, "DYLD_LIBRARY_PATH") == 0 ) {
-		if ( !disableIfBadUser((char*)value) )
-			sEnv.DYLD_LIBRARY_PATH = parseColonList(value);
+		sEnv.DYLD_LIBRARY_PATH = parseColonList(value);
 	}
 	else if ( strcmp(key, "DYLD_FALLBACK_LIBRARY_PATH") == 0 ) {
-		if ( !disableIfBadUser((char*)value) )
-			sEnv.DYLD_FALLBACK_LIBRARY_PATH = parseColonList(value);
+		sEnv.DYLD_FALLBACK_LIBRARY_PATH = parseColonList(value);
 	}
 	else if ( (strcmp(key, "DYLD_ROOT_PATH") == 0) || (strcmp(key, "DYLD_PATHS_ROOT") == 0) ) {
-		if ( !disableIfBadUser((char*)value) ) {
-			if ( strcmp(value, "/") != 0 ) {
-				sEnv.DYLD_ROOT_PATH = parseColonList(value);
-				for (int i=0; sEnv.DYLD_ROOT_PATH[i] != NULL; ++i) {
-					if ( sEnv.DYLD_ROOT_PATH[i][0] != '/' ) {
-						fprintf(stderr, "dyld: warning DYLD_ROOT_PATH not used because it contains a non-absolute path\n");
-						sEnv.DYLD_ROOT_PATH = NULL;
-						break;
-					}
+		if ( strcmp(value, "/") != 0 ) {
+			sEnv.DYLD_ROOT_PATH = parseColonList(value);
+			for (int i=0; sEnv.DYLD_ROOT_PATH[i] != NULL; ++i) {
+				if ( sEnv.DYLD_ROOT_PATH[i][0] != '/' ) {
+					fprintf(stderr, "dyld: warning DYLD_ROOT_PATH not used because it contains a non-absolute path\n");
+					sEnv.DYLD_ROOT_PATH = NULL;
+					break;
 				}
 			}
 		}
 	} 
 	else if ( strcmp(key, "DYLD_IMAGE_SUFFIX") == 0 ) {
-		if ( !disableIfBadUser((char*)value) )
-			gLinkContext.imageSuffix = value;
+		gLinkContext.imageSuffix = value;
 	}
 	else if ( strcmp(key, "DYLD_INSERT_LIBRARIES") == 0 ) {
-		if ( !disableIfBadUser((char*)value) )
-			sEnv.DYLD_INSERT_LIBRARIES = parseColonList(value);
+		sEnv.DYLD_INSERT_LIBRARIES = parseColonList(value);
 	}
 	else if ( strcmp(key, "DYLD_DEBUG_TRACE") == 0 ) {
 		fprintf(stderr, "dyld: warning DYLD_DEBUG_TRACE not supported\n");
@@ -653,6 +614,48 @@ void processDyldEnvironmentVarible(const char* key, const char* value)
 	}
 }
 
+//
+// For security, setuid programs ignore DYLD_* environment variables.
+// Additionally, the DYLD_* enviroment variables are removed
+// from the environment, so that any child processes don't see them.
+//
+static void pruneEnvironmentVariables(const char* envp[], const char*** applep)
+{
+	// delete all DYLD_* and LD_LIBRARY_PATH environment variables
+	int removedCount = 0;
+	const char** d = envp;
+	for(const char** s = envp; *s != NULL; s++) {
+	    if ( (strncmp(*s, "DYLD_", 5) != 0) && (strncmp(*s, "LD_LIBRARY_PATH=", 16) != 0) ) {
+			*d++ = *s;
+		}
+		else {
+			++removedCount;
+		}
+	}
+	*d++ = NULL;
+	
+	// slide apple parameters
+	if ( removedCount > 0 ) {
+		*applep = d;
+		do {
+			*d = d[removedCount];
+		} while ( *d++ != NULL );
+	}
+	
+	// setup DYLD_FALLBACK_FRAMEWORK_PATH, if not set in environment
+	if ( sEnv.DYLD_FALLBACK_FRAMEWORK_PATH == NULL ) {
+		const char** paths = sFrameworkFallbackPaths;
+		removePathWithPrefix(paths, "$HOME");
+		sEnv.DYLD_FALLBACK_FRAMEWORK_PATH = paths;
+	}
+
+	// default value for DYLD_FALLBACK_LIBRARY_PATH, if not set in environment
+	if ( sEnv.DYLD_FALLBACK_LIBRARY_PATH == NULL ) {
+		const char** paths = sLibraryFallbackPaths;
+		removePathWithPrefix(paths, "$HOME");
+		sEnv.DYLD_FALLBACK_LIBRARY_PATH = paths;
+	}
+}
 
 static void checkEnvironmentVariables(const char* envp[], bool ignoreEnviron)
 {
@@ -676,8 +679,7 @@ static void checkEnvironmentVariables(const char* envp[], bool ignoreEnviron)
 		}
 		else if ( strncmp(keyEqualsValue, "LD_LIBRARY_PATH=", 16) == 0 ) {
 			const char* path = &keyEqualsValue[16];
-			if ( !disableIfBadUser((char*)path) )
-				sEnv.LD_LIBRARY_PATH = parseColonList(path);
+			sEnv.LD_LIBRARY_PATH = parseColonList(path);
 		}
 	}
 		
@@ -1052,6 +1054,15 @@ static bool fatFindRunsOnAllCPUs(cpu_type_t cpu, const fat_header* fh, uint64_t*
 						return true;
 					}
 					break;
+#ifdef CPU_TYPE_X86_64
+				case CPU_TYPE_X86_64:
+					if ( (cpu_subtype_t)OSSwapBigToHostInt32(archs[i].cpusubtype) == CPU_SUBTYPE_X86_64_ALL ) {
+						*offset = OSSwapBigToHostInt32(archs[i].offset);
+						*len = OSSwapBigToHostInt32(archs[i].size);
+						return true;
+					}
+					break;
+#endif
 			}
 		}
 	}
@@ -1131,6 +1142,12 @@ bool isCompatibleMachO(const uint8_t* firstPage)
 					if ( mh->cpusubtype == CPU_SUBTYPE_I386_ALL ) 
 						return true;
 					break;					
+#ifdef CPU_TYPE_X86_64
+				case CPU_TYPE_X86_64:
+					if ( mh->cpusubtype == CPU_SUBTYPE_X86_64_ALL ) 
+ 						return true;
+					break;		
+#endif
 			}
 		}
 	}
@@ -1692,7 +1709,7 @@ void  halt(const char* message)
 	
 #if __ppc__ || __ppc64__
 	__asm__  ("trap");
-#elif __i386__
+#elif __i386__ || __x86_64__
 	__asm__  ("int3");
 #else
 	#error unknown architecture
@@ -1904,21 +1921,16 @@ static void setContext(int argc, const char* argv[], const char* envp[], const c
 	gLinkContext.apple					= apple;
 }
 
-static bool checkEmulation()
+static bool isRosetta()
 {
-#if __i386__
 	int mib[] = { CTL_KERN, KERN_CLASSIC, getpid() };
 	int is_classic = 0;
 	size_t len = sizeof(int);
 	int ret = sysctl(mib, 3, &is_classic, &len, NULL, 0);
 	if ((ret != -1) && is_classic) {
-		// When a 32-bit ppc program is run under emulation on an Intel processor,
-		// we want any i386 dylibs (e.g. the emulator) to not load in the shared region
-		// because the shared region is being used by ppc dylibs
-		gLinkContext.sharedRegionMode = ImageLoader::kDontUseSharedRegion;
+		// we're running under Rosetta 
 		return true;
 	}
-#endif
 	return false;
 }
 
@@ -1980,13 +1992,20 @@ _main(const struct mach_header* mainExecutableMH, int argc, const char* argv[], 
 	// set pthread keys to dyld range
 	__pthread_tsd_first = 1;
 	
-	bool isEmulated = checkEmulation();
 	// Pickup the pointer to the exec path.
 	sExecPath = apple[0];
-	if (isEmulated) {
-		// under Rosetta 
+	bool ignoreEnvironmentVariables = false;
+#if __i386__
+	if ( isRosetta() ) {
+		// under Rosetta (x86 side)
+		// When a 32-bit ppc program is run under emulation on an Intel processor,
+		// we want any i386 dylibs (e.g. any used by Rosetta) to not load in the shared region
+		// because the shared region is being used by ppc dylibs
+		gLinkContext.sharedRegionMode = ImageLoader::kDontUseSharedRegion;
 		sExecPath = strdup(apple[0] + strlen(apple[0]) + 1);
+		ignoreEnvironmentVariables = true;
 	}
+#endif
 	if ( sExecPath[0] != '/' ) {
 		// have relative path, use cwd to make absolute
 		char cwdbuff[MAXPATHLEN];
@@ -2001,7 +2020,10 @@ _main(const struct mach_header* mainExecutableMH, int argc, const char* argv[], 
 	}
 	uintptr_t result = 0;
 	sMainExecutableMachHeader = mainExecutableMH;
-	checkEnvironmentVariables(envp, isEmulated);
+	if ( issetugid() )
+		pruneEnvironmentVariables(envp, &apple);
+	else
+		checkEnvironmentVariables(envp, ignoreEnvironmentVariables);
 	if ( sEnv.DYLD_PRINT_OPTS ) 
 		printOptions(argv);
 	if ( sEnv.DYLD_PRINT_ENV ) 
@@ -2059,8 +2081,9 @@ _main(const struct mach_header* mainExecutableMH, int argc, const char* argv[], 
 		fprintf(stderr, "dyld: launch failed\n");
 	}
 	
+
 	// Link in any inserted libraries.  
-	// Do this after link main executable so any extra libraries pulled in by inserted libraries are at end of flat namespace
+	// Do this after linking main executable so any extra libraries pulled in by inserted libraries are at end of flat namespace
 	if ( insertLibrariesCount > 0 ) {
 		for (int i=0; i < insertLibrariesCount; ++i) {
 			try {
