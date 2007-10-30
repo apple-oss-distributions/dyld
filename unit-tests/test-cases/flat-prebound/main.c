@@ -23,26 +23,29 @@
 #include <stdio.h>  // fprintf(), NULL
 #include <stdlib.h> // exit(), EXIT_SUCCESS
 #include <dlfcn.h>
-
+#include <stdbool.h>
 #include "test.h" // PASS(), FAIL(), XPASS(), XFAIL()
 
 // foo() internally calls bar()
 // libfoo.dylib is build flat and prebound to libbar.dylib
 // but the bar in this main executable should override the prebound bar
-
-extern int foo();
+extern bool foo();
 
 int main()
 {
-	if ( foo() != 0 )
-		FAIL("flat-prebound found wrong bar");
-	else
+	if ( foo() )
 		PASS("flat-prebound");
+	else
+		FAIL("flat-prebound found wrong bar");
 
 	return EXIT_SUCCESS;
 }
+
 
 int bar()
 {
 	return 0;
 }
+int barVar = 0;
+int barVar2 = 0;
+

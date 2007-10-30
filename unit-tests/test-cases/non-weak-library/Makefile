@@ -24,7 +24,7 @@ TESTROOT = ../..
 include ${TESTROOT}/include/common.makefile
 
 run: all
-	cd absent/  && ../${TESTROOT}/bin/exit-non-zero-pass.pl "pass message" "fail message" ./main
+	cd absent/  && ../${TESTROOT}/bin/exit-non-zero-pass.pl "non-weak-library" "non-weak-library" ./main
 	cd present/ && ./main
 
 all: foo.c main.c
