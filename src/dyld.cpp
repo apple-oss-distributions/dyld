@@ -1190,7 +1190,8 @@ static void checkDylibOverridesInDir(const char* dirPath)
 {
 	//dyld::log("checkDylibOverridesInDir('%s')\n", dirPath);
 	char dylibPath[PATH_MAX];
-	if ( strlcpy(dylibPath, dirPath, PATH_MAX) >= PATH_MAX )
+	int dirPathLen = strlcpy(dylibPath, dirPath, PATH_MAX-1);
+	if ( dirPathLen >= PATH_MAX )
 		return;
 	DIR* dirp = opendir(dirPath);
 	if ( dirp != NULL) {
@@ -1201,8 +1202,8 @@ static void checkDylibOverridesInDir(const char* dirPath)
 				break;
 			if ( entp->d_type != DT_REG ) 
 				continue;
-			if ( strlcat(dylibPath, "/", PATH_MAX) >= PATH_MAX )
-				continue;
+			dylibPath[dirPathLen] = '/';
+			dylibPath[dirPathLen+1] = '\0';
 			if ( strlcat(dylibPath, entp->d_name, PATH_MAX) >= PATH_MAX )
 				continue;
 			checkDylibOverride(dylibPath);
@@ -1216,7 +1217,8 @@ static void checkFrameworkOverridesInDir(const char* dirPath)
 {
 	//dyld::log("checkFrameworkOverridesInDir('%s')\n", dirPath);
 	char frameworkPath[PATH_MAX];
-	if ( strlcpy(frameworkPath, dirPath, PATH_MAX) >= PATH_MAX )
+	int dirPathLen = strlcpy(frameworkPath, dirPath, PATH_MAX-1);
+	if ( dirPathLen >= PATH_MAX )
 		return;
 	DIR* dirp = opendir(dirPath);
 	if ( dirp != NULL) {
@@ -1227,9 +1229,9 @@ static void checkFrameworkOverridesInDir(const char* dirPath)
 				break;
 			if ( entp->d_type != DT_DIR ) 
 				continue;
-			if ( strlcat(frameworkPath, "/", PATH_MAX) >= PATH_MAX )
-				continue;
-			int dirNameLen = strlen(entp->d_name);
+			frameworkPath[dirPathLen] = '/';
+			frameworkPath[dirPathLen+1] = '\0';
+			int dirNameLen = (int)strlen(entp->d_name);
 			if ( dirNameLen < 11 )
 				continue;
 			if ( strcmp(&entp->d_name[dirNameLen-10], ".framework") != 0 )

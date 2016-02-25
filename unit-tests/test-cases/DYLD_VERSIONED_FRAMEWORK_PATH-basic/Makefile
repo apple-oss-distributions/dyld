@@ -47,15 +47,18 @@ check-macosx:
 	export DYLD_VERSIONED_FRAMEWORK_PATH="${PWD}/alt11:${PWD}/alt12" && ./main 12
 
 all: 
-	mkdir -p Foo.framework alt11/Foo.framework/Versions/A alt9/Foo.framework alt12/Foo.framework
+	mkdir -p Foo.framework alt11/Foo.framework/Versions/A alt9/Foo.framework alt12/Foo.framework Bar.framework alt11/Bar.framework/Versions/A/
+	${CC} ${CCFLAGS} -dynamiclib bar.c -DRESULT=10 -current_version 10 -install_name "${PWD}/Bar.framework/Bar" -o Bar.framework/Bar
 	${CC} ${CCFLAGS} -dynamiclib foo.c -DRESULT=10 -current_version 10 -install_name "${PWD}/Foo.framework/Foo" -o Foo.framework/Foo
-	${CC} ${CCFLAGS} -I${TESTROOT}/include -o main main.c Foo.framework/Foo 
+	${CC} ${CCFLAGS} -I${TESTROOT}/include -o main main.c Bar.framework/Bar Foo.framework/Foo
 	${CC} ${CCFLAGS} -dynamiclib foo.c -DRESULT=11 -current_version 11 -install_name "${PWD}/Foo.framework/Foo" -o alt11/Foo.framework/Versions/A/Foo
+	${CC} ${CCFLAGS} -dynamiclib bar.c -DRESULT=11 -current_version 11 -install_name "${PWD}/Bar.framework/Foo" -o alt11/Bar.framework/Versions/A/Bar
 	cd alt11/Foo.framework && ln -sf Versions/A/Foo
-	${CC} ${CCFLAGS} -dynamiclib foo.c -DRESULT=9  -current_version 9  -install_name "${PWD}/Foo.framework/Foo" -o alt9/Foo.framework/Foo  
+	cd alt11/Bar.framework && ln -sf Versions/A/Bar
+	${CC} ${CCFLAGS} -dynamiclib foo.c -DRESULT=9  -current_version 9  -install_name "${PWD}/Foo.framework/Foo" -o alt9/Foo.framework/Foo
 	${CC} ${CCFLAGS} -dynamiclib foo.c -DRESULT=12 -current_version 12 -install_name "${PWD}/Foo.framework/Foo" -o alt12/Foo.framework/Foo  
 
 
 clean:
-	${RM} -rf main Foo.framework alt9 alt11 alt12
+	${RM} -rf main Foo.framework Bar.framework alt9 alt11 alt12
 
