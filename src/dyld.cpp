@@ -4413,7 +4413,10 @@ static void loadInsertedDylib(const char* path)
 #if TARGET_IPHONE_SIMULATOR
 		dyld::log("dyld: warning: could not load inserted library '%s' because %s\n", path, msg);
 #else
-		halt(dyld::mkstringf("could not load inserted library '%s' because %s\n", path, msg));
+		if ( sProcessRequiresLibraryValidation )
+			dyld::log("dyld: warning: could not load inserted library '%s' into library validated process because %s\n", path, msg);
+		else
+			halt(dyld::mkstringf("could not load inserted library '%s' because %s\n", path, msg));
 #endif
 	}
 	catch (...) {
@@ -4650,6 +4653,8 @@ static uintptr_t useSimulatorDyld(int fd, const macho_header* mainExecutableMH, 
 					void* segAddress = ::mmap((void*)requestedLoadAddress, seg->filesize, seg->initprot, MAP_FIXED | MAP_PRIVATE, fd, fileOffset + seg->fileoff);
 					//dyld::log("dyld_sim %s mapped at %p\n", seg->segname, segAddress);
 					if ( segAddress == (void*)(-1) )
+						return 0;
+					if ( ((uintptr_t)segAddress < loadAddress) || ((uintptr_t)segAddress+seg->filesize > loadAddress+mappingSize) )
 						return 0;
 				}
 				break;
