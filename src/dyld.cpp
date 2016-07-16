@@ -4549,7 +4549,18 @@ static uintptr_t useSimulatorDyld(int fd, const macho_header* mainExecutableMH, 
 								int argc, const char* argv[], const char* envp[], const char* apple[], uintptr_t* startGlue)
 {
 	*startGlue = 0;
-	
+
+	// <rdar://problem/25311921> simulator does not support restricted processes
+	uint32_t flags;
+	if ( csops(0, CS_OPS_STATUS, &flags, sizeof(flags)) == -1 )
+		return 0;
+	if ( (flags & CS_RESTRICT) == CS_RESTRICT )
+		return 0;
+	if ( issetugid() )
+		return 0;
+	if ( hasRestrictedSegment(mainExecutableMH) )
+		return 0;
+
 	// verify simulator dyld file is owned by root
 	struct stat sb;
 	if ( fstat(fd, &sb) == -1 )
