@@ -62,14 +62,14 @@ struct Node
 		const char* partialStr = &fullStr[strlen(fCummulativeString)];
 		for (std::vector<Edge>::iterator it = fChildren.begin(); it != fChildren.end(); ++it) {
 			Edge& e = *it;
-			int subStringLen = strlen(e.fSubString);
+			long subStringLen = strlen(e.fSubString);
 			if ( strncmp(e.fSubString, partialStr, subStringLen) == 0 ) {
 				// already have matching edge, go down that path
 				e.fChild->addSymbol(fullStr, address, flags, other, importName);
 				return;
 			}
 			else {
-				for (int i=subStringLen-1; i > 0; --i) {
+				for (long i=subStringLen-1; i > 0; --i) {
 					if ( strncmp(e.fSubString, partialStr, i) == 0 ) {
 						// found a common substring, splice in new node
 						//  was A -> C,  now A -> B -> C
@@ -116,7 +116,7 @@ struct Node
 		const char* partialStr = &name[strlen(fCummulativeString)];
 		for (std::vector<Edge>::iterator it = fChildren.begin(); it != fChildren.end(); ++it) {
 			Edge& e = *it;
-			int subStringLen = strlen(e.fSubString);
+			long subStringLen = strlen(e.fSubString);
 			if ( strncmp(e.fSubString, partialStr, subStringLen) == 0 ) {
 				// already have matching edge, go down that path
 				e.fChild->addOrderedNodes(name, orderedNodes);
@@ -165,7 +165,7 @@ struct Node
 			if ( fFlags & EXPORT_SYMBOL_FLAGS_REEXPORT ) {
 				if ( fImportedName != NULL ) {
 					// nodes with re-export info: size, flags, ordinal, string
-					uint32_t nodeSize = uleb128_size(fFlags) + uleb128_size(fOther) + strlen(fImportedName) + 1;
+					uint32_t nodeSize = (uint32_t)(uleb128_size(fFlags) + uleb128_size(fOther) + strlen(fImportedName) + 1);
 					out.push_back(nodeSize);
 					append_uleb128(fFlags, out);
 					append_uleb128(fOther, out);
@@ -365,7 +365,7 @@ static inline void processExportNode(const uint8_t* const start, const uint8_t* 
 			++edgeStrLen;
 		}
 		cummulativeString[curStrOffset+edgeStrLen] = *s++;
-		uint32_t childNodeOffet = read_uleb128(s, end);
+		uint32_t childNodeOffet = (uint32_t)read_uleb128(s, end);
 		processExportNode(start, start+childNodeOffet, end, cummulativeString, curStrOffset+edgeStrLen, output);	
 	}
 }
@@ -376,7 +376,7 @@ inline void parseTrie(const uint8_t* start, const uint8_t* end, std::vector<Entr
 	// empty trie has no entries
 	if ( start == end )
 		return;
-	char cummulativeString[4000];
+	char cummulativeString[32000];
 	std::vector<EntryWithOffset> entries;
 	processExportNode(start, start, end, cummulativeString, 0, entries);
 	// to preserve tie layout order, sort by node offset

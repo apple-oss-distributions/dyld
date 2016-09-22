@@ -48,12 +48,14 @@ check-macosx:
 all: 
 	mkdir -p alt11 alt9 alt12
 	${CC} ${CCFLAGS} -dynamiclib foo.c -DRESULT=10 -current_version 10 -o "${PWD}/libfoo.dylib"
-	${CC} ${CCFLAGS} -I${TESTROOT}/include -o main main.c libfoo.dylib 
+	${CC} ${CCFLAGS} -dynamiclib bar.c -DRESULT=10 -current_version 10 -o "${PWD}/libbar.dylib"
+	${CC} ${CCFLAGS} -I${TESTROOT}/include -o main main.c libbar.dylib libfoo.dylib
 	${CC} ${CCFLAGS} -dynamiclib foo.c -DRESULT=11 -current_version 11 -install_name "${PWD}/libfoo.dylib" -o alt11/libfoo.dylib  
-	${CC} ${CCFLAGS} -dynamiclib foo.c -DRESULT=9  -current_version 9  -install_name "${PWD}/libfoo.dylib" -o alt9/libfoo.dylib  
+	${CC} ${CCFLAGS} -dynamiclib bar.c -DRESULT=11 -current_version 11 -install_name "${PWD}/libbar.dylib" -o alt11/libbar.dylib
+	${CC} ${CCFLAGS} -dynamiclib foo.c -DRESULT=9  -current_version 9  -install_name "${PWD}/libfoo.dylib" -o alt9/libfoo.dylib
 	${CC} ${CCFLAGS} -dynamiclib foo.c -DRESULT=12 -current_version 12 -install_name "${PWD}/libfoo.dylib" -o alt12/libfoo.dylib  
 
 
 clean:
-	${RM} -rf main libfoo.dylib alt9 alt11 alt12
+	${RM} -rf main libfoo.dylib libbar.dylib alt9 alt11 alt12
 

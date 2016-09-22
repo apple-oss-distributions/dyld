@@ -158,7 +158,7 @@ static perfect_hash make_perfect(const string_map& strings);
 
 // Precomputed perfect hash table of strings.
 // Base class for precomputed selector table and class table.
-// Edit objc-sel-table.s and OPT_INITIALIZER if you change this structure.
+// Edit objc-sel-table.s if you change this structure.
 struct objc_stringhash_t {
     uint32_t capacity;
     uint32_t occupied;
@@ -334,7 +334,7 @@ struct objc_stringhash_t {
 
 
 // Precomputed selector table.
-// Edit objc-sel-table.s and OPT_INITIALIZER if you change this structure.
+// Edit objc-sel-table.s if you change this structure.
 struct objc_selopt_t : objc_stringhash_t { 
     const char *get(const char *key) const 
     {
@@ -346,7 +346,7 @@ struct objc_selopt_t : objc_stringhash_t {
 };
 
 // Precomputed class list.
-// Edit objc-sel-table.s and OPT_INITIALIZER if you change these structures.
+// Edit objc-sel-table.s if you change these structures.
 
 struct objc_classheader_t {
     objc_stringhash_offset_t clsOffset;
@@ -489,7 +489,7 @@ struct objc_clsopt_t : objc_stringhash_t {
                 continue;
             }
 
-            uint32_t count = classes.count(c->first);
+            uint32_t count = (uint32_t)classes.count(c->first);
             if (count == 1) {
                 // only one class with this name
 
@@ -632,24 +632,36 @@ struct objc_protocolopt_t : objc_stringhash_t {
 
 
 // Precomputed image list.
-struct objc_headeropt_t;
+struct objc_headeropt_ro_t;
+
+// Precomputed image list.
+struct objc_headeropt_rw_t;
 
 // Precomputed class list.
 struct objc_clsopt_t;
 
 // Edit objc-sel-table.s if you change this value.
-enum { VERSION = 13 };
+// lldb and Symbolication read these structures. Inform them of any changes.
+enum { VERSION = 15 };
+
+// Values for objc_opt_t::flags
+enum : uint32_t {
+    IsProduction = (1 << 0),               // never set in development cache
+    NoMissingWeakSuperclasses = (1 << 1),  // never set in development cache
+};
 
 // Top-level optimization structure.
-// Edit objc-sel-table.s and OPT_INITIALIZER if you change this structure.
+// Edit objc-sel-table.s if you change this structure.
 struct alignas(alignof(void*)) objc_opt_t {
     uint32_t version;
+    uint32_t flags;
     int32_t selopt_offset;
-    int32_t headeropt_offset;
+    int32_t headeropt_ro_offset;
     int32_t clsopt_offset;
     int32_t protocolopt_offset;
+    int32_t headeropt_rw_offset;
 
-    const objc_selopt_t* selopt() const { 
+    const objc_selopt_t* selopt() const {
         if (selopt_offset == 0) return NULL;
         return (objc_selopt_t *)((uint8_t *)this + selopt_offset);
     }
@@ -658,9 +670,9 @@ struct alignas(alignof(void*)) objc_opt_t {
         return (objc_selopt_t *)((uint8_t *)this + selopt_offset);
     }
 
-    struct objc_headeropt_t* headeropt() const { 
-        if (headeropt_offset == 0) return NULL;
-        return (struct objc_headeropt_t *)((uint8_t *)this + headeropt_offset);
+    struct objc_headeropt_ro_t* headeropt_ro() const {
+        if (headeropt_ro_offset == 0) return NULL;
+        return (struct objc_headeropt_ro_t *)((uint8_t *)this + headeropt_ro_offset);
     }
 
     struct objc_clsopt_t* clsopt() const { 
@@ -672,24 +684,15 @@ struct alignas(alignof(void*)) objc_opt_t {
         if (protocolopt_offset == 0) return NULL;
         return (objc_protocolopt_t *)((uint8_t *)this + protocolopt_offset);
     }
+
+    struct objc_headeropt_rw_t* headeropt_rw() const {
+        if (headeropt_rw_offset == 0) return NULL;
+        return (struct objc_headeropt_rw_t *)((uint8_t *)this + headeropt_rw_offset);
+    }
 };
 
 // sizeof(objc_opt_t) must be pointer-aligned
 STATIC_ASSERT(sizeof(objc_opt_t) % sizeof(void*) == 0);
-
-// Initializer for empty opt of type uint32_t[].
-#define X8(x) x, x, x, x, x, x, x, x
-#define X64(x) X8(x), X8(x), X8(x), X8(x), X8(x), X8(x), X8(x), X8(x)
-#define X256(x) X64(x), X64(x), X64(x), X64(x)
-#define OPT_INITIALIZER {                                           \
-        /* objc_opt_t */                                            \
-        objc_opt::VERSION, 16, 0, 0,                                \
-        /* objc_selopt_t */                                         \
-        4, 4, 63, 3, 0, 0, 0,0, X256(0), 0, 0, 16, 16, 16, 16       \
-        /* no objc_headeropt_t */                                   \
-        /* no objc_clsopt_t */                                      \
-        /* no objc_protocolopt_t */                                 \
-}
 
 
 // List of offsets in libobjc that the shared cache optimization needs to use.
@@ -1039,8 +1042,8 @@ static void initnorm(key *keys, ub4 nkeys, ub4 alen, ub4 blen, ub4 smax, ub8 sal
   for (i = 0; i < nkeys; i++) {
     key *mykey = keys+i;
     ub8 hash = lookup8(mykey->name_k, mykey->len_k, salt);
-    mykey->a_k = (loga > 0) ? hash>>(UB8BITS-loga) : 0;
-    mykey->b_k = (blen > 1) ? hash&(blen-1) : 0;
+    mykey->a_k = (loga > 0) ? (ub4)(hash >> (UB8BITS-loga)) : 0;
+    mykey->b_k = (blen > 1) ? (hash & (blen-1)) : 0;
   }
 }
 
@@ -1412,7 +1415,7 @@ static void getkeys(key **keys, ub4 *nkeys, const string_map& strings)
     mykey->len_k  = (ub4)strlen(s->first);
   }
   *keys = buf;
-  *nkeys = strings.size();
+  *nkeys = (ub4)strings.size();
 }
 
 

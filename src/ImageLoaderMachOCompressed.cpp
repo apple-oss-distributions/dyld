@@ -62,46 +62,6 @@
 	struct macho_routines_command	: public routines_command  {};	
 #endif
 
-	
-static uintptr_t read_uleb128(const uint8_t*& p, const uint8_t* end)
-{
-	uint64_t result = 0;
-	int		 bit = 0;
-	do {
-		if (p == end)
-			dyld::throwf("malformed uleb128");
-
-		uint64_t slice = *p & 0x7f;
-
-		if (bit > 63)
-			dyld::throwf("uleb128 too big for uint64, bit=%d, result=0x%0llX", bit, result);
-		else {
-			result |= (slice << bit);
-			bit += 7;
-		}
-	} while (*p++ & 0x80);
-	return result;
-}
-
-
-static intptr_t read_sleb128(const uint8_t*& p, const uint8_t* end)
-{
-	int64_t result = 0;
-	int bit = 0;
-	uint8_t byte;
-	do {
-		if (p == end)
-			throw "malformed sleb128";
-		byte = *p++;
-		result |= (((int64_t)(byte & 0x7f)) << bit);
-		bit += 7;
-	} while (byte & 0x80);
-	// sign extend negative numbers
-	if ( (byte & 0x40) != 0 )
-		result |= (-1LL) << bit;
-	return result;
-}
-
 
 // create image for main executable
 ImageLoaderMachOCompressed* ImageLoaderMachOCompressed::instantiateMainExecutable(const macho_header* mh, uintptr_t slide, const char* path, 
@@ -430,15 +390,14 @@ void ImageLoaderMachOCompressed::rebaseAt(const LinkContext& context, uintptr_t 
 void ImageLoaderMachOCompressed::throwBadRebaseAddress(uintptr_t address, uintptr_t segmentEndAddress, int segmentIndex, 
 										const uint8_t* startOpcodes, const uint8_t* endOpcodes, const uint8_t* pos)
 {
-	dyld::throwf("malformed rebase opcodes (%ld/%ld): address 0x%08lX is beyond end of segment %s (0x%08lX -> 0x%08lX)",
+	dyld::throwf("malformed rebase opcodes (%ld/%ld): address 0x%08lX is outside of segment %s (0x%08lX -> 0x%08lX)",
 		(intptr_t)(pos-startOpcodes), (intptr_t)(endOpcodes-startOpcodes), address, segName(segmentIndex), 
 		segActualLoadAddress(segmentIndex), segmentEndAddress); 
 }
 
-void ImageLoaderMachOCompressed::rebase(const LinkContext& context)
+void ImageLoaderMachOCompressed::rebase(const LinkContext& context, uintptr_t slide)
 {
 	CRSetCrashLogMessage2(this->getPath());
-	const uintptr_t slide = this->fSlide;
 	const uint8_t* const start = fLinkEditBase + fDyldInfo->rebase_off;
 	const uint8_t* const end = &start[fDyldInfo->rebase_size];
 	const uint8_t* p = start;
@@ -447,6 +406,7 @@ void ImageLoaderMachOCompressed::rebase(const LinkContext& context)
 		uint8_t type = 0;
 		int segmentIndex = 0;
 		uintptr_t address = segActualLoadAddress(0);
+		uintptr_t segmentStartAddress = segActualLoadAddress(0);
 		uintptr_t segmentEndAddress = segActualEndAddress(0);
 		uintptr_t count;
 		uintptr_t skip;
@@ -467,8 +427,16 @@ void ImageLoaderMachOCompressed::rebase(const LinkContext& context)
 					if ( segmentIndex >= fSegmentsCount )
 						dyld::throwf("REBASE_OPCODE_SET_SEGMENT_AND_OFFSET_ULEB has segment %d which is too large (0..%d)",
 								segmentIndex, fSegmentsCount-1);
-					address = segActualLoadAddress(segmentIndex) + read_uleb128(p, end);
+			#if TEXT_RELOC_SUPPORT
+					if ( !segWriteable(segmentIndex) && !segHasRebaseFixUps(segmentIndex) && !segHasBindFixUps(segmentIndex) )
+			#else
+					if ( !segWriteable(segmentIndex) )
+			#endif
+						dyld::throwf("REBASE_OPCODE_SET_SEGMENT_AND_OFFSET_ULEB has segment %d which is not a writable segment (%s)",
+								segmentIndex, segName(segmentIndex));
+					segmentStartAddress = segActualLoadAddress(segmentIndex);
 					segmentEndAddress = segActualEndAddress(segmentIndex);
+					address = segmentStartAddress + read_uleb128(p, end);
 					break;
 				case REBASE_OPCODE_ADD_ADDR_ULEB:
 					address += read_uleb128(p, end);
@@ -478,7 +446,7 @@ void ImageLoaderMachOCompressed::rebase(const LinkContext& context)
 					break;
 				case REBASE_OPCODE_DO_REBASE_IMM_TIMES:
 					for (int i=0; i < immediate; ++i) {
-						if ( address >= segmentEndAddress ) 
+						if ( (address < segmentStartAddress) || (address >= segmentEndAddress) )
 							throwBadRebaseAddress(address, segmentEndAddress, segmentIndex, start, end, p);
 						rebaseAt(context, address, slide, type);
 						address += sizeof(uintptr_t);
@@ -488,7 +456,7 @@ void ImageLoaderMachOCompressed::rebase(const LinkContext& context)
 				case REBASE_OPCODE_DO_REBASE_ULEB_TIMES:
 					count = read_uleb128(p, end);
 					for (uint32_t i=0; i < count; ++i) {
-						if ( address >= segmentEndAddress ) 
+						if ( (address < segmentStartAddress) || (address >= segmentEndAddress) )
 							throwBadRebaseAddress(address, segmentEndAddress, segmentIndex, start, end, p);
 						rebaseAt(context, address, slide, type);
 						address += sizeof(uintptr_t);
@@ -496,7 +464,7 @@ void ImageLoaderMachOCompressed::rebase(const LinkContext& context)
 					fgTotalRebaseFixups += count;
 					break;
 				case REBASE_OPCODE_DO_REBASE_ADD_ADDR_ULEB:
-					if ( address >= segmentEndAddress ) 
+					if ( (address < segmentStartAddress) || (address >= segmentEndAddress) )
 						throwBadRebaseAddress(address, segmentEndAddress, segmentIndex, start, end, p);
 					rebaseAt(context, address, slide, type);
 					address += read_uleb128(p, end) + sizeof(uintptr_t);
@@ -506,7 +474,7 @@ void ImageLoaderMachOCompressed::rebase(const LinkContext& context)
 					count = read_uleb128(p, end);
 					skip = read_uleb128(p, end);
 					for (uint32_t i=0; i < count; ++i) {
-						if ( address >= segmentEndAddress ) 
+						if ( (address < segmentStartAddress) || (address >= segmentEndAddress) )
 							throwBadRebaseAddress(address, segmentEndAddress, segmentIndex, start, end, p);
 						rebaseAt(context, address, slide, type);
 						address += skip + sizeof(uintptr_t);
@@ -526,74 +494,7 @@ void ImageLoaderMachOCompressed::rebase(const LinkContext& context)
 	CRSetCrashLogMessage2(NULL);
 }
 
-//
-// This function is the hotspot of symbol lookup.  It was pulled out of findExportedSymbol()
-// to enable it to be re-written in assembler if needed.
-//
-const uint8_t* ImageLoaderMachOCompressed::trieWalk(const uint8_t* start, const uint8_t* end, const char* s)
-{
-	const uint8_t* p = start;
-	while ( p != NULL ) {
-		uintptr_t terminalSize = *p++;
-		if ( terminalSize > 127 ) {
-			// except for re-export-with-rename, all terminal sizes fit in one byte
-			--p;
-			terminalSize = read_uleb128(p, end);
-		}
-		if ( (*s == '\0') && (terminalSize != 0) ) {
-			//dyld::log("trieWalk(%p) returning %p\n", start, p);
-			return p;
-		}
-		const uint8_t* children = p + terminalSize;
-		//dyld::log("trieWalk(%p) sym=%s, terminalSize=%d, children=%p\n", start, s, terminalSize, children);
-		uint8_t childrenRemaining = *children++;
-		p = children;
-		uintptr_t nodeOffset = 0;
-		for (; childrenRemaining > 0; --childrenRemaining) {
-			const char* ss = s;
-			//dyld::log("trieWalk(%p) child str=%s\n", start, (char*)p);
-			bool wrongEdge = false;
-			// scan whole edge to get to next edge
-			// if edge is longer than target symbol name, don't read past end of symbol name
-			char c = *p;
-			while ( c != '\0' ) {
-				if ( !wrongEdge ) {
-					if ( c != *ss )
-						wrongEdge = true;
-					++ss;
-				}
-				++p;
-				c = *p;
-			}
-			if ( wrongEdge ) {
-				// advance to next child
-				++p; // skip over zero terminator
-				// skip over uleb128 until last byte is found
-				while ( (*p & 0x80) != 0 )
-					++p;
-				++p; // skil over last byte of uleb128
-			}
-			else {
- 				// the symbol so far matches this edge (child)
-				// so advance to the child's node
-				++p;
-				nodeOffset = read_uleb128(p, end);
-				s = ss;
-				//dyld::log("trieWalk() found matching edge advancing to node 0x%x\n", nodeOffset);
-				break;
-			}
-		}
-		if ( nodeOffset != 0 )
-			p = &start[nodeOffset];
-		else
-			p = NULL;
-	}
-	//dyld::log("trieWalk(%p) return NULL\n", start);
-	return NULL;
-}
-
-
-const ImageLoader::Symbol* ImageLoaderMachOCompressed::findExportedSymbol(const char* symbol, const ImageLoader** foundIn) const
+const ImageLoader::Symbol* ImageLoaderMachOCompressed::findShallowExportedSymbol(const char* symbol, const ImageLoader** foundIn) const
 {
 	//dyld::log("Compressed::findExportedSymbol(%s) in %s\n", symbol, this->getShortName());
 	if ( fDyldInfo->export_size == 0 )
@@ -618,7 +519,8 @@ const ImageLoader::Symbol* ImageLoaderMachOCompressed::findExportedSymbol(const 
 			if ( (ordinal > 0) && (ordinal <= libraryCount()) ) {
 				const ImageLoader* reexportedFrom = libImage((unsigned int)ordinal-1);
 				//dyld::log("Compressed::findExportedSymbol(), %s -> %s/%s\n", symbol, reexportedFrom->getShortName(), importedName);
-				return reexportedFrom->findExportedSymbol(importedName, true, foundIn);
+				const char* reExportLibPath = libPath((unsigned int)ordinal-1);
+				return reexportedFrom->findExportedSymbol(importedName, true, reExportLibPath, foundIn);
 			}
 			else {
 				//dyld::throwf("bad mach-o binary, library ordinal (%u) invalid (max %u) for re-exported symbol %s in %s",
@@ -741,7 +643,7 @@ uintptr_t ImageLoaderMachOCompressed::resolveFlat(const LinkContext& context, co
 	// if a bundle is loaded privately the above will not find its exports
 	if ( this->isBundle() && this->hasHiddenExports() ) {
 		// look in self for needed symbol
-		sym = this->ImageLoaderMachO::findExportedSymbol(symbolName, false, foundIn);
+		sym = this->findShallowExportedSymbol(symbolName, foundIn);
 		if ( sym != NULL )
 			return (*foundIn)->getExportedSymbolAddress(sym, context, this, runResolver);
 	}
@@ -753,15 +655,15 @@ uintptr_t ImageLoaderMachOCompressed::resolveFlat(const LinkContext& context, co
 }
 
 
-uintptr_t ImageLoaderMachOCompressed::resolveTwolevel(const LinkContext& context, const ImageLoader* targetImage, bool weak_import, 
-												const char* symbolName, bool runResolver, const ImageLoader** foundIn)
+uintptr_t ImageLoaderMachOCompressed::resolveTwolevel(const LinkContext& context, const char* symbolName, const ImageLoader* definedInImage,
+													  const ImageLoader* requestorImage, unsigned requestorOrdinalOfDef, bool weak_import, bool runResolver,
+													  const ImageLoader** foundIn)
 {
 	// two level lookup
-	const Symbol* sym = targetImage->findExportedSymbol(symbolName, true, foundIn);
-	if ( sym != NULL ) {
-		return (*foundIn)->getExportedSymbolAddress(sym, context, this, runResolver);
-	}
-	
+	uintptr_t address;
+	if ( definedInImage->findExportedSymbolAddress(context, symbolName, requestorImage, requestorOrdinalOfDef, runResolver, foundIn, &address) )
+		return address;
+
 	if ( weak_import ) {
 		// definition can't be found anywhere, ok because it is weak, just return 0
 		return 0;
@@ -784,7 +686,7 @@ uintptr_t ImageLoaderMachOCompressed::resolveTwolevel(const LinkContext& context
 		strcpy(versMismatch, msg);
 		::free((void*)msg);
 	}
-	throwSymbolNotFound(context, symbolName, this->getPath(), versMismatch, targetImage->getPath());
+	throwSymbolNotFound(context, symbolName, this->getPath(), versMismatch, definedInImage->getPath());
 }
 
 
@@ -838,10 +740,10 @@ uintptr_t ImageLoaderMachOCompressed::resolve(const LinkContext& context, const 
 			}
 		}
 		else {
-			symbolAddress = resolveTwolevel(context, *targetImage, weak_import, symbolName, runResolver, targetImage);
+			symbolAddress = resolveTwolevel(context, symbolName, *targetImage, this, (unsigned)libraryOrdinal, weak_import, runResolver, targetImage);
 		}
 	}
-	
+
 	// save off lookup results if client wants 
 	if ( last != NULL ) {
 		last->ordinal	= libraryOrdinal;
@@ -855,23 +757,24 @@ uintptr_t ImageLoaderMachOCompressed::resolve(const LinkContext& context, const 
 }
 
 uintptr_t ImageLoaderMachOCompressed::bindAt(const LinkContext& context, uintptr_t addr, uint8_t type, const char* symbolName, 
-								uint8_t symboFlags, intptr_t addend, long libraryOrdinal, const char* msg, 
+								uint8_t symbolFlags, intptr_t addend, long libraryOrdinal, const char* msg,
 								LastLookup* last, bool runResolver)
 {
 	const ImageLoader*	targetImage;
 	uintptr_t			symbolAddress;
 	
 	// resolve symbol
-	symbolAddress = this->resolve(context, symbolName, symboFlags, libraryOrdinal, &targetImage, last, runResolver);
+	symbolAddress = this->resolve(context, symbolName, symbolFlags, libraryOrdinal, &targetImage, last, runResolver);
 
 	// do actual update
-	return this->bindLocation(context, addr, symbolAddress, targetImage, type, symbolName, addend, msg);
+	return this->bindLocation(context, addr, symbolAddress, type, symbolName, addend, this->getPath(), targetImage ? targetImage->getPath() : NULL, msg);
 }
+
 
 void ImageLoaderMachOCompressed::throwBadBindingAddress(uintptr_t address, uintptr_t segmentEndAddress, int segmentIndex, 
 										const uint8_t* startOpcodes, const uint8_t* endOpcodes, const uint8_t* pos)
 {
-	dyld::throwf("malformed binding opcodes (%ld/%ld): address 0x%08lX is beyond end of segment %s (0x%08lX -> 0x%08lX)",
+	dyld::throwf("malformed binding opcodes (%ld/%ld): address 0x%08lX is outside segment %s (0x%08lX -> 0x%08lX)",
 		(intptr_t)(pos-startOpcodes), (intptr_t)(endOpcodes-startOpcodes), address, segName(segmentIndex), 
 		segActualLoadAddress(segmentIndex), segmentEndAddress); 
 }
@@ -887,7 +790,8 @@ void ImageLoaderMachOCompressed::doBind(const LinkContext& context, bool forceLa
 		// don't need to bind
 	}
 	else {
-	
+		uint64_t t0 = mach_absolute_time();
+
 	#if TEXT_RELOC_SUPPORT
 		// if there are __TEXT fixups, temporarily make __TEXT writable
 		if ( fTextSegmentBinds ) 
@@ -917,6 +821,9 @@ void ImageLoaderMachOCompressed::doBind(const LinkContext& context, bool forceLa
 		// tell kernel we are done with chunks of LINKEDIT
 		if ( !context.preFetchDisabled ) 
 			this->markFreeLINKEDIT(context);
+
+		uint64_t t1 = mach_absolute_time();
+		ImageLoader::fgTotalRebindCacheTime += (t1-t0);
 	}
 	
 	// set up dyld entry points in image
@@ -935,15 +842,18 @@ void ImageLoaderMachOCompressed::eachBind(const LinkContext& context, bind_handl
 {
 	try {
 		uint8_t type = 0;
-		int segmentIndex = 0;
+		int segmentIndex = -1;
 		uintptr_t address = segActualLoadAddress(0);
+		uintptr_t segmentStartAddress = segActualLoadAddress(0);
 		uintptr_t segmentEndAddress = segActualEndAddress(0);
 		const char* symbolName = NULL;
 		uint8_t symboFlags = 0;
+		bool libraryOrdinalSet = false;
 		long libraryOrdinal = 0;
 		intptr_t addend = 0;
 		uintptr_t count;
 		uintptr_t skip;
+		uintptr_t segOffset;
 		LastLookup last = { 0, 0, NULL, 0, NULL };
 		const uint8_t* const start = fLinkEditBase + fDyldInfo->bind_off;
 		const uint8_t* const end = &start[fDyldInfo->bind_size];
@@ -959,9 +869,11 @@ void ImageLoaderMachOCompressed::eachBind(const LinkContext& context, bind_handl
 					break;
 				case BIND_OPCODE_SET_DYLIB_ORDINAL_IMM:
 					libraryOrdinal = immediate;
+					libraryOrdinalSet = true;
 					break;
 				case BIND_OPCODE_SET_DYLIB_ORDINAL_ULEB:
 					libraryOrdinal = read_uleb128(p, end);
+					libraryOrdinalSet = true;
 					break;
 				case BIND_OPCODE_SET_DYLIB_SPECIAL_IMM:
 					// the special ordinals are negative numbers
@@ -971,6 +883,7 @@ void ImageLoaderMachOCompressed::eachBind(const LinkContext& context, bind_handl
 						int8_t signExtended = BIND_OPCODE_MASK | immediate;
 						libraryOrdinal = signExtended;
 					}
+					libraryOrdinalSet = true;
 					break;
 				case BIND_OPCODE_SET_SYMBOL_TRAILING_FLAGS_IMM:
 					symbolName = (char*)p;
@@ -987,38 +900,72 @@ void ImageLoaderMachOCompressed::eachBind(const LinkContext& context, bind_handl
 					break;
 				case BIND_OPCODE_SET_SEGMENT_AND_OFFSET_ULEB:
 					segmentIndex = immediate;
-					if ( segmentIndex >= fSegmentsCount )
-						dyld::throwf("BIND_OPCODE_SET_SEGMENT_AND_OFFSET_ULEB has segment %d which is too large (0..%d)",
+					if ( (segmentIndex >= fSegmentsCount) || (segmentIndex < 0) )
+						dyld::throwf("BIND_OPCODE_SET_SEGMENT_AND_OFFSET_ULEB has segment %d which is out of range (0..%d)",
 								segmentIndex, fSegmentsCount-1);
-					address = segActualLoadAddress(segmentIndex) + read_uleb128(p, end);
+			#if TEXT_RELOC_SUPPORT
+					if ( !segWriteable(segmentIndex) && !segHasRebaseFixUps(segmentIndex) && !segHasBindFixUps(segmentIndex) )
+			#else
+					if ( !segWriteable(segmentIndex) )
+			#endif
+						dyld::throwf("BIND_OPCODE_SET_SEGMENT_AND_OFFSET_ULEB has segment %d which is not writable", segmentIndex);
+					segOffset = read_uleb128(p, end);
+					if ( segOffset > segSize(segmentIndex) )
+						dyld::throwf("BIND_OPCODE_SET_SEGMENT_AND_OFFSET_ULEB has offset 0x%08lX beyond segment size (0x%08lX)", segOffset, segSize(segmentIndex));
+					segmentStartAddress = segActualLoadAddress(segmentIndex);
+					address = segmentStartAddress + segOffset;
 					segmentEndAddress = segActualEndAddress(segmentIndex);
 					break;
 				case BIND_OPCODE_ADD_ADDR_ULEB:
 					address += read_uleb128(p, end);
 					break;
 				case BIND_OPCODE_DO_BIND:
-					if ( address >= segmentEndAddress ) 
+					if ( (address < segmentStartAddress) || (address >= segmentEndAddress) )
 						throwBadBindingAddress(address, segmentEndAddress, segmentIndex, start, end, p);
+					if ( symbolName  == NULL )
+						dyld::throwf("BIND_OPCODE_DO_BIND missing preceding BIND_OPCODE_SET_SYMBOL_TRAILING_FLAGS_IMM");
+					if ( segmentIndex == -1 )
+						dyld::throwf("BIND_OPCODE_DO_BIND missing preceding BIND_OPCODE_SET_SEGMENT_AND_OFFSET_ULEB");
+					if ( !libraryOrdinalSet )
+						dyld::throwf("BIND_OPCODE_DO_BIND missing preceding BIND_OPCODE_SET_DYLIB_ORDINAL*");
 					(this->*handler)(context, address, type, symbolName, symboFlags, addend, libraryOrdinal, "", &last, false);
 					address += sizeof(intptr_t);
 					break;
 				case BIND_OPCODE_DO_BIND_ADD_ADDR_ULEB:
-					if ( address >= segmentEndAddress ) 
+					if ( (address < segmentStartAddress) || (address >= segmentEndAddress) )
 						throwBadBindingAddress(address, segmentEndAddress, segmentIndex, start, end, p);
+					if ( symbolName  == NULL )
+						dyld::throwf("BIND_OPCODE_DO_BIND_ADD_ADDR_ULEB missing preceding BIND_OPCODE_SET_SYMBOL_TRAILING_FLAGS_IMM");
+					if ( segmentIndex == -1 )
+						dyld::throwf("BIND_OPCODE_DO_BIND_ADD_ADDR_ULEB missing preceding BIND_OPCODE_SET_SEGMENT_AND_OFFSET_ULEB");
+					if ( !libraryOrdinalSet )
+						dyld::throwf("BIND_OPCODE_DO_BIND_ADD_ADDR_ULEB missing preceding BIND_OPCODE_SET_DYLIB_ORDINAL*");
 					(this->*handler)(context, address, type, symbolName, symboFlags, addend, libraryOrdinal, "", &last, false);
 					address += read_uleb128(p, end) + sizeof(intptr_t);
 					break;
 				case BIND_OPCODE_DO_BIND_ADD_ADDR_IMM_SCALED:
-					if ( address >= segmentEndAddress ) 
+					if ( (address < segmentStartAddress) || (address >= segmentEndAddress) )
 						throwBadBindingAddress(address, segmentEndAddress, segmentIndex, start, end, p);
+					if ( symbolName  == NULL )
+						dyld::throwf("BIND_OPCODE_DO_BIND_ADD_ADDR_IMM_SCALED missing preceding BIND_OPCODE_SET_SYMBOL_TRAILING_FLAGS_IMM");
+					if ( segmentIndex == -1 )
+						dyld::throwf("BIND_OPCODE_DO_BIND_ADD_ADDR_IMM_SCALED missing preceding BIND_OPCODE_SET_SEGMENT_AND_OFFSET_ULEB");
+					if ( !libraryOrdinalSet )
+						dyld::throwf("BIND_OPCODE_DO_BIND_ADD_ADDR_IMM_SCALED missing preceding BIND_OPCODE_SET_DYLIB_ORDINAL*");
 					(this->*handler)(context, address, type, symbolName, symboFlags, addend, libraryOrdinal, "", &last, false);
 					address += immediate*sizeof(intptr_t) + sizeof(intptr_t);
 					break;
 				case BIND_OPCODE_DO_BIND_ULEB_TIMES_SKIPPING_ULEB:
+					if ( symbolName  == NULL )
+						dyld::throwf("BIND_OPCODE_DO_BIND_ULEB_TIMES_SKIPPING_ULEB missing preceding BIND_OPCODE_SET_SYMBOL_TRAILING_FLAGS_IMM");
+					if ( segmentIndex == -1 )
+						dyld::throwf("BIND_OPCODE_DO_BIND_ULEB_TIMES_SKIPPING_ULEB missing preceding BIND_OPCODE_SET_SEGMENT_AND_OFFSET_ULEB");
 					count = read_uleb128(p, end);
+					if ( !libraryOrdinalSet )
+						dyld::throwf("BIND_OPCODE_DO_BIND_ULEB_TIMES_SKIPPING_ULEB missing preceding BIND_OPCODE_SET_DYLIB_ORDINAL*");
 					skip = read_uleb128(p, end);
 					for (uint32_t i=0; i < count; ++i) {
-						if ( address >= segmentEndAddress ) 
+						if ( (address < segmentStartAddress) || (address >= segmentEndAddress) )
 							throwBadBindingAddress(address, segmentEndAddress, segmentIndex, start, end, p);
 						(this->*handler)(context, address, type, symbolName, symboFlags, addend, libraryOrdinal, "", &last, false);
 						address += skip + sizeof(intptr_t);
@@ -1040,9 +987,11 @@ void ImageLoaderMachOCompressed::eachLazyBind(const LinkContext& context, bind_h
 {
 	try {
 		uint8_t type = BIND_TYPE_POINTER;
-		int segmentIndex = 0;
+		int segmentIndex = -1;
 		uintptr_t address = segActualLoadAddress(0);
+		uintptr_t segmentStartAddress = segActualLoadAddress(0);
 		uintptr_t segmentEndAddress = segActualEndAddress(0);
+		uintptr_t segOffset;
 		const char* symbolName = NULL;
 		uint8_t symboFlags = 0;
 		long libraryOrdinal = 0;
@@ -1089,18 +1038,28 @@ void ImageLoaderMachOCompressed::eachLazyBind(const LinkContext& context, bind_h
 					break;
 				case BIND_OPCODE_SET_SEGMENT_AND_OFFSET_ULEB:
 					segmentIndex = immediate;
-					if ( segmentIndex >= fSegmentsCount )
-						dyld::throwf("BIND_OPCODE_SET_SEGMENT_AND_OFFSET_ULEB has segment %d which is too large (0..%d)",
+					if ( (segmentIndex >= fSegmentsCount) || (segmentIndex < 0) )
+						dyld::throwf("BIND_OPCODE_SET_SEGMENT_AND_OFFSET_ULEB has segment %d which is out of range (0..%d)",
 								segmentIndex, fSegmentsCount-1);
-					address = segActualLoadAddress(segmentIndex) + read_uleb128(p, end);
+					if ( !segWriteable(segmentIndex) )
+						dyld::throwf("BIND_OPCODE_SET_SEGMENT_AND_OFFSET_ULEB has segment %d which is not writable", segmentIndex);
+					segOffset = read_uleb128(p, end);
+					if ( segOffset > segSize(segmentIndex) )
+						dyld::throwf("BIND_OPCODE_SET_SEGMENT_AND_OFFSET_ULEB has offset 0x%08lX beyond segment size (0x%08lX)", segOffset, segSize(segmentIndex));
+					segmentStartAddress = segActualLoadAddress(segmentIndex);
 					segmentEndAddress = segActualEndAddress(segmentIndex);
+					address = segmentStartAddress + segOffset;
 					break;
 				case BIND_OPCODE_ADD_ADDR_ULEB:
 					address += read_uleb128(p, end);
 					break;
 				case BIND_OPCODE_DO_BIND:
-					if ( address >= segmentEndAddress ) 
+					if ( segmentIndex == -1 )
+						dyld::throwf("BIND_OPCODE_DO_BIND missing preceding BIND_OPCODE_SET_SEGMENT_AND_OFFSET_ULEB");
+					if ( (address < segmentStartAddress) || (address >= segmentEndAddress) )
 						throwBadBindingAddress(address, segmentEndAddress, segmentIndex, start, end, p);
+					if ( symbolName  == NULL )
+						dyld::throwf("BIND_OPCODE_DO_BIND missing preceding BIND_OPCODE_SET_SYMBOL_TRAILING_FLAGS_IMM");
 					(this->*handler)(context, address, type, symbolName, symboFlags, addend, libraryOrdinal, "forced lazy ", NULL, false);
 					address += sizeof(intptr_t);
 					break;
@@ -1194,6 +1153,7 @@ uintptr_t ImageLoaderMachOCompressed::doBindLazySymbol(uintptr_t* lazyPointer, c
 }
 
 
+
 uintptr_t ImageLoaderMachOCompressed::doBindFastLazySymbol(uint32_t lazyBindingInfoOffset, const LinkContext& context,
 															void (*lock)(), void (*unlock)())
 {
@@ -1209,73 +1169,26 @@ uintptr_t ImageLoaderMachOCompressed::doBindFastLazySymbol(uint32_t lazyBindingI
 	
 	const uint8_t* const start = fLinkEditBase + fDyldInfo->lazy_bind_off;
 	const uint8_t* const end = &start[fDyldInfo->lazy_bind_size];
-	if ( lazyBindingInfoOffset > fDyldInfo->lazy_bind_size ) {
-		dyld::throwf("fast lazy bind offset out of range (%u, max=%u) in image %s", 
-			lazyBindingInfoOffset, fDyldInfo->lazy_bind_size, this->getPath());
-	}
+	uint8_t segIndex;
+	uintptr_t segOffset;
+	int libraryOrdinal;
+	const char* symbolName;
+	bool doneAfterBind;
+	uintptr_t result;
+	do {
+		if ( ! getLazyBindingInfo(lazyBindingInfoOffset, start, end, &segIndex, &segOffset, &libraryOrdinal, &symbolName, &doneAfterBind) )
+			dyld::throwf("bad lazy bind info");
 
-	uint8_t type = BIND_TYPE_POINTER;
-	uintptr_t address = 0;
-	const char* symbolName = NULL;
-	uint8_t symboFlags = 0;
-	long libraryOrdinal = 0;
-	bool done = false;
-	uintptr_t result = 0;
-	const uint8_t* p = &start[lazyBindingInfoOffset];
-	while ( !done && (p < end) ) {
-		uint8_t immediate = *p & BIND_IMMEDIATE_MASK;
-		uint8_t opcode = *p & BIND_OPCODE_MASK;
-		++p;
-		switch (opcode) {
-			case BIND_OPCODE_DONE:
-				done = true;
-				break;
-			case BIND_OPCODE_SET_DYLIB_ORDINAL_IMM:
-				libraryOrdinal = immediate;
-				break;
-			case BIND_OPCODE_SET_DYLIB_ORDINAL_ULEB:
-				libraryOrdinal = read_uleb128(p, end);
-				break;
-			case BIND_OPCODE_SET_DYLIB_SPECIAL_IMM:
-				// the special ordinals are negative numbers
-				if ( immediate == 0 )
-					libraryOrdinal = 0;
-				else {
-					int8_t signExtended = BIND_OPCODE_MASK | immediate;
-					libraryOrdinal = signExtended;
-				}
-				break;
-			case BIND_OPCODE_SET_SYMBOL_TRAILING_FLAGS_IMM:
-				symbolName = (char*)p;
-				symboFlags = immediate;
-				while (*p != '\0')
-					++p;
-				++p;
-				break;
-			case BIND_OPCODE_SET_TYPE_IMM:
-				type = immediate;
-				break;
-			case BIND_OPCODE_SET_SEGMENT_AND_OFFSET_ULEB:
-				if ( immediate >= fSegmentsCount )
-					dyld::throwf("BIND_OPCODE_SET_SEGMENT_AND_OFFSET_ULEB has segment %d which is too large (0..%d)", 
-							immediate, fSegmentsCount-1);
-				address = segActualLoadAddress(immediate) + read_uleb128(p, end);
-				break;
-			case BIND_OPCODE_DO_BIND:
-				
-			
-				result = this->bindAt(context, address, type, symbolName, 0, 0, libraryOrdinal, "lazy ", NULL, true);
-				break;
-			case BIND_OPCODE_SET_ADDEND_SLEB:
-			case BIND_OPCODE_ADD_ADDR_ULEB:
-			case BIND_OPCODE_DO_BIND_ADD_ADDR_ULEB:
-			case BIND_OPCODE_DO_BIND_ADD_ADDR_IMM_SCALED:
-			case BIND_OPCODE_DO_BIND_ULEB_TIMES_SKIPPING_ULEB:
-			default:
-				dyld::throwf("bad lazy bind opcode %d", *p);
-		}
-	}	
-	
+		if ( segIndex >= fSegmentsCount )
+			dyld::throwf("BIND_OPCODE_SET_SEGMENT_AND_OFFSET_ULEB has segment %d which is too large (0..%d)", 
+							segIndex, fSegmentsCount-1);
+		if ( segOffset > segSize(segIndex) )
+			dyld::throwf("BIND_OPCODE_SET_SEGMENT_AND_OFFSET_ULEB has offset 0x%08lX beyond segment size (0x%08lX)", segOffset, segSize(segIndex));
+		uintptr_t address = segActualLoadAddress(segIndex) + segOffset;
+		result = this->bindAt(context, address, BIND_TYPE_POINTER, symbolName, 0, 0, libraryOrdinal, "lazy ", NULL, true);
+		// <rdar://problem/24140465> Some old apps had multiple lazy symbols bound at once
+	} while (!doneAfterBind && !context.strictMachORequired);
+
 	if ( !this->usesTwoLevelNameSpace() ) {
 		// release dyld global lock
 		if ( unlock != NULL )
@@ -1284,7 +1197,7 @@ uintptr_t ImageLoaderMachOCompressed::doBindFastLazySymbol(uint32_t lazyBindingI
 	return result;
 }
 
-void ImageLoaderMachOCompressed::initializeCoalIterator(CoalIterator& it, unsigned int loadOrder)
+void ImageLoaderMachOCompressed::initializeCoalIterator(CoalIterator& it, unsigned int loadOrder, unsigned)
 {
 	it.image = this;
 	it.symbolName = " ";
@@ -1316,6 +1229,7 @@ bool ImageLoaderMachOCompressed::incrementCoalIterator(CoalIterator& it)
 	const uint8_t* end = fLinkEditBase + fDyldInfo->weak_bind_off + this->fDyldInfo->weak_bind_size;
 	uintptr_t count;
 	uintptr_t skip;
+	uintptr_t segOffset;
 	while ( p < end ) {
 		uint8_t immediate = *p & BIND_IMMEDIATE_MASK;
 		uint8_t opcode = *p & BIND_OPCODE_MASK;
@@ -1345,7 +1259,21 @@ bool ImageLoaderMachOCompressed::incrementCoalIterator(CoalIterator& it)
 				if ( immediate >= fSegmentsCount )
 					dyld::throwf("BIND_OPCODE_SET_SEGMENT_AND_OFFSET_ULEB has segment %d which is too large (0..%d)",
 							immediate, fSegmentsCount-1);
-				it.address = segActualLoadAddress(immediate) + read_uleb128(p, end);
+		#if __arm__
+				// <rdar://problem/23138428> iOS app compatibility
+				if ( !segWriteable(immediate) && it.image->isPositionIndependentExecutable() )
+		#elif TEXT_RELOC_SUPPORT
+				// <rdar://problem/23479396&23590867> i386 OS X app compatibility
+				if ( !segWriteable(immediate) && !segHasRebaseFixUps(immediate) && !segHasBindFixUps(immediate)
+					&& (!it.image->isExecutable() || it.image->isPositionIndependentExecutable()) )
+		#else
+				if ( !segWriteable(immediate) )
+        #endif
+					dyld::throwf("BIND_OPCODE_SET_SEGMENT_AND_OFFSET_ULEB targets segment %s which is not writable", segName(immediate));
+				segOffset = read_uleb128(p, end);
+				if ( segOffset > segSize(immediate) )
+					dyld::throwf("BIND_OPCODE_SET_SEGMENT_AND_OFFSET_ULEB has offset 0x%08lX beyond segment size (0x%08lX)", segOffset, segSize(immediate));
+				it.address = segActualLoadAddress(immediate) + segOffset;
 				break;
 			case BIND_OPCODE_ADD_ADDR_ULEB:
 				it.address += read_uleb128(p, end);
@@ -1381,7 +1309,7 @@ uintptr_t ImageLoaderMachOCompressed::getAddressCoalIterator(CoalIterator& it, c
 {
 	//dyld::log("looking for %s in %s\n", it.symbolName, this->getPath());
 	const ImageLoader* foundIn = NULL;
-	const ImageLoader::Symbol* sym = this->findExportedSymbol(it.symbolName, &foundIn);
+	const ImageLoader::Symbol* sym = this->findShallowExportedSymbol(it.symbolName, &foundIn);
 	if ( sym != NULL ) {
 		//dyld::log("sym=%p, foundIn=%p\n", sym, foundIn);
 		return foundIn->getExportedSymbolAddress(sym, context, this);
@@ -1390,7 +1318,7 @@ uintptr_t ImageLoaderMachOCompressed::getAddressCoalIterator(CoalIterator& it, c
 }
 
 
-void ImageLoaderMachOCompressed::updateUsesCoalIterator(CoalIterator& it, uintptr_t value, ImageLoader* targetImage, const LinkContext& context)
+void ImageLoaderMachOCompressed::updateUsesCoalIterator(CoalIterator& it, uintptr_t value, ImageLoader* targetImage, unsigned targetIndex, const LinkContext& context)
 {
 	// <rdar://problem/6570879> weak binding done too early with inserted libraries
 	if ( this->getState() < dyld_image_state_bound  )
@@ -1406,6 +1334,7 @@ void ImageLoaderMachOCompressed::updateUsesCoalIterator(CoalIterator& it, uintpt
 	intptr_t addend = it.addend;
 	uintptr_t count;
 	uintptr_t skip;
+	uintptr_t segOffset;
 	bool done = false;
 	bool boundSomething = false;
 	while ( !done && (p < end) ) {
@@ -1429,23 +1358,37 @@ void ImageLoaderMachOCompressed::updateUsesCoalIterator(CoalIterator& it, uintpt
 				if ( immediate >= fSegmentsCount )
 					dyld::throwf("BIND_OPCODE_SET_SEGMENT_AND_OFFSET_ULEB has segment %d which is too large (0..%d)",
 							immediate, fSegmentsCount-1);
-				address = segActualLoadAddress(immediate) + read_uleb128(p, end);
+		#if __arm__
+				// <rdar://problem/23138428> iOS app compatibility
+				if ( !segWriteable(immediate) && it.image->isPositionIndependentExecutable() )
+		#elif TEXT_RELOC_SUPPORT
+				// <rdar://problem/23479396&23590867> i386 OS X app compatibility
+				if ( !segWriteable(immediate) && !segHasRebaseFixUps(immediate) && !segHasBindFixUps(immediate)
+					&& (!it.image->isExecutable() || it.image->isPositionIndependentExecutable()) )
+		#else
+				if ( !segWriteable(immediate) )
+        #endif
+					dyld::throwf("BIND_OPCODE_SET_SEGMENT_AND_OFFSET_ULEB targets segment %s which is not writable", segName(immediate));
+				segOffset = read_uleb128(p, end);
+				if ( segOffset > segSize(immediate) )
+					dyld::throwf("BIND_OPCODE_SET_SEGMENT_AND_OFFSET_ULEB has offset 0x%08lX beyond segment size (0x%08lX)", segOffset, segSize(immediate));
+				address = segActualLoadAddress(immediate) + segOffset;
 				break;
 			case BIND_OPCODE_ADD_ADDR_ULEB:
 				address += read_uleb128(p, end);
 				break;
 			case BIND_OPCODE_DO_BIND:
-				bindLocation(context, address, value, targetImage, type, symbolName, addend, "weak ");
+				bindLocation(context, address, value, type, symbolName, addend, this->getPath(), targetImage ? targetImage->getPath() : NULL, "weak ");
 				boundSomething = true;
 				address += sizeof(intptr_t);
 				break;
 			case BIND_OPCODE_DO_BIND_ADD_ADDR_ULEB:
-				bindLocation(context, address, value, targetImage, type, symbolName, addend, "weak ");
+				bindLocation(context, address, value, type, symbolName, addend, this->getPath(), targetImage ? targetImage->getPath() : NULL, "weak ");
 				boundSomething = true;
 				address += read_uleb128(p, end) + sizeof(intptr_t);
 				break;
 			case BIND_OPCODE_DO_BIND_ADD_ADDR_IMM_SCALED:
-				bindLocation(context, address, value, targetImage, type, symbolName, addend, "weak ");
+				bindLocation(context, address, value, type, symbolName, addend, this->getPath(), targetImage ? targetImage->getPath() : NULL, "weak ");
 				boundSomething = true;
 				address += immediate*sizeof(intptr_t) + sizeof(intptr_t);
 				break;
@@ -1453,7 +1396,7 @@ void ImageLoaderMachOCompressed::updateUsesCoalIterator(CoalIterator& it, uintpt
 				count = read_uleb128(p, end);
 				skip = read_uleb128(p, end);
 				for (uint32_t i=0; i < count; ++i) {
-					bindLocation(context, address, value, targetImage, type, symbolName, addend, "weak ");
+					bindLocation(context, address, value, type, symbolName, addend, this->getPath(), targetImage ? targetImage->getPath() : NULL, "weak ");
 					boundSomething = true;
 					address += skip + sizeof(intptr_t);
 				}
@@ -1474,8 +1417,9 @@ uintptr_t ImageLoaderMachOCompressed::interposeAt(const LinkContext& context, ui
 		uintptr_t* fixupLocation = (uintptr_t*)addr;
 		uintptr_t curValue = *fixupLocation;
 		uintptr_t newValue = interposedAddress(context, curValue, this);
-		if ( newValue != curValue)
+		if ( newValue != curValue) {
 			*fixupLocation = newValue;
+		}
 	}
 	return 0;
 }
@@ -1523,78 +1467,9 @@ void ImageLoaderMachOCompressed::dynamicInterpose(const LinkContext& context)
 	eachLazyBind(context, &ImageLoaderMachOCompressed::dynamicInterposeAt);
 }
 
-
 const char* ImageLoaderMachOCompressed::findClosestSymbol(const void* addr, const void** closestAddr) const
 {
-	// called by dladdr()
-	// only works with compressed LINKEDIT if classic symbol table is also present
-	const macho_nlist* symbolTable = NULL;
-	const char* symbolTableStrings = NULL;
-	const dysymtab_command* dynSymbolTable = NULL;
-	const uint32_t cmd_count = ((macho_header*)fMachOData)->ncmds;
-	const struct load_command* const cmds = (struct load_command*)&fMachOData[sizeof(macho_header)];
-	const struct load_command* cmd = cmds;
-	for (uint32_t i = 0; i < cmd_count; ++i) {
-		switch (cmd->cmd) {
-			case LC_SYMTAB:
-				{
-					const struct symtab_command* symtab = (struct symtab_command*)cmd;
-					symbolTableStrings = (const char*)&fLinkEditBase[symtab->stroff];
-					symbolTable = (macho_nlist*)(&fLinkEditBase[symtab->symoff]);
-				}
-				break;
-			case LC_DYSYMTAB:
-				dynSymbolTable = (struct dysymtab_command*)cmd;
-				break;
-		}
-		cmd = (const struct load_command*)(((char*)cmd)+cmd->cmdsize);
-	}
-	// no symbol table => no lookup by address
-	if ( (symbolTable == NULL) || (dynSymbolTable == NULL) )
-		return NULL;
-
-	uintptr_t targetAddress = (uintptr_t)addr - fSlide;
-	const struct macho_nlist* bestSymbol = NULL;
-	// first walk all global symbols
-	const struct macho_nlist* const globalsStart = &symbolTable[dynSymbolTable->iextdefsym];
-	const struct macho_nlist* const globalsEnd= &globalsStart[dynSymbolTable->nextdefsym];
-	for (const struct macho_nlist* s = globalsStart; s < globalsEnd; ++s) {
- 		if ( (s->n_type & N_TYPE) == N_SECT ) {
-			if ( bestSymbol == NULL ) {
-				if ( s->n_value <= targetAddress )
-					bestSymbol = s;
-			}
-			else if ( (s->n_value <= targetAddress) && (bestSymbol->n_value < s->n_value) ) {
-				bestSymbol = s;
-			}
-		}
-	}
-	// next walk all local symbols
-	const struct macho_nlist* const localsStart = &symbolTable[dynSymbolTable->ilocalsym];
-	const struct macho_nlist* const localsEnd= &localsStart[dynSymbolTable->nlocalsym];
-	for (const struct macho_nlist* s = localsStart; s < localsEnd; ++s) {
- 		if ( ((s->n_type & N_TYPE) == N_SECT) && ((s->n_type & N_STAB) == 0) ) {
-			if ( bestSymbol == NULL ) {
-				if ( s->n_value <= targetAddress )
-					bestSymbol = s;
-			}
-			else if ( (s->n_value <= targetAddress) && (bestSymbol->n_value < s->n_value) ) {
-				bestSymbol = s;
-			}
-		}
-	}
-	if ( bestSymbol != NULL ) {
-#if __arm__
-		if (bestSymbol->n_desc & N_ARM_THUMB_DEF)
-			*closestAddr = (void*)((bestSymbol->n_value | 1) + fSlide);
-		else
-			*closestAddr = (void*)(bestSymbol->n_value + fSlide);
-#else
-		*closestAddr = (void*)(bestSymbol->n_value + fSlide);
-#endif
-		return &symbolTableStrings[bestSymbol->n_un.n_strx];
-	}
-	return NULL;
+	return ImageLoaderMachO::findClosestSymbol((mach_header*)fMachOData, addr, closestAddr);
 }
 
 
@@ -1647,9 +1522,8 @@ void ImageLoaderMachOCompressed::updateAlternateLazyPointer(uint8_t* stub, void*
 void ImageLoaderMachOCompressed::updateOptimizedLazyPointers(const LinkContext& context)
 {
 #if __arm__ || __x86_64__
-	// find stubs and lazy pointer sections
+	// find stubs and indirect symbol table
 	const struct macho_section* stubsSection = NULL;
-	const struct macho_section* lazyPointerSection = NULL;
 	const dysymtab_command* dynSymbolTable = NULL;
 	const macho_header* mh = (macho_header*)fMachOData;
 	const uint32_t cmd_count = mh->ncmds;
@@ -1664,8 +1538,6 @@ void ImageLoaderMachOCompressed::updateOptimizedLazyPointers(const LinkContext& 
 				const uint8_t type = sect->flags & SECTION_TYPE;
 				if ( type == S_SYMBOL_STUBS ) 
 					stubsSection = sect;
-				else if ( type == S_LAZY_SYMBOL_POINTERS ) 
-					lazyPointerSection = sect;
 			}
 		}
 		else if ( cmd->cmd == LC_DYSYMTAB ) {
@@ -1673,36 +1545,51 @@ void ImageLoaderMachOCompressed::updateOptimizedLazyPointers(const LinkContext& 
 		}
 		cmd = (const struct load_command*)(((char*)cmd)+cmd->cmdsize);
 	}
-	
-	// sanity check
 	if ( dynSymbolTable == NULL )
 		return;
-	if ( (stubsSection == NULL) || (lazyPointerSection == NULL) )
+	const uint32_t* const indirectTable = (uint32_t*)&fLinkEditBase[dynSymbolTable->indirectsymoff];
+	if ( stubsSection == NULL )
 		return;
-	const uint32_t stubsCount = stubsSection->size / stubsSection->reserved2;
-	const uint32_t lazyPointersCount = lazyPointerSection->size / sizeof(void*);
-	if ( stubsCount != lazyPointersCount )
-		return;
+	const uint32_t stubsSize = stubsSection->reserved2;
+	const uint32_t stubsCount = (uint32_t)(stubsSection->size / stubsSize);
 	const uint32_t stubsIndirectTableOffset = stubsSection->reserved1;
-	const uint32_t lazyPointersIndirectTableOffset = lazyPointerSection->reserved1;
 	if ( (stubsIndirectTableOffset+stubsCount) > dynSymbolTable->nindirectsyms )
 		return;
-	if ( (lazyPointersIndirectTableOffset+lazyPointersCount) > dynSymbolTable->nindirectsyms )
-		return;
-	
-	// walk stubs and lazy pointers
-	const uint32_t* const indirectTable = (uint32_t*)&fLinkEditBase[dynSymbolTable->indirectsymoff];
-	void** const lazyPointersStartAddr = (void**)(lazyPointerSection->addr + this->fSlide);
-	uint8_t* const stubsStartAddr = (uint8_t*)(stubsSection->addr + this->fSlide);
-	uint8_t* stub = stubsStartAddr;
-	void** lpa = lazyPointersStartAddr;
-	for(uint32_t i=0; i < stubsCount; ++i, stub += stubsSection->reserved2, ++lpa) {
-        // sanity check symbol index of stub and lazy pointer match
-		if ( indirectTable[stubsIndirectTableOffset+i] != indirectTable[lazyPointersIndirectTableOffset+i] ) 
-			continue;
-		this->updateAlternateLazyPointer(stub, lpa, context);
+	uint8_t* const stubsAddr = (uint8_t*)(stubsSection->addr + this->fSlide);
+
+	// for each lazy pointer section
+	cmd = cmds;
+	for (uint32_t i = 0; i < cmd_count; ++i) {
+		if (cmd->cmd == LC_SEGMENT_COMMAND) {
+			const struct macho_segment_command* seg = (struct macho_segment_command*)cmd;
+			const struct macho_section* const sectionsStart = (struct macho_section*)((char*)seg + sizeof(struct macho_segment_command));
+			const struct macho_section* const sectionsEnd = &sectionsStart[seg->nsects];
+			for (const struct macho_section* lazyPointerSection=sectionsStart; lazyPointerSection < sectionsEnd; ++lazyPointerSection) {
+				const uint8_t type = lazyPointerSection->flags & SECTION_TYPE;
+				if ( type != S_LAZY_SYMBOL_POINTERS )
+					continue;
+				const uint32_t lazyPointersCount = (uint32_t)(lazyPointerSection->size / sizeof(void*));
+				const uint32_t lazyPointersIndirectTableOffset = lazyPointerSection->reserved1;
+				if ( (lazyPointersIndirectTableOffset+lazyPointersCount) > dynSymbolTable->nindirectsyms )
+					continue;
+				void** const lazyPointersAddr = (void**)(lazyPointerSection->addr + this->fSlide);
+				// for each lazy pointer
+				for(uint32_t lpIndex=0; lpIndex < lazyPointersCount; ++lpIndex) {
+					const uint32_t lpSymbolIndex = indirectTable[lazyPointersIndirectTableOffset+lpIndex];
+					// find matching stub and validate it uses this lazy pointer
+					for(uint32_t stubIndex=0; stubIndex < stubsCount; ++stubIndex) {
+						if ( indirectTable[stubsIndirectTableOffset+stubIndex] == lpSymbolIndex ) {
+							this->updateAlternateLazyPointer(stubsAddr+stubIndex*stubsSize, &lazyPointersAddr[lpIndex], context);
+							break;
+						}
+					}
+				}
+
+			}
+		}
+		cmd = (const struct load_command*)(((char*)cmd)+cmd->cmdsize);
 	}
-	
+
 #endif
 }
 

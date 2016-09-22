@@ -32,6 +32,7 @@ extern "C" {
 #endif
 
 
+
 /* 
  *	Beginning in Mac OS X 10.4, this is how gdb discovers which mach-o images are loaded in a process.
  *
@@ -88,6 +89,8 @@ enum {	dyld_error_kind_none=0,
 		dyld_error_kind_symbol_missing=4
 	};
 
+/* internal limit */ 
+#define DYLD_MAX_PROCESS_INFO_NOTIFY_COUNT  8
 
 struct dyld_all_image_infos {
 	uint32_t						version;		/* 1 in Mac OS X 10.4 and 10.5 */
@@ -124,8 +127,16 @@ struct dyld_all_image_infos {
 	uintptr_t						sharedCacheSlide;
 	/* the following field is only in version 13 (Mac OS X 10.9, iOS 7.0) and later */
 	uint8_t							sharedCacheUUID[16];
-	/* the following field is only in version 14 (Mac OS X 10.9, iOS 7.0) and later */
-	uintptr_t						reserved[16];
+	/* the following field is only in version 15 (macOS 10.12, iOS 10.0) and later */
+	uintptr_t						sharedCacheBaseAddress;
+	uint64_t						infoArrayChangeTimestamp;
+	const char*						dyldPath;
+	mach_port_t						notifyPorts[DYLD_MAX_PROCESS_INFO_NOTIFY_COUNT];
+#if __LP64__
+	uintptr_t						reserved[13-(DYLD_MAX_PROCESS_INFO_NOTIFY_COUNT/2)];
+#else
+	uintptr_t						reserved[12-DYLD_MAX_PROCESS_INFO_NOTIFY_COUNT];
+#endif
 };
 
 

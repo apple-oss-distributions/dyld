@@ -31,8 +31,13 @@
 #include <Availability.h>
 #include <vproc_priv.h>
 
+#include <dirent.h>
+#include <sys/stat.h>
+
+#include "mach-o/dyld_images.h"
 #include "mach-o/dyld.h"
 #include "mach-o/dyld_priv.h"
+#include "dyld_cache_format.h"
 
 #include "ImageLoader.h"
 #include "dyldLock.h"
@@ -595,6 +600,21 @@ uint32_t dyld_get_program_sdk_watch_os_version()
 	}
 	return 0;
 }
+
+uint32_t dyld_get_program_min_watch_os_version()
+{
+	const mach_header* mh = (mach_header*)_NSGetMachExecuteHeader();
+	uint32_t loadCommand;
+	uint32_t minOS;
+	uint32_t sdk;
+
+	if ( getVersionLoadCommandInfo(mh, &loadCommand, &minOS, &sdk) ) {
+		if ( loadCommand == LC_VERSION_MIN_WATCHOS )
+				return minOS;  // return raw minOS (not mapped to iOS version)
+	}
+	return 0;
+}
+
 #endif
 
 /*
@@ -689,6 +709,36 @@ uint32_t dyld_get_program_min_os_version()
 {
 	return dyld_get_min_os_version((mach_header*)_NSGetMachExecuteHeader());
 }
+
+
+bool _dyld_get_image_uuid(const struct mach_header* mh, uuid_t uuid)
+{
+	const load_command* startCmds = NULL;
+	if ( mh->magic == MH_MAGIC_64 )
+		startCmds = (load_command*)((char *)mh + sizeof(mach_header_64));
+	else if ( mh->magic == MH_MAGIC )
+		startCmds = (load_command*)((char *)mh + sizeof(mach_header));
+	else
+		return false;  // not a mach-o file, or wrong endianness
+
+	const load_command* const cmdsEnd = (load_command*)((char*)startCmds + mh->sizeofcmds);
+	const load_command* cmd = startCmds;
+	for(uint32_t i = 0; i < mh->ncmds; ++i) {
+	    const load_command* nextCmd = (load_command*)((char *)cmd + cmd->cmdsize);
+		if ( (cmd->cmdsize < 8) || (nextCmd > cmdsEnd) || (nextCmd < startCmds)) {
+			return false;
+		}
+		if ( cmd->cmd == LC_UUID ) {
+			const uuid_command* uuidCmd = (uuid_command*)cmd;
+			memcpy(uuid, uuidCmd->uuid, 16);
+			return true;
+		}
+		cmd = nextCmd;
+	}
+	bzero(uuid, 16);
+	return false;
+}
+
 
 
 #if DEPRECATED_APIS_SUPPORTED
@@ -795,7 +845,7 @@ NSSymbolDefinitionCountInObjectFileImage(
 NSObjectFileImage objectFileImage)
 {
 	DYLD_LOCK_THIS_BLOCK;
-    static unsigned long (*p)(NSObjectFileImage) = NULL;
+    static uint32_t (*p)(NSObjectFileImage) = NULL;
 
 	if(p == NULL)
 	    _dyld_func_lookup("__dyld_NSSymbolDefinitionCountInObjectFileImage", (void**)&p);
@@ -832,7 +882,7 @@ NSSymbolReferenceCountInObjectFileImage(
 NSObjectFileImage objectFileImage)
 {
 	DYLD_LOCK_THIS_BLOCK;
-    static unsigned long (*p)(NSObjectFileImage) = NULL;
+    static uint32_t (*p)(NSObjectFileImage) = NULL;
 
 	if(p == NULL)
 	    _dyld_func_lookup("__dyld_NSSymbolReferenceCountInObjectFileImage", (void**)&p);
@@ -964,7 +1014,7 @@ _NSGetExecutablePath(
 char *buf,
 uint32_t *bufsize)
 {
-	DYLD_LOCK_THIS_BLOCK;
+	DYLD_NO_LOCK_THIS_BLOCK;
     static int (*p)(char *buf, uint32_t *bufsize) = NULL;
 
 	if(p == NULL)
@@ -1350,18 +1400,12 @@ static bool hasPerThreadBufferFor_dlerror()
 typedef vproc_err_t (*vswapproc)(vproc_t vp, vproc_gsk_t key,int64_t *inval, int64_t *outval);
 static vswapproc swapProc = &vproc_swap_integer;
 
-static bool isLaunchdOwned() {
-	static bool first = true;
-	static bool result;
-	if ( first ) {
-		int64_t val = 0;
-		(*swapProc)(NULL, VPROC_GSK_IS_MANAGED, NULL, &val);
-		result = ( val != 0 );
-		first = false;
-	}
-	return result;
+static bool isLaunchdOwned()
+{
+	int64_t val = 0;
+	(*swapProc)(NULL, VPROC_GSK_IS_MANAGED, NULL, &val);
+	return ( val != 0 );
 }
-
 
 #if DYLD_SHARED_CACHE_SUPPORT
 static void shared_cache_missing()
@@ -1394,7 +1438,8 @@ static dyld::LibSystemHelpers sHelpers = { 13, &dyldGlobalLockAcquire, &dyldGlob
 									&isLaunchdOwned,
 									&vm_allocate,
 									&mmap,
-									&__cxa_finalize_ranges};
+									&__cxa_finalize_ranges
+									};
 
 
 //
@@ -1483,17 +1528,6 @@ void* dlsym(void* handle, const char* symbol)
 	return(p(handle, symbol));
 }
 
-void dyld_register_image_state_change_handler(dyld_image_states state, 
-											bool batch, dyld_image_state_change_handler handler)
-{
-	DYLD_LOCK_THIS_BLOCK;
-    static void* (*p)(dyld_image_states, bool, dyld_image_state_change_handler) = NULL;
-
-	if(p == NULL)
-	    _dyld_func_lookup("__dyld_dyld_register_image_state_change_handler", (void**)&p);
-	p(state, batch, handler);
-}
-
 
 const struct dyld_all_image_infos* _dyld_get_all_image_infos()
 {
@@ -1563,6 +1597,16 @@ bool dyld_shared_cache_some_image_overridden()
 	return p();
 }
 
+bool _dyld_get_shared_cache_uuid(uuid_t uuid)
+{
+	DYLD_NO_LOCK_THIS_BLOCK;
+    static bool (*p)(uuid_t) = NULL;
+
+	if(p == NULL)
+	    _dyld_func_lookup("__dyld_get_shared_cache_uuid", (void**)&p);
+	return p(uuid);
+}
+
 
 bool dyld_process_is_restricted()
 {
@@ -1607,6 +1651,156 @@ void _dyld_fork_child()
 	    _dyld_func_lookup("__dyld_fork_child", (void**)&p);
 	return p();
 }
+
+
+
+static void* mapStartOfCache(const char* path, size_t length)
+{
+	struct stat statbuf;
+	if ( ::stat(path, &statbuf) == -1 )
+		return NULL;
+
+	if ( statbuf.st_size < length )
+		return NULL;
+
+	int cache_fd = ::open(path, O_RDONLY);
+	if ( cache_fd < 0 )
+		return NULL;
+
+	void* result = ::mmap(NULL, length, PROT_READ, MAP_PRIVATE, cache_fd, 0);
+	close(cache_fd);
+
+	if ( result == MAP_FAILED )
+		return NULL;
+
+	return result;
+}
+
+
+static const dyld_cache_header* findCacheInDirAndMap(const uuid_t cacheUuid, const char* dirPath)
+{
+	DIR* dirp = ::opendir(dirPath);
+	if ( dirp != NULL) {
+		dirent entry;
+		dirent* entp = NULL;
+		char cachePath[PATH_MAX];
+		while ( ::readdir_r(dirp, &entry, &entp) == 0 ) {
+			if ( entp == NULL )
+				break;
+			if ( entp->d_type != DT_REG ) 
+				continue;
+			if ( strlcpy(cachePath, dirPath, PATH_MAX) >= PATH_MAX )
+				continue;
+			if ( strlcat(cachePath, "/", PATH_MAX) >= PATH_MAX )
+				continue;
+			if ( strlcat(cachePath, entp->d_name, PATH_MAX) >= PATH_MAX )
+				continue;
+			if ( const dyld_cache_header* cacheHeader = (dyld_cache_header*)mapStartOfCache(cachePath, 0x00100000) ) {
+				if ( ::memcmp(cacheHeader->uuid, cacheUuid, 16) != 0 ) {
+					// wrong uuid, unmap and keep looking
+					::munmap((void*)cacheHeader, 0x00100000);
+				}
+				else {
+					// found cache
+					closedir(dirp);
+					return cacheHeader;
+				}
+			}
+		}
+		closedir(dirp);
+	}
+	return NULL;
+}
+
+int dyld_shared_cache_find_iterate_text(const uuid_t cacheUuid, const char* extraSearchDirs[], void (^callback)(const dyld_shared_cache_dylib_text_info* info))
+{
+	const dyld_cache_header* cacheHeader = NULL;
+	bool needToUnmap = true;
+
+	// get info from dyld about this process, to see if requested cache is already mapped into this process
+	const dyld_all_image_infos* allInfo = _dyld_get_all_image_infos();
+	if ( (allInfo != NULL) && (memcmp(allInfo->sharedCacheUUID, cacheUuid, 16) == 0) ) {
+		// requested cache is already mapped, just re-use it
+		cacheHeader = (dyld_cache_header*)(SHARED_REGION_BASE + allInfo->sharedCacheSlide);
+		needToUnmap = false;
+	}
+	else {
+		// look first is default location for cache files
+	#if	__IPHONE_OS_VERSION_MIN_REQUIRED
+		const char* defaultSearchDir = IPHONE_DYLD_SHARED_CACHE_DIR;
+	#else
+		const char* defaultSearchDir = MACOSX_DYLD_SHARED_CACHE_DIR;
+	#endif
+		cacheHeader = findCacheInDirAndMap(cacheUuid, defaultSearchDir);
+		// if not there, look in extra search locations
+		if ( cacheHeader == NULL ) {
+			for (const char** p = extraSearchDirs; *p != NULL; ++p) {
+				cacheHeader = findCacheInDirAndMap(cacheUuid, *p);
+				if ( cacheHeader != NULL )
+					break;
+			}
+		}
+	}
+
+	if ( cacheHeader == NULL )
+		return -1;
+	
+	if ( cacheHeader->mappingOffset < sizeof(dyld_cache_header) ) {
+		// old cache without imagesText array
+		if ( needToUnmap )
+			::munmap((void*)cacheHeader, 0x00100000);
+		return -1;
+	}
+
+	// walk imageText table and call callback for each entry
+	const dyld_cache_image_text_info* imagesText = (dyld_cache_image_text_info*)((char*)cacheHeader + cacheHeader->imagesTextOffset);
+	const dyld_cache_image_text_info* imagesTextEnd = &imagesText[cacheHeader->imagesTextCount];
+	for (const dyld_cache_image_text_info* p=imagesText; p < imagesTextEnd; ++p) {
+		dyld_shared_cache_dylib_text_info dylibTextInfo;
+		dylibTextInfo.version			= 1;
+		dylibTextInfo.loadAddressUnslid = p->loadAddress;
+		dylibTextInfo.textSegmentSize	= p->textSegmentSize;
+		dylibTextInfo.path				= (char*)cacheHeader + p->pathOffset;
+		::memcpy(dylibTextInfo.dylibUuid, p->uuid, 16);
+		callback(&dylibTextInfo);
+	}
+
+	if ( needToUnmap )
+		::munmap((void*)cacheHeader, 0x00100000);
+
+	return 0;
+}
+
+int dyld_shared_cache_iterate_text(const uuid_t cacheUuid, void (^callback)(const dyld_shared_cache_dylib_text_info* info))
+{
+	const char* extraSearchDirs[] = { NULL };
+	return dyld_shared_cache_find_iterate_text(cacheUuid, extraSearchDirs, callback);
+}
+
+
+bool _dyld_is_memory_immutable(const void* addr, size_t length)
+{
+	DYLD_NO_LOCK_THIS_BLOCK;
+    static bool (*p)(const void*, size_t) = NULL;
+
+	if(p == NULL)
+	    _dyld_func_lookup("__dyld_is_memory_immutable", (void**)&p);
+	return p(addr, length);
+}
+
+
+void _dyld_objc_notify_register(_dyld_objc_notify_mapped    mapped,
+                                _dyld_objc_notify_init      init,
+                                _dyld_objc_notify_unmapped  unmapped)
+{
+	DYLD_LOCK_THIS_BLOCK;
+    static bool (*p)(_dyld_objc_notify_mapped, _dyld_objc_notify_init, _dyld_objc_notify_unmapped) = NULL;
+
+	if(p == NULL)
+	    _dyld_func_lookup("__dyld_objc_notify_register", (void**)&p);
+	p(mapped, init, unmapped);
+}
+
 
 
 

@@ -26,6 +26,7 @@
 #include <string.h>
 #include "test.h" // PASS(), FAIL(), XPASS(), XFAIL()
 
+#include <_simple.h>
 
 ///
 /// verify parameters passed to initializer are same as passed to main()
@@ -70,10 +71,13 @@ main(int argc, const char* argv[], const char* env[], const char* apple[])
 		exit(EXIT_SUCCESS);
 	}
 		
-	if ( strcmp(apple[0], argv[1]) == 0 )
-		PASS("crt-apple %s", apple[0]);
+	const char* execPath = _simple_getenv(apple, "executable_path");
+    if ( execPath == NULL )
+		FAIL("crt-apple apple[] missing executable_path=");
+	else if ( strcmp(execPath, argv[1]) == 0 )
+		PASS("crt-apple %s", execPath);
 	else
-		FAIL("crt-apple %s", apple[0]);
+		FAIL("crt-apple %s", execPath);
 		
 	return EXIT_SUCCESS;
 }

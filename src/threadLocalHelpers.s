@@ -282,6 +282,7 @@ LlazyAllocate:
 
 #if __arm__
 	// returns address of TLV in r0, all other registers preserved
+	.align 2
 	.globl _tlv_get_addr
 	.private_extern _tlv_get_addr
 _tlv_get_addr:

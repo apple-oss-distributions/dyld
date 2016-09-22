@@ -41,7 +41,7 @@
 class ImageLoaderMachO : public ImageLoader {
 public:
 	static ImageLoader*					instantiateMainExecutable(const macho_header* mh, uintptr_t slide, const char* path, const LinkContext& context);
-	static ImageLoader*					instantiateFromFile(const char* path, int fd, const uint8_t firstPages[4096], uint64_t offsetInFat,
+	static ImageLoader*					instantiateFromFile(const char* path, int fd, const uint8_t firstPages[], size_t firstPagesSize, uint64_t offsetInFat,
 															uint64_t lenInFat, const struct stat& info, const LinkContext& context);
 	static ImageLoader*					instantiateFromCache(const macho_header* mh, const char* path, long slide, const struct stat& info, const LinkContext& context);
 	static ImageLoader*					instantiateFromMemory(const char* moduleName, const macho_header* mh, uint64_t len, const LinkContext& context);
@@ -57,9 +57,9 @@ public:
 	virtual uintptr_t					getSlide() const;
 	virtual const void*					getEnd() const;
 	virtual bool						hasCoalescedExports() const;
-	virtual const Symbol*				findExportedSymbol(const char* name, bool searchReExports, const ImageLoader** foundIn) const;
+	virtual const Symbol*				findExportedSymbol(const char* name, bool searchReExports, const char* thisPath, const ImageLoader** foundIn) const;
 	virtual uintptr_t					getExportedSymbolAddress(const Symbol* sym, const LinkContext& context, 
-																const ImageLoader* requestor, bool runResolver) const;
+																const ImageLoader* requestor, bool runResolver, const char*) const;
 	virtual DefinitionFlags				getExportedSymbolInfo(const Symbol* sym) const;
 	virtual const char*					getExportedSymbolName(const Symbol* sym) const;
 	virtual uint32_t					getExportedSymbolCount() const;
@@ -75,10 +75,10 @@ public:
 	virtual bool						forceFlat() const;
 	virtual bool						participatesInCoalescing() const;
 	virtual const char*					findClosestSymbol(const void* addr, const void** closestAddr) const = 0;
-	virtual	void						initializeCoalIterator(CoalIterator&, unsigned int loadOrder) = 0;
+	virtual	void						initializeCoalIterator(CoalIterator&, unsigned int loadOrder, unsigned) = 0;
 	virtual	bool						incrementCoalIterator(CoalIterator&) = 0;
 	virtual	uintptr_t					getAddressCoalIterator(CoalIterator&, const LinkContext& contex) = 0;
-	virtual	void						updateUsesCoalIterator(CoalIterator&, uintptr_t newAddr, ImageLoader* target, const LinkContext& context) = 0;
+	virtual	void						updateUsesCoalIterator(CoalIterator&, uintptr_t newAddr, ImageLoader* target, unsigned targetIndex, const LinkContext& context) = 0;
 	virtual uintptr_t					doBindLazySymbol(uintptr_t* lazyPointer, const LinkContext& context) = 0;
 	virtual uintptr_t					doBindFastLazySymbol(uint32_t lazyBindingInfoOffset, const LinkContext& context, void (*lock)(), void (*unlock)()) = 0;
 	virtual void						doTermination(const LinkContext& context);
@@ -104,11 +104,26 @@ public:
 	virtual void						registerInterposing();
 	virtual uint32_t					sdkVersion() const;
 	virtual uint32_t					minOSVersion() const;
-			
-	
-	static void							printStatistics(unsigned int imageCount, const InitializerTimingList&);
-	static  uint32_t					minOSVersion(const mach_header*);
-	
+	virtual const char*					libPath(unsigned int) const;
+	virtual	bool						notifyObjC() const { return fNotifyObjC; }
+
+	static void							printStatisticsDetails(unsigned int imageCount, const InitializerTimingList&);
+	static uint32_t						minOSVersion(const mach_header*);
+	static uint32_t						sdkVersion(const mach_header* mh);
+	static intptr_t						computeSlide(const mach_header* mh);
+	static bool							findSection(const mach_header* mh, const char* segmentName, const char* sectionName, void** sectAddress, uintptr_t* sectSize);
+	static const dyld_info_command*		findDyldInfoLoadCommand(const mach_header* mh);
+	static const char*					findClosestSymbol(const mach_header* mh, const void* addr, const void** closestAddr);
+	static bool							getLazyBindingInfo(uint32_t& lazyBindingInfoOffset, const uint8_t* lazyInfoStart, const uint8_t* lazyInfoEnd,
+														  uint8_t* segIndex, uintptr_t* segOffset, int* ordinal, const char** symbolName, bool* doneAfterBind);
+	static uintptr_t					segPreferredAddress(const mach_header* mh, unsigned segIndex);
+	static uintptr_t					bindLocation(const LinkContext& context, uintptr_t location, uintptr_t value, 
+													uint8_t type, const char* symbolName,
+													intptr_t addend, const char* inPath, const char* toPath, const char* msg);
+	virtual	void						rebase(const LinkContext& context, uintptr_t slide) = 0;
+
+
+
 protected:
 						ImageLoaderMachO(const ImageLoaderMachO&);
 						ImageLoaderMachO(const macho_header* mh, const char* path, unsigned int segCount,
@@ -122,8 +137,7 @@ protected:
 	virtual	bool						isSubframeworkOf(const LinkContext& context, const ImageLoader* image) const = 0;
 	virtual	bool						hasSubLibrary(const LinkContext& context, const ImageLoader* child) const = 0;
 	virtual uint32_t*					segmentCommandOffsets() const = 0;
-	virtual	void						rebase(const LinkContext& context) = 0;
-	virtual const ImageLoader::Symbol*	findExportedSymbol(const char* name, const ImageLoader** foundIn) const = 0;
+	virtual const ImageLoader::Symbol*	findShallowExportedSymbol(const char* name, const ImageLoader** foundIn) const = 0;
 	virtual bool						containsSymbol(const void* addr) const = 0;
 	virtual uintptr_t					exportedSymbolAddress(const LinkContext& context, const Symbol* symbol, const ImageLoader* requestor, bool runResolver) const = 0;
 	virtual bool						exportedSymbolIsWeakDefintion(const Symbol* symbol) const = 0;
@@ -136,10 +150,10 @@ protected:
 #if PREBOUND_IMAGE_SUPPORT
 	virtual void						resetPreboundLazyPointers(const LinkContext& context) = 0;
 #endif
-	
+
 
 	virtual void		doGetDependentLibraries(DependentLibraryInfo libs[]);
-	virtual LibraryInfo doGetLibraryInfo();
+	virtual LibraryInfo doGetLibraryInfo(const LibraryInfo& requestorInfo);
 	virtual	void		getRPaths(const LinkContext& context, std::vector<const char*>&) const;
 	virtual	bool		getUUID(uuid_t) const;
 	virtual void		doRebase(const LinkContext& context);
@@ -154,7 +168,6 @@ protected:
 	virtual bool		usesTwoLevelNameSpace() const;
 	virtual bool		isPrebindable() const;
 
-		
 protected:
 
 			void		destroy();
@@ -188,10 +201,7 @@ protected:
 			void		doModInitFunctions(const LinkContext& context);
 			void		setupLazyPointerHandler(const LinkContext& context);
 			void		lookupProgramVars(const LinkContext& context) const;
-			uintptr_t	bindLocation(const LinkContext& context, uintptr_t location, uintptr_t value, 
-										const ImageLoader* targetImage, uint8_t type, const char* symbolName, 
-										intptr_t addend, const char* msg);
-			
+
 			void		makeTextSegmentWritable(const LinkContext& context, bool writeable);
 			void		preFetchDATA(int fd, uint64_t offsetInFat, const LinkContext& context);
 
@@ -227,11 +237,12 @@ protected:
 											fHasDashInit : 1,
 											fHasInitializers : 1,
 											fHasTerminators : 1,
+											fNotifyObjC : 1,
+											fRetainForObjC : 1,
 											fRegisteredAsRequiresCoalescing : 1; 	// <rdar://problem/7886402> Loading MH_DYLIB_STUB causing coalescable miscount
-											
+
 											
 	static uint32_t					fgSymbolTableBinarySearchs;
-	static uint32_t					fgSymbolTrieSearchs;
 };
 
 

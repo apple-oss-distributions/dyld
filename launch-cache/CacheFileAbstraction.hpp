@@ -71,8 +71,26 @@ public:
 	const uint8_t*	uuid() const							INLINE { return fields.uuid; }
 	void			set_uuid(const uint8_t value[16])		INLINE { memcpy(fields.uuid, value, 16); }
 	
-	uint64_t		cacheType() const				INLINE { return E::get64(fields.cacheType); }
-	void			set_cacheType(uint64_t value)	INLINE { E::set64(fields.cacheType, value); }
+	uint64_t		cacheType() const						INLINE { return E::get64(fields.cacheType); }
+	void			set_cacheType(uint64_t value)			INLINE { E::set64(fields.cacheType, value); }
+
+	uint32_t		branchPoolsOffset() const				INLINE { return E::get32(fields.branchPoolsOffset); }
+	void			set_branchPoolsOffset(uint32_t value)	INLINE { E::set32(fields.branchPoolsOffset, value); }
+
+	uint32_t		branchPoolsCount() const				INLINE { return E::get32(fields.branchPoolsCount); }
+	void			set_branchPoolsCount(uint32_t value)	INLINE { E::set32(fields.branchPoolsCount, value); }
+
+	uint64_t		accelerateInfoAddr() const				INLINE { return E::get64(fields.accelerateInfoAddr); }
+	void			set_accelerateInfoAddr(uint64_t value)	INLINE { E::set64(fields.accelerateInfoAddr, value); }
+
+	uint64_t		accelerateInfoSize() const				INLINE { return E::get64(fields.accelerateInfoSize); }
+	void			set_accelerateInfoSize(uint64_t value)	INLINE { E::set64(fields.accelerateInfoSize, value); }
+
+	uint64_t		imagesTextOffset() const				INLINE { return E::get64(fields.imagesTextOffset); }
+	void			set_imagesTextOffset(uint64_t value)	INLINE { E::set64(fields.imagesTextOffset, value); }
+
+	uint64_t		imagesTextCount() const					INLINE { return E::get64(fields.imagesTextCount); }
+	void			set_imagesTextCount(uint64_t value)		INLINE { E::set64(fields.imagesTextCount, value); }
 
 private:
 	dyld_cache_header			fields;
@@ -122,6 +140,159 @@ private:
 };
 
 template <typename E>
+class dyldCacheImageTextInfo {
+public:		
+	const uint8_t*	uuid() const								INLINE { return fields.uuid; }
+	void			set_uuid(const uint8_t value[16])			INLINE { memcpy(fields.uuid, value, 16); }
+
+	uint64_t		loadAddress() const							INLINE { return E::get64(fields.loadAddress); }
+	void			set_loadAddress(uint64_t value)				INLINE { E::set64(fields.loadAddress, value); }
+
+	uint32_t		textSegmentSize() const						INLINE { return E::get32(fields.textSegmentSize); }
+	void			set_textSegmentSize(uint32_t value)			INLINE { E::set32(fields.textSegmentSize, value); }
+
+	uint32_t		pathOffset() const							INLINE { return E::get32(fields.pathOffset); }
+	void			set_pathOffset(uint32_t value)				INLINE { E::set32(fields.pathOffset, value); }
+
+private:
+	dyld_cache_image_text_info			fields;
+};
+
+
+
+template <typename E>
+class dyldCacheImageInfoExtra {
+public:		
+	uint64_t		exportsTrieAddr() const							INLINE { return E::get64(fields.exportsTrieAddr); }
+	void			set_exportsTrieAddr(uint64_t value)				INLINE { E::set64(fields.exportsTrieAddr, value); }
+
+	uint64_t		weakBindingsAddr() const						INLINE { return E::get64(fields.weakBindingsAddr); }
+	void			set_weakBindingsAddr(uint64_t value)			INLINE { E::set64(fields.weakBindingsAddr, value); }
+
+	uint32_t		exportsTrieSize() const							INLINE { return E::get32(fields.exportsTrieSize); }
+	void			set_exportsTrieSize(uint32_t value)				INLINE { E::set32(fields.exportsTrieSize, value); }
+
+	uint32_t		weakBindingsSize() const						INLINE { return E::get32(fields.weakBindingsSize); }
+	void			set_weakBindingsSize(uint32_t value)			INLINE { E::set32(fields.weakBindingsSize, value); }
+
+	uint32_t		dependentsStartArrayIndex() const				INLINE { return E::get32(fields.dependentsStartArrayIndex); }
+	void			set_dependentsStartArrayIndex(uint32_t value)	INLINE { E::set32(fields.dependentsStartArrayIndex, value); }
+
+	uint32_t		reExportsStartArrayIndex() const				INLINE { return E::get32(fields.reExportsStartArrayIndex); }
+	void			set_reExportsStartArrayIndex(uint32_t value)	INLINE { E::set32(fields.reExportsStartArrayIndex, value); }
+
+private:
+	dyld_cache_image_info_extra			fields;
+};
+
+
+template <typename E>
+class dyldCacheAcceleratorInfo {
+public:		
+	uint32_t		version() const								INLINE { return E::get32(fields.version); }
+	void			set_version(uint32_t value)					INLINE { E::set32(fields.version, value); }
+
+	uint32_t		imageExtrasCount() const					INLINE { return E::get32(fields.imageExtrasCount); }
+	void			set_imageExtrasCount(uint32_t value)		INLINE { E::set32(fields.imageExtrasCount, value); }
+
+	uint32_t		imagesExtrasOffset() const					INLINE { return E::get32(fields.imagesExtrasOffset); }
+	void			set_imagesExtrasOffset(uint32_t value)		INLINE { E::set32(fields.imagesExtrasOffset, value); }
+
+	uint32_t		bottomUpListOffset() const					INLINE { return E::get32(fields.bottomUpListOffset); }
+	void			set_bottomUpListOffset(uint32_t value)		INLINE { E::set32(fields.bottomUpListOffset, value); }
+
+	uint32_t		dylibTrieOffset() const						INLINE { return E::get32(fields.dylibTrieOffset); }
+	void			set_dylibTrieOffset(uint32_t value)			INLINE { E::set32(fields.dylibTrieOffset, value); }
+
+	uint32_t		dylibTrieSize() const						INLINE { return E::get32(fields.dylibTrieSize); }
+	void			set_dylibTrieSize(uint32_t value)			INLINE { E::set32(fields.dylibTrieSize, value); }
+
+	uint32_t		initializersOffset() const					INLINE { return E::get32(fields.initializersOffset); }
+	void			set_initializersOffset(uint32_t value)		INLINE { E::set32(fields.initializersOffset, value); }
+
+	uint32_t		initializersCount() const					INLINE { return E::get32(fields.initializersCount); }
+	void			set_initializersCount(uint32_t value)		INLINE { E::set32(fields.initializersCount, value); }
+
+	uint32_t		dofSectionsOffset() const					INLINE { return E::get32(fields.dofSectionsOffset); }
+	void			set_dofSectionsOffset(uint32_t value)		INLINE { E::set32(fields.dofSectionsOffset, value); }
+
+	uint32_t		dofSectionsCount() const					INLINE { return E::get32(fields.dofSectionsCount); }
+	void			set_dofSectionsCount(uint32_t value)		INLINE { E::set32(fields.dofSectionsCount, value); }
+
+	uint32_t		reExportListOffset() const					INLINE { return E::get32(fields.reExportListOffset); }
+	void			set_reExportListOffset(uint32_t value)		INLINE { E::set32(fields.reExportListOffset, value); }
+
+	uint32_t		reExportCount() const						INLINE { return E::get32(fields.reExportCount); }
+	void			set_reExportCount(uint32_t value)			INLINE { E::set32(fields.reExportCount, value); }
+
+	uint32_t		depListOffset() const						INLINE { return E::get32(fields.depListOffset); }
+	void			set_depListOffset(uint32_t value)			INLINE { E::set32(fields.depListOffset, value); }
+
+	uint32_t		depListCount() const						INLINE { return E::get32(fields.depListCount); }
+	void			set_depListCount(uint32_t value)			INLINE { E::set32(fields.depListCount, value); }
+
+	uint32_t		rangeTableOffset() const					INLINE { return E::get32(fields.rangeTableOffset); }
+	void			set_rangeTableOffset(uint32_t value)		INLINE { E::set32(fields.rangeTableOffset, value); }
+
+	uint32_t		rangeTableCount() const						INLINE { return E::get32(fields.rangeTableCount); }
+	void			set_rangeTableCount(uint32_t value)			INLINE { E::set32(fields.rangeTableCount, value); }
+
+	uint64_t		dyldSectionAddr() const						INLINE { return E::get64(fields.dyldSectionAddr); }
+	void			set_dyldSectionAddr(uint64_t value)			INLINE { E::set64(fields.dyldSectionAddr, value); }
+
+
+private:
+	dyld_cache_accelerator_info			fields;
+};
+
+
+template <typename E>
+class dyldCacheAcceleratorInitializer {
+public:		
+	uint32_t		functionOffset() const						INLINE { return E::get32(fields.functionOffset); }
+	void			set_functionOffset(uint32_t value)			INLINE { E::set32(fields.functionOffset, value); }
+
+	uint32_t		imageIndex() const							INLINE { return E::get32(fields.imageIndex); }
+	void			set_imageIndex(uint32_t value)				INLINE { E::set32(fields.imageIndex, value); }
+
+private:
+	dyld_cache_accelerator_initializer			fields;
+};
+
+
+template <typename E>
+class dyldCacheAcceleratorRangeEntry {
+public:		
+	uint64_t		startAddress() const						INLINE { return E::get64(fields.startAddress); }
+	void			set_startAddress(uint64_t value)			INLINE { E::set64(fields.startAddress, value); }
+
+	uint32_t		size() const								INLINE { return E::get32(fields.size); }
+	void			set_size(uint32_t value)					INLINE { E::set32(fields.size, value); }
+
+	uint32_t		imageIndex() const							INLINE { return E::get32(fields.imageIndex); }
+	void			set_imageIndex(uint32_t value)				INLINE { E::set32(fields.imageIndex, value); }
+
+private:
+	dyld_cache_range_entry			fields;
+};
+
+template <typename E>
+class dyldCacheAcceleratorDOFEntry {
+public:		
+	uint64_t		sectionAddress() const						INLINE { return E::get64(fields.sectionAddress); }
+	void			set_sectionAddress(uint64_t value)			INLINE { E::set64(fields.sectionAddress, value); }
+
+	uint32_t		sectionSize() const							INLINE { return E::get32(fields.sectionSize); }
+	void			set_sectionSize(uint32_t value)				INLINE { E::set32(fields.sectionSize, value); }
+
+	uint32_t		imageIndex() const							INLINE { return E::get32(fields.imageIndex); }
+	void			set_imageIndex(uint32_t value)				INLINE { E::set32(fields.imageIndex, value); }
+
+private:
+	dyld_cache_accelerator_dof			fields;
+};
+
+template <typename E>
 class dyldCacheSlideInfo {
 public:		
 	uint32_t		version() const								INLINE { return E::get32(fields.version); }
@@ -152,6 +323,45 @@ private:
 
 struct dyldCacheSlideInfoEntry {
 	uint8_t  bits[4096/(8*4)]; // 128-byte bitmap
+};
+
+
+template <typename E>
+class dyldCacheSlideInfo2 {
+public:		
+	uint32_t		version() const								INLINE { return E::get32(fields.version); }
+	void			set_version(uint32_t value)					INLINE { E::set32(fields.version, value); }
+
+	uint32_t		page_starts_offset() const					INLINE { return E::get32(fields.page_starts_offset); }
+	void			set_page_starts_offset(uint32_t value)		INLINE { E::set32(fields.page_starts_offset, value); }
+
+	uint32_t		page_starts_count() const					INLINE { return E::get32(fields.page_starts_count); }
+	void			set_page_starts_count(uint32_t value)		INLINE { E::set32(fields.page_starts_count, value); }
+
+	uint32_t		page_extras_offset() const					INLINE { return E::get32(fields.page_extras_offset); }
+	void			set_page_extras_offset(uint32_t value)		INLINE { E::set32(fields.page_extras_offset, value); }
+
+	uint32_t		page_extras_count() const					INLINE { return E::get32(fields.page_extras_count); }
+	void			set_page_extras_count(uint32_t value)		INLINE { E::set32(fields.page_extras_count, value); }
+
+	uint32_t		page_size() const							INLINE { return E::get32(fields.page_size); }
+	void			set_page_size(uint32_t value)				INLINE { E::set32(fields.page_size, value); }
+
+	uint64_t		delta_mask() const							INLINE { return E::get64(fields.delta_mask); }
+	void			set_delta_mask(uint64_t value)				INLINE { E::set64(fields.delta_mask, value); }
+
+	uint64_t		value_add() const							INLINE { return E::get64(fields.value_add); }
+	void			set_value_add(uint64_t value)				INLINE { E::set64(fields.value_add, value); }
+
+	uint16_t		page_starts(unsigned index) const				INLINE { return E::get16(((uint16_t*)(((uint8_t*)this)+E::get16(fields.page_starts_offset)))[index]); }
+	void			set_page_starts(unsigned index, uint16_t value) INLINE { return E::set16(((uint16_t*)(((uint8_t*)this)+E::get16(fields.page_starts_offset)))[index], value); }
+
+	uint16_t		page_extras(unsigned index) const				INLINE { return E::get16(((uint16_t*)(((uint8_t*)this)+E::get16(fields.page_extras_offset)))[index]); }
+	void			set_page_extras(unsigned index, uint16_t value) INLINE { return E::set16(((uint16_t*)(((uint8_t*)this)+E::get16(fields.page_extras_offset)))[index], value); }
+
+
+private:
+	dyld_cache_slide_info2			fields;
 };
 
 

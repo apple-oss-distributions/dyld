@@ -78,6 +78,21 @@ namespace dyld {
 		// Added in version 4
 		void			(*coresymbolication_load_notifier)(void *connection, uint64_t load_timestamp, const char *image_path, const struct mach_header *mach_header);
 		void			(*coresymbolication_unload_notifier)(void *connection, uint64_t unload_timestamp, const char *image_path, const struct mach_header *mach_header);
+		// Added in version 5
+		int				(*proc_regionfilename)(int pid, uint64_t address, void* buffer, uint32_t buffersize);
+		int				(*getpid)();
+		kern_return_t	(*mach_port_insert_right)(ipc_space_t task, mach_port_name_t name, mach_port_t poly, mach_msg_type_name_t polyPoly);
+		kern_return_t   (*mach_port_allocate)(ipc_space_t, mach_port_right_t, mach_port_name_t*);
+		kern_return_t   (*mach_msg)(mach_msg_header_t *, mach_msg_option_t , mach_msg_size_t , mach_msg_size_t , mach_port_name_t , mach_msg_timeout_t , mach_port_name_t);
+		// Added in version 6
+		void			(*abort_with_payload)(uint32_t reason_namespace, uint64_t reason_code, void* payload, uint32_t payload_size, const char* reason_string, uint64_t reason_flags);
+		// Add in version 7
+		kern_return_t	(*task_register_dyld_image_infos)(task_t task, dyld_kernel_image_info_array_t dyld_images, mach_msg_type_number_t dyld_imagesCnt);
+		kern_return_t	(*task_unregister_dyld_image_infos)(task_t task, dyld_kernel_image_info_array_t dyld_images, mach_msg_type_number_t dyld_imagesCnt);
+		kern_return_t	(*task_get_dyld_image_infos)(task_t task, dyld_kernel_image_info_array_t *dyld_images, mach_msg_type_number_t *dyld_imagesCnt);
+		kern_return_t	(*task_register_dyld_shared_cache_image_info)(task_t task, dyld_kernel_image_info_t dyld_cache_image, boolean_t no_cache, boolean_t private_cache);
+		kern_return_t	(*task_register_dyld_set_dyld_state)(task_t task, uint8_t dyld_state);
+		kern_return_t	(*task_register_dyld_get_process_state)(task_t task, dyld_kernel_process_info_t *dyld_process_state);
 	};
 
 	extern const struct SyscallHelpers* gSyscallHelpers;

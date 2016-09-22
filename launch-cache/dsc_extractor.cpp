@@ -98,7 +98,7 @@ private:
 		if ( (entry.flags & EXPORT_SYMBOL_FLAGS_REEXPORT) == 0 )
 			return true;
 		// If the symbol comes from a dylib that is re-exported, this is not an individual symbol re-export
-		if ( _reexportDeps.count(entry.other) != 0 )
+		if ( _reexportDeps.count((int)entry.other) != 0 )
 			return true;
 		return false;
 	}
@@ -118,8 +118,11 @@ int optimize_linkedit(macho_header<typename A::P>* mh, uint64_t textOffsetInCach
 	
 	// update load commands
 	uint64_t cumulativeFileSize = 0;
+	const unsigned origLoadCommandsSize = mh->sizeofcmds();
+	unsigned bytesRemaining = origLoadCommandsSize;
+	unsigned removedCount = 0;
 	const macho_load_command<P>* const cmds = (macho_load_command<P>*)((uint8_t*)mh + sizeof(macho_header<P>));
-	const uint32_t cmd_count = mh->ncmds();
+	const uint32_t cmdCount = mh->ncmds();
 	const macho_load_command<P>* cmd = cmds;
 	macho_segment_command<P>* linkEditSegCmd = NULL;
 	macho_symtab_command<P>* symtab = NULL;
@@ -130,7 +133,8 @@ int optimize_linkedit(macho_header<typename A::P>* mh, uint64_t textOffsetInCach
 	uint32_t exportsTrieSize = 0;
 	std::set<int> reexportDeps;
 	int depIndex = 0;
-	for (uint32_t i = 0; i < cmd_count; ++i) {
+	for (uint32_t i = 0; i < cmdCount; ++i) {
+	    bool remove = false;
 		switch ( cmd->cmd() ) {
 		case macho_segment_command<P>::CMD:
 			{
@@ -188,10 +192,28 @@ int optimize_linkedit(macho_header<typename A::P>* mh, uint64_t textOffsetInCach
 				reexportDeps.insert(depIndex);
 			}
 			break;
+		case LC_SEGMENT_SPLIT_INFO:
+			// <rdar://problem/23212513> dylibs iOS 9 dyld caches have bogus LC_SEGMENT_SPLIT_INFO
+			remove = true;
+			break;
 		}
-		cmd = (const macho_load_command<P>*)(((uint8_t*)cmd)+cmd->cmdsize());
+		uint32_t cmdSize = cmd->cmdsize();
+		macho_load_command<P>* nextCmd = (macho_load_command<P>*)(((uint8_t*)cmd)+cmdSize);
+		if ( remove ) {
+			::memmove((void*)cmd, (void*)nextCmd, bytesRemaining);
+			++removedCount;
+		}
+		else {
+			bytesRemaining -= cmdSize;
+			cmd = nextCmd;
+		}
 	}
-	
+	// zero out stuff removed
+	::bzero((void*)cmd, bytesRemaining);
+	// update header
+	mh->set_ncmds(cmdCount - removedCount);
+	mh->set_sizeofcmds(origLoadCommandsSize - bytesRemaining);
+
 	// rebuild symbol table
 	if ( linkEditSegCmd == NULL ) {
 		fprintf(stderr, "__LINKEDIT not found\n");

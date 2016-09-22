@@ -35,7 +35,9 @@
 static int singleMappedCount = 0;
 static int batchMappedCount = 0;
 static int singleUnMappedCount = 0;
-
+static int batchBoundCount = 0;
+static int singleDepsInitedCount = 0;
+static int singleBoundCount = 0;
 
 static const char* batchMappedHandler(enum dyld_image_states state, uint32_t infoCount, const struct dyld_image_info info[])
 {
@@ -46,6 +48,18 @@ static const char* batchMappedHandler(enum dyld_image_states state, uint32_t inf
 		exit(0);
 	}
 	batchMappedCount += infoCount;
+	return NULL;
+}
+
+static const char* batchBoundHandler(enum dyld_image_states state, uint32_t infoCount, const struct dyld_image_info info[])
+{
+	for (uint32_t i=0; i < infoCount; ++i) 
+		printf("batchBoundHandler(): %u/%u -> %s\n", i, infoCount, info[i].imageFilePath);
+	if ( state != dyld_image_state_bound ) {
+		FAIL("image-state-change: batchBoundHandler passed state %d", state);
+		exit(0);
+	}
+	batchBoundCount += infoCount;
 	return NULL;
 }
 
@@ -63,6 +77,41 @@ static const char* singleMappedHandler(enum dyld_image_states state, uint32_t in
 	++singleMappedCount;
 	return NULL;
 }
+
+
+static const char* singleBoundHandler(enum dyld_image_states state, uint32_t infoCount, const struct dyld_image_info info[])
+{
+	printf("singleBoundHandler(%s)\n", info[0].imageFilePath);
+	if ( state != dyld_image_state_bound ) {
+		FAIL("image-state-change: singleBoundHandler passed state %d", state);
+		exit(0);
+	}
+	if ( infoCount != 1 ) {
+		FAIL("image-state-change: singleBoundHandler given %d images", infoCount);
+		exit(0);
+	}
+	++singleBoundCount;
+	return NULL;
+}
+
+
+
+static const char* singleDepsInitedHandler(enum dyld_image_states state, uint32_t infoCount, const struct dyld_image_info info[])
+{
+	printf("singleDepsInitedHandler(%s)\n", info[0].imageFilePath);
+	if ( state != dyld_image_state_dependents_initialized ) {
+		FAIL("image-state-change: singleDepsInitedHandler passed state %d", state);
+		exit(0);
+	}
+	if ( infoCount != 1 ) {
+		FAIL("image-state-change: singleDepsInitedHandler given %d images", infoCount);
+		exit(0);
+	}
+	++singleDepsInitedCount;
+	return NULL;
+}
+
+
 
 static const char* singleUnmappedHandler(enum dyld_image_states state, uint32_t infoCount, const struct dyld_image_info info[])
 {
@@ -100,7 +149,11 @@ int main(int argc, const char* argv[])
 	// tell dyld we want to know when images are mapped
 	dyld_register_image_state_change_handler(dyld_image_state_dependents_mapped, true, batchMappedHandler);
 	dyld_register_image_state_change_handler(dyld_image_state_mapped, false, singleMappedHandler);
+	dyld_register_image_state_change_handler(dyld_image_state_bound, true, batchBoundHandler);
+ 	dyld_register_image_state_change_handler(dyld_image_state_bound, false, singleBoundHandler);
+	dyld_register_image_state_change_handler(dyld_image_state_dependents_initialized, false, singleDepsInitedHandler);
 	dyld_register_image_state_change_handler(dyld_image_state_terminated, false, singleUnmappedHandler);
+
 	// with batch mode we get notified of existing images, but not with single mode, so re-sync counts
 	batchMappedCount=0;
 	

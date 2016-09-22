@@ -24,6 +24,7 @@
 
 #include <stdint.h>
 #include <sys/stat.h>
+#include <dlfcn.h>
 
 #include "ImageLoader.h"
 #include "mach-o/dyld_priv.h"
@@ -61,6 +62,9 @@ namespace dyld {
 	extern ImageLoader::LinkContext			gLinkContext;
 	extern struct dyld_all_image_infos*		gProcessInfo;
 	extern bool								gLogAPIs;
+#if SUPPORT_ACCELERATE_TABLES
+	extern bool								gLogAppAPIs;
+#endif
 #if DYLD_SHARED_CACHE_SUPPORT
 	extern bool								gSharedCacheOverridden;
 #endif
@@ -72,8 +76,8 @@ namespace dyld {
 	extern void					registerRemoveCallback(ImageCallback func);
 	extern void					registerUndefinedHandler(UndefinedHandler);
 	extern void					initializeMainExecutable();
-	extern void					preflight(ImageLoader* image, const ImageLoader::RPathChain& loaderRPaths);
-	extern void					link(ImageLoader* image, bool forceLazysBound, bool neverUnload, const ImageLoader::RPathChain& loaderRPaths);
+	extern void					preflight(ImageLoader* image, const ImageLoader::RPathChain& loaderRPaths, unsigned cacheIndex);
+	extern void					link(ImageLoader* image, bool forceLazysBound, bool neverUnload, const ImageLoader::RPathChain& loaderRPaths, unsigned cacheIndex);
 	extern void					runInitializers(ImageLoader* image);
 	extern void					runImageStaticTerminators(ImageLoader* image);	
 	extern const char*			getExecutablePath();
@@ -87,7 +91,7 @@ namespace dyld {
 	extern ImageLoader*			findLoadedImageByInstallPath(const char* path);
 	extern bool					flatFindExportedSymbol(const char* name, const ImageLoader::Symbol** sym, const ImageLoader** image);
 	extern bool					flatFindExportedSymbolWithHint(const char* name, const char* librarySubstring, const ImageLoader::Symbol** sym, const ImageLoader** image);
-	extern ImageLoader*			load(const char* path, const LoadContext& context);
+	extern ImageLoader*			load(const char* path, const LoadContext& context, unsigned& cacheIndex);
 	extern ImageLoader*			loadFromMemory(const uint8_t* mem, uint64_t len, const char* moduleName);
 	extern void					removeImage(ImageLoader* image);
 	extern ImageLoader*			cloneImage(ImageLoader* image);
@@ -103,6 +107,8 @@ namespace dyld {
 	extern void					processDyldEnvironmentVariable(const char* key, const char* value, const char* mainDir);
 	extern void					registerImageStateSingleChangeHandler(dyld_image_states state, dyld_image_state_change_handler handler);
 	extern void					registerImageStateBatchChangeHandler(dyld_image_states state, dyld_image_state_change_handler handler);
+	extern void					registerObjCNotifiers(_dyld_objc_notify_mapped, _dyld_objc_notify_init, _dyld_objc_notify_unmapped);
+	extern bool					sharedCacheUUID(uuid_t uuid);
 	extern void					garbageCollectImages();
 	extern int					openSharedCacheFile();
 	extern const void*			imMemorySharedCacheHeader();
@@ -117,5 +123,20 @@ namespace dyld {
 	extern const char*			getStandardSharedCacheFilePath();
 	extern int					my_stat(const char* path, struct stat* buf);
 	extern int					my_open(const char* path, int flag, int other);
+	bool						sandboxBlockedOpen(const char* path);
+	bool						sandboxBlockedMmap(const char* path);
+	bool						sandboxBlockedStat(const char* path);
+
+#if SUPPORT_ACCELERATE_TABLES
+	bool						dlopenFromCache(const char* path, int mode, void** handle);
+	bool						makeCacheHandle(ImageLoader* image, unsigned cacheIndex, int mode, void** result);
+	void*						dlsymFromCache(void* handle, const char* symName, unsigned index);
+	bool						isCacheHandle(void* handle);
+	bool						addressInCache(const void* address, const mach_header** mh, const char** path, unsigned* index=NULL);
+	bool						findUnwindSections(const void* addr, dyld_unwind_sections* info);
+	bool						dladdrFromCache(const void* address, Dl_info* info);
+	bool						isPathInCache(const char* path);
+	const char*					getPathFromIndex(unsigned cacheIndex);
+#endif
 }
 

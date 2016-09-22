@@ -75,6 +75,8 @@ extern void _ZN4dyld3logEPKcz(const char*, ...);
 // dyld::halt(const char* msg);
 extern void _ZN4dyld4haltEPKc(const char* msg) __attribute__((noreturn));
 
+extern void dyld_fatal_error(const char* errString) __attribute__((noreturn));
+
 
 // abort called by C++ unwinding code
 void abort()
@@ -492,59 +494,43 @@ int closedir(DIR* dirp) {
 	return gSyscallHelpers->closedir(dirp);
 }
 
-#define SUPPORT_HOST_10_10  1
+void xcoresymbolication_load_notifier(void* connection, uint64_t timestamp, const char* path, const struct mach_header* mh)
+{
+	// if host dyld supports this notifier, call into host dyld
+	if ( gSyscallHelpers->version >= 4 )
+		return gSyscallHelpers->coresymbolication_load_notifier(connection, timestamp, path, mh);
+}
 
-#if SUPPORT_HOST_10_10
-typedef int               (*FuncPtr_nanosleep)(const struct timespec*, struct timespec*);
+void xcoresymbolication_unload_notifier(void* connection, uint64_t timestamp, const char* path, const struct mach_header* mh)
+{
+	// if host dyld supports this notifier, call into host dyld
+	if ( gSyscallHelpers->version >= 4 )
+		return gSyscallHelpers->coresymbolication_unload_notifier(connection, timestamp, path, mh);
+}
+
+
+
+#define SUPPORT_HOST_10_11  1
+
+#if SUPPORT_HOST_10_11
+typedef int               (*FuncPtr_proc_regionfilename)(int pid, uint64_t address, void* buffer, uint32_t bufferSize);
+typedef pid_t             (*FuncPtr_getpid)();
+typedef bool              (*FuncPtr_mach_port_insert_right)(ipc_space_t task, mach_port_name_t name, mach_port_t poly, mach_msg_type_name_t polyPoly);
 typedef kern_return_t     (*FuncPtr_mach_port_allocate)(ipc_space_t, mach_port_right_t, mach_port_name_t*);
 typedef mach_msg_return_t (*FuncPtr_mach_msg)(mach_msg_header_t *, mach_msg_option_t , mach_msg_size_t , mach_msg_size_t , mach_port_name_t , mach_msg_timeout_t , mach_port_name_t);
-typedef int               (*FuncPtr_kill)(pid_t pid, int sig);
-typedef pid_t             (*FuncPtr_getpid)();
-typedef bool              (*FuncPtr_OSAtomicCompareAndSwap32)(int32_t, int32_t, volatile int32_t*);
 
-static FuncPtr_nanosleep                 proc_nanosleep = NULL;
+static FuncPtr_proc_regionfilename		 proc_proc_regionfilename = NULL;
+static FuncPtr_getpid                    proc_getpid = NULL;
+static FuncPtr_mach_port_insert_right    proc_mach_port_insert_right = NULL;
 static FuncPtr_mach_port_allocate        proc_mach_port_allocate = NULL;
 static FuncPtr_mach_msg                  proc_mach_msg = NULL;
-static FuncPtr_kill                      proc_kill = NULL;
-static FuncPtr_getpid                    proc_getpid = NULL;
-static FuncPtr_OSAtomicCompareAndSwap32  proc_OSAtomicCompareAndSwap32 = NULL;
 
-
-int nanosleep(const struct timespec* p1, struct timespec* p2)
-{
-	return (*proc_nanosleep)(p1, p2);
-}
-
-kern_return_t mach_port_allocate(ipc_space_t p1, mach_port_right_t p2, mach_port_name_t* p3)
-{
-	return (*proc_mach_port_allocate)(p1, p2, p3);
-}
-
-mach_msg_return_t mach_msg(mach_msg_header_t* p1, mach_msg_option_t p2, mach_msg_size_t p3, mach_msg_size_t p4, mach_port_name_t p5, mach_msg_timeout_t p6, mach_port_name_t p7)
-{
-	return (*proc_mach_msg)(p1, p2, p3, p4, p5, p6, p7);
-}
-
-int kill(pid_t p1, int p2)
-{
-	return (*proc_kill)(p1, p2);
-}
-
-pid_t getpid()
-{
-	return (*proc_getpid)();
-}
-
-bool OSAtomicCompareAndSwap32(int32_t p1, int32_t p2, volatile int32_t* p3)
-{
-	return (*proc_OSAtomicCompareAndSwap32)(p1, p2, p3);
-}
 
 
 // Look up sycalls in host dyld needed by coresymbolication_ routines in dyld_sim
 static void findHostFunctions() {
 	// Only look up symbols once
-	if ( proc_nanosleep != NULL )
+	if ( proc_mach_msg != NULL )
 		return;
 
 	struct dyld_all_image_infos* imageInfo = (struct dyld_all_image_infos*)(gSyscallHelpers->getProcessInfo());
@@ -596,47 +582,131 @@ static void findHostFunctions() {
 	for (const macho_nlist* s = localsStart; s < localsEnd; ++s) {
  		if ( ((s->n_type & N_TYPE) == N_SECT) && ((s->n_type & N_STAB) == 0) ) {
 			const char* name = &symbolTableStrings[s->n_un.n_strx];
-			if ( strcmp(name, "_nanosleep") == 0 )
-				proc_nanosleep = (FuncPtr_nanosleep)(s->n_value + slide);
+			if ( strcmp(name, "_proc_regionfilename") == 0 )
+				proc_proc_regionfilename = (FuncPtr_proc_regionfilename)(s->n_value + slide);
+			else if ( strcmp(name, "_getpid") == 0 )
+				proc_getpid = (FuncPtr_getpid)(s->n_value + slide);
+			else if ( strcmp(name, "mach_port_insert_right") == 0 )
+				proc_mach_port_insert_right = (FuncPtr_mach_port_insert_right)(s->n_value + slide);
 			else if ( strcmp(name, "_mach_port_allocate") == 0 )
 				proc_mach_port_allocate = (FuncPtr_mach_port_allocate)(s->n_value + slide);
 			else if ( strcmp(name, "_mach_msg") == 0 )
 				proc_mach_msg = (FuncPtr_mach_msg)(s->n_value + slide);
-			else if ( strcmp(name, "_kill") == 0 )
-				proc_kill = (FuncPtr_kill)(s->n_value + slide);
-			else if ( strcmp(name, "_getpid") == 0 )
-				proc_getpid = (FuncPtr_getpid)(s->n_value + slide);
-			else if ( strcmp(name, "_OSAtomicCompareAndSwap32") == 0 )
-				proc_OSAtomicCompareAndSwap32 = (FuncPtr_OSAtomicCompareAndSwap32)(s->n_value + slide);
 		}
 	}
 }
 #endif
 
-void xcoresymbolication_load_notifier(void* connection, uint64_t timestamp, const char* path, const struct mach_header* mh)
+
+int proc_regionfilename(int pid, uint64_t address, void* buffer, uint32_t bufferSize)
 {
-	// if host dyld supports this notifier, call into host dyld
-	if ( gSyscallHelpers->version >= 4 )
-		return gSyscallHelpers->coresymbolication_load_notifier(connection, timestamp, path, mh);
-#if SUPPORT_HOST_10_10
-	// otherwise use notifier code in dyld_sim
+	if ( gSyscallHelpers->version >= 5 )
+		return gSyscallHelpers->proc_regionfilename(pid, address, buffer, bufferSize);
+#if SUPPORT_HOST_10_11
 	findHostFunctions();
-	coresymbolication_load_notifier(connection, timestamp, path, mh);
+	if ( proc_proc_regionfilename )
+		return (*proc_proc_regionfilename)(pid, address, buffer, bufferSize);
+	else
+		return 0;
+#else
+	return 0;
 #endif
 }
 
-void xcoresymbolication_unload_notifier(void* connection, uint64_t timestamp, const char* path, const struct mach_header* mh)
+pid_t getpid()
 {
-	// if host dyld supports this notifier, call into host dyld
-	if ( gSyscallHelpers->version >= 4 )
-		return gSyscallHelpers->coresymbolication_unload_notifier(connection, timestamp, path, mh);
-#if SUPPORT_HOST_10_10
-	// otherwise use notifier code in dyld_sim
+	if ( gSyscallHelpers->version >= 5 )
+		return gSyscallHelpers->getpid();
+#if SUPPORT_HOST_10_11
 	findHostFunctions();
-	coresymbolication_unload_notifier(connection, timestamp, path, mh);
+	return (*proc_getpid)();
+#else
+	return 0;
 #endif
 }
 
+kern_return_t mach_port_insert_right(ipc_space_t task, mach_port_name_t name, mach_port_t poly, mach_msg_type_name_t polyPoly)
+{
+	if ( gSyscallHelpers->version >= 5 )
+		return gSyscallHelpers->mach_port_insert_right(task, name, poly, polyPoly);
+#if SUPPORT_HOST_10_11
+	findHostFunctions();
+	if ( proc_mach_port_insert_right )
+		return (*proc_mach_port_insert_right)(task, name, poly, polyPoly);
+	else
+		return KERN_NOT_SUPPORTED;
+#else
+	return KERN_NOT_SUPPORTED;
+#endif
+}
+
+kern_return_t mach_port_allocate(ipc_space_t task, mach_port_right_t right, mach_port_name_t* name)
+{
+	if ( gSyscallHelpers->version >= 5 )
+		return gSyscallHelpers->mach_port_allocate(task, right, name);
+#if SUPPORT_HOST_10_11
+	findHostFunctions();
+	return (*proc_mach_port_allocate)(task, right, name);
+#else
+	return KERN_NOT_SUPPORTED;
+#endif
+}
+
+kern_return_t mach_msg(mach_msg_header_t* msg, mach_msg_option_t option, mach_msg_size_t send_size, mach_msg_size_t rcv_size, mach_port_name_t rcv_name, mach_msg_timeout_t timeout, mach_port_name_t notify)
+{
+	if ( gSyscallHelpers->version >= 5 )
+		return gSyscallHelpers->mach_msg(msg, option, send_size, rcv_size, rcv_name, timeout, notify);
+#if SUPPORT_HOST_10_11
+	findHostFunctions();
+	return (*proc_mach_msg)(msg, option, send_size, rcv_size, rcv_name, timeout, notify);
+#else
+	return KERN_NOT_SUPPORTED;
+#endif
+}
+
+
+void abort_with_payload(uint32_t reason_namespace, uint64_t reason_code, void* payload, uint32_t payload_size, const char* reason_string, uint64_t reason_flags)
+{
+	if ( gSyscallHelpers->version >= 6 )
+		gSyscallHelpers->abort_with_payload(reason_namespace, reason_code, payload, payload_size, reason_string, reason_flags);
+	dyld_fatal_error(reason_string);
+}
+
+kern_return_t	task_register_dyld_image_infos(task_t task, dyld_kernel_image_info_array_t dyld_images, mach_msg_type_number_t dyld_imagesCnt) {
+	if ( gSyscallHelpers->version >= 7 )
+		return gSyscallHelpers->task_register_dyld_image_infos(task, dyld_images, dyld_imagesCnt);
+	return KERN_NOT_SUPPORTED;
+}
+
+kern_return_t	task_unregister_dyld_image_infos(task_t task, dyld_kernel_image_info_array_t dyld_images, mach_msg_type_number_t dyld_imagesCnt) {
+	if ( gSyscallHelpers->version >= 7 )
+		return gSyscallHelpers->task_unregister_dyld_image_infos(task, dyld_images, dyld_imagesCnt);
+	return KERN_NOT_SUPPORTED;
+}
+
+kern_return_t	task_get_dyld_image_infos(task_t task, dyld_kernel_image_info_array_t *dyld_images, mach_msg_type_number_t *dyld_imagesCnt) {
+	if ( gSyscallHelpers->version >= 7 )
+		return gSyscallHelpers->task_get_dyld_image_infos(task, dyld_images, dyld_imagesCnt);
+	return KERN_NOT_SUPPORTED;
+}
+
+kern_return_t	task_register_dyld_shared_cache_image_info(task_t task, dyld_kernel_image_info_t dyld_cache_image, boolean_t no_cache, boolean_t private_cache) {
+	if ( gSyscallHelpers->version >= 7 )
+		return gSyscallHelpers->task_register_dyld_shared_cache_image_info(task, dyld_cache_image, no_cache, private_cache);
+	return KERN_NOT_SUPPORTED;
+}
+
+kern_return_t	task_register_dyld_set_dyld_state(task_t task, uint8_t dyld_state) {
+	if ( gSyscallHelpers->version >= 7 )
+		return gSyscallHelpers->task_register_dyld_set_dyld_state(task, dyld_state);
+	return KERN_NOT_SUPPORTED;
+}
+
+kern_return_t	task_register_dyld_get_process_state(task_t task, dyld_kernel_process_info_t *dyld_process_state) {
+	if ( gSyscallHelpers->version >= 7 )
+		return gSyscallHelpers->task_register_dyld_get_process_state(task, dyld_process_state);
+	return KERN_NOT_SUPPORTED;
+}
 
 int* __error(void) {
 	return gSyscallHelpers->errnoAddress();
@@ -653,5 +723,17 @@ extern int myerrno_fallback  __asm("_errno");
 int myerrno_fallback = 0;
 
 #endif  // TARGET_IPHONE_SIMULATOR
+
+
+#if ! TARGET_IPHONE_SIMULATOR
+	#include "mach-o/dyld_process_info.h"
+
+	void _dyld_debugger_notification(enum dyld_notify_mode mode, unsigned long count, uint64_t machHeaders[])
+	{
+		// Do nothing.  This exists for the debugger to set a break point on to see what images have been loaded or unloaded.
+	}
+#endif
+
+
 
 

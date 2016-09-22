@@ -114,6 +114,7 @@ struct uuid_command {
 #define DYLD_CACHE_ADJ_V2_THUMB_BR22			0x0B
 #define DYLD_CACHE_ADJ_V2_IMAGE_OFF_32			0x0C
 
+#define MH_HAS_OBJC			0x40000000
 
 #include "FileAbstraction.hpp"
 #include "Architectures.hpp"
@@ -130,6 +131,10 @@ struct ArchPair
 		if ( this->arch != other.arch )
 			return (this->arch < other.arch);
 		return (this->subtype < other.subtype);
+	}
+
+	bool operator==(const ArchPair& other) const { 
+        return this->arch == other.arch  &&  this->subtype == other.subtype;
 	}
 };
 
@@ -933,7 +938,7 @@ inline uint64_t read_uleb128(const uint8_t*& p, const uint8_t* end) {
 }
 	
 
-static int64_t read_sleb128(const uint8_t*& p, const uint8_t* end)
+inline int64_t read_sleb128(const uint8_t*& p, const uint8_t* end)
 {
 	int64_t result = 0;
 	int bit = 0;

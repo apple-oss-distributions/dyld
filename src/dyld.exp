@@ -29,10 +29,10 @@
 # gdb and Symbolication look at these to discover a process's loaded images
 _dyld_all_image_infos
 _dyld_shared_cache_ranges
+__dyld_debugger_notification
 
 # CrashReporter uses this to get message as to why dyld terminated the process
 _error_string
-_dyld_fatal_error
 
 # Used by various tools to see build number of dyld
 _dyldVersionString

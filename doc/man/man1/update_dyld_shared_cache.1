@@ -1,4 +1,4 @@
-.Dd Oct 10, 2008
+.Dd June 23, 2016
 .Dt update_dyld_shared_cache 1
 .Os Darwin
 .Sh NAME
@@ -11,12 +11,8 @@
 .Op Fl arch Ar arch 
 .Op Fl force 
 .Op Fl debug
-.Op Fl sort_by_name 
-.Op Fl universal_boot 
+.Op Fl universal_boot
 .Op Fl verify
-.Op Fl dylib_list Ar file
-.Op Fl iPhone
-.Op Fl cache_dir Ar dir
 .Sh DESCRIPTION
 .Nm update_dyld_shared_cache
 ensures that dyld's shared cache is up-to-date.  This tool is normally
@@ -79,27 +75,12 @@ This option will cause
 to regenerated the shared cache files even if they appear to be already up-to-date. 
 .It Fl debug
 This option prints out additional information about the work being done.
-.It Fl sort_by_name
-By default
-.Nm update_dyld_shared_cache
-assigns a random start address to each mach-o image in the cache.
-This option causes the start addresses to be chosen in path order, thus subsequent runs will
-produce the same address layout which can help reproduce some bugs.
 .It Fl universal_boot
-This option can only be used running on an machine with an Intel processor.  It builds caches
-that can be used when booting on both 32-bit and 64-bit machines.
-.It Fl dylib_list Ar file
-Instead of scanning /var/db/dyld/shared_region_roots/, this option provides a file that contains
-a list of the dylibs to use when building the shared cache file.
+This option builds caches for all machines.
 .It Fl verify
 Will regenerate a shared cache in-memory that matches the randomization of the existing shared 
 cache file.  Then instead of writing the cache file, it compares the in-memory cache file to
 the on disk version and reports any differences.  
-.It Fl iPhone
-indicates that cache is not for the current Mac OS X, but for rather for an iPhone
-.It Fl cache_dir Ar directory
-This option specifies the directory in which to create the cache file(s).  If not specified,
-the cache file(s) are created in the standard location (e.g. var/db/dyld/) of the root partition.
 .El
 .Sh FILES
 .Tp

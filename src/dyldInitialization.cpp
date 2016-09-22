@@ -115,7 +115,7 @@ static uintptr_t slideOfMainExecutable(const struct macho_header* mh)
 	for (uint32_t i = 0; i < cmd_count; ++i) {
 		if ( cmd->cmd == LC_SEGMENT_COMMAND ) {
 			const struct macho_segment_command* segCmd = (struct macho_segment_command*)cmd;
-			if ( strcmp(segCmd->segname, "__TEXT") == 0 ) {
+			if ( (segCmd->fileoff == 0) && (segCmd->filesize != 0)) {
 				return (uintptr_t)mh - segCmd->vmaddr;
 			}
 		}

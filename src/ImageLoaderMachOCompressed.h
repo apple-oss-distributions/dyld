@@ -62,12 +62,11 @@ public:
 	virtual uintptr_t					doBindLazySymbol(uintptr_t* lazyPointer, const LinkContext& context);
 	virtual uintptr_t					doBindFastLazySymbol(uint32_t lazyBindingInfoOffset, const LinkContext& context, void (*lock)(), void (*unlock)());
 	virtual const char*					findClosestSymbol(const void* addr, const void** closestAddr) const;
-	virtual	void						initializeCoalIterator(CoalIterator&, unsigned int loadOrder);
+	virtual	void						initializeCoalIterator(CoalIterator&, unsigned int loadOrder, unsigned);
 	virtual	bool						incrementCoalIterator(CoalIterator&);
 	virtual	uintptr_t					getAddressCoalIterator(CoalIterator&, const LinkContext& contex);
-	virtual	void						updateUsesCoalIterator(CoalIterator&, uintptr_t newAddr, ImageLoader* target, const LinkContext& context);
+	virtual	void						updateUsesCoalIterator(CoalIterator&, uintptr_t newAddr, ImageLoader* target, unsigned targetIndex, const LinkContext& context);
 
-	
 protected:
 	virtual void						doInterpose(const LinkContext& context);
 	virtual void						dynamicInterpose(const LinkContext& context);
@@ -76,8 +75,8 @@ protected:
 	virtual	bool						isSubframeworkOf(const LinkContext& context, const ImageLoader* image) const { return false; }
 	virtual	bool						hasSubLibrary(const LinkContext& context, const ImageLoader* child) const { return false; }
 	virtual uint32_t*					segmentCommandOffsets() const;
-	virtual	void						rebase(const LinkContext& context);
-	virtual const ImageLoader::Symbol*	findExportedSymbol(const char* name, const ImageLoader** foundIn) const;
+	virtual	void						rebase(const LinkContext& context, uintptr_t slide);
+	virtual const ImageLoader::Symbol*	findShallowExportedSymbol(const char* name, const ImageLoader** foundIn) const;
 	virtual bool						containsSymbol(const void* addr) const;
 	virtual uintptr_t					exportedSymbolAddress(const LinkContext& context, const Symbol* symbol, const ImageLoader* requestor, bool runResolver) const;
 	virtual bool						exportedSymbolIsWeakDefintion(const Symbol* symbol) const;
@@ -127,13 +126,13 @@ private:
 	uintptr_t							resolveFlat(const LinkContext& context, const char* symbolName, bool weak_import, bool runResolver,
 													const ImageLoader** foundIn);
 	uintptr_t							resolveCoalesced(const LinkContext& context, const char* symbolName, const ImageLoader** foundIn);
-	uintptr_t							resolveTwolevel(const LinkContext& context, const ImageLoader* targetImage, bool weak_import, 
-														const char* symbolName, bool runResolver, const ImageLoader** foundIn);
+	uintptr_t							resolveTwolevel(const LinkContext& context, const char* symbolName, const ImageLoader* definedInImage,
+													  const ImageLoader* requestorImage, unsigned requestorOrdinalOfDef, bool weak_import, bool runResolver,
+													  const ImageLoader** foundInn);
 	uintptr_t							interposeAt(const LinkContext& context, uintptr_t addr, uint8_t type, const char*, 
 												uint8_t, intptr_t, long, const char*, LastLookup*, bool runResolver);
 	uintptr_t							dynamicInterposeAt(const LinkContext& context, uintptr_t addr, uint8_t type, const char*, 
 												uint8_t, intptr_t, long, const char*, LastLookup*, bool runResolver);
-	static const uint8_t*				trieWalk(const uint8_t* start, const uint8_t* end, const  char* s);
     void                                updateOptimizedLazyPointers(const LinkContext& context);
     void                                updateAlternateLazyPointer(uint8_t* stub, void** originalLazyPointerAddr, const LinkContext& context);
 	void								registerEncryption(const struct encryption_info_command* encryptCmd, const LinkContext& context);

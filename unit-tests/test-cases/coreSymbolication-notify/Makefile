@@ -29,10 +29,10 @@ all-check: all check
 
 check:
 	export DYLD_PRINT_CS_NOTIFICATIONS=1 && ./main  2> notifications.log
-	grep " load" notifications.log | grep foo.bundle | wc -l | grep 1  >/dev/null
-	grep " load" notifications.log | grep bar.dylib | wc -l | grep 1 >/dev/null
-	grep " unload" notifications.log | grep foo.bundle | wc -l | grep 1  >/dev/null
-	grep " unload" notifications.log | grep bar.dylib | wc -l | grep 1 >/dev/null
+	grep "_load" notifications.log | grep foo.bundle | wc -l | grep 1  >/dev/null
+	grep "_load" notifications.log | grep bar.dylib | wc -l | grep 1 >/dev/null
+	grep "_unload" notifications.log | grep foo.bundle | wc -l | grep 1  >/dev/null
+	grep "_unload" notifications.log | grep bar.dylib | wc -l | grep 1 >/dev/null
 	echo "PASS coreSymbolication-notify"
 
 all: main foo.bundle 

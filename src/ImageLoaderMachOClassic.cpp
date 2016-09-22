@@ -442,8 +442,8 @@ ImageLoaderMachOClassic::mapSplitSegDylibOutsideSharedRegion(int fd,
 			if ( 0 != r ) {
 				// no room here, deallocate what has succeeded so far
 				for(unsigned int j=0; j < i; ++j) {
-					vm_address_t addr = nextAltLoadAddress + regions[j].sfm_address - regions[0].sfm_address;
-					vm_size_t size = regions[j].sfm_size ;
+					addr = nextAltLoadAddress + regions[j].sfm_address - regions[0].sfm_address;
+					size = regions[j].sfm_size ;
 					(void)vm_deallocate(mach_task_self(), addr, size);
 				}
 				nextAltLoadAddress += 0x00100000;  // skip ahead 1MB and try again
@@ -757,10 +757,9 @@ void ImageLoaderMachOClassic::resetPreboundLazyPointers(const LinkContext& conte
 
 
 
-void ImageLoaderMachOClassic::rebase(const LinkContext& context)
+void ImageLoaderMachOClassic::rebase(const LinkContext& context, uintptr_t slide)
 {
 	CRSetCrashLogMessage2(this->getPath());
-	register const uintptr_t slide = this->fSlide;
 	const uintptr_t relocBase = this->getRelocBase();
 	
 	// prefetch any LINKEDIT pages needed
@@ -933,7 +932,7 @@ const struct macho_nlist* ImageLoaderMachOClassic::binarySearch(const char* key,
 }
 
 
-const ImageLoader::Symbol* ImageLoaderMachOClassic::findExportedSymbol(const char* name, const ImageLoader** foundIn) const
+const ImageLoader::Symbol* ImageLoaderMachOClassic::findShallowExportedSymbol(const char* name, const ImageLoader** foundIn) const
 {
 	const struct macho_nlist* sym = NULL;
 	if ( fDynamicInfo->tocoff == 0 )
@@ -1043,7 +1042,7 @@ uintptr_t ImageLoaderMachOClassic::getSymbolAddress(const macho_nlist* sym, cons
 }
 
 uintptr_t ImageLoaderMachOClassic::resolveUndefined(const LinkContext& context, const struct macho_nlist* undefinedSymbol, 
-										bool twoLevel, bool dontCoalesce, const ImageLoader** foundIn)
+										bool twoLevel, bool dontCoalesce, bool runResolver, const ImageLoader** foundIn)
 {
 	++fgTotalBindSymbolsResolved;
 	const char* symbolName = &fStrings[undefinedSymbol->n_un.n_strx];
@@ -1069,7 +1068,7 @@ uintptr_t ImageLoaderMachOClassic::resolveUndefined(const LinkContext& context, 
 		// if a bundle is loaded privately the above will not find its exports
 		if ( this->isBundle() && this->hasHiddenExports() ) {
 			// look in self for needed symbol
-			sym = this->findExportedSymbol(symbolName, foundIn);
+			sym = this->findShallowExportedSymbol(symbolName, foundIn);
 			if ( sym != NULL )
 				return (*foundIn)->getExportedSymbolAddress(sym, context, this);
 		}
@@ -1141,12 +1140,12 @@ uintptr_t ImageLoaderMachOClassic::resolveUndefined(const LinkContext& context, 
 			//dyld::log("resolveUndefined(%s) in %s\n", symbolName, this->getPath());
 			throw "symbol not found";
 		}
-				
-		const Symbol* sym = target->findExportedSymbol(symbolName, true, foundIn);
-		if ( sym!= NULL ) {
-			return (*foundIn)->getExportedSymbolAddress(sym, context, this);
-		}
-		else if ( (undefinedSymbol->n_type & N_PEXT) != 0 ) {
+
+		uintptr_t address;
+		if ( target->findExportedSymbolAddress(context, symbolName, this, ord, runResolver, foundIn, &address) )
+			return address;
+
+		if ( (undefinedSymbol->n_type & N_PEXT) != 0 ) {
 			// don't know why the static linker did not eliminate the internal reference to a private extern definition
 			*foundIn = this;
 			return this->getSymbolAddress(undefinedSymbol, context, false);
@@ -1269,7 +1268,7 @@ void ImageLoaderMachOClassic::doBindExternalRelocations(const LinkContext& conte
 								// range of global symbols.  To handle that case we do the coalesing now.
 								dontCoalesce = false;
 							}
-							symbolAddr = this->resolveUndefined(context, undefinedSymbol, twoLevel, dontCoalesce, &image);
+							symbolAddr = this->resolveUndefined(context, undefinedSymbol, twoLevel, dontCoalesce, false, &image);
 							lastUndefinedSymbol = undefinedSymbol;
 							symbolAddrCached = false;
 						}
@@ -1435,7 +1434,7 @@ uintptr_t ImageLoaderMachOClassic::doBindLazySymbol(uintptr_t* lazyPointer, cons
 						if ( symbolIndex != INDIRECT_SYMBOL_ABS && symbolIndex != INDIRECT_SYMBOL_LOCAL ) {
 							const char* symbolName = &fStrings[fSymbolTable[symbolIndex].n_un.n_strx];
 							const ImageLoader* image = NULL;
-							uintptr_t symbolAddr = this->resolveUndefined(context, &fSymbolTable[symbolIndex], twoLevel, false, &image);
+							uintptr_t symbolAddr = this->resolveUndefined(context, &fSymbolTable[symbolIndex], twoLevel, false, true, &image);
 							symbolAddr = this->bindIndirectSymbol(lazyPointer, sect, symbolName, symbolAddr, image,  context);
 							++fgTotalLazyBindFixups;
 							return symbolAddr;
@@ -1451,7 +1450,7 @@ uintptr_t ImageLoaderMachOClassic::doBindLazySymbol(uintptr_t* lazyPointer, cons
 
 
 
-void ImageLoaderMachOClassic::initializeCoalIterator(CoalIterator& it, unsigned int loadOrder)
+void ImageLoaderMachOClassic::initializeCoalIterator(CoalIterator& it, unsigned int loadOrder, unsigned)
 {
 	it.image = this;
 	it.symbolName = " ";
@@ -1542,7 +1541,7 @@ uintptr_t ImageLoaderMachOClassic::getAddressCoalIterator(CoalIterator& it, cons
 }
 
 
-void ImageLoaderMachOClassic::updateUsesCoalIterator(CoalIterator& it, uintptr_t value, ImageLoader* targetImage, const LinkContext& context)
+void ImageLoaderMachOClassic::updateUsesCoalIterator(CoalIterator& it, uintptr_t value, ImageLoader* targetImage, unsigned targetIndex, const LinkContext& context)
 {
 	// flat_namespace images with classic LINKEDIT do not need late coalescing.
 	// They still need to be iterated becuase they may implement
@@ -1644,7 +1643,7 @@ void ImageLoaderMachOClassic::updateUsesCoalIterator(CoalIterator& it, uintptr_t
 			if ( reloc->r_pcrel ) 
 				type = BIND_TYPE_TEXT_PCREL32;
 		#endif
-			this->bindLocation(context, (uintptr_t)location, value, targetImage, type, symbolName, addend, "weak ");
+			this->bindLocation(context, (uintptr_t)location, value, type, symbolName, addend, this->getPath(), targetImage ? targetImage->getPath() : NULL, "weak ");
 			boundSomething = true;
 		}
 	}
@@ -1798,7 +1797,7 @@ void ImageLoaderMachOClassic::bindIndirectSymbolPointers(const LinkContext& cont
 									// range of global symbols.  To handle that case we do the coalesing now.
 									dontCoalesce = false;
 								}
-								uintptr_t symbolAddr = resolveUndefined(context, sym, twoLevel, dontCoalesce, &image);
+								uintptr_t symbolAddr = resolveUndefined(context, sym, twoLevel, dontCoalesce, false, &image);
 								// update pointer
 								symbolAddr = this->bindIndirectSymbol((uintptr_t*)ptrToBind, sect, &fStrings[sym->n_un.n_strx], symbolAddr, image,  context);
 								// update stats
@@ -1853,7 +1852,7 @@ void ImageLoaderMachOClassic::initializeLazyStubs(const LinkContext& context)
 										const char* symbolName = &fStrings[fSymbolTable[symbolIndex].n_un.n_strx];
 										const ImageLoader* image = NULL;
 										try {
-											uintptr_t symbolAddr = this->resolveUndefined(context, &fSymbolTable[symbolIndex], this->usesTwoLevelNameSpace(), false, &image);
+											uintptr_t symbolAddr = this->resolveUndefined(context, &fSymbolTable[symbolIndex], this->usesTwoLevelNameSpace(), false, false, &image);
 											symbolAddr = this->bindIndirectSymbol((uintptr_t*)entry, sect, symbolName, symbolAddr, image, context);
 											++fgTotalBindFixups;
 											uint32_t rel32 = symbolAddr - (((uint32_t)entry)+5);
@@ -2034,14 +2033,14 @@ void ImageLoaderMachOClassic::dynamicInterpose(const LinkContext& context)
 							const size_t pointerCount = sect->size / sizeof(uintptr_t);
 							uintptr_t* const symbolPointers = (uintptr_t*)(sect->addr + fSlide);
 							for (size_t pointerIndex=0; pointerIndex < pointerCount; ++pointerIndex) {
-								for(size_t i=0; i < context.dynamicInterposeCount; ++i) {
+								for(size_t j=0; j < context.dynamicInterposeCount; ++j) {
 									// replace all references to 'replacee' with 'replacement'
-									if ( symbolPointers[pointerIndex] == (uintptr_t)context.dynamicInterposeArray[i].replacee ) {
+									if ( symbolPointers[pointerIndex] == (uintptr_t)context.dynamicInterposeArray[j].replacee ) {
 										if ( context.verboseInterposing ) {
 											dyld::log("dyld: dynamic interposing: at %p replace %p with %p in %s\n", 
-												&symbolPointers[pointerIndex], context.dynamicInterposeArray[i].replacee, context.dynamicInterposeArray[i].replacement, this->getPath());
+												&symbolPointers[pointerIndex], context.dynamicInterposeArray[j].replacee, context.dynamicInterposeArray[j].replacement, this->getPath());
 										}
-										symbolPointers[pointerIndex] = (uintptr_t)context.dynamicInterposeArray[i].replacement;
+										symbolPointers[pointerIndex] = (uintptr_t)context.dynamicInterposeArray[j].replacement;
 									}
 								}
 							}

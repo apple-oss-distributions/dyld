@@ -324,36 +324,17 @@ Lapple:	ldr	x4, [x3]
 #endif // __arm64__
 
 
-/*
- * dyld calls this function to terminate a process.
- * It has a label so that CrashReporter can distinguish this
- * termination from a random crash.  rdar://problem/4764143
- */
+// When iOS 10.0 simulator runs on 10.11, abort_with_payload() does not exist,
+// so it falls back and uses dyld_fatal_error().
+#if TARGET_IPHONE_SIMULATOR
 	.text
 	.align 2
 	.globl	_dyld_fatal_error
 _dyld_fatal_error:
-#if __arm__
-    trap
-    nop
-#elif __x86_64__ || __i386__
     int3
     nop
-#elif __arm64__
-    brk	#3
-#else
-    #error unknown architecture
 #endif
 
-#if __arm__
-	// work around for:  <rdar://problem/6530727> gdb-1109: notifier in dyld does not work if it is in thumb
- 	.text
-	.align 2
-	.globl	_gdb_image_notifier
-	.private_extern _gdb_image_notifier
-_gdb_image_notifier:
-	bx  lr
-#endif
 
 
 

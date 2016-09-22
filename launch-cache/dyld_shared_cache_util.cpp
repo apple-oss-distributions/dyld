@@ -26,6 +26,7 @@
 #include <unistd.h>
 #include <sys/stat.h>
 #include <string.h>
+#include <dlfcn.h>
 #include <fcntl.h>
 #include <stdlib.h>
 #include <errno.h>
@@ -33,16 +34,19 @@
 #include <sys/syslimits.h>
 #include <mach-o/arch.h>
 #include <mach-o/loader.h>
+#include <mach-o/dyld.h>
 #include <mach/mach.h>
 
 #include <map>
 #include <vector>
 
 #include "dsc_iterator.h"
+#include "dsc_extractor.h"
 #include "dyld_cache_format.h"
 #include "Architectures.hpp"
 #include "MachOFileAbstraction.hpp"
 #include "CacheFileAbstraction.hpp"
+#include "Trie.hpp"
 
 enum Mode {
 	modeNone,
@@ -50,15 +54,20 @@ enum Mode {
 	modeMap,
 	modeDependencies,
 	modeSlideInfo,
+	modeAcceleratorInfo,
+	modeTextInfo,
 	modeLinkEdit,
+	modeLocalSymbols,
 	modeInfo,
-	modeSize
+	modeSize,
+	modeExtract
 };
 
 struct Options {
 	Mode		mode;
 	const char*	dependentsOfPath;
 	const void*	mappedCache;
+	const char*	extractionDir;
 	bool		printUUIDs;
 	bool		printVMAddrs;
     bool		printDylibVersions;
@@ -86,7 +95,7 @@ struct Results {
 
 
 void usage() {
-	fprintf(stderr, "Usage: dyld_shared_cache_util -list [ -uuid ] [-vmaddr] | -dependents <dylib-path> [ -versions ] | -linkedit | -map [ shared-cache-file ] | -slide_info | -info\n");
+	fprintf(stderr, "Usage: dyld_shared_cache_util -list [ -uuid ] [-vmaddr] | -dependents <dylib-path> [ -versions ] | -linkedit | -map | -slide_info | -info | -extract <dylib-dir>  [ shared-cache-file ] \n");
 }
 
 #if __x86_64__
@@ -331,7 +340,7 @@ void print_map(const dyld_shared_cache_dylib_info* dylibInfo, const dyld_shared_
 
 static void checkMode(Mode mode) {
 	if ( mode != modeNone ) {
-		fprintf(stderr, "Error: select one of: -list, -dependents, -info, -slide_info, -linkedit, -map, or -size\n");
+		fprintf(stderr, "Error: select one of: -list, -dependents, -info, -slide_info, -linkedit, -map, -extract, or -size\n");
 		usage();
 		exit(1);
 	}
@@ -348,7 +357,8 @@ int main (int argc, const char* argv[]) {
     options.printDylibVersions = false;
 	options.printInodes = false;
     options.dependentsOfPath = NULL;
-    
+    options.extractionDir = NULL;
+
     for (uint32_t i = 1; i < argc; i++) {
         const char* opt = argv[i];
         if (opt[0] == '-') {
@@ -377,7 +387,19 @@ int main (int argc, const char* argv[]) {
 			else if (strcmp(opt, "-slide_info") == 0) {
 				checkMode(options.mode);
 				options.mode = modeSlideInfo;
-			} 
+			}
+			else if (strcmp(opt, "-accelerator_info") == 0) {
+				checkMode(options.mode);
+				options.mode = modeAcceleratorInfo;
+			}
+			else if (strcmp(opt, "-text_info") == 0) {
+				checkMode(options.mode);
+				options.mode = modeTextInfo;
+			}
+			else if (strcmp(opt, "-local_symbols") == 0) {
+				checkMode(options.mode);
+				options.mode = modeLocalSymbols;
+			}
 			else if (strcmp(opt, "-map") == 0) {
 				checkMode(options.mode);
 				options.mode = modeMap;
@@ -385,7 +407,17 @@ int main (int argc, const char* argv[]) {
 			else if (strcmp(opt, "-size") == 0) {
 				checkMode(options.mode);
 				options.mode = modeSize;
-            } 
+            }
+			else if (strcmp(opt, "-extract") == 0) {
+				checkMode(options.mode);
+				options.mode = modeExtract;
+ 				options.extractionDir = argv[++i];
+                if ( i >= argc ) {
+                    fprintf(stderr, "Error: option -extract requires a directory argument\n");
+                    usage();
+                    exit(1);
+                }
+           }
 			else if (strcmp(opt, "-uuid") == 0) {
                 options.printUUIDs = true;
             } 
@@ -461,14 +493,46 @@ int main (int argc, const char* argv[]) {
 		uint64_t dataSize = dataMapping->size();
 		const dyldCacheSlideInfo<LittleEndian>* slideInfoHeader = (dyldCacheSlideInfo<LittleEndian>*)((char*)options.mappedCache+header->slideInfoOffset());
 		printf("slide info version=%d\n", slideInfoHeader->version());
-		printf("toc_count=%d, data page count=%lld\n", slideInfoHeader->toc_count(), dataSize/4096);
-		const dyldCacheSlideInfoEntry* entries = (dyldCacheSlideInfoEntry*)((char*)slideInfoHeader + slideInfoHeader->entries_offset());
-		for(int i=0; i < slideInfoHeader->toc_count(); ++i) {
-			printf("0x%08llX: [% 5d,% 5d] ", dataStartAddress + i*4096, i, slideInfoHeader->toc(i));
-			const dyldCacheSlideInfoEntry* entry = &entries[slideInfoHeader->toc(i)];
-			for(int j=0; j < slideInfoHeader->entries_size(); ++j)
-				printf("%02X", entry->bits[j]);
-			printf("\n");
+		if ( slideInfoHeader->version() == 1 ) {
+			printf("toc_count=%d, data page count=%lld\n", slideInfoHeader->toc_count(), dataSize/4096);
+			const dyldCacheSlideInfoEntry* entries = (dyldCacheSlideInfoEntry*)((char*)slideInfoHeader + slideInfoHeader->entries_offset());
+			for(int i=0; i < slideInfoHeader->toc_count(); ++i) {
+				printf("0x%08llX: [% 5d,% 5d] ", dataStartAddress + i*4096, i, slideInfoHeader->toc(i));
+				const dyldCacheSlideInfoEntry* entry = &entries[slideInfoHeader->toc(i)];
+				for(int j=0; j < slideInfoHeader->entries_size(); ++j)
+					printf("%02X", entry->bits[j]);
+				printf("\n");
+			}
+		}
+		else if ( slideInfoHeader->version() == 2 ) {
+			const dyldCacheSlideInfo2<LittleEndian>* slideInfo = (dyldCacheSlideInfo2<LittleEndian>*)(slideInfoHeader);
+			printf("page_size=%d\n", slideInfo->page_size());
+			printf("delta_mask=0x%016llX\n", slideInfo->delta_mask());
+			printf("value_add=0x%016llX\n", slideInfo->value_add());
+			printf("page_starts_count=%d, page_extras_count=%d\n", slideInfo->page_starts_count(), slideInfo->page_extras_count());
+			const uint16_t* starts = (uint16_t* )((char*)slideInfo + slideInfo->page_starts_offset());
+			const uint16_t* extras = (uint16_t* )((char*)slideInfo + slideInfo->page_extras_offset());
+			for (int i=0; i < slideInfo->page_starts_count(); ++i) {
+				const uint16_t start = starts[i];
+				if ( start == DYLD_CACHE_SLIDE_PAGE_ATTR_NO_REBASE ) {
+					printf("page[% 5d]: no rebasing\n", i);
+				}
+				else if ( start & DYLD_CACHE_SLIDE_PAGE_ATTR_EXTRA ) {
+					printf("page[% 5d]: ", i);
+					int j=(start & 0x3FFF);
+					bool done = false;
+					do {
+						uint16_t aStart = extras[j];
+						printf("start=0x%04X ", aStart & 0x3FFF);
+						done = (extras[j] & DYLD_CACHE_SLIDE_PAGE_ATTR_END);
+						++j;
+					} while ( !done );
+					printf("\n");
+				}
+				else {
+					printf("page[% 5d]: start=0x%04X\n", i, starts[i]);
+				}
+			}
 		}
 	}
 	else if ( options.mode == modeInfo ) {
@@ -486,21 +550,210 @@ int main (int argc, const char* argv[]) {
 			printf("n/a\n");
 		}
 		printf("image count: %u\n", header->imagesCount());
+		if ( (header->mappingOffset() >= 0x78) && (header->branchPoolsOffset() != 0) ) {
+			printf("branch pool count:  %u\n", header->branchPoolsCount());
+		}
 		printf("mappings:\n");
 		const dyldCacheFileMapping<LittleEndian>* mappings = (dyldCacheFileMapping<LittleEndian>*)((char*)options.mappedCache + header->mappingOffset());
 		for (uint32_t i=0; i < header->mappingCount(); ++i) {
 			if ( mappings[i].init_prot() & VM_PROT_EXECUTE )
-				printf("    __TEXT      %3lluMB,  0x%08llX -> 0x%08llX\n", mappings[i].size()/(1024*1024), mappings[i].address(), mappings[i].address() + mappings[i].size());
+				printf("    __TEXT      %3lluMB,  file offset: 0x%08llX -> 0x%08llX,  address: 0x%08llX -> 0x%08llX\n",
+						mappings[i].size()/(1024*1024), mappings[i].file_offset(), mappings[i].file_offset() + mappings[i].size(),
+													    mappings[i].address(), mappings[i].address() + mappings[i].size());
 			else if ( mappings[i]. init_prot() & VM_PROT_WRITE )
-				printf("    __DATA      %3lluMB,  0x%08llX -> 0x%08llX\n", mappings[i].size()/(1024*1024), mappings[i].address(), mappings[i].address() + mappings[i].size());
+				printf("    __DATA      %3lluMB,  file offset: 0x%08llX -> 0x%08llX,  address: 0x%08llX -> 0x%08llX\n",
+						mappings[i].size()/(1024*1024), mappings[i].file_offset(), mappings[i].file_offset() + mappings[i].size(),
+													    mappings[i].address(), mappings[i].address() + mappings[i].size());
 			else if ( mappings[i].init_prot() & VM_PROT_READ )
-				printf("    __LINKEDIT  %3lluMB,  0x%08llX -> 0x%08llX\n", mappings[i].size()/(1024*1024), mappings[i].address(), mappings[i].address() + mappings[i].size());
+				printf("    __LINKEDIT  %3lluMB,  file offset: 0x%08llX -> 0x%08llX,  address: 0x%08llX -> 0x%08llX\n",
+						mappings[i].size()/(1024*1024), mappings[i].file_offset(), mappings[i].file_offset() + mappings[i].size(),
+													    mappings[i].address(), mappings[i].address() + mappings[i].size());
 		}
 		if ( header->codeSignatureOffset() != 0 ) {
-			uint64_t size = statbuf.st_size - header->codeSignatureOffset(); 
+			uint64_t size = statbuf.st_size - header->codeSignatureOffset();
 			uint64_t csAddr = mappings[header->mappingCount()-1].address() + mappings[header->mappingCount()-1].size();
-				printf("    code sign   %3lluMB,  0x%08llX -> 0x%08llX\n", size/(1024*1024), csAddr, csAddr + size);
+			if ( size != 0 )
+				printf("    code sign   %3lluMB,  file offset: 0x%08llX -> 0x%08llX,  address: 0x%08llX -> 0x%08llX\n",
+					size/(1024*1024), header->codeSignatureOffset(), header->codeSignatureOffset() + size, csAddr, csAddr + size);
 		}
+				printf("slide info:    %4lluKB,  file offset: 0x%08llX -> 0x%08llX\n",
+						header->slideInfoSize()/1024, header->slideInfoOffset(), header->slideInfoOffset() + header->slideInfoSize());
+		if ( header->localSymbolsOffset() != 0 )
+			printf("local symbols:  %3lluMB,  file offset: 0x%08llX -> 0x%08llX\n",
+						header->localSymbolsSize()/(1024*1024), header->localSymbolsOffset(), header->localSymbolsOffset() + header->localSymbolsSize());
+		if ( (header->mappingOffset() >= 0x78) && (header->accelerateInfoSize() != 0) )
+				printf("accelerate tab: %3lluKB,                                          address: 0x%08llX -> 0x%08llX\n",
+						header->accelerateInfoSize()/1024, header->accelerateInfoAddr(), header->accelerateInfoAddr() + header->accelerateInfoSize());
+	}
+	else if ( options.mode == modeAcceleratorInfo ) {
+		const dyldCacheHeader<LittleEndian>* header = (dyldCacheHeader<LittleEndian>*)options.mappedCache;
+		if ( (header->mappingOffset() < sizeof(dyldCacheHeader<LittleEndian>)) || (header->accelerateInfoSize() == 0) ) {
+			printf("no accelerator info\n");
+		}
+		else {
+			const dyldCacheFileMapping<LittleEndian>* mappings = (dyldCacheFileMapping<LittleEndian>*)((char*)options.mappedCache + header->mappingOffset());
+			uint64_t aiAddr = header->accelerateInfoAddr();
+			dyldCacheAcceleratorInfo<LittleEndian>* accelInfo = NULL;
+			for (uint32_t i=0; i < header->mappingCount(); ++i) {
+				if ( (mappings[i].address() <= aiAddr) && (aiAddr < mappings[i].address()+mappings[i].size()) ) {
+					uint64_t offset = aiAddr - mappings[i].address() + mappings[i].file_offset();
+					accelInfo = (dyldCacheAcceleratorInfo<LittleEndian>*)((uint8_t*)options.mappedCache + offset);
+				}
+			}
+			if ( accelInfo == NULL ) {
+				printf("accelerator info not in any mapped range\n");
+			}
+			else {
+				const dyldCacheImageInfo<LittleEndian>* images = (dyldCacheImageInfo<LittleEndian>*)((char*)options.mappedCache + header->imagesOffset());
+				const dyldCacheImageInfoExtra<LittleEndian>* imagesExtra = (dyldCacheImageInfoExtra<LittleEndian>*)((char*)accelInfo + accelInfo->imagesExtrasOffset());
+				const uint16_t* dependencyArray = (uint16_t*)((char*)accelInfo + accelInfo->depListOffset());
+				const uint16_t* reExportArray = (uint16_t*)((char*)accelInfo + accelInfo->reExportListOffset());
+				printf("extra image info (count=%u):\n", accelInfo->imageExtrasCount());
+				for (uint32_t i=0; i < accelInfo->imageExtrasCount(); ++i) {
+					printf("  image[%3u] %s:\n", i, (char*)options.mappedCache +images[i].pathFileOffset());
+					printf("     exports trie: addr=0x%llX, size=0x%08X\n", imagesExtra[i].exportsTrieAddr(), imagesExtra[i].exportsTrieSize());
+					if ( imagesExtra[i].weakBindingsSize() )
+						printf("     weak bind info: addr=0x%llX, size=0x%08X\n", imagesExtra[i].weakBindingsAddr(), imagesExtra[i].weakBindingsSize());
+					printf("     dependents: ");
+					for (uint32_t d=imagesExtra[i].dependentsStartArrayIndex(); dependencyArray[d] != 0xFFFF; ++d) {
+						uint16_t depIndex = dependencyArray[d];
+						if ( depIndex & 0x8000 )
+							printf(" up(%d) ", depIndex & 0x7FFF);
+						else
+							printf(" %d ", depIndex);
+					}
+					printf("\n");
+					printf("     re-exports: ");
+					for (uint32_t r=imagesExtra[i].reExportsStartArrayIndex(); reExportArray[r] != 0xFFFF; ++r)
+						printf(" %d ", reExportArray[r]);
+					printf("\n");
+				}
+				printf("libdyld.dylib:\n");
+				printf("   __dyld section address: 0x%llX\n", accelInfo->dyldSectionAddr());
+				printf("initializers (count=%u):\n", accelInfo->initializersCount());
+				const dyldCacheAcceleratorInitializer<LittleEndian>* initializers = (dyldCacheAcceleratorInitializer<LittleEndian>*)((char*)accelInfo + accelInfo->initializersOffset());
+				for (uint32_t i=0; i < accelInfo->initializersCount(); ++i) {
+					printf("  image[%3u] 0x%llX\n", initializers[i].imageIndex(), mappings[0].address() + initializers[i].functionOffset());
+				}
+				printf("DOF sections (count=%u):\n", accelInfo->dofSectionsCount());
+				const dyldCacheAcceleratorDOFEntry<LittleEndian>* dofs = (dyldCacheAcceleratorDOFEntry<LittleEndian>*)((char*)accelInfo + accelInfo->dofSectionsOffset());
+				for (uint32_t i=0; i < accelInfo->dofSectionsCount(); ++i) {
+					printf("  image[%3u] 0x%llX -> 0x%llX\n", dofs[i].imageIndex(), dofs[i].sectionAddress(), dofs[i].sectionAddress()+dofs[i].sectionSize());
+				}
+				printf("bottom up order (count=%u):\n", accelInfo->imageExtrasCount());
+				const uint16_t* bottomUpArray = (uint16_t*)((char*)accelInfo + accelInfo->bottomUpListOffset());
+				for (uint32_t i=0; i < accelInfo->imageExtrasCount(); ++i) {
+					unsigned imageIndex = bottomUpArray[i];
+					if ( imageIndex < accelInfo->imageExtrasCount() )
+						printf("  image[%3u] %s\n", imageIndex, (char*)options.mappedCache + images[imageIndex].pathFileOffset());
+					else
+						printf("  image[%3u] BAD INDEX\n", imageIndex);
+				}
+				printf("range table (count=%u):\n", accelInfo->rangeTableCount());
+				const dyldCacheAcceleratorRangeEntry<LittleEndian>* rangeTable = (dyldCacheAcceleratorRangeEntry<LittleEndian>*)((char*)accelInfo + accelInfo->rangeTableOffset());
+				for (uint32_t i=0; i < accelInfo->rangeTableCount(); ++i) {
+					const dyldCacheAcceleratorRangeEntry<LittleEndian>& entry = rangeTable[i];
+					printf("  0x%llX -> 0x%llX %s\n", entry.startAddress(), entry.startAddress() + entry.size(), (char*)options.mappedCache + images[entry.imageIndex()].pathFileOffset());
+				}
+				printf("dylib trie (size=%u):\n", accelInfo->dylibTrieSize());
+				const uint8_t* dylibTrieStart = (uint8_t*)accelInfo + accelInfo->dylibTrieOffset();
+				const uint8_t* dylibTrieEnd = dylibTrieStart + accelInfo->dylibTrieSize();
+				std::vector<DylibIndexTrie::Entry> dylibEntries;
+				if ( !Trie<DylibIndex>::parseTrie(dylibTrieStart, dylibTrieEnd, dylibEntries) )
+					printf("  malformed dylibs trie\n");
+				for (const DylibIndexTrie::Entry& x : dylibEntries) {
+					printf("  image[%3u] %s\n", x.info.index, x.name.c_str());
+				}
+			}
+		}
+	}
+	else if ( options.mode == modeTextInfo ) {
+		const dyldCacheHeader<LittleEndian>* header = (dyldCacheHeader<LittleEndian>*)options.mappedCache;
+		if ( (header->mappingOffset() < sizeof(dyldCacheHeader<LittleEndian>)) || (header->imagesTextCount() == 0) ) {
+			printf("no text info\n");
+		}
+		else {
+			const dyldCacheImageTextInfo<LittleEndian>* imagesText = (dyldCacheImageTextInfo<LittleEndian>*)((char*)options.mappedCache + header->imagesTextOffset());
+			const dyldCacheImageTextInfo<LittleEndian>* imagesTextEnd = &imagesText[header->imagesTextCount()];
+			printf("dylib text infos (count=%llu):\n", header->imagesTextCount());
+			for (const dyldCacheImageTextInfo<LittleEndian>* p=imagesText; p < imagesTextEnd; ++p) {
+				printf("   0x%09llX -> 0x%09llX  <", p->loadAddress(), p->loadAddress() + p->textSegmentSize());
+				for (int i=0; i<16; ++i) {
+					switch (i) {
+						case 4:
+						case 6:
+						case 8:
+						case 10:
+							printf("-");
+							break;
+					}
+					printf("%02X", p->uuid()[i]);
+				}
+				printf(">  %s\n", (char*)options.mappedCache + p->pathOffset());
+			}
+		}
+	}
+	else if ( options.mode == modeLocalSymbols ) {
+		const dyldCacheHeader<LittleEndian>* header = (dyldCacheHeader<LittleEndian>*)options.mappedCache;
+		if ( header->localSymbolsOffset() == 0 ) {
+			fprintf(stderr, "Error: dyld shared cache does not contain local symbols info\n");
+			exit(1);
+		}
+		const bool is64 = (strstr((char*)options.mappedCache, "64") != NULL);
+		const dyldCacheImageInfo<LittleEndian>* imageInfos = (dyldCacheImageInfo<LittleEndian>*)((char*)options.mappedCache + header->imagesOffset());
+		const dyldCacheLocalSymbolsInfo<LittleEndian>* localsInfo = (dyldCacheLocalSymbolsInfo<LittleEndian>*)((char*)options.mappedCache + header->localSymbolsOffset());
+		const uint32_t nlistFileOffset = (uint32_t)(header->localSymbolsOffset() + localsInfo->nlistOffset());
+		const uint32_t nlistCount = localsInfo->nlistCount();
+		const uint32_t nlistByteSize = is64 ? nlistCount*16 : nlistCount*12;
+		const uint32_t stringsFileOffset = (uint32_t)(header->localSymbolsOffset() + localsInfo->stringsOffset());
+		const uint32_t stringsSize = localsInfo->stringsSize();
+		const uint32_t entriesCount = localsInfo->entriesCount();
+		const dyldCacheLocalSymbolEntry<LittleEndian>* entries = (dyldCacheLocalSymbolEntry<LittleEndian>*)((char*)localsInfo + localsInfo->entriesOffset());
+		printf("local symbols nlist array:  %3uMB,  file offset: 0x%08X -> 0x%08X\n", nlistByteSize/(1024*1024), nlistFileOffset, nlistFileOffset+nlistByteSize);
+		printf("local symbols string pool:  %3uMB,  file offset: 0x%08X -> 0x%08X\n", stringsSize/(1024*1024), stringsFileOffset, stringsFileOffset+stringsSize);
+		printf("local symbols by dylib (count=%d):\n", entriesCount);
+		const char* stringPool = (char*)options.mappedCache + stringsFileOffset;
+		for (int i=0; i < entriesCount; ++i) {
+			const char* imageName = (char*)options.mappedCache + imageInfos[i].pathFileOffset();
+			printf("   nlistStartIndex=%5d, nlistCount=%5d, image=%s\n", entries[i].nlistStartIndex(), entries[i].nlistCount(), imageName);
+		#if 0
+			if ( is64 ) {
+				const nlist_64* symTab = (nlist_64*)((char*)options.mappedCache + nlistFileOffset);
+				for (int e=0; e < entries[i].nlistCount(); ++e) {
+					const nlist_64* entry = &symTab[entries[i].nlistStartIndex()+e];
+					printf("     nlist[%d].str=%d, %s\n", e, entry->n_un.n_strx, &stringPool[entry->n_un.n_strx]);
+					printf("     nlist[%d].value=0x%0llX\n", e, entry->n_value);
+				}
+			}
+		#endif
+		}
+	}
+	else if ( options.mode == modeExtract ) {
+		char pathBuffer[PATH_MAX];
+		uint32_t bufferSize = PATH_MAX;
+		if ( _NSGetExecutablePath(pathBuffer, &bufferSize) != 0 ) {
+			fprintf(stderr, "Error: could not get path of program\n");
+			return 1;
+		}
+		char* last = strrchr(pathBuffer, '/');
+		strcpy(last+1, "../../lib/dsc_extractor.bundle");
+		void* handle = dlopen(pathBuffer, RTLD_LAZY);
+		if ( handle == NULL ) {
+			fprintf(stderr, "Error: dsc_extractor.bundle could not be loaded at %s\n", pathBuffer);
+			return 1;
+		}
+
+		typedef int (*extractor_proc)(const char* shared_cache_file_path, const char* extraction_root_path,
+									  void (^progress)(unsigned current, unsigned total));
+
+		extractor_proc proc = (extractor_proc)dlsym(handle, "dyld_shared_cache_extract_dylibs_progress");
+		if ( proc == NULL ) {
+			fprintf(stderr, "Error: dsc_extractor.bundle did not have dyld_shared_cache_extract_dylibs_progress symbol\n");
+			return 1;
+		}
+		
+		int result = (*proc)(sharedCachePath, options.extractionDir, ^(unsigned c, unsigned total) { } );
+		return result;
 	}
 	else {
 		segment_callback_t callback;
@@ -524,6 +777,10 @@ int main (int argc, const char* argv[]) {
 				case modeNone:
 				case modeInfo:
 				case modeSlideInfo:
+				case modeAcceleratorInfo:
+				case modeTextInfo:
+				case modeLocalSymbols:
+				case modeExtract:
 					break;
 			}
 		}		
@@ -548,6 +805,10 @@ int main (int argc, const char* argv[]) {
 				case modeNone:
 				case modeInfo:
 				case modeSlideInfo:
+				case modeAcceleratorInfo:
+				case modeTextInfo:
+				case modeLocalSymbols:
+				case modeExtract:
 					break;
 			}
 		}		
@@ -572,6 +833,10 @@ int main (int argc, const char* argv[]) {
 				case modeNone:
 				case modeInfo:
 				case modeSlideInfo:
+				case modeAcceleratorInfo:
+				case modeTextInfo:
+				case modeLocalSymbols:
+				case modeExtract:
 					break;
 			}
 		}		
@@ -595,6 +860,10 @@ int main (int argc, const char* argv[]) {
 				case modeNone:
 				case modeInfo:
 				case modeSlideInfo:
+				case modeAcceleratorInfo:
+				case modeTextInfo:
+				case modeLocalSymbols:
+				case modeExtract:
 					break;
 			}
 		}		
@@ -626,7 +895,7 @@ int main (int argc, const char* argv[]) {
 				printf(" 0x%08llX  %s\n", it->textSize, it->path);
 			}
 		}
-		
+
 		if ( (options.mode == modeDependencies) && options.dependentsOfPath && !results.dependentTargetFound) {
 			fprintf(stderr, "Error: could not find '%s' in the shared cache at\n  %s\n", options.dependentsOfPath, sharedCachePath);
 			exit(1);

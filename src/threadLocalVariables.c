@@ -238,8 +238,8 @@ void* tlv_allocate_and_initialize_for_key(pthread_key_t key)
 						typedef void (*InitFunc)(void);
 						InitFunc* funcs = (InitFunc*)(sect->addr + slide);
 						const size_t count = sect->size / sizeof(uintptr_t);
-						for (size_t i=count; i > 0; --i) {
-							InitFunc func = funcs[i-1];
+						for (size_t j=count; j > 0; --j) {
+							InitFunc func = funcs[j-1];
 							func();
 						}
 					}
@@ -305,17 +305,13 @@ static void tlv_initialize_descriptors(const struct mach_header* mh)
 	}
 }
 
-// called by dyld when a image is loaded
-static const char* tlv_load_notification(enum dyld_image_states state, uint32_t infoCount, const struct dyld_image_info info[])
+
+void tlv_load_notification(const struct mach_header* mh, intptr_t slide)
 {
-	// this is called on all images, even those without TLVs, so we want
-	// this to be fast.  The linker sets MH_HAS_TLV_DESCRIPTORS so we don't
-	// have to search images just to find the don't have TLVs.
-	for (uint32_t i=0; i < infoCount; ++i) {
-		if ( info[i].imageLoadAddress->flags & MH_HAS_TLV_DESCRIPTORS )
-			tlv_initialize_descriptors(info[i].imageLoadAddress);
-	}
-	return NULL;
+	// This is called on all images, even those without TLVs. So we want this to be fast.
+	// The linker sets MH_HAS_TLV_DESCRIPTORS so we don't have to search images just to find the don't have TLVs.
+	if ( mh->flags & MH_HAS_TLV_DESCRIPTORS )
+		tlv_initialize_descriptors(mh);
 }
 
 
@@ -453,7 +449,8 @@ void tlv_initializer()
     (void)pthread_key_create(&tlv_terminators_key, &tlv_finalize);
        
     // register with dyld for notification when images are loaded
-    dyld_register_image_state_change_handler(dyld_image_state_bound, true, tlv_load_notification);
+	_dyld_register_func_for_add_image(tlv_load_notification);
+
 }
 
 

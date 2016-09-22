@@ -53,12 +53,16 @@ uint32_t								ImageLoader::fgTotalSegmentsMapped = 0;
 uint64_t								ImageLoader::fgTotalBytesMapped = 0;
 uint64_t								ImageLoader::fgTotalBytesPreFetched = 0;
 uint64_t								ImageLoader::fgTotalLoadLibrariesTime;
+uint64_t								ImageLoader::fgTotalObjCSetupTime = 0;
+uint64_t								ImageLoader::fgTotalDebuggerPausedTime = 0;
+uint64_t								ImageLoader::fgTotalRebindCacheTime = 0;
 uint64_t								ImageLoader::fgTotalRebaseTime;
 uint64_t								ImageLoader::fgTotalBindTime;
 uint64_t								ImageLoader::fgTotalWeakBindTime;
 uint64_t								ImageLoader::fgTotalDOF;
 uint64_t								ImageLoader::fgTotalInitTime;
 uint16_t								ImageLoader::fgLoadOrdinal = 0;
+uint32_t								ImageLoader::fgSymbolTrieSearchs = 0;
 std::vector<ImageLoader::InterposeTuple>ImageLoader::fgInterposingTuples;
 uintptr_t								ImageLoader::fgNextPIEDylibAddress = 0;
 
@@ -106,7 +110,7 @@ void ImageLoader::setFileInfo(dev_t device, ino_t inode, time_t modDate)
 void ImageLoader::setMapped(const LinkContext& context)
 {
 	fState = dyld_image_state_mapped;
-	context.notifySingle(dyld_image_state_mapped, this);  // note: can throw exception
+	context.notifySingle(dyld_image_state_mapped, this, NULL);  // note: can throw exception
 }
 
 int ImageLoader::compare(const ImageLoader* right) const
@@ -190,15 +194,20 @@ bool ImageLoader::statMatch(const struct stat& stat_buf) const
 	return ( (this->fDevice == stat_buf.st_dev) && (this->fInode == stat_buf.st_ino) );	
 }
 
-const char* ImageLoader::getShortName() const
+const char* ImageLoader::shortName(const char* fullName)
 {
 	// try to return leaf name
-	if ( fPath != NULL ) {
-		const char* s = strrchr(fPath, '/');
+	if ( fullName != NULL ) {
+		const char* s = strrchr(fullName, '/');
 		if ( s != NULL ) 
 			return &s[1];
 	}
-	return fPath; 
+	return fullName;
+}
+
+const char* ImageLoader::getShortName() const
+{
+	return shortName(fPath);
 }
 
 void ImageLoader::setLeaveMapped()
@@ -288,6 +297,18 @@ static bool notInImgageList(const ImageLoader* image, const ImageLoader** dsiSta
 	return true;
 }
 
+bool ImageLoader::findExportedSymbolAddress(const LinkContext& context, const char* symbolName,
+											const ImageLoader* requestorImage, int requestorOrdinalOfDef,
+											bool runResolver, const ImageLoader** foundIn, uintptr_t* address) const
+{
+	const Symbol* sym = this->findExportedSymbol(symbolName, true, foundIn);
+	if ( sym != NULL ) {
+		*address = (*foundIn)->getExportedSymbolAddress(sym, context, requestorImage, runResolver);
+		return true;
+	}
+	return false;
+}
+
 
 // private method that handles circular dependencies by only search any image once
 const ImageLoader::Symbol* ImageLoader::findExportedSymbolInDependentImagesExcept(const char* name, 
@@ -296,7 +317,7 @@ const ImageLoader::Symbol* ImageLoader::findExportedSymbolInDependentImagesExcep
 	const ImageLoader::Symbol* sym;
 	// search self
 	if ( notInImgageList(this, dsiStart, dsiCur) ) {
-		sym = this->findExportedSymbol(name, false, foundIn);
+		sym = this->findExportedSymbol(name, false, this->getPath(), foundIn);
 		if ( sym != NULL )
 			return sym;
 		*dsiCur++ = this;
@@ -306,7 +327,7 @@ const ImageLoader::Symbol* ImageLoader::findExportedSymbolInDependentImagesExcep
 	for(unsigned int i=0; i < libraryCount(); ++i) {
 		ImageLoader* dependentImage = libImage(i);
 		if ( (dependentImage != NULL) && notInImgageList(dependentImage, dsiStart, dsiCur) ) {
-			const ImageLoader::Symbol* sym = dependentImage->findExportedSymbol(name, false, foundIn);
+			sym = dependentImage->findExportedSymbol(name, false, libPath(i), foundIn);
 			if ( sym != NULL )
 				return sym;
 		}
@@ -317,7 +338,7 @@ const ImageLoader::Symbol* ImageLoader::findExportedSymbolInDependentImagesExcep
 		ImageLoader* dependentImage = libImage(i);
 		if ( (dependentImage != NULL) && notInImgageList(dependentImage, dsiStart, dsiCur) ) {
 			*dsiCur++ = dependentImage; 
-			const ImageLoader::Symbol* sym = dependentImage->findExportedSymbolInDependentImagesExcept(name, dsiStart, dsiCur, dsiEnd, foundIn);
+			sym = dependentImage->findExportedSymbolInDependentImagesExcept(name, dsiStart, dsiCur, dsiEnd, foundIn);
 			if ( sym != NULL )
 				return sym;
 		}
@@ -329,7 +350,7 @@ const ImageLoader::Symbol* ImageLoader::findExportedSymbolInDependentImagesExcep
 
 const ImageLoader::Symbol* ImageLoader::findExportedSymbolInDependentImages(const char* name, const LinkContext& context, const ImageLoader** foundIn) const
 {
-	unsigned int imageCount = context.imageCount();
+	unsigned int imageCount = context.imageCount()+2;
 	const ImageLoader* dontSearchImages[imageCount];
 	dontSearchImages[0] = this; // don't search this image
 	const ImageLoader** cur = &dontSearchImages[1];
@@ -338,7 +359,7 @@ const ImageLoader::Symbol* ImageLoader::findExportedSymbolInDependentImages(cons
 
 const ImageLoader::Symbol* ImageLoader::findExportedSymbolInImageOrDependentImages(const char* name, const LinkContext& context, const ImageLoader** foundIn) const
 {
-	unsigned int imageCount = context.imageCount();
+	unsigned int imageCount = context.imageCount()+2;
 	const ImageLoader* dontSearchImages[imageCount];
 	const ImageLoader** cur = &dontSearchImages[0];
 	return this->findExportedSymbolInDependentImagesExcept(name, &dontSearchImages[0], cur, &dontSearchImages[imageCount], foundIn);
@@ -388,17 +409,17 @@ void ImageLoader::addDynamicInterposingTuples(const struct dyld_interpose_tuple 
 }
 
 
-void ImageLoader::link(const LinkContext& context, bool forceLazysBound, bool preflightOnly, bool neverUnload, const RPathChain& loaderRPaths)
+void ImageLoader::link(const LinkContext& context, bool forceLazysBound, bool preflightOnly, bool neverUnload, const RPathChain& loaderRPaths, const char* imagePath)
 {
-	//dyld::log("ImageLoader::link(%s) refCount=%d, neverUnload=%d\n", this->getPath(), fDlopenReferenceCount, fNeverUnload);
+	//dyld::log("ImageLoader::link(%s) refCount=%d, neverUnload=%d\n", imagePath, fDlopenReferenceCount, fNeverUnload);
 	
 	// clear error strings
-	(*context.setErrorStrings)(dyld_error_kind_none, NULL, NULL, NULL);
+	(*context.setErrorStrings)(0, NULL, NULL, NULL);
 
 	uint64_t t0 = mach_absolute_time();
-	this->recursiveLoadLibraries(context, preflightOnly, loaderRPaths);
-	context.notifyBatch(dyld_image_state_dependents_mapped);
-	
+	this->recursiveLoadLibraries(context, preflightOnly, loaderRPaths, imagePath);
+	context.notifyBatch(dyld_image_state_dependents_mapped, preflightOnly);
+
 	// we only do the loading step for preflights
 	if ( preflightOnly )
 		return;
@@ -409,7 +430,7 @@ void ImageLoader::link(const LinkContext& context, bool forceLazysBound, bool pr
 
 	uint64_t t2 = mach_absolute_time();
  	this->recursiveRebase(context);
-	context.notifyBatch(dyld_image_state_rebased);
+	context.notifyBatch(dyld_image_state_rebased, false);
 	
 	uint64_t t3 = mach_absolute_time();
  	this->recursiveBind(context, forceLazysBound, neverUnload);
@@ -419,7 +440,7 @@ void ImageLoader::link(const LinkContext& context, bool forceLazysBound, bool pr
 		this->weakBind(context);
 	uint64_t t5 = mach_absolute_time();	
 
-	context.notifyBatch(dyld_image_state_bound);
+	context.notifyBatch(dyld_image_state_bound, false);
 	uint64_t t6 = mach_absolute_time();	
 
 	std::vector<DOFInfo> dofs;
@@ -433,7 +454,7 @@ void ImageLoader::link(const LinkContext& context, bool forceLazysBound, bool pr
 	}
 	
 	// clear error strings
-	(*context.setErrorStrings)(dyld_error_kind_none, NULL, NULL, NULL);
+	(*context.setErrorStrings)(0, NULL, NULL, NULL);
 
 	fgTotalLoadLibrariesTime += t1 - t0;
 	fgTotalRebaseTime += t3 - t2;
@@ -468,14 +489,14 @@ bool ImageLoader::decrementDlopenReferenceCount()
 void ImageLoader::processInitializers(const LinkContext& context, mach_port_t thisThread,
 									 InitializerTimingList& timingInfo, ImageLoader::UninitedUpwards& images)
 {
-	uint32_t maxImageCount = context.imageCount();
+	uint32_t maxImageCount = context.imageCount()+2;
 	ImageLoader::UninitedUpwards upsBuffer[maxImageCount];
 	ImageLoader::UninitedUpwards& ups = upsBuffer[0];
 	ups.count = 0;
 	// Calling recursive init on all images in images list, building a new list of
 	// uninitialized upward dependencies.
 	for (uintptr_t i=0; i < images.count; ++i) {
-		images.images[i]->recursiveInitialization(context, thisThread, timingInfo, ups);
+		images.images[i]->recursiveInitialization(context, thisThread, images.images[i]->getPath(), timingInfo, ups);
 	}
 	// If any upward dependencies remain, init them.
 	if ( ups.count > 0 )
@@ -491,7 +512,7 @@ void ImageLoader::runInitializers(const LinkContext& context, InitializerTimingL
 	up.count = 1;
 	up.images[0] = this;
 	processInitializers(context, thisThread, timingInfo, up);
-	context.notifyBatch(dyld_image_state_initialized);
+	context.notifyBatch(dyld_image_state_initialized, false);
 	mach_port_deallocate(mach_task_self(), thisThread);
 	uint64_t t2 = mach_absolute_time();
 	fgTotalInitTime += (t2 - t1);
@@ -574,7 +595,7 @@ unsigned int ImageLoader::recursiveUpdateDepth(unsigned int maxDepth)
 }
 
 
-void ImageLoader::recursiveLoadLibraries(const LinkContext& context, bool preflightOnly, const RPathChain& loaderRPaths)
+void ImageLoader::recursiveLoadLibraries(const LinkContext& context, bool preflightOnly, const RPathChain& loaderRPaths, const char* loadPath)
 {
 	if ( fState < dyld_image_state_dependents_mapped ) {
 		// break cycles
@@ -594,7 +615,7 @@ void ImageLoader::recursiveLoadLibraries(const LinkContext& context, bool prefli
 		for(unsigned int i=0; i < fLibraryCount; ++i){
 			ImageLoader* dependentLib;
 			bool depLibReExported = false;
-			bool depLibReRequired = false;
+			bool depLibRequired = false;
 			bool depLibCheckSumsMatch = false;
 			DependentLibraryInfo& requiredLibInfo = libraryInfos[i];
 #if DYLD_SHARED_CACHE_SUPPORT
@@ -606,10 +627,11 @@ void ImageLoader::recursiveLoadLibraries(const LinkContext& context, bool prefli
 			}
 #endif
 			try {
-				dependentLib = context.loadLibrary(requiredLibInfo.name, true, this->getPath(), &thisRPaths);
+				unsigned cacheIndex;
+				dependentLib = context.loadLibrary(requiredLibInfo.name, true, this->getPath(), &thisRPaths, cacheIndex);
 				if ( dependentLib == this ) {
 					// found circular reference, perhaps DYLD_LIBARY_PATH is causing this rdar://problem/3684168 
-					dependentLib = context.loadLibrary(requiredLibInfo.name, false, NULL, NULL);
+					dependentLib = context.loadLibrary(requiredLibInfo.name, false, NULL, NULL, cacheIndex);
 					if ( dependentLib != this )
 						dyld::warn("DYLD_ setting caused circular dependency in %s\n", this->getPath());
 				}
@@ -620,8 +642,8 @@ void ImageLoader::recursiveLoadLibraries(const LinkContext& context, bool prefli
 				else { 
 					dependentLib->fIsReferencedDownward = true;
 				}
-				LibraryInfo actualInfo = dependentLib->doGetLibraryInfo();
-				depLibReRequired = requiredLibInfo.required;
+				LibraryInfo actualInfo = dependentLib->doGetLibraryInfo(requiredLibInfo.info);
+				depLibRequired = requiredLibInfo.required;
 				depLibCheckSumsMatch = ( actualInfo.checksum == requiredLibInfo.info.checksum );
 				depLibReExported = requiredLibInfo.reExported;
 				if ( ! depLibReExported ) {
@@ -637,8 +659,8 @@ void ImageLoader::recursiveLoadLibraries(const LinkContext& context, bool prefli
 							dependentLib->getShortName(), actualInfo.minVersion >> 16, (actualInfo.minVersion >> 8) & 0xff, actualInfo.minVersion & 0xff);
 				}
 				// prebinding for this image disabled if any dependent library changed
-				if ( !depLibCheckSumsMatch ) 
-					canUsePrelinkingInfo = false;
+				//if ( !depLibCheckSumsMatch )
+				//	canUsePrelinkingInfo = false;
 				// prebinding for this image disabled unless both this and dependent are in the shared cache
 				if ( !dependentLib->inSharedCache() || !this->inSharedCache() )
 					canUsePrelinkingInfo = false;
@@ -657,12 +679,18 @@ void ImageLoader::recursiveLoadLibraries(const LinkContext& context, bool prefli
 				if ( requiredLibInfo.required ) {
 					fState = dyld_image_state_mapped;
 					// record values for possible use by CrashReporter or Finder
-					if ( strstr(msg, "Incompatible") != NULL )
-						(*context.setErrorStrings)(dyld_error_kind_dylib_version, this->getPath(), requiredLibInfo.name, NULL);
+					if ( strstr(msg, "Incompatible library version") != NULL )
+						(*context.setErrorStrings)(DYLD_EXIT_REASON_DYLIB_WRONG_VERSION, this->getPath(), requiredLibInfo.name, NULL);
 					else if ( strstr(msg, "architecture") != NULL )
-						(*context.setErrorStrings)(dyld_error_kind_dylib_wrong_arch, this->getPath(), requiredLibInfo.name, NULL);
+						(*context.setErrorStrings)(DYLD_EXIT_REASON_DYLIB_WRONG_ARCH, this->getPath(), requiredLibInfo.name, NULL);
+					else if ( strstr(msg, "file system sandbox") != NULL )
+						(*context.setErrorStrings)(DYLD_EXIT_REASON_FILE_SYSTEM_SANDBOX, this->getPath(), requiredLibInfo.name, NULL);
+					else if ( strstr(msg, "code signature") != NULL )
+						(*context.setErrorStrings)(DYLD_EXIT_REASON_CODE_SIGNATURE, this->getPath(), requiredLibInfo.name, NULL);
+					else if ( strstr(msg, "malformed") != NULL )
+						(*context.setErrorStrings)(DYLD_EXIT_REASON_MALFORMED_MACHO, this->getPath(), requiredLibInfo.name, NULL);
 					else
-						(*context.setErrorStrings)(dyld_error_kind_dylib_missing, this->getPath(), requiredLibInfo.name, NULL);
+						(*context.setErrorStrings)(DYLD_EXIT_REASON_DYLIB_MISSING, this->getPath(), requiredLibInfo.name, NULL);
 					const char* newMsg = dyld::mkstringf("Library not loaded: %s\n  Referenced from: %s\n  Reason: %s", requiredLibInfo.name, this->getRealPath(), msg);
 					free((void*)msg); 	// our free() will do nothing if msg is a string literal
 					throw newMsg;
@@ -680,7 +708,7 @@ void ImageLoader::recursiveLoadLibraries(const LinkContext& context, bool prefli
 		for(unsigned int i=0; i < libraryCount(); ++i) {
 			ImageLoader* dependentImage = libImage(i);
 			if ( dependentImage != NULL ) {	
-				dependentImage->recursiveLoadLibraries(context, preflightOnly, thisRPaths);
+				dependentImage->recursiveLoadLibraries(context, preflightOnly, thisRPaths, libraryInfos[i].name);
 			}
 		}
 		
@@ -722,7 +750,7 @@ void ImageLoader::recursiveRebase(const LinkContext& context)
 			doRebase(context);
 			
 			// notify
-			context.notifySingle(dyld_image_state_rebased, this);
+			context.notifySingle(dyld_image_state_rebased, this, NULL);
 		}
 		catch (const char* msg) {
 			// this image is not rebased
@@ -786,7 +814,7 @@ void ImageLoader::recursiveBind(const LinkContext& context, bool forceLazysBound
 			if ( neverUnload )
 				this->setNeverUnload();
 				
-			context.notifySingle(dyld_image_state_bound, this);
+			context.notifySingle(dyld_image_state_bound, this, NULL);
 		}
 		catch (const char* msg) {
 			// restore state
@@ -804,20 +832,17 @@ void ImageLoader::weakBind(const LinkContext& context)
 	uint64_t t1 = mach_absolute_time();
 	// get set of ImageLoaders that participate in coalecsing
 	ImageLoader* imagesNeedingCoalescing[fgImagesRequiringCoalescing];
-	int count = context.getCoalescedImages(imagesNeedingCoalescing);
+	unsigned imageIndexes[fgImagesRequiringCoalescing];
+	int count = context.getCoalescedImages(imagesNeedingCoalescing, imageIndexes);
 	
 	// count how many have not already had weakbinding done
 	int countNotYetWeakBound = 0;
-	int countOfImagesWithWeakDefinitions = 0;
 	int countOfImagesWithWeakDefinitionsNotInSharedCache = 0;
 	for(int i=0; i < count; ++i) {
-		if ( ! imagesNeedingCoalescing[i]->fWeakSymbolsBound )
+		if ( ! imagesNeedingCoalescing[i]->weakSymbolsBound(imageIndexes[i]) )
 			++countNotYetWeakBound;
-		if ( imagesNeedingCoalescing[i]->hasCoalescedExports() ) {
-			++countOfImagesWithWeakDefinitions;
-			if ( ! imagesNeedingCoalescing[i]->inSharedCache() ) 
-				++countOfImagesWithWeakDefinitionsNotInSharedCache;
-		}
+		if ( ! imagesNeedingCoalescing[i]->inSharedCache() )
+			++countOfImagesWithWeakDefinitionsNotInSharedCache;
 	}
 
 	// don't need to do any coalescing if only one image has overrides, or all have already been done
@@ -826,10 +851,10 @@ void ImageLoader::weakBind(const LinkContext& context)
 		ImageLoader::CoalIterator iterators[count];
 		ImageLoader::CoalIterator* sortedIts[count];
 		for(int i=0; i < count; ++i) {
-			imagesNeedingCoalescing[i]->initializeCoalIterator(iterators[i], i);
+			imagesNeedingCoalescing[i]->initializeCoalIterator(iterators[i], i, imageIndexes[i]);
 			sortedIts[i] = &iterators[i];
 			if ( context.verboseWeakBind )
-				dyld::log("dyld: weak bind load order %d/%d for %s\n", i, count, imagesNeedingCoalescing[i]->getPath());
+				dyld::log("dyld: weak bind load order %d/%d for %s\n", i, count, imagesNeedingCoalescing[i]->getIndexedPath(imageIndexes[i]));
 		}
 		
 		// walk all symbols keeping iterators in sync by 
@@ -862,21 +887,25 @@ void ImageLoader::weakBind(const LinkContext& context)
 				// pick first symbol in load order (and non-weak overrides weak)
 				uintptr_t targetAddr = 0;
 				ImageLoader* targetImage = NULL;
+				unsigned targetImageIndex = 0;
 				for(int i=0; i < count; ++i) {
 					if ( strcmp(iterators[i].symbolName, nameToCoalesce) == 0 ) {
 						if ( context.verboseWeakBind )
-							dyld::log("dyld: weak bind, found %s weak=%d in %s \n", nameToCoalesce, iterators[i].weakSymbol, iterators[i].image->getPath());
+							dyld::log("dyld: weak bind, found %s weak=%d in %s \n", nameToCoalesce, iterators[i].weakSymbol, iterators[i].image->getIndexedPath((unsigned)iterators[i].imageIndex));
 						if ( iterators[i].weakSymbol ) {
 							if ( targetAddr == 0 ) {
 								targetAddr = iterators[i].image->getAddressCoalIterator(iterators[i], context);
-								if ( targetAddr != 0 )
+								if ( targetAddr != 0 ) {
 									targetImage = iterators[i].image;
+									targetImageIndex = (unsigned)iterators[i].imageIndex;
+								}
 							}
 						}
 						else {
 							targetAddr = iterators[i].image->getAddressCoalIterator(iterators[i], context);
 							if ( targetAddr != 0 ) {
 								targetImage = iterators[i].image;
+								targetImageIndex = (unsigned)iterators[i].imageIndex;
 								// strong implementation found, stop searching
 								break;
 							}
@@ -885,14 +914,19 @@ void ImageLoader::weakBind(const LinkContext& context)
 				}
 				// tell each to bind to this symbol (unless already bound)
 				if ( targetAddr != 0 ) {
-					if ( context.verboseWeakBind )
-						dyld::log("dyld: weak binding all uses of %s to copy from %s\n", nameToCoalesce, targetImage->getShortName());
+					if ( context.verboseWeakBind ) {
+						dyld::log("dyld: weak binding all uses of %s to copy from %s\n",
+									nameToCoalesce, targetImage->getIndexedShortName(targetImageIndex));
+					}
 					for(int i=0; i < count; ++i) {
 						if ( strcmp(iterators[i].symbolName, nameToCoalesce) == 0 ) {
-							if ( context.verboseWeakBind )
-								dyld::log("dyld: weak bind, setting all uses of %s in %s to 0x%lX from %s\n", nameToCoalesce, iterators[i].image->getShortName(), targetAddr, targetImage->getShortName());
-							if ( ! iterators[i].image->fWeakSymbolsBound )
-								iterators[i].image->updateUsesCoalIterator(iterators[i], targetAddr, targetImage, context);
+							if ( context.verboseWeakBind ) {
+								dyld::log("dyld: weak bind, setting all uses of %s in %s to 0x%lX from %s\n",
+											nameToCoalesce, iterators[i].image->getIndexedShortName((unsigned)iterators[i].imageIndex),
+											targetAddr, targetImage->getIndexedShortName(targetImageIndex));
+							}
+							if ( ! iterators[i].image->weakSymbolsBound(imageIndexes[i]) )
+								iterators[i].image->updateUsesCoalIterator(iterators[i], targetAddr, targetImage, targetImageIndex, context);
 							iterators[i].symbolMatches = false; 
 						}
 					}
@@ -903,7 +937,7 @@ void ImageLoader::weakBind(const LinkContext& context)
 		
 		// mark all as having all weak symbols bound
 		for(int i=0; i < count; ++i) {
-			imagesNeedingCoalescing[i]->fWeakSymbolsBound = true;
+			imagesNeedingCoalescing[i]->setWeakSymbolsBound(imageIndexes[i]);
 		}
 	}
 	uint64_t t2 = mach_absolute_time();
@@ -964,8 +998,20 @@ void ImageLoader::recursiveSpinUnLock()
 		fInitializerRecursiveLock = NULL;
 }
 
+void ImageLoader::InitializerTimingList::addTime(const char* name, uint64_t time)
+{
+	for (int i=0; i < count; ++i) {
+		if ( strcmp(images[i].shortName, name) == 0 ) {
+			images[i].initTime += time;
+			return;
+		}
+	}
+	images[count].initTime = time;
+	images[count].shortName = name;
+	++count;
+}
 
-void ImageLoader::recursiveInitialization(const LinkContext& context, mach_port_t this_thread,
+void ImageLoader::recursiveInitialization(const LinkContext& context, mach_port_t this_thread, const char* pathToInitialize,
 										  InitializerTimingList& timingInfo, UninitedUpwards& uninitUps)
 {
 	recursive_lock lock_info(this_thread);
@@ -986,7 +1032,7 @@ void ImageLoader::recursiveInitialization(const LinkContext& context, mach_port_
 						uninitUps.count++;
 					}
 					else if ( dependentImage->fDepth >= fDepth ) {
-						dependentImage->recursiveInitialization(context, this_thread, timingInfo, uninitUps);
+						dependentImage->recursiveInitialization(context, this_thread, libPath(i), timingInfo, uninitUps);
 					}
                 }
 			}
@@ -999,7 +1045,7 @@ void ImageLoader::recursiveInitialization(const LinkContext& context, mach_port_
 			uint64_t t1 = mach_absolute_time();
 			fState = dyld_image_state_dependents_initialized;
 			oldState = fState;
-			context.notifySingle(dyld_image_state_dependents_initialized, this);
+			context.notifySingle(dyld_image_state_dependents_initialized, this, &timingInfo);
 			
 			// initialize this image
 			bool hasInitializers = this->doInitialization(context);
@@ -1007,13 +1053,11 @@ void ImageLoader::recursiveInitialization(const LinkContext& context, mach_port_
 			// let anyone know we finished initializing this image
 			fState = dyld_image_state_initialized;
 			oldState = fState;
-			context.notifySingle(dyld_image_state_initialized, this);
+			context.notifySingle(dyld_image_state_initialized, this, NULL);
 			
 			if ( hasInitializers ) {
 				uint64_t t2 = mach_absolute_time();
-				timingInfo.images[timingInfo.count].image = this;
-				timingInfo.images[timingInfo.count].initTime = (t2-t1);
-				timingInfo.count++;
+				timingInfo.addTime(this->getShortName(), t2-t1);
 			}
 		}
 		catch (const char* msg) {
@@ -1042,7 +1086,12 @@ static void printTime(const char* msg, uint64_t partTime, uint64_t totalTime)
 		uint32_t milliSeconds = (uint32_t)(milliSecondsTimesHundred/100);
 		uint32_t percentTimesTen = (uint32_t)((partTime*1000)/totalTime);
 		uint32_t percent = percentTimesTen/10;
-		dyld::log("%s: %u.%02u milliseconds (%u.%u%%)\n", msg, milliSeconds, milliSecondsTimesHundred-milliSeconds*100, percent, percentTimesTen-percent*10);
+		if ( milliSeconds >= 100 )
+			dyld::log("%s: %u.%02u milliseconds (%u.%u%%)\n", msg, milliSeconds, milliSecondsTimesHundred-milliSeconds*100, percent, percentTimesTen-percent*10);
+		else if ( milliSeconds >= 10 )
+			dyld::log("%s:  %u.%02u milliseconds (%u.%u%%)\n", msg, milliSeconds, milliSecondsTimesHundred-milliSeconds*100, percent, percentTimesTen-percent*10);
+		else
+			dyld::log("%s:   %u.%02u milliseconds (%u.%u%%)\n", msg, milliSeconds, milliSecondsTimesHundred-milliSeconds*100, percent, percentTimesTen-percent*10);
 	}
 	else {
 		uint32_t secondsTimeTen = (uint32_t)((partTime*10)/sUnitsPerSecond);
@@ -1077,25 +1126,43 @@ static char* commatize(uint64_t in, char* out)
 
 void ImageLoader::printStatistics(unsigned int imageCount, const InitializerTimingList& timingInfo)
 {
-	uint64_t totalTime = fgTotalLoadLibrariesTime + fgTotalRebaseTime + fgTotalBindTime + fgTotalWeakBindTime + fgTotalDOF + fgTotalInitTime;
+	uint64_t totalTime = fgTotalLoadLibrariesTime  + fgTotalRebaseTime + fgTotalBindTime + fgTotalWeakBindTime + fgTotalDOF + fgTotalInitTime;
+
+	uint64_t totalDyldTime = totalTime - fgTotalDebuggerPausedTime - fgTotalRebindCacheTime;
+	printTime("Total pre-main time", totalDyldTime, totalDyldTime);
+	printTime("         dylib loading time", fgTotalLoadLibrariesTime-fgTotalDebuggerPausedTime, totalDyldTime);
+	printTime("        rebase/binding time", fgTotalRebaseTime+fgTotalBindTime+fgTotalWeakBindTime-fgTotalRebindCacheTime, totalDyldTime);
+	printTime("            ObjC setup time", fgTotalObjCSetupTime, totalDyldTime);
+	printTime("           initializer time", fgTotalInitTime-fgTotalObjCSetupTime, totalDyldTime);
+	dyld::log("           slowest intializers :\n");
+	for (uintptr_t i=0; i < timingInfo.count; ++i) {
+		uint64_t t = timingInfo.images[i].initTime;
+		if ( t*50 < totalDyldTime )
+			continue;
+		dyld::log("%30s ", timingInfo.images[i].shortName);
+		if ( strncmp(timingInfo.images[i].shortName, "libSystem.", 10) == 0 )
+			t -= fgTotalObjCSetupTime;
+			printTime("", t, totalDyldTime);
+	}
+	dyld::log("\n");
+}
+
+void ImageLoader::printStatisticsDetails(unsigned int imageCount, const InitializerTimingList& timingInfo)
+{
+	uint64_t totalTime = fgTotalLoadLibrariesTime  + fgTotalRebaseTime + fgTotalBindTime + fgTotalWeakBindTime + fgTotalDOF + fgTotalInitTime;
 	char commaNum1[40];
 	char commaNum2[40];
 
-	printTime("total time", totalTime, totalTime);
-#if __IPHONE_OS_VERSION_MIN_REQUIRED	
-	if ( fgImagesUsedFromSharedCache != 0 )
-		dyld::log("total images loaded:  %d (%u from dyld shared cache)\n", imageCount, fgImagesUsedFromSharedCache);
-	else
-		dyld::log("total images loaded:  %d\n", imageCount);
-#else
-	dyld::log("total images loaded:  %d (%u from dyld shared cache)\n", imageCount, fgImagesUsedFromSharedCache);
-#endif
-	dyld::log("total segments mapped: %u, into %llu pages with %llu pages pre-fetched\n", fgTotalSegmentsMapped, fgTotalBytesMapped/4096, fgTotalBytesPreFetched/4096);
-	printTime("total images loading time", fgTotalLoadLibrariesTime, totalTime);
-	printTime("total dtrace DOF registration time", fgTotalDOF, totalTime);
-	dyld::log("total rebase fixups:  %s\n", commatize(fgTotalRebaseFixups, commaNum1));
-	printTime("total rebase fixups time", fgTotalRebaseTime, totalTime);
-	dyld::log("total binding fixups: %s\n", commatize(fgTotalBindFixups, commaNum1));
+	printTime("  total time", totalTime, totalTime);
+	dyld::log("  total images loaded:  %d (%u from dyld shared cache)\n", imageCount, fgImagesUsedFromSharedCache);
+	dyld::log("  total segments mapped: %u, into %llu pages with %llu pages pre-fetched\n", fgTotalSegmentsMapped, fgTotalBytesMapped/4096, fgTotalBytesPreFetched/4096);
+	printTime("  total images loading time", fgTotalLoadLibrariesTime, totalTime);
+	printTime("  total load time in ObjC", fgTotalObjCSetupTime, totalTime);
+	printTime("  total debugger pause time", fgTotalDebuggerPausedTime, totalTime);
+	printTime("  total dtrace DOF registration time", fgTotalDOF, totalTime);
+	dyld::log("  total rebase fixups:  %s\n", commatize(fgTotalRebaseFixups, commaNum1));
+	printTime("  total rebase fixups time", fgTotalRebaseTime, totalTime);
+	dyld::log("  total binding fixups: %s\n", commatize(fgTotalBindFixups, commaNum1));
 	if ( fgTotalBindSymbolsResolved != 0 ) {
 		uint32_t avgTimesTen = (fgTotalBindImageSearches * 10) / fgTotalBindSymbolsResolved;
 		uint32_t avgInt = fgTotalBindImageSearches / fgTotalBindSymbolsResolved;
@@ -1103,13 +1170,19 @@ void ImageLoader::printStatistics(unsigned int imageCount, const InitializerTimi
 		dyld::log("total binding symbol lookups: %s, average images searched per symbol: %u.%u\n", 
 				commatize(fgTotalBindSymbolsResolved, commaNum1), avgInt, avgTenths);
 	}
-	printTime("total binding fixups time", fgTotalBindTime, totalTime);
-	printTime("total weak binding fixups time", fgTotalWeakBindTime, totalTime);
-	dyld::log("total bindings lazily fixed up: %s of %s\n", commatize(fgTotalLazyBindFixups, commaNum1), commatize(fgTotalPossibleLazyBindFixups, commaNum2));
-	printTime("total initializer time", fgTotalInitTime, totalTime);
+	printTime("  total binding fixups time", fgTotalBindTime, totalTime);
+	printTime("  total weak binding fixups time", fgTotalWeakBindTime, totalTime);
+	printTime("  total redo shared cached bindings time", fgTotalRebindCacheTime, totalTime);
+	dyld::log("  total bindings lazily fixed up: %s of %s\n", commatize(fgTotalLazyBindFixups, commaNum1), commatize(fgTotalPossibleLazyBindFixups, commaNum2));
+	printTime("  total time in initializers and ObjC +load", fgTotalInitTime-fgTotalObjCSetupTime, totalTime);
 	for (uintptr_t i=0; i < timingInfo.count; ++i) {
-		dyld::log("%21s ", timingInfo.images[i].image->getShortName());
-		printTime("", timingInfo.images[i].initTime, totalTime);
+		uint64_t t = timingInfo.images[i].initTime;
+		if ( t*1000 < totalTime )
+			continue;
+		dyld::log("%42s ", timingInfo.images[i].shortName);
+		if ( strncmp(timingInfo.images[i].shortName, "libSystem.", 10) == 0 )
+			t -= fgTotalObjCSetupTime;
+		printTime("", t, totalTime);
 	}
 	
 }
@@ -1142,6 +1215,128 @@ void ImageLoader::addSuffix(const char* path, const char* suffix, char* result)
 	else {
 		strcat(result, suffix);
 	}
+}
+
+
+//
+// This function is the hotspot of symbol lookup.  It was pulled out of findExportedSymbol()
+// to enable it to be re-written in assembler if needed.
+//
+const uint8_t* ImageLoader::trieWalk(const uint8_t* start, const uint8_t* end, const char* s)
+{
+	//dyld::log("trieWalk(%p, %p, %s)\n", start, end, s);
+	++fgSymbolTrieSearchs;
+	const uint8_t* p = start;
+	while ( p != NULL ) {
+		uintptr_t terminalSize = *p++;
+		if ( terminalSize > 127 ) {
+			// except for re-export-with-rename, all terminal sizes fit in one byte
+			--p;
+			terminalSize = read_uleb128(p, end);
+		}
+		if ( (*s == '\0') && (terminalSize != 0) ) {
+			//dyld::log("trieWalk(%p) returning %p\n", start, p);
+			return p;
+		}
+		const uint8_t* children = p + terminalSize;
+		if ( children > end ) {
+			dyld::log("trieWalk() malformed trie node, terminalSize=0x%lx extends past end of trie\n", terminalSize);
+			return NULL;
+		}
+		//dyld::log("trieWalk(%p) sym=%s, terminalSize=%lu, children=%p\n", start, s, terminalSize, children);
+		uint8_t childrenRemaining = *children++;
+		p = children;
+		uintptr_t nodeOffset = 0;
+		for (; childrenRemaining > 0; --childrenRemaining) {
+			const char* ss = s;
+			//dyld::log("trieWalk(%p) child str=%s\n", start, (char*)p);
+			bool wrongEdge = false;
+			// scan whole edge to get to next edge
+			// if edge is longer than target symbol name, don't read past end of symbol name
+			char c = *p;
+			while ( c != '\0' ) {
+				if ( !wrongEdge ) {
+					if ( c != *ss )
+						wrongEdge = true;
+					++ss;
+				}
+				++p;
+				c = *p;
+			}
+			if ( wrongEdge ) {
+				// advance to next child
+				++p; // skip over zero terminator
+				// skip over uleb128 until last byte is found
+				while ( (*p & 0x80) != 0 )
+					++p;
+				++p; // skip over last byte of uleb128
+				if ( p > end ) {
+					dyld::log("trieWalk() malformed trie node, child node extends past end of trie\n");
+					return NULL;
+				}
+			}
+			else {
+ 				// the symbol so far matches this edge (child)
+				// so advance to the child's node
+				++p;
+				nodeOffset = read_uleb128(p, end);
+				if ( (nodeOffset == 0) || ( &start[nodeOffset] > end) ) {
+					dyld::log("trieWalk() malformed trie child, nodeOffset=0x%lx out of range\n", nodeOffset);
+					return NULL;
+				}
+				s = ss;
+				//dyld::log("trieWalk() found matching edge advancing to node 0x%lx\n", nodeOffset);
+				break;
+			}
+		}
+		if ( nodeOffset != 0 )
+			p = &start[nodeOffset];
+		else
+			p = NULL;
+	}
+	//dyld::log("trieWalk(%p) return NULL\n", start);
+	return NULL;
+}
+
+
+	
+uintptr_t ImageLoader::read_uleb128(const uint8_t*& p, const uint8_t* end)
+{
+	uint64_t result = 0;
+	int		 bit = 0;
+	do {
+		if (p == end)
+			dyld::throwf("malformed uleb128");
+
+		uint64_t slice = *p & 0x7f;
+
+		if (bit > 63)
+			dyld::throwf("uleb128 too big for uint64, bit=%d, result=0x%0llX", bit, result);
+		else {
+			result |= (slice << bit);
+			bit += 7;
+		}
+	} while (*p++ & 0x80);
+	return result;
+}
+
+
+intptr_t ImageLoader::read_sleb128(const uint8_t*& p, const uint8_t* end)
+{
+	int64_t result = 0;
+	int bit = 0;
+	uint8_t byte;
+	do {
+		if (p == end)
+			throw "malformed sleb128";
+		byte = *p++;
+		result |= (((int64_t)(byte & 0x7f)) << bit);
+		bit += 7;
+	} while (byte & 0x80);
+	// sign extend negative numbers
+	if ( (byte & 0x40) != 0 )
+		result |= (-1LL) << bit;
+	return result;
 }
 
 

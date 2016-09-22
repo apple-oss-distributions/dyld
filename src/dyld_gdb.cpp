@@ -32,6 +32,7 @@
 
 #include "mach-o/dyld_gdb.h"
 #include "mach-o/dyld_images.h"
+#include "mach-o/dyld_process_info.h"
 #include "ImageLoader.h"
 #include "dyld.h"
 
@@ -46,6 +47,27 @@ VECTOR_NEVER_DESTRUCTED(dyld_uuid_info);
 
 static std::vector<dyld_image_info> sImageInfos;
 static std::vector<dyld_uuid_info>  sImageUUIDs;
+
+size_t allImagesCount()
+{
+	return sImageInfos.size();
+}
+
+const mach_header* allImagesIndexedMachHeader(uint32_t index)
+{
+	if ( index < sImageInfos.size() )
+		return sImageInfos[index].imageLoadAddress;
+	else
+		return NULL;
+}
+
+const char* allImagesIndexedPath(uint32_t index)
+{
+	if ( index < sImageInfos.size() )
+		return sImageInfos[index].imageFilePath;
+	else
+		return NULL;
+}
 
 
 void addImagesToAllImages(uint32_t infoCount, const dyld_image_info info[])
@@ -62,7 +84,8 @@ void addImagesToAllImages(uint32_t infoCount, const dyld_image_info info[])
 	for (uint32_t i=0; i < infoCount; ++i)
 		sImageInfos.push_back(info[i]);
 	dyld::gProcessInfo->infoArrayCount = (uint32_t)sImageInfos.size();
-	
+	dyld::gProcessInfo->infoArrayChangeTimestamp = mach_absolute_time();
+
 	// set infoArray back to base address of vector (other process can now read)
 	dyld::gProcessInfo->infoArray = &sImageInfos[0];
 }
@@ -89,11 +112,15 @@ void syncProcessInfo()
 const char* notifyGDB(enum dyld_image_states state, uint32_t infoCount, const dyld_image_info info[])
 {
 	// tell gdb that about the new images
+	uint64_t t0 = mach_absolute_time();
 	dyld::gProcessInfo->notification(dyld_image_adding, infoCount, info);
+	uint64_t t1 = mach_absolute_time();
+	ImageLoader::fgTotalDebuggerPausedTime += (t1-t0);
+
 	// <rdar://problem/7739489> record initial count of images  
 	// so CrashReporter can note which images were dynamically loaded
 	if ( dyld::gProcessInfo->initialImageCount == 0 )
-		dyld::gProcessInfo->initialImageCount = infoCount;
+		dyld::gProcessInfo->initialImageCount = dyld::gProcessInfo->infoArrayCount;
 	return NULL;
 }
 
@@ -144,18 +171,13 @@ void removeImageFromAllImages(const struct mach_header* loadAddress)
 		}
 	}
 	dyld::gProcessInfo->uuidArrayCount = sImageUUIDs.size();
-	
+	dyld::gProcessInfo->infoArrayChangeTimestamp = mach_absolute_time();
+
 	// set infoArray back to base address of vector
 	dyld::gProcessInfo->uuidArray = &sImageUUIDs[0];
 
 	// tell gdb that about the new images
 	dyld::gProcessInfo->notification(dyld_image_removing, 1, &goingAway);
-}
-
-void setAlImageInfosHalt(const char* message, uintptr_t flags)
-{
-	dyld::gProcessInfo->errorMessage = message;
-	dyld::gProcessInfo->terminationFlags = flags;
 }
 
 
@@ -165,21 +187,38 @@ void setAlImageInfosHalt(const char* message, uintptr_t flags)
 	}
 #else
 
-	#if __arm__
-		// work around for:  <rdar://problem/6530727> gdb-1109: notifier in dyld does not work if it is in thumb
-		extern "C" void gdb_image_notifier(enum dyld_image_mode mode, uint32_t infoCount, const dyld_image_info info[]);
-	#else
-		static void gdb_image_notifier(enum dyld_image_mode mode, uint32_t infoCount, const dyld_image_info info[])
-		{
-			// do nothing
-			// gdb sets a break point here to catch notifications
-			//dyld::log("dyld: gdb_image_notifier(%s, %d, ...)\n", mode ? "dyld_image_removing" : "dyld_image_adding", infoCount);
-			//for (uint32_t i=0; i < infoCount; ++i)
-			//	dyld::log("dyld: %d loading at %p %s\n", i, info[i].imageLoadAddress, info[i].imageFilePath);
-			//for (uint32_t i=0; i < dyld::gProcessInfo->infoArrayCount; ++i)
-			//	dyld::log("dyld: %d loading at %p %s\n", i, dyld::gProcessInfo->infoArray[i].imageLoadAddress, dyld::gProcessInfo->infoArray[i].imageFilePath);
+	static void gdb_image_notifier(enum dyld_image_mode mode, uint32_t infoCount, const dyld_image_info info[])
+	{
+		uint64_t machHeaders[infoCount];
+		for (uint32_t i=0; i < infoCount; ++i) {
+			machHeaders[i] = (uintptr_t)(info[i].imageLoadAddress);
 		}
-	#endif
+		switch ( mode ) {
+			 case dyld_image_adding:
+				_dyld_debugger_notification(dyld_notify_adding, infoCount, machHeaders);
+				break;
+			 case dyld_image_removing:
+				_dyld_debugger_notification(dyld_notify_removing, infoCount, machHeaders);
+				break;
+			default:
+				break;
+		}
+		// do nothing
+		// gdb sets a break point here to catch notifications
+		//dyld::log("dyld: gdb_image_notifier(%s, %d, ...)\n", mode ? "dyld_image_removing" : "dyld_image_adding", infoCount);
+		//for (uint32_t i=0; i < infoCount; ++i)
+		//	dyld::log("dyld: %d loading at %p %s\n", i, info[i].imageLoadAddress, info[i].imageFilePath);
+		//for (uint32_t i=0; i < dyld::gProcessInfo->infoArrayCount; ++i)
+		//	dyld::log("dyld: %d loading at %p %s\n", i, dyld::gProcessInfo->infoArray[i].imageLoadAddress, dyld::gProcessInfo->infoArray[i].imageFilePath);
+	}
+
+	// only used with accelerator tables and ASan which images need to be re-loaded
+	void resetAllImages()
+	{
+		sImageInfos.clear();
+		sImageUUIDs.clear();
+		_dyld_debugger_notification(dyld_notify_remove_all, 0, NULL);
+	}
 
 	extern void* __dso_handle;
 	#define STR(s) # s
@@ -187,10 +226,10 @@ void setAlImageInfosHalt(const char* message, uintptr_t flags)
 
 	struct dyld_all_image_infos  dyld_all_image_infos __attribute__ ((section ("__DATA,__all_image_info"))) 
 								= { 
-									14, 0, NULL, &gdb_image_notifier, false, false, (const mach_header*)&__dso_handle, NULL,
+									15, 0, NULL, &gdb_image_notifier, false, false, (const mach_header*)&__dso_handle, NULL,
 									XSTR(DYLD_VERSION), NULL, 0, NULL, 0, 0, NULL, &dyld_all_image_infos, 
-									0, dyld_error_kind_none, NULL, NULL, NULL, 0, {0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,}, 
-									{0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,}
+									0, 0, NULL, NULL, NULL, 0, {0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,},
+									0, 0, "/usr/lib/dyld", {0}, {0}
 									};
 
 	struct dyld_shared_cache_ranges dyld_shared_cache_ranges;

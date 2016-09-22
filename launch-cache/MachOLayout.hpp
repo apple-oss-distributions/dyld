@@ -38,7 +38,6 @@
 #include <unistd.h>
 #include <mach-o/loader.h>
 #include <mach-o/fat.h>
-#include <rootless.h>
 
 #include <vector>
 #include <set>
@@ -141,7 +140,6 @@ public:
 	virtual bool								isSplitSeg() const = 0;
 	virtual bool								hasSplitSegInfo() const = 0;
 	virtual bool								hasSplitSegInfoV2() const = 0;
-	virtual int									notTrusted() const = 0;
 	virtual bool								inSharableLocation() const = 0;
 	virtual bool								hasDynamicLookupLinkage() const = 0;
 	virtual bool								hasMainExecutableLookupLinkage() const = 0;
@@ -190,7 +188,6 @@ public:
 	virtual bool								isSplitSeg() const;
 	virtual bool								hasSplitSegInfo() const	{ return fSplitSegInfo != NULL; }
 	virtual bool								hasSplitSegInfoV2() const{ return fHasSplitSegInfoV2; }
-	virtual int									notTrusted() const		{ return fRootlessErrno; }
 	virtual bool								inSharableLocation() const { return fShareableLocation; }
 	virtual bool								hasDynamicLookupLinkage() const { return fDynamicLookupLinkage; }
 	virtual bool								hasMainExecutableLookupLinkage() const { return fMainExecutableLookupLinkage; }
@@ -252,7 +249,6 @@ private:
 	uint64_t									fVMReadOnlySize;
 	const macho_linkedit_data_command<P>*		fSplitSegInfo;
 	bool										fHasSplitSegInfoV2;
-	int											fRootlessErrno;
 	bool										fShareableLocation;
 	bool										fDynamicLookupLinkage;
 	bool										fMainExecutableLookupLinkage;
@@ -556,7 +552,7 @@ uint64_t MachOLayout<A>::sectionsAlignment(const macho_segment_command<typename 
 
 template <typename A>
 MachOLayout<A>::MachOLayout(const void* machHeader, uint64_t offset, const char* path, ino_t inode, time_t modTime, uid_t uid)
- : fPath(path), fOffset(offset), fArchPair(0,0), fMTime(modTime), fInode(inode), fSplitSegInfo(NULL), fHasSplitSegInfoV2(false), fRootlessErrno(0),
+ : fPath(path), fOffset(offset), fArchPair(0,0), fMTime(modTime), fInode(inode), fSplitSegInfo(NULL), fHasSplitSegInfoV2(false),
    fShareableLocation(false), fDynamicLookupLinkage(false), fMainExecutableLookupLinkage(false), fIsDylib(false), 
 	fHasDyldInfo(false), fHasTooManyWritableSegments(false), fDyldInfoExports(NULL)
 {
@@ -584,8 +580,6 @@ MachOLayout<A>::MachOLayout(const void* machHeader, uint64_t offset, const char*
 	fFileType = mh->filetype();
 	fArchPair.arch = mh->cputype();
 	fArchPair.subtype = mh->cpusubtype();
-	if ( rootless_check_trusted(path) != 0 && rootless_protected_volume(path) == 1)
-		fRootlessErrno = errno;
 
 	const macho_dyld_info_command<P>* dyldInfo = NULL;
 	const macho_symtab_command<P>* symbolTableCmd = NULL;

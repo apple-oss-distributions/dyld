@@ -943,6 +943,8 @@ void Rebaser<arm>::adjustReference(uint32_t kind, uint8_t* mappedAddr, uint64_t 
 			pointersInData.push_back( mappedAddr);
 			break;
 		case DYLD_CACHE_ADJ_V2_IMAGE_OFF_32:
+            if ( adjust == 0 )
+                break;
 			mappedAddr32 = (uint32_t*)mappedAddr;
 			value32 = (uint32_t)(toNewAddress - imageStartAddress);
 			E::set32(*mappedAddr32, value32);

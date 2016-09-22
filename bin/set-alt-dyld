@@ -16,7 +16,7 @@ foreach $arg (@ARGV)
     my $in = <IN>;
     close IN or die $!;
 
-    if($in =~ s{/usr/lib/dyld}{/usr/lib/dyle})
+    if($in =~ s{/usr/lib/dyld}{/usr/local/dy})
     {
 	open OUT, ">$arg" or die $!;
 	print OUT $in;

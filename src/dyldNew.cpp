@@ -62,7 +62,7 @@ static dyld_static_pool* currentPool = &initialPool;
 
 void* malloc(size_t size)
 {
-	if ( dyld::gLibSystemHelpers != NULL) {
+	if ( (dyld::gLibSystemHelpers != NULL) && dyld::gProcessInfo->libSystemInitialized ) {
 		void* p = dyld::gLibSystemHelpers->malloc(size);
 		//dyld::log("malloc(%lu) => %p from libSystem\n", size, p);
 		return p;
