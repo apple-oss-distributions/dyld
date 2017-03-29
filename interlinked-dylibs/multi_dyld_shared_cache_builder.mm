@@ -56,10 +56,12 @@
 #include <map>
 #include <algorithm>
 
+#include "mega-dylib-utils.h"
+
 #include "MultiCacheBuilder.h"
 #include "Manifest.h"
+#include "MachOProxy.h"
 
-#include "mega-dylib-utils.h"
 #include "Logging.h"
 
 #if !__has_feature(objc_arc)
@@ -106,45 +108,34 @@ bool copyFile(const std::string& from, const std::string& to)
 void createArtifact(Manifest& manifest, const std::string& dylibCachePath, bool includeExecutables)
 {
     mkpath_np(dylibCachePath.c_str(), 0755);
-    (void)copyFile(manifest.dylibOrderFile, dylibCachePath + "Metadata/dylibOrderFile.txt");
-    (void)copyFile(manifest.dirtyDataOrderFile, dylibCachePath + "Metadata/dirtyDataOrderFile.txt");
-    (void)copyFile(manifest.metabomFile, dylibCachePath + "Metadata/metabom.bom");
+    (void)copyFile(manifest.dylibOrderFile(), dylibCachePath + "Metadata/dylibOrderFile.txt");
+    (void)copyFile(manifest.dirtyDataOrderFile(), dylibCachePath + "Metadata/dirtyDataOrderFile.txt");
+    (void)copyFile(manifest.metabomFile(), dylibCachePath + "Metadata/metabom.bom");
 
     std::set<std::string> copied;
-
-    for (auto archFiles : manifest.architectureFiles) {
-        for (auto& file : archFiles.second.dylibs) {
-            std::string installname = file.first;
-            if (copied.count(installname) > 0) {
-                continue;
-            }
-            (void)copyFile(file.second.proxy->path, normalize_absolute_file_path(dylibCachePath + "/Root/" + file.first));
-            copied.insert(installname);
+    MachOProxy::runOnAllProxies(false, [&](MachOProxy* proxy) {
+        if (copied.count(proxy->path) > 0) {
+            return;
         }
-        if (includeExecutables) {
-            for (auto& file : archFiles.second.executables) {
-                std::string installname = file.first;
-                if (copied.count(installname) > 0) {
-                    continue;
-                }
-                (void)copyFile(file.second.proxy->path, normalize_absolute_file_path(dylibCachePath + "/Root/" + file.first));
-                copied.insert(installname);
-            }
-        }
-    }
+        if (!includeExecutables && !proxy->isDylib())
+            return;
+        (void)copyFile(proxy->buildPath, normalize_absolute_file_path(dylibCachePath + "/Root/" + proxy->path));
+        copied.insert(proxy->path);
+    });
 
+    // HACK for 10.e
+    (void)symlink("libstdc++.6.0.9.dylib", (dylibCachePath + "/Root/usr/lib/libstdc++.6.dylib").c_str());
+    (void)symlink("libstdc++.6.0.9.dylib", (dylibCachePath + "/Root/usr/lib/libstdc++.dylib").c_str());
     log("Artifact dylibs copied");
 }
 
 void addArtifactPaths(Manifest &manifest) {
-	manifest.dylibOrderFile = "./Metadata/dylibOrderFile.txt";
-	manifest.dirtyDataOrderFile = "./Metadata/dirtyDataOrderFile.txt";
-        manifest.metabomFile = "./Metadata/metabom.bom";
+    manifest.setDylibOrderFile("./Metadata/dylibOrderFile.txt");
+    manifest.setDirtyDataOrderFile("./Metadata/dirtyDataOrderFile.txt");
+    manifest.setMetabomFile("./Metadata/metabom.bom");
 
-        for ( auto& projects : manifest.projects ) {
-            if ( projects.second.sources[0] != "./Root/" ) {
-                projects.second.sources.insert( projects.second.sources.begin(), "./Root/" );
-            }
+    for (auto& projects : manifest.projects()) {
+        manifest.addProjectSource(projects.first, "./Root", true);
         }
 }
 
@@ -161,7 +152,6 @@ int main (int argc, const char * argv[]) {
         bool        skipBuilds = false;
         bool        preflight = false;
         std::string manifestPath;
-
         time_t mytime = time(0);
         log("Started: %s", asctime(localtime(&mytime)));
 
@@ -208,17 +198,17 @@ int main (int argc, const char * argv[]) {
             skipBuilds = true;
         }
 
-		if (manifest.build.empty()) {
-			terminate("No version found in manifest");
+        if (manifest.build().empty()) {
+            terminate("No version found in manifest");
 		}
-		log("Building Caches for %s", manifest.build.c_str());
+        log("Building Caches for %s", manifest.build().c_str());
 
-		if ( masterDstRoot.empty() ) {
+        if ( masterDstRoot.empty() ) {
 			terminate("-master_dst_root required path argument");
 		}
 
-		if (manifest.manifest_version < 4) {
-			terminate("must specify valid manifest file");
+        if (manifest.version() < 4) {
+            terminate("must specify valid manifest file");
 		}
 
 		struct rlimit rl = {OPEN_MAX, OPEN_MAX};
@@ -228,31 +218,24 @@ int main (int argc, const char * argv[]) {
 			(void)mkpath_np((masterDstRoot + "/Boms/").c_str(), 0755);
 		}
 
-		if (manifest.dylibOrderFile.empty()) {
-			manifest.dylibOrderFile = toolDir() + "/dylib-order.txt";
-		}
-
-		if (manifest.dirtyDataOrderFile.empty()) {
-			manifest.dirtyDataOrderFile = toolDir() + "/dirty-data-segments-order.txt";
-		}
-
         auto dylibCacheCtx = std::make_shared<LoggingContext>("DylibCache");
         setLoggingContext(dylibCacheCtx);
 
-        if (!skipWrites) {
+        if (!skipWrites && !skipBuilds) {
             cacheBuilderDispatchGroupAsync(build_group, build_queue, [&] {
                 createArtifact(manifest, masterDstRoot + "/Artifact.dlc/", true);
             });
 
             if (!dylibCacheDir.empty()) {
                 cacheBuilderDispatchGroupAsync(build_group, build_queue, [&] {
-                    createArtifact(manifest, dylibCacheDir + "/AppleInternal/Developer/DylibCaches/" + manifest.build + ".dlc/", false);
+                    createArtifact(manifest, dylibCacheDir + "/AppleInternal/Developer/DylibCaches/" + manifest.build() + ".dlc/", false);
                 });
             }
         }
         setLoggingContext(defaultCtx);
 
         manifest.calculateClosure(false);
+        manifest.checkLinks();
         std::shared_ptr<MultiCacheBuilder> builder = std::make_shared<MultiCacheBuilder>(manifest, true, skipWrites, false, skipBuilds);
         dispatch_group_async(build_group, build_queue, [&] { builder->buildCaches(masterDstRoot); });
         dispatch_group_wait(build_group, DISPATCH_TIME_FOREVER);
@@ -271,7 +254,7 @@ int main (int argc, const char * argv[]) {
             manifest.write(masterDstRoot + "/Artifact.dlc/Manifest.plist");
 
             if (!dylibCacheDir.empty()) {
-                manifest.write(dylibCacheDir + kDylibCachePrefix + manifest.build + ".dlc/Manifest.plist");
+                manifest.write(dylibCacheDir + kDylibCachePrefix + manifest.build() + ".dlc/Manifest.plist");
             }
             setLoggingContext(defaultCtx);
         }
@@ -285,5 +268,3 @@ int main (int argc, const char * argv[]) {
 
 	return 0;
 }
-
-

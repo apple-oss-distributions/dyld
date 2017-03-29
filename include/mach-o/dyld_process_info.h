@@ -122,6 +122,10 @@ extern dyld_process_info_notify _dyld_process_info_notify(task_t task, dispatch_
                                                           void (^notify)(bool unload, uint64_t timestamp, uint64_t machHeader, const uuid_t uuid, const char* path),
                                                           void (^notifyExit)(),
                                                           kern_return_t* kernelError);
+// add block to call right before main() is entered.
+// does nothing if process is already in main().
+extern void _dyld_process_info_notify_main(dyld_process_info_notify objc, void (^notifyMain)());
+
 
 // stop notifications and invalid dyld_process_info_notify object
 extern void  _dyld_process_info_notify_release(dyld_process_info_notify object);

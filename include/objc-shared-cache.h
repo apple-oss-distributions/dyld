@@ -114,13 +114,13 @@ static uint64_t lookup8( uint8_t *k, size_t length, uint64_t level);
 
 // Perfect hash code is at the end of this file.
 
-struct perfect_hash {
+struct __attribute__((packed)) perfect_hash {
     uint32_t capacity;
     uint32_t occupied;
     uint32_t shift;
     uint32_t mask;
     uint64_t salt;
-    
+
     uint32_t scramble[256];
     uint8_t *tab;  // count == mask+1; free with delete[]
     
@@ -159,7 +159,7 @@ static perfect_hash make_perfect(const string_map& strings);
 // Precomputed perfect hash table of strings.
 // Base class for precomputed selector table and class table.
 // Edit objc-sel-table.s if you change this structure.
-struct objc_stringhash_t {
+struct __attribute__((packed)) objc_stringhash_t {
     uint32_t capacity;
     uint32_t occupied;
     uint32_t shift;
@@ -167,7 +167,7 @@ struct objc_stringhash_t {
     uint32_t unused1;  // was zero
     uint32_t unused2;  // alignment pad
     uint64_t salt;
-    
+
     uint32_t scramble[256];
     uint8_t tab[0];                   /* tab[mask+1] (always power-of-2) */
     // uint8_t checkbytes[capacity];  /* check byte for each string */

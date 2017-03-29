@@ -43,6 +43,8 @@
 
 #include "dyld_cache_config.h"
 
+#include "MachOProxy.h"
+
 #if !NEW_CACHE_FILE_FORMAT
     #include "CacheFileAbstraction.hpp"
 #endif
@@ -57,30 +59,17 @@ namespace {
 template <typename P>
 class BindInfo {
 public:
-    BindInfo(void* cacheBuffer, macho_header<P>* mh);
+    BindInfo(void* cacheBuffer, const std::map<const MachOProxy*, std::vector<SharedCache::SegmentInfo>>& segmentMap, macho_header<P>* mh, MachOProxy* proxy);
 
     void setReExports(const std::unordered_map<std::string, BindInfo<P>*>& dylibPathToBindInfo);
     void setDependentDylibs(const std::unordered_map<std::string, BindInfo<P>*>& dylibPathToBindInfo);
     void bind(const std::unordered_map<std::string, BindInfo<P>*>& dylibPathToBindInfo, std::vector<void*>& pointersForASLR);
 
-    static void bindAllImagesInCache(void* cacheBuffer, const std::unordered_map<std::string, void*>& dylibPathToMachHeader, std::vector<void*>& pointersForASLR);
-
-    void addExportsToGlobalMap(std::unordered_map<std::string, BindInfo<P>*>& reverseMap);
+    static void bindAllImagesInCache(void* cacheBuffer, const std::vector<MachOProxy*> dylibs, const std::map<const MachOProxy*, std::vector<SharedCache::SegmentInfo>>& segmentMap, std::vector<void*>& pointersForASLR);
 
 private:
     typedef typename P::uint_t pint_t;
     typedef typename P::E E;
-
-    struct SymbolInfo {
-                SymbolInfo() { }
-        pint_t  address          = 0;
-        bool    isResolver       = false;
-        bool    isAbsolute       = false;
-        bool    isSymbolReExport = false;
-        bool    isThreadLocal    = false;
-        int     reExportDylibIndex = 0;
-        std::string reExportName;
-   };
 
     void bindImmediates(const std::unordered_map<std::string, BindInfo<P>*>& dylibPathToBindInfo, std::vector<void*>& pointersForASLR);
     void bindLazyPointers(const std::unordered_map<std::string, BindInfo<P>*>& dylibPathToBindInfo, std::vector<void*>& pointersForASLR);
@@ -101,6 +90,7 @@ private:
 
     void*                                       _cacheBuffer;
     macho_header<P>*                            _mh;
+    MachOProxy*                                 _proxy;
     const uint8_t*                              _linkeditBias;
     const char*                                 _installName;
     const macho_symtab_command<P>*              _symTabCmd;
@@ -110,7 +100,7 @@ private:
     std::vector<uint64_t>                       _segSizes;
     std::vector<uint64_t>                       _segCacheOffsets;
     std::vector<const macho_segment_command<P>*>_segCmds;
-    std::unordered_map<std::string, SymbolInfo> _exports;
+    const std::map<const MachOProxy*, std::vector<SharedCache::SegmentInfo>>& _segmentMap;
     std::vector<std::string>                    _reExportedDylibNames;
     std::vector<BindInfo<P>*>                   _reExportedDylibs;
     std::vector<BindInfo<P>*>                   _dependentDylibs;
@@ -119,10 +109,17 @@ private:
     ResolverToBlessedLazyPointerMap             _resolverBlessedMap;
 };
 
-
 template <typename P>
-BindInfo<P>::BindInfo(void* cacheBuffer, macho_header<P>* mh)
-    : _cacheBuffer(cacheBuffer), _mh(mh), _linkeditBias((uint8_t*)cacheBuffer), _symTabCmd(nullptr), _dynSymTabCmd(nullptr), _dyldInfo(nullptr), _baseAddress(0)
+BindInfo<P>::BindInfo(void* cacheBuffer, const std::map<const MachOProxy*, std::vector<SharedCache::SegmentInfo>>& segmentMap, macho_header<P>* mh, MachOProxy* proxy)
+    : _cacheBuffer(cacheBuffer)
+    , _mh(mh)
+    , _segmentMap(segmentMap)
+    , _proxy(proxy)
+    , _linkeditBias((uint8_t*)cacheBuffer)
+    , _symTabCmd(nullptr)
+    , _dynSymTabCmd(nullptr)
+    , _dyldInfo(nullptr)
+    , _baseAddress(0)
 {
     macho_segment_command<P>* segCmd;
     macho_dylib_command<P>* dylibCmd;
@@ -180,35 +177,6 @@ BindInfo<P>::BindInfo(void* cacheBuffer, macho_header<P>* mh)
     if ( !ExportInfoTrie::parseTrie(exportsStart, exportsEnd, exports) ) {
         terminate("malformed exports trie in %s", _installName);
     }
-
-    for(const ExportInfoTrie::Entry& entry : exports) {
-        _exports[entry.name].address = (pint_t)entry.info.address + _baseAddress;
-        switch ( entry.info.flags & EXPORT_SYMBOL_FLAGS_KIND_MASK ) {
-            case EXPORT_SYMBOL_FLAGS_KIND_REGULAR:
-                if ( (entry.info.flags & EXPORT_SYMBOL_FLAGS_STUB_AND_RESOLVER) ) {
-                    _exports[entry.name].isResolver = true;
-                }
-                if ( entry.info.flags & EXPORT_SYMBOL_FLAGS_REEXPORT ) {
-                    SymbolInfo& info = _exports[entry.name];
-                    info.isSymbolReExport = true;
-                    info.reExportDylibIndex = (int)entry.info.other;
-                    if ( !entry.info.importName.empty())
-                        info.reExportName = entry.info.importName;
-                }
-                break;
-            case EXPORT_SYMBOL_FLAGS_KIND_THREAD_LOCAL:
-                _exports[entry.name].isThreadLocal = true;
-                break;
-            case EXPORT_SYMBOL_FLAGS_KIND_ABSOLUTE:
-                _exports[entry.name].isAbsolute = true;
-                _exports[entry.name].address = (pint_t)entry.info.address;
-                break;
-            default:
-                terminate("non-regular symbol binding not supported for %s in %s", entry.name.c_str(), _installName);
-                break;
-        }
-    }
-
 }
 
 template <typename P>
@@ -460,7 +428,6 @@ void BindInfo<P>::bindLocation(uint8_t segmentIndex, uint64_t segmentOffset, uin
         pint_t lpVMAddr = targetBinder->findBlessedLazyPointerFor(symbolName);
         // switch stub to use shared lazy pointer to reduce dirty pages
         this->switchStubToUseSharedLazyPointer(symbolName, lpVMAddr);
-        return;
     }
 
 
@@ -493,13 +460,13 @@ template <typename P>
 bool BindInfo<P>::findExportedSymbolAddress(const char* symbolName, const std::unordered_map<std::string, BindInfo<P>*>& dylibPathToBindInfo,
                                             pint_t* address, BindInfo<P>** foundIn, bool* isResolverSymbol, bool* isAbsolute)
 {
-    auto pos = _exports.find(symbolName);
-    if ( pos != _exports.end() ) {
-        if ( pos->second.isSymbolReExport ) {
+    auto info = _proxy->symbolInfo(symbolName);
+    if (info != nullptr) {
+        if (info->isSymbolReExport) {
             const char* importName = symbolName;
-            if ( !pos->second.reExportName.empty() )
-                importName = pos->second.reExportName.c_str();
-            std::string& depPath = _dependentPaths[pos->second.reExportDylibIndex-1];
+            if (!info->reExportName.empty())
+                importName = info->reExportName.c_str();
+            std::string& depPath = _dependentPaths[info->reExportDylibIndex - 1];
             auto pos2 = dylibPathToBindInfo.find(depPath);
             if ( pos2 != dylibPathToBindInfo.end() ) {
                 BindInfo<P>* reExportFrom = pos2->second;
@@ -509,10 +476,11 @@ bool BindInfo<P>::findExportedSymbolAddress(const char* symbolName, const std::u
                 verboseLog("findExportedSymbolAddress(%s) => ???\n", symbolName);
             }
         }
-        *address = pos->second.address;
+
+        *address = (pint_t)_proxy->addressOf(symbolName, _segmentMap);
         *foundIn = this;
-        *isResolverSymbol = pos->second.isResolver;
-        *isAbsolute = pos->second.isAbsolute;
+        *isResolverSymbol = info->isResolver;
+        *isAbsolute = info->isAbsolute;
         //verboseLog("findExportedSymbolAddress(%s) => 0x0%llX\n", symbolName, (uint64_t)*address);
         return true;
     }
@@ -522,26 +490,6 @@ bool BindInfo<P>::findExportedSymbolAddress(const char* symbolName, const std::u
             return true;
     }
     return false;
-}
-
-template <typename P>
-void BindInfo<P>::addExportsToGlobalMap(std::unordered_map<std::string, BindInfo<P>*>& reverseMap)
-{
-    for (const auto& expEntry : _exports) {
-        const std::string& symName = expEntry.first;
-        auto pos = reverseMap.find(symName);
-        if ( pos == reverseMap.end() ) {
-            reverseMap[symName] = this;
-        }
-        else {
-            BindInfo<P>* other = pos->second;
-            if ( expEntry.second.isSymbolReExport )
-                continue;
-            if ( other->_exports[symName].isSymbolReExport )
-                continue;
-            //warning("symbol '%s' exported from %s and %s\n", symName.c_str(), this->_installName, other->_installName);
-        }
-    }
 }
 
 template <typename P>
@@ -557,18 +505,17 @@ typename P::uint_t BindInfo<P>::findBlessedLazyPointerFor(const std::string& res
 
     // if this symbol is re-exported from another dylib, look there
     bool thisDylibImplementsResolver = false;
-    auto pos = _exports.find(resolverSymbolName);
-    if ( pos != _exports.end() ) {
-        const SymbolInfo& info = pos->second;
-        if ( info.isSymbolReExport ) {
+    const auto info = _proxy->symbolInfo(resolverSymbolName);
+    if (info) {
+        if (info->isSymbolReExport) {
             std::string reImportName = resolverSymbolName;
-            if ( !info.reExportName.empty() )
-                reImportName = info.reExportName;
-            if ( info.reExportDylibIndex > _dependentDylibs.size() ) {
-                warning("dylib index for re-exported symbol %s too large (%d) in %s", resolverSymbolName.c_str(), info.reExportDylibIndex, _installName);
+            if (!info->reExportName.empty())
+                reImportName = info->reExportName;
+            if (info->reExportDylibIndex > _dependentDylibs.size()) {
+                warning("dylib index for re-exported symbol %s too large (%d) in %s", resolverSymbolName.c_str(), info->reExportDylibIndex, _installName);
             }
             else {
-                BindInfo<P>* reExportedFrom = _dependentDylibs[info.reExportDylibIndex-1];
+                BindInfo<P>* reExportedFrom = _dependentDylibs[info->reExportDylibIndex - 1];
                 if ( log ) verboseLog( "following re-export of %s in %s, to %s in %s", resolverSymbolName.c_str(), _installName, reImportName.c_str(), reExportedFrom->_installName);
                 pint_t lp = reExportedFrom->findBlessedLazyPointerFor(reImportName);
                 if ( lp != 0 ) {
@@ -577,7 +524,7 @@ typename P::uint_t BindInfo<P>::findBlessedLazyPointerFor(const std::string& res
                 }
             }
         }
-        if ( info.isResolver )
+        if (info->isResolver)
             thisDylibImplementsResolver = true;
     }
 
@@ -700,19 +647,23 @@ void BindInfo<P>::switchArmStubsLazyPointer(uint8_t* stubMappedAddress, pint_t s
     E::set32(instructions[3], betterOffset);
 }
 
-
 template <typename P>
-void BindInfo<P>::bindAllImagesInCache(void* cacheBuffer, const std::unordered_map<std::string, void*>& dylibPathToMachHeader, std::vector<void*>& pointersForASLR)
+void BindInfo<P>::bindAllImagesInCache(void* cacheBuffer, const std::vector<MachOProxy*> dylibs, const std::map<const MachOProxy*, std::vector<SharedCache::SegmentInfo>>& segmentMap, std::vector<void*>& pointersForASLR)
 {
-    // build BindInfo object for each dylib
-    std::unordered_map<macho_header<P>*, BindInfo<P>*> headersToBindInfo;
     std::unordered_map<std::string, BindInfo<P>*> dylibPathToBindInfo;
-    for (const auto& entry: dylibPathToMachHeader) {
-        macho_header<P>* mh = (macho_header<P>*)entry.second;
-        if ( headersToBindInfo.count(mh) == 0 )
-            headersToBindInfo[mh] = new BindInfo<P>(cacheBuffer, mh);
-        dylibPathToBindInfo[entry.first] = headersToBindInfo[mh];
-   }
+    std::unordered_map<macho_header<P>*, BindInfo<P>*> headersToBindInfo;
+    for (auto& dylib : dylibs) {
+        auto dylibI = segmentMap.find(dylib);
+        assert(dylibI != segmentMap.end());
+        macho_header<P>* mh = (macho_header<P>*)((uint8_t*)cacheBuffer + dylibI->second[0].cacheFileOffset);
+        if (headersToBindInfo.count(mh) == 0) {
+            headersToBindInfo[mh] = new BindInfo<P>(cacheBuffer, segmentMap, mh, dylib);
+        }
+        dylibPathToBindInfo[dylib->installName] = headersToBindInfo[mh];
+        for (const auto& alias : dylib->installNameAliases) {
+            dylibPathToBindInfo[alias] = headersToBindInfo[mh];
+        }
+    }
 
     // chain re-exported dylibs
     for (const auto& entry: headersToBindInfo) {
@@ -725,12 +676,6 @@ void BindInfo<P>::bindAllImagesInCache(void* cacheBuffer, const std::unordered_m
         entry.second->bind(dylibPathToBindInfo, pointersForASLR);
     }
 
-    // look for exported symbol collisions
-    std::unordered_map<std::string, BindInfo<P>*> reverseMap;
-    for (const auto& entry: headersToBindInfo) {
-        entry.second->addExportsToGlobalMap(reverseMap);
-    }
-
     // clean up
     for (const auto& entry: headersToBindInfo) {
         delete entry.second;
@@ -740,17 +685,16 @@ void BindInfo<P>::bindAllImagesInCache(void* cacheBuffer, const std::unordered_m
 
 } // anonymous namespace
 
-
-void SharedCache::bindAllImagesInCache(const std::unordered_map<std::string, void*>& dylibPathToMachHeader, std::vector<void*>& pointersForASLR)
+void SharedCache::bindAllImagesInCache(const std::vector<MachOProxy*> dylibs, const std::map<const MachOProxy*, std::vector<SegmentInfo>>& segmentMap, std::vector<void*>& pointersForASLR)
 {
     switch ( _arch.arch ) {
         case CPU_TYPE_ARM:
         case CPU_TYPE_I386:
-            BindInfo<Pointer32<LittleEndian>>::bindAllImagesInCache(_buffer.get(), dylibPathToMachHeader, pointersForASLR);
+            BindInfo<Pointer32<LittleEndian>>::bindAllImagesInCache(_buffer.get(), dylibs, segmentMap, pointersForASLR);
             break;
         case CPU_TYPE_X86_64:
         case CPU_TYPE_ARM64:
-             BindInfo<Pointer64<LittleEndian>>::bindAllImagesInCache(_buffer.get(), dylibPathToMachHeader, pointersForASLR);
+            BindInfo<Pointer64<LittleEndian>>::bindAllImagesInCache(_buffer.get(), dylibs, segmentMap, pointersForASLR);
             break;
         default:
             terminate("unsupported arch 0x%08X", _arch.arch);

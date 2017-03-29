@@ -312,7 +312,7 @@ static OSSpinLock					sDynamicReferencesLock = 0;
 static bool							sLogToFile = false;
 #endif
 static char							sLoadingCrashMessage[1024] = "dyld: launch, loading dependent libraries";
-
+static bool							sSafeMode = false;
 static _dyld_objc_notify_mapped		sNotifyObjCMapped;
 static _dyld_objc_notify_init		sNotifyObjCInit;
 static _dyld_objc_notify_unmapped	sNotifyObjCUnmapped;
@@ -779,7 +779,7 @@ static void notifyMonitoringDyld(bool unloading, unsigned portSlot, unsigned ima
 	header->imageCount		= imageCount;
 	header->imagesOffset	= sizeof(dyld_process_info_notify_header);
 	header->stringsOffset	= sizeof(dyld_process_info_notify_header) + entriesSize;
-	header->timestamp		= mach_absolute_time();
+	header->timestamp		= dyld::gProcessInfo->infoArrayChangeTimestamp;
 	dyld_process_info_image_entry* entries = (dyld_process_info_image_entry*)&buffer[header->imagesOffset];
 	char* const pathPoolStart = (char*)&buffer[header->stringsOffset];
 	char* pathPool = pathPoolStart;
@@ -831,6 +831,38 @@ static void notifyMonitoringDyld(bool unloading, unsigned portSlot, unsigned ima
 		mach_port_deallocate(mach_task_self(), sNotifyReplyPorts[portSlot]);
 		dyld::gProcessInfo->notifyPorts[portSlot] = 0;
 		sNotifyReplyPorts[portSlot] = 0;
+	}
+}
+
+static void notifyMonitoringDyldMain()
+{
+	for (int slot=0; slot < DYLD_MAX_PROCESS_INFO_NOTIFY_COUNT; ++slot) {
+		if ( dyld::gProcessInfo->notifyPorts[slot] != 0 ) {
+			if ( sNotifyReplyPorts[slot] == 0 ) {
+				if ( !mach_port_allocate(mach_task_self(), MACH_PORT_RIGHT_RECEIVE, &sNotifyReplyPorts[slot]) )
+					mach_port_insert_right(mach_task_self(), sNotifyReplyPorts[slot], sNotifyReplyPorts[slot], MACH_MSG_TYPE_MAKE_SEND);
+				//dyld::log("allocated reply port %d\n", sNotifyReplyPorts[slot]);
+			}
+			//dyld::log("found port to send to\n");
+			mach_msg_header_t h;
+			h.msgh_bits			= MACH_MSGH_BITS(MACH_MSG_TYPE_COPY_SEND,MACH_MSG_TYPE_MAKE_SEND); // MACH_MSG_TYPE_MAKE_SEND_ONCE
+			h.msgh_id			= DYLD_PROCESS_INFO_NOTIFY_MAIN_ID;
+			h.msgh_local_port	= sNotifyReplyPorts[slot];
+			h.msgh_remote_port	= dyld::gProcessInfo->notifyPorts[slot];
+			h.msgh_reserved		= 0;
+			h.msgh_size			= (mach_msg_size_t)sizeof(mach_msg_header_t);
+			//dyld::log("sending to port[%d]=%d, size=%d, reply port=%d, id=0x%X\n", slot, dyld::gProcessInfo->notifyPorts[slot], h.msgh_size, sNotifyReplyPorts[slot], h.msgh_id);
+			kern_return_t sendResult = mach_msg(&h, MACH_SEND_MSG | MACH_RCV_MSG | MACH_SEND_TIMEOUT, h.msgh_size, h.msgh_size, sNotifyReplyPorts[slot], 100, MACH_PORT_NULL);
+			//dyld::log("send result = 0x%X, msg_id=%d, msg_size=%d\n", sendResult, h.msgh_id, h.msgh_size);
+			if ( sendResult == MACH_SEND_INVALID_DEST ) {
+				// sender is not responding, detatch
+				//dyld::log("process requesting notification gone. deallocation send port %d and receive port %d\n", dyld::gProcessInfo->notifyPorts[slot], sNotifyReplyPorts[slot]);
+				mach_port_deallocate(mach_task_self(), dyld::gProcessInfo->notifyPorts[slot]);
+				mach_port_deallocate(mach_task_self(), sNotifyReplyPorts[slot]);
+				dyld::gProcessInfo->notifyPorts[slot] = 0;
+				sNotifyReplyPorts[slot] = 0;
+			}
+		}
 	}
 }
 
@@ -1903,7 +1935,7 @@ void processDyldEnvironmentVariable(const char* key, const char* value, const ch
 	else if ( strcmp(key, "DYLD_PRINT_CODE_SIGNATURES") == 0 ) {
 		gLinkContext.verboseCodeSignatures = true;
 	}
-	else if ( strcmp(key, "DYLD_SHARED_REGION") == 0 ) {
+	else if ( (strcmp(key, "DYLD_SHARED_REGION") == 0) && !sSafeMode ) {
 		if ( strcmp(value, "private") == 0 ) {
 			gLinkContext.sharedRegionMode = ImageLoader::kUsePrivateSharedRegion;
 		}
@@ -1921,10 +1953,10 @@ void processDyldEnvironmentVariable(const char* key, const char* value, const ch
 		}
 	}
 #if DYLD_SHARED_CACHE_SUPPORT
-	else if ( strcmp(key, "DYLD_SHARED_CACHE_DIR") == 0 ) {
+	else if ( (strcmp(key, "DYLD_SHARED_CACHE_DIR") == 0) && !sSafeMode  ) {
         sSharedCacheDir = value;
 	}
-	else if ( strcmp(key, "DYLD_SHARED_CACHE_DONT_VALIDATE") == 0 ) {
+	else if ( (strcmp(key, "DYLD_SHARED_CACHE_DONT_VALIDATE") == 0) && !sSafeMode  ) {
 		sSharedCacheIgnoreInodeAndTimeStamp = true;
 	}
 #endif
@@ -1960,7 +1992,7 @@ void processDyldEnvironmentVariable(const char* key, const char* value, const ch
 	}
 #endif
 #if !TARGET_IPHONE_SIMULATOR
-	else if ( (strcmp(key, "DYLD_PRINT_TO_FILE") == 0) && (mainExecutableDir == NULL) ) {
+	else if ( (strcmp(key, "DYLD_PRINT_TO_FILE") == 0) && (mainExecutableDir == NULL) && !sSafeMode ) {
 		int fd = open(value, O_WRONLY | O_CREAT | O_APPEND, 0644);
 		if ( fd != -1 ) {
 			sLogfile = fd;
@@ -3422,6 +3454,23 @@ static ImageLoader* loadPhase3(const char* path, const char* orgPath, const Load
 	return loadPhase4(path, orgPath, context, cacheIndex, exceptions);
 }
 
+static ImageLoader* loadPhase2cache(const char* path, const char *orgPath, const LoadContext& context, unsigned& cacheIndex, std::vector<const char*>* exceptions) {
+	ImageLoader* image = NULL;
+#if !TARGET_IPHONE_SIMULATOR
+	if ( exceptions != NULL) {
+		char resolvedPath[PATH_MAX];
+		realpath(path, resolvedPath);
+		int myerr = errno;
+		// If realpath() resolves to a path which does not exist on disk, errno is set to ENOENT
+		if ( (myerr == ENOENT) || (myerr == 0) )
+		{
+			image = loadPhase4(resolvedPath, orgPath, context, cacheIndex, exceptions);
+		}
+	}
+#endif
+	return image;
+}
+
 
 // try search paths
 static ImageLoader* loadPhase2(const char* path, const char* orgPath, const LoadContext& context,
@@ -3441,6 +3490,9 @@ static ImageLoader* loadPhase2(const char* path, const char* orgPath, const Load
 				strcat(npath, frameworkPartialPath);
 				//dyld::log("dyld: fallback framework path used: %s() -> loadPhase4(\"%s\", ...)\n", __func__, npath);
 				image = loadPhase4(npath, orgPath, context, cacheIndex, exceptions);
+				// Look in the cache if appropriate
+				if ( image == NULL)
+					image = loadPhase2cache(npath, orgPath, context, cacheIndex, exceptions);
 				if ( image != NULL )
 					return image;
 			}
@@ -3458,6 +3510,9 @@ static ImageLoader* loadPhase2(const char* path, const char* orgPath, const Load
 			strcat(libpath, libraryLeafName);
 			//dyld::log("dyld: fallback library path used: %s() -> loadPhase4(\"%s\", ...)\n", __func__, libpath);
 			image = loadPhase4(libpath, orgPath, context, cacheIndex, exceptions);
+			// Look in the cache if appropriate
+			if ( image == NULL)
+				image = loadPhase2cache(libpath, orgPath, context, cacheIndex, exceptions);
 			if ( image != NULL )
 				return image;
 		}
@@ -3575,32 +3630,10 @@ ImageLoader* load(const char* path, const LoadContext& context, unsigned& cacheI
 	// try all path permutations and try open() until first success
 	std::vector<const char*> exceptions;
 	image = loadPhase0(path, orgPath, context, cacheIndex, &exceptions);
-#if __IPHONE_OS_VERSION_MIN_REQUIRED && DYLD_SHARED_CACHE_SUPPORT && !TARGET_IPHONE_SIMULATOR
+#if !TARGET_IPHONE_SIMULATOR
 	// <rdar://problem/16704628> support symlinks on disk to a path in dyld shared cache
-	if ( (image == NULL) && cacheablePath(path) && !context.dontLoad ) {
-		char resolvedPath[PATH_MAX];
-		realpath(path, resolvedPath);
-		int myerr = errno;
-		// If realpath() resolves to a path which does not exist on disk, errno is set to ENOENT
-		if ( (myerr == ENOENT) || (myerr == 0) )
-		{
-			// see if this image is in shared cache
-			const macho_header* mhInCache;
-			const char*			pathInCache;
-			long				slideInCache;
-			if ( findInSharedCacheImage(resolvedPath, false, NULL, &mhInCache, &pathInCache, &slideInCache) ) {
-				struct stat stat_buf;
-				bzero(&stat_buf, sizeof(stat_buf));
-				try {
-					image = ImageLoaderMachO::instantiateFromCache(mhInCache, pathInCache, slideInCache, stat_buf, gLinkContext);
-					image = checkandAddImage(image, context);
-				}
-				catch (...) {
-					image = NULL;
-				}
-			}
-		}
-	}
+	if ( image == NULL)
+		image = loadPhase2cache(path, orgPath, context, cacheIndex, &exceptions);
 #endif
     CRSetCrashLogMessage2(NULL);
 	if ( image != NULL ) {
@@ -4002,6 +4035,7 @@ static void mapSharedCache()
 				return;
 			}
 		}
+		dyld::gProcessInfo->sharedCacheBaseAddress = cacheBaseAddress;
 		// check if cache file is slidable
 		const dyld_cache_header* header = sSharedCache;
 		if ( (header->mappingOffset >= 0x48) && (header->slideInfoSize != 0) ) {
@@ -4011,10 +4045,9 @@ static void mapSharedCache()
 			const uint8_t* preferedLoadAddress = (uint8_t*)(long)(mappings[0].address);
 			sSharedCacheSlide = loadedAddress - preferedLoadAddress;
 			dyld::gProcessInfo->sharedCacheSlide = sSharedCacheSlide;
-			dyld::gProcessInfo->sharedCacheBaseAddress = cacheBaseAddress;
 			//dyld::log("sSharedCacheSlide=0x%08lX, loadedAddress=%p, preferedLoadAddress=%p\n", sSharedCacheSlide, loadedAddress, preferedLoadAddress);
 		}
-		// if cache has a uuid, copy it 
+		// if cache has a uuid, copy it
 		if ( header->mappingOffset >= 0x68 ) {
 			memcpy(dyld::gProcessInfo->sharedCacheUUID, header->uuid, 16);
 		}
@@ -4778,14 +4811,27 @@ bool dlopenFromCache(const char* path, int mode, void** handle)
 {
 	if ( sAllCacheImagesProxy == NULL )
 		return false;
+	char fallbackPath[PATH_MAX];
 	bool result = sAllCacheImagesProxy->dlopenFromCache(gLinkContext, path, mode, handle);
 	if ( !result && (strchr(path, '/') == NULL) ) {
 		// POSIX says you can call dlopen() with a leaf name (e.g. dlopen("libz.dylb"))
-		char fallbackPath[PATH_MAX];
 		strcpy(fallbackPath, "/usr/lib/");
 		strlcat(fallbackPath, path, PATH_MAX);
 		result = sAllCacheImagesProxy->dlopenFromCache(gLinkContext, fallbackPath, mode, handle);
+		if ( !result )
+			path = fallbackPath;
 	}
+	if ( !result ) {
+		// leaf name could be a symlink
+		char resolvedPath[PATH_MAX];
+		realpath(path, resolvedPath);
+		int realpathErrno = errno;
+		// If realpath() resolves to a path which does not exist on disk, errno is set to ENOENT
+		if ( (realpathErrno == ENOENT) || (realpathErrno == 0) ) {
+			result = sAllCacheImagesProxy->dlopenFromCache(gLinkContext, resolvedPath, mode, handle);
+		}
+	}
+
 	return result;
 }
 
@@ -5345,9 +5391,10 @@ static void configureProcessRestrictions(const macho_header* mainExecutableMH)
     if ( issetugid() || hasRestrictedSegment(mainExecutableMH) ) {
 		gLinkContext.processIsRestricted = true;
 	}
+	bool usingSIP = (csr_check(CSR_ALLOW_TASK_FOR_PID) != 0);
 	if ( csops(0, CS_OPS_STATUS, &flags, sizeof(flags)) != -1 ) {
 		// On OS X CS_RESTRICT means the program was signed with entitlements
-		if ( ((flags & CS_RESTRICT) == CS_RESTRICT) && (csr_check(CSR_ALLOW_TASK_FOR_PID) != 0) ) {
+		if ( ((flags & CS_RESTRICT) == CS_RESTRICT) && usingSIP ) {
 			gLinkContext.processIsRestricted = true;
 		}
 		// Library Validation loosens searching but requires everything to be code signed
@@ -5355,6 +5402,7 @@ static void configureProcessRestrictions(const macho_header* mainExecutableMH)
 			gLinkContext.processIsRestricted = false;
 			//gLinkContext.requireCodeSignature = true;
 			gLinkContext.processUsingLibraryValidation = true;
+			sSafeMode = usingSIP;
 		}
 	}
 #endif
@@ -5893,8 +5941,10 @@ reloadAllImages:
 #endif
 		char dyldPathBuffer[MAXPATHLEN+1];
 		int len = proc_regionfilename(getpid(), (uint64_t)(long)addressInDyld, dyldPathBuffer, MAXPATHLEN);
-		if ( (len != 0) && (strcmp(dyldPathBuffer, gProcessInfo->dyldPath) != 0) ) {
-			gProcessInfo->dyldPath = strdup(dyldPathBuffer);
+		if ( len > 0 ) {
+			dyldPathBuffer[len] = '\0'; // proc_regionfilename() does not zero terminate returned string
+			if ( strcmp(dyldPathBuffer, gProcessInfo->dyldPath) != 0 )
+				gProcessInfo->dyldPath = strdup(dyldPathBuffer);
 		}
 
 		// load any inserted libraries
@@ -6017,6 +6067,10 @@ reloadAllImages:
 		// run all initializers
 		initializeMainExecutable(); 
 	#endif
+
+		// notify any montoring proccesses that this process is about to enter main()
+		notifyMonitoringDyldMain();
+
 		// find entry point for main executable
 		result = (uintptr_t)sMainExecutable->getThreadPC();
 		if ( result != 0 ) {

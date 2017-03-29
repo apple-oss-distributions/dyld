@@ -157,7 +157,7 @@ std::string normalize_absolute_file_path(const std::string &path) {
 FileCache fileCache;
 
 FileCache::FileCache(void) {
-    cache_queue = dispatch_queue_create("com.apple.dyld.cache.cache", DISPATCH_QUEUE_SERIAL);
+    cache_queue = dispatch_queue_create("com.apple.dyld.cache.cache", dispatch_queue_attr_make_with_qos_class(DISPATCH_QUEUE_SERIAL, QOS_CLASS_USER_INITIATED, 0));
 }
 
 
@@ -172,59 +172,87 @@ void FileCache::preflightCache(const std::string& path)
     cacheBuilderDispatchAsync(cache_queue, [=] {
         std::string normalizedPath = normalize_absolute_file_path(path);
         if (entries.count(normalizedPath) == 0) {
-            fill(normalizedPath);
+            entries[normalizedPath] = fill(normalizedPath);
         }
     });
 }
 
 std::tuple<uint8_t *, struct stat, bool> FileCache::cacheLoad(const std::string path) {
+    bool found = false;
+    std::tuple<uint8_t*, struct stat, bool> retval;
     std::string normalizedPath = normalize_absolute_file_path(path);
-    cacheBuilderDispatchSync(cache_queue, [=] {
-        if ( entries.count(normalizedPath) == 0 )
-            fill(normalizedPath);
+    cacheBuilderDispatchSync(cache_queue, [=, &found, &retval] {
+        auto entry = entries.find(normalizedPath);
+        if (entry != entries.end()) {
+            retval = entry->second;
+            found = true;
+        }
     });
 
-    return entries[normalizedPath];
+    if (!found) {
+        auto info = fill(normalizedPath);
+        cacheBuilderDispatchSync(cache_queue, [=, &found, &retval] {
+            auto entry = entries.find(normalizedPath);
+            if (entry != entries.end()) {
+                retval = entry->second;
+            }else {
+                retval = entries[normalizedPath] = info;
+                retval = info;
+            }
+        });
+    }
+
+    return retval;
 }
 
-
 //FIXME error handling
-void FileCache::fill(const std::string& path) {
+std::tuple<uint8_t*, struct stat, bool>  FileCache::fill(const std::string& path) {
     struct stat stat_buf;
 
     int fd = ::open(path.c_str(), O_RDONLY, 0);
     if ( fd == -1 ) {
         verboseLog("can't open file '%s', errno=%d", path.c_str(), errno);
-        entries[path] = std::make_tuple((uint8_t*)(-1), stat_buf, false);
-        return;
+        return std::make_tuple((uint8_t*)(-1), stat_buf, false);
     }
 
     if ( fstat(fd, &stat_buf) == -1) {
         verboseLog("can't stat open file '%s', errno=%d", path.c_str(), errno);
-        entries[path] = std::make_tuple((uint8_t*)(-1), stat_buf, false);
         ::close(fd);
-        return;
+        return std::make_tuple((uint8_t*)(-1), stat_buf, false);
     }
 
     if ( stat_buf.st_size < 4096 ) {
         verboseLog("file too small '%s'", path.c_str());
-        entries[path] = std::make_tuple((uint8_t*)(-1), stat_buf, false);
         ::close(fd);
-        return;
+        return std::make_tuple((uint8_t*)(-1), stat_buf, false);
     }
 
     bool rootlessProtected = isProtectedBySIP(path, fd);
 
     void* buffer_ptr = mmap(NULL, stat_buf.st_size, PROT_READ, MAP_PRIVATE, fd, 0);
     if (buffer_ptr == MAP_FAILED) {
-        verboseLog("mmap() for shared cache at %s failed, errno=%d", path.c_str(), errno);
-        entries[path] = std::make_tuple((uint8_t*)(-1), stat_buf, false);
+        verboseLog("mmap() for file at %s failed, errno=%d", path.c_str(), errno);
         ::close(fd);
-        return;
+        return std::make_tuple((uint8_t*)(-1), stat_buf, false);
     }
 
-    entries[path] = std::make_tuple((uint8_t*)buffer_ptr, stat_buf, rootlessProtected);
     ::close(fd);
+
+    //PERF-HACK: touch bits of the MachO before we need them to speed things up on a spinning disk
+    madvise((void*)buffer_ptr, 4096, MADV_WILLNEED);
+
+    //if it is fat we need to touch each architecture
+    const fat_header* fh = (fat_header*)buffer_ptr;
+    if ( OSSwapBigToHostInt32( fh->magic ) == FAT_MAGIC ) {
+        const fat_arch* slices = (const fat_arch*)( (char*)fh + sizeof( fat_header ) );
+        const uint32_t sliceCount = OSSwapBigToHostInt32( fh->nfat_arch );
+        for ( uint32_t i = 0; i < sliceCount; ++i ) {
+            uint32_t fileOffset = OSSwapBigToHostInt32( slices[i].offset );
+            madvise((void*)((uint8_t *)buffer_ptr+fileOffset), 4096, MADV_WILLNEED);
+        }
+    }
+
+    return std::make_tuple((uint8_t*)buffer_ptr, stat_buf, rootlessProtected);
 }
 
 

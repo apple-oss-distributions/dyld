@@ -43,6 +43,7 @@
 
 #include <CommonCrypto/CommonDigest.h>
 
+#include "MachOProxy.h"
 
 static const bool verbose = false;
 
@@ -1259,11 +1260,11 @@ void SharedCache::bypassStubs(const std::vector<uint64_t>& branchPoolStartAddrs)
 
     // construct a StubOptimizer for each image
     std::vector<StubOptimizer<P>*> optimizers;
-    forEachImage([&](const void* mh, const char*, time_t, ino_t, const std::vector<MachOProxy::Segment>&) {
+    forEachImage([&](const void* mh, const char*, time_t, ino_t, const std::vector<MachOProxySegment>&) {
         optimizers.push_back(new StubOptimizer<P>(_buffer.get(), (macho_header<P>*)mh));
     });
 
-     // construct a BranchPoolDylib for each pool
+    // construct a BranchPoolDylib for each pool
     std::vector<BranchPoolDylib<P>*> pools;
 
     if ( _arch.arch == CPU_TYPE_ARM64 ) {
@@ -1283,8 +1284,8 @@ void SharedCache::bypassStubs(const std::vector<uint64_t>& branchPoolStartAddrs)
             }
         });
         uint64_t lastLinkEditRegionUsedOffset = 0;
-        forEachImage([&](const void* mh, const char*, time_t, ino_t, const std::vector<MachOProxy::Segment>& segs) {
-            for (MachOProxy::Segment seg : segs) {
+        forEachImage([&](const void* mh, const char*, time_t, ino_t, const std::vector<MachOProxySegment>& segs) {
+            for (const auto& seg : segs) {
                 if ( seg.name != "__LINKEDIT" )
                     continue;
                 if ( seg.fileOffset >= lastLinkEditRegionUsedOffset )

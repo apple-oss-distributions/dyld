@@ -33,6 +33,7 @@
 				F908137111D3FB5000626CC1 /* usr|local|include|mach-o */,
 				F908137211D3FB5000626CC1 /* usr|share|man|man1 */,
 				F908137311D3FB5000626CC1 /* usr|share|man|man3 */,
+				F96D19701D7F62C3007AF3CE /* Install dyld_priv.h */,
 			);
 			dependencies = (
 				F9B4D78012AD9736000605A6 /* PBXTargetDependency */,
@@ -119,7 +120,6 @@
 		F908135D11D3FACD00626CC1 /* dyld-interposing.h in usr|local|include|mach-o */ = {isa = PBXBuildFile; fileRef = F918691408B16D2500E0F9DB /* dyld-interposing.h */; };
 		F908135E11D3FACD00626CC1 /* dyld_cache_format.h in usr|local|include|mach-o */ = {isa = PBXBuildFile; fileRef = F93937400A94FC4700070A07 /* dyld_cache_format.h */; };
 		F908135F11D3FACD00626CC1 /* dyld_gdb.h in usr|local|include|mach-o */ = {isa = PBXBuildFile; fileRef = F9ED4CE80630A80600DF4E74 /* dyld_gdb.h */; };
-		F908136011D3FACD00626CC1 /* dyld_priv.h in usr|local|include|mach-o */ = {isa = PBXBuildFile; fileRef = F9ED4CE90630A80600DF4E74 /* dyld_priv.h */; };
 		F908136411D3FB0300626CC1 /* dyld.1 in usr|share|man|man1 */ = {isa = PBXBuildFile; fileRef = EF799FE9070D27BB00F78484 /* dyld.1 */; };
 		F908136811D3FB3A00626CC1 /* dladdr.3 in usr|share|man|man3 */ = {isa = PBXBuildFile; fileRef = EF799FEB070D27BB00F78484 /* dladdr.3 */; };
 		F908136911D3FB3A00626CC1 /* dlclose.3 in usr|share|man|man3 */ = {isa = PBXBuildFile; fileRef = EF799FEC070D27BB00F78484 /* dlclose.3 */; };
@@ -359,7 +359,6 @@
 				F908135E11D3FACD00626CC1 /* dyld_cache_format.h in usr|local|include|mach-o */,
 				F9FF8C161C69B080009F8A53 /* dyld_process_info.h in usr|local|include|mach-o */,
 				F908135F11D3FACD00626CC1 /* dyld_gdb.h in usr|local|include|mach-o */,
-				F908136011D3FACD00626CC1 /* dyld_priv.h in usr|local|include|mach-o */,
 			);
 			name = "usr|local|include|mach-o";
 			runOnlyForDeploymentPostprocessing = 1;
@@ -485,6 +484,7 @@
 		F958D4751C7FCD4A00A0B199 /* dyld_process_info_internal.h */ = {isa = PBXFileReference; fileEncoding = 4; lastKnownFileType = sourcecode.c.h; name = dyld_process_info_internal.h; path = src/dyld_process_info_internal.h; sourceTree = "<group>"; };
 		F958D4761C7FCD4A00A0B199 /* dyld_process_info_notify.cpp */ = {isa = PBXFileReference; fileEncoding = 4; lastKnownFileType = sourcecode.cpp.cpp; name = dyld_process_info_notify.cpp; path = src/dyld_process_info_notify.cpp; sourceTree = "<group>"; };
 		F95C95160E994796007B7CB8 /* MachOTrie.hpp */ = {isa = PBXFileReference; fileEncoding = 4; lastKnownFileType = sourcecode.cpp.h; path = MachOTrie.hpp; sourceTree = "<group>"; };
+		F96D19711D7F63EE007AF3CE /* expand.pl */ = {isa = PBXFileReference; fileEncoding = 4; lastKnownFileType = text.script.perl; name = expand.pl; path = bin/expand.pl; sourceTree = "<group>"; };
 		F971DD131A4A0E0700BBDD52 /* base.xcconfig */ = {isa = PBXFileReference; fileEncoding = 4; lastKnownFileType = text.xcconfig; path = base.xcconfig; sourceTree = "<group>"; };
 		F971DD141A4A0E0700BBDD52 /* dyld.xcconfig */ = {isa = PBXFileReference; fileEncoding = 4; lastKnownFileType = text.xcconfig; path = dyld.xcconfig; sourceTree = "<group>"; };
 		F971DD151A4A0E0700BBDD52 /* libdyld.xcconfig */ = {isa = PBXFileReference; fileEncoding = 4; lastKnownFileType = text.xcconfig; path = libdyld.xcconfig; sourceTree = "<group>"; };
@@ -810,6 +810,7 @@
 		F9ED4CBE0630A7B100DF4E74 /* include */ = {
 			isa = PBXGroup;
 			children = (
+				F96D19711D7F63EE007AF3CE /* expand.pl */,
 				F95090D01C5AB89A0031F81D /* dyld_process_info.h */,
 				F918691408B16D2500E0F9DB /* dyld-interposing.h */,
 				F98D274C0AA79D7400416316 /* dyld_images.h */,
@@ -942,6 +943,7 @@
 			buildConfigurationList = F9D8C7DD087B087300E93EFB /* Build configuration list for PBXNativeTarget "dyld" */;
 			buildPhases = (
 				F9D050C811DD701A00FB0A29 /* configure archives */,
+				F96D19A31D91D733007AF3CE /* make dyld_priv.h */,
 				F9ED4C950630A76000DF4E74 /* Sources */,
 				F907E2490FA6469000BFEDBD /* install iPhone file */,
 				F9213B3F18BFC9CB001CB6E8 /* simulator entitlement */,
@@ -1138,6 +1140,38 @@
 			runOnlyForDeploymentPostprocessing = 1;
 			shellPath = /bin/bash;
 			shellScript = "if [[ \"${PLATFORM_NAME}\"  == *simulator* ]]\nthen\n\tcd ${DSTROOT}/${INSTALL_PATH}\n\tln -s libdyld.dylib libdyld_sim.dylib\nfi\n";
+			showEnvVarsInLog = 0;
+		};
+		F96D19701D7F62C3007AF3CE /* Install dyld_priv.h */ = {
+			isa = PBXShellScriptBuildPhase;
+			buildActionMask = 8;
+			files = (
+			);
+			inputPaths = (
+			);
+			name = "Install dyld_priv.h";
+			outputPaths = (
+			);
+			runOnlyForDeploymentPostprocessing = 1;
+			shellPath = /bin/sh;
+			shellScript = "${SRCROOT}/bin/expand.pl < ${SRCROOT}/include/mach-o/dyld_priv.h >  ${DSTROOT}/${INSTALL_PATH_PREFIX}/usr/local/include/mach-o/dyld_priv.h\n";
+			showEnvVarsInLog = 0;
+		};
+		F96D19A31D91D733007AF3CE /* make dyld_priv.h */ = {
+			isa = PBXShellScriptBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+			);
+			inputPaths = (
+				"$(SRCROOT)/include/mach-o/dyld_priv.h",
+			);
+			name = "make dyld_priv.h";
+			outputPaths = (
+				"$(DERIVED_FILE_DIR)/mach-o/dyld_priv.h",
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+			shellPath = /bin/sh;
+			shellScript = "mkdir -p ${DERIVED_FILE_DIR}/mach-o\n${SRCROOT}/bin/expand.pl < ${SRCROOT}/include/mach-o/dyld_priv.h >  ${DERIVED_FILE_DIR}/mach-o/dyld_priv.h\n";
 			showEnvVarsInLog = 0;
 		};
 		F991E3030FF1A4EC0082CCC9 /* do not install duplicates */ = {
@@ -1909,6 +1943,7 @@
 				GCC_WARN_TYPECHECK_CALLS_TO_PRINTF = YES;
 				GCC_WARN_UNINITIALIZED_AUTOS = NO;
 				HEADER_SEARCH_PATHS = (
+					"$(DERIVED_FILE_DIR)/**",
 					./include,
 					"./launch-cache",
 				);
@@ -1959,6 +1994,7 @@
 				GCC_WARN_SHADOW = YES;
 				GCC_WARN_TYPECHECK_CALLS_TO_PRINTF = YES;
 				HEADER_SEARCH_PATHS = (
+					"$(DERIVED_FILE_DIR)/**",
 					./include,
 					"./launch-cache",
 				);

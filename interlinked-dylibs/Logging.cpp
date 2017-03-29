@@ -32,7 +32,6 @@
 
 #include "Logging.h"
 
-#define MAX_LOG_STR_LEN (512)
 //const char* kDispatchQueueLogNameKey = "kDispatchQueueLogNameKey";
 const char* kDispatchWarningArrayKey = "kDispatchWarningArrayKey";
 
@@ -142,27 +141,24 @@ void setReturnNonZeroOnTerminate()
 
 void queued_print(FILE* __restrict fd, const char* str)
 {
-    const char* qstr = strdup(str);
-
     dispatch_async(getLogQueue(), ^{
-        (void)fprintf(fd, "%s", qstr);
-        free((void*)qstr);
+        (void)fprintf(fd, "%s", str);
+        free((void*)str);
     });
 }
 
 #define VLOG(header)                                                                 \
     va_list list;                                                                    \
     va_start(list, format);                                                          \
-    char temp[MAX_LOG_STR_LEN];                                                      \
-    vsprintf(temp, format, list);                                                    \
+    char *temp, *temp2;                                                              \
+    vasprintf(&temp, format, list);                                                  \
     auto ctx = getLoggingContext();                                                  \
-    char temp2[MAX_LOG_STR_LEN];                                                     \
     if (ctx && !ctx->name().empty()) {                                               \
-        snprintf(temp2, MAX_LOG_STR_LEN, "[%s] %s%s\n", ctx->name().c_str(), header, \
-            temp);                                                                   \
+        asprintf(&temp2, "[%s] %s%s\n", ctx->name().c_str(), header, temp);          \
     } else {                                                                         \
-        snprintf(temp2, MAX_LOG_STR_LEN, "%s%s\n", header, temp);                    \
+        asprintf(&temp2, "%s%s\n", header, temp);                                    \
     }                                                                                \
+    free(temp);                                                                      \
     queued_print(stderr, temp2);                                                     \
     va_end(list);
 
@@ -188,14 +184,13 @@ void warning(const char* format, ...)
 
     va_list list;
     va_start(list, format);
-    char temp[MAX_LOG_STR_LEN];
-    vsprintf(temp, format, list);
-    char* blockTemp = strdup(temp);
+    char* blockTemp;
+    vasprintf(&blockTemp, format, list);
 
     auto ctx = getLoggingContext();
     if (ctx) {
         for (auto& target : ctx->targets().second) {
-            ctx->targets().first->configurations[target.first].architectures[target.second].results.warnings.push_back(blockTemp);
+            ctx->targets().first->configuration(target.first).architecture(target.second).results.warnings.push_back(blockTemp);
         }
     }
 
@@ -218,7 +213,7 @@ void terminate(const char* format, ...)
 
     if (ctx) {
         // We are a work in a logging context, throw
-        throw std::string(temp);
+        throw std::string(temp2);
     } else {
         // We are in general handing, let the loggging queue darain and exit
         dispatch_sync(getLogQueue(), ^{

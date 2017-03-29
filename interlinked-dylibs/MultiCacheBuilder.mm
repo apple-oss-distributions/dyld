@@ -23,6 +23,7 @@
 #include "mega-dylib-utils.h"
 #include "Logging.h"
 
+#include "MachOProxy.h"
 #include "MultiCacheBuilder.h"
 
 
@@ -155,44 +156,42 @@ void MultiCacheBuilder::write_cache(std::string cachePath, const std::set<std::s
 //FIXME (make development a type)
 void MultiCacheBuilder::buildCache(const std::string cachePath, const std::set<std::string> configurations, const std::string architecture, bool development)
 {
-    auto& configResults = _manifest.configurations[*configurations.begin()].architectures[architecture].results.dylibs;
+    auto& configResults = _manifest.configuration(*configurations.begin()).architecture(architecture).results.dylibs;
 
     if ( _skipBuilds ) {
         log( "Build Skipped" );
 
         for ( auto& config : configurations ) {
             for ( auto& dylib : configResults ) {
-                _manifest.configurations[config].architectures[architecture].results.dylibs[dylib.first].exclude(
-                    "All dylibs excluded" );
+                _manifest.configuration(config).architecture(architecture).results.exclude(MachOProxy::forIdentifier(dylib.first, architecture), "All dylibs excluded");
             }
         }
         return;
 	}
 
-	Manifest::Architecture arch;
 	std::vector<std::unique_ptr<MachOProxy>> dylibs;
 	std::vector<std::string> emptyList;
 	std::shared_ptr<SharedCache> cache = std::make_shared<SharedCache>(_manifest, *configurations.begin(), architecture);
 
 	for (auto& config : configurations) {
-		auto& results = _manifest.configurations[config].architectures[architecture].results.dylibs;
+        auto& results = _manifest.configuration(config).architecture(architecture).results;
 
-		for (auto& dylib : configResults) {
-			if (dylib.second.included == false
-				&& results.count(dylib.first)
-				&& results[dylib.first].included == true) {
-				results[dylib.first].exclude(dylib.second.exclusionInfo);
-			}
+        for (auto& dylib : configResults) {
+            if (dylib.second.included == false
+                && results.dylibs.count(dylib.first)
+                && results.dylibs[dylib.first].included == true) {
+                results.exclude(MachOProxy::forIdentifier(dylib.first, architecture), dylib.second.exclusionInfo);
+            }
 		}
 	}
 
-	if (development) {
-		cache->buildForDevelopment(cachePath);
-	} else {
-		cache->buildForProduction(cachePath);
-	}
+    if (development) {
+        cache->buildForDevelopment(cachePath);
+    } else {
+        cache->buildForProduction(cachePath);
+    }
 
-	std::vector<uint64_t> regionStartAddresses;
+    std::vector<uint64_t> regionStartAddresses;
 	std::vector<uint64_t> regionSizes;
 	std::vector<uint64_t> regionFileOffsets;
 
@@ -207,95 +206,74 @@ void MultiCacheBuilder::buildCache(const std::string cachePath, const std::set<s
 			prot = "RO";
 		for (auto& config : configurations) {
 			if (development) {
-				_manifest.configurations[config].architectures[architecture].results.developmentCache.regions.push_back({prot, vmAddr,vmAddr+size });
-			} else {
-				_manifest.configurations[config].architectures[architecture].results.productionCache.regions.push_back({prot, vmAddr,vmAddr+size });
-			}
+                _manifest.configuration(config).architecture(architecture).results.developmentCache.regions.push_back({ prot, vmAddr, vmAddr + size });
+            } else {
+                _manifest.configuration(config).architecture(architecture).results.productionCache.regions.push_back({ prot, vmAddr, vmAddr + size });
+            }
 		}
 	});
 
-	cache->forEachImage([&](const void* machHeader, const char* installName, time_t mtime,
-								ino_t inode, const std::vector<MachOProxy::Segment>& segments) {
-		for (auto& seg : segments) {
-			uint64_t vmAddr = 0;
-			for (int i=0; i < regionSizes.size(); ++i) {
-				if ( (seg.fileOffset >= regionFileOffsets[i]) && (seg.fileOffset < (regionFileOffsets[i]+regionSizes[i])) ) {
-					vmAddr = regionStartAddresses[i] + seg.fileOffset - regionFileOffsets[i];
-				}
-			}
-			for (auto& config : configurations) {
-				_manifest.configurations[config].architectures[architecture].results.dylibs[installName].segments.push_back({seg.name, vmAddr, vmAddr+seg.size});
-				if (_manifest.configurations[config].architectures[architecture].results.dylibs[installName].segments.size() == 0) {
-					warning("Attempting to write info for excluded dylib");
-					_manifest.configurations[config].architectures[architecture].results.dylibs[installName].exclude("Internal Error");
-				}
-			}
-		}
-	});
-	if (development) {
-		verboseLog("developement cache size = %llu", cache->fileSize());
-	} else {
-		verboseLog("production cache size = %llu", cache->fileSize());
-	}
+    cache->forEachImage([&](const void* machHeader, const char* installName, time_t mtime,
+        ino_t inode, const std::vector<MachOProxySegment>& segments) {
+        for (auto& seg : segments) {
+            uint64_t vmAddr = 0;
+            for (int i = 0; i < regionSizes.size(); ++i) {
+                if ((seg.fileOffset >= regionFileOffsets[i]) && (seg.fileOffset < (regionFileOffsets[i] + regionSizes[i]))) {
+                    vmAddr = regionStartAddresses[i] + seg.fileOffset - regionFileOffsets[i];
+                }
+            }
+
+            for (auto& config : configurations) {
+                _manifest.configuration(config).architecture(architecture).results.dylibForInstallname(installName).segments.push_back({ seg.name, vmAddr, vmAddr + seg.size });
+                if (_manifest.configuration(config).architecture(architecture).results.dylibForInstallname(installName).segments.size() == 0) {
+                    warning("Attempting to write info for non-existent dylib");
+                }
+            }
+        }
+    });
+    if (development) {
+        verboseLog("developement cache size = %llu", cache->fileSize());
+    } else {
+        verboseLog("production cache size = %llu", cache->fileSize());
+    }
 	if ( cache->vmSize()+align(cache->vmSize()/200, sharedRegionRegionAlignment(archForString(architecture))) > sharedRegionRegionSize(archForString(architecture))) {
             warning("shared cache will not fit in shared regions address space.  Overflow amount: %llu",
                 cache->vmSize() + align(cache->vmSize() / 200, sharedRegionRegionAlignment(archForString(architecture))) - sharedRegionRegionSize(archForString(architecture)));
             return;
 	}
-        write_cache(cachePath, configurations, architecture, cache, development);
-        for (auto& config : configurations) {
+    write_cache(cachePath, configurations, architecture, cache, development);
+    for (auto& config : configurations) {
 		if (development) {
-			_manifest.configurations[config].architectures[architecture].results.developmentCache.cdHash = cache->cdHashString();
-		}
-		else {
-			_manifest.configurations[config].architectures[architecture].results.productionCache.cdHash = cache->cdHashString();
-		}
-	}
-}
-
-void MultiCacheBuilder::runOnManifestConcurrently(std::function<void(const std::string configuration, const std::string architecture)> lambda)
-{
-    dispatch_group_t runGroup = dispatch_group_create();
-    for (auto& config : _manifest.configurations) {
-        for (auto& architecture : config.second.architectures) {
-            dispatch_semaphore_wait(_concurrencyLimitingSemaphore, DISPATCH_TIME_FOREVER);
-            cacheBuilderDispatchGroupAsync(runGroup, _buildQueue, [&] {
-                WarningTargets targets;
-                targets.first = &_manifest;
-                targets.second.insert(std::make_pair(config.first, architecture.first));
-                auto ctx = std::make_shared<LoggingContext>(config.first + "/" + architecture.first, targets);
-                setLoggingContext(ctx);
-                lambda(config.first, architecture.first);
-                dispatch_semaphore_signal(_concurrencyLimitingSemaphore);
-            });
+            _manifest.configuration(config).architecture(architecture).results.developmentCache.cdHash = cache->cdHashString();
+        } else {
+            _manifest.configuration(config).architecture(architecture).results.productionCache.cdHash = cache->cdHashString();
         }
-    }
-
-    dispatch_group_wait(runGroup, DISPATCH_TIME_FOREVER);
+	}
 }
 
 void MultiCacheBuilder::buildCaches(std::string masterDstRoot) {
 	if (_bniMode) {
 		std::vector<std::set<std::string>> dedupedCacheSets;
-		for (auto& config : _manifest.configurations) {
-			bool dupeFound = false;
+        _manifest.forEachConfiguration([&dedupedCacheSets, this](const std::string& configName) {
+            auto config = _manifest.configuration(configName);
+            bool dupeFound = false;
 
-			for (auto& cacheSet : dedupedCacheSets) {
-				if (config.second.equivalent(_manifest.configurations[*cacheSet.begin()])) {
-					cacheSet.insert(config.first);
-					dupeFound = true;
-					break;
-				}
-			}
+            for (auto& cacheSet : dedupedCacheSets) {
+                if (config == _manifest.configuration(*cacheSet.begin())) {
+                    cacheSet.insert(configName);
+                    dupeFound = true;
+                    break;
+                }
+            }
 
-			if (!dupeFound) {
-				std::set<std::string> temp;
-				temp.insert(config.first);
-				dedupedCacheSets.push_back(temp);
-			}
-		}
+            if (!dupeFound) {
+                std::set<std::string> temp;
+                temp.insert(configName);
+                dedupedCacheSets.push_back(temp);
+            }
+        });
 
-		for (auto& cacheSet : dedupedCacheSets) {
+        for (auto& cacheSet : dedupedCacheSets) {
 			//FIXME we may want to consider moving to hashes of UUID sets
 			std::string setName;
 
@@ -326,8 +304,8 @@ void MultiCacheBuilder::buildCaches(std::string masterDstRoot) {
 				}
 			}
 
-			for (auto& arch : _manifest.configurations[*cacheSet.begin()].architectures) {
-				dispatch_semaphore_wait(_concurrencyLimitingSemaphore, DISPATCH_TIME_FOREVER);
+            for (auto& arch : _manifest.configuration(*cacheSet.begin()).architectures) {
+                dispatch_semaphore_wait(_concurrencyLimitingSemaphore, DISPATCH_TIME_FOREVER);
                 cacheBuilderDispatchGroupAsync(_writeGroup, _buildQueue, [=] {
                     WarningTargets targets;
                     targets.first = &_manifest;
@@ -358,20 +336,22 @@ void MultiCacheBuilder::buildCaches(std::string masterDstRoot) {
 		dispatch_group_wait(_writeGroup, DISPATCH_TIME_FOREVER);
 
 #if BOM_SUPPORT
-                if ( !_skipWrites ) {
-                    for ( auto& configuration : _manifest.configurations ) {
-                                std::vector<std::string> prodBomPaths;
-				std::vector<std::string> devBomPaths;
+        if (!_skipWrites) {
+            _manifest.forEachConfiguration([this, &masterDstRoot](const std::string& configName) {
+                auto config = _manifest.configuration(configName);
+                //            for ( auto& configuration : _manifest.configurations ) {
+                std::vector<std::string> prodBomPaths;
+                std::vector<std::string> devBomPaths;
 
-				for (auto& arch : configuration.second.architectures) {
-					std::string cachePath = "dyld_shared_cache_" + arch.first;
-					prodBomPaths.push_back(cachePath);
-					cachePath += ".development";
-					devBomPaths.push_back(cachePath);
-					dispatch_group_enter(_writeGroup);
+                for (auto& arch : config.architectures) {
+                    std::string cachePath = "dyld_shared_cache_" + arch.first;
+                    prodBomPaths.push_back(cachePath);
+                    cachePath += ".development";
+                    devBomPaths.push_back(cachePath);
+                    dispatch_group_enter(_writeGroup);
                     cacheBuilderDispatchAsync(_writeQueue, [=] {
                         char buffer[MAXPATHLEN];
-                        sprintf(buffer, "%s/Boms/%s.prod.bom", masterDstRoot.c_str(), configuration.first.c_str());
+                        sprintf(buffer, "%s/Boms/%s.prod.bom", masterDstRoot.c_str(), configName.c_str());
                         BOMBom bom = BOMBomNew(buffer);
                         insertCacheDirInBom(bom);
                         for (auto& path : prodBomPaths) {
@@ -379,7 +359,7 @@ void MultiCacheBuilder::buildCaches(std::string masterDstRoot) {
                         }
                         BOMBomFree(bom);
 
-                        sprintf(buffer, "%s/Boms/%s.dev.bom", masterDstRoot.c_str(), configuration.first.c_str());
+                        sprintf(buffer, "%s/Boms/%s.dev.bom", masterDstRoot.c_str(), configName.c_str());
                         bom = BOMBomNew(buffer);
                         insertCacheDirInBom(bom);
                         for (auto& path : devBomPaths) {
@@ -387,7 +367,7 @@ void MultiCacheBuilder::buildCaches(std::string masterDstRoot) {
                         }
                         BOMBomFree(bom);
 
-                        sprintf(buffer, "%s/Boms/%s.full.bom", masterDstRoot.c_str(), configuration.first.c_str());
+                        sprintf(buffer, "%s/Boms/%s.full.bom", masterDstRoot.c_str(), configName.c_str());
                         bom = BOMBomNew(buffer);
                         insertCacheDirInBom(bom);
                         for (auto& path : prodBomPaths) {
@@ -400,32 +380,32 @@ void MultiCacheBuilder::buildCaches(std::string masterDstRoot) {
                         dispatch_group_leave(_writeGroup);
                     });
                 }
-			}
-		}
+            });
+        }
 #endif /* BOM_SUPPORT */
-        } else {
-            runOnManifestConcurrently(
-                [&](const std::string configuration, const std::string architecture) {
-                    cacheBuilderDispatchGroupAsync(_writeGroup, _buildQueue, [=] {
-                        std::set<std::string> configurations;
-                        configurations.insert( configuration );
-                        // FIXME hacky, we make implicit assumptions about dev vs non-dev and layout depending on the flags
-                        if ( _buildRoot ) {
-                            int err = mkpath_np( ( masterDstRoot + "/System/Library/Caches/com.apple.dyld/" ).c_str(), 0755 );
+    } else {
+        _manifest.runConcurrently(_buildQueue, _concurrencyLimitingSemaphore,
+            [&](const std::string configuration, const std::string architecture) {
+                cacheBuilderDispatchGroupAsync(_writeGroup, _buildQueue, [=] {
+                    std::set<std::string> configurations;
+                    configurations.insert( configuration );
+                    // FIXME hacky, we make implicit assumptions about dev vs non-dev and layout depending on the flags
+                    if ( _buildRoot ) {
+                        int err = mkpath_np( ( masterDstRoot + "/System/Library/Caches/com.apple.dyld/" ).c_str(), 0755 );
 
-                            if ( err != 0 && err != EEXIST ) {
-                                terminate( "mkpath_np fail: %d", err );
-                            }
-                            buildCache(masterDstRoot + "/System/Library/Caches/com.apple.dyld/dyld_shared_cache_" + architecture,
-                                configurations, architecture, false);
-                            buildCache(masterDstRoot + "/System/Library/Caches/com.apple.dyld/dyld_shared_cache_" + architecture + ".development",
-                                configurations, architecture, true);
-                        } else {
-                            buildCache(masterDstRoot + "/dyld_shared_cache_" + architecture, configurations, architecture, true);
+                        if ( err != 0 && err != EEXIST ) {
+                            terminate( "mkpath_np fail: %d", err );
                         }
-                    });
+                        buildCache(masterDstRoot + "/System/Library/Caches/com.apple.dyld/dyld_shared_cache_" + architecture,
+                            configurations, architecture, false);
+                        buildCache(masterDstRoot + "/System/Library/Caches/com.apple.dyld/dyld_shared_cache_" + architecture + ".development",
+                            configurations, architecture, true);
+                    } else {
+                        buildCache(masterDstRoot + "/dyld_shared_cache_" + architecture, configurations, architecture, true);
+                    }
                 });
-            dispatch_group_wait(_writeGroup, DISPATCH_TIME_FOREVER);
+            });
+        dispatch_group_wait(_writeGroup, DISPATCH_TIME_FOREVER);
 	}
 
 	int err = sync_volume_np(masterDstRoot.c_str(), SYNC_VOLUME_FULLSYNC | SYNC_VOLUME_WAIT);

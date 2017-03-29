@@ -37,6 +37,7 @@
 
 typedef void (^Notify)(bool unload, uint64_t timestamp, uint64_t machHeader, const uuid_t uuid, const char* path);
 typedef void (^NotifyExit)();
+typedef void (^NotifyMain)();
 
 
 //
@@ -48,6 +49,7 @@ struct __attribute__((visibility("hidden"))) dyld_process_info_notify_base
 											~dyld_process_info_notify_base();
 
     uint32_t&           retainCount() const { return _retainCount; }
+	void				setNotifyMain(NotifyMain notifyMain) const { _notifyMain = notifyMain; }
 
 private:
                         dyld_process_info_notify_base(dispatch_queue_t queue, Notify notify, NotifyExit notifyExit, task_t task);
@@ -61,6 +63,7 @@ private:
     dispatch_queue_t    _queue;
     Notify              _notify;
     NotifyExit          _notifyExit;
+	mutable NotifyMain	_notifyMain;
 	task_t				_targetTask;
 	dispatch_source_t	_machSource;
     uint64_t            _portAddressInTarget;
@@ -70,7 +73,7 @@ private:
 
 
 dyld_process_info_notify_base::dyld_process_info_notify_base(dispatch_queue_t queue, Notify notify, NotifyExit notifyExit, task_t task)
-    : _retainCount(1), _queue(queue), _notify(notify), _notifyExit(notifyExit), _targetTask(task), _machSource(NULL), _portAddressInTarget(0), _sendPortInTarget(0), _receivePortInMonitor(0)
+    : _retainCount(1), _queue(queue), _notify(notify), _notifyExit(notifyExit), _notifyMain(NULL), _targetTask(task), _machSource(NULL), _portAddressInTarget(0), _sendPortInTarget(0), _receivePortInMonitor(0)
 {
     dispatch_retain(_queue);
 }
@@ -188,6 +191,20 @@ void dyld_process_info_notify_base::setMachSourceOnQueue()
 				replyHeader.msgh_size        = sizeof(replyHeader);
 				mach_msg(&replyHeader, MACH_SEND_MSG | MACH_SEND_TIMEOUT, replyHeader.msgh_size, 0, MACH_PORT_NULL, 100, MACH_PORT_NULL);
 			}
+			else if ( h->msgh_id == DYLD_PROCESS_INFO_NOTIFY_MAIN_ID ) {
+				if ( _notifyMain != NULL )  {
+					_notifyMain();
+				}
+				// reply to dyld, so it can continue
+				mach_msg_header_t replyHeader;
+				replyHeader.msgh_bits        = MACH_MSGH_BITS(MACH_MSG_TYPE_COPY_SEND, MACH_MSG_TYPE_MAKE_SEND);
+				replyHeader.msgh_id          = 0;
+				replyHeader.msgh_local_port  = MACH_PORT_NULL;
+				replyHeader.msgh_remote_port = h->msgh_remote_port;
+				replyHeader.msgh_reserved    = 0;
+				replyHeader.msgh_size        = sizeof(replyHeader);
+				mach_msg(&replyHeader, MACH_SEND_MSG | MACH_SEND_TIMEOUT, replyHeader.msgh_size, 0, MACH_PORT_NULL, 100, MACH_PORT_NULL);
+			}
 			else if ( h->msgh_id == MACH_NOTIFY_PORT_DELETED ) {
 				mach_port_t deadPort = ((mach_port_deleted_notification_t *)h)->not_port;
 				//fprintf(stderr, "received message id=MACH_NOTIFY_PORT_DELETED, size=%d, deadPort=%d\n", h->msgh_size, deadPort);
@@ -290,6 +307,11 @@ dyld_process_info_notify _dyld_process_info_notify(task_t task, dispatch_queue_t
                                                    kern_return_t* kr)
 {
     return dyld_process_info_notify_base::make(task, queue, notify, notifyExit, kr);
+}
+
+void _dyld_process_info_notify_main(dyld_process_info_notify object, void (^notifyMain)())
+{
+	object->setNotifyMain(notifyMain);
 }
 
 void _dyld_process_info_notify_retain(dyld_process_info_notify object)

@@ -227,14 +227,22 @@ dyld_process_info_base* dyld_process_info_base::makeSuspended(task_t task, kern_
         if ( result != KERN_SUCCESS )
             break;
         if ( info.protection == (VM_PROT_READ|VM_PROT_EXECUTE) ) {
-            if ( mainExecutableAddress == 0 ) {
+            // read start of vm region to verify it is a mach header
+            mach_vm_size_t readSize = sizeof(mach_header_64);
+            mach_header_64 mhBuffer;
+            if ( mach_vm_read_overwrite(task, address, sizeof(mach_header_64), (vm_address_t)&mhBuffer, &readSize) != KERN_SUCCESS )
+                continue;
+            if ( (mhBuffer.magic != MH_MAGIC) && (mhBuffer.magic != MH_MAGIC_64) )
+                continue;
+            // now know the region is the start of a mach-o file
+            if ( mhBuffer.filetype == MH_EXECUTE ) {
                 mainExecutableAddress = address;
                 int len = proc_regionfilename(pid, mainExecutableAddress, mainExecutablePathBuffer, PATH_MAX);
                 if ( len != 0 )
                     mainExecutablePathBuffer[len] = '\0';
                 ++imageCount;
             }
-            else if ( dyldAddress == 0 ) {
+            else if ( mhBuffer.filetype == MH_DYLINKER ) {
                 dyldAddress = address;
                 int len = proc_regionfilename(pid, dyldAddress, dyldPathBuffer, PATH_MAX);
                 if ( len != 0 )
@@ -500,7 +508,7 @@ void dyld_process_info_base::forEachSegment(uint64_t machHeaderAddress, void (^c
 
 
 // Implementation that works with existing dyld data structures
-dyld_process_info _dyld_process_info_create(task_t task, uint64_t timestamp, kern_return_t* kr)
+static dyld_process_info _dyld_process_info_create_inner(task_t task, uint64_t timestamp, kern_return_t* kr)
 {
     if ( kr != NULL )
         *kr = KERN_SUCCESS;
@@ -588,10 +596,16 @@ dyld_process_info _dyld_process_info_create(task_t task, uint64_t timestamp, ker
     imageCount = MIN(imageCount, 8192);
 
     // read image array
+    if ( allImageInfo64.infoArray == 0 ) {
+        // dyld is in middle of updating image list, try again
+        return NULL;
+    }
     dyld_image_info_64 imageArray64[imageCount];
     if ( kern_return_t r = mach_vm_read_overwrite(task, allImageInfo64.infoArray, imageArraySize, (vm_address_t)&imageArray64, &readSize) ) {
-         if ( kr != NULL )
+        // if image array moved, try whole thing again
+        if ( kr != NULL ) {
             *kr = r;
+        }
         return  NULL;
     }
     // normalize by expanding 32-bit image_infos into 64-bit ones
@@ -607,9 +621,46 @@ dyld_process_info _dyld_process_info_create(task_t task, uint64_t timestamp, ker
     }
 
     // create object based on local copy of all image infos and image array
-    return dyld_process_info_base::make(task, allImageInfo64, imageArray64, kr);
+    dyld_process_info result = dyld_process_info_base::make(task, allImageInfo64, imageArray64, kr);
+
+    // verify nothing has changed by re-reading all_image_infos struct and checking timestamp
+    if ( result != NULL ) {
+        dyld_all_image_infos_64 allImageInfo64again;
+        readSize = task_dyld_info.all_image_info_size;
+        if ( kern_return_t r = mach_vm_read_overwrite(task, task_dyld_info.all_image_info_addr, task_dyld_info.all_image_info_size, (vm_address_t)&allImageInfo64again, &readSize) ) {
+            if ( kr != NULL )
+                *kr = r;
+            free((void*)result);
+            return  NULL;
+        }
+        uint64_t doneTimeStamp = allImageInfo64again.infoArrayChangeTimestamp;
+        if ( task_dyld_info.all_image_info_format == TASK_DYLD_ALL_IMAGE_INFO_32 ) {
+            const dyld_all_image_infos_32* allImageInfo32 = (dyld_all_image_infos_32*)&allImageInfo64again;
+            doneTimeStamp = allImageInfo32->infoArrayChangeTimestamp;
+        }
+        if ( allImageInfo64.infoArrayChangeTimestamp != doneTimeStamp ) {
+            // image list has changed since we started reading it
+            // throw out what we have and start over
+            free((void*)result);
+            result = nullptr;
+        }
+    }
+
+    return result;
 }
 
+
+dyld_process_info _dyld_process_info_create(task_t task, uint64_t timestamp, kern_return_t* kr)
+{
+    // Other process may be loading and unloading as we read its memory, which can cause a read failure
+    // <rdar://problem30067343&29567679> Retry if something fails
+    for (int i=0; i < 100; ++i) {
+        if ( dyld_process_info result = _dyld_process_info_create_inner( task,  timestamp, kr) )
+            return result;
+
+    }
+    return NULL;
+}
 
 void _dyld_process_info_get_state(dyld_process_info info, dyld_process_state_info* stateInfo)
 {

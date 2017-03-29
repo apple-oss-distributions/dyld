@@ -16,8 +16,6 @@ DYLD_VERSIONED_LIBRARY_PATH
 .br
 DYLD_PRINT_TO_FILE
 .br
-DYLD_ROOT_PATH
-.br
 DYLD_SHARED_REGION
 .br
 DYLD_INSERT_LIBRARIES
@@ -151,10 +149,6 @@ This is a path to a (writable) file. Normally, the dynamic linker writes all
 logging output (triggered by DYLD_PRINT_* settings) to file descriptor 2 
 (which is usually stderr).  But this setting causes the dynamic linker to
 write logging output to the specified file.  
-.TP
-.B DYLD_ROOT_PATH
-This is a colon separated list of directories.  The dynamic linker will prepend each of
-this directory paths to every image access until a file is found.    
 .TP
 .B DYLD_SHARED_REGION 
 This can be "use" (the default), "avoid", or "private".  Setting it to 

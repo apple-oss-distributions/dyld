@@ -40,7 +40,6 @@ struct MultiCacheBuilder {
 
 	void logStats();
 private:
-    void runOnManifestConcurrently(std::function<void(const std::string configuration, const std::string architecture)> lambda);
     void buildCache(const std::string cachePath, const std::set<std::string> configurations, const std::string architecture, bool development);
     void write_cache(std::string cachePath, const std::set<std::string>& configurations, const std::string& architecture, std::shared_ptr<SharedCache> cache, bool developmentCache);
 };

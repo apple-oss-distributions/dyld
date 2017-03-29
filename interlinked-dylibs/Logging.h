@@ -93,11 +93,11 @@ std::function<void(void)>* heapSafe(BodyFtor&& Body, std::shared_ptr<LoggingCont
             try {
                 B();
             } catch (std::string exception) {
-                WarningTargets warningTargets = context->targets();
-                for (auto& target : warningTargets.second) {
-                    warningTargets.first->configurations[target.first].architectures[target.second].results.failure = exception;
-                }
                 if (context) {
+                    WarningTargets warningTargets = context->targets();
+                    for (auto& target : warningTargets.second) {
+                        warningTargets.first->configuration(target.first).architecture(target.second).results.failure = exception;
+                    }
                     context->taint();
                 }
             } catch (...) {

@@ -517,22 +517,22 @@ static uint32_t deriveSDKVersFromDylibs(const mach_header* mh)
 	
   #if __IPHONE_OS_VERSION_MIN_REQUIRED
 	static const DylibToOSMapping foundationMapping[] = {
-		{ PACKED_VERSION(678,24,0), DYLD_IOS_VERSION_2_0 },
-		{ PACKED_VERSION(678,26,0), DYLD_IOS_VERSION_2_1 },
-		{ PACKED_VERSION(678,29,0), DYLD_IOS_VERSION_2_2 },
-		{ PACKED_VERSION(678,47,0), DYLD_IOS_VERSION_3_0 },
-		{ PACKED_VERSION(678,51,0), DYLD_IOS_VERSION_3_1 },
-		{ PACKED_VERSION(678,60,0), DYLD_IOS_VERSION_3_2 },
-		{ PACKED_VERSION(751,32,0), DYLD_IOS_VERSION_4_0 },
-		{ PACKED_VERSION(751,37,0), DYLD_IOS_VERSION_4_1 },
-		{ PACKED_VERSION(751,49,0), DYLD_IOS_VERSION_4_2 },
-		{ PACKED_VERSION(751,58,0), DYLD_IOS_VERSION_4_3 },
-		{ PACKED_VERSION(881,0,0),  DYLD_IOS_VERSION_5_0 },
-		{ PACKED_VERSION(890,1,0),  DYLD_IOS_VERSION_5_1 },
-		{ PACKED_VERSION(992,0,0),  DYLD_IOS_VERSION_6_0 },
-		{ PACKED_VERSION(993,0,0),  DYLD_IOS_VERSION_6_1 },  
-		{ PACKED_VERSION(1038,14,0),DYLD_IOS_VERSION_7_0 },
-		{ PACKED_VERSION(0,0,0),    DYLD_IOS_VERSION_7_0 }
+		{ PACKED_VERSION(678,24,0), 0x00020000 },
+		{ PACKED_VERSION(678,26,0), 0x00020100 },
+		{ PACKED_VERSION(678,29,0), 0x00020200 },
+		{ PACKED_VERSION(678,47,0), 0x00030000 },
+		{ PACKED_VERSION(678,51,0), 0x00030100 },
+		{ PACKED_VERSION(678,60,0), 0x00030200 },
+		{ PACKED_VERSION(751,32,0), 0x00040000 },
+		{ PACKED_VERSION(751,37,0), 0x00040100 },
+		{ PACKED_VERSION(751,49,0), 0x00040200 },
+		{ PACKED_VERSION(751,58,0), 0x00040300 },
+		{ PACKED_VERSION(881,0,0),  0x00050000 },
+		{ PACKED_VERSION(890,1,0),  0x00050100 },
+		{ PACKED_VERSION(992,0,0),  0x00060000 },
+		{ PACKED_VERSION(993,0,0),  0x00060100 },
+		{ PACKED_VERSION(1038,14,0),0x00070000 },
+		{ PACKED_VERSION(0,0,0),    0x00070000 }
 		// We don't need to expand this table because all recent
 		// binaries have LC_VERSION_MIN_ load command.
 	};
@@ -554,13 +554,13 @@ static uint32_t deriveSDKVersFromDylibs(const mach_header* mh)
 	// a new last entry needs to be added and the previous zero
 	// updated to the GM dylib version.
 	static const DylibToOSMapping libSystemMapping[] = {
-		{ PACKED_VERSION(88,1,3),   DYLD_MACOSX_VERSION_10_4 },
-		{ PACKED_VERSION(111,0,0),  DYLD_MACOSX_VERSION_10_5 },
-		{ PACKED_VERSION(123,0,0),  DYLD_MACOSX_VERSION_10_6 },
-		{ PACKED_VERSION(159,0,0),  DYLD_MACOSX_VERSION_10_7 },
-		{ PACKED_VERSION(169,3,0),  DYLD_MACOSX_VERSION_10_8 },
-		{ PACKED_VERSION(1197,0,0), DYLD_MACOSX_VERSION_10_9 },
-		{ PACKED_VERSION(0,0,0),    DYLD_MACOSX_VERSION_10_9 }
+		{ PACKED_VERSION(88,1,3),   0x000A0400 },
+		{ PACKED_VERSION(111,0,0),  0x000A0500 },
+		{ PACKED_VERSION(123,0,0),  0x000A0600 },
+		{ PACKED_VERSION(159,0,0),  0x000A0700 },
+		{ PACKED_VERSION(169,3,0),  0x000A0800 },
+		{ PACKED_VERSION(1197,0,0), 0x000A0900 },
+		{ PACKED_VERSION(0,0,0),    0x000A0900 }
 		// We don't need to expand this table because all recent
 		// binaries have LC_VERSION_MIN_ load command.
 	};
@@ -1605,6 +1605,16 @@ bool _dyld_get_shared_cache_uuid(uuid_t uuid)
 	if(p == NULL)
 	    _dyld_func_lookup("__dyld_get_shared_cache_uuid", (void**)&p);
 	return p(uuid);
+}
+
+const void* _dyld_get_shared_cache_range(size_t* length)
+{
+	DYLD_NO_LOCK_THIS_BLOCK;
+    static const void* (*p)(size_t*) = NULL;
+
+	if(p == NULL)
+	    _dyld_func_lookup("__dyld_get_shared_cache_range", (void**)&p);
+	return p(length);
 }
 
 

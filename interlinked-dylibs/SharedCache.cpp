@@ -52,6 +52,8 @@
 #include <unordered_map>
 #include <unordered_set>
 
+#include "MachOProxy.h"
+
 #include "OptimizerBranches.h"
 
 #include "CacheFileAbstraction.hpp"
@@ -184,18 +186,26 @@ std::string fallbackArchStringForArchString( const std::string& archStr ) {
 }
 
 SharedCache::SharedCache(Manifest& manifest,
-                         const std::string& configuration, const std::string& architecture) :
-        _manifest(manifest), _arch(archForString(architecture)),
-        _archManifest(manifest.configurations.find(configuration)->second.architectures.find(architecture)->second), _buffer(nullptr),
-        _fileSize(0), _vmSize(0), _aliasCount(0), _slideInfoFileOffset(0), _slideInfoBufferSize(0) {
+    const std::string& configuration, const std::string& architecture)
+    : _manifest(manifest)
+    , _arch(archForString(architecture))
+    , _archManifest(manifest.configuration(configuration).architecture(architecture))
+    , _buffer(nullptr)
+    , _fileSize(0)
+    , _vmSize(0)
+    , _aliasCount(0)
+    , _slideInfoFileOffset(0)
+    , _slideInfoBufferSize(0)
+{
     auto maxCacheVMSize = sharedRegionRegionSize(_arch);
 
-    for ( auto& includedDylib : _archManifest.results.dylibs ) {
-        if (includedDylib.second.included) {
+    for (auto& includedIdentifier : _archManifest.results.dylibs) {
+        if (includedIdentifier.second.included) {
             //assert(manifest.dylibs.count(includedDylib.first) > 0);
             //assert(manifest.dylibs.find(includedDylib.first)->second.proxies.count(architecture) > 0);
-            MachOProxy* proxy = _manifest.dylibProxy( includedDylib.first, architecture );
+            MachOProxy* proxy = MachOProxy::forIdentifier(includedIdentifier.first, architecture);
             assert(proxy != nullptr);
+            assert(proxy->isDylib());
             _dylibs.push_back(proxy);
         }
     }
@@ -211,9 +221,9 @@ SharedCache::SharedCache(Manifest& manifest,
         _aliasCount += dylib->installNameAliases.size();
     }
 
-    sortDylibs(_manifest.dylibOrderFile);
-    if ( !_manifest.dirtyDataOrderFile.empty() )
-        loadDirtyDataOrderFile(_manifest.dirtyDataOrderFile);
+    sortDylibs(_manifest.dylibOrderFile());
+    if (!_manifest.dirtyDataOrderFile().empty())
+        loadDirtyDataOrderFile(_manifest.dirtyDataOrderFile());
 
     assignSegmentAddresses();
     if ( _vmSize > maxCacheVMSize )
@@ -304,7 +314,7 @@ void SharedCache::buildForDevelopment(const std::string& cachePath) {
     std::vector<uint64_t> emptyBranchPoolOffsets;
     buildUnoptimizedCache();
     optimizeObjC(false/*not production*/);
-    if (_manifest.platform == "osx") {
+    if (_manifest.platform() == "osx") {
         optimizeLinkedit(false, false, emptyBranchPoolOffsets);
     } else {
         optimizeLinkedit(true, false, emptyBranchPoolOffsets);
@@ -324,7 +334,7 @@ void SharedCache::buildForDevelopment(const std::string& cachePath) {
     });
     _vmSize = endAddr - sharedRegionStartExecutableAddress(_arch);
 
-    if (_manifest.platform == "osx") {
+    if (_manifest.platform() == "osx") {
         appendCodeSignature("release");
     } else {
         appendCodeSignature("development");
@@ -398,12 +408,12 @@ bool SharedCache::writeCacheMapFile(const std::string& mapPath) {
 
     std::unordered_set<const void*> seenHeaders;
     forEachImage([&](const void* machHeader, const char* installName, time_t mtime,
-                                                        ino_t inode, const std::vector<MachOProxy::Segment>& segments) {
+        ino_t inode, const std::vector<MachOProxySegment>& segments) {
         if ( !seenHeaders.count(machHeader) ) {
             seenHeaders.insert(machHeader);
 
             fprintf(fmap, "%s\n", installName);
-            for (const MachOProxy::Segment& seg : segments) {
+            for (const auto& seg : segments) {
                 uint64_t vmAddr = 0;
                 for (int i=0; i < regionSizes.size(); ++i) {
                     if ( (seg.fileOffset >= regionFileOffsets[i]) && (seg.fileOffset < (regionFileOffsets[i]+regionSizes[i])) ) {
@@ -415,15 +425,14 @@ bool SharedCache::writeCacheMapFile(const std::string& mapPath) {
         }
     });
 
-
     ::fclose(fmap);
     return true;
 }
 
 template <typename P>
-std::vector<MachOProxy::Segment> getSegments(const void* cacheBuffer, const void* machHeader)
+std::vector<MachOProxySegment> getSegments(const void* cacheBuffer, const void* machHeader)
 {
-    std::vector<MachOProxy::Segment> result;
+    std::vector<MachOProxySegment> result;
     macho_header<P>* mh = (macho_header<P>*)machHeader;
     const uint32_t cmd_count = mh->ncmds();
     const macho_load_command<P>* cmd = (macho_load_command<P>*)((uint8_t*)mh + sizeof(macho_header<P>));
@@ -431,9 +440,11 @@ std::vector<MachOProxy::Segment> getSegments(const void* cacheBuffer, const void
         if ( cmd->cmd() != macho_segment_command<P>::CMD )
             continue;
         macho_segment_command<P>* segCmd = (macho_segment_command<P>*)cmd;
-        MachOProxy::Segment seg;
+        MachOProxySegment seg;
+        seg.name        = segCmd->segname();
         seg.name        = segCmd->segname();
         seg.size        = segCmd->vmsize();
+        seg.vmaddr        = segCmd->vmaddr();
         seg.diskSize    = (uint32_t)segCmd->filesize();
         seg.fileOffset  = (uint32_t)segCmd->fileoff();
         seg.protection  = segCmd->initprot();
@@ -783,8 +794,14 @@ void SharedCache::assignSegmentAddresses()
     uint64_t endReadOnlyAddress = align(addr, sharedRegionRegionAlignment(_arch));
     _readOnlyRegion.size = endReadOnlyAddress - _readOnlyRegion.address;
     _fileSize = _readOnlyRegion.fileOffset + _readOnlyRegion.size;
+
+    // FIXME: Confirm these numbers for all platform/arch combos
     // assume LINKEDIT optimzation reduces LINKEDITs to %40 of original size
-    _vmSize = _readOnlyRegion.address+(_readOnlyRegion.size * 2/5) - _textRegion.address;
+    if (_manifest.platform() == "osx") {
+        _vmSize = _readOnlyRegion.address + (_readOnlyRegion.size * 9 / 10) - _textRegion.address;
+    } else {
+        _vmSize = _readOnlyRegion.address + (_readOnlyRegion.size * 2 / 5) - _textRegion.address;
+    }
 }
 
 uint64_t SharedCache::pathHash(const char* path)
@@ -1329,7 +1346,7 @@ void SharedCache::writeCacheHeader(void)
     for (auto& dylib : _dylibs) {
         auto textSeg = _segmentMap[dylib][0];
         images->set_address(textSeg.address);
-        if (_manifest.platform == "osx") {
+        if (_manifest.platform() == "osx") {
             images->set_modTime(dylib->lastModTime);
             images->set_inode(dylib->inode);
         } else {
@@ -1345,7 +1362,7 @@ void SharedCache::writeCacheHeader(void)
         if (!dylib->installNameAliases.empty()) {
             for (const std::string& alias : dylib->installNameAliases) {
                 images->set_address(_segmentMap[dylib][0].address);
-                if (_manifest.platform == "osx") {
+                if (_manifest.platform() == "osx") {
                     images->set_modTime(dylib->lastModTime);
                     images->set_inode(dylib->inode);
                 } else {
@@ -1368,9 +1385,9 @@ void SharedCache::writeCacheHeader(void)
 
     // write text image array and image names pool at same time
     for (auto& dylib : _dylibs) {
-        textImages->set_uuid(dylib->uuid);
+        textImages->set_uuid(dylib->uuid.get());
         textImages->set_loadAddress(_segmentMap[dylib][0].address);
-        textImages->set_textSegmentSize((uint32_t)dylib->segments[0].size);
+        textImages->set_textSegmentSize((uint32_t)_segmentMap[dylib].front().cacheSegSize);
         textImages->set_pathOffset(stringOffset);
         ::strcpy((char*)&buffer[stringOffset], dylib->installName.c_str());
         stringOffset += dylib->installName.size()+1;
@@ -1403,34 +1420,19 @@ void SharedCache::rebaseAll(void)
 
 void SharedCache::bindAll(void)
 {
-    std::unordered_map<std::string, void*> dylibPathToMachHeader;
-    for (auto& dylib : _dylibs) {
-        void* mh = (uint8_t*)_buffer.get() + _segmentMap[dylib][0].cacheFileOffset;
-        dylibPathToMachHeader[dylib->installName] = mh;
-        for (const std::string& path : dylib->installNameAliases) {
-            if (path != dylib->installName) {
-                dylibPathToMachHeader[path] = mh;
-            }
-        }
-    }
-
-    bindAllImagesInCache(dylibPathToMachHeader, _pointersForASLR);
+    bindAllImagesInCache(_dylibs, _segmentMap, _pointersForASLR);
 }
 
 void SharedCache::writeCacheSegments(void)
 {
     uint8_t* cacheBytes = (uint8_t*)_buffer.get();
     for (auto& dylib : _dylibs) {
-        struct stat stat_buf;
-        const uint8_t* srcDylib;
-        bool rootless;
+        const uint8_t* srcDylib = dylib->getBuffer();
 
-        std::tie(srcDylib, stat_buf, rootless) = fileCache.cacheLoad(dylib->path);
         for (auto& seg : _segmentMap[dylib]) {
-            uint32_t segFileOffset = dylib->fatFileOffset + seg.base->fileOffset;
             uint64_t copySize = std::min(seg.cacheSegSize, (uint64_t)seg.base->diskSize);
             verboseLog("copy segment %12s (0x%08llX bytes) to %p (logical addr 0x%llX) for %s", seg.base->name.c_str(), copySize, &cacheBytes[seg.cacheFileOffset], seg.address, dylib->installName.c_str());
-            ::memcpy(&cacheBytes[seg.cacheFileOffset], &srcDylib[segFileOffset], copySize);
+            ::memcpy(&cacheBytes[seg.cacheFileOffset], &srcDylib[seg.base->fileOffset], copySize);
         }
     }
 }
@@ -1443,7 +1445,7 @@ void SharedCache::appendCodeSignature(const std::string& suffix)
     uint8_t  dscHashType     = CS_HASHTYPE_SHA1;
     uint8_t  dscHashSize     = CS_HASH_SIZE_SHA1;
     uint32_t dscDigestFormat = kCCDigestSHA1;
-    if ( _manifest.platform == "osx" ) {
+    if (_manifest.platform() == "osx") {
         dscHashType     = CS_HASHTYPE_SHA256;
         dscHashSize     = CS_HASH_SIZE_SHA256;
         dscDigestFormat = kCCDigestSHA256;

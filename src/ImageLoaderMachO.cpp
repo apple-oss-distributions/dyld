@@ -132,6 +132,12 @@ fSegmentsCount(segCount), fIsSplitSeg(false), fInSharedCache(false),
 
 }
 
+#if __MAC_OS_X_VERSION_MIN_REQUIRED
+static uintptr_t pageAlign(uintptr_t value)
+{
+	return (value + 4095) & (-4096);
+}
+#endif
 
 // determine if this mach-o file has classic or compressed LINKEDIT and number of segments it has
 void ImageLoaderMachO::sniffLoadCommands(const macho_header* mh, const char* path, bool inCache, bool* compressed,
@@ -185,12 +191,12 @@ void ImageLoaderMachO::sniffLoadCommands(const macho_header* mh, const char* pat
 				segCmd = (struct macho_segment_command*)cmd;
 #if __MAC_OS_X_VERSION_MIN_REQUIRED
 				// rdar://problem/19617624 allow unmapped segments on OSX (but not iOS)
-				if ( (segCmd->filesize > segCmd->vmsize) && (segCmd->vmsize != 0) )
+				if ( ((segCmd->filesize) > pageAlign(segCmd->vmsize)) && (segCmd->vmsize != 0) )
 #else
 				// <rdar://problem/19986776> dyld should support non-allocatable __LLVM segment
 				if ( (segCmd->filesize > segCmd->vmsize) && ((segCmd->vmsize != 0) || ((segCmd->flags & SG_NORELOC) == 0)) )
 #endif
-				    dyld::throwf("malformed mach-o image: segment load command %s filesize is larger than vmsize", segCmd->segname);
+				    dyld::throwf("malformed mach-o image: segment load command %s filesize (0x%0lX) is larger than vmsize (0x%0lX)", segCmd->segname, (long)segCmd->filesize , (long)segCmd->vmsize );
 				if ( cmd->cmdsize < sizeof(macho_segment_command) )
 					throw "malformed mach-o image: LC_SEGMENT size too small";
 				if ( cmd->cmdsize != (sizeof(macho_segment_command) + segCmd->nsects * sizeof(macho_section)) )
@@ -250,10 +256,12 @@ void ImageLoaderMachO::sniffLoadCommands(const macho_header* mh, const char* pat
 						}
 						else {
 							// allow: vmSize > fileSize && initprot != X  e.g. __DATA
-							if ( vmSize < fileSize )
+							if ( vmSize < fileSize ) {
 								dyld::throwf("malformed mach-o image: segment %s has vmsize < filesize", segCmd->segname);
-							if ( segCmd->initprot & VM_PROT_EXECUTE )
+							}
+							if ( segCmd->initprot & VM_PROT_EXECUTE ) {
 								dyld::throwf("malformed mach-o image: segment %s has vmsize != filesize and is executable", segCmd->segname);
+							}
 						}
 					}
 					if ( inCache ) {

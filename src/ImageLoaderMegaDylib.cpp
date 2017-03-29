@@ -283,6 +283,18 @@ unsigned ImageLoaderMegaDylib::findImageIndex(const LinkContext& context, const 
 			}
 		}
 	}
+
+	// handle symlinks embedded in load commands
+	char resolvedPath[PATH_MAX];
+	realpath(path, resolvedPath);
+	int realpathErrno = errno;
+	// If realpath() resolves to a path which does not exist on disk, errno is set to ENOENT
+	if ( (realpathErrno == ENOENT) || (realpathErrno == 0) ) {
+		if ( strcmp(resolvedPath, path) != 0 )
+			return findImageIndex(context, resolvedPath);
+	}
+
+
 	dyld::throwf("no cache image with name (%s)", path);
 }
 

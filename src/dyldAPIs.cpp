@@ -160,6 +160,7 @@ static struct dyld_func dyld_funcs[] = {
     {"__dyld_is_memory_immutable",						(void*)_dyld_is_memory_immutable },
     {"__dyld_objc_notify_register",						(void*)_dyld_objc_notify_register },
     {"__dyld_get_shared_cache_uuid",					(void*)_dyld_get_shared_cache_uuid },
+    {"__dyld_get_shared_cache_range",					(void*)_dyld_get_shared_cache_range },
 
 
 	// deprecated
@@ -2032,3 +2033,17 @@ bool _dyld_get_shared_cache_uuid(uuid_t uuid)
 {
 	return dyld::sharedCacheUUID(uuid);
 }
+
+const void* _dyld_get_shared_cache_range(size_t* length)
+{
+#if DYLD_SHARED_CACHE_SUPPORT
+	uintptr_t cacheEndAddr = (dyld_shared_cache_ranges.ranges[2].start + dyld_shared_cache_ranges.ranges[2].length);
+	*length = cacheEndAddr - dyld_shared_cache_ranges.ranges[0].start;
+	return (void*)(dyld_shared_cache_ranges.ranges[0].start);
+#else
+	return NULL;
+#endif
+}
+
+
+

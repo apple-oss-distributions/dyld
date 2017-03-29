@@ -1148,7 +1148,7 @@ void SharedCache::optimizeLinkedit(bool dontMapLocalSymbols, bool addAccelerator
 {
     // construct a LinkeditOptimizer for each image
     std::vector<LinkeditOptimizer<P>*> optimizers;
-    forEachImage([&](const void* mh, const char*, time_t, ino_t, const std::vector<MachOProxy::Segment>&) {
+    forEachImage([&](const void* mh, const char*, time_t, ino_t, const std::vector<MachOProxySegment>&) {
         optimizers.push_back(new LinkeditOptimizer<P>(_buffer.get(), (macho_header<P>*)mh));
     });
     // add optimizer for each branch pool

@@ -184,50 +184,12 @@ extern const struct mach_header* dyld_image_header_containing_address(const void
 
 
 // Convienence constants for return values from dyld_get_sdk_version() and friends.
-#define DYLD_MACOSX_VERSION_10_4		0x000A0400
-#define DYLD_MACOSX_VERSION_10_5		0x000A0500
-#define DYLD_MACOSX_VERSION_10_6		0x000A0600
-#define DYLD_MACOSX_VERSION_10_7		0x000A0700
-#define DYLD_MACOSX_VERSION_10_8		0x000A0800
-#define DYLD_MACOSX_VERSION_10_9		0x000A0900
-#define DYLD_MACOSX_VERSION_10_10		0x000A0A00
-#define DYLD_MACOSX_VERSION_10_11		0x000A0B00
-#define DYLD_MACOSX_VERSION_10_12		0x000A0C00
 
-#define DYLD_IOS_VERSION_2_0		0x00020000
-#define DYLD_IOS_VERSION_2_1		0x00020100
-#define DYLD_IOS_VERSION_2_2		0x00020200
-#define DYLD_IOS_VERSION_3_0		0x00030000
-#define DYLD_IOS_VERSION_3_1		0x00030100
-#define DYLD_IOS_VERSION_3_2		0x00030200
-#define DYLD_IOS_VERSION_4_0		0x00040000
-#define DYLD_IOS_VERSION_4_1		0x00040100
-#define DYLD_IOS_VERSION_4_2		0x00040200
-#define DYLD_IOS_VERSION_4_3		0x00040300
-#define DYLD_IOS_VERSION_5_0		0x00050000
-#define DYLD_IOS_VERSION_5_1		0x00050100
-#define DYLD_IOS_VERSION_6_0		0x00060000
-#define DYLD_IOS_VERSION_6_1		0x00060100
-#define DYLD_IOS_VERSION_7_0		0x00070000
-#define DYLD_IOS_VERSION_7_1		0x00070100
-#define DYLD_IOS_VERSION_8_0		0x00080000
-#define DYLD_IOS_VERSION_8_1		0x00080100
-#define DYLD_IOS_VERSION_8_2		0x00080200
-#define DYLD_IOS_VERSION_8_3		0x00080300
-#define DYLD_IOS_VERSION_8_4		0x00080400
-#define DYLD_IOS_VERSION_9_0		0x00090000
-#define DYLD_IOS_VERSION_9_1		0x00090100
-#define DYLD_IOS_VERSION_9_2		0x00090200
-#define DYLD_IOS_VERSION_9_3		0x00090300
-#define DYLD_IOS_VERSION_10_0		0x000A0000
+//@MAC_VERSION_DEFS@
 
+//@IOS_VERSION_DEFS@
 
-#define DYLD_WATCHOS_VERSION_1_0	0x00010000
-#define DYLD_WATCHOS_VERSION_2_0	0x00020000
-#define DYLD_WATCHOS_VERSION_2_1	0x00020100
-#define DYLD_WATCHOS_VERSION_2_2	0x00020200
-#define DYLD_WATCHOS_VERSION_3_0	0x00030000
-
+//@WATCHOS_VERSION_DEFS@
 
 
 //
@@ -386,6 +348,15 @@ extern bool _dyld_get_image_uuid(const struct mach_header* mh, uuid_t uuid);
 // Exists in Mac OS X 10.12 and later
 // Exists in iOS 10.0 and later
 extern bool _dyld_get_shared_cache_uuid(uuid_t uuid);
+
+
+//
+// Returns the start address of the dyld cache in the process and sets length to the size of the cache.
+// Returns NULL if the process is not using a dyld shared cache
+//
+// Exists in Mac OS X 10.13 and later
+// Exists in iOS 11.0 and later
+extern const void* _dyld_get_shared_cache_range(size_t* length);
 
 
 

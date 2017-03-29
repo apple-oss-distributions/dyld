@@ -61,10 +61,12 @@
 
 #include <Bom/Bom.h>
 
-#include "Manifest.h"
+#include "mega-dylib-utils.h"
+
 #include "MultiCacheBuilder.h"
 
-#include "mega-dylib-utils.h"
+#include "MachOProxy.h"
+#include "Manifest.h"
 #include "Logging.h"
 
 #if !__has_feature(objc_arc)
@@ -185,6 +187,15 @@ bool writeRootList( const std::string &dstRoot, const std::set<std::string> &roo
 	return true;
 }
 
+std::string realPath(const std::string& path) {
+    char resolvedPath[PATH_MAX];
+    if (realpath( path.c_str(), &resolvedPath[0]) != nullptr)  {
+        return resolvedPath;
+    } else {
+        return "";
+    }
+}
+
 std::set<std::string> cachePaths;
 
 BOMCopierCopyOperation filteredCopy(BOMCopier copier, const char *path, BOMFSObjType type, off_t size) {
@@ -198,7 +209,6 @@ BOMCopierCopyOperation filteredCopy(BOMCopier copier, const char *path, BOMFSObj
 int main (int argc, const char * argv[]) {
 	@autoreleasepool {
 		std::set<std::string>    roots;
-		std::vector<std::string> inputRoots;
 		std::string              dylibCacheDir;
 		std::string              release;
 		bool                     emitDevCaches = true;
@@ -223,13 +233,12 @@ int main (int argc, const char * argv[]) {
 				} else if (strcmp(arg, "-list_configs") == 0) {
 					listConfigs = true;
 				} else if (strcmp(arg, "-root") == 0) {
-					std::string root = argv[++i];
-					inputRoots.push_back(root);
+					std::string root = realPath(argv[++i]);
 					processRoot(root, roots);
 				} else if (strcmp(arg, "-copy_roots") == 0) {
 					copyRoots = true;
 				} else if (strcmp(arg, "-dylib_cache") == 0) {
-					dylibCacheDir = argv[++i];
+					dylibCacheDir = realPath(argv[++i]);
 				} else if (strcmp(arg, "-no_development_cache") == 0) {
 					emitDevCaches = false;
 				} else if (strcmp(arg, "-no_overflow_dylibs") == 0) {
@@ -239,11 +248,11 @@ int main (int argc, const char * argv[]) {
 				} else if (strcmp(arg, "-overflow_dylibs") == 0) {
 					emitElidedDylibs = true;
 				} else if (strcmp(arg, "-dst_root") == 0) {
-					dstRoot = argv[++i];
+					dstRoot = realPath(argv[++i]);
 				} else if (strcmp(arg, "-release") == 0) {
 					release = argv[++i];
 				} else if (strcmp(arg, "-results") == 0) {
-					resultPath = argv[++i];
+					resultPath = realPath(argv[++i]);
 				} else {
 					//usage();
 					terminate("unknown option: %s\n", arg);
@@ -279,63 +288,50 @@ int main (int argc, const char * argv[]) {
 
 		auto manifest = Manifest(dylibCacheDir + "/Manifest.plist", roots);
 
-		if (manifest.build.empty()) {
-			terminate("No manifest found at '%s/Manifest.plist'\n", dylibCacheDir.c_str());
+        if (manifest.build().empty()) {
+            terminate("No manifest found at '%s/Manifest.plist'\n", dylibCacheDir.c_str());
 		}
-		log("Building Caches for %s", manifest.build.c_str());
+        log("Building Caches for %s", manifest.build().c_str());
 
-		if (listConfigs) {
-			for (auto& config : manifest.configurations) {
-				printf("%s\n", config.first.c_str());
-			}
-			exit(0);
-		}
-
-		std::map<std::string, Manifest::Configuration> filteredConfigs;
-
-		for (auto& config : manifest.configurations) {
-			if (config.first == configuration) {
-				filteredConfigs[config.first] = config.second;
-
-				for (auto& arch : filteredConfigs[config.first].architectures) {
-					arch.second.results = Manifest::Results();
-				}
-			}
+        if (listConfigs) {
+            manifest.forEachConfiguration([](const std::string& configName) {
+                printf("%s\n", configName.c_str());
+            });
+            exit(0);
 		}
 
-		if ( filteredConfigs.empty() ) {
-			terminate( "No config %s. Please run with -list_configs to see configurations available for this %s.\n",
-				   configuration.c_str(), manifest.build.c_str() );
-		}
+        if (!manifest.filterForConfig(configuration)) {
+            terminate("No config %s. Please run with -list_configs to see configurations available for this %s.\n",
+                configuration.c_str(), manifest.build().c_str());
+        }
+        manifest.calculateClosure(false);
+        manifest.checkLinks();
 
-		manifest.configurations = filteredConfigs;
-		manifest.calculateClosure(false);
+        // FIXME: Plumb through no_development
 
-		// FIXME: Plumb through no_development
+        std::shared_ptr<MultiCacheBuilder> builder = std::make_shared<MultiCacheBuilder>(manifest, false, false, true);
+        builder->buildCaches(dstRoot);
+        writeRootList(dstRoot, roots);
 
-		std::shared_ptr<MultiCacheBuilder> builder = std::make_shared<MultiCacheBuilder>( manifest, false, false, true );
-		builder->buildCaches(dstRoot);
-		writeRootList(dstRoot, roots);
+        if (copyRoots) {
+            manifest.forEachConfiguration([&manifest](const std::string& configName) {
+                for (auto& arch : manifest.configuration(configName).architectures) {
+                    for (auto& dylib : arch.second.results.dylibs) {
+                        if (dylib.second.included) {
+                            MachOProxy* proxy = MachOProxy::forIdentifier(dylib.first, arch.first);
+                            cachePaths.insert(proxy->installName);
+                            for (auto& alias : proxy->installNameAliases) {
+                                cachePaths.insert(alias);
+                            }
+                        }
+                    }
+                }
+            });
 
-		if (copyRoots) {
-			for (auto& config : manifest.configurations) {
-				for (auto& arch : config.second.architectures) {
-					for (auto& dylib : arch.second.results.dylibs) {
-						if (dylib.second.included) {
-							MachOProxy *proxy = manifest.dylibProxy( dylib.first, arch.first );
-							cachePaths.insert( proxy->installName );
-							for ( auto &alias : proxy->installNameAliases ) {
-										cachePaths.insert(alias);
-							}
-						}
-					}
-				}
-			}
-
-			BOMCopier copier = BOMCopierNewWithSys(BomSys_default());
-			BOMCopierSetCopyFileStartedHandler(copier, filteredCopy);
-			for (auto& root : roots) {
-				BOMCopierCopy(copier, root.c_str(), dstRoot.c_str());
+            BOMCopier copier = BOMCopierNewWithSys(BomSys_default());
+            BOMCopierSetCopyFileStartedHandler(copier, filteredCopy);
+            for (auto& root : roots) {
+                BOMCopierCopy(copier, root.c_str(), dstRoot.c_str());
 			}
 			BOMCopierFree(copier);
 		}
@@ -381,7 +377,7 @@ int main (int argc, const char * argv[]) {
 		dumpLogAndExit();
 	}
 
-        dispatch_main();
+    dispatch_main();
 
-        return 0;
+    return 0;
 }

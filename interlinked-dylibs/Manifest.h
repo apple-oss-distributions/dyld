@@ -17,9 +17,14 @@
 #include <unordered_map>
 #include <unordered_set>
 
+#include <assert.h>
+
+struct MachOProxy;
+
+extern void terminate(const char* format, ...) __printflike(1, 2) __attribute__((noreturn));
+extern std::string toolDir();
 
 struct SharedCache;
-struct MachOProxy;
 struct Manifest;
 
 struct Manifest {
@@ -33,22 +38,16 @@ struct Manifest {
         File( MachOProxy* P ) : proxy( P ) {}
     };
 
-    struct FileSet {
-        std::map<std::string, File> dylibs;
-        std::map<std::string, File> executables;
-    };
-
     struct Anchor {
-                std::string installname;
+        ImageIdentifier identifier;
 		bool required;
-
-                Anchor( const std::string& IN ) : installname( IN ) {}
+        Anchor( const ImageIdentifier& I ) : identifier( I ) {}
     };
 
     struct SegmentInfo {
-                std::string name;
-		uint64_t startAddr;
-		uint64_t endAddr;
+        std::string name;
+        uint64_t    startAddr;
+        uint64_t    endAddr;
 	};
 
 	struct SegmentInfoHasher {
@@ -65,143 +64,189 @@ struct Manifest {
 	struct DylibInfo {
 		bool included;
 		std::string exclusionInfo;
-		uuid_t uuid;
+		UUID uuid;
+        std::string installname;
 		std::vector<SegmentInfo> segments;
 		DylibInfo(void) : included(true) {}
-		void exclude(const std::string& reason) {
-			included = false;
-			exclusionInfo = reason;
-		}
 	};
 
 	struct Results {
-            std::string failure;
-            std::map<std::string, DylibInfo> dylibs;
-            std::vector<std::string> warnings;
-                CacheInfo developmentCache;
-		CacheInfo productionCache;
-	};
+        std::string                             failure;
+        std::map<ImageIdentifier, DylibInfo>    dylibs;
+        std::vector<std::string>                warnings;
+        CacheInfo                               developmentCache;
+        CacheInfo                               productionCache;
+        DylibInfo& dylibForInstallname(const std::string& installname)
+        {
+            auto i = find_if(dylibs.begin(), dylibs.end(), [&installname](std::pair<ImageIdentifier, DylibInfo> d) { return d.second.installname == installname; });
+            assert(i != dylibs.end());
+            return i->second;
+        }
+        void exclude(MachOProxy* proxy, const std::string& reason);
+    };
 
 	struct Architecture {
 		std::vector<Anchor> anchors;
 		mutable Results results;
-		//FIXME: Gross
-		std::unordered_map<std::string, std::unordered_set<std::string>> dependents;
 
-		uint64_t hash(void) const {
-			if (!_hash) {
-				for (auto& dylib : results.dylibs) {
-					if (dylib.second.included) {
-						_hash ^= std::hash<std::string>()(dylib.first);
-						//HACK to get some of the UUID into the hash
-						_hash ^= std::hash<uint64_t>()(*(uint64_t *)(&dylib.second.uuid[0]));
-					}
-				};
-			}
+        bool operator==(const Architecture& O) const
+        {
+            for (auto& dylib : results.dylibs) {
+                if (dylib.second.included) {
+                    auto Odylib = O.results.dylibs.find(dylib.first);
+                    if (Odylib == O.results.dylibs.end()
+                        || Odylib->second.included == false
+                        || Odylib->second.uuid != dylib.second.uuid)
+                        return false;
+                }
+            }
 
-			return _hash;
-		}
+            for (const auto& Odylib : O.results.dylibs) {
+                if (Odylib.second.included) {
+                    auto dylib = results.dylibs.find(Odylib.first);
+                    if (dylib == results.dylibs.end()
+                        || dylib->second.included == false
+                        || dylib->second.uuid != Odylib.second.uuid)
+                        return false;
+                }
+            }
 
-		bool equivalent(const Architecture& O) const {
-			if (hash() != O.hash()) {
-				return false;
-			}
-			for (auto& dylib : results.dylibs) {
-				if (dylib.second.included) {
-					auto Odylib = O.results.dylibs.find(dylib.first);
-					if (Odylib == O.results.dylibs.end()
-						|| Odylib->second.included == false
-						|| memcmp(&Odylib->second.uuid[0], &dylib.second.uuid[0], sizeof(uuid_t)) != 0)
-					return false;
-				}
-			}
-			//Iterate over O.results to make sure we included all the same things
-			for (auto Odylib : O.results.dylibs) {
-				if (Odylib.second.included) {
-					auto dylib = results.dylibs.find(Odylib.first);
-					if (dylib == results.dylibs.end()
-						|| dylib->second.included == false)
-						return false;
-				}
-			}
-			return true;
-		}
-	private:
-		mutable uint64_t _hash = 0;
-	};
+            return true;
+        }
+
+        bool operator!=(const Architecture& other) const { return !(*this == other); }
+    };
 
 	struct Configuration {
-            std::string platformName;
-            std::string metabomTag;
-            std::set<std::string> metabomExcludeTags;
-            std::set<std::string> metabomRestrictTags;
-            std::set<std::string> restrictedInstallnames;
-            std::map<std::string, Architecture> architectures;
+        std::string platformName;
+        std::string metabomTag;
+        std::set<std::string> metabomExcludeTags;
+        std::set<std::string> metabomRestrictTags;
+        std::set<std::string> restrictedInstallnames;
+        std::map<std::string, Architecture> architectures;
 
-            uint64_t hash( void ) const {
-                        if (!_hash) {
-				_hash ^= std::hash<size_t>()(architectures.size());
-				// We want the preliminary info here to make dedupe decisions
-				for (auto& arch : architectures) {
-					_hash ^= arch.second.hash();
-				};
-			}
-			return _hash;
-		}
+        bool operator==(const Configuration& O) const
+        {
+            return architectures == O.architectures;
+        }
 
-		//Used for dedupe
-		bool equivalent(const Configuration& O) const {
-			if (hash() != O.hash())
-				return false;
-			for (const auto& arch : architectures) {
-				if (O.architectures.count(arch.first) == 0)
-					return false;
-				if (!arch.second.equivalent(O.architectures.find(arch.first)->second))
-					return false;
-			}
+        bool operator!=(const Configuration& other) const { return !(*this == other); }
 
-			return true;
-		}
-	private:
-		mutable uint64_t _hash = 0;
+        const Architecture& architecture(const std::string& architecture) const
+        {
+            assert(architectures.find(architecture) != architectures.end());
+            return architectures.find(architecture)->second;
+        }
+
+        void forEachArchitecture(std::function<void(const std::string& archName)> lambda)
+        {
+            for (const auto& architecutre : architectures) {
+                lambda(architecutre.first);
+            }
+        }
 	};
 
-        std::map<std::string, FileSet> architectureFiles;
-        std::map<std::string, Project> projects;
-        std::map<std::string, Configuration> configurations;
-        std::string dylibOrderFile;
-        std::string dirtyDataOrderFile;
-        std::string metabomFile;
-        std::string build;
-        // FIXME every needs to adopt platform string for v5
-        std::string platform;
-        uint32_t manifest_version;
-        bool normalized;
+    const std::map<std::string, Project>& projects()
+    {
+        return _projects;
+    }
 
-        Manifest( void ) {}
+    const Configuration& configuration(const std::string& configuration) const
+    {
+        assert(_configurations.find(configuration) != _configurations.end());
+        return _configurations.find(configuration)->second;
+    }
+
+    void forEachConfiguration(std::function<void(const std::string& configName)> lambda)
+    {
+        for (const auto& configuration : _configurations) {
+            lambda(configuration.first);
+        }
+    }
+
+    void addProjectSource(const std::string& project, const std::string& source, bool first = false)
+    {
+        auto& sources = _projects[project].sources;
+        if (std::find(sources.begin(), sources.end(), source) == sources.end()) {
+            if (first) {
+                sources.insert(sources.begin(), source);
+            } else {
+                sources.push_back(source);
+            }
+        }
+    }
+
+    const std::string projectPath(const std::string& projectName)
+    {
+        auto project = _projects.find(projectName);
+        if (project == _projects.end())
+            return "";
+        if (project->second.sources.size() == 0)
+            return "";
+        return project->second.sources[0];
+    }
+
+    
+    const bool empty(void) {
+        for (const auto& configuration : _configurations) {
+            if (configuration.second.architectures.size() != 0)
+                return false;
+        }
+        return true;
+    }
+    
+    const std::string dylibOrderFile() const { return _dylibOrderFile; };
+    void setDylibOrderFile(const std::string& dylibOrderFile) { _dylibOrderFile = dylibOrderFile; };
+
+    const std::string dirtyDataOrderFile() const { return  _dirtyDataOrderFile; };
+    void setDirtyDataOrderFile(const std::string& dirtyDataOrderFile) { _dirtyDataOrderFile = dirtyDataOrderFile; };
+
+    const std::string metabomFile() const { return _metabomFile; };
+    void setMetabomFile(const std::string& metabomFile) { _metabomFile = metabomFile; };
+
+    const std::string platform() const { return _platform; };
+    void setPlatform(const std::string& platform) { _platform = platform; };
+
+    const std::string& build() const { return _build; };
+    void setBuild(const std::string& build) { _build = build; };
+    const uint32_t                   version() const { return _manifestVersion; };
+    void setVersion(const uint32_t manifestVersion) { _manifestVersion = manifestVersion; };
+    bool                           normalized;
+
+    Manifest(void) {}
+    Manifest(const std::set<std::string>& archs, const std::string& overlayPath, const std::string& rootPath, const std::set<std::string>& paths);
 #if BOM_SUPPORT
-        Manifest( const std::string& path );
-        Manifest( const std::string& path, const std::set<std::string>& overlays );
+    Manifest(const std::string& path);
+    Manifest(const std::string& path, const std::set<std::string>& overlays);
 #endif
-        void write( const std::string& path );
-        void canonicalize( void );
-        void calculateClosure( bool enforeceRootless );
-		void pruneClosure();
-        bool sameContentsAsCacheAtPath( const std::string& configuration, const std::string& architecture,
-                                        const std::string& path ) const;
-        MachOProxy* dylibProxy( const std::string& installname, const std::string& arch );
-        MachOProxy* removeLargestLeafDylib( const std::string& configuration, const std::string& architecture );
+    void write(const std::string& path);
+    void canonicalize(void);
+    void calculateClosure(bool enforeceRootless);
+    bool sameContentsAsCacheAtPath(const std::string& configuration, const std::string& architecture,
+        const std::string& path) const;
+    void remove(const std::string& config, const std::string& arch);
+    MachOProxy* removeLargestLeafDylib(const std::string& configuration, const std::string& architecture);
+    bool checkLinks();
+    void runConcurrently(dispatch_queue_t queue, dispatch_semaphore_t concurrencyLimitingSemaphore, std::function<void(const std::string configuration, const std::string architecture)> lambda);
+    bool filterForConfig(const std::string& configName);
 
 private:
- void removeDylib( MachOProxy* proxy, const std::string& reason, const std::string& configuration, const std::string& architecture,
-                   std::unordered_set<std::string>& processedInstallnames );
- File* dylibForInstallName( const std::string& installname, const std::string& arch );
- void calculateClosure( const std::string& configuration, const std::string& architecture);
- void pruneClosure(const std::string& configuration, const std::string& architecture);
- void canonicalizeDylib( const std::string& installname );
- template <typename P>
- void canonicalizeDylib( const std::string& installname, const uint8_t* p );
- void addImplicitAliases( void );
+    uint32_t    _manifestVersion;
+    std::string _build;
+    std::string _dylibOrderFile;
+    std::string _dirtyDataOrderFile;
+    std::string _metabomFile;
+    std::string _platform;
+    std::map<std::string, Project>       _projects;
+    std::map<std::string, Configuration> _configurations;
+    void removeDylib(MachOProxy* proxy, const std::string& reason, const std::string& configuration, const std::string& architecture,
+        std::unordered_set<ImageIdentifier>& processedIdentifiers);
+    void calculateClosure(const std::string& configuration, const std::string& architecture);
+    void canonicalizeDylib(const std::string& installname);
+    template <typename P>
+    void canonicalizeDylib(const std::string& installname, const uint8_t* p);
+    void        addImplicitAliases(void);
+    MachOProxy* dylibProxy(const std::string& installname, const std::string& arch);
 };
 
 

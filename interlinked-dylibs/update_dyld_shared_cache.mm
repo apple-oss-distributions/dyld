@@ -54,12 +54,11 @@ extern "C" {
 #include <iostream>
 #include <fstream>
 
-#include "MachOProxy.h"
-#include "manifest.h"
 #include "mega-dylib-utils.h"
+#include "MultiCacheBuilder.h"
+#include "MachOProxy.h"
+#include "Manifest.h"
 #include "Logging.h"
-
-#import "MultiCacheBuilder.h"
 
 #if !__has_feature(objc_arc)
 #error The use of libdispatch in this files requires it to be compiled with ARC in order to avoid leaks
@@ -202,75 +201,6 @@ bool improvePath(const char* volumeRootPath, const std::vector<const char*>& ove
 	return tryPath("", path, foundPath, aliases);
 }
 
-std::string fileExists( const std::string& path ) {
-    const uint8_t* p = (uint8_t*)( -1 );
-    struct stat stat_buf;
-	bool rootless;
-
-    std::tie( p, stat_buf, rootless ) = fileCache.cacheLoad( path );
-    if ( p != (uint8_t*)( -1 ) ) {
-        return normalize_absolute_file_path( path );
-    }
-
-    return "";
-}
-
-void populateManifest(Manifest& manifest, std::set<std::string> archs, const std::string& overlayPath,
-                      const std::string& rootPath, const std::set<std::string>& paths) {
-	for ( const auto& arch : archs ) {
-		auto fallback = fallbackArchStringForArchString(arch);
-		std::set<std::string> allArchs = archs;
-		std::set<std::string> processedPaths;
-		std::set<std::string> unprocessedPaths = paths;
-		std::set<std::string> pathsToProcess;
-		std::set_difference( unprocessedPaths.begin(), unprocessedPaths.end(), processedPaths.begin(), processedPaths.end(),
-							std::inserter( pathsToProcess, pathsToProcess.begin() ) );
-		while ( !pathsToProcess.empty() ) {
-            for (const std::string path : pathsToProcess) {
-                processedPaths.insert(path);
-                std::string fullPath;
-                if ( rootPath != "/" ) {
-                    // with -root, only look in the root path volume
-                    fullPath = fileExists(rootPath + path);
-                }
-                else {
-                    // with -overlay, look first in overlay dir
-                    if ( !overlayPath.empty() )
-                        fullPath = fileExists(overlayPath + path);
-                    // if not in overlay, look in boot volume
-                    if ( fullPath.empty() )
-                        fullPath = fileExists(path);
-                }
-				if ( fullPath.empty() )
-					continue;
-				auto proxies = MachOProxy::findDylibInfo(fullPath, true, true);
-				auto proxy = proxies.find(arch);
-				if (proxy == proxies.end())
-					proxy = proxies.find(fallback);
-				if (proxy == proxies.end())
-					continue;
-				
-				for ( const auto& dependency : proxy->second->dependencies ) {
-					unprocessedPaths.insert( dependency );
-				}
-				
-				if ( proxy->second->installName.empty() ) {
-					continue;
-				}
-				
-				proxy->second->addAlias( path );
-                manifest.architectureFiles[arch].dylibs.insert(std::make_pair(proxy->second->installName,
-                                                                              Manifest::File(proxy->second)));
-                manifest.configurations["localhost"].architectures[arch].anchors.push_back( proxy->second->installName );
-			}
-			
-			pathsToProcess.clear();
-			std::set_difference( unprocessedPaths.begin(), unprocessedPaths.end(), processedPaths.begin(), processedPaths.end(),
-								std::inserter( pathsToProcess, pathsToProcess.begin() ) );
-		}
-	}
-}
-
 static bool runningOnHaswell()
 {
     // check system is capable of running x86_64h code
@@ -397,39 +327,37 @@ int main(int argc, const char* argv[])
         terminate("mkpath_np fail: %d", err);
     }
 
-	Manifest manifest;
+    std::set<std::string> paths;
 
-        std::set<std::string> paths;
-
-        if ( !dylibListFile.empty() ) {
-            if ( !parsePathsFile( dylibListFile, paths ) ) {
-                terminate( "could not build intiial paths\n" );
-            }
-        } else if ( !buildInitialPaths( rootPath, overlayPath, paths ) ) {
+    if ( !dylibListFile.empty() ) {
+        if ( !parsePathsFile( dylibListFile, paths ) ) {
             terminate( "could not build intiial paths\n" );
         }
+    } else if ( !buildInitialPaths( rootPath, overlayPath, paths ) ) {
+        terminate( "could not build intiial paths\n" );
+    }
 
-        manifest.platform = platform;
-        populateManifest( manifest, archStrs, overlayPath, rootPath, paths );
+    Manifest manifest(archStrs, overlayPath, rootPath, paths);
 
-        // If the path we are writing to is trusted then our sources need to be trusted
-        // <rdar://problem/21166835> Can't update the update_dyld_shared_cache on a non-boot volume
-        bool requireDylibsBeRootlessProtected = isProtectedBySIP(cacheDir);
-        manifest.calculateClosure( requireDylibsBeRootlessProtected );
-        manifest.pruneClosure();
+    manifest.setPlatform(platform);
+
+    // If the path we are writing to is trusted then our sources need to be trusted
+    // <rdar://problem/21166835> Can't update the update_dyld_shared_cache on a non-boot volume
+    bool requireDylibsBeRootlessProtected = isProtectedBySIP(cacheDir);
+    manifest.calculateClosure( requireDylibsBeRootlessProtected );
 
     for (const std::string& archStr : archStrs) {
         std::string cachePath = cacheDir + "/dyld_shared_cache_" + archStr;
-        if ( manifest.sameContentsAsCacheAtPath("localhost", archStr, cachePath) && !force ) {
-            manifest.configurations["localhost"].architectures.erase(archStr);
+        if (!force && manifest.sameContentsAsCacheAtPath("localhost", archStr, cachePath)) {
+            manifest.remove("localhost", archStr);
             verboseLog("%s is already up to date", cachePath.c_str());
         }
     }
-
-    // If caches already up to date, do nothing
-    if ( manifest.configurations["localhost"].architectures.empty() )
+    
+    if (manifest.empty()) {
         dumpLogAndExit(false);
-
+    }
+    
     // build caches
     std::shared_ptr<MultiCacheBuilder> builder = std::make_shared<MultiCacheBuilder>(manifest, false, false, false, false, requireDylibsBeRootlessProtected);
     builder->buildCaches(cacheDir);
@@ -445,4 +373,3 @@ int main(int argc, const char* argv[])
 
 	dispatch_main();
 }
-

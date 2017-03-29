@@ -109,6 +109,7 @@ struct dyld_image_info_64 {
 #define DYLD_PROCESS_INFO_NOTIFY_MAX_BUFFER_SIZE	(32*1024)
 #define DYLD_PROCESS_INFO_NOTIFY_LOAD_ID			0x1000
 #define DYLD_PROCESS_INFO_NOTIFY_UNLOAD_ID			0x2000
+#define DYLD_PROCESS_INFO_NOTIFY_MAIN_ID			0x3000
 
 
 struct dyld_process_info_image_entry {

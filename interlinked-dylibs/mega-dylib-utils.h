@@ -39,19 +39,76 @@
 #include <memory>
 #include <map>
 #include <set>
+#include <array>
 #include <vector>
 #include <string>
 #include <algorithm>
 #include <unordered_set>
 #include <unordered_map>
 
+#ifndef UUID
+#include <uuid/uuid.h>
+
+struct UUID {
+    UUID() {}
+    UUID(const UUID& other) { uuid_copy(&_bytes[0], &other._bytes[0]); }
+    UUID(const uuid_t other_uuid) { uuid_copy(&_bytes[0], other_uuid); }
+    bool operator<(const UUID& other) const { return uuid_compare(&_bytes[0], &other._bytes[0]) < 0; }
+    bool operator==(const UUID& other) const { return uuid_compare(&_bytes[0], &other._bytes[0]) == 0; }
+    bool operator!=(const UUID& other) const { return !(*this == other); }
+
+    size_t               hash() const {
+        size_t retval = 0;
+        for (auto i = 0; i < 16/sizeof(size_t); ++i) {
+            retval ^= ((size_t *)(&_bytes[0]))[i];
+        }
+        return retval;
+    }
+    const unsigned char* get() const { return &_bytes[0]; };
+private:
+    std::array<unsigned char, 16> _bytes;
+};
+
+struct ImageIdentifier {
+    ImageIdentifier() {}
+    ImageIdentifier(const UUID &U) : _uuid(U) {}
+    size_t hash() const { return _uuid.hash(); }
+    bool operator<(const ImageIdentifier& other) const { return _uuid < other._uuid; }
+    bool operator==(const ImageIdentifier& other) const { return _uuid == other._uuid; }
+    bool operator!=(const ImageIdentifier& other) const { return !(*this == other); }
+
+private:
+    UUID _uuid;
+};
+
+namespace std {
+template <>
+struct hash<UUID> {
+    size_t operator()(const UUID& x) const
+    {
+        return x.hash();
+    }
+};
+
+template <>
+struct hash<ImageIdentifier> {
+    size_t operator()(const ImageIdentifier& x) const
+    {
+        return x.hash();
+    }
+};
+}
+
+#endif
+
 #include "CacheFileAbstraction.hpp"
 
 #include "MachOFileAbstraction.hpp"
 
 #include "Manifest.h"
-#include "MachOProxy.h"
 
+struct MachOProxy;
+struct MachOProxySegment;
 struct SharedCache;
 
 struct FileCache {
@@ -60,7 +117,7 @@ struct FileCache {
     void preflightCache(const std::string& path);
     void preflightCache(const std::unordered_set<std::string> &paths);
 private:
-    void fill(const std::string& path);
+    std::tuple<uint8_t *, struct stat, bool> fill(const std::string& path);
 
     std::unordered_map<std::string, std::tuple<uint8_t *, struct stat, bool>> entries;
     dispatch_queue_t cache_queue;
@@ -85,10 +142,15 @@ std::string fallbackArchStringForArchString( const std::string& archStr );
 
 struct SharedCache {
     struct SegmentInfo {
-        SegmentInfo(const MachOProxy::Segment* seg)
-        : base(seg), address(0), cacheFileOffset(0), cacheSegSize(0) { }
+        SegmentInfo(const MachOProxySegment* seg)
+            : base(seg)
+            , address(0)
+            , cacheFileOffset(0)
+            , cacheSegSize(0)
+        {
+        }
 
-        const MachOProxy::Segment*  base;
+        const MachOProxySegment*    base;
         uint64_t                    address;
         uint64_t                    cacheFileOffset;
         uint64_t                    cacheSegSize;
@@ -121,7 +183,8 @@ struct SharedCache {
     bool writeCacheMapFile(const std::string&  mapPath);
 
     typedef std::function<void(const void* machHeader, const char* installName, time_t lastModTime, ino_t inode,
-                               const std::vector<MachOProxy::Segment>& segments)> DylibHandler;
+        const std::vector<MachOProxySegment>& segments)>
+        DylibHandler;
     // Calls lambda once per image in the cache
     void forEachImage(DylibHandler handler);
 
@@ -143,7 +206,7 @@ private:
 
     // Once all a dylib's segments are copied into a cache, this function will adjust the contents of
     // the TEXT, DATA, and LINKEDIT segments in the cache to be correct for their new addresses.
-    void bindAllImagesInCache(const std::unordered_map<std::string, void*>& dylibPathToMachHeader, std::vector<void*>& pointersForASLR);
+    void bindAllImagesInCache(const std::vector<MachOProxy*> dylibs, const std::map<const MachOProxy*, std::vector<SegmentInfo>>& segmentMap, std::vector<void*>& pointersForASLR);
 
     // After adjustImageForNewSegmentLocations() is called to rebase all segments, this function can be called to
     // bind all symbols to their new addresses
@@ -160,7 +223,7 @@ private:
     void        optimizeObjC(bool forProduction);
     void        writeSlideInfoV2(void);
 
-    void buildUnoptimizedCache();
+    void buildUnoptimizedCache(void);
     void appendCodeSignature(const std::string& suffix);
     template <typename P> void buildForDevelopment(const std::string& cachePath);
     template <typename P> void buildForProduction(const std::string& cachePath);
@@ -185,7 +248,7 @@ private:
     ArchPair _arch;
     std::vector<MachOProxy *> _dylibs;
     std::shared_ptr<void> _buffer;
-    std::unordered_map<const MachOProxy *, std::vector<SegmentInfo>>    _segmentMap;
+    std::map<const MachOProxy*, std::vector<SegmentInfo>> _segmentMap;
 
     std::string                                 archName();
 
@@ -212,7 +275,6 @@ std::string dirpath(const std::string& path);
 
 std::string toolDir();
 bool isProtectedBySIP(const std::string& path, int fd=-1);
-
 
 template <class Set1, class Set2>
 inline bool is_disjoint(const Set1& set1, const Set2& set2)
@@ -243,7 +305,6 @@ inline bool has_prefix(const std::string& str, const std::string& prefix)
 {
     return std::mismatch(prefix.begin(), prefix.end(), str.begin()).first == prefix.end();
 }
-
 
 #define NEW_CACHE_FILE_FORMAT 0
 

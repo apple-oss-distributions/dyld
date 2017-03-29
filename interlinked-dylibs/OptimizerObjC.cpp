@@ -478,7 +478,7 @@ void optimizeObjC(SharedCache& cache, std::vector<void*>& pointersForASLR, bool 
     const macho_section<P> *optPointerListSection = nullptr;
     std::vector<const macho_header<P>*> objcDylibs;
     cache.forEachImage([&](const void* machHeader, const char* installName,
-                        time_t, ino_t, const std::vector<MachOProxy::Segment>& segments) {
+        time_t, ino_t, const std::vector<MachOProxySegment>& segments) {
         const macho_header<P>* mh = (const macho_header<P>*)machHeader;
         if ( strstr(installName, "/libobjc.") != nullptr ) {
             optROSection = mh->getSection("__TEXT", "__objc_opt_ro");

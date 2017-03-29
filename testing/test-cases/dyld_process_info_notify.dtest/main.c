@@ -92,6 +92,10 @@ static bool monitor(task_t task, bool disconnectEarly, bool attachLate)
     __block bool sawlibSystem = false;
     __block bool gotTerminationNotice = false;
     __block bool gotEarlyNotice = false;
+    __block bool gotMainNotice = false;
+    __block bool gotMainNoticeBeforeAllInitialDylibs = false;
+    __block bool gotFooNoticeBeforeMain = false;
+
     __block int libFooLoadCount = 0;
     __block int libFooUnloadCount = 0;
     dispatch_semaphore_t taskDone = dispatch_semaphore_create(0);
@@ -108,6 +112,8 @@ static bool monitor(task_t task, bool disconnectEarly, bool attachLate)
                                             if ( strstr(path, "/libSystem") != NULL )
                                                 sawlibSystem = true;
                                             if ( strstr(path, "/libfoo.dylib") != NULL ) {
+                                                if ( !gotMainNotice )
+                                                    gotFooNoticeBeforeMain = true;
                                                 if ( unload )
                                                     ++libFooUnloadCount;
                                                 else
@@ -136,6 +142,14 @@ static bool monitor(task_t task, bool disconnectEarly, bool attachLate)
         return false;
     }
 
+    // register for notification that it is entrying main()
+    _dyld_process_info_notify_main(handle, ^{
+                                            //fprintf(stderr, "target entering main()\n");
+                                            gotMainNotice = true;
+                                            if ( !sawMainExecutable || !sawlibSystem )
+                                                gotMainNoticeBeforeAllInitialDylibs = true;
+                                            });
+
     // if process suspends itself, wait until it has done so
     if ( attachLate )
         wait_util_task_suspended(task);
@@ -155,6 +169,21 @@ static bool monitor(task_t task, bool disconnectEarly, bool attachLate)
 
     if ( !attachLate && !sawMainExecutable ) {
         fprintf(stderr, "did not get load notification of main executable\n");
+        return false;
+    }
+
+    if ( !gotMainNotice ) {
+        fprintf(stderr, "did not get notification of main()\n");
+        return false;
+    }
+
+    if ( gotMainNoticeBeforeAllInitialDylibs ) {
+        fprintf(stderr, "notification of main() arrived before all initial dylibs\n");
+        return false;
+    }
+
+    if ( gotFooNoticeBeforeMain ) {
+        fprintf(stderr, "notification of main() arrived after libfoo load notice\n");
         return false;
     }
 
