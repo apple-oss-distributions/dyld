@@ -18,6 +18,7 @@
 #include <mach/machine.h>
 #include <mach-o/dyld_process_info.h>
 #include <dispatch/dispatch.h>
+#include <Availability.h>
 
 
 extern char** environ;
@@ -32,10 +33,15 @@ extern char** environ;
     cpu_type_t otherArch[] = { CPU_TYPE_ARM64 };
 #endif
 
-static task_t launchTest(const char* testProgPath, const char* arg1, bool launchOtherArch, bool launchSuspended)
+struct task_and_pid {
+    pid_t pid;
+    task_t task;
+};
+
+static struct task_and_pid launchTest(const char* testProgPath, const char* arg1, bool launchOtherArch, bool launchSuspended)
 {
     //fprintf(stderr, "launchTest() launchOtherArch=%d, launchSuspended=%d, arg=%s\n", launchOtherArch, launchSuspended, arg1);
-    posix_spawnattr_t attr;
+    posix_spawnattr_t attr = 0;
     if ( posix_spawnattr_init(&attr) != 0 ) {
         printf("[FAIL] dyld_process_info_notify posix_spawnattr_init()\n");
         exit(0);
@@ -54,23 +60,29 @@ static task_t launchTest(const char* testProgPath, const char* arg1, bool launch
         }
     }
 
-    pid_t childPid;
+    struct task_and_pid child;
     const char* argv[] = { testProgPath, arg1, NULL };
-    int psResult = posix_spawn(&childPid, testProgPath, NULL, &attr, (char**)argv, environ);
+    int psResult = posix_spawn(&child.pid, testProgPath, NULL, &attr, (char**)argv, environ);
     if ( psResult != 0 ) {
         printf("[FAIL] dyld_process_info_notify posix_spawn(%s) failed, err=%d\n", testProgPath, psResult);
         exit(0);
     }
-    //printf("child pid=%d\n", childPid);
-
-    task_t childTask = 0;
-    if ( task_for_pid(mach_task_self(), childPid, &childTask) != KERN_SUCCESS ) {
+    if (posix_spawnattr_destroy(&attr) != 0) {
+        printf("[FAIL] dyld_process_info_notify posix_spawnattr_destroy()\n");
+        exit(0);
+    }
+    if ( task_for_pid(mach_task_self(), child.pid, &child.task) != KERN_SUCCESS ) {
         printf("[FAIL] dyld_process_info_notify task_for_pid()\n");
-        kill(childPid, SIGKILL);
+        (void)kill(child.pid, SIGKILL);
         exit(0);
     }
 
-    return childTask;
+    return child;
+}
+
+static void killTest(struct task_and_pid tp) {
+    int r = kill(tp.pid, SIGKILL);
+    waitpid(tp.pid, &r, 0);
 }
 
 static void wait_util_task_suspended(task_t task)
@@ -85,7 +97,7 @@ static void wait_util_task_suspended(task_t task)
 }
 
 
-static bool monitor(task_t task, bool disconnectEarly, bool attachLate)
+static bool monitor(struct task_and_pid tp, bool disconnectEarly, bool attachLate)
 {
     kern_return_t kr;
     __block bool sawMainExecutable = false;
@@ -105,7 +117,7 @@ static bool monitor(task_t task, bool disconnectEarly, bool attachLate)
     unsigned count = 0;
     dyld_process_info_notify handle;
     do {
-        handle = _dyld_process_info_notify(task, serviceQueue,
+        handle = _dyld_process_info_notify(tp.task, serviceQueue,
                                           ^(bool unload, uint64_t timestamp, uint64_t machHeader, const uuid_t uuid, const char* path) {
                                             if ( strstr(path, "/target.exe") != NULL )
                                                 sawMainExecutable = true;
@@ -142,20 +154,23 @@ static bool monitor(task_t task, bool disconnectEarly, bool attachLate)
         return false;
     }
 
-    // register for notification that it is entrying main()
-    _dyld_process_info_notify_main(handle, ^{
-                                            //fprintf(stderr, "target entering main()\n");
-                                            gotMainNotice = true;
-                                            if ( !sawMainExecutable || !sawlibSystem )
-                                                gotMainNoticeBeforeAllInitialDylibs = true;
-                                            });
-
-    // if process suspends itself, wait until it has done so
-    if ( attachLate )
-        wait_util_task_suspended(task);
+    if (!attachLate) {
+        // If the process starts suspended register for main(),
+        // otherwise skip since this test is a race between
+        // process setup and notification registration
+        _dyld_process_info_notify_main(handle, ^{
+                                                //fprintf(stderr, "target entering main()\n");
+                                                gotMainNotice = true;
+                                                if ( !sawMainExecutable || !sawlibSystem )
+                                                    gotMainNoticeBeforeAllInitialDylibs = true;
+                                                });
+    } else {
+        // if process suspends itself, wait until it has done so
+        wait_util_task_suspended(tp.task);
+    }
 
     // resume from initial suspend
-    task_resume(task);
+    kill(tp.pid, SIGCONT);
 
     // block waiting for notification that target has exited
     bool gotSignal = (dispatch_semaphore_wait(taskDone, dispatch_time(DISPATCH_TIME_NOW, 10LL * NSEC_PER_SEC)) == 0);
@@ -167,29 +182,33 @@ static bool monitor(task_t task, bool disconnectEarly, bool attachLate)
         return false;
     }
 
-    if ( !attachLate && !sawMainExecutable ) {
-        fprintf(stderr, "did not get load notification of main executable\n");
-        return false;
-    }
+    // Do not run any tests associated with startup unless the kernel suspended us
+    // before main()
+    if (!attachLate) {
+        if ( !sawMainExecutable ) {
+            fprintf(stderr, "did not get load notification of main executable\n");
+            return false;
+        }
 
-    if ( !gotMainNotice ) {
-        fprintf(stderr, "did not get notification of main()\n");
-        return false;
-    }
+        if ( !gotMainNotice ) {
+            fprintf(stderr, "did not get notification of main()\n");
+            return false;
+        }
 
-    if ( gotMainNoticeBeforeAllInitialDylibs ) {
-        fprintf(stderr, "notification of main() arrived before all initial dylibs\n");
-        return false;
-    }
+        if ( gotMainNoticeBeforeAllInitialDylibs ) {
+            fprintf(stderr, "notification of main() arrived before all initial dylibs\n");
+            return false;
+        }
 
-    if ( gotFooNoticeBeforeMain ) {
-        fprintf(stderr, "notification of main() arrived after libfoo load notice\n");
-        return false;
-    }
+        if ( gotFooNoticeBeforeMain ) {
+            fprintf(stderr, "notification of main() arrived after libfoo load notice\n");
+            return false;
+        }
 
-    if ( !attachLate && !sawlibSystem ) {
-        fprintf(stderr, "did not get load notification of libSystem\n");
-        return false;
+        if ( !sawlibSystem ) {
+            fprintf(stderr, "did not get load notification of libSystem\n");
+            return false;
+        }
     }
 
     if ( disconnectEarly ) {
@@ -216,13 +235,13 @@ static bool monitor(task_t task, bool disconnectEarly, bool attachLate)
     return true;
 }
 
-static void validateMaxNotifies(task_t task)
+static void validateMaxNotifies(struct task_and_pid tp)
 {
     dispatch_queue_t serviceQueue = dispatch_get_global_queue(DISPATCH_QUEUE_PRIORITY_HIGH, 0);
     dyld_process_info_notify handles[10];
     for (int i=0; i < 10; ++i) {
         kern_return_t kr;
-        handles[i] = _dyld_process_info_notify(task, serviceQueue,
+        handles[i] = _dyld_process_info_notify(tp.task, serviceQueue,
                                           ^(bool unload, uint64_t timestamp, uint64_t machHeader, const uuid_t uuid, const char* path) {
                                             //fprintf(stderr, "unload=%d, 0x%012llX <%02X%02X%02X%02X-%02X%02X-%02X%02X-%02X%02X-%02X%02X%02X%02X%02X%02X> %s\n",
                                             //   unload, machHeader, uuid[0],  uuid[1],  uuid[2],  uuid[3],  uuid[4],  uuid[5],  uuid[6],  uuid[7],
@@ -241,7 +260,7 @@ static void validateMaxNotifies(task_t task)
             }
             else {
                 fprintf(stderr, "_dyld_process_info_notify() returned NULL and kern_result=%d, on count=%d\n", kr, i);
-                task_terminate(task);
+                killTest(tp);
                 exit(0);
             }
         }
@@ -265,55 +284,55 @@ int main(int argc, const char* argv[])
     const char* testProgPath = argv[1];
 
     dispatch_async(dispatch_get_main_queue(), ^{
-        task_t childTask;
+        struct task_and_pid child;
 
         // test 1) launch test program suspended in same arch as this program
-        childTask = launchTest(testProgPath, "", false, true);
-        if ( ! monitor(childTask, false, false) ) {
+        child = launchTest(testProgPath, "", false, true);
+        if ( ! monitor(child, false, false) ) {
             printf("[FAIL] dyld_process_info_notify launch suspended missed some notifications\n");
-            task_terminate(childTask);
+            killTest(child);
             exit(0);
         }
-        task_terminate(childTask);
+        killTest(child);
 
         // test 2) launch test program in same arch as this program where it sleeps itself
-        childTask = launchTest(testProgPath, "suspend-in-main", false, false);
-        validateMaxNotifies(childTask);
-        if ( ! monitor(childTask, false, true) ) {
+        child = launchTest(testProgPath, "suspend-in-main", false, false);
+        validateMaxNotifies(child);
+        if ( ! monitor(child, false, true) ) {
             printf("[FAIL] dyld_process_info_notify launch suspend-in-main missed some notifications\n");
-            task_terminate(childTask);
+             killTest(child);
             exit(0);
         }
-        task_terminate(childTask);
+        killTest(child);
 
-#if !TARGET_OS_WATCH && !TARGET_OS_TV && __LP64__
+#if __MAC_OS_X_VERSION_MIN_REQUIRED
         // test 3) launch test program suspended in opposite arch as this program
-        childTask = launchTest(testProgPath, "", true, true);
-        if ( ! monitor(childTask, false, false) ) {
+        child = launchTest(testProgPath, "", true, true);
+        if ( ! monitor(child, false, false) ) {
             printf("[FAIL] dyld_process_info_notify launch suspended other arch missed some notifications\n");
-            task_terminate(childTask);
+            killTest(child);
             exit(0);
         }
-        task_terminate(childTask);
+        killTest(child);
 
         // test 4) launch test program in opposite arch as this program where it sleeps itself
-        childTask = launchTest(testProgPath, "suspend-in-main", true, false);
-        if ( ! monitor(childTask, false, true) ) {
+        child = launchTest(testProgPath, "suspend-in-main", true, false);
+        if ( ! monitor(child, false, true) ) {
             printf("[FAIL] dyld_process_info_notify launch other arch suspend-in-main missed some notifications\n");
-            task_terminate(childTask);
+            killTest(child);
             exit(0);
         }
-        task_terminate(childTask);
+        killTest(child);
 #endif
 
         // test 5) launch test program where we disconnect from it after first dlopen
-        childTask = launchTest(testProgPath, "", false, true);
-        if ( ! monitor(childTask, true, false) ) {
+        child = launchTest(testProgPath, "", false, true);
+        if ( ! monitor(child, true, false) ) {
             printf("[FAIL] dyld_process_info_notify connect/disconnect missed some notifications\n");
-            task_terminate(childTask);
+            killTest(child);
             exit(0);
         }
-        task_terminate(childTask);
+        killTest(child);
 
         printf("[PASS] dyld_process_info_notify\n");
         exit(0);

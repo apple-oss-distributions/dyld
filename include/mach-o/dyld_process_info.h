@@ -43,10 +43,11 @@ extern "C" {
 // a list of images that were just added or removed from the process.  Dyld calls this function before running
 // any initializers in the image, so the debugger will have a chance to set break points in the image.
 //
+//
 
 enum dyld_notify_mode { dyld_notify_adding=0, dyld_notify_removing=1, dyld_notify_remove_all=2 };
+// void _dyld_debugger_notification(enum dyld_notify_mode, unsigned long count, uint64_t machHeaders[]);
 
-void _dyld_debugger_notification(enum dyld_notify_mode, unsigned long count, uint64_t machHeaders[]);
 
 
 struct dyld_process_cache_info {

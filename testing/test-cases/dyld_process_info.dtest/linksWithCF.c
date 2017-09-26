@@ -1,8 +1,10 @@
+#include <signal.h>
+#include <unistd.h>
 #include <mach/mach.h>
 
 int main()
 {
-    task_suspend(mach_task_self());
+    (void)kill(getpid(), SIGSTOP);
     return 0;
 }
 

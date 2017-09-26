@@ -36,6 +36,8 @@
 #include "ImageLoader.h"
 #include "dyld.h"
 
+extern "C" 	void _dyld_debugger_notification(enum dyld_notify_mode mode, unsigned long count, uint64_t machHeaders[]);
+
 #if __IPHONE_OS_VERSION_MIN_REQUIRED
 	#define INITIAL_UUID_IMAGE_COUNT 4
 #else

@@ -30,19 +30,19 @@ static void verifybar()
 {
     Dl_info info;
     if ( dladdr(&bar, &info) == 0 ) {
-        printf("[FAIL] dladdr(&bar, xx) failed");
+        printf("[FAIL] dladdr(&bar, xx) failed\n");
         exit(0);
     }
     if ( strcmp(info.dli_sname, "bar") != 0 ) {
-        printf("[FAIL] dladdr()->dli_sname is \"%s\" instead of \"bar\"", info.dli_sname);
+        printf("[FAIL] dladdr()->dli_sname is \"%s\" instead of \"bar\"\n", info.dli_sname);
         exit(0);
     }
     if ( info.dli_saddr != &bar) {
-        printf("[FAIL] dladdr()->dli_saddr is not &bar");
+        printf("[FAIL] dladdr()->dli_saddr is not &bar\n");
         exit(0);
     }
     if ( info.dli_fbase != dyld_image_header_containing_address(&bar) ) {
-        printf("[FAIL] dladdr()->dli_fbase is not image that contains &bar");
+        printf("[FAIL] dladdr()->dli_fbase is not image that contains &bar\n");
         exit(0);
     }
 }
@@ -52,19 +52,19 @@ static void verifyfoo()
 {
     Dl_info info;
     if ( dladdr(&foo, &info) == 0 ) {
-        printf("[FAIL] dladdr(&foo, xx) failed");
+        printf("[FAIL] dladdr(&foo, xx) failed\n");
         exit(0);
     }
     if ( strcmp(info.dli_sname, "foo") != 0 ) {
-        printf("[FAIL] dladdr()->dli_sname is \"%s\" instead of \"foo\"", info.dli_sname);
+        printf("[FAIL] dladdr()->dli_sname is \"%s\" instead of \"foo\"\n", info.dli_sname);
         exit(0);
     }
     if ( info.dli_saddr != &foo) {
-        printf("[FAIL] dladdr()->dli_saddr is not &foo");
+        printf("[FAIL] dladdr()->dli_saddr is not &foo\n");
         exit(0);
     }
     if ( info.dli_fbase != dyld_image_header_containing_address(&foo) ) {
-        printf("[FAIL] dladdr()->dli_fbase is not image that contains &foo");
+        printf("[FAIL] dladdr()->dli_fbase is not image that contains &foo\n");
         exit(0);
     }
 }
@@ -74,19 +74,19 @@ static void verifyhide()
 {
     Dl_info info;
     if ( dladdr(&hide, &info) == 0 ) {
-        printf("[FAIL] dladdr(&hide, xx) failed");
+        printf("[FAIL] dladdr(&hide, xx) failed\n");
         exit(0);
     }
     if ( strcmp(info.dli_sname, "hide") != 0 ) {
-        printf("[FAIL] dladdr()->dli_sname is \"%s\" instead of \"hide\"", info.dli_sname);
+        printf("[FAIL] dladdr()->dli_sname is \"%s\" instead of \"hide\"\n", info.dli_sname);
         exit(0);
     }
     if ( info.dli_saddr != &hide) {
-        printf("[FAIL] dladdr()->dli_saddr is not &hide");
+        printf("[FAIL] dladdr()->dli_saddr is not &hide\n");
         exit(0);
     }
     if ( info.dli_fbase != dyld_image_header_containing_address(&hide) ) {
-        printf("[FAIL] dladdr()->dli_fbase is not image that contains &hide");
+        printf("[FAIL] dladdr()->dli_fbase is not image that contains &hide\n");
         exit(0);
     }
 }
@@ -96,19 +96,19 @@ static void verifymalloc()
 {
     Dl_info info;
     if ( dladdr(&malloc, &info) == 0 ) {
-        printf("[FAIL] dladdr(&malloc, xx) failed");
+        printf("[FAIL] dladdr(&malloc, xx) failed\n");
         exit(0);
     }
     if ( strcmp(info.dli_sname, "malloc") != 0 ) {
-        printf("[FAIL] dladdr()->dli_sname is \"%s\" instead of \"malloc\"", info.dli_sname);
+        printf("[FAIL] dladdr()->dli_sname is \"%s\" instead of \"malloc\"\n", info.dli_sname);
         exit(0);
     }
     if ( info.dli_saddr != &malloc) {
-        printf("[FAIL] dladdr()->dli_saddr is not &malloc");
+        printf("[FAIL] dladdr()->dli_saddr is not &malloc\n");
         exit(0);
     }
     if ( info.dli_fbase != dyld_image_header_containing_address(&malloc) ) {
-        printf("[FAIL] dladdr()->dli_fbase is not image that contains &malloc");
+        printf("[FAIL] dladdr()->dli_fbase is not image that contains &malloc\n");
         exit(0);
     }
 }

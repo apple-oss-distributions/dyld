@@ -108,6 +108,38 @@ void _ZN10__cxxabiv112__unexpectedEPFvvE()
 	_ZN4dyld4haltEPKc("dyld std::__unexpected()\n");
 }
 
+// std::__terminate() called by C++ unwinding code
+void _ZSt11__terminatePFvvE(void (*func)())
+{
+	_ZN4dyld4haltEPKc("dyld std::__terminate()\n");
+}
+
+// std::__unexpected() called by C++ unwinding code
+void _ZSt12__unexpectedPFvvE(void (*func)())
+{
+	_ZN4dyld4haltEPKc("dyld std::__unexpected()\n");
+}
+
+// terminate_handler get_terminate()
+void* _ZSt13get_terminatev()
+{
+    return NULL;
+}
+
+// unexpected_handler get_unexpected()
+void* _ZSt14get_unexpectedv()
+{
+    return NULL;
+}
+
+// new_handler get_new_handler()
+void* _ZSt15get_new_handlerv()
+{
+    return NULL;
+}
+
+
+
 // __cxxabiv1::__terminate_handler
 void* _ZN10__cxxabiv119__terminate_handlerE  = &_ZSt9terminatev;
 
@@ -425,6 +457,16 @@ void _ZN4dyld3logEPKcz(const char* format, ...) {
 	va_end(list);
 }
 
+#if __i386__
+void _ZN4dyld4vlogEPKcPc(const char* format, va_list list) {
+#else
+void _ZN4dyld4vlogEPKcP13__va_list_tag(const char* format, va_list list) {
+#endif
+	gSyscallHelpers->vlog(format, list);
+}
+
+
+
 void _ZN4dyld4warnEPKcz(const char* format, ...) {
 	va_list	list;
 	va_start(list, format);
@@ -708,6 +750,30 @@ kern_return_t	task_register_dyld_get_process_state(task_t task, dyld_kernel_proc
 	return KERN_NOT_SUPPORTED;
 }
 
+kern_return_t   task_info(task_name_t target_task, task_flavor_t flavor, task_info_t task_info_out, mach_msg_type_number_t *task_info_outCnt) {
+    if ( gSyscallHelpers->version >= 8 )
+        return gSyscallHelpers->task_info(target_task, flavor, task_info_out, task_info_outCnt);
+    return KERN_NOT_SUPPORTED;
+}
+
+kern_return_t   thread_info(thread_inspect_t target_act, thread_flavor_t flavor, thread_info_t thread_info_out, mach_msg_type_number_t *thread_info_outCnt) {
+    if ( gSyscallHelpers->version >= 8 )
+        return gSyscallHelpers->task_info(target_act, flavor, thread_info_out, thread_info_outCnt);
+    return KERN_NOT_SUPPORTED;
+}
+
+bool kdebug_is_enabled(uint32_t code) {
+    if ( gSyscallHelpers->version >= 8 )
+        return gSyscallHelpers->kdebug_is_enabled(code);
+    return false;
+}
+
+int kdebug_trace(uint32_t code, uint64_t arg1, uint64_t arg2, uint64_t arg3, uint64_t arg4) {
+    if ( gSyscallHelpers->version >= 8 )
+        return gSyscallHelpers->kdebug_trace(code, arg1, arg2, arg3, arg4);
+    return 0;
+}
+
 int* __error(void) {
 	return gSyscallHelpers->errnoAddress();
 } 
@@ -734,6 +800,21 @@ int myerrno_fallback = 0;
 	}
 #endif
 
+
+void* _NSConcreteStackBlock[32];
+void* _NSConcreteGlobalBlock[32];
+
+void _Block_object_assign()
+{
+	_ZN4dyld4haltEPKc("_Block_object_assign()");
+}
+
+void _Block_object_dispose(const void* object, int flags)
+{
+	// only support stack blocks in dyld: BLOCK_FIELD_IS_BYREF=8
+	if ( flags != 8 )
+		_ZN4dyld4haltEPKc("_Block_object_dispose()");
+}
 
 
 

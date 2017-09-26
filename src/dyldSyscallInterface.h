@@ -92,9 +92,12 @@ namespace dyld {
 		kern_return_t	(*task_get_dyld_image_infos)(task_t task, dyld_kernel_image_info_array_t *dyld_images, mach_msg_type_number_t *dyld_imagesCnt);
 		kern_return_t	(*task_register_dyld_shared_cache_image_info)(task_t task, dyld_kernel_image_info_t dyld_cache_image, boolean_t no_cache, boolean_t private_cache);
 		kern_return_t	(*task_register_dyld_set_dyld_state)(task_t task, uint8_t dyld_state);
-		kern_return_t	(*task_register_dyld_get_process_state)(task_t task, dyld_kernel_process_info_t *dyld_process_state);
-	};
-
+        kern_return_t   (*task_register_dyld_get_process_state)(task_t task, dyld_kernel_process_info_t *dyld_process_state);
+        kern_return_t   (*task_info)(task_name_t target_task, task_flavor_t flavor, task_info_t task_info_out, mach_msg_type_number_t *task_info_outCnt);
+        kern_return_t   (*thread_info)(thread_inspect_t target_act, thread_flavor_t flavor, thread_info_t thread_info_out, mach_msg_type_number_t *thread_info_outCnt);
+        bool            (*kdebug_is_enabled)(uint32_t code);
+        int             (*kdebug_trace)(uint32_t code, uint64_t arg1, uint64_t arg2, uint64_t arg3, uint64_t arg4);
+    };
 	extern const struct SyscallHelpers* gSyscallHelpers;
 
 

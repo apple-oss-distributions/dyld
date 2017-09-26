@@ -214,6 +214,9 @@ void* tlv_allocate_and_initialize_for_key(pthread_key_t key)
 		}
 		cmd = (const struct load_command*)(((char*)cmd)+cmd->cmdsize);
 	}
+    // no thread local storage in image: should never happen
+    if ( size == 0 )
+        return NULL;
 	
 	// allocate buffer and fill with template
 	void* buffer = malloc(size);
@@ -306,7 +309,7 @@ static void tlv_initialize_descriptors(const struct mach_header* mh)
 }
 
 
-void tlv_load_notification(const struct mach_header* mh, intptr_t slide)
+static void tlv_load_notification(const struct mach_header* mh, intptr_t slide)
 {
 	// This is called on all images, even those without TLVs. So we want this to be fast.
 	// The linker sets MH_HAS_TLV_DESCRIPTORS so we don't have to search images just to find the don't have TLVs.
@@ -394,7 +397,7 @@ void _tlv_atexit(TermFunc func, void* objAddr)
         pthread_setspecific(tlv_terminators_key, list);
     }
     else {
-        if ( list->allocCount == list->allocCount ) {
+        if ( list->useCount == list->allocCount ) {
             // handle resizing allocation 
             uint32_t newAllocCount = list->allocCount * 2;
             size_t newAllocSize = offsetof(struct TLVTerminatorList, entries[newAllocCount]);

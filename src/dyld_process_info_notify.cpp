@@ -35,6 +35,11 @@
 #include "dyld_images.h"
 #include "dyld_priv.h"
 
+#include "LaunchCache.h"
+#include "Loading.h"
+#include "AllImages.h"
+
+
 typedef void (^Notify)(bool unload, uint64_t timestamp, uint64_t machHeader, const uuid_t uuid, const char* path);
 typedef void (^NotifyExit)();
 typedef void (^NotifyMain)();
@@ -46,10 +51,14 @@ typedef void (^NotifyMain)();
 struct __attribute__((visibility("hidden"))) dyld_process_info_notify_base
 {
     static dyld_process_info_notify_base* make(task_t task, dispatch_queue_t queue, Notify notify, NotifyExit notifyExit, kern_return_t* kr);
-											~dyld_process_info_notify_base();
+    										~dyld_process_info_notify_base();
 
     uint32_t&           retainCount() const { return _retainCount; }
 	void				setNotifyMain(NotifyMain notifyMain) const { _notifyMain = notifyMain; }
+
+    // override new and delete so we don't need to link with libc++
+    static void*        operator new(size_t sz) { return malloc(sz); }
+    static void         operator delete(void* p) { return free(p); }
 
 private:
                         dyld_process_info_notify_base(dispatch_queue_t queue, Notify notify, NotifyExit notifyExit, task_t task);
@@ -57,7 +66,6 @@ private:
     kern_return_t       pokeSendPortIntoTarget();
 	kern_return_t		unpokeSendPortInTarget();
     void				setMachSourceOnQueue();
-    void*               operator new (size_t, void* buf) { return buf; }
 
 	mutable uint32_t	_retainCount;
     dispatch_queue_t    _queue;
@@ -101,8 +109,7 @@ dyld_process_info_notify_base::~dyld_process_info_notify_base()
 
 dyld_process_info_notify_base* dyld_process_info_notify_base::make(task_t task, dispatch_queue_t queue, Notify notify, NotifyExit notifyExit, kern_return_t* kr)
 {
-    void* storage = malloc(sizeof(dyld_process_info_notify_base));
-    dyld_process_info_notify_base* obj = new (storage) dyld_process_info_notify_base(queue, notify, notifyExit, task);
+    dyld_process_info_notify_base* obj = new dyld_process_info_notify_base(queue, notify, notifyExit, task);
 
     if ( kern_return_t r = obj->makePorts() ) {
 		if ( kr != NULL )
@@ -123,7 +130,7 @@ dyld_process_info_notify_base* dyld_process_info_notify_base::make(task_t task, 
     return obj;
 
 fail:
-    free(obj);
+    delete obj;
     return NULL;
 }
 
@@ -322,11 +329,178 @@ void _dyld_process_info_notify_retain(dyld_process_info_notify object)
 void _dyld_process_info_notify_release(dyld_process_info_notify object)
 {
     object->retainCount() -= 1;
-    if ( object->retainCount() == 0 ) {
-		object->~dyld_process_info_notify_base();
-		free((void*)object);
-	}
+    if ( object->retainCount() == 0 )
+        delete object;
 }
+
+
+
+
+
+
+
+namespace dyld3 {
+
+
+static mach_port_t sNotifyReplyPorts[DYLD_MAX_PROCESS_INFO_NOTIFY_COUNT];
+static bool        sZombieNotifiers[DYLD_MAX_PROCESS_INFO_NOTIFY_COUNT];
+
+static void notifyMonitoringDyld(bool unloading, unsigned portSlot, const launch_cache::DynArray<loader::ImageInfo>& imageInfos)
+{
+    if ( sZombieNotifiers[portSlot] )
+        return;
+
+    unsigned entriesSize = (unsigned)imageInfos.count()*sizeof(dyld_process_info_image_entry);
+    unsigned pathsSize = 0;
+    for (uintptr_t i=0; i < imageInfos.count(); ++i) {
+        launch_cache::Image image(imageInfos[i].imageData);
+        pathsSize += (strlen(image.path()) + 1);
+    }
+    unsigned totalSize = (sizeof(dyld_process_info_notify_header) + MAX_TRAILER_SIZE + entriesSize + pathsSize + 127) & -128;   // align
+    if ( totalSize > DYLD_PROCESS_INFO_NOTIFY_MAX_BUFFER_SIZE ) {
+        // Putting all image paths into one message would make buffer too big.
+        // Instead split into two messages.  Recurse as needed until paths fit in buffer.
+        unsigned imageHalfCount = (unsigned)imageInfos.count()/2;
+        const launch_cache::DynArray<loader::ImageInfo> firstHalf(imageHalfCount, (loader::ImageInfo*)&imageInfos[0]);
+        const launch_cache::DynArray<loader::ImageInfo> secondHalf(imageInfos.count() - imageHalfCount, (loader::ImageInfo*)&imageInfos[imageHalfCount]);
+        notifyMonitoringDyld(unloading, portSlot, firstHalf);
+        notifyMonitoringDyld(unloading, portSlot, secondHalf);
+        return;
+    }
+    // build buffer to send
+    dyld_all_image_infos*  allImageInfo = gAllImages.oldAllImageInfo();
+    uint8_t    buffer[totalSize];
+    dyld_process_info_notify_header* header = (dyld_process_info_notify_header*)buffer;
+    header->version          = 1;
+    header->imageCount       = (uint32_t)imageInfos.count();
+    header->imagesOffset     = sizeof(dyld_process_info_notify_header);
+    header->stringsOffset    = sizeof(dyld_process_info_notify_header) + entriesSize;
+    header->timestamp        = allImageInfo->infoArrayChangeTimestamp;
+    dyld_process_info_image_entry* entries = (dyld_process_info_image_entry*)&buffer[header->imagesOffset];
+    char* const pathPoolStart = (char*)&buffer[header->stringsOffset];
+    char* pathPool = pathPoolStart;
+    for (uintptr_t i=0; i < imageInfos.count(); ++i) {
+        launch_cache::Image image(imageInfos[i].imageData);
+        strcpy(pathPool, image.path());
+        uint32_t len = (uint32_t)strlen(pathPool);
+        memcpy(entries->uuid, image.uuid(), sizeof(uuid_t));
+        entries->loadAddress = (uint64_t)imageInfos[i].loadAddress;
+        entries->pathStringOffset = (uint32_t)(pathPool - pathPoolStart);
+        entries->pathLength  = len;
+        pathPool += (len +1);
+        ++entries;
+    }
+    // lazily alloc reply port
+    if ( sNotifyReplyPorts[portSlot] == 0 ) {
+        if ( !mach_port_allocate(mach_task_self(), MACH_PORT_RIGHT_RECEIVE, &sNotifyReplyPorts[portSlot]) )
+            mach_port_insert_right(mach_task_self(), sNotifyReplyPorts[portSlot], sNotifyReplyPorts[portSlot], MACH_MSG_TYPE_MAKE_SEND);
+        //log("allocated reply port %d\n", sNotifyReplyPorts[portSlot]);
+    }
+    //log("found port to send to\n");
+    mach_msg_header_t* h = (mach_msg_header_t*)buffer;
+    h->msgh_bits         = MACH_MSGH_BITS(MACH_MSG_TYPE_COPY_SEND,MACH_MSG_TYPE_MAKE_SEND); // MACH_MSG_TYPE_MAKE_SEND_ONCE
+    h->msgh_id           = unloading ? DYLD_PROCESS_INFO_NOTIFY_UNLOAD_ID : DYLD_PROCESS_INFO_NOTIFY_LOAD_ID;
+    h->msgh_local_port   = sNotifyReplyPorts[portSlot];
+    h->msgh_remote_port  = allImageInfo->notifyPorts[portSlot];
+    h->msgh_reserved     = 0;
+    h->msgh_size         = (mach_msg_size_t)sizeof(buffer);
+    //log("sending to port[%d]=%d, size=%d, reply port=%d, id=0x%X\n", portSlot, allImageInfo->notifyPorts[portSlot], h->msgh_size, sNotifyReplyPorts[portSlot], h->msgh_id);
+    kern_return_t sendResult = mach_msg(h, MACH_SEND_MSG | MACH_RCV_MSG | MACH_RCV_TIMEOUT, h->msgh_size, h->msgh_size, sNotifyReplyPorts[portSlot], 2000, MACH_PORT_NULL);
+    //log("send result = 0x%X, msg_id=%d, msg_size=%d\n", sendResult, h->msgh_id, h->msgh_size);
+    if ( sendResult == MACH_SEND_INVALID_DEST ) {
+        // sender is not responding, detatch
+        //log("process requesting notification gone. deallocation send port %d and receive port %d\n", allImageInfo->notifyPorts[portSlot], sNotifyReplyPorts[portSlot]);
+        mach_port_deallocate(mach_task_self(), allImageInfo->notifyPorts[portSlot]);
+        mach_port_deallocate(mach_task_self(), sNotifyReplyPorts[portSlot]);
+        allImageInfo->notifyPorts[portSlot] = 0;
+        sNotifyReplyPorts[portSlot] = 0;
+    }
+    else if ( sendResult == MACH_RCV_TIMED_OUT ) {
+        // client took too long, ignore him from now on
+        sZombieNotifiers[portSlot] = true;
+        mach_port_deallocate(mach_task_self(), sNotifyReplyPorts[portSlot]);
+        sNotifyReplyPorts[portSlot] = 0;
+    }
+}
+
+void AllImages::notifyMonitorMain()
+{
+    dyld_all_image_infos* allImageInfo = gAllImages.oldAllImageInfo();
+    for (int slot=0; slot < DYLD_MAX_PROCESS_INFO_NOTIFY_COUNT; ++slot) {
+        if ( (allImageInfo->notifyPorts[slot] != 0 ) && !sZombieNotifiers[slot] ) {
+            if ( sNotifyReplyPorts[slot] == 0 ) {
+                if ( !mach_port_allocate(mach_task_self(), MACH_PORT_RIGHT_RECEIVE, &sNotifyReplyPorts[slot]) )
+                    mach_port_insert_right(mach_task_self(), sNotifyReplyPorts[slot], sNotifyReplyPorts[slot], MACH_MSG_TYPE_MAKE_SEND);
+                //dyld::log("allocated reply port %d\n", sNotifyReplyPorts[slot]);
+            }
+            //dyld::log("found port to send to\n");
+            uint8_t messageBuffer[sizeof(mach_msg_header_t) + MAX_TRAILER_SIZE];
+            mach_msg_header_t* h = (mach_msg_header_t*)messageBuffer;
+            h->msgh_bits         = MACH_MSGH_BITS(MACH_MSG_TYPE_COPY_SEND,MACH_MSG_TYPE_MAKE_SEND); // MACH_MSG_TYPE_MAKE_SEND_ONCE
+            h->msgh_id           = DYLD_PROCESS_INFO_NOTIFY_MAIN_ID;
+            h->msgh_local_port   = sNotifyReplyPorts[slot];
+            h->msgh_remote_port  = allImageInfo->notifyPorts[slot];
+            h->msgh_reserved     = 0;
+            h->msgh_size         = (mach_msg_size_t)sizeof(messageBuffer);
+            //dyld::log("sending to port[%d]=%d, size=%d, reply port=%d, id=0x%X\n", slot, allImageInfo->notifyPorts[slot], h->msgh_size, sNotifyReplyPorts[slot], h->msgh_id);
+            kern_return_t sendResult = mach_msg(h, MACH_SEND_MSG | MACH_RCV_MSG | MACH_RCV_TIMEOUT, h->msgh_size, h->msgh_size, sNotifyReplyPorts[slot], 2000, MACH_PORT_NULL);
+            //dyld::log("send result = 0x%X, msg_id=%d, msg_size=%d\n", sendResult, h->msgh_id, h->msgh_size);
+            if ( sendResult == MACH_SEND_INVALID_DEST ) {
+                // sender is not responding, detatch
+                //dyld::log("process requesting notification gone. deallocation send port %d and receive port %d\n", allImageInfo->notifyPorts[slot], sNotifyReplyPorts[slot]);
+                mach_port_deallocate(mach_task_self(), allImageInfo->notifyPorts[slot]);
+                mach_port_deallocate(mach_task_self(), sNotifyReplyPorts[slot]);
+                allImageInfo->notifyPorts[slot] = 0;
+                sNotifyReplyPorts[slot] = 0;
+            }
+            else if ( sendResult == MACH_RCV_TIMED_OUT ) {
+                // client took too long, ignore him from now on
+                sZombieNotifiers[slot] = true;
+                mach_port_deallocate(mach_task_self(), sNotifyReplyPorts[slot]);
+                sNotifyReplyPorts[slot] = 0;
+            }
+        }
+    }
+}
+
+void AllImages::notifyMonitorLoads(const launch_cache::DynArray<loader::ImageInfo>& newImages)
+{
+    // notify each monitoring process
+    dyld_all_image_infos* allImageInfo = gAllImages.oldAllImageInfo();
+    for (int slot=0; slot < DYLD_MAX_PROCESS_INFO_NOTIFY_COUNT; ++slot) {
+        if ( allImageInfo->notifyPorts[slot] != 0 ) {
+             notifyMonitoringDyld(false, slot, newImages);
+        }
+        else if ( sNotifyReplyPorts[slot] != 0 ) {
+            // monitoring process detached from this process, so release reply port
+            //dyld::log("deallocated reply port %d\n", sNotifyReplyPorts[slot]);
+            mach_port_deallocate(mach_task_self(), sNotifyReplyPorts[slot]);
+            sNotifyReplyPorts[slot] = 0;
+            sZombieNotifiers[slot] = false;
+        }
+    }
+}
+
+void AllImages::notifyMonitorUnloads(const launch_cache::DynArray<loader::ImageInfo>& unloadingImages)
+{
+    // notify each monitoring process
+    dyld_all_image_infos* allImageInfo = gAllImages.oldAllImageInfo();
+    for (int slot=0; slot < DYLD_MAX_PROCESS_INFO_NOTIFY_COUNT; ++slot) {
+        if ( allImageInfo->notifyPorts[slot] != 0 ) {
+             notifyMonitoringDyld(true, slot, unloadingImages);
+        }
+        else if ( sNotifyReplyPorts[slot] != 0 ) {
+            // monitoring process detached from this process, so release reply port
+            //dyld::log("deallocated reply port %d\n", sNotifyReplyPorts[slot]);
+            mach_port_deallocate(mach_task_self(), sNotifyReplyPorts[slot]);
+            sNotifyReplyPorts[slot] = 0;
+            sZombieNotifiers[slot] = false;
+        }
+    }
+}
+
+} // namespace dyld3
+
 
 
 

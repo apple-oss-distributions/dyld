@@ -1,6 +1,6 @@
-.TH DYLD 1 "December 14, 2009" "Apple Inc."
+.TH DYLD 1 "June 1, 2017" "Apple Inc."
 .SH NAME
-dyld \- the dynamic link editor
+dyld \- the dynamic linker
 .SH SYNOPSIS
 DYLD_FRAMEWORK_PATH
 .br
@@ -30,8 +30,6 @@ DYLD_PRINT_ENV
 .br
 DYLD_PRINT_LIBRARIES
 .br
-DYLD_PRINT_LIBRARIES_POST_LAUNCH
-.br
 DYLD_BIND_AT_LAUNCH
 .br
 DYLD_DISABLE_DOFS
@@ -56,8 +54,12 @@ DYLD_SHARED_CACHE_DIR
 .br
 DYLD_SHARED_CACHE_DONT_VALIDATE
 .SH DESCRIPTION
-The dynamic linker uses the following environment variables.
-They affect any program that uses the dynamic linker.
+The dynamic linker checks the following environment variables during the launch
+of each process.
+.br
+.br
+Note: If System Integrity Protection is enabled, these environment variables are ignored
+when executing binaries protected by System Integrity Protection.
 .TP
 .B DYLD_FRAMEWORK_PATH
 This is a colon separated list of directories that contain frameworks.
@@ -197,11 +199,6 @@ This is useful to make sure that the use of
 .SM DYLD_LIBRARY_PATH
 is getting what you want.
 .TP
-.B DYLD_PRINT_LIBRARIES_POST_LAUNCH
-This does the same as
-.SM DYLD_PRINT_LIBRARIES
-but the printing starts after the program gets to its entry point.
-.TP
 .B DYLD_BIND_AT_LAUNCH
 When this is set, the dynamic linker binds all undefined symbols
 the program needs at launch time. This includes function symbols that can are normally 
@@ -300,4 +297,4 @@ with -rpath @loader_path/zzz, where zzz is the path from the executable to the a
 At runtime dyld sets it run path to be the anchor point, then each dylib is found relative
 to the anchor point.  
 .SH "SEE ALSO"
-libtool(1), ld(1), otool(1)
+dyldinfo(1), ld(1), otool(1)

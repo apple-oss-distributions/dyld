@@ -24,12 +24,12 @@ int main()
 
     Dl_info info;
     if ( dladdr(&main, &info) == 0 ) {
-        printf("[FAIL] dladdr(&main, xx) failed");
+        printf("[FAIL] dladdr(&main, xx) failed\n");
         return 0;
     }
 
     if ( info.dli_sname != NULL ){
-        printf("[FAIL] dladdr() returned: \"%s\" instead of NULL", info.dli_sname);
+        printf("[FAIL] dladdr() returned: \"%s\" instead of NULL\n", info.dli_sname);
         return 0;
     }
 

@@ -26,6 +26,7 @@
 
 #include <stdbool.h>
 #include <Availability.h>
+#include <TargetConditionals.h>
 #include <mach-o/dyld.h>
 #include <mach-o/dyld_images.h>
 
@@ -34,11 +35,6 @@ extern "C" {
 #endif /* __cplusplus */
 
 
-
-//
-// private interface between libSystem.dylib and dyld
-//
-extern int _dyld_func_lookup(const char* dyld_func_name, void **address);
 
 //
 // private interface between libSystem.dylib and dyld
@@ -136,14 +132,6 @@ dyld_enumerate_tlv_storage(dyld_tlv_state_change_handler handler);
 extern intptr_t _dyld_get_image_slide(const struct mach_header* mh);
 
 
-//
-// get pointer to this process's dyld_all_image_infos
-// Exists in Mac OS X 10.4 and later through _dyld_func_lookup()
-// Exists in Mac OS X 10.6 and later through libSystem.dylib
-//
-const struct dyld_all_image_infos* _dyld_get_all_image_infos() __attribute__((deprecated));
-
-
 
 struct dyld_unwind_sections
 {
@@ -164,7 +152,9 @@ struct dyld_unwind_sections
 //  info->compact_unwind_section_length	length of __TEXT/__unwind_info section
 //
 // Exists in Mac OS X 10.6 and later 
+#if !__USING_SJLJ_EXCEPTIONS__
 extern bool _dyld_find_unwind_sections(void* addr, struct dyld_unwind_sections* info);
+#endif
 
 
 //
@@ -205,8 +195,8 @@ extern uint32_t dyld_get_sdk_version(const struct mach_header* mh);
 // This finds the SDK version that the main executable was built against.
 // Returns zero on error, or if SDK version could not be determined.
 //
-// Note on WatchOS, this returns the equivalent iOS SDK version number
-// (i.e an app built against WatchOS 2.0 SDK returne 9.0).  To see the
+// Note on watchOS, this returns the equivalent iOS SDK version number
+// (i.e an app built against watchOS 2.0 SDK returne 9.0).  To see the
 // platform specific sdk version use dyld_get_program_sdk_watch_os_version().
 //
 // Exists in Mac OS X 10.8 and later 
@@ -214,19 +204,35 @@ extern uint32_t dyld_get_sdk_version(const struct mach_header* mh);
 extern uint32_t dyld_get_program_sdk_version();
 
 
-// Watch OS only.
+#if __WATCH_OS_VERSION_MIN_REQUIRED
+// watchOS only.
 // This finds the Watch OS SDK version that the main executable was built against.
 // Exists in Watch OS 2.0 and later
-extern uint32_t dyld_get_program_sdk_watch_os_version(); // __WATCHOS_AVAILABLE(2.0);
+extern uint32_t dyld_get_program_sdk_watch_os_version() __IOS_UNAVAILABLE __OSX_UNAVAILABLE __WATCHOS_AVAILABLE(2.0);
 
 
-// Watch OS only.
+// watchOS only.
 // This finds the Watch min OS version that the main executable was built to run on.
 // Note: dyld_get_program_min_os_version() returns the iOS equivalent (e.g. 9.0)
 //       whereas this returns the raw watchOS version (e.g. 2.0).
 // Exists in Watch OS 3.0 and later
 extern uint32_t dyld_get_program_min_watch_os_version(); // __WATCHOS_AVAILABLE(3.0);
+#endif
 
+
+#if TARGET_OS_BRIDGE
+// bridgeOS only.
+// This finds the bridgeOS SDK version that the main executable was built against.
+// Exists in bridgeOSOS 2.0 and later
+extern uint32_t dyld_get_program_sdk_bridge_os_version();
+
+// bridgeOS only.
+// This finds the Watch min OS version that the main executable was built to run on.
+// Note: dyld_get_program_min_os_version() returns the iOS equivalent (e.g. 9.0)
+//       whereas this returns the raw bridgeOS version (e.g. 2.0).
+// Exists in bridgeOS 2.0 and later
+extern uint32_t dyld_get_program_min_bridge_os_version();
+#endif
 
 //
 // This finds the min OS version a binary was built to run on.
@@ -301,9 +307,13 @@ struct dyld_shared_cache_dylib_text_info {
 	uint64_t		textSegmentSize; 
 	uuid_t			dylibUuid;
 	const char*		path;			// pointer invalid at end of iterations
+	// following fields all exist in version 2
+	uint64_t        textSegmentOffset;  // offset from start of cache
 };
 typedef struct dyld_shared_cache_dylib_text_info dyld_shared_cache_dylib_text_info;
 
+
+#ifdef __BLOCKS__
 //
 // Given the UUID of a dyld shared cache file, this function will attempt to locate the cache
 // file and if found iterate all images, returning info about each one.  Returns 0 on success.
@@ -321,6 +331,7 @@ extern int dyld_shared_cache_iterate_text(const uuid_t cacheUuid, void (^callbac
 // Exists in Mac OS X 10.12 and later
 //           iOS 10.0 and later
 extern int dyld_shared_cache_find_iterate_text(const uuid_t cacheUuid, const char* extraSearchDirs[], void (^callback)(const dyld_shared_cache_dylib_text_info* info));
+#endif /* __BLOCKS */
 
 
 //
@@ -388,6 +399,32 @@ struct dyld_abort_payload {
 	// string data
 };
 typedef struct dyld_abort_payload dyld_abort_payload;
+
+
+// These global variables are implemented in libdyld.dylib
+// Old programs that used crt1.o also defined these globals.
+// The ones in dyld are not used when an old program is run.
+extern int          NXArgc;
+extern const char** NXArgv;
+extern       char** environ;       // POSIX says this not const, because it pre-dates const
+extern const char*  __progname;
+
+
+// called by libSystem_initializer only
+extern void _dyld_initializer();
+
+// never called from source code. Used by static linker to implement lazy binding
+extern void dyld_stub_binder() __asm__("dyld_stub_binder");
+
+
+// called by exit() before it calls cxa_finalize() so that thread_local
+// objects are destroyed before global objects.
+extern void _tlv_exit();
+
+
+// temp exports to keep tapi happy, until ASan stops using dyldVersionNumber
+extern double      dyldVersionNumber;
+extern const char* dyldVersionString;
 
 #if __cplusplus
 }

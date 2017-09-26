@@ -43,10 +43,27 @@
 #include "dyldLock.h"
 #include "start_glue.h"
 
+#include "../dyld3/APIs.h"
+#include "../dyld3/AllImages.h"
+
+
+// this was in dyld_priv.h but it is no longer exported
+extern "C" {
+    const struct dyld_all_image_infos* _dyld_get_all_image_infos() __attribute__((visibility("hidden")));
+}
+
+
 extern "C" int  __cxa_atexit(void (*func)(void *), void *arg, void *dso);
 extern "C" void __cxa_finalize(const void *dso);
 extern "C" void __cxa_finalize_ranges(const struct __cxa_range_t ranges[], int count);
 
+//
+// private interface between libSystem.dylib and dyld
+//
+extern "C" int _dyld_func_lookup(const char* dyld_func_name, void **address);
+
+
+extern bool gUseDyld3;
 
 #ifndef LC_VERSION_MIN_MACOSX
 	#define LC_VERSION_MIN_MACOSX 0x24
@@ -74,6 +91,42 @@ extern "C" void __cxa_finalize_ranges(const struct __cxa_range_t ranges[], int c
 
 #ifndef LC_LOAD_UPWARD_DYLIB
 	#define	LC_LOAD_UPWARD_DYLIB (0x23|LC_REQ_DYLD)	/* load of dylib whose initializers run later */
+#endif
+
+#ifndef LC_BUILD_VERSION
+	#define LC_BUILD_VERSION 0x32 /* build for platform min OS version */
+
+	/*
+	 * The build_version_command contains the min OS version on which this 
+	 * binary was built to run for its platform.  The list of known platforms and
+	 * tool values following it.
+	 */
+	struct build_version_command {
+		uint32_t	cmd;		/* LC_BUILD_VERSION */
+		uint32_t	cmdsize;	/* sizeof(struct build_version_command) plus */
+								/* ntools * sizeof(struct build_tool_version) */
+		uint32_t	platform;	/* platform */
+		uint32_t	minos;		/* X.Y.Z is encoded in nibbles xxxx.yy.zz */
+		uint32_t	sdk;		/* X.Y.Z is encoded in nibbles xxxx.yy.zz */
+		uint32_t	ntools;		/* number of tool entries following this */
+	};
+
+	struct build_tool_version {
+		uint32_t	tool;		/* enum for the tool */
+		uint32_t	version;	/* version number of the tool */
+	};
+
+	/* Known values for the platform field above. */
+	#define PLATFORM_MACOS		1
+	#define PLATFORM_IOS		2
+	#define PLATFORM_TVOS		3
+	#define PLATFORM_WATCHOS	4
+	#define PLATFORM_BRIDGEOS	5
+
+	/* Known values for the tool field above. */
+	#define TOOL_CLANG	1
+	#define TOOL_SWIFT	2
+	#define TOOL_LD		3
 #endif
 
 
@@ -142,6 +195,9 @@ const char* libraryName)
 void NSInstallLinkEditErrorHandlers(
 const NSLinkEditErrorHandlers* handlers)
 {
+	if ( gUseDyld3 )
+		return dyld3::NSInstallLinkEditErrorHandlers(handlers);
+
 	DYLD_LOCK_THIS_BLOCK;
 	typedef void (*ucallback_t)(const char* symbol_name);
  	typedef NSModule (*mcallback_t)(NSSymbol s, NSModule old, NSModule newhandler);
@@ -159,6 +215,9 @@ const char*
 NSNameOfModule(
 NSModule module)
 {
+	if ( gUseDyld3 )
+		return dyld3::NSNameOfModule(module);
+
 	DYLD_LOCK_THIS_BLOCK;
     static const char*  (*p)(NSModule module) = NULL;
 
@@ -171,6 +230,9 @@ const char*
 NSLibraryNameForModule(
 NSModule module)
 {
+	if ( gUseDyld3 )
+		return dyld3::NSLibraryNameForModule(module);
+
 	DYLD_LOCK_THIS_BLOCK;
     static const char*  (*p)(NSModule module) = NULL;
 
@@ -183,6 +245,9 @@ bool
 NSIsSymbolNameDefined(
 const char* symbolName)
 {
+	if ( gUseDyld3 )
+		return dyld3::NSIsSymbolNameDefined(symbolName);
+
 	DYLD_LOCK_THIS_BLOCK;
     static bool (*p)(const char* symbolName) = NULL;
 
@@ -196,6 +261,9 @@ NSIsSymbolNameDefinedWithHint(
 const char* symbolName,
 const char* libraryNameHint)
 {
+	if ( gUseDyld3 )
+		return dyld3::NSIsSymbolNameDefinedWithHint(symbolName, libraryNameHint);
+
 	DYLD_LOCK_THIS_BLOCK;
     static bool (*p)(const char* symbolName,
 			  const char* libraryNameHint) = NULL;
@@ -210,6 +278,9 @@ NSIsSymbolNameDefinedInImage(
 const struct mach_header *image,
 const char* symbolName)
 {
+	if ( gUseDyld3 )
+		return dyld3::NSIsSymbolNameDefinedInImage(image, symbolName);
+
 	DYLD_LOCK_THIS_BLOCK;
     static bool (*p)(const struct mach_header *image,
 			  const char* symbolName) = NULL;
@@ -223,6 +294,9 @@ NSSymbol
 NSLookupAndBindSymbol(
 const char* symbolName)
 {
+	if ( gUseDyld3 )
+		return dyld3::NSLookupAndBindSymbol(symbolName);
+
 	DYLD_LOCK_THIS_BLOCK;
     static NSSymbol (*p)(const char* symbolName) = NULL;
 
@@ -236,6 +310,9 @@ NSLookupAndBindSymbolWithHint(
 const char* symbolName,
 const char* libraryNameHint)
 {
+	if ( gUseDyld3 )
+		return dyld3::NSLookupAndBindSymbolWithHint(symbolName, libraryNameHint);
+
 	DYLD_LOCK_THIS_BLOCK;
     static NSSymbol (*p)(const char* symbolName,
 			 const char* libraryNameHint) = NULL;
@@ -250,6 +327,9 @@ NSLookupSymbolInModule(
 NSModule module,
 const char* symbolName)
 {
+	if ( gUseDyld3 )
+		return dyld3::NSLookupSymbolInModule(module, symbolName);
+
 	DYLD_LOCK_THIS_BLOCK;
     static NSSymbol (*p)(NSModule module, const char* symbolName) = NULL;
 
@@ -264,8 +344,11 @@ const struct mach_header *image,
 const char* symbolName,
 uint32_t options)
 {
+	if ( gUseDyld3 )
+		return dyld3::NSLookupSymbolInImage(image, symbolName, options);
+
  	DYLD_LOCK_THIS_BLOCK;
-   static NSSymbol (*p)(const struct mach_header *image,
+    static NSSymbol (*p)(const struct mach_header *image,
 			 const char* symbolName,
 			 uint32_t options) = NULL;
 
@@ -278,6 +361,9 @@ const char*
 NSNameOfSymbol(
 NSSymbol symbol)
 {
+	if ( gUseDyld3 )
+		return dyld3::NSNameOfSymbol(symbol);
+
 	DYLD_LOCK_THIS_BLOCK;
     static char * (*p)(NSSymbol symbol) = NULL;
 
@@ -290,6 +376,9 @@ void *
 NSAddressOfSymbol(
 NSSymbol symbol)
 {
+	if ( gUseDyld3 )
+		return dyld3::NSAddressOfSymbol(symbol);
+
 	DYLD_LOCK_THIS_BLOCK;
     static void * (*p)(NSSymbol symbol) = NULL;
 
@@ -302,6 +391,9 @@ NSModule
 NSModuleForSymbol(
 NSSymbol symbol)
 {
+	if ( gUseDyld3 )
+		return dyld3::NSModuleForSymbol(symbol);
+
 	DYLD_LOCK_THIS_BLOCK;
     static NSModule (*p)(NSSymbol symbol) = NULL;
 
@@ -314,6 +406,9 @@ bool
 NSAddLibrary(
 const char* pathName)
 {
+	if ( gUseDyld3 )
+		return dyld3::NSAddLibrary(pathName);
+
 	DYLD_LOCK_THIS_BLOCK;
     static bool (*p)(const char* pathName) = NULL;
 
@@ -326,6 +421,9 @@ bool
 NSAddLibraryWithSearching(
 const char* pathName)
 {
+	if ( gUseDyld3 )
+		return dyld3::NSAddLibrary(pathName);
+
 	DYLD_LOCK_THIS_BLOCK;
     static bool (*p)(const char* pathName) = NULL;
 
@@ -339,6 +437,9 @@ NSAddImage(
 const char* image_name,
 uint32_t options)
 {
+	if ( gUseDyld3 )
+		return dyld3::NSAddImage(image_name, options);
+
 	DYLD_LOCK_THIS_BLOCK;
     static const struct mach_header * (*p)(const char* image_name,
 					   uint32_t options) = NULL;
@@ -362,6 +463,9 @@ uint32_t options)
  */
 int32_t NSVersionOfLinkTimeLibrary(const char* libraryName)
 {
+	if ( gUseDyld3 )
+		return dyld3::NSVersionOfLinkTimeLibrary(libraryName);
+
 	// Lazily call _NSGetMachExecuteHeader() and cache result
 #if __LP64__
     static mach_header_64* mh = NULL;
@@ -400,6 +504,9 @@ int32_t NSVersionOfLinkTimeLibrary(const char* libraryName)
  */
 int32_t NSVersionOfRunTimeLibrary(const char* libraryName)
 {
+	if ( gUseDyld3 )
+		return dyld3::NSVersionOfRunTimeLibrary(libraryName);
+
 	uint32_t n = _dyld_image_count();
 	for(uint32_t i = 0; i < n; i++){
 	    const mach_header* mh = _dyld_get_image_header(i);
@@ -429,7 +536,7 @@ int32_t NSVersionOfRunTimeLibrary(const char* libraryName)
 #define PACKED_VERSION(major, minor, tiny) ((((major) & 0xffff) << 16) | (((minor) & 0xff) << 8) | ((tiny) & 0xff))
 
 
-static bool getVersionLoadCommandInfo(const mach_header* mh, uint32_t* loadCommand, uint32_t* minOS, uint32_t* sdk)
+static bool getVersionLoadCommandInfo(const mach_header* mh, uint32_t* platform, uint32_t* minOS, uint32_t* sdk)
 {
 	const load_command* startCmds = NULL;
 	if ( mh->magic == MH_MAGIC_64 )
@@ -447,15 +554,37 @@ static bool getVersionLoadCommandInfo(const mach_header* mh, uint32_t* loadComma
 			return 0;
 		}
 		const version_min_command* versCmd;
+		const build_version_command* buildVersCmd;
 		switch ( cmd->cmd ) {
 			case LC_VERSION_MIN_IPHONEOS:
+				versCmd = (version_min_command*)cmd;
+				*platform	= PLATFORM_IOS;
+				*minOS		= versCmd->version;
+				*sdk		= versCmd->sdk;
+				return true;
 			case LC_VERSION_MIN_MACOSX:
+				versCmd = (version_min_command*)cmd;
+				*platform	= PLATFORM_MACOS;
+				*minOS		= versCmd->version;
+				*sdk		= versCmd->sdk;
+				return true;
 			case LC_VERSION_MIN_TVOS:
+				versCmd = (version_min_command*)cmd;
+				*platform	= PLATFORM_TVOS;
+				*minOS		= versCmd->version;
+				*sdk		= versCmd->sdk;
+				return true;
 			case LC_VERSION_MIN_WATCHOS:
 				versCmd = (version_min_command*)cmd;
-				*loadCommand = versCmd->cmd;
-				*minOS = versCmd->version;
-				*sdk = versCmd->sdk;
+				*platform	= PLATFORM_WATCHOS;
+				*minOS		= versCmd->version;
+				*sdk		= versCmd->sdk;
+				return true;
+			case LC_BUILD_VERSION:
+				buildVersCmd = (build_version_command*)cmd;
+				*platform	 = buildVersCmd->platform;
+				*minOS		 = buildVersCmd->minos;
+				*sdk		 = buildVersCmd->sdk;
 				return true;
 		}
 		cmd = nextCmd;
@@ -589,13 +718,16 @@ static uint32_t watchVersToIOSVers(uint32_t vers)
 
 uint32_t dyld_get_program_sdk_watch_os_version()
 {
+	if ( gUseDyld3 )
+		return dyld3::dyld_get_program_sdk_watch_os_version();
+
 	const mach_header* mh = (mach_header*)_NSGetMachExecuteHeader();
-	uint32_t loadCommand;
+	uint32_t platform;
 	uint32_t minOS;
 	uint32_t sdk;
 
-	if ( getVersionLoadCommandInfo(mh, &loadCommand, &minOS, &sdk) ) {
-		if ( loadCommand == LC_VERSION_MIN_WATCHOS )
+	if ( getVersionLoadCommandInfo(mh, &platform, &minOS, &sdk) ) {
+		if ( platform == PLATFORM_WATCHOS )
 				return sdk;
 	}
 	return 0;
@@ -603,13 +735,54 @@ uint32_t dyld_get_program_sdk_watch_os_version()
 
 uint32_t dyld_get_program_min_watch_os_version()
 {
+	if ( gUseDyld3 )
+		return dyld3::dyld_get_program_min_watch_os_version();
+
 	const mach_header* mh = (mach_header*)_NSGetMachExecuteHeader();
-	uint32_t loadCommand;
+	uint32_t platform;
 	uint32_t minOS;
 	uint32_t sdk;
 
-	if ( getVersionLoadCommandInfo(mh, &loadCommand, &minOS, &sdk) ) {
-		if ( loadCommand == LC_VERSION_MIN_WATCHOS )
+	if ( getVersionLoadCommandInfo(mh, &platform, &minOS, &sdk) ) {
+		if ( platform == PLATFORM_WATCHOS )
+				return minOS;  // return raw minOS (not mapped to iOS version)
+	}
+	return 0;
+}
+
+#endif
+
+
+
+#if TARGET_OS_BRIDGE
+static uint32_t bridgeVersToIOSVers(uint32_t vers)
+{
+	return vers + 0x00090000;
+}
+
+uint32_t dyld_get_program_sdk_bridge_os_version()
+{
+	const mach_header* mh = (mach_header*)_NSGetMachExecuteHeader();
+	uint32_t platform;
+	uint32_t minOS;
+	uint32_t sdk;
+
+	if ( getVersionLoadCommandInfo(mh, &platform, &minOS, &sdk) ) {
+		if ( platform == PLATFORM_BRIDGEOS )
+				return sdk;
+	}
+	return 0;
+}
+
+uint32_t dyld_get_program_min_bridge_os_version()
+{
+	const mach_header* mh = (mach_header*)_NSGetMachExecuteHeader();
+	uint32_t platform;
+	uint32_t minOS;
+	uint32_t sdk;
+
+	if ( getVersionLoadCommandInfo(mh, &platform, &minOS, &sdk) ) {
+		if ( platform == PLATFORM_BRIDGEOS )
 				return minOS;  // return raw minOS (not mapped to iOS version)
 	}
 	return 0;
@@ -628,30 +801,40 @@ uint32_t dyld_get_program_min_watch_os_version()
  */
 uint32_t dyld_get_sdk_version(const mach_header* mh)
 {
-	uint32_t loadCommand;
+	if ( gUseDyld3 )
+		return dyld3::dyld_get_sdk_version(mh);
+
+    uint32_t platform;
 	uint32_t minOS;
 	uint32_t sdk;
 
-	if ( getVersionLoadCommandInfo(mh, &loadCommand, &minOS, &sdk) ) {
-		switch (loadCommand) {
-#if __WATCH_OS_VERSION_MIN_REQUIRED
-			case LC_VERSION_MIN_WATCHOS:
+	if ( getVersionLoadCommandInfo(mh, &platform, &minOS, &sdk) ) {
+		switch (platform) {
+#if TARGET_OS_BRIDGE
+			case PLATFORM_BRIDGEOS:
+				// new binary. sdk version looks like "2.0" but API wants "11.0"
+				return bridgeVersToIOSVers(sdk);
+			case PLATFORM_IOS:
+				// old binary. sdk matches API semantics so can return directly.
+				return sdk;
+#elif __WATCH_OS_VERSION_MIN_REQUIRED
+			case PLATFORM_WATCHOS:
 				// new binary. sdk version looks like "2.0" but API wants "9.0"
 				return watchVersToIOSVers(sdk);
-			case LC_VERSION_MIN_IPHONEOS:
+			case PLATFORM_IOS:
 				// old binary. sdk matches API semantics so can return directly.
 				return sdk;
 #elif __TV_OS_VERSION_MIN_REQUIRED
-			case LC_VERSION_MIN_TVOS:
-			case LC_VERSION_MIN_IPHONEOS:
+			case PLATFORM_TVOS:
+			case PLATFORM_IOS:
 				return sdk;
 #elif __IPHONE_OS_VERSION_MIN_REQUIRED
-			case LC_VERSION_MIN_IPHONEOS:
+			case PLATFORM_IOS:
 				if ( sdk != 0 )	// old binaries might not have SDK set
 					return sdk;
 				break;
 #else
-			case LC_VERSION_MIN_MACOSX:
+			case PLATFORM_MACOS:
 				if ( sdk != 0 )	// old binaries might not have SDK set
 					return sdk;
 				break;
@@ -659,7 +842,7 @@ uint32_t dyld_get_sdk_version(const mach_header* mh)
 		}
 	}
 
-#if __WATCH_OS_VERSION_MIN_REQUIRED ||__TV_OS_VERSION_MIN_REQUIRED
+#if __WATCH_OS_VERSION_MIN_REQUIRED || __TV_OS_VERSION_MIN_REQUIRED || TARGET_OS_BRIDGE
 	// All WatchOS and tv OS binaries should have version load command.
 	return 0;
 #else
@@ -670,33 +853,46 @@ uint32_t dyld_get_sdk_version(const mach_header* mh)
 
 uint32_t dyld_get_program_sdk_version()
 {
+	if ( gUseDyld3 )
+		return dyld3::dyld_get_program_sdk_version();
+
 	return dyld_get_sdk_version((mach_header*)_NSGetMachExecuteHeader());
 }
 
 uint32_t dyld_get_min_os_version(const struct mach_header* mh)
 {
-	uint32_t loadCommand;
+	if ( gUseDyld3 )
+		return dyld3::dyld_get_min_os_version(mh);
+
+	uint32_t platform;
 	uint32_t minOS;
 	uint32_t sdk;
 
-	if ( getVersionLoadCommandInfo(mh, &loadCommand, &minOS, &sdk) ) {
-		switch (loadCommand) {
-#if __WATCH_OS_VERSION_MIN_REQUIRED
-			case LC_VERSION_MIN_WATCHOS:
+	if ( getVersionLoadCommandInfo(mh, &platform, &minOS, &sdk) ) {
+		switch (platform) {
+#if TARGET_OS_BRIDGE
+			case PLATFORM_BRIDGEOS:
+				// new binary. sdk version looks like "2.0" but API wants "11.0"
+				return bridgeVersToIOSVers(minOS);
+			case PLATFORM_IOS:
+				// old binary. sdk matches API semantics so can return directly.
+				return minOS;
+#elif __WATCH_OS_VERSION_MIN_REQUIRED
+			case PLATFORM_WATCHOS:
 				// new binary. OS version looks like "2.0" but API wants "9.0"
 				return watchVersToIOSVers(minOS);
-			case LC_VERSION_MIN_IPHONEOS:
+			case PLATFORM_IOS:
 				// old binary. OS matches API semantics so can return directly.
 				return minOS;
 #elif __TV_OS_VERSION_MIN_REQUIRED
-			case LC_VERSION_MIN_TVOS:
-			case LC_VERSION_MIN_IPHONEOS:
+			case PLATFORM_TVOS:
+			case PLATFORM_IOS:
 				return minOS;
 #elif __IPHONE_OS_VERSION_MIN_REQUIRED
-			case LC_VERSION_MIN_IPHONEOS:
+			case PLATFORM_IOS:
 				return minOS;
 #else
-			case LC_VERSION_MIN_MACOSX:
+			case PLATFORM_MACOS:
 				return minOS;
 #endif
 		}
@@ -707,12 +903,18 @@ uint32_t dyld_get_min_os_version(const struct mach_header* mh)
 
 uint32_t dyld_get_program_min_os_version()
 {
+	if ( gUseDyld3 )
+		return dyld3::dyld_get_program_min_os_version();
+
 	return dyld_get_min_os_version((mach_header*)_NSGetMachExecuteHeader());
 }
 
 
 bool _dyld_get_image_uuid(const struct mach_header* mh, uuid_t uuid)
 {
+	if ( gUseDyld3 )
+		return dyld3::_dyld_get_image_uuid(mh, uuid);
+
 	const load_command* startCmds = NULL;
 	if ( mh->magic == MH_MAGIC_64 )
 		startCmds = (load_command*)((char *)mh + sizeof(mach_header_64));
@@ -754,6 +956,9 @@ NSCreateObjectFileImageFromFile(
 const char* pathName,
 NSObjectFileImage *objectFileImage)
 {
+	if ( gUseDyld3 )
+		return dyld3::NSCreateObjectFileImageFromFile(pathName, objectFileImage);
+
 	DYLD_LOCK_THIS_BLOCK;
     static NSObjectFileImageReturnCode (*p)(const char*, NSObjectFileImage*) = NULL;
 
@@ -776,6 +981,9 @@ const void* address,
 size_t size, 
 NSObjectFileImage *objectFileImage)
 {
+	if ( gUseDyld3 )
+		return dyld3::NSCreateObjectFileImageFromMemory(address, size, objectFileImage);
+
 	DYLD_LOCK_THIS_BLOCK;
     static NSObjectFileImageReturnCode (*p)(const void*, size_t, NSObjectFileImage*) = NULL;
 
@@ -809,6 +1017,9 @@ bool
 NSDestroyObjectFileImage(
 NSObjectFileImage objectFileImage)
 {
+	if ( gUseDyld3 )
+		return dyld3::NSDestroyObjectFileImage(objectFileImage);
+
 	DYLD_LOCK_THIS_BLOCK;
     static bool (*p)(NSObjectFileImage) = NULL;
 
@@ -824,6 +1035,9 @@ NSObjectFileImage objectFileImage,
 const char* moduleName,
 uint32_t options)
 {
+	if ( gUseDyld3 )
+		return dyld3::NSLinkModule(objectFileImage, moduleName, options);
+
 	DYLD_LOCK_THIS_BLOCK;
     static NSModule (*p)(NSObjectFileImage, const char*, unsigned long) = NULL;
 
@@ -844,6 +1058,9 @@ uint32_t
 NSSymbolDefinitionCountInObjectFileImage(
 NSObjectFileImage objectFileImage)
 {
+	if ( gUseDyld3 )
+		return dyld3::NSSymbolDefinitionCountInObjectFileImage(objectFileImage);
+
 	DYLD_LOCK_THIS_BLOCK;
     static uint32_t (*p)(NSObjectFileImage) = NULL;
 
@@ -864,6 +1081,9 @@ NSSymbolDefinitionNameInObjectFileImage(
 NSObjectFileImage objectFileImage,
 uint32_t ordinal)
 {
+	if ( gUseDyld3 )
+		return dyld3::NSSymbolDefinitionNameInObjectFileImage(objectFileImage, ordinal);
+
 	DYLD_LOCK_THIS_BLOCK;
     static const char*  (*p)(NSObjectFileImage, uint32_t) = NULL;
 
@@ -881,6 +1101,9 @@ uint32_t
 NSSymbolReferenceCountInObjectFileImage(
 NSObjectFileImage objectFileImage)
 {
+	if ( gUseDyld3 )
+		return dyld3::NSSymbolReferenceCountInObjectFileImage(objectFileImage);
+
 	DYLD_LOCK_THIS_BLOCK;
     static uint32_t (*p)(NSObjectFileImage) = NULL;
 
@@ -902,6 +1125,9 @@ NSObjectFileImage objectFileImage,
 uint32_t ordinal,
 bool *tentative_definition) /* can be NULL */
 {
+	if ( gUseDyld3 )
+		return dyld3::NSSymbolReferenceNameInObjectFileImage(objectFileImage, ordinal, tentative_definition);
+
 	DYLD_LOCK_THIS_BLOCK;
     static const char*  (*p)(NSObjectFileImage, uint32_t, bool*) = NULL;
 
@@ -920,6 +1146,9 @@ NSIsSymbolDefinedInObjectFileImage(
 NSObjectFileImage objectFileImage,
 const char* symbolName)
 {
+	if ( gUseDyld3 )
+		return dyld3::NSIsSymbolDefinedInObjectFileImage(objectFileImage, symbolName);
+
 	DYLD_LOCK_THIS_BLOCK;
     static bool (*p)(NSObjectFileImage, const char*) = NULL;
 
@@ -943,6 +1172,9 @@ const char* segmentName,
 const char* sectionName,
 unsigned long *size) /* can be NULL */
 {
+	if ( gUseDyld3 )
+		return dyld3::NSGetSectionDataInObjectFileImage(objectFileImage, segmentName, sectionName, size);
+
 	DYLD_LOCK_THIS_BLOCK;
     static void* (*p)(NSObjectFileImage, const char*, const char*, unsigned long*) = NULL;
 
@@ -960,6 +1192,9 @@ int *errorNumber,
 const char* *fileName,
 const char* *errorString)
 {
+	if ( gUseDyld3 )
+		return dyld3::NSLinkEditError(c, errorNumber, fileName, errorString);
+
 	DYLD_LOCK_THIS_BLOCK;
     static void (*p)(NSLinkEditErrors *c,
 		     int *errorNumber, 
@@ -977,6 +1212,9 @@ NSUnLinkModule(
 NSModule module, 
 uint32_t options)
 {
+	if ( gUseDyld3 )
+		return dyld3::NSUnLinkModule(module, options);
+
 	DYLD_LOCK_THIS_BLOCK;
     static bool (*p)(NSModule module, uint32_t options) = NULL;
 
@@ -1014,6 +1252,9 @@ _NSGetExecutablePath(
 char *buf,
 uint32_t *bufsize)
 {
+	if ( gUseDyld3 )
+		return dyld3::_NSGetExecutablePath(buf, bufsize);
+
 	DYLD_NO_LOCK_THIS_BLOCK;
     static int (*p)(char *buf, uint32_t *bufsize) = NULL;
 
@@ -1106,6 +1347,9 @@ void
 _dyld_register_func_for_add_image(
 void (*func)(const struct mach_header *mh, intptr_t vmaddr_slide))
 {
+	if ( gUseDyld3 )
+		return dyld3::_dyld_register_func_for_add_image(func);
+
 	DYLD_LOCK_THIS_BLOCK;
 	typedef void (*callback_t)(const struct mach_header *mh, intptr_t vmaddr_slide);
     static void (*p)(callback_t func) = NULL;
@@ -1124,6 +1368,9 @@ void
 _dyld_register_func_for_remove_image(
 void (*func)(const struct mach_header *mh, intptr_t vmaddr_slide))
 {
+	if ( gUseDyld3 )
+		return dyld3::_dyld_register_func_for_remove_image(func);
+
 	DYLD_LOCK_THIS_BLOCK;
 	typedef void (*callback_t)(const struct mach_header *mh, intptr_t vmaddr_slide);
     static void (*p)(callback_t func) = NULL;
@@ -1207,21 +1454,6 @@ unsigned long *size)
 	p(module, objc_module, size);
 }
 
-/*
- * _dyld_bind_objc_module() is passed a pointer to something in an (__OBJC,
- * __module) section and causes the module that is associated with that address
- * to be bound.
- */
-void
-_dyld_bind_objc_module(const void* objc_module)
-{
-	DYLD_LOCK_THIS_BLOCK;
-    static void (*p)(const void *objc_module) = NULL;
-
-	if(p == NULL)
-	    _dyld_func_lookup("__dyld_bind_objc_module", (void**)&p);
-	p(objc_module);
-}
 #endif
 
 #if DEPRECATED_APIS_SUPPORTED
@@ -1236,6 +1468,9 @@ _dyld_present(void)
 uint32_t
 _dyld_image_count(void)
 {
+	if ( gUseDyld3 )
+		return dyld3::_dyld_image_count();
+
 	DYLD_NO_LOCK_THIS_BLOCK;
     static uint32_t (*p)(void) = NULL;
 
@@ -1247,6 +1482,9 @@ _dyld_image_count(void)
 const struct mach_header *
 _dyld_get_image_header(uint32_t image_index)
 {
+	if ( gUseDyld3 )
+		return dyld3::_dyld_get_image_header(image_index);
+
 	DYLD_NO_LOCK_THIS_BLOCK;
     static struct mach_header * (*p)(uint32_t image_index) = NULL;
 
@@ -1258,6 +1496,9 @@ _dyld_get_image_header(uint32_t image_index)
 intptr_t
 _dyld_get_image_vmaddr_slide(uint32_t image_index)
 {
+	if ( gUseDyld3 )
+		return dyld3::_dyld_get_image_vmaddr_slide(image_index);
+
 	DYLD_NO_LOCK_THIS_BLOCK;
     static unsigned long (*p)(uint32_t image_index) = NULL;
 
@@ -1269,6 +1510,9 @@ _dyld_get_image_vmaddr_slide(uint32_t image_index)
 const char* 
 _dyld_get_image_name(uint32_t image_index)
 {
+	if ( gUseDyld3 )
+		return dyld3::_dyld_get_image_name(image_index);
+
 	DYLD_NO_LOCK_THIS_BLOCK;
     static const char*  (*p)(uint32_t image_index) = NULL;
 
@@ -1280,6 +1524,9 @@ _dyld_get_image_name(uint32_t image_index)
 // SPI in Mac OS X 10.6
 intptr_t _dyld_get_image_slide(const struct mach_header* mh)
 {
+	if ( gUseDyld3 )
+		return dyld3::_dyld_get_image_slide(mh);
+
 	DYLD_NO_LOCK_THIS_BLOCK;
     static intptr_t (*p)(const struct mach_header*) = NULL;
 
@@ -1289,9 +1536,13 @@ intptr_t _dyld_get_image_slide(const struct mach_header* mh)
 }
 
 
+#if DEPRECATED_APIS_SUPPORTED
 bool
 _dyld_image_containing_address(const void* address)
 {
+	if ( gUseDyld3 )
+		return dyld3::_dyld_image_containing_address(address);
+
 	DYLD_LOCK_THIS_BLOCK;
     static bool (*p)(const void*) = NULL;
 
@@ -1304,6 +1555,9 @@ const struct mach_header *
 _dyld_get_image_header_containing_address(
 const void* address)
 {
+	if ( gUseDyld3 )
+		return dyld3::_dyld_get_image_header_containing_address(address);
+
 	DYLD_LOCK_THIS_BLOCK;
     static const struct mach_header * (*p)(const void*) = NULL;
 
@@ -1312,8 +1566,6 @@ const void* address)
 	return p(address);
 }
 
-
-#if DEPRECATED_APIS_SUPPORTED
 bool _dyld_launched_prebound(void)
 {
 	DYLD_LOCK_THIS_BLOCK;
@@ -1407,7 +1659,6 @@ static bool isLaunchdOwned()
 	return ( val != 0 );
 }
 
-#if DYLD_SHARED_CACHE_SUPPORT
 static void shared_cache_missing()
 {
 	// leave until dyld's that might call this are rare
@@ -1417,17 +1668,12 @@ static void shared_cache_out_of_date()
 {
 	// leave until dyld's that might call this are rare
 }
-#endif // DYLD_SHARED_CACHE_SUPPORT
 
 
 // the table passed to dyld containing thread helpers
 static dyld::LibSystemHelpers sHelpers = { 13, &dyldGlobalLockAcquire, &dyldGlobalLockRelease,
 									&getPerThreadBufferFor_dlerror, &malloc, &free, &__cxa_atexit,
-						#if DYLD_SHARED_CACHE_SUPPORT
 									&shared_cache_missing, &shared_cache_out_of_date,
-						#else
-									NULL, NULL,
-						#endif
 									NULL, NULL,
 									&pthread_key_create, &pthread_setspecific,
 									&malloc_size,
@@ -1447,21 +1693,28 @@ static dyld::LibSystemHelpers sHelpers = { 13, &dyldGlobalLockAcquire, &dyldGlob
 // and call dyld, registering the helper functions.
 //
 extern "C" void tlv_initializer();
-extern "C" void _dyld_initializer();
 void _dyld_initializer()
 {	
    void (*p)(dyld::LibSystemHelpers*);
 
-	_dyld_func_lookup("__dyld_register_thread_helpers", (void**)&p);
-	if(p != NULL)
-		p(&sHelpers);
-		
+	if ( gUseDyld3 ) {
+		dyld3::gAllImages.applyInitialImages();
+	}
+	else {
+		_dyld_func_lookup("__dyld_register_thread_helpers", (void**)&p);
+		if(p != NULL)
+			p(&sHelpers);
+	}
+
 	tlv_initializer();
 }
 
 
 char* dlerror()
 {
+	if ( gUseDyld3 )
+		return dyld3::dlerror();
+
 	DYLD_LOCK_THIS_BLOCK;
     static char* (*p)() = NULL;
 
@@ -1472,6 +1725,9 @@ char* dlerror()
 
 int dladdr(const void* addr, Dl_info* info)
 {
+	if ( gUseDyld3 )
+		return dyld3::dladdr(addr, info);
+
 	DYLD_LOCK_THIS_BLOCK;
     static int (*p)(const void* , Dl_info*) = NULL;
 
@@ -1482,6 +1738,9 @@ int dladdr(const void* addr, Dl_info* info)
 
 int dlclose(void* handle)
 {
+	if ( gUseDyld3 )
+		return dyld3::dlclose(handle);
+
 	DYLD_LOCK_THIS_BLOCK;
     static int (*p)(void* handle) = NULL;
 
@@ -1492,6 +1751,9 @@ int dlclose(void* handle)
 
 void* dlopen(const char* path, int mode)
 {	
+	if ( gUseDyld3 )
+		return dyld3::dlopen(path, mode);
+
 	// dlopen is special. locking is done inside dyld to allow initializer to run without lock
 	DYLD_NO_LOCK_THIS_BLOCK;
 	
@@ -1510,6 +1772,9 @@ void* dlopen(const char* path, int mode)
 
 bool dlopen_preflight(const char* path)
 {
+	if ( gUseDyld3 )
+		return dyld3::dlopen_preflight(path);
+
 	DYLD_LOCK_THIS_BLOCK;
     static bool (*p)(const char* path) = NULL;
 
@@ -1520,6 +1785,9 @@ bool dlopen_preflight(const char* path)
 
 void* dlsym(void* handle, const char* symbol)
 {
+	if ( gUseDyld3 )
+		return dyld3::dlsym(handle, symbol);
+
 	DYLD_LOCK_THIS_BLOCK;
     static void* (*p)(void* handle, const char* symbol) = NULL;
 
@@ -1528,9 +1796,11 @@ void* dlsym(void* handle, const char* symbol)
 	return(p(handle, symbol));
 }
 
-
 const struct dyld_all_image_infos* _dyld_get_all_image_infos()
 {
+	if ( gUseDyld3 )
+		return dyld3::_dyld_get_all_image_infos();
+
 	DYLD_NO_LOCK_THIS_BLOCK;
     static struct dyld_all_image_infos* (*p)() = NULL;
 
@@ -1542,6 +1812,9 @@ const struct dyld_all_image_infos* _dyld_get_all_image_infos()
 #if SUPPORT_ZERO_COST_EXCEPTIONS
 bool _dyld_find_unwind_sections(void* addr, dyld_unwind_sections* info)
 {
+	if ( gUseDyld3 )
+		return dyld3::_dyld_find_unwind_sections(addr, info);
+
 	DYLD_NO_LOCK_THIS_BLOCK;
     static void* (*p)(void*, dyld_unwind_sections*) = NULL;
 
@@ -1568,6 +1841,9 @@ void* _dyld_fast_stub_entry(void* loadercache, long lazyinfo)
 
 const char* dyld_image_path_containing_address(const void* addr)
 {
+	if ( gUseDyld3 )
+		return dyld3::dyld_image_path_containing_address(addr);
+
 	DYLD_NO_LOCK_THIS_BLOCK;
     static const char* (*p)(const void*) = NULL;
 
@@ -1578,6 +1854,9 @@ const char* dyld_image_path_containing_address(const void* addr)
 
 const struct mach_header* dyld_image_header_containing_address(const void* addr)
 {
+	if ( gUseDyld3 )
+		return dyld3::dyld_image_header_containing_address(addr);
+
 	DYLD_NO_LOCK_THIS_BLOCK;
     static const mach_header* (*p)(const void*) = NULL;
 
@@ -1589,6 +1868,9 @@ const struct mach_header* dyld_image_header_containing_address(const void* addr)
 
 bool dyld_shared_cache_some_image_overridden()
 {
+	if ( gUseDyld3 )
+		return dyld3::dyld_shared_cache_some_image_overridden();
+
 	DYLD_NO_LOCK_THIS_BLOCK;
     static bool (*p)() = NULL;
 
@@ -1599,6 +1881,9 @@ bool dyld_shared_cache_some_image_overridden()
 
 bool _dyld_get_shared_cache_uuid(uuid_t uuid)
 {
+	if ( gUseDyld3 )
+		return dyld3::_dyld_get_shared_cache_uuid(uuid);
+
 	DYLD_NO_LOCK_THIS_BLOCK;
     static bool (*p)(uuid_t) = NULL;
 
@@ -1609,6 +1894,9 @@ bool _dyld_get_shared_cache_uuid(uuid_t uuid)
 
 const void* _dyld_get_shared_cache_range(size_t* length)
 {
+	if ( gUseDyld3 )
+		return dyld3::_dyld_get_shared_cache_range(length);
+
 	DYLD_NO_LOCK_THIS_BLOCK;
     static const void* (*p)(size_t*) = NULL;
 
@@ -1620,6 +1908,9 @@ const void* _dyld_get_shared_cache_range(size_t* length)
 
 bool dyld_process_is_restricted()
 {
+	if ( gUseDyld3 )
+		return dyld3::dyld_process_is_restricted();
+
 	DYLD_NO_LOCK_THIS_BLOCK;
     static bool (*p)() = NULL;
 	
@@ -1628,9 +1919,11 @@ bool dyld_process_is_restricted()
 	return p();
 }
 
-#if DYLD_SHARED_CACHE_SUPPORT
 const char* dyld_shared_cache_file_path()
 {
+	if ( gUseDyld3 )
+		return dyld3::dyld_shared_cache_file_path();
+
 	DYLD_NO_LOCK_THIS_BLOCK;
     static const char* (*p)() = NULL;
 	
@@ -1638,10 +1931,12 @@ const char* dyld_shared_cache_file_path()
 	    _dyld_func_lookup("__dyld_shared_cache_file_path", (void**)&p);
 	return p();
 }
-#endif
 
 void dyld_dynamic_interpose(const struct mach_header* mh, const struct dyld_interpose_tuple array[], size_t count)
 {
+	if ( gUseDyld3 )
+		return dyld3::dyld_dynamic_interpose(mh, array, count);
+
 	DYLD_LOCK_THIS_BLOCK;
     static void (*p)(const struct mach_header* mh, const struct dyld_interpose_tuple array[], size_t count) = NULL;
 
@@ -1654,6 +1949,9 @@ void dyld_dynamic_interpose(const struct mach_header* mh, const struct dyld_inte
 // SPI called __fork
 void _dyld_fork_child()
 {
+	if ( gUseDyld3 )
+		return dyld3::_dyld_fork_child();
+
 	DYLD_NO_LOCK_THIS_BLOCK;
     static void (*p)() = NULL;
 
@@ -1724,14 +2022,17 @@ static const dyld_cache_header* findCacheInDirAndMap(const uuid_t cacheUuid, con
 
 int dyld_shared_cache_find_iterate_text(const uuid_t cacheUuid, const char* extraSearchDirs[], void (^callback)(const dyld_shared_cache_dylib_text_info* info))
 {
+	if ( gUseDyld3 )
+		return dyld3::dyld_shared_cache_find_iterate_text(cacheUuid, extraSearchDirs, callback);
+
 	const dyld_cache_header* cacheHeader = NULL;
 	bool needToUnmap = true;
 
 	// get info from dyld about this process, to see if requested cache is already mapped into this process
 	const dyld_all_image_infos* allInfo = _dyld_get_all_image_infos();
-	if ( (allInfo != NULL) && (memcmp(allInfo->sharedCacheUUID, cacheUuid, 16) == 0) ) {
+	if ( (allInfo != NULL) && (allInfo->sharedCacheBaseAddress != 0) && (memcmp(allInfo->sharedCacheUUID, cacheUuid, 16) == 0) ) {
 		// requested cache is already mapped, just re-use it
-		cacheHeader = (dyld_cache_header*)(SHARED_REGION_BASE + allInfo->sharedCacheSlide);
+		cacheHeader = (dyld_cache_header*)(allInfo->sharedCacheBaseAddress);
 		needToUnmap = false;
 	}
 	else {
@@ -1763,15 +2064,18 @@ int dyld_shared_cache_find_iterate_text(const uuid_t cacheUuid, const char* extr
 	}
 
 	// walk imageText table and call callback for each entry
+	const dyld_cache_mapping_info* mappings = (dyld_cache_mapping_info*)((char*)cacheHeader + cacheHeader->mappingOffset);
+	const uint64_t cacheUnslidBaseAddress = mappings[0].address;
 	const dyld_cache_image_text_info* imagesText = (dyld_cache_image_text_info*)((char*)cacheHeader + cacheHeader->imagesTextOffset);
 	const dyld_cache_image_text_info* imagesTextEnd = &imagesText[cacheHeader->imagesTextCount];
 	for (const dyld_cache_image_text_info* p=imagesText; p < imagesTextEnd; ++p) {
 		dyld_shared_cache_dylib_text_info dylibTextInfo;
-		dylibTextInfo.version			= 1;
+		dylibTextInfo.version			= 2;
 		dylibTextInfo.loadAddressUnslid = p->loadAddress;
 		dylibTextInfo.textSegmentSize	= p->textSegmentSize;
 		dylibTextInfo.path				= (char*)cacheHeader + p->pathOffset;
 		::memcpy(dylibTextInfo.dylibUuid, p->uuid, 16);
+		dylibTextInfo.textSegmentOffset = p->loadAddress - cacheUnslidBaseAddress;
 		callback(&dylibTextInfo);
 	}
 
@@ -1783,6 +2087,9 @@ int dyld_shared_cache_find_iterate_text(const uuid_t cacheUuid, const char* extr
 
 int dyld_shared_cache_iterate_text(const uuid_t cacheUuid, void (^callback)(const dyld_shared_cache_dylib_text_info* info))
 {
+	if ( gUseDyld3 )
+		return dyld3::dyld_shared_cache_iterate_text(cacheUuid, callback);
+
 	const char* extraSearchDirs[] = { NULL };
 	return dyld_shared_cache_find_iterate_text(cacheUuid, extraSearchDirs, callback);
 }
@@ -1790,6 +2097,9 @@ int dyld_shared_cache_iterate_text(const uuid_t cacheUuid, void (^callback)(cons
 
 bool _dyld_is_memory_immutable(const void* addr, size_t length)
 {
+	if ( gUseDyld3 )
+		return dyld3::_dyld_is_memory_immutable(addr, length);
+
 	DYLD_NO_LOCK_THIS_BLOCK;
     static bool (*p)(const void*, size_t) = NULL;
 
@@ -1803,6 +2113,9 @@ void _dyld_objc_notify_register(_dyld_objc_notify_mapped    mapped,
                                 _dyld_objc_notify_init      init,
                                 _dyld_objc_notify_unmapped  unmapped)
 {
+	if ( gUseDyld3 )
+		return dyld3::_dyld_objc_notify_register(mapped, init, unmapped);
+
 	DYLD_LOCK_THIS_BLOCK;
     static bool (*p)(_dyld_objc_notify_mapped, _dyld_objc_notify_init, _dyld_objc_notify_unmapped) = NULL;
 

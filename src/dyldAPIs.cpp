@@ -54,9 +54,16 @@
 #include "ImageLoaderMachO.h"
 #include "dyld.h"
 #include "dyldLibSystemInterface.h"
+#include "DyldSharedCache.h"
 
 #undef _POSIX_C_SOURCE
 #include "dlfcn.h"
+
+
+// this was in dyld_priv.h but it is no longer exported
+extern "C" {
+    const struct dyld_all_image_infos* _dyld_get_all_image_infos();
+}
 
 // from dyldExceptions.c
 extern "C" void __Unwind_SjLj_SetThreadKey(pthread_key_t key);
@@ -67,6 +74,7 @@ extern uint32_t allImagesCount();
 extern const mach_header* allImagesIndexedMachHeader(uint32_t index);
 extern const char* allImagesIndexedPath(uint32_t index);
 
+extern "C" int _dyld_func_lookup(const char* name, void** address);
 
 // deprecated APIs are still availble on Mac OS X, but not on iPhone OS
 #if __IPHONE_OS_VERSION_MIN_REQUIRED	
@@ -153,9 +161,7 @@ static struct dyld_func dyld_funcs[] = {
 	{"__dyld_shared_cache_some_image_overridden",		(void*)dyld_shared_cache_some_image_overridden },
 	{"__dyld_process_is_restricted",					(void*)dyld::processIsRestricted },
 	{"__dyld_dynamic_interpose",						(void*)dyld_dynamic_interpose },
-#if DYLD_SHARED_CACHE_SUPPORT
 	{"__dyld_shared_cache_file_path",					(void*)dyld::getStandardSharedCacheFilePath },
-#endif
     {"__dyld_get_image_header_containing_address",		(void*)dyld_image_header_containing_address },
     {"__dyld_is_memory_immutable",						(void*)_dyld_is_memory_immutable },
     {"__dyld_objc_notify_register",						(void*)_dyld_objc_notify_register },
@@ -171,7 +177,6 @@ static struct dyld_func dyld_funcs[] = {
     {"__dyld_install_handlers",						(void*)_dyld_install_handlers },
     {"__dyld_link_edit_error",						(void*)NSLinkEditError },
     {"__dyld_unlink_module",						(void*)NSUnLinkModule },
-    {"__dyld_bind_objc_module",						(void*)_dyld_bind_objc_module },
     {"__dyld_bind_fully_image_containing_address",  (void*)_dyld_bind_fully_image_containing_address },
     {"__dyld_image_containing_address",				(void*)_dyld_image_containing_address },
     {"__dyld_register_binding_handler",				(void*)_dyld_register_binding_handler },
@@ -198,7 +203,6 @@ static struct dyld_func dyld_funcs[] = {
     {"__dyld_NSCreateObjectFileImageFromMemory",		(void*)NSCreateObjectFileImageFromMemory },
     {"__dyld_NSDestroyObjectFileImage",					(void*)NSDestroyObjectFileImage },
     {"__dyld_NSLinkModule",								(void*)NSLinkModule },
-    {"__dyld_NSHasModInitObjectFileImage",				(void*)NSHasModInitObjectFileImage },
     {"__dyld_NSSymbolDefinitionCountInObjectFileImage",	(void*)NSSymbolDefinitionCountInObjectFileImage },
     {"__dyld_NSSymbolDefinitionNameInObjectFileImage",	(void*)NSSymbolDefinitionNameInObjectFileImage },
     {"__dyld_NSIsSymbolDefinedInObjectFileImage",		(void*)NSIsSymbolDefinedInObjectFileImage },
@@ -734,14 +738,6 @@ bool _dyld_all_twolevel_modules_prebound(void)
 	return FALSE; 
 }
 
-void _dyld_bind_objc_module(const void *objc_module)
-{
-	if ( dyld::gLogAPIs )
-		dyld::log("%s(%p)\n", __func__, objc_module);
-	// do nothing, with new dyld everything already bound
-}
-
-
 bool _dyld_bind_fully_image_containing_address(const void* address)
 {
 	if ( dyld::gLogAPIs )
@@ -849,8 +845,8 @@ NSObjectFileImageReturnCode NSCreateObjectFileImageFromMemory(const void* addres
 
 static bool validOFI(NSObjectFileImage objectFileImage)
 {
-	const int ofiCount = sObjectFileImages.size();
-	for (int i=0; i < ofiCount; ++i) {
+	const size_t ofiCount = sObjectFileImages.size();
+	for (size_t i=0; i < ofiCount; ++i) {
 		if ( sObjectFileImages[i] == objectFileImage )
 			return true;
 	}
@@ -903,13 +899,6 @@ bool NSDestroyObjectFileImage(NSObjectFileImage objectFileImage)
 		return true;
 	}
 	return false;
-}
-
-bool NSHasModInitObjectFileImage(NSObjectFileImage objectFileImage)
-{
-	if ( dyld::gLogAPIs )
-		dyld::log("%s(%p)\n", __func__, objectFileImage);
-	return objectFileImage->image->needsInitialization();
 }
 
 uint32_t NSSymbolDefinitionCountInObjectFileImage(NSObjectFileImage objectFileImage)
@@ -1145,9 +1134,9 @@ bool NSUnLinkModule(NSModule module, uint32_t options)
 
 	// Only delete image if there is no ofi referencing it
 	// That means the ofi was destroyed after linking, so no one is left to delete this image	
-	const int ofiCount = sObjectFileImages.size();
+	const size_t ofiCount = sObjectFileImages.size();
 	bool found = false;
-	for (int i=0; i < ofiCount; ++i) {
+	for (size_t i=0; i < ofiCount; ++i) {
 		NSObjectFileImage ofi = sObjectFileImages[i];
 		if ( ofi->image == image )
 			found = true;
@@ -1346,12 +1335,10 @@ bool dlopen_preflight(const char* path)
 		return true;
 #endif
 
-#if DYLD_SHARED_CACHE_SUPPORT
 	// <rdar://problem/5910137> dlopen_preflight() on image in shared cache leaves it loaded but not objc initialized
 	// if requested path is to something in the dyld shared cache, always succeed
 	if ( dyld::inSharedCache(path) )
 		return true;
-#endif
 	
 	bool result = false;
 	std::vector<const char*> rpathsFromCallerImage;
@@ -1520,12 +1507,13 @@ void* dlopen(const char* path, int mode)
 		image = load(path, context, cacheIndex);
 #if SUPPORT_ACCELERATE_TABLES
 		if ( (image != NULL) && (cacheIndex != UINT32_MAX) ) {
-			if ( dyld::makeCacheHandle(image, cacheIndex, mode, &result) ) {
-				if ( dyld::gLogAPIs )
-					dyld::log("  %s(%s) ==> %p\n", __func__, path, result);
-				if ( lockHeld )
-					dyld::gLibSystemHelpers->releaseGlobalDyldLock();
-				return result;
+            // found in cache, but under a different path
+            const char* betterPath = dyld::getPathFromIndex(cacheIndex);
+            if ( (betterPath != NULL) && dyld::dlopenFromCache(betterPath, mode, &result) ) {
+                // Note: dlopenFromCache() releases the lock
+                if ( dyld::gLogAPIs )
+                    dyld::log("  %s(%s) ==> %p\n", __func__, path, result);
+                return result;
 			}
 		}
 #endif
@@ -1950,11 +1938,7 @@ const char* dyld_image_path_containing_address(const void* address)
 
 bool dyld_shared_cache_some_image_overridden()
 {
- #if DYLD_SHARED_CACHE_SUPPORT
 	return dyld::gSharedCacheOverridden;
- #else
-    return true;
- #endif
 }
 
 
@@ -1992,15 +1976,15 @@ bool _dyld_is_memory_immutable(const void* addr, size_t length)
 	uintptr_t checkStart = (uintptr_t)addr;
 	uintptr_t checkEnd   = checkStart + length;
 
-#if DYLD_SHARED_CACHE_SUPPORT
 	// quick check to see if in r/o region of shared cache.  If so return true.
-	if ( dyld_shared_cache_ranges.sharedRegionsCount > 2 ) {
-		uintptr_t roStart    = dyld_shared_cache_ranges.ranges[0].start;
-		uintptr_t roEnd      = roStart + dyld_shared_cache_ranges.ranges[0].length;
+    const DyldSharedCache* cache = (DyldSharedCache*)dyld::imMemorySharedCacheHeader();
+    if ( cache != nullptr ) {
+        const dyld_cache_mapping_info* const mappings = (dyld_cache_mapping_info*)((char*)cache + cache->header.mappingOffset);
+		uintptr_t roStart    = (uintptr_t)cache;
+		uintptr_t roEnd      = roStart + (uintptr_t)mappings[0].size;
 		if ( (roStart < checkStart) && (checkEnd < roEnd) )
 			return true;
-	}
-#endif
+    }
 
 	// Otherwise find if addr is in a dyld loaded image
 	ImageLoader* image = dyld::findImageContainingAddress(addr);
@@ -2036,13 +2020,13 @@ bool _dyld_get_shared_cache_uuid(uuid_t uuid)
 
 const void* _dyld_get_shared_cache_range(size_t* length)
 {
-#if DYLD_SHARED_CACHE_SUPPORT
-	uintptr_t cacheEndAddr = (dyld_shared_cache_ranges.ranges[2].start + dyld_shared_cache_ranges.ranges[2].length);
-	*length = cacheEndAddr - dyld_shared_cache_ranges.ranges[0].start;
-	return (void*)(dyld_shared_cache_ranges.ranges[0].start);
-#else
-	return NULL;
-#endif
+    const DyldSharedCache* cache = (DyldSharedCache*)dyld::imMemorySharedCacheHeader();
+    if ( cache != nullptr ) {
+        const dyld_cache_mapping_info* const mappings = (dyld_cache_mapping_info*)((char*)cache + cache->header.mappingOffset);
+        *length = (size_t)((mappings[2].address + mappings[2].size) - mappings[0].address);
+        return cache;
+    }
+	return nullptr;
 }
 
 

@@ -59,8 +59,10 @@ struct dyld_all_image_infos_32 {
     uint32_t        sharedCacheBaseAddress;
     uint64_t        infoArrayChangeTimestamp;
     uint32_t        dyldPath;
-    uint32_t        notifyMachPorts[2];
-    uint32_t        reserved[11];
+    uint32_t        notifyMachPorts[8];
+    uint32_t        reserved[5];
+    uint32_t        compact_dyld_image_info_addr;
+    uint32_t        compact_dyld_image_info_size;
 };
 
 struct dyld_all_image_infos_64 {
@@ -91,8 +93,10 @@ struct dyld_all_image_infos_64 {
     uint64_t        sharedCacheBaseAddress;
     uint64_t        infoArrayChangeTimestamp;
     uint64_t        dyldPath;
-    uint32_t        notifyMachPorts[2];
-    uint64_t        reserved[12];
+    uint32_t        notifyMachPorts[8];
+    uint64_t        reserved[9];
+    uint64_t        compact_dyld_image_info_addr;
+    uint64_t        compact_dyld_image_info_size;
 };
 
 struct dyld_image_info_32 {

@@ -65,9 +65,7 @@ namespace dyld {
 #if SUPPORT_ACCELERATE_TABLES
 	extern bool								gLogAppAPIs;
 #endif
-#if DYLD_SHARED_CACHE_SUPPORT
 	extern bool								gSharedCacheOverridden;
-#endif
 	extern const struct LibSystemHelpers*	gLibSystemHelpers;
 #if SUPPORT_OLD_CRT_INITIALIZATION
 	extern bool								gRunInitializersOldWay;
@@ -110,12 +108,9 @@ namespace dyld {
 	extern void					registerObjCNotifiers(_dyld_objc_notify_mapped, _dyld_objc_notify_init, _dyld_objc_notify_unmapped);
 	extern bool					sharedCacheUUID(uuid_t uuid);
 	extern void					garbageCollectImages();
-	extern int					openSharedCacheFile();
 	extern const void*			imMemorySharedCacheHeader();
 	extern uintptr_t			fastBindLazySymbol(ImageLoader** imageLoaderCache, uintptr_t lazyBindingInfoOffset);
-#if DYLD_SHARED_CACHE_SUPPORT
 	extern bool					inSharedCache(const char* path);
-#endif
 #if LOG_BINDINGS
 	extern void					logBindings(const char* format, ...);
 #endif

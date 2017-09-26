@@ -38,6 +38,62 @@
 #include "dyld_images.h"
 #include "dyld_priv.h"
 
+// this was in dyld_priv.h but it is no longer exported
+extern "C" {
+    const struct dyld_all_image_infos* _dyld_get_all_image_infos();
+}
+
+namespace {
+
+void withRemoteBuffer(task_t task, vm_address_t remote_address, size_t remote_size, bool allow_truncation, kern_return_t *kr, void (^block)(void *buffer)) {
+    kern_return_t r = KERN_SUCCESS;
+    mach_vm_address_t local_address = 0;
+    mach_vm_address_t local_size = remote_size;
+    while (1) {
+        vm_prot_t cur_protection, max_protection;
+        r = mach_vm_remap(mach_task_self(),
+                            &local_address,
+                            local_size,
+                            0,  // mask
+                            VM_FLAGS_ANYWHERE | VM_FLAGS_RETURN_DATA_ADDR | VM_FLAGS_RESILIENT_CODESIGN,
+                            task,
+                            remote_address,
+                            TRUE,  // Copy semantics: changes to this memory by the target process will not be visible in this process
+                            &cur_protection,
+                            &max_protection,
+                            VM_INHERIT_DEFAULT);
+        //Do this here to allow chaining of multiple embedded blocks with a single error out;
+        if (kr != NULL) {
+            *kr = r;
+        }
+        if (r == KERN_SUCCESS) {
+            // We got someting, call the block and then exit
+            block(reinterpret_cast<void *>(local_address));
+            vm_deallocate(mach_task_self(), local_address, local_size);
+            break;
+        }
+        if (!allow_truncation) {
+            break;
+        }
+        // We did not get something, but we are allowed to truncate and try again
+        uint64_t trunc_size = ((remote_address + local_size - 1) & PAGE_MASK) + 1;
+        if (local_size <= trunc_size) {
+            //Even if we truncate it will be in the same page, time to accept defeat
+            break;
+        } else {
+            local_size -= trunc_size;
+        }
+    }
+}
+
+template<typename T>
+void withRemoteObject(task_t task, vm_address_t remote_address, kern_return_t *kr, void (^block)(T t))
+{
+    withRemoteBuffer(task, remote_address, sizeof(T), false, kr, ^(void *buffer) {
+        block(*reinterpret_cast<T *>(buffer));
+    });
+}
+};
 
 //
 // Opaque object returned by _dyld_process_info_create()
@@ -123,7 +179,10 @@ dyld_process_info_base* dyld_process_info_base::make(task_t task, const dyld_all
 {
     // figure out how many path strings will need to be copied and their size
     const dyld_all_image_infos* myInfo = _dyld_get_all_image_infos();
-    bool sameCacheAsThisProcess = ((memcmp(myInfo->sharedCacheUUID, allImageInfo.sharedCacheUUID, 16) == 0) && (myInfo->sharedCacheSlide == allImageInfo.sharedCacheSlide));
+    bool sameCacheAsThisProcess = !allImageInfo.processDetachedFromSharedRegion
+                                    && !myInfo->processDetachedFromSharedRegion
+                                    && ((memcmp(myInfo->sharedCacheUUID, allImageInfo.sharedCacheUUID, 16) == 0)
+                                    && (myInfo->sharedCacheSlide == allImageInfo.sharedCacheSlide));
     unsigned countOfPathsNeedingCopying = 0;
     if ( sameCacheAsThisProcess ) {
         for (int i=0; i < allImageInfo.infoArrayCount; ++i) {
@@ -181,7 +240,7 @@ dyld_process_info_base* dyld_process_info_base::make(task_t task, const dyld_all
             goto fail;
         }
     }
-    
+
     // fill in info for each image
     for (uint32_t i=0; i < allImageInfo.infoArrayCount; ++i) {
         if ( kern_return_t r = obj->addImage(task, sameCacheAsThisProcess, imageArray[i].imageLoadAddress, imageArray[i].imageFilePath, NULL) ) {
@@ -212,11 +271,13 @@ dyld_process_info_base* dyld_process_info_base::makeSuspended(task_t task, kern_
         return NULL;
     }
 
-    unsigned imageCount = 0;  // main executable and dyld
-    uint64_t            mainExecutableAddress = 0;
-    uint64_t            dyldAddress = 0;
+    __block unsigned    imageCount = 0;  // main executable and dyld
+    __block uint64_t    mainExecutableAddress = 0;
+    __block uint64_t    dyldAddress = 0;
     char                dyldPathBuffer[PATH_MAX+1];
     char                mainExecutablePathBuffer[PATH_MAX+1];
+    __block char *      dyldPath = &dyldPathBuffer[0];
+    __block char *      mainExecutablePath = &mainExecutablePathBuffer[0];
     mach_vm_size_t      size;
     for (mach_vm_address_t address = 0; ; address += size) {
         vm_region_basic_info_data_64_t  info;
@@ -226,31 +287,31 @@ dyld_process_info_base* dyld_process_info_base::makeSuspended(task_t task, kern_
                          (vm_region_info_t)&info, &infoCount, &objectName);
         if ( result != KERN_SUCCESS )
             break;
-        if ( info.protection == (VM_PROT_READ|VM_PROT_EXECUTE) ) {
+        if ( info.protection != (VM_PROT_READ|VM_PROT_EXECUTE) )
+            continue;
             // read start of vm region to verify it is a mach header
-            mach_vm_size_t readSize = sizeof(mach_header_64);
-            mach_header_64 mhBuffer;
-            if ( mach_vm_read_overwrite(task, address, sizeof(mach_header_64), (vm_address_t)&mhBuffer, &readSize) != KERN_SUCCESS )
-                continue;
-            if ( (mhBuffer.magic != MH_MAGIC) && (mhBuffer.magic != MH_MAGIC_64) )
-                continue;
-            // now know the region is the start of a mach-o file
-            if ( mhBuffer.filetype == MH_EXECUTE ) {
-                mainExecutableAddress = address;
-                int len = proc_regionfilename(pid, mainExecutableAddress, mainExecutablePathBuffer, PATH_MAX);
-                if ( len != 0 )
-                    mainExecutablePathBuffer[len] = '\0';
-                ++imageCount;
-            }
-            else if ( mhBuffer.filetype == MH_DYLINKER ) {
-                dyldAddress = address;
-                int len = proc_regionfilename(pid, dyldAddress, dyldPathBuffer, PATH_MAX);
-                if ( len != 0 )
-                    dyldPathBuffer[len] = '\0';
-                ++imageCount;
-            }
+            withRemoteObject(task, address, NULL, ^(mach_header_64 mhBuffer){
+                if ( (mhBuffer.magic != MH_MAGIC) && (mhBuffer.magic != MH_MAGIC_64) )
+                    return;
+                // now know the region is the start of a mach-o file
+                if ( mhBuffer.filetype == MH_EXECUTE ) {
+                    mainExecutableAddress = address;
+                    int len = proc_regionfilename(pid, mainExecutableAddress, mainExecutablePath, PATH_MAX);
+                    if ( len != 0 ) {
+                        mainExecutablePath[len] = '\0';
+                    }
+                    ++imageCount;
+                }
+                else if ( mhBuffer.filetype == MH_DYLINKER ) {
+                    dyldAddress = address;
+                    int len = proc_regionfilename(pid, dyldAddress, dyldPath, PATH_MAX);
+                    if ( len != 0 ) {
+                        dyldPath[len] = '\0';
+                    }
+                    ++imageCount;
+                }
+            });
             //fprintf(stderr, "vm region: addr=0x%llX, size=0x%llX, prot=0x%X\n", (uint64_t)address, (uint64_t)size, info.protection);
-        }
     }
     //fprintf(stderr, "dyld: addr=0x%llX, path=%s\n", dyldAddress, dyldPathBuffer);
     //fprintf(stderr, "app:  addr=0x%llX, path=%s\n", mainExecutableAddress, mainExecutablePathBuffer);
@@ -280,7 +341,7 @@ dyld_process_info_base* dyld_process_info_base::makeSuspended(task_t task, kern_
 
     // fill in info for dyld
     if ( dyldAddress != 0 ) {
-        if ( kern_return_t r = obj->addDyldImage(task, dyldAddress, 0, dyldPathBuffer) ) {
+        if ( kern_return_t r = obj->addDyldImage(task, dyldAddress, 0, dyldPath) ) {
             if ( kr != NULL )
                 *kr = r;
             free(obj);
@@ -290,7 +351,7 @@ dyld_process_info_base* dyld_process_info_base::makeSuspended(task_t task, kern_
 
     // fill in info for each image
     if ( mainExecutableAddress != 0 ) {
-        if ( kern_return_t r = obj->addImage(task, false, mainExecutableAddress, 0, mainExecutablePathBuffer) ) {
+        if ( kern_return_t r = obj->addImage(task, false, mainExecutableAddress, 0, mainExecutablePath) ) {
             if ( kr != NULL )
                 *kr = r;
             free(obj);
@@ -313,41 +374,12 @@ const char* dyld_process_info_base::addString(const char* str)
 
 const char* dyld_process_info_base::copyPath(task_t task, uint64_t stringAddressInTask, kern_return_t* kr)
 {
-    char temp[PATH_MAX+8]; // +8 is to allow '\0' at temp[PATH_MAX]
-    mach_vm_size_t readSize = PATH_MAX;
-    if ( ((stringAddressInTask & 0xFFF) + PATH_MAX) < 4096 ) {
-        // string fits within page, only one vm_read needed
-        if ( kern_return_t r = mach_vm_read_overwrite(task, stringAddressInTask, PATH_MAX, (vm_address_t)&temp, &readSize) ) {
-            if ( kr != NULL )
-                *kr = r;
-            return NULL;
-        }
-    }
-    else {
-        // string may cross page boundary, split into two reads
-        size_t firstLen = 4096 - (stringAddressInTask & 0xFFF);
-        readSize = firstLen;
-        if ( kern_return_t r = mach_vm_read_overwrite(task, stringAddressInTask, firstLen, (vm_address_t)&temp, &readSize) ) {
-            if ( kr != NULL )
-                *kr = r;
-            return NULL;
-        }
-        temp[firstLen] = '\0';
-        if ( strlen(temp) >= firstLen ) {
-            readSize = PATH_MAX-firstLen;
-            if ( kern_return_t r = mach_vm_read_overwrite(task, stringAddressInTask+firstLen, PATH_MAX-firstLen, (vm_address_t)&temp+firstLen, &readSize) ) {
-                if ( kr != NULL )
-                    *kr = r;
-                return NULL;
-                temp[PATH_MAX] = '\0'; // truncate any string that is too long
-            }
-        }
-    }
-    if ( kr != NULL )
-        *kr = KERN_SUCCESS;
-    return addString(temp);
+    __block const char* retval = NULL;
+    withRemoteBuffer(task, stringAddressInTask, PATH_MAX+8, true, kr, ^(void *buffer) {
+        retval = addString(static_cast<const char *>(buffer));
+    });
+    return retval;
 }
-
 
 kern_return_t dyld_process_info_base::addImage(task_t task, bool sameCacheAsThisProcess, uint64_t imageAddress, uint64_t imagePath, const char* imagePathLocal)
 {
@@ -369,19 +401,16 @@ kern_return_t dyld_process_info_base::addImage(task_t task, bool sameCacheAsThis
         addInfoFromLoadCommands((mach_header*)imageAddress, imageAddress, 32*1024);
     }
     else {
-        mach_vm_size_t readSize = sizeof(mach_header_64);
-        mach_header_64 mhBuffer;
-        if ( kern_return_t r = mach_vm_read_overwrite(task, imageAddress, sizeof(mach_header_64), (vm_address_t)&mhBuffer, &readSize) ) {
-            return r;
+        __block kern_return_t kr = KERN_SUCCESS;
+        withRemoteObject(task, imageAddress, &kr, ^(mach_header_64 mhBuffer) {
+            size_t          headerPagesSize = sizeof(mach_header_64) + mhBuffer.sizeofcmds;
+            withRemoteBuffer(task, imageAddress, headerPagesSize, false, &kr, ^(void * buffer) {
+                addInfoFromLoadCommands((mach_header*)buffer, imageAddress, headerPagesSize);
+            });
+        });
+        if (kr != KERN_SUCCESS) {
+            return kr;
         }
-        size_t          headerPagesSize = (sizeof(mach_header_64) + mhBuffer.sizeofcmds + 4095) & (-4096);
-        vm_address_t    localCopyBuffer;
-        unsigned int    localCopyBufferSize;
-        if ( kern_return_t r = mach_vm_read(task, imageAddress, headerPagesSize, &localCopyBuffer, &localCopyBufferSize) ) {
-            return r;
-        }
-        addInfoFromLoadCommands((mach_header*)localCopyBuffer, imageAddress, localCopyBufferSize);
-        vm_deallocate(mach_task_self(), localCopyBuffer, localCopyBufferSize);
     }
     _curImage->segmentsCount = _curSegmentIndex - _curImage->segmentStartIndex;
     _curImage++;
@@ -391,7 +420,7 @@ kern_return_t dyld_process_info_base::addImage(task_t task, bool sameCacheAsThis
 
 kern_return_t dyld_process_info_base::addDyldImage(task_t task, uint64_t dyldAddress, uint64_t dyldPathAddress, const char* localPath)
 {
-    kern_return_t kr;
+    __block kern_return_t kr = KERN_SUCCESS;
     _curImage->loadAddress = dyldAddress;
     _curImage->segmentStartIndex = _curSegmentIndex;
     if ( localPath != NULL ) {
@@ -403,19 +432,16 @@ kern_return_t dyld_process_info_base::addDyldImage(task_t task, uint64_t dyldAdd
             return kr;
     }
 
-    mach_vm_size_t readSize = sizeof(mach_header_64);
-    mach_header_64 mhBuffer;
-    if ( kern_return_t r = mach_vm_read_overwrite(task, dyldAddress, sizeof(mach_header_64), (vm_address_t)&mhBuffer, &readSize) ) {
-        return r;
+    withRemoteObject(task, dyldAddress, &kr, ^(mach_header_64 mhBuffer) {
+        size_t          headerPagesSize = sizeof(mach_header_64) + mhBuffer.sizeofcmds;
+        withRemoteBuffer(task, dyldAddress, headerPagesSize, false, &kr, ^(void * buffer) {
+            addInfoFromLoadCommands((mach_header*)buffer, dyldAddress, headerPagesSize);
+        });
+    });
+    if (kr != KERN_SUCCESS) {
+        return kr;
     }
-    size_t          headerPagesSize = (sizeof(mach_header_64) + mhBuffer.sizeofcmds + 4095) & (-4096);
-    vm_address_t    localCopyBuffer;
-    unsigned int    localCopyBufferSize;
-    if ( kern_return_t r = mach_vm_read(task, dyldAddress, headerPagesSize, &localCopyBuffer, &localCopyBufferSize) ) {
-        return r;
-    }
-    addInfoFromLoadCommands((mach_header*)localCopyBuffer, dyldAddress, localCopyBufferSize);
-    vm_deallocate(mach_task_self(), localCopyBuffer, localCopyBufferSize);
+
     _curImage->segmentsCount = _curSegmentIndex - _curImage->segmentStartIndex;
     _curImage++;
     return KERN_SUCCESS;
@@ -431,7 +457,7 @@ void dyld_process_info_base::addInfoFromLoadCommands(const mach_header* mh, uint
         startCmds = (load_command*)((char *)mh + sizeof(mach_header));
     else
         return;  // not a mach-o file, or wrong endianness
-        
+
     const load_command* const cmdsEnd = (load_command*)((char*)startCmds + mh->sizeofcmds);
     const load_command* cmd = startCmds;
     for(uint32_t i = 0; i < mh->ncmds; ++i) {

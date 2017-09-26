@@ -30,40 +30,47 @@ extern char** environ;
     cpu_type_t otherArch[] = { CPU_TYPE_ARM64 };
 #endif
 
-static task_t launchTest(const char* testProgPath, bool launchOtherArch, bool launchSuspended)
+struct task_and_pid {
+    pid_t pid;
+    task_t task;
+};
+
+static struct task_and_pid launchTest(const char* testProgPath, bool launchOtherArch, bool launchSuspended)
 {
-    posix_spawnattr_t attr;
+    posix_spawnattr_t attr = 0;
     if ( posix_spawnattr_init(&attr) != 0 ) {
-        printf("[FAIL] dyld_process_info posix_spawnattr_init()\n");
+        printf("[FAIL] dyld_process_info_unload posix_spawnattr_init()\n");
         exit(0);
     }
     if ( launchSuspended ) {
         if ( posix_spawnattr_setflags(&attr, POSIX_SPAWN_START_SUSPENDED) != 0 ) {
-            printf("[FAIL] dyld_process_info POSIX_SPAWN_START_SUSPENDED\n");
+            printf("[FAIL] dyld_process_info_unload POSIX_SPAWN_START_SUSPENDED\n");
             exit(0);
         }
     }
     if ( launchOtherArch ) {
         size_t copied;
         if ( posix_spawnattr_setbinpref_np(&attr, 1, otherArch, &copied) != 0 ) {
-           printf("[FAIL] dyld_process_info posix_spawnattr_setbinpref_np()\n");
+           printf("[FAIL] dyld_process_info_unload posix_spawnattr_setbinpref_np()\n");
             exit(0);
         }
     }
 
-    pid_t childPid;
+    struct task_and_pid child;
     const char* argv[] = { testProgPath, NULL };
-    int psResult = posix_spawn(&childPid, testProgPath, NULL, &attr, (char**)argv, environ);
+    int psResult = posix_spawn(&child.pid, testProgPath, NULL, &attr, (char**)argv, environ);
     if ( psResult != 0 ) {
-        printf("[FAIL] dyld_process_info posix_spawn(%s) failed, err=%d\n", testProgPath, psResult);
+        printf("[FAIL] dyld_process_info_unload posix_spawn(%s) failed, err=%d\n", testProgPath, psResult);
         exit(0);
     }
-    //printf("child pid=%d\n", childPid);
+    if (posix_spawnattr_destroy(&attr) != 0) {
+        printf("[FAIL] dyld_process_info_unload posix_spawnattr_destroy()\n");
+        exit(0);
+    }
 
-    task_t childTask = 0;
-    if ( task_for_pid(mach_task_self(), childPid, &childTask) != KERN_SUCCESS ) {
-        printf("[FAIL] dyld_process_info task_for_pid()\n");
-        kill(childPid, SIGKILL);
+    if ( task_for_pid(mach_task_self(), child.pid, &child.task) != KERN_SUCCESS ) {
+        printf("[FAIL] dyld_process_info_unload task_for_pid()\n");
+        kill(child.pid, SIGKILL);
         exit(0);
     }
 
@@ -71,22 +78,27 @@ static task_t launchTest(const char* testProgPath, bool launchOtherArch, bool la
     struct task_basic_info info;
     do {
         unsigned count = TASK_BASIC_INFO_COUNT;
-        kern_return_t kr = task_info(childTask, TASK_BASIC_INFO, (task_info_t)&info, &count);
+        kern_return_t kr = task_info(child.task, TASK_BASIC_INFO, (task_info_t)&info, &count);
         sleep(1);
     } while ( info.suspend_count == 0 );
 
-    return childTask;
+    return child;
 }
 
-static bool alwaysGetImages(task_t task, bool launchedSuspended)
+static void killTest(struct task_and_pid tp) {
+    int r = kill(tp.pid, SIGKILL);
+    waitpid(tp.pid, &r, 0);
+}
+
+static bool alwaysGetImages(struct task_and_pid tp, bool launchedSuspended)
 {
     int failCount = 0;
     for (int i=0; i < 100; ++i ) {
         kern_return_t result;
-        dyld_process_info info = _dyld_process_info_create(task, 0, &result);
+        dyld_process_info info = _dyld_process_info_create(tp.task, 0, &result);
         //fprintf(stderr, "info=%p, result=%08X\n", info, result);
         if ( i == 0 )
-            task_resume(task);
+            (void)kill(tp.pid, SIGCONT);
         if ( info == NULL ) {
             failCount++;
             //fprintf(stderr, "info=%p, result=%08X\n", info, result);
@@ -96,7 +108,10 @@ static bool alwaysGetImages(task_t task, bool launchedSuspended)
             _dyld_process_info_release(info);
         }
     }
-    if ( failCount !=0 ) {
+    // ideally the fail count would be zero.  But the target is dlopen/dlclosing in a tight loop, so there may never be a stable set of images.
+    // The real bug driving this test case was _dyld_process_info_create() crashing when the the image list changed too fast.
+    // The important thing is to not crash.  Getting NULL back is ok.
+    if ( failCount > 50 ) {
         printf("[FAIL] dyld_process_info_unload %d out of 100 calls to _dyld_process_info_create() failed\n", failCount);
         return false;
     }
@@ -113,16 +128,15 @@ int main(int argc, const char* argv[])
         exit(0);
     }
     const char* testProgPath = argv[1];
-    task_t childTask;
+    struct task_and_pid child;
 
     // launch test program suspended
-    childTask = launchTest(testProgPath, false, true);
-    if ( ! alwaysGetImages(childTask, true) ) {
-        task_terminate(childTask);
+    child = launchTest(testProgPath, false, true);
+    if ( ! alwaysGetImages(child, true) ) {
+        killTest(child);
         exit(0);
     }
-    task_terminate(childTask);
-
+    killTest(child);
 
     printf("[PASS] dyld_process_info_unload\n");
 	return 0;

@@ -54,6 +54,7 @@ struct dyld_cache_header
 	uint64_t	imagesTextCount;		// number of dyld_cache_image_text_info entries
 };
 
+
 struct dyld_cache_mapping_info {
 	uint64_t	address;
 	uint64_t	size;
@@ -130,7 +131,6 @@ struct dyld_cache_image_text_info
 	uint32_t	textSegmentSize;
 	uint32_t	pathOffset;				// offset from start of cache file
 };
-
 
 // The rebasing info is to allow the kernel to lazily rebase DATA pages of the
 // dyld shared cache.  Rebasing is adding the slide to interior pointers.

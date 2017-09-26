@@ -135,10 +135,12 @@ struct dyld_all_image_infos {
 #if __LP64__
 	uintptr_t						reserved[13-(DYLD_MAX_PROCESS_INFO_NOTIFY_COUNT/2)];
 #else
-	uintptr_t						reserved[12-DYLD_MAX_PROCESS_INFO_NOTIFY_COUNT];
+	uintptr_t						reserved[13-DYLD_MAX_PROCESS_INFO_NOTIFY_COUNT];
 #endif
+	/* the following field is only in version 16 (macOS 10.13, iOS 11.0) and later */
+    uintptr_t                       compact_dyld_image_info_addr;
+    size_t                          compact_dyld_image_info_size;
 };
-
 
 /*
  * Beginning in Mac OS X 10.5, this is how gdb discovers where the shared cache is in a process.
@@ -158,7 +160,7 @@ struct dyld_shared_cache_ranges {
 		uintptr_t	length;
 	}							ranges[4];			/* max regions */
 };
-extern struct dyld_shared_cache_ranges dyld_shared_cache_ranges;
+extern struct dyld_shared_cache_ranges dyld_shared_cache_ranges __attribute__((visibility("hidden")));
 
 
 

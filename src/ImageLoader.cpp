@@ -618,14 +618,12 @@ void ImageLoader::recursiveLoadLibraries(const LinkContext& context, bool prefli
 			bool depLibRequired = false;
 			bool depLibCheckSumsMatch = false;
 			DependentLibraryInfo& requiredLibInfo = libraryInfos[i];
-#if DYLD_SHARED_CACHE_SUPPORT
 			if ( preflightOnly && context.inSharedCache(requiredLibInfo.name) ) {
 				// <rdar://problem/5910137> dlopen_preflight() on image in shared cache leaves it loaded but not objc initialized
 				// in preflight mode, don't even load dylib that are in the shared cache because they will never be unloaded
 				setLibImage(i, NULL, false, false);
 				continue;
 			}
-#endif
 			try {
 				unsigned cacheIndex;
 				dependentLib = context.loadLibrary(requiredLibInfo.name, true, this->getPath(), &thisRPaths, cacheIndex);
@@ -1317,7 +1315,7 @@ uintptr_t ImageLoader::read_uleb128(const uint8_t*& p, const uint8_t* end)
 			bit += 7;
 		}
 	} while (*p++ & 0x80);
-	return result;
+	return (uintptr_t)result;
 }
 
 
@@ -1336,7 +1334,7 @@ intptr_t ImageLoader::read_sleb128(const uint8_t*& p, const uint8_t* end)
 	// sign extend negative numbers
 	if ( (byte & 0x40) != 0 )
 		result |= (-1LL) << bit;
-	return result;
+	return (intptr_t)result;
 }
 
 

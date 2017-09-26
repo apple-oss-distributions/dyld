@@ -1,0 +1,22 @@
+;;; Copyright (c) 2017 Apple Inc.  All Rights reserved.
+;;;
+;;; WARNING: The sandbox rules in this file currently constitute
+;;; Apple System Private Interface and are subject to change at any time and
+;;; without notice.
+;;;
+(version 1)
+
+(deny default)
+(deny file-map-executable iokit-get-properties process-info* nvram*)
+(deny dynamic-code-generation)
+
+(import "system.sb")
+
+;; For reading dylibs
+(allow file-read*)
+
+;; For resolving symlinks, realpath(3), and equivalents.
+(allow file-read-metadata)
+
+;; for logging name of client
+(allow process-info-pidinfo)

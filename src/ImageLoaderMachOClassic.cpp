@@ -436,14 +436,14 @@ ImageLoaderMachOClassic::mapSplitSegDylibOutsideSharedRegion(int fd,
 	while ( ! foundRoom ) {
 		foundRoom = true;
 		for(unsigned int i=0; i < regionCount; ++i) {
-			vm_address_t addr = nextAltLoadAddress + regions[i].sfm_address - regions[0].sfm_address;
-			vm_size_t size = regions[i].sfm_size ;
+			vm_address_t addr = (vm_address_t)(nextAltLoadAddress + regions[i].sfm_address - regions[0].sfm_address);
+			vm_size_t size = (vm_size_t)regions[i].sfm_size ;
 			r = vm_allocate(mach_task_self(), &addr, size, false /*only this range*/);
 			if ( 0 != r ) {
 				// no room here, deallocate what has succeeded so far
 				for(unsigned int j=0; j < i; ++j) {
-					addr = nextAltLoadAddress + regions[j].sfm_address - regions[0].sfm_address;
-					size = regions[j].sfm_size ;
+					addr = (vm_address_t)(nextAltLoadAddress + regions[j].sfm_address - regions[0].sfm_address);
+					size = (vm_size_t)(regions[j].sfm_size);
 					(void)vm_deallocate(mach_task_self(), addr, size);
 				}
 				nextAltLoadAddress += 0x00100000;  // skip ahead 1MB and try again
@@ -459,7 +459,7 @@ ImageLoaderMachOClassic::mapSplitSegDylibOutsideSharedRegion(int fd,
 	}
 	
 	// map in each region
-	uintptr_t slide = nextAltLoadAddress - regions[0].sfm_address;
+	uintptr_t slide = (uintptr_t)(nextAltLoadAddress - regions[0].sfm_address);
 	this->setSlide(slide);
 	for(unsigned int i=0; i < regionCount; ++i) {
 		if ( ((regions[i].sfm_init_prot & VM_PROT_ZF) != 0) || (regions[i].sfm_size == 0) ) {
@@ -467,7 +467,7 @@ ImageLoaderMachOClassic::mapSplitSegDylibOutsideSharedRegion(int fd,
 		}
 		else {
 			void* mmapAddress = (void*)(uintptr_t)(regions[i].sfm_address + slide);
-			size_t size = regions[i].sfm_size;
+			size_t size = (size_t)regions[i].sfm_size;
 			int protection = 0;
 			if ( regions[i].sfm_init_prot & VM_PROT_EXECUTE )
 				protection   |= PROT_EXEC;
@@ -728,7 +728,7 @@ void ImageLoaderMachOClassic::resetPreboundLazyPointers(const LinkContext& conte
 {
 	// loop through all local (internal) relocation records looking for pre-bound-lazy-pointer values
 	const uintptr_t relocBase = this->getRelocBase();
-	register const uintptr_t slide = this->fSlide;
+    const uintptr_t slide = this->fSlide;
 	const relocation_info* const relocsStart = (struct relocation_info*)(&fLinkEditBase[fDynamicInfo->locreloff]);
 	const relocation_info* const relocsEnd = &relocsStart[fDynamicInfo->nlocrel];
 	for (const relocation_info* reloc=relocsStart; reloc < relocsEnd; ++reloc) {

@@ -133,15 +133,24 @@ if __name__ == "__main__":
     testsRunDstTopDir = "/AppleInternal/CoreOS/tests/dyld/"
     testsBuildDstTopDir = dstDir + testsRunDstTopDir
     shutil.rmtree(testsBuildDstTopDir, ignore_errors=True)
-    testsSrcTopDir = os.getenv("SRCROOT", "./") + "/testing/test-cases/"
-    sdkDir = os.getenv("SDKROOT", "/")
+    dyldSrcDir = os.getenv("SRCROOT", "")
+    if not dyldSrcDir:
+        dyldSrcDir = os.getcwd()
+    testsSrcTopDir = dyldSrcDir + "/testing/test-cases/"
+    sdkDir = os.getenv("SDKROOT", "")
+    if not sdkDir:
+        #sdkDir = subprocess.check_output(["xcrun", "--show-sdk-path"]).rstrip()
+        sdkDir = "/Applications/Xcode.app/Contents/Developer/Platforms/MacOSX.platform/Developer/SDKs/MacOSX10.13.Internal.sdk"
     toolsDir = os.getenv("TOOLCHAIN_DIR", "/")
     defaultMinOS = ""
+    minVersNum = "10.12"
     minOSOption = os.getenv("DEPLOYMENT_TARGET_CLANG_FLAG_NAME", "")
     if minOSOption:
         minOSVersName = os.getenv("DEPLOYMENT_TARGET_CLANG_ENV_NAME", "")
         if minOSVersName:
             minVersNum = os.getenv(minOSVersName, "")
+    else:
+        minOSOption = "mmacosx-version-min"
     platformName = os.getenv("PLATFORM_NAME", "osx")
     archOptions = ""
     archList = os.getenv("RC_ARCHS", "")
@@ -155,9 +164,11 @@ if __name__ == "__main__":
         elif platformName == "appletvos":
             archOptions = "-arch arm64"
         else:
-            archOptions = ""
-            for arch in string.split(archList, " "):
-                archOptions = archOptions + " -arch " + arch
+            if archList:
+                for arch in string.split(archList, " "):
+                    archOptions = archOptions + " -arch " + arch
+            else:
+                archOptions = "-arch x86_64"
     allTests = []
     for f in os.listdir(testsSrcTopDir):
         if f.endswith(".dtest"):

@@ -116,6 +116,10 @@ struct uuid_command {
 
 #define MH_HAS_OBJC			0x40000000
 
+#ifndef CPU_SUBTYPE_ARM64_E
+	#define CPU_SUBTYPE_ARM64_E    2
+#endif
+
 #include "FileAbstraction.hpp"
 #include "Architectures.hpp"
 
@@ -947,7 +951,7 @@ inline int64_t read_sleb128(const uint8_t*& p, const uint8_t* end)
 		if (p == end)
 			throw "malformed sleb128";
 		byte = *p++;
-		result |= ((byte & 0x7f) << bit);
+		result |= (((int64_t)(byte & 0x7f)) << bit);
 		bit += 7;
 	} while (byte & 0x80);
 	// sign extend negative numbers

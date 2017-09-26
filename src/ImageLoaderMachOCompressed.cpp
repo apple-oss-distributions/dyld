@@ -35,6 +35,7 @@
 #include <sys/fcntl.h>
 #include <sys/stat.h> 
 #include <sys/param.h>
+#include <sys/sysctl.h>
 #include <mach/mach.h>
 #include <mach/thread_status.h>
 #include <mach-o/loader.h> 
@@ -61,6 +62,12 @@
 	struct macho_section			: public section  {};	
 	struct macho_routines_command	: public routines_command  {};	
 #endif
+
+#if __arm__ || __arm64__
+bool ImageLoaderMachOCompressed::sVmAccountingDisabled  = false;
+bool ImageLoaderMachOCompressed::sVmAccountingSuspended = false;
+#endif
+
 
 
 // create image for main executable
@@ -149,6 +156,10 @@ ImageLoaderMachOCompressed* ImageLoaderMachOCompressed::instantiateFromFile(cons
 
 		// make sure path is stable before recording in dyld_all_image_infos
 		image->setMapped(context);
+
+		// dylibs with thread local variables cannot be unloaded because there is no way to clean up all threads
+		if ( image->machHeader()->flags & MH_HAS_TLV_DESCRIPTORS )
+			image->setNeverUnload();
 
 		// pre-fetch content of __DATA and __LINKEDIT segment for faster launches
 		// don't do this on prebound images or if prefetching is disabled
@@ -838,8 +849,45 @@ void ImageLoaderMachOCompressed::doBindJustLazies(const LinkContext& context)
 	eachLazyBind(context, &ImageLoaderMachOCompressed::bindAt);
 }
 
+#if __arm__ || __arm64__
+int ImageLoaderMachOCompressed::vmAccountingSetSuspended(bool suspend, const LinkContext& context)
+{
+    if ( context.verboseBind )
+        dyld::log("vm.footprint_suspend=%d\n", suspend);
+    int newValue = suspend ? 1 : 0;
+    int oldValue = 0;
+    size_t newlen = sizeof(newValue);
+    size_t oldlen = sizeof(oldValue);
+    return sysctlbyname("vm.footprint_suspend", &oldValue, &oldlen, &newValue, newlen);
+}
+#endif
+
 void ImageLoaderMachOCompressed::eachBind(const LinkContext& context, bind_handler handler)
 {
+#if __arm__ || __arm64__
+    // <rdar://problem/29099600> dyld should tell the kernel when it is doing root fix-ups
+    if ( !sVmAccountingDisabled ) {
+        if ( fInSharedCache ) {
+            if ( !sVmAccountingSuspended ) {
+                int ret = vmAccountingSetSuspended(true, context);
+                if ( context.verboseBind && (ret != 0) )
+                    dyld::log("vm.footprint_suspend => %d, errno=%d\n", ret, errno);
+                if ( ret == 0 )
+                    sVmAccountingSuspended = true;
+                else
+                    sVmAccountingDisabled = true;
+            }
+        }
+        else if ( sVmAccountingSuspended ) {
+            int ret = vmAccountingSetSuspended(false, context);
+            if ( ret == 0 )
+                sVmAccountingSuspended = false;
+            else if ( errno == ENOENT )
+                sVmAccountingDisabled = true;
+        }
+    }
+#endif
+
 	try {
 		uint8_t type = 0;
 		int segmentIndex = -1;

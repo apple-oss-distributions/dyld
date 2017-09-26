@@ -136,7 +136,9 @@ static const char* default_shared_cache_path() {
 	return IPHONE_DYLD_SHARED_CACHE_DIR DYLD_SHARED_CACHE_BASE_NAME "armv7f";
 #elif __ARM_ARCH_7S__ 
 	return IPHONE_DYLD_SHARED_CACHE_DIR DYLD_SHARED_CACHE_BASE_NAME "armv7s";
-#elif __arm64__ 
+#elif __arm64e__
+	return IPHONE_DYLD_SHARED_CACHE_DIR DYLD_SHARED_CACHE_BASE_NAME "arm64e";
+#elif __arm64__
 	return IPHONE_DYLD_SHARED_CACHE_DIR DYLD_SHARED_CACHE_BASE_NAME "arm64";
 #else
 	#error unsupported architecture
@@ -249,7 +251,6 @@ void collect_size(const dyld_shared_cache_dylib_info* dylibInfo, const dyld_shar
 	info.textSize = segInfo->fileSize;
 	info.path = dylibInfo->path;
 	results.textSegments.push_back(info);
-	size_t size = segInfo->fileSize;
 }
 
 
@@ -475,7 +476,7 @@ int main (int argc, const char* argv[]) {
 		fprintf(stderr, "Error: open() failed for shared cache file at %s, errno=%d\n", sharedCachePath, errno);
 		exit(1);
 	}
-	options.mappedCache = ::mmap(NULL, statbuf.st_size, PROT_READ, MAP_PRIVATE, cache_fd, 0);
+	options.mappedCache = ::mmap(NULL, (size_t)statbuf.st_size, PROT_READ, MAP_PRIVATE, cache_fd, 0);
 	if (options.mappedCache == MAP_FAILED) {
 		fprintf(stderr, "Error: mmap() for shared cache at %s failed, errno=%d\n", sharedCachePath, errno);
 		exit(1);
@@ -549,6 +550,39 @@ int main (int argc, const char* argv[]) {
 		else {
 			printf("n/a\n");
 		}
+		if ( header->mappingOffset() >= 0xE0 ) {
+            // HACK until this uses new header
+            uint32_t platform = *((uint32_t*)(((char*)header) + 0xD8));
+            uint32_t simulator = *((uint32_t*)(((char*)header) + 0xDC));
+            switch (platform) {
+                case 1:
+                    printf("platform: macOS\n");
+                    break;
+                case 2:
+                    if ( simulator & 0x400 )
+                        printf("platform: iOS simulator\n");
+                    else
+                        printf("platform: iOS\n");
+                    break;
+                case 3:
+                    if ( simulator & 0x400 )
+                        printf("platform: tvOS simulator\n");
+                    else
+                        printf("platform: tvOS\n");
+                    break;
+                case 4:
+                    if ( simulator & 0x400 )
+                        printf("platform: watchOS simulator\n");
+                    else
+                        printf("platform: watchOS\n");
+                    break;
+                case 5:
+                    printf("platform: bridgeOS\n");
+                    break;
+                default:
+                    printf("platform: 0x%08X 0x%08X\n", platform, simulator);
+            }
+        }
 		printf("image count: %u\n", header->imagesCount());
 		if ( (header->mappingOffset() >= 0x78) && (header->branchPoolsOffset() != 0) ) {
 			printf("branch pool count:  %u\n", header->branchPoolsCount());
@@ -712,7 +746,7 @@ int main (int argc, const char* argv[]) {
 		printf("local symbols nlist array:  %3uMB,  file offset: 0x%08X -> 0x%08X\n", nlistByteSize/(1024*1024), nlistFileOffset, nlistFileOffset+nlistByteSize);
 		printf("local symbols string pool:  %3uMB,  file offset: 0x%08X -> 0x%08X\n", stringsSize/(1024*1024), stringsFileOffset, stringsFileOffset+stringsSize);
 		printf("local symbols by dylib (count=%d):\n", entriesCount);
-		const char* stringPool = (char*)options.mappedCache + stringsFileOffset;
+		//const char* stringPool = (char*)options.mappedCache + stringsFileOffset;
 		for (int i=0; i < entriesCount; ++i) {
 			const char* imageName = (char*)options.mappedCache + imageInfos[i].pathFileOffset();
 			printf("   nlistStartIndex=%5d, nlistCount=%5d, image=%s\n", entries[i].nlistStartIndex(), entries[i].nlistCount(), imageName);
@@ -756,7 +790,7 @@ int main (int argc, const char* argv[]) {
 		return result;
 	}
 	else {
-		segment_callback_t callback;
+		segment_callback_t callback = nullptr;
 		if ( strcmp((char*)options.mappedCache, "dyld_v1    i386") == 0 ) {
 			switch ( options.mode ) {
 				case modeList:
@@ -840,7 +874,8 @@ int main (int argc, const char* argv[]) {
 					break;
 			}
 		}		
-		else if ( strcmp((char*)options.mappedCache, "dyld_v1   arm64") == 0 ) {
+		else if ( (strcmp((char*)options.mappedCache, "dyld_v1   arm64") == 0)
+               || (strcmp((char*)options.mappedCache, "dyld_v1  arm64e") == 0) ) {
 			switch ( options.mode ) {
 				case modeList:
 					callback = print_list<arm64>;

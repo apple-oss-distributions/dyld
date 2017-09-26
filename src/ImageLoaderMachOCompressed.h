@@ -136,8 +136,14 @@ private:
     void                                updateOptimizedLazyPointers(const LinkContext& context);
     void                                updateAlternateLazyPointer(uint8_t* stub, void** originalLazyPointerAddr, const LinkContext& context);
 	void								registerEncryption(const struct encryption_info_command* encryptCmd, const LinkContext& context);
-	
+
 	const struct dyld_info_command*			fDyldInfo;
+
+#if __arm__ || __arm64__
+    static int                          vmAccountingSetSuspended(bool suspend, const LinkContext& context);
+    static bool                         sVmAccountingDisabled;  // sysctl not availble
+    static bool                         sVmAccountingSuspended; // kernel is currently ignoring COWs
+#endif
 };
 
 

@@ -15,6 +15,7 @@
 #include <mach/mach.h>
 #include <mach/machine.h>
 #include <mach-o/dyld_process_info.h>
+#include <Availability.h>
 
 
 extern char** environ;
@@ -29,9 +30,14 @@ extern char** environ;
     cpu_type_t otherArch[] = { CPU_TYPE_ARM64 };
 #endif
 
-static task_t launchTest(const char* testProgPath, bool launchOtherArch, bool launchSuspended)
+struct task_and_pid {
+    pid_t pid;
+    task_t task;
+};
+
+static struct task_and_pid launchTest(const char* testProgPath, bool launchOtherArch, bool launchSuspended)
 {
-    posix_spawnattr_t attr;
+    posix_spawnattr_t attr = 0;
     if ( posix_spawnattr_init(&attr) != 0 ) {
         printf("[FAIL] dyld_process_info posix_spawnattr_init()\n");
         exit(0);
@@ -50,31 +56,42 @@ static task_t launchTest(const char* testProgPath, bool launchOtherArch, bool la
         }
     }
 
-    pid_t childPid;
+    struct task_and_pid child = {0, 0};
     const char* argv[] = { testProgPath, NULL };
-    int psResult = posix_spawn(&childPid, testProgPath, NULL, &attr, (char**)argv, environ);
+    int psResult = posix_spawn(&child.pid, testProgPath, NULL, &attr, (char**)argv, environ);
     if ( psResult != 0 ) {
         printf("[FAIL] dyld_process_info posix_spawn(%s) failed, err=%d\n", testProgPath, psResult);
         exit(0);
     }
-    //printf("child pid=%d\n", childPid);
-
-    task_t childTask = 0;
-    if ( task_for_pid(mach_task_self(), childPid, &childTask) != KERN_SUCCESS ) {
-        printf("[FAIL] dyld_process_info task_for_pid()\n");
-        kill(childPid, SIGKILL);
+    if (posix_spawnattr_destroy(&attr) != 0) {
+        printf("[FAIL] dyld_process_info posix_spawnattr_destroy()\n");
         exit(0);
     }
+
+    if ( task_for_pid(mach_task_self(), child.pid, &child.task) != KERN_SUCCESS ) {
+        printf("[FAIL] dyld_process_info task_for_pid()\n");
+        kill(child.pid, SIGKILL);
+        exit(0);
+    }
+
+#if __x86_64__
+    //printf("child pid=%d task=%d (%s, %s)\n", child.pid, child.task, launchOtherArch ? "i386" : "x86_64",  launchSuspended ? "suspended" : "active");
+#endif
 
     // wait until process is up and has suspended itself
     struct task_basic_info info;
     do {
         unsigned count = TASK_BASIC_INFO_COUNT;
-        kern_return_t kr = task_info(childTask, TASK_BASIC_INFO, (task_info_t)&info, &count);
+        kern_return_t kr = task_info(child.task, TASK_BASIC_INFO, (task_info_t)&info, &count);
         sleep(1);
     } while ( info.suspend_count == 0 );
 
-    return childTask;
+    return child;
+}
+
+static void killTest(struct task_and_pid tp) {
+    int r = kill(tp.pid, SIGKILL);
+    waitpid(tp.pid, &r, 0);
 }
 
 static bool hasCF(task_t task, bool launchedSuspended)
@@ -127,43 +144,55 @@ static bool hasCF(task_t task, bool launchedSuspended)
 
 int main(int argc, const char* argv[])
 {
+    kern_return_t kr = KERN_SUCCESS;
     printf("[BEGIN] dyld_process_info\n");
 
     if ( argc < 2 ) {
         printf("[FAIL] dyld_process_info missing argument\n");
         exit(0);
     }
+
     const char* testProgPath = argv[1];
-    task_t childTask;
+    struct task_and_pid child;
 
     // launch test program same arch as this program
-    childTask = launchTest(testProgPath, false, false);
-    if ( ! hasCF(childTask, false) ) {
+    child = launchTest(testProgPath, false, false);
+    if ( ! hasCF(child.task, false) ) {
         printf("[FAIL] dyld_process_info same arch does not link with CF and dyld\n");
-        task_terminate(childTask);
+        killTest(child);
         exit(0);
     }
-    task_terminate(childTask);
-    
-    // launch test program suspended
-    childTask = launchTest(testProgPath, false, true);
-    if ( ! hasCF(childTask, true) ) {
-        printf("[FAIL] dyld_process_info suspended does not link with CF and dyld\n");
-        task_terminate(childTask);
-        exit(0);
-    }
-    task_resume(childTask);
-    task_terminate(childTask);
+    killTest(child);
 
-#if !TARGET_OS_WATCH && !TARGET_OS_TV && __LP64__
-    // on 64/32 devices, run test program as other arch too
-    childTask = launchTest(testProgPath, true, false);
-    if ( ! hasCF(childTask, false) ) {
-        printf("[FAIL] dyld_process_info other arch does not link with CF and dyld\n");
-        task_terminate(childTask);
+    // launch test program suspended
+    child = launchTest(testProgPath, false, true);
+    if ( ! hasCF(child.task, true) ) {
+        printf("[FAIL] dyld_process_info suspended does not link with CF and dyld\n");
+        killTest(child);
         exit(0);
     }
-    task_terminate(childTask);
+    (void)kill(child.pid, SIGCONT);
+    killTest(child);
+
+#if __MAC_OS_X_VERSION_MIN_REQUIRED
+    // only mac supports multiple architectures, run test program as other arch too
+    child = launchTest(testProgPath, true, false);
+    if ( ! hasCF(child.task, false) ) {
+        printf("[FAIL] dyld_process_info other arch does not link with CF and dyld\n");
+        killTest(child);
+        exit(0);
+    }
+    killTest(child);
+
+    // launch test program suspended
+    child = launchTest(testProgPath, true, true);
+    if ( ! hasCF(child.task, true) ) {
+        printf("[FAIL] dyld_process_info suspended does not link with CF and dyld\n");
+        killTest(child);
+        exit(0);
+    }
+    (void)kill(child.pid, SIGCONT);
+    killTest(child);
 #endif
 
     // verify this program does not use CF

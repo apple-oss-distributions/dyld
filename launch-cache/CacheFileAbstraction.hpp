@@ -97,6 +97,7 @@ private:
 };
 
 
+
 template <typename E>
 class dyldCacheFileMapping {
 public:		
@@ -291,6 +292,7 @@ public:
 private:
 	dyld_cache_accelerator_dof			fields;
 };
+
 
 template <typename E>
 class dyldCacheSlideInfo {

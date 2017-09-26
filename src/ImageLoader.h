@@ -102,7 +102,6 @@
 	#define SPLIT_SEG_DYLIB_SUPPORT			0
 	#define PREBOUND_IMAGE_SUPPORT			__arm__
 	#define TEXT_RELOC_SUPPORT				__i386__
-	#define DYLD_SHARED_CACHE_SUPPORT		(__arm__ || __arm64__)
 	#define SUPPORT_OLD_CRT_INITIALIZATION	0
 	#define SUPPORT_LC_DYLD_ENVIRONMENT		1
 	#define SUPPORT_VERSIONED_PATHS			1
@@ -116,7 +115,6 @@
 	#define SPLIT_SEG_DYLIB_SUPPORT			__i386__
 	#define PREBOUND_IMAGE_SUPPORT			__i386__
 	#define TEXT_RELOC_SUPPORT				__i386__
-	#define DYLD_SHARED_CACHE_SUPPORT		1
 	#define SUPPORT_OLD_CRT_INITIALIZATION	__i386__
 	#define SUPPORT_LC_DYLD_ENVIRONMENT		(__i386__ || __x86_64__)
 	#define SUPPORT_VERSIONED_PATHS			1
@@ -609,6 +607,7 @@ public:
 	dyld_image_states					getState() { return (dyld_image_states)fState; }
 
 	ino_t								getInode() const { return fInode; }
+    dev_t                               getDevice() const { return fDevice; }
 
 										// used to sort images bottom-up
 	int									compare(const ImageLoader* right) const;

@@ -39,7 +39,7 @@
 //
 class ImageLoaderMegaDylib : public ImageLoader {
 public:
-	static ImageLoaderMegaDylib*		makeImageLoaderMegaDylib(const dyld_cache_header*, long slide, const LinkContext&);
+	static ImageLoaderMegaDylib*		makeImageLoaderMegaDylib(const dyld_cache_header*, long slide, const macho_header* mainMH, const LinkContext&);
 
 
 	virtual								~ImageLoaderMegaDylib();
@@ -185,7 +185,13 @@ protected:
 	virtual void						setWeakSymbolsBound(unsigned index);
 
 private:
-										ImageLoaderMegaDylib(const dyld_cache_header*, long slide, const LinkContext&);
+										ImageLoaderMegaDylib(const dyld_cache_header*, long slide, const macho_header* mainMH, const LinkContext&);
+
+    struct UpwardIndexes
+	{
+		uint16_t	 count;
+		uint16_t     images[1];
+	};
 
 	const macho_header*					getIndexedMachHeader(unsigned index) const;
 	const uint8_t*						getIndexedTrie(unsigned index, uint32_t& trieSize) const;
@@ -213,7 +219,7 @@ private:
 															const ImageLoader* requestorImage, bool runResolver, uintptr_t* address) const;
 	static uint8_t						dyldStateToCacheState(dyld_image_states state);
 	void								recursiveInitialization(const LinkContext& context, mach_port_t this_thread, unsigned int imageIndex,
-																InitializerTimingList& timingInfo);
+																InitializerTimingList& timingInfo, UpwardIndexes&);
 	void								recursiveSpinLockAcquire(unsigned int imageIndex, mach_port_t thisThread);
 	void								recursiveSpinLockRelease(unsigned int imageIndex, mach_port_t thisThread);
 

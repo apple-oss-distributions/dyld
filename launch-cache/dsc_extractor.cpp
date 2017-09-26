@@ -497,7 +497,7 @@ size_t dylib_maker(const void* mapped_cache, std::vector<uint8_t> &dylib_data, c
 	optimize_linkedit<A>(((macho_header<P>*)(base_ptr+offsetInFatFile)), textOffsetInCache, mapped_cache, &newSize);
 	
 	// update fat header with new file size
-    dylib_data.resize(offsetInFatFile+newSize);
+    dylib_data.resize((size_t)(offsetInFatFile+newSize));
     base_ptr                                    = &dylib_data.front();
 	FA->size                                    = OSSwapHostToBigInt32(newSize);
 #undef FH
@@ -521,7 +521,7 @@ int dyld_shared_cache_extract_dylibs_progress(const char* shared_cache_file_path
 		return -1;
 	}
 	
-	void* mapped_cache = mmap(NULL, statbuf.st_size, PROT_READ, MAP_PRIVATE, cache_fd, 0);
+	void* mapped_cache = mmap(NULL, (size_t)statbuf.st_size, PROT_READ, MAP_PRIVATE, cache_fd, 0);
 	if (mapped_cache == MAP_FAILED) {
 		fprintf(stderr, "Error: mmap() for shared cache at %s failed, errno=%d\n", shared_cache_file_path, errno);
 		return -1;
@@ -547,9 +547,11 @@ int dyld_shared_cache_extract_dylibs_progress(const char* shared_cache_file_path
 		dylib_create_func = dylib_maker<arm>;
 	else if ( strcmp((char*)mapped_cache, "dyld_v1   arm64") == 0 ) 
 		dylib_create_func = dylib_maker<arm64>;
+	else if ( strcmp((char*)mapped_cache, "dyld_v1  arm64e") == 0 )
+		dylib_create_func = dylib_maker<arm64>;
 	else {
 		fprintf(stderr, "Error: unrecognized dyld shared cache magic.\n");
-        munmap(mapped_cache, statbuf.st_size);
+        munmap(mapped_cache, (size_t)statbuf.st_size);
 		return -1;
 	}
 
@@ -561,7 +563,7 @@ int dyld_shared_cache_extract_dylibs_progress(const char* shared_cache_file_path
 
     if(result != 0) {
 		fprintf(stderr, "Error: dyld_shared_cache_iterate_segments_with_slide failed.\n");
-        munmap(mapped_cache, statbuf.st_size);
+        munmap(mapped_cache, (size_t)statbuf.st_size);
 		return result;
     }
 
@@ -602,7 +604,7 @@ int dyld_shared_cache_extract_dylibs_progress(const char* shared_cache_file_path
                 return;
             }
             
-            std::vector<uint8_t> *vec   = new std::vector<uint8_t>(statbuf.st_size);
+            std::vector<uint8_t> *vec   = new std::vector<uint8_t>((size_t)statbuf.st_size);
             if(pread(fd, &vec->front(), vec->size(), 0) != (long)vec->size()) {
                 fprintf(stderr, "can't read dylib file %s, errnor=%d\n", dylib_path, errno);
                 close(fd);
@@ -635,7 +637,7 @@ int dyld_shared_cache_extract_dylibs_progress(const char* shared_cache_file_path
     dispatch_release(group);
     dispatch_release(writer_queue);
     
-    munmap(mapped_cache, statbuf.st_size);
+    munmap(mapped_cache, (size_t)statbuf.st_size);
 	return result;
 }
 
