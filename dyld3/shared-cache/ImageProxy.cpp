@@ -1212,7 +1212,7 @@ ImageProxyGroup* ImageProxyGroup::makeOtherOsGroup(Diagnostics& diag, const Dyld
     // add every dylib/bundle in "other: list to _images
     uint32_t indexInGroup = 0;
     for (const DyldSharedCache::MappedMachO& mapping : otherDylibsAndBundles) {
-        ImageProxy* proxy = new ImageProxy(mapping, 1, indexInGroup++, false);
+        ImageProxy* proxy = new ImageProxy(mapping, 1, indexInGroup++, true);
         groupProxy->_images.push_back(proxy);
         groupProxy->_pathToProxy[mapping.runtimePath] = proxy;
     }
@@ -1304,7 +1304,7 @@ BinaryClosureData* ImageProxyGroup::makeClosure(Diagnostics& diag, const DyldCac
     ImageProxyGroup mainClosureGroupProxy(2, dyldCache, nullptr, otherOsDylibs, mainProgMapping.runtimePath, existingGroups, buildTimePrefixes,
                                           emptyEnvVars, false, true, inodesAreSameAsRuntime);
 
-    ImageProxy* mainProxy = new ImageProxy(mainProgMapping, 2, 0, false);
+    ImageProxy* mainProxy = new ImageProxy(mainProgMapping, 2, 0, true);
     if ( mainProxy == nullptr ) {
         diag.error("can't find slice matching dyld cache in %s", mainProgMapping.runtimePath.c_str());
         return nullptr;
@@ -2149,7 +2149,10 @@ void ImageProxyGroup::populateGroupWriter(Diagnostics& diag, launch_cache::Image
                             assert(interposeReplacement.isGroupImageTarget(replacementGroupNum, replacementIndexInGroup, replacementOffsetInImage));
                             assert(replacementGroupNum == 2);
                             assert(replacementIndexInGroup < (1 << 8));
-                            assert(replacementOffsetInImage < 0xFFFFFFFFULL);
+                            if ( replacementOffsetInImage >= 0xFFFFFFFFULL ) {
+                                diag.warning("bad interposing implementation in %s", _images[imageIndex]->runtimePath().c_str());
+                                return;
+                            }
                             DyldCacheOverride cacheOverride;
                             cacheOverride.patchTableIndex = patchTableIndex;
                             cacheOverride.imageIndex      = replacementIndexInGroup;
@@ -2225,7 +2228,10 @@ void ImageProxyGroup::populateGroupWriter(Diagnostics& diag, launch_cache::Image
                             MachOParser::FoundSymbol foundInfo;
                             if ( weakDefParser.findExportedSymbol(weakDiag, entry.first.c_str(), nullptr, foundInfo, nullptr) ) {
                                 assert(proxy->indexInGroup() < (1 << 8));
-                                assert(foundInfo.value < (1ULL << 32));
+                                if ( foundInfo.value >= (1ULL << 32) ) {
+                                    diag.warning("bad weak symbol address in %s", proxy->runtimePath().c_str());
+                                    return;
+                                }
                                 entry.second.imageIndex  = proxy->indexInGroup();
                                 entry.second.imageOffset = foundInfo.value;
                             }

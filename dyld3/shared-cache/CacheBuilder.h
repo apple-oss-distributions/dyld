@@ -47,19 +47,20 @@ namespace  dyld3 {
 
 struct CacheBuilder {
 
-                                    CacheBuilder(const DyldSharedCache::CreateOptions& options);
+                                        CacheBuilder(const DyldSharedCache::CreateOptions& options);
 
-    bool                            build(const std::vector<DyldSharedCache::MappedMachO>&  dylibsToCache,
-                                          const std::vector<DyldSharedCache::MappedMachO>&  otherOsDylibs,
-                                          const std::vector<DyldSharedCache::MappedMachO>&  osExecutables);
-    void                            deleteBuffer();
-    const DyldSharedCache*          buffer() { return _buffer; }
-    size_t                          bufferSize() { return (size_t)_allocatedBufferSize; }
-    std::string                     errorMessage();
-    const std::set<std::string>     warnings();
-    const bool                      agileSignature();
-    const std::string               cdHashFirst();
-    const std::string               cdHashSecond();
+    void                                build(const std::vector<DyldSharedCache::MappedMachO>&  dylibsToCache,
+                                              const std::vector<DyldSharedCache::MappedMachO>&  otherOsDylibs,
+                                              const std::vector<DyldSharedCache::MappedMachO>&  osExecutables);
+    void                                deleteBuffer();
+    const DyldSharedCache*              buffer() { return _buffer; }
+    size_t                              bufferSize() { return (size_t)_allocatedBufferSize; }
+    std::string                         errorMessage();
+    const std::set<std::string>         warnings();
+    const std::set<const mach_header*>  evictions();
+    const bool                          agileSignature();
+    const std::string                   cdHashFirst();
+    const std::string                   cdHashSecond();
 
     struct SegmentMappingInfo {
         const void*     srcSegment;
@@ -126,6 +127,7 @@ private:
     const DyldSharedCache::CreateOptions&       _options;
     DyldSharedCache*                            _buffer;
     Diagnostics                                 _diagnostics;
+    std::set<const mach_header*>               _evictions;
     const ArchLayout*                           _archLayout;
     uint32_t                                    _aliasCount;
     uint64_t                                    _slideInfoFileOffset;

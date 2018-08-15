@@ -455,6 +455,12 @@ void AllImages::init(const BinaryClosure* closure, const void* dyldCacheLoadAddr
     _dyldCacheAddress   = dyldCacheLoadAddress;
     _dyldCachePath      = dyldCachePath;
 
+    if ( _dyldCacheAddress ) {
+        const DyldSharedCache* cache = (DyldSharedCache*)_dyldCacheAddress;
+        const dyld_cache_mapping_info* const fileMappings = (dyld_cache_mapping_info*)((uint64_t)_dyldCacheAddress + cache->header.mappingOffset);
+        _dyldCacheSlide     = (uint64_t)dyldCacheLoadAddress - fileMappings[0].address;
+    }
+
     // Make temporary old image array, so libSystem initializers can be debugged
     uint32_t count = (uint32_t)initialImages.count();
     dyld_image_info oldDyldInfo[count];
@@ -585,9 +591,13 @@ void AllImages::addImages(const launch_cache::DynArray<loader::ImageInfo>& newIm
     for (uint32_t j=0; j < existingNotifierCount; ++j) {
         NotifyFunc func = existingNotifierArray[j];
         for (uint32_t i=0; i < count; ++i) {
-            MachOParser parser(newImages[i].loadAddress);
             log_notifications("dyld: add notifier %p called with mh=%p\n", func, newImages[i].loadAddress);
-            func(newImages[i].loadAddress, parser.getSlide());
+            if (newImages[i].justUsedFromDyldCache) {
+                func(newImages[i].loadAddress, _dyldCacheSlide);
+            } else {
+                MachOParser parser(newImages[i].loadAddress);
+                func(newImages[i].loadAddress, parser.getSlide());
+            }
         }
     }
 

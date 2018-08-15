@@ -205,11 +205,9 @@ MachOParser::MachOParser(const mach_header* mh, bool dyldCacheIsRaw)
         // asssume out-of-process mach_header not in a dyld cache are raw mapped files
         _data |= 1;
     }
-    else {
-        // out-of-process mach_header in a dyld cache are not raw, but cache may be raw
-        if ( dyldCacheIsRaw )
-            _data |= 2;
-    }
+    // out-of-process mach_header in a dyld cache are not raw, but cache may be raw
+    if ( dyldCacheIsRaw )
+        _data |= 2;
 #endif
 }
 

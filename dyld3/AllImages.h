@@ -146,6 +146,7 @@ private:
     const BinaryClosure*                    _mainClosure         = nullptr;
     const void*                             _dyldCacheAddress    = nullptr;
     const char*                             _dyldCachePath       = nullptr;
+    uint64_t                                _dyldCacheSlide      = 0;
     StartImageArray*                        _initialImages       = nullptr;
     const char*                             _mainExeOverridePath = nullptr;
     _dyld_objc_notify_mapped                _objcNotifyMapped    = nullptr;

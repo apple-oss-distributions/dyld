@@ -97,14 +97,14 @@ public:
 
     struct CreateResults
     {
-        const DyldSharedCache*      cacheContent    = nullptr;    // caller needs to vm_deallocate() when done
-        size_t                      cacheLength     = 0;
-        std::string                 errorMessage;
-        std::set<std::string>       warnings;
-        bool                        agileSignature = false;
-        std::string                 cdHashFirst;
-        std::string                 cdHashSecond;
-        bool                        overflowed = false;
+        const DyldSharedCache*          cacheContent    = nullptr;    // caller needs to vm_deallocate() when done
+        size_t                          cacheLength     = 0;
+        std::string                     errorMessage;
+        std::set<std::string>           warnings;
+        std::set<const mach_header*>    evictions;
+        bool                            agileSignature = false;
+        std::string                     cdHashFirst;
+        std::string                     cdHashSecond;
     };
 
 

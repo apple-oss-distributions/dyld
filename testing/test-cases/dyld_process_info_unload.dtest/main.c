@@ -111,10 +111,6 @@ static bool alwaysGetImages(struct task_and_pid tp, bool launchedSuspended)
     // ideally the fail count would be zero.  But the target is dlopen/dlclosing in a tight loop, so there may never be a stable set of images.
     // The real bug driving this test case was _dyld_process_info_create() crashing when the the image list changed too fast.
     // The important thing is to not crash.  Getting NULL back is ok.
-    if ( failCount > 50 ) {
-        printf("[FAIL] dyld_process_info_unload %d out of 100 calls to _dyld_process_info_create() failed\n", failCount);
-        return false;
-    }
     return true;
 }
 

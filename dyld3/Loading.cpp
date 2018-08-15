@@ -91,16 +91,20 @@ static bool sandboxBlockedStat(const char* path)
     return sandboxBlocked(path, "file-read-metadata");
 }
 
-#if TARGET_OS_WATCH
+#if TARGET_OS_WATCH || TARGET_OS_BRIDGE
 static uint64_t pageAlign(uint64_t value)
 {
-	return (value + 4095) & (-4096);
+  #if __arm64__
+    return (value + 0x3FFF) & (-0x4000);
+  #else
+	return (value + 0xFFF) & (-0x1000);
+  #endif
 }
 #endif
 
 static void updateSliceOffset(uint64_t& sliceOffset, uint64_t codeSignEndOffset, size_t fileLen)
 {
-#if TARGET_OS_WATCH
+#if TARGET_OS_WATCH || TARGET_OS_BRIDGE
     if ( sliceOffset != 0 ) {
         if ( pageAlign(codeSignEndOffset) == pageAlign(fileLen) ) {
             // cache builder saw fat file, but file is now thin

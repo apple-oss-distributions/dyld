@@ -504,7 +504,7 @@ void ImageLoaderMachO::sniffLoadCommands(const macho_header* mh, const char* pat
 
 	if ( symTabCmd != NULL ) {
 		// validate symbol table fits in LINKEDIT
-		if ( symTabCmd->symoff < linkeditFileOffsetStart )
+		if ( (symTabCmd->nsyms > 0) && (symTabCmd->symoff < linkeditFileOffsetStart) )
 			throw "malformed mach-o image: symbol table underruns __LINKEDIT";
 		if ( symTabCmd->nsyms > 0x10000000 )
 			throw "malformed mach-o image: symbol table too large";
@@ -1614,6 +1614,10 @@ void ImageLoaderMachO::doRebase(const LinkContext& context)
 	// <rdar://problem/25329861> Delay calling setNeverUnload() until we know this is not for dlopen_preflight()
 	if ( fRetainForObjC )
 		this->setNeverUnload();
+
+    // dylibs with thread local variables cannot be unloaded because there is no way to clean up all threads
+    if ( !this->inSharedCache() && (this->machHeader()->flags & MH_HAS_TLV_DESCRIPTORS) )
+        this->setNeverUnload();
 
 	// if prebound and loaded at prebound address, then no need to rebase
 	if ( this->usablePrebinding(context) ) {

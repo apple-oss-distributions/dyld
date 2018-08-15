@@ -241,19 +241,7 @@ bool build(Diagnostics& diags, dyld3::Manifest& manifest, const std::string& mas
         auto queueEntry = buildQueue[index];
         pthread_setname_np(queueEntry.options.loggingPrefix.substr(0, MAXTHREADNAMESIZE - 1).c_str());
         
-        DyldSharedCache::CreateResults results;
-        while (1) {
-            results = DyldSharedCache::create(queueEntry.options, queueEntry.dylibsForCache, queueEntry.otherDylibsAndBundles, queueEntry.mainExecutables);
-            if (!results.overflowed)
-                break;
-            auto evicted = manifest.removeLargestLeafDylib(queueEntry.configNames, queueEntry.options.archName);
-            if (evicted.empty())
-                break;
-            queueEntry = manifest.makeQueueEntry(queueEntry.outputPath, queueEntry.configNames, queueEntry.options.archName, queueEntry.options.optimizeStubs,  queueEntry.options.loggingPrefix, queueEntry.options.verbose);
-            dispatch_sync(warningQueue, ^{
-                warnings.insert("[WARNING] CACHE OVERFLOW: " + queueEntry.options.loggingPrefix + " evicted dylib: " + evicted);
-            });
-        }
+        DyldSharedCache::CreateResults results = DyldSharedCache::create(queueEntry.options, queueEntry.dylibsForCache, queueEntry.otherDylibsAndBundles, queueEntry.mainExecutables);
         dispatch_sync(warningQueue, ^{
             warnings.insert(results.warnings.begin(), results.warnings.end());
             bool chooseSecondCdHash = agileChooseSHA256CdHash;
@@ -262,13 +250,16 @@ bool build(Diagnostics& diags, dyld3::Manifest& manifest, const std::string& mas
                 chooseSecondCdHash = false;
             }
             for (const auto& configName : queueEntry.configNames) {
-                manifest.configuration(configName).architecture(queueEntry.options.archName).results.warnings = results.warnings;
+                auto& configResults = manifest.configuration(configName).architecture(queueEntry.options.archName).results;
+                for (const auto& mh : results.evictions) {
+                    auto parser = dyld3::MachOParser(mh);
+                    configResults.exclude(&parser, "VM overflow, evicting");
+                }
+                configResults.warnings = results.warnings;
                 if (queueEntry.options.optimizeStubs) {
-                    manifest.configuration(configName).architecture(queueEntry.options.archName)
-                    .results.developmentCache.cdHash = chooseSecondCdHash ? results.cdHashSecond : results.cdHashFirst;
+                    configResults.developmentCache.cdHash = chooseSecondCdHash ? results.cdHashSecond : results.cdHashFirst;
                 } else {
-                    manifest.configuration(configName).architecture(queueEntry.options.archName)
-                    .results.productionCache.cdHash =  chooseSecondCdHash ? results.cdHashSecond : results.cdHashFirst;
+                    configResults.productionCache.cdHash =  chooseSecondCdHash ? results.cdHashSecond : results.cdHashFirst;
                 }
             }
         });

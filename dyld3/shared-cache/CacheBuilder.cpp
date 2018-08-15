@@ -119,6 +119,11 @@ const std::set<std::string> CacheBuilder::warnings()
     return _diagnostics.warnings();
 }
 
+const std::set<const mach_header*> CacheBuilder::evictions()
+{
+    return _evictions;
+}
+
 void CacheBuilder::deleteBuffer()
 {
     vm_deallocate(mach_task_self(), (vm_address_t)_buffer, _allocatedBufferSize);
@@ -176,7 +181,7 @@ bool CacheBuilder::cacheOverflow(const dyld_cache_mapping_info regions[3])
     }
 }
 
-bool CacheBuilder::build(const std::vector<DyldSharedCache::MappedMachO>& dylibs,
+void CacheBuilder::build(const std::vector<DyldSharedCache::MappedMachO>& dylibs,
                          const std::vector<DyldSharedCache::MappedMachO>& otherOsDylibsInput,
                          const std::vector<DyldSharedCache::MappedMachO>& osExecutables)
 {
@@ -184,7 +189,7 @@ bool CacheBuilder::build(const std::vector<DyldSharedCache::MappedMachO>& dylibs
     // FIXME: plist should specify required vs optional dylibs
     if ( dylibs.size() < 30 ) {
         _diagnostics.error("missing required minimum set of dylibs");
-        return false;
+        return;
     }
     uint64_t t1 = mach_absolute_time();
 
@@ -196,10 +201,10 @@ bool CacheBuilder::build(const std::vector<DyldSharedCache::MappedMachO>& dylibs
     // assign addresses for each segment of each dylib in new cache
     dyld_cache_mapping_info regions[3];
     SegmentMapping segmentMapping = assignSegmentAddresses(sortedDylibs, regions);
-    if ( cacheOverflow(regions) ) {
+    while ( cacheOverflow(regions) ) {
         if ( !_options.evictLeafDylibsOnOverflow ) {
             _diagnostics.error("cache overflow: %lluMB (max %lluMB)", _vmSize / 1024 / 1024, (_archLayout->sharedMemorySize) / 1024 / 1024);
-            return false;
+            return;
         }
         // find all leaf (not referenced by anything else in cache) dylibs
 
@@ -248,6 +253,7 @@ bool CacheBuilder::build(const std::vector<DyldSharedCache::MappedMachO>& dylibs
             for (std::vector<DyldSharedCache::MappedMachO>::iterator it=sortedDylibs.begin(); it != sortedDylibs.end(); ++it) {
                 dyld3::MachOParser parser(it->mh);
                 if ( installName == parser.installName() ) {
+                    _evictions.insert(parser.header());
                     otherOsDylibs.push_back(*it);
                     sortedDylibs.erase(it);
                     break;
@@ -256,10 +262,10 @@ bool CacheBuilder::build(const std::vector<DyldSharedCache::MappedMachO>& dylibs
         }
         // re-layout cache
         segmentMapping = assignSegmentAddresses(sortedDylibs, regions);
-        if ( cacheOverflow(regions) ) {
+        if ( unreferencedDylibs.size() == 0 && cacheOverflow(regions) ) {
             _diagnostics.error("cache overflow, tried evicting %ld leaf daylibs, but still too big: %lluMB (max %lluMB)",
                                toRemove.size(), _vmSize / 1024 / 1024, (_archLayout->sharedMemorySize) / 1024 / 1024);
-            return false;
+            return;
         }
     }
 
@@ -267,7 +273,7 @@ bool CacheBuilder::build(const std::vector<DyldSharedCache::MappedMachO>& dylibs
     _allocatedBufferSize = std::max(_currentFileSize, (uint64_t)0x100000)*1.1; // add 10% to allocation to support large closures
     if ( vm_allocate(mach_task_self(), (vm_address_t*)&_buffer, _allocatedBufferSize, VM_FLAGS_ANYWHERE) != 0 ) {
         _diagnostics.error("could not allocate buffer");
-        return false;
+        return;
     }
     _currentFileSize = _allocatedBufferSize;
 
@@ -276,17 +282,17 @@ bool CacheBuilder::build(const std::vector<DyldSharedCache::MappedMachO>& dylibs
     copyRawSegments(sortedDylibs, segmentMapping);
     adjustAllImagesForNewSegmentLocations(sortedDylibs, segmentMapping);
     if ( _diagnostics.hasError() )
-        return false;
+        return;
 
     bindAllImagesInCacheFile(regions);
     if ( _diagnostics.hasError() )
-        return false;
+        return;
 
     // optimize ObjC
     if ( _options.optimizeObjC )
         optimizeObjC(_buffer, _archLayout->is64, _options.optimizeStubs, _pointersForASLR, _diagnostics);
     if ( _diagnostics.hasError() )
-        return false;
+        return;
 
     // optimize away stubs
     std::vector<uint64_t> branchPoolOffsets;
@@ -355,10 +361,10 @@ bool CacheBuilder::build(const std::vector<DyldSharedCache::MappedMachO>& dylibs
                                                                                           _options.pathPrefixes, _patchTable,
                                                                                           _options.optimizeStubs, !_options.dylibsRemovedDuringMastering);
     if ( _diagnostics.hasError() )
-        return false;
+        return;
     addCachedDylibsImageGroup(dylibGroup);
     if ( _diagnostics.hasError() )
-        return false;
+        return;
 
     uint64_t t4 = mach_absolute_time();
 
@@ -366,10 +372,10 @@ bool CacheBuilder::build(const std::vector<DyldSharedCache::MappedMachO>& dylibs
     dyld3::ImageProxyGroup* otherGroup = dyld3::ImageProxyGroup::makeOtherOsGroup(_diagnostics, dyldCacheParser, dylibGroup, otherOsDylibs,
                                                                                   _options.inodesAreSameAsRuntime, _options.pathPrefixes);
     if ( _diagnostics.hasError() )
-        return false;
+        return;
     addCachedOtherDylibsImageGroup(otherGroup);
     if ( _diagnostics.hasError() )
-        return false;
+        return;
 
     uint64_t t5 = mach_absolute_time();
 
@@ -393,7 +399,7 @@ bool CacheBuilder::build(const std::vector<DyldSharedCache::MappedMachO>& dylibs
     }
     addClosures(closures);
     if ( _diagnostics.hasError() )
-        return false;
+        return;
 
     uint64_t t6 = mach_absolute_time();
 
@@ -455,13 +461,13 @@ bool CacheBuilder::build(const std::vector<DyldSharedCache::MappedMachO>& dylibs
     // last sanity check on size
     if ( _vmSize > _archLayout->sharedMemorySize ) {
         _diagnostics.error("cache overflow after optimizations.  %lluMB (max %lluMB)", _vmSize / 1024 / 1024, (_archLayout->sharedMemorySize) / 1024 / 1024);
-        return true;
+        return;
     }
 
     // codesignature is part of file, but is not mapped
     codeSign();
     if ( _diagnostics.hasError() )
-        return false;
+        return;
 
     uint64_t t8 = mach_absolute_time();
 
@@ -483,7 +489,7 @@ bool CacheBuilder::build(const std::vector<DyldSharedCache::MappedMachO>& dylibs
         _allocatedBufferSize = _currentFileSize;
     }
 
-    return false;
+    return;
 }
 
 

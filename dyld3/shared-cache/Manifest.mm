@@ -279,7 +279,7 @@ BuildQueueEntry Manifest::makeQueueEntry(const std::string& outputPath, const st
     options.cacheSupportsASLR = true;
     options.forSimulator = false;
     options.verbose = verbose;
-    options.evictLeafDylibsOnOverflow = false;
+    options.evictLeafDylibsOnOverflow = true;
     options.loggingPrefix = prefix;
     options.pathPrefixes = { "" };
     options.dylibOrdering = loadOrderFile(_dylibOrderFile);

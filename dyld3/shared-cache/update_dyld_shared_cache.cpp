@@ -25,6 +25,7 @@
 #include <sys/types.h>
 #include <sys/stat.h>
 #include <sys/mman.h>
+#include <sys/xattr.h>
 #include <mach/mach.h>
 #include <mach/mach_time.h>
 #include <limits.h>
@@ -772,6 +773,11 @@ int main(int argc, const char* argv[])
         //    fprintf(stderr, "  %s\n", aFile.runtimePath.c_str());
         //}
 
+        // Clear the UUID xattr for the existing cache.
+        // This prevents the existing cache from being used by dyld3 as roots are probably involved
+        if (removexattr(outFile.c_str(), "cacheUUID", 0) != 0) {
+            fprintf(stderr, "update_dyld_shared_cache: warning: failure to remove UUID xattr on shared cache file %s with error %s\n", outFile.c_str(), strerror(errno));
+        }
 
         // build cache new cache file
         DyldSharedCache::CreateOptions options;
@@ -802,9 +808,16 @@ int main(int argc, const char* argv[])
         else {
             // save new cache file to disk and write new .map file
             assert(results.cacheContent != nullptr);
-            if ( !safeSave(results.cacheContent, results.cacheLength, outFile) )
+            if ( !safeSave(results.cacheContent, results.cacheLength, outFile) ) {
+                fprintf(stderr, "update_dyld_shared_cache: could not write dyld cache file %s\n", outFile.c_str());
                 cacheBuildFailure = true;
+            }
             if ( !cacheBuildFailure ) {
+                uuid_t cacheUUID;
+                results.cacheContent->getUUID(cacheUUID);
+                if (setxattr(outFile.c_str(), "cacheUUID", (const void*)&cacheUUID, sizeof(cacheUUID), 0, XATTR_CREATE) != 0) {
+                    fprintf(stderr, "update_dyld_shared_cache: warning: failure to set UUID xattr on shared cache file %s with error %s\n", outFile.c_str(), strerror(errno));
+                }
                 std::string mapStr = results.cacheContent->mapFile();
                 std::string outFileMap = cacheDir + "/dyld_shared_cache_" + fileSet.archName + ".map";
                 safeSave(mapStr.c_str(), mapStr.size(), outFileMap);

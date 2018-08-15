@@ -29,6 +29,7 @@
 #include "Logging.h"
 #include "PathOverrides.h"
 #include "LaunchCacheFormat.h"
+#include "start_glue.h"
 
 extern "C" void start();
 
@@ -123,6 +124,8 @@ static void entry_setChildForkFunction(void (*func)() )
     sChildForkFunction = func;
 }
 
+typedef void (*StartFunc)();
+
 const LibDyldEntryVector entryVectorForDyld = {
     LibDyldEntryVector::kCurrentVectorVersion,
     launch_cache::binary_format::kFormatVersion,
@@ -131,7 +134,7 @@ const LibDyldEntryVector entryVectorForDyld = {
     &entry_setOldAllImageInfo,
     &entry_setInitialImageList,
     &entry_runInitialzersBottomUp,
-    &start,
+    (StartFunc)address_of_start,
     &entry_setChildForkFunction,
     &entry_setLogFunction,
 };

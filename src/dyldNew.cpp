@@ -126,18 +126,20 @@ void free(void* ptr)
 
 void* calloc(size_t count, size_t size)
 {
+    // Check for overflow of integer multiplication
+    size_t total = count * size;
+    if ( total/count != size ) {
+        dyld::log("dyld calloc overflow: count=%zu, size=%zu\n", count, size);
+        dyld::halt("dyld calloc overflow");
+    }
 	if ( dyld::gLibSystemHelpers != NULL ) {
-		void* result = dyld::gLibSystemHelpers->malloc(size*count);
-		bzero(result, size*count);
+		void* result = dyld::gLibSystemHelpers->malloc(total);
+        if ( result != NULL )
+		    bzero(result, total);
 		return result;
 	}
 	else {
-		// Check for overflow of integer multiplication
-		size_t total = count * size;
-		if ( total/count != size ) {
-			dyld::log("dyld calloc overflow: count=%zu, size=%zu\n", count, size);
-			exit(1);
-		}
+        // this allocates out of static buffer which is already zero filled
 		return malloc(total);
 	}
 }

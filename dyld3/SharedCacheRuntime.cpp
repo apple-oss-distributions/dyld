@@ -266,10 +266,13 @@ static bool preflightCacheFile(const SharedCacheOptions& options, SharedCacheLoa
         ::close(fd);
         return false;
     }
+    if ( (cache->header.mappingCount != 3) || (cache->header.mappingOffset > 0x120) ) {
+        results->errorMessage = "shared cache file mappings are invalid";
+        ::close(fd);
+        return false;
+    }
     const dyld_cache_mapping_info* const fileMappings = (dyld_cache_mapping_info*)&firstPage[cache->header.mappingOffset];
-    if ( (cache->header.mappingCount != 3)
-      || (cache->header.mappingOffset > 0x120)
-      || (fileMappings[0].fileOffset != 0)
+    if (  (fileMappings[0].fileOffset != 0)
       || ((fileMappings[0].address + fileMappings[0].size) > fileMappings[1].address)
       || ((fileMappings[1].address + fileMappings[1].size) > fileMappings[2].address)
       || ((fileMappings[0].fileOffset + fileMappings[0].size) != fileMappings[1].fileOffset)

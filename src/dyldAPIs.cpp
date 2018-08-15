@@ -645,6 +645,7 @@ NSSymbol NSLookupSymbolInImage(const struct mach_header* mh, const char* symbolN
 	dyld::clearErrorMessage();
 	ImageLoader* image = dyld::findImageByMachHeader(mh);
 	if ( image != NULL ) {
+		const char* symbolToFind = symbolName;
 		try {
 			if ( options & NSLOOKUPSYMBOLINIMAGE_OPTION_BIND_FULLY ) {
 				image->bindAllLazyPointers(dyld::gLinkContext, true);
@@ -658,7 +659,7 @@ NSSymbol NSLookupSymbolInImage(const struct mach_header* mh, const char* symbolN
 				dyldAPIhalt(__func__, msg);
 			}
 		}
-		symbol = image->findExportedSymbol(symbolName, true, NULL);
+		symbol = image->findExportedSymbol(symbolToFind, true, NULL);
 	}
 	if ( dyld::gLogAPIs && (symbol == NULL) )
 		dyld::log("%s(%p, \"%s\", 0x%08X) ==> NULL\n", __func__, mh, symbolName, options);

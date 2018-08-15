@@ -157,10 +157,6 @@ ImageLoaderMachOCompressed* ImageLoaderMachOCompressed::instantiateFromFile(cons
 		// make sure path is stable before recording in dyld_all_image_infos
 		image->setMapped(context);
 
-		// dylibs with thread local variables cannot be unloaded because there is no way to clean up all threads
-		if ( image->machHeader()->flags & MH_HAS_TLV_DESCRIPTORS )
-			image->setNeverUnload();
-
 		// pre-fetch content of __DATA and __LINKEDIT segment for faster launches
 		// don't do this on prebound images or if prefetching is disabled
         if ( !context.preFetchDisabled && !image->isPrebindable()) {

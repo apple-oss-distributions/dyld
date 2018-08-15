@@ -64,12 +64,14 @@ DyldSharedCache::CreateResults DyldSharedCache::create(const CreateOptions&     
     CreateResults  results;
     CacheBuilder   cache(options);
 
-    results.overflowed = cache.build(dylibsToCache, otherOsDylibs, osExecutables);
+    cache.build(dylibsToCache, otherOsDylibs, osExecutables);
 
     results.agileSignature = cache.agileSignature();
     results.cdHashFirst = cache.cdHashFirst();
     results.cdHashSecond = cache.cdHashSecond();
     results.warnings = cache.warnings();
+    results.evictions = cache.evictions();
+
     if ( cache.errorMessage().empty() ) {
         results.cacheContent = cache.buffer();
         results.cacheLength  = cache.bufferSize();

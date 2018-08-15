@@ -1,7 +1,7 @@
 
 namespace dyld3 {
 
-struct ClosureBuffer { int x; };
+struct ClosureBuffer { };
 
 ClosureBuffer closured_CreateImageGroup(const ClosureBuffer& input)
 {

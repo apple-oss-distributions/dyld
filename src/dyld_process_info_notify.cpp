@@ -53,7 +53,9 @@ struct __attribute__((visibility("hidden"))) dyld_process_info_notify_base
     static dyld_process_info_notify_base* make(task_t task, dispatch_queue_t queue, Notify notify, NotifyExit notifyExit, kern_return_t* kr);
     										~dyld_process_info_notify_base();
 
-    uint32_t&           retainCount() const { return _retainCount; }
+    bool                incRetainCount() const;
+    bool                decRetainCount() const;
+
 	void				setNotifyMain(NotifyMain notifyMain) const { _notifyMain = notifyMain; }
 
     // override new and delete so we don't need to link with libc++
@@ -67,7 +69,7 @@ private:
 	kern_return_t		unpokeSendPortInTarget();
     void				setMachSourceOnQueue();
 
-	mutable uint32_t	_retainCount;
+	mutable int32_t 	_retainCount;
     dispatch_queue_t    _queue;
     Notify              _notify;
     NotifyExit          _notifyExit;
@@ -89,6 +91,7 @@ dyld_process_info_notify_base::dyld_process_info_notify_base(dispatch_queue_t qu
 dyld_process_info_notify_base::~dyld_process_info_notify_base()
 {
 	if ( _machSource ) {
+        dispatch_source_cancel(_machSource);
 		dispatch_release(_machSource);
 		_machSource = NULL;
 	}
@@ -104,6 +107,18 @@ dyld_process_info_notify_base::~dyld_process_info_notify_base()
 		mach_port_deallocate(mach_task_self(), _receivePortInMonitor);
 		_receivePortInMonitor = 0;
 	}
+}
+
+bool dyld_process_info_notify_base::incRetainCount() const
+{
+    int32_t newCount = OSAtomicIncrement32(&_retainCount);
+    return ( newCount == 1 );
+}
+
+bool dyld_process_info_notify_base::decRetainCount() const
+{
+    int32_t newCount = OSAtomicDecrement32(&_retainCount);
+    return ( newCount == 0 );
 }
 
 
@@ -173,6 +188,10 @@ void dyld_process_info_notify_base::setMachSourceOnQueue()
 	NotifyExit exitHandler = _notifyExit;
 	_machSource = dispatch_source_create(DISPATCH_SOURCE_TYPE_MACH_RECV, _receivePortInMonitor, 0, _queue);
     dispatch_source_set_event_handler(_machSource, ^{
+        // This event handler block has an implicit reference to "this"
+        // if incrementing the count goes to one, that means the object may have already been destroyed
+        if ( incRetainCount() )
+            return;
         uint8_t messageBuffer[DYLD_PROCESS_INFO_NOTIFY_MAX_BUFFER_SIZE];
         mach_msg_header_t* h = (mach_msg_header_t*)messageBuffer;
 
@@ -229,7 +248,9 @@ void dyld_process_info_notify_base::setMachSourceOnQueue()
 				fprintf(stderr, "received unknown message id=0x%X, size=%d\n", h->msgh_id, h->msgh_size);
 			}
         }
-    });
+        if ( decRetainCount() )
+            delete this;
+   });
     dispatch_resume(_machSource);
 }
 
@@ -323,13 +344,14 @@ void _dyld_process_info_notify_main(dyld_process_info_notify object, void (^noti
 
 void _dyld_process_info_notify_retain(dyld_process_info_notify object)
 {
-    object->retainCount() += 1;
+    object->incRetainCount();
 }
 
 void _dyld_process_info_notify_release(dyld_process_info_notify object)
 {
-    object->retainCount() -= 1;
-    if ( object->retainCount() == 0 )
+    // Note if _machSource is currently handling a message, the retain count will not be zero
+    // and object will instead be deleted when handling is done.
+    if ( object->decRetainCount() )
         delete object;
 }
 

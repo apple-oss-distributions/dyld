@@ -296,9 +296,10 @@ AcceleratorTables<P>::AcceleratorTables(DyldSharedCache* cache, uint64_t linkedi
         DepNode& node = _depDAG[op->machHeader()];
         for (const char* depPath : op->getDownwardDependents()) {
             macho_header<P>* depMH = _dylibPathToMachHeader[depPath];
-            assert(depMH != NULL);
-            DepNode* depNode = &_depDAG[depMH];
-            node._dependents.push_back(depNode);
+            if ( depMH != nullptr ) {
+                DepNode* depNode = &_depDAG[depMH];
+                node._dependents.push_back(depNode);
+            }
         }
     }
 

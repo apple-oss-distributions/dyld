@@ -196,7 +196,15 @@ uintptr_t TargetSymbolValue::resolveTarget(Diagnostics& diag, const ImageGroup& 
                             });
                             return (*foundMH != nullptr);
                         }) ) {
-                        result = ((uintptr_t)(foundInfo.foundInDylib) + (uintptr_t)foundInfo.value);
+                        switch (foundInfo.kind) {
+                            case MachOParser::FoundSymbol::Kind::headerOffset:
+                            case MachOParser::FoundSymbol::Kind::resolverOffset:
+                                result = ((uintptr_t)(foundInfo.foundInDylib) + (uintptr_t)foundInfo.value);
+                                break;
+                            case MachOParser::FoundSymbol::Kind::absolute:
+                                result = (uintptr_t)foundInfo.value;
+                                break;
+                        }
                         images.setAsNeverUnload(idx);
                         found  = true;
                         stop   = true;
@@ -216,7 +224,15 @@ uintptr_t TargetSymbolValue::resolveTarget(Diagnostics& diag, const ImageGroup& 
                         dyld3::MachOParser parser(mh);
                         dyld3::MachOParser::FoundSymbol foundInfo;
                         if ( parser.findExportedSymbol(findSymbolDiag, symbolName, nullptr, foundInfo, nullptr) ) {
-                            result = ((uintptr_t)(foundInfo.foundInDylib) + (uintptr_t)foundInfo.value);
+                            switch (foundInfo.kind) {
+                                case MachOParser::FoundSymbol::Kind::headerOffset:
+                                case MachOParser::FoundSymbol::Kind::resolverOffset:
+                                    result = ((uintptr_t)(foundInfo.foundInDylib) + (uintptr_t)foundInfo.value);
+                                    break;
+                                case MachOParser::FoundSymbol::Kind::absolute:
+                                    result = (uintptr_t)foundInfo.value;
+                                    break;
+                            }
                             found  = true;
                             stop   = true;
                         }
@@ -232,7 +248,15 @@ uintptr_t TargetSymbolValue::resolveTarget(Diagnostics& diag, const ImageGroup& 
                         dyld3::MachOParser parser(mh);
                         dyld3::MachOParser::FoundSymbol foundInfo;
                         if ( parser.findExportedSymbol(findSymbolDiag, symbolName, nullptr, foundInfo, nullptr) ) {
-                            result = ((uintptr_t)(foundInfo.foundInDylib) + (uintptr_t)foundInfo.value);
+                            switch (foundInfo.kind) {
+                                case MachOParser::FoundSymbol::Kind::headerOffset:
+                                case MachOParser::FoundSymbol::Kind::resolverOffset:
+                                    result = ((uintptr_t)(foundInfo.foundInDylib) + (uintptr_t)foundInfo.value);
+                                    break;
+                                case MachOParser::FoundSymbol::Kind::absolute:
+                                    result = (uintptr_t)foundInfo.value;
+                                    break;
+                            }
                             found  = true;
                             images.setAsNeverUnload(idx);
                             stop   = true;
@@ -249,7 +273,15 @@ uintptr_t TargetSymbolValue::resolveTarget(Diagnostics& diag, const ImageGroup& 
                         dyld3::MachOParser parser(mh);
                         dyld3::MachOParser::FoundSymbol foundInfo;
                         if ( parser.findExportedSymbol(findSymbolDiag, symbolName, nullptr, foundInfo, reExportFollower) ) {
-                            result = ((uintptr_t)(foundInfo.foundInDylib) + (uintptr_t)foundInfo.value);
+                            switch (foundInfo.kind) {
+                                case MachOParser::FoundSymbol::Kind::headerOffset:
+                                case MachOParser::FoundSymbol::Kind::resolverOffset:
+                                    result = ((uintptr_t)(foundInfo.foundInDylib) + (uintptr_t)foundInfo.value);
+                                    break;
+                                case MachOParser::FoundSymbol::Kind::absolute:
+                                    result = (uintptr_t)foundInfo.value;
+                                    break;
+                            }
                             found  = true;
                             stop = true;
                         }

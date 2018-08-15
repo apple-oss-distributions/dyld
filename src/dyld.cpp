@@ -40,6 +40,7 @@
 #include <sys/un.h>
 #include <sys/syslog.h>
 #include <sys/uio.h>
+#include <sys/xattr.h>
 #include <mach/mach.h>
 #include <mach-o/fat.h>
 #include <mach-o/loader.h> 
@@ -3139,8 +3140,15 @@ static ImageLoader* loadPhase5load(const char* path, const char* orgPath, const 
 				return anImage;
 		}
 		// if RTLD_NOLOAD, do nothing if not already loaded
-		if ( context.dontLoad )
+		if ( context.dontLoad ) {
+			// <rdar://33412890> possible that there is an override of cache
+			if ( my_stat(path, &statBuf) == 0 ) {
+				ImageLoader* imageLoader = findLoadedImage(statBuf);
+				if ( imageLoader != NULL )
+					return imageLoader;
+			}
 			return NULL;
+		}
 		bool useCache = false;
 		if ( shareCacheResults.imageData == nullptr ) {
 			// HACK to support old caches
@@ -5134,21 +5142,21 @@ static bool closureValid(const dyld3::launch_cache::BinaryClosureData* mainClosu
 	}
 #if __MAC_OS_X_VERSION_MIN_REQUIRED
 	else {
-		// HACK until closured for dlopen can run against live cache file
-		int fd = my_open(sSharedCacheLoadInfo.path, O_RDONLY, 0);
-		if ( fd != -1 ) {
-			dyld_cache_header fileHeader;
-			if ( pread(fd, &fileHeader, sizeof(fileHeader), 0) == sizeof(fileHeader) ) {
-				uuid_t cacheUUID;
-				sSharedCacheLoadInfo.loadAddress->getUUID(cacheUUID);
-				if ( memcmp(fileHeader.uuid, cacheUUID, sizeof(uuid_t)) != 0 ) {
-					if ( gLinkContext.verboseWarnings )
-						dyld::log("dyld: closure %p not used because current cache on disk is not they one being used\n", mainClosureData);
-					::close(fd);
-					return false;
-				}
-			}
-			::close(fd);
+		// If the in-memory cache doesn't have the same UUID xattr as the on-disk cache then we must
+		// have built a new cache but not rebooted.  In this case, don't use dyld3.
+		const char* sharedCachePath = getStandardSharedCacheFilePath();
+		uuid_t inMemoryUUID;
+		uuid_t onDiskUUID;
+		sharedCacheUUID(inMemoryUUID);
+		if (getxattr(sharedCachePath, "cacheUUID", (void*)&onDiskUUID, sizeof(uuid_t), 0, 0) != sizeof(uuid_t)) {
+			if ( gLinkContext.verboseWarnings )
+				dyld::log("dyld: closure %p on disk cache doesn't have a UUID xattr\n", mainClosureData);
+			return false;
+		}
+		if (memcmp(&inMemoryUUID, &onDiskUUID, sizeof(uuid_t)) != 0) {
+			if ( gLinkContext.verboseWarnings )
+				dyld::log("dyld: closure %p not used because current cache on disk and in memory cache have UUID mismatches\n", mainClosureData);
+			return false;
 		}
 	}
 #endif

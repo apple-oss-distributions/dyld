@@ -45,7 +45,7 @@ extern "C" {
 
 namespace {
 
-void withRemoteBuffer(task_t task, vm_address_t remote_address, size_t remote_size, bool allow_truncation, kern_return_t *kr, void (^block)(void *buffer)) {
+void withRemoteBuffer(task_t task, vm_address_t remote_address, size_t remote_size, bool allow_truncation, kern_return_t *kr, void (^block)(void *buffer, size_t size)) {
     kern_return_t r = KERN_SUCCESS;
     mach_vm_address_t local_address = 0;
     mach_vm_address_t local_size = remote_size;
@@ -68,7 +68,7 @@ void withRemoteBuffer(task_t task, vm_address_t remote_address, size_t remote_si
         }
         if (r == KERN_SUCCESS) {
             // We got someting, call the block and then exit
-            block(reinterpret_cast<void *>(local_address));
+            block(reinterpret_cast<void *>(local_address), local_size);
             vm_deallocate(mach_task_self(), local_address, local_size);
             break;
         }
@@ -89,7 +89,7 @@ void withRemoteBuffer(task_t task, vm_address_t remote_address, size_t remote_si
 template<typename T>
 void withRemoteObject(task_t task, vm_address_t remote_address, kern_return_t *kr, void (^block)(T t))
 {
-    withRemoteBuffer(task, remote_address, sizeof(T), false, kr, ^(void *buffer) {
+    withRemoteBuffer(task, remote_address, sizeof(T), false, kr, ^(void *buffer, size_t size) {
         block(*reinterpret_cast<T *>(buffer));
     });
 }
@@ -133,7 +133,7 @@ private:
 
     bool                        invalid() { return ((char*)_stringRevBumpPtr < (char*)_curSegment); }
     const char*                 copyPath(task_t task, uint64_t pathAddr, kern_return_t* kr);
-    const char*                 addString(const char*);
+    const char*                 addString(const char*, size_t);
     const char*                 copySegmentName(const char*);
 
     void                        addInfoFromLoadCommands(const mach_header* mh, uint64_t addressInTask, size_t size);
@@ -364,20 +364,21 @@ dyld_process_info_base* dyld_process_info_base::makeSuspended(task_t task, kern_
 
 
 
-const char* dyld_process_info_base::addString(const char* str)
+const char* dyld_process_info_base::addString(const char* str, size_t maxlen)
 {
-    size_t len = strlen(str) + 1;
+    size_t len = strnlen(str, maxlen) + 1;
     _stringRevBumpPtr -= len;
-    strcpy(_stringRevBumpPtr, str);
+    strlcpy(_stringRevBumpPtr, str, len);
     return _stringRevBumpPtr;
 }
 
 const char* dyld_process_info_base::copyPath(task_t task, uint64_t stringAddressInTask, kern_return_t* kr)
 {
     __block const char* retval = NULL;
-    withRemoteBuffer(task, stringAddressInTask, PATH_MAX+8, true, kr, ^(void *buffer) {
-        retval = addString(static_cast<const char *>(buffer));
+    withRemoteBuffer(task, stringAddressInTask, PATH_MAX, true, kr, ^(void *buffer, size_t size) {
+        retval = addString(static_cast<const char *>(buffer), size);
     });
+
     return retval;
 }
 
@@ -386,7 +387,7 @@ kern_return_t dyld_process_info_base::addImage(task_t task, bool sameCacheAsThis
     _curImage->loadAddress = imageAddress;
     _curImage->segmentStartIndex = _curSegmentIndex;
     if ( imagePathLocal != NULL ) {
-        _curImage->path = addString(imagePathLocal);
+        _curImage->path = addString(imagePathLocal, PATH_MAX);
     }
     else if ( sameCacheAsThisProcess && inCache(imagePath) ) {
         _curImage->path = (const char*)imagePath;
@@ -404,8 +405,8 @@ kern_return_t dyld_process_info_base::addImage(task_t task, bool sameCacheAsThis
         __block kern_return_t kr = KERN_SUCCESS;
         withRemoteObject(task, imageAddress, &kr, ^(mach_header_64 mhBuffer) {
             size_t          headerPagesSize = sizeof(mach_header_64) + mhBuffer.sizeofcmds;
-            withRemoteBuffer(task, imageAddress, headerPagesSize, false, &kr, ^(void * buffer) {
-                addInfoFromLoadCommands((mach_header*)buffer, imageAddress, headerPagesSize);
+            withRemoteBuffer(task, imageAddress, headerPagesSize, false, &kr, ^(void * buffer, size_t size) {
+                addInfoFromLoadCommands((mach_header*)buffer, imageAddress, size);
             });
         });
         if (kr != KERN_SUCCESS) {
@@ -424,7 +425,7 @@ kern_return_t dyld_process_info_base::addDyldImage(task_t task, uint64_t dyldAdd
     _curImage->loadAddress = dyldAddress;
     _curImage->segmentStartIndex = _curSegmentIndex;
     if ( localPath != NULL ) {
-        _curImage->path = addString(localPath);
+        _curImage->path = addString(localPath, PATH_MAX);
     }
     else {
         _curImage->path = copyPath(task, dyldPathAddress, &kr);
@@ -434,8 +435,8 @@ kern_return_t dyld_process_info_base::addDyldImage(task_t task, uint64_t dyldAdd
 
     withRemoteObject(task, dyldAddress, &kr, ^(mach_header_64 mhBuffer) {
         size_t          headerPagesSize = sizeof(mach_header_64) + mhBuffer.sizeofcmds;
-        withRemoteBuffer(task, dyldAddress, headerPagesSize, false, &kr, ^(void * buffer) {
-            addInfoFromLoadCommands((mach_header*)buffer, dyldAddress, headerPagesSize);
+        withRemoteBuffer(task, dyldAddress, headerPagesSize, false, &kr, ^(void * buffer, size_t size) {
+            addInfoFromLoadCommands((mach_header*)buffer, dyldAddress, size);
         });
     });
     if (kr != KERN_SUCCESS) {
@@ -498,7 +499,7 @@ const char* dyld_process_info_base::copySegmentName(const char* name)
         return *s;
     }
     // copy custom segment names into string pool
-    return addString(name);
+    return addString(name, 16);
 }
 
 void dyld_process_info_base::forEachImage(void (^callback)(uint64_t machHeaderAddress, const uuid_t uuid, const char* path)) const
