@@ -5116,6 +5116,19 @@ static bool envVarsMatch(dyld3::launch_cache::Closure mainClosure, const char* e
 		}
 	}
 
+	// FIXME: dyld3 doesn't support versioned paths so we need to fall back to dyld2 if we have them.
+	// <rdar://problem/37004660> dyld3: support DYLD_VERSIONED_*_PATHs ?
+	if ( sEnv.DYLD_VERSIONED_LIBRARY_PATH != nullptr ) {
+		if ( gLinkContext.verboseWarnings )
+			dyld::log("dyld: closure %p not used because DYLD_VERSIONED_LIBRARY_PATH used\n", mainClosure.binaryData());
+		return false;
+	}
+	if ( sEnv.DYLD_VERSIONED_FRAMEWORK_PATH != nullptr ) {
+		if ( gLinkContext.verboseWarnings )
+			dyld::log("dyld: closure %p not used because DYLD_VERSIONED_FRAMEWORK_PATH used\n", mainClosure.binaryData());
+		return false;
+	}
+
 	return true;
 }
 
