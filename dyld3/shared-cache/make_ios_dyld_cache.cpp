@@ -55,7 +55,7 @@
 #include <iostream>
 #include <fstream>
 
-#include "MachOParser.h"
+#include "MachOFile.h"
 #include "FileUtils.h"
 #include "StringUtils.h"
 #include "DyldSharedCache.h"
@@ -86,21 +86,24 @@ static bool addIfMachO(const std::string& buildRootPath, const std::string& runt
         Diagnostics diag;
         bool usedWholeFile = false;
         for (MappedMachOsByCategory& file : files) {
-            size_t sliceOffset;
-            size_t sliceLength;
+            uint64_t sliceOffset = 0;
+            uint64_t sliceLength = statBuf.st_size;
             bool fatButMissingSlice;
             const void* slice = MAP_FAILED;
-            if ( dyld3::FatUtil::isFatFileWithSlice(diag, wholeFile, statBuf.st_size, file.archName, sliceOffset, sliceLength, fatButMissingSlice) ) {
+            const dyld3::FatFile* fh = (dyld3::FatFile*)wholeFile;
+            const dyld3::MachOFile* mh = (dyld3::MachOFile*)wholeFile;
+            if ( fh->isFatFileWithSlice(diag, statBuf.st_size, file.archName.c_str(), sliceOffset, sliceLength, fatButMissingSlice) ) {
                 slice = ::mmap(NULL, sliceLength, PROT_READ, MAP_PRIVATE, fd, sliceOffset);
                 if ( slice != MAP_FAILED ) {
                     //fprintf(stderr, "mapped slice at %p size=0x%0lX, offset=0x%0lX for %s\n", p, len, offset, fullPath.c_str());
-                    if ( !dyld3::MachOParser::isValidMachO(diag, file.archName, platform, slice, sliceLength, fullPath.c_str(), false) ) {
+                    mh = (dyld3::MachOFile*)slice;
+                    if ( !mh->isMachO(diag, sliceLength) ) {
                         ::munmap((void*)slice, sliceLength);
                         slice = MAP_FAILED;
                     }
                 }
             }
-            else if ( !fatButMissingSlice && dyld3::MachOParser::isValidMachO(diag, file.archName, platform, wholeFile, statBuf.st_size, fullPath.c_str(), false) ) {
+            else if ( !fatButMissingSlice && mh->isMachO(diag, sliceLength) ) {
                 slice           = wholeFile;
                 sliceLength     = statBuf.st_size;
                 sliceOffset     = 0;
@@ -108,24 +111,20 @@ static bool addIfMachO(const std::string& buildRootPath, const std::string& runt
                 //fprintf(stderr, "mapped whole file at %p size=0x%0lX for %s\n", p, len, inputPath.c_str());
             }
             if ( slice != MAP_FAILED ) {
-                const mach_header* mh = (mach_header*)slice;
-                dyld3::MachOParser parser(mh);
-                if ( parser.platform() != platform ) {
+                mh = (dyld3::MachOFile*)slice;
+                if ( mh->platform() != platform ) {
                     fprintf(stderr, "skipped wrong platform binary: %s\n", fullPath.c_str());
                     result = false;
                 }
                 else {
                     bool sip = true; // assume anything found in the simulator runtime is a platform binary
-                    if ( parser.isDynamicExecutable() ) {
+                    if ( mh->isDynamicExecutable() ) {
                         bool issetuid = (statBuf.st_mode & (S_ISUID|S_ISGID));
                         file.mainExecutables.emplace_back(runtimePath, mh, sliceLength, issetuid, sip, sliceOffset, statBuf.st_mtime, statBuf.st_ino);
                     }
                     else {
                         if ( parser.canBePlacedInDyldCache(runtimePath) ) {
                             file.dylibsForCache.emplace_back(runtimePath, mh, sliceLength, false, sip, sliceOffset, statBuf.st_mtime, statBuf.st_ino);
-                        }
-                        else {
-                            file.otherDylibsAndBundles.emplace_back(runtimePath, mh, sliceLength, false, sip, sliceOffset, statBuf.st_mtime, statBuf.st_ino);
                         }
                     }
                     result = true;
@@ -275,6 +274,7 @@ int main(int argc, const char* argv[])
                 break;
             case dyld3::Platform::watchOS:
                 archStrs.insert("armv7k");
+                archStrs.insert("arm64_32");
                 break;
              case dyld3::Platform::unknown:
              case dyld3::Platform::macOS:
@@ -289,6 +289,8 @@ int main(int argc, const char* argv[])
     std::vector<MappedMachOsByCategory> allFileSets;
     if ( archStrs.count("arm64") )
         allFileSets.push_back({"arm64"});
+    if ( archStrs.count("arm64_32") )
+        allFileSets.push_back({"arm64_32"});
     if ( archStrs.count("armv7k") )
         allFileSets.push_back({"armv7k"});
     std::vector<std::string> paths;
@@ -320,6 +322,7 @@ int main(int argc, const char* argv[])
         options.inodesAreSameAsRuntime       = false;
         options.cacheSupportsASLR            = true;
         options.forSimulator                 = false;
+        options.isLocallyBuiltCache          = true;
         options.verbose                      = verbose;
         options.evictLeafDylibsOnOverflow    = false;
         options.pathPrefixes                 = { rootPath };

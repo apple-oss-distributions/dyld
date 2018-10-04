@@ -34,7 +34,10 @@
 #include <sys/mman.h>
 #include <sys/param.h>
 #include <sys/mount.h>
+#include <sys/sysctl.h>
 #include <libkern/OSAtomic.h>
+
+#include "Tracing.h"
 
 #include "ImageLoader.h"
 
@@ -368,6 +371,7 @@ const ImageLoader::Symbol* ImageLoader::findExportedSymbolInImageOrDependentImag
 // this is called by initializeMainExecutable() to interpose on the initial set of images
 void ImageLoader::applyInterposing(const LinkContext& context)
 {
+	dyld3::ScopedTimer timer(DBG_DYLD_TIMING_APPLY_INTERPOSING, 0, 0, 0);
 	if ( fgInterposingTuples.size() != 0 )
 		this->recursiveApplyInterposing(context);
 }
@@ -390,6 +394,58 @@ uintptr_t ImageLoader::interposedAddress(const LinkContext& context, uintptr_t a
 	return address;
 }
 
+void ImageLoader::applyInterposingToDyldCache(const LinkContext& context) {
+#if USES_CHAINED_BINDS
+	if (!context.dyldCache)
+		return;
+	if (fgInterposingTuples.empty())
+		return;
+	// For each of the interposed addresses, see if any of them are in the shared cache.  If so, find
+	// that image and apply its patch table to all uses.
+	uintptr_t cacheStart = (uintptr_t)context.dyldCache;
+	for (std::vector<InterposeTuple>::iterator it=fgInterposingTuples.begin(); it != fgInterposingTuples.end(); it++) {
+		if ( context.verboseInterposing )
+			dyld::log("dyld: interpose: Trying to interpose address 0x%08llx\n", (uint64_t)it->replacee);
+		uint32_t imageIndex;
+		uint32_t cacheOffsetOfReplacee = (uint32_t)(it->replacee - cacheStart);
+		if (!context.dyldCache->addressInText(cacheOffsetOfReplacee, &imageIndex))
+			continue;
+		dyld3::closure::ImageNum imageInCache = imageIndex+1;
+		if ( context.verboseInterposing )
+			dyld::log("dyld: interpose: Found shared cache image %d for 0x%08llx\n", imageInCache, (uint64_t)it->replacee);
+		const dyld3::closure::Image* image = context.dyldCache->cachedDylibsImageArray()->imageForNum(imageInCache);
+		image->forEachPatchableExport(^(uint32_t cacheOffsetOfImpl, const char* exportName) {
+			// Skip patching anything other than this symbol
+			if (cacheOffsetOfImpl != cacheOffsetOfReplacee)
+				return;
+			if ( context.verboseInterposing )
+				dyld::log("dyld: interpose: Patching uses of symbol %s in shared cache binary at %s\n", exportName, image->path());
+			uintptr_t newLoc = it->replacement;
+			image->forEachPatchableUseOfExport(cacheOffsetOfImpl, ^(dyld3::closure::Image::PatchableExport::PatchLocation patchLocation) {
+				uintptr_t* loc = (uintptr_t*)(cacheStart+patchLocation.cacheOffset);
+#if __has_feature(ptrauth_calls)
+				if ( patchLocation.authenticated ) {
+					dyld3::MachOLoaded::ChainedFixupPointerOnDisk fixupInfo;
+					fixupInfo.authRebase.auth      = true;
+					fixupInfo.authRebase.addrDiv   = patchLocation.usesAddressDiversity;
+					fixupInfo.authRebase.diversity = patchLocation.discriminator;
+					fixupInfo.authRebase.key       = patchLocation.key;
+					*loc = fixupInfo.signPointer(loc, newLoc + patchLocation.getAddend());
+					if ( context.verboseInterposing )
+						dyld::log("dyld: interpose: *%p = %p (JOP: diversity 0x%04X, addr-div=%d, key=%s)\n",
+								  loc, (void*)*loc, patchLocation.discriminator, patchLocation.usesAddressDiversity, patchLocation.keyName());
+					return;
+				}
+#endif
+				if ( context.verboseInterposing )
+					dyld::log("dyld: interpose: *%p = 0x%0llX (dyld cache patch) to %s\n", loc, newLoc + patchLocation.getAddend(), exportName);
+				*loc = newLoc + patchLocation.getAddend();
+			});
+		});
+	}
+#endif
+}
+
 void ImageLoader::addDynamicInterposingTuples(const struct dyld_interpose_tuple array[], size_t count)
 {
 	for(size_t i=0; i < count; ++i) {
@@ -408,6 +464,26 @@ void ImageLoader::addDynamicInterposingTuples(const struct dyld_interpose_tuple 
 	}
 }
 
+// <rdar://problem/29099600> dyld should tell the kernel when it is doing root fix-ups
+void ImageLoader::vmAccountingSetSuspended(const LinkContext& context, bool suspend)
+{
+#if __arm__ || __arm64__
+	static bool sVmAccountingSuspended = false;
+	if ( suspend == sVmAccountingSuspended )
+		return;
+    if ( context.verboseBind )
+        dyld::log("set vm.footprint_suspend=%d\n", suspend);
+    int newValue = suspend ? 1 : 0;
+    int oldValue = 0;
+    size_t newlen = sizeof(newValue);
+    size_t oldlen = sizeof(oldValue);
+    int ret = sysctlbyname("vm.footprint_suspend", &oldValue, &oldlen, &newValue, newlen);
+    if ( context.verboseBind && (ret != 0) )
+		dyld::log("vm.footprint_suspend => %d, errno=%d\n", ret, errno);
+	sVmAccountingSuspended = suspend;
+#endif
+}
+
 
 void ImageLoader::link(const LinkContext& context, bool forceLazysBound, bool preflightOnly, bool neverUnload, const RPathChain& loaderRPaths, const char* imagePath)
 {
@@ -423,24 +499,30 @@ void ImageLoader::link(const LinkContext& context, bool forceLazysBound, bool pr
 	// we only do the loading step for preflights
 	if ( preflightOnly )
 		return;
-		
+
 	uint64_t t1 = mach_absolute_time();
 	context.clearAllDepths();
 	this->recursiveUpdateDepth(context.imageCount());
 
-	uint64_t t2 = mach_absolute_time();
- 	this->recursiveRebase(context);
-	context.notifyBatch(dyld_image_state_rebased, false);
-	
-	uint64_t t3 = mach_absolute_time();
- 	this->recursiveBind(context, forceLazysBound, neverUnload);
+	__block uint64_t t2, t3, t4, t5;
+	{
+		dyld3::ScopedTimer(DBG_DYLD_TIMING_APPLY_FIXUPS, 0, 0, 0);
+		t2 = mach_absolute_time();
+		this->recursiveRebase(context);
+		context.notifyBatch(dyld_image_state_rebased, false);
 
-	uint64_t t4 = mach_absolute_time();
-	if ( !context.linkingMainExecutable )
-		this->weakBind(context);
-	uint64_t t5 = mach_absolute_time();	
+		t3 = mach_absolute_time();
+		if ( !context.linkingMainExecutable )
+			this->recursiveBindWithAccounting(context, forceLazysBound, neverUnload);
 
-	context.notifyBatch(dyld_image_state_bound, false);
+		t4 = mach_absolute_time();
+		if ( !context.linkingMainExecutable )
+			this->weakBind(context);
+		t5 = mach_absolute_time();
+	}
+
+    if ( !context.linkingMainExecutable )
+        context.notifyBatch(dyld_image_state_bound, false);
 	uint64_t t6 = mach_absolute_time();	
 
 	std::vector<DOFInfo> dofs;
@@ -450,9 +532,10 @@ void ImageLoader::link(const LinkContext& context, bool forceLazysBound, bool pr
 
 	// interpose any dynamically loaded images
 	if ( !context.linkingMainExecutable && (fgInterposingTuples.size() != 0) ) {
+		dyld3::ScopedTimer timer(DBG_DYLD_TIMING_APPLY_INTERPOSING, 0, 0, 0);
 		this->recursiveApplyInterposing(context);
 	}
-	
+
 	// clear error strings
 	(*context.setErrorStrings)(0, NULL, NULL, NULL);
 
@@ -626,10 +709,16 @@ void ImageLoader::recursiveLoadLibraries(const LinkContext& context, bool prefli
 			}
 			try {
 				unsigned cacheIndex;
-				dependentLib = context.loadLibrary(requiredLibInfo.name, true, this->getPath(), &thisRPaths, cacheIndex);
+				bool enforceIOSMac = false;
+		#if __MAC_OS_X_VERSION_MIN_REQUIRED
+				const dyld3::MachOFile* mf = (dyld3::MachOFile*)this->machHeader();
+				if ( mf->supportsPlatform(dyld3::Platform::iOSMac) && !mf->supportsPlatform(dyld3::Platform::macOS) )
+					enforceIOSMac = true;
+		#endif
+				dependentLib = context.loadLibrary(requiredLibInfo.name, true, this->getPath(), &thisRPaths, enforceIOSMac, cacheIndex);
 				if ( dependentLib == this ) {
 					// found circular reference, perhaps DYLD_LIBARY_PATH is causing this rdar://problem/3684168 
-					dependentLib = context.loadLibrary(requiredLibInfo.name, false, NULL, NULL, cacheIndex);
+					dependentLib = context.loadLibrary(requiredLibInfo.name, false, NULL, NULL, enforceIOSMac, cacheIndex);
 					if ( dependentLib != this )
 						dyld::warn("DYLD_ setting caused circular dependency in %s\n", this->getPath());
 				}
@@ -650,7 +739,8 @@ void ImageLoader::recursiveLoadLibraries(const LinkContext& context, bool prefli
 				}
 				// check found library version is compatible
 				// <rdar://problem/89200806> 0xFFFFFFFF is wildcard that matches any version
-				if ( (requiredLibInfo.info.minVersion != 0xFFFFFFFF) && (actualInfo.minVersion < requiredLibInfo.info.minVersion) ) {
+				if ( (requiredLibInfo.info.minVersion != 0xFFFFFFFF) && (actualInfo.minVersion < requiredLibInfo.info.minVersion)
+						&& ((dyld3::MachOFile*)(dependentLib->machHeader()))->enforceCompatVersion() ) {
 					// record values for possible use by CrashReporter or Finder
 					dyld::throwf("Incompatible library version: %s requires version %d.%d.%d or later, but %s provides version %d.%d.%d",
 							this->getShortName(), requiredLibInfo.info.minVersion >> 16, (requiredLibInfo.info.minVersion >> 8) & 0xff, requiredLibInfo.info.minVersion & 0xff,
@@ -784,7 +874,11 @@ void ImageLoader::recursiveApplyInterposing(const LinkContext& context)
 	}
 }
 
-
+void ImageLoader::recursiveBindWithAccounting(const LinkContext& context, bool forceLazysBound, bool neverUnload)
+{
+	this->recursiveBind(context, forceLazysBound, neverUnload);
+	vmAccountingSetSuspended(context, false);
+}
 
 void ImageLoader::recursiveBind(const LinkContext& context, bool forceLazysBound, bool neverUnload)
 {
@@ -822,6 +916,23 @@ void ImageLoader::recursiveBind(const LinkContext& context, bool forceLazysBound
 		}
 	}
 }
+
+
+// These are mangled symbols for all the variants of operator new and delete
+// which a main executable can define (non-weak) and override the
+// weak-def implementation in the OS.
+static const char* sTreatAsWeak[] = {
+    "__Znwm", "__ZnwmRKSt9nothrow_t",
+    "__Znam", "__ZnamRKSt9nothrow_t",
+    "__ZdlPv", "__ZdlPvRKSt9nothrow_t", "__ZdlPvm",
+    "__ZdaPv", "__ZdaPvRKSt9nothrow_t", "__ZdaPvm",
+    "__ZnwmSt11align_val_t", "__ZnwmSt11align_val_tRKSt9nothrow_t",
+    "__ZnamSt11align_val_t", "__ZnamSt11align_val_tRKSt9nothrow_t",
+    "__ZdlPvSt11align_val_t", "__ZdlPvSt11align_val_tRKSt9nothrow_t", "__ZdlPvmSt11align_val_t",
+    "__ZdaPvSt11align_val_t", "__ZdaPvSt11align_val_tRKSt9nothrow_t", "__ZdaPvmSt11align_val_t"
+};
+
+
 
 void ImageLoader::weakBind(const LinkContext& context)
 {
@@ -929,15 +1040,43 @@ void ImageLoader::weakBind(const LinkContext& context)
 						}
 					}
 				}
-				
+
 			}
 		}
-		
+
+#if __arm64e__
+		for (int i=0; i < count; ++i) {
+			if ( imagesNeedingCoalescing[i]->usesChainedFixups() ) {
+				// during binding of references to weak-def symbols, the dyld cache was patched
+				// but if main executable has non-weak override of operator new or delete it needs is handled here
+				if ( !imagesNeedingCoalescing[i]->weakSymbolsBound(imageIndexes[i]) ) {
+					for (const char* weakSymbolName : sTreatAsWeak) {
+						const ImageLoader* dummy;
+						imagesNeedingCoalescing[i]->resolveWeak(context, weakSymbolName, true, false, &dummy);
+					}
+				}
+			}
+			else {
+				// look for weak def symbols in this image which may override the cache
+				ImageLoader::CoalIterator coaler;
+				imagesNeedingCoalescing[i]->initializeCoalIterator(coaler, i, 0);
+				imagesNeedingCoalescing[i]->incrementCoalIterator(coaler);
+				while ( !coaler.done ) {
+					imagesNeedingCoalescing[i]->incrementCoalIterator(coaler);
+					const ImageLoader* dummy;
+					// a side effect of resolveWeak() is to patch cache
+					imagesNeedingCoalescing[i]->resolveWeak(context, coaler.symbolName, true, false, &dummy);
+				}
+			}
+		}
+#endif
+
 		// mark all as having all weak symbols bound
 		for(int i=0; i < count; ++i) {
 			imagesNeedingCoalescing[i]->setWeakSymbolsBound(imageIndexes[i]);
 		}
 	}
+
 	uint64_t t2 = mach_absolute_time();
 	fgTotalWeakBindTime += t2  - t1;
 	
@@ -1075,9 +1214,9 @@ static void printTime(const char* msg, uint64_t partTime, uint64_t totalTime)
 	static uint64_t sUnitsPerSecond = 0;
 	if ( sUnitsPerSecond == 0 ) {
 		struct mach_timebase_info timeBaseInfo;
-		if ( mach_timebase_info(&timeBaseInfo) == KERN_SUCCESS ) {
-			sUnitsPerSecond = 1000000000ULL * timeBaseInfo.denom / timeBaseInfo.numer;
-		}
+		if ( mach_timebase_info(&timeBaseInfo) != KERN_SUCCESS )
+			return;
+		sUnitsPerSecond = 1000000000ULL * timeBaseInfo.denom / timeBaseInfo.numer;
 	}
 	if ( partTime < sUnitsPerSecond ) {
 		uint32_t milliSecondsTimesHundred = (uint32_t)((partTime*100000)/sUnitsPerSecond);
@@ -1333,7 +1472,7 @@ intptr_t ImageLoader::read_sleb128(const uint8_t*& p, const uint8_t* end)
 	} while (byte & 0x80);
 	// sign extend negative numbers
 	if ( (byte & 0x40) != 0 )
-		result |= (-1LL) << bit;
+		result |= (~0ULL) << bit;
 	return (intptr_t)result;
 }
 

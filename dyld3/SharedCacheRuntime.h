@@ -41,22 +41,21 @@ struct SharedCacheOptions {
 };
 
 struct SharedCacheLoadInfo {
-    const DyldSharedCache*                          loadAddress;
-    long                                            slide;
-    const launch_cache::binary_format::ImageGroup*  cachedDylibsGroup;
-    const char*                                     errorMessage;
-    char                                            path[256];
+    const DyldSharedCache*       loadAddress;
+    long                         slide;
+    const char*                  errorMessage;
+    char                         path[256];
 };
 
 bool loadDyldCache(const SharedCacheOptions& options, SharedCacheLoadInfo* results);
 
-struct SharedCacheFindDylibResults {
-    const mach_header*                          mhInCache;
-    const char*                                 pathInCache;
-    long                                        slideInCache;
-    const launch_cache::binary_format::Image*   imageData;
-};
 
+struct SharedCacheFindDylibResults {
+    const mach_header*          mhInCache;
+    const char*                 pathInCache;
+    long                        slideInCache;
+    const closure::Image*       image;
+};
 
 bool findInSharedCacheImage(const SharedCacheLoadInfo& loadInfo, const char* dylibPathToFind, SharedCacheFindDylibResults* results);
 

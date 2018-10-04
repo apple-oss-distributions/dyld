@@ -1,4 +1,1 @@
 
-
-CODE_SIGN_ENTITLEMENTS = dyld3/shared-cache/update_dyld_shared_cache_entitlements.plist
-

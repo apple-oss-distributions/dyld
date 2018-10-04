@@ -68,6 +68,17 @@ struct uuid_command {
 	#define CPU_TYPE_ARM64				((cpu_type_t) (CPU_TYPE_ARM | CPU_ARCH_ABI64))
 #endif
 
+#ifndef CPU_ARCH_ABI64_32
+	#define CPU_ARCH_ABI64_32				((cpu_type_t) 0x02000000)
+#endif
+#ifndef CPU_TYPE_ARM64_32
+	#define CPU_TYPE_ARM64_32				((cpu_type_t) (CPU_TYPE_ARM | CPU_ARCH_ABI64_32))
+#endif
+#ifndef CPU_SUBTYPE_ARM64_32_V8
+	#define CPU_SUBTYPE_ARM64_32_V8		((cpu_subtype_t) 1)
+#endif
+
+
 #define ARM64_RELOC_UNSIGNED            0 // for pointers
 
 
@@ -956,7 +967,7 @@ inline int64_t read_sleb128(const uint8_t*& p, const uint8_t* end)
 	} while (byte & 0x80);
 	// sign extend negative numbers
 	if ( (byte & 0x40) != 0 )
-		result |= (-1LL) << bit;
+		result |= (~0ULL) << bit;
 	return result;
 }
 

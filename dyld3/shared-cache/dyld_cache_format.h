@@ -59,12 +59,22 @@ struct dyld_cache_header
     uint64_t    progClosuresTrieAddr;   // (unslid) address of trie of indexes into program launch closures
     uint64_t    progClosuresTrieSize;   // size of trie of indexes into program launch closures
     uint32_t    platform;               // platform number (macOS=1, etc)
-    uint32_t    formatVersion        : 8, // launch_cache::binary_format::kFormatVersion
-                dylibsExpectedOnDisk : 1, // dyld should expect the dylib exists on disk and to compare inode/mtime to see if cache is valid
-                simulator            : 1; // for simulator of specified platform
+    uint32_t    formatVersion        : 8,  // dyld3::closure::kFormatVersion
+                dylibsExpectedOnDisk : 1,  // dyld should expect the dylib exists on disk and to compare inode/mtime to see if cache is valid
+                simulator            : 1,  // for simulator of specified platform
+                locallyBuiltCache    : 1,  // 0 for B&I built cache, 1 for locally built cache
+                padding              : 21; // TBD
     uint64_t    sharedRegionStart;      // base load address of cache if not slid
     uint64_t    sharedRegionSize;       // overall size of region cache can be mapped into
     uint64_t    maxSlide;               // runtime slide of cache can be between zero and this value
+    uint64_t    dylibsImageArrayAddr;   // (unslid) address of ImageArray for dylibs in this cache
+    uint64_t    dylibsImageArraySize;   // size of ImageArray for dylibs in this cache
+    uint64_t    dylibsTrieAddr;         // (unslid) address of trie of indexes of all cached dylibs
+    uint64_t    dylibsTrieSize;         // size of trie of cached dylib paths
+    uint64_t    otherImageArrayAddr;    // (unslid) address of ImageArray for dylibs and bundles with dlopen closures
+    uint64_t    otherImageArraySize;    // size of ImageArray for dylibs and bundles with dlopen closures
+    uint64_t    otherTrieAddr;          // (unslid) address of trie of indexes of all dylibs and bundles with dlopen closures
+    uint64_t    otherTrieSize;          // size of trie of dylibs and bundles with dlopen closures
 };
 
 
@@ -238,10 +248,176 @@ struct dyld_cache_slide_info2
     //uint16_t    page_starts[page_starts_count];
     //uint16_t    page_extras[page_extras_count];
 };
-#define DYLD_CACHE_SLIDE_PAGE_ATTRS                0xC000    // high bits of uint16_t are flags
-#define DYLD_CACHE_SLIDE_PAGE_ATTR_EXTRA        0x8000  // index is into extras array (not starts array)
-#define DYLD_CACHE_SLIDE_PAGE_ATTR_NO_REBASE    0x4000  // page has no rebasing
-#define DYLD_CACHE_SLIDE_PAGE_ATTR_END            0x8000  // last chain entry for page
+#define DYLD_CACHE_SLIDE_PAGE_ATTRS                0xC000  // high bits of uint16_t are flags
+#define DYLD_CACHE_SLIDE_PAGE_ATTR_EXTRA           0x8000  // index is into extras array (not starts array)
+#define DYLD_CACHE_SLIDE_PAGE_ATTR_NO_REBASE       0x4000  // page has no rebasing
+#define DYLD_CACHE_SLIDE_PAGE_ATTR_END             0x8000  // last chain entry for page
+
+
+
+// The version 3 of the slide info uses a different compression scheme. Since
+// only interior pointers (pointers that point within the cache) are rebased
+// (slid), we know the possible range of the pointers and thus know there are
+// unused bits in each pointer.  We use those bits to form a linked list of
+// locations needing rebasing in each page.
+//
+// Definitions:
+//
+//  pageIndex = (pageAddress - startOfAllDataAddress)/info->page_size
+//  pageStarts[] = info + info->page_starts_offset
+//
+// There are two cases:
+//
+// 1) pageStarts[pageIndex] == DYLD_CACHE_SLIDE_V3_PAGE_ATTR_NO_REBASE
+//    The page contains no values that need rebasing.
+//
+// 2) otherwise...
+//    All rebase locations are in one linked list. The offset of the first
+//    rebase location in the page is pageStarts[pageIndex].
+//
+// A pointer is one of of the variants in dyld_cache_slide_pointer3
+//
+// The code for processing a linked list (chain) is:
+//
+//    uint32_t delta = pageStarts[pageIndex];
+//    dyld_cache_slide_pointer3* loc = pageStart;
+//    do {
+//        loc += delta;
+//        delta = loc->offsetToNextPointer;
+//        if ( loc->auth.authenticated ) {
+//            newValue = loc->offsetFromSharedCacheBase  + results->slide + auth_value_add;
+//            newValue = sign_using_the_various_bits(newValue);
+//        }
+//        else {
+//            uint64_t value51      = loc->pointerValue;
+//            uint64_t top8Bits     = value51 & 0x0007F80000000000ULL;
+//            uint64_t bottom43Bits = value51 & 0x000007FFFFFFFFFFULL;
+//            uint64_t targetValue  = ( top8Bits << 13 ) | bottom43Bits;
+//            newValue = targetValue + results->slide;
+//        }
+//        loc->raw = newValue;
+//    } while (delta != 0);
+//
+//
+struct dyld_cache_slide_info3
+{
+    uint32_t    version;            // currently 3
+    uint32_t    page_size;          // currently 4096 (may also be 16384)
+    uint32_t    page_starts_count;
+    uint64_t    auth_value_add;
+    uint16_t    page_starts[/* page_starts_count */];
+};
+
+#define DYLD_CACHE_SLIDE_V3_PAGE_ATTR_NO_REBASE    0xFFFF    // page has no rebasing
+
+union dyld_cache_slide_pointer3
+{
+    uint64_t  raw;
+    struct {
+        uint64_t    pointerValue        : 51,
+                    offsetToNextPointer : 11,
+                    unused              :  2;
+    }         plain;
+
+    struct {
+        uint64_t    offsetFromSharedCacheBase : 32,
+                    diversityData             : 16,
+                    hasAddressDiversity       :  1,
+                    key                       :  2,
+                    offsetToNextPointer       : 11,
+                    unused                    :  1,
+                    authenticated             :  1; // = 1;
+    }         auth;
+};
+
+
+
+// The version 4 of the slide info is optimized for 32-bit caches up to 1GB.
+// Since only interior pointers (pointers that point within the cache) are rebased
+// (slid), we know the possible range of the pointers takes 30 bits.  That
+// gives us two bits to use to chain to the next rebase.
+//
+// Definitions:
+//
+//  pageIndex = (pageAddress - startOfAllDataAddress)/info->page_size
+//  pageStarts[] = info + info->page_starts_offset
+//  pageExtras[] = info + info->page_extras_offset
+//  valueMask = ~(info->delta_mask)
+//  deltaShift = __builtin_ctzll(info->delta_mask) - 2
+//
+// There are three cases:
+//
+// 1) pageStarts[pageIndex] == DYLD_CACHE_SLIDE4_PAGE_NO_REBASE
+//    The page contains no values that need rebasing.
+//
+// 2) (pageStarts[pageIndex] & DYLD_CACHE_SLIDE4_PAGE_USE_EXTRA) == 0
+//    All rebase locations are in one linked list. The offset of the first
+//    rebase location in the page is pageStarts[pageIndex] * 4.
+//
+// 3) pageStarts[pageIndex] & DYLD_CACHE_SLIDE4_PAGE_USE_EXTRA
+//    Multiple chains are needed for all rebase locations in a page.
+//    The pagesExtras array contains 2 or more entries each of which is the
+//    start of a new chain in the page. The first is at:
+//       extrasStartIndex = (pageStarts[pageIndex] & DYLD_CACHE_SLIDE4_PAGE_INDEX)
+//    The next is at extrasStartIndex+1.  The last is denoted by
+//    having the high bit (DYLD_CACHE_SLIDE4_PAGE_EXTRA_END) of the pageExtras[].
+//
+// For 32-bit architectures, there are only two bits free (the two most
+// significant bits). To extract the delta, you must first subtract value_add
+// from the pointer value, then AND with delta_mask, then shift by deltaShift.
+// That still leaves a maximum delta to the next rebase location of 12 bytes.
+// To reduce the number or chains needed, an optimization was added.  Turns
+// most of the non-rebased data are small values and can be co-opt'ed into
+// being used in the chain. The can be done because nothing
+// in the shared cache should point to the first 64KB which are in the shared
+// cache header information. So if the resulting pointer points to the
+// start of the cache +/-32KB, then it is actually a small number that should
+// not be rebased, but just reconstituted.
+//
+// The code for processing a linked list (chain) is:
+//
+//    uint32_t delta = 1;
+//    while ( delta != 0 ) {
+//        uint8_t* loc = pageStart + pageOffset;
+//        uint32_t rawValue = *((uint32_t*)loc);
+//        delta = ((rawValue & deltaMask) >> deltaShift);
+//        uintptr_t newValue = (rawValue & valueMask);
+//        if ( (newValue & 0xFFFF8000) == 0 ) {
+//           // small positive non-pointer, use as-is
+//        }
+//        else if ( (newValue & 0x3FFF8000) == 0x3FFF8000 ) {
+//           // small negative non-pointer
+//           newValue |= 0xC0000000;
+//        }
+//        else  {
+//            // pointer that needs rebasing
+//            newValue += valueAdd;
+//            newValue += slideAmount;
+//        }
+//        *((uint32_t*)loc) = newValue;
+//        pageOffset += delta;
+//    }
+//
+//
+struct dyld_cache_slide_info4
+{
+    uint32_t    version;            // currently 4
+    uint32_t    page_size;          // currently 4096 (may also be 16384)
+    uint32_t    page_starts_offset;
+    uint32_t    page_starts_count;
+    uint32_t    page_extras_offset;
+    uint32_t    page_extras_count;
+    uint64_t    delta_mask;         // which (contiguous) set of bits contains the delta to the next rebase location (0xC0000000)
+    uint64_t    value_add;          // base address of cache
+    //uint16_t    page_starts[page_starts_count];
+    //uint16_t    page_extras[page_extras_count];
+};
+#define DYLD_CACHE_SLIDE4_PAGE_NO_REBASE           0xFFFF  // page has no rebasing
+#define DYLD_CACHE_SLIDE4_PAGE_INDEX               0x7FFF  // mask of page_starts[] values
+#define DYLD_CACHE_SLIDE4_PAGE_USE_EXTRA           0x8000  // index is into extras array (not a chain start offset)
+#define DYLD_CACHE_SLIDE4_PAGE_EXTRA_END           0x8000  // last chain entry for page
+
+
 
 
 struct dyld_cache_local_symbols_info

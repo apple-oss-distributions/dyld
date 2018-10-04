@@ -27,7 +27,8 @@
 #define __IMAGELOADER_MEGADYLIB__
 
 #include <stdint.h> 
-#include <pthread.h> 
+#include <pthread.h>
+#include <uuid/uuid.h>
 
 #include "ImageLoaderMachO.h"
 #include "dyld_cache_format.h"
@@ -55,8 +56,8 @@ public:
 	virtual const char*					getInstallPath() const;
 	virtual bool						inSharedCache() const { return true; }
 	virtual bool						containsSymbol(const void* addr) const { unreachable(); }
-	virtual void*						getThreadPC() const { unreachable(); }
-	virtual void*						getMain() const { unreachable(); }
+	virtual void*						getEntryFromLC_MAIN() const { unreachable(); }
+	virtual void*						getEntryFromLC_UNIXTHREAD() const { unreachable(); }
 	virtual const struct mach_header*   machHeader() const { unreachable(); }
 	virtual uintptr_t					getSlide() const { return _slide; }
 	virtual const void*					getEnd() const { unreachable(); }
@@ -89,7 +90,8 @@ public:
 	virtual bool						needsInitialization() { unreachable(); }
 	virtual bool						getSectionContent(const char* segmentName, const char* sectionName, void** start, size_t* length) { unreachable(); }
 	virtual void						getUnwindInfo(dyld_unwind_sections* info) { unreachable(); }
-	virtual bool						findSection(const void* imageInterior, const char** segmentName, const char** sectionName, size_t* sectionOffset) { unreachable(); }
+    virtual bool                        findSection(const void* imageInterior, const char** segmentName, const char** sectionName, size_t* sectionOffset) { unreachable(); }
+    virtual const struct macho_section* findSection(const void* imageInterior) const { unreachable(); }
 	virtual bool						isPrebindable() const { unreachable();  }
 	virtual bool						usablePrebinding(const LinkContext& context) const { unreachable(); }
 	virtual	void						getRPaths(const LinkContext& context, std::vector<const char*>&) const { }
@@ -118,7 +120,7 @@ public:
 	virtual uint32_t					minOSVersion() const { unreachable(); }
 	
 										// if the image contains interposing functions, register them
-	virtual void						registerInterposing() { unreachable(); }
+	virtual void						registerInterposing(const LinkContext& context) { unreachable(); }
 
 	virtual ImageLoader*				libImage(unsigned int) const { unreachable(); }
 	virtual bool						libReExported(unsigned int) const { unreachable(); }
@@ -137,7 +139,7 @@ public:
 	bool								findUnwindSections(const void* addr, dyld_unwind_sections* info);
 	bool								dladdrFromCache(const void* address, Dl_info* info);
 	uintptr_t							bindLazy(uintptr_t lazyBindingInfoOffset, const LinkContext& context, const mach_header* mh, unsigned index);
-	bool								flatFindSymbol(const char* name, bool onlyInCoalesced, const ImageLoader::Symbol** sym, const ImageLoader** image);
+	bool								flatFindSymbol(const char* name, bool onlyInCoalesced, const ImageLoader::Symbol** sym, const ImageLoader** image, ImageLoader::CoalesceNotifier);
 	void								getDylibUUID(unsigned int index, uuid_t) const;
 
 protected:

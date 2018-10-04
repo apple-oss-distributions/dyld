@@ -25,6 +25,7 @@
 #include <stdint.h>
 #include <sys/stat.h>
 #include <dlfcn.h>
+#include <uuid/uuid.h>
 
 #include "ImageLoader.h"
 #include "mach-o/dyld_priv.h"
@@ -48,6 +49,7 @@ namespace dyld {
 		bool			mustBeBundle;
 		bool			mustBeDylib;
 		bool			canBePIE;
+        bool            enforceIOSMac;
 		const char*						origin;			// path for expanding @loader_path
 		const ImageLoader::RPathChain*	rpath;			// paths for expanding @rpath
 	};
@@ -55,6 +57,7 @@ namespace dyld {
 
 
 	typedef void		 (*ImageCallback)(const struct mach_header* mh, intptr_t slide);
+    typedef void         (*LoadImageCallback)(const mach_header* mh, const char* path, bool unloadable);
 	typedef void		 (*UndefinedHandler)(const char* symbolName);
 	typedef const char*	 (*ImageLocator)(const char* dllName);
 
@@ -73,6 +76,7 @@ namespace dyld {
 	extern void					registerAddCallback(ImageCallback func);
 	extern void					registerRemoveCallback(ImageCallback func);
 	extern void					registerUndefinedHandler(UndefinedHandler);
+    extern void                 registerLoadCallback(LoadImageCallback func);
 	extern void					initializeMainExecutable();
 	extern void					preflight(ImageLoader* image, const ImageLoader::RPathChain& loaderRPaths, unsigned cacheIndex);
 	extern void					link(ImageLoader* image, bool forceLazysBound, bool neverUnload, const ImageLoader::RPathChain& loaderRPaths, unsigned cacheIndex);
@@ -134,4 +138,3 @@ namespace dyld {
 	const char*					getPathFromIndex(unsigned cacheIndex);
 #endif
 }
-

@@ -30,50 +30,119 @@
 #include <stdint.h>
 #include <mach/mach.h>
 #include <_simple.h>
-#include "LaunchCache.h"
-#include "LaunchCacheFormat.h"
-#include "MachOParser.h"
-#include "ClosureBuffer.h"
 
-
+#include "Closure.h"
+#include "MachOLoaded.h"
 
 namespace dyld3 {
 
-ClosureBuffer closured_CreateImageGroup(const ClosureBuffer& input);
 
-namespace loader {
+//
+// Tuple of info about a loaded image. Contains the loaded address, Image*, and state.
+//
+class VIS_HIDDEN LoadedImage {
+public:
+    enum class State { unmapped=0, mapped=1, fixedUp=2, beingInited=3, inited=4 };
 
-struct ImageInfo
-{
-    const launch_cache::binary_format::Image*   imageData;
-    const mach_header*                          loadAddress;
-    uint32_t                                    groupNum;
-    uint32_t                                    indexInGroup;
-    bool                                        previouslyFixedUp;
-    bool                                        justMapped;
-    bool                                        justUsedFromDyldCache;
-    bool                                        neverUnload;
+    static LoadedImage      make(const closure::Image* img)         { LoadedImage result; result._image = img; return result; }
+    static LoadedImage      make(const closure::Image* img, const MachOLoaded* mh)
+                                                                    { LoadedImage result; result._image = img; result.setLoadedAddress(mh); return result; }
+
+    const closure::Image*   image() const                           { return _image; }
+    const MachOLoaded*      loadedAddress() const                   { return (MachOLoaded*)(_loadAddr & (-4096)); }
+    void                    setLoadedAddress(const MachOLoaded* a)  { _loadAddr |= ((uintptr_t)a & (-4096)); }
+    State                   state() const                           { return (State)(asBits().state); }
+    void                    setState(State s)                       { asBits().state = (int)s; }
+    bool                    hideFromFlatSearch() const              { return asBits().hide; }
+    void                    setHideFromFlatSearch(bool h)           { asBits().hide = h; }
+    bool                    leaveMapped() const                     { return asBits().leaveMapped; }
+    void                    markLeaveMapped()                       { asBits().leaveMapped = true; }
+
+private:
+    // since loaded MachO files are always page aligned, that means at least low 12-bits are always zero
+    // so we don't need to record the low 12 bits, instead those bits hold various flags in the _loadeAddr field
+    struct AddrBits {
+        uintptr_t    state       :  3,
+                     hide        :  1,
+                     leaveMapped :  1,
+                     extra       :  7,
+          #if __LP64__
+                     addr        : 52;
+          #else
+                     addr        : 20;
+          #endif
+    };
+    AddrBits&               asBits()       { return *((AddrBits*)&_loadAddr); }
+    const AddrBits&         asBits() const { return *((AddrBits*)&_loadAddr); }
+
+    // Note: this must be statically initializable so as to not cause static initializers
+    const closure::Image*   _image      = nullptr;
+    uintptr_t               _loadAddr   = 0;        // really AddrBits
 };
 
 
-#if DYLD_IN_PROCESS
+//
+// Utility class to recursively load dependents
+//
+class VIS_HIDDEN Loader {
+public:
+        typedef bool (*LogFunc)(const char*, ...) __attribute__((format(printf, 1, 2)));
 
-typedef bool (*LogFunc)(const char*, ...) __attribute__((format(printf, 1, 2)));
+                        Loader(Array<LoadedImage>& storage, const void* cacheAddress, const Array<const dyld3::closure::ImageArray*>& imagesArrays,
+                               LogFunc log_loads, LogFunc log_segments, LogFunc log_fixups, LogFunc log_dofs);
 
-void mapAndFixupImages(Diagnostics& diag, launch_cache::DynArray<ImageInfo>& images, const uint8_t* cacheLoadAddress,
-                       LogFunc log_loads, LogFunc log_segments, LogFunc log_fixups, LogFunc log_dofs) VIS_HIDDEN;
+    void                addImage(const LoadedImage&);
+    void                completeAllDependents(Diagnostics& diag, uintptr_t topIndex=0);
+    void                mapAndFixupAllImages(Diagnostics& diag, bool processDOFs, bool fromOFI=false, uintptr_t topIndex=0);
+    uintptr_t           resolveTarget(closure::Image::ResolvedSymbolTarget target);
+    LoadedImage*        findImage(closure::ImageNum targetImageNum);
+
+    static void         unmapImage(LoadedImage& info);
+    static bool         dtraceUserProbesEnabled();
+    static void         vmAccountingSetSuspended(bool suspend, LogFunc);
+
+private:
+
+    struct ImageOverride
+    {
+        closure::ImageNum  inCache;
+        closure::ImageNum  replacement;
+    };
+
+    struct DOFInfo {
+        const void*            dof;
+        const mach_header*     imageHeader;
+        const char*            imageShortName;
+    };
+
+    void                mapImage(Diagnostics& diag, LoadedImage& info, bool fromOFI);
+    void                applyFixupsToImage(Diagnostics& diag, LoadedImage& info);
+    void                registerDOFs(const Array<DOFInfo>& dofs);
+    void                setSegmentProtects(const LoadedImage& info, bool write);
+	bool                sandboxBlockedMmap(const char* path);
+    bool                sandboxBlockedOpen(const char* path);
+    bool                sandboxBlockedStat(const char* path);
+    bool                sandboxBlocked(const char* path, const char* kind);
+
+    Array<LoadedImage>&                         _allImages;
+    const Array<const closure::ImageArray*>&    _imagesArrays;
+    const void*                                 _dyldCacheAddress;
+    LogFunc                                     _logLoads;
+    LogFunc                                     _logSegments;
+    LogFunc                                     _logFixups;
+    LogFunc                                     _logDofs;
+};
 
 
-void unmapImage(const launch_cache::binary_format::Image* image, const mach_header* loadAddress) VIS_HIDDEN;
 
 #if BUILDING_DYLD
 bool bootArgsContains(const char* arg) VIS_HIDDEN;
 bool internalInstall();
 void forEachLineInFile(const char* path, void (^lineHandler)(const char* line, bool& stop));
-#endif
+void forEachLineInFile(const char* buffer, size_t bufferLen, void (^lineHandler)(const char* line, bool& stop));
 #endif
 
-} // namespace loader
+
 } // namespace dyld3
 
 

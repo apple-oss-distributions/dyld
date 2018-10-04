@@ -25,78 +25,81 @@
 #ifndef _DYLD_PROCESS_INFO_INTERNAL_H_
 #define _DYLD_PROCESS_INFO_INTERNAL_H_
 
+#define VIS_HIDDEN __attribute__((visibility("hidden")))
 
 #include <stdlib.h>
 #include <string.h>
 #include <limits.h>
 #include <stdio.h>
+#include <uuid/uuid.h>
 
+#include <array>
 
 struct dyld_all_image_infos_32 {
-    uint32_t        version;
-    uint32_t        infoArrayCount;
-    uint32_t        infoArray;
-    uint32_t        notification;           
-    bool            processDetachedFromSharedRegion;
-    bool            libSystemInitialized;
-    uint32_t        dyldImageLoadAddress;
-    uint32_t        jitInfo;
-    uint32_t        dyldVersion;
-    uint32_t        errorMessage;
-    uint32_t        terminationFlags;
-    uint32_t        coreSymbolicationShmPage;
-    uint32_t        systemOrderFlag;
-    uint32_t        uuidArrayCount;
-    uint32_t        uuidArray;
-    uint32_t        dyldAllImageInfosAddress;
-    uint32_t        initialImageCount;
-    uint32_t        errorKind;
-    uint32_t        errorClientOfDylibPath;
-    uint32_t        errorTargetDylibPath;
-    uint32_t        errorSymbol;
-    uint32_t        sharedCacheSlide;
-    uint8_t         sharedCacheUUID[16];
-    uint32_t        sharedCacheBaseAddress;
-    uint64_t        infoArrayChangeTimestamp;
-    uint32_t        dyldPath;
-    uint32_t        notifyMachPorts[8];
-    uint32_t        reserved[5];
-    uint32_t        compact_dyld_image_info_addr;
-    uint32_t        compact_dyld_image_info_size;
+    uint32_t                        version;
+    uint32_t                        infoArrayCount;
+    std::atomic<uint32_t>           infoArray;
+    uint32_t                        notification;
+    bool                            processDetachedFromSharedRegion;
+    bool                            libSystemInitialized;
+    uint32_t                        dyldImageLoadAddress;
+    uint32_t                        jitInfo;
+    uint32_t                        dyldVersion;
+    uint32_t                        errorMessage;
+    uint32_t                        terminationFlags;
+    uint32_t                        coreSymbolicationShmPage;
+    uint32_t                        systemOrderFlag;
+    uint32_t                        uuidArrayCount;
+    uint32_t                        uuidArray;
+    uint32_t                        dyldAllImageInfosAddress;
+    uint32_t                        initialImageCount;
+    uint32_t                        errorKind;
+    uint32_t                        errorClientOfDylibPath;
+    uint32_t                        errorTargetDylibPath;
+    uint32_t                        errorSymbol;
+    uint32_t                        sharedCacheSlide;
+    std::array<uint8_t, 16>         sharedCacheUUID;
+    uint32_t                        sharedCacheBaseAddress;
+    std::atomic<uint64_t>           infoArrayChangeTimestamp;
+    uint32_t                        dyldPath;
+    uint32_t                        notifyMachPorts[8];
+    uint32_t                        reserved[5];
+    uint32_t                        compact_dyld_image_info_addr;
+    uint32_t                        compact_dyld_image_info_size;
 };
 
 struct dyld_all_image_infos_64 {
-    uint32_t        version;
-    uint32_t        infoArrayCount;
-    uint64_t        infoArray;
-    uint64_t        notification;           
-    bool            processDetachedFromSharedRegion;
-    bool            libSystemInitialized;
-    uint32_t        paddingToMakeTheSizeCorrectOn32bitAndDoesntAffect64b; // NOT PART OF DYLD_ALL_IMAGE_INFOS!
-    uint64_t        dyldImageLoadAddress;
-    uint64_t        jitInfo;
-    uint64_t        dyldVersion;
-    uint64_t        errorMessage;
-    uint64_t        terminationFlags;
-    uint64_t        coreSymbolicationShmPage;
-    uint64_t        systemOrderFlag;
-    uint64_t        uuidArrayCount;
-    uint64_t        uuidArray;
-    uint64_t        dyldAllImageInfosAddress;
-    uint64_t        initialImageCount;
-    uint64_t        errorKind;
-    uint64_t        errorClientOfDylibPath;
-    uint64_t        errorTargetDylibPath;
-    uint64_t        errorSymbol;
-    uint64_t        sharedCacheSlide;
-    uint8_t         sharedCacheUUID[16];
-    uint64_t        sharedCacheBaseAddress;
-    uint64_t        infoArrayChangeTimestamp;
-    uint64_t        dyldPath;
-    uint32_t        notifyMachPorts[8];
-    uint64_t        reserved[9];
-    uint64_t        compact_dyld_image_info_addr;
-    uint64_t        compact_dyld_image_info_size;
+    uint32_t                version;
+    uint32_t                infoArrayCount;
+    std::atomic<uint64_t>   infoArray;
+    uint64_t                notification;
+    bool                    processDetachedFromSharedRegion;
+    bool                    libSystemInitialized;
+    uint32_t                paddingToMakeTheSizeCorrectOn32bitAndDoesntAffect64b; // NOT PART OF DYLD_ALL_IMAGE_INFOS!
+    uint64_t                dyldImageLoadAddress;
+    uint64_t                jitInfo;
+    uint64_t                dyldVersion;
+    uint64_t                errorMessage;
+    uint64_t                terminationFlags;
+    uint64_t                coreSymbolicationShmPage;
+    uint64_t                systemOrderFlag;
+    uint64_t                uuidArrayCount;
+    uint64_t                uuidArray;
+    uint64_t                dyldAllImageInfosAddress;
+    uint64_t                initialImageCount;
+    uint64_t                errorKind;
+    uint64_t                errorClientOfDylibPath;
+    uint64_t                errorTargetDylibPath;
+    uint64_t                errorSymbol;
+    uint64_t                sharedCacheSlide;
+    std::array<uint8_t, 16> sharedCacheUUID;
+    uint64_t                sharedCacheBaseAddress;
+    std::atomic<uint64_t>   infoArrayChangeTimestamp;
+    uint64_t                dyldPath;
+    uint32_t                notifyMachPorts[8];
+    uint64_t                reserved[9];
+    uint64_t                compact_dyld_image_info_addr;
+    uint64_t                compact_dyld_image_info_size;
 };
 
 struct dyld_image_info_32 {
@@ -132,7 +135,46 @@ struct dyld_process_info_notify_header {
     uint64_t                    timestamp;
 };
 
+struct VIS_HIDDEN RemoteBuffer {
+    RemoteBuffer();
+    RemoteBuffer(task_t task, mach_vm_address_t remote_address, size_t remote_size, bool shared, bool allow_truncation);
+    ~RemoteBuffer();
+    RemoteBuffer& operator=(RemoteBuffer&& other) {
+        _localAddress = other._localAddress;
+        _size = other._size;
+        _kr = other._kr;
+        other._localAddress = 0;
+        other._size = 0;
+        other._kr = KERN_SUCCESS;
+        return *this;
+    }
+    RemoteBuffer(const RemoteBuffer &) = delete;
+    RemoteBuffer& operator=(const RemoteBuffer &) = delete;
+    void *getLocalAddress();
+    kern_return_t getKernelReturn();
+    size_t getSize();
+private:
+    bool map(task_t task, mach_vm_address_t remote_address, bool shared);
+    mach_vm_address_t _localAddress;
+    vm_size_t _size;
+    kern_return_t _kr;
+};
 
+// only called during libdyld set up
+void setNotifyMonitoringDyldMain(void (*func)()) VIS_HIDDEN;
+void setNotifyMonitoringDyld(void (*func)(bool unloading, unsigned imageCount,
+                                          const struct mach_header* loadAddresses[],
+                                          const char* imagePaths[])) VIS_HIDDEN;
+
+void withRemoteBuffer(task_t task, mach_vm_address_t remote_address, size_t remote_size, bool shared, bool allow_truncation, kern_return_t *kr, void (^block)(void *buffer, size_t size)) __attribute__((visibility("hidden")));
+
+template<typename T>
+VIS_HIDDEN void withRemoteObject(task_t task, mach_vm_address_t remote_address, bool shared, kern_return_t *kr, void (^block)(T t))
+{
+    withRemoteBuffer(task, remote_address, sizeof(T), shared, false, kr, ^(void *buffer, size_t size) {
+        block(*reinterpret_cast<T *>(buffer));
+    });
+}
 
 
 #endif // _DYLD_PROCESS_INFO_INTERNAL_H_

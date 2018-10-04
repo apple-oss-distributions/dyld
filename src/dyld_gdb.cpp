@@ -33,6 +33,7 @@
 #include "mach-o/dyld_gdb.h"
 #include "mach-o/dyld_images.h"
 #include "mach-o/dyld_process_info.h"
+#include "Tracing.h"
 #include "ImageLoader.h"
 #include "dyld.h"
 
@@ -191,6 +192,7 @@ void removeImageFromAllImages(const struct mach_header* loadAddress)
 
 	static void gdb_image_notifier(enum dyld_image_mode mode, uint32_t infoCount, const dyld_image_info info[])
 	{
+		dyld3::ScopedTimer(DBG_DYLD_GDB_IMAGE_NOTIFIER, 0, 0, 0);
 		uint64_t machHeaders[infoCount];
 		for (uint32_t i=0; i < infoCount; ++i) {
 			machHeaders[i] = (uintptr_t)(info[i].imageLoadAddress);
@@ -228,10 +230,10 @@ void removeImageFromAllImages(const struct mach_header* loadAddress)
 
 	struct dyld_all_image_infos  dyld_all_image_infos __attribute__ ((section ("__DATA,__all_image_info"))) 
 								= { 
-									15, 0, NULL, &gdb_image_notifier, false, false, (const mach_header*)&__dso_handle, NULL,
-									XSTR(DYLD_VERSION), NULL, 0, NULL, 0, 0, NULL, &dyld_all_image_infos, 
+									15, 0, {NULL}, &gdb_image_notifier, false, false, (const mach_header*)&__dso_handle, NULL,
+									XSTR(DYLD_VERSION), NULL, 0, NULL, 0, 0, NULL, &dyld_all_image_infos,
 									0, 0, NULL, NULL, NULL, 0, {0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,},
-									0, 0, "/usr/lib/dyld", {0}, {0}
+									0, {0}, "/usr/lib/dyld", {0}, {0}
 									};
 
 	struct dyld_shared_cache_ranges dyld_shared_cache_ranges;

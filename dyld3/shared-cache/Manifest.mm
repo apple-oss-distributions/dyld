@@ -40,6 +40,8 @@ extern "C" {
 #include "Trie.hpp"
 #include "FileUtils.h"
 #include "StringUtils.h"
+#include "MachOFile.h"
+#include "MachOAnalyzer.h"
 
 #include <mach-o/loader.h>
 #include <mach-o/fat.h>
@@ -48,6 +50,7 @@ extern "C" {
 #include <vector>
 
 #include "Manifest.h"
+#include "ClosureFileSystemPhysical.h"
 
 namespace {
 //FIXME this should be in a class
@@ -78,27 +81,24 @@ inline bool is_disjoint(const Set1& set1, const Set2& set2)
     return true;
 }
 
-//hACK: If we declare this in manifest
-static NSDictionary* gManifestDict;
-
 } /* Anonymous namespace */
 
 namespace dyld3 {
-void Manifest::Results::exclude(MachOParser* parser, const std::string& reason)
+void Manifest::Results::exclude(const dyld3::MachOAnalyzer* mh, const std::string& reason)
 {
-    auto dylibUUID = parser->uuid();
-    dylibs[dylibUUID].uuid = dylibUUID;
-    dylibs[dylibUUID].installname = parser->installName();
-    dylibs[dylibUUID].included = false;
+    UUID dylibUUID(mh);
+    dylibs[dylibUUID].uuid          = dylibUUID;
+    dylibs[dylibUUID].installname   = mh->installName();
+    dylibs[dylibUUID].included      = false;
     dylibs[dylibUUID].exclusionInfo = reason;
 }
 
 void Manifest::Results::exclude(Manifest& manifest, const UUID& uuid, const std::string& reason)
 {
-    auto parser = manifest.parserForUUID(uuid);
-    dylibs[uuid].uuid = uuid;
-    dylibs[uuid].installname = parser.installName();
-    dylibs[uuid].included = false;
+    const MachOAnalyzer* mh = manifest.machOForUUID(uuid);
+    dylibs[uuid].uuid          = uuid;
+    dylibs[uuid].installname   = mh->installName();
+    dylibs[uuid].included      = false;
     dylibs[uuid].exclusionInfo = reason;
 }
 
@@ -262,11 +262,14 @@ void Manifest::setBuild(const std::string& build) { _build = build; };
 const uint32_t                             Manifest::version() const { return _manifestVersion; };
 void Manifest::setVersion(const uint32_t manifestVersion) { _manifestVersion = manifestVersion; };
 
-BuildQueueEntry Manifest::makeQueueEntry(const std::string& outputPath, const std::set<std::string>& configs, const std::string& arch, bool optimizeStubs, const std::string& prefix, bool verbose)
+BuildQueueEntry Manifest::makeQueueEntry(const std::string& outputPath, const std::set<std::string>& configs, const std::string& arch, bool optimizeStubs,
+                                         const std::string& prefix, bool isLocallyBuiltCache, bool skipWrites, bool verbose)
 {
     dyld3::BuildQueueEntry retval;
 
     DyldSharedCache::CreateOptions options;
+    options.outputFilePath    = skipWrites ? "" : outputPath;
+    options.outputMapFilePath = skipWrites ? "" : outputPath + ".map";
     options.archName = arch;
     options.platform = platform();
     options.excludeLocalSymbols = true;
@@ -278,12 +281,13 @@ BuildQueueEntry Manifest::makeQueueEntry(const std::string& outputPath, const st
     options.inodesAreSameAsRuntime = false;
     options.cacheSupportsASLR = true;
     options.forSimulator = false;
+    options.isLocallyBuiltCache = isLocallyBuiltCache;
     options.verbose = verbose;
     options.evictLeafDylibsOnOverflow = true;
     options.loggingPrefix = prefix;
-    options.pathPrefixes = { "" };
-    options.dylibOrdering = loadOrderFile(_dylibOrderFile);
-    options.dirtyDataSegmentOrdering = loadOrderFile(_dirtyDataOrderFile);
+    options.pathPrefixes = { "./Root/" };
+    options.dylibOrdering = parseOrderFile(loadOrderFile(_dylibOrderFile));
+    options.dirtyDataSegmentOrdering = parseOrderFile(loadOrderFile(_dirtyDataOrderFile));
 
     dyld3::BuildQueueEntry queueEntry;
     retval.configNames = configs;
@@ -296,36 +300,62 @@ BuildQueueEntry Manifest::makeQueueEntry(const std::string& outputPath, const st
     return retval;
 }
 
-bool Manifest::loadParser(const void* p, size_t size, uint64_t sliceOffset, const std::string& runtimePath, const std::string& buildPath, const std::set<std::string>& architectures)
+bool Manifest::loadParser(const void* p, size_t sliceLength, uint64_t sliceOffset, const std::string& runtimePath, const std::string& buildPath, const std::set<std::string>& architectures)
 {
-    const mach_header* mh = reinterpret_cast<const mach_header*>(p);
-    if (!MachOParser::isValidMachO(_diags, "", _platform, p, size, runtimePath.c_str(), false)) {
+    assert(!_diags.hasError());
+
+    const MachOFile* mf = reinterpret_cast<const MachOFile*>(p);
+    const std::string archName = mf->archName();
+    if ( archName == "unknown" ) {
+        // Clear the error and punt
+        _diags.verbose("Dylib located at '%s' has unknown architecture\n", runtimePath.c_str());
         return false;
     }
+    if ( architectures.count(archName) == 0 )
+        return false;
 
-    auto parser = MachOParser(mh);
-    if (_diags.hasError()) {
+    const MachOAnalyzer* ma = reinterpret_cast<const MachOAnalyzer*>(p);
+    if ( !ma->validMachOForArchAndPlatform(_diags, sliceLength, runtimePath.c_str(), archName.c_str(), _platform) ) {
         // Clear the error and punt
-        _diags.verbose("MachoParser error: %s\n", _diags.errorMessage().c_str());
+        _diags.verbose("Mach-O error: %s\n", _diags.errorMessage().c_str());
         _diags.clearError();
         return false;
     }
 
-    auto uuid = parser.uuid();
-    auto archName = parser.archName();
+    // if this file uses zero-fill expansion, then mapping whole file in one blob will not work
+    // remapIfZeroFill() will remap the file
+    closure::FileSystemPhysical fileSystem;
+    closure::LoadedFileInfo info;
+    info.fileContent                = p;
+    info.fileContentLen             = sliceLength;
+    info.sliceOffset                = 0;
+    info.sliceLen                   = sliceLength;
+    info.inode                      = 0;
+    info.mtime                      = 0;
+    info.unload                     = nullptr;
+    ma = ma->remapIfZeroFill(_diags, fileSystem, info);
 
-    if (parser.fileType() == MH_DYLIB && architectures.count(parser.archName()) != 0) {
-        std::string installName = parser.installName();
-        auto index = std::make_pair(installName, parser.archName());
+    if (ma == nullptr) {
+        _diags.verbose("Mach-O error: %s\n", _diags.errorMessage().c_str());
+        _diags.clearError();
+        return false;
+    }
+
+    uuid_t uuid;
+    ma->getUuid(uuid);
+
+    if ( ma->isDylib() ) {
+        std::string installName = ma->installName();
+        auto index = std::make_pair(installName, archName);
         auto i = _installNameMap.find(index);
 
         if ( installName == "/System/Library/Caches/com.apple.xpc/sdk.dylib"
             || installName == "/System/Library/Caches/com.apple.xpcd/xpcd_cache.dylib" ) {
             // HACK to deal with device specific dylibs. These must not be inseted into the installNameMap
-            _uuidMap.insert(std::make_pair(uuid, UUIDInfo(mh, size, sliceOffset, uuid, parser.archName(), runtimePath, buildPath, installName)));
+            _uuidMap.insert(std::make_pair(uuid, UUIDInfo(ma, sliceLength, sliceOffset, uuid, archName, runtimePath, buildPath, installName)));
         } else if (i == _installNameMap.end()) {
             _installNameMap.insert(std::make_pair(index, uuid));
-            _uuidMap.insert(std::make_pair(uuid, UUIDInfo(mh, size, sliceOffset, uuid, parser.archName(), runtimePath, buildPath, installName)));
+            _uuidMap.insert(std::make_pair(uuid, UUIDInfo(ma, sliceLength, sliceOffset, uuid, archName, runtimePath, buildPath, installName)));
             if (installName[0] != '@' && installName != runtimePath) {
                 _diags.warning("Dylib located at '%s' has  installname '%s'", runtimePath.c_str(), installName.c_str());
             }
@@ -336,11 +366,11 @@ bool Manifest::loadParser(const void* p, size_t size, uint64_t sliceOffset, cons
             // This is the "Good" one, overwrite
             if (runtimePath == installName) {
                 _uuidMap.erase(uuid);
-                _uuidMap.insert(std::make_pair(uuid, UUIDInfo(mh, size, sliceOffset, uuid, parser.archName(), runtimePath, buildPath, installName)));
+                _uuidMap.insert(std::make_pair(uuid, UUIDInfo(ma, sliceLength, sliceOffset, uuid, archName, runtimePath, buildPath, installName)));
             }
         }
     } else {
-        _uuidMap.insert(std::make_pair(uuid, UUIDInfo(mh, size, sliceOffset, uuid, parser.archName(), runtimePath, buildPath, "")));
+        _uuidMap.insert(std::make_pair(uuid, UUIDInfo(ma, sliceLength, sliceOffset, uuid, archName, runtimePath, buildPath, "")));
     }
     return true;
 }
@@ -358,8 +388,8 @@ bool Manifest::loadParsers(const std::string& buildPath, const std::string& runt
         return false;
     }
 
-    if (FatUtil::isFatFile(p)) {
-        FatUtil::forEachSlice(_diags, p, stat_buf.st_size, ^(uint32_t sliceCpuType, uint32_t sliceCpuSubType, const void* sliceStart, size_t sliceSize, bool& stop) {
+    if ( const FatFile* fh = FatFile::isFatFile(p) ) {
+        fh->forEachSlice(_diags, stat_buf.st_size, ^(uint32_t sliceCpuType, uint32_t sliceCpuSubType, const void* sliceStart, uint64_t sliceSize, bool& stop) {
             if (loadParser(sliceStart, sliceSize, (uintptr_t)sliceStart-(uintptr_t)p, runtimePath, buildPath, architectures))
                 retval = true;
         });
@@ -368,6 +398,7 @@ bool Manifest::loadParsers(const std::string& buildPath, const std::string& runt
     }
     return retval;
 }
+
 
 const Manifest::UUIDInfo& Manifest::infoForUUID(const UUID& uuid) const {
     auto i = _uuidMap.find(uuid);
@@ -387,8 +418,8 @@ const Manifest::UUIDInfo Manifest::infoForInstallNameAndarch(const std::string& 
     return i->second;
 }
 
-MachOParser Manifest::parserForUUID(const UUID& uuid) const {
-    return MachOParser(infoForUUID(uuid).mh);
+const MachOAnalyzer* Manifest::machOForUUID(const UUID& uuid) const {
+    return infoForUUID(uuid).mh;
 }
 
 const std::string Manifest::buildPathForUUID(const UUID& uuid) {
@@ -398,22 +429,29 @@ const std::string Manifest::buildPathForUUID(const UUID& uuid) {
 const std::string Manifest::runtimePathForUUID(const UUID& uuid) {
     return infoForUUID(uuid).runtimePath;
 }
-    
-Manifest::Manifest(Diagnostics& D, const std::string& path)  : Manifest(D, path, std::set<std::string>())
+
+const std::string& Manifest::installNameForUUID(const UUID& uuid) {
+    return infoForUUID(uuid).installName;
+}
+
+
+Manifest::Manifest(Diagnostics& D, const std::string& path, bool onlyParseManifest)  : Manifest(D, path, std::set<std::string>(), onlyParseManifest)
 {
 }
 
-Manifest::Manifest(Diagnostics& D, const std::string& path, const std::set<std::string>& overlays) :
+Manifest::Manifest(Diagnostics& D, const std::string& path, const std::set<std::string>& overlays, bool onlyParseManifest) :
     _diags(D)
 {
-    NSMutableDictionary* manifestDict = [NSMutableDictionary dictionaryWithContentsOfFile:cppToObjStr(path)];
-    NSString*            platStr = manifestDict[@"platform"];
+    _manifestDict = [NSMutableDictionary dictionaryWithContentsOfFile:cppToObjStr(path)];
+    if (!_manifestDict)
+        return;
+    NSString*            platStr = _manifestDict[@"platform"];
     std::set<std::string> architectures;
 
     if (platStr == nullptr)
         platStr = @"ios";
     std::string platformString = [platStr UTF8String];
-    setMetabomFile([manifestDict[@"metabomFile"] UTF8String]);
+    setMetabomFile([_manifestDict[@"metabomFile"] UTF8String]);
 
     if (platformString == "ios") {
         setPlatform(dyld3::Platform::iOS);
@@ -430,25 +468,25 @@ Manifest::Manifest(Diagnostics& D, const std::string& path, const std::set<std::
         setPlatform(dyld3::Platform::iOS);
     }
 
-    for (NSString* project in manifestDict[@"projects"]) {
-        for (NSString* source in manifestDict[@"projects"][project]) {
+    for (NSString* project in _manifestDict[@"projects"]) {
+        for (NSString* source in _manifestDict[@"projects"][project]) {
             addProjectSource([project UTF8String], [source UTF8String]);
         }
     }
 
-    for (NSString* configuration in manifestDict[@"configurations"]) {
+    for (NSString* configuration in _manifestDict[@"configurations"]) {
         std::string configStr = [configuration UTF8String];
-        std::string configTag = [manifestDict[@"configurations"][configuration][@"metabomTag"] UTF8String];
+        std::string configTag = [_manifestDict[@"configurations"][configuration][@"metabomTag"] UTF8String];
 
-        if (manifestDict[@"configurations"][configuration][@"metabomExcludeTags"]) {
-            for (NSString* excludeTag in manifestDict[@"configurations"][configuration][@"metabomExcludeTags"]) {
+        if (_manifestDict[@"configurations"][configuration][@"metabomExcludeTags"]) {
+            for (NSString* excludeTag in _manifestDict[@"configurations"][configuration][@"metabomExcludeTags"]) {
                 _metabomExcludeTagMap[configStr].insert([excludeTag UTF8String]);
                 _configurations[configStr].metabomExcludeTags.insert([excludeTag UTF8String]);
             }
         }
 
-        if (manifestDict[@"configurations"][configuration][@"metabomRestrictTags"]) {
-            for (NSString* restrictTag in manifestDict[@"configurations"][configuration][@"metabomRestrictTags"]) {
+        if (_manifestDict[@"configurations"][configuration][@"metabomRestrictTags"]) {
+            for (NSString* restrictTag in _manifestDict[@"configurations"][configuration][@"metabomRestrictTags"]) {
                 _metabomRestrictedTagMap[configStr].insert([restrictTag UTF8String]);
                 _configurations[configStr].metabomRestrictTags.insert([restrictTag UTF8String]);
             }
@@ -457,7 +495,7 @@ Manifest::Manifest(Diagnostics& D, const std::string& path, const std::set<std::
         _configurations[configStr].metabomTag = configTag;
         _configurations[configStr].metabomTags.insert(configTag);
         _configurations[configStr].platformName =
-            [manifestDict[@"configurations"][configuration][@"platformName"] UTF8String];
+            [_manifestDict[@"configurations"][configuration][@"platformName"] UTF8String];
 
         if (endsWith(configStr, "InternalOS")) {
             _configurations[configStr].disposition = "internal";
@@ -494,7 +532,7 @@ Manifest::Manifest(Diagnostics& D, const std::string& path, const std::set<std::
             _configurations[configStr].device = configStr.substr(0, configStr.length()-strlen("OS"));
         }
 
-        for (NSString* architecutre in manifestDict[@"configurations"][configuration][@"architectures"]) {
+        for (NSString* architecutre in _manifestDict[@"configurations"][configuration][@"architectures"]) {
             //HACK until B&I stops mastering armv7s
             if ([architecutre isEqual:@"armv7s"]) break;
             _configurations[configStr].architectures[[architecutre UTF8String]] = Architecture();
@@ -502,14 +540,17 @@ Manifest::Manifest(Diagnostics& D, const std::string& path, const std::set<std::
         }
     }
 
-    setVersion([manifestDict[@"manifest-version"] unsignedIntValue]);
-    setBuild([manifestDict[@"build"] UTF8String]);
-    if (manifestDict[@"dylibOrderFile"]) {
-        setDylibOrderFile([manifestDict[@"dylibOrderFile"] UTF8String]);
+    setVersion([_manifestDict[@"manifest-version"] unsignedIntValue]);
+    setBuild([_manifestDict[@"build"] UTF8String]);
+    if (_manifestDict[@"dylibOrderFile"]) {
+        setDylibOrderFile([_manifestDict[@"dylibOrderFile"] UTF8String]);
     }
-    if (manifestDict[@"dirtyDataOrderFile"]) {
-        setDirtyDataOrderFile([manifestDict[@"dirtyDataOrderFile"] UTF8String]);
+    if (_manifestDict[@"dirtyDataOrderFile"]) {
+        setDirtyDataOrderFile([_manifestDict[@"dirtyDataOrderFile"] UTF8String]);
     }
+
+    if (onlyParseManifest)
+        return;
 
     auto    metabom = MBMetabomOpen(metabomFile().c_str(), false);
     auto    metabomEnumerator = MBIteratorNewWithPath(metabom, ".", "");
@@ -518,7 +559,6 @@ Manifest::Manifest(Diagnostics& D, const std::string& path, const std::set<std::
     // FIXME error handling (NULL metabom)
 
     //First we iterate through the bom and build our objects
-
     while ((entry = MBIteratorNext(metabomEnumerator))) {
         BOMFSObject  fsObject = MBEntryGetFSObject(entry);
         BOMFSObjType entryType = BOMFSObjectType(fsObject);
@@ -549,7 +589,9 @@ Manifest::Manifest(Diagnostics& D, const std::string& path, const std::set<std::
 
         MBTag tag;
         auto  tagCount = MBEntryGetNumberOfProjectTags(entry);
-        if (entryType == BOMFileType && BOMFSObjectIsBinaryObject(fsObject) && MBEntryGetNumberOfProjectTags(entry) != 0 && tagCount != 0) {
+        bool isObjectFile = (entryType == BOMFileType) && BOMFSObjectIsBinaryObject(fsObject);
+        bool isSymlinkFile = entryType == BOMSymlinkType;
+        if ( (isObjectFile || isSymlinkFile) && MBEntryGetNumberOfProjectTags(entry) != 0 && tagCount != 0) {
             if (tagCount == 1) {
                 MBEntryGetProjectTags(entry, &tag);
             } else {
@@ -588,17 +630,35 @@ Manifest::Manifest(Diagnostics& D, const std::string& path, const std::set<std::
                 tagStrs.insert(MBMetabomGetPackageForTag(metabom, tags[i]));
             }
 
-            _metabomTagMap.insert(std::make_pair(entryPath, tagStrs));
-            bool foundParser = false;
-            for (const auto& overlay : overlays) {
-                if (loadParsers(overlay + "/" + entryPath, entryPath, architectures)) {
-                    foundParser = true;
-                    break;
-                }
-            }
+            if (isObjectFile) {
+                _metabomTagMap.insert(std::make_pair(entryPath, tagStrs));
 
-            if (!foundParser) {
-                (void)loadParsers(projectPath(projectName) + "/" + entryPath, entryPath, architectures);
+                bool foundParser = false;
+                for (const auto& overlay : overlays) {
+                    if (loadParsers(overlay + "/" + entryPath, entryPath, architectures)) {
+                        foundParser = true;
+                        _diags.verbose("Taking '%s' from overlay instead of dylib cache\n", entryPath.c_str());
+                        break;
+                    }
+                    if (_diags.hasError()) {
+                        _diags.verbose("Mach-O error: %s\n", _diags.errorMessage().c_str());
+                        _diags.clearError();
+                    }
+                }
+
+                if (!foundParser) {
+                    (void)loadParsers(projectPath(projectName) + "/" + entryPath, entryPath, architectures);
+                    if (_diags.hasError()) {
+                        _diags.verbose("Mach-O error: %s\n", _diags.errorMessage().c_str());
+                        _diags.clearError();
+                    } else {
+                        foundParser = true;
+                    }
+                }
+            } else if (isSymlinkFile) {
+                const char* target = BOMFSObjectSymlinkTarget(fsObject);
+                _symlinks.push_back({ entryPath, target });
+                _metabomSymlinkTagMap.insert(std::make_pair(entryPath, tagStrs));
             }
         }
     }
@@ -631,13 +691,17 @@ std::vector<DyldSharedCache::MappedMachO> Manifest::otherDylibsAndBundles(const 
     const auto&                               dylibs = _configurations[configuration].architectures[architecture].results.dylibs;
     for (const auto& dylib : dylibs) {
         if (!dylib.second.included) {
-            insert(retval, dylib.second);
+            const UUIDInfo& info = infoForUUID(dylib.second.uuid);
+            if ( ((MachOAnalyzer*)(info.mh))->canHavePrecomputedDlopenClosure(info.runtimePath.c_str(), ^(const char*) {}) )
+                insert(retval, dylib.second);
         }
     }
 
     const auto& bundles = _configurations[configuration].architectures[architecture].results.bundles;
     for (const auto& bundle : bundles) {
-        insert(retval, bundle.second);
+        const UUIDInfo& info = infoForUUID(bundle.second.uuid);
+        if ( ((MachOAnalyzer*)(info.mh))->canHavePrecomputedDlopenClosure(info.runtimePath.c_str(), ^(const char*) {}) )
+            insert(retval, bundle.second);
     }
 
     return retval;
@@ -654,6 +718,8 @@ std::vector<DyldSharedCache::MappedMachO> Manifest::mainExecutables(const std::s
     return retval;
 }
 
+#pragma clang diagnostic push
+#pragma clang diagnostic ignored "-Wrange-loop-analysis"
 bool Manifest::filterForConfig(const std::string& configName)
 {
     for (const auto configuration : _configurations) {
@@ -670,6 +736,21 @@ bool Manifest::filterForConfig(const std::string& configName)
         }
     }
     return false;
+}
+#pragma clang diagnostic pop
+
+std::set<std::string> Manifest::resultsForConfiguration(const std::string& configName) {
+    std::set<std::string> results;
+    NSDictionary* configurationResults = _manifestDict[@"results"][[NSString stringWithUTF8String:configName.c_str()]];
+    for (NSString* arch in configurationResults) {
+        NSDictionary* dylibs = configurationResults[arch][@"dylibs"];
+        for (NSString* dylib in dylibs) {
+            NSDictionary* dylibDict = dylibs[dylib];
+            if ([dylibDict[@"included"] boolValue])
+                results.insert([dylib UTF8String]);
+        }
+    }
+    return results;
 }
 
 void Manifest::dedupeDispositions(void) {
@@ -719,88 +800,6 @@ void Manifest::remove(const std::string& config, const std::string& arch)
         _configurations[config].architectures.erase(arch);
 }
 
-void Manifest::removeDylib(MachOParser parser, const std::string& reason, const std::string& configuration,
-    const std::string& architecture, std::unordered_set<UUID>& processedIdentifiers)
-{
-#if 0
-    auto configIter = _configurations.find(configuration);
-    if (configIter == _configurations.end())
-        return;
-    auto archIter = configIter->second.architectures.find( architecture );
-    if ( archIter == configIter->second.architectures.end() ) return;
-    auto& archManifest = archIter->second;
-
-    if (archManifest.results.dylibs.count(parser->uuid()) == 0) {
-        archManifest.results.dylibs[parser->uuid()].uuid = parser->uuid();
-        archManifest.results.dylibs[parser->uuid()].installname = parser->installName();
-        processedIdentifiers.insert(parser->uuid());
-    }
-    archManifest.results.exclude(MachOProxy::forIdentifier(parser->uuid(), architecture), reason);
-
-    processedIdentifiers.insert(parser->uuid());
-
-    for (const auto& dependent : proxy->dependentIdentifiers) {
-        auto dependentProxy = MachOProxy::forIdentifier(dependent, architecture);
-        auto dependentResultIter = archManifest.results.dylibs.find(dependentProxy->identifier);
-        if ( dependentProxy &&
-             ( dependentResultIter == archManifest.results.dylibs.end() || dependentResultIter->second.included == true ) ) {
-            removeDylib(dependentProxy, "Missing dependency: " + proxy->installName, configuration, architecture,
-                processedIdentifiers);
-        }
-    }
-#endif
-}
-
-const std::string Manifest::removeLargestLeafDylib(const std::set<std::string>& configurations, const std::string& architecture)
-{
-    // Find the leaf nodes
-    __block std::map<std::string, uint64_t> dependentCounts;
-    for (const auto& dylib : _configurations[*configurations.begin()].architectures[architecture].results.dylibs) {
-        if (!dylib.second.included)
-            continue;
-        std::string installName;
-        auto info = infoForUUID(dylib.first);
-        auto parser = MachOParser(info.mh);
-        dependentCounts[parser.installName()] = 0;
-    }
-
-    for (const auto& dylib : _configurations[*configurations.begin()].architectures[architecture].results.dylibs) {
-        if (!dylib.second.included)
-            continue;
-        auto info = infoForUUID(dylib.first);
-        auto parser = MachOParser(info.mh);
-        parser.forEachDependentDylib(^(const char *loadPath, bool isWeak, bool isReExport, bool isUpward, uint32_t compatVersion, uint32_t curVersion, bool &stop) {
-            if (!isWeak) {
-                dependentCounts[loadPath]++;
-            }
-        });
-    }
-
-    // Figure out which leaf is largest
-    UUIDInfo largestLeaf;
-
-    for (const auto& dependentCount : dependentCounts) {
-        if (dependentCount.second == 0) {
-            auto info = infoForInstallNameAndarch(dependentCount.first, architecture);
-            assert(info.mh != nullptr);
-            if (info.size > largestLeaf.size) {
-                largestLeaf = info;
-            }
-        }
-    }
-
-    if (largestLeaf.mh == nullptr) {
-        _diags.error("Fatal overflow, could not evict more dylibs");
-        return "";
-    }
-
-    // Remove it ferom all configs
-    for (const auto& config : configurations) {
-        configuration(config).architecture(architecture).results.exclude(*this, largestLeaf.uuid, "Cache Overflow");
-    }
-
-    return largestLeaf.installName;
-}
 
 void Manifest::calculateClosure(const std::string& configuration, const std::string& architecture)
 {
@@ -816,13 +815,12 @@ void Manifest::calculateClosure(const std::string& configuration, const std::str
         if (info.arch != architecture) {
             continue;
         }
-
+        
         auto i = _metabomTagMap.find(info.runtimePath);
         assert(i != _metabomTagMap.end());
         auto tags = i->second;
         if (!is_disjoint(tags, configManifest.metabomTags)) {
             newUuids.insert(info.uuid);
-
         }
     }
 
@@ -837,41 +835,41 @@ void Manifest::calculateClosure(const std::string& configuration, const std::str
             }
             processedUuids.insert(uuid);
 
-            auto parser = parserForUUID(uuid);
+            const MachOAnalyzer* mh = machOForUUID(uuid);
             auto runtimePath = runtimePathForUUID(uuid);
-            assert(parser.header() != 0);
+            assert(mh != nullptr);
 
-            parser.forEachDependentDylib(^(const char* loadPath, bool isWeak, bool isReExport, bool isUpward, uint32_t compatVersion, uint32_t curVersion, bool& stop) {
+            mh->forEachDependentDylib(^(const char* loadPath, bool isWeak, bool isReExport, bool isUpward, uint32_t compatVersion, uint32_t curVersion, bool& stop) {
                 auto i = _installNameMap.find(std::make_pair(loadPath, architecture));
                 if (i != _installNameMap.end())
                 newUuids.insert(i->second);
             });
 
-            if (parser.fileType() == MH_DYLIB) {
+            if (mh->isDylib()) {
                 // Add the dylib to the results
                 if (archManifest.results.dylibs.count(uuid) == 0 ) {
                     archManifest.results.dylibs[uuid].uuid = uuid;
-                    archManifest.results.dylibs[uuid].installname = parser.installName();
+                    archManifest.results.dylibs[uuid].installname = mh->installName();
                 }
 
                 // HACK to insert device specific dylib closures into all caches
-                if ( parser.installName() == std::string("/System/Library/Caches/com.apple.xpc/sdk.dylib")
-                    || parser.installName() == std::string("/System/Library/Caches/com.apple.xpcd/xpcd_cache.dylib") ) {
-                    archManifest.results.exclude(&parser, "Device specific dylib");
+                if ( (strcmp(mh->installName(), "/System/Library/Caches/com.apple.xpc/sdk.dylib") == 0)
+                    || (strcmp(mh->installName(), "/System/Library/Caches/com.apple.xpcd/xpcd_cache.dylib") == 0) ) {
+                    archManifest.results.exclude(mh, "Device specific dylib");
                     continue;
                 }
 
-                std::set<std::string> reasons;
-                if (parser.canBePlacedInDyldCache(runtimePath, reasons)) {
+                __block std::set<std::string> reasons;
+                if (mh->canBePlacedInDyldCache(runtimePath.c_str(), ^(const char* reason) { reasons.insert(reason); })) {
                     auto i = _metabomTagMap.find(runtimePath);
                     assert(i != _metabomTagMap.end());
                     auto restrictions = _metabomRestrictedTagMap.find(configuration);
                     if (restrictions != _metabomRestrictedTagMap.end() && !is_disjoint(restrictions->second, i->second)) {
-                        archManifest.results.exclude(&parser, "Dylib '" + runtimePath + "' removed due to explict restriction");
+                        archManifest.results.exclude(mh, "Dylib '" + runtimePath + "' removed due to explict restriction");
                     }
 
                     // It can be placed in the cache, grab its dependents and queue them for inclusion
-                    cachedUUIDs.insert(parser.uuid());
+                    cachedUUIDs.insert(uuid);
                 } else {
                     // It can't be placed in the cache, print out the reasons why
                     std::string reasonString = "Rejected from cached dylibs: " + runtimePath + " " + architecture + " (\"";
@@ -882,13 +880,13 @@ void Manifest::calculateClosure(const std::string& configuration, const std::str
                         }
                     }
                     reasonString += "\")";
-                    archManifest.results.exclude(&parser, reasonString);
+                    archManifest.results.exclude(mh, reasonString);
                 }
-            } else if (parser.fileType() == MH_BUNDLE) {
+            } else if (mh->isBundle()) {
                 if (archManifest.results.bundles.count(uuid) == 0) {
                     archManifest.results.bundles[uuid].uuid = uuid;
                 }
-            } else if (parser.fileType() == MH_EXECUTE) {
+            } else if (mh->isMainExecutable()) {
                 //HACK exclude all launchd and installd variants until we can do something about xpcd_cache.dylib and friends
                 if (runtimePath == "/sbin/launchd"
                     || runtimePath == "/usr/local/sbin/launchd.debug"
@@ -911,8 +909,8 @@ void Manifest::calculateClosure(const std::string& configuration, const std::str
         doAgain = false;
         for (const auto& uuid : cachedUUIDs) {
             __block std::set<std::string> badDependencies;
-            __block auto parser = parserForUUID(uuid);
-            parser.forEachDependentDylib(^(const char* loadPath, bool isWeak, bool isReExport, bool isUpward, uint32_t compatVersion, uint32_t curVersion, bool& stop) {
+            const dyld3::MachOAnalyzer* mh = machOForUUID(uuid);
+            mh->forEachDependentDylib(^(const char* loadPath, bool isWeak, bool isReExport, bool isUpward, uint32_t compatVersion, uint32_t curVersion, bool& stop) {
                 if (isWeak)
                     return;
 
@@ -924,7 +922,7 @@ void Manifest::calculateClosure(const std::string& configuration, const std::str
                 }
 
                 if (badDependencies.size()) {
-                    std::string reasonString = "Rejected from cached dylibs: " + std::string(parser.installName()) + " " + architecture + " (\"";
+                    std::string reasonString = "Rejected from cached dylibs: " + std::string(mh->installName()) + " " + architecture + " (\"";
                     for (auto i = badDependencies.begin(); i != badDependencies.end(); ++i) {
                         reasonString += *i;
                         if (i != --badDependencies.end()) {
@@ -932,7 +930,7 @@ void Manifest::calculateClosure(const std::string& configuration, const std::str
                         }
                     }
                     reasonString += "\")";
-                    archManifest.results.exclude(&parser, reasonString);
+                    archManifest.results.exclude(mh, reasonString);
                 }
             });
         }
@@ -946,8 +944,8 @@ void Manifest::calculateClosure(const std::string& configuration, const std::str
     __block std::set<std::string> linkedDylibs;
 
     for(const auto& uuid : cachedUUIDs) {
-        auto parser = parserForUUID(uuid);
-        parser.forEachDependentDylib(^(const char* loadPath, bool isWeak, bool isReExport, bool isUpward, uint32_t compatVersion, uint32_t curVersion, bool& stop) {
+        const dyld3::MachOAnalyzer* mh = machOForUUID(uuid);
+        mh->forEachDependentDylib(^(const char* loadPath, bool isWeak, bool isReExport, bool isUpward, uint32_t compatVersion, uint32_t curVersion, bool& stop) {
             linkedDylibs.insert(loadPath);
         });
     }
@@ -1120,6 +1118,10 @@ void Manifest::write(const std::string& path)
         cacheDict[@"platform"] = @"macos";
         break;
     case Platform::unknown:
+    case Platform::iOSMac:
+    case Platform::iOS_simulator:
+    case Platform::tvOS_simulator:
+    case Platform::watchOS_simulator:
         cacheDict[@"platform"] = @"unknown";
         break;
     }
@@ -1131,4 +1133,38 @@ void Manifest::write(const std::string& path)
                                                                   error:&error];
     (void)[outData writeToFile:cppToObjStr(path) atomically:YES];
 }
+
+
+void Manifest::forEachMachO(std::string configuration,
+                            std::function<void(const std::string &buildPath, const std::string &runtimePath, const std::string &arch, bool shouldBeExcludedIfLeaf)> lambda) {
+    for (auto& uuidInfo : _uuidMap) {
+        auto i = _metabomTagMap.find(uuidInfo.second.runtimePath);
+        assert(i != _metabomTagMap.end());
+        auto restrictions = _metabomRestrictedTagMap.find(configuration);
+        if (restrictions != _metabomRestrictedTagMap.end() && !is_disjoint(restrictions->second, i->second)) {
+            continue;
+        }
+        auto& configManifest = _configurations[configuration];
+        auto exclusions = _metabomExcludeTagMap.find(configuration);
+        bool isExcluded = (exclusions != _metabomExcludeTagMap.end()) && !is_disjoint(exclusions->second, i->second);
+        bool isAnchor = !is_disjoint(i->second, configManifest.metabomTags);
+        bool shouldBeExcludedIfLeaf = isExcluded || !isAnchor;
+        lambda(uuidInfo.second.buildPath, uuidInfo.second.runtimePath, uuidInfo.second.arch, shouldBeExcludedIfLeaf);
+    }
 }
+
+
+void Manifest::forEachSymlink(std::string configuration,
+                            std::function<void(const std::string &fromPath, const std::string &toPath)> lambda) {
+    for (const auto& symlink : _symlinks) {
+        auto i = _metabomSymlinkTagMap.find(symlink.first);
+        assert(i != _metabomSymlinkTagMap.end());
+        auto restrictions = _metabomRestrictedTagMap.find(configuration);
+        if (restrictions != _metabomRestrictedTagMap.end() && !is_disjoint(restrictions->second, i->second)) {
+            continue;
+        }
+        lambda(symlink.first, symlink.second);
+    }
+}
+
+} //namespace dyld3

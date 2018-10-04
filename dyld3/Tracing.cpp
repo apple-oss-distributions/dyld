@@ -69,38 +69,71 @@ void kdebug_trace_dyld_image(const uint32_t code,
 #endif /* __LP64__ */
 }
 
-VIS_HIDDEN
-void kdebug_trace_dyld_signpost(const uint32_t code, uint64_t data1, uint64_t data2) {
-    if (kdebug_is_enabled(KDBG_CODE(DBG_DYLD, DBG_DYLD_SIGNPOST, code))) {
-        task_thread_times_info info;
-        mach_msg_type_number_t infoSize = sizeof(task_thread_times_info);
-        (void)task_info(mach_task_self(), TASK_THREAD_TIMES_INFO, (task_info_t)&info, &infoSize);
-        uint64_t user_duration = elapsed({0,0}, info.user_time);
-        uint64_t system_duration = elapsed({0,0}, info.system_time);
-        kdebug_trace(KDBG_CODE(DBG_DYLD, DBG_DYLD_SIGNPOST, code), user_duration, system_duration, data1, data2);
-    }
-}
+// FIXME
+// We get distinct copies of this in libdyld and dyld. Eventually we can fix it,
+// for now we will just offset the values.
 
+#if BUILDING_DYLD
 static std::atomic<uint64_t> trace_pair_id(0);
+#else
+static std::atomic<uint64_t> trace_pair_id(1LL<<63);
+#endif
 
 VIS_HIDDEN
-void kdebug_trace_dyld_duration(const uint32_t code, uint64_t data1, uint64_t data2, void (^block)()) {
-    //FIXME: We should assert here, but it is verified on our current platforms
-    //Re-enabled when we move to C++17 and can use constexpr is_lock_always_free()
-    //assert(std::atomic<uint64_t>{}.is_lock_free());
-    if (kdebug_is_enabled(KDBG_CODE(DBG_DYLD, DBG_DYLD_TIMING, code))) {
-        uint64_t current_trace_id = trace_pair_id++;
-        kdebug_trace(KDBG_CODE(DBG_DYLD, DBG_DYLD_TIMING, code) | DBG_FUNC_START, current_trace_id, 0, data1, data2);
-        block();
-        kdebug_trace(KDBG_CODE(DBG_DYLD, DBG_DYLD_TIMING, code) | DBG_FUNC_END, current_trace_id, 0, data1, data2);
-    } else {
-        block();
+bool kdebug_trace_dyld_enabled(uint32_t code) {
+    return kdebug_is_enabled(code);
+}
+
+VIS_HIDDEN
+void kdebug_trace_dyld_marker(uint32_t code, kt_arg data1, kt_arg data2, kt_arg data3, kt_arg data4) {
+    if (kdebug_is_enabled(code)) {
+        data1.prepare(code);
+        data2.prepare(code);
+        data3.prepare(code);
+        data4.prepare(code);
+        kdebug_trace(code, data1.value(), data2.value(), data3.value(), data4.value());
+        data4.destroy(code);
+        data3.destroy(code);
+        data2.destroy(code);
+        data1.destroy(code);
     }
 }
 
-void kdebug_trace_print(const uint32_t code, const char *string) {
-    if (kdebug_is_enabled(KDBG_CODE(DBG_DYLD, DBG_DYLD_PRINT, code))) {
-        kdebug_trace_string(KDBG_CODE(DBG_DYLD, DBG_DYLD_PRINT, code), 0, string);
+VIS_HIDDEN
+uint64_t kdebug_trace_dyld_duration_start(uint32_t code, kt_arg data1, kt_arg data2, kt_arg data3) {
+    uint64_t result = 0;
+    if (kdebug_is_enabled(code)) {
+        result = ++trace_pair_id;
+        data1.prepare(code);
+        data2.prepare(code);
+        data3.prepare(code);
+        kdebug_trace(code | DBG_FUNC_START, result, data1.value(), data2.value(), data3.value());
+        data3.destroy(code);
+        data2.destroy(code);
+        data1.destroy(code);
+    }
+    return result;
+}
+
+VIS_HIDDEN
+void kdebug_trace_dyld_duration_end(uint64_t trace_id, uint32_t code, kt_arg data1, kt_arg data2, kt_arg data3) {
+    if (trace_id != 0 && kdebug_is_enabled(code)) {
+        data1.prepare(code);
+        data2.prepare(code);
+        data3.prepare(code);
+        kdebug_trace(code | DBG_FUNC_END, trace_id, data1.value(), data2.value(), data3.value());
+        data3.destroy(code);
+        data2.destroy(code);
+        data1.destroy(code);
     }
 }
+
+void ScopedTimer::startTimer() {
+    current_trace_id = kdebug_trace_dyld_duration_start(code, data1, data2, data3);
+}
+
+void ScopedTimer::endTimer() {
+    kdebug_trace_dyld_duration_end(current_trace_id, code, data4, data5, data6);
+}
+
 };

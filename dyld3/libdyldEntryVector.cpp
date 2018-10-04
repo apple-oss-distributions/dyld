@@ -26,13 +26,14 @@
 #include "dyld_priv.h"
 #include "libdyldEntryVector.h"
 #include "AllImages.h"
+#include "Array.h"
+#include "Loading.h"
 #include "Logging.h"
 #include "PathOverrides.h"
-#include "LaunchCacheFormat.h"
-#include "start_glue.h"
+#include "StartGlue.h"
+#include "dyld_process_info_internal.h"
 
-extern "C" void start();
-
+extern "C" char start;
 
 VIS_HIDDEN const char** appleParams;
 
@@ -90,32 +91,38 @@ static void entry_setOldAllImageInfo(dyld_all_image_infos* old)
     gAllImages.setOldAllImageInfo(old);
 }
 
-static void entry_setInitialImageList(const launch_cache::binary_format::Closure* closure,
-                                const void* dyldCacheLoadAddress, const char* dyldCachePath,
-                                const dyld3::launch_cache::DynArray<loader::ImageInfo>& initialImages,
-                                const mach_header* libSystemMH, const launch_cache::binary_format::Image* libSystemImage)
+static void entry_setNotifyMonitoringDyldMain(void (*notifyMonitoringDyldMain)()) {
+    setNotifyMonitoringDyldMain(notifyMonitoringDyldMain);
+}
+
+static void entry_setNotifyMonitoringDyld(void (*notifyMonitoringDyld)(bool unloading,unsigned imageCount,
+                                                                               const struct mach_header* loadAddresses[],
+                                                                               const char* imagePaths[])) {
+    setNotifyMonitoringDyld(notifyMonitoringDyld);
+}
+
+static void entry_setInitialImageList(const closure::LaunchClosure* closure,
+                                const DyldSharedCache* dyldCacheLoadAddress, const char* dyldCachePath,
+                                const Array<LoadedImage>& initialImages, const LoadedImage& libSystem)
 {
     gAllImages.init(closure, dyldCacheLoadAddress, dyldCachePath, initialImages);
-    gAllImages.applyInterposingToDyldCache(closure, initialImages);
+    gAllImages.applyInterposingToDyldCache(closure);
 
     const char* mainPath = _simple_getenv(appleParams, "executable_path");
     if ( (mainPath != nullptr) && (mainPath[0] == '/') )
         gAllImages.setMainPath(mainPath);
 
-    // ok to call before malloc is ready because 4 slots are reserved.
-    gAllImages.setInitialGroups();
-
     // run initializer for libSytem.B.dylib
     // this calls back into _dyld_initializer which calls gAllIimages.addImages()
-    gAllImages.runLibSystemInitializer(libSystemMH, libSystemImage);
+    gAllImages.runLibSystemInitializer(libSystem);
 
     // now that malloc is available, parse DYLD_ env vars
-    gPathOverrides.setEnvVars((const char**)environ);
+    closure::gPathOverrides.setEnvVars((const char**)environ, gAllImages.mainExecutable(), gAllImages.mainExecutableImage()->path());
 }
 
 static void entry_runInitialzersBottomUp(const mach_header* mainExecutableImageLoadAddress)
 {
-    gAllImages.runInitialzersBottomUp(mainExecutableImageLoadAddress);
+    gAllImages.runStartupInitialzers();
     gAllImages.notifyMonitorMain();
 }
 
@@ -124,19 +131,25 @@ static void entry_setChildForkFunction(void (*func)() )
     sChildForkFunction = func;
 }
 
-typedef void (*StartFunc)();
+static void entry_setRestrictions(bool allowAtPaths, bool allowEnvPaths)
+{
+    gAllImages.setRestrictions(allowAtPaths, allowEnvPaths);
+}
 
 const LibDyldEntryVector entryVectorForDyld = {
     LibDyldEntryVector::kCurrentVectorVersion,
-    launch_cache::binary_format::kFormatVersion,
+    closure::kFormatVersion,
     &entry_setVars,
     &entry_setHaltFunction,
     &entry_setOldAllImageInfo,
     &entry_setInitialImageList,
     &entry_runInitialzersBottomUp,
-    (StartFunc)address_of_start,
+    (__typeof(LibDyldEntryVector::startFunc))address_of_start,
     &entry_setChildForkFunction,
     &entry_setLogFunction,
+    &entry_setRestrictions,
+    &entry_setNotifyMonitoringDyldMain,
+    &entry_setNotifyMonitoringDyld
 };
 
 VIS_HIDDEN void _dyld_fork_child()

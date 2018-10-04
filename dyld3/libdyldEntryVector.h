@@ -28,32 +28,39 @@
 
 #include <mach-o/loader.h>
 
-#include "LaunchCache.h"
 #include "Loading.h"
 
 struct dyld_all_image_infos;
+class DyldSharedCache;
 
 namespace dyld3 {
 
+
 struct LibDyldEntryVector
 {
-    enum { kCurrentVectorVersion = 4 };
+    enum { kCurrentVectorVersion = 6 };
 
     uint32_t    vectorVersion;              // should be kCurrentVectorVersion
-    uint32_t    binaryFormatVersion;        // should be launch_cache::binary_format::kFormatVersion
+    uint32_t    binaryFormatVersion;        // should be dyld3::closure::kFormatVersion
     void        (*setVars)(const mach_header* mainMH, int argc, const char* argv[], const char* envp[], const char* apple[]);
     void        (*setHaltFunction)(void (*func)(const char* message) __attribute__((noreturn)) );
     void        (*setOldAllImageInfo)(dyld_all_image_infos*);
-    void        (*setInitialImageList)(const launch_cache::BinaryClosureData* closure,
-                                        const void* dyldCacheLoadAddress, const char* dyldCachePath,
-                                        const dyld3::launch_cache::DynArray<loader::ImageInfo>& initialImages,
-                                        const mach_header* libSystemMH, const launch_cache::BinaryImageData* libSystemImage);
+    void        (*setInitialImageList)(const closure::LaunchClosure* closure,
+                                        const DyldSharedCache* dyldCacheLoadAddress, const char* dyldCachePath,
+                                        const Array<LoadedImage>& initialImages, const LoadedImage& libSystem);
     void        (*runInitialzersBottomUp)(const mach_header* topImageLoadAddress);
     void        (*startFunc)();
     // added in version 3
     void        (*setChildForkFunction)(void (*func)());
     // added in version 4
     void        (*setLogFunction)(void (*logFunction)(const char* format, va_list list));
+    // added in version 5
+    void        (*setRestrictions)(bool allowAtPaths, bool allowEnvVars);
+    // added in version 6
+    void        (*setNotifyMonitoringDyldMain)(void (*notifyMonitoringDyldMain)());
+    void        (*setNotifyMonitoringDyld)(void (*notifyMonitoringDyldMain)(bool unloading, unsigned imageCount,
+                                                                            const struct mach_header* loadAddresses[],
+                                                                            const char* imagePaths[]));
 };
 
 extern const LibDyldEntryVector entryVectorForDyld;

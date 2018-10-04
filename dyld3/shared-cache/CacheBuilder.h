@@ -27,55 +27,119 @@
 
 #include <string>
 #include <vector>
+#include <map>
 #include <unordered_map>
 #include <unordered_set>
 
+#include "ClosureFileSystem.h"
 #include "DyldSharedCache.h"
 #include "Diagnostics.h"
-#include "ImageProxy.h"
+#include "MachOAnalyzer.h"
 
 
-namespace  dyld3 {
-  namespace launch_cache {
-    namespace binary_format {
-      struct ImageGroup;
-      struct Closure;
-    }
-  }
-}
+
+template <typename P> class LinkeditOptimizer;
 
 
-struct CacheBuilder {
+class CacheBuilder {
+public:
+    CacheBuilder(const DyldSharedCache::CreateOptions& options, const dyld3::closure::FileSystem& fileSystem);
 
-                                        CacheBuilder(const DyldSharedCache::CreateOptions& options);
+    struct InputFile {
+        enum State {
+            Unset,
+            MustBeIncluded,
+            MustBeIncludedForDependent,
+            MustBeExcludedIfUnused
+        };
+        InputFile(const char* path, State state) : path(path), state(state) { }
+        const char*     path;
+        State           state = Unset;
+        Diagnostics     diag;
 
-    void                                build(const std::vector<DyldSharedCache::MappedMachO>&  dylibsToCache,
-                                              const std::vector<DyldSharedCache::MappedMachO>&  otherOsDylibs,
-                                              const std::vector<DyldSharedCache::MappedMachO>&  osExecutables);
-    void                                deleteBuffer();
-    const DyldSharedCache*              buffer() { return _buffer; }
-    size_t                              bufferSize() { return (size_t)_allocatedBufferSize; }
-    std::string                         errorMessage();
-    const std::set<std::string>         warnings();
-    const std::set<const mach_header*>  evictions();
-    const bool                          agileSignature();
-    const std::string                   cdHashFirst();
-    const std::string                   cdHashSecond();
+        bool mustBeIncluded() const {
+            return (state == MustBeIncluded) || (state == MustBeIncludedForDependent);
+        }
+    };
+
+    // Contains a MachO which has been loaded from the file system and may potentially need to be unloaded later.
+    struct LoadedMachO {
+        DyldSharedCache::MappedMachO    mappedFile;
+        dyld3::closure::LoadedFileInfo  loadedFileInfo;
+        InputFile*                      inputFile;
+    };
+
+    void                                        build(std::vector<InputFile>& inputFiles,
+                                                      std::vector<DyldSharedCache::FileAlias>& aliases);
+    void                                        build(const std::vector<LoadedMachO>& dylibs,
+                                                      const std::vector<LoadedMachO>& otherOsDylibsInput,
+                                                      const std::vector<LoadedMachO>& osExecutables,
+                                                      std::vector<DyldSharedCache::FileAlias>& aliases);
+    void                                        build(const std::vector<DyldSharedCache::MappedMachO>&  dylibsToCache,
+                                                      const std::vector<DyldSharedCache::MappedMachO>&  otherOsDylibs,
+                                                      const std::vector<DyldSharedCache::MappedMachO>&  osExecutables,
+                                                      std::vector<DyldSharedCache::FileAlias>& aliases);
+    void                                        writeFile(const std::string& path);
+    void                                        writeBuffer(uint8_t*& buffer, uint64_t& size);
+    void                                        writeMapFile(const std::string& path);
+    void                                        writeMapFileBuffer(uint8_t*& buffer, uint64_t& bufferSize);
+    void                                        deleteBuffer();
+    std::string                                 errorMessage();
+    const std::set<std::string>                 warnings();
+    const std::set<const dyld3::MachOAnalyzer*> evictions();
+    const bool                                  agileSignature();
+    const std::string                           cdHashFirst();
+    const std::string                           cdHashSecond();
+
+    void forEachCacheDylib(void (^callback)(const std::string& path));
 
     struct SegmentMappingInfo {
         const void*     srcSegment;
         const char*     segName;
-        uint64_t        dstCacheAddress;
-        uint32_t        dstCacheOffset;
+        void*           dstSegment;
+        uint64_t        dstCacheUnslidAddress;
+        uint32_t        dstCacheFileOffset;
         uint32_t        dstCacheSegmentSize;
         uint32_t        copySegmentSize;
         uint32_t        srcSegmentIndex;
     };
 
+    class ASLR_Tracker
+    {
+    public:
+                ~ASLR_Tracker();
+
+        void        setDataRegion(const void* rwRegionStart, size_t rwRegionSize);
+        void        add(void* p);
+        void        remove(void* p);
+        bool        has(void* p);
+        const bool* bitmap()        { return _bitmap; }
+        unsigned    dataPageCount() { return _pageCount; }
+
+    private:
+
+        uint8_t*     _regionStart    = nullptr;
+        uint8_t*     _endStart       = nullptr;
+        bool*        _bitmap         = nullptr;
+        unsigned     _pageCount      = 0;
+        unsigned     _pageSize       = 4096;
+    };
+
+    typedef std::map<uint64_t, std::set<void*>> LOH_Tracker;
+
+    struct Region
+    {
+        uint8_t*    buffer                 = nullptr;
+        uint64_t    bufferSize             = 0;
+        uint64_t    sizeInUse              = 0;
+        uint64_t    unslidLoadAddress      = 0;
+        uint64_t    cacheFileOffset        = 0;
+    };
+
 private:
-
-    typedef std::unordered_map<const mach_header*, std::vector<SegmentMappingInfo>> SegmentMapping;
-
+    template <typename P>
+    friend class LinkeditOptimizer;
+    
     struct ArchLayout
     {
         uint64_t    sharedMemoryStart;
@@ -87,6 +151,7 @@ private:
         uint32_t    branchPoolLinkEditSize;
         uint32_t    branchReach;
         uint8_t     sharedRegionAlignP2;
+        uint8_t     slideInfoBytesPerPage;
         bool        sharedRegionsAreDiscontiguous;
         bool        is64;
     };
@@ -94,68 +159,101 @@ private:
     static const ArchLayout  _s_archLayout[];
     static const char* const _s_neverStubEliminate[];
 
-    std::vector<DyldSharedCache::MappedMachO> makeSortedDylibs(const std::vector<DyldSharedCache::MappedMachO>& dylibs, const std::unordered_map<std::string, unsigned> sortOrder);
+    struct UnmappedRegion
+    {
+        uint8_t*    buffer                 = nullptr;
+        uint64_t    bufferSize             = 0;
+        uint64_t    sizeInUse              = 0;
+    };
 
-    SegmentMapping assignSegmentAddresses(const std::vector<DyldSharedCache::MappedMachO>& dylibs, struct dyld_cache_mapping_info regions[3]);
+    struct DylibInfo
+    {
+        const LoadedMachO*              input;
+        std::string                     runtimePath;
+        std::vector<SegmentMappingInfo> cacheLocation;
+    };
 
-    bool        cacheOverflow(const dyld_cache_mapping_info regions[3]);
-    void        adjustImageForNewSegmentLocations(const std::vector<uint64_t>& segNewStartAddresses,
-                                                 const std::vector<uint64_t>& segCacheFileOffsets,
-                                                 const std::vector<uint64_t>& segCacheSizes, std::vector<void*>& pointersForASLR);
+    void        makeSortedDylibs(const std::vector<LoadedMachO>& dylibs, const std::unordered_map<std::string, unsigned> sortOrder);
+    void        assignSegmentAddresses();
+
+    uint64_t    cacheOverflowAmount();
+    size_t      evictLeafDylibs(uint64_t reductionTarget, std::vector<const LoadedMachO*>& overflowDylibs);
 
     void        fipsSign();
     void        codeSign();
     uint64_t    pathHash(const char* path);
-    void        writeCacheHeader(const struct dyld_cache_mapping_info regions[3], const std::vector<DyldSharedCache::MappedMachO>& dylibs, const SegmentMapping&);
-    void        copyRawSegments(const std::vector<DyldSharedCache::MappedMachO>& dylibs, const SegmentMapping& mapping);
-    void        adjustAllImagesForNewSegmentLocations(const std::vector<DyldSharedCache::MappedMachO>& dylibs, const SegmentMapping& mapping);
-    void        bindAllImagesInCacheFile(const dyld_cache_mapping_info regions[3]);
+    void        writeCacheHeader();
+    void        copyRawSegments();
+    void        adjustAllImagesForNewSegmentLocations();
     void        writeSlideInfoV1();
-    void        recomputeCacheUUID(void);
+    void        writeSlideInfoV3(const bool bitmap[], unsigned dataPageCoun);
+    uint16_t    pageStartV3(uint8_t* pageContent, uint32_t pageSize, const bool bitmap[]);
     void        findDylibAndSegment(const void* contentPtr, std::string& dylibName, std::string& segName);
+    void        addImageArray();
+    void        buildImageArray(std::vector<DyldSharedCache::FileAlias>& aliases);
+    void        addOtherImageArray(const std::vector<LoadedMachO>&, std::vector<const LoadedMachO*>& overflowDylibs);
+    void        addClosures(const std::vector<LoadedMachO>&);
+    void        markPaddingInaccessible();
 
-    void        addCachedDylibsImageGroup(dyld3::ImageProxyGroup*);
-    void        addCachedOtherDylibsImageGroup(dyld3::ImageProxyGroup*);
-    void        addClosures(const std::map<std::string, const dyld3::launch_cache::binary_format::Closure*>& closures);
+    bool        writeCache(void (^cacheSizeCallback)(uint64_t size), bool (^copyCallback)(const uint8_t* src, uint64_t size, uint64_t dstOffset));
 
-    template <typename P> void writeSlideInfoV2();
-    template <typename P> bool makeRebaseChain(uint8_t* pageContent, uint16_t lastLocationOffset, uint16_t newOffset, const struct dyld_cache_slide_info2* info);
-    template <typename P> void addPageStarts(uint8_t* pageContent, const bool bitmap[], const struct dyld_cache_slide_info2* info,
+    template <typename P> void writeSlideInfoV2(const bool bitmap[], unsigned dataPageCount);
+    template <typename P> bool makeRebaseChainV2(uint8_t* pageContent, uint16_t lastLocationOffset, uint16_t newOffset, const struct dyld_cache_slide_info2* info);
+    template <typename P> void addPageStartsV2(uint8_t* pageContent, const bool bitmap[], const struct dyld_cache_slide_info2* info,
                                              std::vector<uint16_t>& pageStarts, std::vector<uint16_t>& pageExtras);
+
+    template <typename P> void writeSlideInfoV4(const bool bitmap[], unsigned dataPageCount);
+    template <typename P> bool makeRebaseChainV4(uint8_t* pageContent, uint16_t lastLocationOffset, uint16_t newOffset, const struct dyld_cache_slide_info4* info);
+    template <typename P> void addPageStartsV4(uint8_t* pageContent, const bool bitmap[], const struct dyld_cache_slide_info4* info,
+                                             std::vector<uint16_t>& pageStarts, std::vector<uint16_t>& pageExtras);
+
+    // implemented in AdjustDylibSegemnts.cpp
+    void        adjustDylibSegments(const DylibInfo& dylib, Diagnostics& diag) const;
+
+    // implemented in OptimizerLinkedit.cpp
+    void        optimizeLinkedit(const std::vector<uint64_t>& branchPoolOffsets);
+
+    // implemented in OptimizerObjC.cpp
+    void        optimizeObjC();
+
+    // implemented in OptimizerBranches.cpp
+    void        optimizeAwayStubs(const std::vector<uint64_t>& branchPoolStartAddrs, uint64_t branchPoolsLinkEditStartAddr);
+
+
+    typedef std::unordered_map<std::string, const dyld3::MachOAnalyzer*> InstallNameToMA;
 
 
     const DyldSharedCache::CreateOptions&       _options;
-    DyldSharedCache*                            _buffer;
+    const dyld3::closure::FileSystem&           _fileSystem;
+    Region                                      _readExecuteRegion;
+    Region                                      _readWriteRegion;
+    Region                                      _readOnlyRegion;
+    UnmappedRegion                              _localSymbolsRegion;
+    UnmappedRegion                              _codeSignatureRegion;
+    vm_address_t                                _fullAllocatedBuffer;
+    uint64_t                                    _nonLinkEditReadOnlySize;
     Diagnostics                                 _diagnostics;
-    std::set<const mach_header*>               _evictions;
+    std::set<const dyld3::MachOAnalyzer*>       _evictions;
     const ArchLayout*                           _archLayout;
     uint32_t                                    _aliasCount;
     uint64_t                                    _slideInfoFileOffset;
     uint64_t                                    _slideInfoBufferSizeAllocated;
     uint64_t                                    _allocatedBufferSize;
-    uint64_t                                    _currentFileSize;
-    uint64_t                                    _vmSize;
+    std::vector<DylibInfo>                      _sortedDylibs;
+    InstallNameToMA                             _installNameToCacheDylib;
     std::unordered_map<std::string, uint32_t>   _dataDirtySegsOrder;
-    std::vector<void*>                          _pointersForASLR;
-    dyld3::ImageProxyGroup::PatchTable          _patchTable;
+    // Note this is mutable as the only parallel writes to it are done atomically to the bitmap
+    mutable ASLR_Tracker                        _aslrTracker;
+    std::map<void*, std::string>                _missingWeakImports;
+    mutable LOH_Tracker                         _lohTracker;
+    const dyld3::closure::ImageArray*           _imageArray;
+    uint32_t                                    _sharedStringsPoolVmOffset;
     std::vector<uint64_t>                       _branchPoolStarts;
     uint64_t                                    _branchPoolsLinkEditStartAddr;
     uint8_t                                     _cdHashFirst[20];
     uint8_t                                     _cdHashSecond[20];
 };
 
-
-// implemented in AdjustDylibSegemnts.cpp
-void        adjustDylibSegments(DyldSharedCache* cache, bool is64, mach_header* mhInCache, const std::vector<CacheBuilder::SegmentMappingInfo>& mappingInfo, std::vector<void*>& pointersForASLR, Diagnostics& diag);
-
-// implemented in OptimizerLinkedit.cpp
-uint64_t    optimizeLinkedit(DyldSharedCache* cache, bool is64, bool dontMapLocalSymbols, bool addAcceleratorTables, const std::vector<uint64_t>& branchPoolOffsets, Diagnostics& diag, dyld_cache_local_symbols_info** localsInfo);
-
-// implemented in OptimizerBranches.cpp
-void        bypassStubs(DyldSharedCache* cache, const std::vector<uint64_t>& branchPoolStartAddrs, const char* const alwaysUsesStubsTo[], Diagnostics& diag);
-
-// implemented in OptimizerObjC.cpp
-void        optimizeObjC(DyldSharedCache* cache, bool is64, bool customerCache, std::vector<void*>& pointersForASLR, Diagnostics& diag);
 
 
 

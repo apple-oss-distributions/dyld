@@ -27,6 +27,7 @@
 #include <unistd.h>
 #include <mach/mach.h>
 #include <dispatch/dispatch.h>
+#include <uuid/uuid.h>
 
 #ifdef __cplusplus
 extern "C" {
@@ -121,11 +122,11 @@ typedef const struct dyld_process_info_notify_base* dyld_process_info_notify;
 //
 extern dyld_process_info_notify _dyld_process_info_notify(task_t task, dispatch_queue_t queue,
                                                           void (^notify)(bool unload, uint64_t timestamp, uint64_t machHeader, const uuid_t uuid, const char* path),
-                                                          void (^notifyExit)(),
+                                                          void (^notifyExit)(void),
                                                           kern_return_t* kernelError);
 // add block to call right before main() is entered.
 // does nothing if process is already in main().
-extern void _dyld_process_info_notify_main(dyld_process_info_notify objc, void (^notifyMain)());
+extern void _dyld_process_info_notify_main(dyld_process_info_notify objc, void (^notifyMain)(void));
 
 
 // stop notifications and invalid dyld_process_info_notify object

@@ -26,6 +26,11 @@
 #include <stdbool.h>
 #include <unistd.h>
 #include <mach/mach.h>
+#include <uuid/uuid.h>
+
+#if defined(__cplusplus) && (BUILDING_LIBDYLD || BUILDING_DYLD)
+#include <atomic>
+#endif
 
 #ifdef __cplusplus
 extern "C" {
@@ -95,7 +100,11 @@ enum {	dyld_error_kind_none=0,
 struct dyld_all_image_infos {
 	uint32_t						version;		/* 1 in Mac OS X 10.4 and 10.5 */
 	uint32_t						infoArrayCount;
-	const struct dyld_image_info*	infoArray;
+#if defined(__cplusplus) && (BUILDING_LIBDYLD || BUILDING_DYLD)
+    std::atomic<const struct dyld_image_info*>	infoArray;
+#else
+    const struct dyld_image_info*    infoArray;
+#endif
 	dyld_image_notifier				notification;		
 	bool							processDetachedFromSharedRegion;
 	/* the following fields are only in version 2 (Mac OS X 10.6, iPhoneOS 2.0) and later */
@@ -129,7 +138,12 @@ struct dyld_all_image_infos {
 	uint8_t							sharedCacheUUID[16];
 	/* the following field is only in version 15 (macOS 10.12, iOS 10.0) and later */
 	uintptr_t						sharedCacheBaseAddress;
+#if defined(__cplusplus) && (BUILDING_LIBDYLD || BUILDING_DYLD)
+    // We want this to be atomic in libdyld so that we can see updates when we map it shared
+    std::atomic<uint64_t>           infoArrayChangeTimestamp;
+#else
 	uint64_t						infoArrayChangeTimestamp;
+#endif
 	const char*						dyldPath;
 	mach_port_t						notifyPorts[DYLD_MAX_PROCESS_INFO_NOTIFY_COUNT];
 #if __LP64__

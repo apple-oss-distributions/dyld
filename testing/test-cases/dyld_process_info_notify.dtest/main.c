@@ -135,12 +135,8 @@ static bool monitor(struct task_and_pid tp, bool disconnectEarly, bool attachLat
                                                     dispatch_semaphore_signal(taskDone);
                                                 }
                                             }
-                                            //fprintf(stderr, "unload=%d, 0x%012llX <%02X%02X%02X%02X-%02X%02X-%02X%02X-%02X%02X-%02X%02X%02X%02X%02X%02X> %s\n",
-                                            //   unload, machHeader, uuid[0],  uuid[1],  uuid[2],  uuid[3],  uuid[4],  uuid[5],  uuid[6],  uuid[7],
-                                            //                        uuid[8],  uuid[9],  uuid[10], uuid[11], uuid[12], uuid[13], uuid[14], uuid[15], path);
                                           },
                                           ^{
-                                            //fprintf(stderr, "target exited\n");
                                             gotTerminationNotice = true;
                                             dispatch_semaphore_signal(taskDone);
                                           },
@@ -239,6 +235,10 @@ static void validateMaxNotifies(struct task_and_pid tp)
 {
     dispatch_queue_t serviceQueue = dispatch_get_global_queue(DISPATCH_QUEUE_PRIORITY_HIGH, 0);
     dyld_process_info_notify handles[10];
+    // This loop goes through 10 iterations
+    // i = 0..7 Should succeed
+    // i = 8 Should fail,  but trigger a release that frees up a slot
+    // i = 9 Should succeed
     for (int i=0; i < 10; ++i) {
         kern_return_t kr;
         handles[i] = _dyld_process_info_notify(tp.task, serviceQueue,
@@ -274,9 +274,28 @@ static void validateMaxNotifies(struct task_and_pid tp)
     dispatch_release(serviceQueue);
 }
 
+static bool testSelfAttach(void) {
+    __block bool retval = false;
+    kern_return_t kr = KERN_SUCCESS;
+    dispatch_queue_t serviceQueue = dispatch_get_global_queue(DISPATCH_QUEUE_PRIORITY_HIGH, 0);
+    dyld_process_info_notify handle = _dyld_process_info_notify(mach_task_self(), serviceQueue,
+                                       ^(bool unload, uint64_t timestamp, uint64_t machHeader, const uuid_t uuid, const char* path) {
+                                           if ( strstr(path, "/libfoo.dylib") != NULL ) {
+                                               retval = true;
+                                           }
+                                       },
+                                       ^{},
+                                       &kr);
+    if ( handle == NULL ) {
+        fprintf(stderr, "_dyld_process_info_notify() returned NULL, result=%d\n", kr);
+    }
+    void* h = dlopen("./libfoo.dylib", 0);
+    dlclose(h);
+    return retval;
+}
+
 int main(int argc, const char* argv[])
 {
-    printf("[BEGIN] dyld_process_info_notify\n");
     if ( argc < 2 ) {
         printf("[FAIL] dyld_process_info_notify missing argument\n");
         exit(0);
@@ -287,6 +306,7 @@ int main(int argc, const char* argv[])
         struct task_and_pid child;
 
         // test 1) launch test program suspended in same arch as this program
+        printf("[BEGIN] dyld_process_info_notify laucnh suspended (same arch)\n");
         child = launchTest(testProgPath, "", false, true);
         if ( ! monitor(child, false, false) ) {
             printf("[FAIL] dyld_process_info_notify launch suspended missed some notifications\n");
@@ -294,19 +314,23 @@ int main(int argc, const char* argv[])
             exit(0);
         }
         killTest(child);
+        printf("[PASS] dyld_process_info_notify laucnh suspended (same arch)\n");
 
         // test 2) launch test program in same arch as this program where it sleeps itself
+        printf("[BEGIN] dyld_process_info_notify laucnh suspend-in-main (same arch)\n");
         child = launchTest(testProgPath, "suspend-in-main", false, false);
         validateMaxNotifies(child);
         if ( ! monitor(child, false, true) ) {
             printf("[FAIL] dyld_process_info_notify launch suspend-in-main missed some notifications\n");
-             killTest(child);
+            killTest(child);
             exit(0);
         }
         killTest(child);
+        printf("[PASS] dyld_process_info_notify laucnh suspend-in-main (same arch)\n");
 
 #if __MAC_OS_X_VERSION_MIN_REQUIRED
         // test 3) launch test program suspended in opposite arch as this program
+        printf("[BEGIN] dyld_process_info_notify laucnh suspended (other arch)\n");
         child = launchTest(testProgPath, "", true, true);
         if ( ! monitor(child, false, false) ) {
             printf("[FAIL] dyld_process_info_notify launch suspended other arch missed some notifications\n");
@@ -314,8 +338,10 @@ int main(int argc, const char* argv[])
             exit(0);
         }
         killTest(child);
+        printf("[PASS] dyld_process_info_notify laucnh suspended (other arch)\n");
 
         // test 4) launch test program in opposite arch as this program where it sleeps itself
+        printf("[BEGIN] dyld_process_info_notify laucnh suspend-in-main (other arch)\n");
         child = launchTest(testProgPath, "suspend-in-main", true, false);
         if ( ! monitor(child, false, true) ) {
             printf("[FAIL] dyld_process_info_notify launch other arch suspend-in-main missed some notifications\n");
@@ -323,9 +349,11 @@ int main(int argc, const char* argv[])
             exit(0);
         }
         killTest(child);
+        printf("[PASS] dyld_process_info_notify laucnh suspend-in-main (other arch)\n");
 #endif
 
         // test 5) launch test program where we disconnect from it after first dlopen
+        printf("[BEGIN] dyld_process_info_notify disconnect\n");
         child = launchTest(testProgPath, "", false, true);
         if ( ! monitor(child, true, false) ) {
             printf("[FAIL] dyld_process_info_notify connect/disconnect missed some notifications\n");
@@ -333,8 +361,15 @@ int main(int argc, const char* argv[])
             exit(0);
         }
         killTest(child);
+        printf("[PASS] dyld_process_info_notify disconnect\n");
 
-        printf("[PASS] dyld_process_info_notify\n");
+        // test 6) attempt to monitor the monitoring process
+        printf("[BEGIN] dyld_process_info_notify self-attach\n");
+        if (! testSelfAttach() ) {
+            printf("[FAIL] dyld_process_info_notify self notification\n");
+        }
+        printf("[PASS] dyld_process_info_notify self-attach\n");
+
         exit(0);
     });
 

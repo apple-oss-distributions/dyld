@@ -32,6 +32,11 @@ inline bool startsWith(const std::string& str, const std::string& prefix)
     return std::mismatch(prefix.begin(), prefix.end(), str.begin()).first == prefix.end();
 }
 
+inline bool startsWith(const std::string_view& str, const std::string_view& prefix)
+{
+    return std::mismatch(prefix.begin(), prefix.end(), str.begin()).first == prefix.end();
+}
+
 inline bool endsWith(const std::string& str, const std::string& suffix)
 {
     std::size_t index = str.find(suffix, str.size() - suffix.size());
@@ -55,7 +60,7 @@ inline char hexDigit(uint8_t value)
 inline void bytesToHex(const uint8_t* bytes, size_t byteCount, char buffer[])
 {
     char* p = buffer;
-    for (int i=0; i < byteCount; ++i) {
+    for (size_t i=0; i < byteCount; ++i) {
         *p++ = hexDigit(bytes[i] >> 4);
         *p++ = hexDigit(bytes[i] & 0x0F);
     }

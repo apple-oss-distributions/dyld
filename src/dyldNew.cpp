@@ -69,8 +69,8 @@ void* malloc(size_t size)
 	}
 	else {
 		if ( size > DYLD_POOL_CHUNK_SIZE ) {
-			dyld::log("dyld malloc overflow: size=%zu\n", size);
-			exit(1);
+			dyld::log("dyld malloc overflow: size=%lu\n", size);
+			dyld::halt("dyld malloc overflow\n");
 		}
 		size = (size+sizeof(void*)-1) & (-sizeof(void*)); // pointer align
 		uint8_t* result = currentPool->current;
@@ -79,8 +79,7 @@ void* malloc(size_t size)
 			vm_address_t addr = 0;
 			kern_return_t r = vm_allocate(mach_task_self(), &addr, DYLD_POOL_CHUNK_SIZE, VM_FLAGS_ANYWHERE);
 			if ( r != KERN_SUCCESS ) {
-				dyld::log("out of address space for dyld memory pool\n");
-				exit(1);
+				dyld::halt("out of address space for dyld memory pool\n");
 			}
 			dyld_static_pool* newPool = (dyld_static_pool*)addr;
 			newPool->previousPool = NULL;
@@ -90,7 +89,7 @@ void* malloc(size_t size)
 			currentPool = newPool;
 			if ( (currentPool->current + size) > currentPool->end ) {
 				dyld::log("dyld memory pool exhausted: size=%lu\n", size);
-				exit(1);
+				dyld::halt("dyld memory pool exhausted\n");
 			}
 			result = currentPool->current;
 			currentPool->current += size;

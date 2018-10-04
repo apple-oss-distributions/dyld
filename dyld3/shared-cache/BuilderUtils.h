@@ -27,6 +27,7 @@
 
 dispatch_group_t buildGroup();
 void makeBoms(dyld3::Manifest& manifest, const std::string& masterDstRoot);
-bool build(Diagnostics& diags, dyld3::Manifest& manifest, const std::string& masterDstRoot, bool dedupe, bool verbose, bool skipWrites, bool agileChooseSHA256CdHash);
+bool build(Diagnostics& diags, dyld3::Manifest& manifest, const std::string& masterDstRoot, bool dedupe, bool verbose, bool skipWrites, bool agileChooseSHA256CdHash,
+           bool emitDevCaches, bool isLocallyBuiltCache);
 
 #endif /* BuilderUtils_h */

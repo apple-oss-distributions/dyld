@@ -40,7 +40,6 @@
 #include "dyld_priv.h"
 
 #include "AllImages.h"
-#include "MachOParser.h"
 #include "Loading.h"
 #include "Logging.h"
 #include "Diagnostics.h"
@@ -48,15 +47,10 @@
 #include "APIs.h"
 
 
-
-typedef dyld3::launch_cache::binary_format::Image BinaryImage;
-
-
 namespace dyld3 {
 
 // from APIs.cpp
-void                                        parseDlHandle(void* h, const mach_header** mh, bool* dontContinue);
-const mach_header*                          loadImageAndDependents(Diagnostics& diag, const launch_cache::binary_format::Image* imageToLoad, bool bumpDlopenCount);
+void                    parseDlHandle(void* h, const MachOLoaded** mh, bool* dontContinue);
 
 
 // only in macOS and deprecated 
@@ -79,15 +73,15 @@ NSObjectFileImageReturnCode NSCreateObjectFileImageFromFile(const char* path, NS
         return NSObjectFileImageFailure;
 
     // create ofi that just contains path. NSLinkModule does all the work
-    __NSObjectFileImage* result = gAllImages.addNSObjectFileImage();
-    result->path        = strdup(path);
-    result->memSource   = nullptr;
-    result->memLength   = 0;
-    result->loadAddress = nullptr;
-    result->binImage    = nullptr;
-    *ofi = result;
+    OFIInfo result;
+    result.path        = strdup(path);
+    result.memSource   = nullptr;
+    result.memLength   = 0;
+    result.loadAddress = nullptr;
+    result.imageNum    = 0;
+    *ofi = gAllImages.addNSObjectFileImage(result);
 
-    log_apis("NSCreateObjectFileImageFromFile() => %p\n", result);
+    log_apis("NSCreateObjectFileImageFromFile() => %p\n", *ofi);
 
     return NSObjectFileImageSuccess;
 }
@@ -98,150 +92,164 @@ NSObjectFileImageReturnCode NSCreateObjectFileImageFromMemory(const void* memIma
 
     // sanity check the buffer is a mach-o file
     __block Diagnostics diag;
-    __block const mach_header* foundMH = nullptr;
-    if ( MachOParser::isMachO(diag, memImage, memImageSize) ) {
-        foundMH = (mach_header*)memImage;
+
+	// check if it is current arch mach-o or fat with slice for current arch
+    bool usable = false;
+    const MachOFile* mf = (MachOFile*)memImage;
+    if ( mf->hasMachOMagic() && mf->isMachO(diag, memImageSize) ) {
+        if ( strcmp(mf->archName(), MachOFile::currentArchName()) == 0 )
+            usable = true;
+#if __x86_64__
+        // <rdar://problem/42727628> support thin x86_64 on haswell machines
+        else if ( (strcmp(MachOFile::currentArchName(), "x86_64h") == 0) && (strcmp(mf->archName(), "x86_64") == 0) )
+            usable = true;
+#endif
     }
-    else {
-        FatUtil::forEachSlice(diag, memImage, memImageSize, ^(uint32_t sliceCpuType, uint32_t sliceCpuSubType, const void* sliceStart, size_t sliceSize, bool& stop) {
-            if ( MachOParser::isMachO(diag, sliceStart, sliceSize) ) {
-                foundMH = (mach_header*)sliceStart;
-                stop = true;
+    else if ( const FatFile* ff = FatFile::isFatFile(memImage) ) {
+        uint64_t sliceOffset;
+        uint64_t sliceLen;
+        bool     missingSlice;
+        if ( ff->isFatFileWithSlice(diag, memImageSize, MachOFile::currentArchName(), sliceOffset, sliceLen, missingSlice) ) {
+            mf = (MachOFile*)((long)memImage+sliceOffset);
+            if ( mf->isMachO(diag, sliceLen) ) {
+                usable = true;
             }
-        });
+        }
     }
-    if ( foundMH == nullptr ) {
+    if ( usable ) {
+        if ( !mf->supportsPlatform(Platform::macOS) )
+            usable = false;
+    }
+    if ( !usable ) {
         log_apis("NSCreateObjectFileImageFromMemory() not mach-o\n");
         return NSObjectFileImageFailure;
     }
 
     // this API can only be used with bundles
-    if ( foundMH->filetype != MH_BUNDLE ) {
-        log_apis("NSCreateObjectFileImageFromMemory() not a bundle, filetype=%d\n", foundMH->filetype);
+    if ( !mf->isBundle() ) {
+        log_apis("NSCreateObjectFileImageFromMemory() not a bundle\n");
         return NSObjectFileImageInappropriateFile;
     }
 
     // allocate ofi that just lists the memory range
-    __NSObjectFileImage* result = gAllImages.addNSObjectFileImage();
-    result->path        = nullptr;
-    result->memSource   = memImage;
-    result->memLength   = memImageSize;
-    result->loadAddress = nullptr;
-    result->binImage    = nullptr;
-    *ofi = result;
+    OFIInfo result;
+    result.path        = nullptr;
+    result.memSource   = memImage;
+    result.memLength   = memImageSize;
+    result.loadAddress = nullptr;
+    result.imageNum    = 0;
+    *ofi = gAllImages.addNSObjectFileImage(result);
 
-    log_apis("NSCreateObjectFileImageFromMemory() => %p\n", result);
+    log_apis("NSCreateObjectFileImageFromMemory() => %p\n", *ofi);
 
     return NSObjectFileImageSuccess;
 }
 
 NSModule NSLinkModule(NSObjectFileImage ofi, const char* moduleName, uint32_t options)
 {
+    DYLD_LOAD_LOCK_THIS_BLOCK
     log_apis("NSLinkModule(%p, \"%s\", 0x%08X)\n", ofi, moduleName, options);
 
-    // ofi is invalid if not in list
-    if ( !gAllImages.hasNSObjectFileImage(ofi) ) {
+    __block const char* path = nullptr;
+    bool foundImage = gAllImages.forNSObjectFileImage(ofi, ^(OFIInfo &image) {
+        // if this is memory based image, write to temp file, then use file based loading
+        if ( image.memSource != nullptr ) {
+            // make temp file with content of memory buffer
+            bool successfullyWritten = false;
+            image.path = ::tempnam(nullptr, "NSCreateObjectFileImageFromMemory-");
+            if ( image.path != nullptr ) {
+                int fd = ::open(image.path, O_WRONLY | O_CREAT | O_EXCL, 0644);
+                if ( fd != -1 ) {
+                    ssize_t writtenSize = ::pwrite(fd, image.memSource, image.memLength, 0);
+                    if ( writtenSize == image.memLength )
+                        successfullyWritten = true;
+                    ::close(fd);
+                }
+            }
+            if ( !successfullyWritten ) {
+                if ( image.path != nullptr ) {
+                    free((void*)image.path);
+                    image.path = nullptr;
+                }
+                log_apis("NSLinkModule() => NULL (could not save memory image to temp file)\n");
+                return;
+            }
+        }
+        path = image.path;
+    });
+
+    if (!foundImage) {
+        // ofi is invalid if not in list
         log_apis("NSLinkModule() => NULL (invalid NSObjectFileImage)\n");
         return nullptr;
     }
 
-    // if this is memory based image, write to temp file, then use file based loading
-    const BinaryImage* imageToLoad = nullptr;
-    if ( ofi->memSource != nullptr ) {
-        // make temp file with content of memory buffer
-        bool successfullyWritten = false;
-        ofi->path = ::tempnam(nullptr, "NSCreateObjectFileImageFromMemory-");
-        if ( ofi->path != nullptr ) {
-            int fd = ::open(ofi->path, O_WRONLY | O_CREAT | O_EXCL, 0644);
-            if ( fd != -1 ) {
-                ssize_t writtenSize = ::pwrite(fd, ofi->memSource, ofi->memLength, 0);
-                if ( writtenSize == ofi->memLength )
-                    successfullyWritten = true;
-                ::close(fd);
-            }
-        }
-        if ( !successfullyWritten ) {
-            if ( ofi->path != nullptr ) {
-                free((void*)ofi->path);
-                ofi->path = nullptr;
-            }
-            log_apis("NSLinkModule() => NULL (could not save memory image to temp file)\n");
-            return nullptr;
-        }
-    }
-    else {
-        // check if image is in a known ImageGroup, but not loaded. if so, load using existing closure info
-        log_apis("   NSLinkModule: checking for pre-built closure for path: %s\n", ofi->path);
-        imageToLoad = gAllImages.findImageInKnownGroups(ofi->path);
-        // TODO: check symlinks, realpath
+    if (!path)
+        return nullptr;
+
+    // dlopen the binary outside of the read lock as we don't want to risk deadlock
+    Diagnostics diag;
+    void* callerAddress = __builtin_return_address(1); // note layers: 1: real client, 0: libSystem glue
+    const MachOLoaded* loadAddress = gAllImages.dlopen(diag, path, false, false, false, true, callerAddress);
+    if ( diag.hasError() ) {
+        log_apis("   NSLinkModule: failed: %s\n", diag.errorMessage());
+        return nullptr;
     }
 
-    // if no existing closure, RPC to closured to create one
-    if ( imageToLoad == nullptr ) {
-        const char* closuredErrorMessages[3];
-        int closuredErrorMessagesCount = 0;
-        if ( imageToLoad == nullptr ) {
-            imageToLoad = gAllImages.messageClosured(ofi->path, "NSLinkModule", closuredErrorMessages, closuredErrorMessagesCount);
+    // Now update the load address of this object
+    gAllImages.forNSObjectFileImage(ofi, ^(OFIInfo &image) {
+        image.loadAddress = loadAddress;
+
+        // if memory based load, delete temp file
+        if ( image.memSource != nullptr ) {
+            log_apis("   NSLinkModule: delete temp file: %s\n", image.path);
+            ::unlink(image.path);
         }
-        for (int i=0; i < closuredErrorMessagesCount; ++i) {
-            log_apis("   NSLinkModule: failed: %s\n", closuredErrorMessages[i]);
-            free((void*)closuredErrorMessages[i]);
-        }
-    }
+    });
 
-    // use Image info to load and fixup image and all its dependents
-    if ( imageToLoad != nullptr ) {
-        Diagnostics diag;
-        ofi->loadAddress = loadImageAndDependents(diag, imageToLoad, true);
-        if ( diag.hasError() )
-            log_apis("   NSLinkModule: failed: %s\n", diag.errorMessage());
-   }
-
-    // if memory based load, delete temp file
-    if ( ofi->memSource != nullptr ) {
-        log_apis("   NSLinkModule: delete temp file: %s\n", ofi->path);
-        ::unlink(ofi->path);
-    }
-
-    log_apis("NSLinkModule() => %p\n", ofi->loadAddress);
-    return (NSModule)ofi->loadAddress;
+    log_apis("NSLinkModule() => %p\n", loadAddress);
+    return (NSModule)loadAddress;
 }
 
 // NSUnLinkModule unmaps the image, but does not release the NSObjectFileImage
 bool NSUnLinkModule(NSModule module, uint32_t options)
 {
+    DYLD_LOAD_LOCK_THIS_BLOCK
     log_apis("NSUnLinkModule(%p, 0x%08X)\n", module, options);
 
-    bool result = false;
-    const mach_header*  mh = (mach_header*)module;
-    launch_cache::Image image = gAllImages.findByLoadAddress(mh);
-    if ( image.valid() ) {
-        // removes image if reference count went to zero
-        gAllImages.decRefCount(mh);
-        result = true;
-    }
+    __block const mach_header* mh = nullptr;
+    gAllImages.infoForImageMappedAt(module, ^(const LoadedImage& foundImage, uint8_t permissions) {
+        mh = foundImage.loadedAddress();
+    });
 
-    log_apis("NSUnLinkModule() => %d\n", result);
+    if ( mh != nullptr )
+        gAllImages.decRefCount(mh); // removes image if reference count went to zero
 
-    return result;
+    log_apis("NSUnLinkModule() => %d\n", mh != nullptr);
+
+    return mh != nullptr;
 }
 
 // NSDestroyObjectFileImage releases the NSObjectFileImage, but the mapped image may remain in use
-bool NSDestroyObjectFileImage(NSObjectFileImage ofi)
+bool NSDestroyObjectFileImage(NSObjectFileImage imageHandle)
 {
-    log_apis("NSDestroyObjectFileImage(%p)\n", ofi);
+    log_apis("NSDestroyObjectFileImage(%p)\n", imageHandle);
 
-    // ofi is invalid if not in list
-    if ( !gAllImages.hasNSObjectFileImage(ofi) )
+    __block const void* memSource = nullptr;
+    __block size_t      memLength = 0;
+    __block const char* path      = nullptr;
+    bool foundImage = gAllImages.forNSObjectFileImage(imageHandle, ^(OFIInfo &image) {
+        // keep copy of info
+        memSource = image.memSource;
+        memLength = image.memLength;
+        path      = image.path;
+    });
+
+    if (!foundImage)
         return false;
 
-    // keep copy of info
-    const void* memSource = ofi->memSource;
-    size_t      memLength = ofi->memLength;
-    const char* path      = ofi->path;
-
     // remove from list
-    gAllImages.removeNSObjectFileImage(ofi);
+    gAllImages.removeNSObjectFileImage(imageHandle);
 
     // if object was created from a memory, release that memory
     // NOTE: this is the way dyld has always done this. NSCreateObjectFileImageFromMemory() hands ownership of the memory to dyld
@@ -277,79 +285,76 @@ const char* NSSymbolReferenceNameInObjectFileImage(NSObjectFileImage objectFileI
     halt("NSSymbolReferenceNameInObjectFileImage() is obsolete");
 }
 
-bool NSIsSymbolDefinedInObjectFileImage(NSObjectFileImage ofi, const char* symbolName)
+bool NSIsSymbolDefinedInObjectFileImage(NSObjectFileImage imageHandle, const char* symbolName)
 {
-    log_apis("NSIsSymbolDefinedInObjectFileImage(%p, %s)\n", ofi, symbolName);
+    log_apis("NSIsSymbolDefinedInObjectFileImage(%p, %s)\n", imageHandle, symbolName);
+
+    __block bool hasSymbol = false;
+    bool foundImage = gAllImages.forNSObjectFileImage(imageHandle, ^(OFIInfo &image) {
+        void* addr;
+        bool resultPointsToInstructions = false;
+        hasSymbol = image.loadAddress->hasExportedSymbol(symbolName, nullptr, &addr, &resultPointsToInstructions);
+    });
 
     // ofi is invalid if not in list
-    if ( !gAllImages.hasNSObjectFileImage(ofi) )
+    if (!foundImage)
         return false;
 
-    void* addr;
-    MachOParser parser(ofi->loadAddress);
-    return parser.hasExportedSymbol(symbolName, ^(uint32_t , const char*, void*, const mach_header**, void**) {
-        return false;
-    }, &addr);
+    return hasSymbol;
 }
 
-void* NSGetSectionDataInObjectFileImage(NSObjectFileImage ofi, const char* segmentName, const char* sectionName, size_t* size)
+void* NSGetSectionDataInObjectFileImage(NSObjectFileImage imageHandle, const char* segmentName, const char* sectionName, size_t* size)
 {
+    __block const void* result = nullptr;
+    bool foundImage = gAllImages.forNSObjectFileImage(imageHandle, ^(OFIInfo &image) {
+        uint64_t sz;
+        result = image.loadAddress->findSectionContent(segmentName, sectionName, sz);
+        *size = (size_t)sz;
+    });
+
     // ofi is invalid if not in list
-    if ( !gAllImages.hasNSObjectFileImage(ofi) )
+    if (!foundImage)
         return nullptr;
 
-    __block void* result = nullptr;
-    MachOParser parser(ofi->loadAddress);
-    parser.forEachSection(^(const char* aSegName, const char* aSectName, uint32_t flags, const void* content, size_t aSize, bool illegalSectionSize, bool& stop) {
-        if ( (strcmp(sectionName, aSectName) == 0) && (strcmp(segmentName, aSegName) == 0) ) {
-            result = (void*)content;
-            if ( size != nullptr )
-                *size = aSize;
-            stop = true;
-        }
-    });
-    return result;
+	return (void*)result;
 }
 
 const char* NSNameOfModule(NSModule m)
 {
     log_apis("NSNameOfModule(%p)\n", m);
 
-    const mach_header* foundInLoadAddress;
-    launch_cache::Image image = gAllImages.findByOwnedAddress(m, &foundInLoadAddress);
-    if ( image.valid() ) {
-        return gAllImages.imagePath(image.binaryData());
-    }
-    return nullptr;
+    __block const char* result = nullptr;
+    gAllImages.infoForImageMappedAt(m, ^(const LoadedImage& foundImage, uint8_t permissions) {
+        result = gAllImages.imagePath(foundImage.image());
+    });
+
+    return result;
 }
 
 const char* NSLibraryNameForModule(NSModule m)
 {
     log_apis("NSLibraryNameForModule(%p)\n", m);
 
-    const mach_header* foundInLoadAddress;
-    launch_cache::Image image = gAllImages.findByOwnedAddress(m, &foundInLoadAddress);
-    if ( image.valid() ) {
-        return gAllImages.imagePath(image.binaryData());
-    }
-    return nullptr;
-}
+     __block const char* result = nullptr;
+    gAllImages.infoForImageMappedAt(m, ^(const LoadedImage& foundImage, uint8_t permissions) {
+        result = gAllImages.imagePath(foundImage.image());
+    });
+    return result;
+ }
 
 
 static bool flatFindSymbol(const char* symbolName, void** symbolAddress, const mach_header** foundInImageAtLoadAddress)
 {
-    for (uint32_t index=0; index < gAllImages.count(); ++index) {
-        const mach_header* loadAddress;
-        launch_cache::Image image = gAllImages.findByLoadOrder(index, &loadAddress);
-        if ( image.valid() ) {
-            MachOParser parser(loadAddress);
-            if ( parser.hasExportedSymbol(symbolName, ^(uint32_t , const char* , void* , const mach_header** , void**) { return false; }, symbolAddress) ) {
-                *foundInImageAtLoadAddress = loadAddress;
-                return true;
-            }
+    __block bool result = false;
+    gAllImages.forEachImage(^(const LoadedImage& loadedImage, bool& stop) {
+        bool resultPointsToInstructions = false;
+        if ( loadedImage.loadedAddress()->hasExportedSymbol(symbolName, nullptr, symbolAddress, &resultPointsToInstructions) ) {
+            *foundInImageAtLoadAddress = loadedImage.loadedAddress();
+            stop = true;
+            result = true;
         }
-    }
-    return false;
+    });
+    return result;
 }
 
 bool NSIsSymbolNameDefined(const char* symbolName)
@@ -374,14 +379,9 @@ bool NSIsSymbolNameDefinedInImage(const struct mach_header* mh, const char* symb
 {
     log_apis("NSIsSymbolNameDefinedInImage(%p, %s)\n", mh, symbolName);
 
-    MachOParser::DependentFinder reExportFollower = ^(uint32_t depIndex, const char* depLoadPath, void* extra, const mach_header** foundMH, void** foundExtra) {
-        *foundMH = gAllImages.alreadyLoaded(depLoadPath, false);
-        return (*foundMH != nullptr);
-    };
-
-    MachOParser parser(mh);
-    void* result;
-    return parser.hasExportedSymbol(symbolName, reExportFollower, &result);
+    void* addr;
+    bool resultPointsToInstructions = false;
+    return ((MachOLoaded*)mh)->hasExportedSymbol(symbolName, nullptr, &addr, &resultPointsToInstructions);
 }
 
 NSSymbol NSLookupAndBindSymbol(const char* symbolName)
@@ -412,43 +412,30 @@ NSSymbol NSLookupSymbolInModule(NSModule module, const char* symbolName)
 {
     log_apis("NSLookupSymbolInModule(%p. %s)\n", module, symbolName);
 
-    MachOParser::DependentFinder reExportFollower = ^(uint32_t depIndex, const char* depLoadPath, void* extra, const mach_header** foundMH, void** foundExtra) {
-        *foundMH = gAllImages.alreadyLoaded(depLoadPath, false);
-        return (*foundMH != nullptr);
-    };
-
-    const mach_header* mh = (const mach_header*)module;
-    uint32_t loadIndex;
-    if ( gAllImages.findIndexForLoadAddress(mh, loadIndex) ) {
-        MachOParser parser(mh);
-        void* symAddress;
-        if ( parser.hasExportedSymbol(symbolName, reExportFollower, &symAddress) ) {
-            return (NSSymbol)symAddress;
-        }
+    const MachOLoaded* mh = (const MachOLoaded*)module;
+    void* addr;
+    bool resultPointsToInstructions = false;
+    if ( mh->hasExportedSymbol(symbolName, nullptr, &addr, &resultPointsToInstructions) ) {
+        return (NSSymbol)addr;
     }
     return nullptr;
 }
 
-NSSymbol NSLookupSymbolInImage(const struct mach_header* mh, const char* symbolName, uint32_t options)
+NSSymbol NSLookupSymbolInImage(const mach_header* mh, const char* symbolName, uint32_t options)
 {
     log_apis("NSLookupSymbolInImage(%p, \"%s\", 0x%08X)\n", mh, symbolName, options);
 
-    MachOParser::DependentFinder reExportFollower = ^(uint32_t depIndex, const char* depLoadPath, void* extra, const mach_header** foundMH, void** foundExtra) {
-        *foundMH = gAllImages.alreadyLoaded(depLoadPath, false);
-        return (*foundMH != nullptr);
-    };
-
-    MachOParser parser(mh);
-    void* result;
-    if ( parser.hasExportedSymbol(symbolName, reExportFollower, &result) ) {
-        log_apis("   NSLookupSymbolInImage() => %p\n", result);
-        return (NSSymbol)result;
-    }
-
+    void* addr;
+    bool resultPointsToInstructions = false;
+	if ( ((MachOLoaded*)mh)->hasExportedSymbol(symbolName, nullptr, &addr, &resultPointsToInstructions) ) {
+        log_apis("   NSLookupSymbolInImage() => %p\n", addr);
+        return (NSSymbol)addr;
+	}
     if ( options & NSLOOKUPSYMBOLINIMAGE_OPTION_RETURN_ON_ERROR ) {
         log_apis("   NSLookupSymbolInImage() => NULL\n");
         return nullptr;
     }
+    // FIXME: abort();
     return nullptr;
 }
 
@@ -469,12 +456,12 @@ NSModule NSModuleForSymbol(NSSymbol symbol)
 {
     log_apis("NSModuleForSymbol(%p)\n", symbol);
 
-    const mach_header* foundInLoadAddress;
-    launch_cache::Image image = gAllImages.findByOwnedAddress(symbol, &foundInLoadAddress);
-    if ( image.valid() ) {
-        return (NSModule)foundInLoadAddress;
-    }
-    return nullptr;
+    __block NSModule result = nullptr;
+    gAllImages.infoForImageMappedAt(symbol, ^(const LoadedImage& foundImage, uint8_t permissions) {
+        result = (NSModule)foundImage.loadedAddress();
+    });
+
+    return result;
 }
 
 void NSLinkEditError(NSLinkEditErrors *c, int *errorNumber, const char** fileName, const char** errorString)
@@ -490,14 +477,16 @@ bool NSAddLibrary(const char* pathName)
 {
     log_apis("NSAddLibrary(%s)\n", pathName);
 
-    return ( dlopen(pathName, 0) != nullptr);
+    void* callerAddress = __builtin_return_address(1); // note layers: 1: real client, 0: libSystem glue
+    return ( dlopen_internal(pathName, 0, callerAddress) != nullptr);
 }
 
 bool NSAddLibraryWithSearching(const char* pathName)
 {
     log_apis("NSAddLibraryWithSearching(%s)\n", pathName);
 
-    return ( dlopen(pathName, 0) != nullptr);
+    void* callerAddress = __builtin_return_address(1); // note layers: 1: real client, 0: libSystem glue
+    return ( dlopen_internal(pathName, 0, callerAddress) != nullptr);
 }
 
 const mach_header* NSAddImage(const char* imageName, uint32_t options)
@@ -509,9 +498,10 @@ const mach_header* NSAddImage(const char* imageName, uint32_t options)
     if ( (options & NSADDIMAGE_OPTION_RETURN_ONLY_IF_LOADED) != 0 )
         dloptions |= RTLD_NOLOAD;
 
-    void* h = dlopen(imageName, dloptions);
+    void* callerAddress = __builtin_return_address(1); // note layers: 1: real client, 0: libSystem glue
+    void* h = dlopen_internal(imageName, dloptions, callerAddress);
     if ( h != nullptr ) {
-        const mach_header* mh;
+        const MachOLoaded* mh;
         bool dontContinue;
         parseDlHandle(h, &mh, &dontContinue);
         return mh;

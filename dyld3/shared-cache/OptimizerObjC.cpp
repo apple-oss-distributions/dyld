@@ -35,7 +35,7 @@
 #include "CacheBuilder.h"
 #include "FileAbstraction.hpp"
 #include "MachOFileAbstraction.hpp"
-
+#include "MachOLoaded.h"
 
 // Scan a C++ or Swift length-mangled field.
 static bool scanMangledField(const char *&string, const char *end, 
@@ -109,37 +109,57 @@ public:
     ContentAccessor(const DyldSharedCache* cache, Diagnostics& diag)
         : _diagnostics(diag)
     {
-        __block int index = 0;
-        cache->forEachRegion(^(const void* content, uint64_t vmAddr, uint64_t size, uint32_t permissions) {
-            _regions[index++] = { (uint8_t*)content, (uint8_t*)content+size, vmAddr, vmAddr+size };
-        });
+        _cacheStart         = (uint8_t*)cache;
+        _cacheUnslideAddr   = cache->unslidLoadAddress();
+        _slide              = (uint64_t)cache - _cacheUnslideAddr;
+#if SUPPORT_ARCH_arm64e
+        _chainedFixups      = (strcmp(cache->archName(), "arm64e") == 0);
+#else
+        _chainedFixups      = false;
+#endif
+     }
+
+    // Converts from an on disk vmAddr to the real vmAddr
+    // That is, for a chained fixup, decodes the chain, for a non-chained fixup, does nothing.
+    uint64_t vmAddrForOnDiskVMAddr(uint64_t vmaddr) {
+        if ( _chainedFixups ) {
+            dyld3::MachOLoaded::ChainedFixupPointerOnDisk ptr;
+            ptr.raw = vmaddr;
+            assert(ptr.authRebase.bind == 0);
+            if ( ptr.authRebase.auth ) {
+                vmaddr = _cacheUnslideAddr + ptr.authRebase.target;
+            }
+            else {
+                vmaddr = ptr.plainRebase.signExtendedTarget();
+            }
+        }
+        return vmaddr;
     }
 
     void* contentForVMAddr(uint64_t vmaddr) {
-        for (const Info& info : _regions) {
-            if ( (info.startAddr <= vmaddr) && (vmaddr < info.endAddr) )
-                return (void*)(info.contentStart + vmaddr - info.startAddr);
-        }
-        if ( vmaddr != 0 )
-            _diagnostics.error("invalid vmaddr 0x%0llX in ObjC data", vmaddr);
-        return nullptr;
+        vmaddr = vmAddrForOnDiskVMAddr(vmaddr);
+        if ( vmaddr != 0 ) {
+            uint64_t offset = vmaddr - _cacheUnslideAddr;
+            return _cacheStart + offset;
+        } else
+            return nullptr;
     }
 
     uint64_t vmAddrForContent(const void* content) {
-        for (const Info& info : _regions) {
-            if ( (info.contentStart <= content) && (content < info.contentEnd) )
-                return info.startAddr + ((uint8_t*)content - (uint8_t*)info.contentStart);
-        }
-        _diagnostics.error("invalid content pointer %p in ObjC data", content);
-        return 0;
+        if ( content != nullptr )
+            return _cacheUnslideAddr + ((uint8_t*)content - _cacheStart);
+        else
+            return 0;
     }
 
     Diagnostics& diagnostics() { return _diagnostics; }
 
 private:
-    struct Info { uint8_t* contentStart; uint8_t* contentEnd; uint64_t startAddr; uint64_t endAddr; };
-    Diagnostics&    _diagnostics;
-    Info            _regions[3];
+    Diagnostics&                    _diagnostics;
+    uint64_t                        _slide;
+    uint64_t                        _cacheUnslideAddr;
+    uint8_t*                        _cacheStart;
+    bool                            _chainedFixups;
 };
 
 
@@ -165,6 +185,10 @@ public:
             return 0;
         }
         return (pint_t)P::getP(_base[index]);
+    }
+
+    pint_t getSectionVMAddress() const {
+        return (pint_t)_section->addr();
     }
 
     T get(pint_t index) const {
@@ -253,6 +277,7 @@ public:
     {
         _count++;
         const char *s = (const char *)_cache->contentForVMAddr(oldValue);
+        oldValue = (pint_t)_cache->vmAddrForOnDiskVMAddr(oldValue);
         objc_opt::string_map::iterator element = 
             _selectorStrings.insert(objc_opt::string_map::value_type(s, oldValue)).first;
         return (pint_t)element->second;
@@ -366,7 +391,7 @@ public:
     const char *writeProtocols(ContentAccessor* cache,
                                uint8_t *& rwdest, size_t& rwremaining,
                                uint8_t *& rodest, size_t& roremaining, 
-                               std::vector<void*>& pointersInData, 
+                               CacheBuilder::ASLR_Tracker& aslrTracker,
                                pint_t protocolClassVMAddr)
     {
         if (_protocolCount == 0) return NULL;
@@ -430,7 +455,7 @@ public:
             iter->second = cache->vmAddrForContent(proto);
 
             // Add new rebase entries.
-            proto->addPointers(pointersInData);
+            proto->addPointers(cache, aslrTracker);
         }
         
         return NULL;
@@ -464,7 +489,9 @@ static int percent(size_t num, size_t denom) {
 
 
 template <typename P>
-void optimizeObjC(DyldSharedCache* cache, bool forProduction, std::vector<void*>& pointersForASLR, Diagnostics& diag)
+void doOptimizeObjC(DyldSharedCache* cache, bool forProduction, CacheBuilder::ASLR_Tracker& aslrTracker,
+                    CacheBuilder::LOH_Tracker& lohTracker,
+                    const std::map<void*, std::string>& missingWeakImports, Diagnostics& diag)
 {
     typedef typename P::E           E;
     typedef typename P::uint_t      pint_t;
@@ -563,7 +590,7 @@ void optimizeObjC(DyldSharedCache* cache, bool forProduction, std::vector<void*>
     }
     else {
         for (const macho_header<P>* mh : addressSortedDylibs) {
-            hinfoROOptimizer.update(&cacheAccessor, mh, pointersForASLR);
+            hinfoROOptimizer.update(&cacheAccessor, mh, aslrTracker);
         }
     }
 
@@ -578,7 +605,7 @@ void optimizeObjC(DyldSharedCache* cache, bool forProduction, std::vector<void*>
     }
     else {
         for (const macho_header<P>* mh : addressSortedDylibs) {
-            hinfoRWOptimizer.update(&cacheAccessor, mh, pointersForASLR);
+            hinfoRWOptimizer.update(&cacheAccessor, mh, aslrTracker);
         }
     }
 
@@ -640,7 +667,7 @@ void optimizeObjC(DyldSharedCache* cache, bool forProduction, std::vector<void*>
     if (forProduction) {
         WeakClassDetector<P> weakopt;
         noMissingWeakSuperclasses = 
-            weakopt.noMissingWeakSuperclasses(&cacheAccessor, sizeSortedDylibs);
+            weakopt.noMissingWeakSuperclasses(&cacheAccessor, missingWeakImports, sizeSortedDylibs);
 
         // Shared cache does not currently support unbound weak references. 
         // Here we assert that there are none. If support is added later then 
@@ -717,7 +744,7 @@ void optimizeObjC(DyldSharedCache* cache, bool forProduction, std::vector<void*>
     err = protocolOptimizer.writeProtocols(&cacheAccessor,
                                            optRWData, optRWRemaining,
                                            optROData, optRORemaining,
-                                           pointersForASLR, protocolClassVMAddr);
+                                           aslrTracker, protocolClassVMAddr);
     if (err) {
         diag.warning("%s", err);
         return;
@@ -804,17 +831,120 @@ void optimizeObjC(DyldSharedCache* cache, bool forProduction, std::vector<void*>
     diag.verbose("  %lu/%llu bytes (%d%%) used in libobjc read/write optimization section\n",
                   rwSize, optRWSection->size(), percent(rwSize, optRWSection->size()));
     diag.verbose("  wrote objc metadata optimization version %d\n", objc_opt::VERSION);
+
+    // Now that objc has uniqued the selector references, we can apply the LOHs so that ADRP/LDR -> ADRP/ADD
+    if (forProduction) {
+        uint64_t lohADRPCount = 0;
+        uint64_t lohLDRCount = 0;
+
+        for (auto& targetAndInstructions : lohTracker) {
+            uint64_t targetVMAddr = targetAndInstructions.first;
+            if (!selOptimizer.isSelectorRefAddress((pint_t)targetVMAddr))
+                continue;
+
+            std::set<void*>& instructions = targetAndInstructions.second;
+            // We do 2 passes over the instructions.  The first to validate them and the second
+            // to actually update them.
+            for (unsigned pass = 0; pass != 2; ++pass) {
+                uint32_t adrpCount = 0;
+                uint32_t ldrCount = 0;
+                for (void* instructionAddress : instructions) {
+                    uint32_t& instruction = *(uint32_t*)instructionAddress;
+                    uint64_t instructionVMAddr = cacheAccessor.vmAddrForContent(&instruction);
+                    uint64_t selRefContent = *(uint64_t*)cacheAccessor.contentForVMAddr(targetVMAddr);
+                    const char* selectorString = (const char*)cacheAccessor.contentForVMAddr(selRefContent);
+                    uint64_t selectorStringVMAddr = cacheAccessor.vmAddrForContent(selectorString);
+
+                    if ( (instruction & 0x9F000000) == 0x90000000 ) {
+                        // ADRP
+                        int64_t pageDistance = ((selectorStringVMAddr & ~0xFFF) - (instructionVMAddr & ~0xFFF));
+                        int64_t newPage21 = pageDistance >> 12;
+
+                        if (pass == 0) {
+                            if ( (newPage21 > 2097151) || (newPage21 < -2097151) ) {
+                                diag.verbose("Out of bounds ADRP selector reference target\n");
+                                instructions.clear();
+                                break;
+                            }
+                            ++adrpCount;
+                        }
+
+                        if (pass == 1) {
+                            instruction = (instruction & 0x9F00001F) | ((newPage21 << 29) & 0x60000000) | ((newPage21 << 3) & 0x00FFFFE0);
+                            ++lohADRPCount;
+                        }
+                        continue;
+                    }
+
+                    if ( (instruction & 0x3B000000) == 0x39000000 ) {
+                        // LDR/STR.  STR shouldn't be possible as this is a selref!
+                        if (pass == 0) {
+                            if ( (instruction & 0xC0C00000) != 0xC0400000 ) {
+                                // Not a load, or dest reg isn't xN, or uses sign extension
+                                diag.verbose("Bad LDR for selector reference optimisation\n");
+                                instructions.clear();
+                                break;
+                            }
+                            if ( (instruction & 0x04000000) != 0 ) {
+                                // Loading a float
+                                diag.verbose("Bad LDR for selector reference optimisation\n");
+                                instructions.clear();
+                                break;
+                            }
+                            ++ldrCount;
+                        }
+
+                        if (pass == 1) {
+                            uint32_t ldrDestReg = (instruction & 0x1F);
+                            uint32_t ldrBaseReg = ((instruction >> 5) & 0x1F);
+
+                            // Convert the LDR to an ADD
+                            instruction = 0x91000000;
+                            instruction |= ldrDestReg;
+                            instruction |= ldrBaseReg << 5;
+                            instruction |= (selectorStringVMAddr & 0xFFF) << 10;
+
+                            ++lohLDRCount;
+                        }
+                        continue;
+                    }
+
+                    if ( (instruction & 0xFFC00000) == 0x91000000 ) {
+                        // ADD imm12
+                        // We don't support ADDs.
+                        diag.verbose("Bad ADD for selector reference optimisation\n");
+                        instructions.clear();
+                        break;
+                    }
+
+                    diag.verbose("Unknown instruction for selref optimisation\n");
+                    instructions.clear();
+                    break;
+                }
+                if (pass == 0) {
+                    // If we didn't see at least one ADRP/LDR in pass one then don't optimize this location
+                    if ((adrpCount == 0) || (ldrCount == 0)) {
+                        instructions.clear();
+                        break;
+                    }
+                }
+            }
+        }
+
+        diag.verbose("  Optimized %lld ADRP LOHs\n", lohADRPCount);
+        diag.verbose("  Optimized %lld LDR LOHs\n", lohLDRCount);
+    }
 }
 
 
 } // anon namespace
 
-void optimizeObjC(DyldSharedCache* cache, bool is64, bool customerCache, std::vector<void*>& pointersForASLR, Diagnostics& diag)
+void CacheBuilder::optimizeObjC()
 {
-    if ( is64 )
-        optimizeObjC<Pointer64<LittleEndian>>(cache, customerCache, pointersForASLR, diag);
+    if ( _archLayout->is64 )
+        doOptimizeObjC<Pointer64<LittleEndian>>((DyldSharedCache*)_readExecuteRegion.buffer, _options.optimizeStubs, _aslrTracker, _lohTracker, _missingWeakImports, _diagnostics);
     else
-        optimizeObjC<Pointer32<LittleEndian>>(cache, customerCache, pointersForASLR, diag);
+        doOptimizeObjC<Pointer32<LittleEndian>>((DyldSharedCache*)_readExecuteRegion.buffer, _options.optimizeStubs, _aslrTracker, _lohTracker, _missingWeakImports, _diagnostics);
 }
 
 

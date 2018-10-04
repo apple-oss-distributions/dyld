@@ -25,25 +25,27 @@
 #ifndef __ALL_IMAGES_H__
 #define __ALL_IMAGES_H__
 
-#include <pthread.h>
 #include <mach-o/loader.h>
+#include <pthread.h>
+#include <os/lock_private.h>
 
 #include "dyld_priv.h"
 
-#include "LaunchCache.h"
+#include "Closure.h"
 #include "Loading.h"
-
+#include "MachOLoaded.h"
+#include "DyldSharedCache.h"
 
 
 #if __MAC_OS_X_VERSION_MIN_REQUIRED
 // only in macOS and deprecated 
-struct VIS_HIDDEN __NSObjectFileImage
+struct VIS_HIDDEN OFIInfo
 {
-    const char*                                         path        = nullptr;
-    const void*                                         memSource   = nullptr;
-    size_t                                              memLength   = 0;
-    const mach_header*                                  loadAddress = nullptr;
-    const dyld3::launch_cache::binary_format::Image*    binImage    = nullptr;
+    const char*                     path; //        = nullptr;
+    const void*                     memSource; //   = nullptr;
+    size_t                          memLength; //   = 0;
+    const dyld3::MachOLoaded*       loadAddress; // = nullptr;
+    uint64_t                        imageNum; //    = 0;
 };
 #endif
 
@@ -52,53 +54,48 @@ namespace dyld3 {
 class VIS_HIDDEN AllImages
 {
 public:
-    typedef launch_cache::binary_format::Closure    BinaryClosure;
-    typedef launch_cache::binary_format::ImageGroup BinaryImageGroup;
-    typedef launch_cache::binary_format::Image      BinaryImage;
-    typedef launch_cache::ImageGroupList            ImageGroupList;
-    typedef void                                    (*NotifyFunc)(const mach_header* mh, intptr_t slide);
+    typedef void                (*NotifyFunc)(const mach_header* mh, intptr_t slide);
+    typedef void                (*LoadNotifyFunc)(const mach_header* mh, const char* path, bool unloadable);
 
-    void                        init(const BinaryClosure* closure, const void* dyldCacheLoadAddress, const char* dyldCachePath,
-                                     const dyld3::launch_cache::DynArray<loader::ImageInfo>& initialImages);
+    void                        init(const closure::LaunchClosure* closure, const DyldSharedCache* dyldCacheLoadAddress, const char* dyldCachePath,
+                                     const Array<LoadedImage>& initialImages);
+    void                        setRestrictions(bool allowAtPaths, bool allowEnvPaths);
     void                        setMainPath(const char* path);
     void                        applyInitialImages();
 
-    void                        addImages(const dyld3::launch_cache::DynArray<loader::ImageInfo>& newImages);
-    void                        removeImages(const launch_cache::DynArray<loader::ImageInfo>& unloadImages);
-    void                        setNeverUnload(const loader::ImageInfo& existingImage);
-    void                        applyInterposingToDyldCache(const launch_cache::binary_format::Closure* closure, const dyld3::launch_cache::DynArray<loader::ImageInfo>& initialImages);
-    void                        runInitialzersBottomUp(const mach_header* imageLoadAddress);
-    void                        setInitialGroups();
+    void                        addImages(const Array<LoadedImage>& newImages);
+    void                        removeImages(const Array<LoadedImage>& unloadImages);
+    void                        runImageNotifiers(const Array<LoadedImage>& newImages);
+    void                        applyInterposingToDyldCache(const closure::Closure* closure);
+    void                        runStartupInitialzers();
+    void                        runInitialzersBottomUp(const closure::Image* topImage);
+    void                        runLibSystemInitializer(const LoadedImage& libSystem);
 
     uint32_t                    count() const;
-    const BinaryImageGroup*     cachedDylibsGroup();
-    const BinaryImageGroup*     otherDylibsGroup();
-    const BinaryImageGroup*     mainClosureGroup();
-    const BinaryClosure*        mainClosure() { return _mainClosure; }
-    uint32_t                    currentGroupsCount() const;
-    void                        copyCurrentGroups(ImageGroupList& groups) const;
 
-    const BinaryImage*          messageClosured(const char* path, const char* apiName, const char* closuredErrorMessages[3], int& closuredErrorMessagesCount);
+    void                        forEachImage(void (^handler)(const LoadedImage& loadedImage, bool& stop)) const;
+    const MachOLoaded*          findDependent(const MachOLoaded* mh, uint32_t depIndex);
+    void                        visitDependentsTopDown(const LoadedImage& start, void (^handler)(const LoadedImage& aLoadedImage, bool& stop)) const;
+    void                        infoForImageMappedAt(const void* addr, void (^handler)(const LoadedImage& foundImage, uint8_t permissions)) const;
+    bool                        infoForImageMappedAt(const void* addr, const MachOLoaded** ml, uint64_t* textSize, const char** path) const;
+    void                        infoForNonCachedImageMappedAt(const void* addr, void (^handler)(const LoadedImage& foundImage, uint8_t permissions)) const;
+    void                        infoForImageWithLoadAddress(const MachOLoaded*, void (^handler)(const LoadedImage& foundImage)) const;
+    const char*                 pathForImageMappedAt(const void* addr) const;
+    const char*                 imagePathByIndex(uint32_t index) const;
+    const mach_header*          imageLoadAddressByIndex(uint32_t index) const;
+    bool                        immutableMemory(const void* addr, size_t length) const;
 
-    launch_cache::Image         findByLoadOrder(uint32_t index, const mach_header** loadAddress) const;
-    launch_cache::Image         findByLoadAddress(const mach_header* loadAddress) const;
-    launch_cache::Image         findByOwnedAddress(const void* addr, const mach_header** loadAddress, uint8_t* permissions=nullptr) const;
-    const mach_header*          findLoadAddressByImage(const BinaryImage*) const;
-    bool                        findIndexForLoadAddress(const mach_header* loadAddress, uint32_t& index);
-    void                        forEachImage(void (^handler)(uint32_t imageIndex, const mach_header* loadAddress, const launch_cache::Image image, bool& stop)) const;
-
-    const mach_header*          mainExecutable() const;
-    launch_cache::Image         mainExecutableImage() const;
+    bool                        isRestricted() const;
+    const MachOLoaded*          mainExecutable() const;
+    const closure::Image*       mainExecutableImage() const;
     const void*                 cacheLoadAddress() const { return _dyldCacheAddress; }
     const char*                 dyldCachePath() const { return _dyldCachePath; }
-    const char*                 imagePath(const BinaryImage*) const;
+    bool                        dyldCacheHasPath(const char* path) const;
+    const char*                 imagePath(const closure::Image*) const;
+    dyld_platform_t             platform() const;
 
-    const mach_header*          alreadyLoaded(const char* path, bool bumpRefCount);
-    const mach_header*          alreadyLoaded(const BinaryImage*, bool bumpRefCount);
-    const mach_header*          alreadyLoaded(uint64_t inode, uint64_t mtime, bool bumpRefCount);
-    const BinaryImage*          findImageInKnownGroups(const char* path);
+    const Array<const closure::ImageArray*>& imagesArrays();
 
-    bool                        imageUnloadable(const launch_cache::Image& image, const mach_header* loadAddress) const;
     void                        incRefCount(const mach_header* loadAddress);
     void                        decRefCount(const mach_header* loadAddress);
 
@@ -106,21 +103,23 @@ public:
     void                        addUnloadNotifier(NotifyFunc);
     void                        setObjCNotifiers(_dyld_objc_notify_mapped, _dyld_objc_notify_init, _dyld_objc_notify_unmapped);
     void                        notifyObjCUnmap(const char* path, const struct mach_header* mh);
+    void                        addLoadNotifier(LoadNotifyFunc);
 
-    void                        runLibSystemInitializer(const mach_header* imageLoadAddress, const launch_cache::binary_format::Image* binImage);
 
     void                        setOldAllImageInfo(dyld_all_image_infos* old) { _oldAllImageInfos = old; }
     dyld_all_image_infos*       oldAllImageInfo() const { return _oldAllImageInfos;}
-
     void                        notifyMonitorMain();
-    void                        notifyMonitorLoads(const launch_cache::DynArray<loader::ImageInfo>& newImages);
-    void                        notifyMonitorUnloads(const launch_cache::DynArray<loader::ImageInfo>& unloadingImages);
+    void                        notifyMonitorLoads(const Array<LoadedImage>& newImages);
+    void                        notifyMonitorUnloads(const Array<LoadedImage>& unloadingImages);
 
 #if __MAC_OS_X_VERSION_MIN_REQUIRED
-    __NSObjectFileImage*        addNSObjectFileImage();
-    bool                        hasNSObjectFileImage(__NSObjectFileImage*);
-    void                        removeNSObjectFileImage(__NSObjectFileImage*);
+    NSObjectFileImage           addNSObjectFileImage(const OFIInfo&);
+    void                        removeNSObjectFileImage(NSObjectFileImage);
+    bool                        forNSObjectFileImage(NSObjectFileImage imageHandle,
+                                                     void (^handler)(OFIInfo& image));
 #endif
+
+    const MachOLoaded*          dlopen(Diagnostics& diag, const char* path, bool rtldNoLoad, bool rtldLocal, bool rtldNoDelete, bool fromOFI, const void* callerAddress);
 
     struct ProgramVars
     {
@@ -133,18 +132,42 @@ public:
     void                    setProgramVars(ProgramVars* vars);
 
 private:
+    friend class Reaper;
+    
+    struct DlopenCount {
+        const mach_header*  loadAddress;
+        uintptr_t           refCount;
+    };
+
 
     typedef void (*Initializer)(int argc, const char* argv[], char* envp[], const char* apple[], const ProgramVars* vars);
-    typedef const launch_cache::DynArray<loader::ImageInfo> StartImageArray;
+    typedef const Array<LoadedImage> StartImageArray;
     
-    void                        runInitialzersInImage(const mach_header* imageLoadAddress, const launch_cache::binary_format::Image* binImage);
+    void                        runInitialzersInImage(const mach_header* imageLoadAddress, const closure::Image* image);
     void                        mirrorToOldAllImageInfos();
     void                        garbageCollectImages();
-    void                        vmAccountingSetSuspended(bool suspend);
-    void                        copyCurrentGroupsNoLock(ImageGroupList& groups) const;
+    void                        breadthFirstRecurseDependents(Array<closure::ImageNum>& visited, const LoadedImage& nodeLi, bool& stop, void (^handler)(const LoadedImage& aLoadedImage, bool& stop)) const;
+    void                        appendToImagesArray(const closure::ImageArray* newArray);
+    void                        withReadLock(void (^work)()) const;
+    void                        withWriteLock(void (^work)());
+    void                        withNotifiersLock(void (^work)()) const;
+    bool                        findImage(const mach_header* loadAddress, LoadedImage& foundImage) const;
+    bool                        findImageNum(closure::ImageNum imageNum, LoadedImage& foundImage) const;
+    LoadedImage                 findImageNum(closure::ImageNum num, uint32_t& indexHint);
+    bool                        swapImageState(closure::ImageNum num, uint32_t& indexHint, LoadedImage::State expectedCurrentState, LoadedImage::State newState);
+    void                        runAllInitializersInImage(const closure::Image* image, const MachOLoaded* ml);
+    void                        recomputeBounds();
 
-    const BinaryClosure*                    _mainClosure         = nullptr;
-    const void*                             _dyldCacheAddress    = nullptr;
+    void                        constructMachPorts(int slot);
+    void                        teardownMachPorts(int slot);
+    void                        forEachPortSlot(void (^callback)(int slot));
+    void                        sendMachMessage(int slot, mach_msg_id_t msg_id, mach_msg_header_t* msg_buffer, mach_msg_size_t msg_size);
+    void                        notifyMonitoringDyld(bool unloading, const Array<LoadedImage>& images);
+
+    typedef closure::ImageArray  ImageArray;
+
+    const closure::LaunchClosure*           _mainClosure         = nullptr;
+    const DyldSharedCache*                  _dyldCacheAddress    = nullptr;
     const char*                             _dyldCachePath       = nullptr;
     uint64_t                                _dyldCacheSlide      = 0;
     StartImageArray*                        _initialImages       = nullptr;
@@ -155,10 +178,32 @@ private:
     ProgramVars*                            _programVars         = nullptr;
     dyld_all_image_infos*                   _oldAllImageInfos    = nullptr;
     dyld_image_info*                        _oldAllImageArray    = nullptr;
+    dyld_platform_t                         _platform            = 0;
     uint32_t                                _oldArrayAllocCount  = 0;
-    pthread_mutex_t                         _initializerLock     = PTHREAD_RECURSIVE_MUTEX_INITIALIZER;
-    pthread_cond_t                          _initializerCondition= PTHREAD_COND_INITIALIZER;
+    closure::ImageNum                       _nextImageNum        = 0;
     int32_t                                 _gcCount             = 0;
+    bool                                    _processDOFs         = false;
+    bool                                    _allowAtPaths        = false;
+    bool                                    _allowEnvPaths       = false;
+    uintptr_t                               _lowestNonCached     = 0;
+    uintptr_t                               _highestNonCached    = UINTPTR_MAX;
+#ifdef OS_UNFAIR_RECURSIVE_LOCK_INIT
+    mutable os_unfair_recursive_lock        _loadImagesLock      = OS_UNFAIR_RECURSIVE_LOCK_INIT;
+    mutable os_unfair_recursive_lock        _notifiersLock       = OS_UNFAIR_RECURSIVE_LOCK_INIT;
+#else
+    mutable pthread_mutex_t                 _loadImagesLock      = PTHREAD_RECURSIVE_MUTEX_INITIALIZER;
+    mutable pthread_mutex_t                 _notifiersLock       = PTHREAD_RECURSIVE_MUTEX_INITIALIZER;
+#endif
+    GrowableArray<const ImageArray*, 4, 4>  _imagesArrays;
+    GrowableArray<NotifyFunc, 4, 4>         _loadNotifiers;
+    GrowableArray<NotifyFunc, 4, 4>         _unloadNotifiers;
+    GrowableArray<LoadNotifyFunc, 4, 4>     _loadNotifiers2;
+    GrowableArray<DlopenCount, 4, 4>        _dlopenRefCounts;
+    GrowableArray<LoadedImage, 16>          _loadedImages;
+#if __MAC_OS_X_VERSION_MIN_REQUIRED
+    uint64_t                                 _nextObjectFileImageNum = 0;
+    GrowableArray<OFIInfo, 4, 1>             _objectFileImages;
+#endif
 };
 
 extern AllImages gAllImages;

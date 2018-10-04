@@ -27,7 +27,7 @@
 
 #include <stdint.h>
 
-#if !DYLD_IN_PROCESS
+#if BUILDING_CACHE_BUILDER
 #include <set>
 #include <string>
 #include <vector>
@@ -44,7 +44,8 @@ public:
                     ~Diagnostics();
 
     void            error(const char* format, ...)  __attribute__((format(printf, 2, 3)));
-#if !DYLD_IN_PROCESS
+    void            error(const char* format, va_list list);
+#if BUILDING_CACHE_BUILDER
                     Diagnostics(const std::string& prefix, bool verbose=false);
 
     void            warning(const char* format, ...)  __attribute__((format(printf, 2, 3)));
@@ -57,7 +58,7 @@ public:
     void            clearError();
     void            assertNoError() const;
 
-#if DYLD_IN_PROCESS
+#if !BUILDING_CACHE_BUILDER
     const char*                     errorMessage() const;
 #else
     const std::string               prefix() const;
@@ -68,7 +69,7 @@ public:
 
 private:
     void*                    _buffer = nullptr;
-#if !DYLD_IN_PROCESS
+#if BUILDING_CACHE_BUILDER
     std::string              _prefix;
     std::set<std::string>    _warnings;
     bool                     _verbose = false;

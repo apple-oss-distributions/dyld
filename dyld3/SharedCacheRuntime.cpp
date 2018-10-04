@@ -45,8 +45,6 @@
 
 #include "dyld_cache_format.h"
 #include "SharedCacheRuntime.h"
-#include "LaunchCache.h"
-#include "LaunchCacheFormat.h"
 #include "Loading.h"
 
 #define ENABLE_DYLIBS_TO_OVERRIDE_CACHE_SIZE 1024
@@ -102,13 +100,18 @@ struct CacheInfo
     #define ARCH_NAME            "arm64e"
     #define ARCH_CACHE_MAGIC     "dyld_v1  arm64e"
 #elif __arm64__
-    #define ARCH_NAME            "arm64"
-    #define ARCH_CACHE_MAGIC     "dyld_v1   arm64"
+    #if __LP64__
+        #define ARCH_NAME            "arm64"
+        #define ARCH_CACHE_MAGIC     "dyld_v1   arm64"
+    #else
+        #define ARCH_NAME            "arm64_32"
+        #define ARCH_CACHE_MAGIC     "dyld_v1arm64_32"
+    #endif
 #endif
 
 
 
-static void rebaseChain(uint8_t* pageContent, uint16_t startOffset, uintptr_t slideAmount, const dyld_cache_slide_info2* slideInfo)
+static void rebaseChainV2(uint8_t* pageContent, uint16_t startOffset, uintptr_t slideAmount, const dyld_cache_slide_info2* slideInfo)
 {
     const uintptr_t   deltaMask    = (uintptr_t)(slideInfo->delta_mask);
     const uintptr_t   valueMask    = ~deltaMask;
@@ -132,6 +135,38 @@ static void rebaseChain(uint8_t* pageContent, uint16_t startOffset, uintptr_t sl
     }
 }
 
+#if !__LP64__
+static void rebaseChainV4(uint8_t* pageContent, uint16_t startOffset, uintptr_t slideAmount, const dyld_cache_slide_info4* slideInfo)
+{
+    const uintptr_t   deltaMask    = (uintptr_t)(slideInfo->delta_mask);
+    const uintptr_t   valueMask    = ~deltaMask;
+    const uintptr_t   valueAdd     = (uintptr_t)(slideInfo->value_add);
+    const unsigned    deltaShift   = __builtin_ctzll(deltaMask) - 2;
+
+    uint32_t pageOffset = startOffset;
+    uint32_t delta = 1;
+    while ( delta != 0 ) {
+        uint8_t* loc = pageContent + pageOffset;
+        uintptr_t rawValue = *((uintptr_t*)loc);
+        delta = (uint32_t)((rawValue & deltaMask) >> deltaShift);
+        uintptr_t value = (rawValue & valueMask);
+        if ( (value & 0xFFFF8000) == 0 ) {
+           // small positive non-pointer, use as-is
+        }
+        else if ( (value & 0x3FFF8000) == 0x3FFF8000 ) {
+           // small negative non-pointer
+           value |= 0xC0000000;
+        }
+        else {
+            value += valueAdd;
+            value += slideAmount;
+        }
+        *((uintptr_t*)loc) = value;
+        //dyld::log("         pageOffset=0x%03X, loc=%p, org value=0x%08llX, new value=0x%08llX, delta=0x%X\n", pageOffset, loc, (uint64_t)rawValue, (uint64_t)value, delta);
+        pageOffset += delta;
+    }
+}
+#endif
 
 static void getCachePath(const SharedCacheOptions& options, size_t pathBufferSize, char pathBuffer[])
 {
@@ -168,10 +203,11 @@ static void getCachePath(const SharedCacheOptions& options, size_t pathBufferSiz
     struct stat enableStatBuf;
     struct stat devCacheStatBuf;
     struct stat optCacheStatBuf;
+    bool developmentDevice = dyld3::internalInstall();
     bool enableFileExists = (dyld::my_stat(IPHONE_DYLD_SHARED_CACHE_DIR "enable-dylibs-to-override-cache", &enableStatBuf) == 0);
     bool devCacheExists = (dyld::my_stat(IPHONE_DYLD_SHARED_CACHE_DIR DYLD_SHARED_CACHE_BASE_NAME ARCH_NAME DYLD_SHARED_CACHE_DEVELOPMENT_EXT, &devCacheStatBuf) == 0);
     bool optCacheExists = (dyld::my_stat(IPHONE_DYLD_SHARED_CACHE_DIR DYLD_SHARED_CACHE_BASE_NAME ARCH_NAME, &optCacheStatBuf) == 0);
-    if ( (enableFileExists && (enableStatBuf.st_size < ENABLE_DYLIBS_TO_OVERRIDE_CACHE_SIZE) && devCacheExists) || !optCacheExists )
+    if ( developmentDevice && ((enableFileExists && (enableStatBuf.st_size < ENABLE_DYLIBS_TO_OVERRIDE_CACHE_SIZE) && devCacheExists) || !optCacheExists) )
         strlcat(pathBuffer, DYLD_SHARED_CACHE_DEVELOPMENT_EXT, pathBufferSize);
 #endif
 
@@ -205,7 +241,7 @@ static bool validPlatform(const SharedCacheOptions& options, const DyldSharedCac
     if ( cache->header.mappingOffset < 0xE0 )
         return true;
 
-    if ( cache->header.platform != (uint32_t)MachOParser::currentPlatform() )
+    if ( cache->header.platform != (uint32_t)MachOFile::currentPlatform() )
         return false;
 
 #if TARGET_IPHONE_SIMULATOR
@@ -240,6 +276,7 @@ static bool preflightCacheFile(const SharedCacheOptions& options, SharedCacheLoa
         results->errorMessage = "shared cache file cannot be opened";
         return false;
     }
+
     struct stat cacheStatBuf;
     if ( dyld::my_stat(results->path, &cacheStatBuf) != 0 ) {
         results->errorMessage = "shared cache file cannot be stat()ed";
@@ -266,7 +303,7 @@ static bool preflightCacheFile(const SharedCacheOptions& options, SharedCacheLoa
         ::close(fd);
         return false;
     }
-    if ( (cache->header.mappingCount != 3) || (cache->header.mappingOffset > 0x120) ) {
+    if ( (cache->header.mappingCount != 3) || (cache->header.mappingOffset > 0x138) ) {
         results->errorMessage = "shared cache file mappings are invalid";
         ::close(fd);
         return false;
@@ -327,7 +364,7 @@ static bool preflightCacheFile(const SharedCacheOptions& options, SharedCacheLoa
         return false;
     }
     if ( memcmp(mappedData, firstPage, sizeof(firstPage)) != 0 ) {
-        results->errorMessage = "first page of shared cache not mmap()able";
+        results->errorMessage = "first page of mmap()ed shared cache not valid";
         ::close(fd);
         return false;
     }
@@ -363,7 +400,120 @@ static bool preflightCacheFile(const SharedCacheOptions& options, SharedCacheLoa
     return true;
 }
 
+
 #if !TARGET_IPHONE_SIMULATOR
+
+// update all __DATA pages with slide info
+static bool rebaseDataPages(bool isVerbose, CacheInfo& info, SharedCacheLoadInfo* results)
+{
+    uint64_t dataPagesStart = info.mappings[1].sfm_address;
+    const dyld_cache_slide_info* slideInfo = nullptr;
+    if ( info.slideInfoSize != 0 ) {
+        slideInfo = (dyld_cache_slide_info*)(info.slideInfoAddressUnslid + results->slide);
+    }
+    const dyld_cache_slide_info* slideInfoHeader = (dyld_cache_slide_info*)slideInfo;
+    if ( slideInfoHeader != nullptr ) {
+        if ( slideInfoHeader->version == 2 ) {
+            const dyld_cache_slide_info2* slideHeader = (dyld_cache_slide_info2*)slideInfo;
+            const uint32_t  page_size = slideHeader->page_size;
+            const uint16_t* page_starts = (uint16_t*)((long)(slideInfo) + slideHeader->page_starts_offset);
+            const uint16_t* page_extras = (uint16_t*)((long)(slideInfo) + slideHeader->page_extras_offset);
+            for (int i=0; i < slideHeader->page_starts_count; ++i) {
+                uint8_t* page = (uint8_t*)(long)(dataPagesStart + (page_size*i));
+                uint16_t pageEntry = page_starts[i];
+                //dyld::log("page[%d]: page_starts[i]=0x%04X\n", i, pageEntry);
+                if ( pageEntry == DYLD_CACHE_SLIDE_PAGE_ATTR_NO_REBASE )
+                    continue;
+                if ( pageEntry & DYLD_CACHE_SLIDE_PAGE_ATTR_EXTRA ) {
+                    uint16_t chainIndex = (pageEntry & 0x3FFF);
+                    bool done = false;
+                    while ( !done ) {
+                        uint16_t pInfo = page_extras[chainIndex];
+                        uint16_t pageStartOffset = (pInfo & 0x3FFF)*4;
+                        //dyld::log("     chain[%d] pageOffset=0x%03X\n", chainIndex, pageStartOffset);
+                        rebaseChainV2(page, pageStartOffset, results->slide, slideHeader);
+                        done = (pInfo & DYLD_CACHE_SLIDE_PAGE_ATTR_END);
+                        ++chainIndex;
+                    }
+                }
+                else {
+                    uint32_t pageOffset = pageEntry * 4;
+                    //dyld::log("     start pageOffset=0x%03X\n", pageOffset);
+                    rebaseChainV2(page, pageOffset, results->slide, slideHeader);
+                }
+            }
+        }
+#if __LP64__
+        else if ( slideInfoHeader->version == 3 ) {
+             const dyld_cache_slide_info3* slideHeader = (dyld_cache_slide_info3*)slideInfo;
+             const uint32_t                pageSize    = slideHeader->page_size;
+             for (int i=0; i < slideHeader->page_starts_count; ++i) {
+                 uint8_t* page = (uint8_t*)(dataPagesStart + (pageSize*i));
+                 uint64_t delta = slideHeader->page_starts[i];
+                 if ( delta == DYLD_CACHE_SLIDE_V3_PAGE_ATTR_NO_REBASE )
+                     continue;
+                 delta = delta/sizeof(uint64_t); // initial offset is byte based
+                 dyld_cache_slide_pointer3* loc = (dyld_cache_slide_pointer3*)page;
+                 do {
+                     loc += delta;
+                     delta = loc->plain.offsetToNextPointer;
+                     if ( loc->auth.authenticated ) {
+#if __has_feature(ptrauth_calls)
+                        uint64_t target = info.sharedRegionStart + loc->auth.offsetFromSharedCacheBase + results->slide;
+                        MachOLoaded::ChainedFixupPointerOnDisk ptr;
+                        ptr.raw = *((uint64_t*)loc);
+                        loc->raw = ptr.signPointer(loc, target);
+#else
+                        results->errorMessage = "invalid pointer kind in cache file";
+                        return false;
+#endif
+                     }
+                     else {
+                         loc->raw = MachOLoaded::ChainedFixupPointerOnDisk::signExtend51(loc->plain.pointerValue) + results->slide;
+                     }
+                } while (delta != 0);
+            }
+        }
+#else
+        else if ( slideInfoHeader->version == 4 ) {
+            const dyld_cache_slide_info4* slideHeader = (dyld_cache_slide_info4*)slideInfo;
+            const uint32_t  page_size = slideHeader->page_size;
+            const uint16_t* page_starts = (uint16_t*)((long)(slideInfo) + slideHeader->page_starts_offset);
+            const uint16_t* page_extras = (uint16_t*)((long)(slideInfo) + slideHeader->page_extras_offset);
+            for (int i=0; i < slideHeader->page_starts_count; ++i) {
+                uint8_t* page = (uint8_t*)(long)(dataPagesStart + (page_size*i));
+                uint16_t pageEntry = page_starts[i];
+                //dyld::log("page[%d]: page_starts[i]=0x%04X\n", i, pageEntry);
+                if ( pageEntry == DYLD_CACHE_SLIDE4_PAGE_NO_REBASE )
+                    continue;
+                if ( pageEntry & DYLD_CACHE_SLIDE4_PAGE_USE_EXTRA ) {
+                    uint16_t chainIndex = (pageEntry & DYLD_CACHE_SLIDE4_PAGE_INDEX);
+                    bool done = false;
+                    while ( !done ) {
+                        uint16_t pInfo = page_extras[chainIndex];
+                        uint16_t pageStartOffset = (pInfo & DYLD_CACHE_SLIDE4_PAGE_INDEX)*4;
+                        //dyld::log("     chain[%d] pageOffset=0x%03X\n", chainIndex, pageStartOffset);
+                        rebaseChainV4(page, pageStartOffset, results->slide, slideHeader);
+                        done = (pInfo & DYLD_CACHE_SLIDE4_PAGE_EXTRA_END);
+                        ++chainIndex;
+                    }
+                }
+                else {
+                    uint32_t pageOffset = pageEntry * 4;
+                    //dyld::log("     start pageOffset=0x%03X\n", pageOffset);
+                    rebaseChainV4(page, pageOffset, results->slide, slideHeader);
+                }
+            }
+        }
+#endif // LP64
+        else {
+            results->errorMessage = "invalid slide info in cache file";
+            return false;
+        }
+    }
+    return true;
+}
+
 static bool reuseExistingCache(const SharedCacheOptions& options, SharedCacheLoadInfo* results)
 {
     uint64_t cacheBaseAddress;
@@ -377,10 +527,6 @@ static bool reuseExistingCache(const SharedCacheOptions& options, SharedCacheLoa
             const dyld_cache_mapping_info* const fileMappings = (dyld_cache_mapping_info*)(cacheBaseAddress + existingCache->header.mappingOffset);
             results->loadAddress = existingCache;
             results->slide = (long)(cacheBaseAddress - fileMappings[0].address);
-            if ( (existingCache->header.mappingOffset > 0xD0) && (existingCache->header.dylibsImageGroupAddr != 0) )
-                results->cachedDylibsGroup = (const launch_cache::binary_format::ImageGroup*)(existingCache->header.dylibsImageGroupAddr + results->slide);
-            else
-                results->cachedDylibsGroup = nullptr;
             // we don't know the path this cache was previously loaded from, assume default
             getCachePath(options, sizeof(results->path), results->path);
             if ( options.verbose ) {
@@ -413,7 +559,7 @@ static long pickCacheASLR(CacheInfo& info)
 #endif
 
     // <rdar://problem/32031197> respect -disable_aslr boot-arg
-    if ( dyld3::loader::bootArgsContains("-disable_aslr") )
+    if ( dyld3::bootArgsContains("-disable_aslr") )
         slide = 0;
 
     // update mappings
@@ -435,10 +581,6 @@ static bool mapCacheSystemWide(const SharedCacheOptions& options, SharedCacheLoa
         results->slide = pickCacheASLR(info);
         slideInfo = (dyld_cache_slide_info2*)(info.slideInfoAddressUnslid + results->slide);
     }
-    if ( info.cachedDylibsGroupUnslid != 0 )
-        results->cachedDylibsGroup = (const launch_cache::binary_format::ImageGroup*)(info.cachedDylibsGroupUnslid + results->slide);
-    else
-        results->cachedDylibsGroup = nullptr;
 
     int result = __shared_region_map_and_slide_np(info.fd, 3, info.mappings, results->slide, slideInfo, info.slideInfoSize);
     ::close(info.fd);
@@ -450,7 +592,8 @@ static bool mapCacheSystemWide(const SharedCacheOptions& options, SharedCacheLoa
         if ( reuseExistingCache(options, results) )
             return true;
         // if cache does not exist, then really is an error
-        results->errorMessage = "syscall to map cache into shared region failed";
+        if ( results->errorMessage == nullptr )
+            results->errorMessage = "syscall to map cache into shared region failed";
         return false;
     }
 
@@ -460,7 +603,7 @@ static bool mapCacheSystemWide(const SharedCacheOptions& options, SharedCacheLoa
     }
     return true;
 }
-#endif
+#endif // TARGET_IPHONE_SIMULATOR
 
 static bool mapCachePrivate(const SharedCacheOptions& options, SharedCacheLoadInfo* results)
 {
@@ -471,18 +614,12 @@ static bool mapCachePrivate(const SharedCacheOptions& options, SharedCacheLoadIn
 
     // compute ALSR slide
     results->slide = 0;
-    const dyld_cache_slide_info2* slideInfo = nullptr;
 #if !TARGET_IPHONE_SIMULATOR // simulator caches do not support sliding
     if ( info.slideInfoSize != 0 ) {
         results->slide = pickCacheASLR(info);
-        slideInfo = (dyld_cache_slide_info2*)(info.slideInfoAddressUnslid + results->slide);
     }
 #endif
     results->loadAddress = (const DyldSharedCache*)(info.mappings[0].sfm_address);
-     if ( info.cachedDylibsGroupUnslid != 0 )
-        results->cachedDylibsGroup = (const launch_cache::binary_format::ImageGroup*)(info.cachedDylibsGroupUnslid + results->slide);
-    else
-        results->cachedDylibsGroup = nullptr;
 
     // remove the shared region sub-map
     vm_deallocate(mach_task_self(), (vm_address_t)info.sharedRegionStart, (vm_size_t)info.sharedRegionSize);
@@ -506,55 +643,22 @@ static bool mapCachePrivate(const SharedCacheOptions& options, SharedCacheLoadIn
             vm_deallocate(mach_task_self(), (vm_address_t)info.sharedRegionStart, (vm_size_t)info.sharedRegionSize);
             // return failure
             results->loadAddress        = nullptr;
-            results->cachedDylibsGroup  = nullptr;
             results->errorMessage       = "could not mmap() part of dyld cache";
             return false;
         }
     }
 
-    // update all __DATA pages with slide info
-    const dyld_cache_slide_info* slideInfoHeader = (dyld_cache_slide_info*)slideInfo;
-    if ( slideInfoHeader != nullptr ) {
-        if ( slideInfoHeader->version != 2 ) {
-            results->errorMessage = "invalide slide info in cache file";
-            return false;
-        }
-        const dyld_cache_slide_info2* slideHeader = (dyld_cache_slide_info2*)slideInfo;
-        const uint32_t  page_size = slideHeader->page_size;
-        const uint16_t* page_starts = (uint16_t*)((long)(slideInfo) + slideHeader->page_starts_offset);
-        const uint16_t* page_extras = (uint16_t*)((long)(slideInfo) + slideHeader->page_extras_offset);
-        const uintptr_t dataPagesStart = (uintptr_t)info.mappings[1].sfm_address;
-        for (int i=0; i < slideHeader->page_starts_count; ++i) {
-            uint8_t* page = (uint8_t*)(long)(dataPagesStart + (page_size*i));
-            uint16_t pageEntry = page_starts[i];
-            //dyld::log("page[%d]: page_starts[i]=0x%04X\n", i, pageEntry);
-            if ( pageEntry == DYLD_CACHE_SLIDE_PAGE_ATTR_NO_REBASE )
-                continue;
-            if ( pageEntry & DYLD_CACHE_SLIDE_PAGE_ATTR_EXTRA ) {
-                uint16_t chainIndex = (pageEntry & 0x3FFF);
-                bool done = false;
-                while ( !done ) {
-                    uint16_t pInfo = page_extras[chainIndex];
-                    uint16_t pageStartOffset = (pInfo & 0x3FFF)*4;
-                    //dyld::log("     chain[%d] pageOffset=0x%03X\n", chainIndex, pageStartOffset);
-                    rebaseChain(page, pageStartOffset, results->slide, slideInfo);
-                    done = (pInfo & DYLD_CACHE_SLIDE_PAGE_ATTR_END);
-                    ++chainIndex;
-                }
-            }
-            else {
-                uint32_t pageOffset = pageEntry * 4;
-                //dyld::log("     start pageOffset=0x%03X\n", pageOffset);
-                rebaseChain(page, pageOffset, results->slide, slideInfo);
-            }
-        }
-    }
+#if TARGET_IPHONE_SIMULATOR // simulator caches do not support sliding
+    return true;
+#else
+    bool success = rebaseDataPages(options.verbose, info, results);
 
     if ( options.verbose ) {
         dyld::log("mapped dyld cache file private to process (%s):\n", results->path);
         verboseSharedCacheMappings(info.mappings);
     }
-    return true;
+    return success;
+#endif
 }
 
 
@@ -563,7 +667,6 @@ bool loadDyldCache(const SharedCacheOptions& options, SharedCacheLoadInfo* resul
 {
     results->loadAddress        = 0;
     results->slide              = 0;
-    results->cachedDylibsGroup  = nullptr;
     results->errorMessage       = nullptr;
 
 #if TARGET_IPHONE_SIMULATOR
@@ -576,11 +679,14 @@ bool loadDyldCache(const SharedCacheOptions& options, SharedCacheLoadInfo* resul
     }
     else {
         // fast path: when cache is already mapped into shared region
-        if ( reuseExistingCache(options, results) )
-            return (results->errorMessage != nullptr);
-
-        // slow path: this is first process to load cache
-        return mapCacheSystemWide(options, results);
+        bool hasError = false;
+        if ( reuseExistingCache(options, results) ) {
+            hasError = (results->errorMessage != nullptr);
+        } else {
+            // slow path: this is first process to load cache
+            hasError = mapCacheSystemWide(options, results);
+        }
+        return hasError;
     }
 #endif
 }
@@ -591,56 +697,84 @@ bool findInSharedCacheImage(const SharedCacheLoadInfo& loadInfo, const char* dyl
     if ( loadInfo.loadAddress == nullptr )
         return false;
 
-    // HACK: temp support for old caches
-    if ( (loadInfo.cachedDylibsGroup == nullptr) || (loadInfo.loadAddress->header.formatVersion != launch_cache::binary_format::kFormatVersion) ) {
+    if ( loadInfo.loadAddress->header.formatVersion != dyld3::closure::kFormatVersion ) {
+        // support for older cache with a different Image* format
+#if __IPHONE_OS_VERSION_MIN_REQUIRED
+        uint64_t hash = 0;
+        for (const char* s=dylibPathToFind; *s != '\0'; ++s)
+                hash += hash*4 + *s;
+#endif
         const dyld_cache_image_info* const start = (dyld_cache_image_info*)((uint8_t*)loadInfo.loadAddress + loadInfo.loadAddress->header.imagesOffset);
         const dyld_cache_image_info* const end = &start[loadInfo.loadAddress->header.imagesCount];
         for (const dyld_cache_image_info* p = start; p != end; ++p) {
+#if __IPHONE_OS_VERSION_MIN_REQUIRED
+            // on iOS, inode is used to hold hash of path
+            if ( (p->modTime == 0) && (p->inode != hash) )
+                continue;
+#endif
             const char* aPath = (char*)loadInfo.loadAddress + p->pathFileOffset;
             if ( strcmp(aPath, dylibPathToFind) == 0 ) {
                 results->mhInCache    = (const mach_header*)(p->address+loadInfo.slide);
                 results->pathInCache  = aPath;
                 results->slideInCache = loadInfo.slide;
-                results->imageData    = nullptr;
+                results->image        = nullptr;
                 return true;
             }
         }
         return false;
     }
-    // HACK: end
 
-    launch_cache::ImageGroup dylibsGroup(loadInfo.cachedDylibsGroup);
-    uint32_t foundIndex;
-    const launch_cache::binary_format::Image* imageData = dylibsGroup.findImageByPath(dylibPathToFind, foundIndex);
-#if __MAC_OS_X_VERSION_MIN_REQUIRED
-    // <rdar://problem/32740215> handle symlink to cached dylib
-    if ( imageData == nullptr ) {
-        char resolvedPath[PATH_MAX];
-        if ( realpath(dylibPathToFind, resolvedPath) != nullptr )
-            imageData = dylibsGroup.findImageByPath(resolvedPath, foundIndex);
+    const dyld3::closure::ImageArray* images = loadInfo.loadAddress->cachedDylibsImageArray();
+    results->image = nullptr;
+    uint32_t imageIndex;
+    if ( loadInfo.loadAddress->hasImagePath(dylibPathToFind, imageIndex) ) {
+        results->image = images->imageForNum(imageIndex+1);
+    }
+ #if __MAC_OS_X_VERSION_MIN_REQUIRED
+    else {
+        // <rdar://problem/32740215> handle symlink to cached dylib
+        if ( loadInfo.loadAddress->header.dylibsExpectedOnDisk ) {
+            struct stat statBuf;
+            if ( dyld::my_stat(dylibPathToFind, &statBuf) == 0 ) {
+                // on macOS we store the inode and mtime of each dylib in the cache in the dyld_cache_image_info array
+                const dyld_cache_image_info* const start = (dyld_cache_image_info*)((uint8_t*)loadInfo.loadAddress + loadInfo.loadAddress->header.imagesOffset);
+                const dyld_cache_image_info* const end = &start[loadInfo.loadAddress->header.imagesCount];
+                for (const dyld_cache_image_info* p = start; p != end; ++p) {
+                    if ( (p->inode == statBuf.st_ino) && (p->modTime == statBuf.st_mtime) ) {
+                        imageIndex = (uint32_t)(p - start);
+                        results->image = images->imageForNum(imageIndex+1);
+                        break;
+                    }
+                }
+            }
+        }
+        else {
+            char resolvedPath[PATH_MAX];
+            if ( realpath(dylibPathToFind, resolvedPath) != nullptr ) {
+                if ( loadInfo.loadAddress->hasImagePath(resolvedPath, imageIndex) ) {
+                    results->image = images->imageForNum(imageIndex+1);
+                }
+            }
+        }
     }
 #endif
-    if ( imageData == nullptr )
+    if ( results->image == nullptr )
         return false;
 
-    launch_cache::Image image(imageData);
-    results->mhInCache    = (const mach_header*)((uintptr_t)loadInfo.loadAddress + image.cacheOffset());
-    results->pathInCache  = image.path();
+    results->mhInCache    = (const mach_header*)((uintptr_t)loadInfo.loadAddress + results->image->cacheOffset());
+    results->pathInCache  = results->image->path();
     results->slideInCache = loadInfo.slide;
-    results->imageData    = imageData;
     return true;
 }
 
 
 bool pathIsInSharedCacheImage(const SharedCacheLoadInfo& loadInfo, const char* dylibPathToFind)
 {
-    if ( (loadInfo.loadAddress == nullptr) || (loadInfo.cachedDylibsGroup == nullptr) || (loadInfo.loadAddress->header.formatVersion != launch_cache::binary_format::kFormatVersion) )
+    if ( (loadInfo.loadAddress == nullptr) || (loadInfo.loadAddress->header.formatVersion != closure::kFormatVersion) )
         return false;
 
-    launch_cache::ImageGroup dylibsGroup(loadInfo.cachedDylibsGroup);
-    uint32_t foundIndex;
-    const launch_cache::binary_format::Image* imageData = dylibsGroup.findImageByPath(dylibPathToFind, foundIndex);
-    return (imageData != nullptr);
+    uint32_t imageIndex;
+    return loadInfo.loadAddress->hasImagePath(dylibPathToFind, imageIndex);
 }
 
 

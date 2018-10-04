@@ -42,153 +42,104 @@
 #include <map>
 #include <vector>
 
-#include "LaunchCache.h"
-#include "LaunchCacheWriter.h"
 #include "DyldSharedCache.h"
 #include "FileUtils.h"
-#include "ImageProxy.h"
 #include "StringUtils.h"
-#include "ClosureBuffer.h"
+#include "ClosureBuilder.h"
+#include "ClosurePrinter.h"
+#include "ClosureFileSystemPhysical.h"
 
-extern "C" {
-    #include "closuredProtocol.h"
-}
+using dyld3::closure::ImageArray;
+using dyld3::closure::Image;
+using dyld3::closure::ImageNum;
+using dyld3::closure::ClosureBuilder;
+using dyld3::closure::LaunchClosure;
+using dyld3::closure::DlopenClosure;
+using dyld3::closure::PathOverrides;
+using dyld3::Array;
 
+
+// mmap() an shared cache file read/only but laid out like it would be at runtime
 static const DyldSharedCache* mapCacheFile(const char* path)
 {
     struct stat statbuf;
-    if (stat(path, &statbuf)) {
+    if ( ::stat(path, &statbuf) ) {
         fprintf(stderr, "Error: stat failed for dyld shared cache at %s\n", path);
         return nullptr;
     }
         
-    int cache_fd = open(path, O_RDONLY);
+    int cache_fd = ::open(path, O_RDONLY);
     if (cache_fd < 0) {
         fprintf(stderr, "Error: failed to open shared cache file at %s\n", path);
         return nullptr;
     }
-    
-    void* mapped_cache = mmap(NULL, (size_t)statbuf.st_size, PROT_READ, MAP_PRIVATE, cache_fd, 0);
-    if (mapped_cache == MAP_FAILED) {
-        fprintf(stderr, "Error: mmap() for shared cache at %s failed, errno=%d\n", path, errno);
+
+    uint8_t  firstPage[4096];
+    if ( ::pread(cache_fd, firstPage, 4096, 0) != 4096 ) {
+        fprintf(stderr, "Error: failed to read shared cache file at %s\n", path);
         return nullptr;
     }
-    close(cache_fd);
+    const dyld_cache_header*       header   = (dyld_cache_header*)firstPage;
+	const dyld_cache_mapping_info* mappings = (dyld_cache_mapping_info*)(firstPage + header->mappingOffset);
 
-    return (DyldSharedCache*)mapped_cache;
-}
-
-struct CachedSections
-{
-    uint32_t            mappedOffsetStart;
-    uint32_t            mappedOffsetEnd;
-    uint64_t            vmAddress;
-    const mach_header*  mh;
-    std::string         segmentName;
-    std::string         sectionName;
-    const char*         dylibPath;
-};
-
-static const CachedSections& find(uint32_t mappedOffset, const std::vector<CachedSections>& sections)
-{
-    for (const CachedSections& entry : sections) {
-        //printf("0x%08X -> 0x%08X\n", entry.mappedOffsetStart, entry.mappedOffsetEnd);
-        if ( (entry.mappedOffsetStart <= mappedOffset) && (mappedOffset < entry.mappedOffsetEnd) )
-            return entry;
-    }
-    assert(0 && "invalid offset");
-}
-
-/*
-static const dyld3::launch_cache::BinaryClosureData*
-callClosureDaemon(const std::string& mainPath, const std::string& cachePath, const std::vector<std::string>& envArgs)
-{
-
-    mach_port_t   serverPort = MACH_PORT_NULL;
-    mach_port_t   bootstrapPort = MACH_PORT_NULL;
-    kern_return_t kr = task_get_bootstrap_port(mach_task_self(), &bootstrapPort);
-    kr = bootstrap_look_up(bootstrapPort, "com.apple.dyld.closured", &serverPort);
-    switch( kr ) {
-        case BOOTSTRAP_SUCCESS :
-            // service currently registered, "a good thing" (tm)
-            break;
-        case BOOTSTRAP_UNKNOWN_SERVICE :
-            // service not currently registered, try again later
-            fprintf(stderr, "bootstrap_look_up(): %s\n", mach_error_string(kr));
-            return nullptr;
-        default:
-            // service not currently registered, try again later
-            fprintf(stderr, "bootstrap_look_up(): %s [%d]\n", mach_error_string(kr), kr);
-            return nullptr;
-    }
-
-    //printf("serverPort=%d, replyPort=%d\n", serverPort, replyPort);
-
-
-
-    bool success;
-    char envBuffer[2048];
-    vm_offset_t reply = 0;
-    uint32_t  replySize = 0;
-    envBuffer[0] = '\0';
-    envBuffer[1] = '\0';
-//    kr = closured_CreateLaunchClosure(serverPort, mainPath.c_str(), cachePath.c_str(), uuid, envBuffer, &success, &reply, &replySize);
-
-    printf("success=%d, buf=%p, bufLen=%d\n", success, (void*)reply, replySize);
-
-    if (!success)
+    size_t vmSize = (size_t)(mappings[2].address + mappings[2].size - mappings[0].address);
+    vm_address_t result;
+    kern_return_t r = ::vm_allocate(mach_task_self(), &result, vmSize, VM_FLAGS_ANYWHERE);
+    if ( r != KERN_SUCCESS ) {
+        fprintf(stderr, "Error: failed to allocate space to load shared cache file at %s\n", path);
         return nullptr;
-    return (const dyld3::launch_cache::BinaryClosureData*)reply;
+	}
+    for (int i=0; i < 3; ++i) {
+        void* mapped_cache = ::mmap((void*)(result + mappings[i].address - mappings[0].address), (size_t)mappings[i].size,
+                                    PROT_READ, MAP_FIXED | MAP_PRIVATE, cache_fd, mappings[i].fileOffset);
+        if (mapped_cache == MAP_FAILED) {
+            fprintf(stderr, "Error: mmap() for shared cache at %s failed, errno=%d\n", path, errno);
+            return nullptr;
+        }
+    }
+    ::close(cache_fd);
+
+    return (DyldSharedCache*)result;
 }
-*/
 
 static void usage()
 {
-    printf("dyld_closure_util program to create of view dyld3 closures\n");
+    printf("dyld_closure_util program to create or view dyld3 closures\n");
     printf("  mode:\n");
     printf("    -create_closure <prog-path>            # create a closure for the specified main executable\n");
-    printf("    -create_image_group <dylib-path>       # create an ImageGroup for the specified dylib/bundle\n");
-    printf("    -list_dyld_cache_closures              # list all closures in the dyld shared cache with size\n");
-    printf("    -list_dyld_cache_other_dylibs          # list all group-1 (non-cached dylibs/bundles)\n");
-    printf("    -print_image_group <closure-path>      # print specified ImageGroup file as JSON\n");
-    printf("    -print_closure_file <closure-path>     # print specified closure file as JSON\n");
+    printf("    -list_dyld_cache_closures              # list all launch closures in the dyld shared cache with size\n");
+    printf("    -list_dyld_cache_dlopen_closures       # list all dlopen closures in the dyld shared cache with size\n");
     printf("    -print_dyld_cache_closure <prog-path>  # find closure for specified program in dyld cache and print as JSON\n");
-    printf("    -print_dyld_cache_dylibs               # print group-0 (cached dylibs) as JSON\n");
-    printf("    -print_dyld_cache_other_dylibs         # print group-1 (non-cached dylibs/bundles) as JSON\n");
-    printf("    -print_dyld_cache_other <path>         # print just one group-1 (non-cached dylib/bundle) as JSON\n");
-    printf("    -print_dyld_cache_patch_table          # print locations in shared cache that may need patching\n");
+    printf("    -print_dyld_cache_dylib <dylib-path>   # print specified cached dylib as JSON\n");
+    printf("    -print_dyld_cache_dylibs               # print all cached dylibs as JSON\n");
+    printf("    -print_dyld_cache_dlopen <path>        # print specified dlopen closure as JSON\n");
     printf("  options:\n");
     printf("    -cache_file <cache-path>               # path to cache file to use (default is current cache)\n");
     printf("    -build_root <path-prefix>              # when building a closure, the path prefix when runtime volume is not current boot volume\n");
-    printf("    -o <output-file>                       # when building a closure, the file to write the (binary) closure to\n");
-    printf("    -include_all_dylibs_in_dir             # when building a closure, add other mach-o files found in directory\n");
     printf("    -env <var=value>                       # when building a closure, DYLD_* env vars to assume\n");
-    printf("    -dlopen <path>                         # for use with -create_closure to append ImageGroup if target had called dlopen\n");
+    printf("    -dlopen <path>                         # for use with -create_closure to simulate that program calling dlopen\n");
     printf("    -verbose_fixups                        # for use with -print* options to force printing fixups\n");
+    printf("    -no_at_paths                           # when building a closure, simulate security not allowing @path expansion\n");
+    printf("    -no_fallback_paths                     # when building a closure, simulate security not allowing default fallback paths\n");
+    printf("    -allow_insertion_failures              # when building a closure, simulate security allowing unloadable DYLD_INSERT_LIBRARIES to be ignored\n");
 }
 
 int main(int argc, const char* argv[])
 {
     const char*               cacheFilePath = nullptr;
     const char*               inputMainExecutablePath = nullptr;
-    const char*               inputTopImagePath = nullptr;
-    const char*               outPath = nullptr;
-    const char*               printPath = nullptr;
-    const char*               printGroupPath = nullptr;
     const char*               printCacheClosure = nullptr;
     const char*               printCachedDylib = nullptr;
     const char*               printOtherDylib = nullptr;
     bool                      listCacheClosures = false;
-    bool                      listOtherDylibs = false;
-    bool                      includeAllDylibs = false;
-    bool                      printClosures = false;
+    bool                      listCacheDlopenClosures = false;
     bool                      printCachedDylibs = false;
-    bool                      printOtherDylibs = false;
-    bool                      printPatchTable = false;
-    bool                      useClosured = false;
     bool                      verboseFixups = false;
+    bool                      allowAtPaths = true;
+    bool                      allowFallbackPaths = true;
+    bool                      allowInsertionFailures = false;
     std::vector<std::string>  buildtimePrefixes;
-    std::vector<std::string>  envArgs;
+    std::vector<const char*>  envArgs;
     std::vector<const char*>  dlopens;
 
     if ( argc == 1 ) {
@@ -212,14 +163,7 @@ int main(int argc, const char* argv[])
                 return 1;
             }
         }
-       else if ( strcmp(arg, "-create_image_group") == 0 ) {
-            inputTopImagePath = argv[++i];
-            if ( inputTopImagePath == nullptr ) {
-                fprintf(stderr, "-create_image_group option requires a path to a dylib or bundle\n");
-                return 1;
-            }
-        }
-       else if ( strcmp(arg, "-dlopen") == 0 ) {
+        else if ( strcmp(arg, "-dlopen") == 0 ) {
             const char* path = argv[++i];
             if ( path == nullptr ) {
                 fprintf(stderr, "-dlopen option requires a path to a packed closure list\n");
@@ -227,8 +171,17 @@ int main(int argc, const char* argv[])
             }
             dlopens.push_back(path);
         }
-       else if ( strcmp(arg, "-verbose_fixups") == 0 ) {
+        else if ( strcmp(arg, "-verbose_fixups") == 0 ) {
            verboseFixups = true;
+        }
+        else if ( strcmp(arg, "-no_at_paths") == 0 ) {
+            allowAtPaths = false;
+        }
+        else if ( strcmp(arg, "-no_fallback_paths") == 0 ) {
+            allowFallbackPaths = false;
+        }
+        else if ( strcmp(arg, "-allow_insertion_failures") == 0 ) {
+            allowInsertionFailures = true;
         }
         else if ( strcmp(arg, "-build_root") == 0 ) {
             const char* buildRootPath = argv[++i];
@@ -238,32 +191,11 @@ int main(int argc, const char* argv[])
             }
             buildtimePrefixes.push_back(buildRootPath);
         }
-        else if ( strcmp(arg, "-o") == 0 ) {
-            outPath = argv[++i];
-            if ( outPath == nullptr ) {
-                fprintf(stderr, "-o option requires a path \n");
-                return 1;
-            }
-        }
-        else if ( strcmp(arg, "-print_closure_file") == 0 ) {
-            printPath = argv[++i];
-            if ( printPath == nullptr ) {
-                fprintf(stderr, "-print_closure_file option requires a path \n");
-                return 1;
-            }
-        }
-        else if ( strcmp(arg, "-print_image_group") == 0 ) {
-            printGroupPath = argv[++i];
-            if ( printGroupPath == nullptr ) {
-                fprintf(stderr, "-print_image_group option requires a path \n");
-                return 1;
-            }
-        }
         else if ( strcmp(arg, "-list_dyld_cache_closures") == 0 ) {
             listCacheClosures = true;
         }
-        else if ( strcmp(arg, "-list_dyld_cache_other_dylibs") == 0 ) {
-            listOtherDylibs = true;
+        else if ( strcmp(arg, "-list_dyld_cache_dlopen_closures") == 0 ) {
+            listCacheDlopenClosures = true;
         }
         else if ( strcmp(arg, "-print_dyld_cache_closure") == 0 ) {
             printCacheClosure = argv[++i];
@@ -272,14 +204,8 @@ int main(int argc, const char* argv[])
                 return 1;
             }
         }
-        else if ( strcmp(arg, "-print_dyld_cache_closures") == 0 ) {
-            printClosures = true;
-        }
         else if ( strcmp(arg, "-print_dyld_cache_dylibs") == 0 ) {
             printCachedDylibs = true;
-        }
-        else if ( strcmp(arg, "-print_dyld_cache_other_dylibs") == 0 ) {
-            printOtherDylibs = true;
         }
         else if ( strcmp(arg, "-print_dyld_cache_dylib") == 0 ) {
             printCachedDylib = argv[++i];
@@ -288,18 +214,12 @@ int main(int argc, const char* argv[])
                 return 1;
             }
         }
-        else if ( strcmp(arg, "-print_dyld_cache_other") == 0 ) {
+        else if ( strcmp(arg, "-print_dyld_cache_dlopen") == 0 ) {
             printOtherDylib = argv[++i];
             if ( printOtherDylib == nullptr ) {
-                fprintf(stderr, "-print_dyld_cache_other option requires a path \n");
+                fprintf(stderr, "-print_dyld_cache_dlopen option requires a path \n");
                 return 1;
             }
-        }
-        else if ( strcmp(arg, "-print_dyld_cache_patch_table") == 0 ) {
-            printPatchTable = true;
-        }
-        else if ( strcmp(arg, "-include_all_dylibs_in_dir") == 0 ) {
-            includeAllDylibs = true;
         }
         else if ( strcmp(arg, "-env") == 0 ) {
             const char* envArg = argv[++i];
@@ -309,306 +229,151 @@ int main(int argc, const char* argv[])
             }
             envArgs.push_back(envArg);
         }
-        else if ( strcmp(arg, "-use_closured") == 0 ) {
-            useClosured = true;
-        }
         else {
             fprintf(stderr, "unknown option %s\n", arg);
             return 1;
         }
     }
 
-    if ( (inputMainExecutablePath || inputTopImagePath) && printPath ) {
-        fprintf(stderr, "-create_closure and -print_closure_file are mutually exclusive");
-        return 1;
-    }
+    envArgs.push_back(nullptr);
+
 
     const DyldSharedCache* dyldCache = nullptr;
-    bool dyldCacheIsRaw = false;
+    bool dyldCacheIsLive = true;
     if ( cacheFilePath != nullptr ) {
         dyldCache = mapCacheFile(cacheFilePath);
-        dyldCacheIsRaw = true;
+        dyldCacheIsLive = false;
     }
     else {
-#if !defined(__MAC_OS_X_VERSION_MIN_REQUIRED) || (__MAC_OS_X_VERSION_MIN_REQUIRED >= 101300)
+#if __MAC_OS_X_VERSION_MIN_REQUIRED && (__MAC_OS_X_VERSION_MIN_REQUIRED < 101300)
+        fprintf(stderr, "this tool needs to run on macOS 10.13 or later\n");
+        return 1;
+#else
         size_t cacheLength;
         dyldCache = (DyldSharedCache*)_dyld_get_shared_cache_range(&cacheLength);
-        dyldCacheIsRaw = false;
 #endif
     }
-    dyld3::ClosureBuffer::CacheIdent cacheIdent;
-    dyldCache->getUUID(cacheIdent.cacheUUID);
-    cacheIdent.cacheAddress     = (unsigned long)dyldCache;
-    cacheIdent.cacheMappedSize  = dyldCache->mappedSize();
-    dyld3::DyldCacheParser cacheParser(dyldCache, dyldCacheIsRaw);
+    dyld3::Platform platform = dyldCache->platform();
+    const char*     archName = dyldCache->archName();
 
-    if ( buildtimePrefixes.empty() )
-        buildtimePrefixes.push_back("");
-
-    std::vector<const dyld3::launch_cache::binary_format::ImageGroup*> existingGroups;
-    const dyld3::launch_cache::BinaryClosureData* mainClosure = nullptr;
     if ( inputMainExecutablePath != nullptr ) {
-        dyld3::PathOverrides pathStuff(envArgs);
-        STACK_ALLOC_DYNARRAY(const dyld3::launch_cache::binary_format::ImageGroup*, 3+dlopens.size(), theGroups);
-        theGroups[0] = cacheParser.cachedDylibsGroup();
-        theGroups[1] = cacheParser.otherDylibsGroup();
-        dyld3::launch_cache::DynArray<const dyld3::launch_cache::binary_format::ImageGroup*> groupList(2, &theGroups[0]);
-        dyld3::ClosureBuffer clsBuffer(cacheIdent, inputMainExecutablePath, groupList, pathStuff);
+        PathOverrides pathOverrides;
+        pathOverrides.setFallbackPathHandling(allowFallbackPaths ? dyld3::closure::PathOverrides::FallbackPathMode::classic : dyld3::closure::PathOverrides::FallbackPathMode::none);
+        pathOverrides.setEnvVars(&envArgs[0], nullptr, nullptr);
+        const char* prefix = ( buildtimePrefixes.empty() ? nullptr : buildtimePrefixes.front().c_str());
+        //dyld3::PathOverrides pathStuff(envArgs);
+        STACK_ALLOC_ARRAY(const ImageArray*,    imagesArrays, 3+dlopens.size());
+        STACK_ALLOC_ARRAY(dyld3::LoadedImage,   loadedArray,  1024);
+        imagesArrays.push_back(dyldCache->cachedDylibsImageArray());
+        imagesArrays.push_back(dyldCache->otherOSImageArray());
 
-        std::string mainPath = inputMainExecutablePath;
-        for (const std::string& prefix : buildtimePrefixes) {
-            if ( startsWith(mainPath, prefix) ) {
-                mainPath = mainPath.substr(prefix.size());
-                if ( mainPath[0] != '/' )
-                    mainPath = "/" + mainPath;
-                break;
-            }
-        }
-        
-        Diagnostics closureDiag;
-        //if ( useClosured )
-        //    mainClosure = closured_makeClosure(closureDiag, clsBuffer);
-       // else
-            mainClosure = dyld3::ImageProxyGroup::makeClosure(closureDiag, clsBuffer, mach_task_self(), buildtimePrefixes);
-        if ( closureDiag.hasError() ) {
-            fprintf(stderr, "dyld_closure_util: %s\n", closureDiag.errorMessage().c_str());
+        dyld3::closure::FileSystemPhysical fileSystem(prefix);
+        ClosureBuilder::AtPath atPathHanding = allowAtPaths ? ClosureBuilder::AtPath::all : ClosureBuilder::AtPath::none;
+        ClosureBuilder builder(dyld3::closure::kFirstLaunchClosureImageNum, fileSystem, dyldCache, dyldCacheIsLive, pathOverrides, atPathHanding, nullptr, archName, platform, nullptr);
+        const LaunchClosure* mainClosure = builder.makeLaunchClosure(inputMainExecutablePath, allowInsertionFailures);
+        if ( builder.diagnostics().hasError() ) {
+            fprintf(stderr, "dyld_closure_util: %s\n", builder.diagnostics().errorMessage());
             return 1;
         }
-        for (const std::string& warn : closureDiag.warnings() )
-            fprintf(stderr, "dyld_closure_util: warning: %s\n", warn.c_str());
+        ImageNum nextNum = builder.nextFreeImageNum();
 
-        dyld3::launch_cache::Closure closure(mainClosure);
-        if ( outPath != nullptr ) {
-            safeSave(mainClosure, closure.size(), outPath);
-        }
-        else {
-            dyld3::launch_cache::Closure theClosure(mainClosure);
-            theGroups[2] = theClosure.group().binaryData();
-            if ( !dlopens.empty() )
-                printf("[\n");
-            closure.printAsJSON(dyld3::launch_cache::ImageGroupList(3, &theGroups[0]), true);
+        if ( !dlopens.empty() )
+            printf("[\n");
+        imagesArrays.push_back(mainClosure->images());
+        dyld3::closure::printClosureAsJSON(mainClosure, imagesArrays, verboseFixups);
+        ClosureBuilder::buildLoadOrder(loadedArray, imagesArrays, mainClosure);
 
-            int groupIndex = 3;
-            for (const char* path : dlopens) {
-                printf(",\n");
-                dyld3::launch_cache::DynArray<const dyld3::launch_cache::binary_format::ImageGroup*> groupList2(groupIndex-2, &theGroups[2]);
-                dyld3::ClosureBuffer dlopenBuffer(cacheIdent, path, groupList2, pathStuff);
-                Diagnostics  dlopenDiag;
-                //if ( useClosured )
-                //    theGroups[groupIndex] = closured_makeDlopenGroup(closureDiag, clsBuffer);
-                //else
-                    theGroups[groupIndex] = dyld3::ImageProxyGroup::makeDlopenGroup(dlopenDiag, dlopenBuffer, mach_task_self(), buildtimePrefixes);
-                if ( dlopenDiag.hasError() ) {
-                    fprintf(stderr, "dyld_closure_util: %s\n", dlopenDiag.errorMessage().c_str());
-                    return 1;
+        for (const char* path : dlopens) {
+            printf(",\n");
+
+            // map unloaded mach-o files for use during closure building
+            for (dyld3::LoadedImage& li : loadedArray) {
+                if ( li.loadedAddress() != nullptr )
+                    continue;
+                if ( li.image()->inDyldCache() ) {
+                    li.setLoadedAddress((dyld3::MachOLoaded*)((uint8_t*)dyldCache + li.image()->cacheOffset()));
                 }
-                for (const std::string& warn : dlopenDiag.warnings() )
-                    fprintf(stderr, "dyld_closure_util: warning: %s\n", warn.c_str());
-                dyld3::launch_cache::ImageGroup dlopenGroup(theGroups[groupIndex]);
-                dlopenGroup.printAsJSON(dyld3::launch_cache::ImageGroupList(groupIndex+1, &theGroups[0]), true);
-                ++groupIndex;
+                else {
+                    Diagnostics diag;
+                    dyld3::closure::LoadedFileInfo loadedFileInfo = dyld3::MachOAnalyzer::load(diag, fileSystem, li.image()->path(), archName, platform);
+                    li.setLoadedAddress((const dyld3::MachOAnalyzer*)loadedFileInfo.fileContent);
+                }
             }
-            if ( !dlopens.empty() )
-                printf("]\n");
-        }
 
-    }
-#if 0
-    else if ( inputTopImagePath != nullptr ) {
-        std::string imagePath = inputTopImagePath;
-        for (const std::string& prefix : buildtimePrefixes) {
-            if ( startsWith(imagePath, prefix) ) {
-                imagePath = imagePath.substr(prefix.size());
-                if ( imagePath[0] != '/' )
-                    imagePath = "/" + imagePath;
-                break;
-            }
-        }
-
-        Diagnostics igDiag;
-        existingGroups.push_back(dyldCache->cachedDylibsGroup());
-        existingGroups.push_back(dyldCache->otherDylibsGroup());
-        if ( existingClosuresPath != nullptr ) {
-            size_t mappedSize;
-            const void* imageGroups = mapFileReadOnly(existingClosuresPath, mappedSize);
-            if ( imageGroups == nullptr ) {
-                fprintf(stderr, "dyld_closure_util: could not read file %s\n", printPath);
+            ClosureBuilder::AtPath atPathHandingDlopen = allowAtPaths ? ClosureBuilder::AtPath::all : ClosureBuilder::AtPath::onlyInRPaths;
+            ClosureBuilder dlopenBuilder(nextNum, fileSystem, dyldCache, dyldCacheIsLive, pathOverrides, atPathHandingDlopen, nullptr, archName, platform, nullptr);
+            ImageNum topImageNum;
+            const DlopenClosure* dlopenClosure = dlopenBuilder.makeDlopenClosure(path, mainClosure, loadedArray, 0, false, false, &topImageNum);
+            if ( dlopenBuilder.diagnostics().hasError() ) {
+                fprintf(stderr, "dyld_closure_util: %s\n", dlopenBuilder.diagnostics().errorMessage());
                 return 1;
             }
-            uint32_t sentGroups = *(uint32_t*)imageGroups;
-            uint16_t lastGroupNum = 2;
-            existingGroups.resize(sentGroups+2);
-            const uint8_t* p   = (uint8_t*)(imageGroups)+4;
-            //const uint8_t* end = (uint8_t*)(imageGroups) + mappedSize;
-            for (uint32_t i=0; i < sentGroups; ++i) {
-                const dyld3::launch_cache::binary_format::ImageGroup* aGroup = (const dyld3::launch_cache::binary_format::ImageGroup*)p;
-                existingGroups[2+i] = aGroup;
-                dyld3::launch_cache::ImageGroup imgrp(aGroup);
-                lastGroupNum = imgrp.groupNum();
-                p += imgrp.size();
+            if ( dlopenClosure == nullptr ) {
+                if ( topImageNum == 0 ) {
+                    fprintf(stderr, "dyld_closure_util: failed to dlopen %s\n", path);
+                    return 1;
+                }
+                printf("{\n   \"dyld-cache-image-num\":  \"0x%04X\"\n}\n", topImageNum);
+            }
+            else {
+                nextNum += dlopenClosure->images()->imageCount();
+                imagesArrays.push_back(dlopenClosure->images());
+                dyld3::closure::printClosureAsJSON(dlopenClosure, imagesArrays, verboseFixups);
+                ClosureBuilder::buildLoadOrder(loadedArray, imagesArrays, dlopenClosure);
             }
         }
-        const dyld3::launch_cache::binary_format::ImageGroup* ig = dyld3::ImageProxyGroup::makeDlopenGroup(igDiag, dyldCache, existingGroups.size(), existingGroups, imagePath, envArgs);
-        if ( igDiag.hasError() ) {
-            fprintf(stderr, "dyld_closure_util: %s\n", igDiag.errorMessage().c_str());
-            return 1;
-        }
-
-        dyld3::launch_cache::ImageGroup group(ig);
-        group.printAsJSON(dyldCache, true);
-    }
-#endif
-    else if ( printPath != nullptr ) {
-        size_t mappedSize;
-        const void* buff = mapFileReadOnly(printPath, mappedSize);
-        if ( buff == nullptr ) {
-            fprintf(stderr, "dyld_closure_util: could not read file %s\n", printPath);
-            return 1;
-        }
-        dyld3::launch_cache::Closure theClosure((dyld3::launch_cache::binary_format::Closure*)buff);
-        STACK_ALLOC_DYNARRAY(const dyld3::launch_cache::binary_format::ImageGroup*, 3, theGroups);
-        theGroups[0] = cacheParser.cachedDylibsGroup();
-        theGroups[1] = cacheParser.otherDylibsGroup();
-        theGroups[2] = theClosure.group().binaryData();
-        theClosure.printAsJSON(theGroups, verboseFixups);
-        //closure.printStatistics();
-        munmap((void*)buff, mappedSize);
-    }
-    else if ( printGroupPath != nullptr ) {
-        size_t mappedSize;
-        const void* buff = mapFileReadOnly(printGroupPath, mappedSize);
-        if ( buff == nullptr ) {
-            fprintf(stderr, "dyld_closure_util: could not read file %s\n", printPath);
-            return 1;
-        }
-        dyld3::launch_cache::ImageGroup group((dyld3::launch_cache::binary_format::ImageGroup*)buff);
-//        group.printAsJSON(dyldCache, verboseFixups);
-        munmap((void*)buff, mappedSize);
+        if ( !dlopens.empty() )
+            printf("]\n");
     }
     else if ( listCacheClosures ) {
-        cacheParser.forEachClosure(^(const char* runtimePath, const dyld3::launch_cache::binary_format::Closure* closureBinary) {
-            dyld3::launch_cache::Closure closure(closureBinary);
-            printf("%6lu  %s\n", closure.size(), runtimePath);
+        dyldCache->forEachLaunchClosure(^(const char* runtimePath, const dyld3::closure::LaunchClosure* closure) {
+            printf("%6lu  %s\n", closure->size(), runtimePath);
         });
     }
-    else if ( listOtherDylibs ) {
-        dyld3::launch_cache::ImageGroup dylibGroup(cacheParser.otherDylibsGroup());
-        for (uint32_t i=0; i < dylibGroup.imageCount(); ++i) {
-            dyld3::launch_cache::Image image = dylibGroup.image(i);
-            printf("%s\n", image.path());
-        }
+    else if ( listCacheDlopenClosures ) {
+        dyldCache->forEachDlopenImage(^(const char* runtimePath, const dyld3::closure::Image* image) {
+            printf("%6lu  %s\n", image->size(), runtimePath);
+        });
     }
     else if ( printCacheClosure ) {
-        const dyld3::launch_cache::BinaryClosureData* cls = cacheParser.findClosure(printCacheClosure);
-        if ( cls != nullptr ) {
-            dyld3::launch_cache::Closure theClosure(cls);
-            STACK_ALLOC_DYNARRAY(const dyld3::launch_cache::binary_format::ImageGroup*, 3, theGroups);
-            theGroups[0] = cacheParser.cachedDylibsGroup();
-            theGroups[1] = cacheParser.otherDylibsGroup();
-            theGroups[2] = theClosure.group().binaryData();
-            theClosure.printAsJSON(theGroups, verboseFixups);
+        const dyld3::closure::LaunchClosure* closure = dyldCache->findClosure(printCacheClosure);
+        if ( closure != nullptr ) {
+            STACK_ALLOC_ARRAY(const ImageArray*, imagesArrays, 3);
+            imagesArrays.push_back(dyldCache->cachedDylibsImageArray());
+            imagesArrays.push_back(dyldCache->otherOSImageArray());
+            imagesArrays.push_back(closure->images());
+            dyld3::closure::printClosureAsJSON(closure, imagesArrays, verboseFixups);
         }
         else {
             fprintf(stderr, "no closure in cache for %s\n", printCacheClosure);
         }
     }
-    else if ( printClosures ) {
-        cacheParser.forEachClosure(^(const char* runtimePath, const dyld3::launch_cache::binary_format::Closure* closureBinary) {
-            dyld3::launch_cache::Closure theClosure(closureBinary);
-            STACK_ALLOC_DYNARRAY(const dyld3::launch_cache::binary_format::ImageGroup*, 3, theGroups);
-            theGroups[0] = cacheParser.cachedDylibsGroup();
-            theGroups[1] = cacheParser.otherDylibsGroup();
-            theGroups[2] = theClosure.group().binaryData();
-            theClosure.printAsJSON(theGroups, verboseFixups);
-        });
-    }
     else if ( printCachedDylibs ) {
-        STACK_ALLOC_DYNARRAY(const dyld3::launch_cache::binary_format::ImageGroup*, 2, theGroups);
-        theGroups[0] = cacheParser.cachedDylibsGroup();
-        theGroups[1] = cacheParser.otherDylibsGroup();
-        dyld3::launch_cache::ImageGroup dylibGroup(theGroups[0]);
-        dylibGroup.printAsJSON(theGroups, verboseFixups);
+        dyld3::closure::printDyldCacheImagesAsJSON(dyldCache, verboseFixups);
     }
     else if ( printCachedDylib != nullptr ) {
-        STACK_ALLOC_DYNARRAY(const dyld3::launch_cache::binary_format::ImageGroup*, 2, theGroups);
-        theGroups[0] = cacheParser.cachedDylibsGroup();
-        theGroups[1] = cacheParser.otherDylibsGroup();
-        dyld3::launch_cache::ImageGroup dylibGroup(cacheParser.cachedDylibsGroup());
-        uint32_t imageIndex;
-        const dyld3::launch_cache::binary_format::Image* binImage = dylibGroup.findImageByPath(printCachedDylib, imageIndex);
-        if ( binImage != nullptr ) {
-            dyld3::launch_cache::Image image(binImage);
-            image.printAsJSON(theGroups, true);
+        const dyld3::closure::ImageArray* dylibs = dyldCache->cachedDylibsImageArray();
+        STACK_ALLOC_ARRAY(const ImageArray*, imagesArrays, 2);
+        imagesArrays.push_back(dylibs);
+        ImageNum num;
+        if ( dylibs->hasPath(printCachedDylib, num) ) {
+            dyld3::closure::printImageAsJSON(dylibs->imageForNum(num), imagesArrays, verboseFixups);
         }
         else {
-            fprintf(stderr, "no such other image found\n");
+            fprintf(stderr, "no such image found\n");
         }
-    }
-    else if ( printOtherDylibs ) {
-        STACK_ALLOC_DYNARRAY(const dyld3::launch_cache::binary_format::ImageGroup*, 2, theGroups);
-        theGroups[0] = cacheParser.cachedDylibsGroup();
-        theGroups[1] = cacheParser.otherDylibsGroup();
-        dyld3::launch_cache::ImageGroup dylibGroup(theGroups[1]);
-        dylibGroup.printAsJSON(theGroups, verboseFixups);
     }
     else if ( printOtherDylib != nullptr ) {
-        STACK_ALLOC_DYNARRAY(const dyld3::launch_cache::binary_format::ImageGroup*, 2, theGroups);
-        theGroups[0] = cacheParser.cachedDylibsGroup();
-        theGroups[1] = cacheParser.otherDylibsGroup();
-        dyld3::launch_cache::ImageGroup dylibGroup(cacheParser.otherDylibsGroup());
-        uint32_t imageIndex;
-        const dyld3::launch_cache::binary_format::Image* binImage = dylibGroup.findImageByPath(printOtherDylib, imageIndex);
-        if ( binImage != nullptr ) {
-            dyld3::launch_cache::Image image(binImage);
-            image.printAsJSON(theGroups, true);
+        if ( const dyld3::closure::Image* image = dyldCache->findDlopenOtherImage(printOtherDylib) ) {
+            STACK_ALLOC_ARRAY(const ImageArray*, imagesArrays, 2);
+            imagesArrays.push_back(dyldCache->cachedDylibsImageArray());
+            imagesArrays.push_back(dyldCache->otherOSImageArray());
+            dyld3::closure::printImageAsJSON(image, imagesArrays, verboseFixups);
         }
         else {
-            fprintf(stderr, "no such other image found\n");
+            fprintf(stderr, "no such image found\n");
         }
     }
-    else if ( printPatchTable ) {
-        __block uint64_t cacheBaseAddress = 0;
-        dyldCache->forEachRegion(^(const void* content, uint64_t vmAddr, uint64_t size, uint32_t permissions) {
-            if ( cacheBaseAddress == 0 )
-                cacheBaseAddress = vmAddr;
-        });
-        __block std::vector<CachedSections> sections;
-        __block bool hasError = false;
-        dyldCache->forEachImage(^(const mach_header* mh, const char* installName) {
-            dyld3::MachOParser parser(mh, dyldCacheIsRaw);
-            parser.forEachSection(^(const char* segName, const char* sectionName, uint32_t flags, uint64_t addr, const void* content, 
-                                    uint64_t size, uint32_t alignP2, uint32_t reserved1, uint32_t reserved2, bool illegalSectionSize, bool& stop) {
-                if ( illegalSectionSize ) {
-                    fprintf(stderr, "dyld_closure_util: section size extends beyond the end of the segment %s/%s\n", segName, sectionName);
-                    stop = true;
-                    return;
-                }
-                uint32_t offsetStart = (uint32_t)(addr - cacheBaseAddress);
-                uint32_t offsetEnd   = (uint32_t)(offsetStart + size);
-                sections.push_back({offsetStart, offsetEnd, addr, mh, segName, sectionName, installName});
-            });
-        });
-        if (hasError)
-            return 1;
-        dyld3::launch_cache::ImageGroup dylibGroup(cacheParser.cachedDylibsGroup());
-        dylibGroup.forEachDyldCachePatchLocation(cacheParser, ^(uint32_t targetCacheVmOffset, const std::vector<uint32_t>& usesPointersCacheVmOffsets, bool& stop) {
-            const CachedSections& targetSection = find(targetCacheVmOffset, sections);
-            dyld3::MachOParser targetParser(targetSection.mh, dyldCacheIsRaw);
-            const char* symbolName;
-            uint64_t symbolAddress;
-            if ( targetParser.findClosestSymbol(targetSection.vmAddress + targetCacheVmOffset - targetSection.mappedOffsetStart, &symbolName, &symbolAddress) ) {
-                printf("%s:  [cache offset = 0x%08X]\n", symbolName, targetCacheVmOffset);
-            }
-            else {
-                printf("0x%08X from %40s    %10s   %16s  + 0x%06X\n", targetCacheVmOffset, strrchr(targetSection.dylibPath, '/')+1, targetSection.segmentName.c_str(), targetSection.sectionName.c_str(), targetCacheVmOffset - targetSection.mappedOffsetStart);
-            }
-            for (uint32_t offset : usesPointersCacheVmOffsets) {
-                const CachedSections& usedInSection  = find(offset, sections);
-                printf("%40s    %10s   %16s  + 0x%06X\n",  strrchr(usedInSection.dylibPath, '/')+1, usedInSection.segmentName.c_str(), usedInSection.sectionName.c_str(), offset - usedInSection.mappedOffsetStart);
-            }
-        });
-    }
-
 
     return 0;
 }

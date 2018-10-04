@@ -22,6 +22,8 @@
  * @APPLE_LICENSE_HEADER_END@
  */
 
+#define _FORTIFY_SOURCE 0
+
 #include <stddef.h>
 #include <stdlib.h>
 #include <string.h>
@@ -41,6 +43,10 @@
 #include <libkern/OSAtomic.h>
 #include <errno.h>
 #include <pthread.h>
+#include <corecrypto/ccdigest.h>
+#include <corecrypto/ccsha1.h>
+#include <corecrypto/ccsha2.h>
+
 #if TARGET_IPHONE_SIMULATOR
 	#include "dyldSyscallInterface.h"
 	#include "dyld_images.h"
@@ -58,6 +64,27 @@
 		typedef struct mach_header			macho_header;
 		typedef struct nlist				macho_nlist;
 	#endif
+
+    #define DYLD_PROCESS_INFO_NOTIFY_MAX_BUFFER_SIZE    (32*1024)
+    #define DYLD_PROCESS_INFO_NOTIFY_LOAD_ID            0x1000
+    #define DYLD_PROCESS_INFO_NOTIFY_UNLOAD_ID          0x2000
+    #define DYLD_PROCESS_INFO_NOTIFY_MAIN_ID            0x3000
+
+    struct dyld_process_info_image_entry {
+        uuid_t                        uuid;
+        uint64_t                    loadAddress;
+        uint32_t                    pathStringOffset;
+        uint32_t                    pathLength;
+    };
+
+    struct dyld_process_info_notify_header {
+        mach_msg_header_t            header;
+        uint32_t                    version;
+        uint32_t                    imageCount;
+        uint32_t                    imagesOffset;
+        uint32_t                    stringsOffset;
+        uint64_t                    timestamp;
+    };
 #endif
 
 // from _simple.h in libc
@@ -109,13 +136,13 @@ void _ZN10__cxxabiv112__unexpectedEPFvvE()
 }
 
 // std::__terminate() called by C++ unwinding code
-void _ZSt11__terminatePFvvE(void (*func)())
+void _ZSt11__terminatePFvvE(void (*func)(void))
 {
 	_ZN4dyld4haltEPKc("dyld std::__terminate()\n");
 }
 
 // std::__unexpected() called by C++ unwinding code
-void _ZSt12__unexpectedPFvvE(void (*func)())
+void _ZSt12__unexpectedPFvvE(void (*func)(void))
 {
 	_ZN4dyld4haltEPKc("dyld std::__unexpected()\n");
 }
@@ -290,8 +317,6 @@ void __chk_fail()
 
 
 // referenced by libc.a(pthread.o) but unneeded in dyld
-void _init_cpu_capabilities() { }
-void _cpu_capabilities() {}
 void set_malloc_singlethreaded() {}
 int PR_5243343_flag = 0;
 
@@ -312,8 +337,8 @@ FILE* __stderrp = NULL;
 FILE* __stdoutp = NULL;
 
 // work with c++abi.a
-void (*__cxa_terminate_handler)() = _ZSt9terminatev;
-void (*__cxa_unexpected_handler)() = _ZSt10unexpectedv;
+void (*__cxa_terminate_handler)(void) = _ZSt9terminatev;
+void (*__cxa_unexpected_handler)(void) = _ZSt10unexpectedv;
 
 void abort_message(const char* format, ...)
 {
@@ -374,8 +399,6 @@ int _ZN4dyld7my_openEPKcii(const char* path, int flag, int other)
 //
 
 #if TARGET_IPHONE_SIMULATOR
-
-#include <coreSymbolicationDyldSupport.h>
 
 int myopen(const char* path, int oflag, int extra) __asm("_open");
 int myopen(const char* path, int oflag, int extra) {
@@ -530,20 +553,25 @@ int	readdir_r(DIR* dirp, struct dirent* entry, struct dirent **result) {
 	return gSyscallHelpers->readdir_r(dirp, entry, result);
 }
 
+// HACK: readdir() is not used in dyld_sim, but it is pulled in by libc.a, then dead stripped.
+struct dirent* readdir(DIR *dirp) {
+    _ZN4dyld4haltEPKc("dyld_sim readdir() not supported\n");
+}
+
 int closedir(DIR* dirp) {
 	if ( gSyscallHelpers->version < 3 )
 		return EPERM;
 	return gSyscallHelpers->closedir(dirp);
 }
 
-void xcoresymbolication_load_notifier(void* connection, uint64_t timestamp, const char* path, const struct mach_header* mh)
+void coresymbolication_load_notifier(void* connection, uint64_t timestamp, const char* path, const struct mach_header* mh)
 {
 	// if host dyld supports this notifier, call into host dyld
 	if ( gSyscallHelpers->version >= 4 )
 		return gSyscallHelpers->coresymbolication_load_notifier(connection, timestamp, path, mh);
 }
 
-void xcoresymbolication_unload_notifier(void* connection, uint64_t timestamp, const char* path, const struct mach_header* mh)
+void coresymbolication_unload_notifier(void* connection, uint64_t timestamp, const char* path, const struct mach_header* mh)
 {
 	// if host dyld supports this notifier, call into host dyld
 	if ( gSyscallHelpers->version >= 4 )
@@ -556,16 +584,24 @@ void xcoresymbolication_unload_notifier(void* connection, uint64_t timestamp, co
 
 #if SUPPORT_HOST_10_11
 typedef int               (*FuncPtr_proc_regionfilename)(int pid, uint64_t address, void* buffer, uint32_t bufferSize);
-typedef pid_t             (*FuncPtr_getpid)();
+typedef pid_t             (*FuncPtr_getpid)(void);
 typedef bool              (*FuncPtr_mach_port_insert_right)(ipc_space_t task, mach_port_name_t name, mach_port_t poly, mach_msg_type_name_t polyPoly);
 typedef kern_return_t     (*FuncPtr_mach_port_allocate)(ipc_space_t, mach_port_right_t, mach_port_name_t*);
 typedef mach_msg_return_t (*FuncPtr_mach_msg)(mach_msg_header_t *, mach_msg_option_t , mach_msg_size_t , mach_msg_size_t , mach_port_name_t , mach_msg_timeout_t , mach_port_name_t);
+typedef void              (*FuncPtr_mach_msg_destroy)(mach_msg_header_t *);
+typedef kern_return_t     (*FuncPtr_mach_port_construct)(ipc_space_t task, mach_port_options_ptr_t options, mach_port_context_t context, mach_port_name_t *name);
+typedef kern_return_t     (*FuncPtr_mach_port_destruct)(ipc_space_t task, mach_port_name_t name, mach_port_delta_t srdelta, mach_port_context_t guard);
+typedef void              (*FuncPtr_notifyMonitoringDyld)(bool unloading, unsigned portSlot, unsigned imageCount, const struct dyld_image_info infos[]);
 
 static FuncPtr_proc_regionfilename		 proc_proc_regionfilename = NULL;
 static FuncPtr_getpid                    proc_getpid = NULL;
 static FuncPtr_mach_port_insert_right    proc_mach_port_insert_right = NULL;
 static FuncPtr_mach_port_allocate        proc_mach_port_allocate = NULL;
 static FuncPtr_mach_msg                  proc_mach_msg = NULL;
+static FuncPtr_mach_msg_destroy          proc_mach_msg_destroy = NULL;
+static FuncPtr_mach_port_construct       proc_mach_port_construct = NULL;
+static FuncPtr_mach_port_destruct        proc_mach_port_destruct = NULL;
+static FuncPtr_notifyMonitoringDyld      proc_notifyMonitoringDyld = NULL;
 
 
 
@@ -633,9 +669,90 @@ static void findHostFunctions() {
 			else if ( strcmp(name, "_mach_port_allocate") == 0 )
 				proc_mach_port_allocate = (FuncPtr_mach_port_allocate)(s->n_value + slide);
 			else if ( strcmp(name, "_mach_msg") == 0 )
-				proc_mach_msg = (FuncPtr_mach_msg)(s->n_value + slide);
+                proc_mach_msg = (FuncPtr_mach_msg)(s->n_value + slide);
+            else if ( strcmp(name, "__ZN4dyldL20notifyMonitoringDyldEbjjPK15dyld_image_info") == 0 )
+                proc_notifyMonitoringDyld = (FuncPtr_notifyMonitoringDyld)(s->n_value + slide);
 		}
 	}
+}
+
+// Look up sycalls in host dyld needed by coresymbolication_ routines in dyld_sim
+static bool findHostLibSystemFunctions() {
+    // Only look up symbols once
+    if (proc_mach_msg_destroy != NULL && proc_mach_port_construct != NULL && proc_mach_port_destruct != NULL)
+        return true;
+
+    const struct mach_header* hostLibSystemMH = NULL;
+    struct dyld_all_image_infos* imageInfo = (struct dyld_all_image_infos*)(gSyscallHelpers->getProcessInfo());
+    const struct dyld_image_info* infoArray = imageInfo->infoArray;
+    if (infoArray == NULL)
+        return false;
+    uint32_t imageCount = imageInfo->infoArrayCount;
+    for (uint32_t i = 0; i<imageCount; ++i) {
+        if (strcmp("/usr/lib/system/libsystem_kernel.dylib", infoArray[i].imageFilePath) == 0) {
+            //Found the kernel interface
+            hostLibSystemMH = infoArray[i].imageLoadAddress;
+            break;
+        }
+    }
+    if (hostLibSystemMH == NULL)
+        return false;
+
+    // find symbol table and slide of host dyld
+    uintptr_t slide = 0;
+    const macho_nlist* symbolTable = NULL;
+    const char* symbolTableStrings = NULL;
+    const struct dysymtab_command* dynSymbolTable = NULL;
+    const uint32_t cmd_count = hostLibSystemMH->ncmds;
+    const struct load_command* const cmds = (struct load_command*)(((char*)hostLibSystemMH)+sizeof(macho_header));
+    const struct load_command* cmd = cmds;
+    const uint8_t* linkEditBase = NULL;
+    for (uint32_t i = 0; i < cmd_count; ++i) {
+        switch (cmd->cmd) {
+            case LC_SEGMENT_COMMAND:
+            {
+                const macho_segment_command* seg = (macho_segment_command*)cmd;
+                if ( (seg->fileoff == 0) && (seg->filesize != 0) )
+                    slide = (uintptr_t)hostLibSystemMH - seg->vmaddr;
+                if ( strcmp(seg->segname, "__LINKEDIT") == 0 )
+                    linkEditBase = (uint8_t*)(seg->vmaddr - seg->fileoff + slide);
+            }
+                break;
+            case LC_SYMTAB:
+            {
+                const struct symtab_command* symtab = (struct symtab_command*)cmd;
+                if ( linkEditBase == NULL )
+                    return false;
+                symbolTableStrings = (const char*)&linkEditBase[symtab->stroff];
+                symbolTable = (macho_nlist*)(&linkEditBase[symtab->symoff]);
+            }
+                break;
+            case LC_DYSYMTAB:
+                dynSymbolTable = (struct dysymtab_command*)cmd;
+                break;
+        }
+        cmd = (const struct load_command*)(((char*)cmd)+cmd->cmdsize);
+    }
+    if ( symbolTableStrings == NULL )
+        return false;;
+    if ( dynSymbolTable == NULL )
+        return false;;
+
+    // scan local symbols in host dyld looking for load/unload functions
+    const macho_nlist* const localsStart = &symbolTable[dynSymbolTable->iextdefsym];
+    const macho_nlist* const localsEnd= &localsStart[dynSymbolTable->nextdefsym];
+    for (const macho_nlist* s = localsStart; s < localsEnd; ++s) {
+        if ( ((s->n_type & N_TYPE) == N_SECT) && ((s->n_type & N_STAB) == 0) ) {
+            const char* name = &symbolTableStrings[s->n_un.n_strx];
+            if ( strcmp(name, "_mach_msg_destroy") == 0 )
+                proc_mach_msg_destroy = (FuncPtr_mach_msg_destroy)(s->n_value + slide);
+            else if ( strcmp(name, "_mach_port_construct") == 0 )
+                proc_mach_port_construct = (FuncPtr_mach_port_construct)(s->n_value + slide);
+            else if ( strcmp(name, "_mach_port_destruct") == 0 )
+                proc_mach_port_destruct = (FuncPtr_mach_port_destruct)(s->n_value + slide);
+        }
+    }
+    return (proc_mach_msg_destroy != NULL && proc_mach_port_construct != NULL && proc_mach_port_destruct != NULL);
 }
 #endif
 
@@ -706,6 +823,41 @@ kern_return_t mach_msg(mach_msg_header_t* msg, mach_msg_option_t option, mach_ms
 #endif
 }
 
+void mach_msg_destroy(mach_msg_header_t *msg) {
+    if ( gSyscallHelpers->version >= 12 ) {
+        gSyscallHelpers->mach_msg_destroy(msg);
+        return;
+    }
+#if SUPPORT_HOST_10_11
+    if (findHostLibSystemFunctions()) {
+        (*proc_mach_msg_destroy)(msg);
+    }
+#endif
+}
+
+kern_return_t mach_port_construct(ipc_space_t task, mach_port_options_ptr_t options, mach_port_context_t context, mach_port_name_t *name) {
+    if ( gSyscallHelpers->version >= 12 ) {
+        return gSyscallHelpers->mach_port_construct(task, options, context, name);
+    }
+#if SUPPORT_HOST_10_11
+    if (findHostLibSystemFunctions()) {
+        return (*proc_mach_port_construct)(task, options, context, name);
+    }
+#endif
+    return KERN_NOT_SUPPORTED;
+}
+
+kern_return_t mach_port_destruct(ipc_space_t task, mach_port_name_t name, mach_port_delta_t srdelta, mach_port_context_t guard) {
+    if ( gSyscallHelpers->version >= 12 ) {
+        return gSyscallHelpers->mach_port_destruct(task, name, srdelta, guard);
+    }
+#if SUPPORT_HOST_10_11
+    if (findHostLibSystemFunctions()) {
+        return (*proc_mach_port_destruct)(task, name, srdelta, guard);
+    }
+#endif
+    return KERN_NOT_SUPPORTED;
+}
 
 void abort_with_payload(uint32_t reason_namespace, uint64_t reason_code, void* payload, uint32_t payload_size, const char* reason_string, uint64_t reason_flags)
 {
@@ -774,6 +926,86 @@ int kdebug_trace(uint32_t code, uint64_t arg1, uint64_t arg2, uint64_t arg3, uin
     return 0;
 }
 
+uint64_t kdebug_trace_string(uint32_t debugid, uint64_t str_id, const char *str) {
+    if ( gSyscallHelpers->version >= 9 )
+        return gSyscallHelpers->kdebug_trace_string(debugid, str_id, str);
+    return 0;
+}
+
+uint64_t amfi_check_dyld_policy_self(uint64_t inFlags, uint64_t* outFlags)
+{
+    if ( gSyscallHelpers->version >= 10 )
+        return gSyscallHelpers->amfi_check_dyld_policy_self(inFlags, outFlags);
+    *outFlags = 0x3F;  // on old kernel, simulator process get all flags
+    return 0;
+}
+    
+static mach_port_t sNotifyReplyPorts[DYLD_MAX_PROCESS_INFO_NOTIFY_COUNT];
+static bool        sZombieNotifiers[DYLD_MAX_PROCESS_INFO_NOTIFY_COUNT];
+
+void _ZN4dyld24notifyMonitoringDyldMainEv() {
+    if ( gSyscallHelpers->version >= 11 ) {
+        gSyscallHelpers->notifyMonitoringDyldMain();
+        return;
+    }
+    struct dyld_all_image_infos* imageInfo = (struct dyld_all_image_infos*)(gSyscallHelpers->getProcessInfo());
+    for (int slot=0; slot < DYLD_MAX_PROCESS_INFO_NOTIFY_COUNT; ++slot) {
+        if ( (imageInfo->notifyPorts[slot] != 0 ) && !sZombieNotifiers[slot] ) {
+            if ( sNotifyReplyPorts[slot] == 0 ) {
+                if ( !mach_port_allocate(mach_task_self(), MACH_PORT_RIGHT_RECEIVE, &sNotifyReplyPorts[slot]) )
+                    mach_port_insert_right(mach_task_self(), sNotifyReplyPorts[slot], sNotifyReplyPorts[slot], MACH_MSG_TYPE_MAKE_SEND);
+                //dyld::log("allocated reply port %d\n", sNotifyReplyPorts[slot]);
+            }
+            //dyld::log("found port to send to\n");
+            uint8_t messageBuffer[sizeof(mach_msg_header_t) + MAX_TRAILER_SIZE];
+            mach_msg_header_t* h = (mach_msg_header_t*)messageBuffer;
+            h->msgh_bits        = MACH_MSGH_BITS(MACH_MSG_TYPE_COPY_SEND,MACH_MSG_TYPE_MAKE_SEND); // MACH_MSG_TYPE_MAKE_SEND_ONCE
+            h->msgh_id          = DYLD_PROCESS_INFO_NOTIFY_MAIN_ID;
+            h->msgh_local_port    = sNotifyReplyPorts[slot];
+            h->msgh_remote_port    = imageInfo->notifyPorts[slot];
+            h->msgh_reserved    = 0;
+            h->msgh_size        = (mach_msg_size_t)sizeof(messageBuffer);
+            //dyld::log("sending to port[%d]=%d, size=%d, reply port=%d, id=0x%X\n", slot, dyld::gProcessInfo->notifyPorts[slot], h->msgh_size, sNotifyReplyPorts[slot], h->msgh_id);
+            kern_return_t sendResult = mach_msg(h, MACH_SEND_MSG | MACH_RCV_MSG | MACH_RCV_TIMEOUT, h->msgh_size, h->msgh_size, sNotifyReplyPorts[slot], 5000, MACH_PORT_NULL);
+            //dyld::log("send result = 0x%X, msg_id=%d, msg_size=%d\n", sendResult, h->msgh_id, h->msgh_size);
+            if ( sendResult == MACH_SEND_INVALID_DEST ) {
+                // sender is not responding, detatch
+                //dyld::log("process requesting notification gone. deallocation send port %d and receive port %d\n", dyld::gProcessInfo->notifyPorts[slot], sNotifyReplyPorts[slot]);
+                mach_port_deallocate(mach_task_self(), imageInfo->notifyPorts[slot]);
+                mach_port_deallocate(mach_task_self(), sNotifyReplyPorts[slot]);
+                imageInfo->notifyPorts[slot] = 0;
+                sNotifyReplyPorts[slot] = 0;
+            }
+            else if ( sendResult == MACH_RCV_TIMED_OUT ) {
+                // client took too long, ignore him from now on
+                sZombieNotifiers[slot] = true;
+                mach_port_deallocate(mach_task_self(), sNotifyReplyPorts[slot]);
+                sNotifyReplyPorts[slot] = 0;
+            }
+        }
+    }
+}
+
+void _ZN4dyld20notifyMonitoringDyldEbjPPK11mach_headerPPKc(bool unloading, unsigned imageCount, const struct mach_header* loadAddresses[], const char* imagePaths[]) {
+    if ( gSyscallHelpers->version >= 11 ) {
+        gSyscallHelpers->notifyMonitoringDyld(unloading, imageCount, loadAddresses, imagePaths);
+        return;
+    }
+#if SUPPORT_HOST_10_11
+    findHostFunctions();
+    if ( proc_notifyMonitoringDyld ) {
+        struct dyld_image_info infos[imageCount];
+        for (int i=0; i<imageCount; ++i) {
+            struct dyld_image_info info = { loadAddresses[i], imagePaths[i], 0};
+            infos[i] = info;
+        }
+        for (int slot=0; slot < DYLD_MAX_PROCESS_INFO_NOTIFY_COUNT; ++slot) {
+            (*proc_notifyMonitoringDyld)(unloading, slot, imageCount, infos);
+        }
+    }
+#endif
+}
+
 int* __error(void) {
 	return gSyscallHelpers->errnoAddress();
 } 
@@ -787,6 +1019,10 @@ mach_port_t mach_task_self_ = MACH_PORT_NULL;
 
 extern int myerrno_fallback  __asm("_errno");
 int myerrno_fallback = 0;
+
+
+vm_size_t vm_kernel_page_mask = 0xFFF;
+vm_size_t vm_page_size = 0x1000;
 
 #endif  // TARGET_IPHONE_SIMULATOR
 
@@ -817,4 +1053,52 @@ void _Block_object_dispose(const void* object, int flags)
 }
 
 
+unsigned char* CC_SHA384(const void* data, unsigned long len, unsigned char* md)
+{
+    const struct ccdigest_info *di = ccsha384_di();
+    ccdigest_di_decl(di, dc);//declares dc array in stack
+    ccdigest_init(di, dc);
+	ccdigest_update(di, dc, len, data);
+    ccdigest_final(di, dc, md);
+    ccdigest_di_clear(di, dc);
+    return NULL;
+}
+
+
+unsigned char* CC_SHA256(const void* data, unsigned long len, unsigned char* md)
+{
+    const struct ccdigest_info *di = ccsha256_di();
+    ccdigest_di_decl(di, dc);//declares dc array in stack
+    ccdigest_init(di, dc);
+	ccdigest_update(di, dc, len, data);
+    ccdigest_final(di, dc, md);
+    ccdigest_di_clear(di, dc);
+    return NULL;
+}
+
+unsigned char* CC_SHA1(const void* data, unsigned long len, unsigned char* md)
+{
+    const struct ccdigest_info *di = ccsha1_di();
+    ccdigest_di_decl(di, dc);//declares dc array in stack
+    ccdigest_init(di, dc);
+    ccdigest_update(di, dc, len, data);
+    ccdigest_final(di, dc, md);
+    ccdigest_di_clear(di, dc);
+    return NULL;
+}
+
+#if !TARGET_IPHONE_SIMULATOR
+errno_t memset_s(void* s, rsize_t smax, int c, rsize_t n)
+{
+    errno_t err = 0;
+    if (s == NULL)
+        return EINVAL;
+    if (n > smax) {
+        err = EOVERFLOW;
+        n = smax;
+    }
+    memset(s, c, n);
+    return err;
+}
+#endif
 

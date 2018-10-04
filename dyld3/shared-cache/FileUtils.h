@@ -27,11 +27,15 @@
 
 #include <stdint.h>
 
+#include <map>
+#include <set>
 #include <string>
 #include <vector>
 #include <unordered_map>
 #include <unordered_set>
 #include <dispatch/dispatch.h>
+
+#include "DyldSharedCache.h"
 
 class Diagnostics;
 
@@ -39,8 +43,6 @@ class Diagnostics;
 struct FileCache {
     FileCache(void);
     std::pair<uint8_t*, struct stat> cacheLoad(Diagnostics& diags, const std::string path);
-    void preflightCache(Diagnostics& diags, const std::string& path);
-    void preflightCache(Diagnostics& diags, const std::unordered_set<std::string>& paths);
 
 private:
     std::pair<uint8_t*, struct stat> fill(Diagnostics& diags, const std::string& path);
@@ -59,7 +61,7 @@ extern FileCache fileCache;
 // callback is called on each regular file found with stat() info about the file
 //
 void iterateDirectoryTree(const std::string& pathPrefix, const std::string& path, bool (^dirFilter)(const std::string& dirPath),
-                          void (^callback)(const std::string& path, const struct stat& statBuf), bool processFiles=true);
+                          void (^callback)(const std::string& path, const struct stat& statBuf), bool processFiles=true, bool recurse=true);
 
 
 //
@@ -69,14 +71,15 @@ void iterateDirectoryTree(const std::string& pathPrefix, const std::string& path
 bool safeSave(const void* buffer, size_t bufferLen, const std::string& path);
 
 
-const void* mapFileReadOnly(const std::string& path, size_t& mappedSize);
+const void* mapFileReadOnly(const char* path, size_t& mappedSize);
 
 bool isProtectedBySIP(const std::string& path);
 bool isProtectedBySIP(int fd);
 
 bool fileExists(const std::string& path);
 
-std::unordered_map<std::string, uint32_t> loadOrderFile(const std::string& orderFile);
+std::unordered_map<std::string, uint32_t> parseOrderFile(const std::string& orderFileData);
+std::string loadOrderFile(const std::string& orderFilePath);
 
 std::string normalize_absolute_file_path(std::string path);
 std::string basePath(const std::string& path);
@@ -86,7 +89,21 @@ std::string realFilePath(const std::string& path);
 
 std::string toolDir();
 
+class SymlinkResolver {
+public:
+    SymlinkResolver() { }
 
+    void addFile(Diagnostics& diags, std::string path);
 
+    void addSymlink(Diagnostics& diags, std::string fromPath, std::string toPath);
+
+    std::string realPath(Diagnostics& diags, const std::string& path) const;
+
+    std::vector<DyldSharedCache::FileAlias> getResolvedSymlinks(Diagnostics& diags);
+
+private:
+    std::set<std::string> filePaths;
+    std::map<std::string, std::string> symlinks;
+};
 
 #endif // FileUtils_h

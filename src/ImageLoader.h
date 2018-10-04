@@ -39,6 +39,7 @@
 #include <TargetConditionals.h>
 #include <vector>
 #include <new>
+#include <uuid/uuid.h>
 
 #if __arm__
  #include <mach/vm_page_size.h>
@@ -65,6 +66,7 @@
 
 #include "mach-o/dyld_images.h"
 #include "mach-o/dyld_priv.h"
+#include "DyldSharedCache.h"
 
 #if __i386__
 	#define SHARED_REGION_BASE SHARED_REGION_BASE_I386
@@ -108,8 +110,9 @@
 	#define SUPPORT_CLASSIC_MACHO			__arm__
 	#define SUPPORT_ZERO_COST_EXCEPTIONS	(!__USING_SJLJ_EXCEPTIONS__)
 	#define INITIAL_IMAGE_COUNT				150
-	#define SUPPORT_ACCELERATE_TABLES		(__arm__ || __arm64__)
+	#define SUPPORT_ACCELERATE_TABLES		!TARGET_IPHONE_SIMULATOR
 	#define SUPPORT_ROOT_PATH				TARGET_IPHONE_SIMULATOR
+	#define USES_CHAINED_BINDS				(__arm64e__)
 #else
 	#define SPLIT_SEG_SHARED_REGION_SUPPORT 0
 	#define SPLIT_SEG_DYLIB_SUPPORT			__i386__
@@ -123,11 +126,13 @@
 	#define INITIAL_IMAGE_COUNT				200
 	#define SUPPORT_ACCELERATE_TABLES		0
 	#define SUPPORT_ROOT_PATH				1
+	#define USES_CHAINED_BINDS				0
 #endif
 
 #define MAX_MACH_O_HEADER_AND_LOAD_COMMANDS_SIZE (32*1024)
 
 #define MH_HAS_OBJC			0x40000000
+
 
 // <rdar://problem/13590567> optimize away dyld's initializers
 #define VECTOR_NEVER_DESTRUCTED(type) \
@@ -256,12 +261,14 @@ public:
 
 		void addTime(const char* name, uint64_t time);
 	};
+
+	typedef void (^CoalesceNotifier)(const Symbol* implSym, const ImageLoader* implIn, const mach_header* implMh);
 	
 	struct LinkContext {
-		ImageLoader*	(*loadLibrary)(const char* libraryName, bool search, const char* origin, const RPathChain* rpaths, unsigned& cacheIndex);
+		ImageLoader*	(*loadLibrary)(const char* libraryName, bool search, const char* origin, const RPathChain* rpaths, bool enforceIOSMac, unsigned& cacheIndex);
 		void			(*terminationRecorder)(ImageLoader* image);
 		bool			(*flatExportFinder)(const char* name, const Symbol** sym, const ImageLoader** image);
-		bool			(*coalescedExportFinder)(const char* name, const Symbol** sym, const ImageLoader** image);
+		bool			(*coalescedExportFinder)(const char* name, const Symbol** sym, const ImageLoader** image, CoalesceNotifier);
 		unsigned int	(*getCoalescedImages)(ImageLoader* images[], unsigned imageIndex[]);
 		void			(*undefinedHandler)(const char* name);
 		MappedRegion*	(*getAllMappedRegions)(MappedRegion*);
@@ -296,17 +303,23 @@ public:
 		const char*		progname;
 		ProgramVars		programVars;
 		ImageLoader*	mainExecutable;
-		const char*		imageSuffix;
+		const char* const * imageSuffix;
 #if SUPPORT_ROOT_PATH
 		const char**	rootPaths;
 #endif
+		const DyldSharedCache*  dyldCache;
 		const dyld_interpose_tuple*	dynamicInterposeArray;
 		size_t			dynamicInterposeCount;
 		PrebindMode		prebindUsage;
 		SharedRegionMode sharedRegionMode;
 		bool			dyldLoadedAtSameAddressNeededBySharedCache;
 		bool			strictMachORequired;
-		bool			requireCodeSignature;
+		bool			allowAtPaths;
+		bool			allowEnvVarsPrint;
+		bool			allowEnvVarsPath;
+		bool			allowEnvVarsSharedCache;
+		bool			allowClassicFallbackPaths;
+		bool			allowInsertFailures;
 		bool			mainExecutableCodeSigned;
 		bool			preFetchDisabled;
 		bool			prebinding;
@@ -314,8 +327,7 @@ public:
 		bool			linkingMainExecutable;
 		bool			startedInitializingMainExecutable;
 #if __MAC_OS_X_VERSION_MIN_REQUIRED
-		bool			processIsRestricted;
-		bool			processUsingLibraryValidation;
+		bool			marzipan;
 #endif
 		bool			verboseOpts;
 		bool			verboseEnv;
@@ -417,7 +429,7 @@ public:
 	bool								leaveMapped() { return fLeaveMapped; }
 
 										// image resides in dyld shared cache
-	virtual bool						inSharedCache() const = 0;
+	virtual bool						inSharedCache() const { return false; };
 
 										// checks if the specifed address is within one of this image's segments
 	virtual bool						containsAddress(const void* addr) const;
@@ -434,11 +446,11 @@ public:
 										// st_mtime from stat() on file
 	time_t								lastModified() const;
 
-										// only valid for main executables, returns a pointer its entry point from LC_UNIXTHREAD
-	virtual void*						getThreadPC() const = 0;
+										// only valid for main executables, returns a pointer its entry point from LC_MAIN
+	virtual void*						getEntryFromLC_MAIN() const = 0;
 	
-										// only valid for main executables, returns a pointer its main from LC_<MAIN
-	virtual void*						getMain() const = 0;
+										// only valid for main executables, returns a pointer its main from LC_UNIXTHREAD
+	virtual void*						getEntryFromLC_UNIXTHREAD() const = 0;
 	
 										// dyld API's require each image to have an associated mach_header
 	virtual const struct mach_header*   machHeader() const = 0;
@@ -543,6 +555,9 @@ public:
 	virtual void						getUnwindInfo(dyld_unwind_sections* info) = 0;
 
 										// given a pointer into an image, find which segment and section it is in
+	virtual const struct macho_section* findSection(const void* imageInterior) const = 0;
+
+										// given a pointer into an image, find which segment and section it is in
 	virtual bool						findSection(const void* imageInterior, const char** segmentName, const char** sectionName, size_t* sectionOffset) = 0;
 	
 										// the image supports being prebound
@@ -571,6 +586,10 @@ public:
 										// Image has objc sections, so information objc about when it comes and goes
 	virtual	bool						notifyObjC() const { return false; }
 
+	virtual bool						overridesCachedDylib(uint32_t& num) const { return false; }
+	virtual void						setOverridesCachedDylib(uint32_t num) { }
+
+
 //
 // A segment is a chunk of an executable file that is mapped into memory.  
 //
@@ -595,11 +614,16 @@ public:
 	virtual uint32_t					minOSVersion() const = 0;
 	
 										// if the image contains interposing functions, register them
-	virtual void						registerInterposing() = 0;
+	virtual void						registerInterposing(const LinkContext& context) = 0;
+
+	virtual bool						usesChainedFixups() const { return false; }
+
 
 										// when resolving symbols look in subImage if symbol can't be found
 	void								reExport(ImageLoader* subImage);
-	
+
+	virtual void						recursiveBind(const LinkContext& context, bool forceLazysBound, bool neverUnload);
+	virtual void						recursiveBindWithAccounting(const LinkContext& context, bool forceLazysBound, bool neverUnload);
 	void								weakBind(const LinkContext& context);
 
 	void								applyInterposing(const LinkContext& context);
@@ -629,7 +653,9 @@ public:
 	
 	bool								isReferencedDownward() { return fIsReferencedDownward; }
 
-	
+	virtual uintptr_t					resolveWeak(const LinkContext& context, const char* symbolName, bool weak_import, bool runResolver,
+													const ImageLoader** foundIn) { return 0; } 
+
 										// triggered by DYLD_PRINT_STATISTICS to write info on work done and how fast
 	static void							printStatistics(unsigned int imageCount, const InitializerTimingList& timingInfo);
 	static void							printStatisticsDetails(unsigned int imageCount, const InitializerTimingList& timingInfo);
@@ -646,6 +672,8 @@ public:
 
 	static bool							haveInterposingTuples() { return !fgInterposingTuples.empty(); }
 	static void							clearInterposingTuples() { fgInterposingTuples.clear(); }
+
+	static void							applyInterposingToDyldCache(const LinkContext& context);
 
 			bool						dependsOn(ImageLoader* image);
 			
@@ -675,6 +703,8 @@ public:
 
 	static uintptr_t read_uleb128(const uint8_t*& p, const uint8_t* end);
 	static intptr_t read_sleb128(const uint8_t*& p, const uint8_t* end);
+
+	void			vmAccountingSetSuspended(const LinkContext& context, bool suspend);
 
 protected:			
 	// abstract base class so all constructors protected
@@ -723,7 +753,6 @@ protected:
 	virtual void		recursiveLoadLibraries(const LinkContext& context, bool preflightOnly, const RPathChain& loaderRPaths, const char* loadPath);
 	virtual unsigned 	recursiveUpdateDepth(unsigned int maxDepth);
 	virtual void		recursiveRebase(const LinkContext& context);
-	virtual void		recursiveBind(const LinkContext& context, bool forceLazysBound, bool neverUnload);
 	virtual void		recursiveApplyInterposing(const LinkContext& context);
 	virtual void		recursiveGetDOFSections(const LinkContext& context, std::vector<DOFInfo>& dofs);
 	virtual void		recursiveInitialization(const LinkContext& context, mach_port_t this_thread, const char* pathToInitialize,
@@ -806,12 +835,13 @@ public:
 	static uint64_t				fgTotalObjCSetupTime;
 	static uint64_t				fgTotalDebuggerPausedTime;
 	static uint64_t				fgTotalRebindCacheTime;
-protected:
 	static uint64_t				fgTotalRebaseTime;
 	static uint64_t				fgTotalBindTime;
 	static uint64_t				fgTotalWeakBindTime;
 	static uint64_t				fgTotalDOF;
 	static uint64_t				fgTotalInitTime;
+
+protected:
 	static std::vector<InterposeTuple>	fgInterposingTuples;
 	
 	const char*					fPath;

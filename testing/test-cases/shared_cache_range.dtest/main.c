@@ -9,6 +9,18 @@
 #include <mach-o/dyld_priv.h>
 #include <dlfcn.h>
 
+#if __has_feature(ptrauth_calls)
+    #include <ptrauth.h>
+#endif
+
+static const void *stripPointer(const void *ptr) {
+#if __has_feature(ptrauth_calls)
+    return __builtin_ptrauth_strip(ptr, ptrauth_key_asia);
+#else
+    return ptr;
+#endif
+}
+
 
 int main()
 {
@@ -41,7 +53,7 @@ int main()
         const void* cacheEnd = (char*)cacheStart + cacheLen;
 
         // verify malloc is in shared cache
-        if ( ((void*)&malloc < cacheStart) || ((void*)&malloc > cacheEnd) ) {
+        if ( (stripPointer((void*)&malloc) < cacheStart) || (stripPointer((void*)&malloc) > cacheEnd) ) {
             printf("[FAIL] shared_cache_range: malloc is outside range of cache\n");
             return 0;
         }

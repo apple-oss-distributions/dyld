@@ -23,6 +23,7 @@
 
 
 #include <set>
+#include <array>
 #include <string>
 #include <sstream>
 #include <iomanip> // std::setfill, std::setw
@@ -140,7 +141,7 @@ void makeBoms(dyld3::Manifest& manifest, const std::string& masterDstRoot)
 }
 
 bool build(Diagnostics& diags, dyld3::Manifest& manifest, const std::string& masterDstRoot, bool dedupe, bool verbose,
-           bool skipWrites, bool agileChooseSHA256CdHash)
+           bool skipWrites, bool agileChooseSHA256CdHash, bool emitDevCaches, bool isLocallyBuiltCache)
 {
     dispatch_queue_t                   queue = dispatch_get_global_queue(DISPATCH_QUEUE_PRIORITY_DEFAULT, 0);
     dispatch_queue_t                   warningQueue = dispatch_queue_create("com.apple.dyld.cache-builder.warnings", DISPATCH_QUEUE_SERIAL);
@@ -207,7 +208,8 @@ bool build(Diagnostics& diags, dyld3::Manifest& manifest, const std::string& mas
             }
         }
         
-        manifest.configuration(*cacheSet.begin()).forEachArchitecture([&masterDstRoot, &dedupe, &fileName, &setName, &manifest, &buildQueue, &cacheSet, verbose](const std::string& arch) {
+        manifest.configuration(*cacheSet.begin()).forEachArchitecture([&masterDstRoot, &dedupe, &fileName, &setName, &manifest,
+                                                                       &buildQueue, &cacheSet, skipWrites, verbose, emitDevCaches, isLocallyBuiltCache](const std::string& arch) {
             std::string configPath;
             std::string runtimePath =  "/System/Library/Caches/com.apple.dyld/";
             if (manifest.platform() == dyld3::Platform::macOS) {
@@ -219,11 +221,16 @@ bool build(Diagnostics& diags, dyld3::Manifest& manifest, const std::string& mas
                 configPath = masterDstRoot + runtimePath;
             }
 
+            mkpath_np(configPath.c_str(), 0755);
             if (manifest.platform() == dyld3::Platform::macOS) {
-                buildQueue.push_back(manifest.makeQueueEntry(configPath + "dyld_shared_cache_" + arch, cacheSet, arch, false, setName + "/" + arch, verbose));
+                buildQueue.push_back(manifest.makeQueueEntry(configPath + "dyld_shared_cache_" + arch, cacheSet, arch, false, setName + "/" + arch,
+                                                             isLocallyBuiltCache, skipWrites, verbose));
             } else {
-                buildQueue.push_back(manifest.makeQueueEntry(configPath + "dyld_shared_cache_" + arch + ".development", cacheSet, arch, false, setName + "/" + arch, verbose));
-                buildQueue.push_back(manifest.makeQueueEntry(configPath + "dyld_shared_cache_" + arch, cacheSet, arch, true, setName + "/" + arch, verbose));
+                if (emitDevCaches)
+                    buildQueue.push_back(manifest.makeQueueEntry(configPath + "dyld_shared_cache_" + arch + ".development", cacheSet, arch, false, setName + "/" + arch,
+                                                                 isLocallyBuiltCache, skipWrites, verbose));
+                buildQueue.push_back(manifest.makeQueueEntry(configPath + "dyld_shared_cache_" + arch, cacheSet, arch, true, setName + "/" + arch,
+                                                             isLocallyBuiltCache, skipWrites, verbose));
             }
         });
     }
@@ -234,7 +241,7 @@ bool build(Diagnostics& diags, dyld3::Manifest& manifest, const std::string& mas
 
     dispatch_sync(warningQueue, ^{
         auto manifestWarnings = diags.warnings();
-        warnings.insert(manifestWarnings.begin(), manifestWarnings.end());
+        //warnings.insert(manifestWarnings.begin(), manifestWarnings.end());
     });
 
     dispatch_apply(buildQueue.size(), queue, ^(size_t index) {
@@ -252,39 +259,21 @@ bool build(Diagnostics& diags, dyld3::Manifest& manifest, const std::string& mas
             for (const auto& configName : queueEntry.configNames) {
                 auto& configResults = manifest.configuration(configName).architecture(queueEntry.options.archName).results;
                 for (const auto& mh : results.evictions) {
-                    auto parser = dyld3::MachOParser(mh);
-                    configResults.exclude(&parser, "VM overflow, evicting");
+                    configResults.exclude(mh, "VM overflow, evicting");
                 }
                 configResults.warnings = results.warnings;
                 if (queueEntry.options.optimizeStubs) {
-                    configResults.developmentCache.cdHash = chooseSecondCdHash ? results.cdHashSecond : results.cdHashFirst;
+                    configResults.productionCache.cdHash = chooseSecondCdHash ? results.cdHashSecond : results.cdHashFirst;
                 } else {
-                    configResults.productionCache.cdHash =  chooseSecondCdHash ? results.cdHashSecond : results.cdHashFirst;
+                    configResults.developmentCache.cdHash =  chooseSecondCdHash ? results.cdHashSecond : results.cdHashFirst;
                 }
             }
         });
         if (!results.errorMessage.empty()) {
             fprintf(stderr, "[%s] ERROR: %s\n", queueEntry.options.loggingPrefix.c_str(), results.errorMessage.c_str());
-        } else if (!skipWrites) {
-            dispatch_sync(write_queue, ^{
-                // save new cache file to disk and write new .map file
-                assert(results.cacheContent != nullptr);
-                mkpath_np(dirPath(queueEntry.outputPath).c_str(), 0755);
-                if (!safeSave(results.cacheContent, results.cacheLength, queueEntry.outputPath)) {
-                    cacheBuildFailure = true;
-                    fprintf(stderr, "[%s] ERROR: Could not write cache to: %s\n", queueEntry.options.loggingPrefix.c_str(), queueEntry.outputPath.c_str());
-                } else {
-                    fprintf(stderr, "[%s] Wrote cache to: %s\n", queueEntry.options.loggingPrefix.c_str(), queueEntry.outputPath.c_str());
-                    std::string mapStr = results.cacheContent->mapFile();
-                    std::string outFileMap = queueEntry.outputPath + ".map";
-                    safeSave(mapStr.c_str(), mapStr.size(), outFileMap);
-                }
-                // free created cache buffer
-                vm_deallocate(mach_task_self(), (vm_address_t)results.cacheContent, results.cacheLength);
-            });
-        } else {
+            cacheBuildFailure = true;
+        } else if (skipWrites) {
             fprintf(stderr, "[%s] Skipped writing cache to: %s\n", queueEntry.options.loggingPrefix.c_str(), queueEntry.outputPath.c_str());
-            vm_deallocate(mach_task_self(), (vm_address_t)results.cacheContent, results.cacheLength);
         }
     });
     

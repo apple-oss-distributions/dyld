@@ -29,21 +29,12 @@
 #include <string>
 #include <vector>
 #include <unordered_map>
+#include <uuid/uuid.h>
 
 #include "dyld_cache_format.h"
 #include "Diagnostics.h"
-#include "MachOParser.h"
-
-
-namespace  dyld3 {
-  namespace launch_cache {
-    namespace binary_format {
-      struct Closure;
-      struct ImageGroup;
-      struct Image;
-    }
-  }
-}
+#include "MachOAnalyzer.h"
+#include "Closure.h"
 
 
 class VIS_HIDDEN DyldSharedCache
@@ -59,17 +50,19 @@ public:
 
     struct CreateOptions
     {
+        std::string                                 outputFilePath;
+        std::string                                 outputMapFilePath;
         std::string                                 archName;
         dyld3::Platform                             platform;
         bool                                        excludeLocalSymbols;
         bool                                        optimizeStubs;
         bool                                        optimizeObjC;
         CodeSigningDigestMode                       codeSigningDigestMode;
-        bool                                        agileSignatureChooseSHA256CdHash;
         bool                                        dylibsRemovedDuringMastering;
         bool                                        inodesAreSameAsRuntime;
         bool                                        cacheSupportsASLR;
         bool                                        forSimulator;
+        bool                                        isLocallyBuiltCache;
         bool                                        verbose;
         bool                                        evictLeafDylibsOnOverflow;
         std::unordered_map<std::string, unsigned>   dylibOrdering;
@@ -82,11 +75,11 @@ public:
     {
                                     MappedMachO()
                                             : mh(nullptr), length(0), isSetUID(false), protectedBySIP(false), sliceFileOffset(0), modTime(0), inode(0) { }
-                                    MappedMachO(const std::string& path, const mach_header* p, size_t l, bool isu, bool sip, uint64_t o, uint64_t m, uint64_t i)
+                                    MappedMachO(const std::string& path, const dyld3::MachOAnalyzer* p, size_t l, bool isu, bool sip, uint64_t o, uint64_t m, uint64_t i)
                                             : runtimePath(path), mh(p), length(l), isSetUID(isu), protectedBySIP(sip), sliceFileOffset(o), modTime(m), inode(i) { }
 
         std::string                 runtimePath;
-        const mach_header*          mh;
+        const dyld3::MachOAnalyzer* mh;
         size_t                      length;
         uint64_t                    isSetUID        :  1,
                                     protectedBySIP  :  1,
@@ -97,14 +90,19 @@ public:
 
     struct CreateResults
     {
-        const DyldSharedCache*          cacheContent    = nullptr;    // caller needs to vm_deallocate() when done
-        size_t                          cacheLength     = 0;
-        std::string                     errorMessage;
-        std::set<std::string>           warnings;
-        std::set<const mach_header*>    evictions;
-        bool                            agileSignature = false;
-        std::string                     cdHashFirst;
-        std::string                     cdHashSecond;
+        std::string                             errorMessage;
+        std::set<std::string>                   warnings;
+        std::set<const dyld3::MachOAnalyzer*>   evictions;
+        bool                                    agileSignature  = false;
+        std::string                             cdHashFirst;
+        std::string                             cdHashSecond;
+    };
+
+
+    struct FileAlias
+    {
+        std::string             realPath;
+        std::string             aliasPath;
     };
 
 
@@ -149,13 +147,13 @@ public:
     //
     // Returns the architecture name of the shared cache, e.g. "arm64"
     //
-    std::string         archName() const;
+    const char*         archName() const;
 
 
     //
     // Returns the platform the cache is for
     //
-    uint32_t            platform() const;
+    dyld3::Platform    platform() const;
 
 
     //
@@ -165,6 +163,17 @@ public:
 
 
     //
+    // Searches cache for dylib with specified path
+    //
+    bool                hasImagePath(const char* dylibPath, uint32_t& imageIndex) const;
+
+
+    //
+    // Searches cache for dylib with specified mach_header
+    //
+    bool                findMachHeaderImageIndex(const mach_header* mh, uint32_t& imageIndex) const;
+
+   //
     // Iterates over each dylib in the cache
     //
     void                forEachImageEntry(void (^handler)(const char* path, uint64_t mTime, uint64_t inode)) const;
@@ -173,13 +182,25 @@ public:
     //
     // Iterates over each dylib in the cache
     //
-    void                forEachImageTextSegment(void (^handler)(uint64_t loadAddressUnslid, uint64_t textSegmentSize, const uuid_t dylibUUID, const char* installName)) const;
+    const mach_header*  getIndexedImageEntry(uint32_t index, uint64_t& mTime, uint64_t& node) const;
+
+
+    //
+    // Iterates over each dylib in the cache
+    //
+    void                forEachImageTextSegment(void (^handler)(uint64_t loadAddressUnslid, uint64_t textSegmentSize, const uuid_t dylibUUID, const char* installName, bool& stop)) const;
 
 
     //
     // Iterates over each of the three regions in the cache
     //
     void                forEachRegion(void (^handler)(const void* content, uint64_t vmAddr, uint64_t size, uint32_t permissions)) const;
+
+
+    //
+    // Returns if an address range is in this cache, and if so if in a read-only area
+    //
+    bool                inCache(const void* addr, size_t length, bool& readOnly) const;
 
 
     //
@@ -198,6 +219,49 @@ public:
     // returns the vm size required to map cache
     //
     uint64_t            mappedSize() const;
+
+
+    //
+    // searches cache for pre-built closure for program
+    //
+    const dyld3::closure::LaunchClosure* findClosure(const char* executablePath) const;
+
+
+    //
+    // iterates all pre-built closures for program
+    //
+    void forEachLaunchClosure(void (^handler)(const char* executableRuntimePath, const dyld3::closure::LaunchClosure* closure)) const;
+
+
+    //
+    // iterates all pre-built Image* for OS dylibs/bundles not in dyld cache
+    //
+    void forEachDlopenImage(void (^handler)(const char* runtimePath, const dyld3::closure::Image* image)) const;
+
+
+    //
+    // returns the ImageArray pointer to Images in dyld shared cache
+    //
+    const dyld3::closure::ImageArray*  cachedDylibsImageArray() const;
+
+
+    //
+    // returns the ImageArray pointer to Images in OS with pre-build dlopen closure
+    //
+    const dyld3::closure::ImageArray*  otherOSImageArray() const;
+
+
+    //
+    // searches cache for pre-built dlopen closure for OS dylib/bundle
+    //
+    const dyld3::closure::Image* findDlopenOtherImage(const char* path) const;
+
+
+    //
+    // returns true if the offset is in the TEXT of some cached dylib and sets *index to the dylib index
+    //
+    bool              addressInText(uint32_t cacheOffset, uint32_t* index) const;
+
 
 
     dyld_cache_header header;

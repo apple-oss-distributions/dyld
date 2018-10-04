@@ -12,6 +12,9 @@
 #include <signal.h>
 #include <spawn.h>
 #include <errno.h>
+#include <sys/uio.h>
+#include <sys/wait.h>
+#include <sys/types.h>
 #include <mach/mach.h>
 #include <mach/machine.h>
 #include <mach-o/dyld_process_info.h>
@@ -108,13 +111,14 @@ static bool hasCF(task_t task, bool launchedSuspended)
     bool valueSaysLaunchedSuspended = (stateInfo.dyldState == dyld_process_state_not_started);
     if ( valueSaysLaunchedSuspended != launchedSuspended ) {
         printf("[FAIL] dyld_process_info suspend state mismatch\n");
+        _dyld_process_info_release(info);
         return false;
     }
 
     __block bool foundDyld = false;
     _dyld_process_info_for_each_image(info, ^(uint64_t machHeaderAddress, const uuid_t uuid, const char* path) {
         //fprintf(stderr, "0x%llX %s\n", machHeaderAddress, path);
-        if ( strstr(path, "/usr/lib/dyld") != NULL )
+        if ( strstr(path, "/dyld") != NULL )
             foundDyld = true;
     });
 
@@ -126,6 +130,7 @@ static bool hasCF(task_t task, bool launchedSuspended)
             if ( strstr(path, "/linksWithCF.exe") != NULL )
                 foundMain = true;
        });
+        _dyld_process_info_release(info);
         return foundMain && foundDyld;
     }
 
@@ -139,6 +144,37 @@ static bool hasCF(task_t task, bool launchedSuspended)
     _dyld_process_info_release(info);
 
     return foundCF && foundDyld;
+}
+
+static void checkForLeaks(const char *name) {
+    printf("[BEGIN] %s checkForLeaks\n", name);
+    pid_t child;
+    int stat_loc;
+    char buffer[PAGE_SIZE];
+    (void)snprintf(&buffer[0], 128, "%d", getpid());
+
+    const char* argv[] = { "/usr/bin/leaks", buffer, NULL };
+    int psResult = posix_spawn(&child, "/usr/bin/leaks", NULL, NULL, (char**)argv, environ);
+    if ( psResult != 0 ) {
+        printf("[FAIL] %s checkForLeaks posix_spawn failed, err=%d\n", name, psResult);
+        exit(0);
+    }
+
+    (void)wait4(child, &stat_loc, 0, NULL);
+    ssize_t readBytes = 0;
+    if (WIFEXITED(stat_loc) == 0) {
+        printf("[FAIL] %s checkForLeaks leaks did not exit\n", name);
+        exit(0);
+    }
+    if (WEXITSTATUS(stat_loc) == 1) {
+        printf("[FAIL] %s checkForLeaks found leaks\n", name);
+        exit(0);
+    }
+    if (WEXITSTATUS(stat_loc) != 0) {
+        printf("[FAIL] %s checkForLeaks leaks errored out\n", name);
+        exit(0);
+    }
+    printf("[PASS] %s checkForLeaks\n", name);
 }
 
 
@@ -202,5 +238,7 @@ int main(int argc, const char* argv[])
     }
 
     printf("[PASS] dyld_process_info\n");
+    checkForLeaks("dyld_process_info");
+
 	return 0;
 }

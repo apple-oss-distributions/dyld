@@ -28,7 +28,7 @@ static void tryImage(const char* path)
 	
 	int result = dlclose(handle);
 	if ( result != 0 ) {
-        printf("dlclose() returned %c\n", result);
+        printf("dlclose() returned %d, dlerror()=%s\n", result, dlerror());
         printf("[FAIL] dlopen-basic %s\n", path);
 		return;
 	}

@@ -47,6 +47,7 @@ enum {
     CS_HASHTYPE_SHA1              = 1,
     CS_HASHTYPE_SHA256            = 2,
     CS_HASHTYPE_SHA256_TRUNCATED  = 3,
+    CS_HASHTYPE_SHA384 = 4,
 
     CS_HASH_SIZE_SHA1             = 20,
     CS_HASH_SIZE_SHA256           = 32,

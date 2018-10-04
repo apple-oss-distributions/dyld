@@ -26,7 +26,9 @@
 #include <string.h>
 #include <malloc/malloc.h>
 #include <sys/mman.h>
+#include <execinfo.h>
 
+#include <System/sys/csr.h>
 #include <crt_externs.h>
 #include <Availability.h>
 #include <vproc_priv.h>
@@ -41,10 +43,11 @@
 
 #include "ImageLoader.h"
 #include "dyldLock.h"
-#include "start_glue.h"
 
 #include "../dyld3/APIs.h"
 #include "../dyld3/AllImages.h"
+#include "../dyld3/StartGlue.h"
+#include "../dyld3/Tracing.h"
 
 
 // this was in dyld_priv.h but it is no longer exported
@@ -128,7 +131,6 @@ extern bool gUseDyld3;
 	#define TOOL_SWIFT	2
 	#define TOOL_LD		3
 #endif
-
 
 // deprecated APIs are still availble on Mac OS X, but not on iPhone OS
 #if __IPHONE_OS_VERSION_MIN_REQUIRED	
@@ -532,262 +534,84 @@ int32_t NSVersionOfRunTimeLibrary(const char* libraryName)
 	return (-1);
 }
 
-
-#define PACKED_VERSION(major, minor, tiny) ((((major) & 0xffff) << 16) | (((minor) & 0xff) << 8) | ((tiny) & 0xff))
-
-
-static bool getVersionLoadCommandInfo(const mach_header* mh, uint32_t* platform, uint32_t* minOS, uint32_t* sdk)
-{
-	const load_command* startCmds = NULL;
-	if ( mh->magic == MH_MAGIC_64 )
-		startCmds = (load_command*)((char *)mh + sizeof(mach_header_64));
-	else if ( mh->magic == MH_MAGIC )
-		startCmds = (load_command*)((char *)mh + sizeof(mach_header));
-	else
-		return false;  // not a mach-o file, or wrong endianness
-		
-	const load_command* const cmdsEnd = (load_command*)((char*)startCmds + mh->sizeofcmds);
-	const load_command* cmd = startCmds;
-	for(uint32_t i = 0; i < mh->ncmds; ++i) {
-	    const load_command* nextCmd = (load_command*)((char *)cmd + cmd->cmdsize);
-		if ( (cmd->cmdsize < 8) || (nextCmd > cmdsEnd) || (nextCmd < startCmds)) {
-			return 0;
-		}
-		const version_min_command* versCmd;
-		const build_version_command* buildVersCmd;
-		switch ( cmd->cmd ) {
-			case LC_VERSION_MIN_IPHONEOS:
-				versCmd = (version_min_command*)cmd;
-				*platform	= PLATFORM_IOS;
-				*minOS		= versCmd->version;
-				*sdk		= versCmd->sdk;
-				return true;
-			case LC_VERSION_MIN_MACOSX:
-				versCmd = (version_min_command*)cmd;
-				*platform	= PLATFORM_MACOS;
-				*minOS		= versCmd->version;
-				*sdk		= versCmd->sdk;
-				return true;
-			case LC_VERSION_MIN_TVOS:
-				versCmd = (version_min_command*)cmd;
-				*platform	= PLATFORM_TVOS;
-				*minOS		= versCmd->version;
-				*sdk		= versCmd->sdk;
-				return true;
-			case LC_VERSION_MIN_WATCHOS:
-				versCmd = (version_min_command*)cmd;
-				*platform	= PLATFORM_WATCHOS;
-				*minOS		= versCmd->version;
-				*sdk		= versCmd->sdk;
-				return true;
-			case LC_BUILD_VERSION:
-				buildVersCmd = (build_version_command*)cmd;
-				*platform	 = buildVersCmd->platform;
-				*minOS		 = buildVersCmd->minos;
-				*sdk		 = buildVersCmd->sdk;
-				return true;
-		}
-		cmd = nextCmd;
-	}
-	return false;
-}
-
-#if !__WATCH_OS_VERSION_MIN_REQUIRED && !__TV_OS_VERSION_MIN_REQUIRED
-static uint32_t deriveSDKVersFromDylibs(const mach_header* mh)
-{
-	const load_command* startCmds = NULL;
-	if ( mh->magic == MH_MAGIC_64 )
-		startCmds = (load_command*)((char *)mh + sizeof(mach_header_64));
-	else if ( mh->magic == MH_MAGIC )
-		startCmds = (load_command*)((char *)mh + sizeof(mach_header));
-	else
-		return 0;  // not a mach-o file, or wrong endianness
-		
-	const load_command* const cmdsEnd = (load_command*)((char*)startCmds + mh->sizeofcmds);
-	const dylib_command* dylibCmd;
-	const load_command* cmd = startCmds;
-	const char* dylibName;
-  #if __IPHONE_OS_VERSION_MIN_REQUIRED
-	uint32_t foundationVers = 0;
-  #else
-	uint32_t libSystemVers = 0;
-  #endif
-	for(uint32_t i = 0; i < mh->ncmds; ++i) {
-	    const load_command* nextCmd = (load_command*)((char *)cmd + cmd->cmdsize);
-		// <rdar://problem/14381579&16050962> sanity check size of command
-		if ( (cmd->cmdsize < 8) || (nextCmd > cmdsEnd) || (nextCmd < startCmds)) {
-			return 0;
-		}
-		switch ( cmd->cmd ) {
-			case LC_LOAD_DYLIB:
-			case LC_LOAD_WEAK_DYLIB:
-			case LC_LOAD_UPWARD_DYLIB:
-				dylibCmd = (dylib_command*)cmd;
-				// sanity check dylib command layout
-				if ( dylibCmd->dylib.name.offset > cmd->cmdsize )
-					return 0;
-				dylibName = (char*)dylibCmd + dylibCmd->dylib.name.offset;
-  #if __IPHONE_OS_VERSION_MIN_REQUIRED
-				if ( strcmp(dylibName, "/System/Library/Frameworks/Foundation.framework/Foundation") == 0 )
-					foundationVers = dylibCmd->dylib.current_version;
-  #else
-				if ( strcmp(dylibName, "/usr/lib/libSystem.B.dylib") == 0 )
-					libSystemVers = dylibCmd->dylib.current_version;
-  #endif
-				break;
-		}
-		cmd = nextCmd;
-	}
-
-	struct DylibToOSMapping {
-		uint32_t dylibVersion;
-		uint32_t osVersion;
-	};
-	
-  #if __IPHONE_OS_VERSION_MIN_REQUIRED
-	static const DylibToOSMapping foundationMapping[] = {
-		{ PACKED_VERSION(678,24,0), 0x00020000 },
-		{ PACKED_VERSION(678,26,0), 0x00020100 },
-		{ PACKED_VERSION(678,29,0), 0x00020200 },
-		{ PACKED_VERSION(678,47,0), 0x00030000 },
-		{ PACKED_VERSION(678,51,0), 0x00030100 },
-		{ PACKED_VERSION(678,60,0), 0x00030200 },
-		{ PACKED_VERSION(751,32,0), 0x00040000 },
-		{ PACKED_VERSION(751,37,0), 0x00040100 },
-		{ PACKED_VERSION(751,49,0), 0x00040200 },
-		{ PACKED_VERSION(751,58,0), 0x00040300 },
-		{ PACKED_VERSION(881,0,0),  0x00050000 },
-		{ PACKED_VERSION(890,1,0),  0x00050100 },
-		{ PACKED_VERSION(992,0,0),  0x00060000 },
-		{ PACKED_VERSION(993,0,0),  0x00060100 },
-		{ PACKED_VERSION(1038,14,0),0x00070000 },
-		{ PACKED_VERSION(0,0,0),    0x00070000 }
-		// We don't need to expand this table because all recent
-		// binaries have LC_VERSION_MIN_ load command.
-	};
-
-	if ( foundationVers != 0 ) {
-		uint32_t lastOsVersion = 0;
-		for (const DylibToOSMapping* p=foundationMapping; ; ++p) {
-			if ( p->dylibVersion == 0 )
-				return p->osVersion;
-			if ( foundationVers < p->dylibVersion )
-				return lastOsVersion;
-			lastOsVersion = p->osVersion;
-		}
-	}
-
-  #else
-	// Note: versions are for the GM release.  The last entry should
-	// always be zero.  At the start of the next major version,
-	// a new last entry needs to be added and the previous zero
-	// updated to the GM dylib version.
-	static const DylibToOSMapping libSystemMapping[] = {
-		{ PACKED_VERSION(88,1,3),   0x000A0400 },
-		{ PACKED_VERSION(111,0,0),  0x000A0500 },
-		{ PACKED_VERSION(123,0,0),  0x000A0600 },
-		{ PACKED_VERSION(159,0,0),  0x000A0700 },
-		{ PACKED_VERSION(169,3,0),  0x000A0800 },
-		{ PACKED_VERSION(1197,0,0), 0x000A0900 },
-		{ PACKED_VERSION(0,0,0),    0x000A0900 }
-		// We don't need to expand this table because all recent
-		// binaries have LC_VERSION_MIN_ load command.
-	};
-
-	if ( libSystemVers != 0 ) {
-		uint32_t lastOsVersion = 0;
-		for (const DylibToOSMapping* p=libSystemMapping; ; ++p) {
-			if ( p->dylibVersion == 0 )
-				return p->osVersion;
-			if ( libSystemVers < p->dylibVersion )
-				return lastOsVersion;
-			lastOsVersion = p->osVersion;
-		}
-	}
-  #endif
-  return 0;
-}
-#endif
-
-
-#if __WATCH_OS_VERSION_MIN_REQUIRED
-static uint32_t watchVersToIOSVers(uint32_t vers)
-{
-	return vers + 0x00070000;
-}
-
+#if TARGET_OS_WATCH
 uint32_t dyld_get_program_sdk_watch_os_version()
 {
-	if ( gUseDyld3 )
-		return dyld3::dyld_get_program_sdk_watch_os_version();
+    if (gUseDyld3)
+        return dyld3::dyld_get_program_sdk_watch_os_version();
 
-	const mach_header* mh = (mach_header*)_NSGetMachExecuteHeader();
-	uint32_t platform;
-	uint32_t minOS;
-	uint32_t sdk;
+    __block uint32_t retval = 0;
+    __block bool versionFound = false;
+    dyld3::dyld_get_image_versions((mach_header*)_NSGetMachExecuteHeader(), ^(dyld_platform_t platform, uint32_t sdk_version, uint32_t min_version) {
+        if (versionFound) return;
 
-	if ( getVersionLoadCommandInfo(mh, &platform, &minOS, &sdk) ) {
-		if ( platform == PLATFORM_WATCHOS )
-				return sdk;
-	}
-	return 0;
+        if (dyld_get_base_platform(platform) == PLATFORM_WATCHOS) {
+            versionFound = true;
+            retval = sdk_version;
+        }
+    });
+
+    return retval;
 }
 
 uint32_t dyld_get_program_min_watch_os_version()
 {
-	if ( gUseDyld3 )
-		return dyld3::dyld_get_program_min_watch_os_version();
+    if (gUseDyld3)
+        return dyld3::dyld_get_program_min_watch_os_version();
 
-	const mach_header* mh = (mach_header*)_NSGetMachExecuteHeader();
-	uint32_t platform;
-	uint32_t minOS;
-	uint32_t sdk;
+    __block uint32_t retval = 0;
+    __block bool versionFound = false;
+    dyld3::dyld_get_image_versions((mach_header*)_NSGetMachExecuteHeader(), ^(dyld_platform_t platform, uint32_t sdk_version, uint32_t min_version) {
+        if (versionFound) return;
 
-	if ( getVersionLoadCommandInfo(mh, &platform, &minOS, &sdk) ) {
-		if ( platform == PLATFORM_WATCHOS )
-				return minOS;  // return raw minOS (not mapped to iOS version)
-	}
-	return 0;
+        if (dyld_get_base_platform(platform) == PLATFORM_WATCHOS) {
+            versionFound = true;
+            retval = min_version;
+        }
+    });
+
+    return retval;
 }
-
 #endif
 
-
-
 #if TARGET_OS_BRIDGE
-static uint32_t bridgeVersToIOSVers(uint32_t vers)
-{
-	return vers + 0x00090000;
-}
-
 uint32_t dyld_get_program_sdk_bridge_os_version()
 {
-	const mach_header* mh = (mach_header*)_NSGetMachExecuteHeader();
-	uint32_t platform;
-	uint32_t minOS;
-	uint32_t sdk;
+    if (gUseDyld3)
+        return dyld3::dyld_get_program_sdk_bridge_os_version();
 
-	if ( getVersionLoadCommandInfo(mh, &platform, &minOS, &sdk) ) {
-		if ( platform == PLATFORM_BRIDGEOS )
-				return sdk;
-	}
-	return 0;
+    __block uint32_t retval = 0;
+    __block bool versionFound = false;
+    dyld3::dyld_get_image_versions((mach_header*)_NSGetMachExecuteHeader(), ^(dyld_platform_t platform, uint32_t sdk_version, uint32_t min_version) {
+        if (versionFound) return;
+
+        if (dyld_get_base_platform(platform) == PLATFORM_BRIDGEOS) {
+            versionFound = true;
+            retval = sdk_version;
+        }
+    });
+
+    return retval;
 }
 
 uint32_t dyld_get_program_min_bridge_os_version()
 {
-	const mach_header* mh = (mach_header*)_NSGetMachExecuteHeader();
-	uint32_t platform;
-	uint32_t minOS;
-	uint32_t sdk;
+    if (gUseDyld3)
+        return dyld3::dyld_get_program_min_bridge_os_version();
 
-	if ( getVersionLoadCommandInfo(mh, &platform, &minOS, &sdk) ) {
-		if ( platform == PLATFORM_BRIDGEOS )
-				return minOS;  // return raw minOS (not mapped to iOS version)
-	}
-	return 0;
+    __block uint32_t retval = 0;
+    __block bool versionFound = false;
+    dyld3::dyld_get_image_versions((mach_header*)_NSGetMachExecuteHeader(), ^(dyld_platform_t platform, uint32_t sdk_version, uint32_t min_version) {
+        if (versionFound) return;
+
+        if (dyld_get_base_platform(platform) == PLATFORM_BRIDGEOS) {
+            versionFound = true;
+            retval = min_version;
+        }
+    });
+
+    return retval;
 }
-
 #endif
 
 /*
@@ -801,112 +625,23 @@ uint32_t dyld_get_program_min_bridge_os_version()
  */
 uint32_t dyld_get_sdk_version(const mach_header* mh)
 {
-	if ( gUseDyld3 )
-		return dyld3::dyld_get_sdk_version(mh);
-
-    uint32_t platform;
-	uint32_t minOS;
-	uint32_t sdk;
-
-	if ( getVersionLoadCommandInfo(mh, &platform, &minOS, &sdk) ) {
-		switch (platform) {
-#if TARGET_OS_BRIDGE
-			case PLATFORM_BRIDGEOS:
-				// new binary. sdk version looks like "2.0" but API wants "11.0"
-				return bridgeVersToIOSVers(sdk);
-			case PLATFORM_IOS:
-				// old binary. sdk matches API semantics so can return directly.
-				return sdk;
-#elif __WATCH_OS_VERSION_MIN_REQUIRED
-			case PLATFORM_WATCHOS:
-				// new binary. sdk version looks like "2.0" but API wants "9.0"
-				return watchVersToIOSVers(sdk);
-			case PLATFORM_IOS:
-				// old binary. sdk matches API semantics so can return directly.
-				return sdk;
-#elif __TV_OS_VERSION_MIN_REQUIRED
-			case PLATFORM_TVOS:
-			case PLATFORM_IOS:
-				return sdk;
-#elif __IPHONE_OS_VERSION_MIN_REQUIRED
-			case PLATFORM_IOS:
-				if ( sdk != 0 )	// old binaries might not have SDK set
-					return sdk;
-				break;
-#else
-			case PLATFORM_MACOS:
-				if ( sdk != 0 )	// old binaries might not have SDK set
-					return sdk;
-				break;
-#endif
-		}
-	}
-
-#if __WATCH_OS_VERSION_MIN_REQUIRED || __TV_OS_VERSION_MIN_REQUIRED || TARGET_OS_BRIDGE
-	// All WatchOS and tv OS binaries should have version load command.
-	return 0;
-#else
-	// MacOSX and iOS have old binaries without version load commmand.
-	return deriveSDKVersFromDylibs(mh);
-#endif
+    return dyld3::dyld_get_sdk_version(mh);
 }
 
 uint32_t dyld_get_program_sdk_version()
 {
-	if ( gUseDyld3 )
-		return dyld3::dyld_get_program_sdk_version();
-
-	return dyld_get_sdk_version((mach_header*)_NSGetMachExecuteHeader());
+    return dyld3::dyld_get_sdk_version((mach_header*)_NSGetMachExecuteHeader());
 }
 
 uint32_t dyld_get_min_os_version(const struct mach_header* mh)
 {
-	if ( gUseDyld3 )
-		return dyld3::dyld_get_min_os_version(mh);
-
-	uint32_t platform;
-	uint32_t minOS;
-	uint32_t sdk;
-
-	if ( getVersionLoadCommandInfo(mh, &platform, &minOS, &sdk) ) {
-		switch (platform) {
-#if TARGET_OS_BRIDGE
-			case PLATFORM_BRIDGEOS:
-				// new binary. sdk version looks like "2.0" but API wants "11.0"
-				return bridgeVersToIOSVers(minOS);
-			case PLATFORM_IOS:
-				// old binary. sdk matches API semantics so can return directly.
-				return minOS;
-#elif __WATCH_OS_VERSION_MIN_REQUIRED
-			case PLATFORM_WATCHOS:
-				// new binary. OS version looks like "2.0" but API wants "9.0"
-				return watchVersToIOSVers(minOS);
-			case PLATFORM_IOS:
-				// old binary. OS matches API semantics so can return directly.
-				return minOS;
-#elif __TV_OS_VERSION_MIN_REQUIRED
-			case PLATFORM_TVOS:
-			case PLATFORM_IOS:
-				return minOS;
-#elif __IPHONE_OS_VERSION_MIN_REQUIRED
-			case PLATFORM_IOS:
-				return minOS;
-#else
-			case PLATFORM_MACOS:
-				return minOS;
-#endif
-		}
-	}
-	return 0;
+    return dyld3::dyld_get_min_os_version(mh);
 }
 
 
 uint32_t dyld_get_program_min_os_version()
 {
-	if ( gUseDyld3 )
-		return dyld3::dyld_get_program_min_os_version();
-
-	return dyld_get_min_os_version((mach_header*)_NSGetMachExecuteHeader());
+    return dyld3::dyld_get_min_os_version((mach_header*)_NSGetMachExecuteHeader());
 }
 
 
@@ -939,6 +674,55 @@ bool _dyld_get_image_uuid(const struct mach_header* mh, uuid_t uuid)
 	}
 	bzero(uuid, 16);
 	return false;
+}
+
+dyld_platform_t dyld_get_active_platform(void) {
+    if (gUseDyld3)
+        return dyld3::dyld_get_active_platform();
+
+    // HACK
+    // Most of the new version SPIs have pure dyld3 implementations, but
+    // They cannot get to the main executable, so we implement this here
+    // and they can use this by calling ::dyld_get_active_platform() in the root namespace
+    static dyld_platform_t sActivePlatform = 0;
+    if (sActivePlatform) return sActivePlatform;
+
+    dyld3::dyld_get_image_versions((mach_header*)_NSGetMachExecuteHeader(), ^(dyld_platform_t platform, uint32_t sdk_version, uint32_t min_version) {
+        sActivePlatform = platform;
+        //FIXME assert there is only one?
+    });
+    return sActivePlatform;
+}
+
+dyld_platform_t dyld_get_base_platform(dyld_platform_t platform) {
+    return dyld3::dyld_get_base_platform(platform);
+}
+
+bool dyld_is_simulator_platform(dyld_platform_t platform) {
+    return dyld3::dyld_is_simulator_platform(platform);
+}
+
+bool dyld_sdk_at_least(const struct mach_header* mh, dyld_build_version_t version) {
+    return dyld3::dyld_sdk_at_least(mh, version);
+}
+
+bool dyld_minos_at_least(const struct mach_header* mh, dyld_build_version_t version) {
+    return dyld3::dyld_minos_at_least(mh, version);
+}
+
+bool dyld_program_sdk_at_least(dyld_build_version_t version) {
+    return dyld3::dyld_sdk_at_least((mach_header*)_NSGetMachExecuteHeader(),version);
+}
+
+bool dyld_program_minos_at_least(dyld_build_version_t version) {
+    return dyld3::dyld_minos_at_least((mach_header*)_NSGetMachExecuteHeader(), version);
+}
+
+// Function that walks through the load commands and calls the internal block for every version found
+// Intended as a fallback for very complex (and rare) version checks, or for tools that need to
+// print our everything for diagnostic reasons
+void dyld_get_image_versions(const struct mach_header* mh, void (^callback)(dyld_platform_t platform, uint32_t sdk_version, uint32_t min_version)) {
+    dyld3::dyld_get_image_versions(mh, callback);
 }
 
 
@@ -1654,9 +1438,15 @@ static vswapproc swapProc = &vproc_swap_integer;
 
 static bool isLaunchdOwned()
 {
-	int64_t val = 0;
-	(*swapProc)(NULL, VPROC_GSK_IS_MANAGED, NULL, &val);
-	return ( val != 0 );
+    static bool checked = false;
+    static bool result = false;
+    if ( !checked ) {
+        checked = true;
+	    int64_t val = 0;
+	    (*swapProc)(NULL, VPROC_GSK_IS_MANAGED, NULL, &val);
+	    result = ( val != 0 );
+    }
+    return result;
 }
 
 static void shared_cache_missing()
@@ -1685,7 +1475,7 @@ static dyld::LibSystemHelpers sHelpers = { 13, &dyldGlobalLockAcquire, &dyldGlob
 									&vm_allocate,
 									&mmap,
 									&__cxa_finalize_ranges
-									};
+                                    };
 
 
 //
@@ -1725,6 +1515,8 @@ char* dlerror()
 
 int dladdr(const void* addr, Dl_info* info)
 {
+    dyld3::ScopedTimer timer(DBG_DYLD_TIMING_DLADDR, (uint64_t)addr, 0, 0);
+    int result = 0;
 	if ( gUseDyld3 )
 		return dyld3::dladdr(addr, info);
 
@@ -1733,11 +1525,17 @@ int dladdr(const void* addr, Dl_info* info)
 
 	if(p == NULL)
 	    _dyld_func_lookup("__dyld_dladdr", (void**)&p);
-	return(p(addr, info));
+    result = p(addr, info);
+    timer.setData4(result);
+    timer.setData5(info != NULL ? info->dli_fbase : 0);
+    timer.setData6(info != NULL ? info->dli_saddr : 0);
+	return result;
 }
 
 int dlclose(void* handle)
 {
+    dyld3::ScopedTimer timer(DBG_DYLD_TIMING_DLCLOSE, (uint64_t)handle, 0, 0);
+    int result = 0;
 	if ( gUseDyld3 )
 		return dyld3::dlclose(handle);
 
@@ -1746,54 +1544,101 @@ int dlclose(void* handle)
 
 	if(p == NULL)
 	    _dyld_func_lookup("__dyld_dlclose", (void**)&p);
-	return(p(handle));
+    result = p(handle);
+	return result;
 }
 
 void* dlopen(const char* path, int mode)
-{	
-	if ( gUseDyld3 )
-		return dyld3::dlopen(path, mode);
+{
+    dyld3::ScopedTimer timer(DBG_DYLD_TIMING_DLOPEN, path, mode, 0);
+    void* result = nullptr;
 
-	// dlopen is special. locking is done inside dyld to allow initializer to run without lock
-	DYLD_NO_LOCK_THIS_BLOCK;
-	
-    static void* (*p)(const char* path, int) = NULL;
+    if ( gUseDyld3 ) {
+        result = dyld3::dlopen_internal(path, mode, __builtin_return_address(0));
+        return result;
+    }
 
-	if(p == NULL)
-	    _dyld_func_lookup("__dyld_dlopen", (void**)&p);
-	void* result = p(path, mode);
-	// use asm block to prevent tail call optimization
-	// this is needed because dlopen uses __builtin_return_address() and depends on this glue being in the frame chain
-	// <rdar://problem/5313172 dlopen() looks too far up stack, can cause crash>
-	__asm__ volatile(""); 
-	
+    // dlopen is special. locking is done inside dyld to allow initializer to run without lock
+    DYLD_NO_LOCK_THIS_BLOCK;
+
+    static void* (*p)(const char* path, int, void*) = NULL;
+
+    if(p == NULL)
+        _dyld_func_lookup("__dyld_dlopen_internal", (void**)&p);
+    result = p(path, mode, __builtin_return_address(0));
+    // use asm block to prevent tail call optimization
+    // this is needed because dlopen uses __builtin_return_address() and depends on this glue being in the frame chain
+    // <rdar://problem/5313172 dlopen() looks too far up stack, can cause crash>
+    __asm__ volatile("");
+    timer.setData4(result);
+
+#if TARGET_OS_OSX
+    // HACK for iOSMac bringup rdar://40945421
+    if ( result == nullptr  && dyld_get_active_platform() == PLATFORM_IOSMAC && csr_check(CSR_ALLOW_APPLE_INTERNAL) == 0) {
+        if (hasPerThreadBufferFor_dlerror()) {
+            // first char of buffer is flag whether string (starting at second char) is valid
+            char* buffer = getPerThreadBufferFor_dlerror(2);
+
+            if ( buffer[0] != '\0' && (strstr(&buffer[1], "macOS dylib cannot be loaded into iOSMac process")
+                                       || strstr(&buffer[1], "mach-o, but not built for iOSMac")) ) {
+                // if valid buffer and contains an iOSMac issue
+                fprintf(stderr, "dyld: iOSMac ERROR: process attempted to dlopen() dylib with macOS dependency: \n");
+                fprintf(stderr, "\tdlerror: %s\n", &buffer[1]);
+                fprintf(stderr, "\tBacktrace:\n");
+
+                void* stackPointers[128];
+                int stackPointersCnt = backtrace(stackPointers, 128);
+                char** symbolicatedStack = backtrace_symbols(stackPointers, stackPointersCnt);
+                for (int32_t i = 0; i < stackPointersCnt; ++i) {
+                    fprintf(stderr, "\t\t%s\n", symbolicatedStack[i]);
+                }
+                free(symbolicatedStack);
+            }
+        }
+    }
+#endif
+
 	return result;
 }
 
 bool dlopen_preflight(const char* path)
 {
-	if ( gUseDyld3 )
-		return dyld3::dlopen_preflight(path);
+    dyld3::ScopedTimer timer(DBG_DYLD_TIMING_DLOPEN_PREFLIGHT, path, 0, 0);
+    bool result = false;
 
-	DYLD_LOCK_THIS_BLOCK;
-    static bool (*p)(const char* path) = NULL;
+    if ( gUseDyld3 ) {
+        result = dyld3::dlopen_preflight_internal(path);
+        return result;
+    }
 
-	if(p == NULL)
-	    _dyld_func_lookup("__dyld_dlopen_preflight", (void**)&p);
-	return(p(path));
+    DYLD_LOCK_THIS_BLOCK;
+    static bool (*p)(const char* path, void* callerAddress) = NULL;
+
+    if(p == NULL)
+        _dyld_func_lookup("__dyld_dlopen_preflight_internal", (void**)&p);
+    result = p(path, __builtin_return_address(0));
+    timer.setData4(result);
+    return result;
 }
 
 void* dlsym(void* handle, const char* symbol)
 {
-	if ( gUseDyld3 )
-		return dyld3::dlsym(handle, symbol);
+    dyld3::ScopedTimer timer(DBG_DYLD_TIMING_DLSYM, handle, symbol, 0);
+    void* result = nullptr;
 
-	DYLD_LOCK_THIS_BLOCK;
-    static void* (*p)(void* handle, const char* symbol) = NULL;
+    if ( gUseDyld3 ) {
+        result = dyld3::dlsym_internal(handle, symbol, __builtin_return_address(0));
+        return result;
+    }
 
-	if(p == NULL)
-	    _dyld_func_lookup("__dyld_dlsym", (void**)&p);
-	return(p(handle, symbol));
+    DYLD_LOCK_THIS_BLOCK;
+    static void* (*p)(void* handle, const char* symbol, void *callerAddress) = NULL;
+
+    if(p == NULL)
+        _dyld_func_lookup("__dyld_dlsym_internal", (void**)&p);
+    result = p(handle, symbol, __builtin_return_address(0));
+    timer.setData4(result);
+    return result;
 }
 
 const struct dyld_all_image_infos* _dyld_get_all_image_infos()
@@ -1905,6 +1750,31 @@ const void* _dyld_get_shared_cache_range(size_t* length)
 	return p(length);
 }
 
+void _dyld_images_for_addresses(unsigned count, const void* addresses[], struct dyld_image_uuid_offset infos[])
+{
+    if ( gUseDyld3 )
+        return dyld3::_dyld_images_for_addresses(count, addresses, infos);
+
+    DYLD_NO_LOCK_THIS_BLOCK;
+    static const void (*p)(unsigned, const void*[], struct dyld_image_uuid_offset[]) = NULL;
+
+    if(p == NULL)
+        _dyld_func_lookup("__dyld_images_for_addresses", (void**)&p);
+    return p(count, addresses, infos);
+}
+
+void _dyld_register_for_image_loads(void (*func)(const mach_header* mh, const char* path, bool unloadable))
+{
+    if ( gUseDyld3 )
+        return dyld3::_dyld_register_for_image_loads(func);
+
+    DYLD_NO_LOCK_THIS_BLOCK;
+    static const void (*p)(void (*)(const mach_header* mh, const char* path, bool unloadable)) = NULL;
+
+    if(p == NULL)
+        _dyld_func_lookup("__dyld_register_for_image_loads", (void**)&p);
+    return p(func);
+}
 
 bool dyld_process_is_restricted()
 {
@@ -1968,7 +1838,7 @@ static void* mapStartOfCache(const char* path, size_t length)
 	if ( ::stat(path, &statbuf) == -1 )
 		return NULL;
 
-	if ( statbuf.st_size < length )
+	if ( (size_t)statbuf.st_size < length )
 		return NULL;
 
 	int cache_fd = ::open(path, O_RDONLY);
@@ -2123,8 +1993,6 @@ void _dyld_objc_notify_register(_dyld_objc_notify_mapped    mapped,
 	    _dyld_func_lookup("__dyld_objc_notify_register", (void**)&p);
 	p(mapped, init, unmapped);
 }
-
-
 
 
 

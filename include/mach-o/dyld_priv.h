@@ -24,11 +24,13 @@
 #ifndef _MACH_O_DYLD_PRIV_H_
 #define _MACH_O_DYLD_PRIV_H_
 
+#include <assert.h>
 #include <stdbool.h>
 #include <Availability.h>
 #include <TargetConditionals.h>
 #include <mach-o/dyld.h>
 #include <mach-o/dyld_images.h>
+#include <uuid/uuid.h>
 
 #if __cplusplus
 extern "C" {
@@ -39,7 +41,7 @@ extern "C" {
 //
 // private interface between libSystem.dylib and dyld
 //
-extern void _dyld_fork_child();
+extern void _dyld_fork_child(void);
 
 
 // DEPRECATED
@@ -171,7 +173,53 @@ extern const char* dyld_image_path_containing_address(const void* addr);
 // Exists in Mac OS X 10.11 and later
 extern const struct mach_header* dyld_image_header_containing_address(const void* addr);
 
+typedef uint32_t dyld_platform_t;
 
+typedef struct {
+    dyld_platform_t platform;
+    uint32_t        version;
+} dyld_build_version_t;
+
+// Returns the active platform of the process
+extern dyld_platform_t dyld_get_active_platform(void) __API_AVAILABLE(macos(10.14), ios(12.0), watchos(5.0), tvos(12.0), bridgeos(3.0));
+
+// Base platforms are platforms that have version numbers (macOS, iOS, watchos, tvOS, bridgeOS)
+// All other platforms are mapped to a base platform for version checks
+extern dyld_platform_t dyld_get_base_platform(dyld_platform_t platform) __API_AVAILABLE(macos(10.14), ios(12.0), watchos(5.0), tvos(12.0), bridgeos(3.0));
+
+// SPI to ask if a platform is a simulation platform
+extern bool dyld_is_simulator_platform(dyld_platform_t platform) __API_AVAILABLE(macos(10.14), ios(12.0), watchos(5.0), tvos(12.0), bridgeos(3.0));
+
+// Takes a version and returns if the image was built againt that SDK or newer
+// In the case of multi_plaform mach-o's it tests against the active platform
+extern bool dyld_sdk_at_least(const struct mach_header* mh, dyld_build_version_t version) __API_AVAILABLE(macos(10.14), ios(12.0), watchos(5.0), tvos(12.0), bridgeos(3.0));
+
+// Takes a version and returns if the image was built with that minos version or newer
+// In the case of multi_plaform mach-o's it tests against the active platform
+extern bool dyld_minos_at_least(const struct mach_header* mh, dyld_build_version_t version) __API_AVAILABLE(macos(10.14), ios(12.0), watchos(5.0), tvos(12.0), bridgeos(3.0));
+
+// Convenience versions of the previous two functions that run against the the main executable
+extern bool dyld_program_sdk_at_least(dyld_build_version_t version) __API_AVAILABLE(macos(10.14), ios(12.0), watchos(5.0), tvos(12.0), bridgeos(3.0));
+extern bool dyld_program_minos_at_least(dyld_build_version_t version) __API_AVAILABLE(macos(10.14), ios(12.0), watchos(5.0), tvos(12.0), bridgeos(3.0));
+
+// Function that walks through the load commands and calls the internal block for every version found
+// Intended as a fallback for very complex (and rare) version checks, or for tools that need to
+// print our everything for diagnostic reasons
+extern void dyld_get_image_versions(const struct mach_header* mh, void (^callback)(dyld_platform_t platform, uint32_t sdk_version, uint32_t min_version)) __API_AVAILABLE(macos(10.14), ios(12.0), watchos(5.0), tvos(12.0), bridgeos(3.0));
+
+// Convienence constants for dyld version SPIs.
+
+//@VERSION_SET_DEFS@
+
+//@MACOS_PLATFORM_VERSION_DEFS@
+
+//@IOS_PLATFORM_VERSION_DEFS@
+
+//@WATCHOS_PLATFORM_VERSION_DEFS@
+
+//@TVOS_PLATFORM_VERSION_DEFS@
+
+//@BRIDGEOS_PLATFORM_VERSION_DEFS@
 
 // Convienence constants for return values from dyld_get_sdk_version() and friends.
 
@@ -180,7 +228,6 @@ extern const struct mach_header* dyld_image_header_containing_address(const void
 //@IOS_VERSION_DEFS@
 
 //@WATCHOS_VERSION_DEFS@
-
 
 //
 // This finds the SDK version a binary was built against.
@@ -201,14 +248,13 @@ extern uint32_t dyld_get_sdk_version(const struct mach_header* mh);
 //
 // Exists in Mac OS X 10.8 and later 
 // Exists in iOS 6.0 and later
-extern uint32_t dyld_get_program_sdk_version();
+extern uint32_t dyld_get_program_sdk_version(void);
 
-
-#if __WATCH_OS_VERSION_MIN_REQUIRED
+#if TARGET_OS_WATCH
 // watchOS only.
 // This finds the Watch OS SDK version that the main executable was built against.
 // Exists in Watch OS 2.0 and later
-extern uint32_t dyld_get_program_sdk_watch_os_version() __IOS_UNAVAILABLE __OSX_UNAVAILABLE __WATCHOS_AVAILABLE(2.0);
+extern uint32_t dyld_get_program_sdk_watch_os_version(void) __API_AVAILABLE(watchos(2.0));
 
 
 // watchOS only.
@@ -216,22 +262,21 @@ extern uint32_t dyld_get_program_sdk_watch_os_version() __IOS_UNAVAILABLE __OSX_
 // Note: dyld_get_program_min_os_version() returns the iOS equivalent (e.g. 9.0)
 //       whereas this returns the raw watchOS version (e.g. 2.0).
 // Exists in Watch OS 3.0 and later
-extern uint32_t dyld_get_program_min_watch_os_version(); // __WATCHOS_AVAILABLE(3.0);
+extern uint32_t dyld_get_program_min_watch_os_version(void) __API_AVAILABLE(watchos(3.0));
 #endif
-
 
 #if TARGET_OS_BRIDGE
 // bridgeOS only.
 // This finds the bridgeOS SDK version that the main executable was built against.
 // Exists in bridgeOSOS 2.0 and later
-extern uint32_t dyld_get_program_sdk_bridge_os_version();
+extern uint32_t dyld_get_program_sdk_bridge_os_version(void) __API_AVAILABLE(bridgeos(2.0));
 
 // bridgeOS only.
 // This finds the Watch min OS version that the main executable was built to run on.
 // Note: dyld_get_program_min_os_version() returns the iOS equivalent (e.g. 9.0)
 //       whereas this returns the raw bridgeOS version (e.g. 2.0).
 // Exists in bridgeOS 2.0 and later
-extern uint32_t dyld_get_program_min_bridge_os_version();
+extern uint32_t dyld_get_program_min_bridge_os_version(void) __API_AVAILABLE(bridgeos(2.0));
 #endif
 
 //
@@ -249,7 +294,7 @@ extern uint32_t dyld_get_min_os_version(const struct mach_header* mh);
 //
 // Exists in Mac OS X 10.8 and later 
 // Exists in iOS 6.0 and later
-extern uint32_t dyld_get_program_min_os_version();
+extern uint32_t dyld_get_program_min_os_version(void);
 
 
 
@@ -259,7 +304,7 @@ extern uint32_t dyld_get_program_min_os_version();
 //
 // Exists in iPhoneOS 3.1 and later 
 // Exists in Mac OS X 10.10 and later
-extern bool dyld_shared_cache_some_image_overridden();
+extern bool dyld_shared_cache_some_image_overridden(void);
 
 
 	
@@ -267,7 +312,7 @@ extern bool dyld_shared_cache_some_image_overridden();
 // Returns if the process is setuid or is code signed with entitlements.
 //
 // Exists in Mac OS X 10.9 and later
-extern bool dyld_process_is_restricted();
+extern bool dyld_process_is_restricted(void);
 
 
 
@@ -275,7 +320,7 @@ extern bool dyld_process_is_restricted();
 // Returns path used by dyld for standard dyld shared cache file for the current arch.
 //
 // Exists in Mac OS X 10.11 and later
-extern const char* dyld_shared_cache_file_path();
+extern const char* dyld_shared_cache_file_path(void);
 
 
 
@@ -371,6 +416,36 @@ extern const void* _dyld_get_shared_cache_range(size_t* length);
 
 
 
+
+struct dyld_image_uuid_offset {
+    uuid_t                      uuid;
+	uint64_t                    offsetInImage;
+    const struct mach_header*   image;
+};
+
+//
+// Given an array of addresses, returns info about each address.
+// Common usage is the array or addresses was produced by a stack backtrace.
+// For each address, returns the where that image was loaded, the offset
+// of the address in the image, and the image's uuid.  If a specified
+// address is unknown to dyld, all fields will be returned a zeros.
+//
+// Exists in macOS 10.14 and later
+// Exists in iOS 12.0 and later
+extern void _dyld_images_for_addresses(unsigned count, const void* addresses[], struct dyld_image_uuid_offset infos[]);
+
+
+//
+// Lets you register a callback which is called each time an image is loaded and provides the mach_header*, path, and
+// whether the image may be unloaded later.  During the call to _dyld_register_for_image_loads(), the callback is called
+// once for each image currently loaded.
+//
+// Exists in macOS 10.14 and later
+// Exists in iOS 12.0 and later
+extern void _dyld_register_for_image_loads(void (*func)(const struct mach_header* mh, const char* path, bool unloadable));
+
+
+
 //
 // When dyld must terminate a process because of a required dependent dylib
 // could not be loaded or a symbol is missing, dyld calls abort_with_reason()
@@ -411,15 +486,15 @@ extern const char*  __progname;
 
 
 // called by libSystem_initializer only
-extern void _dyld_initializer();
+extern void _dyld_initializer(void);
 
 // never called from source code. Used by static linker to implement lazy binding
-extern void dyld_stub_binder() __asm__("dyld_stub_binder");
+extern void dyld_stub_binder(void) __asm__("dyld_stub_binder");
 
 
 // called by exit() before it calls cxa_finalize() so that thread_local
 // objects are destroyed before global objects.
-extern void _tlv_exit();
+extern void _tlv_exit(void);
 
 
 // temp exports to keep tapi happy, until ASan stops using dyldVersionNumber

@@ -5,8 +5,22 @@
 #include <string.h> 
 #include <dlfcn.h> 
 #include <mach-o/dyld_priv.h>
+#if __has_feature(ptrauth_calls)
+    #include <ptrauth.h>
+#endif
 
 extern void* __dso_handle;
+
+
+static const void* stripPointer(const void* ptr)
+{
+#if __has_feature(ptrauth_calls)
+    return __builtin_ptrauth_strip(ptr, ptrauth_key_asia);
+#else
+    return ptr;
+#endif
+}
+
 
 int dylib_bar()
 {
@@ -35,7 +49,7 @@ static void verifybar()
         printf("[FAIL] dladdr()->dli_sname is \"%s\" instead of \"dylib_bar\"\n", info.dli_sname);
         exit(0);
     }
-    if ( info.dli_saddr != &dylib_bar) {
+    if ( info.dli_saddr != stripPointer(&dylib_bar) ) {
         printf("[FAIL] dladdr()->dli_saddr is not &dylib_bar\n");
         exit(0);
     }
@@ -57,7 +71,7 @@ static void verifyfoo()
         printf("[FAIL] dladdr()->dli_sname is \"%s\" instead of \"dylib_foo\"\n", info.dli_sname);
         exit(0);
     }
-    if ( info.dli_saddr != &dylib_foo) {
+    if ( info.dli_saddr != stripPointer(&dylib_foo) ) {
         printf("[FAIL] dladdr()->dli_saddr is not &dylib_foo\n");
         exit(0);
     }
@@ -69,7 +83,7 @@ static void verifyfoo()
 
 // checks hidden symbol
 static void verifyhide()
-{
+{ 
     Dl_info info;
     if ( dladdr(&dylib_hide, &info) == 0 ) {
         printf("[FAIL] dladdr(&dylib_hide, xx) failed\n");
@@ -79,7 +93,7 @@ static void verifyhide()
         printf("[FAIL] dladdr()->dli_sname is \"%s\" instead of \"dylib_hide\"\n", info.dli_sname);
         exit(0);
     }
-    if ( info.dli_saddr != &dylib_hide) {
+    if ( info.dli_saddr != stripPointer(&dylib_hide) ) {
         printf("[FAIL] dladdr()->dli_saddr is not &dylib_hide\n");
         exit(0);
     }

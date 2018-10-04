@@ -11,6 +11,20 @@
 #include <mach-o/dyld.h>
 #include <mach-o/dyld_priv.h>
 
+#if __has_feature(ptrauth_calls)
+    #include <ptrauth.h>
+#endif
+
+static const void* stripPointer(const void* ptr)
+{
+#if __has_feature(ptrauth_calls)
+    return __builtin_ptrauth_strip(ptr, ptrauth_key_asia);
+#else
+    return ptr;
+#endif
+}
+
+
 typedef const char* (*BarProc)(void);
 
 extern uint32_t _cpu_capabilities;
@@ -45,8 +59,8 @@ int main()
         return 0;
     }
 
-    if ( !_dyld_is_memory_immutable(&strcpy, 4) ) {
-		printf("[FAIL] _dyld_is_memory_immutable() returned false for function in dyld shared cache\n");
+    if ( !_dyld_is_memory_immutable(stripPointer((void*)&strcpy), 4) ) {
+		printf("[FAIL] _dyld_is_memory_immutable() returned false for strcpy function in dyld shared cache\n");
         return 0;
     }
 

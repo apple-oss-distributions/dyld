@@ -221,13 +221,13 @@ public:
         }
     }
     
-    static void addPointers(uint8_t* methodList, std::vector<void*>& pointersToAdd) {
+    static void addPointers(uint8_t* methodList, CacheBuilder::ASLR_Tracker& aslrTracker) {
         objc_method_list_t<P>* mlist = (objc_method_list_t<P>*)methodList;
         for(method_iterator it = mlist->begin(); it != mlist->end(); ++it) {
             objc_method_t<P>& entry = *it;
-            pointersToAdd.push_back(&(entry.name));
-            pointersToAdd.push_back(&(entry.types));
-            pointersToAdd.push_back(&(entry.imp));
+            aslrTracker.add(&(entry.name));
+            aslrTracker.add(&(entry.types));
+            aslrTracker.add(&(entry.imp));
         }
     }
 
@@ -380,12 +380,12 @@ public:
         }
     }
 
-    static void addPointers(uint8_t* propertyList, std::vector<void*>& pointersToAdd) {
+    static void addPointers(uint8_t* propertyList, CacheBuilder::ASLR_Tracker& aslrTracker) {
         objc_property_list_t<P>* plist = (objc_property_list_t<P>*)propertyList;
         for(property_iterator it = plist->begin(); it != plist->end(); ++it) {
             objc_property_t<P>& entry = *it;
-            pointersToAdd.push_back(&(entry.name));
-            pointersToAdd.push_back(&(entry.attributes));
+            aslrTracker.add(&(entry.name));
+            aslrTracker.add(&(entry.attributes));
         }
     }
 
@@ -474,18 +474,18 @@ public:
             P::setP(demangledName, cache->vmAddrForContent((void*)newName));
     }
 
-    void addPointers(std::vector<void*>& pointersToAdd) 
+    void addPointers(ContentAccessor* cache, CacheBuilder::ASLR_Tracker& aslrTracker)
     {
-        pointersToAdd.push_back(&isa);
-        pointersToAdd.push_back(&name);
-        if (protocols) pointersToAdd.push_back(&protocols);
-        if (instanceMethods) pointersToAdd.push_back(&instanceMethods);
-        if (classMethods) pointersToAdd.push_back(&classMethods);
-        if (optionalInstanceMethods) pointersToAdd.push_back(&optionalInstanceMethods);
-        if (optionalClassMethods) pointersToAdd.push_back(&optionalClassMethods);
-        if (instanceProperties) pointersToAdd.push_back(&instanceProperties);
-        if (extendedMethodTypes) pointersToAdd.push_back(&extendedMethodTypes);
-        if (demangledName) pointersToAdd.push_back(&demangledName);
+        aslrTracker.add(&isa);
+        aslrTracker.add(&name);
+        if (protocols)               aslrTracker.add(&protocols);
+        if (instanceMethods)         aslrTracker.add(&instanceMethods);
+        if (classMethods)            aslrTracker.add(&classMethods);
+        if (optionalInstanceMethods) aslrTracker.add(&optionalInstanceMethods);
+        if (optionalClassMethods)    aslrTracker.add(&optionalClassMethods);
+        if (instanceProperties)      aslrTracker.add(&instanceProperties);
+        if (extendedMethodTypes)     aslrTracker.add(&extendedMethodTypes);
+        if (demangledName)           aslrTracker.add(&demangledName);
     }
 };
 
@@ -531,10 +531,10 @@ public:
         }
     }
 
-     static void addPointers(uint8_t* protocolList, std::vector<void*>& pointersToAdd) {
+     static void addPointers(uint8_t* protocolList, CacheBuilder::ASLR_Tracker& aslrTracker) {
         objc_protocol_list_t<P>* plist = (objc_protocol_list_t<P>*)protocolList;
         for(int i=0 ; i < plist->count; ++i) {
-            pointersToAdd.push_back(&plist->list[i]);
+            aslrTracker.add(&plist->list[i]);
         }
     }
 
@@ -606,16 +606,16 @@ public:
         P::setP(baseProperties, cache->vmAddrForContent(proplist));
     }
     
-    void addMethodListPointer(std::vector<void*>& pointersToAdd) {
-        pointersToAdd.push_back(&this->baseMethods);
+    void addMethodListPointer(CacheBuilder::ASLR_Tracker& aslrTracker) {
+        aslrTracker.add(&this->baseMethods);
     }
     
-    void addPropertyListPointer(std::vector<void*>& pointersToAdd) {
-        pointersToAdd.push_back(&this->baseProperties);
+    void addPropertyListPointer(CacheBuilder::ASLR_Tracker& aslrTracker) {
+        aslrTracker.add(&this->baseProperties);
     }
     
-    void addProtocolListPointer(std::vector<void*>& pointersToAdd) {
-        pointersToAdd.push_back(&this->baseProtocols);
+    void addProtocolListPointer(CacheBuilder::ASLR_Tracker& aslrTracker) {
+        aslrTracker.add(&this->baseProtocols);
     }
 };
 
@@ -637,6 +637,8 @@ public:
 
     objc_class_t<P> *getSuperclass(ContentAccessor* cache) const { return (objc_class_t<P> *)cache->contentForVMAddr(P::getP(superclass)); }
     
+    const pint_t* getSuperClassAddress() const { return &superclass; }
+
     // Low bit marks Swift classes.
     objc_class_data_t<P> *getData(ContentAccessor* cache) const { return (objc_class_data_t<P> *)cache->contentForVMAddr(P::getP(data & ~0x1LL)); }
 
@@ -665,16 +667,16 @@ public:
         getData(cache)->setPropertyList(cache, proplist);
     }
     
-    void addMethodListPointer(ContentAccessor* cache, std::vector<void*>& pointersToAdd) {
-        getData(cache)->addMethodListPointer(pointersToAdd);
+    void addMethodListPointer(ContentAccessor* cache, CacheBuilder::ASLR_Tracker& aslrTracker) {
+        getData(cache)->addMethodListPointer(aslrTracker);
     }
     
-    void addPropertyListPointer(ContentAccessor* cache, std::vector<void*>& pointersToAdd) {
-        getData(cache)->addPropertyListPointer(pointersToAdd);
+    void addPropertyListPointer(ContentAccessor* cache, CacheBuilder::ASLR_Tracker& aslrTracker) {
+        getData(cache)->addPropertyListPointer(aslrTracker);
     }
     
-    void addProtocolListPointer(ContentAccessor* cache, std::vector<void*>& pointersToAdd) {
-        getData(cache)->addProtocolListPointer(pointersToAdd);
+    void addProtocolListPointer(ContentAccessor* cache, CacheBuilder::ASLR_Tracker& aslrTracker) {
+        getData(cache)->addProtocolListPointer(aslrTracker);
     }
     
 };
@@ -943,6 +945,8 @@ class SelectorOptimizer {
 
     V& mVisitor;
 
+    std::set<pint_t> selectorRefVMAddrs;
+
     friend class MethodListWalker<P, SelectorOptimizer<P,V> >;
     void visitMethodList(objc_method_list_t<P> *mlist)
     {
@@ -977,6 +981,7 @@ public:
             pint_t oldValue = selrefs.getVMAddress(i);
             pint_t newValue = mVisitor.visit(oldValue);
             selrefs.setVMAddress(i, newValue);
+            selectorRefVMAddrs.insert(selrefs.getSectionVMAddress() + (i * sizeof(pint_t)));
         }
 
         // message references
@@ -988,6 +993,10 @@ public:
             pint_t newValue = mVisitor.visit(oldValue);
             msg.setName(newValue);
         }
+    }
+
+    bool isSelectorRefAddress(pint_t vmAddr) const {
+        return selectorRefVMAddrs.count(vmAddr);
     }
 };
 
@@ -1083,7 +1092,8 @@ public:
 // Detect classes that have missing weak-import superclasses.
 template <typename P>
 class WeakClassDetector {
-    bool noMissing;
+    bool                                noMissing;
+    const std::map<void*, std::string>* missingWeakImports = nullptr;
 
     friend class ClassWalker<P, WeakClassDetector<P>>;
     void visitClass(ContentAccessor* cache, const macho_header<P>*, 
@@ -1098,18 +1108,26 @@ class WeakClassDetector {
         } else if (cls->isRootClass(cache)) {
             // okay: root class is expected to have no superclass
         } else {
-            // bad: cls's superclass is missing. 
-            cache->diagnostics().warning("Superclass of class '%s' is weak-import and missing.",
-                    cls->getName(cache));
+            // bad: cls's superclass is missing.
+            // See if we can find the name from the missing weak import map
+            auto it = missingWeakImports->find((void*)cls->getSuperClassAddress());
+            const char* dylibName = "unknown dylib";
+            if (it != missingWeakImports->end()) {
+                dylibName = it->second.c_str();
+            }
+            cache->diagnostics().warning("Superclass of class '%s' is weak-import and missing.  Expected in %s",
+                                         cls->getName(cache), dylibName);
             noMissing = false;
         }
     }
 
 public:
-    bool noMissingWeakSuperclasses(ContentAccessor* cache, 
+    bool noMissingWeakSuperclasses(ContentAccessor* cache,
+                                   const std::map<void*, std::string>& missingWeakImportsMap,
                                    std::vector<const macho_header<P>*> dylibs)
     {
-        noMissing = true;
+        noMissing           = true;
+        missingWeakImports  = &missingWeakImportsMap;
         ClassWalker<P, WeakClassDetector<P>> classes(*this);
         for (auto mh : dylibs) {
             classes.walk(cache, mh);
@@ -1197,7 +1215,7 @@ public:
         return nullptr;
     }
 
-    void update(ContentAccessor* cache, const macho_header<P>* mh, std::vector<void*>& pointersInData) {
+    void update(ContentAccessor* cache, const macho_header<P>* mh, CacheBuilder::ASLR_Tracker& aslrTracker) {
         InfoT* hi = new(&_hInfos[_count++]) InfoT(cache, mh);
         (void)hi;
     }

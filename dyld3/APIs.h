@@ -28,6 +28,8 @@
 
 #include <string.h>
 #include <stdint.h>
+#include <pthread.h>
+#include <uuid/uuid.h>
 
 #include "dlfcn.h"
 #include "dyld_priv.h"
@@ -35,7 +37,39 @@
 
 #define TEMP_HIDDEN __attribute__((visibility("hidden")))
 
+//
+// The implementation of all dyld load/unload API's must hold a global lock
+// so that the next load/unload does start until the current is complete.
+// This lock is recursive so that initializers can call dlopen().
+// This is done using the macros DYLD_LOCK_THIS_BLOCK.
+// Example:
+//
+//  void dyld_load_api() {
+//        DYLD_LOAD_LOCK_THIS_BLOCK;
+//        // free to do stuff here
+//        // that accesses dyld internal data structures
+//    }
+//
+//
+
+#define DYLD_LOAD_LOCK_THIS_BLOCK            RecursiveAutoLock _dyld_load_lock;
+
 namespace dyld3 {
+
+class __attribute__((visibility("hidden"))) RecursiveAutoLock
+{
+public:
+    RecursiveAutoLock() {
+        pthread_mutex_lock(&_sMutex);
+    }
+    ~RecursiveAutoLock() {
+        pthread_mutex_unlock(&_sMutex);
+    }
+private:
+    static pthread_mutex_t _sMutex;
+};
+
+
 
 
 uint32_t _dyld_image_count() TEMP_HIDDEN;
@@ -52,17 +86,11 @@ int32_t NSVersionOfLinkTimeLibrary(const char* libraryName) TEMP_HIDDEN;
 
 int32_t NSVersionOfRunTimeLibrary(const char* libraryName) TEMP_HIDDEN;
 
-#if __WATCH_OS_VERSION_MIN_REQUIRED
 uint32_t dyld_get_program_sdk_watch_os_version() TEMP_HIDDEN;
-
 uint32_t dyld_get_program_min_watch_os_version() TEMP_HIDDEN;
-#endif
 
-#if TARGET_OS_BRIDGE
 uint32_t dyld_get_program_sdk_bridge_os_version() TEMP_HIDDEN;
-
 uint32_t dyld_get_program_min_bridge_os_version() TEMP_HIDDEN;
-#endif
 
 
 uint32_t dyld_get_sdk_version(const mach_header* mh) TEMP_HIDDEN;
@@ -73,6 +101,14 @@ uint32_t dyld_get_min_os_version(const mach_header* mh) TEMP_HIDDEN;
 
 uint32_t dyld_get_program_min_os_version() TEMP_HIDDEN;
 
+dyld_platform_t dyld_get_active_platform(void) TEMP_HIDDEN;
+dyld_platform_t dyld_get_base_platform(dyld_platform_t platform) TEMP_HIDDEN;
+bool dyld_is_simulator_platform(dyld_platform_t platform) TEMP_HIDDEN;
+bool dyld_sdk_at_least(const struct mach_header* mh, dyld_build_version_t version) TEMP_HIDDEN;
+bool dyld_minos_at_least(const struct mach_header* mh, dyld_build_version_t version) TEMP_HIDDEN;
+bool dyld_program_sdk_at_least(dyld_build_version_t version) TEMP_HIDDEN;
+bool dyld_program_minos_at_least(dyld_build_version_t version) TEMP_HIDDEN;
+void dyld_get_image_versions(const struct mach_header* mh, void (^callback)(dyld_platform_t platform, uint32_t sdk_version, uint32_t min_version)) TEMP_HIDDEN;
 
 bool _dyld_get_image_uuid(const mach_header* mh, uuid_t uuid) TEMP_HIDDEN;
 
@@ -103,11 +139,11 @@ char* dlerror() TEMP_HIDDEN;
 
 int dlclose(void* handle) TEMP_HIDDEN;
 
-void* dlopen(const char* path, int mode) TEMP_HIDDEN;
+void* dlopen_internal(const char* path, int mode, void* callerAddress) TEMP_HIDDEN;
 
-bool dlopen_preflight(const char* path) TEMP_HIDDEN;
+bool dlopen_preflight_internal(const char* path) TEMP_HIDDEN;
 
-void* dlsym(void* handle, const char* symbolName) TEMP_HIDDEN;
+void* dlsym_internal(void* handle, const char* symbolName, void* callerAddress) TEMP_HIDDEN;
 
 const struct dyld_all_image_infos* _dyld_get_all_image_infos() TEMP_HIDDEN;
 
@@ -116,6 +152,10 @@ bool dyld_shared_cache_some_image_overridden() TEMP_HIDDEN;
 bool _dyld_get_shared_cache_uuid(uuid_t uuid) TEMP_HIDDEN;
 
 const void* _dyld_get_shared_cache_range(size_t* length) TEMP_HIDDEN;
+
+void _dyld_images_for_addresses(unsigned count, const void* addresses[], struct dyld_image_uuid_offset infos[]) TEMP_HIDDEN;
+
+void _dyld_register_for_image_loads(void (*func)(const mach_header* mh, const char* path, bool unloadable)) TEMP_HIDDEN;
 
 bool _dyld_find_unwind_sections(void* addr, dyld_unwind_sections* info) TEMP_HIDDEN;
 

@@ -20,6 +20,7 @@ def parseDirectives(testCaseSourceDir):
     runLines = []
     minOS = ""
     timeout = ""
+    noCrashLogs = []
     for file in os.listdir(testCaseSourceDir):
         if file.endswith((".c", ".cpp", ".cxx")):
             with open(testCaseSourceDir + "/" + file) as f:
@@ -39,13 +40,16 @@ def parseDirectives(testCaseSourceDir):
                     timeoutIndex = string.find(line, "RUN_TIMEOUT:")
                     if timeoutIndex != -1:
                         timeout = line[timeoutIndex+12:].lstrip()
-
+                    noCrashLogsIndex = string.find(line, "NO_CRASH_LOG:")
+                    if noCrashLogsIndex != -1:
+                        noCrashLogs.append(line[noCrashLogsIndex+13:].lstrip())
     return {
         "BUILD":        buildLines,
         "BUILD_ONLY":   onlyLines,
         "BUILD_MIN_OS": minOS,
         "RUN":          runLines,
-        "RUN_TIMEOUT":  timeout
+        "RUN_TIMEOUT":  timeout,
+        "NO_CRASH_LOG": noCrashLogs
    }
 
 
@@ -66,13 +70,13 @@ def useTestCase(testCaseDirectives, platformName):
 # Use BUILD directives to construct the test case
 # Use RUN directives to generate a shell script to run test(s)
 #
-def buildTestCase(testCaseDirectives, testCaseSourceDir, toolsDir, sdkDir, minOsOptionsName, defaultMinOS, archOptions, testCaseDestDirBuild, testCaseDestDirRun):
+def buildTestCase(testCaseDirectives, testCaseSourceDir, toolsDir, sdkDir, dyldIncludesDir, minOsOptionsName, defaultMinOS, archOptions, testCaseDestDirBuild, testCaseDestDirRun):
     scratchDir = tempfile.mkdtemp()
     if testCaseDirectives["BUILD_MIN_OS"]:
         minOS = testCaseDirectives["BUILD_MIN_OS"]
     else:
         minOS = defaultMinOS
-    compilerSearchOptions = " -isysroot " + sdkDir + " -I" + sdkDir + "/System/Library/Frameworks/System.framework/PrivateHeaders"
+    compilerSearchOptions = " -isysroot " + sdkDir + " -I" + sdkDir + "/System/Library/Frameworks/System.framework/PrivateHeaders" + " -I" + dyldIncludesDir
     if minOsOptionsName == "mmacosx-version-min":
         taskForPidCommand = "touch "
         envEnableCommand  = "touch "
@@ -116,8 +120,17 @@ def buildTestCase(testCaseDirectives, testCaseSourceDir, toolsDir, sdkDir, minOs
         runFile.write("#!/bin/sh\n")
         runFile.write("cd " + testCaseDestDirRun + "\n")
         os.chmod(runFilePath, 0755)
+        runFile.write("echo \"run in dyld2 mode\" \n");
         for runline in testCaseDirectives["RUN"]:
            runFile.write(string.Template(runline).safe_substitute(runSubs) + "\n")
+        runFile.write("echo \"run in dyld3 mode\" \n");
+        for runline in testCaseDirectives["RUN"]:
+            subLine = string.Template(runline).safe_substitute(runSubs)
+            if subLine.startswith("sudo "):
+                subLine = "sudo DYLD_USE_CLOSURES=1 " + subLine[5:]
+            else:
+                subLine = "DYLD_USE_CLOSURES=1 " + subLine
+            runFile.write(subLine + "\n")
         runFile.write("\n")
         runFile.close()
     return 0
@@ -137,13 +150,13 @@ if __name__ == "__main__":
     if not dyldSrcDir:
         dyldSrcDir = os.getcwd()
     testsSrcTopDir = dyldSrcDir + "/testing/test-cases/"
+    dyldIncludesDir = dyldSrcDir + "/include/"
     sdkDir = os.getenv("SDKROOT", "")
     if not sdkDir:
-        #sdkDir = subprocess.check_output(["xcrun", "--show-sdk-path"]).rstrip()
-        sdkDir = "/Applications/Xcode.app/Contents/Developer/Platforms/MacOSX.platform/Developer/SDKs/MacOSX10.13.Internal.sdk"
+        sdkDir = subprocess.check_output(["xcrun", "-sdk", "macosx.internal", "--show-sdk-path"]).rstrip()
     toolsDir = os.getenv("TOOLCHAIN_DIR", "/")
     defaultMinOS = ""
-    minVersNum = "10.12"
+    minVersNum = "10.14"
     minOSOption = os.getenv("DEPLOYMENT_TARGET_CLANG_FLAG_NAME", "")
     if minOSOption:
         minOSVersName = os.getenv("DEPLOYMENT_TARGET_CLANG_ENV_NAME", "")
@@ -170,7 +183,8 @@ if __name__ == "__main__":
             else:
                 archOptions = "-arch x86_64"
     allTests = []
-    for f in os.listdir(testsSrcTopDir):
+    suppressCrashLogs = []
+    for f in sorted(os.listdir(testsSrcTopDir)):
         if f.endswith(".dtest"):
             testName = f[0:-6]
             outDirBuild = testsBuildDstTopDir + testName
@@ -178,7 +192,7 @@ if __name__ == "__main__":
             testCaseDir = testsSrcTopDir + f
             testCaseDirectives = parseDirectives(testCaseDir)
             if useTestCase(testCaseDirectives, platformName):
-                result = buildTestCase(testCaseDirectives, testCaseDir, toolsDir, sdkDir, minOSOption, minVersNum, archOptions, outDirBuild, outDirRun)
+                result = buildTestCase(testCaseDirectives, testCaseDir, toolsDir, sdkDir, dyldIncludesDir, minOSOption, minVersNum, archOptions, outDirBuild, outDirRun)
                 if result:
                     sys.exit(result)
                 mytest = {}
@@ -187,15 +201,27 @@ if __name__ == "__main__":
                 mytest["WorkingDirectory"] = testsRunDstTopDir + testName
                 mytest["Command"] = []
                 mytest["Command"].append("./run.sh")
+                usesDtrace = False
                 for runline in testCaseDirectives["RUN"]:
                     if "$SUDO" in runline:
                         mytest["AsRoot"] = True
+                    if "dtrace" in runline:
+                        usesDtrace = True
                 if testCaseDirectives["RUN_TIMEOUT"]:
                     mytest["Timeout"] = testCaseDirectives["RUN_TIMEOUT"]
+                if usesDtrace and minOSOption != "mmacosx-version-min":
+                    mytest["BootArgsSet"] = "dtrace_dof_mode=1"
                 allTests.append(mytest)
+            if testCaseDirectives["NO_CRASH_LOG"]:
+                for skipCrash in testCaseDirectives["NO_CRASH_LOG"]:
+                    suppressCrashLogs.append(skipCrash)
     batsInfo = { "BATSConfigVersion": "0.1.0",
                  "Project":           "dyld_tests",
                  "Tests":             allTests }
+    if suppressCrashLogs:
+        batsInfo["IgnoreCrashes"] = []
+        for skipCrash in suppressCrashLogs:
+            batsInfo["IgnoreCrashes"].append(skipCrash)
     batsFileDir = dstDir + "/AppleInternal/CoreOS/BATS/unit_tests/"
     shutil.rmtree(batsFileDir, ignore_errors=True)
     os.makedirs(batsFileDir)
@@ -212,5 +238,4 @@ if __name__ == "__main__":
             shFile.write(test["WorkingDirectory"] + "/run.sh\n")
         shFile.close()
     os.chmod(runHelper, 0755)
-
 

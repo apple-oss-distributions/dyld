@@ -35,10 +35,13 @@
 #include <mach-o/arch.h>
 #include <mach-o/loader.h>
 #include <mach-o/dyld.h>
+#include <mach-o/dyld_priv.h>
 #include <mach/mach.h>
 
 #include <map>
 #include <vector>
+
+#include "DyldSharedCache.h"
 
 #include "dsc_iterator.h"
 #include "dsc_extractor.h"
@@ -47,6 +50,7 @@
 #include "MachOFileAbstraction.hpp"
 #include "CacheFileAbstraction.hpp"
 #include "Trie.hpp"
+#include "SupportedArchs.h"
 
 enum Mode {
 	modeNone,
@@ -54,10 +58,12 @@ enum Mode {
 	modeMap,
 	modeDependencies,
 	modeSlideInfo,
+    modeVerboseSlideInfo,
 	modeAcceleratorInfo,
 	modeTextInfo,
 	modeLinkEdit,
 	modeLocalSymbols,
+    modeStrings,
 	modeInfo,
 	modeSize,
 	modeExtract
@@ -93,9 +99,55 @@ struct Results {
 };
 
 
+// mmap() an shared cache file read/only but laid out like it would be at runtime
+static const DyldSharedCache* mapCacheFile(const char* path, size_t& cacheLength)
+{
+    struct stat statbuf;
+    if ( ::stat(path, &statbuf) ) {
+        fprintf(stderr, "Error: stat failed for dyld shared cache at %s\n", path);
+        return nullptr;
+    }
+    
+    int cache_fd = ::open(path, O_RDONLY);
+    if (cache_fd < 0) {
+        fprintf(stderr, "Error: failed to open shared cache file at %s\n", path);
+        return nullptr;
+    }
+    
+    uint8_t  firstPage[4096];
+    if ( ::pread(cache_fd, firstPage, 4096, 0) != 4096 ) {
+        fprintf(stderr, "Error: failed to read shared cache file at %s\n", path);
+        return nullptr;
+    }
+    const dyld_cache_header*       header   = (dyld_cache_header*)firstPage;
+    const dyld_cache_mapping_info* mappings = (dyld_cache_mapping_info*)(firstPage + header->mappingOffset);
+    
+    size_t vmSize = (size_t)(mappings[2].address + mappings[2].size - mappings[0].address);
+    vm_address_t result;
+    kern_return_t r = ::vm_allocate(mach_task_self(), &result, vmSize, VM_FLAGS_ANYWHERE);
+    if ( r != KERN_SUCCESS ) {
+        fprintf(stderr, "Error: failed to allocate space to load shared cache file at %s\n", path);
+        return nullptr;
+    }
+    for (int i=0; i < 3; ++i) {
+        void* mapped_cache = ::mmap((void*)(result + mappings[i].address - mappings[0].address), (size_t)mappings[i].size,
+                                    PROT_READ, MAP_FIXED | MAP_PRIVATE, cache_fd, mappings[i].fileOffset);
+        if (mapped_cache == MAP_FAILED) {
+            fprintf(stderr, "Error: mmap() for shared cache at %s failed, errno=%d\n", path, errno);
+            return nullptr;
+        }
+    }
+    ::close(cache_fd);
+    
+    cacheLength = statbuf.st_size;
+    
+    return (DyldSharedCache*)result;
+}
+
+
 
 void usage() {
-	fprintf(stderr, "Usage: dyld_shared_cache_util -list [ -uuid ] [-vmaddr] | -dependents <dylib-path> [ -versions ] | -linkedit | -map | -slide_info | -info | -extract <dylib-dir>  [ shared-cache-file ] \n");
+	fprintf(stderr, "Usage: dyld_shared_cache_util -list [ -uuid ] [-vmaddr] | -dependents <dylib-path> [ -versions ] | -linkedit | -map | -slide_info | -verbose_slide_info | -info | -extract <dylib-dir>  [ shared-cache-file ] \n");
 }
 
 #if __x86_64__
@@ -136,6 +188,8 @@ static const char* default_shared_cache_path() {
 	return IPHONE_DYLD_SHARED_CACHE_DIR DYLD_SHARED_CACHE_BASE_NAME "armv7f";
 #elif __ARM_ARCH_7S__ 
 	return IPHONE_DYLD_SHARED_CACHE_DIR DYLD_SHARED_CACHE_BASE_NAME "armv7s";
+#elif __ARM64_ARCH_8_32__
+	return IPHONE_DYLD_SHARED_CACHE_DIR DYLD_SHARED_CACHE_BASE_NAME "arm64_32";
 #elif __arm64e__
 	return IPHONE_DYLD_SHARED_CACHE_DIR DYLD_SHARED_CACHE_BASE_NAME "arm64e";
 #elif __arm64__
@@ -341,7 +395,7 @@ void print_map(const dyld_shared_cache_dylib_info* dylibInfo, const dyld_shared_
 
 static void checkMode(Mode mode) {
 	if ( mode != modeNone ) {
-		fprintf(stderr, "Error: select one of: -list, -dependents, -info, -slide_info, -linkedit, -map, -extract, or -size\n");
+		fprintf(stderr, "Error: select one of: -list, -dependents, -info, -slide_info, -verbose_slide_info, -linkedit, -map, -extract, or -size\n");
 		usage();
 		exit(1);
 	}
@@ -359,6 +413,9 @@ int main (int argc, const char* argv[]) {
 	options.printInodes = false;
     options.dependentsOfPath = NULL;
     options.extractionDir = NULL;
+
+    bool printStrings = false;
+    bool printExports = false;
 
     for (uint32_t i = 1; i < argc; i++) {
         const char* opt = argv[i];
@@ -389,6 +446,10 @@ int main (int argc, const char* argv[]) {
 				checkMode(options.mode);
 				options.mode = modeSlideInfo;
 			}
+            else if (strcmp(opt, "-verbose_slide_info") == 0) {
+                checkMode(options.mode);
+                options.mode = modeVerboseSlideInfo;
+            }
 			else if (strcmp(opt, "-accelerator_info") == 0) {
 				checkMode(options.mode);
 				options.mode = modeAcceleratorInfo;
@@ -397,10 +458,22 @@ int main (int argc, const char* argv[]) {
 				checkMode(options.mode);
 				options.mode = modeTextInfo;
 			}
-			else if (strcmp(opt, "-local_symbols") == 0) {
-				checkMode(options.mode);
-				options.mode = modeLocalSymbols;
-			}
+            else if (strcmp(opt, "-local_symbols") == 0) {
+                checkMode(options.mode);
+                options.mode = modeLocalSymbols;
+            }
+            else if (strcmp(opt, "-strings") == 0) {
+                if (options.mode != modeStrings)
+                    checkMode(options.mode);
+                options.mode = modeStrings;
+                printStrings = true;
+            }
+            else if (strcmp(opt, "-exports") == 0) {
+                if (options.mode != modeStrings)
+                    checkMode(options.mode);
+                options.mode = modeStrings;
+                printExports = true;
+            }
 			else if (strcmp(opt, "-map") == 0) {
 				checkMode(options.mode);
 				options.mode = modeMap;
@@ -448,7 +521,7 @@ int main (int argc, const char* argv[]) {
 		exit(1);
 	}
 		
-	if ( options.mode != modeSlideInfo ) {
+	if ( options.mode != modeSlideInfo &&  options.mode != modeVerboseSlideInfo ) {
 		if ( options.printUUIDs && (options.mode != modeList) )
 			fprintf(stderr, "Warning: -uuid option ignored outside of -list mode\n");
 			
@@ -464,35 +537,39 @@ int main (int argc, const char* argv[]) {
 			exit(1);
 		}
 	}
-			
-	struct stat statbuf;
-	if ( ::stat(sharedCachePath, &statbuf) == -1 ) {
-		fprintf(stderr, "Error: stat() failed for dyld shared cache at %s, errno=%d\n", sharedCachePath, errno);
-		exit(1);
-	}
-		
-	int cache_fd = ::open(sharedCachePath, O_RDONLY);
-	if ( cache_fd < 0 ) {
-		fprintf(stderr, "Error: open() failed for shared cache file at %s, errno=%d\n", sharedCachePath, errno);
-		exit(1);
-	}
-	options.mappedCache = ::mmap(NULL, (size_t)statbuf.st_size, PROT_READ, MAP_PRIVATE, cache_fd, 0);
-	if (options.mappedCache == MAP_FAILED) {
-		fprintf(stderr, "Error: mmap() for shared cache at %s failed, errno=%d\n", sharedCachePath, errno);
-		exit(1);
-	}
+    
+    const DyldSharedCache* dyldCache = nullptr;
+    bool dyldCacheIsLive = true;
+    size_t cacheLength = 0;
+    if ( sharedCachePath != nullptr ) {
+        dyldCache = mapCacheFile(sharedCachePath, cacheLength);
+        dyldCacheIsLive = false;
+    }
+    else {
+#if __MAC_OS_X_VERSION_MIN_REQUIRED && (__MAC_OS_X_VERSION_MIN_REQUIRED < 101300)
+        fprintf(stderr, "this tool needs to run on macOS 10.13 or later\n");
+        return 1;
+#else
+        dyldCache = (DyldSharedCache*)_dyld_get_shared_cache_range(&cacheLength);
+#endif
+    }
+
+    options.mappedCache = dyldCache;
 	
-	if ( options.mode == modeSlideInfo ) {
+	if ( options.mode == modeSlideInfo || options.mode == modeVerboseSlideInfo ) {
 		const dyldCacheHeader<LittleEndian>* header = (dyldCacheHeader<LittleEndian>*)options.mappedCache;
 		if ( header->slideInfoOffset() == 0 ) {
 			fprintf(stderr, "Error: dyld shared cache does not contain slide info\n");
 			exit(1);
 		}
 		const dyldCacheFileMapping<LittleEndian>* mappings = (dyldCacheFileMapping<LittleEndian>*)((char*)options.mappedCache + header->mappingOffset());
+        const dyldCacheFileMapping<LittleEndian>* textMapping = &mappings[0];
 		const dyldCacheFileMapping<LittleEndian>* dataMapping = &mappings[1];
+        const dyldCacheFileMapping<LittleEndian>* linkEditMapping = &mappings[2];
 		uint64_t dataStartAddress = dataMapping->address();
 		uint64_t dataSize = dataMapping->size();
-		const dyldCacheSlideInfo<LittleEndian>* slideInfoHeader = (dyldCacheSlideInfo<LittleEndian>*)((char*)options.mappedCache+header->slideInfoOffset());
+        uint64_t slideInfoMappedOffset = (header->slideInfoOffset()-linkEditMapping->file_offset()) + (linkEditMapping->address() - textMapping->address());
+		const dyldCacheSlideInfo<LittleEndian>* slideInfoHeader = (dyldCacheSlideInfo<LittleEndian>*)((char*)options.mappedCache+slideInfoMappedOffset);
 		printf("slide info version=%d\n", slideInfoHeader->version());
 		if ( slideInfoHeader->version() == 1 ) {
 			printf("toc_count=%d, data page count=%lld\n", slideInfoHeader->toc_count(), dataSize/4096);
@@ -515,6 +592,30 @@ int main (int argc, const char* argv[]) {
 			const uint16_t* extras = (uint16_t* )((char*)slideInfo + slideInfo->page_extras_offset());
 			for (int i=0; i < slideInfo->page_starts_count(); ++i) {
 				const uint16_t start = starts[i];
+                auto rebaseChain = [&](uint8_t* pageContent, uint16_t startOffset)
+                {
+                    uintptr_t slideAmount = 0;
+                    const uintptr_t   deltaMask    = (uintptr_t)(slideInfo->delta_mask());
+                    const uintptr_t   valueMask    = ~deltaMask;
+                    const uintptr_t   valueAdd     = (uintptr_t)(slideInfo->value_add());
+                    const unsigned    deltaShift   = __builtin_ctzll(deltaMask) - 2;
+
+                    uint32_t pageOffset = startOffset;
+                    uint32_t delta = 1;
+                    while ( delta != 0 ) {
+                        uint8_t* loc = pageContent + pageOffset;
+                        uintptr_t rawValue = *((uintptr_t*)loc);
+                        delta = (uint32_t)((rawValue & deltaMask) >> deltaShift);
+                        uintptr_t value = (rawValue & valueMask);
+                        if ( value != 0 ) {
+                            value += valueAdd;
+                            value += slideAmount;
+                        }
+                        printf("    [% 5d + 0x%04llX]: 0x%016llX\n", i, (uint64_t)(pageOffset), (uint64_t)rawValue);
+                        pageOffset += delta;
+                    }
+                };
+                const uint8_t* dataPagesStart = (uint8_t*)((char*)options.mappedCache + dataMapping->file_offset());
 				if ( start == DYLD_CACHE_SLIDE_PAGE_ATTR_NO_REBASE ) {
 					printf("page[% 5d]: no rebasing\n", i);
 				}
@@ -525,6 +626,11 @@ int main (int argc, const char* argv[]) {
 					do {
 						uint16_t aStart = extras[j];
 						printf("start=0x%04X ", aStart & 0x3FFF);
+                        if ( options.mode == modeVerboseSlideInfo ) {
+                            uint8_t* page = (uint8_t*)(long)(dataPagesStart + (slideInfo->page_size()*i));
+                            uint16_t pageStartOffset = (aStart & 0x3FFF)*4;
+                            rebaseChain(page, pageStartOffset);
+                        }
 						done = (extras[j] & DYLD_CACHE_SLIDE_PAGE_ATTR_END);
 						++j;
 					} while ( !done );
@@ -532,11 +638,125 @@ int main (int argc, const char* argv[]) {
 				}
 				else {
 					printf("page[% 5d]: start=0x%04X\n", i, starts[i]);
+                    if ( options.mode == modeVerboseSlideInfo ) {
+                        uint8_t* page = (uint8_t*)(long)(dataPagesStart + (slideInfo->page_size()*i));
+                        uint16_t pageStartOffset = start*4;
+                        rebaseChain(page, pageStartOffset);
+                    }
 				}
 			}
 		}
+        else if ( slideInfoHeader->version() == 3 ) {
+            const dyldCacheSlideInfo3<LittleEndian>* slideInfo = (dyldCacheSlideInfo3<LittleEndian>*)(slideInfoHeader);
+            printf("page_size=%d\n", slideInfo->page_size());
+            printf("page_starts_count=%d\n", slideInfo->page_starts_count());
+            printf("auth_value_add=0x%016llX\n", slideInfo->auth_value_add());
+            const uint8_t* dataSegmentStart = (uint8_t*)((char*)options.mappedCache + dataMapping->file_offset());
+            for (int i=0; i < slideInfo->page_starts_count(); ++i) {
+                const uint16_t start = slideInfo->page_starts(i);
+                if ( start == 0xFFFF ) {
+                    printf("page[% 5d]: no rebasing\n", i);
+                }
+                else {
+                    printf("page[% 5d]: start=0x%04X\n", i, start);
+                    if ( options.mode == modeVerboseSlideInfo ) {
+                        typedef Pointer64<LittleEndian> P;
+                        typedef typename P::uint_t      pint_t;
+                        const uint8_t* pageStart = dataSegmentStart + (i * slideInfo->page_size());
+                        pint_t delta = start;
+                        const uint8_t* rebaseLocation = pageStart;
+                        do {
+                            rebaseLocation += delta;
+                            pint_t value = (pint_t)P::getP(*(uint64_t*)rebaseLocation);
+                            delta = ( (value & 0x3FF8000000000000) >> 51) * sizeof(pint_t);
+
+                            // Regular pointer which needs to fit in 51-bits of value.
+                            // C++ RTTI uses the top bit, so we'll allow the whole top-byte
+                            // and the signed-extended bottom 43-bits to be fit in to 51-bits.
+                            uint64_t top8Bits = value & 0x007F80000000000ULL;
+                            uint64_t bottom43Bits = value & 0x000007FFFFFFFFFFULL;
+                            uint64_t targetValue = ( top8Bits << 13 ) | (((intptr_t)(bottom43Bits << 21) >> 21) & 0x00FFFFFFFFFFFFFF);
+                            printf("    [% 5d + 0x%04llX]: 0x%016llX\n", i, (uint64_t)(rebaseLocation - pageStart), targetValue);
+                        } while (delta != 0);
+                    }
+                }
+            }
+        }
+        else if ( slideInfoHeader->version() == 4 ) {
+            const dyld_cache_slide_info4* slideInfo = (dyld_cache_slide_info4*)(slideInfoHeader);
+            printf("page_size=%d\n", slideInfo->page_size);
+            printf("delta_mask=0x%016llX\n", slideInfo->delta_mask);
+            printf("value_add=0x%016llX\n", slideInfo->value_add);
+            printf("page_starts_count=%d, page_extras_count=%d\n", slideInfo->page_starts_count, slideInfo->page_extras_count);
+            const uint16_t* starts = (uint16_t* )((char*)slideInfo + slideInfo->page_starts_offset);
+            const uint16_t* extras = (uint16_t* )((char*)slideInfo + slideInfo->page_extras_offset);
+            for (int i=0; i < slideInfo->page_starts_count; ++i) {
+                const uint16_t start = starts[i];
+                auto rebaseChainV4 = [&](uint8_t* pageContent, uint16_t startOffset)
+                {
+                    uintptr_t slideAmount = 0;
+                    const uintptr_t   deltaMask    = (uintptr_t)(slideInfo->delta_mask);
+                    const uintptr_t   valueMask    = ~deltaMask;
+                    const uintptr_t   valueAdd     = (uintptr_t)(slideInfo->value_add);
+                    const unsigned    deltaShift   = __builtin_ctzll(deltaMask) - 2;
+
+                    uint32_t pageOffset = startOffset;
+                    uint32_t delta = 1;
+                    while ( delta != 0 ) {
+                        uint8_t* loc = pageContent + pageOffset;
+                        uint32_t rawValue = *((uint32_t*)loc);
+                        delta = (uint32_t)((rawValue & deltaMask) >> deltaShift);
+                        uintptr_t value = (rawValue & valueMask);
+                        if ( (value & 0xFFFF8000) == 0 ) {
+                            // small positive non-pointer, use as-is
+                        }
+                        else if ( (value & 0x3FFF8000) == 0x3FFF8000 ) {
+                            // small negative non-pointer
+                            value |= 0xC0000000;
+                        }
+                        else  {
+                            value += valueAdd;
+                            value += slideAmount;
+                        }
+                        printf("    [% 5d + 0x%04X]: 0x%08X\n", i, pageOffset, rawValue);
+                        pageOffset += delta;
+                    }
+                };
+                const uint8_t* dataPagesStart = (uint8_t*)((char*)options.mappedCache + dataMapping->file_offset());
+                if ( start == DYLD_CACHE_SLIDE4_PAGE_NO_REBASE ) {
+                    printf("page[% 5d]: no rebasing\n", i);
+                }
+                else if ( start & DYLD_CACHE_SLIDE4_PAGE_USE_EXTRA ) {
+                    printf("page[% 5d]: ", i);
+                    int j=(start & DYLD_CACHE_SLIDE4_PAGE_INDEX);
+                    bool done = false;
+                    do {
+                        uint16_t aStart = extras[j];
+                        printf("start=0x%04X ", aStart & DYLD_CACHE_SLIDE4_PAGE_INDEX);
+                        if ( options.mode == modeVerboseSlideInfo ) {
+                            uint8_t* page = (uint8_t*)(long)(dataPagesStart + (slideInfo->page_size*i));
+                            uint16_t pageStartOffset = (aStart & DYLD_CACHE_SLIDE4_PAGE_INDEX)*4;
+                            rebaseChainV4(page, pageStartOffset);
+                        }
+                        done = (extras[j] & DYLD_CACHE_SLIDE4_PAGE_EXTRA_END);
+                        ++j;
+                    } while ( !done );
+                    printf("\n");
+                }
+                else {
+                    printf("page[% 5d]: start=0x%04X\n", i, starts[i]);
+                    if ( options.mode == modeVerboseSlideInfo ) {
+                        uint8_t* page = (uint8_t*)(long)(dataPagesStart + (slideInfo->page_size*i));
+                        uint16_t pageStartOffset = start*4;
+                        rebaseChainV4(page, pageStartOffset);
+                    }
+                }
+            }
+        }
+        return 0;
 	}
-	else if ( options.mode == modeInfo ) {
+	
+    if ( options.mode == modeInfo ) {
 		const dyldCacheHeader<LittleEndian>* header = (dyldCacheHeader<LittleEndian>*)options.mappedCache;
 		printf("uuid: ");
 		if ( header->mappingOffset() >= 0x68 ) {
@@ -553,25 +773,27 @@ int main (int argc, const char* argv[]) {
 		if ( header->mappingOffset() >= 0xE0 ) {
             // HACK until this uses new header
             uint32_t platform = *((uint32_t*)(((char*)header) + 0xD8));
-            uint32_t simulator = *((uint32_t*)(((char*)header) + 0xDC));
+            uint32_t bitfield = *((uint32_t*)(((char*)header) + 0xDC));
+            uint32_t simulator = bitfield & 0x200;
+            uint32_t locallyBuiltCache = bitfield & 0x400;
             switch (platform) {
                 case 1:
                     printf("platform: macOS\n");
                     break;
                 case 2:
-                    if ( simulator & 0x400 )
+                    if ( simulator )
                         printf("platform: iOS simulator\n");
                     else
                         printf("platform: iOS\n");
                     break;
                 case 3:
-                    if ( simulator & 0x400 )
+                    if ( simulator )
                         printf("platform: tvOS simulator\n");
                     else
                         printf("platform: tvOS\n");
                     break;
                 case 4:
-                    if ( simulator & 0x400 )
+                    if ( simulator )
                         printf("platform: watchOS simulator\n");
                     else
                         printf("platform: watchOS\n");
@@ -582,6 +804,7 @@ int main (int argc, const char* argv[]) {
                 default:
                     printf("platform: 0x%08X 0x%08X\n", platform, simulator);
             }
+            printf("built by: %s\n", locallyBuiltCache ? "local machine" : "B&I");
         }
 		printf("image count: %u\n", header->imagesCount());
 		if ( (header->mappingOffset() >= 0x78) && (header->branchPoolsOffset() != 0) ) {
@@ -604,7 +827,7 @@ int main (int argc, const char* argv[]) {
 													    mappings[i].address(), mappings[i].address() + mappings[i].size());
 		}
 		if ( header->codeSignatureOffset() != 0 ) {
-			uint64_t size = statbuf.st_size - header->codeSignatureOffset();
+			uint64_t size = cacheLength - header->codeSignatureOffset();
 			uint64_t csAddr = mappings[header->mappingCount()-1].address() + mappings[header->mappingCount()-1].size();
 			if ( size != 0 )
 				printf("    code sign   %3lluMB,  file offset: 0x%08llX -> 0x%08llX,  address: 0x%08llX -> 0x%08llX\n",
@@ -762,6 +985,51 @@ int main (int argc, const char* argv[]) {
 		#endif
 		}
 	}
+    else if ( options.mode == modeStrings ) {
+        if (printStrings) {
+            dyldCache->forEachImage(^(const mach_header *mh, const char *installName) {
+                const dyld3::MachOAnalyzer* ma = (dyld3::MachOAnalyzer*)mh;
+                int64_t slide = ma->getSlide();
+                ma->forEachSection(^(const dyld3::MachOAnalyzer::SectionInfo& info, bool malformedSectionRange, bool& stop) {
+                    if ( ( (info.sectFlags & SECTION_TYPE) == S_CSTRING_LITERALS ) ) {
+                        if ( malformedSectionRange ) {
+                            stop = true;
+                            return;
+                        }
+                        const uint8_t* content = (uint8_t*)(info.sectAddr + slide);
+                        const char* s   = (char*)content;
+                        const char* end = s + info.sectSize;
+                        while ( s < end ) {
+                            printf("%s: %s\n", ma->installName(), s);
+                            while (*s != '\0' )
+                                ++s;
+                            ++s;
+                        }
+                    }
+                });
+            });
+        }
+
+        if (printExports) {
+            dyldCache->forEachImage(^(const mach_header *mh, const char *installName) {
+                const dyld3::MachOAnalyzer* ma = (dyld3::MachOAnalyzer*)mh;
+                uint32_t exportTrieRuntimeOffset;
+                uint32_t exportTrieSize;
+                if ( ma->hasExportTrie(exportTrieRuntimeOffset, exportTrieSize) ) {
+                    const uint8_t* start = (uint8_t*)mh + exportTrieRuntimeOffset;
+                    const uint8_t* end = start + exportTrieSize;
+                    std::vector<ExportInfoTrie::Entry> exports;
+                    if ( !ExportInfoTrie::parseTrie(start, end, exports) ) {
+                        return;
+                    }
+
+                    for (const ExportInfoTrie::Entry& entry: exports) {
+                        printf("%s: %s\n", ma->installName(), entry.name.c_str());
+                    }
+                }
+            });
+        }
+    }
 	else if ( options.mode == modeExtract ) {
 		char pathBuffer[PATH_MAX];
 		uint32_t bufferSize = PATH_MAX;
@@ -810,10 +1078,12 @@ int main (int argc, const char* argv[]) {
 					break;
 				case modeNone:
 				case modeInfo:
-				case modeSlideInfo:
+                case modeSlideInfo:
+                case modeVerboseSlideInfo:
 				case modeAcceleratorInfo:
 				case modeTextInfo:
 				case modeLocalSymbols:
+                case modeStrings:
 				case modeExtract:
 					break;
 			}
@@ -838,16 +1108,22 @@ int main (int argc, const char* argv[]) {
 					break;
 				case modeNone:
 				case modeInfo:
-				case modeSlideInfo:
+                case modeSlideInfo:
+                case modeVerboseSlideInfo:
 				case modeAcceleratorInfo:
 				case modeTextInfo:
-				case modeLocalSymbols:
+                case modeLocalSymbols:
+                case modeStrings:
 				case modeExtract:
 					break;
 			}
 		}		
-		else if ( (strncmp((char*)options.mappedCache, "dyld_v1   armv", 14) == 0) 
-			   || (strncmp((char*)options.mappedCache, "dyld_v1  armv", 13) == 0) ) {
+		else if ( (strncmp((char*)options.mappedCache, "dyld_v1   armv", 14) == 0)
+				 || (strncmp((char*)options.mappedCache, "dyld_v1  armv", 13) == 0)
+#if SUPPORT_ARCH_arm64_32
+				 || (strcmp((char*)options.mappedCache, "dyld_v1arm64_32") == 0)
+#endif
+                 ) {
 			switch ( options.mode ) {
 				case modeList:
 					callback = print_list<arm>;
@@ -866,16 +1142,21 @@ int main (int argc, const char* argv[]) {
 					break;
 				case modeNone:
 				case modeInfo:
-				case modeSlideInfo:
+                case modeSlideInfo:
+                case modeVerboseSlideInfo:
 				case modeAcceleratorInfo:
 				case modeTextInfo:
-				case modeLocalSymbols:
+                case modeLocalSymbols:
+                case modeStrings:
 				case modeExtract:
 					break;
 			}
 		}		
 		else if ( (strcmp((char*)options.mappedCache, "dyld_v1   arm64") == 0)
-               || (strcmp((char*)options.mappedCache, "dyld_v1  arm64e") == 0) ) {
+#if SUPPORT_ARCH_arm64e
+               || (strcmp((char*)options.mappedCache, "dyld_v1  arm64e") == 0)
+#endif
+                 ) {
 			switch ( options.mode ) {
 				case modeList:
 					callback = print_list<arm64>;
@@ -894,22 +1175,55 @@ int main (int argc, const char* argv[]) {
 					break;
 				case modeNone:
 				case modeInfo:
-				case modeSlideInfo:
+                case modeSlideInfo:
+                case modeVerboseSlideInfo:
 				case modeAcceleratorInfo:
 				case modeTextInfo:
-				case modeLocalSymbols:
+                case modeLocalSymbols:
+                case modeStrings:
 				case modeExtract:
 					break;
 			}
-		}		
- 		else {
+		}
+#if SUPPORT_ARCH_arm64_32
+		else if ( (strcmp((char*)options.mappedCache, "dyld_v1arm64_32") == 0) ) {
+			switch ( options.mode ) {
+				case modeList:
+					callback = print_list<arm64_32>;
+					break;
+				case modeMap:
+					callback = print_map<arm64_32>;
+					break;
+				case modeDependencies:
+					callback = print_dependencies<arm64_32>;
+					break;
+				case modeLinkEdit:
+					callback = process_linkedit<arm64_32>;
+					break;
+				case modeSize:
+					callback = collect_size<arm64_32>;
+					break;
+				case modeNone:
+				case modeInfo:
+				case modeSlideInfo:
+                case modeVerboseSlideInfo:
+				case modeAcceleratorInfo:
+				case modeTextInfo:
+                case modeLocalSymbols:
+                case modeStrings:
+				case modeExtract:
+					break;
+			}
+ 		}
+#endif
+        else {
 			fprintf(stderr, "Error: unrecognized dyld shared cache magic.\n");
 			exit(1);
 		}
 		
 		__block Results results;
 		results.dependentTargetFound = false;
-		int iterateResult = dyld_shared_cache_iterate(options.mappedCache, (uint32_t)statbuf.st_size, 
+		int iterateResult = dyld_shared_cache_iterate(options.mappedCache, (uint32_t)cacheLength, 
 										   ^(const dyld_shared_cache_dylib_info* dylibInfo, const dyld_shared_cache_segment_info* segInfo ) {
 											   (callback)(dylibInfo, segInfo, options, results);
 										   });

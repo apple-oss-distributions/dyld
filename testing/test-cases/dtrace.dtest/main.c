@@ -1,3 +1,5 @@
+// BUILD_ONLY: MacOSX
+
 // BUILD:  /usr/sbin/dtrace -h -s main.d -o $TEMP_DIR/probes.h
 // BUILD:  $CC main.c -I$TEMP_DIR -o $BUILD_DIR/dtrace.exe
 // BUILD:  $DYLD_ENV_VARS_ENABLE $BUILD_DIR/dtrace.exe
@@ -20,8 +22,9 @@ int main()
     DYLD_TESTING_CALLBACK();
 
     if (!DYLD_TESTING_CALLBACK_ENABLED())
-        printf("[FAIL] !DYLD_TESTING_CALLBACK_ENABLED\n");
+        printf("[FAIL] dtrace: DYLD_TESTING_CALLBACK_ENABLED() returned false\n");
+    else
+        printf("[PASS] dtrace\n");
 
-    printf("[PASS] dtrace\n");
 	return 0;
 }

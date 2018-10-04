@@ -3,7 +3,7 @@
 // BUILD:  $CC bar.c -dynamiclib -Wl,-U,_gInitialisersCalled $BUILD_DIR/libfoo.dylib -flat_namespace -install_name $RUN_DIR/libbar.dylib -o $BUILD_DIR/libbar.dylib
 // BUILD:  $CC main.c -DRUN_DIR="$RUN_DIR"                                                                                               -o $BUILD_DIR/dlopen-flat.exe
 
-// RUN:  DYLD_LIBRARY_PATH=$RUN_DIR ./dlopen-flat.exe
+// RUN:  ./dlopen-flat.exe
 
 #include <stdio.h>
 #include <dlfcn.h>
@@ -17,8 +17,7 @@ int main() {
 	// Foo exports foo()
 	void* fooHandle = 0;
 	{
-		const char* path = RUN_DIR "/libfoo.dylib";
-		fooHandle = dlopen(path, RTLD_LAZY);
+		fooHandle = dlopen(RUN_DIR "/libfoo.dylib", RTLD_LAZY);
 		if (!fooHandle) {
 			printf("dlopen failed with error: %s\n", dlerror());
 			return 1;
@@ -39,8 +38,7 @@ int main() {
 
 	// Open foo again which should do something.
 	{
-		const char* path = RUN_DIR "/libfoo.dylib";
-		fooHandle = dlopen(path, RTLD_LAZY);
+		fooHandle = dlopen(RUN_DIR "/libfoo.dylib", RTLD_LAZY);
 		if (!fooHandle) {
 			printf("dlopen failed with error: %s\n", dlerror());
 			return 1;
@@ -55,8 +53,7 @@ int main() {
 	// Bar is going to resolve foo()
 	void* barHandle = 0;
 	{
-		const char* path = RUN_DIR "/libbar.dylib";
-		barHandle = dlopen(path, RTLD_LAZY);
+		barHandle = dlopen(RUN_DIR "/libbar.dylib", RTLD_LAZY);
 		if (!barHandle) {
 			printf("dlopen failed with error: %s\n", dlerror());
 			return 1;
@@ -77,8 +74,7 @@ int main() {
 
 	// Open foo again which shouldn't do anything.
 	{
-		const char* path = RUN_DIR "/libfoo.dylib";
-		fooHandle = dlopen(path, RTLD_LAZY);
+		fooHandle = dlopen(RUN_DIR "/libfoo.dylib", RTLD_LAZY);
 		if (!fooHandle) {
 			printf("dlopen failed with error: %s\n", dlerror());
 			return 1;

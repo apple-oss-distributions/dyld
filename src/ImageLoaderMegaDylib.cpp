@@ -460,17 +460,17 @@ void ImageLoaderMegaDylib::updateUsesCoalIterator(CoalIterator& it, uintptr_t va
 				address += read_uleb128(p, end);
 				break;
 			case BIND_OPCODE_DO_BIND:
-				ImageLoaderMachO::bindLocation(context, address, value, type, symbolName, addend, getIndexedPath((unsigned)it.imageIndex), targetImagePath, "weak ");
+				ImageLoaderMachO::bindLocation(context, 0, address, value, type, symbolName, addend, getIndexedPath((unsigned)it.imageIndex), targetImagePath, "weak ", NULL, _slide);
 				boundSomething = true;
 				address += sizeof(intptr_t);
 				break;
 			case BIND_OPCODE_DO_BIND_ADD_ADDR_ULEB:
-				ImageLoaderMachO::bindLocation(context, address, value, type, symbolName, addend, getIndexedPath((unsigned)it.imageIndex), targetImagePath, "weak ");
+				ImageLoaderMachO::bindLocation(context, 0, address, value, type, symbolName, addend, getIndexedPath((unsigned)it.imageIndex), targetImagePath, "weak ", NULL, _slide);
 				boundSomething = true;
 				address += read_uleb128(p, end) + sizeof(intptr_t);
 				break;
 			case BIND_OPCODE_DO_BIND_ADD_ADDR_IMM_SCALED:
-				ImageLoaderMachO::bindLocation(context, address, value, type, symbolName, addend, getIndexedPath((unsigned)it.imageIndex), targetImagePath, "weak ");
+				ImageLoaderMachO::bindLocation(context, 0, address, value, type, symbolName, addend, getIndexedPath((unsigned)it.imageIndex), targetImagePath, "weak ", NULL, _slide);
 				boundSomething = true;
 				address += immediate*sizeof(intptr_t) + sizeof(intptr_t);
 				break;
@@ -478,7 +478,7 @@ void ImageLoaderMegaDylib::updateUsesCoalIterator(CoalIterator& it, uintptr_t va
 				count = read_uleb128(p, end);
 				skip = read_uleb128(p, end);
 				for (uint32_t i=0; i < count; ++i) {
-					ImageLoaderMachO::bindLocation(context, address, value, type, symbolName, addend, getIndexedPath((unsigned)it.imageIndex), targetImagePath, "weak ");
+					ImageLoaderMachO::bindLocation(context, 0, address, value, type, symbolName, addend, getIndexedPath((unsigned)it.imageIndex), targetImagePath, "weak ", NULL, _slide);
 					boundSomething = true;
 					address += skip + sizeof(intptr_t);
 				}
@@ -777,24 +777,37 @@ bool ImageLoaderMegaDylib::findInChainedTriesAndDependents(const LinkContext& co
 }
 
 
-bool ImageLoaderMegaDylib::flatFindSymbol(const char* name, bool onlyInCoalesced, const ImageLoader::Symbol** sym, const ImageLoader** image)
+bool ImageLoaderMegaDylib::flatFindSymbol(const char* name, bool onlyInCoalesced, const ImageLoader::Symbol** sym, const ImageLoader** image, ImageLoader::CoalesceNotifier notifier)
 {
+	bool found = false;
 	// check export trie of all in-use images
 	for (unsigned i=0; i < _imageCount ; ++i) {
 		uint16_t imageIndex = _bottomUpArray[i];
 		if ( _stateFlags[imageIndex] == kStateUnused )
 			continue;
+#if USES_CHAINED_BINDS
+		const macho_header* mh = getIndexedMachHeader(imageIndex);
+		if ( onlyInCoalesced && (mh->flags & MH_WEAK_DEFINES) == 0 )
+			continue;
+#else
 		if ( onlyInCoalesced && (_imageExtras[imageIndex].weakBindingsSize == 0) )
 			continue;
+#endif
 		const uint8_t* exportNode;
 		const uint8_t* exportTrieEnd;
 		if ( exportTrieHasNode(name, imageIndex, &exportNode, &exportTrieEnd) ) {
-			*sym = (Symbol*)exportNode;
-			*image = this;
-			return true;
+			if ( notifier )
+				notifier((Symbol*)exportNode, this, (mach_header*)getIndexedMachHeader(imageIndex));
+			if ( !found ) {
+				*sym = (Symbol*)exportNode;
+				*image = this;
+				found = true;
+			}
+			if ( !onlyInCoalesced )
+				return true;
 		}
 	}
-	return false;
+	return found;
 }
 
 
@@ -881,9 +894,10 @@ void ImageLoaderMegaDylib::recursiveInitialization(const LinkContext& context, m
 				if ( context.verboseInit )
 					dyld::log("dyld: calling initializer function %p in %s\n", func, getIndexedPath(imageIndex));
 				bool haveLibSystemHelpersBefore = (dyld::gLibSystemHelpers != NULL);
-				dyld3::kdebug_trace_dyld_duration(DBG_DYLD_TIMING_STATIC_INITIALIZER, (uint64_t)func, 0, ^{
+				{
+					dyld3::ScopedTimer timer(DBG_DYLD_TIMING_STATIC_INITIALIZER, (uint64_t)getIndexedMachHeader(imageIndex), (uint64_t)func, 0);
 					func(context.argc, context.argv, context.envp, context.apple, &context.programVars);
-				});
+				};
 				bool haveLibSystemHelpersAfter = (dyld::gLibSystemHelpers != NULL);
 				ranSomeInitializers = true;
 				if ( !haveLibSystemHelpersBefore && haveLibSystemHelpersAfter ) {

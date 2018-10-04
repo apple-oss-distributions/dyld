@@ -230,6 +230,77 @@ struct dyld_cache_slide_info2
 #define DYLD_CACHE_SLIDE_PAGE_ATTR_END			0x8000  // last chain entry for page
 
 
+
+// The version 3 of the slide info uses a different compression scheme. Since
+// only interior pointers (pointers that point within the cache) are rebased
+// (slid), we know the possible range of the pointers and thus know there are
+// unused bits in each pointer.  We use those bits to form a linked list of
+// locations needing rebasing in each page.
+//
+// Definitions:
+//
+//  pageIndex = (pageAddress - startOfAllDataAddress)/info->page_size
+//  pageStarts[] = info + info->page_starts_offset
+//
+// There are two cases:
+//
+// 1) pageStarts[pageIndex] == DYLD_CACHE_SLIDE_V3_PAGE_ATTR_NO_REBASE
+//    The page contains no values that need rebasing.
+//
+// 2) otherwise...
+//    All rebase locations are in one linked list. The offset of the first
+//    rebase location in the page is pageStarts[pageIndex].
+//
+// A pointer is one of :
+// {
+//     uint64_t pointerValue : 51;
+//     uint64_t offsetToNextPointer : 11;
+//     uint64_t isBind : 1 = 0;
+//     uint64_t authenticated : 1 = 0;
+// }
+// {
+//     uint32_t offsetFromSharedCacheBase;
+//     uint16_t diversityData;
+//     uint16_t hasAddressDiversity : 1;
+//     uint16_t key : 2;
+//     uint16_t offsetToNextPointer : 11;
+//     uint16_t isBind : 1;
+//     uint16_t authenticated : 1 = 1;
+// }
+//
+// The code for processing a linked list (chain) is:
+//
+//    uint32_t delta = pageStarts[pageIndex];
+//    uint8_t* loc = pageStart;
+//    do {
+//        loc += delta;
+//        uintptr_t rawValue = *((uintptr_t*)loc);
+//        delta = ( (value & 0x3FF8000000000000) >> 51) * sizeof(uint64_t);
+//        if (extraBindData.isAuthenticated) {
+//            newValue = ( value & 0xFFFFFFFF )  + results->slide + auth_value_add;
+//            newValue = sign_using_the_various_bits(newValue);
+//        } else {
+//            uint64_t top8Bits = value & 0x0007F80000000000ULL;
+//            uint64_t bottom43Bits = value & 0x000007FFFFFFFFFFULL;
+//            uint64_t targetValue = ( top8Bits << 13 ) | bottom43Bits;
+//            newValue = targetValue + results->slide;
+//        }
+//        *((uintptr_t*)loc) = newValue;
+//    } while (delta != 0 )
+//
+//
+struct dyld_cache_slide_info3
+{
+    uint32_t    version;            // currently 3
+    uint32_t    page_size;          // currently 4096 (may also be 16384)
+    uint32_t    page_starts_count;
+    uint64_t    auth_value_add;
+    uint16_t    page_starts[/* page_starts_count */];
+};
+
+#define DYLD_CACHE_SLIDE_V3_PAGE_ATTR_NO_REBASE    0xFFFF    // page has no rebasing
+
+
 struct dyld_cache_local_symbols_info
 {
 	uint32_t	nlistOffset;		// offset into this chunk of nlist entries

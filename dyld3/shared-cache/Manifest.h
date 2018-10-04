@@ -39,13 +39,36 @@
 
 #import <Foundation/Foundation.h>
 
-#include "MachOParser.h"
 #include "DyldSharedCache.h"
 #include "Diagnostics.h"
+#include "MachOAnalyzer.h"
 
 extern std::string toolDir();
 
 namespace dyld3 {
+
+struct VIS_HIDDEN UUID {
+    UUID() {}
+    UUID(const UUID& other) { uuid_copy(_bytes, other._bytes); }
+    UUID(const uuid_t other) { uuid_copy(&_bytes[0], other); }
+    UUID(const dyld3::MachOAnalyzer* ml) { ml->getUuid(_bytes); }
+    bool operator<(const UUID& other) const { return uuid_compare(_bytes, other._bytes) < 0; }
+    bool operator==(const UUID& other) const { return uuid_compare(_bytes, other._bytes) == 0; }
+    bool operator!=(const UUID& other) const { return !(*this == other); }
+
+    size_t hash() const
+    {
+        size_t retval = 0;
+        for (size_t i = 0; i < (16 / sizeof(size_t)); ++i) {
+            retval ^= ((size_t*)(&_bytes[0]))[i];
+        }
+        return retval;
+    }
+    const unsigned char* get() const { return _bytes; };
+
+private:
+    uuid_t _bytes;
+};
 
 struct BuildQueueEntry {
     DyldSharedCache::CreateOptions            options;
@@ -58,7 +81,7 @@ struct BuildQueueEntry {
 
 struct Manifest {
     struct UUIDInfo {
-        const mach_header* mh;
+        const MachOAnalyzer* mh;
         uint64_t sliceFileOffset;
         std::size_t size;
         std::string runtimePath;
@@ -66,7 +89,7 @@ struct Manifest {
         std::string installName;
         std::string arch;
         UUID uuid;
-        UUIDInfo(const mach_header* M, std::size_t S, uint64_t SO, UUID U, std::string A, std::string RP, std::string BP, std::string IN)
+        UUIDInfo(const MachOAnalyzer* M, std::size_t S, uint64_t SO, UUID U, std::string A, std::string RP, std::string BP, std::string IN)
             : mh(M), size(S), arch(A), uuid(U), runtimePath(RP), buildPath(BP), installName(IN), sliceFileOffset(SO) {}
         UUIDInfo() : UUIDInfo(nullptr, 0, 0, UUID(), "", "", "", "") {}
     };
@@ -75,13 +98,6 @@ struct Manifest {
         std::vector<std::string> sources;
     };
 
-    struct File {
-        MachOParser* parser;
-        File(MachOParser* P)
-            : parser(P)
-        {
-        }
-    };
 
     struct SegmentInfo {
         std::string name;
@@ -116,7 +132,7 @@ struct Manifest {
         CacheInfo             developmentCache;
         CacheInfo             productionCache;
         CacheImageInfo& dylibForInstallname(const std::string& installname);
-        void exclude(MachOParser* parser, const std::string& reason);
+        void exclude(const dyld3::MachOAnalyzer* ml, const std::string& reason);
         void exclude(Manifest& manifest, const UUID& uuid, const std::string& reason);
     };
 
@@ -170,29 +186,37 @@ struct Manifest {
     void setVersion(const uint32_t manifestVersion);
     bool normalized;
 
-    Manifest(Diagnostics& D, const std::string& path);
-    Manifest(Diagnostics& D, const std::string& path, const std::set<std::string>& overlays);
+    Manifest(Diagnostics& D, const std::string& path, bool onlyParseManifest = false);
+    Manifest(Diagnostics& D, const std::string& path, const std::set<std::string>& overlays, bool onlyParseManifest = false);
 
-    BuildQueueEntry makeQueueEntry(const std::string& outputPath, const std::set<std::string>& configs, const std::string& arch, bool optimizeStubs, const std::string& prefix, bool verbose);
+    BuildQueueEntry makeQueueEntry(const std::string& outputPath, const std::set<std::string>& configs, const std::string& arch, bool optimizeStubs, const std::string& prefix,
+                                   bool isLocallyBuiltCache, bool skipWrites, bool verbose);
 
     void write(const std::string& path);
     void writeJSON(const std::string& path);
     void        canonicalize(void);
     void        calculateClosure();
-    MachOParser parserForUUID(const UUID& uuid) const;
+    const MachOAnalyzer* machOForUUID(const UUID& uuid) const;
     const std::string buildPathForUUID(const UUID& uuid);
     const std::string runtimePathForUUID(const UUID& uuid);
+    const std::string& installNameForUUID(const UUID& uuid);
     DyldSharedCache::MappedMachO machoForPathAndArch(const std::string& path, const std::string& arch) const;
     void remove(const std::string& config, const std::string& arch);
-    const std::string removeLargestLeafDylib(const std::set<std::string>& configurations, const std::string& architecture);
     void runConcurrently(dispatch_queue_t queue, dispatch_semaphore_t concurrencyLimitingSemaphore, std::function<void(const std::string configuration, const std::string architecture)> lambda);
     bool filterForConfig(const std::string& configName);
+    std::set<std::string> resultsForConfiguration(const std::string& configName);
+
+    // These are used by MRM to support having the Manifest give us a list of files/symlinks from the BOM but we use MRM for the actual cache generation
+    void forEachMachO(std::string configuration, std::function<void(const std::string &buildPath, const std::string &runtimePath, const std::string &arch, bool shouldBeExcludedIfLeaf)> lambda);
+
+    void forEachSymlink(std::string configuration, std::function<void(const std::string &fromPath, const std::string &toPath)> lambda);
 
 private:
     NSDictionary*    _manifestDict;
     Diagnostics&      _diags;
     std::map<UUID, UUIDInfo> _uuidMap;
     std::map<std::pair<std::string, std::string>, UUID> _installNameMap;
+    std::vector<std::pair<std::string, std::string>>    _symlinks;
     static dispatch_queue_t _identifierQueue;
     uint32_t                _manifestVersion;
     std::string             _build;
@@ -203,6 +227,7 @@ private:
     std::map<std::string, Project>               _projects;
     std::map<std::string, Configuration>         _configurations;
     std::map<std::string, std::set<std::string>> _metabomTagMap;
+    std::map<std::string, std::set<std::string>> _metabomSymlinkTagMap;
     std::map<std::string, std::set<std::string>> _metabomExcludeTagMap;
     std::map<std::string, std::set<std::string>> _metabomRestrictedTagMap;
 
@@ -213,16 +238,24 @@ private:
     const UUIDInfo& infoForUUID(const UUID& uuid) const;
     const UUIDInfo infoForInstallNameAndarch(const std::string& installName, const std::string arch) const;
     void insert(std::vector<DyldSharedCache::MappedMachO>& mappedMachOs, const CacheImageInfo& imageInfo);
-    bool loadParser(const void* p, size_t size, uint64_t sliceOffset, const std::string& runtimePath, const std::string& buildPath, const std::set<std::string>& architectures);
+    bool loadParser(const void* p, size_t sliceLength, uint64_t sliceOffset, const std::string& runtimePath, const std::string& buildPath, const std::set<std::string>& architectures);
     bool loadParsers(const std::string& pathToMachO, const std::string& runtimePath, const std::set<std::string>& architectures);
-    void removeDylib(MachOParser parser, const std::string& reason, const std::string& configuration, const std::string& architecture,
-        std::unordered_set<UUID>& processedIdentifiers);
     void dedupeDispositions();
     void calculateClosure(const std::string& configuration, const std::string& architecture);
     void canonicalizeDylib(const std::string& installname);
     template <typename P>
     void canonicalizeDylib(const std::string& installname, const uint8_t* p);
     void addImplicitAliases(void);
+};
+}
+
+namespace std {
+template <>
+struct hash<dyld3::UUID> {
+    size_t operator()(const dyld3::UUID& x) const
+    {
+        return x.hash();
+    }
 };
 }
 

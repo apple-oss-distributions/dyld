@@ -246,7 +246,7 @@ int main(int argc, const char* argv[])
                     makeBoms(manifest, masterDstRoot);
                 });
                 allBuildsSucceeded = build(diags, manifest, masterDstRoot, true, verbose, skipWrites,
-                                           agileChooseSHA256CdHash);
+                                           agileChooseSHA256CdHash, true, false);
             }
 
             manifest.write(resultPath);

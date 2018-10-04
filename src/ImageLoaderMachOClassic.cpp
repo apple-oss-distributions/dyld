@@ -601,11 +601,13 @@ bool ImageLoaderMachOClassic::isSubframeworkOf(const LinkContext& context, const
 							return true;
 						if ( context.imageSuffix != NULL ) {
 							// when DYLD_IMAGE_SUFFIX is used, lastSlash string needs imageSuffix removed from end
-							char reexportAndSuffix[strlen(context.imageSuffix)+strlen(exportThruName)+1];
-							strcpy(reexportAndSuffix, exportThruName);
-							strcat(reexportAndSuffix, context.imageSuffix);
-							if ( strcmp(&lastSlash[1], reexportAndSuffix) == 0 )
-								return true;
+							for(const char* const* suffix = context.imageSuffix; *suffix != NULL; ++suffix) {
+								char reexportAndSuffix[strlen(*suffix)+strlen(exportThruName)+1];
+								strcpy(reexportAndSuffix, exportThruName);
+								strcat(reexportAndSuffix, *suffix);
+								if ( strcmp(&lastSlash[1], reexportAndSuffix) == 0 )
+									return true;
+							}
 						}
 					}
 				}
@@ -647,11 +649,13 @@ bool ImageLoaderMachOClassic::hasSubLibrary(const LinkContext& context, const Im
 									return true;
 								if ( context.imageSuffix != NULL ) {
 									// when DYLD_IMAGE_SUFFIX is used, childLeafName string needs imageSuffix removed from end
-									char aSubLibNameAndSuffix[strlen(context.imageSuffix)+strlen(aSubLibName)+1];
-									strcpy(aSubLibNameAndSuffix, aSubLibName);
-									strcat(aSubLibNameAndSuffix, context.imageSuffix);
-									if ( strcmp(aSubLibNameAndSuffix, childLeafName) == 0 )
-										return true;
+									for(const char* const* suffix = context.imageSuffix; *suffix != NULL; ++suffix) {
+										char aSubLibNameAndSuffix[strlen(*suffix)+strlen(aSubLibName)+1];
+										strcpy(aSubLibNameAndSuffix, aSubLibName);
+										strcat(aSubLibNameAndSuffix, *suffix);
+										if ( strcmp(aSubLibNameAndSuffix, childLeafName) == 0 )
+											return true;
+									}
 								}
 							}
 							break;
@@ -680,11 +684,13 @@ bool ImageLoaderMachOClassic::hasSubLibrary(const LinkContext& context, const Im
 									return true;
 								if ( context.imageSuffix != NULL ) {
 									// when DYLD_IMAGE_SUFFIX is used, lastSlash string needs imageSuffix removed from end
-									char umbrellaAndSuffix[strlen(context.imageSuffix)+strlen(aSubUmbrellaName)+1];
-									strcpy(umbrellaAndSuffix, aSubUmbrellaName);
-									strcat(umbrellaAndSuffix, context.imageSuffix);
-									if ( strcmp(umbrellaAndSuffix, &lastSlash[1]) == 0 )
-										return true;
+									for(const char* const* suffix = context.imageSuffix; *suffix != NULL; ++suffix) {
+										char umbrellaAndSuffix[strlen(*suffix)+strlen(aSubUmbrellaName)+1];
+										strcpy(umbrellaAndSuffix, aSubUmbrellaName);
+										strcat(umbrellaAndSuffix, *suffix);
+										if ( strcmp(umbrellaAndSuffix, &lastSlash[1]) == 0 )
+											return true;
+									}
 								}
 							}
 							break;
@@ -1083,7 +1089,7 @@ uintptr_t ImageLoaderMachOClassic::resolveUndefined(const LinkContext& context, 
 		// symbol requires searching images with coalesced symbols (not done during prebinding)
 		if ( !context.prebinding && !dontCoalesce && (symbolIsWeakReference(undefinedSymbol) || symbolIsWeakDefinition(undefinedSymbol)) ) {
 			const Symbol* sym;
-			if ( context.coalescedExportFinder(symbolName, &sym, foundIn) ) {
+			if ( context.coalescedExportFinder(symbolName, &sym, foundIn, nullptr) ) {
 				if ( *foundIn != this )
 					context.addDynamicReference(this, const_cast<ImageLoader*>(*foundIn));
 				return (*foundIn)->getExportedSymbolAddress(sym, context, this);
@@ -1643,7 +1649,7 @@ void ImageLoaderMachOClassic::updateUsesCoalIterator(CoalIterator& it, uintptr_t
 			if ( reloc->r_pcrel ) 
 				type = BIND_TYPE_TEXT_PCREL32;
 		#endif
-			this->bindLocation(context, (uintptr_t)location, value, type, symbolName, addend, this->getPath(), targetImage ? targetImage->getPath() : NULL, "weak ");
+			this->bindLocation(context, this->imageBaseAddress(), (uintptr_t)location, value, type, symbolName, addend, this->getPath(), targetImage ? targetImage->getPath() : NULL, "weak ", NULL, fSlide);
 			boundSomething = true;
 		}
 	}

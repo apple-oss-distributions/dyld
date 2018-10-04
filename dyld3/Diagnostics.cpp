@@ -55,14 +55,14 @@
 #endif
 
 Diagnostics::Diagnostics(bool verbose)
-#if !DYLD_IN_PROCESS
+#if BUILDING_CACHE_BUILDER
     : _verbose(verbose)
     , _prefix("")
 #endif
 {
 }
 
-#if !DYLD_IN_PROCESS
+#if BUILDING_CACHE_BUILDER
 Diagnostics::Diagnostics(const std::string& prefix, bool verbose)
     : _verbose(verbose)
     , _prefix(prefix)
@@ -77,20 +77,23 @@ Diagnostics::~Diagnostics()
 
 void Diagnostics::error(const char* format, ...)
 {
-    _buffer = _simple_salloc();
     va_list    list;
     va_start(list, format);
-    _simple_vsprintf(_buffer, format, list);
+    error(format, list);
     va_end(list);
+}
 
-#if !DYLD_IN_PROCESS
+void Diagnostics::error(const char* format, va_list list)
+{
+    _buffer = _simple_salloc();
+    _simple_vsprintf(_buffer, format, list);
+
+#if BUILDING_CACHE_BUILDER
     if ( !_verbose )
         return;
     
     char *output_string;
-    va_start(list, format);
     vasprintf(&output_string, format, list);
-    va_end(list);
     
     if (_prefix.empty()) {
         fprintf(stderr, "%s", output_string);
@@ -123,7 +126,7 @@ void Diagnostics::assertNoError() const
         abort_report_np("%s", _simple_string(_buffer));
 }
 
-#if DYLD_IN_PROCESS
+#if !BUILDING_CACHE_BUILDER
 const char* Diagnostics::errorMessage() const
 {
     return _simple_string(_buffer);

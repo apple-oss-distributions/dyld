@@ -35,15 +35,38 @@
 #include <sys/fcntl.h>
 #include <sys/stat.h> 
 #include <sys/param.h>
-#include <sys/sysctl.h>
 #include <mach/mach.h>
 #include <mach/thread_status.h>
 #include <mach-o/loader.h> 
 #include "ImageLoaderMachOCompressed.h"
 #include "mach-o/dyld_images.h"
+#include "Closure.h"
+#include "Array.h"
 
 #ifndef EXPORT_SYMBOL_FLAGS_KIND_ABSOLUTE
 	#define EXPORT_SYMBOL_FLAGS_KIND_ABSOLUTE			0x02
+#endif
+
+
+#ifndef BIND_OPCODE_THREADED
+#define BIND_OPCODE_THREADED    0xD0
+#endif
+
+#ifndef BIND_SUBOPCODE_THREADED_SET_BIND_ORDINAL_TABLE_SIZE_ULEB
+#define BIND_SUBOPCODE_THREADED_SET_BIND_ORDINAL_TABLE_SIZE_ULEB	0x00
+#endif
+
+#ifndef BIND_SUBOPCODE_THREADED_APPLY
+#define BIND_SUBOPCODE_THREADED_APPLY								0x01
+#endif
+
+
+#ifndef BIND_SPECIAL_DYLIB_WEAK_LOOKUP
+#define BIND_SPECIAL_DYLIB_WEAK_LOOKUP								-3
+#endif
+
+#ifndef CPU_SUBTYPE_ARM64_E
+	#define CPU_SUBTYPE_ARM64_E    2
 #endif
 
 // relocation_info.r_length field has value 3 for 64-bit executables and value 2 for 32-bit executables
@@ -61,11 +84,6 @@
 	struct macho_segment_command	: public segment_command {};
 	struct macho_section			: public section  {};	
 	struct macho_routines_command	: public routines_command  {};	
-#endif
-
-#if __arm__ || __arm64__
-bool ImageLoaderMachOCompressed::sVmAccountingDisabled  = false;
-bool ImageLoaderMachOCompressed::sVmAccountingSuspended = false;
 #endif
 
 
@@ -489,7 +507,7 @@ void ImageLoaderMachOCompressed::rebase(const LinkContext& context, uintptr_t sl
 					fgTotalRebaseFixups += count;
 					break;
 				default:
-					dyld::throwf("bad rebase opcode %d", *p);
+					dyld::throwf("bad rebase opcode %d", *(p-1));
 			}
 		}
 	}
@@ -662,6 +680,95 @@ uintptr_t ImageLoaderMachOCompressed::resolveFlat(const LinkContext& context, co
 }
 
 
+#if USES_CHAINED_BINDS
+static void patchCacheUsesOf(const ImageLoader::LinkContext& context, const dyld3::closure::Image* overriddenImage,
+							 uint32_t cacheOffsetOfImpl, const char* symbolName, uintptr_t newImpl)
+{
+	uintptr_t cacheStart = (uintptr_t)context.dyldCache;
+	overriddenImage->forEachPatchableUseOfExport(cacheOffsetOfImpl, ^(dyld3::closure::Image::PatchableExport::PatchLocation patchLocation) {
+		uintptr_t* loc = (uintptr_t*)(cacheStart+patchLocation.cacheOffset);
+#if __has_feature(ptrauth_calls)
+		if ( patchLocation.authenticated ) {
+			 dyld3::MachOLoaded::ChainedFixupPointerOnDisk fixupInfo;
+			fixupInfo.authRebase.auth      = true;
+			fixupInfo.authRebase.addrDiv   = patchLocation.usesAddressDiversity;
+			fixupInfo.authRebase.diversity = patchLocation.discriminator;
+			fixupInfo.authRebase.key       = patchLocation.key;
+			uintptr_t newValue = fixupInfo.signPointer(loc, newImpl + patchLocation.getAddend());
+			if ( *loc != newValue ) {
+				*loc = newValue;
+				if ( context.verboseBind )
+					dyld::log("dyld: cache fixup: *%p = %p (JOP: diversity 0x%04X, addr-div=%d, key=%s) to %s\n",
+						  	loc, (void*)newValue, patchLocation.discriminator, patchLocation.usesAddressDiversity, patchLocation.keyName(), symbolName);
+			}
+			return;
+		}
+#endif
+		uintptr_t newValue =newImpl + patchLocation.getAddend();
+		if ( *loc != newValue ) {
+			*loc = newValue;
+			if ( context.verboseBind )
+				dyld::log("dyld: cache fixup: *%p = %p to %s\n", loc, (void*)newValue, symbolName);
+		}
+	});
+}
+#endif
+
+
+uintptr_t ImageLoaderMachOCompressed::resolveWeak(const LinkContext& context, const char* symbolName, bool weak_import,
+												  bool runResolver, const ImageLoader** foundIn)
+{
+	const Symbol* sym;
+#if USES_CHAINED_BINDS
+	__block uintptr_t foundOutsideCache  = 0;
+	__block uintptr_t lastFoundInCache = 0;
+	CoalesceNotifier notifier = ^(const Symbol* implSym, const ImageLoader* implIn, const mach_header* implMh) {
+		//dyld::log("notifier: found %s in %p %s\n", symbolName, implMh, implIn->getPath());
+		// This block is only called in dyld2 mode when a non-cached image is search for which weak-def implementation to use
+		// As a side effect of that search we notice any implementations outside and inside the cache,
+		// and use that to trigger patching the cache to use the implementation outside the cache.
+		uintptr_t implAddr = implIn->getExportedSymbolAddress(implSym, context, nullptr, false, symbolName);
+		if ( ((dyld3::MachOLoaded*)implMh)->inDyldCache() ) {
+			if ( foundOutsideCache != 0 ) {
+				// have an implementation in cache and and earlier one not in the cache, patch cache to use earlier one
+				lastFoundInCache = implAddr;
+				uint32_t imageIndex;
+				if ( context.dyldCache->findMachHeaderImageIndex(implMh, imageIndex) ) {
+					const dyld3::closure::Image* overriddenImage = context.dyldCache->cachedDylibsImageArray()->imageForNum(imageIndex+1);
+					uint32_t cacheOffsetOfImpl = (uint32_t)((uintptr_t)implAddr - (uintptr_t)context.dyldCache);
+					patchCacheUsesOf(context, overriddenImage, cacheOffsetOfImpl, symbolName, foundOutsideCache);
+				}
+			}
+		}
+		else {
+			// record first non-cache implementation
+			if ( foundOutsideCache == 0 )
+				foundOutsideCache = implAddr;
+		}
+	};
+#else
+	CoalesceNotifier notifier = nullptr;
+#endif
+	if ( context.coalescedExportFinder(symbolName, &sym, foundIn, notifier) ) {
+		if ( *foundIn != this )
+			context.addDynamicReference(this, const_cast<ImageLoader*>(*foundIn));
+		return (*foundIn)->getExportedSymbolAddress(sym, context, this, runResolver);
+	}
+	// if a bundle is loaded privately the above will not find its exports
+	if ( this->isBundle() && this->hasHiddenExports() ) {
+		// look in self for needed symbol
+		sym = this->findShallowExportedSymbol(symbolName, foundIn);
+		if ( sym != NULL )
+			return (*foundIn)->getExportedSymbolAddress(sym, context, this, runResolver);
+	}
+	if ( weak_import ) {
+		// definition can't be found anywhere, ok because it is weak, just return 0
+		return 0;
+	}
+	throwSymbolNotFound(context, symbolName, this->getPath(), "", "weak");
+}
+
+
 uintptr_t ImageLoaderMachOCompressed::resolveTwolevel(const LinkContext& context, const char* symbolName, const ImageLoader* definedInImage,
 													  const ImageLoader* requestorImage, unsigned requestorOrdinalOfDef, bool weak_import, bool runResolver,
 													  const ImageLoader** foundIn)
@@ -718,6 +825,9 @@ uintptr_t ImageLoaderMachOCompressed::resolve(const LinkContext& context, const 
 	if ( context.bindFlat || (libraryOrdinal == BIND_SPECIAL_DYLIB_FLAT_LOOKUP) ) {
 		symbolAddress = this->resolveFlat(context, symbolName, weak_import, runResolver, targetImage);
 	}
+	else if ( libraryOrdinal == BIND_SPECIAL_DYLIB_WEAK_LOOKUP ) {
+		symbolAddress = this->resolveWeak(context, symbolName, false, runResolver, targetImage);
+	}
 	else {
 		if ( libraryOrdinal == BIND_SPECIAL_DYLIB_MAIN_EXECUTABLE ) {
 			*targetImage = context.mainExecutable;
@@ -763,18 +873,24 @@ uintptr_t ImageLoaderMachOCompressed::resolve(const LinkContext& context, const 
 	return symbolAddress;
 }
 
-uintptr_t ImageLoaderMachOCompressed::bindAt(const LinkContext& context, uintptr_t addr, uint8_t type, const char* symbolName, 
-								uint8_t symbolFlags, intptr_t addend, long libraryOrdinal, const char* msg,
-								LastLookup* last, bool runResolver)
+uintptr_t ImageLoaderMachOCompressed::bindAt(const LinkContext& context, ImageLoaderMachOCompressed* image,
+											 uintptr_t addr, uint8_t type, const char* symbolName,
+											 uint8_t symbolFlags, intptr_t addend, long libraryOrdinal,
+											 ExtraBindData *extraBindData,
+											 const char* msg, LastLookup* last, bool runResolver)
 {
 	const ImageLoader*	targetImage;
 	uintptr_t			symbolAddress;
 	
 	// resolve symbol
-	symbolAddress = this->resolve(context, symbolName, symbolFlags, libraryOrdinal, &targetImage, last, runResolver);
+    if (type == BIND_TYPE_THREADED_REBASE) {
+        symbolAddress = 0;
+        targetImage = nullptr;
+    } else
+        symbolAddress = image->resolve(context, symbolName, symbolFlags, libraryOrdinal, &targetImage, last, runResolver);
 
 	// do actual update
-	return this->bindLocation(context, addr, symbolAddress, type, symbolName, addend, this->getPath(), targetImage ? targetImage->getPath() : NULL, msg);
+	return image->bindLocation(context, image->imageBaseAddress(), addr, symbolAddress, type, symbolName, addend, image->getPath(), targetImage ? targetImage->getPath() : NULL, msg, extraBindData, image->fSlide);
 }
 
 
@@ -795,6 +911,21 @@ void ImageLoaderMachOCompressed::doBind(const LinkContext& context, bool forceLa
 	// note: flat-namespace binaries need to have imports rebound (even if correctly prebound)
 	if ( this->usablePrebinding(context) ) {
 		// don't need to bind
+		// except weak which may now be inline with the regular binds
+		if (this->participatesInCoalescing()) {
+			// run through all binding opcodes
+			eachBind(context, ^(const LinkContext& ctx, ImageLoaderMachOCompressed* image,
+								uintptr_t addr, uint8_t type, const char* symbolName,
+								uint8_t symbolFlags, intptr_t addend, long libraryOrdinal,
+								ExtraBindData *extraBindData,
+								const char* msg, LastLookup* last, bool runResolver) {
+				if ( libraryOrdinal != BIND_SPECIAL_DYLIB_WEAK_LOOKUP )
+					return (uintptr_t)0;
+				return ImageLoaderMachOCompressed::bindAt(ctx, image, addr, type, symbolName, symbolFlags,
+														  addend, libraryOrdinal, extraBindData,
+														  msg, last, runResolver);
+			});
+		}
 	}
 	else {
 		uint64_t t0 = mach_absolute_time();
@@ -804,9 +935,21 @@ void ImageLoaderMachOCompressed::doBind(const LinkContext& context, bool forceLa
 		if ( fTextSegmentBinds ) 
 			this->makeTextSegmentWritable(context, true);
 	#endif
-	
+
+		uint32_t ignore;
+		bool bindingBecauseOfRoot = ( this->overridesCachedDylib(ignore) || this->inSharedCache() );
+		vmAccountingSetSuspended(context, bindingBecauseOfRoot);
+
 		// run through all binding opcodes
-		eachBind(context, &ImageLoaderMachOCompressed::bindAt);
+		eachBind(context, ^(const LinkContext& ctx, ImageLoaderMachOCompressed* image,
+							uintptr_t addr, uint8_t type, const char* symbolName,
+							uint8_t symbolFlags, intptr_t addend, long libraryOrdinal,
+							ExtraBindData *extraBindData,
+							const char* msg, LastLookup* last, bool runResolver) {
+			return ImageLoaderMachOCompressed::bindAt(ctx, image, addr, type, symbolName, symbolFlags,
+													  addend, libraryOrdinal, extraBindData,
+													  msg, last, runResolver);
+		});
 			
 	#if TEXT_RELOC_SUPPORT
 		// if there were __TEXT fixups, restore write protection
@@ -824,7 +967,7 @@ void ImageLoaderMachOCompressed::doBind(const LinkContext& context, bool forceLa
         // the stub may have been altered to point to a shared lazy pointer.
 		if ( fInSharedCache ) 
 			this->updateOptimizedLazyPointers(context);
-	
+
 		// tell kernel we are done with chunks of LINKEDIT
 		if ( !context.preFetchDisabled ) 
 			this->markFreeLINKEDIT(context);
@@ -832,6 +975,23 @@ void ImageLoaderMachOCompressed::doBind(const LinkContext& context, bool forceLa
 		uint64_t t1 = mach_absolute_time();
 		ImageLoader::fgTotalRebindCacheTime += (t1-t0);
 	}
+
+#if USES_CHAINED_BINDS
+	// See if this dylib overrides something in the dyld cache
+	uint32_t dyldCacheOverrideImageNum;
+	if ( context.dyldCache && overridesCachedDylib(dyldCacheOverrideImageNum) ) {
+		// need to patch all other places in cache that point to the overridden dylib, to point to this dylib instead
+		const dyld3::closure::Image* overriddenImage = context.dyldCache->cachedDylibsImageArray()->imageForNum(dyldCacheOverrideImageNum);
+		overriddenImage->forEachPatchableExport(^(uint32_t cacheOffsetOfImpl, const char* exportName) {
+			uintptr_t newImpl = 0;
+			const ImageLoader* foundIn;
+			if ( const ImageLoader::Symbol* sym = this->findShallowExportedSymbol(exportName, &foundIn) ) {
+				newImpl = foundIn->getExportedSymbolAddress(sym, context, this);
+			}
+			patchCacheUsesOf(context, overriddenImage, cacheOffsetOfImpl, exportName, newImpl);
+		});
+	}
+#endif
 	
 	// set up dyld entry points in image
 	// do last so flat main executables will have __dyld or __program_vars set up
@@ -842,49 +1002,179 @@ void ImageLoaderMachOCompressed::doBind(const LinkContext& context, bool forceLa
 
 void ImageLoaderMachOCompressed::doBindJustLazies(const LinkContext& context)
 {
-	eachLazyBind(context, &ImageLoaderMachOCompressed::bindAt);
+	eachLazyBind(context, ^(const LinkContext& ctx, ImageLoaderMachOCompressed* image,
+							uintptr_t addr, uint8_t type, const char* symbolName,
+							uint8_t symbolFlags, intptr_t addend, long libraryOrdinal,
+							ExtraBindData *extraBindData,
+							const char* msg, LastLookup* last, bool runResolver) {
+		return ImageLoaderMachOCompressed::bindAt(ctx, image, addr, type, symbolName, symbolFlags,
+												  addend, libraryOrdinal, extraBindData,
+												  msg, last, runResolver);
+	});
 }
 
-#if __arm__ || __arm64__
-int ImageLoaderMachOCompressed::vmAccountingSetSuspended(bool suspend, const LinkContext& context)
+void ImageLoaderMachOCompressed::registerInterposing(const LinkContext& context)
 {
-    if ( context.verboseBind )
-        dyld::log("vm.footprint_suspend=%d\n", suspend);
-    int newValue = suspend ? 1 : 0;
-    int oldValue = 0;
-    size_t newlen = sizeof(newValue);
-    size_t oldlen = sizeof(oldValue);
-    return sysctlbyname("vm.footprint_suspend", &oldValue, &oldlen, &newValue, newlen);
+	// mach-o files advertise interposing by having a __DATA __interpose section
+	struct InterposeData { uintptr_t replacement; uintptr_t replacee; };
+	const uint32_t cmd_count = ((macho_header*)fMachOData)->ncmds;
+	const struct load_command* const cmds = (struct load_command*)&fMachOData[sizeof(macho_header)];
+	const struct load_command* cmd = cmds;
+	for (uint32_t i = 0; i < cmd_count; ++i) {
+		switch (cmd->cmd) {
+			case LC_SEGMENT_COMMAND:
+			{
+				const struct macho_segment_command* seg = (struct macho_segment_command*)cmd;
+				const struct macho_section* const sectionsStart = (struct macho_section*)((char*)seg + sizeof(struct macho_segment_command));
+				const struct macho_section* const sectionsEnd = &sectionsStart[seg->nsects];
+				for (const struct macho_section* sect=sectionsStart; sect < sectionsEnd; ++sect) {
+					if ( ((sect->flags & SECTION_TYPE) == S_INTERPOSING) || ((strcmp(sect->sectname, "__interpose") == 0) && (strcmp(seg->segname, "__DATA") == 0)) ) {
+						// <rdar://problem/23929217> Ensure section is within segment
+						if ( (sect->addr < seg->vmaddr) || (sect->addr+sect->size > seg->vmaddr+seg->vmsize) || (sect->addr+sect->size < sect->addr) )
+							dyld::throwf("interpose section has malformed address range for %s\n", this->getPath());
+						__block uintptr_t sectionStart = sect->addr + fSlide;
+						__block uintptr_t sectionEnd = sectionStart + sect->size;
+						const size_t count = sect->size / sizeof(InterposeData);
+						InterposeData interposeArray[count];
+						// Note, we memcpy here as rebases may have already been applied.
+						memcpy(&interposeArray[0], (void*)sectionStart, sect->size);
+						__block InterposeData *interposeArrayStart = &interposeArray[0];
+						eachBind(context, ^(const LinkContext& ctx, ImageLoaderMachOCompressed* image, uintptr_t addr, uint8_t type,
+											const char* symbolName, uint8_t symbolFlags, intptr_t addend, long libraryOrdinal,
+											ExtraBindData *extraBindData,
+											const char* msg, LastLookup* last, bool runResolver) {
+							if (addr >= sectionStart && addr < sectionEnd) {
+								if ( context.verboseInterposing ) {
+									dyld::log("dyld: interposing %s at 0x%lx in range 0x%lx..0x%lx\n",
+											  symbolName, addr, sectionStart, sectionEnd);
+								}
+								const ImageLoader*	targetImage;
+								uintptr_t			symbolAddress;
+
+								// resolve symbol
+								if (type == BIND_TYPE_THREADED_REBASE) {
+									symbolAddress = 0;
+									targetImage = nullptr;
+								} else
+									symbolAddress = image->resolve(ctx, symbolName, symbolFlags, libraryOrdinal, &targetImage, last, runResolver);
+
+								uintptr_t newValue = symbolAddress+addend;
+								uintptr_t index = (addr - sectionStart) / sizeof(uintptr_t);
+								switch (type) {
+									case BIND_TYPE_POINTER:
+										((uintptr_t*)interposeArrayStart)[index] = newValue;
+										break;
+									case BIND_TYPE_TEXT_ABSOLUTE32:
+										// unreachable!
+										abort();
+									case BIND_TYPE_TEXT_PCREL32:
+										// unreachable!
+										abort();
+									case BIND_TYPE_THREADED_BIND:
+										((uintptr_t*)interposeArrayStart)[index] = newValue;
+										break;
+									case BIND_TYPE_THREADED_REBASE: {
+										// Regular pointer which needs to fit in 51-bits of value.
+										// C++ RTTI uses the top bit, so we'll allow the whole top-byte
+										// and the signed-extended bottom 43-bits to be fit in to 51-bits.
+										uint64_t top8Bits = (*(uint64_t*)addr) & 0x0007F80000000000ULL;
+										uint64_t bottom43Bits = (*(uint64_t*)addr) & 0x000007FFFFFFFFFFULL;
+										uint64_t targetValue = ( top8Bits << 13 ) | (((intptr_t)(bottom43Bits << 21) >> 21) & 0x00FFFFFFFFFFFFFF);
+										newValue = (uintptr_t)(targetValue + fSlide);
+										((uintptr_t*)interposeArrayStart)[index] = newValue;
+										break;
+									}
+									default:
+										dyld::throwf("bad bind type %d", type);
+								}
+							}
+							return (uintptr_t)0;
+						});
+						for (size_t j=0; j < count; ++j) {
+							ImageLoader::InterposeTuple tuple;
+							tuple.replacement        = interposeArray[j].replacement;
+							tuple.neverImage        = this;
+							tuple.onlyImage            = NULL;
+							tuple.replacee            = interposeArray[j].replacee;
+							if ( context.verboseInterposing ) {
+								dyld::log("dyld: interposing index %d 0x%lx with 0x%lx\n",
+										  (unsigned)j, interposeArray[j].replacee, interposeArray[j].replacement);
+							}
+							// <rdar://problem/25686570> ignore interposing on a weak function that does not exist
+							if ( tuple.replacee == 0 )
+								continue;
+							// <rdar://problem/7937695> verify that replacement is in this image
+							if ( this->containsAddress((void*)tuple.replacement) ) {
+								// chain to any existing interpositions
+								for (std::vector<InterposeTuple>::iterator it=fgInterposingTuples.begin(); it != fgInterposingTuples.end(); it++) {
+									if ( it->replacee == tuple.replacee ) {
+										tuple.replacee = it->replacement;
+									}
+								}
+								ImageLoader::fgInterposingTuples.push_back(tuple);
+							}
+						}
+					}
+				}
+			}
+				break;
+		}
+		cmd = (const struct load_command*)(((char*)cmd)+cmd->cmdsize);
+	}
 }
+
+bool ImageLoaderMachOCompressed::usesChainedFixups() const
+{
+#if __arm64e__
+	return ( machHeader()->cpusubtype == CPU_SUBTYPE_ARM64_E );
+#else
+	return false;
 #endif
+}
+
+struct ThreadedBindData {
+    ThreadedBindData(const char* symbolName, int64_t addend, long libraryOrdinal, uint8_t symbolFlags, uint8_t type)
+    : symbolName(symbolName), addend(addend), libraryOrdinal(libraryOrdinal), symbolFlags(symbolFlags), type(type) { }
+
+    std::tuple<const char*, int64_t, long, bool, uint8_t> pack() const {
+        return std::make_tuple(symbolName, addend, libraryOrdinal, symbolFlags, type);
+    }
+
+    const char* symbolName     = nullptr;
+    int64_t addend             = 0;
+    long libraryOrdinal        = 0;
+    uint8_t symbolFlags        = 0;
+    uint8_t type               = 0;
+};
 
 void ImageLoaderMachOCompressed::eachBind(const LinkContext& context, bind_handler handler)
 {
-#if __arm__ || __arm64__
-    // <rdar://problem/29099600> dyld should tell the kernel when it is doing root fix-ups
-    if ( !sVmAccountingDisabled ) {
-        if ( fInSharedCache ) {
-            if ( !sVmAccountingSuspended ) {
-                int ret = vmAccountingSetSuspended(true, context);
-                if ( context.verboseBind && (ret != 0) )
-                    dyld::log("vm.footprint_suspend => %d, errno=%d\n", ret, errno);
-                if ( ret == 0 )
-                    sVmAccountingSuspended = true;
-                else
-                    sVmAccountingDisabled = true;
-            }
-        }
-        else if ( sVmAccountingSuspended ) {
-            int ret = vmAccountingSetSuspended(false, context);
-            if ( ret == 0 )
-                sVmAccountingSuspended = false;
-            else if ( errno == ENOENT )
-                sVmAccountingDisabled = true;
-        }
-    }
-#endif
+    try {
+        const dysymtab_command* dynSymbolTable = NULL;
+        const macho_nlist* symbolTable = NULL;
+        const char* symbolTableStrings = NULL;
+        uint32_t maxStringOffset = 0;
 
-	try {
+        const uint32_t cmd_count = ((macho_header*)fMachOData)->ncmds;
+        const struct load_command* const cmds = (struct load_command*)&fMachOData[sizeof(macho_header)];
+        const struct load_command* cmd = cmds;
+        for (uint32_t i = 0; i < cmd_count; ++i) {
+            switch (cmd->cmd) {
+                case LC_SYMTAB:
+                {
+                    const struct symtab_command* symtab = (struct symtab_command*)cmd;
+                    symbolTableStrings = (const char*)&fLinkEditBase[symtab->stroff];
+                    maxStringOffset = symtab->strsize;
+                    symbolTable = (macho_nlist*)(&fLinkEditBase[symtab->symoff]);
+                }
+                    break;
+                case LC_DYSYMTAB:
+                    dynSymbolTable = (struct dysymtab_command*)cmd;
+                    break;
+            }
+            cmd = (const struct load_command*)(((char*)cmd)+cmd->cmdsize);
+        }
+
 		uint8_t type = 0;
 		int segmentIndex = -1;
 		uintptr_t address = segActualLoadAddress(0);
@@ -897,7 +1187,11 @@ void ImageLoaderMachOCompressed::eachBind(const LinkContext& context, bind_handl
 		intptr_t addend = 0;
 		uintptr_t count;
 		uintptr_t skip;
-		uintptr_t segOffset;
+        uintptr_t segOffset = 0;
+
+		dyld3::OverflowSafeArray<ThreadedBindData> ordinalTable;
+        bool useThreadedRebaseBind = false;
+        ExtraBindData extraBindData;
 		LastLookup last = { 0, 0, NULL, 0, NULL };
 		const uint8_t* const start = fLinkEditBase + fDyldInfo->bind_off;
 		const uint8_t* const end = &start[fDyldInfo->bind_size];
@@ -964,16 +1258,21 @@ void ImageLoaderMachOCompressed::eachBind(const LinkContext& context, bind_handl
 					address += read_uleb128(p, end);
 					break;
 				case BIND_OPCODE_DO_BIND:
-					if ( (address < segmentStartAddress) || (address >= segmentEndAddress) )
-						throwBadBindingAddress(address, segmentEndAddress, segmentIndex, start, end, p);
-					if ( symbolName  == NULL )
-						dyld::throwf("BIND_OPCODE_DO_BIND missing preceding BIND_OPCODE_SET_SYMBOL_TRAILING_FLAGS_IMM");
-					if ( segmentIndex == -1 )
-						dyld::throwf("BIND_OPCODE_DO_BIND missing preceding BIND_OPCODE_SET_SEGMENT_AND_OFFSET_ULEB");
-					if ( !libraryOrdinalSet )
-						dyld::throwf("BIND_OPCODE_DO_BIND missing preceding BIND_OPCODE_SET_DYLIB_ORDINAL*");
-					(this->*handler)(context, address, type, symbolName, symboFlags, addend, libraryOrdinal, "", &last, false);
-					address += sizeof(intptr_t);
+                    if (!useThreadedRebaseBind) {
+                        if ( (address < segmentStartAddress) || (address >= segmentEndAddress) )
+                            throwBadBindingAddress(address, segmentEndAddress, segmentIndex, start, end, p);
+                        if ( symbolName  == NULL )
+                            dyld::throwf("BIND_OPCODE_DO_BIND missing preceding BIND_OPCODE_SET_SYMBOL_TRAILING_FLAGS_IMM");
+                        if ( segmentIndex == -1 )
+                            dyld::throwf("BIND_OPCODE_DO_BIND missing preceding BIND_OPCODE_SET_SEGMENT_AND_OFFSET_ULEB");
+                        if ( !libraryOrdinalSet )
+                            dyld::throwf("BIND_OPCODE_DO_BIND missing preceding BIND_OPCODE_SET_DYLIB_ORDINAL*");
+                        handler(context, this, address, type, symbolName, symboFlags, addend, libraryOrdinal,
+								&extraBindData, "", &last, false);
+                        address += sizeof(intptr_t);
+                    } else {
+                        ordinalTable.push_back(ThreadedBindData(symbolName, addend, libraryOrdinal, symboFlags, type));
+                    }
 					break;
 				case BIND_OPCODE_DO_BIND_ADD_ADDR_ULEB:
 					if ( (address < segmentStartAddress) || (address >= segmentEndAddress) )
@@ -984,7 +1283,8 @@ void ImageLoaderMachOCompressed::eachBind(const LinkContext& context, bind_handl
 						dyld::throwf("BIND_OPCODE_DO_BIND_ADD_ADDR_ULEB missing preceding BIND_OPCODE_SET_SEGMENT_AND_OFFSET_ULEB");
 					if ( !libraryOrdinalSet )
 						dyld::throwf("BIND_OPCODE_DO_BIND_ADD_ADDR_ULEB missing preceding BIND_OPCODE_SET_DYLIB_ORDINAL*");
-					(this->*handler)(context, address, type, symbolName, symboFlags, addend, libraryOrdinal, "", &last, false);
+                    handler(context, this, address, type, symbolName, symboFlags, addend, libraryOrdinal,
+                                     &extraBindData, "", &last, false);
 					address += read_uleb128(p, end) + sizeof(intptr_t);
 					break;
 				case BIND_OPCODE_DO_BIND_ADD_ADDR_IMM_SCALED:
@@ -996,7 +1296,8 @@ void ImageLoaderMachOCompressed::eachBind(const LinkContext& context, bind_handl
 						dyld::throwf("BIND_OPCODE_DO_BIND_ADD_ADDR_IMM_SCALED missing preceding BIND_OPCODE_SET_SEGMENT_AND_OFFSET_ULEB");
 					if ( !libraryOrdinalSet )
 						dyld::throwf("BIND_OPCODE_DO_BIND_ADD_ADDR_IMM_SCALED missing preceding BIND_OPCODE_SET_DYLIB_ORDINAL*");
-					(this->*handler)(context, address, type, symbolName, symboFlags, addend, libraryOrdinal, "", &last, false);
+                    handler(context, this, address, type, symbolName, symboFlags, addend, libraryOrdinal,
+                                     &extraBindData, "", &last, false);
 					address += immediate*sizeof(intptr_t) + sizeof(intptr_t);
 					break;
 				case BIND_OPCODE_DO_BIND_ULEB_TIMES_SKIPPING_ULEB:
@@ -1011,10 +1312,69 @@ void ImageLoaderMachOCompressed::eachBind(const LinkContext& context, bind_handl
 					for (uint32_t i=0; i < count; ++i) {
 						if ( (address < segmentStartAddress) || (address >= segmentEndAddress) )
 							throwBadBindingAddress(address, segmentEndAddress, segmentIndex, start, end, p);
-						(this->*handler)(context, address, type, symbolName, symboFlags, addend, libraryOrdinal, "", &last, false);
+                        handler(context, this, address, type, symbolName, symboFlags, addend, libraryOrdinal,
+                                         &extraBindData, "", &last, false);
 						address += skip + sizeof(intptr_t);
 					}
-					break;
+                    break;
+                case BIND_OPCODE_THREADED:
+                    if (sizeof(intptr_t) != 8) {
+                        dyld::throwf("BIND_OPCODE_THREADED require 64-bit");
+                        return;
+                    }
+                    // Note the immediate is a sub opcode
+                    switch (immediate) {
+                        case BIND_SUBOPCODE_THREADED_SET_BIND_ORDINAL_TABLE_SIZE_ULEB:
+                            count = read_uleb128(p, end);
+                            ordinalTable.clear();
+                            // FIXME: ld64 wrote the wrong value here and we need to offset by 1 for now.
+                            ordinalTable.reserve(count + 1);
+                            useThreadedRebaseBind = true;
+                            break;
+                        case BIND_SUBOPCODE_THREADED_APPLY: {
+                            uint64_t delta = 0;
+                            do {
+                                address = segmentStartAddress + segOffset;
+                                uint64_t value = *(uint64_t*)address;
+
+
+                                bool isRebase = (value & (1ULL << 62)) == 0;
+                                if (isRebase) {
+                                    {
+                                        // Call the bind handler which knows about our bind type being set to rebase
+                                        handler(context, this, address, BIND_TYPE_THREADED_REBASE, nullptr, 0, 0, 0,
+                                                         nullptr, "", &last, false);
+                                    }
+                                } else {
+                                    // the ordinal is bits [0..15]
+                                    uint16_t ordinal = value & 0xFFFF;
+                                    if (ordinal >= ordinalTable.count()) {
+                                        dyld::throwf("bind ordinal is out of range\n");
+                                        return;
+                                    }
+                                    std::tie(symbolName, addend, libraryOrdinal, symboFlags, type) = ordinalTable[ordinal].pack();
+                                    if ( (address < segmentStartAddress) || (address >= segmentEndAddress) )
+                                        throwBadBindingAddress(address, segmentEndAddress, segmentIndex, start, end, p);
+                                    {
+                                        handler(context, this, address, BIND_TYPE_THREADED_BIND,
+                                                         symbolName, symboFlags, addend, libraryOrdinal,
+                                                         nullptr, "", &last, false);
+                                    }
+                                }
+
+                                // The delta is bits [51..61]
+                                // And bit 62 is to tell us if we are a rebase (0) or bind (1)
+                                value &= ~(1ULL << 62);
+                                delta = ( value & 0x3FF8000000000000 ) >> 51;
+                                segOffset += delta * sizeof(intptr_t);
+                            } while ( delta != 0 );
+                            break;
+                        }
+
+                        default:
+                            dyld::throwf("bad threaded bind subopcode 0x%02X", *p);
+                    }
+                    break;
 				default:
 					dyld::throwf("bad bind opcode %d in bind info", *p);
 			}
@@ -1104,7 +1464,8 @@ void ImageLoaderMachOCompressed::eachLazyBind(const LinkContext& context, bind_h
 						throwBadBindingAddress(address, segmentEndAddress, segmentIndex, start, end, p);
 					if ( symbolName  == NULL )
 						dyld::throwf("BIND_OPCODE_DO_BIND missing preceding BIND_OPCODE_SET_SYMBOL_TRAILING_FLAGS_IMM");
-					(this->*handler)(context, address, type, symbolName, symboFlags, addend, libraryOrdinal, "forced lazy ", NULL, false);
+                    handler(context, this, address, type, symbolName, symboFlags, addend, libraryOrdinal,
+                                     NULL, "forced lazy ", NULL, false);
 					address += sizeof(intptr_t);
 					break;
 				case BIND_OPCODE_DO_BIND_ADD_ADDR_ULEB:
@@ -1183,7 +1544,8 @@ uintptr_t ImageLoaderMachOCompressed::doBindLazySymbol(uintptr_t* lazyPointer, c
 							if ( !twoLevel || context.bindFlat ) 
 								libraryOrdinal = BIND_SPECIAL_DYLIB_FLAT_LOOKUP;
 							uintptr_t ptrToBind = (uintptr_t)lazyPointer;
-							uintptr_t symbolAddr = bindAt(context, ptrToBind, BIND_TYPE_POINTER, symbolName, 0, 0, libraryOrdinal, "lazy ", NULL);
+                            uintptr_t symbolAddr = bindAt(context, this, ptrToBind, BIND_TYPE_POINTER, symbolName, 0, 0, libraryOrdinal,
+                                                          NULL, "lazy ", NULL);
 							++fgTotalLazyBindFixups;
 							return symbolAddr;
 						}
@@ -1229,7 +1591,8 @@ uintptr_t ImageLoaderMachOCompressed::doBindFastLazySymbol(uint32_t lazyBindingI
 		if ( segOffset > segSize(segIndex) )
 			dyld::throwf("BIND_OPCODE_SET_SEGMENT_AND_OFFSET_ULEB has offset 0x%08lX beyond segment size (0x%08lX)", segOffset, segSize(segIndex));
 		uintptr_t address = segActualLoadAddress(segIndex) + segOffset;
-		result = this->bindAt(context, address, BIND_TYPE_POINTER, symbolName, 0, 0, libraryOrdinal, "lazy ", NULL, true);
+        result = bindAt(context, this, address, BIND_TYPE_POINTER, symbolName, 0, 0, libraryOrdinal,
+                              NULL, "lazy ", NULL, true);
 		// <rdar://problem/24140465> Some old apps had multiple lazy symbols bound at once
 	} while (!doneAfterBind && !context.strictMachORequired);
 
@@ -1422,17 +1785,17 @@ void ImageLoaderMachOCompressed::updateUsesCoalIterator(CoalIterator& it, uintpt
 				address += read_uleb128(p, end);
 				break;
 			case BIND_OPCODE_DO_BIND:
-				bindLocation(context, address, value, type, symbolName, addend, this->getPath(), targetImage ? targetImage->getPath() : NULL, "weak ");
+				bindLocation(context, this->imageBaseAddress(), address, value, type, symbolName, addend, this->getPath(), targetImage ? targetImage->getPath() : NULL, "weak ", NULL, fSlide);
 				boundSomething = true;
 				address += sizeof(intptr_t);
 				break;
 			case BIND_OPCODE_DO_BIND_ADD_ADDR_ULEB:
-				bindLocation(context, address, value, type, symbolName, addend, this->getPath(), targetImage ? targetImage->getPath() : NULL, "weak ");
+				bindLocation(context, this->imageBaseAddress(), address, value, type, symbolName, addend, this->getPath(), targetImage ? targetImage->getPath() : NULL, "weak ", NULL, fSlide);
 				boundSomething = true;
 				address += read_uleb128(p, end) + sizeof(intptr_t);
 				break;
 			case BIND_OPCODE_DO_BIND_ADD_ADDR_IMM_SCALED:
-				bindLocation(context, address, value, type, symbolName, addend, this->getPath(), targetImage ? targetImage->getPath() : NULL, "weak ");
+				bindLocation(context, this->imageBaseAddress(), address, value, type, symbolName, addend, this->getPath(), targetImage ? targetImage->getPath() : NULL, "weak ", NULL, fSlide);
 				boundSomething = true;
 				address += immediate*sizeof(intptr_t) + sizeof(intptr_t);
 				break;
@@ -1440,7 +1803,7 @@ void ImageLoaderMachOCompressed::updateUsesCoalIterator(CoalIterator& it, uintpt
 				count = read_uleb128(p, end);
 				skip = read_uleb128(p, end);
 				for (uint32_t i=0; i < count; ++i) {
-					bindLocation(context, address, value, type, symbolName, addend, this->getPath(), targetImage ? targetImage->getPath() : NULL, "weak ");
+					bindLocation(context, this->imageBaseAddress(), address, value, type, symbolName, addend, this->getPath(), targetImage ? targetImage->getPath() : NULL, "weak ", NULL, fSlide);
 					boundSomething = true;
 					address += skip + sizeof(intptr_t);
 				}
@@ -1454,13 +1817,16 @@ void ImageLoaderMachOCompressed::updateUsesCoalIterator(CoalIterator& it, uintpt
 		context.addDynamicReference(this, targetImage);
 }
 
-uintptr_t ImageLoaderMachOCompressed::interposeAt(const LinkContext& context, uintptr_t addr, uint8_t type, const char*, 
-												uint8_t, intptr_t, long, const char*, LastLookup*, bool runResolver)
+uintptr_t ImageLoaderMachOCompressed::interposeAt(const LinkContext& context, ImageLoaderMachOCompressed* image,
+												  uintptr_t addr, uint8_t type, const char*,
+                                                  uint8_t, intptr_t, long,
+                                                  ExtraBindData *extraBindData,
+                                                  const char*, LastLookup*, bool runResolver)
 {
 	if ( type == BIND_TYPE_POINTER ) {
 		uintptr_t* fixupLocation = (uintptr_t*)addr;
 		uintptr_t curValue = *fixupLocation;
-		uintptr_t newValue = interposedAddress(context, curValue, this);
+		uintptr_t newValue = interposedAddress(context, curValue, image);
 		if ( newValue != curValue) {
 			*fixupLocation = newValue;
 		}
@@ -1474,13 +1840,32 @@ void ImageLoaderMachOCompressed::doInterpose(const LinkContext& context)
 		dyld::log("dyld: interposing %lu tuples onto image: %s\n", fgInterposingTuples.size(), this->getPath());
 
 	// update prebound symbols
-	eachBind(context, &ImageLoaderMachOCompressed::interposeAt);
-	eachLazyBind(context, &ImageLoaderMachOCompressed::interposeAt);
+	eachBind(context, ^(const LinkContext& ctx, ImageLoaderMachOCompressed* image,
+						uintptr_t addr, uint8_t type, const char* symbolName,
+						uint8_t symbolFlags, intptr_t addend, long libraryOrdinal,
+						ExtraBindData *extraBindData,
+						const char* msg, LastLookup* last, bool runResolver) {
+		return ImageLoaderMachOCompressed::interposeAt(ctx, image, addr, type, symbolName, symbolFlags,
+													   addend, libraryOrdinal, extraBindData,
+													   msg, last, runResolver);
+	});
+	eachLazyBind(context, ^(const LinkContext& ctx, ImageLoaderMachOCompressed* image,
+							uintptr_t addr, uint8_t type, const char* symbolName,
+							uint8_t symbolFlags, intptr_t addend, long libraryOrdinal,
+							ExtraBindData *extraBindData,
+							const char* msg, LastLookup* last, bool runResolver) {
+		return ImageLoaderMachOCompressed::interposeAt(ctx, image, addr, type, symbolName, symbolFlags,
+													   addend, libraryOrdinal, extraBindData,
+													   msg, last, runResolver);
+	});
 }
 
 
-uintptr_t ImageLoaderMachOCompressed::dynamicInterposeAt(const LinkContext& context, uintptr_t addr, uint8_t type, const char* symbolName, 
-												uint8_t, intptr_t, long, const char*, LastLookup*, bool runResolver)
+uintptr_t ImageLoaderMachOCompressed::dynamicInterposeAt(const LinkContext& context, ImageLoaderMachOCompressed* image,
+														 uintptr_t addr, uint8_t type, const char* symbolName,
+                                                         uint8_t, intptr_t, long,
+                                                         ExtraBindData *extraBindData,
+                                                         const char*, LastLookup*, bool runResolver)
 {
 	if ( type == BIND_TYPE_POINTER ) {
 		uintptr_t* fixupLocation = (uintptr_t*)addr;
@@ -1492,7 +1877,7 @@ uintptr_t ImageLoaderMachOCompressed::dynamicInterposeAt(const LinkContext& cont
 			if ( value == (uintptr_t)context.dynamicInterposeArray[i].replacee ) {
 				if ( context.verboseInterposing ) {
 					dyld::log("dyld: dynamic interposing: at %p replace %p with %p in %s\n", 
-						fixupLocation, context.dynamicInterposeArray[i].replacee, context.dynamicInterposeArray[i].replacement, this->getPath());
+						fixupLocation, context.dynamicInterposeArray[i].replacee, context.dynamicInterposeArray[i].replacement, image->getPath());
 				}
 				*fixupLocation = (uintptr_t)context.dynamicInterposeArray[i].replacement;
 			}
@@ -1507,8 +1892,24 @@ void ImageLoaderMachOCompressed::dynamicInterpose(const LinkContext& context)
 		dyld::log("dyld: dynamic interposing %lu tuples onto image: %s\n", context.dynamicInterposeCount, this->getPath());
 
 	// update already bound references to symbols
-	eachBind(context, &ImageLoaderMachOCompressed::dynamicInterposeAt);
-	eachLazyBind(context, &ImageLoaderMachOCompressed::dynamicInterposeAt);
+	eachBind(context, ^(const LinkContext& ctx, ImageLoaderMachOCompressed* image,
+						uintptr_t addr, uint8_t type, const char* symbolName,
+						uint8_t symbolFlags, intptr_t addend, long libraryOrdinal,
+						ExtraBindData *extraBindData,
+						const char* msg, LastLookup* last, bool runResolver) {
+		return ImageLoaderMachOCompressed::dynamicInterposeAt(ctx, image, addr, type, symbolName, symbolFlags,
+															  addend, libraryOrdinal, extraBindData,
+															  msg, last, runResolver);
+	});
+	eachLazyBind(context, ^(const LinkContext& ctx, ImageLoaderMachOCompressed* image,
+							uintptr_t addr, uint8_t type, const char* symbolName,
+							uint8_t symbolFlags, intptr_t addend, long libraryOrdinal,
+							ExtraBindData *extraBindData,
+							const char* msg, LastLookup* last, bool runResolver) {
+		return ImageLoaderMachOCompressed::dynamicInterposeAt(ctx, image, addr, type, symbolName, symbolFlags,
+															  addend, libraryOrdinal, extraBindData,
+															  msg, last, runResolver);
+	});
 }
 
 const char* ImageLoaderMachOCompressed::findClosestSymbol(const void* addr, const void** closestAddr) const

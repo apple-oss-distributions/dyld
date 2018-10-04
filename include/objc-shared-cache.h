@@ -581,7 +581,7 @@ struct objc_protocolopt_t : objc_stringhash_t {
         objc_stringhash_offset_t *o;
         
         o = protocolOffsets();
-        for (objc_stringhash_offset_t i = 0; i < capacity; i++) {
+        for (objc_stringhash_offset_t i = 0; i < (int)capacity; i++) {
             S32(o[i]);
         }
 
@@ -1038,13 +1038,13 @@ static void initnorm(key *keys, ub4 nkeys, ub4 alen, ub4 blen, ub4 smax, ub8 sal
 // gencode  *final;                          /* output, code for the final hash */
 {
   ub4 loga = log2u(alen);                            /* log based 2 of blen */
-  ub4 i;
-  for (i = 0; i < nkeys; i++) {
+  dispatch_apply(nkeys, DISPATCH_APPLY_AUTO, ^(size_t index) {
+    ub4 i = (ub4)index;
     key *mykey = keys+i;
     ub8 hash = lookup8(mykey->name_k, mykey->len_k, salt);
     mykey->a_k = (loga > 0) ? (ub4)(hash >> (UB8BITS-loga)) : 0;
     mykey->b_k = (blen > 1) ? (hash & (blen-1)) : 0;
-  }
+  });
 }
 
 
@@ -1431,7 +1431,7 @@ make_perfect(const string_map& strings)
   ub8       salt;                       /* a parameter to the hash function */
   ub4       scramble[SCRAMBLE_LEN];           /* used in final hash function */
   int ok;
-  int i;
+  uint32_t i;
   perfect_hash result;
 
   /* read in the list of keywords */

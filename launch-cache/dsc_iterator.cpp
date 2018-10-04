@@ -33,7 +33,7 @@
 #include "Architectures.hpp"
 #include "MachOFileAbstraction.hpp"
 #include "CacheFileAbstraction.hpp"
-
+#include "SupportedArchs.h"
 
 namespace dyld {
 
@@ -203,8 +203,14 @@ extern int dyld_shared_cache_iterate(const void* shared_cache_file, uint32_t sha
 			return dyld::walkImages<arm>(cache, shared_cache_size, callback);
 	else if ( strcmp((char*)cache, "dyld_v1   arm64") == 0 ) 
 			return dyld::walkImages<arm64>(cache, shared_cache_size, callback);
+#if SUPPORT_ARCH_arm64_32
+	else if ( strcmp((char*)cache, "dyld_v1arm64_32") == 0 ) 
+			return dyld::walkImages<arm64_32>(cache, shared_cache_size, callback);
+#endif
+#if SUPPORT_ARCH_arm64e
 	else if ( strcmp((char*)cache, "dyld_v1  arm64e") == 0 ) 
 			return dyld::walkImages<arm64>(cache, shared_cache_size, callback);
+#endif
 	else
 		return -1;
 }

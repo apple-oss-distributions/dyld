@@ -1,18 +1,32 @@
 
 // BUILD:  $CC foo.c -dynamiclib  -install_name $RUN_DIR/libfoo.dylib -o $BUILD_DIR/libfoo.dylib
-// BUILD:  $CC main.c $BUILD_DIR/libfoo.dylib -o $BUILD_DIR/dladdr-basic.exe
+// BUILD:  $CC main.c $BUILD_DIR/libfoo.dylib -o $BUILD_DIR/dladdr-dylib.exe
 
-// RUN:  ./dladdr-basic.exe
+// RUN:  ./dladdr-dylib.exe
 
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h> 
 #include <dlfcn.h> 
 #include <mach-o/dyld_priv.h>
+#if __has_feature(ptrauth_calls)
+    #include <ptrauth.h>
+#endif
 
 extern void* __dso_handle;
 
 extern void verifyDylib();
+
+
+static const void* stripPointer(const void* ptr)
+{
+#if __has_feature(ptrauth_calls)
+    return __builtin_ptrauth_strip(ptr, ptrauth_key_asia);
+#else
+    return ptr;
+#endif
+}
+
 
 int bar()
 {
@@ -41,7 +55,7 @@ static void verifybar()
         printf("[FAIL] dladdr()->dli_sname is \"%s\" instead of \"bar\"\n", info.dli_sname);
         exit(0);
     }
-    if ( info.dli_saddr != &bar) {
+    if ( info.dli_saddr != stripPointer(&bar) ) {
         printf("[FAIL] dladdr()->dli_saddr is not &bar\n");
         exit(0);
     }
@@ -63,7 +77,7 @@ static void verifyfoo()
         printf("[FAIL] dladdr()->dli_sname is \"%s\" instead of \"foo\"\n", info.dli_sname);
         exit(0);
     }
-    if ( info.dli_saddr != &foo) {
+    if ( info.dli_saddr != stripPointer(&foo) ) {
         printf("[FAIL] dladdr()->dli_saddr is not &foo\n");
         exit(0);
     }
@@ -85,7 +99,7 @@ static void verifyhide()
         printf("[FAIL] dladdr()->dli_sname is \"%s\" instead of \"hide\"\n", info.dli_sname);
         exit(0);
     }
-    if ( info.dli_saddr != &hide) {
+    if ( info.dli_saddr != stripPointer(&hide) ) {
         printf("[FAIL] dladdr()->dli_saddr is not &hide\n");
         exit(0);
     }
@@ -107,7 +121,7 @@ static void verifymalloc()
         printf("[FAIL] dladdr()->dli_sname is \"%s\" instead of \"malloc\"\n", info.dli_sname);
         exit(0);
     }
-    if ( info.dli_saddr != &malloc) {
+    if ( info.dli_saddr != stripPointer(&malloc) ) {
         printf("[FAIL] dladdr()->dli_saddr is not &malloc\n");
         exit(0);
     }
@@ -120,7 +134,7 @@ static void verifymalloc()
 
 int main()
 {
-    printf("[BEGIN] dladdr-basic\n");
+    printf("[BEGIN] dladdr-dylib\n");
     verifybar();
     verifyhide();
     verifyfoo();
@@ -128,7 +142,7 @@ int main()
 
     verifyDylib();
 
-    printf("[PASS] dladdr-basic\n");
+    printf("[PASS] dladdr-dylib\n");
     return 0;
 }
 

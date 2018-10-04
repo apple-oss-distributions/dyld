@@ -22,6 +22,7 @@
  */
 
 
+#include <bitset>
 
 #include <stdint.h>
 #include <string.h>
@@ -43,128 +44,361 @@
 #include <sandbox.h>
 #include <sandbox/private.h>
 #include <dispatch/dispatch.h>
+#include <mach/vm_page_size.h>
 
-#include "LaunchCache.h"
-#include "LaunchCacheFormat.h"
+#include "MachOFile.h"
+#include "MachOLoaded.h"
 #include "Logging.h"
 #include "Loading.h"
-#include "MachOParser.h"
+#include "Tracing.h"
 #include "dyld.h"
 #include "dyld_cache_format.h"
 
-extern "C" {
-    #include "closuredProtocol.h"
-}
 
 namespace dyld {
     void log(const char* m, ...);
 }
 
-namespace dyld3 {
-namespace loader {
 
-#if DYLD_IN_PROCESS
+namespace {
 
-static bool sandboxBlocked(const char* path, const char* kind)
+// utility to track a set of ImageNum's in use
+class VIS_HIDDEN ImageNumSet
 {
-#if BUILDING_LIBDYLD || !TARGET_IPHONE_SIMULATOR
-    sandbox_filter_type filter = (sandbox_filter_type)(SANDBOX_FILTER_PATH | SANDBOX_CHECK_NO_REPORT);
-    return ( sandbox_check(getpid(), kind, filter, path) > 0 );
-#else
+public:
+    void    add(dyld3::closure::ImageNum num);
+    bool    contains(dyld3::closure::ImageNum num) const;
+
+private:
+    std::bitset<5120>                                   _bitmap;
+    dyld3::OverflowSafeArray<dyld3::closure::ImageNum>  _overflowArray;
+};
+
+void ImageNumSet::add(dyld3::closure::ImageNum num)
+{
+    if ( num < 5120 )
+        _bitmap.set(num);
+    else
+        _overflowArray.push_back(num);
+}
+
+bool ImageNumSet::contains(dyld3::closure::ImageNum num) const
+{
+    if ( num < 5120 )
+        return _bitmap.test(num);
+
+    for (dyld3::closure::ImageNum existingNum : _overflowArray) {
+        if ( existingNum == num )
+            return true;
+    }
+    return false;
+}
+} // namespace anonymous
+
+
+namespace dyld3 {
+
+Loader::Loader(Array<LoadedImage>& storage, const void* cacheAddress, const Array<const dyld3::closure::ImageArray*>& imagesArrays,
+               LogFunc logLoads, LogFunc logSegments, LogFunc logFixups, LogFunc logDofs)
+       : _allImages(storage), _imagesArrays(imagesArrays), _dyldCacheAddress(cacheAddress),
+         _logLoads(logLoads), _logSegments(logSegments), _logFixups(logFixups), _logDofs(logDofs)
+{
+}
+
+void Loader::addImage(const LoadedImage& li)
+{
+    _allImages.push_back(li);
+}
+
+LoadedImage* Loader::findImage(closure::ImageNum targetImageNum)
+{
+    for (LoadedImage& info : _allImages) {
+        if ( info.image()->representsImageNum(targetImageNum) )
+            return &info;
+    }
+    return nullptr;
+}
+
+uintptr_t Loader::resolveTarget(closure::Image::ResolvedSymbolTarget target)
+{
+    const LoadedImage* info;
+    switch ( target.sharedCache.kind ) {
+        case closure::Image::ResolvedSymbolTarget::kindSharedCache:
+            assert(_dyldCacheAddress != nullptr);
+            return (uintptr_t)_dyldCacheAddress + (uintptr_t)target.sharedCache.offset;
+
+        case closure::Image::ResolvedSymbolTarget::kindImage:
+            info = findImage(target.image.imageNum);
+            assert(info != nullptr);
+            return (uintptr_t)(info->loadedAddress()) + (uintptr_t)target.image.offset;
+
+        case closure::Image::ResolvedSymbolTarget::kindAbsolute:
+            if ( target.absolute.value & (1ULL << 62) )
+                return (uintptr_t)(target.absolute.value | 0xC000000000000000ULL);
+            else
+                return (uintptr_t)target.absolute.value;
+   }
+    assert(0 && "malformed ResolvedSymbolTarget");
+    return 0;
+}
+
+
+void Loader::completeAllDependents(Diagnostics& diag, uintptr_t topIndex)
+{
+    // accumulate all image overrides
+    STACK_ALLOC_ARRAY(ImageOverride, overrides, _allImages.maxCount());
+    for (const auto anArray : _imagesArrays) {
+        // ignore prebuilt Image* in dyld cache
+        if ( anArray->startImageNum() < dyld3::closure::kFirstLaunchClosureImageNum )
+            continue;
+        anArray->forEachImage(^(const dyld3::closure::Image* image, bool& stop) {
+            ImageOverride overrideEntry;
+            if ( image->isOverrideOfDyldCacheImage(overrideEntry.inCache) ) {
+                overrideEntry.replacement = image->imageNum();
+                overrides.push_back(overrideEntry);
+            }
+        });
+    }
+
+    // make cache for fast lookup of already loaded images
+    __block ImageNumSet alreadyLoaded;
+    for (int i=0; i <= topIndex; ++i) {
+        alreadyLoaded.add(_allImages[i].image()->imageNum());
+    }
+
+    // for each image in _allImages, starting at topIndex, make sure its depenents are in _allImages
+    uintptr_t index = topIndex;
+    while ( (index < _allImages.count()) && diag.noError() ) {
+        const closure::Image* image = _allImages[index].image();
+        //fprintf(stderr, "completeAllDependents(): looking at dependents of %s\n", image->path());
+        image->forEachDependentImage(^(uint32_t depIndex, closure::Image::LinkKind kind, closure::ImageNum depImageNum, bool& stop) {
+            // check if imageNum needs to be changed to an override
+            for (const ImageOverride& entry : overrides) {
+                if ( entry.inCache == depImageNum ) {
+                    depImageNum = entry.replacement;
+                    break;
+                }
+            }
+            // check if this dependent is already loaded
+            if ( !alreadyLoaded.contains(depImageNum) ) {
+                // if not, look in imagesArrays
+                const closure::Image* depImage = closure::ImageArray::findImage(_imagesArrays, depImageNum);
+                if ( depImage != nullptr ) {
+                    //dyld::log("  load imageNum=0x%05X, image path=%s\n", depImageNum, depImage->path());
+                     if ( _allImages.freeCount() == 0 ) {
+                         diag.error("too many initial images");
+                         stop = true;
+                     }
+                     else {
+                         _allImages.push_back(LoadedImage::make(depImage));
+                     }
+                    alreadyLoaded.add(depImageNum);
+                }
+                else {
+                    diag.error("unable to locate imageNum=0x%04X, depIndex=%d of %s", depImageNum, depIndex, image->path());
+                    stop = true;
+                }
+            }
+        });
+        ++index;
+    }
+}
+
+void Loader::mapAndFixupAllImages(Diagnostics& diag, bool processDOFs, bool fromOFI, uintptr_t topIndex)
+{
+    // scan array and map images not already loaded
+    for (uintptr_t i=topIndex; i < _allImages.count(); ++i) {
+        LoadedImage& info = _allImages[i];
+        if ( info.loadedAddress() != nullptr ) {
+            // log main executable's segments
+            if ( (info.loadedAddress()->filetype == MH_EXECUTE) && (info.state() == LoadedImage::State::mapped) ) {
+                if ( _logSegments("dyld: mapped by kernel %s\n", info.image()->path()) ) {
+                    info.image()->forEachDiskSegment(^(uint32_t segIndex, uint32_t fileOffset, uint32_t fileSize, int64_t vmOffset, uint64_t vmSize, uint8_t permissions, bool& stop) {
+                        uint64_t start = (long)info.loadedAddress() + vmOffset;
+                        uint64_t end   = start+vmSize-1;
+                        if ( (segIndex == 0) && (permissions == 0) ) {
+                            start = 0;
+                        }
+                        _logSegments("%14s (%c%c%c) 0x%012llX->0x%012llX \n", info.loadedAddress()->segmentName(segIndex),
+                                    (permissions & PROT_READ) ? 'r' : '.', (permissions & PROT_WRITE) ? 'w' : '.', (permissions & PROT_EXEC) ? 'x' : '.' ,
+                                    start, end);
+                    });
+                }
+            }
+            // skip over ones already loaded
+            continue;
+        }
+        if ( info.image()->inDyldCache() ) {
+            if ( info.image()->overridableDylib() ) {
+                struct stat statBuf;
+                if ( stat(info.image()->path(), &statBuf) == 0 ) {
+                    // verify file has not changed since closure was built
+                    uint64_t inode;
+                    uint64_t mtime;
+                    if ( info.image()->hasFileModTimeAndInode(inode, mtime) ) {
+                        if ( (statBuf.st_mtime != mtime) || (statBuf.st_ino != inode) ) {
+                            diag.error("dylib file mtime/inode changed since closure was built for '%s'", info.image()->path());
+                        }
+                    }
+                    else {
+                        diag.error("dylib file not expected on disk, must be a root '%s'", info.image()->path());
+                    }
+                }
+                else if ( (_dyldCacheAddress != nullptr) && ((dyld_cache_header*)_dyldCacheAddress)->dylibsExpectedOnDisk ) {
+                    diag.error("dylib file missing, was in dyld shared cache '%s'", info.image()->path());
+                }
+            }
+            if ( diag.noError() ) {
+                info.setLoadedAddress((MachOLoaded*)((uintptr_t)_dyldCacheAddress + info.image()->cacheOffset()));
+                info.setState(LoadedImage::State::fixedUp);
+                if ( _logSegments("dyld: Using from dyld cache %s\n", info.image()->path()) ) {
+                    info.image()->forEachCacheSegment(^(uint32_t segIndex, uint64_t vmOffset, uint64_t vmSize, uint8_t permissions, bool &stop) {
+                        _logSegments("%14s (%c%c%c) 0x%012lX->0x%012lX \n", info.loadedAddress()->segmentName(segIndex),
+                                        (permissions & PROT_READ) ? 'r' : '.', (permissions & PROT_WRITE) ? 'w' : '.', (permissions & PROT_EXEC) ? 'x' : '.' ,
+                                        (long)info.loadedAddress()+(long)vmOffset, (long)info.loadedAddress()+(long)vmOffset+(long)vmSize-1);
+                     });
+                }
+            }
+        }
+        else {
+            mapImage(diag, info, fromOFI);
+            if ( diag.hasError() )
+                break; // out of for loop
+        }
+
+    }
+    if ( diag.hasError() )  {
+        // bummer, need to clean up by unmapping any images just mapped
+        for (LoadedImage& info : _allImages) {
+            if ( (info.state() == LoadedImage::State::mapped) && !info.image()->inDyldCache() && !info.leaveMapped() ) {
+                _logSegments("dyld: unmapping %s\n", info.image()->path());
+                unmapImage(info);
+            }
+        }
+        return;
+    }
+
+    // apply fixups
+    for (uintptr_t i=topIndex; i < _allImages.count(); ++i) {
+        LoadedImage& info = _allImages[i];
+        // images in shared cache do not need fixups applied
+        if ( info.image()->inDyldCache() )
+            continue;
+        // previously loaded images were previously fixed up
+        if ( info.state() < LoadedImage::State::fixedUp ) {
+            applyFixupsToImage(diag, info);
+            if ( diag.hasError() )
+                break;
+            info.setState(LoadedImage::State::fixedUp);
+        }
+    }
+
+    // find and register dtrace DOFs
+    if ( processDOFs ) {
+        STACK_ALLOC_OVERFLOW_SAFE_ARRAY(DOFInfo, dofImages, _allImages.count());
+        for (uintptr_t i=topIndex; i < _allImages.count(); ++i) {
+            LoadedImage& info = _allImages[i];
+            info.image()->forEachDOF(info.loadedAddress(), ^(const void* section) {
+                DOFInfo dofInfo;
+                dofInfo.dof            = section;
+                dofInfo.imageHeader    = info.loadedAddress();
+                dofInfo.imageShortName = info.image()->leafName();
+                dofImages.push_back(dofInfo);
+            });
+        }
+        registerDOFs(dofImages);
+    }
+}
+
+bool Loader::sandboxBlocked(const char* path, const char* kind)
+{
+#if TARGET_IPHONE_SIMULATOR
     // sandbox calls not yet supported in dyld_sim
     return false;
+#else
+    sandbox_filter_type filter = (sandbox_filter_type)(SANDBOX_FILTER_PATH | SANDBOX_CHECK_NO_REPORT);
+    return ( sandbox_check(getpid(), kind, filter, path) > 0 );
 #endif
 }
 
-static bool sandboxBlockedMmap(const char* path)
+bool Loader::sandboxBlockedMmap(const char* path)
 {
     return sandboxBlocked(path, "file-map-executable");
 }
 
-static bool sandboxBlockedOpen(const char* path)
+bool Loader::sandboxBlockedOpen(const char* path)
 {
     return sandboxBlocked(path, "file-read-data");
 }
 
-static bool sandboxBlockedStat(const char* path)
+bool Loader::sandboxBlockedStat(const char* path)
 {
     return sandboxBlocked(path, "file-read-metadata");
 }
 
-#if TARGET_OS_WATCH || TARGET_OS_BRIDGE
-static uint64_t pageAlign(uint64_t value)
+void Loader::mapImage(Diagnostics& diag, LoadedImage& info, bool fromOFI)
 {
-  #if __arm64__
-    return (value + 0x3FFF) & (-0x4000);
-  #else
-	return (value + 0xFFF) & (-0x1000);
-  #endif
-}
-#endif
+    dyld3::ScopedTimer timer(DBG_DYLD_TIMING_MAP_IMAGE, info.image()->path(), 0, 0);
 
-static void updateSliceOffset(uint64_t& sliceOffset, uint64_t codeSignEndOffset, size_t fileLen)
-{
-#if TARGET_OS_WATCH || TARGET_OS_BRIDGE
-    if ( sliceOffset != 0 ) {
-        if ( pageAlign(codeSignEndOffset) == pageAlign(fileLen) ) {
-            // cache builder saw fat file, but file is now thin
-            sliceOffset = 0;
-            return;
-        }
-    }
-#endif
-}
-
-static const mach_header* mapImage(const dyld3::launch_cache::Image image, Diagnostics& diag, LogFunc log_loads, LogFunc log_segments)
-{
-    uint64_t       sliceOffset        = image.sliceOffsetInFile();
-    const uint64_t totalVMSize        = image.vmSizeToMap();
-    const uint32_t codeSignFileOffset = image.asDiskImage()->codeSignFileOffset;
-    const uint32_t codeSignFileSize   = image.asDiskImage()->codeSignFileSize;
+    const closure::Image*   image         = info.image();
+    uint64_t                sliceOffset   = image->sliceOffsetInFile();
+    const uint64_t          totalVMSize   = image->vmSizeToMap();
+    uint32_t                codeSignFileOffset;
+    uint32_t                codeSignFileSize;
+    bool                    isCodeSigned  = image->hasCodeSignature(codeSignFileOffset, codeSignFileSize);
 
     // open file
-    int fd = ::open(image.path(), O_RDONLY, 0);
+    int fd = ::open(info.image()->path(), O_RDONLY, 0);
     if ( fd == -1 ) {
         int openErr = errno;
-        if ( (openErr == EPERM) && sandboxBlockedOpen(image.path()) )
-            diag.error("file system sandbox blocked open(\"%s\", O_RDONLY)", image.path());
+        if ( (openErr == EPERM) && sandboxBlockedOpen(image->path()) )
+            diag.error("file system sandbox blocked open(\"%s\", O_RDONLY)", image->path());
         else
-            diag.error("open(\"%s\", O_RDONLY) failed with errno=%d", image.path(), openErr);
-        return nullptr;
+            diag.error("open(\"%s\", O_RDONLY) failed with errno=%d", image->path(), openErr);
+        return;
     }
 
     // get file info
     struct stat statBuf;
 #if TARGET_IPHONE_SIMULATOR
-    if ( stat(image.path(), &statBuf) != 0 ) {
+    if ( stat(image->path(), &statBuf) != 0 ) {
 #else
     if ( fstat(fd, &statBuf) != 0 ) {
 #endif
         int statErr = errno;
-        if ( (statErr == EPERM) && sandboxBlockedStat(image.path()) )
-            diag.error("file system sandbox blocked stat(\"%s\")", image.path());
+        if ( (statErr == EPERM) && sandboxBlockedStat(image->path()) )
+            diag.error("file system sandbox blocked stat(\"%s\")", image->path());
         else
-           diag.error("stat(\"%s\") failed with errno=%d", image.path(), statErr);
+            diag.error("stat(\"%s\") failed with errno=%d", image->path(), statErr);
         close(fd);
-        return nullptr;
+        return;
     }
 
     // verify file has not changed since closure was built
-    if ( image.validateUsingModTimeAndInode() ) {
-        if ( (statBuf.st_mtime != image.fileModTime()) || (statBuf.st_ino != image.fileINode()) ) {
-            diag.error("file mtime/inode changed since closure was built for '%s'", image.path());
+    uint64_t inode;
+    uint64_t mtime;
+    if ( image->hasFileModTimeAndInode(inode, mtime) ) {
+        if ( (statBuf.st_mtime != mtime) || (statBuf.st_ino != inode) ) {
+            diag.error("file mtime/inode changed since closure was built for '%s'", image->path());
             close(fd);
-            return nullptr;
+            return;
         }
     }
 
-    // handle OS dylibs being thinned after closure was built
-    if ( image.group().groupNum() == 1 )
-        updateSliceOffset(sliceOffset, codeSignFileOffset+codeSignFileSize, (size_t)statBuf.st_size);
+    // handle case on iOS where sliceOffset in closure is wrong because file was thinned after cache was built
+    if ( (_dyldCacheAddress != nullptr) && !(((dyld_cache_header*)_dyldCacheAddress)->dylibsExpectedOnDisk) ) {
+        if ( sliceOffset != 0 ) {
+            if ( round_page_kernel(codeSignFileOffset+codeSignFileSize) == round_page_kernel(statBuf.st_size) ) {
+                // file is now thin
+                sliceOffset = 0;
+            }
+        }
+    }
 
     // register code signature
     uint64_t coveredCodeLength  = UINT64_MAX;
-    if ( codeSignFileOffset != 0 ) {
+    if ( isCodeSigned ) {
+        auto sigTimer = ScopedTimer(DBG_DYLD_TIMING_ATTACH_CODESIGNATURE, 0, 0, 0);
         fsignatures_t siginfo;
         siginfo.fs_file_start  = sliceOffset;                           // start of mach-o slice in fat file
         siginfo.fs_blob_start  = (void*)(long)(codeSignFileOffset);     // start of CD in mach-o file
@@ -174,22 +408,25 @@ static const mach_header* mapImage(const dyld3::launch_cache::Image image, Diagn
             int errnoCopy = errno;
             if ( (errnoCopy == EPERM) || (errnoCopy == EBADEXEC) ) {
                 diag.error("code signature invalid (errno=%d) sliceOffset=0x%08llX, codeBlobOffset=0x%08X, codeBlobSize=0x%08X for '%s'",
-                            errnoCopy, sliceOffset, codeSignFileOffset, codeSignFileSize, image.path());
+                            errnoCopy, sliceOffset, codeSignFileOffset, codeSignFileSize, image->path());
             }
             else {
                 diag.error("fcntl(fd, F_ADDFILESIGS_RETURN) failed with errno=%d, sliceOffset=0x%08llX, codeBlobOffset=0x%08X, codeBlobSize=0x%08X for '%s'",
-                            errnoCopy, sliceOffset, codeSignFileOffset, codeSignFileSize, image.path());
+                            errnoCopy, sliceOffset, codeSignFileOffset, codeSignFileSize, image->path());
             }
             close(fd);
-            return nullptr;
+            return;
         }
         coveredCodeLength = siginfo.fs_file_start;
-        if ( coveredCodeLength <  image.asDiskImage()->codeSignFileOffset ) {
+        if ( coveredCodeLength < codeSignFileOffset ) {
             diag.error("code signature does not cover entire file up to signature");
             close(fd);
-            return nullptr;
+            return;
         }
+    }
 
+    // <rdar://problem/41015217> dyld should use F_CHECK_LV even on unsigned binaries
+    {
         // <rdar://problem/32684903> always call F_CHECK_LV to preflight
         fchecklv checkInfo;
         char  messageBuffer[512];
@@ -199,9 +436,9 @@ static const mach_header* mapImage(const dyld3::launch_cache::Image image, Diagn
         checkInfo.lv_error_message = messageBuffer;
         int res = fcntl(fd, F_CHECK_LV, &checkInfo);
         if ( res == -1 ) {
-             diag.error("code signature in (%s) not valid for use in process: %s", image.path(), messageBuffer);
+             diag.error("code signature in (%s) not valid for use in process: %s", image->path(), messageBuffer);
              close(fd);
-             return nullptr;
+             return;
         }
     }
 
@@ -211,20 +448,20 @@ static const mach_header* mapImage(const dyld3::launch_cache::Image image, Diagn
     if ( r != KERN_SUCCESS ) {
         diag.error("vm_allocate(size=0x%0llX) failed with result=%d", totalVMSize, r);
         close(fd);
-        return nullptr;
+        return;
     }
 
     if ( sliceOffset != 0 )
-        log_segments("dyld: Mapping %s (slice offset=%llu)\n", image.path(), sliceOffset);
+        _logSegments("dyld: Mapping %s (slice offset=%llu)\n", image->path(), sliceOffset);
     else
-        log_segments("dyld: Mapping %s\n", image.path());
+        _logSegments("dyld: Mapping %s\n", image->path());
 
     // map each segment
     __block bool mmapFailure = false;
     __block const uint8_t* codeSignatureStartAddress = nullptr;
     __block const uint8_t* linkeditEndAddress = nullptr;
     __block bool mappedFirstSegment = false;
-    image.forEachDiskSegment(^(uint32_t segIndex, uint32_t fileOffset, uint32_t fileSize, int64_t vmOffset, uint64_t vmSize, uint8_t permissions, bool& stop) {
+    image->forEachDiskSegment(^(uint32_t segIndex, uint32_t fileOffset, uint32_t fileSize, int64_t vmOffset, uint64_t vmSize, uint8_t permissions, bool& stop) {
         // <rdar://problem/32363581> Mapping zero filled segments fails with mmap of size 0
         if ( fileSize == 0 )
             return;
@@ -232,13 +469,13 @@ static const mach_header* mapImage(const dyld3::launch_cache::Image image, Diagn
         int mmapErr = errno;
         if ( segAddress == MAP_FAILED ) {
             if ( mmapErr == EPERM ) {
-                if ( sandboxBlockedMmap(image.path()) )
-                    diag.error("file system sandbox blocked mmap() of '%s'", image.path());
+                if ( sandboxBlockedMmap(image->path()) )
+                    diag.error("file system sandbox blocked mmap() of '%s'", image->path());
                 else
-                    diag.error("code signing blocked mmap() of '%s'", image.path());
+                    diag.error("code signing blocked mmap() of '%s'", image->path());
             }
             else {
-                diag.error("mmap(addr=0x%0llX, size=0x%08X) failed with errno=%d for %s", loadAddress+vmOffset, fileSize, mmapErr, image.path());
+                diag.error("mmap(addr=0x%0llX, size=0x%08X) failed with errno=%d for %s", loadAddress+vmOffset, fileSize, mmapErr, image->path());
             }
             mmapFailure = true;
             stop = true;
@@ -250,30 +487,32 @@ static const mach_header* mapImage(const dyld3::launch_cache::Image image, Diagn
         // sanity check first segment is mach-o header
         if ( (segAddress != MAP_FAILED) && !mappedFirstSegment ) {
             mappedFirstSegment = true;
-            if ( !MachOParser::isMachO(diag, segAddress, fileSize) ) {
+            const MachOFile* mf = (MachOFile*)segAddress;
+            if ( !mf->isMachO(diag, fileSize) ) {
                 mmapFailure = true;
                 stop = true;
             }
         }
         if ( !mmapFailure ) {
-            MachOParser parser((mach_header*)loadAddress);
-            log_segments("%14s (%c%c%c) 0x%012lX->0x%012lX \n", parser.segmentName(segIndex),
+            const MachOLoaded* lmo = (MachOLoaded*)loadAddress;
+            _logSegments("%14s (%c%c%c) 0x%012lX->0x%012lX \n", lmo->segmentName(segIndex),
                          (permissions & PROT_READ) ? 'r' : '.', (permissions & PROT_WRITE) ? 'w' : '.', (permissions & PROT_EXEC) ? 'x' : '.' ,
-                         (long)segAddress, (long)segAddress+vmSize-1);
+                         (long)segAddress, (long)segAddress+(long)vmSize-1);
         }
     });
     if ( mmapFailure ) {
-        vm_deallocate(mach_task_self(), loadAddress, (vm_size_t)totalVMSize);
-        close(fd);
-        return nullptr;
+        ::vm_deallocate(mach_task_self(), loadAddress, (vm_size_t)totalVMSize);
+        ::close(fd);
+        return;
     }
 
     // close file
     close(fd);
 
- #if BUILDING_LIBDYLD
+#if BUILDING_LIBDYLD
     // verify file has not changed since closure was built by checking code signature has not changed
-    if ( image.validateUsingCdHash() ) {
+    uint8_t cdHashExpected[20];
+    if ( image->hasCdHash(cdHashExpected) ) {
         if ( codeSignatureStartAddress == nullptr ) {
             diag.error("code signature missing");
         }
@@ -281,18 +520,19 @@ static const mach_header* mapImage(const dyld3::launch_cache::Image image, Diagn
             diag.error("code signature extends beyond end of __LINKEDIT");
         }
         else {
-            uint8_t cdHash[20];
-            if ( MachOParser::cdHashOfCodeSignature(codeSignatureStartAddress, codeSignFileSize, cdHash) ) {
-                if ( memcmp(image.cdHash16(), cdHash, 16) != 0 )
+            uint8_t cdHashFound[20];
+            const MachOLoaded* lmo = (MachOLoaded*)loadAddress;
+            if ( lmo->cdHashOfCodeSignature(codeSignatureStartAddress, codeSignFileSize, cdHashFound) ) {
+                if ( ::memcmp(cdHashFound, cdHashExpected, 20) != 0 )
                     diag.error("code signature changed since closure was built");
             }
-            else{
+            else {
                 diag.error("code signature format invalid");
             }
         }
         if ( diag.hasError() ) {
-            vm_deallocate(mach_task_self(), loadAddress, (vm_size_t)totalVMSize);
-            return nullptr;
+            ::vm_deallocate(mach_task_self(), loadAddress, (vm_size_t)totalVMSize);
+            return;
         }
     }
 #endif
@@ -301,377 +541,223 @@ static const mach_header* mapImage(const dyld3::launch_cache::Image image, Diagn
     // tell kernel about fairplay encrypted regions
     uint32_t fpTextOffset;
     uint32_t fpSize;
-    if ( image.isFairPlayEncrypted(fpTextOffset, fpSize) ) {
+    if ( image->isFairPlayEncrypted(fpTextOffset, fpSize) ) {
         const mach_header* mh = (mach_header*)loadAddress;
-        int result = mremap_encrypted(((uint8_t*)mh) + fpTextOffset, fpSize, 1, mh->cputype, mh->cpusubtype);
-        diag.error("could not register fairplay decryption, mremap_encrypted() => %d", result);
-        vm_deallocate(mach_task_self(), loadAddress, (vm_size_t)totalVMSize);
-        return nullptr;
+        int result = ::mremap_encrypted(((uint8_t*)mh) + fpTextOffset, fpSize, 1, mh->cputype, mh->cpusubtype);
+        if ( result != 0 ) {
+            diag.error("could not register fairplay decryption, mremap_encrypted() => %d", result);
+            ::vm_deallocate(mach_task_self(), loadAddress, (vm_size_t)totalVMSize);
+            return;
+        }
     }
 #endif
 
-    log_loads("dyld: load %s\n", image.path());
+    _logLoads("dyld: load %s\n", image->path());
 
-    return (mach_header*)loadAddress;
+    timer.setData4((uint64_t)loadAddress);
+    info.setLoadedAddress((MachOLoaded*)loadAddress);
+    info.setState(LoadedImage::State::mapped);
 }
 
-
-void unmapImage(const launch_cache::binary_format::Image* binImage, const mach_header* loadAddress)
+void Loader::unmapImage(LoadedImage& info)
 {
-    assert(loadAddress != nullptr);
-    launch_cache::Image image(binImage);
-    vm_deallocate(mach_task_self(), (vm_address_t)loadAddress, (vm_size_t)(image.vmSizeToMap()));
+    assert(info.loadedAddress() != nullptr);
+    ::vm_deallocate(mach_task_self(), (vm_address_t)info.loadedAddress(), (vm_size_t)(info.image()->vmSizeToMap()));
+    info.setLoadedAddress(nullptr);
 }
 
-
-static void applyFixupsToImage(Diagnostics& diag, const mach_header* imageMH, const launch_cache::binary_format::Image* imageData,
-                               launch_cache::TargetSymbolValue::LoadedImages& imageResolver, LogFunc log_fixups)
+void Loader::registerDOFs(const Array<DOFInfo>& dofs)
 {
-    launch_cache::Image image(imageData);
-    MachOParser imageParser(imageMH);
-    // Note, these are cached here to avoid recalculating them on every loop iteration
-    const launch_cache::ImageGroup& imageGroup = image.group();
-    const char* leafName = image.leafName();
-    intptr_t slide = imageParser.getSlide();
-    image.forEachDiskSegment(^(uint32_t segIndex, uint32_t fileOffset, uint32_t fileSize, int64_t vmOffset, uint64_t vmSize, uint8_t protections, bool& segStop) {
-        if ( !image.segmentHasFixups(segIndex) )
-            return;
-        const launch_cache::MemoryRange segContent = { (char*)imageMH + vmOffset, vmSize };
-    #if __i386__
-        bool textRelocs = ((protections & VM_PROT_WRITE) == 0);
-        if ( textRelocs ) {
-            kern_return_t r = vm_protect(mach_task_self(), (vm_address_t)segContent.address, (vm_size_t)segContent.size, false, VM_PROT_WRITE | VM_PROT_READ);
-            if ( r != KERN_SUCCESS ) {
-                diag.error("vm_protect() failed trying to make text segment writable, result=%d", r);
-                return;
+    if ( dofs.empty() )
+        return;
+
+    int fd = open("/dev/" DTRACEMNR_HELPER, O_RDWR);
+    if ( fd < 0 ) {
+        _logDofs("can't open /dev/" DTRACEMNR_HELPER " to register dtrace DOF sections\n");
+    }
+    else {
+        // allocate a buffer on the stack for the variable length dof_ioctl_data_t type
+        uint8_t buffer[sizeof(dof_ioctl_data_t) + dofs.count()*sizeof(dof_helper_t)];
+        dof_ioctl_data_t* ioctlData = (dof_ioctl_data_t*)buffer;
+
+        // fill in buffer with one dof_helper_t per DOF section
+        ioctlData->dofiod_count = dofs.count();
+        for (unsigned int i=0; i < dofs.count(); ++i) {
+            strlcpy(ioctlData->dofiod_helpers[i].dofhp_mod, dofs[i].imageShortName, DTRACE_MODNAMELEN);
+            ioctlData->dofiod_helpers[i].dofhp_dof = (uintptr_t)(dofs[i].dof);
+            ioctlData->dofiod_helpers[i].dofhp_addr = (uintptr_t)(dofs[i].dof);
+        }
+
+        // tell kernel about all DOF sections en mas
+        // pass pointer to ioctlData because ioctl() only copies a fixed size amount of data into kernel
+        user_addr_t val = (user_addr_t)(unsigned long)ioctlData;
+        if ( ioctl(fd, DTRACEHIOC_ADDDOF, &val) != -1 ) {
+            // kernel returns a unique identifier for each section in the dofiod_helpers[].dofhp_dof field.
+            // Note, the closure marked the image as being never unload, so we don't need to keep the ID around
+            // or support unregistering it later.
+            for (unsigned int i=0; i < dofs.count(); ++i) {
+                _logDofs("dyld: registering DOF section %p in %s with dtrace, ID=0x%08X\n",
+                         dofs[i].dof, dofs[i].imageShortName, (int)(ioctlData->dofiod_helpers[i].dofhp_dof));
             }
         }
-    #else
-        if ( (protections & VM_PROT_WRITE) == 0 ) {
-            diag.error("fixups found in non-writable segment of %s", image.path());
-            return;
+        else {
+            _logDofs("dyld: ioctl to register dtrace DOF section failed\n");
         }
-    #endif
-        image.forEachFixup(segIndex, segContent, ^(uint64_t segOffset, launch_cache::Image::FixupKind kind, launch_cache::TargetSymbolValue targetValue, bool& stop) {
-            if ( segOffset > segContent.size ) {
-                diag.error("fixup is past end of segment. segOffset=0x%0llX, segSize=0x%0llX, segIndex=%d", segOffset, segContent.size, segIndex);
-                stop = true;
-                return;
-            }
-            uintptr_t* fixUpLoc = (uintptr_t*)((char*)(segContent.address) + segOffset);
-            uintptr_t value;
-        #if __i386__
-            uint32_t rel32;
-            uint8_t* jumpSlot;
-        #endif
-            //dyld::log("fixup loc=%p\n", fixUpLoc);
-            switch ( kind ) {
-        #if __LP64__
-                case launch_cache::Image::FixupKind::rebase64:
-        #else
-                case launch_cache::Image::FixupKind::rebase32:
-        #endif
-                    *fixUpLoc += slide;
-                    log_fixups("dyld: fixup: %s:%p += %p\n", leafName, fixUpLoc, (void*)slide);
-                    break;
-        #if __LP64__
-                case launch_cache::Image::FixupKind::bind64:
-        #else
-                case launch_cache::Image::FixupKind::bind32:
-        #endif
-                    value = targetValue.resolveTarget(diag, imageGroup, imageResolver);
-                    log_fixups("dyld: fixup: %s:%p = %p\n", leafName, fixUpLoc, (void*)value);
-                    *fixUpLoc = value;
-                    break;
-        #if __i386__
-            case launch_cache::Image::FixupKind::rebaseText32:
-                log_fixups("dyld: text fixup: %s:%p += %p\n", leafName, fixUpLoc, (void*)slide);
-                *fixUpLoc += slide;
-                break;
-            case launch_cache::Image::FixupKind::bindText32:
-                value = targetValue.resolveTarget(diag, imageGroup, imageResolver);
-                log_fixups("dyld: text fixup: %s:%p = %p\n", leafName, fixUpLoc, (void*)value);
-                *fixUpLoc = value;
-                break;
-            case launch_cache::Image::FixupKind::bindTextRel32:
-                // CALL instruction uses pc-rel value
-                value = targetValue.resolveTarget(diag, imageGroup, imageResolver);
-                log_fixups("dyld: CALL fixup: %s:%p = %p (pc+0x%08X)\n", leafName, fixUpLoc, (void*)value, (value - (uintptr_t)(fixUpLoc)));
-                *fixUpLoc = (value - (uintptr_t)(fixUpLoc));
-                break;
-           case launch_cache::Image::FixupKind::bindImportJmp32:
-                // JMP instruction in __IMPORT segment uses pc-rel value
-                jumpSlot = (uint8_t*)fixUpLoc;
-                value = targetValue.resolveTarget(diag, imageGroup, imageResolver);
-                rel32 = (value - ((uintptr_t)(fixUpLoc)+5));
-                log_fixups("dyld: JMP fixup: %s:%p = %p (pc+0x%08X)\n", leafName, fixUpLoc, (void*)value, rel32);
-                jumpSlot[0] = 0xE9; // JMP rel32
-                jumpSlot[1] = rel32 & 0xFF;
-                jumpSlot[2] = (rel32 >> 8) & 0xFF;
-                jumpSlot[3] = (rel32 >> 16) & 0xFF;
-                jumpSlot[4] = (rel32 >> 24) & 0xFF;
-                break;
-        #endif
-            default:
-                diag.error("unknown fixup kind %d", kind);
-            }
-            if ( diag.hasError() )
-                stop = true;
-        });
-    #if __i386__
-        if ( textRelocs ) {
-            kern_return_t r = vm_protect(mach_task_self(), (vm_address_t)segContent.address, (vm_size_t)segContent.size, false, protections);
-            if ( r != KERN_SUCCESS ) {
-                diag.error("vm_protect() failed trying to make text segment non-writable, result=%d", r);
-                return;
-            }
-        }
-    #endif
-    });
-}
-
-
-
-class VIS_HIDDEN CurrentLoadImages : public launch_cache::TargetSymbolValue::LoadedImages
-{
-public:
-                                CurrentLoadImages(launch_cache::DynArray<ImageInfo>& images, const uint8_t* cacheAddr)
-                                    : _dyldCacheLoadAddress(cacheAddr), _images(images) { }
-
-    virtual const uint8_t*      dyldCacheLoadAddressForImage();
-    virtual const mach_header*  loadAddressFromGroupAndIndex(uint32_t groupNum, uint32_t indexInGroup);
-    virtual void                forEachImage(void (^handler)(uint32_t anIndex, const launch_cache::binary_format::Image*, const mach_header*, bool& stop));
-    virtual void                setAsNeverUnload(uint32_t anIndex) { _images[anIndex].neverUnload = true; }
-private:
-    const uint8_t*                      _dyldCacheLoadAddress;
-    launch_cache::DynArray<ImageInfo>&  _images;
-};
-
-const uint8_t* CurrentLoadImages::dyldCacheLoadAddressForImage()
-{
-    return _dyldCacheLoadAddress;
-}
-
-const mach_header* CurrentLoadImages::loadAddressFromGroupAndIndex(uint32_t groupNum, uint32_t indexInGroup)
-{
-    __block const mach_header* result = nullptr;
-    forEachImage(^(uint32_t anIndex, const launch_cache::binary_format::Image* imageData, const mach_header* mh, bool& stop) {
-        launch_cache::Image         image(imageData);
-        launch_cache::ImageGroup    imageGroup = image.group();
-        if ( imageGroup.groupNum() != groupNum )
-            return;
-        if ( imageGroup.indexInGroup(imageData) == indexInGroup ) {
-            result = mh;
-            stop = true;
-        }
-    });
-    return result;
-}
-
-void CurrentLoadImages::forEachImage(void (^handler)(uint32_t anIndex, const launch_cache::binary_format::Image*, const mach_header*, bool& stop))
-{
-    bool stop = false;
-    for (int i=0; i < _images.count(); ++i) {
-        ImageInfo& info = _images[i];
-        handler(i, info.imageData, info.loadAddress, stop);
-        if ( stop )
-            break;
+        close(fd);
     }
 }
 
-struct DOFInfo {
-    const void*            dof;
-    const mach_header*     imageHeader;
-    const char*            imageShortName;
-};
-
-static void registerDOFs(const DOFInfo* dofs, uint32_t dofSectionCount, LogFunc log_dofs)
+bool Loader::dtraceUserProbesEnabled()
 {
-    if ( dofSectionCount != 0 ) {
-        int fd = open("/dev/" DTRACEMNR_HELPER, O_RDWR);
-        if ( fd < 0 ) {
-            log_dofs("can't open /dev/" DTRACEMNR_HELPER " to register dtrace DOF sections\n");
-        }
-        else {
-            // allocate a buffer on the stack for the variable length dof_ioctl_data_t type
-            uint8_t buffer[sizeof(dof_ioctl_data_t) + dofSectionCount*sizeof(dof_helper_t)];
-            dof_ioctl_data_t* ioctlData = (dof_ioctl_data_t*)buffer;
-
-            // fill in buffer with one dof_helper_t per DOF section
-            ioctlData->dofiod_count = dofSectionCount;
-            for (unsigned int i=0; i < dofSectionCount; ++i) {
-                strlcpy(ioctlData->dofiod_helpers[i].dofhp_mod, dofs[i].imageShortName, DTRACE_MODNAMELEN);
-                ioctlData->dofiod_helpers[i].dofhp_dof = (uintptr_t)(dofs[i].dof);
-                ioctlData->dofiod_helpers[i].dofhp_addr = (uintptr_t)(dofs[i].dof);
-            }
-
-            // tell kernel about all DOF sections en mas
-            // pass pointer to ioctlData because ioctl() only copies a fixed size amount of data into kernel
-            user_addr_t val = (user_addr_t)(unsigned long)ioctlData;
-            if ( ioctl(fd, DTRACEHIOC_ADDDOF, &val) != -1 ) {
-                // kernel returns a unique identifier for each section in the dofiod_helpers[].dofhp_dof field.
-                // Note, the closure marked the image as being never unload, so we don't need to keep the ID around
-                // or support unregistering it later.
-                for (unsigned int i=0; i < dofSectionCount; ++i) {
-                    log_dofs("dyld: registering DOF section %p in %s with dtrace, ID=0x%08X\n",
-                             dofs[i].dof, dofs[i].imageShortName, (int)(ioctlData->dofiod_helpers[i].dofhp_dof));
-                }
-            }
-            else {
-                //dyld::log( "dyld: ioctl to register dtrace DOF section failed\n");
-            }
-            close(fd);
-        }
+#if __IPHONE_OS_VERSION_MIN_REQUIRED && !TARGET_IPHONE_SIMULATOR
+    int    dof_mode;
+    size_t dof_mode_size = sizeof(dof_mode);
+    if ( sysctlbyname("kern.dtrace.dof_mode", &dof_mode, &dof_mode_size, nullptr, 0) == 0 ) {
+        return ( dof_mode != 0 );
     }
+    return false;
+#else
+    // dtrace is always available for macOS and simulators
+    return true;
+#endif
 }
 
 
-void mapAndFixupImages(Diagnostics& diag, launch_cache::DynArray<ImageInfo>& images, const uint8_t* cacheLoadAddress,
-                       LogFunc log_loads, LogFunc log_segments, LogFunc log_fixups, LogFunc log_dofs)
+void Loader::vmAccountingSetSuspended(bool suspend, LogFunc logger)
 {
-    // scan array and map images not already loaded
-    for (int i=0; i < images.count(); ++i) {
-        ImageInfo& info = images[i];
-        const dyld3::launch_cache::Image image(info.imageData);
-        if ( info.loadAddress != nullptr ) {
-            // log main executable's segments
-            if ( (info.groupNum == 2) && (info.loadAddress->filetype == MH_EXECUTE) && !info.previouslyFixedUp ) {
-                if ( log_segments("dyld: mapped by kernel %s\n", image.path()) ) {
-                    MachOParser parser(info.loadAddress);
-                    image.forEachDiskSegment(^(uint32_t segIndex, uint32_t fileOffset, uint32_t fileSize, int64_t vmOffset, uint64_t vmSize, uint8_t permissions, bool& stop) {
-                        uint64_t start = (long)info.loadAddress + vmOffset;
-                        uint64_t end   = start+vmSize-1;
-                        if ( (segIndex == 0) && (permissions == 0) ) {
-                            start = 0;
-                        }
-                        log_segments("%14s (%c%c%c) 0x%012llX->0x%012llX \n", parser.segmentName(segIndex),
-                                    (permissions & PROT_READ) ? 'r' : '.', (permissions & PROT_WRITE) ? 'w' : '.', (permissions & PROT_EXEC) ? 'x' : '.' ,
-                                    start, end);
-                    });
-                }
-            }
-            // skip over ones already loaded
-            continue;
-        }
-        if ( image.isDiskImage() ) {
-            //dyld::log("need to load image[%d] %s\n", i, image.path());
-            info.loadAddress = mapImage(image, diag, log_loads, log_segments);
-            if ( diag.hasError() ) {
-                break; // out of for loop
-            }
-            info.justMapped = true;
-        }
-        else {
-            bool expectedOnDisk   = image.group().dylibsExpectedOnDisk();
-            bool overridableDylib = image.overridableDylib();
-            if ( expectedOnDisk || overridableDylib ) {
-                struct stat statBuf;
-                if ( ::stat(image.path(), &statBuf) == 0 ) {
-                    if ( expectedOnDisk ) {
-                        // macOS case: verify dylib file info matches what it was when cache was built
-                        if ( image.fileModTime() != statBuf.st_mtime ) {
-                            diag.error("cached dylib mod-time has changed, dylib cache has: 0x%08llX, file has: 0x%08lX, for: %s", image.fileModTime(), (long)statBuf.st_mtime, image.path());
-                            break; // out of for loop
-                        }
-                         if ( image.fileINode() != statBuf.st_ino ) {
-                            diag.error("cached dylib inode has changed, dylib cache has: 0x%08llX, file has: 0x%08llX, for: %s", image.fileINode(), statBuf.st_ino, image.path());
-                            break; // out of for loop
-                        }
-                   }
-                    else {
-                        // iOS internal: dylib override installed
-                        diag.error("cached dylib overridden: %s", image.path());
-                        break; // out of for loop
-                    }
+#if __arm__ || __arm64__
+    // <rdar://problem/29099600> dyld should tell the kernel when it is doing fix-ups caused by roots
+    logger("vm.footprint_suspend=%d\n", suspend);
+    int newValue = suspend ? 1 : 0;
+    int oldValue = 0;
+    size_t newlen = sizeof(newValue);
+    size_t oldlen = sizeof(oldValue);
+    sysctlbyname("vm.footprint_suspend", &oldValue, &oldlen, &newValue, newlen);
+#endif
+}
+
+void Loader::applyFixupsToImage(Diagnostics& diag, LoadedImage& info)
+{
+    dyld3::ScopedTimer timer(DBG_DYLD_TIMING_APPLY_FIXUPS, (uint64_t)info.loadedAddress(), 0, 0);
+    closure::ImageNum       cacheImageNum;
+    const char*             leafName         = info.image()->leafName();
+    const closure::Image*   image            = info.image();
+    const uint8_t*          imageLoadAddress = (uint8_t*)info.loadedAddress();
+    uintptr_t               slide            = info.loadedAddress()->getSlide();
+    bool                    overrideOfCache  = info.image()->isOverrideOfDyldCacheImage(cacheImageNum);
+    if ( overrideOfCache )
+        vmAccountingSetSuspended(true, _logFixups);
+    image->forEachFixup(^(uint64_t imageOffsetToRebase, bool &stop) {
+        uintptr_t* fixUpLoc = (uintptr_t*)(imageLoadAddress + imageOffsetToRebase);
+        *fixUpLoc += slide;
+        _logFixups("dyld: fixup: %s:%p += %p\n", leafName, fixUpLoc, (void*)slide);
+    },
+    ^(uint64_t imageOffsetToBind, closure::Image::ResolvedSymbolTarget bindTarget, bool &stop) {
+        uintptr_t* fixUpLoc = (uintptr_t*)(imageLoadAddress + imageOffsetToBind);
+        uintptr_t value = resolveTarget(bindTarget);
+        _logFixups("dyld: fixup: %s:%p = %p\n", leafName, fixUpLoc, (void*)value);
+        *fixUpLoc = value;
+    },
+    ^(uint64_t imageOffsetStart, const Array<closure::Image::ResolvedSymbolTarget>& targets, bool& stop) {
+        // walk each fixup in the chain
+        image->forEachChainedFixup((void*)imageLoadAddress, imageOffsetStart, ^(uint64_t* fixupLoc, MachOLoaded::ChainedFixupPointerOnDisk fixupInfo, bool& stopChain) {
+            if ( fixupInfo.authRebase.auth ) {
+    #if  __has_feature(ptrauth_calls)
+                if ( fixupInfo.authBind.bind ) {
+                    closure::Image::ResolvedSymbolTarget bindTarget = targets[fixupInfo.authBind.ordinal];
+                    uint64_t targetAddr = resolveTarget(bindTarget);
+                    // Don't sign missing weak imports.
+                    if (targetAddr != 0)
+                        targetAddr = fixupInfo.signPointer(fixupLoc, targetAddr);
+                    _logFixups("dyld: fixup: *%p = %p (JOP: diversity 0x%04X, addr-div=%d, key=%s)\n",
+                               fixupLoc, (void*)targetAddr, fixupInfo.authBind.diversity, fixupInfo.authBind.addrDiv, fixupInfo.authBind.keyName());
+                    *fixupLoc = targetAddr;
                 }
                 else {
-                    if ( expectedOnDisk ) {
-                        // macOS case: dylib that existed when cache built no longer exists
-                        diag.error("missing cached dylib: %s", image.path());
-                        break; // out of for loop
-                    }
+                    uint64_t targetAddr = (uint64_t)imageLoadAddress + fixupInfo.authRebase.target;
+                    targetAddr = fixupInfo.signPointer(fixupLoc, targetAddr);
+                    _logFixups("dyld: fixup: *%p = %p (JOP: diversity 0x%04X, addr-div=%d, key=%s)\n",
+                               fixupLoc, (void*)targetAddr, fixupInfo.authRebase.diversity, fixupInfo.authRebase.addrDiv, fixupInfo.authRebase.keyName());
+                    *fixupLoc = targetAddr;
+                }
+    #else
+                diag.error("malformed chained pointer");
+                stop = true;
+                stopChain = true;
+    #endif
+            }
+            else {
+                if ( fixupInfo.plainRebase.bind ) {
+                    closure::Image::ResolvedSymbolTarget bindTarget = targets[fixupInfo.plainBind.ordinal];
+                    uint64_t targetAddr = resolveTarget(bindTarget) + fixupInfo.plainBind.signExtendedAddend();
+                    _logFixups("dyld: fixup: %s:%p = %p\n", leafName, fixupLoc, (void*)targetAddr);
+                    *fixupLoc = targetAddr;
+                }
+                else {
+                    uint64_t targetAddr = fixupInfo.plainRebase.signExtendedTarget() + slide;
+                    _logFixups("dyld: fixup: %s:%p += %p\n", leafName, fixupLoc, (void*)slide);
+                    *fixupLoc = targetAddr;
                 }
             }
-            info.loadAddress = (mach_header*)(cacheLoadAddress + image.cacheOffset());
-            info.justUsedFromDyldCache = true;
-            if ( log_segments("dyld: Using from dyld cache %s\n", image.path()) ) {
-                MachOParser parser(info.loadAddress);
-                image.forEachCacheSegment(^(uint32_t segIndex, uint64_t vmOffset, uint64_t vmSize, uint8_t permissions, bool &stop) {
-                    log_segments("%14s (%c%c%c) 0x%012lX->0x%012lX \n", parser.segmentName(segIndex),
-                                    (permissions & PROT_READ) ? 'r' : '.', (permissions & PROT_WRITE) ? 'w' : '.', (permissions & PROT_EXEC) ? 'x' : '.' ,
-                                    (long)cacheLoadAddress+vmOffset, (long)cacheLoadAddress+vmOffset+vmSize-1);
-                 });
-            }
-        }
-    }
-    if ( diag.hasError() )  {
-        // back out and unmapped images all loaded so far
-        for (uint32_t j=0; j < images.count(); ++j) {
-            ImageInfo& anInfo = images[j];
-            if ( anInfo.justMapped )
-                 unmapImage(anInfo.imageData, anInfo.loadAddress);
-            anInfo.loadAddress = nullptr;
-        }
-        return;
-    }
+        });
+    });
 
-    // apply fixups
-    CurrentLoadImages fixupHelper(images, cacheLoadAddress);
-    for (int i=0; i < images.count(); ++i) {
-        ImageInfo& info = images[i];
-        // images in shared cache do not need fixups applied
-        launch_cache::Image image(info.imageData);
-        if ( !image.isDiskImage() )
-            continue;
-        // previously loaded images were previously fixed up
-        if ( info.previouslyFixedUp )
-            continue;
-        //dyld::log("apply fixups to mh=%p, path=%s\n", info.loadAddress, Image(info.imageData).path());
-        dyld3::loader::applyFixupsToImage(diag, info.loadAddress, info.imageData, fixupHelper, log_fixups);
-        if ( diag.hasError() )
+#if __i386__
+    __block bool segmentsMadeWritable = false;
+    image->forEachTextReloc(^(uint32_t imageOffsetToRebase, bool& stop) {
+        if ( !segmentsMadeWritable )
+            setSegmentProtects(info, true);
+        uintptr_t* fixUpLoc = (uintptr_t*)(imageLoadAddress + imageOffsetToRebase);
+        *fixUpLoc += slide;
+        _logFixups("dyld: fixup: %s:%p += %p\n", leafName, fixUpLoc, (void*)slide);
+     },
+    ^(uint32_t imageOffsetToBind, closure::Image::ResolvedSymbolTarget bindTarget, bool& stop) {
+        // FIXME
+    });
+    if ( segmentsMadeWritable )
+        setSegmentProtects(info, false);
+#endif
+
+    if ( overrideOfCache )
+        vmAccountingSetSuspended(false, _logFixups);
+}
+
+#if __i386__
+void Loader::setSegmentProtects(const LoadedImage& info, bool write)
+{
+    info.image()->forEachDiskSegment(^(uint32_t segIndex, uint32_t fileOffset, uint32_t fileSize, int64_t vmOffset, uint64_t vmSize, uint8_t protections, bool& segStop) {
+        if ( protections & VM_PROT_WRITE )
+            return;
+        uint32_t regionProt = protections;
+        if ( write )
+            regionProt = VM_PROT_WRITE | VM_PROT_READ;
+        kern_return_t r = vm_protect(mach_task_self(), ((uintptr_t)info.loadedAddress())+(uintptr_t)vmOffset, (uintptr_t)vmSize, false, regionProt);
+        assert( r == KERN_SUCCESS );
+    });
+}
+#endif
+
+#if BUILDING_DYLD
+void forEachLineInFile(const char* buffer, size_t bufferLen, void (^lineHandler)(const char* line, bool& stop))
+{
+    bool stop = false;
+    const char* const eof = &buffer[bufferLen];
+    for (const char* s = buffer; s < eof; ++s) {
+        char lineBuffer[MAXPATHLEN];
+        char* t = lineBuffer;
+        char* tEnd = &lineBuffer[MAXPATHLEN];
+        while ( (s < eof) && (t != tEnd) ) {
+            if ( *s == '\n' )
             break;
-    }
-
-    // Record dtrace DOFs
-    // if ( /* FIXME! register dofs */ )
-    {
-        __block uint32_t dofCount = 0;
-        for (int i=0; i < images.count(); ++i) {
-            ImageInfo& info = images[i];
-            launch_cache::Image image(info.imageData);
-            // previously loaded images were previously fixed up
-            if ( info.previouslyFixedUp )
-                continue;
-            image.forEachDOF(nullptr, ^(const void* section) {
-                // DOFs cause the image to be never-unload
-                assert(image.neverUnload());
-                ++dofCount;
-            });
+            *t++ = *s++;
         }
-
-        // struct RegisteredDOF { const mach_header* mh; int registrationID; };
-        DOFInfo dofImages[dofCount];
-        __block DOFInfo* dofImagesBase = dofImages;
-        dofCount = 0;
-        for (int i=0; i < images.count(); ++i) {
-            ImageInfo& info = images[i];
-            launch_cache::Image image(info.imageData);
-            // previously loaded images were previously fixed up
-            if ( info.previouslyFixedUp )
-                continue;
-            image.forEachDOF(info.loadAddress, ^(const void* section) {
-                DOFInfo dofInfo;
-                dofInfo.dof            = section;
-                dofInfo.imageHeader    = info.loadAddress;
-                dofInfo.imageShortName = image.leafName();
-                dofImagesBase[dofCount++] = dofInfo;
-            });
-        }
-        registerDOFs(dofImages, dofCount, log_dofs);
+        *t = '\0';
+        lineHandler(lineBuffer, stop);
+        if ( stop )
+        break;
     }
 }
 
-#if BUILDING_DYLD
 void forEachLineInFile(const char* path, void (^lineHandler)(const char* line, bool& stop))
 {
     int fd = dyld::my_open(path, O_RDONLY, 0);
@@ -680,22 +766,7 @@ void forEachLineInFile(const char* path, void (^lineHandler)(const char* line, b
         if ( fstat(fd, &statBuf) == 0 ) {
             const char* lines = (const char*)mmap(nullptr, (size_t)statBuf.st_size, PROT_READ, MAP_PRIVATE, fd, 0);
             if ( lines != MAP_FAILED ) {
-                bool stop = false;
-                const char* const eof = &lines[statBuf.st_size];
-                for (const char* s = lines; s < eof; ++s) {
-                    char lineBuffer[MAXPATHLEN];
-                    char* t = lineBuffer;
-                    char* tEnd = &lineBuffer[MAXPATHLEN];
-                    while ( (s < eof) && (t != tEnd) ) {
-                        if ( *s == '\n' )
-                            break;
-                        *t++ = *s++;
-                    }
-                    *t = '\0';
-                    lineHandler(lineBuffer, stop);
-                    if ( stop )
-                        break;
-                }
+                forEachLineInFile(lines, (size_t)statBuf.st_size, lineHandler);
                 munmap((void*)lines, (size_t)statBuf.st_size);
             }
         }
@@ -796,10 +867,6 @@ void __cxa_pure_virtual()
 }
 #endif
 
-
-#endif // DYLD_IN_PROCESS
-
-} // namespace loader
 } // namespace dyld3
 
 

@@ -9,6 +9,10 @@
 #include <dlfcn.h> 
 #include <mach-o/dyld_priv.h>
 
+#if __has_feature(ptrauth_calls)
+    #include <ptrauth.h>
+#endif
+
 
 int bar()
 {
@@ -25,6 +29,14 @@ __attribute__((visibility("hidden"))) int hide()
     return 4;
 }
 
+static const void *stripPointer(const void *ptr) {
+#if __has_feature(ptrauth_calls)
+    return __builtin_ptrauth_strip(ptr, ptrauth_key_asia);
+#else
+    return ptr;
+#endif
+}
+
 // checks global symbol
 static void verifybar()
 {
@@ -37,7 +49,7 @@ static void verifybar()
         printf("[FAIL] dladdr()->dli_sname is \"%s\" instead of \"bar\"\n", info.dli_sname);
         exit(0);
     }
-    if ( info.dli_saddr != &bar) {
+    if ( info.dli_saddr != stripPointer(&bar) ) {
         printf("[FAIL] dladdr()->dli_saddr is not &bar\n");
         exit(0);
     }
@@ -59,7 +71,7 @@ static void verifyfoo()
         printf("[FAIL] dladdr()->dli_sname is \"%s\" instead of \"foo\"\n", info.dli_sname);
         exit(0);
     }
-    if ( info.dli_saddr != &foo) {
+    if ( info.dli_saddr != stripPointer(&foo) ) {
         printf("[FAIL] dladdr()->dli_saddr is not &foo\n");
         exit(0);
     }
@@ -81,7 +93,7 @@ static void verifyhide()
         printf("[FAIL] dladdr()->dli_sname is \"%s\" instead of \"hide\"\n", info.dli_sname);
         exit(0);
     }
-    if ( info.dli_saddr != &hide) {
+    if ( info.dli_saddr != stripPointer(&hide) ) {
         printf("[FAIL] dladdr()->dli_saddr is not &hide\n");
         exit(0);
     }
@@ -103,7 +115,7 @@ static void verifymalloc()
         printf("[FAIL] dladdr()->dli_sname is \"%s\" instead of \"malloc\"\n", info.dli_sname);
         exit(0);
     }
-    if ( info.dli_saddr != &malloc) {
+    if ( info.dli_saddr != stripPointer(&malloc) ) {
         printf("[FAIL] dladdr()->dli_saddr is not &malloc\n");
         exit(0);
     }
@@ -113,6 +125,19 @@ static void verifymalloc()
     }
 }
 
+// checks passing NULL for info parameter gracefully fails
+static void verifyNULL()
+{
+    Dl_info info;
+    if ( dladdr(&malloc, NULL) != 0 ) {
+        printf("[FAIL] dladdr(&malloc, NULL) did not fail\n");
+        exit(0);
+    }
+    if ( dladdr(NULL, NULL) != 0 ) {
+        printf("[FAIL] dladdr(NULL, NULL) did not fail\n");
+        exit(0);
+    }
+}
 
 int main()
 {
@@ -121,7 +146,7 @@ int main()
     verifyhide();
     verifyfoo();
     verifymalloc();
-
+    verifyNULL();
 
     printf("[PASS] dladdr-basic\n");
     return 0;
