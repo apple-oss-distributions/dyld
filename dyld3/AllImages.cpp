@@ -200,6 +200,40 @@ void AllImages::mirrorToOldAllImageInfos()
         _oldAllImageInfos->infoArrayChangeTimestamp = mach_absolute_time();
         _oldAllImageInfos->infoArray                = _oldAllImageArray;
 
+        // <radr://problem/42668846> update UUID array if needed
+        uint32_t nonCachedCount = 1; // always add dyld
+        for (const LoadedImage& li : _loadedImages) {
+            if ( !li.loadedAddress()->inDyldCache() )
+                ++nonCachedCount;
+        }
+        if ( nonCachedCount != _oldAllImageInfos->uuidArrayCount ) {
+            // set infoArray to NULL to denote it is in-use
+            _oldAllImageInfos->uuidArray = nullptr;
+            // make sure allocation can hold all uuids
+            if ( _oldUUIDAllocCount < nonCachedCount ) {
+                uint32_t        newAllocCount = (nonCachedCount + 3) & (-4); // round up to multiple of 4
+                dyld_uuid_info* newArray      = (dyld_uuid_info*)::malloc(sizeof(dyld_uuid_info)*newAllocCount);
+                if ( _oldUUIDArray != nullptr )
+                    ::free(_oldUUIDArray);
+                _oldUUIDArray       = newArray;
+                _oldUUIDAllocCount  = newAllocCount;
+            }
+            // add dyld then all images not in dyld cache
+            const MachOFile* dyldMF = (MachOFile*)_oldAllImageInfos->dyldImageLoadAddress;
+            _oldUUIDArray[0].imageLoadAddress = dyldMF;
+            dyldMF->getUuid(_oldUUIDArray[0].imageUUID);
+            index = 1;
+            for (const LoadedImage& li : _loadedImages) {
+                if ( !li.loadedAddress()->inDyldCache() ) {
+                    _oldUUIDArray[index].imageLoadAddress = li.loadedAddress();
+                    li.loadedAddress()->getUuid(_oldUUIDArray[index].imageUUID);
+                    ++index;
+                }
+            }
+            // set uuidArray back to base address of array (so kernel can now read)
+            _oldAllImageInfos->uuidArray           = _oldUUIDArray;
+            _oldAllImageInfos->uuidArrayCount      = nonCachedCount;
+        }
     });
 }
 

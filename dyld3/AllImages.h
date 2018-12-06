@@ -178,8 +178,10 @@ private:
     ProgramVars*                            _programVars         = nullptr;
     dyld_all_image_infos*                   _oldAllImageInfos    = nullptr;
     dyld_image_info*                        _oldAllImageArray    = nullptr;
+    dyld_uuid_info*                         _oldUUIDArray        = nullptr;
     dyld_platform_t                         _platform            = 0;
     uint32_t                                _oldArrayAllocCount  = 0;
+    uint32_t                                _oldUUIDAllocCount   = 0;
     closure::ImageNum                       _nextImageNum        = 0;
     int32_t                                 _gcCount             = 0;
     bool                                    _processDOFs         = false;
