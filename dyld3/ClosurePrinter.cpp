@@ -321,6 +321,14 @@ static Node buildClosureNode(const LaunchClosure* closure, const Array<const Ima
     __block Node root;
     root.map["images"] = buildImageArrayNode(closure->images(), imagesArrays, printFixups, printDependentsDetails);
 
+    closure->forEachPatchEntry(^(const Closure::PatchEntry& patchEntry) {
+        Node patchNode;
+        patchNode.map["func-dyld-cache-offset"].value = hex8(patchEntry.exportCacheOffset);
+        patchNode.map["func-image-num"].value         = hex8(patchEntry.overriddenDylibInCache);
+        patchNode.map["replacement"].value            = printTarget(imagesArrays, patchEntry.replacement);
+        root.map["dyld-cache-fixups"].array.push_back(patchNode);
+    });
+
      Image::ResolvedSymbolTarget entry;
     if ( closure->mainEntry(entry) )
         root.map["main"].value = printTarget(imagesArrays, entry);

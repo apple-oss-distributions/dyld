@@ -26,6 +26,8 @@
 
 #include "ClosureFileSystem.h"
 
+#include <sys/stat.h>
+
 namespace dyld3 {
 namespace closure {
 

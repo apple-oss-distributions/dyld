@@ -481,7 +481,8 @@ void MachOFile::forEachLoadCommand(Diagnostics& diag, void (^callback)(const loa
     else if ( this->magic == MH_MAGIC )
         startCmds = (load_command*)((char *)this + sizeof(mach_header));
     else {
-        diag.error("file does not start with MH_MAGIC[_64]");
+        const uint32_t* h = (uint32_t*)this;
+        diag.error("file does not start with MH_MAGIC[_64]: 0x%08X 0x%08X", h[0], h [1]);
         return;  // not a mach-o file
     }
     const load_command* const cmdsEnd = (load_command*)((char*)startCmds + this->sizeofcmds);
@@ -489,11 +490,11 @@ void MachOFile::forEachLoadCommand(Diagnostics& diag, void (^callback)(const loa
     for (uint32_t i = 0; i < this->ncmds; ++i) {
         const load_command* nextCmd = (load_command*)((char *)cmd + cmd->cmdsize);
         if ( cmd->cmdsize < 8 ) {
-            diag.error("malformed load command #%d, size too small %d", i, cmd->cmdsize);
+            diag.error("malformed load command #%d of %d at %p with mh=%p, size (0x%X) too small", i, this->ncmds, cmd, this, cmd->cmdsize);
             return;
         }
         if ( (nextCmd > cmdsEnd) || (nextCmd < startCmds) ) {
-            diag.error("malformed load command #%d, size too large 0x%X", i, cmd->cmdsize);
+            diag.error("malformed load command #%d of %d at %p with mh=%p, size (0x%X) is too large, load commands end at %p", i, this->ncmds, cmd, this, cmd->cmdsize, cmdsEnd);
             return;
         }
         callback(cmd, stop);

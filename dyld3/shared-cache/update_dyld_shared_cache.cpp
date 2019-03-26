@@ -146,13 +146,21 @@ static bool verbose = false;
 
 
 
-static bool addIfMachO(const dyld3::closure::FileSystem& fileSystem, const std::string& runtimePath, const struct stat& statBuf, bool requireSIP, std::vector<MappedMachOsByCategory>& files)
+static bool addIfMachO(const dyld3::closure::FileSystem& fileSystem, const std::string& runtimePath, const struct stat& statBuf, bool requireSIP,
+                       dev_t rootFS, std::vector<MappedMachOsByCategory>& files)
 {
     // don't precompute closure info for any debug or profile dylibs
     if ( endsWith(runtimePath, "_profile.dylib") || endsWith(runtimePath, "_debug.dylib") || endsWith(runtimePath, "_profile") || endsWith(runtimePath, "_debug") )
         return false;
     if ( startsWith(runtimePath, "/usr/lib/system/introspection/") )
         return false;
+
+    // Only use files on the same volume as the boot volume
+    if (statBuf.st_dev != rootFS) {
+        if ( verbose )
+            fprintf(stderr, "update_dyld_shared_cache: warning: skipping overlay file '%s' which is not on the root volume\n", runtimePath.c_str());
+        return false;
+    }
 
     auto warningHandler = ^(const char* msg) {
         if ( verbose )
@@ -201,7 +209,7 @@ static bool addIfMachO(const dyld3::closure::FileSystem& fileSystem, const std::
     return result;
 }
 
-static void findAllFiles(const std::vector<std::string>& pathPrefixes, bool requireSIP, std::vector<MappedMachOsByCategory>& files)
+static void findAllFiles(const std::vector<std::string>& pathPrefixes, bool requireSIP, dev_t rootFS, std::vector<MappedMachOsByCategory>& files)
 {
     std::unordered_set<std::string> skipDirs;
     for (const char* s : sDontUsePrefixes)
@@ -228,7 +236,7 @@ static void findAllFiles(const std::vector<std::string>& pathPrefixes, bool requ
                     return;
 
                 // if the file is mach-o, add to list
-                if ( addIfMachO(fileSystem, path, statBuf, requireSIP, files) ) {
+                if ( addIfMachO(fileSystem, path, statBuf, requireSIP, rootFS, files) ) {
                     if ( multiplePrefixes )
                         alreadyUsed.insert(path);
                 }
@@ -238,7 +246,7 @@ static void findAllFiles(const std::vector<std::string>& pathPrefixes, bool requ
 }
 
 
-static void findOSFilesViaBOMS(const std::vector<std::string>& pathPrefixes, bool requireSIP, std::vector<MappedMachOsByCategory>& files)
+static void findOSFilesViaBOMS(const std::vector<std::string>& pathPrefixes, bool requireSIP, dev_t rootFS, std::vector<MappedMachOsByCategory>& files)
 {
     __block std::unordered_set<std::string> runtimePathsFound;
     for (const std::string& prefix : pathPrefixes) {
@@ -291,9 +299,10 @@ static void findOSFilesViaBOMS(const std::vector<std::string>& pathPrefixes, boo
                                     std::string fullPath2 = prefix2 + runPath;
                                     if ( stat(fullPath2.c_str(), &statBuf2) == 0 ) {
                                         dyld3::closure::FileSystemPhysical fileSystem(prefix2.c_str());
-                                        addIfMachO(fileSystem, runPath, statBuf2, requireSIP, files);
-                                        runtimePathsFound.insert(runPath);
-                                        break;
+                                        if ( addIfMachO(fileSystem, runPath, statBuf2, requireSIP, rootFS, files) ) {
+                                            runtimePathsFound.insert(runPath);
+                                            break;
+                                        }
                                     }
                                 }
                             }
@@ -632,6 +641,15 @@ int main(int argc, const char* argv[], const char* envp[])
         }
     }
 
+    // Find the boot volume so that we can ensure all overlays are on the same volume
+    struct stat rootStatBuf;
+    if ( stat(rootPath == "" ? "/" : rootPath.c_str(), &rootStatBuf) != 0 ) {
+        fprintf(stderr, "update_dyld_shared_cache: error: could not stat root file system because '%s'\n", strerror(errno));
+        return 1;
+    }
+
+    dev_t rootFS = rootStatBuf.st_dev;
+
     //
     // pathPrefixes for three modes:
     //   1) no options: { "" }           // search only boot volume
@@ -639,10 +657,20 @@ int main(int argc, const char* argv[], const char* envp[])
     //   3) -root:      { root }         // search only -root volume
     //
     std::vector<std::string> pathPrefixes;
-    if ( !overlayPath.empty() )
-        pathPrefixes.push_back(overlayPath);
+    if ( !overlayPath.empty() ) {
+        // Only add the overlay path if it exists, and is the same volume as the root
+        struct stat overlayStatBuf;
+        if ( stat(overlayPath.c_str(), &overlayStatBuf) != 0 ) {
+            fprintf(stderr, "update_dyld_shared_cache: warning: ignoring overlay dir '%s' because '%s'\n", overlayPath.c_str(), strerror(errno));
+            overlayPath.clear();
+        } else if (overlayStatBuf.st_dev != rootFS) {
+            fprintf(stderr, "update_dyld_shared_cache: warning: ignoring overlay dir '%s' because it is not the boot volume\n", overlayPath.c_str());
+            overlayPath.clear();
+        } else {
+            pathPrefixes.push_back(overlayPath);
+        }
+    }
     pathPrefixes.push_back(rootPath);
-
 
     if ( cacheDir.empty() ) {
         // if -cache_dir is not specified, then write() will eventually fail if we are not running as root
@@ -692,10 +720,10 @@ int main(int argc, const char* argv[], const char* envp[])
     if ( archStrs.count("i386") )
         allFileSets.push_back({"i386"});
     if ( searchDisk )
-        findAllFiles(pathPrefixes, requireDylibsBeRootlessProtected, allFileSets);
+        findAllFiles(pathPrefixes, requireDylibsBeRootlessProtected, rootFS, allFileSets);
     else {
         std::unordered_set<std::string> runtimePathsFound;
-        findOSFilesViaBOMS(pathPrefixes, requireDylibsBeRootlessProtected, allFileSets);
+        findOSFilesViaBOMS(pathPrefixes, requireDylibsBeRootlessProtected, rootFS, allFileSets);
     }
 
     // nothing in OS uses i386 dylibs, so only dylibs used by third party apps need to be in cache
@@ -759,7 +787,7 @@ int main(int argc, const char* argv[], const char* envp[])
 
                     std::vector<MappedMachOsByCategory> mappedFiles;
                     mappedFiles.push_back({fileSet.archName});
-                   if ( addIfMachO(fileSystem, runtimePath, statBuf, requireDylibsBeRootlessProtected, mappedFiles) ) {
+                   if ( addIfMachO(fileSystem, runtimePath, statBuf, requireDylibsBeRootlessProtected, rootFS, mappedFiles) ) {
                         if ( !mappedFiles.back().dylibsForCache.empty() ) {
                             if ( verbose )
                                 fprintf(stderr, "verifySelfContained, add %s\n", mappedFiles.back().dylibsForCache.back().runtimePath.c_str());

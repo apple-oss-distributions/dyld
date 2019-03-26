@@ -69,6 +69,11 @@ const MachOAnalyzer* MachOAnalyzer::validMainExecutable(Diagnostics& diag, const
 
 closure::LoadedFileInfo MachOAnalyzer::load(Diagnostics& diag, const closure::FileSystem& fileSystem, const char* path, const char* reqArchName, Platform reqPlatform)
 {
+    // FIXME: This should probably be an assert, but if we happen to have a diagnostic here then something is wrong
+    // above us and we should quickly return instead of doing unnecessary work.
+    if (diag.hasError())
+        return closure::LoadedFileInfo();
+
     closure::LoadedFileInfo info;
     char realerPath[MAXPATHLEN];
     if (!fileSystem.loadFile(path, info, realerPath, ^(const char *format, ...) {
@@ -79,6 +84,11 @@ closure::LoadedFileInfo MachOAnalyzer::load(Diagnostics& diag, const closure::Fi
     })) {
         return closure::LoadedFileInfo();
     }
+
+    // If we now have an error, but succeeded, then we must have tried multiple paths, one of which errored, but
+    // then succeeded on a later path.  So clear the error.
+    if (diag.hasError())
+        diag.clearError();
 
     // if fat, remap just slice needed
     bool fatButMissingSlice;
@@ -169,7 +179,7 @@ bool MachOAnalyzer::validMachOForArchAndPlatform(Diagnostics& diag, size_t slice
 {
     // must start with mach-o magic value
     if ( (this->magic != MH_MAGIC) && (this->magic != MH_MAGIC_64) ) {
-        diag.error("could not use '%s' because it is not a mach-o file, 0x%08X", path, this->magic);
+        diag.error("could not use '%s' because it is not a mach-o file: 0x%08X 0x%08X", path, this->magic, this->cputype);
         return false;
     }
 
@@ -198,7 +208,7 @@ bool MachOAnalyzer::validMachOForArchAndPlatform(Diagnostics& diag, size_t slice
         case MH_BUNDLE:
             break;
         default:
-            diag.error("could not use '%s' because it is not a dylib, bundle, or executable", path);
+            diag.error("could not use '%s' because it is not a dylib, bundle, or executable, filetype=0x%08X", path, this->filetype);
            return false;
     }
 
@@ -232,6 +242,10 @@ bool MachOAnalyzer::validMachOForArchAndPlatform(Diagnostics& diag, size_t slice
         if ( !validMain(diag, path) )
             return false;
     }
+
+    // <rdar://problem/45525884> to avoid heap smasher, don't load this dylib
+    if ( strcmp(path, "/usr/lib/libnetsnmp.5.2.1.dylib") == 0 )
+        return false;
 
     // further validations done in validLinkedit()
 
@@ -2043,15 +2057,18 @@ bool MachOAnalyzer::hasCodeSignature(uint32_t& fileOffset, uint32_t& size) const
         return false;
 
     // <rdar://problem/13622786> ignore code signatures in macOS binaries built with pre-10.9 tools
-    __block bool goodSignature = true;
     if ( (this->cputype == CPU_TYPE_X86_64) || (this->cputype == CPU_TYPE_I386) ) {
+        __block bool foundPlatform = false;
+        __block bool badSignature  = false;
         forEachSupportedPlatform(^(Platform platform, uint32_t minOS, uint32_t sdk) {
+            foundPlatform = true;
             if ( (platform == Platform::macOS) && (sdk < 0x000A0900) )
-                goodSignature = false;
+                badSignature = true;
         });
+        return foundPlatform && !badSignature;
     }
 
-    return goodSignature;
+    return true;
 }
 
 bool MachOAnalyzer::hasInitializer(Diagnostics& diag, bool contentRebased, const void* dyldCache) const

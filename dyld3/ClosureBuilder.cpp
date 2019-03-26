@@ -1747,6 +1747,9 @@ const LaunchClosure* ClosureBuilder::makeLaunchClosure(const LoadedFileInfo& fil
             if ( li.overrideImageNum != 0 ) {
                 const Image* cacheImage = _dyldImageArray->imageForNum(li.overrideImageNum);
                 STACK_ALLOC_ARRAY(Closure::PatchEntry, patches, cacheImage->patchableExportCount());
+                MachOLoaded::DependentToMachOLoaded reexportFinder = ^(const MachOLoaded* mh, uint32_t depIndex) {
+                    return (const MachOLoaded*)findDependent(mh, depIndex);
+                };
                 //fprintf(stderr, "'%s' overrides '%s'\n", li.loadedFileInfo.path, cacheImage->path());
                 cacheImage->forEachPatchableExport(^(uint32_t cacheOffsetOfImpl, const char* symbolName) {
                     dyld3::MachOAnalyzer::FoundSymbol foundInfo;
@@ -1754,9 +1757,10 @@ const LaunchClosure* ClosureBuilder::makeLaunchClosure(const LoadedFileInfo& fil
                     Closure::PatchEntry               patch;
                     patch.overriddenDylibInCache  = li.overrideImageNum;
                     patch.exportCacheOffset       = cacheOffsetOfImpl;
-                    if ( li.loadAddress()->findExportedSymbol(patchDiag, symbolName, foundInfo, nullptr) ) {
+                    if ( li.loadAddress()->findExportedSymbol(patchDiag, symbolName, foundInfo, reexportFinder) ) {
+                        const MachOAnalyzer* impDylib = (const MachOAnalyzer*)foundInfo.foundInDylib;
                         patch.replacement.image.kind     = Image::ResolvedSymbolTarget::kindImage;
-                        patch.replacement.image.imageNum = li.imageNum;
+                        patch.replacement.image.imageNum = findLoadedImage(impDylib).imageNum;
                         patch.replacement.image.offset   = foundInfo.value;
                     }
                     else {
@@ -1998,6 +2002,9 @@ const DlopenClosure* ClosureBuilder::makeDlopenClosure(const char* path, const L
             if ( (li.overrideImageNum != 0) && (li.imageNum >= _startImageNum) ) {
                 const Image* cacheImage = _dyldImageArray->imageForNum(li.overrideImageNum);
                 STACK_ALLOC_ARRAY(Closure::PatchEntry, patches, cacheImage->patchableExportCount());
+                MachOLoaded::DependentToMachOLoaded reexportFinder = ^(const MachOLoaded* mh, uint32_t depIndex) {
+                    return (const MachOLoaded*)findDependent(mh, depIndex);
+                };
                 //fprintf(stderr, "'%s' overrides '%s'\n", li.loadedFileInfo.path, cacheImage->path());
                 cacheImage->forEachPatchableExport(^(uint32_t cacheOffsetOfImpl, const char* symbolName) {
                     dyld3::MachOAnalyzer::FoundSymbol foundInfo;
@@ -2005,9 +2012,10 @@ const DlopenClosure* ClosureBuilder::makeDlopenClosure(const char* path, const L
                     Closure::PatchEntry               patch;
                     patch.overriddenDylibInCache  = li.overrideImageNum;
                     patch.exportCacheOffset       = cacheOffsetOfImpl;
-                    if ( li.loadAddress()->findExportedSymbol(patchDiag, symbolName, foundInfo, nullptr) ) {
+                    if ( li.loadAddress()->findExportedSymbol(patchDiag, symbolName, foundInfo, reexportFinder) ) {
+                        const MachOAnalyzer* impDylib = (const MachOAnalyzer*)foundInfo.foundInDylib;
                         patch.replacement.image.kind     = Image::ResolvedSymbolTarget::kindImage;
-                        patch.replacement.image.imageNum = li.imageNum;
+                        patch.replacement.image.imageNum = findLoadedImage(impDylib).imageNum;
                         patch.replacement.image.offset   = foundInfo.value;
                     }
                     else {
