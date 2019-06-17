@@ -359,7 +359,10 @@ static bool dontCache(const std::string& volumePrefix, const std::string& archNa
 
     const char* installName = aFile.mh->installName();
     if ( (pathsWithDuplicateInstallName.count(aFile.runtimePath) != 0) && (aFile.runtimePath != installName) ) {
-        if (warn) fprintf(stderr, "update_dyld_shared_cache: warning: %s skipping because of duplicate install name %s\n", archName.c_str(), aFile.runtimePath.c_str());
+        // <rdar://problem/46431467> if a dylib moves and a symlink is installed into its place, bom iterator will see both and issue a warning
+        struct stat statBuf;
+        bool isSymLink = ( (lstat(aFile.runtimePath.c_str(), &statBuf) == 0) && S_ISLNK(statBuf.st_mode) );
+        if (!isSymLink && warn) fprintf(stderr, "update_dyld_shared_cache: warning: %s skipping because of duplicate install name %s\n", archName.c_str(), aFile.runtimePath.c_str());
         return true;
     }
 
@@ -411,8 +414,11 @@ static void pruneCachedDylibs(const std::string& volumePrefix, const std::unorde
     }
 
     for (DyldSharedCache::MappedMachO& aFile : fileSet.dylibsForCache) {
-        if ( dontCache(volumePrefix, fileSet.archName, pathsWithDuplicateInstallName, aFile, true, skipDylibs) )
-            fileSet.otherDylibsAndBundles.push_back(aFile);
+        if ( dontCache(volumePrefix, fileSet.archName, pathsWithDuplicateInstallName, aFile, true, skipDylibs) ) {
+            // <rdar://problem/46423929> don't build dlopen closures for symlinks to something in the dyld cache
+            if ( pathsWithDuplicateInstallName.count(aFile.runtimePath) == 0 )
+                fileSet.otherDylibsAndBundles.push_back(aFile);
+        }
     }
     fileSet.dylibsForCache.erase(std::remove_if(fileSet.dylibsForCache.begin(), fileSet.dylibsForCache.end(),
         [&](const DyldSharedCache::MappedMachO& aFile) { return dontCache(volumePrefix, fileSet.archName, pathsWithDuplicateInstallName, aFile, false, skipDylibs); }),

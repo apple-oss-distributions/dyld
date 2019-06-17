@@ -1724,6 +1724,9 @@ const LaunchClosure* ClosureBuilder::makeLaunchClosure(const LoadedFileInfo& fil
     for (uint32_t i=0; i <= _mainProgLoadIndex; ++i)
         computeInitOrder(writers[i], i);
 
+    if ( _diag.hasError() )
+        return nullptr;
+
     // combine all Image objects into one ImageArray
     ImageArrayWriter imageArrayWriter(_startImageNum, (uint32_t)writers.count());
     for (ImageWriter& writer : writers) {
@@ -1969,6 +1972,9 @@ const DlopenClosure* ClosureBuilder::makeDlopenClosure(const char* path, const L
         }
     }
 
+    if ( _diag.hasError() )
+        return nullptr;
+
     // check if top image loaded is in shared cache along with everything it depends on
     *topImageNum = foundTopImage->imageNum;
     if ( writers.count() == 0 ) {
@@ -1981,6 +1987,9 @@ const DlopenClosure* ClosureBuilder::makeDlopenClosure(const char* path, const L
 
     // add initializer order into top level Image
     computeInitOrder(writers[0], (uint32_t)alreadyLoadedList.count());
+
+    if ( _diag.hasError() )
+        return nullptr;
 
     // combine all Image objects into one ImageArray
     ImageArrayWriter imageArrayWriter(_startImageNum, (uint32_t)writers.count());
