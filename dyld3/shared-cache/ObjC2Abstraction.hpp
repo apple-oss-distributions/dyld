@@ -640,7 +640,7 @@ public:
     const pint_t* getSuperClassAddress() const { return &superclass; }
 
     // Low bit marks Swift classes.
-    objc_class_data_t<P> *getData(ContentAccessor* cache) const { return (objc_class_data_t<P> *)cache->contentForVMAddr(P::getP(data & ~0x1LL)); }
+    objc_class_data_t<P> *getData(ContentAccessor* cache) const { return (objc_class_data_t<P> *)cache->contentForVMAddr(P::getP(data & ~0x3LL)); }
 
     objc_method_list_t<P> *getMethodList(ContentAccessor* cache) const {
         objc_class_data_t<P>* d = getData(cache);
