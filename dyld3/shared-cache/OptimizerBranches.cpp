@@ -46,602 +46,6 @@
 
 static const bool verbose = false;
 
-// These are functions that are interposed by Instruments.app or ASan
-static const char* sNeverStubEliminateSymbols[] = {
-    "___bzero",
-    "___cxa_atexit",
-    "___cxa_throw", 
-    "__longjmp", 
-    "__objc_autoreleasePoolPop", 
-    "_accept", 
-    "_access", 
-    "_asctime", 
-    "_asctime_r", 
-    "_asprintf", 
-    "_atoi", 
-    "_atol", 
-    "_atoll", 
-    "_calloc", 
-    "_chmod", 
-    "_chown", 
-    "_close", 
-    "_confstr", 
-    "_ctime", 
-    "_ctime_r", 
-    "_dispatch_after", 
-    "_dispatch_after_f", 
-    "_dispatch_async", 
-    "_dispatch_async_f", 
-    "_dispatch_barrier_async_f", 
-    "_dispatch_group_async", 
-    "_dispatch_group_async_f", 
-    "_dispatch_source_set_cancel_handler", 
-    "_dispatch_source_set_event_handler", 
-    "_dispatch_sync_f", 
-    "_dlclose", 
-    "_dlopen", 
-    "_dup", 
-    "_dup2", 
-    "_endgrent", 
-    "_endpwent", 
-    "_ether_aton", 
-    "_ether_hostton", 
-    "_ether_line", 
-    "_ether_ntoa", 
-    "_ether_ntohost", 
-    "_fchmod", 
-    "_fchown", 
-    "_fclose", 
-    "_fdopen", 
-    "_fflush", 
-    "_fopen", 
-    "_fork", 
-    "_fprintf", 
-    "_free", 
-    "_freopen", 
-    "_frexp", 
-    "_frexpf", 
-    "_frexpl", 
-    "_fscanf", 
-    "_fstat", 
-    "_fstatfs", 
-    "_fstatfs64", 
-    "_fsync", 
-    "_ftime", 
-    "_getaddrinfo", 
-    "_getattrlist", 
-    "_getcwd", 
-    "_getgrent", 
-    "_getgrgid", 
-    "_getgrgid_r", 
-    "_getgrnam", 
-    "_getgrnam_r", 
-    "_getgroups", 
-    "_gethostbyaddr", 
-    "_gethostbyname", 
-    "_gethostbyname2", 
-    "_gethostent", 
-    "_getifaddrs", 
-    "_getitimer", 
-    "_getnameinfo", 
-    "_getpass", 
-    "_getpeername", 
-    "_getpwent", 
-    "_getpwnam", 
-    "_getpwnam_r", 
-    "_getpwuid", 
-    "_getpwuid_r", 
-    "_getsockname", 
-    "_getsockopt", 
-    "_gmtime", 
-    "_gmtime_r", 
-    "_if_indextoname", 
-    "_if_nametoindex", 
-    "_index", 
-    "_inet_aton", 
-    "_inet_ntop", 
-    "_inet_pton", 
-    "_initgroups", 
-    "_ioctl", 
-    "_lchown", 
-    "_lgamma", 
-    "_lgammaf", 
-    "_lgammal", 
-    "_link", 
-    "_listxattr", 
-    "_localtime", 
-    "_localtime_r", 
-    "_longjmp", 
-    "_lseek", 
-    "_lstat", 
-    "_malloc", 
-    "_malloc_create_zone", 
-    "_malloc_default_purgeable_zone", 
-    "_malloc_default_zone", 
-    "_malloc_good_size", 
-    "_malloc_make_nonpurgeable", 
-    "_malloc_make_purgeable", 
-    "_malloc_set_zone_name", 
-    "_mbsnrtowcs", 
-    "_mbsrtowcs", 
-    "_mbstowcs", 
-    "_memchr", 
-    "_memcmp", 
-    "_memcpy", 
-    "_memmove", 
-    "_memset", 
-    "_mktime", 
-    "_mlock", 
-    "_mlockall", 
-    "_modf", 
-    "_modff", 
-    "_modfl", 
-    "_munlock", 
-    "_munlockall", 
-    "_objc_autoreleasePoolPop", 
-    "_objc_setProperty", 
-    "_objc_setProperty_atomic", 
-    "_objc_setProperty_atomic_copy", 
-    "_objc_setProperty_nonatomic", 
-    "_objc_setProperty_nonatomic_copy", 
-    "_objc_storeStrong", 
-    "_open", 
-    "_opendir", 
-    "_poll", 
-    "_posix_memalign", 
-    "_pread", 
-    "_printf", 
-    "_pthread_attr_getdetachstate", 
-    "_pthread_attr_getguardsize", 
-    "_pthread_attr_getinheritsched", 
-    "_pthread_attr_getschedparam", 
-    "_pthread_attr_getschedpolicy", 
-    "_pthread_attr_getscope", 
-    "_pthread_attr_getstack", 
-    "_pthread_attr_getstacksize", 
-    "_pthread_condattr_getpshared", 
-    "_pthread_create", 
-    "_pthread_getschedparam", 
-    "_pthread_join", 
-    "_pthread_mutex_lock", 
-    "_pthread_mutex_unlock", 
-    "_pthread_mutexattr_getprioceiling", 
-    "_pthread_mutexattr_getprotocol", 
-    "_pthread_mutexattr_getpshared", 
-    "_pthread_mutexattr_gettype", 
-    "_pthread_rwlockattr_getpshared", 
-    "_pwrite", 
-    "_rand_r", 
-    "_read", 
-    "_readdir", 
-    "_readdir_r", 
-    "_readv", 
-    "_readv$UNIX2003", 
-    "_realloc", 
-    "_realpath", 
-    "_recv", 
-    "_recvfrom", 
-    "_recvmsg", 
-    "_remquo", 
-    "_remquof", 
-    "_remquol", 
-    "_scanf", 
-    "_send", 
-    "_sendmsg", 
-    "_sendto", 
-    "_setattrlist", 
-    "_setgrent", 
-    "_setitimer", 
-    "_setlocale", 
-    "_setpwent", 
-    "_shm_open", 
-    "_shm_unlink", 
-    "_sigaction", 
-    "_sigemptyset", 
-    "_sigfillset", 
-    "_siglongjmp", 
-    "_signal", 
-    "_sigpending", 
-    "_sigprocmask", 
-    "_sigwait", 
-    "_snprintf", 
-    "_sprintf", 
-    "_sscanf", 
-    "_stat", 
-    "_statfs", 
-    "_statfs64", 
-    "_strcasecmp", 
-    "_strcat", 
-    "_strchr", 
-    "_strcmp", 
-    "_strcpy", 
-    "_strdup", 
-    "_strerror", 
-    "_strerror_r", 
-    "_strlen", 
-    "_strncasecmp", 
-    "_strncat", 
-    "_strncmp", 
-    "_strncpy", 
-    "_strptime", 
-    "_strtoimax", 
-    "_strtol", 
-    "_strtoll", 
-    "_strtoumax", 
-    "_tempnam", 
-    "_time", 
-    "_times", 
-    "_tmpnam", 
-    "_tsearch", 
-    "_unlink", 
-    "_valloc", 
-    "_vasprintf", 
-    "_vfprintf", 
-    "_vfscanf", 
-    "_vprintf", 
-    "_vscanf", 
-    "_vsnprintf", 
-    "_vsprintf", 
-    "_vsscanf", 
-    "_wait", 
-    "_wait$UNIX2003", 
-    "_wait3", 
-    "_wait4", 
-    "_waitid", 
-    "_waitid$UNIX2003", 
-    "_waitpid", 
-    "_waitpid$UNIX2003", 
-    "_wcslen", 
-    "_wcsnrtombs", 
-    "_wcsrtombs", 
-    "_wcstombs", 
-    "_wordexp", 
-    "_write", 
-    "_writev", 
-    "_writev$UNIX2003",
-    // <rdar://problem/22050956> always use stubs for C++ symbols that can be overridden
-    "__ZdaPv",
-    "__ZdlPv",
-    "__Znam",
-    "__Znwm",
-
-    nullptr
-};
-
-
-static uint64_t branchPoolTextSize(const std::string& archName)
-{
- if ( startsWith(archName, "arm64") )
-    return 0x0000C000;  // 48KB
-  else
-    return 0;
-}
-
-static uint64_t branchPoolLinkEditSize(const std::string& archName)
-{
-    if ( startsWith(archName, "arm64") )
-        return 0x00100000;  // 1MB
-    else
-        return 0;
-}
-
-
-template <typename P>
-class BranchPoolDylib {
-public:
-                            BranchPoolDylib(DyldSharedCache* cache, uint64_t startAddr,
-                                            uint64_t textRegionStartAddr, uint64_t poolLinkEditStartAddr, uint64_t poolLinkEditFileOffset, Diagnostics& diags);
-
-    uint64_t                addr() { return _startAddr; }
-    uint64_t                getForwardBranch(uint64_t finalTargetAddr, const char* name, std::vector<BranchPoolDylib<P>*>& branchIslandPools);
-    uint64_t                getBackBranch(uint64_t finalTargetAddr, const char* name, std::vector<BranchPoolDylib<P>*>& branchIslandPools);
-    void                    finalizeLoadCommands();
-    void                    printStats();
-
-private:
-    Diagnostics&            _diagnostics;
-    uint64_t                indexToAddr(uint32_t index) { return _startAddr + _firstStubOffset + sizeof(uint32_t)*index; }
-
-    static const int64_t b128MegLimit = 0x07FFFFFF;
-
-    typedef typename P::uint_t pint_t;
-    typedef typename P::E E;
-
-    DyldSharedCache*                            _cacheBuffer;
-    uint64_t                                    _startAddr;
-    std::unordered_map<uint64_t, uint32_t>      _targetToIslandIndex;
-    std::unordered_map<uint32_t, const char*>   _islandIndexToName;
-    macho_symtab_command<P>*                    _symbolTableCmd;
-    macho_dysymtab_command<P>*                  _dynamicSymbolTableCmd;
-    macho_uuid_command<P>*                      _uuidCmd;
-    uint32_t                                    _maxStubs;
-    uint32_t                                    _nextIndex;
-    uint32_t                                    _firstStubOffset;
-    uint32_t*                                   _stubInstructions;
-    macho_nlist<P>*                             _symbolTable;
-    char*                                       _nextString;
-    char*                                       _stringPoolStart;
-    char*                                       _stringPoolEnd;
-};
-
-template <typename P>
-BranchPoolDylib<P>::BranchPoolDylib(DyldSharedCache* cache, uint64_t poolStartAddr,
-                                     uint64_t textRegionStartAddr, uint64_t poolLinkEditStartAddr, uint64_t poolLinkEditFileOffset, Diagnostics& diags)
-    : _cacheBuffer(cache), _startAddr(poolStartAddr), _nextIndex(0), _firstStubOffset(0x280), _diagnostics(diags)
-{
-    std::string archName = cache->archName();
-    bool is64 = (sizeof(typename P::uint_t) == 8);
-
-    const int64_t  cacheSlide = (long)cache - cache->unslidLoadAddress();
-    const uint64_t textSegSize = branchPoolTextSize(archName);
-    const uint64_t linkEditSegSize = branchPoolLinkEditSize(archName);
-    const unsigned stubCount = (unsigned)((textSegSize - _firstStubOffset)/sizeof(uint32_t));
-    const uint32_t linkeditOffsetSymbolTable = 0;
-    const uint32_t linkeditOffsetIndirectSymbolTable = stubCount*sizeof(macho_nlist<P>);
-    const uint32_t linkeditOffsetSymbolPoolOffset = linkeditOffsetIndirectSymbolTable + stubCount*sizeof(uint32_t);
-    _maxStubs = stubCount;
-
-    // write mach_header and load commands for pseudo dylib
-    macho_header<P>* mh = (macho_header<P>*)((uint8_t*)cache + poolStartAddr - textRegionStartAddr);
-    mh->set_magic(is64 ? MH_MAGIC_64 : MH_MAGIC);
-    mh->set_cputype(dyld3::MachOFile::cpuTypeFromArchName(archName.c_str()));
-    mh->set_cpusubtype(dyld3::MachOFile::cpuSubtypeFromArchName(archName.c_str()));
-    mh->set_filetype(MH_DYLIB);
-    mh->set_ncmds(6);
-    mh->set_sizeofcmds(is64 ? 0x210 : 100); // FIXME: 32-bit size
-    mh->set_flags(0x80000000);
-    // LC_SEGMENT
-    macho_load_command<P>* cmd = (macho_load_command<P>*)((uint8_t*)mh + sizeof(macho_header<P>));
-    macho_segment_command<P>* textSegCmd = (macho_segment_command<P>*)cmd;
-    textSegCmd->set_cmd(is64 ? LC_SEGMENT_64 : LC_SEGMENT);
-    textSegCmd->set_cmdsize(sizeof(macho_segment_command<P>)*2+sizeof(macho_section<P>));
-    textSegCmd->set_segname("__TEXT");
-    textSegCmd->set_vmaddr(poolStartAddr);
-    textSegCmd->set_vmsize(textSegSize);
-    textSegCmd->set_fileoff(poolStartAddr - textRegionStartAddr);
-    textSegCmd->set_filesize(branchPoolTextSize(archName));
-    textSegCmd->set_maxprot(PROT_READ|PROT_EXEC);
-    textSegCmd->set_initprot(PROT_READ|PROT_EXEC);
-    textSegCmd->set_nsects(1);
-    textSegCmd->set_flags(0);
-    macho_section<P>* stubSection = (macho_section<P>*)((uint8_t*)textSegCmd + sizeof(macho_segment_command<P>));
-    stubSection->set_sectname("__stubs");
-    stubSection->set_segname("__TEXT");
-    stubSection->set_addr(poolStartAddr + _firstStubOffset);
-    stubSection->set_size(textSegSize - _firstStubOffset);
-    stubSection->set_offset((uint32_t)(poolStartAddr + _firstStubOffset - textRegionStartAddr));
-    stubSection->set_align(2);
-    stubSection->set_reloff(0);
-    stubSection->set_nreloc(0);
-    stubSection->set_flags(S_SYMBOL_STUBS | S_ATTR_SOME_INSTRUCTIONS | S_ATTR_PURE_INSTRUCTIONS);
-    stubSection->set_reserved1(0); // start index in indirect table
-    stubSection->set_reserved2(4); // size of stubs
-    // LC_SEGMENT
-    cmd = (macho_load_command<P>*)(((uint8_t*)cmd)+cmd->cmdsize());
-    macho_segment_command<P>* linkEditSegCmd = (macho_segment_command<P>*)cmd;
-    linkEditSegCmd->set_cmd(is64 ? LC_SEGMENT_64 :  LC_SEGMENT);
-    linkEditSegCmd->set_cmdsize(sizeof(macho_segment_command<P>));
-    linkEditSegCmd->set_segname("__LINKEDIT");
-    linkEditSegCmd->set_vmaddr(poolLinkEditStartAddr);
-    linkEditSegCmd->set_vmsize(linkEditSegSize);
-    linkEditSegCmd->set_fileoff(poolLinkEditFileOffset);
-    linkEditSegCmd->set_filesize(linkEditSegSize);
-    linkEditSegCmd->set_maxprot(PROT_READ);
-    linkEditSegCmd->set_initprot(PROT_READ);
-    linkEditSegCmd->set_nsects(0);
-    linkEditSegCmd->set_flags(0);
-    // LC_ID_DYLIB
-    cmd = (macho_load_command<P>*)(((uint8_t*)cmd)+cmd->cmdsize());
-    macho_dylib_command<P>* installNameCmd = (macho_dylib_command<P>*)cmd;
-    installNameCmd->set_cmd(LC_ID_DYLIB);
-    installNameCmd->set_cmdsize(sizeof(macho_dylib_command<P>) + 48);
-    installNameCmd->set_timestamp(2);
-    installNameCmd->set_current_version(0x10000);
-    installNameCmd->set_compatibility_version(0x10000);
-    installNameCmd->set_name_offset();
-    strcpy((char*)cmd + sizeof(macho_dylib_command<P>), "dyld_shared_cache_branch_islands");
-    // LC_SYMTAB
-    cmd = (macho_load_command<P>*)(((uint8_t*)cmd)+cmd->cmdsize());
-    _symbolTableCmd = (macho_symtab_command<P>*)cmd;
-    _symbolTableCmd->set_cmd(LC_SYMTAB);
-    _symbolTableCmd->set_cmdsize(sizeof(macho_symtab_command<P>));
-    _symbolTableCmd->set_nsyms(stubCount);
-    _symbolTableCmd->set_symoff((uint32_t)(poolLinkEditFileOffset + linkeditOffsetSymbolTable));
-    _symbolTableCmd->set_stroff((uint32_t)(poolLinkEditFileOffset + linkeditOffsetSymbolPoolOffset));
-    _symbolTableCmd->set_strsize((uint32_t)(linkEditSegSize - linkeditOffsetSymbolPoolOffset));
-    // LC_DYSYMTAB
-    cmd = (macho_load_command<P>*)(((uint8_t*)cmd)+cmd->cmdsize());
-    _dynamicSymbolTableCmd = (macho_dysymtab_command<P>*)cmd;
-    _dynamicSymbolTableCmd->set_cmd(LC_DYSYMTAB);
-    _dynamicSymbolTableCmd->set_cmdsize(sizeof(macho_dysymtab_command<P>));
-    _dynamicSymbolTableCmd->set_ilocalsym(0);
-    _dynamicSymbolTableCmd->set_nlocalsym(0);
-    _dynamicSymbolTableCmd->set_iextdefsym(0);
-    _dynamicSymbolTableCmd->set_nextdefsym(0);
-    _dynamicSymbolTableCmd->set_iundefsym(0);
-    _dynamicSymbolTableCmd->set_nundefsym(stubCount);
-    _dynamicSymbolTableCmd->set_tocoff(0);
-    _dynamicSymbolTableCmd->set_ntoc(0);
-    _dynamicSymbolTableCmd->set_modtaboff(0);
-    _dynamicSymbolTableCmd->set_nmodtab(0);
-    _dynamicSymbolTableCmd->set_extrefsymoff(0);
-    _dynamicSymbolTableCmd->set_nextrefsyms(0);
-    _dynamicSymbolTableCmd->set_indirectsymoff((uint32_t)(poolLinkEditFileOffset + linkeditOffsetIndirectSymbolTable));
-    _dynamicSymbolTableCmd->set_nindirectsyms(stubCount);
-    _dynamicSymbolTableCmd->set_extreloff(0);
-    _dynamicSymbolTableCmd->set_nextrel(0);
-    _dynamicSymbolTableCmd->set_locreloff(0);
-    _dynamicSymbolTableCmd->set_nlocrel(0);
-    cmd = (macho_load_command<P>*)(((uint8_t*)cmd)+cmd->cmdsize());
-    // LC_UUID
-    _uuidCmd = (macho_uuid_command<P>*)cmd;
-    _uuidCmd->set_cmd(LC_UUID);
-    _uuidCmd->set_cmdsize(sizeof(macho_uuid_command<P>));
-    cmd = (macho_load_command<P>*)(((uint8_t*)cmd)+cmd->cmdsize());
-
-    // write stubs section content
-    _stubInstructions = (uint32_t*)((uint8_t*)mh + _firstStubOffset);
-    for (unsigned i=0; i < stubCount; ++i) {
-        E::set32(_stubInstructions[i], 0xD4200000);
-    }
-
-    // write linkedit content
-    uint8_t* linkeditBufferStart = (uint8_t*)poolLinkEditStartAddr + cacheSlide;
-    // write symbol table
-    _symbolTable = (macho_nlist<P>*)(linkeditBufferStart);
-    for (unsigned i=0; i < stubCount; ++i) {
-        _symbolTable[i].set_n_strx(1);
-        _symbolTable[i].set_n_type(N_UNDF | N_EXT);
-        _symbolTable[i].set_n_sect(0);
-        _symbolTable[i].set_n_desc(0);
-        _symbolTable[i].set_n_value(0);
-    }
-    // write indirect symbol table
-    uint32_t* indirectSymboTable = (uint32_t*)(linkeditBufferStart + linkeditOffsetIndirectSymbolTable);
-    for (unsigned i=0; i < stubCount; ++i) {
-        P::E::set32(indirectSymboTable[i], i);
-    }
-    // write string pool
-    _stringPoolStart = (char*)(linkeditBufferStart + linkeditOffsetSymbolPoolOffset);
-    _stringPoolEnd = _stringPoolStart + linkEditSegSize - linkeditOffsetSymbolPoolOffset;
-    _stringPoolStart[0] = '\0';
-    strcpy(&_stringPoolStart[1], "<unused>");
-    _nextString = &_stringPoolStart[10];
-}
-
-
-template <typename P>
-void BranchPoolDylib<P>::finalizeLoadCommands()
-{
-    _symbolTableCmd->set_nsyms(_nextIndex);
-    _symbolTableCmd->set_strsize((uint32_t)(_nextString - _stringPoolStart));
-    _dynamicSymbolTableCmd->set_nundefsym(_nextIndex);
-
-    uint8_t digest[CC_MD5_DIGEST_LENGTH];
-    CC_MD5(_stubInstructions, _maxStubs*sizeof(uint32_t), digest);
-    _uuidCmd->set_uuid(digest);
-
-    if ( verbose ) {
-        _diagnostics.verbose("branch islands in image at 0x%0llX:\n", _startAddr);
-        for (uint32_t i=0; i < _nextIndex; ++i) {
-            _diagnostics.verbose("   0x%llX  %s\n", indexToAddr(i), _islandIndexToName[i]);
-        }
-    }
-}
-
-template <typename P>
-uint64_t BranchPoolDylib<P>::getForwardBranch(uint64_t finalTargetAddr, const char* name, std::vector<BranchPoolDylib<P>*>& branchIslandPools)
-{
-    // check if we can re-used existing branch island
-    const auto& pos = _targetToIslandIndex.find(finalTargetAddr);
-    if ( pos != _targetToIslandIndex.end() )
-        return indexToAddr(pos->second);
-
-    // skip if instruction pool is full
-    if ( _nextIndex >= _maxStubs )
-        return 0;
-
-    // skip if string pool is full
-    if ( (_nextString + strlen(name)+1) >= _stringPoolEnd )
-        return 0;
-
-    uint64_t branchIslandTargetAddr = finalTargetAddr;
-    // if final target is too far, we need to use branch island in next pool
-    if ( (finalTargetAddr - _startAddr) > b128MegLimit ) {
-        BranchPoolDylib<P>* nextPool = nullptr;
-        for (size_t i=0; i < branchIslandPools.size()-1; ++i) {
-            if ( branchIslandPools[i] == this ) {
-                nextPool = branchIslandPools[i+1];
-                break;
-            }
-        }
-
-        if (nextPool == nullptr) {
-            _diagnostics.warning("BranchPoolDylib<P>::getForwardBranch: nextPool unreachable");
-            return 0;
-        }
-
-        branchIslandTargetAddr = nextPool->getForwardBranch(finalTargetAddr, name, branchIslandPools);
-        if ( branchIslandTargetAddr == 0 )
-            return 0; // next pool is full
-    }
-
-    // write branch instruction in stubs section
-    uint32_t index = _nextIndex++;
-    int64_t branchDelta =  branchIslandTargetAddr - indexToAddr(index);
-    uint32_t branchInstr = 0x14000000 + ((branchDelta/4) & 0x03FFFFFF);
-    E::set32(_stubInstructions[index], branchInstr);
-
-    // update symbol table
-    _symbolTable[index].set_n_strx((uint32_t)(_nextString - _stringPoolStart));
-    strcpy(_nextString, name);
-    _nextString += (strlen(name) +1);
-
-    // record island
-    _targetToIslandIndex[finalTargetAddr] = index;
-    _islandIndexToName[index] = name;
-    return indexToAddr(index);
-}
-
-template <typename P>
-uint64_t BranchPoolDylib<P>::getBackBranch(uint64_t finalTargetAddr, const char* name, std::vector<BranchPoolDylib<P>*>& branchIslandPools)
-{
-    // check if we can re-used existing branch island
-    const auto& pos = _targetToIslandIndex.find(finalTargetAddr);
-    if ( pos != _targetToIslandIndex.end() )
-        return indexToAddr(pos->second);
-
-     // skip if instruction pool is full
-    if ( _nextIndex >= _maxStubs )
-        return 0;
-
-    // skip if string pool is full
-    if ( (_nextString + strlen(name)+1) >= _stringPoolEnd )
-        return 0;
-
-    uint64_t branchIslandTargetAddr = finalTargetAddr;
-    // if final target is too far, we need to use branch island in next pool
-    if ( (indexToAddr(_nextIndex) - finalTargetAddr) > b128MegLimit ) {
-        BranchPoolDylib<P>* nextPool = nullptr;
-        for (long i=branchIslandPools.size()-1; i > 0; --i) {
-            if ( branchIslandPools[i] == this ) {
-                nextPool = branchIslandPools[i-1];
-                break;
-            }
-        }
-
-        if (nextPool == nullptr) {
-            _diagnostics.warning("BranchPoolDylib<P>::getBackBranch: nextPool unreachable");
-            return 0;
-        }
-
-        branchIslandTargetAddr = nextPool->getBackBranch(finalTargetAddr, name, branchIslandPools);
-        if ( branchIslandTargetAddr == 0 )
-            return 0; // next pool is full
-    }
-
-    // write branch instruction in stubs section
-    uint32_t index = _nextIndex++;
-    int64_t branchDelta =  branchIslandTargetAddr - indexToAddr(index);
-    uint32_t branchInstr = 0x14000000 + ((branchDelta/4) & 0x03FFFFFF);
-    E::set32(_stubInstructions[index], branchInstr);
-
-    // update symbol table
-    _symbolTable[index].set_n_strx((uint32_t)(_nextString - _stringPoolStart));
-    strcpy(_nextString, name);
-    _nextString += (strlen(name) +1);
-
-    // record island
-    _targetToIslandIndex[finalTargetAddr] = index;
-    _islandIndexToName[index] = name;
-    return indexToAddr(index);
-}
-
-template <typename P>
-void BranchPoolDylib<P>::printStats()
-{
-    _diagnostics.verbose("  island pool at 0x%0llX has %u stubs and stringPool size=%lu\n", _startAddr, _nextIndex, _nextString - _stringPoolStart);
-}
 
 
 
@@ -650,32 +54,54 @@ class StubOptimizer {
 public:
                             StubOptimizer(const DyldSharedCache* cache, macho_header<P>* mh, Diagnostics& diags);
     void                    buildStubMap(const std::unordered_set<std::string>& neverStubEliminate);
-    void                    optimizeStubs(std::unordered_map<uint64_t,std::vector<uint64_t>>& targetToBranchIslands);
-    void                    optimizeCallSites(std::vector<BranchPoolDylib<P>*>& branchIslandPools);
+    void                    optimizeStubs();
+    void                    optimizeCallSites(std::unordered_map<uint64_t, uint64_t>& targetAddrToOptStubAddr);
     const char*             installName() { return _installName; }
-    const uint8_t*          exportsTrie() { return &_linkeditBias[_dyldInfo->export_off()]; }
-    uint32_t                exportsTrieSize() { return _dyldInfo->export_size(); }
+    const uint8_t*          exportsTrie() {
+        if ( _dyldInfo != nullptr )
+            return &_linkeditBias[_dyldInfo->export_off()];
+        else
+            return &_linkeditBias[_exportTrie->dataoff()];
+    }
+    uint32_t                exportsTrieSize() {
+        if ( _dyldInfo != nullptr )
+            return _dyldInfo->export_size();
+        else
+            return _exportTrie->datasize();
+    }
 
-    uint32_t                                _stubCount           = 0;
-    uint32_t                                _stubOptimizedCount  = 0;
-    uint32_t                                _branchesCount       = 0;
-    uint32_t                                _branchesModifiedCount = 0;
-    uint32_t                                _branchesDirectCount = 0;
-    uint32_t                                _branchesIslandCount = 0;
+    uint32_t                _stubCount                      = 0;
+    uint32_t                _stubOptimizedCount             = 0;
+    uint32_t                _stubsLeftInterposable          = 0;
+    uint32_t                _branchToStubCount              = 0;
+    uint32_t                _branchOptimizedToDirectCount   = 0;
+    uint32_t                _branchToOptimizedStubCount     = 0;
+    uint32_t                _branchToReUsedOptimizedStubCount = 0;
 
 private:
-    Diagnostics _diagnostics;
+    Diagnostics             _diagnostics;
+
     typedef std::function<bool(uint8_t callSiteKind, uint64_t callSiteAddr, uint64_t stubAddr, uint32_t& instruction)> CallSiteHandler;
     typedef typename P::uint_t pint_t;
     typedef typename P::E E;
 
     void                    forEachCallSiteToAStub(CallSiteHandler);
-    void                    optimizeArm64CallSites(std::vector<BranchPoolDylib<P>*>& branchIslandPools);
-    void                    optimizeArmCallSites();
+    void                    optimizeArm64CallSites(std::unordered_map<uint64_t, uint64_t>& targetAddrToOptStubAddr);
+    void                    optimizeArm64Stubs();
+#if SUPPORT_ARCH_arm64e
+    void                    optimizeArm64eStubs();
+#endif
+#if SUPPORT_ARCH_arm64_32
+    void                    optimizeArm64_32Stubs();
+#endif
+    void                    optimizeArmCallSites(std::unordered_map<uint64_t, uint64_t>& targetAddrToOptStubAddr);
     void                    optimizeArmStubs();
     uint64_t                lazyPointerAddrFromArm64Stub(const uint8_t* stubInstructions, uint64_t stubVMAddr);
 #if SUPPORT_ARCH_arm64e
     uint64_t                lazyPointerAddrFromArm64eStub(const uint8_t* stubInstructions, uint64_t stubVMAddr);
+#endif
+#if SUPPORT_ARCH_arm64_32
+    uint64_t                lazyPointerAddrFromArm64_32Stub(const uint8_t* stubInstructions, uint64_t stubVMAddr);
 #endif
     uint32_t                lazyPointerAddrFromArmStub(const uint8_t* stubInstructions, uint32_t stubVMAddr);
     int32_t                 getDisplacementFromThumbBranch(uint32_t instruction, uint32_t instrAddr);
@@ -683,11 +109,12 @@ private:
                                                          int32_t displacement, bool targetIsThumb);
 
 
-     struct AddressAndName { pint_t targetVMAddr; const char* targetName; };
+    struct AddressAndName { pint_t targetVMAddr; const char* targetName; };
     typedef std::unordered_map<pint_t, AddressAndName> StubVMAddrToTarget;
 
     static const int64_t b128MegLimit = 0x07FFFFFF;
     static const int64_t b16MegLimit  = 0x00FFFFFF;
+
 
 
     macho_header<P>*                        _mh;
@@ -701,6 +128,7 @@ private:
     const macho_symtab_command<P>*          _symTabCmd           = nullptr;
     const macho_dysymtab_command<P>*        _dynSymTabCmd        = nullptr;
     const macho_dyld_info_command<P>*       _dyldInfo            = nullptr;
+    const macho_linkedit_data_command<P>*   _exportTrie          = nullptr;
     macho_linkedit_data_command<P>*         _splitSegInfoCmd     = nullptr;
     const macho_section<P>*                 _textSection         = nullptr;
     const macho_section<P>*                 _stubSection         = nullptr;
@@ -711,7 +139,9 @@ private:
     std::unordered_map<pint_t, pint_t>      _stubAddrToLPAddr;
     std::unordered_map<pint_t, pint_t>      _lpAddrToTargetAddr;
     std::unordered_map<pint_t, const char*> _targetAddrToName;
+    std::unordered_set<uint64_t>            _stubsToOptimize;
 };
+
 
 template <typename P>
 StubOptimizer<P>::StubOptimizer(const DyldSharedCache* cache, macho_header<P>* mh, Diagnostics& diags)
@@ -746,6 +176,9 @@ StubOptimizer<P>::StubOptimizer(const DyldSharedCache* cache, macho_header<P>* m
             case LC_DYLD_INFO:
             case LC_DYLD_INFO_ONLY:
                 _dyldInfo = (macho_dyld_info_command<P>*)cmd;
+                break;
+            case LC_DYLD_EXPORTS_TRIE:
+                _exportTrie = (macho_linkedit_data_command<P>*)cmd;
                 break;
             case macho_segment_command<P>::CMD:
                 segCmd =( macho_segment_command<P>*)cmd;
@@ -827,6 +260,32 @@ uint64_t StubOptimizer<P>::lazyPointerAddrFromArm64Stub(const uint8_t* stubInstr
     return (stubVMAddr & (-4096)) + adrpValue*4096 + ldrValue*8;
 }
 
+#if SUPPORT_ARCH_arm64_32
+template <typename P>
+uint64_t StubOptimizer<P>::lazyPointerAddrFromArm64_32Stub(const uint8_t* stubInstructions, uint64_t stubVMAddr)
+{
+    uint32_t stubInstr1 = E::get32(*(uint32_t*)stubInstructions);
+    if ( (stubInstr1 & 0x9F00001F) != 0x90000010 ) {
+        _diagnostics.warning("first instruction of stub (0x%08X) is not ADRP for stub at addr 0x%0llX in %s",
+                stubInstr1, (uint64_t)stubVMAddr, _installName);
+        return 0;
+    }
+    int32_t adrpValue = ((stubInstr1 & 0x00FFFFE0) >> 3) | ((stubInstr1 & 0x60000000) >> 29);
+    if ( stubInstr1 & 0x00800000 )
+        adrpValue |= 0xFFF00000;
+    uint32_t stubInstr2 = E::get32(*(uint32_t*)(stubInstructions + 4));
+    if ( (stubInstr2 & 0xFFC003FF) != 0xB9400210 ) {
+        _diagnostics.warning("second instruction of stub (0x%08X) is not LDR for stub at addr 0x%0llX in %s",
+                stubInstr2, (uint64_t)stubVMAddr, _installName);
+        return 0;
+    }
+    uint32_t ldrValue = ((stubInstr2 >> 10) & 0x00000FFF);
+    return (stubVMAddr & (-4096)) + adrpValue*4096 + ldrValue*4; // LDR Wn has a scale factor of 4
+
+}
+#endif
+
+
 #if SUPPORT_ARCH_arm64e
 template <typename P>
 uint64_t StubOptimizer<P>::lazyPointerAddrFromArm64eStub(const uint8_t* stubInstructions, uint64_t stubVMAddr)
@@ -861,7 +320,6 @@ uint64_t StubOptimizer<P>::lazyPointerAddrFromArm64eStub(const uint8_t* stubInst
     return (stubVMAddr & (-4096)) + adrpValue*4096 + addValue;
 }
 #endif
-
 
 
 template <typename P>
@@ -910,7 +368,8 @@ void StubOptimizer<P>::buildStubMap(const std::unordered_set<std::string>& never
                                 }
                                 const char* symName = &symbolStrings[stringOffset];
                                 if ( neverStubEliminate.count(symName) ) {
-                                    //fprintf(stderr, "not bypassing stub to %s in %s because target is interposable\n", symName, _installName);
+                                    //fprintf(stderr, "stubVMAddr=0x%llX, not bypassing stub to %s in %s because target is interposable\n", (uint64_t)stubVMAddr, symName, _installName);
+                                    _stubsLeftInterposable++;
                                     continue;
                                 }
                                 const uint8_t* stubInstrs = (uint8_t*)(long)stubVMAddr + _cacheSlide;
@@ -919,8 +378,13 @@ void StubOptimizer<P>::buildStubMap(const std::unordered_set<std::string>& never
                                     case CPU_TYPE_ARM64:
                                     case CPU_TYPE_ARM64_32:
 #if SUPPORT_ARCH_arm64e
-                                        if (_mh->cpusubtype() == CPU_SUBTYPE_ARM64_E)
+                                        if (_mh->cpusubtype() == CPU_SUBTYPE_ARM64E)
                                             targetLPAddr = (pint_t)lazyPointerAddrFromArm64eStub(stubInstrs, stubVMAddr);
+                                        else
+#endif
+#if SUPPORT_ARCH_arm64_32
+                                        if (_mh->cputype() == CPU_TYPE_ARM64_32)
+                                            targetLPAddr = (pint_t)lazyPointerAddrFromArm64_32Stub(stubInstrs, stubVMAddr);
                                         else
 #endif
                                             targetLPAddr = (pint_t)lazyPointerAddrFromArm64Stub(stubInstrs, stubVMAddr);
@@ -955,13 +419,13 @@ void StubOptimizer<P>::buildStubMap(const std::unordered_set<std::string>& never
                                 // Fixup threaded rebase/bind
                                 if ( _chainedFixups ) {
                                     dyld3::MachOLoaded::ChainedFixupPointerOnDisk ptr;
-                                    ptr.raw = lpValue;
-                                    assert(ptr.authRebase.bind == 0);
-                                    if ( ptr.authRebase.auth ) {
-                                        lpValue = (pint_t)(_cacheUnslideAddr + ptr.authRebase.target);
+                                    ptr.raw64 = lpValue;
+                                    assert(ptr.arm64e.authRebase.bind == 0);
+                                    if ( ptr.arm64e.authRebase.auth ) {
+                                        lpValue = (pint_t)(_cacheUnslideAddr + ptr.arm64e.authRebase.target);
                                     }
                                     else {
-                                        lpValue = (pint_t)ptr.plainRebase.signExtendedTarget();
+                                        lpValue = (pint_t)ptr.arm64e.unpackTarget();
                                     }
                                 }
 
@@ -1045,9 +509,8 @@ void StubOptimizer<P>::forEachCallSiteToAStub(CallSiteHandler handler)
                         uint64_t instrAddr = _textSection->addr() + fromSectionOffset;
                         uint64_t stubAddr = _stubSection->addr() + toSectionOffset;
                         uint32_t instruction = E::get32(*instrPtr);
-                        _branchesCount++;
+                        _branchToStubCount++;
                         if ( handler(kind, instrAddr, stubAddr, instruction) ) {
-                            _branchesModifiedCount++;
                             E::set32(*instrPtr, instruction);
                         }
                     }
@@ -1131,7 +594,7 @@ uint32_t StubOptimizer<P>::setDisplacementInThumbBranch(uint32_t instruction,  u
 
 
 template <typename P>
-void StubOptimizer<P>::optimizeArmCallSites()
+void StubOptimizer<P>::optimizeArmCallSites(std::unordered_map<uint64_t, uint64_t>& targetAddrToOptStubAddr)
 {
     forEachCallSiteToAStub([&](uint8_t kind, uint64_t callSiteAddr, uint64_t stubAddr, uint32_t& instruction) -> bool {
         if ( kind == DYLD_CACHE_ADJ_V2_THUMB_BR22 ) {
@@ -1152,22 +615,47 @@ void StubOptimizer<P>::optimizeArmCallSites()
             const auto& pos = _stubAddrToLPAddr.find(targetAddr);
             if ( pos == _stubAddrToLPAddr.end() )
                 return false;
-            // ignore branch if lazy pointer is not known (could be resolver based)
-            pint_t lpAddr = pos->second;
-            const auto& pos2 = _lpAddrToTargetAddr.find(lpAddr);
+
+            // ignore branch if lazy pointer is not known (resolver or interposable)
+            uint64_t lpAddr = pos->second;
+            const auto& pos2 = _lpAddrToTargetAddr.find((pint_t)lpAddr);
             if ( pos2 == _lpAddrToTargetAddr.end() )
                 return false;
+
             uint64_t finalTargetAddr = pos2->second;
             int64_t deltaToFinalTarget = finalTargetAddr - (callSiteAddr + 4);
             // if final target within range, change to branch there directly
             if ( (deltaToFinalTarget > -b16MegLimit) && (deltaToFinalTarget < b16MegLimit) ) {
-                bool targetIsThumb = finalTargetAddr & 1;
+                bool targetIsThumb = (finalTargetAddr & 1);
                 instruction = setDisplacementInThumbBranch(instruction, (uint32_t)callSiteAddr, (int32_t)deltaToFinalTarget, targetIsThumb);
                 if (_diagnostics.hasError())
                     return false;
-                _branchesDirectCount++;
+                _branchOptimizedToDirectCount++;
                 return true;
             }
+
+            // try to re-use an existing optimized stub
+            const auto& pos3 = targetAddrToOptStubAddr.find(finalTargetAddr);
+            if ( pos3 != targetAddrToOptStubAddr.end() ) {
+                uint64_t existingStub = pos3->second;
+                if ( existingStub != stubAddr ) {
+                    int64_t deltaToOptStub = existingStub - (callSiteAddr + 4);
+                    if ( (deltaToOptStub > -b16MegLimit) && (deltaToOptStub < b16MegLimit) ) {
+                        bool targetIsThumb = (existingStub & 1);
+                        instruction = setDisplacementInThumbBranch(instruction, (uint32_t)callSiteAddr, (int32_t)deltaToOptStub, targetIsThumb);
+                        if (_diagnostics.hasError())
+                            return false;
+                        _branchToReUsedOptimizedStubCount++;
+                        return true;
+                    }
+                }
+            }
+
+            // leave as BL to stub, but optimize the stub
+            _stubsToOptimize.insert(stubAddr);
+            targetAddrToOptStubAddr[finalTargetAddr] = stubAddr;
+            _branchToOptimizedStubCount++;
+            return false;
         }
         else if ( kind == DYLD_CACHE_ADJ_V2_ARM_BR24 ) {
             // too few of these to be worth trying to optimize
@@ -1204,9 +692,110 @@ void StubOptimizer<P>::optimizeArmStubs()
 
 
 
+template <typename P>
+void StubOptimizer<P>::optimizeArm64Stubs()
+{
+    for (const uint64_t stubVMAddr : _stubsToOptimize ) {
+        pint_t lpVMAddr   = _stubAddrToLPAddr[(pint_t)stubVMAddr];
+        const auto& pos = _lpAddrToTargetAddr.find(lpVMAddr);
+        if ( pos == _lpAddrToTargetAddr.end() )
+            return;
+        pint_t targetVMAddr = pos->second;
+
+        int64_t adrpDelta = (targetVMAddr & -4096) - (stubVMAddr & -4096);
+        // Note: ADRP/ADD can only span +/-4GB
+        uint32_t* stubInstructions = (uint32_t*)((uint8_t*)(long)stubVMAddr + _cacheSlide);
+        bool rightInstr1 = ((stubInstructions[0] & 0x9F00001F) == 0x90000010);   // ADRP X16, lp@page
+        bool rightInstr2 = ((stubInstructions[1] & 0xFFC003FF) == 0xF9400210);   // LDR X16, [X16, lp@pageoff]
+        bool rightInstr3 = (stubInstructions[2] == 0xD61F0200);                  // BR X16
+
+        if ( rightInstr1 && rightInstr2 && rightInstr3 ) {
+            uint32_t immhi   = (adrpDelta >> 9) & (0x00FFFFE0);
+            uint32_t immlo   = (adrpDelta << 17) & (0x60000000);
+            uint32_t newADRP = (0x90000010) | immlo | immhi;
+            uint32_t off12   = (targetVMAddr & 0xFFF);
+            uint32_t newADD  = (0x91000210) | (off12 << 10);
+
+            stubInstructions[0] = newADRP;     //      ADRP   X16, target@page
+            stubInstructions[1] = newADD;      //      ADD    X16, X16, target@pageoff
+            stubInstructions[2] = 0xD61F0200;  //      BR     X16
+            _stubOptimizedCount++;
+        }
+    }
+}
+
+#if SUPPORT_ARCH_arm64e
+template <typename P>
+void StubOptimizer<P>::optimizeArm64eStubs()
+{
+    for (const uint64_t stubVMAddr : _stubsToOptimize ) {
+        pint_t lpVMAddr   = _stubAddrToLPAddr[(pint_t)stubVMAddr];
+        const auto& pos = _lpAddrToTargetAddr.find(lpVMAddr);
+        if ( pos == _lpAddrToTargetAddr.end() )
+            return;
+        pint_t targetVMAddr = pos->second;
+
+        int64_t adrpDelta = (targetVMAddr & -4096) - (stubVMAddr & -4096);
+        // Note: ADRP/ADD can only span +/-4GB
+        uint32_t* stubInstructions = (uint32_t*)((uint8_t*)(long)stubVMAddr + _cacheSlide);
+        bool rightInstr1 = ((stubInstructions[0] & 0x9F00001F) == 0x90000011);   // ADRP  X17, lp@page
+        bool rightInstr2 = ((stubInstructions[1] & 0xFFC003FF) == 0x91000231);   // ADD   X17, [X17, lp@pageoff]
+        bool rightInstr3 = (stubInstructions[2] == 0xF9400230);                  // LDR   X16, [X17]
+        bool rightInstr4 = (stubInstructions[3] == 0xD71F0A11);                  // BRAA  X16, X17
+
+        if ( rightInstr1 && rightInstr2 && rightInstr3 && rightInstr4) {
+            uint32_t immhi   = (adrpDelta >> 9) & (0x00FFFFE0);
+            uint32_t immlo   = (adrpDelta << 17) & (0x60000000);
+            uint32_t newADRP = (0x90000010) | immlo | immhi;
+            uint32_t off12   = (targetVMAddr & 0xFFF);
+            uint32_t newADD  = (0x91000210) | (off12 << 10);
+
+            stubInstructions[0] = newADRP;     //      ADRP   X16, target@page
+            stubInstructions[1] = newADD;      //      ADD    X16, X16, target@pageoff
+            stubInstructions[2] = 0xD61F0200;  //      BR     X16
+            stubInstructions[3] = 0xD4200020;  //      TRAP
+            _stubOptimizedCount++;
+        }
+    }
+}
+#endif
+
+#if SUPPORT_ARCH_arm64_32
+template <typename P>
+void StubOptimizer<P>::optimizeArm64_32Stubs()
+{
+    for (const uint64_t stubVMAddr : _stubsToOptimize ) {
+        pint_t lpVMAddr   = _stubAddrToLPAddr[(pint_t)stubVMAddr];
+        const auto& pos = _lpAddrToTargetAddr.find(lpVMAddr);
+        if ( pos == _lpAddrToTargetAddr.end() )
+            return;
+        pint_t targetVMAddr = pos->second;
+
+        int64_t adrpDelta = (targetVMAddr & -4096) - (stubVMAddr & -4096);
+        uint32_t* stubInstructions = (uint32_t*)((uint8_t*)(long)stubVMAddr + _cacheSlide);
+        bool rightInstr1 = ((stubInstructions[0] & 0x9F00001F) == 0x90000010);   // ADRP X16, lp@page
+        bool rightInstr2 = ((stubInstructions[1] & 0xFFC003FF) == 0xB9400210);   // LDR  W16, [X16, lp@pageoff]
+        bool rightInstr3 = (stubInstructions[2] == 0xD61F0200);                  // BR   X16
+
+        if ( rightInstr1 && rightInstr2 && rightInstr3 ) {
+            uint32_t immhi   = (adrpDelta >> 9) & (0x00FFFFE0);
+            uint32_t immlo   = (adrpDelta << 17) & (0x60000000);
+            uint32_t newADRP = (0x90000010) | immlo | immhi;
+            uint32_t off12   = (targetVMAddr & 0xFFF);
+            uint32_t newADD  = (0x91000210) | (off12 << 10);
+
+            stubInstructions[0] = newADRP;     //      ADRP   X16, target@page
+            stubInstructions[1] = newADD;      //      ADD    X16, X16, target@pageoff
+            stubInstructions[2] = 0xD61F0200;  //      BR     X16
+            _stubOptimizedCount++;
+        }
+    }
+}
+#endif
+
 
 template <typename P>
-void StubOptimizer<P>::optimizeArm64CallSites(std::vector<BranchPoolDylib<P>*>& branchIslandPools)
+void StubOptimizer<P>::optimizeArm64CallSites(std::unordered_map<uint64_t, uint64_t>& targetAddrToOptStubAddr)
 {
     forEachCallSiteToAStub([&](uint8_t kind, uint64_t callSiteAddr, uint64_t stubAddr, uint32_t& instruction) -> bool {
         if ( kind != DYLD_CACHE_ADJ_V2_ARM64_BR26 )
@@ -1227,59 +816,40 @@ void StubOptimizer<P>::optimizeArm64CallSites(std::vector<BranchPoolDylib<P>*>& 
         const auto& pos = _stubAddrToLPAddr.find((pint_t)targetAddr);
         if ( pos == _stubAddrToLPAddr.end() )
             return false;
-        // ignore branch if lazy pointer is not known (could be resolver based)
+
+        // ignore branch if lazy pointer is not known (resolver or interposable)
         uint64_t lpAddr = pos->second;
         const auto& pos2 = _lpAddrToTargetAddr.find((pint_t)lpAddr);
         if ( pos2 == _lpAddrToTargetAddr.end() )
             return false;
+
         uint64_t finalTargetAddr = pos2->second;
         int64_t deltaToFinalTarget = finalTargetAddr - callSiteAddr;
         // if final target within range, change to branch there directly
         if ( (deltaToFinalTarget > -b128MegLimit) && (deltaToFinalTarget < b128MegLimit) ) {
             instruction= (instruction & 0xFC000000) | ((deltaToFinalTarget >> 2) & 0x03FFFFFF);
-            _branchesDirectCount++;
-           return true;
+            _branchOptimizedToDirectCount++;
+            return true;
         }
-        // find closest branch island pool between instruction and target and get island
-        const auto& pos3 = _targetAddrToName.find((pint_t)finalTargetAddr);
-        if ( pos3 == _targetAddrToName.end() )
-            return false;
-        const char* targetName = pos3->second;
-        if ( finalTargetAddr > callSiteAddr ) {
-            // target is after branch so find first pool after branch
-            for ( BranchPoolDylib<P>* pool : branchIslandPools ) {
-                if ( (pool->addr() > callSiteAddr) && (pool->addr() < finalTargetAddr) ) {
-                    uint64_t brIslandAddr = pool->getForwardBranch(finalTargetAddr, targetName, branchIslandPools);
-                    if ( brIslandAddr == 0 ) {
-                        // branch island pool full
-                        _diagnostics.warning("pool full. Can't optimizer branch to %s from 0x%llX in %s\n", targetName, callSiteAddr, _installName);
-                        break;
-                    }
-                    int64_t deltaToTarget = brIslandAddr - callSiteAddr;
-                    instruction = (instruction & 0xFC000000) | ((deltaToTarget >> 2) & 0x03FFFFFF);
-                    _branchesIslandCount++;
+
+        // try to re-use an existing optimized stub
+        const auto& pos3 = targetAddrToOptStubAddr.find((pint_t)finalTargetAddr);
+        if ( pos3 != targetAddrToOptStubAddr.end() ) {
+            uint64_t existingStub = pos3->second;
+            if ( existingStub != stubAddr ) {
+                int64_t deltaToOptStub = existingStub - callSiteAddr;
+                if ( (deltaToOptStub > -b128MegLimit) && (deltaToOptStub < b128MegLimit) ) {
+                    instruction = (instruction & 0xFC000000) | ((deltaToOptStub >> 2) & 0x03FFFFFF);
+                    _branchToReUsedOptimizedStubCount++;
                     return true;
                 }
             }
         }
-        else {
-            // target is before branch so find closest pool before branch
-            for (size_t j = branchIslandPools.size(); j > 0; --j) {
-                BranchPoolDylib<P>* pool = branchIslandPools[j-1];
-                if ( (pool->addr() < callSiteAddr) && (pool->addr() > finalTargetAddr) ) {
-                    uint64_t brIslandAddr = pool->getBackBranch(finalTargetAddr, targetName, branchIslandPools);
-                    if ( brIslandAddr == 0 ) {
-                        // branch island pool full
-                        _diagnostics.warning("pool full. Can't optimizer branch to %s from 0x%llX in %s\n", targetName, callSiteAddr, _installName);
-                        break;
-                    }
-                    int64_t deltaToTarget = brIslandAddr - callSiteAddr;
-                    instruction = (instruction & 0xFC000000) | ((deltaToTarget >> 2) & 0x03FFFFFF);
-                    _branchesIslandCount++;
-                    return true;
-                }
-            }
-        }
+
+        // leave as BL to stub, but optimize the stub
+        _stubsToOptimize.insert(stubAddr);
+        targetAddrToOptStubAddr[(pint_t)finalTargetAddr] = (pint_t)stubAddr;
+        _branchToOptimizedStubCount++;
         return false;
     });
     if (_diagnostics.hasError())
@@ -1288,7 +858,7 @@ void StubOptimizer<P>::optimizeArm64CallSites(std::vector<BranchPoolDylib<P>*>& 
 
 
 template <typename P>
-void StubOptimizer<P>::optimizeCallSites(std::vector<BranchPoolDylib<P>*>& branchIslandPools)
+void StubOptimizer<P>::optimizeCallSites(std::unordered_map<uint64_t, uint64_t>& targetAddrToOptStubAddr)
 {
     if ( _textSection == NULL )
         return;
@@ -1298,28 +868,38 @@ void StubOptimizer<P>::optimizeCallSites(std::vector<BranchPoolDylib<P>*>& branc
 
     switch ( _mh->cputype() ) {
         case CPU_TYPE_ARM64:
+            optimizeArm64CallSites(targetAddrToOptStubAddr);
+#if SUPPORT_ARCH_arm64e
+            if (_mh->cpusubtype() == CPU_SUBTYPE_ARM64E)
+                optimizeArm64eStubs();
+            else
+#endif
+                optimizeArm64Stubs();
+            break;
+#if SUPPORT_ARCH_arm64_32
         case CPU_TYPE_ARM64_32:
-            optimizeArm64CallSites(branchIslandPools);
-             if ( verbose ) {
-                _diagnostics.verbose("%5u branches in __text, %5u changed to direct branches, %5u changed to use islands for %s\n",
-                            _branchesCount, _branchesDirectCount, _branchesIslandCount, _installName);
-            }
-           break;
+            optimizeArm64CallSites(targetAddrToOptStubAddr);
+            optimizeArm64_32Stubs();
+            break;
+#endif
         case CPU_TYPE_ARM:
-            optimizeArmCallSites();
+            optimizeArmCallSites(targetAddrToOptStubAddr);
             optimizeArmStubs();
-            if ( verbose ) {
-                _diagnostics.verbose("%3u of %3u stubs optimized. %5u branches in __text, %5u changed to direct branches for %s\n",
-                            _stubOptimizedCount, _stubCount, _branchesCount, _branchesDirectCount, _installName);
-            }
             break;
     }
+    if ( verbose ) {
+        _diagnostics.verbose("dylib has %6u BLs to %4u stubs. Changed %5u, %5u, %5u BLs to use direct branch, optimized stub, neighbor's optimized stub. "
+                             "%5u stubs left interposable, %4u stubs optimized. path=%s\n",
+                            _branchToStubCount, _stubCount, _branchOptimizedToDirectCount, _branchToOptimizedStubCount, _branchToReUsedOptimizedStubCount,
+                            _stubsLeftInterposable, _stubOptimizedCount, _installName);
+    }
+
 }
 
 template <typename P>
-void bypassStubs(DyldSharedCache* cache, const std::string& archName, const std::vector<uint64_t>& branchPoolStartAddrs,
-                  uint64_t branchPoolsLinkEditStartAddr, uint64_t branchPoolsLinkEditStartFileOffset,
-                  const char* const neverStubEliminateDylibs[], Diagnostics& diags)
+void bypassStubs(DyldSharedCache* cache, const std::string& archName, std::unordered_map<uint64_t, uint64_t>& targetAddrToOptStubAddr,
+                 const char* const neverStubEliminateDylibs[], const char* const neverStubEliminateSymbols[],
+                 Diagnostics& diags)
 {
     diags.verbose("Stub elimination optimization:\n");
 
@@ -1329,50 +909,9 @@ void bypassStubs(DyldSharedCache* cache, const std::string& archName, const std:
         optimizers.push_back(new StubOptimizer<P>(cache, (macho_header<P>*)mh, diags));
     });
 
-    // construct a BranchPoolDylib for each pool
-    std::vector<BranchPoolDylib<P>*> pools;
-
-    if ( startsWith(archName, "arm64") ) {
-        // Find hole at end of linkedit region for branch pool linkedits
-        __block uint64_t textRegionStartAddr = 0;
-        __block uint64_t linkEditRegionStartAddr = 0;
-        __block uint64_t linkEditRegionEndAddr = 0;
-        __block uint64_t linkEditRegionStartCacheOffset = 0;
-        cache->forEachRegion(^(const void* content, uint64_t vmAddr, uint64_t size, uint32_t permissions) {
-            if ( permissions == (PROT_READ|PROT_EXEC) ) {
-                textRegionStartAddr = vmAddr;
-            }
-            else if ( permissions == PROT_READ ) {
-                linkEditRegionStartAddr = vmAddr;
-                linkEditRegionEndAddr = vmAddr + size;
-                linkEditRegionStartCacheOffset = (char*)content - (char*)cache;
-            }
-        });
-        __block uint64_t lastLinkEditRegionUsedOffset = 0;
-        cache->forEachImage(^(const mach_header* mh, const char* installName) {
-            ((dyld3::MachOFile*)mh)->forEachSegment(^(const dyld3::MachOFile::SegmentInfo& info, bool &stop) {
-                if ( strcmp(info.segName, "__LINKEDIT") == 0 ) {
-                    if ( info.fileOffset >= lastLinkEditRegionUsedOffset )
-                        lastLinkEditRegionUsedOffset = info.fileOffset + info.vmSize;
-                }
-            });
-        });
-        uint64_t allPoolsLinkEditStartAddr =  branchPoolsLinkEditStartAddr;
-        if ( !branchPoolStartAddrs.empty() ) {
-            uint64_t poolLinkEditStartAddr  = allPoolsLinkEditStartAddr;
-            uint64_t poolLinkEditFileOffset = branchPoolsLinkEditStartFileOffset;
-            const uint64_t poolSize = branchPoolLinkEditSize("arm64");
-            for (uint64_t poolAddr : branchPoolStartAddrs) {
-                pools.push_back(new BranchPoolDylib<P>(cache, poolAddr, textRegionStartAddr, poolLinkEditStartAddr, poolLinkEditFileOffset, diags));
-                poolLinkEditStartAddr  += poolSize;
-                poolLinkEditFileOffset += poolSize;
-            }
-        }
-    }
-
     // build set of functions to never stub-eliminate because tools may need to override them
     std::unordered_set<std::string> neverStubEliminate;
-    for (const char** p=sNeverStubEliminateSymbols; *p != nullptr; ++p) {
+    for (const char* const* p=neverStubEliminateSymbols; *p != nullptr; ++p) {
         neverStubEliminate.insert(*p);
     }
     for (const char* const* d=neverStubEliminateDylibs; *d != nullptr; ++d) {
@@ -1399,140 +938,36 @@ void bypassStubs(DyldSharedCache* cache, const std::string& archName, const std:
 
     // optimize call sites to by-pass stubs or jump through island
     for (StubOptimizer<P>* op : optimizers)
-        op->optimizeCallSites(pools);
-
-   // final fix ups in branch pools
-    for (BranchPoolDylib<P>* pool : pools) {
-        pool->finalizeLoadCommands();
-        pool->printStats();
-    }
+        op->optimizeCallSites(targetAddrToOptStubAddr);
 
     // write total optimization info
     uint32_t callSiteCount = 0;
     uint32_t callSiteDirectOptCount = 0;
-    uint32_t callSiteOneHopOptCount = 0;
     for (StubOptimizer<P>* op : optimizers) {
-        callSiteCount           += op->_branchesCount;
-        callSiteDirectOptCount  += op->_branchesDirectCount;
-        callSiteOneHopOptCount  += op->_branchesIslandCount;
+        callSiteCount           += op->_branchToStubCount;
+        callSiteDirectOptCount  += op->_branchOptimizedToDirectCount;
     }
-    diags.verbose("  cache contains %u call sites of which %u were direct bound and %u were bound through islands\n", callSiteCount, callSiteDirectOptCount, callSiteOneHopOptCount);
+    diags.verbose("  cache contains %u call sites of which %u were direct bound\n", callSiteCount, callSiteDirectOptCount);
 
     // clean up
     for (StubOptimizer<P>* op : optimizers)
         delete op;
-   for (BranchPoolDylib<P>* p : pools)
-        delete p;
-
 }
 
-void CacheBuilder::optimizeAwayStubs(const std::vector<uint64_t>& branchPoolStartAddrs, uint64_t branchPoolsLinkEditStartAddr)
+void CacheBuilder::optimizeAwayStubs()
 {
+    std::unordered_map<uint64_t, uint64_t> targetAddrToOptStubAddr;
+
     DyldSharedCache* dyldCache = (DyldSharedCache*)_readExecuteRegion.buffer;
-    uint64_t branchPoolsLinkEditStartFileOffset = _readOnlyRegion.cacheFileOffset + branchPoolsLinkEditStartAddr - _readOnlyRegion.unslidLoadAddress;
     std::string archName = dyldCache->archName();
 #if SUPPORT_ARCH_arm64_32
     if ( startsWith(archName, "arm64_32") )
-        bypassStubs<Pointer32<LittleEndian> >(dyldCache, archName, branchPoolStartAddrs, branchPoolsLinkEditStartAddr, branchPoolsLinkEditStartFileOffset, _s_neverStubEliminate, _diagnostics);
+        bypassStubs<Pointer32<LittleEndian> >(dyldCache, archName, targetAddrToOptStubAddr, _s_neverStubEliminateDylibs, _s_neverStubEliminateSymbols, _diagnostics);
     else
 #endif
     if ( startsWith(archName, "arm64") )
-        bypassStubs<Pointer64<LittleEndian> >(dyldCache, archName, branchPoolStartAddrs, branchPoolsLinkEditStartAddr, branchPoolsLinkEditStartFileOffset, _s_neverStubEliminate, _diagnostics);
+        bypassStubs<Pointer64<LittleEndian> >(dyldCache, archName, targetAddrToOptStubAddr, _s_neverStubEliminateDylibs, _s_neverStubEliminateSymbols, _diagnostics);
     else if ( archName == "armv7k" )
-        bypassStubs<Pointer32<LittleEndian>>(dyldCache, archName, branchPoolStartAddrs, branchPoolsLinkEditStartAddr, branchPoolsLinkEditStartFileOffset, _s_neverStubEliminate, _diagnostics);
+        bypassStubs<Pointer32<LittleEndian>>(dyldCache, archName, targetAddrToOptStubAddr, _s_neverStubEliminateDylibs, _s_neverStubEliminateSymbols, _diagnostics);
     // no stub optimization done for other arches
 }
-
-
-/*
-template <typename P>
-void StubOptimizer<P>::optimizeStubs(std::unordered_map<uint64_t,std::vector<uint64_t>>& targetToBranchIslands)
-{
-    for (const auto& stubEntry : _stubAddrToLPAddr) {
-        pint_t stubVMAddr = stubEntry.first;
-        pint_t lpVMAddr   = stubEntry.second;
-        const auto& pos = _lpAddrToTargetAddr.find(lpVMAddr);
-        if ( pos == _lpAddrToTargetAddr.end() )
-            continue;
-        pint_t targetVMAddr = pos->second;
-        int64_t delta = targetVMAddr - stubVMAddr;
-        if ( (delta > -b128MegLimit) && (delta < b128MegLimit) ) {
-            // target within reach, change stub to direct branch
-            uint32_t* stubInstructions = (uint32_t*)((uint8_t*)_cacheBuffer + _textSegCacheOffset + stubVMAddr -_textSegStartAddr);
-            uint32_t stubInstr1 = E::get32(stubInstructions[0]);
-            if ( (stubInstr1 & 0x9F00001F) != 0x90000010 ) {
-                warning("first instruction of stub (0x%08X) is no longer ADRP for stub at addr 0x%0X in %s\n",
-                        stubInstr1,  stubVMAddr, _installName);
-                continue;
-            }
-            uint32_t directBranchInstr = 0x14000000 + ((delta/4) & 0x03FFFFFF);
-            E::set32(stubInstructions[0], directBranchInstr);
-            uint32_t brkInstr = 0xD4200000;
-            E::set32(stubInstructions[1], brkInstr);
-            E::set32(stubInstructions[2], brkInstr);
-            _stubOptimizedCount++;
-            targetToBranchIslands[targetVMAddr].push_back(stubVMAddr);
-        }
-    }
-    verboseLog("%3u of %3u stubs optimized for %s\n", _stubOptimizedCount, _stubCount, _installName);
-}
-
-
-template <typename P>
-void StubOptimizer<P>::bypassStubs(std::unordered_map<uint64_t,std::vector<uint64_t>>& targetToBranchIslands)
-{
-    if ( _textSection == NULL )
-        return;
-
-    // scan __text section looking for B(L) instructions that branch to a stub
-    unsigned instructionCount = (unsigned)(_textSection->size() / 4);
-    uint32_t* instructions = (uint32_t*)((uint8_t*)_cacheBuffer + _textSegCacheOffset + _textSection->addr() -_textSegStartAddr);
-    for (unsigned i=0; i < instructionCount; ++i) {
-        uint32_t instr = E::get32(instructions[i]); 
-        // skip all but BL or B
-        if ( (instr & 0x7C000000) != 0x14000000 ) 
-            continue;
-        // compute target of branch instruction
-        int32_t brDelta = (instr & 0x03FFFFFF) << 2;
-        if ( brDelta & 0x08000000 )
-            brDelta |= 0xF0000000;
-        uint64_t branchAddr = _textSection->addr() + i*4;
-        uint64_t targetAddr = branchAddr + (int64_t)brDelta;
-        // ignore branch if not to a known stub
-        const auto& pos = _stubAddrToLPAddr.find(targetAddr);
-        if ( pos == _stubAddrToLPAddr.end() )
-            continue;
-        _branchesCount++;
-        // ignore branch if lazy pointer is not known (could be resolver based)
-        const auto& pos2 = _lpAddrToTargetAddr.find(pos->second);
-        if ( pos2 == _lpAddrToTargetAddr.end() )
-            continue;
-        uint64_t finalTargetAddr = pos2->second;
-        int64_t deltaToFinalTarget = finalTargetAddr - branchAddr;
-        // if final target within range, change to branch there directly
-        if ( (deltaToFinalTarget > -b128MegLimit) && (deltaToFinalTarget < b128MegLimit) ) {
-            uint32_t newInstr = (instr & 0xFC000000) | ((deltaToFinalTarget >> 2) & 0x03FFFFFF);
-            E::set32(instructions[i], newInstr);
-            _branchesDirectCount++;
-           continue;
-        }
-        // see if there is an existing branch island in range that can be used
-        std::vector<uint64_t>& existingBranchIslands = targetToBranchIslands[finalTargetAddr];
-        for (uint64_t branchIslandAddr : existingBranchIslands) {
-            int64_t deltaToBranchIsland = branchIslandAddr - branchAddr;
-            // if final target within range, change to branch deltaToBranchIsland directly
-            if ( (deltaToBranchIsland > -b128MegLimit) && (deltaToFinalTarget < b128MegLimit) ) {
-                uint32_t newInstr = (instr & 0xFC000000) | ((deltaToBranchIsland >> 2) & 0x03FFFFFF);
-                E::set32(instructions[i], newInstr);
-                _branchesIslandCount++;
-                break;
-            }
-        }
-    }
-    if ( verbose ) {
-        verboseLog("%5u branches in __text, %5u changed to direct branches, %5u changed to indirect for %s\n",
-                    _branchesCount, _branchesDirectCount, _branchesIslandCount, _installName);
-    }
-}
-*/
-

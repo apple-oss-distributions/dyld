@@ -29,6 +29,8 @@
 #include <sys/sysctl.h>
 #include <mach/mach_time.h> // mach_absolute_time()
 #include <libkern/OSAtomic.h>
+#include <uuid/uuid.h>
+#include <mach-o/dyld_images.h>
 
 #include <vector>
 #include <algorithm>
@@ -44,6 +46,8 @@
 #include "ClosureBuilder.h"
 #include "ClosureFileSystemPhysical.h"
 
+#include "objc-shared-cache.h"
+
 extern const char** appleParams;
 
 // should be a header for these
@@ -52,6 +56,10 @@ struct __cxa_range_t {
     size_t      length;
 };
 extern "C" void __cxa_finalize_ranges(const __cxa_range_t ranges[], unsigned int count);
+
+extern "C" int  __cxa_atexit(void (*func)(void *), void* arg, void* dso);
+
+
 
 VIS_HIDDEN bool gUseDyld3 = false;
 
@@ -109,10 +117,7 @@ void AllImages::setProgramVars(ProgramVars* vars)
 {
     _programVars = vars;
     const dyld3::MachOFile* mf = (dyld3::MachOFile*)_programVars->mh;
-    mf->forEachSupportedPlatform(^(dyld3::Platform platform, uint32_t minOS, uint32_t sdk) {
-        _platform = (dyld_platform_t)platform;
-        //FIXME assert there is only one?
-    });
+    _archs = &GradedArchs::forCurrentOS(mf);
 }
 
 void AllImages::setRestrictions(bool allowAtPaths, bool allowEnvPaths)
@@ -121,49 +126,59 @@ void AllImages::setRestrictions(bool allowAtPaths, bool allowEnvPaths)
     _allowEnvPaths = allowEnvPaths;
 }
 
+void AllImages::setHasCacheOverrides(bool someCacheImageOverriden)
+{
+    _someImageOverridden = someCacheImageOverriden;
+}
+
+bool AllImages::hasCacheOverrides() const {
+    return _someImageOverridden;
+}
+
 void AllImages::applyInitialImages()
 {
     addImages(*_initialImages);
     runImageNotifiers(*_initialImages);
+    runImageCallbacks(*_initialImages);
     _initialImages = nullptr;  // this was stack allocated
 }
 
 void AllImages::withReadLock(void (^work)()) const
 {
 #ifdef OS_UNFAIR_RECURSIVE_LOCK_INIT
-     os_unfair_recursive_lock_lock(&_loadImagesLock);
+     os_unfair_recursive_lock_lock(&_globalLock);
         work();
-     os_unfair_recursive_lock_unlock(&_loadImagesLock);
+     os_unfair_recursive_lock_unlock(&_globalLock);
 #else
-    pthread_mutex_lock(&_loadImagesLock);
+    pthread_mutex_lock(&_globalLock);
         work();
-    pthread_mutex_unlock(&_loadImagesLock);
+    pthread_mutex_unlock(&_globalLock);
 #endif
 }
 
 void AllImages::withWriteLock(void (^work)())
 {
 #ifdef OS_UNFAIR_RECURSIVE_LOCK_INIT
-     os_unfair_recursive_lock_lock(&_loadImagesLock);
+     os_unfair_recursive_lock_lock(&_globalLock);
         work();
-     os_unfair_recursive_lock_unlock(&_loadImagesLock);
+     os_unfair_recursive_lock_unlock(&_globalLock);
 #else
-    pthread_mutex_lock(&_loadImagesLock);
+    pthread_mutex_lock(&_globalLock);
         work();
-    pthread_mutex_unlock(&_loadImagesLock);
+    pthread_mutex_unlock(&_globalLock);
 #endif
 }
 
 void AllImages::withNotifiersLock(void (^work)()) const
 {
 #ifdef OS_UNFAIR_RECURSIVE_LOCK_INIT
-     os_unfair_recursive_lock_lock(&_notifiersLock);
+     os_unfair_recursive_lock_lock(&_globalLock);
         work();
-     os_unfair_recursive_lock_unlock(&_notifiersLock);
+     os_unfair_recursive_lock_unlock(&_globalLock);
 #else
-    pthread_mutex_lock(&_notifiersLock);
+    pthread_mutex_lock(&_globalLock);
         work();
-    pthread_mutex_unlock(&_notifiersLock);
+    pthread_mutex_unlock(&_globalLock);
 #endif
 }
 
@@ -252,6 +267,32 @@ void AllImages::addImages(const Array<LoadedImage>& newImages)
     });
 }
 
+void AllImages::addImmutableRange(uintptr_t start, uintptr_t end)
+{
+    //fprintf(stderr, "AllImages::addImmutableRange(0x%09lX, 0x%09lX)\n", start, end);
+    // first look in existing range buckets for empty slot
+    ImmutableRanges* lastRange = nullptr;
+    for (ImmutableRanges* ranges = &_immutableRanges; ranges != nullptr; ranges = ranges->next.load(std::memory_order_acquire)) {
+        lastRange = ranges;
+        for (uintptr_t i=0; i < ranges->arraySize; ++i) {
+            if ( ranges->array[i].start.load(std::memory_order_acquire) == 0 ) {
+                // set 'end' before 'start' so readers always see consistent state
+                ranges->array[i].end.store(end, std::memory_order_release);
+                ranges->array[i].start.store(start, std::memory_order_release);
+                return;
+            }
+        }
+    }
+    // if we got here, there are no empty slots, so add new ImmutableRanges
+    const uintptr_t newSize = 15;  // allocation is 256 bytes on 64-bit processes
+    ImmutableRanges* newRange = (ImmutableRanges*)calloc(offsetof(ImmutableRanges,array[newSize]), 1);
+    newRange->arraySize = newSize;
+    newRange->array[0].end.store(end, std::memory_order_release);
+    newRange->array[0].start.store(start, std::memory_order_release);
+    // tie into previous list last
+    lastRange->next.store(newRange, std::memory_order_release);
+}
+
 void AllImages::runImageNotifiers(const Array<LoadedImage>& newImages)
 {
     uint32_t count = (uint32_t)newImages.count();
@@ -271,29 +312,57 @@ void AllImages::runImageNotifiers(const Array<LoadedImage>& newImages)
         _oldAllImageInfos->notification(dyld_image_adding, count, oldDyldInfo);
     }
 
-    // log loads
+
+    // update immutable ranges
     for (const LoadedImage& li : newImages) {
-        log_loads("dyld: %s\n", imagePath(li.image()));
+        if ( !li.image()->inDyldCache() && li.image()->neverUnload() ) {
+            uintptr_t baseAddr = (uintptr_t)li.loadedAddress();
+            li.image()->forEachDiskSegment(^(uint32_t segIndex, uint32_t fileOffset, uint32_t fileSize, int64_t vmOffset, uint64_t vmSize, uint8_t permissions, bool laterReadOnly, bool &stop) {
+                if ( (permissions & (VM_PROT_READ|VM_PROT_WRITE)) == VM_PROT_READ ) {
+                    addImmutableRange(baseAddr + vmOffset, baseAddr + vmOffset + vmSize);
+                }
+            });
+        }
     }
 
-#if !TARGET_IPHONE_SIMULATOR
+    // log loads
+    for (const LoadedImage& li : newImages) {
+        const char *path = imagePath(li.image());
+        uuid_t imageUUID;
+        if ( li.image()->getUuid(imageUUID)) {
+            uuid_string_t imageUUIDStr;
+            uuid_unparse_upper(imageUUID, imageUUIDStr);
+            log_loads("dyld: <%s> %s\n", imageUUIDStr, path);
+        }
+        else {
+            log_loads("dyld: %s\n", path);
+        }
+    }
+
     // call kdebug trace for each image
     if (kdebug_is_enabled(KDBG_CODE(DBG_DYLD, DBG_DYLD_UUID, DBG_DYLD_UUID_MAP_A))) {
         for (const LoadedImage& li : newImages) {
             const closure::Image* image = li.image();
             struct stat  stat_buf;
+            const char *path = imagePath(image);
+            uuid_t uuid;
+            image->getUuid(uuid);
             fsid_t       fsid = {{ 0, 0 }};
             fsobj_id_t   fsobjid = { 0, 0 };
-            if ( !image->inDyldCache() && (stat(imagePath(image), &stat_buf) == 0) ) {
+            if ( !li.loadedAddress()->inDyldCache() && (stat(path, &stat_buf) == 0) ) {
                 fsobjid = *(fsobj_id_t*)&stat_buf.st_ino;
                 fsid    = {{ stat_buf.st_dev, 0 }};
             }
-            uuid_t uuid;
-            image->getUuid(uuid);
-            kdebug_trace_dyld_image(DBG_DYLD_UUID_MAP_A, &uuid, fsobjid, fsid, li.loadedAddress());
+            kdebug_trace_dyld_image(DBG_DYLD_UUID_MAP_A, path, &uuid, fsobjid, fsid, li.loadedAddress());
         }
     }
-#endif
+}
+
+void AllImages::runImageCallbacks(const Array<LoadedImage>& newImages)
+{
+    uint32_t count = (uint32_t)newImages.count();
+    assert(count != 0);
+
     // call each _dyld_register_func_for_add_image function with each image
     withNotifiersLock(^{
         for (NotifyFunc func : _loadNotifiers) {
@@ -315,6 +384,17 @@ void AllImages::runImageNotifiers(const Array<LoadedImage>& newImages)
                 else
                     func(li.loadedAddress(), li.image()->path(), !li.image()->neverUnload());
             }
+        }
+        for (BulkLoadNotifier func : _loadBulkNotifiers) {
+            const mach_header* mhs[count];
+            const char*        paths[count];
+            for (unsigned i=0; i < count; ++i) {
+                mhs[i]   = newImages[i].loadedAddress();
+                paths[i] = newImages[i].image()->path();
+            }
+            dyld3::ScopedTimer timer(DBG_DYLD_TIMING_FUNC_FOR_ADD_IMAGE, (uint64_t)mhs[0], (uint64_t)func, 0);
+            log_notifications("dyld: add notifier %p called with %d images\n", func, count);
+            func(count, mhs, paths);
         }
     });
 
@@ -342,8 +422,12 @@ void AllImages::runImageNotifiers(const Array<LoadedImage>& newImages)
         }
     }
 
+#if !TARGET_OS_DRIVERKIT
+    // FIXME: This may make more sense in runImageCallbacks, but the present order
+    // is after callbacks.  Can we safely move it?
     // notify any processes tracking loads in this process
     notifyMonitorLoads(newImages);
+#endif
 }
 
 void AllImages::removeImages(const Array<LoadedImage>& unloadImages)
@@ -372,24 +456,23 @@ void AllImages::removeImages(const Array<LoadedImage>& unloadImages)
         }
     }
 
-#if !TARGET_IPHONE_SIMULATOR
     // call kdebug trace for each image
     if (kdebug_is_enabled(KDBG_CODE(DBG_DYLD, DBG_DYLD_UUID, DBG_DYLD_UUID_MAP_A))) {
         for (const LoadedImage& li : unloadImages) {
             const closure::Image* image = li.image();
             struct stat  stat_buf;
+            const char *path = imagePath(image);
+            uuid_t uuid;
+            image->getUuid(uuid);
             fsid_t       fsid = {{ 0, 0 }};
             fsobj_id_t   fsobjid = { 0, 0 };
-            if ( stat(imagePath(image), &stat_buf) == 0 ) {
+            if ( stat(path, &stat_buf) == 0 ) {
                 fsobjid = *(fsobj_id_t*)&stat_buf.st_ino;
                 fsid    = {{ stat_buf.st_dev, 0 }};
             }
-            uuid_t uuid;
-            image->getUuid(uuid);
-            kdebug_trace_dyld_image(DBG_DYLD_UUID_UNMAP_A, &uuid, fsobjid, fsid, li.loadedAddress());
+            kdebug_trace_dyld_image(DBG_DYLD_UUID_UNMAP_A, path, &uuid, fsobjid, fsid, li.loadedAddress());
         }
     }
-#endif
 
     // remove each from _loadedImages
     withWriteLock(^(){
@@ -464,16 +547,26 @@ bool AllImages::dyldCacheHasPath(const char* path) const
 
 const char* AllImages::imagePathByIndex(uint32_t index) const
 {
-    if ( index < _loadedImages.count() )
-        return imagePath(_loadedImages[index].image());
-    return nullptr;
+    __block const char* result = nullptr;
+    withReadLock(^{
+        if ( index < _loadedImages.count() ) {
+            result = imagePath(_loadedImages[index].image());
+            return;
+        }
+    });
+    return result;
 }
 
 const mach_header* AllImages::imageLoadAddressByIndex(uint32_t index) const
 {
-    if ( index < _loadedImages.count() )
-        return _loadedImages[index].loadedAddress();
-    return nullptr;
+   __block const mach_header* result = nullptr;
+    withReadLock(^{
+        if ( index < _loadedImages.count() ) {
+            result = _loadedImages[index].loadedAddress();
+            return;
+        }
+    });
+    return result;
 }
 
 bool AllImages::findImage(const mach_header* loadAddress, LoadedImage& foundImage) const
@@ -493,6 +586,17 @@ bool AllImages::findImage(const mach_header* loadAddress, LoadedImage& foundImag
 
 void AllImages::forEachImage(void (^handler)(const LoadedImage& loadedImage, bool& stop)) const
 {
+    if ( _initialImages != nullptr ) {
+        // being called during libSystem initialization, so _loadedImages not allocated yet
+        bool stop = false;
+        for (const LoadedImage& li : *_initialImages) {
+            handler(li, stop);
+            if ( stop )
+                break;
+        }
+        return;
+    }
+
     withReadLock(^{
         bool stop = false;
         for (const LoadedImage& li : _loadedImages) {
@@ -607,11 +711,30 @@ bool AllImages::infoForImageMappedAt(const void* addr, const MachOLoaded** ml, u
             });
             if ( result )
                 return result;
+            // in shared cache, but not in a TEXT segment, do slow search of all loaded cache images
+             withReadLock(^{
+                for (const LoadedImage& li : _loadedImages) {
+                    if ( ((MachOAnalyzer*)li.loadedAddress())->inDyldCache() ) {
+                        uint8_t permissions;
+                        if ( li.image()->containsAddress(addr, li.loadedAddress(), &permissions) ) {
+                            if ( ml != nullptr )
+                                *ml = li.loadedAddress();
+                            if ( path != nullptr )
+                                *path = li.image()->path();
+                            if ( textSize != nullptr )
+                                *textSize = li.image()->textSize();
+                            result = true;
+                            break;
+                        }
+                    }
+                }
+            });
+            return result;
         }
     }
 
-    // slow path - search image list
-    infoForImageMappedAt(addr, ^(const LoadedImage& foundImage, uint8_t permissions) {
+    // address not in dyld cache, check each non-cache image
+    infoForNonCachedImageMappedAt(addr, ^(const LoadedImage& foundImage, uint8_t permissions) {
         if ( ml != nullptr )
             *ml = foundImage.loadedAddress();
         if ( path != nullptr )
@@ -655,7 +778,7 @@ void AllImages::infoForNonCachedImageMappedAt(const void* addr, void (^handler)(
 
 bool AllImages::immutableMemory(const void* addr, size_t length) const
 {
-    // quick check to see if in shared cache
+    // check to see if in shared cache
     if ( _dyldCacheAddress != nullptr ) {
         bool readOnly;
         if ( _dyldCacheAddress->inCache(addr, length, readOnly) ) {
@@ -663,26 +786,69 @@ bool AllImages::immutableMemory(const void* addr, size_t length) const
         }
     }
 
-    __block bool result = false;
-    withReadLock(^() {
-        // quick check to see if it is not any non-cached image loaded
-        if ( ((uintptr_t)addr < _lowestNonCached) || ((uintptr_t)addr+length > _highestNonCached) ) {
-            result = false;
-            return;
+    // check to see if it is outside the range of any loaded image
+    if ( ((uintptr_t)addr < _lowestNonCached) || ((uintptr_t)addr+length > _highestNonCached) ) {
+        return false;
+    }
+
+    // check immutable ranges
+    for (const ImmutableRanges* ranges = &_immutableRanges; ranges != nullptr; ranges = ranges->next.load(std::memory_order_acquire)) {
+        for (uintptr_t i=0; i < ranges->arraySize; ++i) {
+            if ( ranges->array[i].start.load(std::memory_order_acquire) == 0 )
+                break; // no more entries in use
+            if ( (ranges->array[i].start.load(std::memory_order_acquire) <= (uintptr_t)addr)
+              && (ranges->array[i].end.load(std::memory_order_acquire) > ((uintptr_t)addr)+length) )
+                return true;
         }
-        // slow walk through all images, only look at images not in dyld cache
-        for (const LoadedImage& li : _loadedImages) {
-            if ( !((MachOAnalyzer*)li.loadedAddress())->inDyldCache() ) {
-                uint8_t permissions;
-                if ( li.image()->containsAddress(addr, li.loadedAddress(), &permissions) ) {
-                    result = ((permissions & VM_PROT_WRITE) == 0) && li.image()->neverUnload();
-                    break;
-                }
-            }
+    }
+
+    return false;
+}
+
+
+uintptr_t AllImages::resolveTarget(closure::Image::ResolvedSymbolTarget target) const
+{
+    switch ( target.sharedCache.kind ) {
+        case closure::Image::ResolvedSymbolTarget::kindSharedCache:
+            assert(_dyldCacheAddress != nullptr);
+            return (uintptr_t)_dyldCacheAddress + (uintptr_t)target.sharedCache.offset;
+
+        case closure::Image::ResolvedSymbolTarget::kindImage: {
+            LoadedImage info;
+            bool foundImage = findImageNum(target.image.imageNum, info);
+            assert(foundImage);
+            return (uintptr_t)(info.loadedAddress()) + (uintptr_t)target.image.offset;
+        }
+
+        case closure::Image::ResolvedSymbolTarget::kindAbsolute:
+            if ( target.absolute.value & (1ULL << 62) )
+                return (uintptr_t)(target.absolute.value | 0xC000000000000000ULL);
+            else
+                return (uintptr_t)target.absolute.value;
+   }
+    assert(0 && "malformed ResolvedSymbolTarget");
+    return 0;
+}
+
+void* AllImages::interposeValue(void *value) const {
+    if ( !_mainClosure->hasInterposings() )
+        return value;
+
+    __block void* replacementValue = nullptr;
+    __block bool foundReplacement = false;
+    _mainClosure->forEachInterposingTuple(^(const closure::InterposingTuple& tuple, bool& stop) {
+        void* stockPointer = (void*)resolveTarget(tuple.stockImplementation);
+        if ( stockPointer == value) {
+            replacementValue = (void*)resolveTarget(tuple.newImplementation);
+            foundReplacement = true;
+            stop = true;
         }
     });
 
-    return result;
+    if ( foundReplacement )
+        return replacementValue;
+
+    return value;
 }
 
 void AllImages::infoForImageWithLoadAddress(const MachOLoaded* mh, void (^handler)(const LoadedImage& foundImage)) const
@@ -811,7 +977,19 @@ const char* AllImages::imagePath(const closure::Image* image) const
 }
 
 dyld_platform_t AllImages::platform() const {
-    return _platform;
+    if (oldAllImageInfo()->version >= 16) { return (dyld_platform_t)oldAllImageInfo()->platform; }
+
+    __block dyld_platform_t result;
+    // FIXME: Remove this once we only care about version 16 or greater all image infos
+    dyld_get_image_versions(mainExecutable(), ^(dyld_platform_t platform, uint32_t sdk_version, uint32_t min_version) {
+        result = platform;
+    });
+    return result;
+}
+
+const GradedArchs& AllImages::archs() const
+{
+    return *_archs;
 }
 
 void AllImages::incRefCount(const mach_header* loadAddress)
@@ -903,6 +1081,8 @@ public:
                         Reaper(Array<ImageAndUse>& unloadables, AllImages*);
     void                garbageCollect();
     void                finalizeDeadImages();
+
+    static void         runTerminators(const LoadedImage& li);
 private:
 
     void                markDirectlyDlopenedImagesAsUsed();
@@ -1000,21 +1180,54 @@ void Reaper::finalizeDeadImages()
 {
     if ( _deadCount == 0 )
         return;
-    __cxa_range_t ranges[_deadCount];
-    __cxa_range_t* rangesArray = ranges;
-    __block unsigned int rangesCount = 0;
+    STACK_ALLOC_OVERFLOW_SAFE_ARRAY(__cxa_range_t, ranges, _deadCount);
 	for (ImageAndUse& iu : _unloadables) {
         if ( iu.inUse )
             continue;
-        iu.li->image()->forEachDiskSegment(^(uint32_t segIndex, uint32_t fileOffset, uint32_t fileSize, int64_t vmOffset, uint64_t vmSize, uint8_t permissions, bool &stop) {
+        runTerminators(*iu.li);
+        iu.li->image()->forEachDiskSegment(^(uint32_t segIndex, uint32_t fileOffset, uint32_t fileSize, int64_t vmOffset, uint64_t vmSize, uint8_t permissions, bool laterReadOnly, bool &stop) {
             if ( permissions & VM_PROT_EXECUTE ) {
-                rangesArray[rangesCount].addr   = (char*)(iu.li->loadedAddress()) + vmOffset;
-                rangesArray[rangesCount].length = (size_t)vmSize;
-                ++rangesCount;
+                __cxa_range_t range;
+                range.addr   = (char*)(iu.li->loadedAddress()) + vmOffset;
+                range.length = (size_t)vmSize;
+                ranges.push_back(range);
            }
         });
     }
-    __cxa_finalize_ranges(ranges, rangesCount);
+    __cxa_finalize_ranges(ranges.begin(), (uint32_t)ranges.count());
+}
+
+void Reaper::runTerminators(const LoadedImage& li)
+{
+    if ( li.image()->hasTerminators() ) {
+        typedef void (*Terminator)();
+        li.image()->forEachTerminator(li.loadedAddress(), ^(const void* terminator) {
+            Terminator termFunc = (Terminator)terminator;
+#if __has_feature(ptrauth_calls)
+            termFunc = (Terminator)__builtin_ptrauth_sign_unauthenticated((void*)termFunc, 0, 0);
+#endif
+            termFunc();
+            log_initializers("dyld: called static terminator %p in %s\n", termFunc, li.image()->path());
+        });
+    }
+}
+
+void AllImages::runAllStaticTerminators()
+{
+    // We want to run terminators in reverse chronological order of initializing
+    // Note: initialLoadCount may be larger than what was actually loaded
+    const uint32_t currentCount     = (uint32_t)_loadedImages.count();
+    const uint32_t initialLoadCount = std::min(_mainClosure->initialLoadCount(), currentCount);
+
+    // first run static terminators of anything dlopen()ed
+    for (uint32_t i=currentCount-1; i >= initialLoadCount; --i) {
+        Reaper::runTerminators(_loadedImages[i]);
+    }
+
+    // next run terminators of statically load images, in loader-order they were init in reverse of this
+    for (uint32_t i=0; i < initialLoadCount; ++i) {
+        Reaper::runTerminators(_loadedImages[i]);
+    }
 }
 
 
@@ -1055,10 +1268,8 @@ void AllImages::garbageCollectImages()
 
         // FIXME: we should sort dead images so higher level ones are terminated first
 
-        // call cxa_finalize_ranges of dead images
+        // call cxa_finalize_ranges and static terminators of dead images
         reaper.finalizeDeadImages();
-
-        // FIXME: call static terminators of dead images
 
         // FIXME: DOF unregister
 
@@ -1138,11 +1349,102 @@ void AllImages::addLoadNotifier(LoadNotifyFunc func)
 }
 
 
+void AllImages::addBulkLoadNotifier(BulkLoadNotifier func)
+{
+    // callback about already loaded images
+    unsigned count = (unsigned)_loadedImages.count();
+    const mach_header* mhs[count];
+    const char*        paths[count];
+    for (unsigned i=0; i < count; ++i) {
+        mhs[i]   = _loadedImages[i].loadedAddress();
+        paths[i] = _loadedImages[i].image()->path();
+    }
+    dyld3::ScopedTimer timer(DBG_DYLD_TIMING_FUNC_FOR_ADD_IMAGE, (uint64_t)mhs[0], (uint64_t)func, 0);
+    log_notifications("dyld: add notifier %p called with %d images\n", func, count);
+    func(count, mhs, paths);
+
+    // add to list of functions to call about future loads
+    withNotifiersLock(^{
+        _loadBulkNotifiers.push_back(func);
+    });
+}
+
+// Returns true if logs should be sent to stderr as well as syslog.
+// Copied from objc which copied it from CFUtilities.c
+static bool also_do_stderr(void)
+{
+    struct stat st;
+    int ret = fstat(STDERR_FILENO, &st);
+    if (ret < 0) return false;
+    mode_t m = st.st_mode & S_IFMT;
+    if (m == S_IFREG  ||  m == S_IFSOCK  ||  m == S_IFIFO  ||  m == S_IFCHR) {
+        return true;
+    }
+    return false;
+}
+
+// Print "message" to the console.  Copied from objc.
+static void _objc_syslog(const char *message)
+{
+    _simple_asl_log(ASL_LEVEL_ERR, NULL, message);
+
+    if (also_do_stderr()) {
+        write(STDERR_FILENO, message, strlen(message));
+    }
+}
+
 void AllImages::setObjCNotifiers(_dyld_objc_notify_mapped map, _dyld_objc_notify_init init, _dyld_objc_notify_unmapped unmap)
 {
     _objcNotifyMapped   = map;
     _objcNotifyInit     = init;
     _objcNotifyUnmapped = unmap;
+
+    // We couldn't initialize the objc optimized closure data in init() as that needs malloc but runs before malloc initializes.
+    // So lets grab the data now and set it up
+
+    // Pull out the objc selector hash table if we have one
+    Array<closure::Image::ObjCSelectorImage>    selectorImageNums;
+    const closure::ObjCSelectorOpt*             selectorHashTable = nullptr;
+    if (_mainClosure->selectorHashTable(selectorImageNums, selectorHashTable)) {
+        _objcSelectorHashTable = selectorHashTable;
+        for (closure::Image::ObjCSelectorImage selectorImage : selectorImageNums) {
+            LoadedImage loadedImage;
+            bool found = findImageNum(selectorImage.imageNum, loadedImage);
+            assert(found);
+            _objcSelectorHashTableImages.push_back( (uintptr_t)loadedImage.loadedAddress() + selectorImage.offset );
+        }
+    }
+
+    // Pull out the objc class hash table if we have one
+    Array<closure::Image::ObjCClassImage>   classImageNums;
+    const closure::ObjCClassOpt*            classHashTable      = nullptr;
+    const closure::ObjCClassOpt*            protocolHashTable   = nullptr;
+    if (_mainClosure->classAndProtocolHashTables(classImageNums, classHashTable, protocolHashTable)) {
+        _objcClassHashTable = (const closure::ObjCClassOpt*)classHashTable;
+        _objcProtocolHashTable = (const closure::ObjCClassOpt*)protocolHashTable;
+        for (closure::Image::ObjCClassImage classImage : classImageNums) {
+            LoadedImage loadedImage;
+            bool found = findImageNum(classImage.imageNum, loadedImage);
+            assert(found);
+            uintptr_t loadAddress = (uintptr_t)loadedImage.loadedAddress();
+            uintptr_t nameBaseAddress = loadAddress + classImage.offsetOfClassNames;
+            uintptr_t dataBaseAddress = loadAddress + classImage.offsetOfClasses;
+            _objcClassHashTableImages.push_back({ nameBaseAddress, dataBaseAddress });
+        }
+    }
+
+    _mainClosure->duplicateClassesHashTable(_objcClassDuplicatesHashTable);
+    if ( _objcClassDuplicatesHashTable != nullptr ) {
+        // If we have duplicates, the those need the objc opt pointer to find dupes
+        _dyldCacheObjCOpt = _dyldCacheAddress->objcOpt();
+    }
+
+    // ObjC would have issued warnings on duplicate classes.  We've recorded those too
+    _mainClosure->forEachWarning(closure::Closure::Warning::duplicateObjCClass, ^(const char *warning, bool &stop) {
+        Diagnostics diag;
+        diag.error("objc[%d]: %s\n", getpid(), warning);
+        _objc_syslog(diag.errorMessage());
+    });
 
     // callback about already loaded images
     uint32_t maxCount = count();
@@ -1199,23 +1501,25 @@ void AllImages::applyInterposingToDyldCache(const closure::Closure* closure)
             default:
                 assert(0 && "bad replacement kind");
         }
-        lastCachedDylibImage->forEachPatchableUseOfExport(entry.exportCacheOffset, ^(closure::Image::PatchableExport::PatchLocation patchLocation) {
+        uint32_t lastCachedDylibImageIndex = lastCachedDylibImageNum - (uint32_t)_dyldCacheAddress->cachedDylibsImageArray()->startImageNum();
+        _dyldCacheAddress->forEachPatchableUseOfExport(lastCachedDylibImageIndex,
+                                                       entry.exportCacheOffset, ^(dyld_cache_patchable_location patchLocation) {
             uintptr_t* loc = (uintptr_t*)(cacheStart+patchLocation.cacheOffset);
  #if __has_feature(ptrauth_calls)
             if ( patchLocation.authenticated ) {
                 MachOLoaded::ChainedFixupPointerOnDisk fixupInfo;
-                fixupInfo.authRebase.auth      = true;
-                fixupInfo.authRebase.addrDiv   = patchLocation.usesAddressDiversity;
-                fixupInfo.authRebase.diversity = patchLocation.discriminator;
-                fixupInfo.authRebase.key       = patchLocation.key;
-                *loc = fixupInfo.signPointer(loc, newValue + patchLocation.getAddend());
+                fixupInfo.arm64e.authRebase.auth      = true;
+                fixupInfo.arm64e.authRebase.addrDiv   = patchLocation.usesAddressDiversity;
+                fixupInfo.arm64e.authRebase.diversity = patchLocation.discriminator;
+                fixupInfo.arm64e.authRebase.key       = patchLocation.key;
+                *loc = fixupInfo.arm64e.signPointer(loc, newValue + DyldSharedCache::getAddend(patchLocation));
                 log_fixups("dyld: cache fixup: *%p = %p (JOP: diversity 0x%04X, addr-div=%d, key=%s)\n",
-                           loc, (void*)*loc, patchLocation.discriminator, patchLocation.usesAddressDiversity, patchLocation.keyName());
+                           loc, (void*)*loc, patchLocation.discriminator, patchLocation.usesAddressDiversity, DyldSharedCache::keyName(patchLocation));
                 return;
             }
 #endif
-            log_fixups("dyld: cache fixup: *%p = 0x%0lX (dyld cache patch)\n", loc, newValue + (uintptr_t)patchLocation.getAddend());
-            *loc = newValue + (uintptr_t)patchLocation.getAddend();
+            log_fixups("dyld: cache fixup: *%p = 0x%0lX (dyld cache patch)\n", loc, newValue + (uintptr_t)DyldSharedCache::getAddend(patchLocation));
+            *loc = newValue + (uintptr_t)DyldSharedCache::getAddend(patchLocation);
         });
     });
     if ( suspendedAccounting )
@@ -1312,13 +1616,18 @@ void AllImages::runInitialzersBottomUp(const closure::Image* topImage)
     });
 }
 
-
-void AllImages::runLibSystemInitializer(const LoadedImage& libSystem)
+void AllImages::runLibSystemInitializer(LoadedImage& libSystem)
 {
+    // First set the libSystem state to beingInited.  This protects against accidentally trying
+    // to run its initializers again if a dlopen happens insie libSystem_initializer().
+    libSystem.setState(LoadedImage::State::beingInited);
+
     // run all initializers in libSystem.dylib
+    // Note: during libSystem's initialization, libdyld_initializer() is called which copies _initialImages to _loadedImages
     runAllInitializersInImage(libSystem.image(), libSystem.loadedAddress());
 
-    // Note: during libSystem's initialization, libdyld_initializer() is called which copies _initialImages to _loadedImages
+    // update global flags that libsystem has been initialized (so debug tools know it is safe to inject threads)
+    _oldAllImageInfos->libSystemInitialized = true;
 
     // mark libSystem.dylib as being inited, so later recursive-init would re-run it
     for (LoadedImage& li : _loadedImages) {
@@ -1327,6 +1636,13 @@ void AllImages::runLibSystemInitializer(const LoadedImage& libSystem)
             break;
         }
     }
+    // now that libSystem is up, register a callback that should be called at exit
+    __cxa_atexit(&AllImages::runAllStaticTerminatorsHelper, nullptr, nullptr);
+}
+
+void AllImages::runAllStaticTerminatorsHelper(void*)
+{
+    gAllImages.runAllStaticTerminators();
 }
 
 void AllImages::runAllInitializersInImage(const closure::Image* image, const MachOLoaded* ml)
@@ -1345,8 +1661,10 @@ void AllImages::runAllInitializersInImage(const closure::Image* image, const Mac
     });
 }
 
-const MachOLoaded* AllImages::dlopen(Diagnostics& diag, const char* path, bool rtldNoLoad, bool rtldLocal, bool rtldNoDelete, bool fromOFI, const void* callerAddress)
+const MachOLoaded* AllImages::dlopen(Diagnostics& diag, const char* path, bool rtldNoLoad, bool rtldLocal, bool rtldNoDelete, bool rtldNow, bool fromOFI, const void* callerAddress)
 {
+    bool sharedCacheFormatCompatible = (_dyldCacheAddress != nullptr) && (_dyldCacheAddress->header.formatVersion == dyld3::closure::kFormatVersion);
+
     // quick check if path is in shared cache and already loaded
     if ( _dyldCacheAddress != nullptr ) {
         uint32_t dyldCacheImageIndex;
@@ -1360,32 +1678,42 @@ const MachOLoaded* AllImages::dlopen(Diagnostics& diag, const char* path, bool r
                     return mh;
                 }
             }
+
+            // If this is a customer cache, and we have no overrides, then we know for sure the cache closure is valid
+            // This assumes that a libdispatch root would have been loaded on launch, and that root path is not
+            // supported with customer caches, which is the case today.
+            if ( !rtldNoLoad && !hasInsertedOrInterposingLibraries() &&
+                 (_dyldCacheAddress->header.cacheType == kDyldSharedCacheTypeProduction) &&
+                 sharedCacheFormatCompatible ) {
+                const dyld3::closure::ImageArray* images = _dyldCacheAddress->cachedDylibsImageArray();
+                const dyld3::closure::Image* image = images->imageForNum(dyldCacheImageIndex+1);
+                return loadImage(diag, image->imageNum(), nullptr, rtldLocal, rtldNoDelete, rtldNow, fromOFI);
+            }
         }
     }
 
     __block closure::ImageNum callerImageNum = 0;
-    STACK_ALLOC_ARRAY(LoadedImage, loadedList, 1024);
     for (const LoadedImage& li : _loadedImages) {
-        loadedList.push_back(li);
         uint8_t permissions;
         if ( (callerImageNum == 0) && li.image()->containsAddress(callerAddress, li.loadedAddress(), &permissions) ) {
             callerImageNum = li.image()->imageNum();
         }
         //fprintf(stderr, "mh=%p, image=%p, imageNum=0x%04X, path=%s\n", li.loadedAddress(), li.image(), li.image()->imageNum(), li.image()->path());
     }
-    uintptr_t alreadyLoadedCount = loadedList.count();
 
     // make closure
     closure::ImageNum topImageNum = 0;
-    const closure::DlopenClosure* newClosure;
+    const closure::DlopenClosure* newClosure = nullptr;
 
     // First try with closures from the shared cache permitted.
     // Then try again with forcing a new closure
     for (bool canUseSharedCacheClosure : { true, false }) {
-        closure::FileSystemPhysical fileSystem;
+        // We can only use a shared cache closure if the shared cache format is the same as libdyld.
+        canUseSharedCacheClosure &= sharedCacheFormatCompatible;
+        closure::FileSystemPhysical fileSystem(nullptr, nullptr, _allowEnvPaths);
         closure::ClosureBuilder::AtPath atPathHanding = (_allowAtPaths ? closure::ClosureBuilder::AtPath::all : closure::ClosureBuilder::AtPath::onlyInRPaths);
-        closure::ClosureBuilder cb(_nextImageNum, fileSystem, _dyldCacheAddress, true, closure::gPathOverrides, atPathHanding);
-        newClosure = cb.makeDlopenClosure(path, _mainClosure, loadedList, callerImageNum, rtldNoLoad, canUseSharedCacheClosure, &topImageNum);
+        closure::ClosureBuilder cb(_nextImageNum, fileSystem, _dyldCacheAddress, true, *_archs, closure::gPathOverrides, atPathHanding);
+        newClosure = cb.makeDlopenClosure(path, _mainClosure, _loadedImages.array(), callerImageNum, rtldNoLoad, rtldNow, canUseSharedCacheClosure, &topImageNum);
         if ( newClosure == closure::ClosureBuilder::sRetryDlopenClosure ) {
             log_apis("   dlopen: closure builder needs to retry: %s\n", path);
             assert(canUseSharedCacheClosure);
@@ -1426,21 +1754,58 @@ const MachOLoaded* AllImages::dlopen(Diagnostics& diag, const char* path, bool r
                 // if called with RTLD_NODELETE, mark it as never-unload
                 if ( rtldNoDelete )
                     li.markLeaveMapped();
+
+                // If we haven't run the initializers then we must be in a static init in a dlopen
+                if ( li.state() != LoadedImage::State::inited ) {
+                    // RTLD_NOLOAD means dlopen should fail unless path is already loaded.
+                    // don't run initializers when RTLD_NOLOAD is set.  This only matters if dlopen() is
+                    // called from within an initializer because it can cause initializers to run
+                    // out of order. Most uses of RTLD_NOLOAD are "probes".  If they want initialzers
+                    // to run, then don't use RTLD_NOLOAD.
+                    if (!rtldNoLoad) {
+                        runInitialzersBottomUp(li.image());
+                    }
+                }
+
                 return topLoadAddress;
             }
         }
     }
 
+    return loadImage(diag, topImageNum, newClosure, rtldLocal, rtldNoDelete, rtldNow, fromOFI);
+}
+
+// Note this is noinline to avoid having too much stack used in the parent
+// dlopen method
+__attribute__((noinline))
+const MachOLoaded* AllImages::loadImage(Diagnostics& diag, closure::ImageNum topImageNum, const closure::DlopenClosure* newClosure,
+                                        bool rtldLocal, bool rtldNoDelete, bool rtldNow, bool fromOFI) {
+    // Note this array is used as the storage to Loader so needs to be at least
+    // large enough to handle whatever total number of images we need to do the dlopen
+    STACK_ALLOC_OVERFLOW_SAFE_ARRAY(LoadedImage, newImages, 1024);
+
+    // Note we don't need pre-optimized Objective-C for dlopen closures, but use
+    // variables here to make it easier to see whats going on.
+    const dyld3::closure::ObjCSelectorOpt*                  selectorOpt = nullptr;
+    dyld3::Array<dyld3::closure::Image::ObjCSelectorImage>  selectorImages;
+
     // run loader to load all new images
-	Loader loader(loadedList, _dyldCacheAddress, imagesArrays(), &dyld3::log_loads, &dyld3::log_segments, &dyld3::log_fixups, &dyld3::log_dofs);
-	const closure::Image* topImage = closure::ImageArray::findImage(imagesArrays(), topImageNum);
+    Loader loader(_loadedImages.array(), newImages, _dyldCacheAddress, imagesArrays(),
+                  selectorOpt, selectorImages,
+                  &dyld3::log_loads, &dyld3::log_segments, &dyld3::log_fixups, &dyld3::log_dofs);
+
+    // find Image* for top image, look in new closure first
+    const closure::Image* topImage = nullptr;
+    if ( newClosure != nullptr )
+        topImage = newClosure->images()->imageForNum(topImageNum);
+    if ( topImage == nullptr )
+        topImage = closure::ImageArray::findImage(imagesArrays(), topImageNum);
     if ( newClosure == nullptr ) {
         if ( topImageNum < dyld3::closure::kLastDyldCacheImageNum )
             log_apis("   dlopen: using image in dyld shared cache %p\n", topImage);
         else
             log_apis("   dlopen: using pre-built dlopen closure %p\n", topImage);
     }
-    uintptr_t topIndex = loadedList.count();
     LoadedImage topLoadedImage = LoadedImage::make(topImage);
     if ( rtldLocal && !topImage->inDyldCache() )
         topLoadedImage.setHideFromFlatSearch(true);
@@ -1450,28 +1815,36 @@ const MachOLoaded* AllImages::dlopen(Diagnostics& diag, const char* path, bool r
 
 
     // recursively load all dependents and fill in allImages array
-    loader.completeAllDependents(diag, topIndex);
+    bool someCacheImageOverridden = false;
+    loader.completeAllDependents(diag, someCacheImageOverridden);
     if ( diag.hasError() )
-         return nullptr;
-    loader.mapAndFixupAllImages(diag, _processDOFs, fromOFI, topIndex);
+        return nullptr;
+    loader.mapAndFixupAllImages(diag, _processDOFs, fromOFI);
     if ( diag.hasError() )
-         return nullptr;
+        return nullptr;
 
-    const MachOLoaded* topLoadAddress = loadedList[topIndex].loadedAddress();
+    // Record if we had a root
+    _someImageOverridden |= someCacheImageOverridden;
+
+    const MachOLoaded* topLoadAddress = newImages.begin()->loadedAddress();
 
     // bump dlopen refcount of image directly loaded
     if ( !topImage->inDyldCache() )
         incRefCount(topLoadAddress);
 
     // tell gAllImages about new images
-    const uint32_t newImageCount = (uint32_t)(loadedList.count() - alreadyLoadedCount);
-    addImages(loadedList.subArray(alreadyLoadedCount, newImageCount));
+    addImages(newImages);
+
+    // Run notifiers before applyInterposingToDyldCache() as then we have an
+    // accurate image list before any calls to findImage().
+    // TODO: Can we move this even earlier, eg, after map images but before fixups?
+    runImageNotifiers(newImages);
 
     // if closure adds images that override dyld cache, patch cache
     if ( newClosure != nullptr )
         applyInterposingToDyldCache(newClosure);
 
-    runImageNotifiers(loadedList.subArray(alreadyLoadedCount, newImageCount));
+    runImageCallbacks(newImages);
 
     // run initializers
     runInitialzersBottomUp(topImage);
@@ -1494,7 +1867,67 @@ bool AllImages::isRestricted() const
     return !_allowEnvPaths;
 }
 
+bool AllImages::hasInsertedOrInterposingLibraries() const
+{
+    return _mainClosure->hasInsertedLibraries() || _mainClosure->hasInterposings();
+}
 
+void AllImages::takeLockBeforeFork() {
+#ifdef OS_UNFAIR_RECURSIVE_LOCK_INIT
+    os_unfair_recursive_lock_lock(&_globalLock);
+#endif
+}
+
+void AllImages::releaseLockInForkParent() {
+#ifdef OS_UNFAIR_RECURSIVE_LOCK_INIT
+    os_unfair_recursive_lock_unlock(&_globalLock);
+#endif
+}
+
+void AllImages::resetLockInForkChild() {
+#if TARGET_OS_SIMULATOR
+
+    // There's no dyld3 on the simulator this year
+    assert(false);
+
+#else
+
+#ifdef OS_UNFAIR_RECURSIVE_LOCK_INIT
+    os_unfair_recursive_lock_unlock_forked_child(&_globalLock);
+#endif
+
+#endif // TARGET_OS_SIMULATOR
+}
+
+const char* AllImages::getObjCSelector(const char *selName) const {
+    if ( _objcSelectorHashTable == nullptr )
+        return nullptr;
+    return _objcSelectorHashTable->getString(selName, _objcSelectorHashTableImages.array());
+}
+
+void AllImages::forEachObjCClass(const char* className,
+                                 void (^callback)(void* classPtr, bool isLoaded, bool* stop)) const {
+    if ( _objcClassHashTable == nullptr )
+        return;
+    // There may be a duplicate in the shared cache.  If that is the case, return it first
+    if ( _objcClassDuplicatesHashTable != nullptr ) {
+        void* classImpl = nullptr;
+        if ( _objcClassDuplicatesHashTable->getClassLocation(className, _dyldCacheObjCOpt, classImpl) ) {
+            bool stop = false;
+            callback(classImpl, true, &stop);
+            if (stop)
+                return;
+        }
+    }
+    _objcClassHashTable->forEachClass(className, _objcClassHashTableImages.array(), callback);
+}
+
+void AllImages::forEachObjCProtocol(const char* protocolName,
+                                    void (^callback)(void* protocolPtr, bool isLoaded, bool* stop)) const {
+    if ( _objcProtocolHashTable == nullptr )
+        return;
+    _objcProtocolHashTable->forEachClass(protocolName, _objcClassHashTableImages.array(), callback);
+}
 
 
 } // namespace dyld3

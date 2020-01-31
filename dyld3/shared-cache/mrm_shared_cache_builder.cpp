@@ -30,9 +30,13 @@
 #include <memory>
 #include <vector>
 #include <map>
+#include <sys/stat.h>
 
 static const uint64_t kMinBuildVersion = 1; //The minimum version BuildOptions struct we can support
 static const uint64_t kMaxBuildVersion = 1; //The maximum version BuildOptions struct we can support
+
+static const uint32_t MajorVersion = 1;
+static const uint32_t MinorVersion = 0;
 
 namespace dyld3 {
 namespace closure {
@@ -93,6 +97,7 @@ public:
         info.fileContentLen             = fileInfo.length;
         info.sliceOffset                = 0;
         info.sliceLen                   = fileInfo.length;
+        info.isSipProtected             = false;
         info.inode                      = fileInfo.inode;
         info.mtime                      = fileInfo.mtime;
         info.unload                     = nullptr;
@@ -111,7 +116,8 @@ public:
         info.fileContentLen = keepLength;
     }
 
-    bool fileExists(const char* path, uint64_t* inode=nullptr, uint64_t* mtime=nullptr, bool* issetuid=nullptr) const override {
+    bool fileExists(const char* path, uint64_t* inode=nullptr, uint64_t* mtime=nullptr,
+                    bool* issetuid=nullptr, bool* inodesMatchRuntime = nullptr) const override {
         Diagnostics diag;
         std::string resolvedPath = symlinkResolver.realPath(diag, path);
         if (diag.hasError()) {
@@ -132,6 +138,8 @@ public:
             *mtime = fileInfo.mtime;
         if (issetuid)
             *issetuid = false;
+        if (inodesMatchRuntime)
+            *inodesMatchRuntime = false;
         return true;
     }
 
@@ -147,11 +155,10 @@ public:
         if (diag.hasError())
             return false;
 
-        // on iOS, inode is used to hold hash of path
-        uint64_t hash = 0;
-        for (const char* s = path; *s != '\0'; ++s)
-            hash += hash*4 + *s;
-        uint64_t inode = hash;
+        // on iOS, inode is just a placeholder
+        // Note its safe to just use the index here as we only compare it during closure building
+        // and never record it in the closures
+        uint64_t inode = files.size() + 1;
         uint64_t mtime = 0;
 
         files.push_back((FileInfo){ path, data, size, fileFlags, mtime, inode });
@@ -195,9 +202,10 @@ struct BuildInstance {
     std::vector<std::string>                        warningStrings; // Owns the data for the warnings
     uint8_t*                                        cacheData       = nullptr;
     uint64_t                                        cacheSize       = 0;
-    uint8_t*                                        cacheMapData    = nullptr;
-    uint64_t                                        cacheMapSize    = 0;
+    std::string                                     jsonMap;
     std::string                                     cdHash;         // Owns the data for the cdHash
+    std::string                                     cdHashType;     // Owns the data for the cdHashType
+    std::string                                     uuid;           // Owns the data for the uuid
 };
 
 struct BuildFileResult {
@@ -217,11 +225,25 @@ struct SharedCacheBuilder {
     // An array of builders and their options as we may have more than one builder for a given device variant.
     std::vector<BuildInstance> builders;
 
+    // The paths in all of the caches
+    // We keep this here to own the std::string path data
+    std::map<std::string, uint32_t> dylibsInCaches;
+
     // The results from all of the builders
     // We keep this in a vector to own the data.
-    std::vector<BuildFileResult> fileResults;
+    std::vector<FileResult*>    fileResults;
+    std::vector<FileResult>     fileResultStorage;
 
-    std::vector<std::string> errors;
+    // The results from all of the builders
+    // We keep this in a vector to own the data.
+    std::vector<CacheResult*>    cacheResults;
+    std::vector<CacheResult>     cacheResultStorage;
+
+    // The files to remove.  These are in every copy of the caches we built
+    std::vector<const char*> filesToRemove;
+
+    std::vector<const char*> errors;
+    std::vector<std::string> errorStorage;
     pthread_mutex_t lock;
 
     enum State {
@@ -246,7 +268,8 @@ struct SharedCacheBuilder {
         diag.error(format, list);
         va_end(list);
 
-        errors.push_back(diag.errorMessage());
+        errorStorage.push_back(diag.errorMessage());
+        errors.push_back(errorStorage.back().data());
     }
 };
 
@@ -302,6 +325,11 @@ void validiateBuildOptions(const BuildOptions_v1* options, SharedCacheBuilder& b
     }
 }
 
+void getVersion(uint32_t *major, uint32_t *minor) {
+    *major = MajorVersion;
+    *minor = MinorVersion;
+}
+
 struct SharedCacheBuilder* createSharedCacheBuilder(const BuildOptions_v1* options) {
     SharedCacheBuilder* builder = new SharedCacheBuilder(options);
 
@@ -351,7 +379,8 @@ bool addFile(struct SharedCacheBuilder* builder, const char* path, uint8_t* data
         }
         Diagnostics diag;
         if (!builder->fileSystem.addFile(path, data, size, diag, fileFlags)) {
-            builder->errors.push_back(diag.errorMessage());
+            builder->errorStorage.push_back(diag.errorMessage());
+            builder->errors.push_back(builder->errorStorage.back().data());
             return;
         }
         success = true;
@@ -377,7 +406,8 @@ bool addSymlink(struct SharedCacheBuilder* builder, const char* fromPath, const 
         }
         Diagnostics diag;
         if (!builder->fileSystem.addSymlink(fromPath, toPath, diag)) {
-            builder->errors.push_back(diag.errorMessage());
+            builder->errorStorage.push_back(diag.errorMessage());
+            builder->errors.push_back(builder->errorStorage.back().data());
             return;
         }
         success = true;
@@ -504,8 +534,8 @@ bool runSharedCacheBuilder(struct SharedCacheBuilder* builder) {
                 const char *cacheSuffix = (isOptimized ? "" : ".development");
                 std::string runtimePath = (builder->options->platform == Platform::macOS) ? "/private/var/db/dyld/" : "/System/Library/Caches/com.apple.dyld/";
                 options->outputFilePath = runtimePath + "dyld_shared_cache_" + builder->options->archs[i] + cacheSuffix;
-                options->outputMapFilePath = options->outputFilePath + ".map";
-                options->archName = builder->options->archs[i];
+                options->outputMapFilePath = options->outputFilePath + ".json";
+                options->archs = &dyld3::GradedArchs::forName(builder->options->archs[i]);
                 options->platform = (dyld3::Platform)builder->options->platform;
                 options->excludeLocalSymbols = platformExcludeLocalSymbols(builder->options->platform);
                 options->optimizeStubs = isOptimized;
@@ -519,7 +549,6 @@ bool runSharedCacheBuilder(struct SharedCacheBuilder* builder) {
                 options->verbose = builder->options->verboseDiagnostics;
                 options->evictLeafDylibsOnOverflow = true;
                 options->loggingPrefix = std::string(builder->options->deviceName) + dispositionName(builder->options->disposition) + "." + builder->options->archs[i] + cacheSuffix;
-                options->pathPrefixes = { "" };
                 options->dylibOrdering = parseOrderFile(builder->dylibOrderFileData);
                 options->dirtyDataSegmentOrdering = parseOrderFile(builder->dirtyDataOrderFileData);
 
@@ -537,18 +566,20 @@ bool runSharedCacheBuilder(struct SharedCacheBuilder* builder) {
                 break;
             case Disposition::Customer:
                 addCacheConfiguration(true);
+                break;
             case Disposition::InternalMinDevelopment:
                 addCacheConfiguration(false);
+                break;
         }
 
         // FIXME: This step can run in parallel.
         for (auto& buildInstance : builder->builders) {
-            CacheBuilder* builder = buildInstance.builder.get();
-            builder->build(buildInstance.inputFiles, aliases);
+            CacheBuilder* cacheBuilder = buildInstance.builder.get();
+            cacheBuilder->build(buildInstance.inputFiles, aliases);
 
             // First put the warnings in to a vector to own them.
-            buildInstance.warningStrings.reserve(builder->warnings().size());
-            for (const std::string& warning : builder->warnings())
+            buildInstance.warningStrings.reserve(cacheBuilder->warnings().size());
+            for (const std::string& warning : cacheBuilder->warnings())
                 buildInstance.warningStrings.push_back(warning);
 
             // Then copy to a vector to reference the owner
@@ -556,9 +587,9 @@ bool runSharedCacheBuilder(struct SharedCacheBuilder* builder) {
             for (const std::string& warning : buildInstance.warningStrings)
                 buildInstance.warnings.push_back(warning.c_str());
 
-            if (!builder->errorMessage().empty()) {
+            if (!cacheBuilder->errorMessage().empty()) {
                 // First put the errors in to a vector to own them.
-                buildInstance.errorStrings.push_back(builder->errorMessage());
+                buildInstance.errorStrings.push_back(cacheBuilder->errorMessage());
 
                 // Then copy to a vector to reference the owner
                 buildInstance.errors.reserve(buildInstance.errorStrings.size());
@@ -566,33 +597,83 @@ bool runSharedCacheBuilder(struct SharedCacheBuilder* builder) {
                     buildInstance.errors.push_back(error.c_str());
             }
 
-            if (builder->errorMessage().empty()) {
-                builder->writeBuffer(buildInstance.cacheData, buildInstance.cacheSize);
-                builder->writeMapFileBuffer(buildInstance.cacheMapData, buildInstance.cacheMapSize);
-                buildInstance.cdHash = builder->cdHashFirst();
+            if (cacheBuilder->errorMessage().empty()) {
+                cacheBuilder->writeBuffer(buildInstance.cacheData, buildInstance.cacheSize);
+                buildInstance.jsonMap = cacheBuilder->getMapFileBuffer(builder->options->deviceName);
+                buildInstance.cdHash = cacheBuilder->cdHashFirst();
+                buildInstance.uuid = cacheBuilder->uuid();
+                switch (buildInstance.options->codeSigningDigestMode) {
+                    case DyldSharedCache::SHA256only:
+                        buildInstance.cdHashType = "sha256";
+                        break;
+                    case DyldSharedCache::SHA1only:
+                        buildInstance.cdHashType = "sha1";
+                        break;
+                    case DyldSharedCache::Agile:
+                        buildInstance.cdHashType = "sha1";
+                        break;
+                }
             }
         }
 
         // Now that we have run all of the builds, collect the results
         // First push file results for each of the shared caches we built
-        __block std::map<std::string, uint32_t> dylibsInCaches;
         for (auto& buildInstance : builder->builders) {
             CacheBuilder* cacheBuilder = buildInstance.builder.get();
+
+            CacheResult cacheBuildResult;
+            cacheBuildResult.version                = 1;
+            cacheBuildResult.loggingPrefix          = buildInstance.options->loggingPrefix.c_str();
+            cacheBuildResult.deviceConfiguration    = buildInstance.options->loggingPrefix.c_str();
+            cacheBuildResult.warnings               = buildInstance.warnings.empty() ? nullptr : buildInstance.warnings.data();
+            cacheBuildResult.numWarnings            = buildInstance.warnings.size();
+            cacheBuildResult.errors                 = buildInstance.errors.empty() ? nullptr : buildInstance.errors.data();
+            cacheBuildResult.numErrors              = buildInstance.errors.size();
+            cacheBuildResult.uuidString             = buildInstance.uuid.c_str();
+            cacheBuildResult.mapJSON                = buildInstance.jsonMap.c_str();
+
+            builder->cacheResultStorage.emplace_back(cacheBuildResult);
+
             if (!cacheBuilder->errorMessage().empty())
                 continue;
-            builder->fileResults.push_back((BuildFileResult) { buildInstance.options->outputFilePath, buildInstance.cacheData, buildInstance.cacheSize });
-            builder->fileResults.push_back((BuildFileResult) { buildInstance.options->outputMapFilePath, buildInstance.cacheMapData, buildInstance.cacheMapSize });
+
+            FileResult cacheFileResult;
+            cacheFileResult.version          = 1;
+            cacheFileResult.path             = buildInstance.options->outputFilePath.c_str();
+            cacheFileResult.behavior         = AddFile;
+            cacheFileResult.data             = buildInstance.cacheData;
+            cacheFileResult.size             = buildInstance.cacheSize;
+            cacheFileResult.hashArch         = buildInstance.options->archs->name();
+            cacheFileResult.hashType         = buildInstance.cdHashType.c_str();
+            cacheFileResult.hash             = buildInstance.cdHash.c_str();
+
+            builder->fileResultStorage.emplace_back(cacheFileResult);
 
             cacheBuilder->forEachCacheDylib(^(const std::string &path) {
-                ++dylibsInCaches[path];
+                ++builder->dylibsInCaches[path.c_str()];
             });
         }
 
+        // Copy from the storage to the vector we can return to the API.
+        for (auto &fileResult : builder->fileResultStorage)
+            builder->fileResults.push_back(&fileResult);
+        for (auto &cacheResult : builder->cacheResultStorage)
+            builder->cacheResults.push_back(&cacheResult);
+
+
         // Add entries to tell us to remove all of the dylibs from disk which are in every cache.
         const size_t numCaches = builder->builders.size();
-        for (const auto& dylibAndCount : dylibsInCaches) {
-            if (dylibAndCount.second == numCaches)
-                builder->fileResults.push_back((BuildFileResult) { dylibAndCount.first, nullptr, 0 });
+        for (const auto& dylibAndCount : builder->dylibsInCaches) {
+            if (dylibAndCount.second == numCaches) {
+                builder->filesToRemove.push_back(dylibAndCount.first.c_str());
+            }
+        }
+
+        // Quit if we had any errors.
+        for (auto& buildInstance : builder->builders) {
+            CacheBuilder* cacheBuilder = buildInstance.builder.get();
+            if (!cacheBuilder->errorMessage().empty())
+                return;
         }
 
         builder->state = SharedCacheBuilder::FinishedBuilding;
@@ -601,47 +682,42 @@ bool runSharedCacheBuilder(struct SharedCacheBuilder* builder) {
     return success;
 }
 
-uint64_t getErrorCount(const struct SharedCacheBuilder* builder) {
-    return builder->errors.size();
-}
-
-const char* getError(const struct SharedCacheBuilder* builder, uint64_t errorIndex) {
-    if (errorIndex >= builder->errors.size())
+const char* const* getErrors(const struct SharedCacheBuilder* builder, uint64_t* errorCount) {
+    if (builder->errors.empty())
         return nullptr;
-    return builder->errors[errorIndex].c_str();
+    *errorCount = builder->errors.size();
+    return builder->errors.data();
 }
 
-uint64_t getCacheResultCount(const struct SharedCacheBuilder* builder) {
-    return builder->builders.size();
+const struct FileResult* const* getFileResults(struct SharedCacheBuilder* builder, uint64_t* resultCount) {
+    if (builder->fileResults.empty())
+        return nullptr;
+    *resultCount = builder->fileResults.size();
+    return builder->fileResults.data();
 }
 
-void getCacheResult(struct SharedCacheBuilder* builder, uint64_t cacheIndex, BuildResult* result) {
-    if (cacheIndex >= builder->builders.size())
-        return;
-
-    BuildInstance& buildInstance = builder->builders[cacheIndex];
-
-    result->version         = 1;
-    result->loggingPrefix   = buildInstance.options->loggingPrefix.c_str();
-    result->warnings        = buildInstance.warnings.empty() ? nullptr : buildInstance.warnings.data();
-    result->numWarnings     = buildInstance.warnings.size();
-    result->errors          = buildInstance.errors.empty() ? nullptr : buildInstance.errors.data();
-    result->numErrors       = buildInstance.errors.size();
-    result->sharedCachePath = buildInstance.options->outputFilePath.c_str();
-    result->cdHash          = buildInstance.cdHash.c_str();
+const struct CacheResult* const* getCacheResults(struct SharedCacheBuilder* builder, uint64_t* resultCount) {
+    if (builder->cacheResults.empty())
+        return nullptr;
+    *resultCount = builder->cacheResults.size();
+    return builder->cacheResults.data();
 }
 
-uint64_t getFileResultCount(const struct SharedCacheBuilder* builder) {
-    return builder->fileResults.size();
-}
-
-void getFileResult(struct SharedCacheBuilder* builder, uint64_t fileIndex, FileResult* result) {
-    if (fileIndex >= builder->fileResults.size())
-        return;
-    const BuildFileResult& buildFileResult = builder->fileResults[fileIndex];
-    *result = (FileResult) { buildFileResult.path.c_str(), buildFileResult.data, buildFileResult.size };
+const char* const* getFilesToRemove(const struct SharedCacheBuilder* builder, uint64_t* fileCount) {
+    if (builder->filesToRemove.empty())
+        return nullptr;
+    *fileCount = builder->filesToRemove.size();
+    return builder->filesToRemove.data();
 }
 
 void destroySharedCacheBuilder(struct SharedCacheBuilder* builder) {
+    for (auto& buildInstance : builder->builders) {
+        CacheBuilder* cacheBuilder = buildInstance.builder.get();
+        cacheBuilder->deleteBuffer();
+    }
+    for (auto &fileResult : builder->fileResultStorage) {
+        free((void*)fileResult.data);
+        fileResult.data = nullptr;
+    }
     delete builder;
 }

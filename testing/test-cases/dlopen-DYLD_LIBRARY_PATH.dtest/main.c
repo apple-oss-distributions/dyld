@@ -4,12 +4,12 @@
 // BUILD:  $CC bar.c -dynamiclib -o $BUILD_DIR/door2/libbar.dylib -install_name $RUN_DIR/libbar.dylib -DVALUE=17
 // BUILD:  $CC foo.c -dynamiclib -o $BUILD_DIR/door1/libfoo.dylib -install_name $RUN_DIR/libfoo.dylib -DVALUE=10  $BUILD_DIR/door1/libbar.dylib
 // BUILD:  $CC foo.c -dynamiclib -o $BUILD_DIR/door2/libfoo.dylib -install_name $RUN_DIR/libfoo.dylib -DVALUE=25  $BUILD_DIR/door2/libbar.dylib
-// BUILD:  $CC main.c            -o $BUILD_DIR/main.exe 
-// BUILD:  $DYLD_ENV_VARS_ENABLE $BUILD_DIR/main.exe
+// BUILD:  $CC main.c            -o $BUILD_DIR/dlopen-DYLD_LIBRARY_PATH.exe 
+// BUILD:  $DYLD_ENV_VARS_ENABLE $BUILD_DIR/dlopen-DYLD_LIBRARY_PATH.exe
 
-// RUN:  DYLD_LIBRARY_PATH=$RUN_DIR/door1/                  ./main.exe  13
-// RUN:  DYLD_LIBRARY_PATH=$RUN_DIR/door2                   ./main.exe  42
-// RUN:  DYLD_LIBRARY_PATH=$RUN_DIR/door3/:$RUN_DIR/door2/  ./main.exe  42
+// RUN:  DYLD_LIBRARY_PATH=$RUN_DIR/door1/                  ./dlopen-DYLD_LIBRARY_PATH.exe  13
+// RUN:  DYLD_LIBRARY_PATH=$RUN_DIR/door2                   ./dlopen-DYLD_LIBRARY_PATH.exe  42
+// RUN:  DYLD_LIBRARY_PATH=$RUN_DIR/door3/:$RUN_DIR/door2/  ./dlopen-DYLD_LIBRARY_PATH.exe  42
 
 #include <stdio.h>
 #include <dlfcn.h>

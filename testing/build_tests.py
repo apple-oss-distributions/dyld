@@ -8,6 +8,7 @@ import os
 import tempfile
 import shutil
 import subprocess
+import uuid
 
 
 #
@@ -17,12 +18,14 @@ import subprocess
 def parseDirectives(testCaseSourceDir):
     onlyLines = []
     buildLines = []
+    extractLines = []
     runLines = []
     minOS = ""
     timeout = ""
     noCrashLogs = []
+    bootArgs = []
     for file in os.listdir(testCaseSourceDir):
-        if file.endswith((".c", ".cpp", ".cxx")):
+        if file.endswith((".c", ".cpp", ".cxx", ".m", ".mm")):
             with open(testCaseSourceDir + "/" + file) as f:
                 for line in f.read().splitlines():
                     buildIndex = string.find(line, "BUILD:")
@@ -43,20 +46,24 @@ def parseDirectives(testCaseSourceDir):
                     noCrashLogsIndex = string.find(line, "NO_CRASH_LOG:")
                     if noCrashLogsIndex != -1:
                         noCrashLogs.append(line[noCrashLogsIndex+13:].lstrip())
+                    bootArgsIndex = string.find(line, "BOOT_ARGS:")
+                    if bootArgsIndex != -1:
+                        bootArgs.append(line[bootArgsIndex+10:].lstrip())
     return {
         "BUILD":        buildLines,
         "BUILD_ONLY":   onlyLines,
         "BUILD_MIN_OS": minOS,
         "RUN":          runLines,
         "RUN_TIMEOUT":  timeout,
-        "NO_CRASH_LOG": noCrashLogs
+        "NO_CRASH_LOG": noCrashLogs,
+        "BOOT_ARGS":    bootArgs,
    }
 
 
 #
 # Look at directives dictionary to see if this test should be skipped for this platform
 #
-def useTestCase(testCaseDirectives, platformName):
+def useTestCase(testName, testCaseDirectives, platformName):
     onlyLines = testCaseDirectives["BUILD_ONLY"]
     for only in onlyLines:
         if only == "MacOSX" and platformName != "macosx":
@@ -70,13 +77,14 @@ def useTestCase(testCaseDirectives, platformName):
 # Use BUILD directives to construct the test case
 # Use RUN directives to generate a shell script to run test(s)
 #
-def buildTestCase(testCaseDirectives, testCaseSourceDir, toolsDir, sdkDir, dyldIncludesDir, minOsOptionsName, defaultMinOS, archOptions, testCaseDestDirBuild, testCaseDestDirRun):
+def buildTestCase(testCaseDirectives, testCaseSourceDir, toolsDir, sdkDir, dyldIncludesDir, minOsOptionsName, defaultMinOS, archOptions, testCaseDestDirBuild, testCaseDestDirRun, plistDir):
     scratchDir = tempfile.mkdtemp()
     if testCaseDirectives["BUILD_MIN_OS"]:
         minOS = testCaseDirectives["BUILD_MIN_OS"]
     else:
         minOS = defaultMinOS
-    compilerSearchOptions = " -isysroot " + sdkDir + " -I" + sdkDir + "/System/Library/Frameworks/System.framework/PrivateHeaders" + " -I" + dyldIncludesDir
+    compilerSearchOptions = " -isysroot " + sdkDir + " -I" + sdkDir + "/System/Library/Frameworks/System.framework/PrivateHeaders" + " -I" + dyldIncludesDir + " -I" + testsSrcTopDir + "../include/"
+    defines = " -DINSTALL_PATH=\"" + testCaseDestDirRun + "\""
     if minOsOptionsName == "mmacosx-version-min":
         taskForPidCommand = "touch "
         envEnableCommand  = "touch "
@@ -84,8 +92,8 @@ def buildTestCase(testCaseDirectives, testCaseSourceDir, toolsDir, sdkDir, dyldI
         taskForPidCommand = "codesign --force --sign - --entitlements " + testCaseSourceDir + "/../../task_for_pid_entitlement.plist "
         envEnableCommand  = "codesign --force --sign - --entitlements " + testCaseSourceDir + "/../../get_task_allow_entitlement.plist "
     buildSubs = {
-        "CC":                   toolsDir + "/usr/bin/clang "   + archOptions + " -" + minOsOptionsName + "=" + str(minOS) + compilerSearchOptions,
-        "CXX":                  toolsDir + "/usr/bin/clang++ " + archOptions + " -" + minOsOptionsName + "=" + str(minOS) + compilerSearchOptions,
+        "CC":                   toolsDir + "/usr/bin/clang "   + archOptions + " -" + minOsOptionsName + "=" + str(minOS) + compilerSearchOptions + defines,
+        "CXX":                  toolsDir + "/usr/bin/clang++ " + archOptions + " -" + minOsOptionsName + "=" + str(minOS) + compilerSearchOptions + defines,
         "BUILD_DIR":            testCaseDestDirBuild,
         "RUN_DIR":              testCaseDestDirRun,
         "TEMP_DIR":             scratchDir,
@@ -94,9 +102,13 @@ def buildTestCase(testCaseDirectives, testCaseSourceDir, toolsDir, sdkDir, dyldI
     }
     os.makedirs(testCaseDestDirBuild)
     os.chdir(testCaseSourceDir)
+    outputfiles = []
+    alreadySigned = []
     print >> sys.stderr, "cd " + testCaseSourceDir
     for line in testCaseDirectives["BUILD"]:
         cmd = string.Template(line).safe_substitute(buildSubs)
+        if "codesign" in cmd:
+            alreadySigned.append(string.split(cmd).pop())
         print >> sys.stderr, cmd
         if "&&" in cmd:
             result = subprocess.call(cmd, shell=True)
@@ -106,6 +118,17 @@ def buildTestCase(testCaseDirectives, testCaseSourceDir, toolsDir, sdkDir, dyldI
             result = subprocess.call(cmdList)
         if result:
             return result
+        args = cmd.split()
+        for index, arg in enumerate(args):
+            if arg == "-o":
+                outputfiles.append(args[index+1])
+                break
+    print >> sys.stderr, "outfiles: " +  ' '.join(outputfiles)  + "already signed: " + ' '.join(alreadySigned)
+    for outfile in outputfiles:
+        if outfile not in alreadySigned:
+            cmd = "codesign --force --sign - " + outfile
+            print >> sys.stderr, cmd
+            subprocess.call(string.split(cmd))
     shutil.rmtree(scratchDir, ignore_errors=True)
     sudoSub = ""
     if minOsOptionsName == "mmacosx-version-min":
@@ -120,19 +143,44 @@ def buildTestCase(testCaseDirectives, testCaseSourceDir, toolsDir, sdkDir, dyldI
         runFile.write("#!/bin/sh\n")
         runFile.write("cd " + testCaseDestDirRun + "\n")
         os.chmod(runFilePath, 0755)
+
         runFile.write("echo \"run in dyld2 mode\" \n");
         for runline in testCaseDirectives["RUN"]:
-           runFile.write(string.Template(runline).safe_substitute(runSubs) + "\n")
+          subLine = string.Template(runline).safe_substitute(runSubs)
+          subLine = "TEST_DYLD_MODE=2 DYLD_USE_CLOSURES=0 " + subLine
+          runFile.write(subLine + "\n")
+
+        if minOsOptionsName == "mmacosx-version-min":
+            runFile.write("echo \"run in dyld2 mode with no shared cache\" \n");
+            for runline in testCaseDirectives["RUN"]:
+                subLine = string.Template(runline).safe_substitute(runSubs)
+                subLine = "TEST_DYLD_MODE=2 DYLD_SHARED_REGION=avoid " + subLine
+                runFile.write(subLine + "\n")
+
         runFile.write("echo \"run in dyld3 mode\" \n");
         for runline in testCaseDirectives["RUN"]:
             subLine = string.Template(runline).safe_substitute(runSubs)
             if subLine.startswith("sudo "):
-                subLine = "sudo DYLD_USE_CLOSURES=1 " + subLine[5:]
+                subLine = "sudo TEST_DYLD_MODE=3 DYLD_USE_CLOSURES=1 " + subLine[5:]
             else:
-                subLine = "DYLD_USE_CLOSURES=1 " + subLine
+                subLine = "TEST_DYLD_MODE=3 DYLD_USE_CLOSURES=1 " + subLine
             runFile.write(subLine + "\n")
+
+        if minOsOptionsName == "mmacosx-version-min":
+            runFile.write("echo \"run in dyld3 mode with no shared cache\" \n");
+            for runline in testCaseDirectives["RUN"]:
+                subLine = string.Template(runline).safe_substitute(runSubs)
+                if subLine.startswith("sudo "):
+                    subLine = "sudo TEST_DYLD_MODE=3 DYLD_SHARED_REGION=avoid DYLD_USE_CLOSURES=1 " + subLine[5:]
+                else:
+                    subLine = "TEST_DYLD_MODE=3 DYLD_SHARED_REGION=avoid DYLD_USE_CLOSURES=1 " + subLine
+                runFile.write(subLine + "\n")
+
         runFile.write("\n")
         runFile.close()
+    for runline in testCaseDirectives["RUN"]:
+        runTarget = runline.split().pop()
+        os.system("xcrun dt_extractmeta extract -i " + testCaseDestDirRun + "/" + runTarget + " -b " + testCaseDestDirBuild + "/" + runTarget + " -o " + plistDir + "/" + str(uuid.uuid4()) + ".plist 2> /dev/null")
     return 0
 
 
@@ -145,6 +193,10 @@ if __name__ == "__main__":
     dstDir = os.getenv("DSTROOT", "/tmp/dyld_tests/")
     testsRunDstTopDir = "/AppleInternal/CoreOS/tests/dyld/"
     testsBuildDstTopDir = dstDir + testsRunDstTopDir
+    # If we want to run directly from the dstroot then override that now
+    runFromDstRoot = os.getenv("RUN_FROM_DSTROOT", "")
+    if runFromDstRoot:
+        testsRunDstTopDir = testsBuildDstTopDir
     shutil.rmtree(testsBuildDstTopDir, ignore_errors=True)
     dyldSrcDir = os.getenv("SRCROOT", "")
     if not dyldSrcDir:
@@ -164,19 +216,26 @@ if __name__ == "__main__":
             minVersNum = os.getenv(minOSVersName, "")
     else:
         minOSOption = "mmacosx-version-min"
-    platformName = os.getenv("PLATFORM_NAME", "osx")
+    platformName = os.getenv("PLATFORM_NAME", "macosx")
     archOptions = ""
     archList = os.getenv("RC_ARCHS", "")
     if archList:
         for arch in string.split(archList, " "):
             archOptions = archOptions + " -arch " + arch
     else:
-        archList = os.getenv("ARCHS_STANDARD_32_64_BIT", "")
         if platformName == "watchos":
             archOptions = "-arch armv7k"
         elif platformName == "appletvos":
             archOptions = "-arch arm64"
+        elif platformName == "macosx":
+            archList = os.getenv("ARCHS_STANDARD_64_BIT", "")
+            if archList:
+                for arch in string.split(archList, " "):
+                    archOptions = archOptions + " -arch " + arch
+            else:
+                archOptions = "-arch x86_64"
         else:
+            archList = os.getenv("ARCHS_STANDARD_32_64_BIT", "")
             if archList:
                 for arch in string.split(archList, " "):
                     archOptions = archOptions + " -arch " + arch
@@ -184,15 +243,21 @@ if __name__ == "__main__":
                 archOptions = "-arch x86_64"
     allTests = []
     suppressCrashLogs = []
+    plistDir = tempfile.mkdtemp()
     for f in sorted(os.listdir(testsSrcTopDir)):
         if f.endswith(".dtest"):
             testName = f[0:-6]
             outDirBuild = testsBuildDstTopDir + testName
             outDirRun = testsRunDstTopDir + testName
             testCaseDir = testsSrcTopDir + f
+            onlyTestDir = os.getenv("ONLY_BUILD_TEST", "")
+            if onlyTestDir:
+                if onlyTestDir != testName:
+                    continue
+                print >> sys.stderr, "Going to build " + testName
             testCaseDirectives = parseDirectives(testCaseDir)
-            if useTestCase(testCaseDirectives, platformName):
-                result = buildTestCase(testCaseDirectives, testCaseDir, toolsDir, sdkDir, dyldIncludesDir, minOSOption, minVersNum, archOptions, outDirBuild, outDirRun)
+            if useTestCase(testName, testCaseDirectives, platformName):
+                result = buildTestCase(testCaseDirectives, testCaseDir, toolsDir, sdkDir, dyldIncludesDir, minOSOption, minVersNum, archOptions, outDirBuild, outDirRun, plistDir)
                 if result:
                     sys.exit(result)
                 mytest = {}
@@ -201,16 +266,13 @@ if __name__ == "__main__":
                 mytest["WorkingDirectory"] = testsRunDstTopDir + testName
                 mytest["Command"] = []
                 mytest["Command"].append("./run.sh")
-                usesDtrace = False
                 for runline in testCaseDirectives["RUN"]:
                     if "$SUDO" in runline:
                         mytest["AsRoot"] = True
-                    if "dtrace" in runline:
-                        usesDtrace = True
                 if testCaseDirectives["RUN_TIMEOUT"]:
                     mytest["Timeout"] = testCaseDirectives["RUN_TIMEOUT"]
-                if usesDtrace and minOSOption != "mmacosx-version-min":
-                    mytest["BootArgsSet"] = "dtrace_dof_mode=1"
+                if testCaseDirectives["BOOT_ARGS"]:
+                    mytest["BootArgsSet"] = ",".join(testCaseDirectives["BOOT_ARGS"]);
                 allTests.append(mytest)
             if testCaseDirectives["NO_CRASH_LOG"]:
                 for skipCrash in testCaseDirectives["NO_CRASH_LOG"]:
@@ -238,4 +300,9 @@ if __name__ == "__main__":
             shFile.write(test["WorkingDirectory"] + "/run.sh\n")
         shFile.close()
     os.chmod(runHelper, 0755)
+    if not os.path.exists(dstDir + "/AppleInternal/CoreOS/tests/metadata/dyld/"): os.makedirs(dstDir + "/AppleInternal/CoreOS/tests/metadata/dyld/")
+    os.system("xcrun dt_extractmeta merge -o " + dstDir + "/AppleInternal/CoreOS/tests/metadata/dyld/dyld.plist " + plistDir + "/*")
+#   FIXME: Enable this once all tests move to darwintest
+#    os.system("xcrun dt_convertmeta " + dstDir + "/AppleInternal/CoreOS/BATS/unit_tests/dyld.plist dyld_tests " + dstDir + "/AppleInternal/CoreOS/tests/metadata/dyld/dyld.plist")
+    shutil.rmtree(plistDir, ignore_errors=True)
 

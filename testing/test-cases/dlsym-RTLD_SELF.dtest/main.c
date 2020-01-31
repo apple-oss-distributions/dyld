@@ -7,6 +7,7 @@
 
 #include <stdio.h>
 #include <dlfcn.h>
+#include <string.h>
 #include <mach-o/dyld_priv.h>
 
 

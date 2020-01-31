@@ -49,7 +49,7 @@ void ContainerTypedBytesWriter::setContainerType(TypedBytes::Type containerType)
     assert(allocationAddr != 0);
     _vmAllocationStart = (void*)allocationAddr;
     _containerTypedBytes =  (TypedBytes*)_vmAllocationStart;
-    _containerTypedBytes->type = (uint32_t)containerType;
+    _containerTypedBytes->type = containerType;
     _containerTypedBytes->payloadLength = 0;
     _end = (uint8_t*)_vmAllocationStart + sizeof(TypedBytes);
 }
@@ -76,11 +76,12 @@ void* ContainerTypedBytesWriter::append(TypedBytes::Type t, const void* payload,
     }
     assert( (uint8_t*)_end + payloadSize < (uint8_t*)_vmAllocationStart + _vmAllocationSize);
     TypedBytes* tb = (TypedBytes*)_end;
-    tb->type   = (uint32_t)t;
+    tb->type   = t;
     tb->payloadLength = payloadSize;
     if ( payload != nullptr )
         ::memcpy(tb->payload(), payload, payloadSize);
     _end = (uint8_t*)_end + sizeof(TypedBytes) + payloadSize;
+    assert((_containerTypedBytes->payloadLength + sizeof(TypedBytes) + payloadSize) < (16 * 1024 * 1024));
     _containerTypedBytes->payloadLength += sizeof(TypedBytes) + payloadSize;
     return tb->payload();
 }
@@ -204,6 +205,11 @@ void ImageWriter::setInDyldCache(bool value)
     getFlags().inDyldCache = value;
 }
 
+void ImageWriter::setHasPrecomputedObjC(bool value)
+{
+    getFlags().hasPrecomputedObjC = value;
+}
+
 void ImageWriter::setNeverUnload(bool value)
 {
     getFlags().neverUnload = value;
@@ -214,7 +220,7 @@ void ImageWriter::setUUID(const uuid_t uuid)
     append(TypedBytes::Type::uuid, uuid, sizeof(uuid_t));
 }
 
-void ImageWriter::setCDHash(const uint8_t cdHash[20])
+void ImageWriter::addCDHash(const uint8_t cdHash[20])
 {
     append(TypedBytes::Type::cdHash, cdHash, 20);
 }
@@ -234,9 +240,25 @@ void ImageWriter::setInitOffsets(const uint32_t initOffsets[], uint32_t count)
     append(TypedBytes::Type::initOffsets, initOffsets, count*sizeof(uint32_t));
 }
 
+void ImageWriter::setTermOffsets(const uint32_t termOffsets[], uint32_t count)
+{
+    getFlags().hasTerminators = true;
+    append(TypedBytes::Type::termOffsets, termOffsets, count*sizeof(uint32_t));
+}
+
+void ImageWriter::setInitSectRange(uint32_t sectionOffset, uint32_t sectionSize)
+{
+    Image::InitializerSectionRange range = { sectionOffset, sectionSize };
+    append(TypedBytes::Type::initsSection, &range, sizeof(Image::InitializerSectionRange));
+}
+
 void ImageWriter::setDiskSegments(const Image::DiskSegment segs[], uint32_t count)
 {
     append(TypedBytes::Type::diskSegment, segs, count*sizeof(Image::DiskSegment));
+    for (uint32_t i=0; i < count; ++i) {
+        if ( segs[i].permissions == Image::DiskSegment::kReadOnlyDataPermissions )
+            getFlags().hasReadOnlyData = true;
+    }
 }
 
 void ImageWriter::setCachedSegments(const Image::DyldCacheSegment segs[], uint32_t count)
@@ -254,12 +276,9 @@ void ImageWriter::setCodeSignatureLocation(uint32_t fileOffset, uint32_t size)
 
 void ImageWriter::setFairPlayEncryptionRange(uint32_t fileOffset, uint32_t size)
 {
-    const uint32_t pageSize = getFlags().has16KBpages ? 0x4000 : 0x1000;
-    assert((fileOffset % pageSize) == 0);
-    assert((size % pageSize) == 0);
     Image::FairPlayRange loc;
-    loc.textStartPage = fileOffset/pageSize;
-    loc.textPageCount = size/pageSize;
+    loc.rangeStart = fileOffset;
+    loc.rangeLength = size;
     append(TypedBytes::Type::fairPlayLoc, &loc, sizeof(loc));
 }
 
@@ -293,21 +312,85 @@ void ImageWriter::setBindInfo(const Array<Image::BindPattern>& fixups)
     append(TypedBytes::Type::bindFixups, fixups.begin(), (uint32_t)fixups.count()*sizeof(Image::BindPattern));
 }
 
-void ImageWriter::setChainedFixups(const Array<uint64_t>& starts, const Array<Image::ResolvedSymbolTarget>& targets)
+void ImageWriter::setChainedFixups(uint64_t runtimeStartsStructOffset, const Array<Image::ResolvedSymbolTarget>& targets)
 {
-    append(TypedBytes::Type::chainedFixupsStarts,  starts.begin(),  (uint32_t)starts.count()*sizeof(uint64_t));
+    getFlags().hasChainedFixups = true;
+    append(TypedBytes::Type::chainedStartsOffset, &runtimeStartsStructOffset, sizeof(uint64_t));
     append(TypedBytes::Type::chainedFixupsTargets, targets.begin(), (uint32_t)targets.count()*sizeof(Image::ResolvedSymbolTarget));
 }
 
-void ImageWriter::addExportPatchInfo(uint32_t implCacheOff, const char* name, uint32_t locCount, const Image::PatchableExport::PatchLocation* locs)
+void ImageWriter::setObjCFixupInfo(const Image::ResolvedSymbolTarget& objcProtocolClassTarget,
+                                   uint64_t objcImageInfoVMOffset,
+                                   const Array<Image::ProtocolISAFixup>& protocolISAFixups,
+                                   const Array<Image::SelectorReferenceFixup>& selRefFixups,
+                                   const Array<Image::ClassStableSwiftFixup>& classStableSwiftFixups,
+                                   const Array<Image::MethodListFixup>& methodListFixups)
 {
-    uint32_t roundedNameLen = ((uint32_t)strlen(name) + 1 + 3) & (-4);
-    uint32_t payloadSize = sizeof(Image::PatchableExport) + locCount*sizeof(Image::PatchableExport::PatchLocation) + roundedNameLen;
-    Image::PatchableExport* buffer = (Image::PatchableExport*)append(TypedBytes::Type::cachePatchInfo, nullptr, payloadSize);
-    buffer->cacheOffsetOfImpl   = implCacheOff;
-    buffer->patchLocationsCount = locCount;
-    memcpy(&buffer->patchLocations[0], locs, locCount*sizeof(Image::PatchableExport::PatchLocation));
-    strcpy((char*)(&buffer->patchLocations[locCount]), name);
+    // The layout here is:
+    //   ResolvedSymbolTarget
+    //   uint64_t vmOffset to objc_imageinfo
+    //   uint32_t protocol count
+    //   uint32_t selector reference count
+    //   array of ProtocolISAFixup
+    //   array of SelectorReferenceFixup
+    //   optional uint32_t stable swift fixup count
+    //   optional uint32_t method list fixup count
+    //   optional array of ClassStableSwiftFixup
+    //   optional array of MethodListFixup
+
+    uint64_t headerSize = sizeof(Image::ResolvedSymbolTarget) + sizeof(uint64_t) + (sizeof(uint32_t) * 4);
+    uint64_t protocolsSize = (sizeof(Image::ProtocolISAFixup) * protocolISAFixups.count());
+    uint64_t selRefsSize = (sizeof(Image::SelectorReferenceFixup) * selRefFixups.count());
+    uint64_t stableSwiftSize = (sizeof(Image::ClassStableSwiftFixup) * classStableSwiftFixups.count());
+    uint64_t methodListSize = (sizeof(Image::MethodListFixup) * methodListFixups.count());
+
+    uint64_t totalSize = headerSize + protocolsSize + selRefsSize + stableSwiftSize + methodListSize;
+    assert( (totalSize & 3) == 0);
+    uint8_t* buffer = (uint8_t*)append(TypedBytes::Type::objcFixups, nullptr, (uint32_t)totalSize);
+
+    // Set the statically sized data
+    uint32_t protocolFixupCount = (uint32_t)protocolISAFixups.count();
+    uint32_t selRefFixupCount = (uint32_t)selRefFixups.count();
+    memcpy(buffer, &objcProtocolClassTarget, sizeof(Image::ResolvedSymbolTarget));
+    buffer += sizeof(Image::ResolvedSymbolTarget);
+    memcpy(buffer, &objcImageInfoVMOffset, sizeof(uint64_t));
+    buffer += sizeof(uint64_t);
+    memcpy(buffer, &protocolFixupCount, sizeof(uint32_t));
+    buffer += sizeof(uint32_t);
+    memcpy(buffer, &selRefFixupCount, sizeof(uint32_t));
+    buffer += sizeof(uint32_t);
+
+    // Set the protocol fixups
+    if ( protocolFixupCount != 0 ) {
+        memcpy(buffer, protocolISAFixups.begin(), (size_t)protocolsSize);
+        buffer += protocolsSize;
+    }
+
+    // Set the selector reference fixups
+    if ( selRefFixupCount != 0 ) {
+        memcpy(buffer, selRefFixups.begin(), (size_t)selRefsSize);
+        buffer += selRefsSize;
+    }
+
+    // New closures get additional fixups.  These are ignored by old dyld's
+    uint32_t stableSwiftFixupCount = (uint32_t)classStableSwiftFixups.count();
+    uint32_t methodListFixupCount = (uint32_t)methodListFixups.count();
+    memcpy(buffer, &stableSwiftFixupCount, sizeof(uint32_t));
+    buffer += sizeof(uint32_t);
+    memcpy(buffer, &methodListFixupCount, sizeof(uint32_t));
+    buffer += sizeof(uint32_t);
+
+    // Set the stable swift fixups
+    if ( stableSwiftFixupCount != 0 ) {
+        memcpy(buffer, classStableSwiftFixups.begin(), (size_t)stableSwiftSize);
+        buffer += stableSwiftSize;
+    }
+
+    // Set the method list fixups
+    if ( methodListFixupCount != 0 ) {
+        memcpy(buffer, methodListFixups.begin(), (size_t)methodListSize);
+        buffer += methodListSize;
+    }
 }
 
 void ImageWriter::setAsOverrideOf(ImageNum imageNum)
@@ -325,7 +408,7 @@ void ImageWriter::setInitsOrder(const ImageNum images[], uint32_t count)
 ////////////////////////////  ImageArrayWriter ////////////////////////////////////////
 
 
-ImageArrayWriter::ImageArrayWriter(ImageNum startImageNum, unsigned count) : _index(0)
+ImageArrayWriter::ImageArrayWriter(ImageNum startImageNum, unsigned count, bool hasRoots) : _index(0)
 {
     setContainerType(TypedBytes::Type::imageArray);
     _end = (void*)((uint8_t*)_end + sizeof(ImageArray) - sizeof(TypedBytes) + sizeof(uint32_t)*count);
@@ -333,6 +416,7 @@ ImageArrayWriter::ImageArrayWriter(ImageNum startImageNum, unsigned count) : _in
     ImageArray* ia = (ImageArray*)_containerTypedBytes;
     ia->firstImageNum   = startImageNum;
     ia->count           = count;
+    ia->hasRoots        = hasRoots;
 }
 
 void ImageArrayWriter::appendImage(const Image* image)
@@ -358,6 +442,39 @@ void ClosureWriter::setTopImageNum(ImageNum imageNum)
 void ClosureWriter::addCachePatches(const Array<Closure::PatchEntry>& patches)
 {
     append(TypedBytes::Type::cacheOverrides, patches.begin(), (uint32_t)patches.count()*sizeof(Closure::PatchEntry));
+}
+
+void ClosureWriter::applyInterposing(const LaunchClosure* launchClosure)
+{
+    const Closure*       currentClosure = (Closure*)currentTypedBytes();
+	const ImageArray*    images         = currentClosure->images();
+	launchClosure->forEachInterposingTuple(^(const InterposingTuple& tuple, bool&) {
+        images->forEachImage(^(const dyld3::closure::Image* image, bool&) {
+            for (const Image::BindPattern& bindPat : image->bindFixups()) {
+                if ( (bindPat.target == tuple.stockImplementation) && (tuple.newImplementation.image.imageNum != image->imageNum()) ) {
+                    Image::BindPattern* writePat = const_cast<Image::BindPattern*>(&bindPat);
+                    writePat->target = tuple.newImplementation;
+                }
+            }
+
+            // Chained fixups may also be interposed.  We can't change elements in the chain, but we can change
+            // the target list.
+            for (const Image::ResolvedSymbolTarget& symbolTarget : image->chainedTargets()) {
+                if ( (symbolTarget == tuple.stockImplementation) && (tuple.newImplementation.image.imageNum != image->imageNum()) ) {
+                    Image::ResolvedSymbolTarget* writeTarget = const_cast<Image::ResolvedSymbolTarget*>(&symbolTarget);
+                    *writeTarget = tuple.newImplementation;
+                }
+            }
+        });
+    });
+}
+
+void ClosureWriter::addWarning(Closure::Warning::Type warningType, const char* warning)
+{
+    uint32_t roundedMessageLen = ((uint32_t)strlen(warning) + 1 + 3) & (-4);
+    Closure::Warning* ph = (Closure::Warning*)append(TypedBytes::Type::warning, nullptr, sizeof(Closure::Warning)+roundedMessageLen);
+    ph->type = warningType;
+    strcpy(ph->message, warning);
 }
 
 
@@ -404,6 +521,11 @@ void LaunchClosureWriter::setUsedAtPaths(bool value)
     getFlags().usedAtPaths = value;
 }
 
+void LaunchClosureWriter::setHasInsertedLibraries(bool value)
+{
+    getFlags().hasInsertedLibraries = value;
+}
+
 void LaunchClosureWriter::setInitImageCount(uint32_t count)
 {
     getFlags().initImageCount = count;
@@ -431,6 +553,41 @@ void LaunchClosureWriter::setMustBeMissingFiles(const Array<const char*>& paths)
     char* t = buffer;
     for (const char* path : paths) {
         for (const char* s=path; *s != '\0'; ++s)
+            *t++ = *s;
+        *t++ = '\0';
+    }
+    while (t < &buffer[totalSize])
+        *t++ = '\0';
+}
+
+void LaunchClosureWriter::setMustExistFiles(const Array<LaunchClosure::SkippedFile>& files)
+{
+    // Start the structure with a count
+    uint32_t totalSize = sizeof(uint64_t);
+
+    // Then make space for the array of mod times and inode numbers
+    totalSize += files.count() * sizeof(uint64_t) * 2;
+
+    // Then the array of paths on the end
+    for (const LaunchClosure::SkippedFile& file : files)
+        totalSize += (strlen(file.path) + 1);
+    totalSize = (totalSize + 3) & (-4); // align
+
+    char* buffer = (char*)append(TypedBytes::Type::existingFiles, nullptr, totalSize);
+
+    // Set the size
+    uint64_t* bufferPtr = (uint64_t*)buffer;
+    *bufferPtr++ = (uint64_t)files.count();
+
+    // And the array of mod times and inode numbers
+    for (const LaunchClosure::SkippedFile& file : files) {
+        *bufferPtr++ = file.inode;
+        *bufferPtr++ = file.mtime;
+    }
+
+    char* t = (char*)bufferPtr;
+    for (const LaunchClosure::SkippedFile& file : files) {
+        for (const char* s=file.path; *s != '\0'; ++s)
             *t++ = *s;
         *t++ = '\0';
     }
@@ -470,29 +627,73 @@ void LaunchClosureWriter::setBootUUID(const char* uuid)
     append(TypedBytes::Type::bootUUID, temp, paddedSize);
 }
 
-void LaunchClosureWriter::applyInterposing()
-{
-    const LaunchClosure* currentClosure = (LaunchClosure*)currentTypedBytes();
-	const ImageArray*    images         = currentClosure->images();
-	currentClosure->forEachInterposingTuple(^(const InterposingTuple& tuple, bool&) {
-        images->forEachImage(^(const dyld3::closure::Image* image, bool&) {
-            for (const Image::BindPattern& bindPat : image->bindFixups()) {
-                if ( (bindPat.target == tuple.stockImplementation) && (tuple.newImplementation.image.imageNum != image->imageNum()) ) {
-                    Image::BindPattern* writePat = const_cast<Image::BindPattern*>(&bindPat);
-                    writePat->target = tuple.newImplementation;
-                }
-            }
+void LaunchClosureWriter::setObjCSelectorInfo(const Array<uint8_t>& hashTable, const Array<Image::ObjCSelectorImage>& hashTableImages) {
+    uint32_t count = (uint32_t)hashTableImages.count();
+    uint32_t totalSize = (uint32_t)(sizeof(count) + (sizeof(Image::ObjCSelectorImage) * count) + hashTable.count());
+    totalSize = (totalSize + 3) & (-4); // align
+    uint8_t* buffer = (uint8_t*)append(TypedBytes::Type::selectorTable, nullptr, totalSize);
 
-            // Chained fixups may also be interposed.  We can't change elements in the chain, but we can change
-            // the target list.
-            for (const Image::ResolvedSymbolTarget& symbolTarget : image->chainedTargets()) {
-                if ( (symbolTarget == tuple.stockImplementation) && (tuple.newImplementation.image.imageNum != image->imageNum()) ) {
-                    Image::ResolvedSymbolTarget* writeTarget = const_cast<Image::ResolvedSymbolTarget*>(&symbolTarget);
-                    *writeTarget = tuple.newImplementation;
-                }
-            }
-        });
-    });
+    // Write out out the image count
+    memcpy(buffer, &count, sizeof(count));
+    buffer += sizeof(count);
+
+    // Write out out the image nums
+    memcpy(buffer, hashTableImages.begin(), sizeof(Image::ObjCSelectorImage) * count);
+    buffer += sizeof(Image::ObjCSelectorImage) * count;
+
+    // Write out out the image count
+    memcpy(buffer, hashTable.begin(), hashTable.count());
+}
+
+void LaunchClosureWriter::setObjCClassAndProtocolInfo(const Array<uint8_t>& classHashTable, const Array<uint8_t>& protocolHashTable,
+                                                      const Array<Image::ObjCClassImage>& hashTableImages) {
+    // The layout here is:
+    //   uint32_t offset to class table (note this is 0 if there are no classes)
+    //   uint32_t offset to protocol table (note this is 0 if there are no protocols)
+    //   uint32_t num images
+    //   ObjCClassImage[num images]
+    //   class hash table
+    //   [ padding to 4-byte alignment if needed
+    //   protocol hash table
+    //   [ padding to 4-byte alignment if needed
+
+    uint32_t numImages = (uint32_t)hashTableImages.count();
+
+    uint32_t headerSize = sizeof(uint32_t) * 3;
+    uint32_t imagesSize = (sizeof(Image::ObjCClassImage) * numImages);
+    uint32_t classTableSize = ((uint32_t)classHashTable.count() + 3) & (-4); // pad to 4-byte multiple
+    uint32_t protocolTableSize = ((uint32_t)protocolHashTable.count() + 3) & (-4); // pad to 4-byte multiple
+    uint32_t offsetToClassTable = (classTableSize == 0) ? 0 : (headerSize + imagesSize);
+    uint32_t offsetToProtocolTable = (protocolTableSize == 0) ? 0 : (headerSize + imagesSize + classTableSize);
+
+    uint32_t totalSize = headerSize + imagesSize + classTableSize + protocolTableSize;
+    assert( (totalSize & 3) == 0);
+    uint8_t* buffer = (uint8_t*)append(TypedBytes::Type::classTable, nullptr, totalSize);
+
+    // Write out out the header
+    memcpy(buffer + 0, &offsetToClassTable, sizeof(uint32_t));
+    memcpy(buffer + 4, &offsetToProtocolTable, sizeof(uint32_t));
+    memcpy(buffer + 8, &numImages, sizeof(uint32_t));
+
+    // Write out out the image nums
+    memcpy(buffer + headerSize, hashTableImages.begin(), imagesSize);
+
+    // Write out out the class hash table
+    if ( offsetToClassTable != 0 )
+        memcpy(buffer + offsetToClassTable, classHashTable.begin(), classHashTable.count());
+
+    // Write out out the protocol hash table
+    if ( offsetToProtocolTable != 0 )
+        memcpy(buffer + offsetToProtocolTable, protocolHashTable.begin(), protocolHashTable.count());
+}
+
+void LaunchClosureWriter::setObjCDuplicateClassesInfo(const Array<uint8_t>& hashTable) {
+    uint32_t totalSize = (uint32_t)hashTable.count();
+    totalSize = (totalSize + 3) & (-4); // align
+    uint8_t* buffer = (uint8_t*)append(TypedBytes::Type::duplicateClassesTable, nullptr, totalSize);
+
+    // Write out out the hash table
+    memcpy(buffer, hashTable.begin(), hashTable.count());
 }
 
 ////////////////////////////  DlopenClosureWriter ////////////////////////////////////////

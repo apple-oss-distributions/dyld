@@ -2,10 +2,8 @@
 
 // BUILD:  $CC main.c  -o $BUILD_DIR/NSCreateObjectFileImageFromMemory-basic.exe -Wno-deprecated-declarations
 // BUILD:  $CC foo.c   -o $BUILD_DIR/foo.bundle -bundle
-// BUILD:  lipo -thin x86_64 $BUILD_DIR/foo.bundle -output $BUILD_DIR/foo-thin.bundle
 
 // RUN:  ./NSCreateObjectFileImageFromMemory-basic.exe $RUN_DIR/foo.bundle
-// RUN:  ./NSCreateObjectFileImageFromMemory-basic.exe $RUN_DIR/foo-thin.bundle
 
 
 

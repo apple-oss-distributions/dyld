@@ -32,12 +32,11 @@
 #include <mach/mach_vm.h>
 #include <mach/vm_region.h>
 #include <libkern/OSAtomic.h>
+#include <mach-o/dyld_process_info.h>
+#include <mach-o/dyld_images.h>
 
-#include "dyld_process_info.h"
+#include "MachOFile.h"
 #include "dyld_process_info_internal.h"
-#include "dyld_images.h"
-#include "dyld_priv.h"
-
 #include "Tracing.h"
 
 // this was in dyld_priv.h but it is no longer exported
@@ -45,61 +44,118 @@ extern "C" {
     const struct dyld_all_image_infos* _dyld_get_all_image_infos();
 }
 
-RemoteBuffer::RemoteBuffer() : _localAddress(0), _size(0) {}
-bool RemoteBuffer::map(task_t task, mach_vm_address_t remote_address, bool shared) {
+RemoteBuffer& RemoteBuffer::operator=(RemoteBuffer&& other) {
+    std::swap(_localAddress, other._localAddress);
+    std::swap(_size, other._size);
+    std::swap(_kr, other._kr);
+    std::swap(_shared, other._shared);
+    return *this;
+}
+
+RemoteBuffer::RemoteBuffer() : _localAddress(0), _size(0), _kr(KERN_SUCCESS), _shared(false) {}
+RemoteBuffer::RemoteBuffer(std::tuple<mach_vm_address_t,vm_size_t,kern_return_t,bool> T)
+    : _localAddress(std::get<0>(T)), _size(std::get<1>(T)), _kr(std::get<2>(T)), _shared(std::get<3>(T)) {}
+
+RemoteBuffer::RemoteBuffer(task_t task, mach_vm_address_t remote_address, size_t remote_size, bool shared, bool allow_truncation)
+: RemoteBuffer(RemoteBuffer::create(task, remote_address, remote_size, shared, allow_truncation)) {};
+
+std::pair<mach_vm_address_t, kern_return_t>
+RemoteBuffer::map(task_t task, mach_vm_address_t remote_address, vm_size_t size, bool shared) {
     vm_prot_t cur_protection = VM_PROT_NONE;
     vm_prot_t max_protection = VM_PROT_NONE;
-    if (_size == 0) {
-        _kr = KERN_NO_SPACE;
-        return false;
+    int flags;
+    if (size == 0) {
+        return std::make_pair(MACH_VM_MIN_ADDRESS, KERN_INVALID_ARGUMENT);
     }
-    _localAddress = 0;
-    _kr = mach_vm_remap(mach_task_self(),
-                        &_localAddress,
-                        _size,
+    if (shared) {
+        flags = VM_FLAGS_ANYWHERE | VM_FLAGS_RETURN_DATA_ADDR;
+    } else {
+    // <rdar://55343677>
+    // Since we are getting rid of the flag probing we have to make sure that simulator libdyld's do not use VM_FLAGS_RESILIENT_MEDIA
+    // FIXME: Remove this when simulator builds do not support back deployment to 10.14
+#if TARGET_OS_SIMULATOR
+        flags = VM_FLAGS_ANYWHERE | VM_FLAGS_RETURN_DATA_ADDR | VM_FLAGS_RESILIENT_CODESIGN;
+#else
+        flags = VM_FLAGS_ANYWHERE | VM_FLAGS_RETURN_DATA_ADDR | VM_FLAGS_RESILIENT_CODESIGN | VM_FLAGS_RESILIENT_MEDIA;
+#endif
+    }
+    mach_vm_address_t localAddress = 0;
+    auto kr = mach_vm_remap(mach_task_self(),
+                        &localAddress,
+                        size,
                         0,  // mask
-                        VM_FLAGS_ANYWHERE | VM_FLAGS_RETURN_DATA_ADDR | (shared ? 0 : VM_FLAGS_RESILIENT_CODESIGN),
+                        flags,
                         task,
                         remote_address,
                         !shared,
                         &cur_protection,
                         &max_protection,
                         VM_INHERIT_NONE);
-    dyld3::kdebug_trace_dyld_marker(DBG_DYLD_DEBUGGING_VM_REMAP, _localAddress, (uint64_t)_size, _kr, remote_address);
-    if (shared && (cur_protection != (VM_PROT_READ|VM_PROT_WRITE))) {
-        if (_kr == KERN_SUCCESS && _localAddress != 0) {
-            _kr = vm_deallocate(mach_task_self(), _localAddress, _size);
-            dyld3::kdebug_trace_dyld_marker(DBG_DYLD_DEBUGGING_VM_UNMAP, _localAddress, (uint64_t)_size, _kr, 0);
-        }
-        _localAddress = 0;
-        _kr = KERN_PROTECTION_FAILURE;
+    // The call is not succesfull return
+    if (kr != KERN_SUCCESS) {
+        return std::make_pair(MACH_VM_MIN_ADDRESS, kr);
     }
-    return (_kr == KERN_SUCCESS);
+    // If it is not a shared buffer then copy it into a local buffer so our results are coherent in the event
+    // the page goes way due to storage removal, etc. We have to do this because even after we read the page the
+    // contents might go away of the object is paged out and then the backing region is disconnected (for example, if
+    // we are copying some memory in the middle of a mach-o that is on a USB drive that is disconnected after we perform
+    // the mapping). Once we copy them into a local buffer the memory will be handled by the default pager instead of
+    // potentially being backed by the mmap pager, and thus will be guaranteed not to mutate out from under us.
+    if (!shared) {
+        void* buffer = malloc(size);
+        if (buffer == nullptr) {
+            (void)vm_deallocate(mach_task_self(), localAddress, size);
+            return std::make_pair(MACH_VM_MIN_ADDRESS, kr);
+        }
+        memcpy(buffer, (void *)localAddress, size);
+        (void)vm_deallocate(mach_task_self(), localAddress, size);
+        return std::make_pair((vm_address_t)buffer, KERN_SUCCESS);
+    }
+    // A shared buffer was requested, if the permissions are not correct deallocate the region and return failure
+    if (cur_protection != (VM_PROT_READ|VM_PROT_WRITE)) {
+        if (localAddress != 0) {
+            (void)vm_deallocate(mach_task_self(), (size_t)localAddress, size);
+        }
+        return std::make_pair(MACH_VM_MIN_ADDRESS, KERN_PROTECTION_FAILURE);
+    }
+    // We have a successfully created shared buffer with the correct permissions, return it
+    return std::make_pair(localAddress, KERN_SUCCESS);
 }
 
-RemoteBuffer::RemoteBuffer(task_t task, mach_vm_address_t remote_address, size_t remote_size, bool shared, bool allow_truncation)
-        : _localAddress(0), _size(remote_size), _kr(KERN_SUCCESS) {
+std::tuple<mach_vm_address_t,vm_size_t,kern_return_t,bool> RemoteBuffer::create(task_t task,
+                                                                                mach_vm_address_t remote_address,
+                                                                                size_t size,
+                                                                                bool shared,
+                                                                                bool allow_truncation) {
+    mach_vm_address_t localAddress;
+    kern_return_t kr;
     // Try the initial map
-    if (map(task, remote_address, shared)) return;
-    // It failed, try to calculate the largest size that can fit in the same page as the remote_address
-    uint64_t newSize = PAGE_SIZE - remote_address%PAGE_SIZE;;
-    // If truncation is allowed and the newSize is different than the original size try that
-    if (!allow_truncation && newSize != _size) return;
-    _size = newSize;
-    if (map(task, remote_address, shared)) return;
-    // That did not work, null out the buffer
-    _size = 0;
-    _localAddress = 0;
+    std::tie(localAddress, kr) = map(task, remote_address, size, shared);
+    if (kr == KERN_SUCCESS) return std::make_tuple(localAddress, size, kr, shared);
+    // The first attempt failed, truncate if possible and try again. We only need to try once since the largest
+    // truncatable buffer we map is less than a single page. To be more general we would need to try repeatedly in a
+    // loop.
+    if (allow_truncation) {
+        size = PAGE_SIZE - remote_address%PAGE_SIZE;
+        std::tie(localAddress, kr) = map(task, remote_address, size, shared);
+        if (kr == KERN_SUCCESS) return std::make_tuple(localAddress, size, kr, shared);
+    }
+    // If we reach this then the mapping completely failed
+    return std::make_tuple(MACH_VM_MIN_ADDRESS, 0, kr, shared);
 }
+
 RemoteBuffer::~RemoteBuffer() {
-    if (_localAddress) {
-        _kr = vm_deallocate(mach_task_self(), _localAddress, _size);
-        dyld3::kdebug_trace_dyld_marker(DBG_DYLD_DEBUGGING_VM_UNMAP, _localAddress, (uint64_t)_size, _kr, 0);
+    if (!_localAddress) { return; }
+
+    if (_shared) {
+        (void)vm_deallocate(mach_task_self(), (vm_address_t)_localAddress, _size);
+    } else {
+        free((void*)_localAddress);
     }
 }
-void *RemoteBuffer::getLocalAddress() { return (void *)_localAddress; }
-size_t RemoteBuffer::getSize() { return _size; }
-kern_return_t RemoteBuffer::getKernelReturn() { return _kr; }
+void *RemoteBuffer::getLocalAddress() const { return (void *)_localAddress; }
+size_t RemoteBuffer::getSize() const { return _size; }
+kern_return_t RemoteBuffer::getKernelReturn() const { return _kr; }
 
 void withRemoteBuffer(task_t task, mach_vm_address_t remote_address, size_t remote_size, bool shared, bool allow_truncation, kern_return_t *kr, void (^block)(void *buffer, size_t size)) {
     kern_return_t krSink = KERN_SUCCESS;
@@ -142,8 +198,16 @@ struct __attribute__((visibility("hidden"))) dyld_process_info_base {
     std::atomic<uint32_t>&      retainCount() const { return _retainCount; }
     dyld_process_cache_info*    cacheInfo() const { return (dyld_process_cache_info*)(((char*)this) + _cacheInfoOffset); }
     dyld_process_state_info*    stateInfo() const { return (dyld_process_state_info*)(((char*)this) + _stateInfoOffset); }
+    dyld_platform_t             platform() const { return _platform; }
+
     void                        forEachImage(void (^callback)(uint64_t machHeaderAddress, const uuid_t uuid, const char* path)) const;
     void                        forEachSegment(uint64_t machHeaderAddress, void (^callback)(uint64_t segmentAddress, uint64_t segmentSize, const char* segmentName)) const;
+
+    bool reserveSpace(size_t space) {
+        if (_freeSpace < space) { return false; }
+        _freeSpace -= space;
+        return true;
+    }
 
     void retain()
     {
@@ -174,16 +238,16 @@ private:
         uint64_t                size;
     };
 
-                                dyld_process_info_base(unsigned imageCount, size_t totalSize);
+                                dyld_process_info_base(dyld_platform_t platform, unsigned imageCount, size_t totalSize);
     void*                       operator new (size_t, void* buf) { return buf; }
 
     static bool                 inCache(uint64_t addr) { return (addr > SHARED_REGION_BASE) && (addr < SHARED_REGION_BASE+SHARED_REGION_SIZE); }
-    kern_return_t               addImage(task_t task, bool sameCacheAsThisProcess, uint64_t imageAddress, uint64_t imagePath, const char* imagePathLocal);
+    bool                        addImage(task_t task, bool sameCacheAsThisProcess, uint64_t imageAddress, uint64_t imagePath, const char* imagePathLocal);
 
     kern_return_t               addDyldImage(task_t task, uint64_t dyldAddress, uint64_t dyldPathAddress, const char* localPath);
 
     bool                        invalid() { return ((char*)_stringRevBumpPtr < (char*)_curSegment); }
-    const char*                 copyPath(task_t task, uint64_t pathAddr, kern_return_t* kr);
+    const char*                 copyPath(task_t task, uint64_t pathAddr);
     const char*                 addString(const char*, size_t);
     const char*                 copySegmentName(const char*);
 
@@ -198,6 +262,8 @@ private:
     const uint32_t              _stateInfoOffset;
     const uint32_t              _imageInfosOffset;
     const uint32_t              _segmentInfosOffset;
+    size_t                      _freeSpace;
+    dyld_platform_t             _platform;
     ImageInfo* const            _firstImage;
     ImageInfo*                  _curImage;
     SegmentInfo* const          _firstSegment;
@@ -212,11 +278,12 @@ private:
     // char                     stringPool[]
 };
 
-dyld_process_info_base::dyld_process_info_base(unsigned imageCount, size_t totalSize)
+dyld_process_info_base::dyld_process_info_base(dyld_platform_t platform, unsigned imageCount, size_t totalSize)
  :  _retainCount(1), _cacheInfoOffset(sizeof(dyld_process_info_base)),
     _stateInfoOffset(sizeof(dyld_process_info_base) + sizeof(dyld_process_cache_info)),
     _imageInfosOffset(sizeof(dyld_process_info_base) + sizeof(dyld_process_cache_info) + sizeof(dyld_process_state_info)),
     _segmentInfosOffset(sizeof(dyld_process_info_base) + sizeof(dyld_process_cache_info) + sizeof(dyld_process_state_info) + imageCount*sizeof(ImageInfo)),
+    _freeSpace(totalSize), _platform(platform),
     _firstImage((ImageInfo*)(((uint8_t*)this) + _imageInfosOffset)),
     _curImage((ImageInfo*)(((uint8_t*)this) + _imageInfosOffset)),
     _firstSegment((SegmentInfo*)(((uint8_t*)this) + _segmentInfosOffset)),
@@ -259,7 +326,7 @@ dyld_process_info_ptr dyld_process_info_base::make(task_t task, const T1& allIma
         return nullptr;
     }
 
-    for(uint32_t i = 0; i < 10; ++i) {
+    for (uint32_t j=0; j < 10; ++j) {
         uint64_t currentTimestamp = allImageInfo.infoArrayChangeTimestamp;
         mach_vm_address_t infoArray = allImageInfo.infoArray;
         if (currentTimestamp == 0) continue;
@@ -315,8 +382,13 @@ dyld_process_info_ptr dyld_process_info_base::make(task_t task, const T1& allIma
                                         + sizeof(SegmentInfo)*imageCountWithDyld*5
                                         + countOfPathsNeedingCopying*PATH_MAX;
             void* storage = malloc(allocationSize);
-            auto info = dyld_process_info_ptr(new (storage) dyld_process_info_base(imageCountWithDyld, allocationSize), deleter);
-            //info =  new (storage) dyld_process_info_base(imageCountWithDyld, allocationSize); // placement new()
+            if (storage == nullptr) {
+                *kr = KERN_NO_SPACE;
+                result = nullptr;
+                return;
+            }
+            auto info = dyld_process_info_ptr(new (storage) dyld_process_info_base(allImageInfo.platform, imageCountWithDyld, allocationSize), deleter);
+            (void)info->reserveSpace(sizeof(dyld_process_info_base)+sizeof(dyld_process_cache_info)+sizeof(dyld_process_state_info));
 
             // fill in base info
             dyld_process_cache_info* cacheInfo = info->cacheInfo();
@@ -355,7 +427,7 @@ dyld_process_info_ptr dyld_process_info_base::make(task_t task, const T1& allIma
             }
             // fill in info for each image
             for (uint32_t i=0; i < imageCount; ++i) {
-                if ((*kr = info->addImage(task, sameCacheAsThisProcess, imageArray[i].imageLoadAddress, imageArray[i].imageFilePath, NULL))) {
+                if (!info->addImage(task, sameCacheAsThisProcess, imageArray[i].imageLoadAddress, imageArray[i].imageFilePath, NULL)) {
                     result = nullptr;
                     return;
                 }
@@ -395,13 +467,14 @@ dyld_process_info_ptr dyld_process_info_base::makeSuspended(task_t task, const T
         return  nullptr;
     }
 
-    __block unsigned    imageCount = 0;  // main executable and dyld
-    __block uint64_t    mainExecutableAddress = 0;
-    __block uint64_t    dyldAddress = 0;
-    char                dyldPathBuffer[PATH_MAX+1];
-    char                mainExecutablePathBuffer[PATH_MAX+1];
-    __block char *      dyldPath = &dyldPathBuffer[0];
-    __block char *      mainExecutablePath = &mainExecutablePathBuffer[0];
+    __block unsigned        imageCount = 0;  // main executable and dyld
+    __block uint64_t        mainExecutableAddress = 0;
+    __block uint64_t        dyldAddress = 0;
+    char                    dyldPathBuffer[PATH_MAX+1];
+    char                    mainExecutablePathBuffer[PATH_MAX+1];
+    __block char *          dyldPath = &dyldPathBuffer[0];
+    __block char *          mainExecutablePath = &mainExecutablePathBuffer[0];
+    __block dyld3::Platform platformID = dyld3::Platform::unknown;
     mach_vm_size_t      size;
     for (mach_vm_address_t address = 0; ; address += size) {
         vm_region_basic_info_data_64_t  info;
@@ -448,7 +521,12 @@ dyld_process_info_ptr dyld_process_info_base::makeSuspended(task_t task, const T
                             + sizeof(SegmentInfo)*imageCount*5
                             + imageCount*PATH_MAX;
     void* storage = malloc(allocationSize);
-    auto obj = dyld_process_info_ptr(new (storage) dyld_process_info_base(imageCount, allocationSize), deleter);
+    if (storage == nullptr) {
+        *kr = KERN_NO_SPACE;
+        return  nullptr;
+    }
+    auto obj = dyld_process_info_ptr(new (storage) dyld_process_info_base((dyld_platform_t)platformID, imageCount, allocationSize), deleter);
+    (void)obj->reserveSpace(sizeof(dyld_process_info_base)+sizeof(dyld_process_cache_info)+sizeof(dyld_process_state_info));
     // fill in base info
     dyld_process_cache_info* cacheInfo = obj->cacheInfo();
     bzero(cacheInfo->cacheUUID, 16);
@@ -471,7 +549,7 @@ dyld_process_info_ptr dyld_process_info_base::makeSuspended(task_t task, const T
 
     // fill in info for each image
     if ( mainExecutableAddress != 0 ) {
-        if ((*kr = obj->addImage(task, false, mainExecutableAddress, 0, mainExecutablePath))) {
+        if (!obj->addImage(task, false, mainExecutableAddress, 0, mainExecutablePath)) {
             return nullptr;
         }
     }
@@ -498,47 +576,46 @@ dyld_process_info_ptr dyld_process_info_base::makeSuspended(task_t task, const T
 const char* dyld_process_info_base::addString(const char* str, size_t maxlen)
 {
     size_t len = strnlen(str, maxlen) + 1;
+    // If we don't have enough space return an empty string
+    if (!reserveSpace(len)) { return ""; }
     _stringRevBumpPtr -= len;
     strlcpy(_stringRevBumpPtr, str, len);
     return _stringRevBumpPtr;
 }
 
-const char* dyld_process_info_base::copyPath(task_t task, uint64_t stringAddressInTask, kern_return_t* kr)
+const char* dyld_process_info_base::copyPath(task_t task, uint64_t stringAddressInTask)
 {
-    __block const char* retval = NULL;
-    withRemoteBuffer(task, stringAddressInTask, PATH_MAX, false, true, kr, ^(void *buffer, size_t size) {
+    __block const char* retval = "";
+    withRemoteBuffer(task, stringAddressInTask, PATH_MAX, false, true, nullptr, ^(void *buffer, size_t size) {
         retval = addString(static_cast<const char *>(buffer), size);
     });
     return retval;
 }
 
-kern_return_t dyld_process_info_base::addImage(task_t task, bool sameCacheAsThisProcess, uint64_t imageAddress, uint64_t imagePath, const char* imagePathLocal)
+bool dyld_process_info_base::addImage(task_t task, bool sameCacheAsThisProcess, uint64_t imageAddress, uint64_t imagePath, const char* imagePathLocal)
 {
-    kern_return_t kr = KERN_SUCCESS;
+    if (!reserveSpace(sizeof(ImageInfo))) { return false; }
     _curImage->loadAddress = imageAddress;
     _curImage->segmentStartIndex = _curSegmentIndex;
     if ( imagePathLocal != NULL ) {
         _curImage->path = addString(imagePathLocal, PATH_MAX);
-    }
-    else if ( sameCacheAsThisProcess && inCache(imagePath) ) {
+    } else if ( sameCacheAsThisProcess && inCache(imagePath) ) {
         _curImage->path = (const char*)imagePath;
+    } else if (imagePath) {
+        _curImage->path = copyPath(task, imagePath);
+    } else {
+        _curImage->path = "";
     }
-    else {
-        _curImage->path = copyPath(task, imagePath, &kr);
-        if ( kr != KERN_SUCCESS)
-            return kr;
-    }
+
     if ( sameCacheAsThisProcess && inCache(imageAddress) ) {
         addInfoFromLoadCommands((mach_header*)imageAddress, imageAddress, 32*1024);
-    }
-    else {
-        kr = addInfoFromRemoteLoadCommands(task, imageAddress);
-        if ( kr != KERN_SUCCESS)
-            return kr;
+    } else if (addInfoFromRemoteLoadCommands(task, imageAddress) != KERN_SUCCESS) {
+        // The image is not here, return early
+        return false;
     }
     _curImage->segmentsCount = _curSegmentIndex - _curImage->segmentStartIndex;
     _curImage++;
-    return KERN_SUCCESS;
+    return true;
 }
 
 
@@ -572,6 +649,11 @@ kern_return_t dyld_process_info_base::addInfoFromRemoteLoadCommands(task_t task,
 
 kern_return_t dyld_process_info_base::addDyldImage(task_t task, uint64_t dyldAddress, uint64_t dyldPathAddress, const char* localPath)
 {
+    if (!reserveSpace(sizeof(ImageInfo))) {
+        // If we don't have ebnough spacee the data will be truncated, but well formed. Return success so
+        // symbolicators can try and use it
+        return KERN_SUCCESS;
+    }
     __block kern_return_t kr = KERN_SUCCESS;
     _curImage->loadAddress = dyldAddress;
     _curImage->segmentStartIndex = _curSegmentIndex;
@@ -579,7 +661,7 @@ kern_return_t dyld_process_info_base::addDyldImage(task_t task, uint64_t dyldAdd
         _curImage->path = addString(localPath, PATH_MAX);
     }
     else {
-        _curImage->path = copyPath(task, dyldPathAddress, &kr);
+        _curImage->path = copyPath(task, dyldPathAddress);
         if ( kr != KERN_SUCCESS)
             return kr;
     }
@@ -616,6 +698,7 @@ void dyld_process_info_base::addInfoFromLoadCommands(const mach_header* mh, uint
             memcpy(_curImage->uuid, uuidCmd->uuid, 16);
         }
         else if ( cmd->cmd == LC_SEGMENT ) {
+            if (!reserveSpace(sizeof(SegmentInfo))) { break; }
             const segment_command* segCmd = (segment_command*)cmd;
             _curSegment->name = copySegmentName(segCmd->segname);
             _curSegment->addr = segCmd->vmaddr;
@@ -624,6 +707,7 @@ void dyld_process_info_base::addInfoFromLoadCommands(const mach_header* mh, uint
             _curSegmentIndex++;
         }
         else if ( cmd->cmd == LC_SEGMENT_64 ) {
+            if (!reserveSpace(sizeof(SegmentInfo))) { break; }
             const segment_command_64* segCmd = (segment_command_64*)cmd;
             _curSegment->name = copySegmentName(segCmd->segname);
             _curSegment->addr = segCmd->vmaddr;
@@ -695,14 +779,11 @@ dyld_process_info _dyld_process_info_create(task_t task, uint64_t timestamp, ker
     if (task_dyld_info.all_image_info_addr == MACH_VM_MIN_ADDRESS)
         return nullptr;
 
-    if ( task_dyld_info.all_image_info_size > sizeof(dyld_all_image_infos_64) )
-        return nullptr;
-
     // We use a true shared memory buffer here, that way by making sure that libdyld in both processes
     // reads and writes the the timestamp atomically we can make sure we get a coherent view of the
     // remote process.
     // That also means that we *MUST* directly read the memory, which is why we template the make() call
-    withRemoteBuffer(task, task_dyld_info.all_image_info_addr, task_dyld_info.all_image_info_size, true, false, kr, ^(void *buffer, size_t size) {
+    withRemoteBuffer(task, task_dyld_info.all_image_info_addr, (size_t)task_dyld_info.all_image_info_size, true, false, kr, ^(void *buffer, size_t size) {
         dyld_process_info_ptr base;
         if (task_dyld_info.all_image_info_format == TASK_DYLD_ALL_IMAGE_INFO_32 ) {
             const dyld_all_image_infos_32* info = (const dyld_all_image_infos_32*)buffer;
@@ -731,6 +812,10 @@ void _dyld_process_info_get_cache(dyld_process_info info, dyld_process_cache_inf
 void _dyld_process_info_retain(dyld_process_info object)
 {
     const_cast<dyld_process_info_base*>(object)->retain();
+}
+
+dyld_platform_t _dyld_process_info_get_platform(dyld_process_info object) {
+    return  const_cast<dyld_process_info_base*>(object)->platform();
 }
 
 void _dyld_process_info_release(dyld_process_info object)

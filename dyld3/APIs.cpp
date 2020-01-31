@@ -29,17 +29,18 @@
 #include <sys/stat.h>
 #include <dirent.h>
 #include <fcntl.h>
+#include <libc_private.h>
 #include <TargetConditionals.h>
-#include <CommonCrypto/CommonDigest.h>
-#include <dispatch/dispatch.h>
 #include <_simple.h>
+#include <mach-o/dyld_priv.h>
+#include <mach-o/dyld_images.h>
+#include <crt_externs.h> // FIXME: Remove once we move off of _NSGetMainExecutable()
+#include <os/once_private.h>
 
 #include <array>
 #include <algorithm>
 
 #include "dlfcn.h"
-#include "dyld.h"
-#include "dyld_priv.h"
 
 #include "AllImages.h"
 #include "Loading.h"
@@ -204,7 +205,7 @@ uint32_t dyld_get_program_sdk_watch_os_version()
 
     __block uint32_t retval = 0;
     __block bool versionFound = false;
-    dyld3::dyld_get_image_versions_internal(gAllImages.mainExecutable(), ^(dyld_platform_t platform, uint32_t sdk_version, uint32_t min_version) {
+    dyld3::dyld_get_image_versions(gAllImages.mainExecutable(), ^(dyld_platform_t platform, uint32_t sdk_version, uint32_t min_version) {
         if (versionFound) return;
 
         if (dyld_get_base_platform(platform) == PLATFORM_WATCHOS) {
@@ -222,7 +223,7 @@ uint32_t dyld_get_program_min_watch_os_version()
 
     __block uint32_t retval = 0;
     __block bool versionFound = false;
-    dyld3::dyld_get_image_versions_internal(gAllImages.mainExecutable(), ^(dyld_platform_t platform, uint32_t sdk_version, uint32_t min_version) {
+    dyld3::dyld_get_image_versions(gAllImages.mainExecutable(), ^(dyld_platform_t platform, uint32_t sdk_version, uint32_t min_version) {
         if (versionFound) return;
 
         if (dyld_get_base_platform(platform) == PLATFORM_WATCHOS) {
@@ -240,7 +241,7 @@ uint32_t dyld_get_program_sdk_bridge_os_version()
 
     __block uint32_t retval = 0;
     __block bool versionFound = false;
-    dyld3::dyld_get_image_versions_internal(gAllImages.mainExecutable(), ^(dyld_platform_t platform, uint32_t sdk_version, uint32_t min_version) {
+    dyld3::dyld_get_image_versions(gAllImages.mainExecutable(), ^(dyld_platform_t platform, uint32_t sdk_version, uint32_t min_version) {
         if (versionFound) return;
 
         if (dyld_get_base_platform(platform) == PLATFORM_BRIDGEOS) {
@@ -258,7 +259,7 @@ uint32_t dyld_get_program_min_bridge_os_version()
 
     __block uint32_t retval = 0;
     __block bool versionFound = false;
-    dyld3::dyld_get_image_versions_internal(gAllImages.mainExecutable(), ^(dyld_platform_t platform, uint32_t sdk_version, uint32_t min_version) {
+    dyld3::dyld_get_image_versions(gAllImages.mainExecutable(), ^(dyld_platform_t platform, uint32_t sdk_version, uint32_t min_version) {
         if (versionFound) return;
 
         if (dyld_get_base_platform(platform) == PLATFORM_BRIDGEOS) {
@@ -294,10 +295,6 @@ uint32_t dyld_get_sdk_version(const mach_header* mh)
                 case PLATFORM_WATCHOS:  retval = sdk_version + 0x00070000; return;
                 default: retval = sdk_version; return;
             }
-        } else if (platform == PLATFORM_IOSSIMULATOR && ::dyld_get_active_platform() == PLATFORM_IOSMAC) {
-            //FIXME bringup hack
-            versionFound = true;
-            retval = 0x000C0000;
         }
     });
 
@@ -307,11 +304,7 @@ uint32_t dyld_get_sdk_version(const mach_header* mh)
 uint32_t dyld_get_program_sdk_version()
 {
 	log_apis("dyld_get_program_sdk_version()\n");
-    static uint32_t sProgramSDKVersion = 0;
-    if (sProgramSDKVersion  == 0) {
-        sProgramSDKVersion = dyld3::dyld_get_sdk_version(gAllImages.mainExecutable());
-    }
-    return sProgramSDKVersion;
+    return dyld3::dyld_get_sdk_version(gAllImages.mainExecutable());
 }
 
 uint32_t dyld_get_min_os_version(const mach_header* mh)
@@ -329,10 +322,6 @@ uint32_t dyld_get_min_os_version(const mach_header* mh)
                 case PLATFORM_WATCHOS:  retval = min_version + 0x00070000; return;
                 default: retval = min_version; return;
             }
-        } else if (platform == PLATFORM_IOSSIMULATOR && ::dyld_get_active_platform() == PLATFORM_IOSMAC) {
-            //FIXME bringup hack
-            versionFound = true;
-            retval = 0x000C0000;
         }
     });
 
@@ -392,6 +381,7 @@ bool dyld_program_minos_at_least(dyld_build_version_t version) {
     return dyld3::dyld_minos_at_least(gAllImages.mainExecutable(), version);
 }
 
+#if TARGET_OS_OSX || TARGET_OS_IOS
 static
 uint32_t linkedDylibVersion(const mach_header* mh, const char *installname) {
     __block uint32_t retval = 0;
@@ -403,6 +393,8 @@ uint32_t linkedDylibVersion(const mach_header* mh, const char *installname) {
     });
     return retval;
 }
+#endif
+
 
 #define PACKED_VERSION(major, minor, tiny) ((((major) & 0xffff) << 16) | (((minor) & 0xff) << 8) | ((tiny) & 0xff))
 
@@ -427,7 +419,7 @@ static uint32_t deriveVersionFromDylibs(const struct mach_header* mh) {
         // binaries have LC_VERSION_MIN_ load command.
     };
 #elif TARGET_OS_IOS
-        linkedVersion = linkedDylibVersion(mh, "/System/Library/Frameworks/Foundation.framework/Versions/C/Foundation");
+        linkedVersion = linkedDylibVersion(mh, "/System/Library/Frameworks/Foundation.framework/Foundation");
         static const DylibToOSMapping versionMapping[] = {
             { PACKED_VERSION(678,24,0), 0x00020000 },
             { PACKED_VERSION(678,26,0), 0x00020100 },
@@ -477,6 +469,9 @@ static void dyld_get_image_versions_internal(const struct mach_header* mh, void 
         if (sdk == 0) {
             sdk = deriveVersionFromDylibs(mh);
         }
+        if (platform == dyld3::Platform::iOSMac) {
+            sdk = 0x000A0F00;
+        }
         callback((const dyld_platform_t)platform, sdk, minOS);
     });
 
@@ -504,6 +499,55 @@ void dyld_get_image_versions(const struct mach_header* mh, void (^callback)(dyld
 {
     Diagnostics diag;
     const MachOFile* mf = (MachOFile*)mh;
+    static dyld_platform_t mainExecutablePlatform = 0;
+    static uint32_t mainExecutableSDKVersion = 0;
+    static uint32_t mainExecutableMinOSVersion = 0;
+
+    // FIXME: Once dyld2 is gone gAllImages.mainExecutable() will be valid in all cases
+    // and we can stop calling _NSGetMachExecuteHeader()
+    if (mh == (const struct mach_header*)_NSGetMachExecuteHeader()) {
+        // Cache the main executable and short circuit parsing the
+        if (mainExecutablePlatform == 0) {
+            dyld_get_image_versions_internal(mh, ^(dyld_platform_t platform, uint32_t sdk_version, uint32_t min_version) {
+#if 0
+                //FIXME: Reenable this once Libc supports dynamic platforms.
+                if (platform == PLATFORM_MACOS && dyld_get_active_platform() == PLATFORM_IOSMAC) {
+                    //FIXME: This version should be generated at link time
+                    mainExecutablePlatform = PLATFORM_IOSMAC;
+                    mainExecutableSDKVersion = 0x000D0000;
+                    mainExecutableMinOSVersion = 0x000D0000;
+                } else {
+                    mainExecutablePlatform = platform;
+                    mainExecutableSDKVersion = sdk_version;
+                    mainExecutableMinOSVersion = min_version;
+                }
+#else
+                mainExecutablePlatform = platform;
+                mainExecutableSDKVersion = sdk_version;
+                mainExecutableMinOSVersion = min_version;
+#endif
+                //FIXME: Assert if more than one command?
+            });
+        }
+        return callback(mainExecutablePlatform, mainExecutableSDKVersion, mainExecutableMinOSVersion);
+    }
+#if TARGET_OS_EMBEDDED
+    // If we are on embedded AND in the shared cache then the versions should be the same as libdyld
+    if (mf->inDyldCache()) {
+        static dyld_platform_t libDyldPlatform = 0;
+        static uint32_t libDyldSDKVersion = 0;
+        static uint32_t libDyldMinOSVersion = 0;
+        if (libDyldPlatform == 0) {
+            dyld_get_image_versions_internal(mh, ^(dyld_platform_t platform, uint32_t sdk_version, uint32_t min_version) {
+                libDyldPlatform = platform;
+                libDyldSDKVersion = sdk_version;
+                libDyldMinOSVersion = min_version;
+                //FIXME: Assert if more than one command?
+            });
+        }
+        return callback(libDyldPlatform, libDyldSDKVersion, libDyldMinOSVersion);
+    }
+#endif
     if ( mf->isMachO(diag, mh->sizeofcmds + sizeof(mach_header_64)) )
         dyld_get_image_versions_internal(mh, callback);
 }
@@ -511,11 +555,7 @@ void dyld_get_image_versions(const struct mach_header* mh, void (^callback)(dyld
 uint32_t dyld_get_program_min_os_version()
 {
     log_apis("dyld_get_program_min_os_version()\n");
-    static uint32_t sProgramMinVersion = 0;
-    if (sProgramMinVersion  == 0) {
-        sProgramMinVersion = dyld3::dyld_get_min_os_version(gAllImages.mainExecutable());
-    }
-    return sProgramMinVersion;
+    return dyld3::dyld_get_min_os_version(gAllImages.mainExecutable());
 }
 
 bool _dyld_get_image_uuid(const mach_header* mh, uuid_t uuid)
@@ -606,7 +646,6 @@ bool _dyld_is_memory_immutable(const void* addr, size_t length)
     return gAllImages.immutableMemory(addr, length);
 }
 
-
 int dladdr(const void* addr, Dl_info* info)
 {
     log_apis("dladdr(%p, %p)\n", addr, info);
@@ -656,6 +695,7 @@ int dladdr(const void* addr, Dl_info* info)
     return result;
 }
 
+#if !TARGET_OS_DRIVERKIT
 
 struct PerThreadErrorMessage
 {
@@ -664,13 +704,17 @@ struct PerThreadErrorMessage
     char        message[1];
 };
 
+static void dlerror_perThreadKey_once(void* ctx)
+{
+    pthread_key_t* dlerrorPThreadKeyPtr = (pthread_key_t*)ctx;
+    pthread_key_create(dlerrorPThreadKeyPtr, &free);
+}
+
 static pthread_key_t dlerror_perThreadKey()
 {
-    static dispatch_once_t  onceToken;
+    static os_once_t  onceToken;
     static pthread_key_t    dlerrorPThreadKey;
-    dispatch_once(&onceToken, ^{
-        pthread_key_create(&dlerrorPThreadKey, &free);
-    });
+    os_once(&onceToken, &dlerrorPThreadKey, dlerror_perThreadKey_once);
     return dlerrorPThreadKey;
 }
 
@@ -842,9 +886,12 @@ void* dlopen_internal(const char* path, int mode, void* callerAddress)
     // RTLD_NOLOAD means do nothing if image not already loaded
     const bool rtldNoLoad = (mode & RTLD_NOLOAD);
 
+    // RTLD_NOW means force lazy symbols bound and fail dlopen() if some cannot be bound
+    const bool rtldNow = (mode & RTLD_NOW);
+
     // try to load image from specified path
     Diagnostics diag;
-    const mach_header* topLoadAddress = gAllImages.dlopen(diag, path, rtldNoLoad, rtldLocal, rtldNoDelete, false, callerAddress);
+    const mach_header* topLoadAddress = gAllImages.dlopen(diag, path, rtldNoLoad, rtldLocal, rtldNoDelete, rtldNow, false, callerAddress);
     if ( diag.hasError() ) {
         setErrorString("dlopen(%s, 0x%04X): %s", path, mode, diag.errorMessage());
         log_apis("   dlopen: closure creation error: %s\n", diag.errorMessage());
@@ -872,7 +919,8 @@ bool dlopen_preflight_internal(const char* path)
     // check if file is loadable
     Diagnostics diag;
     closure::FileSystemPhysical fileSystem;
-    closure::LoadedFileInfo loadedFileInfo = MachOAnalyzer::load(diag, fileSystem, path, MachOFile::currentArchName(), MachOFile::currentPlatform());
+    char realerPath[MAXPATHLEN];
+    closure::LoadedFileInfo loadedFileInfo = MachOAnalyzer::load(diag, fileSystem, path, gAllImages.archs(), (Platform)gAllImages.platform(), realerPath);
     if ( loadedFileInfo.fileContent != nullptr ) {
         fileSystem.unloadFile(loadedFileInfo);
         return true;
@@ -898,6 +946,7 @@ static void* dlsym_search(const char* symName, const LoadedImage& start, bool se
         if ( !searchStartImage && aLoadedImage.image() == start.image() )
             return;
         if ( aLoadedImage.loadedAddress()->hasExportedSymbol(symName, finder, &result, resultPointsToInstructions) ) {
+            result = gAllImages.interposeValue(result);
             stop = true;
         }
     });
@@ -934,6 +983,7 @@ void* dlsym_internal(void* handle, const char* symbolName, void* callerAddress)
             }
         });
         if ( result != nullptr ) {
+            result = gAllImages.interposeValue(result);
 #if __has_feature(ptrauth_calls)
             if (resultPointsToInstructions)
                 result = __builtin_ptrauth_sign_unauthenticated(result, ptrauth_key_asia, 0);
@@ -948,6 +998,7 @@ void* dlsym_internal(void* handle, const char* symbolName, void* callerAddress)
     else if ( handle == RTLD_MAIN_ONLY ) {
         // magic "search only main executable" handle
         if ( gAllImages.mainExecutable()->hasExportedSymbol(underscoredName, finder, &result, &resultPointsToInstructions) ) {
+            result = gAllImages.interposeValue(result);
             log_apis("   dlsym() => %p\n", result);
 #if __has_feature(ptrauth_calls)
             if (resultPointsToInstructions)
@@ -996,7 +1047,8 @@ void* dlsym_internal(void* handle, const char* symbolName, void* callerAddress)
             if ( dontContinue ) {
                 // RTLD_FIRST only searches one place
                 // we go through infoForImageWithLoadAddress() to validate the handle
-                mh->hasExportedSymbol(underscoredName, finder, &result, &resultPointsToInstructions);
+                if (mh->hasExportedSymbol(underscoredName, finder, &result, &resultPointsToInstructions))
+                    result = gAllImages.interposeValue(result);
             }
             else {
                 result = dlsym_search(underscoredName, foundImage, true, finder, &resultPointsToInstructions);
@@ -1022,6 +1074,7 @@ void* dlsym_internal(void* handle, const char* symbolName, void* callerAddress)
     log_apis("   dlsym() => NULL\n");
     return nullptr;
 }
+#endif // !TARGET_OS_DRIVERKIT
 
 
 const struct dyld_all_image_infos* _dyld_get_all_image_infos()
@@ -1033,12 +1086,16 @@ bool dyld_shared_cache_some_image_overridden()
 {
     log_apis("dyld_shared_cache_some_image_overridden()\n");
 
-    assert(0 && "not implemented yet");
+    return gAllImages.hasCacheOverrides();
 }
 
 bool _dyld_get_shared_cache_uuid(uuid_t uuid)
 {
     log_apis("_dyld_get_shared_cache_uuid()\n");
+
+    const DyldSharedCache* sharedCache = (DyldSharedCache*)gAllImages.cacheLoadAddress();
+    if ( sharedCache == nullptr )
+        return false;
 
     if ( gAllImages.oldAllImageInfo() != nullptr ) {
         memcpy(uuid, gAllImages.oldAllImageInfo()->sharedCacheUUID, sizeof(uuid_t));
@@ -1058,6 +1115,24 @@ const void* _dyld_get_shared_cache_range(size_t* mappedSize)
     }
     *mappedSize = 0;
     return NULL;
+}
+
+bool _dyld_shared_cache_optimized()
+{
+    const DyldSharedCache* sharedCache = (DyldSharedCache*)gAllImages.cacheLoadAddress();
+    if ( sharedCache != nullptr ) {
+        return (sharedCache->header.cacheType == kDyldSharedCacheTypeProduction);
+    }
+    return false;
+}
+
+bool _dyld_shared_cache_is_locally_built()
+{
+    const DyldSharedCache* sharedCache = (DyldSharedCache*)gAllImages.cacheLoadAddress();
+    if ( sharedCache != nullptr ) {
+        return (sharedCache->header.locallyBuiltCache == 1);
+    }
+    return false;
 }
 
 void _dyld_images_for_addresses(unsigned count, const void* addresses[], dyld_image_uuid_offset infos[])
@@ -1092,6 +1167,11 @@ void _dyld_images_for_addresses(unsigned count, const void* addresses[], dyld_im
 void _dyld_register_for_image_loads(void (*func)(const mach_header* mh, const char* path, bool unloadable))
 {
     gAllImages.addLoadNotifier(func);
+}
+
+void _dyld_register_for_bulk_image_loads(void (*func)(unsigned imageCount, const struct mach_header* mhs[], const char* paths[]))
+{
+    gAllImages.addBulkLoadNotifier(func);
 }
 
 bool _dyld_find_unwind_sections(void* addr, dyld_unwind_sections* info)
@@ -1135,6 +1215,14 @@ const char* dyld_shared_cache_file_path()
     log_apis("dyld_shared_cache_file_path()\n");
 
     return gAllImages.dyldCachePath();
+}
+
+
+bool dyld_has_inserted_or_interposing_libraries()
+{
+   log_apis("dyld_has_inserted_or_interposing_libraries()\n");
+
+   return gAllImages.hasInsertedOrInterposingLibraries();
 }
 
 
@@ -1269,6 +1357,86 @@ int dyld_shared_cache_iterate_text(const uuid_t cacheUuid, void (^callback)(cons
 
     const char* extraSearchDirs[] = { NULL };
     return dyld3::dyld_shared_cache_find_iterate_text(cacheUuid, extraSearchDirs, callback);
+}
+    
+bool dyld_need_closure(const char* execPath, const char* tempDir)
+{
+    log_apis("dyld_need_closure()\n");
+
+    // We don't need to build a closure if the shared cache has it already
+    const DyldSharedCache* sharedCache = (DyldSharedCache*)gAllImages.cacheLoadAddress();
+    if ( sharedCache != nullptr ) {
+        if ( sharedCache->findClosure(execPath) != nullptr )
+            return false;
+    }
+
+
+    char closurePath[PATH_MAX];
+    if ( dyld3::closure::LaunchClosure::buildClosureCachePath(execPath, closurePath, tempDir, false) ) {
+        struct stat statbuf;
+        return (::stat(closurePath, &statbuf) != 0);
+    }
+
+    // Not containerized so no point in building a closure.
+    return false;
+}
+
+void _dyld_missing_symbol_abort()
+{
+    // We don't know the name of the lazy symbol that is missing.
+    // dyld3 binds all such missing symbols to this one handler.
+    // We need the crash log to contain the backtrace so someone can
+    // figure out the symbol.
+    abort_report_np("missing lazy symbol called");
+}
+
+const char* _dyld_get_objc_selector(const char* selName)
+{
+    log_apis("dyld_get_objc_selector()\n");
+    return gAllImages.getObjCSelector(selName);
+}
+
+void _dyld_for_each_objc_class(const char* className,
+                               void (^callback)(void* classPtr, bool isLoaded, bool* stop)) {
+    log_apis("_dyld_for_each_objc_class()\n");
+    gAllImages.forEachObjCClass(className, callback);
+}
+
+void _dyld_for_each_objc_protocol(const char* protocolName,
+                                  void (^callback)(void* protocolPtr, bool isLoaded, bool* stop)) {
+    log_apis("_dyld_for_each_objc_protocol()\n");
+    gAllImages.forEachObjCProtocol(protocolName, callback);
+}
+
+#if !TARGET_OS_DRIVERKIT
+struct dyld_func {
+    const char*  name;
+    void*        implementation;
+};
+
+static const struct dyld_func dyld_funcs[] = {
+    {"__dyld_dlsym",                    (void*)dlsym }, // needs to go through generic function to get caller address
+    {"__dyld_dlopen",                   (void*)dlopen },// needs to go through generic function to get caller address
+    {"__dyld_dladdr",                   (void*)dyld3::dladdr },
+    {"__dyld_image_count",              (void*)dyld3::_dyld_image_count },
+    {"__dyld_get_image_name",           (void*)dyld3::_dyld_get_image_name },
+    {"__dyld_get_image_header",         (void*)dyld3::_dyld_get_image_header },
+    {"__dyld_get_image_vmaddr_slide",   (void*)dyld3::_dyld_get_image_vmaddr_slide },
+};
+#endif
+
+int compatFuncLookup(const char* name, void** address)
+{
+#if !TARGET_OS_DRIVERKIT
+    for (const dyld_func* p = dyld_funcs; p->name != NULL; ++p) {
+        if ( strcmp(p->name, name) == 0 ) {
+            *address = p->implementation;
+            return true;
+        }
+    }
+    *address = 0;
+#endif
+    return false;
 }
 
 

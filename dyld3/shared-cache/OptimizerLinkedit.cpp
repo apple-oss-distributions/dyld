@@ -156,6 +156,7 @@ private:
     macho_symtab_command<P>*                _symTabCmd          = nullptr;
     macho_dysymtab_command<P>*              _dynSymTabCmd       = nullptr;
     macho_dyld_info_command<P>*             _dyldInfo           = nullptr;
+    macho_linkedit_data_command<P>*         _exportTrieCmd      = nullptr;
     macho_linkedit_data_command<P>*         _functionStartsCmd  = nullptr;
     macho_linkedit_data_command<P>*         _dataInCodeCmd      = nullptr;
     std::vector<macho_segment_command<P>*>  _segCmds;
@@ -558,6 +559,10 @@ LinkeditOptimizer<P>::LinkeditOptimizer(void* cacheBuffer, macho_header<P>* mh, 
             case LC_DATA_IN_CODE:
                 _dataInCodeCmd = (macho_linkedit_data_command<P>*)cmd;
                 break;
+            case LC_DYLD_EXPORTS_TRIE:
+                _exportTrieCmd = (macho_linkedit_data_command<P>*)cmd;
+                _exportInfoSize = _exportTrieCmd->datasize();
+                break;
             case LC_ROUTINES:
             case LC_ROUTINES_64:
                 routinesCmd = (macho_routines_command<P>*)cmd;
@@ -599,7 +604,15 @@ LinkeditOptimizer<P>::LinkeditOptimizer(void* cacheBuffer, macho_header<P>* mh, 
                                 _initializerAddresses.push_back(func);
                             }
                         }
-                          else if ( type == S_DTRACE_DOF ) {
+                        else if ( type == S_INIT_FUNC_OFFSETS ) {
+                            const uint32_t* inits = (uint32_t*)(sect->addr()+slide);
+                            const size_t count = sect->size() / sizeof(uint32_t);
+                            for (size_t j=0; j < count; ++j) {
+                                uint32_t funcOffset = E::get32(inits[j]);
+                                _initializerAddresses.push_back(textSegAddr + funcOffset);
+                            }
+                        }
+                        else if ( type == S_DTRACE_DOF ) {
                             _dofSections.push_back(sect);
                         }
                         else if ( (strcmp(sect->sectname(), "__dyld") == 0) && (strncmp(sect->segname(), "__DATA", 6) == 0) ) {
@@ -756,6 +769,8 @@ void LinkeditOptimizer<P>::updateLoadCommands(uint32_t mergedLinkeditStartOffset
         _dyldInfo->set_weak_bind_off(_dyldInfo->weak_bind_size() ?  mergedLinkeditStartOffset + _newWeakBindingInfoOffset : 0 );
         _dyldInfo->set_lazy_bind_off(_dyldInfo->lazy_bind_size() ?  mergedLinkeditStartOffset + _newLazyBindingInfoOffset : 0 );
         _dyldInfo->set_export_off(mergedLinkeditStartOffset + _newExportInfoOffset);
+    } else if ( _exportTrieCmd != nullptr ) {
+        _exportTrieCmd->set_dataoff(mergedLinkeditStartOffset + _newExportInfoOffset);
     }
 
     // update function-starts
@@ -811,13 +826,15 @@ void LinkeditOptimizer<P>::copyBindingInfo(uint8_t* newLinkEditContent, uint32_t
 template <typename P>
 void LinkeditOptimizer<P>::copyExportInfo(uint8_t* newLinkEditContent, uint32_t& offset)
 {
-    if ( _dyldInfo == nullptr )
+    if ( (_dyldInfo == nullptr) && (_exportTrieCmd == nullptr) )
         return;
-    unsigned size = _dyldInfo->export_size();
-    if ( size != 0 ) {
-        ::memcpy(&newLinkEditContent[offset], &_linkeditBias[_dyldInfo->export_off()], size);
+
+    uint32_t exportOffset = _exportTrieCmd ? _exportTrieCmd->dataoff() : _dyldInfo->export_off();
+    uint32_t exportSize   = _exportTrieCmd ? _exportTrieCmd->datasize() : _dyldInfo->export_size();
+    if ( exportSize != 0 ) {
+        ::memcpy(&newLinkEditContent[offset], &_linkeditBias[exportOffset], exportSize);
         _newExportInfoOffset = offset;
-        offset += size;
+        offset += exportSize;
     }
 }
 
@@ -1170,7 +1187,7 @@ void LinkeditOptimizer<P>::optimizeLinkedit(CacheBuilder& builder)
         delete op;
 }
 
-void CacheBuilder::optimizeLinkedit(const std::vector<uint64_t>& branchPoolOffsets)
+void CacheBuilder::optimizeLinkedit()
 {
     if ( _archLayout->is64 ) {
         return LinkeditOptimizer<Pointer64<LittleEndian>>::optimizeLinkedit(*this);

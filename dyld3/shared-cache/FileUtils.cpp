@@ -155,6 +155,14 @@ bool isProtectedBySIP(const std::string& path)
     return (rootless_check_trusted(path.c_str()) == 0);
 }
 
+bool isProtectedBySIPExceptDyld(const std::string& path)
+{
+    if ( !sipIsEnabled() )
+        return false;
+
+    return (rootless_check_trusted_class(path.c_str(), "dyld") == 0);
+}
+
 bool isProtectedBySIP(int fd)
 {
     if ( !sipIsEnabled() )

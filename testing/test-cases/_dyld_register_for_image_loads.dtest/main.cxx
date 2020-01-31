@@ -3,6 +3,9 @@
 // BUILD:  $CXX main.cxx -o $BUILD_DIR/dyld_register_test.exe $BUILD_DIR/libfoo.dylib -DRUN_DIR="$RUN_DIR"
 // BUILD:  $CC  foo.c -dynamiclib  -install_name $RUN_DIR/libfoo2.dylib -o $BUILD_DIR/libfoo2.dylib
 // BUILD:  $CC  foo.c -bundle -o $BUILD_DIR/foo.bundle
+// BUILD:  $CC  up.c -dynamiclib  -install_name $RUN_DIR/libup.dylib -o $BUILD_DIR/libup.dylib
+// BUILD:  $CC  baz.c -dynamiclib  -install_name $RUN_DIR/libbaz.dylib -o $BUILD_DIR/libbaz.dylib $BUILD_DIR/libup.dylib
+// BUILD:  $CC  bar.c -dynamiclib  -install_name $RUN_DIR/libbar.dylib -o $BUILD_DIR/libbar.dylib -Wl,-upward_library,$BUILD_DIR/libup.dylib -DRUN_DIR="$RUN_DIR"
 
 // RUN:  ./dyld_register_test.exe
 
@@ -19,6 +22,7 @@ extern "C" void foo();
 extern mach_header __dso_handle;
 
 static std::unordered_set<const mach_header*> sCurrentImages;
+static bool expectedUnloadableState = false;
 
 static void notify(const mach_header* mh, const char* path, bool unloadable)
 {
@@ -30,17 +34,10 @@ static void notify(const mach_header* mh, const char* path, bool unloadable)
     sCurrentImages.insert(mh);
 
     const char* leaf = strrchr(path, '/');
-    if ( unloadable ) {
-        if ( (strcmp(leaf, "/libfoo2.dylib") != 0) && (strcmp(leaf, "/foo.bundle") != 0) ) {
-            printf("[FAIL] _dyld_register_for_image_loads: image incorrectly marked unloadable %p %s\n", mh, path);
-            exit(0);
-        }
-    }
-    else {
-        if ( (strcmp(leaf, "/libfoo2.dylib") == 0) || (strcmp(leaf, "/foo.bundle") == 0) ) {
-            printf("[FAIL] _dyld_register_for_image_loads: image incorrectly marked as not unloadable %p %s\n", mh, path);
-            exit(0);
-        }
+    if ( unloadable != expectedUnloadableState ) {
+        printf("[FAIL] _dyld_register_for_image_loads: image incorrectly marked unloadable(%s) but expected unloadable(%s) %p %s\n",
+               unloadable ? "true" : "true", expectedUnloadableState ? "true" : "false", mh, path);
+        exit(0);
     }
 }
 
@@ -49,6 +46,8 @@ int main()
 {
     printf("[BEGIN] _dyld_register_for_image_loads\n");
 
+    // Initially all images must not be unloadable as they are directly linked to the main executable
+    expectedUnloadableState = false;
     _dyld_register_for_image_loads(&notify);
 
     // verify we were notified about already loaded images
@@ -66,6 +65,9 @@ int main()
         printf("[FAIL] _dyld_register_for_image_loads() did not notify us about libfoo.dylib\n");
         exit(0);
     }
+    
+    // These dlopen's can be unloaded
+    expectedUnloadableState = true;
 
     // verify we were notified about load of libfoo2.dylib
 	void* handle2 = dlopen(RUN_DIR "/libfoo2.dylib", RTLD_FIRST);
@@ -93,7 +95,17 @@ int main()
         exit(0);
     }
 
-
+    // Upward linking with dlopen may confuse the notifier as we may try to notify twice on the upwardly linked image
+    // We test this with:
+    //   libbar upward links libup
+    //   libbar also dlopens libbaz
+    //   libbaz links libup
+    // We should not get a duplicate notification on libup
+    void* handleBar = dlopen(RUN_DIR "/libbar.dylib", RTLD_FIRST);
+    if ( handleBar == NULL ) {
+        printf("[FAIL] dlopen(\"%s\") failed with: %s\n", RUN_DIR "/libbar.dylib", dlerror());
+        exit(0);
+    }
 
     printf("[PASS] _dyld_register_for_image_loads\n");
     return 0;

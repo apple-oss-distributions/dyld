@@ -33,6 +33,8 @@
 #include <uuid/uuid.h>
 #include <mach-o/loader.h>
 #include <System/sys/kdebug.h>
+#include <System/sys/reason.h>
+
 
 #define DBG_DYLD_INTERNAL_SUBCLASS              (7)
 #define DBG_DYLD_API_SUBCLASS                   (8)
@@ -51,6 +53,7 @@
 #define DBG_DYLD_TIMING_APPLY_INTERPOSING       (KDBG_CODE(DBG_DYLD, DBG_DYLD_INTERNAL_SUBCLASS, 10))
 #define DBG_DYLD_GDB_IMAGE_NOTIFIER             (KDBG_CODE(DBG_DYLD, DBG_DYLD_INTERNAL_SUBCLASS, 11))
 #define DBG_DYLD_REMOTE_IMAGE_NOTIFIER          (KDBG_CODE(DBG_DYLD, DBG_DYLD_INTERNAL_SUBCLASS, 12))
+#define DBG_DYLD_TIMING_BOOTSTRAP_START         (KDBG_CODE(DBG_DYLD, DBG_DYLD_INTERNAL_SUBCLASS, 13))
 
 #define DBG_DYLD_TIMING_DLOPEN                  (KDBG_CODE(DBG_DYLD, DBG_DYLD_API_SUBCLASS, 0))
 #define DBG_DYLD_TIMING_DLOPEN_PREFLIGHT        (KDBG_CODE(DBG_DYLD, DBG_DYLD_API_SUBCLASS, 1))
@@ -68,9 +71,19 @@
 
 namespace dyld3 {
 
+enum class DyldTimingBuildClosure : uint64_t {
+    ClosureBuildFailure                     = 0,
+    LaunchClosure_Built                     = 1,
+    DlopenClosure_UsedSharedCacheDylib      = 2,
+    DlopenClosure_UsedSharedCacheOther      = 3,
+    DlopenClosure_NoLoad                    = 4,
+    DlopenClosure_Built                     = 5
+};
+
 struct VIS_HIDDEN kt_arg {
     kt_arg(int value) : _value(value), _str(nullptr) {}
     kt_arg(uint64_t value) : _value(value), _str(nullptr) {}
+    kt_arg(DyldTimingBuildClosure value) : _value((uint64_t)value), _str(nullptr) {}
     kt_arg(const char *value) : _value(0), _str(value) {}
     kt_arg(void *value) : _value((uint64_t)value), _str(nullptr) {}
     uint64_t value() const { return _value; }
@@ -130,6 +143,7 @@ private:
 
 VIS_HIDDEN
 void kdebug_trace_dyld_image(const uint32_t code,
+                       const char* path,
                        const uuid_t* uuid_bytes,
                        const fsobj_id_t fsobjid,
                        const fsid_t fsid,
@@ -146,6 +160,9 @@ uint64_t kdebug_trace_dyld_duration_start(uint32_t code, kt_arg data1, kt_arg da
 
 VIS_HIDDEN
 void kdebug_trace_dyld_duration_end(uint64_t trace_id, uint32_t code, kt_arg data4, kt_arg data5, kt_arg data6);
+
+VIS_HIDDEN
+void syntheticBacktrace(const char *reason, bool enableExternally=false);
 
 };
 #endif /* Tracing_h */

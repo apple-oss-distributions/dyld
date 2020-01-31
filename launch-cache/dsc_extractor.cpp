@@ -33,7 +33,6 @@
 #include <sys/mman.h>
 #include <sys/syslimits.h>
 #include <libkern/OSByteOrder.h>
-#include <mach-o/fat.h>
 #include <mach-o/arch.h>
 #include <mach-o/loader.h>
 #include <Availability.h>
@@ -487,52 +486,8 @@ static void make_dirs(const char* file_path)
 
 
 template <typename A>
-size_t dylib_maker(const void* mapped_cache, std::vector<uint8_t> &dylib_data, const std::vector<seg_info>& segments) {
+void dylib_maker(const void* mapped_cache, std::vector<uint8_t> &dylib_data, const std::vector<seg_info>& segments) {
     typedef typename A::P P;
-
-    int32_t                nfat_archs          = 0;
-    uint32_t                offsetInFatFile     = 4096;
-    uint8_t                 *base_ptr           = &dylib_data.front();
-
-#define FH reinterpret_cast<fat_header*>(base_ptr)
-#define FA reinterpret_cast<fat_arch*>(base_ptr + (8 + (nfat_archs - 1) * sizeof(fat_arch)))
-
-    if(dylib_data.size() >= 4096 && OSSwapBigToHostInt32(FH->magic) == FAT_MAGIC) {
-        // have fat header, append new arch to end
-        nfat_archs                              = OSSwapBigToHostInt32(FH->nfat_arch);
-        offsetInFatFile                         = OSSwapBigToHostInt32(FA->offset) + OSSwapBigToHostInt32(FA->size);
-    }
-
-    // First see if this slice already exists.
-    for(std::vector<seg_info>::const_iterator it=segments.begin(); it != segments.end(); ++it) {
-        if(strcmp(it->segName, "__TEXT") == 0 ) {
-            const macho_header<P> *textMH = reinterpret_cast<macho_header<P>*>((uint8_t*)mapped_cache+it->offset);
-
-            // if this cputype/subtype already exist in fat header, then return immediately
-            for(int32_t i=0; i < nfat_archs; ++i) {
-                fat_arch *afa = reinterpret_cast<fat_arch*>(base_ptr+8)+i;
-                if (afa->cputype == (cpu_type_t)OSSwapHostToBigInt32(textMH->cputype()) && afa->cpusubtype == (cpu_type_t)OSSwapHostToBigInt32(textMH->cpusubtype())) {
-                    //fprintf(stderr, "arch already exists in fat dylib\n");
-                    return offsetInFatFile;
-                }
-            }
-        }
-    }
-
-    if (dylib_data.empty()) {
-        // Reserve space for the fat header.
-        dylib_data.resize(4096);
-        base_ptr = &dylib_data.front();
-        FH->magic = OSSwapHostToBigInt32(FAT_MAGIC);
-    }
-
-    FH->nfat_arch                               = OSSwapHostToBigInt32(++nfat_archs);
-
-    FA->cputype                                 = 0; // filled in later
-    FA->cpusubtype                              = 0; // filled in later
-    FA->offset                                  = OSSwapHostToBigInt32(offsetInFatFile);
-    FA->size                                    = 0; // filled in later
-    FA->align                                   = OSSwapHostToBigInt32(12);
 
     size_t  additionalSize  = 0;
     for(std::vector<seg_info>::const_iterator it=segments.begin(); it != segments.end(); ++it) {
@@ -547,12 +502,8 @@ size_t dylib_maker(const void* mapped_cache, std::vector<uint8_t> &dylib_data, c
     uint64_t                textOffsetInCache    = 0;
     for( std::vector<seg_info>::const_iterator it=segments.begin(); it != segments.end(); ++it) {
 
-        if(strcmp(it->segName, "__TEXT") == 0 ) {
-            textOffsetInCache                    = it->offset;
-            const macho_header<P>   *textMH     = reinterpret_cast<macho_header<P>*>((uint8_t*)mapped_cache+textOffsetInCache);
-            FA->cputype                         = OSSwapHostToBigInt32(textMH->cputype());
-            FA->cpusubtype                      = OSSwapHostToBigInt32(textMH->cpusubtype());
-        }
+        if(strcmp(it->segName, "__TEXT") == 0 )
+            textOffsetInCache = it->offset;
 
         //printf("segName=%s, offset=0x%llX, size=0x%0llX\n", it->segName, it->offset, it->sizem);
         // Copy all but the __LINKEDIT.  It will be copied later during the optimizer in to a temporary buffer but it would
@@ -577,12 +528,7 @@ size_t dylib_maker(const void* mapped_cache, std::vector<uint8_t> &dylib_data, c
     while (new_dylib_data.size() % 4096)
         new_dylib_data.push_back(0);
 
-    // update fat header with new file size
-    FA->size                                    = OSSwapHostToBigInt32(new_dylib_data.size());
-#undef FH
-#undef FA
     dylib_data.insert(dylib_data.end(), new_dylib_data.begin(), new_dylib_data.end());
-    return offsetInFatFile;
 }
 
 typedef __typeof(dylib_maker<x86>) dylib_maker_func;
@@ -611,7 +557,7 @@ struct SharedCacheExtractor {
           progress(progress) {
 
       extractors.reserve(map.size());
-      for (const std::pair<const char*, std::vector<seg_info>>& it : map)
+      for (auto it : map)
           extractors.emplace_back(it.first, it.second);
 
         // Limit the number of open files.  16 seems to give better performance than higher numbers.
@@ -665,39 +611,21 @@ void SharedCacheDylibExtractor::extractCache(SharedCacheExtractor &context) {
     make_dirs(dylib_path);
 
     // open file, create if does not already exist
-    int fd = ::open(dylib_path, O_CREAT | O_EXLOCK | O_RDWR, 0644);
+    int fd = ::open(dylib_path, O_CREAT | O_TRUNC | O_EXLOCK | O_RDWR, 0644);
     if ( fd == -1 ) {
         fprintf(stderr, "can't open or create dylib file %s, errnor=%d\n", dylib_path, errno);
         result = -1;
         return;
     }
 
-    struct stat statbuf;
-    if (fstat(fd, &statbuf)) {
-        fprintf(stderr, "Error: stat failed for dyld file %s, errnor=%d\n", dylib_path, errno);
-        close(fd);
-        result = -1;
-        return;
-    }
-
-    std::vector<uint8_t> vec((size_t)statbuf.st_size);
-    if(pread(fd, &vec.front(), vec.size(), 0) != (long)vec.size()) {
-        fprintf(stderr, "can't read dylib file %s, errnor=%d\n", dylib_path, errno);
-        close(fd);
-        result = -1;
-        return;
-    }
-
-    const size_t offset = context.dylib_create_func(context.mapped_cache, vec, segInfo);
+    std::vector<uint8_t> vec;
+    context.dylib_create_func(context.mapped_cache, vec, segInfo);
     context.progress(context.count++, (unsigned)context.map.size());
 
-    if(offset != vec.size()) {
-        //Write out the first page, and everything after offset
-        if(   pwrite(fd, &vec.front(), 4096, 0) == -1
-           || pwrite(fd, &vec.front() + offset, vec.size() - offset, offset) == -1) {
-            fprintf(stderr, "error writing, errnor=%d\n", errno);
-            result = -1;
-        }
+    // Write file data
+    if( write(fd, &vec.front(), vec.size()) == -1) {
+        fprintf(stderr, "error writing, errnor=%d\n", errno);
+        result = -1;
     }
 
     close(fd);
@@ -775,7 +703,10 @@ static int sharedCacheIsValid(const void* mapped_cache, uint64_t size) {
     uint32_t dscDigestFormat = kCCDigestNone;
     switch (cd->hashType) {
         case CS_HASHTYPE_SHA1:
+#pragma clang diagnostic push
+#pragma clang diagnostic ignored "-Wdeprecated-declarations"
             dscDigestFormat = kCCDigestSHA1;
+#pragma clang diagnostic pop
             break;
         case CS_HASHTYPE_SHA256:
             dscDigestFormat = kCCDigestSHA256;
@@ -805,7 +736,7 @@ static int sharedCacheIsValid(const void* mapped_cache, uint64_t size) {
             if ( (fileOffset >= mappings[1].fileOffset) && (fileOffset < (mappings[1].fileOffset + mappings[1].size)) )
                 continue;
 
-            CCDigest(dscDigestFormat, (uint8_t*)mapped_cache + fileOffset, csPageSize, cdHashBuffer);
+            CCDigest(dscDigestFormat, (uint8_t*)mapped_cache + fileOffset, (size_t)csPageSize, cdHashBuffer);
             uint8_t* cacheCdHashBuffer = hashSlot + (i * cd->hashSize);
             if (memcmp(cdHashBuffer, cacheCdHashBuffer, cd->hashSize) != 0)  {
                 fprintf(stderr, "Error: dyld shared cache code signature for page %d is incorrect.\n", i);

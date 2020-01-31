@@ -26,47 +26,50 @@
 
 #include <assert.h>
 #include <mach/mach.h>
+#include <kern/kcdata.h>
+#include <mach-o/dyld_priv.h>
 
+#include "Loading.h"
 #include "Tracing.h"
 
-namespace {
-VIS_HIDDEN
-static uint64_t elapsed(const time_value_t start, const time_value_t end) {
-    uint64_t duration;
-    duration = 1000000*(end.seconds - start.seconds);
-    duration += (end.microseconds - start.microseconds);
-    return duration;
-}
-}
+// Workaround for header issues in rdar://49073930
+// #include <System/os/reason_private.h>
+extern "C" int
+os_fault_with_payload(uint32_t reason_namespace, uint64_t reason_code,
+                      void *payload, uint32_t payload_size, const char *reason_string,
+                      uint64_t reason_flags) __attribute__((cold));
 
 namespace dyld3 {
 
 VIS_HIDDEN
 void kdebug_trace_dyld_image(const uint32_t code,
+                       const char* imagePath,
                        const uuid_t* uuid_bytes,
                        const fsobj_id_t fsobjid,
                        const fsid_t fsid,
                        const mach_header* load_addr)
 {
-#if __LP64__
-    uint64_t *uuid = (uint64_t *)uuid_bytes[0];
-    kdebug_trace(KDBG_CODE(DBG_DYLD, DBG_DYLD_UUID, code), uuid[0],
-                 uuid[1], (uint64_t)load_addr,
-                 (uint64_t)fsid.val[0] | ((uint64_t)fsid.val[1] << 32));
-    kdebug_trace(KDBG_CODE(DBG_DYLD, DBG_DYLD_UUID, code + 1),
-                 (uint64_t)fsobjid.fid_objno |
-                 ((uint64_t)fsobjid.fid_generation << 32),
-                 0, 0, 0);
-#else /* __LP64__ */
-    uint32_t *uuid = (uint32_t *)uuid_bytes[0];
+    uint64_t id = kdebug_trace_string(code, 0, imagePath);
+#if __ARM_ARCH_7K__
+    uint32_t *uuid = (uint32_t *)uuid_bytes;
     kdebug_trace(KDBG_CODE(DBG_DYLD, DBG_DYLD_UUID, code + 2), uuid[0],
                  uuid[1], uuid[2], uuid[3]);
     kdebug_trace(KDBG_CODE(DBG_DYLD, DBG_DYLD_UUID, code + 3),
                  (uint32_t)load_addr, fsid.val[0], fsid.val[1],
                  fsobjid.fid_objno);
     kdebug_trace(KDBG_CODE(DBG_DYLD, DBG_DYLD_UUID, code + 4),
-                 fsobjid.fid_generation, 0, 0, 0);
-#endif /* __LP64__ */
+                 fsobjid.fid_generation, id, 0, 0);
+#else /* __ARM_ARCH_7K__ */
+    uint64_t *uuid = (uint64_t *)uuid_bytes;
+    kdebug_trace(KDBG_CODE(DBG_DYLD, DBG_DYLD_UUID, code), uuid[0],
+                 uuid[1], (uint64_t)load_addr,
+                 (uint64_t)fsid.val[0] | ((uint64_t)fsid.val[1] << 32));
+    kdebug_trace(KDBG_CODE(DBG_DYLD, DBG_DYLD_UUID, code + 1),
+                 (uint64_t)fsobjid.fid_objno |
+                 ((uint64_t)fsobjid.fid_generation << 32),
+                 id, 0, 0);
+#endif /* !__ARM_ARCH_7K__ */
+    kdebug_trace_string(code, id, nullptr);
 }
 
 // FIXME
@@ -134,6 +137,22 @@ void ScopedTimer::startTimer() {
 
 void ScopedTimer::endTimer() {
     kdebug_trace_dyld_duration_end(current_trace_id, code, data4, data5, data6);
+}
+
+void syntheticBacktrace(const char *reason, bool enableExternally) {
+    if (!enableExternally && !internalInstall()) { return; }
+
+    char payloadBuffer[EXIT_REASON_PAYLOAD_MAX_LEN];
+    dyld_abort_payload* payload = (dyld_abort_payload*)payloadBuffer;
+    payload->version               = 1;
+    payload->flags                 = 0;
+    payload->targetDylibPathOffset = 0;
+    payload->clientPathOffset      = 0;
+    payload->symbolOffset          = 0;
+    int payloadSize = sizeof(dyld_abort_payload);
+    char truncMessage[EXIT_REASON_USER_DESC_MAX_LEN];
+    strlcpy(truncMessage, reason, EXIT_REASON_USER_DESC_MAX_LEN);
+    os_fault_with_payload(OS_REASON_DYLD, DYLD_EXIT_REASON_OTHER, payloadBuffer, payloadSize, truncMessage, 0);
 }
 
 };

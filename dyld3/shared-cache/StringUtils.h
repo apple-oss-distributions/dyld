@@ -67,6 +67,21 @@ inline void bytesToHex(const uint8_t* bytes, size_t byteCount, char buffer[])
     *p++ =  '\0';
 }
 
+inline void putHexNibble(uint8_t value, char*& p)
+{
+    if ( value < 10 )
+        *p++ = '0' + value;
+    else
+        *p++ = 'A' + value - 10;
+}
+
+inline void putHexByte(uint8_t value, char*& p)
+{
+    value &= 0xFF;
+    putHexNibble(value >> 4,   p);
+    putHexNibble(value & 0x0F, p);
+}
+
 inline uint8_t hexCharToUInt(const char hexByte, uint8_t& value) {
     if (hexByte >= '0' && hexByte <= '9') {
         value = hexByte - '0';
@@ -83,6 +98,10 @@ inline uint8_t hexCharToUInt(const char hexByte, uint8_t& value) {
 }
 
 inline uint64_t hexToUInt64(const char* startHexByte, const char** endHexByte) {
+    const char* scratch;
+    if (endHexByte == nullptr) {
+        endHexByte = &scratch;
+    }
     if (startHexByte == nullptr)
         return 0;
     uint64_t retval = 0;

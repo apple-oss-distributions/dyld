@@ -66,6 +66,7 @@ struct dyld_all_image_infos_32 {
     uint32_t                        reserved[5];
     uint32_t                        compact_dyld_image_info_addr;
     uint32_t                        compact_dyld_image_info_size;
+    uint32_t                        platform;
 };
 
 struct dyld_all_image_infos_64 {
@@ -100,6 +101,7 @@ struct dyld_all_image_infos_64 {
     uint64_t                reserved[9];
     uint64_t                compact_dyld_image_info_addr;
     uint64_t                compact_dyld_image_info_size;
+    uint32_t                platform;
 };
 
 struct dyld_image_info_32 {
@@ -135,29 +137,29 @@ struct dyld_process_info_notify_header {
     uint64_t                    timestamp;
 };
 
+//FIXME: Refactor this out into a seperate file
 struct VIS_HIDDEN RemoteBuffer {
     RemoteBuffer();
     RemoteBuffer(task_t task, mach_vm_address_t remote_address, size_t remote_size, bool shared, bool allow_truncation);
+    RemoteBuffer& operator=(RemoteBuffer&& other);
     ~RemoteBuffer();
-    RemoteBuffer& operator=(RemoteBuffer&& other) {
-        _localAddress = other._localAddress;
-        _size = other._size;
-        _kr = other._kr;
-        other._localAddress = 0;
-        other._size = 0;
-        other._kr = KERN_SUCCESS;
-        return *this;
-    }
-    RemoteBuffer(const RemoteBuffer &) = delete;
-    RemoteBuffer& operator=(const RemoteBuffer &) = delete;
-    void *getLocalAddress();
-    kern_return_t getKernelReturn();
-    size_t getSize();
+    void *getLocalAddress() const;
+    kern_return_t getKernelReturn() const;
+    size_t getSize() const;
 private:
-    bool map(task_t task, mach_vm_address_t remote_address, bool shared);
+    static std::pair<mach_vm_address_t, kern_return_t> map( task_t task, mach_vm_address_t remote_address,
+                                                            vm_size_t _size, bool shared);
+    static std::tuple<mach_vm_address_t,vm_size_t,kern_return_t,bool>create(    task_t task,
+                                                                                mach_vm_address_t remote_address,
+                                                                                size_t remote_size,
+                                                                                bool shared,
+                                                                                bool allow_truncation);
+    RemoteBuffer(std::tuple<mach_vm_address_t,vm_size_t,kern_return_t,bool> T);
+
     mach_vm_address_t _localAddress;
     vm_size_t _size;
     kern_return_t _kr;
+    bool _shared;
 };
 
 // only called during libdyld set up

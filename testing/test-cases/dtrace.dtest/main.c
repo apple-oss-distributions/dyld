@@ -1,5 +1,7 @@
 // BUILD_ONLY: MacOSX
 
+// if we ever re-enable this on iOS we will need to add // BOOT_ARGS: dtrace_dof_mode=1
+
 // BUILD:  /usr/sbin/dtrace -h -s main.d -o $TEMP_DIR/probes.h
 // BUILD:  $CC main.c -I$TEMP_DIR -o $BUILD_DIR/dtrace.exe
 // BUILD:  $DYLD_ENV_VARS_ENABLE $BUILD_DIR/dtrace.exe

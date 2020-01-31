@@ -30,9 +30,9 @@
 #include <stdint.h>
 #include <pthread.h>
 #include <uuid/uuid.h>
+#include <mach-o/dyld_priv.h>
 
 #include "dlfcn.h"
-#include "dyld_priv.h"
 
 
 #define TEMP_HIDDEN __attribute__((visibility("hidden")))
@@ -153,9 +153,17 @@ bool _dyld_get_shared_cache_uuid(uuid_t uuid) TEMP_HIDDEN;
 
 const void* _dyld_get_shared_cache_range(size_t* length) TEMP_HIDDEN;
 
+bool _dyld_shared_cache_optimized() TEMP_HIDDEN;
+
+bool _dyld_shared_cache_is_locally_built() TEMP_HIDDEN;
+    
+bool dyld_need_closure(const char* execPath, const char* tempDir) TEMP_HIDDEN;
+
 void _dyld_images_for_addresses(unsigned count, const void* addresses[], struct dyld_image_uuid_offset infos[]) TEMP_HIDDEN;
 
 void _dyld_register_for_image_loads(void (*func)(const mach_header* mh, const char* path, bool unloadable)) TEMP_HIDDEN;
+
+void _dyld_register_for_bulk_image_loads(void (*func)(unsigned imageCount, const struct mach_header* mhs[], const char* paths[])) TEMP_HIDDEN;
 
 bool _dyld_find_unwind_sections(void* addr, dyld_unwind_sections* info) TEMP_HIDDEN;
 
@@ -163,13 +171,27 @@ bool dyld_process_is_restricted() TEMP_HIDDEN;
 
 const char* dyld_shared_cache_file_path() TEMP_HIDDEN;
 
+bool dyld_has_inserted_or_interposing_libraries() TEMP_HIDDEN;
+
 void dyld_dynamic_interpose(const mach_header* mh, const dyld_interpose_tuple array[], size_t count) TEMP_HIDDEN;
 
 int dyld_shared_cache_find_iterate_text(const uuid_t cacheUuid, const char* extraSearchDirs[], void (^callback)(const dyld_shared_cache_dylib_text_info* info)) TEMP_HIDDEN;
 
 int dyld_shared_cache_iterate_text(const uuid_t cacheUuid, void (^callback)(const dyld_shared_cache_dylib_text_info* info)) TEMP_HIDDEN;
 
+void _dyld_atfork_prepare() TEMP_HIDDEN;
+void _dyld_atfork_parent() TEMP_HIDDEN;
 void _dyld_fork_child() TEMP_HIDDEN;
+
+void _dyld_missing_symbol_abort() TEMP_HIDDEN;
+
+const char* _dyld_get_objc_selector(const char* selName) TEMP_HIDDEN;
+
+void _dyld_for_each_objc_class(const char* className,
+                               void (^callback)(void* classPtr, bool isLoaded, bool* stop)) TEMP_HIDDEN;
+
+void _dyld_for_each_objc_protocol(const char* protocolName,
+                                  void (^callback)(void* protocolPtr, bool isLoaded, bool* stop)) TEMP_HIDDEN;
 
 // only in macOS and deprecated 
 #if __MAC_OS_X_VERSION_MIN_REQUIRED

@@ -1,6 +1,6 @@
 
 // BUILD:  $CC foo.c -dynamiclib -Wl,-U,_gInitialisersCalled                                         -install_name $RUN_DIR/libfoo.dylib -o $BUILD_DIR/libfoo.dylib
-// BUILD:  $CC bar.c -dynamiclib -Wl,-U,_gInitialisersCalled $BUILD_DIR/libfoo.dylib -flat_namespace -install_name $RUN_DIR/libbar.dylib -o $BUILD_DIR/libbar.dylib
+// BUILD:  $CC bar.c -dynamiclib -Wl,-U,_gInitialisersCalled $BUILD_DIR/libfoo.dylib -flat_namespace -install_name $RUN_DIR/libbar.dylib -o $BUILD_DIR/libbar.dylib -Wl,-w
 // BUILD:  $CC main.c -DRUN_DIR="$RUN_DIR"                                                                                               -o $BUILD_DIR/dlopen-flat.exe
 
 // RUN:  ./dlopen-flat.exe

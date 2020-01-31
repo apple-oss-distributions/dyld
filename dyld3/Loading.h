@@ -34,6 +34,11 @@
 #include "Closure.h"
 #include "MachOLoaded.h"
 
+namespace objc_opt {
+struct objc_clsopt_t;
+struct objc_selopt_t;
+}
+
 namespace dyld3 {
 
 
@@ -88,12 +93,14 @@ class VIS_HIDDEN Loader {
 public:
         typedef bool (*LogFunc)(const char*, ...) __attribute__((format(printf, 1, 2)));
 
-                        Loader(Array<LoadedImage>& storage, const void* cacheAddress, const Array<const dyld3::closure::ImageArray*>& imagesArrays,
+                        Loader(const Array<LoadedImage>& existingImages, Array<LoadedImage>& newImagesStorage,
+                               const void* cacheAddress, const Array<const dyld3::closure::ImageArray*>& imagesArrays,
+                               const closure::ObjCSelectorOpt* selOpt, const Array<closure::Image::ObjCSelectorImage>& selImages,
                                LogFunc log_loads, LogFunc log_segments, LogFunc log_fixups, LogFunc log_dofs);
 
     void                addImage(const LoadedImage&);
-    void                completeAllDependents(Diagnostics& diag, uintptr_t topIndex=0);
-    void                mapAndFixupAllImages(Diagnostics& diag, bool processDOFs, bool fromOFI=false, uintptr_t topIndex=0);
+    void                completeAllDependents(Diagnostics& diag, bool& someCacheImageOverridden);
+    void                mapAndFixupAllImages(Diagnostics& diag, bool processDOFs, bool fromOFI=false);
     uintptr_t           resolveTarget(closure::Image::ResolvedSymbolTarget target);
     LoadedImage*        findImage(closure::ImageNum targetImageNum);
 
@@ -115,6 +122,23 @@ private:
         const char*            imageShortName;
     };
 
+#if BUILDING_DYLD
+    struct LaunchImagesCache {
+        LoadedImage*                    findImage(closure::ImageNum targetImageNum,
+                                                  Array<LoadedImage>& images) const;
+        void                            tryAddImage(closure::ImageNum targetImageNum, uint64_t allImagesIndex);
+
+        static const uint64_t           _cacheSize = 128;
+        static const closure::ImageNum  _firstImageNum = closure::kFirstLaunchClosureImageNum;
+        static const closure::ImageNum  _lastImageNum = closure::kFirstLaunchClosureImageNum + _cacheSize;
+
+        // Note, the cache stores "indices + 1" into the _allImages array.
+        // 0 means we haven't cached an entry yet
+        uint32_t                        _cacheStorage[_cacheSize] = { 0 };
+        Array<uint32_t>                 _imageIndices = { &_cacheStorage[0], _cacheSize, _cacheSize };
+    };
+#endif
+
     void                mapImage(Diagnostics& diag, LoadedImage& info, bool fromOFI);
     void                applyFixupsToImage(Diagnostics& diag, LoadedImage& info);
     void                registerDOFs(const Array<DOFInfo>& dofs);
@@ -124,27 +148,33 @@ private:
     bool                sandboxBlockedStat(const char* path);
     bool                sandboxBlocked(const char* path, const char* kind);
 
-    Array<LoadedImage>&                         _allImages;
-    const Array<const closure::ImageArray*>&    _imagesArrays;
-    const void*                                 _dyldCacheAddress;
-    LogFunc                                     _logLoads;
-    LogFunc                                     _logSegments;
-    LogFunc                                     _logFixups;
-    LogFunc                                     _logDofs;
+    const Array<LoadedImage>&                       _existingImages;
+    Array<LoadedImage>&                             _newImages;
+    const Array<const closure::ImageArray*>&        _imagesArrays;
+    const void*                                     _dyldCacheAddress;
+    const objc_opt::objc_selopt_t*                  _dyldCacheSelectorOpt;
+    const closure::ObjCSelectorOpt*                 _closureSelectorOpt;
+    const Array<closure::Image::ObjCSelectorImage>& _closureSelectorImages;
+#if BUILDING_DYLD
+    LaunchImagesCache                               _launchImagesCache;
+#endif
+    LogFunc                                         _logLoads;
+    LogFunc                                         _logSegments;
+    LogFunc                                         _logFixups;
+    LogFunc                                         _logDofs;
 };
 
 
 
-#if BUILDING_DYLD
-bool bootArgsContains(const char* arg) VIS_HIDDEN;
+#if (BUILDING_LIBDYLD || BUILDING_DYLD)
 bool internalInstall();
+#endif
+#if BUILDING_DYLD
 void forEachLineInFile(const char* path, void (^lineHandler)(const char* line, bool& stop));
 void forEachLineInFile(const char* buffer, size_t bufferLen, void (^lineHandler)(const char* line, bool& stop));
 #endif
 
-
 } // namespace dyld3
-
 
 #endif // __DYLD_LOADING_H__
 

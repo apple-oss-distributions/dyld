@@ -34,6 +34,8 @@
 #include <sys/errno.h>
 #include <unistd.h>
 
+#include <initializer_list>
+
 #include "PathOverrides.h"
 
 
@@ -66,7 +68,7 @@ void PathOverrides::setFallbackPathHandling(FallbackPathMode mode)
 void PathOverrides::setEnvVars(const char* envp[], const MachOFile* mainExe, const char* mainExePath)
 {
     for (const char** p = envp; *p != NULL; p++) {
-        addEnvVar(*p);
+        addEnvVar(*p, false);
     }
     if ( mainExe != nullptr )
         setMainExecutable(mainExe, mainExePath);
@@ -78,7 +80,7 @@ void PathOverrides::setMainExecutable(const dyld3::MachOFile* mainExe, const cha
     assert(mainExe->isMainExecutable());
     // process any LC_DYLD_ENVIRONMENT load commands in main executable
 	mainExe->forDyldEnv(^(const char* envVar, bool& stop) {
-        addEnvVar(envVar);
+        addEnvVar(envVar, true);
 	});
 }
 
@@ -90,31 +92,11 @@ PathOverrides::~PathOverrides()
 }
 #endif
 
-uint32_t PathOverrides::envVarCount() const
-{
-    uint32_t count = 0;
-    if ( _dylibPathOverrides != nullptr )
-        ++count;
-    if ( _frameworkPathOverrides != nullptr )
-        ++count;
-    if ( _frameworkPathFallbacks != nullptr )
-        ++count;
-    if ( _dylibPathFallbacks != nullptr )
-        ++count;
-    if ( _insertedDylibs != nullptr )
-        ++count;
-    if ( _imageSuffix != nullptr )
-        ++count;
-    if ( _rootPath != nullptr )
-        ++count;
-    return count;
-}
-
-void PathOverrides::forEachInsertedDylib(void (^handler)(const char* dylibPath)) const
+void PathOverrides::forEachInsertedDylib(void (^handler)(const char* dylibPath, bool &stop)) const
 {
     if ( _insertedDylibs != nullptr ) {
-        forEachInColonList(_insertedDylibs, ^(const char* path, bool &stop) {
-            handler(path);
+        forEachInColonList(_insertedDylibs, nullptr, ^(const char* path, bool &stop) {
+            handler(path, stop);
         });
     }
 }
@@ -131,15 +113,25 @@ void PathOverrides::handleEnvVar(const char* key, const char* value, void (^hand
     handler(buffer);
 }
 
+// Note, this method only returns variables set on the environment, not those from the load command
 void PathOverrides::forEachEnvVar(void (^handler)(const char* envVar)) const
 {
-    handleEnvVar("DYLD_LIBRARY_PATH",            _dylibPathOverrides,      handler);
-    handleEnvVar("DYLD_FRAMEWORK_PATH",          _frameworkPathOverrides,  handler);
-    handleEnvVar("DYLD_FALLBACK_FRAMEWORK_PATH", _frameworkPathFallbacks,  handler);
-    handleEnvVar("DYLD_FALLBACK_LIBRARY_PATH",   _dylibPathFallbacks,      handler);
-    handleEnvVar("DYLD_INSERT_LIBRARIES",        _insertedDylibs,          handler);
-    handleEnvVar("DYLD_IMAGE_SUFFIX",            _imageSuffix,             handler);
-    handleEnvVar("DYLD_ROOT_PATH",               _rootPath,                handler);
+    handleEnvVar("DYLD_LIBRARY_PATH",            _dylibPathOverridesEnv,        handler);
+    handleEnvVar("DYLD_FRAMEWORK_PATH",          _frameworkPathOverridesEnv,    handler);
+    handleEnvVar("DYLD_FALLBACK_FRAMEWORK_PATH", _frameworkPathFallbacksEnv,    handler);
+    handleEnvVar("DYLD_FALLBACK_LIBRARY_PATH",   _dylibPathFallbacksEnv,        handler);
+    handleEnvVar("DYLD_INSERT_LIBRARIES",        _insertedDylibs,               handler);
+    handleEnvVar("DYLD_IMAGE_SUFFIX",            _imageSuffix,                  handler);
+    handleEnvVar("DYLD_ROOT_PATH",               _rootPath,                     handler);
+}
+
+// Note, this method only returns variables set on the executable load command, not those from the environment
+void PathOverrides::forEachExecutableEnvVar(void (^handler)(const char* envVar)) const
+{
+    handleEnvVar("DYLD_LIBRARY_PATH",            _dylibPathOverridesExeLC,        handler);
+    handleEnvVar("DYLD_FRAMEWORK_PATH",          _frameworkPathOverridesExeLC,    handler);
+    handleEnvVar("DYLD_FALLBACK_FRAMEWORK_PATH", _frameworkPathFallbacksExeLC,    handler);
+    handleEnvVar("DYLD_FALLBACK_LIBRARY_PATH",   _dylibPathFallbacksExeLC,        handler);
 }
 
 const char* PathOverrides::addString(const char* str)
@@ -163,7 +155,7 @@ void PathOverrides::setString(const char*& var, const char* value)
     var = addString(tmp);
 }
 
-void PathOverrides::addEnvVar(const char* keyEqualsValue)
+void PathOverrides::addEnvVar(const char* keyEqualsValue, bool forExecutable)
 {
     // We have to make a copy of the env vars because the dyld
     // semantics is that the env vars are only looked at once
@@ -171,16 +163,16 @@ void PathOverrides::addEnvVar(const char* keyEqualsValue)
     const char* equals = strchr(keyEqualsValue, '=');
     if ( equals != NULL ) {
         if ( strncmp(keyEqualsValue, "DYLD_LIBRARY_PATH", 17) == 0 ) {
-            setString(_dylibPathOverrides, &keyEqualsValue[18]);
+            setString(forExecutable ? _dylibPathOverridesExeLC : _dylibPathOverridesEnv, &keyEqualsValue[18]);
         }
         else if ( strncmp(keyEqualsValue, "DYLD_FRAMEWORK_PATH", 19) == 0 ) {
-            setString(_frameworkPathOverrides, &keyEqualsValue[20]);
+            setString(forExecutable ? _frameworkPathOverridesExeLC : _frameworkPathOverridesEnv, &keyEqualsValue[20]);
         }
         else if ( strncmp(keyEqualsValue, "DYLD_FALLBACK_FRAMEWORK_PATH", 28) == 0 ) {
-            setString(_frameworkPathFallbacks, &keyEqualsValue[29]);
+            setString(forExecutable ? _frameworkPathFallbacksExeLC : _frameworkPathFallbacksEnv, &keyEqualsValue[29]);
         }
         else if ( strncmp(keyEqualsValue, "DYLD_FALLBACK_LIBRARY_PATH", 26) == 0 ) {
-            setString(_dylibPathFallbacks, &keyEqualsValue[27]);
+            setString(forExecutable ? _dylibPathFallbacksExeLC : _dylibPathFallbacksEnv, &keyEqualsValue[27]);
         }
         else if ( strncmp(keyEqualsValue, "DYLD_INSERT_LIBRARIES", 21) == 0 ) {
             setString(_insertedDylibs, &keyEqualsValue[22]);
@@ -194,30 +186,36 @@ void PathOverrides::addEnvVar(const char* keyEqualsValue)
     }
 }
 
-void PathOverrides::forEachInColonList(const char* list, void (^handler)(const char* path, bool& stop))
+void PathOverrides::forEachInColonList(const char* list1, const char* list2, void (^handler)(const char* path, bool& stop))
 {
-    char buffer[strlen(list)+1];
-    const char* t = list;
-    bool stop = false;
-    for (const char* s=list; *s != '\0'; ++s) {
-        if (*s != ':')
+    for (const char* list : { list1, list2 }) {
+        if (list == nullptr)
             continue;
-        size_t len = s - t;
-        memcpy(buffer, t, len);
-        buffer[len] = '\0';
-        handler(buffer, stop);
-        if ( stop )
+        char buffer[strlen(list)+1];
+        const char* t = list;
+        bool stop = false;
+        for (const char* s=list; *s != '\0'; ++s) {
+            if (*s != ':')
+                continue;
+            size_t len = s - t;
+            memcpy(buffer, t, len);
+            buffer[len] = '\0';
+            handler(buffer, stop);
+            if ( stop )
+                return;
+            t = s+1;
+        }
+        handler(t, stop);
+        if (stop)
             return;
-        t = s+1;
     }
-    handler(t, stop);
 }
 
 void PathOverrides::forEachDylibFallback(Platform platform, void (^handler)(const char* fallbackDir, bool& stop)) const
 {
     __block bool stop = false;
-    if ( _dylibPathFallbacks != nullptr ) {
-        forEachInColonList(_dylibPathFallbacks, ^(const char* pth, bool& innerStop) {
+    if ( (_dylibPathFallbacksEnv != nullptr) || (_dylibPathFallbacksExeLC != nullptr) ) {
+        forEachInColonList(_dylibPathFallbacksEnv, _dylibPathFallbacksExeLC, ^(const char* pth, bool& innerStop) {
             handler(pth, innerStop);
             if ( innerStop )
                 stop = true;
@@ -232,7 +230,7 @@ void PathOverrides::forEachDylibFallback(Platform platform, void (^handler)(cons
                         handler("/usr/local/lib", stop);
                         if ( stop )
                             break;
-                        // fall thru
+                        [[clang::fallthrough]];
                     case FallbackPathMode::restricted:
                         handler("/usr/lib", stop);
                         break;
@@ -244,6 +242,7 @@ void PathOverrides::forEachDylibFallback(Platform platform, void (^handler)(cons
             case Platform::watchOS:
             case Platform::tvOS:
             case Platform::bridgeOS:
+            case Platform::driverKit:
             case Platform::unknown:
                 if ( _fallbackPathMode != FallbackPathMode::none ) {
                     handler("/usr/local/lib", stop);
@@ -251,6 +250,7 @@ void PathOverrides::forEachDylibFallback(Platform platform, void (^handler)(cons
                         break;
                 }
                 // fall into /usr/lib case
+                [[clang::fallthrough]];
             case Platform::iOSMac:
             case Platform::iOS_simulator:
             case Platform::watchOS_simulator:
@@ -265,8 +265,8 @@ void PathOverrides::forEachDylibFallback(Platform platform, void (^handler)(cons
 void PathOverrides::forEachFrameworkFallback(Platform platform, void (^handler)(const char* fallbackDir, bool& stop)) const
 {
     __block bool stop = false;
-    if ( _frameworkPathFallbacks != nullptr ) {
-        forEachInColonList(_frameworkPathFallbacks, ^(const char* pth, bool& innerStop) {
+    if ( (_frameworkPathFallbacksEnv != nullptr) || (_frameworkPathFallbacksExeLC != nullptr) ) {
+        forEachInColonList(_frameworkPathFallbacksEnv, _frameworkPathFallbacksExeLC, ^(const char* pth, bool& innerStop) {
             handler(pth, innerStop);
             if ( innerStop )
                 stop = true;
@@ -283,6 +283,7 @@ void PathOverrides::forEachFrameworkFallback(Platform platform, void (^handler)(
                             break;
                         // "/Network/Library/Frameworks"
                         // fall thru
+                        [[clang::fallthrough]];
                     case FallbackPathMode::restricted:
                         handler("/System/Library/Frameworks", stop);
                         break;
@@ -298,6 +299,7 @@ void PathOverrides::forEachFrameworkFallback(Platform platform, void (^handler)(
             case Platform::iOS_simulator:
             case Platform::watchOS_simulator:
             case Platform::tvOS_simulator:
+            case Platform::driverKit:
             case Platform::unknown:
                 if ( _fallbackPathMode != FallbackPathMode::none )
                     handler("/System/Library/Frameworks", stop);
@@ -338,13 +340,13 @@ void PathOverrides::addSuffix(const char* path, const char* suffix, char* result
     }
 }
 
-void PathOverrides::forEachImageSuffix(const char* path, bool isFallbackPath, bool& stop, void (^handler)(const char* possiblePath, bool isFallbackPath, bool& stop)) const
+void PathOverrides::forEachImageSuffix(const char* path, bool isFallbackPath, bool pathIsInDyldCacheWhichCannotBeOverridden, bool& stop, void (^handler)(const char* possiblePath, bool isFallbackPath, bool& stop)) const
 {
-    if ( _imageSuffix == nullptr ) {
+    if ( (_imageSuffix == nullptr) || pathIsInDyldCacheWhichCannotBeOverridden ) {
         handler(path, isFallbackPath, stop);
     }
     else {
-        forEachInColonList(_imageSuffix, ^(const char* suffix, bool& innerStop) {
+        forEachInColonList(_imageSuffix, nullptr, ^(const char* suffix, bool& innerStop) {
             char npath[strlen(path)+strlen(suffix)+8];
             addSuffix(path, suffix, npath);
             handler(npath, isFallbackPath, innerStop);
@@ -356,62 +358,65 @@ void PathOverrides::forEachImageSuffix(const char* path, bool isFallbackPath, bo
     }
 }
 
-void PathOverrides::forEachPathVariant(const char* initialPath, void (^handler)(const char* possiblePath, bool isFallbackPath, bool& stop), Platform platform) const
+void PathOverrides::forEachPathVariant(const char* initialPath, bool pathIsInDyldCacheWhichCannotBeOverridden, void (^handler)(const char* possiblePath, bool isFallbackPath, bool& stop), Platform platform) const
 {
     __block bool stop = false;
 
-    // check for overrides
-    const char* frameworkPartialPath = getFrameworkPartialPath(initialPath);
-    if ( frameworkPartialPath != nullptr ) {
-        const size_t frameworkPartialPathLen = strlen(frameworkPartialPath);
-        // look at each DYLD_FRAMEWORK_PATH directory
-        if ( _frameworkPathOverrides != nullptr ) {
-            forEachInColonList(_frameworkPathOverrides, ^(const char* frDir, bool &innerStop) {
-                char npath[strlen(frDir)+frameworkPartialPathLen+8];
-                strcpy(npath, frDir);
-                strcat(npath, "/");
-                strcat(npath, frameworkPartialPath);
-                forEachImageSuffix(npath, false, innerStop, handler);
-                if ( innerStop )
-                    stop = true;
-            });
+
+    if ( !pathIsInDyldCacheWhichCannotBeOverridden ) {
+        // check for overrides
+        const char* frameworkPartialPath = getFrameworkPartialPath(initialPath);
+        if ( frameworkPartialPath != nullptr ) {
+            const size_t frameworkPartialPathLen = strlen(frameworkPartialPath);
+            // look at each DYLD_FRAMEWORK_PATH directory
+            if ( (_frameworkPathOverridesEnv != nullptr) || (_frameworkPathOverridesExeLC != nullptr) ) {
+                forEachInColonList(_frameworkPathOverridesEnv, _frameworkPathOverridesExeLC, ^(const char* frDir, bool &innerStop) {
+                    char npath[strlen(frDir)+frameworkPartialPathLen+8];
+                    strcpy(npath, frDir);
+                    strcat(npath, "/");
+                    strcat(npath, frameworkPartialPath);
+                    forEachImageSuffix(npath, false, pathIsInDyldCacheWhichCannotBeOverridden, innerStop, handler);
+                    if ( innerStop )
+                        stop = true;
+                });
+            }
         }
-    }
-    else {
-        const char* libraryLeafName = getLibraryLeafName(initialPath);
-        const size_t libraryLeafNameLen = strlen(libraryLeafName);
-        // look at each DYLD_LIBRARY_PATH directory
-        if ( _dylibPathOverrides != nullptr ) {
-            forEachInColonList(_dylibPathOverrides, ^(const char* libDir, bool &innerStop) {
-                char npath[strlen(libDir)+libraryLeafNameLen+8];
-                strcpy(npath, libDir);
-                strcat(npath, "/");
-                strcat(npath, libraryLeafName);
-                forEachImageSuffix(npath, false, innerStop, handler);
-                if ( innerStop )
-                    stop = true;
-            });
+        else {
+            const char* libraryLeafName = getLibraryLeafName(initialPath);
+            const size_t libraryLeafNameLen = strlen(libraryLeafName);
+            // look at each DYLD_LIBRARY_PATH directory
+            if ( (_dylibPathOverridesEnv != nullptr) || (_dylibPathOverridesExeLC != nullptr) ) {
+                forEachInColonList(_dylibPathOverridesEnv, _dylibPathOverridesExeLC, ^(const char* libDir, bool &innerStop) {
+                    char npath[strlen(libDir)+libraryLeafNameLen+8];
+                    strcpy(npath, libDir);
+                    strcat(npath, "/");
+                    strcat(npath, libraryLeafName);
+                    forEachImageSuffix(npath, false, pathIsInDyldCacheWhichCannotBeOverridden, innerStop, handler);
+                    if ( innerStop )
+                        stop = true;
+                });
+            }
         }
+        if ( stop )
+            return;
     }
-    if ( stop )
-        return;
 
     // try original path
-    forEachImageSuffix(initialPath, false, stop, handler);
+    forEachImageSuffix(initialPath, false, pathIsInDyldCacheWhichCannotBeOverridden, stop, handler);
     if ( stop )
         return;
 
     // check fallback paths
-    if ( frameworkPartialPath != nullptr ) {
+    if ( const char* frameworkPartialPath = getFrameworkPartialPath(initialPath) ) {
         const size_t frameworkPartialPathLen = strlen(frameworkPartialPath);
         // look at each DYLD_FALLBACK_FRAMEWORK_PATH directory
-        bool usesDefaultFallbackPaths = (_frameworkPathFallbacks == nullptr);
+        bool usesDefaultFallbackPaths = (_frameworkPathFallbacksEnv == nullptr) && (_frameworkPathFallbacksExeLC == nullptr);
         forEachFrameworkFallback(platform, ^(const char* dir, bool& innerStop) {
             char npath[strlen(dir)+frameworkPartialPathLen+8];
             strcpy(npath, dir);
             strcat(npath, "/");
             strcat(npath, frameworkPartialPath);
-            forEachImageSuffix(npath, usesDefaultFallbackPaths, innerStop, handler);
+            forEachImageSuffix(npath, usesDefaultFallbackPaths, pathIsInDyldCacheWhichCannotBeOverridden, innerStop, handler);
             if ( innerStop )
                 stop = true;
         });
@@ -421,13 +426,13 @@ void PathOverrides::forEachPathVariant(const char* initialPath, void (^handler)(
         const char* libraryLeafName = getLibraryLeafName(initialPath);
         const size_t libraryLeafNameLen = strlen(libraryLeafName);
         // look at each DYLD_FALLBACK_LIBRARY_PATH directory
-        bool usesDefaultFallbackPaths = (_dylibPathFallbacks == nullptr);
+        bool usesDefaultFallbackPaths = (_dylibPathFallbacksEnv == nullptr) && (_dylibPathFallbacksExeLC == nullptr);
         forEachDylibFallback(platform, ^(const char* dir, bool& innerStop) {
             char libpath[strlen(dir)+libraryLeafNameLen+8];
             strcpy(libpath, dir);
             strcat(libpath, "/");
             strcat(libpath, libraryLeafName);
-            forEachImageSuffix(libpath, usesDefaultFallbackPaths, innerStop, handler);
+            forEachImageSuffix(libpath, usesDefaultFallbackPaths, pathIsInDyldCacheWhichCannotBeOverridden, innerStop, handler);
             if ( innerStop )
                 stop = true;
         });

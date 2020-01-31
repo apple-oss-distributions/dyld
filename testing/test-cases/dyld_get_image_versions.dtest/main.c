@@ -24,6 +24,7 @@ int main()
     mh->ncmds       = 1;
     mh->filetype    = MH_DYLIB;
     mh->sizeofcmds  = 40;
+    mh->flags       = 0;
     struct load_command* lc = (struct load_command*)&badFile[32];
     lc->cmd         = 1;
     lc->cmdsize     = 4000; // bad load command size

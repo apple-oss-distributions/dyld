@@ -61,6 +61,7 @@ bool findInSharedCacheImage(const SharedCacheLoadInfo& loadInfo, const char* dyl
 
 bool pathIsInSharedCacheImage(const SharedCacheLoadInfo& loadInfo, const char* dylibPathToFind);
 
+void deallocateExistingSharedCache();
 
 } // namespace dyld3
 

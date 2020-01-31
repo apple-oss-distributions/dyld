@@ -38,35 +38,15 @@
 #include <mach/mach.h>
 #include <mach/thread_status.h>
 #include <mach-o/loader.h> 
+#include <mach-o/dyld_images.h>
+
+#include "dyld2.h"
 #include "ImageLoaderMachOCompressed.h"
-#include "mach-o/dyld_images.h"
 #include "Closure.h"
 #include "Array.h"
 
-#ifndef EXPORT_SYMBOL_FLAGS_KIND_ABSOLUTE
-	#define EXPORT_SYMBOL_FLAGS_KIND_ABSOLUTE			0x02
-#endif
-
-
-#ifndef BIND_OPCODE_THREADED
-#define BIND_OPCODE_THREADED    0xD0
-#endif
-
-#ifndef BIND_SUBOPCODE_THREADED_SET_BIND_ORDINAL_TABLE_SIZE_ULEB
-#define BIND_SUBOPCODE_THREADED_SET_BIND_ORDINAL_TABLE_SIZE_ULEB	0x00
-#endif
-
-#ifndef BIND_SUBOPCODE_THREADED_APPLY
-#define BIND_SUBOPCODE_THREADED_APPLY								0x01
-#endif
-
-
-#ifndef BIND_SPECIAL_DYLIB_WEAK_LOOKUP
-#define BIND_SPECIAL_DYLIB_WEAK_LOOKUP								-3
-#endif
-
-#ifndef CPU_SUBTYPE_ARM64_E
-	#define CPU_SUBTYPE_ARM64_E    2
+#ifndef BIND_SUBOPCODE_THREADED_SET_JOP
+   #define BIND_SUBOPCODE_THREADED_SET_JOP								0x0F
 #endif
 
 // relocation_info.r_length field has value 3 for 64-bit executables and value 2 for 32-bit executables
@@ -169,18 +149,23 @@ ImageLoaderMachOCompressed* ImageLoaderMachOCompressed::instantiateFromFile(cons
 			else
 				image->setPath(path);
 		}
-		else 
-			image->setPath(path);
+		else {
+			// <rdar://problem/46682306> always try to realpath dylibs since they may have been dlopen()ed using a symlink path
+			if ( installName != NULL ) {
+				char realPath[MAXPATHLEN];
+				if ( (fcntl(fd, F_GETPATH, realPath) == 0) && (strcmp(path, realPath) != 0) )
+					image->setPaths(path, realPath);
+				else
+					image->setPath(path);
+			}
+			else {
+				image->setPath(path);
+			}
+		}
 
 		// make sure path is stable before recording in dyld_all_image_infos
 		image->setMapped(context);
 
-		// pre-fetch content of __DATA and __LINKEDIT segment for faster launches
-		// don't do this on prebound images or if prefetching is disabled
-        if ( !context.preFetchDisabled && !image->isPrebindable()) {
-			image->preFetchDATA(fd, offsetInFat, context);
-			image->markSequentialLINKEDIT(context);
-		}
 	}
 	catch (...) {
 		// ImageLoader::setMapped() can throw an exception to block loading of image
@@ -217,6 +202,15 @@ ImageLoaderMachOCompressed* ImageLoaderMachOCompressed::instantiateFromCache(con
 		}
 
 		image->instantiateFinish(context);
+		
+#if TARGET_OS_SIMULATOR
+		char realPath[MAXPATHLEN] = { 0 };
+		if ( dyld::gLinkContext.rootPaths == NULL )
+			throw "root path is not set";
+		strlcpy(realPath, dyld::gLinkContext.rootPaths[0], MAXPATHLEN);
+		strlcat(realPath, path, MAXPATHLEN);
+		image->setPaths(path, realPath);
+#endif
 		image->setMapped(context);
 	}
 	catch (...) {
@@ -267,7 +261,7 @@ ImageLoaderMachOCompressed* ImageLoaderMachOCompressed::instantiateFromMemory(co
 
 ImageLoaderMachOCompressed::ImageLoaderMachOCompressed(const macho_header* mh, const char* path, unsigned int segCount, 
 																		uint32_t segOffsets[], unsigned int libCount)
- : ImageLoaderMachO(mh, path, segCount, segOffsets, libCount), fDyldInfo(NULL)
+ : ImageLoaderMachO(mh, path, segCount, segOffsets, libCount), fDyldInfo(NULL), fChainedFixups(NULL), fExportsTrie(NULL)
 {
 }
 
@@ -340,59 +334,6 @@ void ImageLoaderMachOCompressed::setLibImage(unsigned int libIndex, ImageLoader*
 }
 
 
-void ImageLoaderMachOCompressed::markFreeLINKEDIT(const LinkContext& context)
-{
-	// mark that we are done with rebase and bind info 
-	markLINKEDIT(context, MADV_FREE);
-}
-
-void ImageLoaderMachOCompressed::markSequentialLINKEDIT(const LinkContext& context)
-{
-	// mark the rebase and bind info and using sequential access
-	markLINKEDIT(context, MADV_SEQUENTIAL);
-}
-
-void ImageLoaderMachOCompressed::markLINKEDIT(const LinkContext& context, int advise)
-{
-	// if not loaded at preferred address, mark rebase info 
-	uintptr_t start = 0;
-	if ( (fSlide != 0) && (fDyldInfo->rebase_size != 0) ) 
-		start = (uintptr_t)fLinkEditBase + fDyldInfo->rebase_off;
-	else if ( fDyldInfo->bind_off != 0 )
-		start = (uintptr_t)fLinkEditBase + fDyldInfo->bind_off;
-	else
-		return; // no binding info to prefetch
-		
-	// end is at end of bind info
-	uintptr_t end = 0;
-	if ( fDyldInfo->bind_off != 0 )
-		end = (uintptr_t)fLinkEditBase + fDyldInfo->bind_off + fDyldInfo->bind_size;
-	else if ( fDyldInfo->rebase_off != 0 )
-		end = (uintptr_t)fLinkEditBase + fDyldInfo->rebase_off + fDyldInfo->rebase_size;
-	else
-		return;
-		
-			
-	// round to whole pages
-	start = dyld_page_trunc(start);
-	end = dyld_page_round(end);
-
-	// do nothing if only one page of rebase/bind info
-	if ( (end-start) <= dyld_page_size )
-		return;
-	
-	// tell kernel about our access to these pages
-	madvise((void*)start, end-start, advise);
-	if ( context.verboseMapping ) {
-		const char* adstr = "sequential";
-		if ( advise == MADV_FREE )
-			adstr = "free";
-		dyld::log("%18s %s 0x%0lX -> 0x%0lX for %s\n", "__LINKEDIT", adstr, start, end-1, this->getPath());
-	}
-}
-
-
-
 void ImageLoaderMachOCompressed::rebaseAt(const LinkContext& context, uintptr_t addr, uintptr_t slide, uint8_t type)
 {
 	if ( context.verboseRebase ) {
@@ -422,10 +363,21 @@ void ImageLoaderMachOCompressed::throwBadRebaseAddress(uintptr_t address, uintpt
 
 void ImageLoaderMachOCompressed::rebase(const LinkContext& context, uintptr_t slide)
 {
+	// binary uses chained fixups where are applied during binding
+	if ( fDyldInfo == NULL )
+		return;
+
 	CRSetCrashLogMessage2(this->getPath());
 	const uint8_t* const start = fLinkEditBase + fDyldInfo->rebase_off;
 	const uint8_t* const end = &start[fDyldInfo->rebase_size];
 	const uint8_t* p = start;
+
+	if ( start == end )
+		return;
+
+	uint32_t ignore;
+	bool bindingBecauseOfRoot = this->overridesCachedDylib(ignore);
+	vmAccountingSetSuspended(context, bindingBecauseOfRoot);
 
 	try {
 		uint8_t type = 0;
@@ -522,14 +474,16 @@ void ImageLoaderMachOCompressed::rebase(const LinkContext& context, uintptr_t sl
 const ImageLoader::Symbol* ImageLoaderMachOCompressed::findShallowExportedSymbol(const char* symbol, const ImageLoader** foundIn) const
 {
 	//dyld::log("Compressed::findExportedSymbol(%s) in %s\n", symbol, this->getShortName());
-	if ( fDyldInfo->export_size == 0 )
+	uint32_t trieFileOffset = fDyldInfo ? fDyldInfo->export_off  : fExportsTrie->dataoff;
+	uint32_t trieFileSize   = fDyldInfo ? fDyldInfo->export_size : fExportsTrie->datasize;
+	if ( trieFileSize == 0 )
 		return NULL;
 #if LOG_BINDINGS
 	dyld::logBindings("%s: %s\n", this->getShortName(), symbol);
 #endif
 	++ImageLoaderMachO::fgSymbolTrieSearchs;
-	const uint8_t* start = &fLinkEditBase[fDyldInfo->export_off];
-	const uint8_t* end = &start[fDyldInfo->export_size];
+	const uint8_t* start = &fLinkEditBase[trieFileOffset];
+	const uint8_t* end = &start[trieFileSize];
 	const uint8_t* foundNodeStart = this->trieWalk(start, end, symbol); 
 	if ( foundNodeStart != NULL ) {
 		const uint8_t* p = foundNodeStart;
@@ -543,6 +497,9 @@ const ImageLoader::Symbol* ImageLoaderMachOCompressed::findShallowExportedSymbol
 				importedName = symbol;
 			if ( (ordinal > 0) && (ordinal <= libraryCount()) ) {
 				const ImageLoader* reexportedFrom = libImage((unsigned int)ordinal-1);
+				// Missing weak-dylib
+				if ( reexportedFrom == NULL )
+					return NULL;
 				//dyld::log("Compressed::findExportedSymbol(), %s -> %s/%s\n", symbol, reexportedFrom->getShortName(), importedName);
 				const char* reExportLibPath = libPath((unsigned int)ordinal-1);
 				return reexportedFrom->findExportedSymbol(importedName, true, reExportLibPath, foundIn);
@@ -566,17 +523,21 @@ const ImageLoader::Symbol* ImageLoaderMachOCompressed::findShallowExportedSymbol
 
 bool ImageLoaderMachOCompressed::containsSymbol(const void* addr) const
 {
-	const uint8_t* start = &fLinkEditBase[fDyldInfo->export_off];
-	const uint8_t* end = &start[fDyldInfo->export_size];
+	uint32_t trieFileOffset = fDyldInfo ? fDyldInfo->export_off  : fExportsTrie->dataoff;
+	uint32_t trieFileSize   = fDyldInfo ? fDyldInfo->export_size : fExportsTrie->datasize;
+	const uint8_t* start = &fLinkEditBase[trieFileOffset];
+	const uint8_t* end = &start[trieFileSize];
 	return ( (start <= addr) && (addr < end) );
 }
 
 
 uintptr_t ImageLoaderMachOCompressed::exportedSymbolAddress(const LinkContext& context, const Symbol* symbol, const ImageLoader* requestor, bool runResolver) const
 {
+	uint32_t trieFileOffset = fDyldInfo ? fDyldInfo->export_off  : fExportsTrie->dataoff;
+	uint32_t trieFileSize   = fDyldInfo ? fDyldInfo->export_size : fExportsTrie->datasize;
 	const uint8_t* exportNode = (uint8_t*)symbol;
-	const uint8_t* exportTrieStart = fLinkEditBase + fDyldInfo->export_off;
-	const uint8_t* exportTrieEnd = exportTrieStart + fDyldInfo->export_size;
+	const uint8_t* exportTrieStart = fLinkEditBase + trieFileOffset;
+	const uint8_t* exportTrieEnd = exportTrieStart + trieFileSize;
 	if ( (exportNode < exportTrieStart) || (exportNode > exportTrieEnd) )
 		throw "symbol is not in trie";
 	//dyld::log("exportedSymbolAddress(): node=%p, nodeOffset=0x%04X in %s\n", symbol, (int)((uint8_t*)symbol - exportTrieStart), this->getShortName());
@@ -593,9 +554,15 @@ uintptr_t ImageLoaderMachOCompressed::exportedSymbolAddress(const LinkContext& c
 				// stub was not interposed, so run resolver
 				typedef uintptr_t (*ResolverProc)(void);
 				ResolverProc resolver = (ResolverProc)(read_uleb128(exportNode, exportTrieEnd) + (uintptr_t)fMachOData);
+#if __has_feature(ptrauth_calls)
+				resolver = (ResolverProc)__builtin_ptrauth_sign_unauthenticated(resolver, ptrauth_key_asia, 0);
+#endif
 				uintptr_t result = (*resolver)();
 				if ( context.verboseBind )
 					dyld::log("dyld: resolver at %p returned 0x%08lX\n", resolver, result);
+#if __has_feature(ptrauth_calls)
+    			result = (uintptr_t)__builtin_ptrauth_strip((void*)result, ptrauth_key_asia);
+#endif
 				return result;
 			}
 			return read_uleb128(exportNode, exportTrieEnd) + (uintptr_t)fMachOData;
@@ -614,9 +581,11 @@ uintptr_t ImageLoaderMachOCompressed::exportedSymbolAddress(const LinkContext& c
 
 bool ImageLoaderMachOCompressed::exportedSymbolIsWeakDefintion(const Symbol* symbol) const
 {
+	uint32_t trieFileOffset = fDyldInfo ? fDyldInfo->export_off  : fExportsTrie->dataoff;
+	uint32_t trieFileSize   = fDyldInfo ? fDyldInfo->export_size : fExportsTrie->datasize;
 	const uint8_t* exportNode = (uint8_t*)symbol;
-	const uint8_t* exportTrieStart = fLinkEditBase + fDyldInfo->export_off;
-	const uint8_t* exportTrieEnd = exportTrieStart + fDyldInfo->export_size;
+	const uint8_t* exportTrieStart = fLinkEditBase + trieFileOffset;
+	const uint8_t* exportTrieEnd = exportTrieStart + trieFileSize;
 	if ( (exportNode < exportTrieStart) || (exportNode > exportTrieEnd) )
 		throw "symbol is not in trie";
 	uintptr_t flags = read_uleb128(exportNode, exportTrieEnd);
@@ -680,31 +649,31 @@ uintptr_t ImageLoaderMachOCompressed::resolveFlat(const LinkContext& context, co
 }
 
 
-#if USES_CHAINED_BINDS
 static void patchCacheUsesOf(const ImageLoader::LinkContext& context, const dyld3::closure::Image* overriddenImage,
 							 uint32_t cacheOffsetOfImpl, const char* symbolName, uintptr_t newImpl)
 {
 	uintptr_t cacheStart = (uintptr_t)context.dyldCache;
-	overriddenImage->forEachPatchableUseOfExport(cacheOffsetOfImpl, ^(dyld3::closure::Image::PatchableExport::PatchLocation patchLocation) {
+	uint32_t imageIndex = overriddenImage->imageNum() - (uint32_t)context.dyldCache->cachedDylibsImageArray()->startImageNum();
+	context.dyldCache->forEachPatchableUseOfExport(imageIndex, cacheOffsetOfImpl, ^(dyld_cache_patchable_location patchLocation) {
 		uintptr_t* loc = (uintptr_t*)(cacheStart+patchLocation.cacheOffset);
 #if __has_feature(ptrauth_calls)
 		if ( patchLocation.authenticated ) {
 			 dyld3::MachOLoaded::ChainedFixupPointerOnDisk fixupInfo;
-			fixupInfo.authRebase.auth      = true;
-			fixupInfo.authRebase.addrDiv   = patchLocation.usesAddressDiversity;
-			fixupInfo.authRebase.diversity = patchLocation.discriminator;
-			fixupInfo.authRebase.key       = patchLocation.key;
-			uintptr_t newValue = fixupInfo.signPointer(loc, newImpl + patchLocation.getAddend());
+			fixupInfo.arm64e.authRebase.auth      = true;
+			fixupInfo.arm64e.authRebase.addrDiv   = patchLocation.usesAddressDiversity;
+			fixupInfo.arm64e.authRebase.diversity = patchLocation.discriminator;
+			fixupInfo.arm64e.authRebase.key       = patchLocation.key;
+			uintptr_t newValue = fixupInfo.arm64e.signPointer(loc, newImpl + DyldSharedCache::getAddend(patchLocation));
 			if ( *loc != newValue ) {
 				*loc = newValue;
 				if ( context.verboseBind )
 					dyld::log("dyld: cache fixup: *%p = %p (JOP: diversity 0x%04X, addr-div=%d, key=%s) to %s\n",
-						  	loc, (void*)newValue, patchLocation.discriminator, patchLocation.usesAddressDiversity, patchLocation.keyName(), symbolName);
+						  	loc, (void*)newValue, patchLocation.discriminator, patchLocation.usesAddressDiversity, DyldSharedCache::keyName(patchLocation), symbolName);
 			}
 			return;
 		}
 #endif
-		uintptr_t newValue =newImpl + patchLocation.getAddend();
+		uintptr_t newValue = newImpl + (uintptr_t)DyldSharedCache::getAddend(patchLocation);
 		if ( *loc != newValue ) {
 			*loc = newValue;
 			if ( context.verboseBind )
@@ -712,43 +681,47 @@ static void patchCacheUsesOf(const ImageLoader::LinkContext& context, const dyld
 		}
 	});
 }
-#endif
+
 
 
 uintptr_t ImageLoaderMachOCompressed::resolveWeak(const LinkContext& context, const char* symbolName, bool weak_import,
 												  bool runResolver, const ImageLoader** foundIn)
 {
 	const Symbol* sym;
-#if USES_CHAINED_BINDS
-	__block uintptr_t foundOutsideCache  = 0;
-	__block uintptr_t lastFoundInCache = 0;
-	CoalesceNotifier notifier = ^(const Symbol* implSym, const ImageLoader* implIn, const mach_header* implMh) {
-		//dyld::log("notifier: found %s in %p %s\n", symbolName, implMh, implIn->getPath());
-		// This block is only called in dyld2 mode when a non-cached image is search for which weak-def implementation to use
-		// As a side effect of that search we notice any implementations outside and inside the cache,
-		// and use that to trigger patching the cache to use the implementation outside the cache.
-		uintptr_t implAddr = implIn->getExportedSymbolAddress(implSym, context, nullptr, false, symbolName);
-		if ( ((dyld3::MachOLoaded*)implMh)->inDyldCache() ) {
-			if ( foundOutsideCache != 0 ) {
-				// have an implementation in cache and and earlier one not in the cache, patch cache to use earlier one
-				lastFoundInCache = implAddr;
-				uint32_t imageIndex;
-				if ( context.dyldCache->findMachHeaderImageIndex(implMh, imageIndex) ) {
-					const dyld3::closure::Image* overriddenImage = context.dyldCache->cachedDylibsImageArray()->imageForNum(imageIndex+1);
-					uint32_t cacheOffsetOfImpl = (uint32_t)((uintptr_t)implAddr - (uintptr_t)context.dyldCache);
-					patchCacheUsesOf(context, overriddenImage, cacheOffsetOfImpl, symbolName, foundOutsideCache);
+	CoalesceNotifier notifier = nullptr;
+	__block uintptr_t   foundOutsideCache     = 0;
+	__block const char* foundOutsideCachePath = nullptr;
+	__block uintptr_t   lastFoundInCache      = 0;
+	if ( this->usesChainedFixups() ) {
+		notifier = ^(const Symbol* implSym, const ImageLoader* implIn, const mach_header* implMh) {
+			// This block is only called in dyld2 mode when a non-cached image is search for which weak-def implementation to use
+			// As a side effect of that search we notice any implementations outside and inside the cache,
+			// and use that to trigger patching the cache to use the implementation outside the cache.
+			uintptr_t implAddr = implIn->getExportedSymbolAddress(implSym, context, nullptr, false, symbolName);
+			if ( ((dyld3::MachOLoaded*)implMh)->inDyldCache() ) {
+				if ( foundOutsideCache != 0 ) {
+					// have an implementation in cache and and earlier one not in the cache, patch cache to use earlier one
+					lastFoundInCache = implAddr;
+					uint32_t imageIndex;
+					if ( context.dyldCache->findMachHeaderImageIndex(implMh, imageIndex) ) {
+						const dyld3::closure::Image* overriddenImage = context.dyldCache->cachedDylibsImageArray()->imageForNum(imageIndex+1);
+						uint32_t cacheOffsetOfImpl = (uint32_t)((uintptr_t)implAddr - (uintptr_t)context.dyldCache);
+						if ( context.verboseWeakBind )
+							dyld::log("dyld: weak bind, patching dyld cache uses of %s to use 0x%lX in %s\n", symbolName, foundOutsideCache, foundOutsideCachePath);
+						patchCacheUsesOf(context, overriddenImage, cacheOffsetOfImpl, symbolName, foundOutsideCache);
+					}
 				}
 			}
-		}
-		else {
-			// record first non-cache implementation
-			if ( foundOutsideCache == 0 )
-				foundOutsideCache = implAddr;
-		}
-	};
-#else
-	CoalesceNotifier notifier = nullptr;
-#endif
+			else {
+				// record first non-cache implementation
+				if ( foundOutsideCache == 0 ) {
+					foundOutsideCache     = implAddr;
+					foundOutsideCachePath = implIn->getPath();
+				}
+			}
+		};
+	}
+
 	if ( context.coalescedExportFinder(symbolName, &sym, foundIn, notifier) ) {
 		if ( *foundIn != this )
 			context.addDynamicReference(this, const_cast<ImageLoader*>(*foundIn));
@@ -930,69 +903,68 @@ void ImageLoaderMachOCompressed::doBind(const LinkContext& context, bool forceLa
 	else {
 		uint64_t t0 = mach_absolute_time();
 
-	#if TEXT_RELOC_SUPPORT
-		// if there are __TEXT fixups, temporarily make __TEXT writable
-		if ( fTextSegmentBinds ) 
-			this->makeTextSegmentWritable(context, true);
-	#endif
-
 		uint32_t ignore;
 		bool bindingBecauseOfRoot = ( this->overridesCachedDylib(ignore) || this->inSharedCache() );
 		vmAccountingSetSuspended(context, bindingBecauseOfRoot);
 
-		// run through all binding opcodes
-		eachBind(context, ^(const LinkContext& ctx, ImageLoaderMachOCompressed* image,
-							uintptr_t addr, uint8_t type, const char* symbolName,
-							uint8_t symbolFlags, intptr_t addend, long libraryOrdinal,
-							ExtraBindData *extraBindData,
-							const char* msg, LastLookup* last, bool runResolver) {
-			return ImageLoaderMachOCompressed::bindAt(ctx, image, addr, type, symbolName, symbolFlags,
-													  addend, libraryOrdinal, extraBindData,
-													  msg, last, runResolver);
-		});
-			
-	#if TEXT_RELOC_SUPPORT
-		// if there were __TEXT fixups, restore write protection
-		if ( fTextSegmentBinds ) 
-			this->makeTextSegmentWritable(context, false);
-	#endif	
-	
-		// if this image is in the shared cache, but depends on something no longer in the shared cache,
-		// there is no way to reset the lazy pointers, so force bind them now
-		if ( forceLazysBound || fInSharedCache ) 
-			this->doBindJustLazies(context);
-            
-		// this image is in cache, but something below it is not.  If
-        // this image has lazy pointer to a resolver function, then
-        // the stub may have been altered to point to a shared lazy pointer.
-		if ( fInSharedCache ) 
-			this->updateOptimizedLazyPointers(context);
+		if ( fChainedFixups != NULL ) {
+			const dyld_chained_fixups_header* fixupsHeader = (dyld_chained_fixups_header*)(fLinkEditBase + fChainedFixups->dataoff);
+			doApplyFixups(context, fixupsHeader);
+		}
+		else {
+		#if TEXT_RELOC_SUPPORT
+			// if there are __TEXT fixups, temporarily make __TEXT writable
+			if ( fTextSegmentBinds )
+				this->makeTextSegmentWritable(context, true);
+		#endif
 
-		// tell kernel we are done with chunks of LINKEDIT
-		if ( !context.preFetchDisabled ) 
-			this->markFreeLINKEDIT(context);
+			// run through all binding opcodes
+			eachBind(context, ^(const LinkContext& ctx, ImageLoaderMachOCompressed* image,
+								uintptr_t addr, uint8_t type, const char* symbolName,
+								uint8_t symbolFlags, intptr_t addend, long libraryOrdinal,
+								ExtraBindData *extraBindData,
+								const char* msg, LastLookup* last, bool runResolver) {
+				return ImageLoaderMachOCompressed::bindAt(ctx, image, addr, type, symbolName, symbolFlags,
+														  addend, libraryOrdinal, extraBindData,
+														  msg, last, runResolver);
+			});
+
+		#if TEXT_RELOC_SUPPORT
+			// if there were __TEXT fixups, restore write protection
+			if ( fTextSegmentBinds )
+				this->makeTextSegmentWritable(context, false);
+		#endif
+
+			// if this image is in the shared cache, but depends on something no longer in the shared cache,
+			// there is no way to reset the lazy pointers, so force bind them now
+			if ( forceLazysBound || fInSharedCache )
+				this->doBindJustLazies(context);
+
+			// this image is in cache, but something below it is not.  If
+			// this image has lazy pointer to a resolver function, then
+			// the stub may have been altered to point to a shared lazy pointer.
+			if ( fInSharedCache )
+				this->updateOptimizedLazyPointers(context);
+		}
 
 		uint64_t t1 = mach_absolute_time();
 		ImageLoader::fgTotalRebindCacheTime += (t1-t0);
 	}
 
-#if USES_CHAINED_BINDS
 	// See if this dylib overrides something in the dyld cache
 	uint32_t dyldCacheOverrideImageNum;
-	if ( context.dyldCache && overridesCachedDylib(dyldCacheOverrideImageNum) ) {
+	if ( context.dyldCache && context.dyldCache->header.builtFromChainedFixups && overridesCachedDylib(dyldCacheOverrideImageNum) ) {
 		// need to patch all other places in cache that point to the overridden dylib, to point to this dylib instead
 		const dyld3::closure::Image* overriddenImage = context.dyldCache->cachedDylibsImageArray()->imageForNum(dyldCacheOverrideImageNum);
-		overriddenImage->forEachPatchableExport(^(uint32_t cacheOffsetOfImpl, const char* exportName) {
+		uint32_t imageIndex = dyldCacheOverrideImageNum - (uint32_t)context.dyldCache->cachedDylibsImageArray()->startImageNum();
+		context.dyldCache->forEachPatchableExport(imageIndex, ^(uint32_t cacheOffsetOfImpl, const char* exportName) {
 			uintptr_t newImpl = 0;
 			const ImageLoader* foundIn;
-			if ( const ImageLoader::Symbol* sym = this->findShallowExportedSymbol(exportName, &foundIn) ) {
-				newImpl = foundIn->getExportedSymbolAddress(sym, context, this);
-			}
+			this->findExportedSymbolAddress(context, exportName, NULL, 0, false, &foundIn, &newImpl);
 			patchCacheUsesOf(context, overriddenImage, cacheOffsetOfImpl, exportName, newImpl);
 		});
 	}
-#endif
-	
+
 	// set up dyld entry points in image
 	// do last so flat main executables will have __dyld or __program_vars set up
 	this->setupLazyPointerHandler(context);
@@ -1013,123 +985,153 @@ void ImageLoaderMachOCompressed::doBindJustLazies(const LinkContext& context)
 	});
 }
 
+void ImageLoaderMachOCompressed::doApplyFixups(const LinkContext& context, const dyld_chained_fixups_header* fixupsHeader)
+{
+	const dyld3::MachOLoaded* ml = (dyld3::MachOLoaded*)machHeader();
+	const dyld_chained_starts_in_image* starts = (dyld_chained_starts_in_image*)((uint8_t*)fixupsHeader + fixupsHeader->starts_offset);
+
+	// build table of resolved targets for each symbol ordinal
+	STACK_ALLOC_OVERFLOW_SAFE_ARRAY(const void*, targetAddrs, 128);
+	targetAddrs.reserve(fixupsHeader->imports_count);
+	Diagnostics diag;
+	const dyld3::MachOAnalyzer* ma = (dyld3::MachOAnalyzer*)ml;
+	ma->forEachChainedFixupTarget(diag, ^(int libOrdinal, const char* symbolName, uint64_t addend, bool weakImport, bool& stop) {
+		const ImageLoader*	targetImage;
+		uint8_t symbolFlags = weakImport ? BIND_SYMBOL_FLAGS_WEAK_IMPORT : 0;
+		uintptr_t symbolAddress = this->resolve(context, symbolName, symbolFlags, libOrdinal, &targetImage, NULL, true);
+		targetAddrs.push_back((void*)(symbolAddress + addend));
+	});
+
+	auto logFixups = ^(void* loc, void* newValue) {
+		dyld::log("dyld: fixup: %s:%p = %p\n", this->getShortName(), loc, newValue);
+	};
+	if ( !context.verboseBind )
+		logFixups = nullptr;
+
+	ml->fixupAllChainedFixups(diag, starts, fSlide, targetAddrs, logFixups);
+}
+
 void ImageLoaderMachOCompressed::registerInterposing(const LinkContext& context)
 {
 	// mach-o files advertise interposing by having a __DATA __interpose section
 	struct InterposeData { uintptr_t replacement; uintptr_t replacee; };
-	const uint32_t cmd_count = ((macho_header*)fMachOData)->ncmds;
-	const struct load_command* const cmds = (struct load_command*)&fMachOData[sizeof(macho_header)];
-	const struct load_command* cmd = cmds;
-	for (uint32_t i = 0; i < cmd_count; ++i) {
-		switch (cmd->cmd) {
-			case LC_SEGMENT_COMMAND:
-			{
-				const struct macho_segment_command* seg = (struct macho_segment_command*)cmd;
-				const struct macho_section* const sectionsStart = (struct macho_section*)((char*)seg + sizeof(struct macho_segment_command));
-				const struct macho_section* const sectionsEnd = &sectionsStart[seg->nsects];
-				for (const struct macho_section* sect=sectionsStart; sect < sectionsEnd; ++sect) {
-					if ( ((sect->flags & SECTION_TYPE) == S_INTERPOSING) || ((strcmp(sect->sectname, "__interpose") == 0) && (strcmp(seg->segname, "__DATA") == 0)) ) {
-						// <rdar://problem/23929217> Ensure section is within segment
-						if ( (sect->addr < seg->vmaddr) || (sect->addr+sect->size > seg->vmaddr+seg->vmsize) || (sect->addr+sect->size < sect->addr) )
-							dyld::throwf("interpose section has malformed address range for %s\n", this->getPath());
-						__block uintptr_t sectionStart = sect->addr + fSlide;
-						__block uintptr_t sectionEnd = sectionStart + sect->size;
-						const size_t count = sect->size / sizeof(InterposeData);
-						InterposeData interposeArray[count];
-						// Note, we memcpy here as rebases may have already been applied.
-						memcpy(&interposeArray[0], (void*)sectionStart, sect->size);
-						__block InterposeData *interposeArrayStart = &interposeArray[0];
-						eachBind(context, ^(const LinkContext& ctx, ImageLoaderMachOCompressed* image, uintptr_t addr, uint8_t type,
-											const char* symbolName, uint8_t symbolFlags, intptr_t addend, long libraryOrdinal,
-											ExtraBindData *extraBindData,
-											const char* msg, LastLookup* last, bool runResolver) {
-							if (addr >= sectionStart && addr < sectionEnd) {
-								if ( context.verboseInterposing ) {
-									dyld::log("dyld: interposing %s at 0x%lx in range 0x%lx..0x%lx\n",
-											  symbolName, addr, sectionStart, sectionEnd);
+
+	__block Diagnostics diag;
+	const dyld3::MachOAnalyzer* ma = (dyld3::MachOAnalyzer*)fMachOData;
+	ma->forEachInterposingSection(diag, ^(uint64_t vmOffset, uint64_t vmSize, bool& stopSections) {
+		if ( ma->hasChainedFixups() ) {
+            const uint16_t pointerFormat = ma->chainedPointerFormat();
+			const uint8_t* sectionStart = fMachOData+vmOffset;
+			const uint8_t* sectionEnd   = fMachOData+vmOffset+vmSize;
+        	ma->withChainStarts(diag, ma->chainStartsOffset(), ^(const dyld_chained_starts_in_image* startsInfo) {
+        		__block uintptr_t lastRebaseTarget = 0;
+				ma->forEachFixupInAllChains(diag, startsInfo, false, ^(dyld3::MachOLoaded::ChainedFixupPointerOnDisk* fixupLoc, const dyld_chained_starts_in_segment* segInfo, bool& stopFixups) {
+					if ( ((uint8_t*)fixupLoc < sectionStart) || ((uint8_t*)fixupLoc >= sectionEnd) )
+						return;
+					uint64_t rebaseTargetRuntimeOffset;
+					uint32_t bindOrdinal;
+       				if ( fixupLoc->isRebase(pointerFormat, 0, rebaseTargetRuntimeOffset) ) {
+						//dyld::log("interpose rebase at fixup at %p to 0x%0llX\n", fixupLoc, rebaseTargetRuntimeOffset);
+						lastRebaseTarget = (uintptr_t)(fMachOData+rebaseTargetRuntimeOffset);
+       				}
+     				else if ( fixupLoc->isBind(pointerFormat, bindOrdinal) ) {
+						//dyld::log("interpose bind fixup at %p to bind ordinal %d\n", fixupLoc, bindOrdinal);
+						__block uint32_t targetBindIndex = 0;
+						ma->forEachChainedFixupTarget(diag, ^(int libraryOrdinal, const char* symbolName, uint64_t addend, bool weakImport, bool& stop) {
+							if ( targetBindIndex == bindOrdinal ) {
+								//dyld::log("interpose bind fixup at %p is to %s libOrdinal=%d\n", fixupLoc, symbolName, libraryOrdinal);
+								LastLookup* last = NULL;
+								const ImageLoader* targetImage;
+								uintptr_t targetBindAddress = 0;
+								try {
+									targetBindAddress = this->resolve(context, symbolName, 0, libraryOrdinal, &targetImage, last, false);
 								}
-								const ImageLoader*	targetImage;
-								uintptr_t			symbolAddress;
-
-								// resolve symbol
-								if (type == BIND_TYPE_THREADED_REBASE) {
-									symbolAddress = 0;
-									targetImage = nullptr;
-								} else
-									symbolAddress = image->resolve(ctx, symbolName, symbolFlags, libraryOrdinal, &targetImage, last, runResolver);
-
-								uintptr_t newValue = symbolAddress+addend;
-								uintptr_t index = (addr - sectionStart) / sizeof(uintptr_t);
-								switch (type) {
-									case BIND_TYPE_POINTER:
-										((uintptr_t*)interposeArrayStart)[index] = newValue;
-										break;
-									case BIND_TYPE_TEXT_ABSOLUTE32:
-										// unreachable!
-										abort();
-									case BIND_TYPE_TEXT_PCREL32:
-										// unreachable!
-										abort();
-									case BIND_TYPE_THREADED_BIND:
-										((uintptr_t*)interposeArrayStart)[index] = newValue;
-										break;
-									case BIND_TYPE_THREADED_REBASE: {
-										// Regular pointer which needs to fit in 51-bits of value.
-										// C++ RTTI uses the top bit, so we'll allow the whole top-byte
-										// and the signed-extended bottom 43-bits to be fit in to 51-bits.
-										uint64_t top8Bits = (*(uint64_t*)addr) & 0x0007F80000000000ULL;
-										uint64_t bottom43Bits = (*(uint64_t*)addr) & 0x000007FFFFFFFFFFULL;
-										uint64_t targetValue = ( top8Bits << 13 ) | (((intptr_t)(bottom43Bits << 21) >> 21) & 0x00FFFFFFFFFFFFFF);
-										newValue = (uintptr_t)(targetValue + fSlide);
-										((uintptr_t*)interposeArrayStart)[index] = newValue;
-										break;
+								catch (const char* msg) {
+									if ( !weakImport )
+										throw msg;
+									targetBindAddress = 0;
+								}
+								//dyld::log("interpose bind fixup at %p is bound to 0x%lX\n", fixupLoc, targetBindAddress);
+								// <rdar://problem/25686570> ignore interposing on a weak function that does not exist
+								if ( targetBindAddress == 0 )
+									return;
+								ImageLoader::InterposeTuple tuple;
+								tuple.replacement   = lastRebaseTarget;
+								tuple.neverImage	= this;
+								tuple.onlyImage 	= NULL;
+								tuple.replacee      = targetBindAddress;
+								// <rdar://problem/7937695> verify that replacement is in this image
+								if ( this->containsAddress((void*)tuple.replacement) ) {
+									if ( context.verboseInterposing )
+										dyld::log("dyld: interposing 0x%lx with 0x%lx\n", tuple.replacee, tuple.replacement);
+									// chain to any existing interpositions
+									for (std::vector<InterposeTuple>::iterator it=fgInterposingTuples.begin(); it != fgInterposingTuples.end(); it++) {
+										if ( it->replacee == tuple.replacee ) {
+											tuple.replacee = it->replacement;
+										}
 									}
-									default:
-										dyld::throwf("bad bind type %d", type);
+									ImageLoader::fgInterposingTuples.push_back(tuple);
 								}
 							}
-							return (uintptr_t)0;
+							++targetBindIndex;
 						});
-						for (size_t j=0; j < count; ++j) {
-							ImageLoader::InterposeTuple tuple;
-							tuple.replacement        = interposeArray[j].replacement;
-							tuple.neverImage        = this;
-							tuple.onlyImage            = NULL;
-							tuple.replacee            = interposeArray[j].replacee;
-							if ( context.verboseInterposing ) {
-								dyld::log("dyld: interposing index %d 0x%lx with 0x%lx\n",
-										  (unsigned)j, interposeArray[j].replacee, interposeArray[j].replacement);
-							}
-							// <rdar://problem/25686570> ignore interposing on a weak function that does not exist
-							if ( tuple.replacee == 0 )
-								continue;
-							// <rdar://problem/7937695> verify that replacement is in this image
-							if ( this->containsAddress((void*)tuple.replacement) ) {
-								// chain to any existing interpositions
-								for (std::vector<InterposeTuple>::iterator it=fgInterposingTuples.begin(); it != fgInterposingTuples.end(); it++) {
-									if ( it->replacee == tuple.replacee ) {
-										tuple.replacee = it->replacement;
-									}
-								}
-								ImageLoader::fgInterposingTuples.push_back(tuple);
+					}
+				});
+			});
+		}
+		else {
+			// traditional (non-chained) fixups
+			const size_t         count          = (size_t)(vmSize / sizeof(InterposeData));
+			const InterposeData* interposeArray = (InterposeData*)(fMachOData+vmOffset);
+			if ( context.verboseInterposing )
+				dyld::log("dyld: found %lu interposing tuples in %s\n", count, getPath());
+			for (size_t j=0; j < count; ++j) {
+				uint64_t bindOffset = ((uint8_t*)&(interposeArray[j].replacee)) - fMachOData;
+				ma->forEachBind(diag, ^(uint64_t runtimeOffset, int libOrdinal, const char* symbolName, bool weakImport, bool lazyBind, uint64_t addend, bool& stopBinds) {
+					if ( bindOffset != runtimeOffset )
+						return;
+					stopBinds = true;
+					LastLookup* last = NULL;
+					const ImageLoader* targetImage;
+					uintptr_t targetBindAddress = 0;
+					try {
+						targetBindAddress = this->resolve(context, symbolName, 0, libOrdinal, &targetImage, last, false);
+					}
+					catch (const char* msg) {
+						if ( !weakImport )
+							throw msg;
+						targetBindAddress = 0;
+					}
+					ImageLoader::InterposeTuple tuple;
+					tuple.replacement     = interposeArray[j].replacement;
+					tuple.neverImage      = this;
+					tuple.onlyImage       = NULL;
+					tuple.replacee        = targetBindAddress;
+					// <rdar://problem/25686570> ignore interposing on a weak function that does not exist
+					if ( tuple.replacee == 0 )
+						return;
+					// <rdar://problem/7937695> verify that replacement is in this image
+					if ( this->containsAddress((void*)tuple.replacement) ) {
+						if ( context.verboseInterposing )
+							dyld::log("dyld:   interposing 0x%lx with 0x%lx\n", tuple.replacee, tuple.replacement);
+						// chain to any existing interpositions
+						for (std::vector<InterposeTuple>::iterator it=fgInterposingTuples.begin(); it != fgInterposingTuples.end(); it++) {
+							if ( it->replacee == tuple.replacee ) {
+								tuple.replacee = it->replacement;
 							}
 						}
+						ImageLoader::fgInterposingTuples.push_back(tuple);
 					}
-				}
+				}, ^(const char* symbolName){ },
+				   ^() { });
 			}
-				break;
 		}
-		cmd = (const struct load_command*)(((char*)cmd)+cmd->cmdsize);
-	}
+	});
 }
 
 bool ImageLoaderMachOCompressed::usesChainedFixups() const
 {
-#if __arm64e__
-	return ( machHeader()->cpusubtype == CPU_SUBTYPE_ARM64_E );
-#else
-	return false;
-#endif
+	return ((dyld3::MachOLoaded*)machHeader())->hasChainedFixups();
 }
 
 struct ThreadedBindData {
@@ -1147,34 +1149,26 @@ struct ThreadedBindData {
     uint8_t type               = 0;
 };
 
+void ImageLoaderMachOCompressed::makeDataReadOnly() const
+{
+#if !TEXT_RELOC_SUPPORT
+	if ( fReadOnlyDataSegment && !this->ImageLoader::inSharedCache() ) {
+		for (unsigned int i=0; i < fSegmentsCount; ++i) {
+			if ( segIsReadOnlyData(i) ) {
+				uintptr_t start = segActualLoadAddress(i);
+				uintptr_t size = segSize(i);
+				::mprotect((void*)start, size, PROT_READ);
+				//dyld::log("make read-only 0x%09lX -> 0x%09lX\n", (long)start, (long)(start+size));
+			}
+		}
+	}
+#endif
+}
+
+
 void ImageLoaderMachOCompressed::eachBind(const LinkContext& context, bind_handler handler)
 {
     try {
-        const dysymtab_command* dynSymbolTable = NULL;
-        const macho_nlist* symbolTable = NULL;
-        const char* symbolTableStrings = NULL;
-        uint32_t maxStringOffset = 0;
-
-        const uint32_t cmd_count = ((macho_header*)fMachOData)->ncmds;
-        const struct load_command* const cmds = (struct load_command*)&fMachOData[sizeof(macho_header)];
-        const struct load_command* cmd = cmds;
-        for (uint32_t i = 0; i < cmd_count; ++i) {
-            switch (cmd->cmd) {
-                case LC_SYMTAB:
-                {
-                    const struct symtab_command* symtab = (struct symtab_command*)cmd;
-                    symbolTableStrings = (const char*)&fLinkEditBase[symtab->stroff];
-                    maxStringOffset = symtab->strsize;
-                    symbolTable = (macho_nlist*)(&fLinkEditBase[symtab->symoff]);
-                }
-                    break;
-                case LC_DYSYMTAB:
-                    dynSymbolTable = (struct dysymtab_command*)cmd;
-                    break;
-            }
-            cmd = (const struct load_command*)(((char*)cmd)+cmd->cmdsize);
-        }
-
 		uint8_t type = 0;
 		int segmentIndex = -1;
 		uintptr_t address = segActualLoadAddress(0);
@@ -1349,7 +1343,8 @@ void ImageLoaderMachOCompressed::eachBind(const LinkContext& context, bind_handl
                                     // the ordinal is bits [0..15]
                                     uint16_t ordinal = value & 0xFFFF;
                                     if (ordinal >= ordinalTable.count()) {
-                                        dyld::throwf("bind ordinal is out of range\n");
+                                        dyld::throwf("bind ordinal (%d) is out of range (max=%lu) for disk pointer 0x%16llX at segIndex=%d, segOffset=0x%0lX in %s",
+                                                    ordinal, ordinalTable.count(),value, segmentIndex, segOffset, this->getPath());
                                         return;
                                     }
                                     std::tie(symbolName, addend, libraryOrdinal, symboFlags, type) = ordinalTable[ordinal].pack();
@@ -1613,7 +1608,7 @@ void ImageLoaderMachOCompressed::initializeCoalIterator(CoalIterator& it, unsign
 	it.symbolMatches = false;
 	it.done = false;
 	it.curIndex = 0;
-	it.endIndex = this->fDyldInfo->weak_bind_size;
+	it.endIndex = (this->fDyldInfo ? this->fDyldInfo->weak_bind_size : 0);
 	it.address = 0;
 	it.type = 0;
 	it.addend = 0;
@@ -1625,7 +1620,7 @@ bool ImageLoaderMachOCompressed::incrementCoalIterator(CoalIterator& it)
 	if ( it.done )
 		return false;
 		
-	if ( this->fDyldInfo->weak_bind_size == 0 ) {
+	if ( (this->fDyldInfo == nullptr) || (this->fDyldInfo->weak_bind_size == 0) ) {
 		/// hmmm, ld set MH_WEAK_DEFINES or MH_BINDS_TO_WEAK, but there is no weak binding info
 		it.done = true;
 		it.symbolName = "~~~";
@@ -1731,6 +1726,9 @@ void ImageLoaderMachOCompressed::updateUsesCoalIterator(CoalIterator& it, uintpt
 	if ( this->getState() < dyld_image_state_bound  )
 		return;
 
+	if ( fDyldInfo == nullptr )
+		return;
+		
 	const uint8_t* start = fLinkEditBase + fDyldInfo->weak_bind_off;
 	const uint8_t* p = start + it.curIndex;
 	const uint8_t* end = fLinkEditBase + fDyldInfo->weak_bind_off + this->fDyldInfo->weak_bind_size;
@@ -1839,25 +1837,36 @@ void ImageLoaderMachOCompressed::doInterpose(const LinkContext& context)
 	if ( context.verboseInterposing )
 		dyld::log("dyld: interposing %lu tuples onto image: %s\n", fgInterposingTuples.size(), this->getPath());
 
-	// update prebound symbols
-	eachBind(context, ^(const LinkContext& ctx, ImageLoaderMachOCompressed* image,
-						uintptr_t addr, uint8_t type, const char* symbolName,
-						uint8_t symbolFlags, intptr_t addend, long libraryOrdinal,
-						ExtraBindData *extraBindData,
-						const char* msg, LastLookup* last, bool runResolver) {
-		return ImageLoaderMachOCompressed::interposeAt(ctx, image, addr, type, symbolName, symbolFlags,
-													   addend, libraryOrdinal, extraBindData,
-													   msg, last, runResolver);
-	});
-	eachLazyBind(context, ^(const LinkContext& ctx, ImageLoaderMachOCompressed* image,
-							uintptr_t addr, uint8_t type, const char* symbolName,
-							uint8_t symbolFlags, intptr_t addend, long libraryOrdinal,
-							ExtraBindData *extraBindData,
-							const char* msg, LastLookup* last, bool runResolver) {
-		return ImageLoaderMachOCompressed::interposeAt(ctx, image, addr, type, symbolName, symbolFlags,
-													   addend, libraryOrdinal, extraBindData,
-													   msg, last, runResolver);
-	});
+	const dyld3::MachOAnalyzer* ma = (dyld3::MachOAnalyzer*)fMachOData;
+	if ( !ma->hasChainedFixups() ) {
+		// Note: all binds that happen as part of normal loading and fixups will have interposing applied.
+		// There is only two cases where we need to parse bind opcodes and apply interposing:
+
+		// 1) Lazy pointers are either not bound yet, or in dyld cache they are prebound (to uninterposed target) 
+		eachLazyBind(context, ^(const LinkContext& ctx, ImageLoaderMachOCompressed* image,
+								uintptr_t addr, uint8_t type, const char* symbolName,
+								uint8_t symbolFlags, intptr_t addend, long libraryOrdinal,
+								ExtraBindData *extraBindData,
+								const char* msg, LastLookup* last, bool runResolver) {
+			return ImageLoaderMachOCompressed::interposeAt(ctx, image, addr, type, symbolName, symbolFlags,
+														   addend, libraryOrdinal, extraBindData,
+														   msg, last, runResolver);
+		});
+
+	  	// 2) non-lazy pointers in the dyld cache need to be interposed
+		if ( ma->inDyldCache() ) {
+			eachBind(context, ^(const LinkContext& ctx, ImageLoaderMachOCompressed* image,
+								uintptr_t addr, uint8_t type, const char* symbolName,
+								uint8_t symbolFlags, intptr_t addend, long libraryOrdinal,
+								ExtraBindData *extraBindData,
+								const char* msg, LastLookup* last, bool runResolver) {
+				return ImageLoaderMachOCompressed::interposeAt(ctx, image, addr, type, symbolName, symbolFlags,
+															   addend, libraryOrdinal, extraBindData,
+															   msg, last, runResolver);
+			});
+		}
+
+	}
 }
 
 
@@ -2044,24 +2053,25 @@ void ImageLoaderMachOCompressed::registerEncryption(const encryption_info_comman
 #if __arm__ || __arm64__
 	if ( encryptCmd == NULL )
 		return;
+	// fMachOData not set up yet, need to manually find mach_header
 	const mach_header* mh = NULL;
 	for(unsigned int i=0; i < fSegmentsCount; ++i) {
 		if ( (segFileOffset(i) == 0) && (segFileSize(i) != 0) ) {
 			mh = (mach_header*)segActualLoadAddress(i);
-			break;
+			void* start = ((uint8_t*)mh) + encryptCmd->cryptoff;
+			size_t len = encryptCmd->cryptsize;
+			uint32_t cputype = mh->cputype;
+			uint32_t cpusubtype = mh->cpusubtype;
+			uint32_t cryptid = encryptCmd->cryptid;
+			if (context.verboseMapping) {
+				 dyld::log("                      0x%08lX->0x%08lX configured for FairPlay decryption\n", (long)start, (long)start+len);
+			}
+			int result = mremap_encrypted(start, len, cryptid, cputype, cpusubtype);
+			if ( result != 0 ) {
+				dyld::throwf("mremap_encrypted() => %d, errno=%d for %s\n", result, errno, this->getPath());
+			}
+			return;
 		}
-	}
-	void* start = ((uint8_t*)mh) + encryptCmd->cryptoff;
-	size_t len = encryptCmd->cryptsize;
-	uint32_t cputype = mh->cputype;
-	uint32_t cpusubtype = mh->cpusubtype;
-	uint32_t cryptid = encryptCmd->cryptid;
-	if (context.verboseMapping) {
-		 dyld::log("                      0x%08lX->0x%08lX configured for FairPlay decryption\n", (long)start, (long)start+len);
-	}
-	int result = mremap_encrypted(start, len, cryptid, cputype, cpusubtype);
-	if ( result != 0 ) {
-		dyld::throwf("mremap_encrypted() => %d, errno=%d for %s\n", result, errno, this->getPath());
 	}
 #endif
 }

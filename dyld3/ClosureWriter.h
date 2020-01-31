@@ -70,6 +70,7 @@ public:
     void        addPath(const char* path); // first is canonical, others are aliases
     void        setInvalid();
     void        setInDyldCache(bool);
+    void        setHasPrecomputedObjC(bool);
     void        setIs64(bool);
     void        setHasObjC(bool);
     void        setHasPlusLoads(bool);
@@ -81,11 +82,14 @@ public:
     void        setUses16KPages(bool);
     void        setOverridableDylib(bool);
     void        setNeverUnload(bool);
+    void        setHasTerminators(bool);
     void        setUUID(const uuid_t uuid);
-    void        setCDHash(const uint8_t cdHash[20]);
+    void        addCDHash(const uint8_t cdHash[20]);
     void        setDependents(const Array<Image::LinkedImage>& deps);
     void        setDofOffsets(const Array<uint32_t>& dofSectionOffsets);
     void        setInitOffsets(const uint32_t initOffsets[], uint32_t count);
+    void        setInitSectRange(uint32_t sectionOffset, uint32_t sectionSize);
+    void        setTermOffsets(const uint32_t termOffsets[], uint32_t count);
     void        setDiskSegments(const Image::DiskSegment segs[], uint32_t count);
     void        setCachedSegments(const Image::DyldCacheSegment segs[], uint32_t count);
     void        setCodeSignatureLocation(uint32_t fileOffset, uint32_t size);
@@ -95,10 +99,15 @@ public:
     void        setRebaseInfo(const Array<Image::RebasePattern>&);
     void        setTextRebaseInfo(const Array<Image::TextFixupPattern>&);
     void        setBindInfo(const Array<Image::BindPattern>&);
+    void        setObjCFixupInfo(const Image::ResolvedSymbolTarget& objcProtocolClassTarget,
+                                 uint64_t objcImageInfoVMOffset,
+                                 const Array<Image::ProtocolISAFixup>& protocolISAFixups,
+                                 const Array<Image::SelectorReferenceFixup>& selRefFixups,
+                                 const Array<Image::ClassStableSwiftFixup>& classStableSwiftFixups,
+                                 const Array<Image::MethodListFixup>& methodListFixups);
     void        setAsOverrideOf(ImageNum);
-    void        addExportPatchInfo(uint32_t implOff, const char* name, uint32_t locCount, const Image::PatchableExport::PatchLocation* locs);
     void        setInitsOrder(const ImageNum images[], uint32_t count);
-    void        setChainedFixups(const Array<uint64_t>& starts, const Array<Image::ResolvedSymbolTarget>& targets);
+    void        setChainedFixups(uint64_t runtimeStartsStructOffset, const Array<Image::ResolvedSymbolTarget>& targets);
 
     const Image* currentImage();
 
@@ -114,7 +123,7 @@ private:
 class VIS_HIDDEN ImageArrayWriter : public ContainerTypedBytesWriter
 {
 public:
-                        ImageArrayWriter(ImageNum startImageNum, unsigned count);
+                        ImageArrayWriter(ImageNum startImageNum, unsigned count, bool hasRoots);
 
     void                appendImage(const Image*);
     const ImageArray*   finalize();
@@ -127,10 +136,13 @@ class VIS_HIDDEN ClosureWriter : public ContainerTypedBytesWriter
 public:
     void                    setTopImageNum(ImageNum imageNum);
     void                    addCachePatches(const Array<Closure::PatchEntry>&);
+    void                    applyInterposing(const LaunchClosure* launchClosure);
+    void                    addWarning(Closure::Warning::Type type, const char* warning);
 };
 
 class VIS_HIDDEN LaunchClosureWriter : public ClosureWriter
 {
+    friend class            ClosureBuilder;
 public:
                             LaunchClosureWriter(const ImageArray* images);
 
@@ -142,12 +154,17 @@ public:
     void                    setStartEntry(Image::ResolvedSymbolTarget start);
     void                    setUsedFallbackPaths(bool);
     void                    setUsedAtPaths(bool);
+    void                    setHasInsertedLibraries(bool);
     void                    setMustBeMissingFiles(const Array<const char*>& paths);
+    void                    setMustExistFiles(const Array<LaunchClosure::SkippedFile>& files);
     void                    addInterposingTuples(const Array<InterposingTuple>& tuples);
     void                    setDyldCacheUUID(const uuid_t);
     void                    setBootUUID(const char* uuid);
-    void                    applyInterposing();
     void                    addEnvVar(const char* envVar);
+    void                    setObjCSelectorInfo(const Array<uint8_t>& hashTable, const Array<Image::ObjCSelectorImage>& hashTableImages);
+    void                    setObjCClassAndProtocolInfo(const Array<uint8_t>& classHashTable, const Array<uint8_t>& protocolHashTable,
+                                                        const Array<Image::ObjCClassImage>& hashTableImages);
+    void                    setObjCDuplicateClassesInfo(const Array<uint8_t>& hashTable);
 
 private:
     LaunchClosure::Flags&   getFlags();

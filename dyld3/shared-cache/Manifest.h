@@ -42,6 +42,7 @@
 #include "DyldSharedCache.h"
 #include "Diagnostics.h"
 #include "MachOAnalyzer.h"
+#include "ClosureFileSystemPhysical.h"
 
 extern std::string toolDir();
 
@@ -72,6 +73,7 @@ private:
 
 struct BuildQueueEntry {
     DyldSharedCache::CreateOptions            options;
+    dyld3::closure::FileSystemPhysical        fileSystem;
     std::vector<DyldSharedCache::MappedMachO> dylibsForCache;
     std::vector<DyldSharedCache::MappedMachO> otherDylibsAndBundles;
     std::vector<DyldSharedCache::MappedMachO> mainExecutables;
@@ -186,8 +188,8 @@ struct Manifest {
     void setVersion(const uint32_t manifestVersion);
     bool normalized;
 
-    Manifest(Diagnostics& D, const std::string& path, bool onlyParseManifest = false);
-    Manifest(Diagnostics& D, const std::string& path, const std::set<std::string>& overlays, bool onlyParseManifest = false);
+    Manifest(Diagnostics& D, const std::string& path, bool populateIt = true);
+    void populate(const std::set<std::string>& overlays);
 
     BuildQueueEntry makeQueueEntry(const std::string& outputPath, const std::set<std::string>& configs, const std::string& arch, bool optimizeStubs, const std::string& prefix,
                                    bool isLocallyBuiltCache, bool skipWrites, bool verbose);

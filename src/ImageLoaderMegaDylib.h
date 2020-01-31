@@ -144,6 +144,8 @@ public:
 
 protected:
 	virtual void						setDyldInfo(const dyld_info_command* dyldInfo) { unreachable(); }
+	virtual void						setChainedFixups(const linkedit_data_command* fixups) { unreachable(); }
+	virtual void						setExportsTrie(const linkedit_data_command*) { unreachable(); }
 	virtual void						setSymbolTableInfo(const macho_nlist*, const char*, const dysymtab_command*) { unreachable(); }
 	virtual uint32_t*					segmentCommandOffsets() const { unreachable(); }
 	virtual	void						rebase(const LinkContext& context, uintptr_t slide) { unreachable(); }
@@ -164,6 +166,7 @@ protected:
 	virtual void						recursiveRebase(const LinkContext& context) {  }
 	virtual void						recursiveBind(const LinkContext& context, bool forceLazysBound, bool neverUnload);
 	virtual void						recursiveApplyInterposing(const LinkContext& context);
+	virtual void						recursiveMakeDataReadOnly(const LinkContext& context) {}
 	virtual void						recursiveGetDOFSections(const LinkContext& context, std::vector<DOFInfo>& dofs) { }
 	virtual void						recursiveInitialization(const LinkContext& context, mach_port_t this_thread, const char* pathToInitialize,
 																ImageLoader::InitializerTimingList&, ImageLoader::UninitedUpwards&);

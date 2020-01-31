@@ -21,21 +21,15 @@
  * @APPLE_LICENSE_HEADER_END@
  */
 
-#include <string.h>
+#ifndef __JSON_WRITER_H__
+#define __JSON_WRITER_H__
 
-#include <string>
-#include <map>
-#include <vector>
+#include <iostream>
+
+#include "JSON.h"
 
 namespace dyld3 {
 namespace json {
-
-struct Node
-{
-    std::string                 value;
-    std::map<std::string, Node> map;
-    std::vector<Node>           array;
-};
 
 static inline std::string hex(uint64_t value) {
     char buff[64];
@@ -61,52 +55,62 @@ static inline std::string decimal(uint64_t value) {
     return buff;
 }
 
-static inline void indentBy(uint32_t spaces, FILE* out) {
-    for (int i=0; i < spaces; ++i) {
-        fprintf(out, " ");
+static inline void indentBy(uint32_t spaces, std::ostream& out) {
+    for (uint32_t i=0; i < spaces; ++i) {
+        out << " ";
     }
 }
 
-static inline void printJSON(const Node& node, uint32_t indent, FILE* out)
+static inline void printJSON(const Node& node, uint32_t indent, std::ostream& out)
 {
     if ( !node.map.empty() ) {
-        fprintf(out, "{");
+        out << "{";
         bool needComma = false;
         for (const auto& entry : node.map) {
             if ( needComma )
-                fprintf(out, ",");
-            fprintf(out, "\n");
+                out << ",";
+            out << "\n";
             indentBy(indent+2, out);
-            fprintf(out, "\"%s\": ", entry.first.c_str());
+            out << "\"" << entry.first << "\": ";
             printJSON(entry.second, indent+2, out);
             needComma = true;
         }
-        fprintf(out, "\n");
+        out << "\n";
         indentBy(indent, out);
-        fprintf(out, "}");
+        out << "}";
     }
     else if ( !node.array.empty() ) {
-        fprintf(out, "[");
+        out << "[";
         bool needComma = false;
         for (const auto& entry : node.array) {
             if ( needComma )
-                fprintf(out, ",");
-            fprintf(out, "\n");
+                out << ",";
+            out << "\n";
             indentBy(indent+2, out);
             printJSON(entry, indent+2, out);
             needComma = true;
         }
-        fprintf(out, "\n");
+        out << "\n";
         indentBy(indent, out);
-        fprintf(out, "]");
+        out << "]";
     }
     else {
-        fprintf(out, "\"%s\"", node.value.c_str());
+        std::string escapedString;
+        escapedString.reserve(node.value.size());
+        for (char c : node.value) {
+            if (c == '"')
+                escapedString += '\\';
+            escapedString += c;
+        }
+        out << "\"" << escapedString << "\"";
     }
     if ( indent == 0 )
-        fprintf(out, "\n");
+        out << "\n";
 }
 
 
 } // namespace json
 } // namespace dyld3
+
+
+#endif // __JSON_WRITER_H__

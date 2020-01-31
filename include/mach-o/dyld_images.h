@@ -154,6 +154,7 @@ struct dyld_all_image_infos {
 	/* the following field is only in version 16 (macOS 10.13, iOS 11.0) and later */
     uintptr_t                       compact_dyld_image_info_addr;
     size_t                          compact_dyld_image_info_size;
+    uint32_t                        platform; // FIXME: really a dyld_platform_t, but those aren't exposed here. 
 };
 
 /*

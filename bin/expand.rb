@@ -2,7 +2,11 @@
 
 require 'yaml'
 
-$availCmd = ENV["SDKROOT"] + "/usr/local/libexec/availability.pl";
+if ENV["DRIVERKITROOT"]
+    $availCmd = ENV["SDKROOT"] + ENV["DRIVERKITROOT"] + "/usr/local/libexec/availability.pl";
+else
+    $availCmd = ENV["SDKROOT"] + "/usr/local/libexec/availability.pl";
+end
 
 def versionString(vers)
     uvers = ""
@@ -76,6 +80,10 @@ ARGF.each do |line|
         expandVersions("DYLD_IOS_VERSION_", "--ios")
     elsif line =~ /^\/\/\@WATCHOS_VERSION_DEFS\@$/
         expandVersions("DYLD_WATCHOS_VERSION_", "--watchos")
+    elsif line =~ /^\/\/\@TVOS_VERSION_DEFS\@$/
+        expandVersions("DYLD_TVOS_VERSION_", "--appletvos")
+    elsif line =~ /^\/\/\@BRIDGEOS_VERSION_DEFS\@$/
+        expandVersions("DYLD_BRIDGEOS_VERSION_", "--bridgeos")
     elsif line =~ /^\/\/\@MACOS_PLATFORM_VERSION_DEFS\@$/
         expandPlatformVersions("macOS", "PLATFORM_MACOS", "--macosx")
     elsif line =~ /^\/\/\@IOS_PLATFORM_VERSION_DEFS\@$/

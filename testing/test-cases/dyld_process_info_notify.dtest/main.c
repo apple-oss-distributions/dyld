@@ -328,7 +328,7 @@ int main(int argc, const char* argv[])
         killTest(child);
         printf("[PASS] dyld_process_info_notify laucnh suspend-in-main (same arch)\n");
 
-#if __MAC_OS_X_VERSION_MIN_REQUIRED
+#if 0
         // test 3) launch test program suspended in opposite arch as this program
         printf("[BEGIN] dyld_process_info_notify laucnh suspended (other arch)\n");
         child = launchTest(testProgPath, "", true, true);

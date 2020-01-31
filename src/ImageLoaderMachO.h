@@ -30,13 +30,13 @@
 #include <mach-o/loader.h> 
 #include <mach-o/nlist.h>
 #include <uuid/uuid.h>
+#include <mach-o/dyld_images.h>
 
 #if __has_feature(ptrauth_calls)
 #include <ptrauth.h>
 #endif
 
 #include "ImageLoader.h"
-#include "mach-o/dyld_images.h"
 
 #define BIND_TYPE_THREADED_BIND 100
 
@@ -172,6 +172,8 @@ protected:
 	void				operator=(const ImageLoaderMachO&);
 
 	virtual void						setDyldInfo(const struct dyld_info_command*) = 0;
+	virtual void						setChainedFixups(const linkedit_data_command*) = 0;
+	virtual void						setExportsTrie(const linkedit_data_command*) = 0;
 	virtual void						setSymbolTableInfo(const macho_nlist*, const char*, const dysymtab_command*) = 0;
 	virtual	bool						isSubframeworkOf(const LinkContext& context, const ImageLoader* image) const = 0;
 	virtual	bool						hasSubLibrary(const LinkContext& context, const ImageLoader* child) const = 0;
@@ -227,6 +229,7 @@ protected:
 #if __i386__
 			bool		segIsReadOnlyImport(unsigned int) const;
 #endif
+			bool		segIsReadOnlyData(unsigned int) const;
 			intptr_t	assignSegmentAddresses(const LinkContext& context);
 			uintptr_t	reserveAnAddressRange(size_t length, const ImageLoader::LinkContext& context);
 			bool		reserveAddressRange(uintptr_t start, size_t length);
@@ -242,7 +245,6 @@ protected:
 			void		lookupProgramVars(const LinkContext& context) const;
 
 			void		makeTextSegmentWritable(const LinkContext& context, bool writeable);
-			void		preFetchDATA(int fd, uint64_t offsetInFat, const LinkContext& context);
 
 
 			void		doInterpose(const LinkContext& context) = 0;
@@ -264,7 +266,9 @@ protected:
 											fInSharedCache : 1,
 #if TEXT_RELOC_SUPPORT
 											fTextSegmentRebases : 1, 
-											fTextSegmentBinds : 1, 
+											fTextSegmentBinds : 1,
+#else
+											fReadOnlyDataSegment : 1,
 #endif
 #if __i386__
 											fReadOnlyImportSegment : 1,

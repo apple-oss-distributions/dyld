@@ -31,7 +31,7 @@
 
 extern "C" void* __dso_handle;
 
-#include "dyld.h"
+#include "dyld2.h"
 #include "dyldLibSystemInterface.h"
 
 //

@@ -325,7 +325,6 @@ int main(int argc, const char* argv[])
         options.isLocallyBuiltCache          = true;
         options.verbose                      = verbose;
         options.evictLeafDylibsOnOverflow    = false;
-        options.pathPrefixes                 = { rootPath };
         DyldSharedCache::CreateResults results = DyldSharedCache::create(options, fileSet.dylibsForCache, fileSet.otherDylibsAndBundles, fileSet.mainExecutables);
 
         // print any warnings

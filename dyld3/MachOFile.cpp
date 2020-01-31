@@ -30,27 +30,10 @@
 #include <mach/mach.h>
 #include <mach/mach_host.h>
 
+#include "Array.h"
 #include "MachOFile.h"
 #include "SupportedArchs.h"
 
-#ifndef EXPORT_SYMBOL_FLAGS_KIND_ABSOLUTE
-    #define EXPORT_SYMBOL_FLAGS_KIND_ABSOLUTE 0x02
-#endif
-
-#ifndef CPU_SUBTYPE_ARM64_E
-    #define CPU_SUBTYPE_ARM64_E    2
-#endif
-
-#ifndef CPU_SUBTYPE_ARM64_32_V8
-    #define CPU_SUBTYPE_ARM64_32_V8    1
-#endif
-
-#ifndef CPU_TYPE_ARM64_32
-    #ifndef CPU_ARCH_ABI64_32
-        #define CPU_ARCH_ABI64_32            0x02000000
-    #endif
-    #define CPU_TYPE_ARM64_32            (CPU_TYPE_ARM | CPU_ARCH_ABI64_32)
-#endif
 
 namespace dyld3 {
 
@@ -65,27 +48,63 @@ const FatFile* FatFile::isFatFile(const void* fileStart)
         return nullptr;
 }
 
+bool FatFile::isValidSlice(Diagnostics& diag, uint64_t fileLen, uint32_t sliceIndex,
+                           uint32_t sliceCpuType, uint32_t sliceCpuSubType, uint64_t sliceOffset, uint64_t sliceLen) const {
+    if ( greaterThanAddOrOverflow(sliceOffset, sliceLen, fileLen) ) {
+        diag.error("slice %d extends beyond end of file", sliceIndex);
+        return false;
+    }
+    const dyld3::MachOFile* mf = (const dyld3::MachOFile*)((uint8_t*)this+sliceOffset);
+    if (!mf->isMachO(diag, sliceLen))
+        return false;
+    if ( (mf->cputype != (cpu_type_t)sliceCpuType) || (mf->cpusubtype != (cpu_subtype_t)sliceCpuSubType) ) {
+        diag.error("cpu type/subtype mismatch");
+        return false;
+    }
+    uint32_t pageSizeMask = mf->uses16KPages() ? 0x3FFF : 0xFFF;
+    if ( (sliceOffset & pageSizeMask) != 0 ) {
+        // slice not page aligned
+        if ( strncmp((char*)this+sliceOffset, "!<arch>", 7) == 0 )
+            diag.error("file is static library");
+        else
+            diag.error("slice is not page aligned");
+        return false;
+    }
+    return true;
+}
+
 void FatFile::forEachSlice(Diagnostics& diag, uint64_t fileLen, void (^callback)(uint32_t sliceCpuType, uint32_t sliceCpuSubType, const void* sliceStart, uint64_t sliceSize, bool& stop)) const
 {
 	if ( this->magic == OSSwapBigToHostInt32(FAT_MAGIC) ) {
-        if ( OSSwapBigToHostInt32(nfat_arch) > ((4096 - sizeof(fat_header)) / sizeof(fat_arch)) ) {
-            diag.error("fat header too large: %u entries", OSSwapBigToHostInt32(nfat_arch));
+        const uint64_t maxArchs = ((4096 - sizeof(fat_header)) / sizeof(fat_arch));
+        const uint32_t numArchs = OSSwapBigToHostInt32(nfat_arch);
+        if ( numArchs > maxArchs ) {
+            diag.error("fat header too large: %u entries", numArchs);
             return;
         }
         bool stop = false;
         const fat_arch* const archs = (fat_arch*)(((char*)this)+sizeof(fat_header));
-        for (uint32_t i=0; i < OSSwapBigToHostInt32(nfat_arch); ++i) {
+        for (uint32_t i=0; i < numArchs; ++i) {
             uint32_t cpuType    = OSSwapBigToHostInt32(archs[i].cputype);
             uint32_t cpuSubType = OSSwapBigToHostInt32(archs[i].cpusubtype);
             uint32_t offset     = OSSwapBigToHostInt32(archs[i].offset);
             uint32_t len        = OSSwapBigToHostInt32(archs[i].size);
-            if ( greaterThanAddOrOverflow(offset, len, fileLen) ) {
-                diag.error("slice %d extends beyond end of file", i);
-                return;
-            }
-            callback(cpuType, cpuSubType, (uint8_t*)this+offset, len, stop);
+            if (isValidSlice(diag, fileLen, i, cpuType, cpuSubType, offset, len))
+                callback(cpuType, cpuSubType, (uint8_t*)this+offset, len, stop);
             if ( stop )
                 break;
+        }
+
+        // Look for one more slice
+        if ( numArchs != maxArchs ) {
+            uint32_t cpuType    = OSSwapBigToHostInt32(archs[numArchs].cputype);
+            uint32_t cpuSubType = OSSwapBigToHostInt32(archs[numArchs].cpusubtype);
+            uint32_t offset     = OSSwapBigToHostInt32(archs[numArchs].offset);
+            uint32_t len        = OSSwapBigToHostInt32(archs[numArchs].size);
+            if ((cpuType == CPU_TYPE_ARM64) && ((cpuSubType == CPU_SUBTYPE_ARM64_ALL || cpuSubType == CPU_SUBTYPE_ARM64_V8))) {
+                if (isValidSlice(diag, fileLen, numArchs, cpuType, cpuSubType, offset, len))
+                    callback(cpuType, cpuSubType, (uint8_t*)this+offset, len, stop);
+            }
         }
     }
     else if ( this->magic == OSSwapBigToHostInt32(FAT_MAGIC_64) ) {
@@ -100,11 +119,8 @@ void FatFile::forEachSlice(Diagnostics& diag, uint64_t fileLen, void (^callback)
             uint32_t cpuSubType = OSSwapBigToHostInt32(archs[i].cpusubtype);
             uint64_t offset     = OSSwapBigToHostInt64(archs[i].offset);
             uint64_t len        = OSSwapBigToHostInt64(archs[i].size);
-            if ( greaterThanAddOrOverflow(offset, len, fileLen) ) {
-                diag.error("slice %d extends beyond end of file", i);
-                return;
-            }
-            callback(cpuType, cpuSubType, (uint8_t*)this+offset, len, stop);
+            if (isValidSlice(diag, fileLen, i, cpuType, cpuSubType, offset, len))
+                callback(cpuType, cpuSubType, (uint8_t*)this+offset, len, stop);
             if ( stop )
                 break;
         }
@@ -114,33 +130,133 @@ void FatFile::forEachSlice(Diagnostics& diag, uint64_t fileLen, void (^callback)
     }
 }
 
-bool FatFile::isFatFileWithSlice(Diagnostics& diag, uint64_t fileLen, const char* archName, uint64_t& sliceOffset, uint64_t& sliceLen, bool& missingSlice) const
+bool FatFile::isFatFileWithSlice(Diagnostics& diag, uint64_t fileLen, const GradedArchs& archs, uint64_t& sliceOffset, uint64_t& sliceLen, bool& missingSlice) const
 {
     missingSlice = false;
     if ( (this->magic != OSSwapBigToHostInt32(FAT_MAGIC)) && (this->magic != OSSwapBigToHostInt32(FAT_MAGIC_64)) )
         return false;
 
-    __block bool found = false;
+    __block int bestGrade = 0;
     forEachSlice(diag, fileLen, ^(uint32_t sliceCpuType, uint32_t sliceCpuSubType, const void* sliceStart, uint64_t sliceSize, bool& stop) {
-        const char* sliceArchName = MachOFile::archName(sliceCpuType, sliceCpuSubType);
-        if ( strcmp(sliceArchName, archName) == 0 ) {
-            sliceOffset = (char*)sliceStart - (char*)this;
-            sliceLen    = sliceSize;
-            found       = true;
-            stop        = true;
+        if (int sliceGrade = archs.grade(sliceCpuType, sliceCpuSubType)) {
+            if ( sliceGrade > bestGrade ) {
+                sliceOffset = (char*)sliceStart - (char*)this;
+                sliceLen    = sliceSize;
+                bestGrade   = sliceGrade;
+            }
         }
     });
     if ( diag.hasError() )
         return false;
 
-    if ( !found )
+    if ( bestGrade == 0 )
         missingSlice = true;
 
-    // when looking for x86_64h fallback to x86_64
-    if ( !found && (strcmp(archName, "x86_64h") == 0) )
-        return isFatFileWithSlice(diag, fileLen, "x86_64", sliceOffset, sliceLen, missingSlice);
+    return (bestGrade != 0);
+}
 
-    return found;
+
+////////////////////////////  GradedArchs ////////////////////////////////////////
+
+const GradedArchs GradedArchs::i386          = { {{CPU_TYPE_I386,     CPU_SUBTYPE_I386_ALL,    1}} };
+const GradedArchs GradedArchs::x86_64        = { {{CPU_TYPE_X86_64,   CPU_SUBTYPE_X86_64_ALL,  1}} };
+const GradedArchs GradedArchs::x86_64h       = { {{CPU_TYPE_X86_64,   CPU_SUBTYPE_X86_64_H,    2}, {CPU_TYPE_X86_64, CPU_SUBTYPE_X86_64_ALL, 1}},     };
+const GradedArchs GradedArchs::arm64         = { {{CPU_TYPE_ARM64,    CPU_SUBTYPE_ARM64_ALL,   1}} };
+#if SUPPORT_ARCH_arm64e
+const GradedArchs GradedArchs::arm64e_compat = { {{CPU_TYPE_ARM64,    CPU_SUBTYPE_ARM64E,      2}, {CPU_TYPE_ARM64,  CPU_SUBTYPE_ARM64_ALL, 1}} };
+const GradedArchs GradedArchs::arm64e        = { {{CPU_TYPE_ARM64,    CPU_SUBTYPE_ARM64E,      1}} };
+#endif
+const GradedArchs GradedArchs::armv7k        = { {{CPU_TYPE_ARM,      CPU_SUBTYPE_ARM_V7K,     1}} };
+const GradedArchs GradedArchs::armv7         = { {{CPU_TYPE_ARM,      CPU_SUBTYPE_ARM_V7,      1}} };
+const GradedArchs GradedArchs::armv7s        = { {{CPU_TYPE_ARM,      CPU_SUBTYPE_ARM_V7S,     2}, {CPU_TYPE_ARM,    CPU_SUBTYPE_ARM_V7, 1}} };
+#if SUPPORT_ARCH_arm64_32
+const GradedArchs GradedArchs::arm64_32      = { {{CPU_TYPE_ARM64_32, CPU_SUBTYPE_ARM64_32_V8, 1}} };
+#endif
+
+int GradedArchs::grade(uint32_t cputype, uint32_t cpusubtype) const
+{
+    for (const CpuGrade* p = _orderedCpuTypes; p->type != 0; ++p) {
+        if ( (p->type == cputype) && (p->subtype == (cpusubtype & ~CPU_SUBTYPE_MASK)) )
+            return p->grade;
+    }
+    return 0;
+}
+
+const char* GradedArchs::name() const
+{
+    return MachOFile::archName(_orderedCpuTypes[0].type, _orderedCpuTypes[0].subtype);
+}
+
+#if __x86_64__
+static bool isHaswell()
+{
+    // FIXME: figure out a commpage way to check this
+    static bool sAlreadyDetermined = false;
+    static bool sHaswell = false;
+    if ( !sAlreadyDetermined ) {
+        struct host_basic_info info;
+        mach_msg_type_number_t count = HOST_BASIC_INFO_COUNT;
+        mach_port_t hostPort = mach_host_self();
+        kern_return_t result = host_info(hostPort, HOST_BASIC_INFO, (host_info_t)&info, &count);
+        mach_port_deallocate(mach_task_self(), hostPort);
+        sHaswell = (result == KERN_SUCCESS) && (info.cpu_subtype == CPU_SUBTYPE_X86_64_H);
+        sAlreadyDetermined = true;
+    }
+    return sHaswell;
+}
+#endif
+
+const GradedArchs& GradedArchs::forCurrentOS(const MachOFile* mainExecutable)
+{
+#if __arm64e__
+    if ( mainExecutable->cpusubtype < CPU_SUBTYPE_ARM64E )
+        return arm64e_compat;
+    else
+        return arm64e;
+#elif __ARM64_ARCH_8_32__
+    return arm64_32;
+#elif __arm64__
+    return arm64;
+#elif __ARM_ARCH_7K__
+    return armv7k;
+#elif __ARM_ARCH_7S__
+    return armv7s;
+#elif __ARM_ARCH_7A__
+    return armv7;
+#elif __x86_64__
+    return isHaswell() ? x86_64h : x86_64;
+#elif __i386__
+    return i386;
+#else
+    #error unknown platform
+#endif
+}
+
+const GradedArchs& GradedArchs::forName(const char* archName, bool forMainExecutable)
+{
+    if (strcmp(archName, "x86_64h") == 0 )
+        return x86_64h;
+    else if (strcmp(archName, "x86_64") == 0 )
+        return x86_64;
+#if SUPPORT_ARCH_arm64e
+    else if (strcmp(archName, "arm64e") == 0 )
+        return forMainExecutable ? arm64e_compat : arm64e;
+#endif
+    else if (strcmp(archName, "arm64") == 0 )
+        return arm64;
+    else if (strcmp(archName, "armv7k") == 0 )
+        return armv7k;
+    else if (strcmp(archName, "armv7s") == 0 )
+        return armv7s;
+    else if (strcmp(archName, "armv7") == 0 )
+        return armv7;
+#if SUPPORT_ARCH_arm64_32
+    else if (strcmp(archName, "arm64_32") == 0 )
+        return arm64_32;
+#endif
+    else if (strcmp(archName, "i386") == 0 )
+        return i386;
+    assert(0 && "unknown arch name");
 }
 
 
@@ -153,7 +269,7 @@ const MachOFile::ArchInfo MachOFile::_s_archInfos[] = {
     { "i386",     CPU_TYPE_I386,     CPU_SUBTYPE_I386_ALL    },
     { "arm64",    CPU_TYPE_ARM64,    CPU_SUBTYPE_ARM64_ALL   },
 #if SUPPORT_ARCH_arm64e
-    { "arm64e",   CPU_TYPE_ARM64,    CPU_SUBTYPE_ARM64_E     },
+    { "arm64e",   CPU_TYPE_ARM64,    CPU_SUBTYPE_ARM64E     },
 #endif
 #if SUPPORT_ARCH_arm64_32
     { "arm64_32", CPU_TYPE_ARM64_32, CPU_SUBTYPE_ARM64_32_V8 },
@@ -169,17 +285,24 @@ const MachOFile::PlatformInfo MachOFile::_s_platformInfos[] = {
     { "tvOS",        Platform::tvOS,              LC_VERSION_MIN_TVOS     },
     { "watchOS",     Platform::watchOS,           LC_VERSION_MIN_WATCHOS  },
     { "bridgeOS",    Platform::bridgeOS,          LC_BUILD_VERSION        },
-    { "iOSMac",      Platform::iOSMac,            LC_BUILD_VERSION        },
+    { "UIKitForMac", Platform::iOSMac,            LC_BUILD_VERSION        },
     { "iOS-sim",     Platform::iOS_simulator,     LC_BUILD_VERSION        },
     { "tvOS-sim",    Platform::tvOS_simulator,    LC_BUILD_VERSION        },
     { "watchOS-sim", Platform::watchOS_simulator, LC_BUILD_VERSION        },
 };
 
 
+
 bool MachOFile::is64() const
 {
     return (this->magic == MH_MAGIC_64);
 }
+
+size_t MachOFile::machHeaderSize() const
+{
+    return is64() ? sizeof(mach_header_64) : sizeof(mach_header);
+}
+
 
 uint32_t MachOFile::pointerSize() const
 {
@@ -193,9 +316,11 @@ bool MachOFile::uses16KPages() const
 {
     switch (this->cputype) {
         case CPU_TYPE_ARM64:
-        case CPU_TYPE_ARM:
         case CPU_TYPE_ARM64_32:
             return true;
+        case CPU_TYPE_ARM:
+            // iOS is 16k aligned for armv7/armv7s and watchOS armv7k is 16k aligned
+            return this->cpusubtype == CPU_SUBTYPE_ARM_V7K;
         default:
             return false;
     }
@@ -308,9 +433,35 @@ bool MachOFile::supportsPlatform(Platform reqPlatform) const
     return false;
 }
 
+bool MachOFile::isZippered() const
+{
+    __block bool macOS = false;
+    __block bool iOSMac = false;
+    forEachSupportedPlatform(^(Platform platform, uint32_t minOS, uint32_t sdk) {
+        if ( platform == Platform::macOS )
+            macOS = true;
+        else if ( platform == Platform::iOSMac )
+            iOSMac = true;
+    });
+    return macOS && iOSMac;
+}
+
+bool MachOFile::inDyldCache() const {
+    return (this->flags & 0x80000000);
+}
+
 Platform MachOFile::currentPlatform()
 {
-#if TARGET_OS_BRIDGE
+
+#if TARGET_OS_SIMULATOR
+#if TARGET_OS_WATCH
+    return Platform::watchOS_simulator;
+#elif TARGET_OS_TV
+    return Platform::tvOS_simulator;
+#else
+    return Platform::iOS_simulator;
+#endif
+#elif TARGET_OS_BRIDGE
     return Platform::bridgeOS;
 #elif TARGET_OS_WATCH
     return Platform::watchOS;
@@ -325,24 +476,6 @@ Platform MachOFile::currentPlatform()
 #endif
 }
 
-#if __x86_64__
-static bool isHaswell()
-{
-    // FIXME: figure out a commpage way to check this
-    static bool sAlreadyDetermined = false;
-    static bool sHaswell = false;
-    if ( !sAlreadyDetermined ) {
-        struct host_basic_info info;
-        mach_msg_type_number_t count = HOST_BASIC_INFO_COUNT;
-        mach_port_t hostPort = mach_host_self();
-        kern_return_t result = host_info(hostPort, HOST_BASIC_INFO, (host_info_t)&info, &count);
-        mach_port_deallocate(mach_task_self(), hostPort);
-        sHaswell = (result == KERN_SUCCESS) && (info.cpu_subtype == CPU_SUBTYPE_X86_64_H);
-        sAlreadyDetermined = true;
-    }
-    return sHaswell;
-}
-#endif
 
 const char* MachOFile::currentArchName()
 {
@@ -369,6 +502,12 @@ const char* MachOFile::currentArchName()
 #endif
 }
 
+bool MachOFile::isSimulatorPlatform(Platform platform)
+{
+    return ( (platform == Platform::iOS_simulator) ||
+             (platform == Platform::watchOS_simulator) ||
+             (platform == Platform::tvOS_simulator) );
+}
 
 bool MachOFile::isDylib() const
 {
@@ -391,20 +530,26 @@ bool MachOFile::isDynamicExecutable() const
         return false;
 
     // static executables do not have dyld load command
-    __block bool hasDyldLoad = false;
-    Diagnostics diag;
-    forEachLoadCommand(diag, ^(const load_command* cmd, bool& stop) {
-        if ( cmd->cmd == LC_LOAD_DYLINKER ) {
-            hasDyldLoad = true;
-            stop = true;
-        }
-    });
-    return hasDyldLoad;
+    return hasLoadCommand(LC_LOAD_DYLINKER);
+}
+
+bool MachOFile::isStaticExecutable() const
+{
+    if ( this->filetype != MH_EXECUTE )
+        return false;
+
+    // static executables do not have dyld load command
+    return !hasLoadCommand(LC_LOAD_DYLINKER);
 }
 
 bool MachOFile::isPIE() const
 {
     return (this->flags & MH_PIE);
+}
+
+bool MachOFile::isPreload() const
+{
+    return (this->filetype == MH_PRELOAD);
 }
 
 const char* MachOFile::platformName(Platform reqPlatform)
@@ -456,10 +601,12 @@ void MachOFile::forEachSupportedPlatform(void (^handler)(Platform platform, uint
 bool MachOFile::isMachO(Diagnostics& diag, uint64_t fileSize) const
 {
     if ( !hasMachOMagic() ) {
-        diag.error("file does not start with MH_MAGIC[_64]");
+        // old PPC slices are not currently valid "mach-o" but should not cause an error
+        if ( !hasMachOBigEndianMagic() )
+            diag.error("file does not start with MH_MAGIC[_64]");
         return false;
     }
-    if ( this->sizeofcmds + sizeof(mach_header_64) > fileSize ) {
+    if ( this->sizeofcmds + machHeaderSize() > fileSize ) {
         diag.error("load commands exceed length of first segment");
         return false;
     }
@@ -472,6 +619,12 @@ bool MachOFile::hasMachOMagic() const
     return ( (this->magic == MH_MAGIC) || (this->magic == MH_MAGIC_64) );
 }
 
+bool MachOFile::hasMachOBigEndianMagic() const
+{
+    return ( (this->magic == MH_CIGAM) || (this->magic == MH_CIGAM_64) );
+}
+
+
 void MachOFile::forEachLoadCommand(Diagnostics& diag, void (^callback)(const load_command* cmd, bool& stop)) const
 {
     bool stop = false;
@@ -480,6 +633,8 @@ void MachOFile::forEachLoadCommand(Diagnostics& diag, void (^callback)(const loa
         startCmds = (load_command*)((char *)this + sizeof(mach_header_64));
     else if ( this->magic == MH_MAGIC )
         startCmds = (load_command*)((char *)this + sizeof(mach_header));
+    else if ( hasMachOBigEndianMagic() )
+        return;  // can't process big endian mach-o
     else {
         const uint32_t* h = (uint32_t*)this;
         diag.error("file does not start with MH_MAGIC[_64]: 0x%08X 0x%08X", h[0], h [1]);
@@ -616,6 +771,7 @@ bool MachOFile::enforceCompatVersion() const
                 if ( minOS >= 0x00030000 )  // bridgeOS 3.0
                     result = false;
                 break;
+            case Platform::driverKit:
             case Platform::iOSMac:
                 result = false;
                 break;
@@ -651,8 +807,11 @@ void MachOFile::forEachSegment(void (^callback)(const SegmentInfo& info, bool& s
             info.vmSize            = segCmd->vmsize;
             info.sizeOfSections    = sizeOfSections;
             info.segName           = segCmd->segname;
+            info.loadCommandOffset = (uint32_t)((uint8_t*)segCmd - (uint8_t*)this);
             info.protections       = segCmd->initprot;
             info.textRelocs        = false;
+            info.readOnlyData      = ((segCmd->flags & SG_READ_ONLY) != 0);
+            info.isProtected       = (segCmd->flags & SG_PROTECTED_VERSION_1) ? 1 : 0;
             info.p2align           = p2align;
             info.segIndex          = segIndex;
             callback(info, stop);
@@ -679,8 +838,11 @@ void MachOFile::forEachSegment(void (^callback)(const SegmentInfo& info, bool& s
             info.vmSize            = segCmd->vmsize;
             info.sizeOfSections    = sizeOfSections;
             info.segName           = segCmd->segname;
+            info.loadCommandOffset = (uint32_t)((uint8_t*)segCmd - (uint8_t*)this);
             info.protections       = segCmd->initprot;
             info.textRelocs        = intel32 && !info.writable() && hasTextRelocs;
+            info.readOnlyData      = ((segCmd->flags & SG_READ_ONLY) != 0);
+            info.isProtected       = (segCmd->flags & SG_PROTECTED_VERSION_1) ? 1 : 0;
             info.p2align           = p2align;
             info.segIndex          = segIndex;
             callback(info, stop);
@@ -693,6 +855,7 @@ void MachOFile::forEachSegment(void (^callback)(const SegmentInfo& info, bool& s
 void MachOFile::forEachSection(void (^callback)(const SectionInfo& sectInfo, bool malformedSectionRange, bool& stop)) const
 {
     Diagnostics diag;
+    BLOCK_ACCCESSIBLE_ARRAY(char, sectNameCopy, 20);  // read as:  char sectNameCopy[20];
     const bool intel32 = (this->cputype == CPU_TYPE_I386);
     __block uint32_t segIndex = 0;
     forEachLoadCommand(diag, ^(const load_command* cmd, bool& stop) {
@@ -714,13 +877,15 @@ void MachOFile::forEachSection(void (^callback)(const SectionInfo& sectInfo, boo
             sectInfo.segInfo.vmSize            = segCmd->vmsize;
             sectInfo.segInfo.sizeOfSections    = sizeOfSections;
             sectInfo.segInfo.segName           = segCmd->segname;
+            sectInfo.segInfo.loadCommandOffset = (uint32_t)((uint8_t*)segCmd - (uint8_t*)this);
             sectInfo.segInfo.protections       = segCmd->initprot;
             sectInfo.segInfo.textRelocs        = false;
+            sectInfo.segInfo.readOnlyData      = ((segCmd->flags & SG_READ_ONLY) != 0);
+            sectInfo.segInfo.isProtected       = (segCmd->flags & SG_PROTECTED_VERSION_1) ? 1 : 0;
             sectInfo.segInfo.p2align           = p2align;
             sectInfo.segInfo.segIndex          = segIndex;
             for (const section_64* sect=sectionsStart; !stop && (sect < sectionsEnd); ++sect) {
                 const char* sectName = sect->sectname;
-                char sectNameCopy[20];
                 if ( sectName[15] != '\0' ) {
                     strlcpy(sectNameCopy, sectName, 17);
                     sectName = sectNameCopy;
@@ -758,13 +923,15 @@ void MachOFile::forEachSection(void (^callback)(const SectionInfo& sectInfo, boo
             sectInfo.segInfo.vmSize            = segCmd->vmsize;
             sectInfo.segInfo.sizeOfSections    = sizeOfSections;
             sectInfo.segInfo.segName           = segCmd->segname;
+            sectInfo.segInfo.loadCommandOffset = (uint32_t)((uint8_t*)segCmd - (uint8_t*)this);
             sectInfo.segInfo.protections       = segCmd->initprot;
             sectInfo.segInfo.textRelocs        = intel32 && !sectInfo.segInfo.writable() && hasTextRelocs;
+            sectInfo.segInfo.readOnlyData      = ((segCmd->flags & SG_READ_ONLY) != 0);
+            sectInfo.segInfo.isProtected       = (segCmd->flags & SG_PROTECTED_VERSION_1) ? 1 : 0;
             sectInfo.segInfo.p2align           = p2align;
             sectInfo.segInfo.segIndex          = segIndex;
             for (const section* sect=sectionsStart; !stop && (sect < sectionsEnd); ++sect) {
                 const char* sectName = sect->sectname;
-                char sectNameCopy[20];
                 if ( sectName[15] != '\0' ) {
                     strlcpy(sectNameCopy, sectName, 17);
                     sectName = sectNameCopy;
@@ -805,8 +972,22 @@ static bool endsWith(const char* str, const char* suffix)
     return (strcmp(&str[strLen-suffixLen], suffix) == 0);
 }
 
+bool MachOFile::isSharedCacheEligiblePath(const char* dylibName) {
+    return (   (strncmp(dylibName, "/usr/lib/", 9) == 0)
+            || (strncmp(dylibName, "/System/Library/", 16) == 0)
+            || (strncmp(dylibName, "/System/iOSSupport/usr/lib/", 27) == 0)
+            || (strncmp(dylibName, "/System/iOSSupport/System/Library/", 34) == 0)
+            || (strncmp(dylibName, "/Library/Apple/usr/lib/", 23) == 0)
+            || (strncmp(dylibName, "/Library/Apple/System/Library/", 30) == 0) );
+}
+
 bool MachOFile::canBePlacedInDyldCache(const char* path, void (^failureReason)(const char*)) const
 {
+    if ( !isSharedCacheEligiblePath(path) ) {
+        // Dont spam the user with an error about paths when we know these are never eligible.
+        return false;
+    }
+
     // only dylibs can go in cache
     if ( this->filetype != MH_DYLIB ) {
         failureReason("Not MH_DYLIB");
@@ -814,16 +995,19 @@ bool MachOFile::canBePlacedInDyldCache(const char* path, void (^failureReason)(c
     }
 
     // only dylibs built for /usr/lib or /System/Library can go in cache
-    bool retval = true;
+
     const char* dylibName = installName();
     if ( dylibName[0] != '/' ) {
-        retval = false;
         failureReason("install name not an absolute path");
+        // Don't continue as we don't want to spam the log with errors we don't need.
+        return false;
     }
-    else if ( (strncmp(dylibName, "/usr/lib/", 9) != 0) && (strncmp(dylibName, "/System/Library/", 16) != 0) ) {
-        retval = false;
-        failureReason("Not in '/usr/lib/' or '/System/Library/'");
+    else if ( strcmp(dylibName, path) != 0 ) {
+        failureReason("install path does not match install name");
+        return false;
     }
+
+    bool retval = true;
 
     // flat namespace files cannot go in cache
     if ( (this->flags & MH_TWOLEVEL) == 0 ) {
@@ -840,26 +1024,29 @@ bool MachOFile::canBePlacedInDyldCache(const char* path, void (^failureReason)(c
     // dylib must have extra info for moving DATA and TEXT segments apart
     __block bool hasExtraInfo = false;
     __block bool hasDyldInfo = false;
+    __block bool hasExportTrie = false;
     Diagnostics diag;
     forEachLoadCommand(diag, ^(const load_command* cmd, bool& stop) {
         if ( cmd->cmd == LC_SEGMENT_SPLIT_INFO )
             hasExtraInfo = true;
         if ( cmd->cmd == LC_DYLD_INFO_ONLY )
             hasDyldInfo = true;
+        if ( cmd->cmd == LC_DYLD_EXPORTS_TRIE )
+            hasExportTrie = true;
     });
     if ( !hasExtraInfo ) {
         retval = false;
         failureReason("Missing split seg info");
     }
-    if ( !hasDyldInfo ) {
+    if ( !hasDyldInfo && !hasExportTrie ) {
         retval = false;
-        failureReason("Old binary, missing dyld info");
+        failureReason("Old binary, missing dyld info or export trie");
     }
 
     // dylib can only depend on other dylibs in the shared cache
     __block bool allDepPathsAreGood = true;
     forEachDependentDylib(^(const char* loadPath, bool isWeak, bool isReExport, bool isUpward, uint32_t compatVersion, uint32_t curVersion, bool& stop) {
-        if ( (strncmp(loadPath, "/usr/lib/", 9) != 0) && (strncmp(loadPath, "/System/Library/", 16) != 0) ) {
+        if ( !isSharedCacheEligiblePath(loadPath) ) {
             allDepPathsAreGood = false;
             stop = true;
         }
@@ -878,6 +1065,14 @@ bool MachOFile::canBePlacedInDyldCache(const char* path, void (^failureReason)(c
     if ( hasInterposing ) {
         retval = false;
         failureReason("Has interposing tuples");
+    }
+
+    // Temporarily kick out swift binaries on watchOS simulators as they have missing split seg
+    if ( supportsPlatform(Platform::watchOS_simulator) && isArch("i386") ) {
+        if ( strncmp(dylibName, "/usr/lib/swift/", 15) == 0 ) {
+            retval = false;
+            failureReason("i386 swift binary");
+        }
     }
 
     return retval;
@@ -921,14 +1116,39 @@ const encryption_info_command* MachOFile::findFairPlayEncryptionLoadCommand() co
 }
 
 
+bool MachOFile::hasLoadCommand(uint32_t cmdNum) const
+{
+    __block bool hasLC = false;
+    Diagnostics diag;
+    forEachLoadCommand(diag, ^(const load_command* cmd, bool& stop) {
+        if ( cmd->cmd == cmdNum ) {
+            hasLC = true;
+            stop = true;
+        }
+    });
+    return hasLC;
+}
+
+bool MachOFile::allowsAlternatePlatform() const
+{
+    __block bool result = false;
+    forEachSection(^(const SectionInfo& info, bool malformedSectionRange, bool& stop) {
+        if ( (strcmp(info.sectName, "__allow_alt_plat") == 0) && (strncmp(info.segInfo.segName, "__DATA", 6) == 0) ) {
+            result = true;
+            stop = true;
+        }
+    });
+    return result;
+}
+
 bool MachOFile::hasChainedFixups() const
 {
 #if SUPPORT_ARCH_arm64e
-    // for now only arm64e uses chained fixups
-    return ( strcmp(archName(), "arm64e") == 0 );
-#else
-    return false;
+    // arm64e always uses chained fixups
+    if ( (this->cputype == CPU_TYPE_ARM64) && (this->cpusubtype == CPU_SUBTYPE_ARM64E) )
+        return true;
 #endif
+    return hasLoadCommand(LC_DYLD_CHAINED_FIXUPS);
 }
 
 uint64_t MachOFile::read_uleb128(Diagnostics& diag, const uint8_t*& p, const uint8_t* end)

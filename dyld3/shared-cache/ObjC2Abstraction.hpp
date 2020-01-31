@@ -26,6 +26,7 @@
 #include <deque>
 #include <set>
 
+
 // iterate an entsize-based list
 // typedef entsize_iterator<P, type_t<P>, type_list_t<P> > type_iterator;
 template <typename P, typename T, typename Tlist>
@@ -440,6 +441,10 @@ public:
     uint32_t getFlags() const { return P::E::get32(flags); }
 
     void setFixedUp() { P::E::set32(flags, getFlags() | (1<<30)); }
+    void setIsCanonical() {
+        assert((getFlags() & (1 << 29)) == 0);
+        P::E::set32(flags, getFlags() | (1<<29));
+    }
 
     objc_protocol_list_t<P> *getProtocols(ContentAccessor* cache) const { return (objc_protocol_list_t<P> *)cache->contentForVMAddr(P::getP(protocols)); }
 
@@ -640,7 +645,7 @@ public:
     const pint_t* getSuperClassAddress() const { return &superclass; }
 
     // Low bit marks Swift classes.
-    objc_class_data_t<P> *getData(ContentAccessor* cache) const { return (objc_class_data_t<P> *)cache->contentForVMAddr(P::getP(data & ~0x1LL)); }
+    objc_class_data_t<P> *getData(ContentAccessor* cache) const { return (objc_class_data_t<P> *)cache->contentForVMAddr(P::getP(data & ~0x3LL)); }
 
     objc_method_list_t<P> *getMethodList(ContentAccessor* cache) const {
         objc_class_data_t<P>* d = getData(cache);
@@ -849,6 +854,14 @@ public:
         ClassWalker<P, ProtocolReferenceWalker<P, V>> classes(*this);
         classes.walk(cache, header);
 
+        // protocol lists from categories
+        PointerSection<P, objc_category_t<P> *>
+        cats(cache, header, "__DATA", "__objc_catlist");
+        for (pint_t i = 0; i < cats.count(); i++) {
+            objc_category_t<P> *cat = cats.get(i);
+            visitProtocolList(cache, cat->getProtocols(cache));
+        }
+
         // protocol lists in protocols
         // __objc_protolists itself is NOT updated
         PointerSection<P, objc_protocol_t<P> *>
@@ -936,7 +949,6 @@ public:
     }
 };
 
-
 // Update selector references. The visitor performs recording and uniquing.
 template <typename P, typename V>
 class SelectorOptimizer {
@@ -967,6 +979,10 @@ class SelectorOptimizer {
 public:
 
     SelectorOptimizer(V& visitor) : mVisitor(visitor) { }
+
+    void visitCoalescedStrings(const CacheBuilder::CacheCoalescedText& coalescedText) {
+        mVisitor.visitCoalescedStrings(coalescedText);
+    }
 
     void optimize(ContentAccessor* cache, const macho_header<P>* header)
     {

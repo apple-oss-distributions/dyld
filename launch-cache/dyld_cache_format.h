@@ -318,6 +318,45 @@ struct dyld_cache_local_symbols_entry
 	uint32_t	nlistCount;			// number of local symbols for this dylib
 };
 
+struct dyld_cache_image_patches
+{
+    uint32_t    patchExportsStartIndex;
+    uint32_t    patchExportsCount;
+};
+
+struct dyld_cache_patchable_export
+{
+    uint32_t    cacheOffsetOfImpl;
+    uint32_t    patchLocationsStartIndex;
+    uint32_t    patchLocationsCount;
+    uint32_t    exportNameOffset;
+};
+
+struct dyld_cache_patchable_location
+{
+    uint64_t    cacheOffset             : 32,
+                addend                  : 12,    // +/- 2048
+                authenticated           : 1,
+                usesAddressDiversity    : 1,
+                key                     : 2,
+                discriminator           : 16;
+
+    dyld_cache_patchable_location(size_t cacheOffset, uint64_t addend);
+    //dyld_cache_patchable_location(size_t cacheOffset, uint64_t addend, dyld3::MachOLoaded::ChainedFixupPointerOnDisk authInfo);
+
+    uint64_t getAddend() const {
+        uint64_t unsingedAddend = addend;
+        int64_t signedAddend = (int64_t)unsingedAddend;
+        signedAddend = (signedAddend << 52) >> 52;
+        return (uint64_t)signedAddend;
+    }
+
+    const char* keyName() const;
+    bool operator==(const dyld_cache_patchable_location& other) const {
+        return this->cacheOffset == other.cacheOffset;
+    }
+};
+
 
 
 #define MACOSX_DYLD_SHARED_CACHE_DIR	"/private/var/db/dyld/"

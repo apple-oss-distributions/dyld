@@ -270,7 +270,7 @@ BuildQueueEntry Manifest::makeQueueEntry(const std::string& outputPath, const st
     DyldSharedCache::CreateOptions options;
     options.outputFilePath    = skipWrites ? "" : outputPath;
     options.outputMapFilePath = skipWrites ? "" : outputPath + ".map";
-    options.archName = arch;
+    options.archs = &dyld3::GradedArchs::forName(arch.c_str());
     options.platform = platform();
     options.excludeLocalSymbols = true;
     options.optimizeStubs = optimizeStubs;
@@ -285,13 +285,16 @@ BuildQueueEntry Manifest::makeQueueEntry(const std::string& outputPath, const st
     options.verbose = verbose;
     options.evictLeafDylibsOnOverflow = true;
     options.loggingPrefix = prefix;
-    options.pathPrefixes = { "./Root/" };
     options.dylibOrdering = parseOrderFile(loadOrderFile(_dylibOrderFile));
     options.dirtyDataSegmentOrdering = parseOrderFile(loadOrderFile(_dirtyDataOrderFile));
 
+    char rootsDir[PATH_MAX];
+    realpath("./Root/", rootsDir);
+    
     dyld3::BuildQueueEntry queueEntry;
     retval.configNames = configs;
     retval.options = options;
+    retval.fileSystem = dyld3::closure::FileSystemPhysical(strdup(rootsDir));
     retval.outputPath = outputPath;
     retval.dylibsForCache = dylibsForCache(*configs.begin(), arch);
     retval.otherDylibsAndBundles = otherDylibsAndBundles(*configs.begin(), arch);
@@ -315,7 +318,7 @@ bool Manifest::loadParser(const void* p, size_t sliceLength, uint64_t sliceOffse
         return false;
 
     const MachOAnalyzer* ma = reinterpret_cast<const MachOAnalyzer*>(p);
-    if ( !ma->validMachOForArchAndPlatform(_diags, sliceLength, runtimePath.c_str(), archName.c_str(), _platform) ) {
+    if ( !ma->validMachOForArchAndPlatform(_diags, sliceLength, runtimePath.c_str(), dyld3::GradedArchs::forName(archName.c_str()), _platform) ) {
         // Clear the error and punt
         _diags.verbose("Mach-O error: %s\n", _diags.errorMessage().c_str());
         _diags.clearError();
@@ -434,19 +437,13 @@ const std::string& Manifest::installNameForUUID(const UUID& uuid) {
     return infoForUUID(uuid).installName;
 }
 
-
-Manifest::Manifest(Diagnostics& D, const std::string& path, bool onlyParseManifest)  : Manifest(D, path, std::set<std::string>(), onlyParseManifest)
-{
-}
-
-Manifest::Manifest(Diagnostics& D, const std::string& path, const std::set<std::string>& overlays, bool onlyParseManifest) :
+Manifest::Manifest(Diagnostics& D, const std::string& path, bool populateIt) :
     _diags(D)
 {
     _manifestDict = [NSMutableDictionary dictionaryWithContentsOfFile:cppToObjStr(path)];
     if (!_manifestDict)
         return;
     NSString*            platStr = _manifestDict[@"platform"];
-    std::set<std::string> architectures;
 
     if (platStr == nullptr)
         platStr = @"ios";
@@ -532,11 +529,10 @@ Manifest::Manifest(Diagnostics& D, const std::string& path, const std::set<std::
             _configurations[configStr].device = configStr.substr(0, configStr.length()-strlen("OS"));
         }
 
-        for (NSString* architecutre in _manifestDict[@"configurations"][configuration][@"architectures"]) {
+        for (NSString* architecture in _manifestDict[@"configurations"][configuration][@"architectures"]) {
             //HACK until B&I stops mastering armv7s
-            if ([architecutre isEqual:@"armv7s"]) break;
-            _configurations[configStr].architectures[[architecutre UTF8String]] = Architecture();
-            architectures.insert([architecutre UTF8String]);
+            if ([architecture isEqual:@"armv7s"]) break;
+            _configurations[configStr].architectures[[architecture UTF8String]] = Architecture();
         }
     }
 
@@ -549,12 +545,50 @@ Manifest::Manifest(Diagnostics& D, const std::string& path, const std::set<std::
         setDirtyDataOrderFile([_manifestDict[@"dirtyDataOrderFile"] UTF8String]);
     }
 
-    if (onlyParseManifest)
-        return;
+    if (populateIt)
+        populate(std::set<std::string>());
+}
 
+// Perform the initialization that populateIt=false omitted.
+void Manifest::populate(const std::set<std::string>& overlays)
+{
     auto    metabom = MBMetabomOpen(metabomFile().c_str(), false);
     auto    metabomEnumerator = MBIteratorNewWithPath(metabom, ".", "");
     MBEntry entry;
+
+    // Collect every architecture from the configurations.
+    std::set<std::string> architectures;
+    for (auto& configuration : _configurations) {
+        for (auto& arch : configuration.second.architectures) {
+            architectures.insert(arch.first);
+        }
+    }
+
+    auto filterPath = [](std::string& entryPath) {
+        // Skip artifacts that happen to be in the build chain
+        if ( startsWith(entryPath, "/Applications/Xcode.app") ) {
+            return true;
+        }
+
+        // Skip variants we can't deal with
+        if ( endsWith(entryPath, "_profile.dylib") || endsWith(entryPath, "_debug.dylib") || endsWith(entryPath, "_profile") || endsWith(entryPath, "_debug") || endsWith(entryPath, "/CoreADI") ) {
+            return true;
+        }
+
+        // Skip images that are only used in InternalOS variants
+        if ( startsWith(entryPath, "/AppleInternal/") || startsWith(entryPath, "/usr/local/") || startsWith(entryPath, "/Developer/")) {
+            return true;
+        }
+
+        // Skip genCache generated dylibs
+        if ( endsWith(entryPath, "/System/Library/Caches/com.apple.xpc/sdk.dylib") || endsWith(entryPath, "/System/Library/Caches/com.apple.xpcd/xpcd_cache.dylib")) {
+            return true;
+        }
+
+        return false;
+    };
+
+    __block std::set<std::string> seenPaths;
 
     // FIXME error handling (NULL metabom)
 
@@ -567,25 +601,8 @@ Manifest::Manifest(Diagnostics& D, const std::string& path, const std::set<std::
             entryPath.erase(0, 1);
         }
 
-        // Skip artifacts that happen to be in the build chain
-        if ( startsWith(entryPath, "/Applications/Xcode.app") ) {
+        if (filterPath(entryPath))
             continue;
-        }
-
-        // Skip variants we can't deal with
-        if ( endsWith(entryPath, "_profile.dylib") || endsWith(entryPath, "_debug.dylib") || endsWith(entryPath, "_profile") || endsWith(entryPath, "_debug") || endsWith(entryPath, "/CoreADI") ) {
-            continue;
-        }
-
-        // Skip images that are only used in InternalOS variants
-        if ( startsWith(entryPath, "/AppleInternal/") || startsWith(entryPath, "/usr/local/") || startsWith(entryPath, "/Developer/")) {
-            continue;
-        }
-        
-        // Skip genCache generated dylibs
-        if ( endsWith(entryPath, "/System/Library/Caches/com.apple.xpc/sdk.dylib") || endsWith(entryPath, "/System/Library/Caches/com.apple.xpcd/xpcd_cache.dylib")) {
-            continue;
-        }
 
         MBTag tag;
         auto  tagCount = MBEntryGetNumberOfProjectTags(entry);
@@ -647,14 +664,15 @@ Manifest::Manifest(Diagnostics& D, const std::string& path, const std::set<std::
                 }
 
                 if (!foundParser) {
-                    (void)loadParsers(projectPath(projectName) + "/" + entryPath, entryPath, architectures);
+                    foundParser = loadParsers(projectPath(projectName) + "/" + entryPath, entryPath, architectures);
                     if (_diags.hasError()) {
                         _diags.verbose("Mach-O error: %s\n", _diags.errorMessage().c_str());
                         _diags.clearError();
-                    } else {
-                        foundParser = true;
                     }
                 }
+
+                if (foundParser)
+                    seenPaths.insert(entryPath);
             } else if (isSymlinkFile) {
                 const char* target = BOMFSObjectSymlinkTarget(fsObject);
                 _symlinks.push_back({ entryPath, target });
@@ -665,6 +683,42 @@ Manifest::Manifest(Diagnostics& D, const std::string& path, const std::set<std::
 
     MBIteratorFree(metabomEnumerator);
     MBMetabomFree(metabom);
+
+    // Add files from the overlays
+    for (const auto& overlay : overlays) {
+        iterateDirectoryTree("", overlay, ^bool(const std::string &dirPath) {
+            return false;
+        }, ^(const std::string &path, const struct stat &statBuf) {
+            std::string relativePath = path;
+            if (relativePath.size() < overlay.size())
+                return;
+            relativePath = relativePath.substr(overlay.size());
+            if (relativePath.front() != '/')
+                return;
+            if (filterPath(relativePath))
+                return;
+            // Filter out dylibs we've seen already
+            if (seenPaths.count(relativePath))
+                return;
+            if (loadParsers(path, relativePath, architectures)) {
+                seenPaths.insert(relativePath);
+                // Get the tags from libSystem, assuming that will work.
+                std::set<std::string> tagStrs;
+                auto it = _metabomTagMap.find("/usr/lib/libSystem.B.dylib");
+                if (it != _metabomTagMap.end())
+                    tagStrs = it->second;
+                _metabomTagMap.insert(std::make_pair(relativePath, tagStrs));
+                _diags.verbose("Taking '%s' from overlay instead of dylib cache\n", relativePath.c_str());
+                return;
+            }
+            if (_diags.hasError()) {
+                _diags.verbose("Mach-O error: %s\n", _diags.errorMessage().c_str());
+                _diags.clearError();
+            }
+        },
+        true, true);
+    }
+
 }
 
 void Manifest::insert(std::vector<DyldSharedCache::MappedMachO>& mappedMachOs, const CacheImageInfo& imageInfo) {
@@ -824,6 +878,8 @@ void Manifest::calculateClosure(const std::string& configuration, const std::str
         }
     }
 
+    __block std::set<UUID>         removedUUIDs;
+
     // Pull in all dependencies
     while (!newUuids.empty()) {
         std::set<UUID> uuidsToProcess = newUuids;
@@ -881,6 +937,7 @@ void Manifest::calculateClosure(const std::string& configuration, const std::str
                     }
                     reasonString += "\")";
                     archManifest.results.exclude(mh, reasonString);
+                    removedUUIDs.insert(uuid);
                 }
             } else if (mh->isBundle()) {
                 if (archManifest.results.bundles.count(uuid) == 0) {
@@ -901,7 +958,6 @@ void Manifest::calculateClosure(const std::string& configuration, const std::str
         }
     }
 
-    __block std::set<UUID>         removedUUIDs;
     __block bool                   doAgain = true;
 
     //Trim out dylibs that are missing dependencies
@@ -1122,6 +1178,7 @@ void Manifest::write(const std::string& path)
     case Platform::iOS_simulator:
     case Platform::tvOS_simulator:
     case Platform::watchOS_simulator:
+    case Platform::driverKit:
         cacheDict[@"platform"] = @"unknown";
         break;
     }

@@ -28,6 +28,7 @@
 #include <Availability.h>
 
 #include <stdint.h>
+#include <sys/types.h>
 
 #ifdef __cplusplus
 extern "C" {
@@ -81,24 +82,43 @@ struct BuildOptions_v1
     bool                                        isLocallyBuiltCache;
 };
 
-struct BuildResult {
-    uint64_t                                    version;            // Future proofing, set to 1
-    const char*                                 loggingPrefix;
-    const char **                               warnings;
-    uint64_t                                    numWarnings;
-    const char **                               errors;
-    uint64_t                                    numErrors;
-    const char*                                 sharedCachePath;
-    const char*                                 cdHash;
+enum FileBehavior
+{
+    AddFile                                     = 0,        // New file: uid, gid, mode, data, cdhash fields must be set
+    ChangeFile                                  = 1,        // Change the data of file: data, size, and cdhash fields must be set
 };
 
-struct FileResult {
+struct FileResult
+{
+    uint64_t                                    version;            // Future proofing, set to 1
     const char*                                 path;
+    enum FileBehavior                           behavior;
     const uint8_t*                              data;               // Owned by the cache builder.  Destroyed by destroySharedCacheBuilder
     uint64_t                                    size;
+    // CDHash, must be set for new or modified files
+    const char*                                 hashArch;
+    const char*                                 hashType;
+    const char*                                 hash;
+};
+
+
+struct CacheResult
+{
+    uint64_t                                    version;            // Future proofing, set to 1
+    const char*                                 loggingPrefix;      // needed?
+    const char*                                 deviceConfiguration;
+    const char **                               warnings;           // should this be per-result?
+    uint64_t                                    numWarnings;
+    const char **                               errors;             // should this be per-result?
+    uint64_t                                    numErrors;
+    const char*                                 uuidString;
+    const char*                                 mapJSON;
 };
 
 struct SharedCacheBuilder;
+
+__API_AVAILABLE(macos(10.12))
+void getVersion(uint32_t *major, uint32_t *minor);
 
 __API_AVAILABLE(macos(10.12))
 struct SharedCacheBuilder* createSharedCacheBuilder(const struct BuildOptions_v1* options);
@@ -114,22 +134,16 @@ __API_AVAILABLE(macos(10.12))
 bool runSharedCacheBuilder(struct SharedCacheBuilder* builder);
 
 __API_AVAILABLE(macos(10.12))
-uint64_t getErrorCount(const struct SharedCacheBuilder* builder);
+const char* const* getErrors(const struct SharedCacheBuilder* builder, uint64_t* errorCount);
 
 __API_AVAILABLE(macos(10.12))
-const char* getError(const struct SharedCacheBuilder* builder, uint64_t errorIndex);
+const struct FileResult* const* getFileResults(struct SharedCacheBuilder* builder, uint64_t* resultCount);
 
 __API_AVAILABLE(macos(10.12))
-uint64_t getCacheResultCount(const struct SharedCacheBuilder* builder);
+const struct CacheResult* const* getCacheResults(struct SharedCacheBuilder* builder, uint64_t* resultCount);
 
 __API_AVAILABLE(macos(10.12))
-void getCacheResult(struct SharedCacheBuilder* builder, uint64_t cacheIndex, struct BuildResult* result);
-
-__API_AVAILABLE(macos(10.12))
-uint64_t getFileResultCount(const struct SharedCacheBuilder* builder);
-
-__API_AVAILABLE(macos(10.12))
-void getFileResult(struct SharedCacheBuilder* builder, uint64_t fileIndex, struct FileResult* result);
+const char* const* getFilesToRemove(const struct SharedCacheBuilder* builder, uint64_t* fileCount);
 
 __API_AVAILABLE(macos(10.12))
 void destroySharedCacheBuilder(struct SharedCacheBuilder* builder);

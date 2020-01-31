@@ -68,11 +68,14 @@ public:
 	virtual	void						updateUsesCoalIterator(CoalIterator&, uintptr_t newAddr, ImageLoader* target, unsigned targetIndex, const LinkContext& context);
 	virtual void						registerInterposing(const LinkContext& context);
 	virtual bool						usesChainedFixups() const;
+	virtual void						makeDataReadOnly() const;
 
 protected:
 	virtual void						doInterpose(const LinkContext& context);
 	virtual void						dynamicInterpose(const LinkContext& context);
 	virtual void						setDyldInfo(const dyld_info_command* dyldInfo) { fDyldInfo = dyldInfo; }
+	virtual void						setChainedFixups(const linkedit_data_command* fixups) { fChainedFixups = fixups; }
+	virtual void						setExportsTrie(const linkedit_data_command* trie) { fExportsTrie = trie; }
 	virtual void						setSymbolTableInfo(const macho_nlist*, const char*, const dysymtab_command*) {}
 	virtual	bool						isSubframeworkOf(const LinkContext& context, const ImageLoader* image) const { return false; }
 	virtual	bool						hasSubLibrary(const LinkContext& context, const ImageLoader* child) const { return false; }
@@ -112,9 +115,6 @@ private:
 																	uint32_t segOffsets[], unsigned int libCount);
 	static ImageLoaderMachOCompressed*	instantiateStart(const macho_header* mh, const char* path, unsigned int segCount, unsigned int libCount);
 	void								instantiateFinish(const LinkContext& context);
-	void								markSequentialLINKEDIT(const LinkContext& context);
-	void								markFreeLINKEDIT(const LinkContext& context);
-	void								markLINKEDIT(const LinkContext& context, int advise);
 
 	void								rebaseAt(const LinkContext& context, uintptr_t addr, uintptr_t slide, uint8_t type);
 	void								throwBadRebaseAddress(uintptr_t address, uintptr_t segmentEndAddress, int segmentIndex, 
@@ -147,8 +147,11 @@ private:
     void                                updateOptimizedLazyPointers(const LinkContext& context);
     void                                updateAlternateLazyPointer(uint8_t* stub, void** originalLazyPointerAddr, const LinkContext& context);
 	void								registerEncryption(const struct encryption_info_command* encryptCmd, const LinkContext& context);
+	void								doApplyFixups(const LinkContext& context, const dyld_chained_fixups_header* fixupsHeader);
 
 	const struct dyld_info_command*			fDyldInfo;
+	const struct linkedit_data_command*		fChainedFixups;
+	const struct linkedit_data_command*		fExportsTrie;
 };
 
 

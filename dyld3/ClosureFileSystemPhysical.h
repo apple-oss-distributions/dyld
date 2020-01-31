@@ -35,7 +35,9 @@ namespace closure {
 #pragma clang diagnostic ignored "-Wnon-virtual-dtor"
 class __attribute__((visibility("hidden"))) FileSystemPhysical : public FileSystem {
 public:
-    FileSystemPhysical(const char* fileSystemPrefix = nullptr) : FileSystem(), _fileSystemPrefix(fileSystemPrefix) { }
+    FileSystemPhysical(const char* rootPath=nullptr, const char* overlayPath=nullptr, bool allowRelativePaths=true)
+            : FileSystem(), _rootPath(rootPath), _overlayPath(overlayPath), _allowRelativePaths(allowRelativePaths)
+            { }
 
     bool getRealPath(const char possiblePath[MAXPATHLEN], char realPath[MAXPATHLEN]) const override;
 
@@ -45,10 +47,16 @@ public:
 
     void unloadPartialFile(LoadedFileInfo& info, uint64_t keepStartOffset, uint64_t keepLength) const override;
 
-    bool fileExists(const char* path, uint64_t* inode=nullptr, uint64_t* mtime=nullptr, bool* issetuid=nullptr) const override;
+    bool fileExists(const char* path, uint64_t* inode=nullptr, uint64_t* mtime=nullptr,
+                    bool* issetuid=nullptr, bool* inodesMatchRuntime = nullptr) const override;
 
 private:
-    const char* _fileSystemPrefix;
+
+    void forEachPath(const char* path, void (^handler)(const char* fullPath, unsigned prefixLen, bool& stop)) const;
+
+    const char* _rootPath;
+    const char* _overlayPath;
+    bool        _allowRelativePaths;
 };
 #pragma clang diagnostic pop
 

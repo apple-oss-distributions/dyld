@@ -27,15 +27,23 @@
 #include <uuid/uuid.h>
 #include <unistd.h>
 #include <limits.h>
+#include <mach-o/dyld_priv.h>
+#include <sys/stat.h>
+#include <sys/sysctl.h>
+#include <System/machine/cpu_capabilities.h>
+
+extern "C" {
+  #include <corecrypto/ccdigest.h>
+  #include <corecrypto/ccsha2.h>
+}
 
 #include "Closure.h"
 #include "MachOFile.h"
 #include "MachOLoaded.h"
+#include "StringUtils.h"
 
+#include "objc-shared-cache.h"
 
-namespace dyld {
-    extern void log(const char* format, ...)  __attribute__((format(printf, 1, 2)));
-}
 
 namespace dyld3 {
 namespace closure {
@@ -231,16 +239,15 @@ bool Image::hasFileModTimeAndInode(uint64_t& inode, uint64_t& mTime) const
     return false;
 }
 
-bool Image::hasCdHash(uint8_t cdHash[20]) const
+void Image::forEachCDHash(void (^handler)(const uint8_t cdHash[20], bool& stop)) const
 {
-    uint32_t size;
-    const uint8_t* bytes = (uint8_t*)(findAttributePayload(Type::cdHash, &size));
-    if ( bytes != nullptr ) {
-        assert(size == 20);
-        memcpy(cdHash, bytes, 20);
-        return true;
-    }
-    return false;
+    forEachAttribute(^(const TypedBytes* typedBytes, bool& stopLoop) {
+        if ( (Type)(typedBytes->type) != Type::cdHash )
+            return;
+        assert(typedBytes->payloadLength == 20);
+        const uint8_t* bytes = (const uint8_t*)typedBytes->payload();
+        handler(bytes, stopLoop);
+    });
 }
 
 bool Image::getUuid(uuid_t uuid) const
@@ -273,8 +280,8 @@ bool Image::isFairPlayEncrypted(uint32_t& textOffset, uint32_t& size) const
     const Image::FairPlayRange* fpInfo = (Image::FairPlayRange*)(findAttributePayload(Type::fairPlayLoc, &sz));
     if ( fpInfo != nullptr ) {
         assert(sz == sizeof(Image::FairPlayRange));
-        textOffset = fpInfo->textStartPage * pageSize();
-        size       = fpInfo->textPageCount * pageSize();
+        textOffset = fpInfo->rangeStart;
+        size       = fpInfo->rangeLength;
         return true;
     }
     return false;
@@ -356,7 +363,8 @@ bool Image::hasPathWithHash(const char* path, uint32_t hash) const
     return found;
 }
 
-void Image::forEachDiskSegment(void (^handler)(uint32_t segIndex, uint32_t fileOffset, uint32_t fileSize, int64_t vmOffset, uint64_t vmSize, uint8_t permissions, bool& stop)) const
+void Image::forEachDiskSegment(void (^handler)(uint32_t segIndex, uint32_t fileOffset, uint32_t fileSize, int64_t vmOffset, uint64_t vmSize,
+                                               uint8_t permissions, bool laterReadOnly, bool& stop)) const
 {
     uint32_t size;
     const DiskSegment* segments = (DiskSegment*)findAttributePayload(Type::diskSegment, &size);
@@ -382,7 +390,14 @@ void Image::forEachDiskSegment(void (^handler)(uint32_t segIndex, uint32_t fileO
         uint64_t vmSize   = (uint64_t)seg->vmPageCount * pageSz;
         uint32_t fileSize = seg->filePageCount * pageSz;
         if ( !seg->paddingNotSeg ) {
-            handler(segIndex, ( fileSize == 0) ? 0 : fileOffset, fileSize, vmOffset, vmSize, seg->permissions, stop);
+            uint8_t perms   = seg->permissions;
+            bool    laterRO = false;
+            // read-only data segments are encoded as .w. , initially make them r/w
+            if ( perms == Image::DiskSegment::kReadOnlyDataPermissions ) {
+                perms   = VM_PROT_READ|VM_PROT_WRITE;
+                laterRO = true;
+            }
+            handler(segIndex, ( fileSize == 0) ? 0 : fileOffset, fileSize, vmOffset, vmSize, perms, laterRO, stop);
             ++segIndex;
         }
         vmOffset   += vmSize;
@@ -435,7 +450,7 @@ uint64_t Image::textSize() const
         });
     }
     else {
-        forEachDiskSegment(^(uint32_t segIndex, uint32_t fileOffset, uint32_t fileSize, int64_t vmOffset, uint64_t vmSize, uint8_t permissions, bool& stop) {
+        forEachDiskSegment(^(uint32_t segIndex, uint32_t fileOffset, uint32_t fileSize, int64_t vmOffset, uint64_t vmSize, uint8_t permissions, bool laterReadOnly, bool& stop) {
             if ( permissions != 0) {
                 result = vmSize;
                 stop = true;
@@ -461,7 +476,7 @@ bool Image::containsAddress(const void* addr, const void* imageLoadAddress, uint
         });
     }
     else {
-        forEachDiskSegment(^(uint32_t segIndex, uint32_t fileOffset, uint32_t fileSize, int64_t vmOffset, uint64_t vmSize, uint8_t permissions, bool& stop) {
+        forEachDiskSegment(^(uint32_t segIndex, uint32_t fileOffset, uint32_t fileSize, int64_t vmOffset, uint64_t vmSize, uint8_t permissions, bool laterReadOnly, bool& stop) {
             if ( (targetAddr >= imageStart+vmOffset) && (targetAddr < imageStart+vmOffset+vmSize) ) {
                 result = true;
                 if ( permsResult )
@@ -503,13 +518,74 @@ void Image::forEachInitializer(const void* imageLoadAddress, void (^handler)(con
             const void* init = (void*)((uint8_t*)imageLoadAddress + offset);
             handler(init);
         }
+        return;
     }
+    const Image::InitializerSectionRange* range = (Image::InitializerSectionRange*)findAttributePayload(Type::initsSection, &size);
+    if ( range != nullptr ) {
+        const uint32_t pointerSize = is64() ? 8 : 4;
+        const uint32_t* start32 = (uint32_t*)((uint8_t*)imageLoadAddress + range->sectionOffset);
+        const uint64_t* start64 = (uint64_t*)((uint8_t*)imageLoadAddress + range->sectionOffset);
+        const uint32_t count = range->sectionSize / pointerSize;
+        for (uint32_t i=0; i < count; ++i) {
+            if ( pointerSize == 8 )
+                handler((void*)(long)(start64[i]));
+            else
+                handler((void*)(long)(start32[i]));
+        }
+    }
+}
+
+bool Image::forEachInitializerSection(void (^handler)(uint32_t sectionOffset, uint32_t sectionSize)) const
+{
+    __block bool result = false;
+    forEachAttributePayload(Type::initsSection, ^(const void* payload, uint32_t size, bool& stop) {
+        const Image::InitializerSectionRange* range = (Image::InitializerSectionRange*)payload;
+        assert((size % sizeof(Image::InitializerSectionRange)) == 0);
+        handler(range->sectionOffset, range->sectionSize);
+        result = true;
+    });
+    return result;
 }
 
 bool Image::hasInitializers() const
 {
     uint32_t size;
     return ( findAttributePayload(Type::initOffsets, &size) != nullptr );
+}
+
+bool Image::hasTerminators() const
+{
+    return getFlags().hasTerminators;
+}
+
+bool Image::hasReadOnlyData() const
+{
+    return getFlags().hasReadOnlyData;
+}
+
+bool Image::hasChainedFixups() const
+{
+    return getFlags().hasChainedFixups;
+}
+
+bool Image::hasPrecomputedObjC() const
+{
+    return getFlags().hasPrecomputedObjC;
+}
+
+void Image::forEachTerminator(const void* imageLoadAddress, void (^handler)(const void* terminator)) const
+{
+    uint32_t size;
+    const uint32_t* terms = (uint32_t*)findAttributePayload(Type::termOffsets, &size);
+    if ( terms != nullptr ) {
+        assert((size % sizeof(uint32_t)) == 0);
+        const uint32_t count = size / sizeof(uint32_t);
+        for (uint32_t i=0; i < count; ++i) {
+            uint32_t offset = terms[i];
+            const void* term = (void*)((uint8_t*)imageLoadAddress + offset);
+            handler(term);
+        }
+    }
 }
 
 void Image::forEachDOF(const void* imageLoadAddress, void (^handler)(const void* dofSection)) const
@@ -527,41 +603,14 @@ void Image::forEachDOF(const void* imageLoadAddress, void (^handler)(const void*
     }
 }
 
-void Image::forEachPatchableExport(void (^handler)(uint32_t cacheOffsetOfImpl, const char* exportName)) const
-{
-    forEachAttributePayload(Type::cachePatchInfo, ^(const void* payload, uint32_t size, bool& stop) {
-        const Image::PatchableExport* pe = (Image::PatchableExport*)payload;
-        assert(size > (sizeof(Image::PatchableExport) + pe->patchLocationsCount*sizeof(PatchableExport::PatchLocation)));
-        handler(pe->cacheOffsetOfImpl, (char*)(&pe->patchLocations[pe->patchLocationsCount]));
-    });
-}
-
-void Image::forEachPatchableUseOfExport(uint32_t cacheOffsetOfImpl, void (^handler)(PatchableExport::PatchLocation patchLocation)) const
-{
-    forEachAttributePayload(Type::cachePatchInfo, ^(const void* payload, uint32_t size, bool& stop) {
-        const Image::PatchableExport* pe = (Image::PatchableExport*)payload;
-        assert(size > (sizeof(Image::PatchableExport) + pe->patchLocationsCount*sizeof(PatchableExport::PatchLocation)));
-        if ( pe->cacheOffsetOfImpl != cacheOffsetOfImpl )
-            return;
-        const PatchableExport::PatchLocation* start = pe->patchLocations;
-        const PatchableExport::PatchLocation* end   = &start[pe->patchLocationsCount];
-        for (const PatchableExport::PatchLocation* p=start; p < end; ++p)
-            handler(*p);
-    });
-}
-
-uint32_t Image::patchableExportCount() const
-{
-    __block uint32_t count = 0;
-    forEachAttributePayload(Type::cachePatchInfo, ^(const void* payload, uint32_t size, bool& stop) {
-        ++count;
-    });
-    return count;
-}
-
 void Image::forEachFixup(void (^rebase)(uint64_t imageOffsetToRebase, bool& stop),
                          void (^bind)(uint64_t imageOffsetToBind, ResolvedSymbolTarget bindTarget, bool& stop),
-                         void (^chainedFixupsStart)(uint64_t imageOffsetStart, const Array<ResolvedSymbolTarget>& targets, bool& stop)) const
+                         void (^chainedFixups)(uint64_t imageOffsetToStarts, const Array<ResolvedSymbolTarget>& targets, bool& stop),
+                         void (^fixupObjCImageInfo)(uint64_t imageOffsetToFixup),
+                         void (^fixupObjCProtocol)(uint64_t imageOffsetToBind, ResolvedSymbolTarget bindTarget, bool& stop),
+                         void (^fixupObjCSelRef)(uint64_t imageOffsetToFixup, uint32_t selectorIndex, bool inSharedCache, bool& stop),
+                         void (^fixupObjCStableSwift)(uint64_t imageOffsetToFixup, bool& stop),
+                         void (^fixupObjCMethodList)(uint64_t imageOffsetToFixup, bool& stop)) const
 {
     const uint32_t pointerSize = is64() ? 8 : 4;
 	uint64_t curRebaseOffset = 0;
@@ -606,27 +655,78 @@ void Image::forEachFixup(void (^rebase)(uint64_t imageOffsetToRebase, bool& stop
             break;
     }
 
-    const Array<Image::ResolvedSymbolTarget> targetsArray = chainedTargets();
-    for (uint64_t start : chainedStarts()) {
-        chainedFixupsStart(start, targetsArray, stop);
-        if ( stop )
-            break;
-    }
-}
+    if (hasChainedFixups())
+        chainedFixups(chainedStartsOffset(), chainedTargets(), stop);
 
-void Image::forEachChainedFixup(void* imageLoadAddress, uint64_t imageOffsetChainStart, void (^callback)(uint64_t* fixUpLoc, ChainedFixupPointerOnDisk fixupInfo, bool& stop))
-{
-    bool stop = false;
-    uint64_t* fixupLoc = (uint64_t*)((uint8_t*)imageLoadAddress + imageOffsetChainStart);
-    do {
-        // save off current entry as it will be overwritten in callback
-        ChainedFixupPointerOnDisk info = *((ChainedFixupPointerOnDisk*)fixupLoc);
-        callback(fixupLoc, info, stop);
-        if ( info.plainRebase.next != 0 )
-            fixupLoc += info.plainRebase.next;
-        else
-            stop = true;
-    } while (!stop);
+    if ( hasPrecomputedObjC() ) {
+        ResolvedSymbolTarget objcProtocolClassTarget;
+        uint64_t objcImageInfoVMOffset = 0;
+        Array<ProtocolISAFixup> protocolISAFixups;
+        Array<Image::SelectorReferenceFixup> selRefFixupEntries;
+        Array<Image::ClassStableSwiftFixup> classStableSwiftFixups;
+        Array<Image::MethodListFixup> methodListFixups;
+        objcFixups(objcProtocolClassTarget, objcImageInfoVMOffset, protocolISAFixups,
+                   selRefFixupEntries, classStableSwiftFixups, methodListFixups);
+
+        // Set the objc image info bit to tell libobjc we are optimized
+        fixupObjCImageInfo(objcImageInfoVMOffset);
+
+
+        // First bind all the protocols to the same Protocol class in libobjc
+        for (const Image::ProtocolISAFixup& bindPat : protocolISAFixups) {
+            uint64_t curBindOffset = bindPat.startVmOffset;
+            for (uint16_t i=0; i < bindPat.repeatCount; ++i) {
+                fixupObjCProtocol(curBindOffset, objcProtocolClassTarget, stop);
+                curBindOffset += (pointerSize * (1 + bindPat.skipCount));
+                if ( stop )
+                    break;
+            }
+            if ( stop )
+                break;
+        }
+
+        for (uintptr_t i = 0, e = selRefFixupEntries.count(); i != e; ++i) {
+            Image::SelectorReferenceFixup fixupEntry = selRefFixupEntries[i];
+            // Start a new chain
+            uint64_t curFixupOffset = fixupEntry.chainStartVMOffset;
+            // Now walk the chain until we get a 'next' of 0
+            while (i != e) {
+                fixupEntry = selRefFixupEntries[++i];
+                fixupObjCSelRef(curFixupOffset, fixupEntry.chainEntry.index, fixupEntry.chainEntry.inSharedCache, stop);
+                if ( stop )
+                    break;
+                if ( fixupEntry.chainEntry.next == 0 )
+                    break;
+                curFixupOffset += (4 * fixupEntry.chainEntry.next);
+            }
+        }
+
+        // Set classes to have stable Swift
+        for (const Image::ClassStableSwiftFixup& bindPat : classStableSwiftFixups) {
+            uint64_t curBindOffset = bindPat.startVmOffset;
+            for (uint16_t i=0; i < bindPat.repeatCount; ++i) {
+                fixupObjCStableSwift(curBindOffset, stop);
+                curBindOffset += (pointerSize * (1 + bindPat.skipCount));
+                if ( stop )
+                    break;
+            }
+            if ( stop )
+                break;
+        }
+
+        // Set method lists to be fixed up
+        for (const Image::MethodListFixup& bindPat : methodListFixups) {
+            uint64_t curBindOffset = bindPat.startVmOffset;
+            for (uint16_t i=0; i < bindPat.repeatCount; ++i) {
+                fixupObjCMethodList(curBindOffset, stop);
+                curBindOffset += (pointerSize * (1 + bindPat.skipCount));
+                if ( stop )
+                    break;
+            }
+            if ( stop )
+                break;
+        }
+    }
 }
 
 void Image::forEachTextReloc(void (^rebase)(uint32_t imageOffsetToRebase, bool& stop),
@@ -662,12 +762,88 @@ const Array<Image::BindPattern> Image::bindFixups() const
     return Array<BindPattern>(bindFixupsContent, bindCount, bindCount);
 }
 
-const Array<uint64_t> Image::chainedStarts() const
+uint64_t Image::chainedStartsOffset() const
 {
-    uint32_t startsSize;
-    uint64_t* starts = (uint64_t*)findAttributePayload(Type::chainedFixupsStarts, &startsSize);
-    uint32_t count = startsSize/sizeof(uint64_t);
-    return Array<uint64_t>(starts, count, count);
+    uint32_t size;
+    uint64_t* startsOffset = (uint64_t*)findAttributePayload(Type::chainedStartsOffset, &size);
+    if ( startsOffset == nullptr )
+        return 0; // means no pre-computed offset to starts table
+    assert(size == sizeof(uint64_t));
+    return *startsOffset;
+}
+    
+void Image::objcFixups(ResolvedSymbolTarget& objcProtocolClassTarget,
+                       uint64_t& objcImageInfoVMOffset,
+                       Array<ProtocolISAFixup>& protocolISAFixups,
+                       Array<SelectorReferenceFixup>& selRefFixups,
+                       Array<ClassStableSwiftFixup>& classStableSwiftFixups,
+                       Array<MethodListFixup>& methodListFixups) const
+{
+    // The layout here is:
+    //   ResolvedSymbolTarget
+    //   uint64_t vmOffset to objc_imageinfo
+    //   uint32_t protocol count
+    //   uint32_t selector reference count
+    //   array of ProtocolISAFixup
+    //   array of SelectorReferenceFixup
+    //   optional uint32_t stable swift fixup count
+    //   optional uint32_t method list fixup count
+    //   optional array of ClassStableSwiftFixup
+    //   optional array of MethodListFixup
+
+    if (!hasPrecomputedObjC())
+        return;
+
+    uint32_t contentSize;
+    const uint8_t* fixupsContent = (uint8_t*)findAttributePayload(Type::objcFixups, &contentSize);
+    const uint8_t* fixupsContentEnd = fixupsContent + contentSize;
+
+    // Get the statically sized data
+    uint32_t protocolFixupCount = 0;
+    uint32_t selRefFixupCount = 0;
+    memcpy(&objcProtocolClassTarget, fixupsContent, sizeof(ResolvedSymbolTarget));
+    fixupsContent += sizeof(ResolvedSymbolTarget);
+    memcpy(&objcImageInfoVMOffset, fixupsContent, sizeof(uint64_t));
+    fixupsContent += sizeof(uint64_t);
+    memcpy(&protocolFixupCount, fixupsContent, sizeof(uint32_t));
+    fixupsContent += sizeof(uint32_t);
+    memcpy(&selRefFixupCount, fixupsContent, sizeof(uint32_t));
+    fixupsContent += sizeof(uint32_t);
+
+    // Get the protocol fixups
+    if ( protocolFixupCount != 0) {
+        protocolISAFixups = Array<ProtocolISAFixup>((ProtocolISAFixup*)fixupsContent, protocolFixupCount, protocolFixupCount);
+        fixupsContent += (sizeof(ProtocolISAFixup) * protocolFixupCount);
+    }
+
+    // Get the selector reference fixups
+    if ( selRefFixupCount != 0) {
+        selRefFixups = Array<SelectorReferenceFixup>((SelectorReferenceFixup*)fixupsContent, selRefFixupCount, selRefFixupCount);
+        fixupsContent += (sizeof(SelectorReferenceFixup) * selRefFixupCount);
+    }
+
+    // Old closures end here, but newer ones might have additional fixups
+    if (fixupsContent == fixupsContentEnd)
+        return;
+
+    uint32_t stableSwiftFixupCount = 0;
+    uint32_t methodListFixupCount = 0;
+    memcpy(&stableSwiftFixupCount, fixupsContent, sizeof(uint32_t));
+    fixupsContent += sizeof(uint32_t);
+    memcpy(&methodListFixupCount, fixupsContent, sizeof(uint32_t));
+    fixupsContent += sizeof(uint32_t);
+
+    // Get the stable swift fixups
+    if ( stableSwiftFixupCount != 0) {
+        classStableSwiftFixups = Array<ClassStableSwiftFixup>((ClassStableSwiftFixup*)fixupsContent, stableSwiftFixupCount, stableSwiftFixupCount);
+        fixupsContent += (sizeof(ClassStableSwiftFixup) * stableSwiftFixupCount);
+    }
+
+    // Get the method list fixups
+    if ( methodListFixupCount != 0) {
+        methodListFixups = Array<MethodListFixup>((MethodListFixup*)fixupsContent, methodListFixupCount, methodListFixupCount);
+        fixupsContent += (sizeof(MethodListFixup) * methodListFixupCount);
+    }
 }
 
 const Array<Image::ResolvedSymbolTarget> Image::chainedTargets() const
@@ -710,25 +886,6 @@ void Image::forEachImageToInitBefore(void (^handler)(ImageNum imageToInit, bool&
             handler(initBefores[i], stop);
         }
     }
-}
-
-const char* Image::PatchableExport::PatchLocation::keyName() const
-{
-    return MachOLoaded::ChainedFixupPointerOnDisk::keyName(this->key);
-}
-
-Image::PatchableExport::PatchLocation::PatchLocation(size_t cacheOff, uint64_t ad)
-    : cacheOffset(cacheOff), addend(ad), authenticated(0), usesAddressDiversity(0), key(0), discriminator(0)
-{
-    int64_t signedAddend = (int64_t)ad;
-    assert(((signedAddend << 52) >> 52) == signedAddend);
-}
-
-Image::PatchableExport::PatchLocation::PatchLocation(size_t cacheOff, uint64_t ad, dyld3::MachOLoaded::ChainedFixupPointerOnDisk authInfo)
-    : cacheOffset(cacheOff), addend(ad), authenticated(authInfo.authBind.auth), usesAddressDiversity(authInfo.authBind.addrDiv), key(authInfo.authBind.key), discriminator(authInfo.authBind.diversity)
-{
-    int64_t signedAddend = (int64_t)ad;
-    assert(((signedAddend << 52) >> 52) == signedAddend);
 }
 
 ////////////////////////////  ImageArray ////////////////////////////////////////
@@ -775,6 +932,16 @@ bool ImageArray::hasPath(const char* path, ImageNum& num) const
 
 const Image* ImageArray::imageForNum(ImageNum num) const
 {
+    if (hasRoots) {
+        __block const Image* foundImage = nullptr;
+        forEachImage(^(const Image *image, bool &stop) {
+            if (image->imageNum() == num) {
+                foundImage = image;
+                stop = true;
+            }
+        });
+        return foundImage;
+    }
     if ( num < firstImageNum )
         return nullptr;
 
@@ -792,6 +959,11 @@ const Image* ImageArray::findImage(const Array<const ImageArray*> imagesArrays, 
             return result;
     }
     return nullptr;
+}
+
+void ImageArray::deallocate() const
+{
+    ::vm_deallocate(mach_task_self(), (long)this, size());
 }
 
 ////////////////////////////  Closure ////////////////////////////////////////
@@ -834,6 +1006,16 @@ void Closure::forEachPatchEntry(void (^handler)(const PatchEntry& entry)) const
 	});
 }
 
+void Closure::forEachWarning(Closure::Warning::Type type, void (^handler)(const char* warning, bool& stop)) const
+{
+    forEachAttributePayload(Type::warning, ^(const void* payload, uint32_t size, bool& stop) {
+        const Closure::Warning* warning = (const Closure::Warning*)payload;
+        if ( warning->type != type )
+            return;
+        handler(warning->message, stop);
+    });
+}
+
 void Closure::deallocate() const
 {
     ::vm_deallocate(mach_task_self(), (long)this, size());
@@ -849,6 +1031,32 @@ void LaunchClosure::forEachMustBeMissingFile(void (^handler)(const char* path, b
     for (const char* s=paths; s < &paths[size]; ++s) {
         if ( *s != '\0' )
             handler(s, stop);
+        if ( stop )
+            break;
+        s += strlen(s);
+    }
+}
+
+void LaunchClosure::forEachSkipIfExistsFile(void (^handler)(const SkippedFile& file, bool& stop)) const
+{
+    uint32_t size;
+    const uint64_t* files = (const uint64_t*)findAttributePayload(Type::existingFiles, &size);
+    if (files == nullptr)
+        return;
+
+    // The first entry is the length of the array
+    uint64_t fileCount = *files++;
+
+    // Followed by count number of mod times and inodes
+    const char* paths = (const char*)(files + (2 * fileCount));
+    bool stop = false;
+    for (const char* s=paths; s < &paths[size]; ++s) {
+        if ( *s != '\0' ) {
+            uint64_t inode = *files++;
+            uint64_t mtime = *files++;
+            SkippedFile skippedFile = { s, inode, mtime };
+            handler(skippedFile, stop);
+        }
         if ( stop )
             break;
         s += strlen(s);
@@ -942,6 +1150,23 @@ bool LaunchClosure::usedFallbackPaths() const
 	return getFlags().usedFallbackPaths;
 }
 
+bool LaunchClosure::hasInsertedLibraries() const
+{
+    return getFlags().hasInsertedLibraries;
+}
+
+bool LaunchClosure::hasInterposings() const
+{
+    __block bool result = false;
+
+    forEachInterposingTuple(^(const InterposingTuple&, bool& stop) {
+        result = true;
+        stop = true;
+    });
+
+    return result;
+}
+
 void LaunchClosure::forEachInterposingTuple(void (^handler)(const InterposingTuple& tuple, bool& stop)) const
 {
 	forEachAttributePayload(Type::interposeTuples, ^(const void* payload, uint32_t size, bool& stop) {
@@ -953,7 +1178,336 @@ void LaunchClosure::forEachInterposingTuple(void (^handler)(const InterposingTup
         }
 	});
 }
+bool LaunchClosure::selectorHashTable(Array<Image::ObjCSelectorImage>& imageNums,
+                                      const closure::ObjCSelectorOpt*& hashTable) const {
+    uint32_t payloadSize = 0;
+    const uint8_t* buffer = (const uint8_t*)findAttributePayload(Type::selectorTable, &payloadSize);
+    if (buffer == nullptr)
+        return false;
 
+    // Get count
+    uint32_t count = 0;
+    memcpy(&count, buffer, sizeof(uint32_t));
+    buffer += sizeof(uint32_t);
+
+    // Get image nums
+    imageNums = Array<Image::ObjCSelectorImage>((Image::ObjCSelectorImage*)buffer, count, count);
+    buffer += sizeof(Image::ObjCSelectorImage) * count;
+
+    // Get hash table
+    hashTable = (const closure::ObjCSelectorOpt*)buffer;
+
+    return true;
+}
+
+bool LaunchClosure::classAndProtocolHashTables(Array<Image::ObjCClassImage>& imageNums,
+                                               const ObjCClassOpt*& classHashTable,
+                                               const ObjCClassOpt*& protocolHashTable) const {
+    // The layout here is:
+    //   uint32_t offset to class table (note this is 0 if there are no classes)
+    //   uint32_t offset to protocol table (note this is 0 if there are no protocols)
+    //   uint32_t num images
+    //   ObjCClassImage[num images]
+    //   class hash table
+    //   [ padding to 4-byte alignment if needed
+    //   protocol hash table
+    //   [ padding to 4-byte alignment if needed
+
+    uint32_t payloadSize = 0;
+    const uint8_t* buffer = (const uint8_t*)findAttributePayload(Type::classTable, &payloadSize);
+    if (buffer == nullptr)
+        return false;
+
+    uint32_t headerSize = sizeof(uint32_t) * 3;
+
+    uint32_t offsetToClassTable = 0;
+    uint32_t offsetToProtocolTable = 0;
+    uint32_t numImages = 0;
+    
+    // Get the header
+    memcpy(&offsetToClassTable,     buffer + 0, sizeof(uint32_t));
+    memcpy(&offsetToProtocolTable,  buffer + 4, sizeof(uint32_t));
+    memcpy(&numImages,              buffer + 8, sizeof(uint32_t));
+
+    // Get the image nums
+    imageNums = Array<Image::ObjCClassImage>((Image::ObjCClassImage*)(buffer + headerSize), numImages, numImages);
+
+    // Get the class hash table if there is one
+    if ( offsetToClassTable != 0 )
+        classHashTable = (const ObjCClassOpt*)(buffer + offsetToClassTable);
+
+    // Write out out the protocol hash table if there is one
+    if ( offsetToProtocolTable != 0 )
+        protocolHashTable = (const ObjCClassOpt*)(buffer + offsetToProtocolTable);
+    
+    return true;
+}
+
+void LaunchClosure::duplicateClassesHashTable(const ObjCClassDuplicatesOpt*& duplicateClassesHashTable) const {
+    uint32_t payloadSize = 0;
+    const uint8_t* buffer = (const uint8_t*)findAttributePayload(Type::duplicateClassesTable, &payloadSize);
+    if (buffer == nullptr)
+        return;
+
+    duplicateClassesHashTable = (const ObjCClassDuplicatesOpt*)buffer;
+}
+
+static void putHexNibble(uint8_t value, char*& p)
+{
+    if ( value < 10 )
+        *p++ = '0' + value;
+    else
+        *p++ = 'A' + value - 10;
+}
+
+static void putHexByte(uint8_t value, char*& p)
+{
+    value &= 0xFF;
+    putHexNibble(value >> 4,   p);
+    putHexNibble(value & 0x0F, p);
+}
+
+static bool hashBootAndFileInfo(const char* mainExecutablePath, char hashString[32])
+{
+    struct stat statbuf;
+    if ( ::stat(mainExecutablePath, &statbuf) != 0)
+        return false;
+#if !TARGET_OS_DRIVERKIT // Temp until core crypto is available
+    const struct ccdigest_info* di = ccsha256_di();
+    ccdigest_di_decl(di, hashTemp); // defines hashTemp array in stack
+    ccdigest_init(di, hashTemp);
+
+    // put boot time into hash
+    const uint64_t* bootTime = ((uint64_t*)_COMM_PAGE_BOOTTIME_USEC);
+    ccdigest_update(di, hashTemp, sizeof(uint64_t), bootTime);
+
+    // put inode of executable into hash
+    ccdigest_update(di, hashTemp, sizeof(statbuf.st_ino), &statbuf.st_ino);
+
+    // put mod-time of executable into hash
+    ccdigest_update(di, hashTemp, sizeof(statbuf.st_mtime), &statbuf.st_mtime);
+
+    // complete hash computation and append as hex string
+    uint8_t hashBits[32];
+    ccdigest_final(di, hashTemp, hashBits);
+    char* s = hashString;
+    for (size_t i=0; i < sizeof(hashBits); ++i)
+        putHexByte(hashBits[i], s);
+    *s = '\0';
+#endif
+    return true;
+}
+
+bool LaunchClosure::buildClosureCachePath(const char* mainExecutablePath, char closurePath[], const char* tempDir,
+                                          bool makeDirsIfMissing)
+{
+    // <rdar://problem/47688842> dyld3 should only save closures to disk for containerized apps
+    if ( strstr(tempDir, "/Containers/Data/") == nullptr )
+        return false;
+
+    strlcpy(closurePath, tempDir, PATH_MAX);
+    strlcat(closurePath, "/com.apple.dyld/", PATH_MAX);
+    
+    // make sure dyld sub-dir exists
+    if ( makeDirsIfMissing ) {
+        struct stat statbuf;
+        if ( ::stat(closurePath, &statbuf) != 0 ) {
+            if ( ::mkdir(closurePath, S_IRWXU) != 0 )
+                return false;
+        }
+    }
+    
+    const char* leafName = strrchr(mainExecutablePath, '/');
+    if ( leafName == nullptr )
+        leafName = mainExecutablePath;
+    else
+        ++leafName;
+    strlcat(closurePath, leafName, PATH_MAX);
+    strlcat(closurePath, "-", PATH_MAX);
+
+    if ( !hashBootAndFileInfo(mainExecutablePath, &closurePath[strlen(closurePath)]) )
+        return false;
+
+    strlcat(closurePath, ".closure", PATH_MAX);
+    return true;
+}
+
+////////////////////////////  ObjCStringTable ////////////////////////////////////////
+    
+uint32_t ObjCStringTable::hash(const char *key, size_t keylen) const
+{
+    uint64_t val = objc_opt::lookup8((uint8_t*)key, keylen, salt);
+    uint32_t index = (uint32_t)((shift == 64) ? 0 : (val>>shift)) ^ scramble[tab[val&mask]];
+    return index;
+}
+
+const char* ObjCStringTable::getString(const char* selName, const Array<uintptr_t>& baseAddresses) const {
+    StringTarget target = getPotentialTarget(selName);
+    if (target == sentinelTarget)
+        return nullptr;
+
+    dyld3::closure::Image::ObjCImageOffset imageAndOffset;
+    imageAndOffset.raw = target;
+
+    uintptr_t sectionBaseAddress = baseAddresses[imageAndOffset.imageIndex];
+
+    const char* value = (const char*)(sectionBaseAddress + imageAndOffset.imageOffset);
+    if (!strcmp(selName, value))
+        return value;
+    return nullptr;
+}
+
+////////////////////////////  ObjCSelectorOpt ////////////////////////////////////////
+bool ObjCSelectorOpt::getStringLocation(uint32_t index, const Array<closure::Image::ObjCSelectorImage>& selImages,
+                                        ImageNum& imageNum, uint64_t& vmOffset) const {
+    if ( index >= capacity )
+        return false;
+
+    StringTarget target = targets()[index];
+    if ( target == indexNotFound )
+        return false;
+
+    dyld3::closure::Image::ObjCImageOffset imageAndOffset;
+    imageAndOffset.raw = target;
+
+    imageNum = selImages[imageAndOffset.imageIndex].imageNum;
+    vmOffset = selImages[imageAndOffset.imageIndex].offset + imageAndOffset.imageOffset;
+    return true;;
+}
+
+void ObjCSelectorOpt::forEachString(const Array<Image::ObjCSelectorImage>& selectorImages,
+                                    void (^callback)(uint64_t selVMOffset, ImageNum imageNum)) const {
+    dyld3::Array<StringTarget> stringTargets = targets();
+    for (unsigned i = 0; i != capacity; ++i) {
+        dyld3::closure::Image::ObjCImageOffset imageAndOffset;
+        imageAndOffset.raw = stringTargets[i];
+
+        if (imageAndOffset.raw == sentinelTarget)
+            continue;
+
+        callback(selectorImages[imageAndOffset.imageIndex].offset + imageAndOffset.imageOffset,
+                 selectorImages[imageAndOffset.imageIndex].imageNum);
+    }
+}
+
+////////////////////////////  ObjCClassOpt ////////////////////////////////////////
+
+void ObjCClassOpt::forEachClass(const char* className, const Array<std::pair<uintptr_t, uintptr_t>>& nameAndDataBaseAddresses,
+                                void (^callback)(void* classPtr, bool isLoaded, bool* stop)) const {
+    uint32_t index = getIndex(className);
+    if ( index == closure::ObjCStringTable::indexNotFound )
+        return;
+
+    StringTarget target = targets()[index];
+    if ( target == sentinelTarget )
+        return;
+
+    // We have a potential target.  First check if the name is an exact match given the hash matched
+    closure::Image::ObjCImageOffset classNameImageAndOffset;
+    classNameImageAndOffset.raw = target;
+
+    uintptr_t nameBaseAddress = 0;
+    uintptr_t dataBaseAddress = 0;
+    std::tie(nameBaseAddress, dataBaseAddress) = nameAndDataBaseAddresses[classNameImageAndOffset.imageIndex];
+
+    const char* value = (const char*)(nameBaseAddress + classNameImageAndOffset.imageOffset);
+    if ( strcmp(className, value) != 0 )
+        return;
+
+    // The name matched so now call the handler on all the classes for this name
+    Array<closure::ObjCClassOpt::ClassTarget> classOffsetsArray = classOffsets();
+    Array<closure::ObjCClassOpt::ClassTarget> duplicatesArray = duplicateOffsets(duplicateCount());
+
+    const closure::ObjCClassOpt::ClassTarget& classOffset = classOffsetsArray[index];
+    if (classOffset.classData.isDuplicate == 0) {
+        // This class has a single implementation
+        void* classImpl = (void*)(dataBaseAddress + classOffset.classData.imageOffset);
+        bool stop = false;
+        callback(classImpl, true, &stop);
+    } else {
+        // This class has mulitple implementations
+        uint32_t duplicateCount = classOffset.duplicateData.count;
+        uint32_t duplicateStartIndex = classOffset.duplicateData.index;
+        for (uint32_t dupeIndex = 0; dupeIndex != duplicateCount; ++dupeIndex) {
+            closure::ObjCClassOpt::ClassTarget& duplicateClass = duplicatesArray[duplicateStartIndex + dupeIndex];
+
+            std::tie(nameBaseAddress, dataBaseAddress) = nameAndDataBaseAddresses[duplicateClass.classData.imageIndex];
+            void* classImpl = (void*)(dataBaseAddress + duplicateClass.classData.imageOffset);
+            bool            stop                = false;
+            callback(classImpl, true, &stop);
+            if (stop)
+                break;
+        }
+    }
+}
+
+void ObjCClassOpt::forEachClass(const Array<Image::ObjCClassImage>& classImages,
+                                void (^nameCallback)(uint64_t classNameVMOffset, ImageNum imageNum),
+                                void (^implCallback)(uint64_t classVMOffset, ImageNum imageNum)) const {
+
+    dyld3::Array<StringTarget> stringTargets = targets();
+    dyld3::Array<ObjCClassOpt::ClassTarget> classOffsetsArray = classOffsets();
+    dyld3::Array<ObjCClassOpt::ClassTarget> duplicatesArray = duplicateOffsets(duplicateCount());
+    for (unsigned i = 0; i != capacity; ++i) {
+        dyld3::closure::Image::ObjCImageOffset classNameImageAndOffset;
+        classNameImageAndOffset.raw = stringTargets[i];
+
+        if (classNameImageAndOffset.raw == sentinelTarget)
+            continue;
+
+        nameCallback(classImages[classNameImageAndOffset.imageIndex].offsetOfClassNames + classNameImageAndOffset.imageOffset,
+                     classImages[classNameImageAndOffset.imageIndex].imageNum);
+
+        // Walk each class for this key
+        const ObjCClassOpt::ClassTarget& classOffset = classOffsetsArray[i];
+        if (classOffset.classData.isDuplicate == 0) {
+            // This class has a single implementation
+            implCallback(classImages[classOffset.classData.imageIndex].offsetOfClasses + classOffset.classData.imageOffset,
+                         classImages[classOffset.classData.imageIndex].imageNum);
+        } else {
+            // This class has mulitple implementations
+            uint32_t duplicateCount = classOffset.duplicateData.count;
+            uint32_t duplicateStartIndex = classOffset.duplicateData.index;
+            for (uint32_t dupeIndex = 0; dupeIndex != duplicateCount; ++dupeIndex) {
+                ObjCClassOpt::ClassTarget& duplicateClass = duplicatesArray[duplicateStartIndex + dupeIndex];
+                implCallback(classImages[duplicateClass.classData.imageIndex].offsetOfClasses + duplicateClass.classData.imageOffset,
+                             classImages[duplicateClass.classData.imageIndex].imageNum);
+            }
+        }
+    }
+}
+
+////////////////////////////  ObjCClassDuplicatesOpt ////////////////////////////////////////
+
+bool ObjCClassDuplicatesOpt::getClassLocation(const char* className, const objc_opt::objc_opt_t* objCOpt, void*& classImpl) const {
+    uint32_t potentialTarget = getPotentialTarget(className);
+    if (potentialTarget == sentinelTarget)
+        return false;
+
+    objc_opt::objc_clsopt_t* clsOpt = objCOpt->clsopt();
+
+    Image::ObjCDuplicateClass duplicateClass;
+    duplicateClass.raw = potentialTarget;
+
+    const char* sharedCacheClassName = clsOpt->getClassNameForIndex(duplicateClass.sharedCacheClassOptIndex);
+    if (strcmp(className, sharedCacheClassName) != 0)
+        return false;
+
+    classImpl = clsOpt->getClassForIndex(duplicateClass.sharedCacheClassOptIndex, duplicateClass.sharedCacheClassDuplicateIndex);
+    return true;
+}
+
+void ObjCClassDuplicatesOpt::forEachClass(void (^callback)(Image::ObjCDuplicateClass duplicateClass)) const {
+    dyld3::Array<StringTarget> stringTargets = targets();
+    for (unsigned i = 0; i != capacity; ++i) {
+        StringTarget target = stringTargets[i];
+        if ( target == sentinelTarget )
+            continue;
+        Image::ObjCDuplicateClass duplicateClass;
+        duplicateClass.raw = (uint32_t)target;
+        callback(duplicateClass);
+    }
+}
 
 
 } // namespace closure

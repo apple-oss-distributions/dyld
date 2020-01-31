@@ -4,19 +4,19 @@
 // BUILD:  $CC foo.c -dynamiclib -o $BUILD_DIR/libfoo_other.dylib      -install_name $RUN_DIR/libfoo.dylib -DVALUE=42
 // BUILD:  $CC bar.c -dynamiclib -o $BUILD_DIR/Bar.framework/Bar       -install_name $RUN_DIR/Bar.framework/Bar  -DVALUE=1
 // BUILD:  $CC bar.c -dynamiclib -o $BUILD_DIR/Bar.framework/Bar_alt   -install_name $RUN_DIR/Bar.framework/Bar  -DVALUE=42
-// BUILD:  $CC main.c            -o $BUILD_DIR/main.exe $BUILD_DIR/libfoo.dylib $BUILD_DIR/Bar.framework/Bar
-// BUILD:  $DYLD_ENV_VARS_ENABLE $BUILD_DIR/main.exe
-// BUILD:  $CC main.c            -o $BUILD_DIR/main-dynamic.exe -DRUN_DIR="$RUN_DIR"
-// BUILD:  $DYLD_ENV_VARS_ENABLE $BUILD_DIR/main-dynamic.exe
+// BUILD:  $CC main.c            -o $BUILD_DIR/env-DYLD_IMAGE_SUFFIX.exe $BUILD_DIR/libfoo.dylib $BUILD_DIR/Bar.framework/Bar
+// BUILD:  $DYLD_ENV_VARS_ENABLE $BUILD_DIR/env-DYLD_IMAGE_SUFFIX.exe
+// BUILD:  $CC main.c            -o $BUILD_DIR/env-DYLD_IMAGE_SUFFIX-dynamic.exe -DRUN_DIR="$RUN_DIR"
+// BUILD:  $DYLD_ENV_VARS_ENABLE $BUILD_DIR/env-DYLD_IMAGE_SUFFIX-dynamic.exe
 
-// RUN:                                 ./main.exe
-// RUN:  DYLD_IMAGE_SUFFIX=_other       ./main.exe
-// RUN:  DYLD_IMAGE_SUFFIX=_alt         ./main.exe
-// RUN:  DYLD_IMAGE_SUFFIX=_alt:_other  ./main.exe
-// RUN:                                 ./main-dynamic.exe
-// RUN:  DYLD_IMAGE_SUFFIX=_other       ./main-dynamic.exe
-// RUN:  DYLD_IMAGE_SUFFIX=_alt         ./main-dynamic.exe
-// RUN:  DYLD_IMAGE_SUFFIX=_alt:_other  ./main-dynamic.exe
+// RUN:                                 ./env-DYLD_IMAGE_SUFFIX.exe
+// RUN:  DYLD_IMAGE_SUFFIX=_other       ./env-DYLD_IMAGE_SUFFIX.exe
+// RUN:  DYLD_IMAGE_SUFFIX=_alt         ./env-DYLD_IMAGE_SUFFIX.exe
+// RUN:  DYLD_IMAGE_SUFFIX=_alt:_other  ./env-DYLD_IMAGE_SUFFIX.exe
+// RUN:                                 ./env-DYLD_IMAGE_SUFFIX-dynamic.exe
+// RUN:  DYLD_IMAGE_SUFFIX=_other       ./env-DYLD_IMAGE_SUFFIX-dynamic.exe
+// RUN:  DYLD_IMAGE_SUFFIX=_alt         ./env-DYLD_IMAGE_SUFFIX-dynamic.exe
+// RUN:  DYLD_IMAGE_SUFFIX=_alt:_other  ./env-DYLD_IMAGE_SUFFIX-dynamic.exe
 
 
 

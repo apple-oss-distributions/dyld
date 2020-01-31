@@ -31,23 +31,29 @@
 #include <System/sys/csr.h>
 #include <crt_externs.h>
 #include <Availability.h>
+#if !TARGET_OS_DRIVERKIT
 #include <vproc_priv.h>
-
+#endif
 #include <dirent.h>
+#include <sys/types.h>
 #include <sys/stat.h>
+#include <fcntl.h>
+#include <System/sys/codesign.h>
 
-#include "mach-o/dyld_images.h"
-#include "mach-o/dyld.h"
-#include "mach-o/dyld_priv.h"
+#include <mach-o/dyld_images.h>
+#include <mach-o/dyld.h>
+#include <mach-o/dyld_priv.h>
+
 #include "dyld_cache_format.h"
+#include "objc-shared-cache.h"
 
 #include "ImageLoader.h"
 #include "dyldLock.h"
 
-#include "../dyld3/APIs.h"
-#include "../dyld3/AllImages.h"
-#include "../dyld3/StartGlue.h"
-#include "../dyld3/Tracing.h"
+#include "APIs.h"
+#include "AllImages.h"
+#include "StartGlue.h"
+#include "Tracing.h"
 
 
 // this was in dyld_priv.h but it is no longer exported
@@ -65,75 +71,18 @@ extern "C" void __cxa_finalize_ranges(const struct __cxa_range_t ranges[], int c
 //
 extern "C" int _dyld_func_lookup(const char* dyld_func_name, void **address);
 
+#if TARGET_OS_IOS && !TARGET_OS_SIMULATOR
+namespace dyld3 {
+    extern int compatFuncLookup(const char* name, void** address) __API_AVAILABLE(ios(13.0));
+}
+extern "C" void setLookupFunc(void*);
+#endif
+
 
 extern bool gUseDyld3;
 
-#ifndef LC_VERSION_MIN_MACOSX
-	#define LC_VERSION_MIN_MACOSX 0x24
-	struct version_min_command {
-		uint32_t	cmd;		/* LC_VERSION_MIN_MACOSX or
-					   LC_VERSION_MIN_IPHONEOS  */
-		uint32_t	cmdsize;	/* sizeof(struct min_version_command) */
-		uint32_t	version;	/* X.Y.Z is encoded in nibbles xxxx.yy.zz */
-		uint32_t	sdk;		/* X.Y.Z is encoded in nibbles xxxx.yy.zz */
-	};
-#endif
-
-#ifndef LC_VERSION_MIN_IPHONEOS
-	#define LC_VERSION_MIN_IPHONEOS 0x25
-#endif
-
-#ifndef LC_VERSION_MIN_TVOS
-	#define LC_VERSION_MIN_TVOS 0x2F
-#endif
-
-#ifndef LC_VERSION_MIN_WATCHOS
-	#define LC_VERSION_MIN_WATCHOS 0x30
-#endif
-
-
-#ifndef LC_LOAD_UPWARD_DYLIB
-	#define	LC_LOAD_UPWARD_DYLIB (0x23|LC_REQ_DYLD)	/* load of dylib whose initializers run later */
-#endif
-
-#ifndef LC_BUILD_VERSION
-	#define LC_BUILD_VERSION 0x32 /* build for platform min OS version */
-
-	/*
-	 * The build_version_command contains the min OS version on which this 
-	 * binary was built to run for its platform.  The list of known platforms and
-	 * tool values following it.
-	 */
-	struct build_version_command {
-		uint32_t	cmd;		/* LC_BUILD_VERSION */
-		uint32_t	cmdsize;	/* sizeof(struct build_version_command) plus */
-								/* ntools * sizeof(struct build_tool_version) */
-		uint32_t	platform;	/* platform */
-		uint32_t	minos;		/* X.Y.Z is encoded in nibbles xxxx.yy.zz */
-		uint32_t	sdk;		/* X.Y.Z is encoded in nibbles xxxx.yy.zz */
-		uint32_t	ntools;		/* number of tool entries following this */
-	};
-
-	struct build_tool_version {
-		uint32_t	tool;		/* enum for the tool */
-		uint32_t	version;	/* version number of the tool */
-	};
-
-	/* Known values for the platform field above. */
-	#define PLATFORM_MACOS		1
-	#define PLATFORM_IOS		2
-	#define PLATFORM_TVOS		3
-	#define PLATFORM_WATCHOS	4
-	#define PLATFORM_BRIDGEOS	5
-
-	/* Known values for the tool field above. */
-	#define TOOL_CLANG	1
-	#define TOOL_SWIFT	2
-	#define TOOL_LD		3
-#endif
-
 // deprecated APIs are still availble on Mac OS X, but not on iPhone OS
-#if __IPHONE_OS_VERSION_MIN_REQUIRED	
+#if __IPHONE_OS_VERSION_MIN_REQUIRED || TARGET_OS_DRIVERKIT
 	#define DEPRECATED_APIS_SUPPORTED 0
 #else
 	#define DEPRECATED_APIS_SUPPORTED 1
@@ -677,21 +626,15 @@ bool _dyld_get_image_uuid(const struct mach_header* mh, uuid_t uuid)
 }
 
 dyld_platform_t dyld_get_active_platform(void) {
-    if (gUseDyld3)
-        return dyld3::dyld_get_active_platform();
+    if (gUseDyld3) { return dyld3::dyld_get_active_platform(); }
+    if (_dyld_get_all_image_infos()->version >= 16) { return (dyld_platform_t)_dyld_get_all_image_infos()->platform; }
 
-    // HACK
-    // Most of the new version SPIs have pure dyld3 implementations, but
-    // They cannot get to the main executable, so we implement this here
-    // and they can use this by calling ::dyld_get_active_platform() in the root namespace
-    static dyld_platform_t sActivePlatform = 0;
-    if (sActivePlatform) return sActivePlatform;
-
+    __block dyld_platform_t result;
+    // FIXME: Remove this once we only care about version 16 or greater all image infos
     dyld3::dyld_get_image_versions((mach_header*)_NSGetMachExecuteHeader(), ^(dyld_platform_t platform, uint32_t sdk_version, uint32_t min_version) {
-        sActivePlatform = platform;
-        //FIXME assert there is only one?
+        result = platform;
     });
-    return sActivePlatform;
+    return result;
 }
 
 dyld_platform_t dyld_get_base_platform(dyld_platform_t platform) {
@@ -765,6 +708,15 @@ const void* address,
 size_t size, 
 NSObjectFileImage *objectFileImage)
 {
+    // <rdar://problem/51812762> NSCreatObjectFileImageFromMemory fail opaquely if Hardened runtime is enabled
+    uint32_t flags;
+    if ( csops(0, CS_OPS_STATUS, &flags, sizeof(flags)) != -1 ) {
+        if ( (flags & (CS_ENFORCEMENT|CS_KILL)) == (CS_ENFORCEMENT|CS_KILL) ) {
+            //fprintf(stderr, "dyld: warning: NSCreatObjectFileImageFromMemory() cannot be used in harden process 0x%08X\n", flags);
+            return NSObjectFileImageAccess;
+        }
+    }
+
 	if ( gUseDyld3 )
 		return dyld3::NSCreateObjectFileImageFromMemory(address, size, objectFileImage);
 
@@ -1308,15 +1260,8 @@ _dyld_get_image_name(uint32_t image_index)
 // SPI in Mac OS X 10.6
 intptr_t _dyld_get_image_slide(const struct mach_header* mh)
 {
-	if ( gUseDyld3 )
-		return dyld3::_dyld_get_image_slide(mh);
-
-	DYLD_NO_LOCK_THIS_BLOCK;
-    static intptr_t (*p)(const struct mach_header*) = NULL;
-
-	if(p == NULL)
-	    _dyld_func_lookup("__dyld_get_image_slide", (void**)&p);
-	return(p(mh));
+	// always use dyld3 version because it does better error handling
+	return dyld3::_dyld_get_image_slide(mh);
 }
 
 
@@ -1377,7 +1322,6 @@ bool _dyld_all_twolevel_modules_prebound(void)
 #include <pthread.h>
 #include <stdlib.h>
 #include <mach-o/dyld.h>
-#include <servers/bootstrap.h>
 #include "dyldLibSystemInterface.h"
 
 
@@ -1432,6 +1376,12 @@ static bool hasPerThreadBufferFor_dlerror()
 	return (pthread_getspecific(dlerrorPerThreadKey) != NULL);
 }
 
+#if TARGET_OS_DRIVERKIT
+static bool isLaunchdOwned()
+{
+    return false;
+}
+#else
 // use non-lazy pointer to vproc_swap_integer so that lazy binding does not recurse
 typedef vproc_err_t (*vswapproc)(vproc_t vp, vproc_gsk_t key,int64_t *inval, int64_t *outval);
 static vswapproc swapProc = &vproc_swap_integer;
@@ -1448,6 +1398,7 @@ static bool isLaunchdOwned()
     }
     return result;
 }
+#endif
 
 static void shared_cache_missing()
 {
@@ -1477,7 +1428,7 @@ static dyld::LibSystemHelpers sHelpers = { 13, &dyldGlobalLockAcquire, &dyldGlob
 									&__cxa_finalize_ranges
                                     };
 
-
+static const objc_opt::objc_opt_t* gObjCOpt = nullptr;
 //
 // during initialization of libSystem this routine will run
 // and call dyld, registering the helper functions.
@@ -1487,8 +1438,21 @@ void _dyld_initializer()
 {	
    void (*p)(dyld::LibSystemHelpers*);
 
+    // Get the optimized objc pointer now that the cache is loaded
+    const dyld_all_image_infos* allInfo = _dyld_get_all_image_infos();
+    if ( allInfo != nullptr  ) {
+        const DyldSharedCache* cache = (const DyldSharedCache*)(allInfo->sharedCacheBaseAddress);
+        if ( cache != nullptr )
+            gObjCOpt = cache->objcOpt();
+    }
+
 	if ( gUseDyld3 ) {
 		dyld3::gAllImages.applyInitialImages();
+#if TARGET_OS_IOS && !TARGET_OS_SIMULATOR
+        // For binaries built before 13.0, set the lookup function if they need it
+        if (dyld_get_program_sdk_version() < DYLD_PACKED_VERSION(13,0,0))
+            setLookupFunc((void*)&dyld3::compatFuncLookup);
+#endif
 	}
 	else {
 		_dyld_func_lookup("__dyld_register_thread_helpers", (void**)&p);
@@ -1499,7 +1463,27 @@ void _dyld_initializer()
 	tlv_initializer();
 }
 
+int dladdr(const void* addr, Dl_info* info)
+{
+    dyld3::ScopedTimer timer(DBG_DYLD_TIMING_DLADDR, (uint64_t)addr, 0, 0);
+    int result = 0;
+    if ( gUseDyld3 ) {
+        result = dyld3::dladdr(addr, info);
+    } else {
+        DYLD_LOCK_THIS_BLOCK;
+        static int (*p)(const void* , Dl_info*) = NULL;
 
+        if(p == NULL)
+            _dyld_func_lookup("__dyld_dladdr", (void**)&p);
+        result = p(addr, info);
+    }
+    timer.setData4(result);
+    timer.setData5(info != NULL ? info->dli_fbase : 0);
+    timer.setData6(info != NULL ? info->dli_saddr : 0);
+    return result;
+}
+
+#if !TARGET_OS_DRIVERKIT
 char* dlerror()
 {
 	if ( gUseDyld3 )
@@ -1513,31 +1497,14 @@ char* dlerror()
 	return(p());
 }
 
-int dladdr(const void* addr, Dl_info* info)
-{
-    dyld3::ScopedTimer timer(DBG_DYLD_TIMING_DLADDR, (uint64_t)addr, 0, 0);
-    int result = 0;
-	if ( gUseDyld3 )
-		return dyld3::dladdr(addr, info);
-
-	DYLD_LOCK_THIS_BLOCK;
-    static int (*p)(const void* , Dl_info*) = NULL;
-
-	if(p == NULL)
-	    _dyld_func_lookup("__dyld_dladdr", (void**)&p);
-    result = p(addr, info);
-    timer.setData4(result);
-    timer.setData5(info != NULL ? info->dli_fbase : 0);
-    timer.setData6(info != NULL ? info->dli_saddr : 0);
-	return result;
-}
-
 int dlclose(void* handle)
 {
     dyld3::ScopedTimer timer(DBG_DYLD_TIMING_DLCLOSE, (uint64_t)handle, 0, 0);
     int result = 0;
-	if ( gUseDyld3 )
+    if ( gUseDyld3 ) {
+        timer.setData4(result);
 		return dyld3::dlclose(handle);
+    }
 
 	DYLD_LOCK_THIS_BLOCK;
     static int (*p)(void* handle) = NULL;
@@ -1545,6 +1512,7 @@ int dlclose(void* handle)
 	if(p == NULL)
 	    _dyld_func_lookup("__dyld_dlclose", (void**)&p);
     result = p(handle);
+    timer.setData4(result);
 	return result;
 }
 
@@ -1555,6 +1523,7 @@ void* dlopen(const char* path, int mode)
 
     if ( gUseDyld3 ) {
         result = dyld3::dlopen_internal(path, mode, __builtin_return_address(0));
+        timer.setData4(result);
         return result;
     }
 
@@ -1572,32 +1541,6 @@ void* dlopen(const char* path, int mode)
     __asm__ volatile("");
     timer.setData4(result);
 
-#if TARGET_OS_OSX
-    // HACK for iOSMac bringup rdar://40945421
-    if ( result == nullptr  && dyld_get_active_platform() == PLATFORM_IOSMAC && csr_check(CSR_ALLOW_APPLE_INTERNAL) == 0) {
-        if (hasPerThreadBufferFor_dlerror()) {
-            // first char of buffer is flag whether string (starting at second char) is valid
-            char* buffer = getPerThreadBufferFor_dlerror(2);
-
-            if ( buffer[0] != '\0' && (strstr(&buffer[1], "macOS dylib cannot be loaded into iOSMac process")
-                                       || strstr(&buffer[1], "mach-o, but not built for iOSMac")) ) {
-                // if valid buffer and contains an iOSMac issue
-                fprintf(stderr, "dyld: iOSMac ERROR: process attempted to dlopen() dylib with macOS dependency: \n");
-                fprintf(stderr, "\tdlerror: %s\n", &buffer[1]);
-                fprintf(stderr, "\tBacktrace:\n");
-
-                void* stackPointers[128];
-                int stackPointersCnt = backtrace(stackPointers, 128);
-                char** symbolicatedStack = backtrace_symbols(stackPointers, stackPointersCnt);
-                for (int32_t i = 0; i < stackPointersCnt; ++i) {
-                    fprintf(stderr, "\t\t%s\n", symbolicatedStack[i]);
-                }
-                free(symbolicatedStack);
-            }
-        }
-    }
-#endif
-
 	return result;
 }
 
@@ -1608,6 +1551,7 @@ bool dlopen_preflight(const char* path)
 
     if ( gUseDyld3 ) {
         result = dyld3::dlopen_preflight_internal(path);
+        timer.setData4(result);
         return result;
     }
 
@@ -1628,6 +1572,7 @@ void* dlsym(void* handle, const char* symbol)
 
     if ( gUseDyld3 ) {
         result = dyld3::dlsym_internal(handle, symbol, __builtin_return_address(0));
+        timer.setData4(result);
         return result;
     }
 
@@ -1640,6 +1585,8 @@ void* dlsym(void* handle, const char* symbol)
     timer.setData4(result);
     return result;
 }
+#endif // !TARGET_OS_DRIVERKIT
+
 
 const struct dyld_all_image_infos* _dyld_get_all_image_infos()
 {
@@ -1750,6 +1697,34 @@ const void* _dyld_get_shared_cache_range(size_t* length)
 	return p(length);
 }
 
+bool _dyld_shared_cache_optimized()
+{
+    if ( gUseDyld3 )
+        return dyld3::_dyld_shared_cache_optimized();
+
+    const dyld_all_image_infos* allInfo = _dyld_get_all_image_infos();
+    if ( allInfo != nullptr  ) {
+        const dyld_cache_header* cacheHeader = (dyld_cache_header*)(allInfo->sharedCacheBaseAddress);
+        if ( cacheHeader != nullptr )
+            return (cacheHeader->cacheType == kDyldSharedCacheTypeProduction);
+    }
+    return false;
+}
+
+bool _dyld_shared_cache_is_locally_built()
+{
+    if ( gUseDyld3 )
+        return dyld3::_dyld_shared_cache_is_locally_built();
+
+    const dyld_all_image_infos* allInfo = _dyld_get_all_image_infos();
+    if ( allInfo != nullptr  ) {
+        const dyld_cache_header* cacheHeader = (dyld_cache_header*)(allInfo->sharedCacheBaseAddress);
+        if ( cacheHeader != nullptr )
+            return (cacheHeader->locallyBuiltCache == 1);
+    }
+    return false;
+}
+
 void _dyld_images_for_addresses(unsigned count, const void* addresses[], struct dyld_image_uuid_offset infos[])
 {
     if ( gUseDyld3 )
@@ -1774,6 +1749,24 @@ void _dyld_register_for_image_loads(void (*func)(const mach_header* mh, const ch
     if(p == NULL)
         _dyld_func_lookup("__dyld_register_for_image_loads", (void**)&p);
     return p(func);
+}
+
+void _dyld_register_for_bulk_image_loads(void (*func)(unsigned imageCount, const struct mach_header* mhs[], const char* paths[]))
+{
+    if ( gUseDyld3 )
+        return dyld3::_dyld_register_for_bulk_image_loads(func);
+
+    DYLD_NO_LOCK_THIS_BLOCK;
+    static const void (*p)(void (*)(unsigned imageCount, const mach_header* mhs[], const char* paths[])) = NULL;
+
+    if(p == NULL)
+        _dyld_func_lookup("__dyld_register_for_bulk_image_loads", (void**)&p);
+    return p(func);
+}
+
+bool dyld_need_closure(const char* execPath, const char* tempDir)
+{
+    return dyld3::dyld_need_closure(execPath, tempDir);
 }
 
 bool dyld_process_is_restricted()
@@ -1802,6 +1795,19 @@ const char* dyld_shared_cache_file_path()
 	return p();
 }
 
+bool dyld_has_inserted_or_interposing_libraries()
+{
+	if ( gUseDyld3 )
+		return dyld3::dyld_has_inserted_or_interposing_libraries();
+
+	DYLD_NO_LOCK_THIS_BLOCK;
+	static bool (*p)() = NULL;
+
+	if (p == NULL)
+	    _dyld_func_lookup("__dyld_has_inserted_or_interposing_libraries", (void**)&p);
+	return p();
+}
+
 void dyld_dynamic_interpose(const struct mach_header* mh, const struct dyld_interpose_tuple array[], size_t count)
 {
 	if ( gUseDyld3 )
@@ -1815,6 +1821,19 @@ void dyld_dynamic_interpose(const struct mach_header* mh, const struct dyld_inte
 	p(mh, array, count);
 }
 
+// SPI called __fork
+void _dyld_atfork_prepare()
+{
+    if ( gUseDyld3 )
+        return dyld3::_dyld_atfork_prepare();
+}
+
+// SPI called __fork
+void _dyld_atfork_parent()
+{
+    if ( gUseDyld3 )
+        return dyld3::_dyld_atfork_parent();
+}
 
 // SPI called __fork
 void _dyld_fork_child()
@@ -1994,5 +2013,45 @@ void _dyld_objc_notify_register(_dyld_objc_notify_mapped    mapped,
 	p(mapped, init, unmapped);
 }
 
+void _dyld_missing_symbol_abort()
+{
+    return dyld3::_dyld_missing_symbol_abort();
+}
 
+const char* _dyld_get_objc_selector(const char* selName)
+{
+    // Check the shared cache table if it exists.
+    if ( gObjCOpt != nullptr ) {
+        if ( const objc_opt::objc_selopt_t* selopt = gObjCOpt->selopt() ) {
+            const char* name = selopt->get(selName);
+            if (name != nullptr)
+                return name;
+        }
+    }
 
+    if ( gUseDyld3 )
+        return dyld3::_dyld_get_objc_selector(selName);
+
+    return nullptr;
+}
+
+void _dyld_for_each_objc_class(const char* className,
+                           void (^callback)(void* classPtr, bool isLoaded, bool* stop)) {
+    if ( gUseDyld3 )
+        return dyld3::_dyld_for_each_objc_class(className, callback);
+}
+
+void _dyld_for_each_objc_protocol(const char* protocolName,
+                                  void (^callback)(void* protocolPtr, bool isLoaded, bool* stop)) {
+    if ( gUseDyld3 )
+        return dyld3::_dyld_for_each_objc_protocol(protocolName, callback);
+}
+
+void _dyld_register_driverkit_main(void (*mainFunc)(void))
+{
+    static bool (*p)(void (*mainFunc)(void)) = NULL;
+
+    if(p == NULL)
+        _dyld_func_lookup("__dyld_register_driverkit_main", (void**)&p);
+   p(mainFunc);
+}

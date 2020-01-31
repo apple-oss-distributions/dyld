@@ -38,7 +38,8 @@ struct LoadedFileInfo {
     const void*  fileContent                = nullptr;
     uint64_t     fileContentLen             = 0;
     uint64_t     sliceOffset                = 0;
-    uint64_t     sliceLen                   = 0;
+    uint64_t     sliceLen            : 63,
+                 isSipProtected      : 1;
     uint64_t     inode                      = 0;
     uint64_t     mtime                      = 0;
     void (*unload)(const LoadedFileInfo&)   = nullptr;
@@ -70,7 +71,8 @@ public:
     virtual void unloadPartialFile(LoadedFileInfo& info, uint64_t keepStartOffset, uint64_t keepLength) const = 0;
 
     // If a file exists at path, returns true and sets inode and mtime
-    virtual bool fileExists(const char* path, uint64_t* inode=nullptr, uint64_t* mtime=nullptr, bool* issetuid=nullptr) const = 0;
+    virtual bool fileExists(const char* path, uint64_t* inode=nullptr, uint64_t* mtime=nullptr,
+                            bool* issetuid=nullptr, bool* inodesMatchRuntime = nullptr) const = 0;
 };
 #pragma clang diagnostic pop
 

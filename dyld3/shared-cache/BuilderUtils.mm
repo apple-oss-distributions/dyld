@@ -29,6 +29,8 @@
 #include <iomanip> // std::setfill, std::setw
 #include <pthread.h>
 #include <mach/mach.h>
+#include <sys/types.h>
+#include <sys/sysctl.h>
 #include <dispatch/dispatch.h>
 
 #include <Bom/Bom.h>
@@ -187,9 +189,12 @@ bool build(Diagnostics& diags, dyld3::Manifest& manifest, const std::string& mas
         }
         
         std::stringstream fileNameStream;
+#pragma clang diagnostic push
+#pragma clang diagnostic ignored "-Wdeprecated-declarations"
         std::array<uint8_t, CC_SHA1_DIGEST_LENGTH> digest = { 0 };
         CC_SHA1(setName.c_str(), (unsigned int)setName.length(), &digest[0]);
-        
+#pragma clang diagnostic pop
+
         fileNameStream << std::hex << std::uppercase << std::setfill('0');
         for (int c : digest) {
             fileNameStream << std::setw(2) << c;
@@ -244,11 +249,32 @@ bool build(Diagnostics& diags, dyld3::Manifest& manifest, const std::string& mas
         //warnings.insert(manifestWarnings.begin(), manifestWarnings.end());
     });
 
+    bool requuiresConcurrencyLimit = false;
+    dispatch_semaphore_t concurrencyLimit = NULL;
+    // Limit cuncurrency to 8 threads for machines with 32GB of RAM and to 1 thread if we have 4GB or less of memory
+    uint64_t memSize = 0;
+    size_t sz = sizeof(memSize);;
+    if ( sysctlbyname("hw.memsize", &memSize, &sz, NULL, 0) == 0 ) {
+        if ( memSize <= 0x100000000ULL ) {
+            fprintf(stderr, "Detected 4Gb or less of memory, limiting concurrency to 1 thread\n");
+            requuiresConcurrencyLimit = true;
+            concurrencyLimit = dispatch_semaphore_create(1);
+        } else if ( memSize <= 0x800000000ULL ) {
+            fprintf(stderr, "Detected 32Gb or less of memory, limiting concurrency to 8 threads\n");
+            requuiresConcurrencyLimit = true;
+            concurrencyLimit = dispatch_semaphore_create(8);
+        }
+    }
+
     dispatch_apply(buildQueue.size(), queue, ^(size_t index) {
         auto queueEntry = buildQueue[index];
         pthread_setname_np(queueEntry.options.loggingPrefix.substr(0, MAXTHREADNAMESIZE - 1).c_str());
         
-        DyldSharedCache::CreateResults results = DyldSharedCache::create(queueEntry.options, queueEntry.dylibsForCache, queueEntry.otherDylibsAndBundles, queueEntry.mainExecutables);
+        // Horrible hack to limit concurrency in low spec build machines.
+        if (requuiresConcurrencyLimit) { dispatch_semaphore_wait(concurrencyLimit, DISPATCH_TIME_FOREVER); }
+        DyldSharedCache::CreateResults results = DyldSharedCache::create(queueEntry.options, queueEntry.fileSystem, queueEntry.dylibsForCache, queueEntry.otherDylibsAndBundles, queueEntry.mainExecutables);
+        if (requuiresConcurrencyLimit) { dispatch_semaphore_signal(concurrencyLimit); }
+
         dispatch_sync(warningQueue, ^{
             warnings.insert(results.warnings.begin(), results.warnings.end());
             bool chooseSecondCdHash = agileChooseSHA256CdHash;
@@ -257,7 +283,7 @@ bool build(Diagnostics& diags, dyld3::Manifest& manifest, const std::string& mas
                 chooseSecondCdHash = false;
             }
             for (const auto& configName : queueEntry.configNames) {
-                auto& configResults = manifest.configuration(configName).architecture(queueEntry.options.archName).results;
+                auto& configResults = manifest.configuration(configName).architecture(queueEntry.options.archs->name()).results;
                 for (const auto& mh : results.evictions) {
                     configResults.exclude(mh, "VM overflow, evicting");
                 }

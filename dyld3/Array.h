@@ -29,6 +29,13 @@
 #include <stddef.h>
 #include <mach/mach.h>
 
+#if !TARGET_OS_DRIVERKIT && (BUILDING_LIBDYLD || BUILDING_DYLD)
+  #include <CrashReporterClient.h>
+#else
+  #define CRSetCrashLogMessage(x)
+  #define CRSetCrashLogMessage2(x)
+#endif
+
 #define VIS_HIDDEN __attribute__((visibility("hidden")))
 
 namespace dyld3 {
@@ -57,6 +64,7 @@ public:
     bool            empty() const                { return (_usedCount == 0); }
     uintptr_t       index(const T& element)      { return &element - _elements; }
     void            push_back(const T& t)        { assert(_usedCount < _allocCount); _elements[_usedCount++] = t; }
+    void            default_constuct_back()      { assert(_usedCount < _allocCount); new (&_elements[_usedCount++])T(); }
     void            pop_back()                   { assert(_usedCount > 0); _usedCount--; }
     T*              begin()                      { return &_elements[0]; }
     T*              end()                        { return &_elements[_usedCount]; }
@@ -104,9 +112,23 @@ public:
                     OverflowSafeArray(T* stackStorage, uintptr_t stackAllocCount) : Array<T>(stackStorage, stackAllocCount) {}
                     ~OverflowSafeArray();
 
+                    OverflowSafeArray(OverflowSafeArray&) = default;
+                    OverflowSafeArray& operator=(OverflowSafeArray&& other);
+
     void            push_back(const T& t)        { verifySpace(1); this->_elements[this->_usedCount++] = t; }
+    void            default_constuct_back()      { verifySpace(1); new (&this->_elements[this->_usedCount++])T(); }
     void            clear() { this->_usedCount = 0; }
     void            reserve(uintptr_t n) { if (this->_allocCount < n) growTo(n); }
+    void            resize(uintptr_t n) {
+        if (n == this->_usedCount)
+            return;
+        if (n < this->_usedCount) {
+            this->_usedCount = n;
+            return;
+        }
+        reserve(n);
+        this->_usedCount = n;
+    }
 
 protected:
     void            growTo(uintptr_t n);
@@ -126,13 +148,23 @@ inline void OverflowSafeArray<T,MAXCOUNT>::growTo(uintptr_t n)
     if ( MAXCOUNT != 0xFFFFFFFF ) {
         assert(oldBufferSize == 0); // only re-alloc once
         // MAXCOUNT is specified, so immediately jump to that size
-        _overflowBufferSize = round_page(MAXCOUNT * sizeof(T));
+        _overflowBufferSize = round_page(std::max(MAXCOUNT, n) * sizeof(T));
     }
     else {
        // MAXCOUNT is not specified, keep doubling size
        _overflowBufferSize = round_page(std::max(this->_allocCount * 2, n) * sizeof(T));
     }
-    assert(::vm_allocate(mach_task_self(), &_overflowBuffer, _overflowBufferSize, VM_FLAGS_ANYWHERE) == KERN_SUCCESS);
+    kern_return_t kr = ::vm_allocate(mach_task_self(), &_overflowBuffer, _overflowBufferSize, VM_FLAGS_ANYWHERE);
+    if (kr != KERN_SUCCESS) {
+#if BUILDING_LIBDYLD
+        //FIXME We should figure out a way to do this in dyld
+        char crashString[256];
+        snprintf(crashString, 256, "OverflowSafeArray failed to allocate %lu bytes, vm_allocate returned: %d\n",
+                _overflowBufferSize, kr);
+        CRSetCrashLogMessage(crashString);
+#endif
+        assert(0);
+    }
     ::memcpy((void*)_overflowBuffer, this->_elements, this->_usedCount*sizeof(T));
     this->_elements = (T*)_overflowBuffer;
     this->_allocCount = _overflowBufferSize / sizeof(T);
@@ -148,6 +180,31 @@ inline OverflowSafeArray<T,MAXCOUNT>::~OverflowSafeArray()
         ::vm_deallocate(mach_task_self(), _overflowBuffer, _overflowBufferSize);
 }
 
+template <typename T, uintptr_t MAXCOUNT>
+inline OverflowSafeArray<T,MAXCOUNT>& OverflowSafeArray<T,MAXCOUNT>::operator=(OverflowSafeArray<T,MAXCOUNT>&& other)
+{
+    if (this == &other)
+        return *this;
+
+    // Free our buffer if we have one
+    if ( _overflowBuffer != 0 )
+        ::vm_deallocate(mach_task_self(), _overflowBuffer, _overflowBufferSize);
+
+    // Now take the buffer from the other array
+    this->_elements     = other._elements;
+    this->_allocCount   = other._allocCount;
+    this->_usedCount    = other._usedCount;
+    _overflowBuffer     = other._overflowBuffer;
+    _overflowBufferSize = other._overflowBufferSize;
+
+    // Now reset the other object so that it doesn't try to deallocate the memory later.
+    other._elements             = nullptr;
+    other._allocCount           = 0;
+    other._usedCount            = 0;
+    other._overflowBuffer       = 0;
+    other._overflowBufferSize   = 0;
+    return *this;
+}
 
 
 

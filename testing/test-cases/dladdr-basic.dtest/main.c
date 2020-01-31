@@ -9,10 +9,13 @@
 #include <dlfcn.h> 
 #include <mach-o/dyld_priv.h>
 
+extern char** environ;
+
 #if __has_feature(ptrauth_calls)
     #include <ptrauth.h>
 #endif
 
+int mydata  = 5;
 
 int bar()
 {
@@ -125,6 +128,52 @@ static void verifymalloc()
     }
 }
 
+// checks dylib data symbol
+static void verifyenviron()
+{
+    Dl_info info;
+    if ( dladdr(&environ, &info) == 0 ) {
+        printf("[FAIL] dladdr(&environ, xx) failed\n");
+        exit(0);
+    }
+    if ( strcmp(info.dli_sname, "environ") != 0 ) {
+        printf("[FAIL] dladdr()->dli_sname is \"%s\" instead of \"environ\"\n", info.dli_sname);
+        exit(0);
+    }
+    if ( info.dli_saddr != &environ ) {
+        printf("[FAIL] dladdr()->dli_saddr is not &environ\n");
+        exit(0);
+    }
+    if ( info.dli_fbase != dyld_image_header_containing_address(&environ) ) {
+        printf("[FAIL] dladdr()->dli_fbase is not image that contains &environ\n");
+        exit(0);
+    }
+}
+
+
+// checks data symbol in main executable
+static void verifymydata()
+{
+    Dl_info info;
+    if ( dladdr(&mydata, &info) == 0 ) {
+        printf("[FAIL] dladdr(&mydata, xx) failed\n");
+        exit(0);
+    }
+    if ( strcmp(info.dli_sname, "mydata") != 0 ) {
+        printf("[FAIL] dladdr()->dli_sname is \"%s\" instead of \"mydata\"\n", info.dli_sname);
+        exit(0);
+    }
+    if ( info.dli_saddr != &mydata ) {
+        printf("[FAIL] dladdr()->dli_saddr is not &mydata\n");
+        exit(0);
+    }
+    if ( info.dli_fbase != dyld_image_header_containing_address(&mydata) ) {
+        printf("[FAIL] dladdr()->dli_fbase is not image that contains &mydata\n");
+        exit(0);
+    }
+}
+
+
 // checks passing NULL for info parameter gracefully fails
 static void verifyNULL()
 {
@@ -146,6 +195,8 @@ int main()
     verifyhide();
     verifyfoo();
     verifymalloc();
+    verifyenviron();
+    verifymydata();
     verifyNULL();
 
     printf("[PASS] dladdr-basic\n");

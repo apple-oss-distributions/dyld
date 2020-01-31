@@ -1,6 +1,7 @@
 
 // BUILD:  $CC foo.c -dynamiclib -install_name /cant/find/me.dylib -o $BUILD_DIR/libmissing.dylib
-// BUILD:  $CC emptyMain.c $BUILD_DIR/libmissing.dylib  -o $BUILD_DIR/prog_missing_dylib.exe
+// BUILD:  $CC foo.c -dynamiclib $BUILD_DIR/libmissing.dylib -install_name $RUN_DIR/libMissingDylib.dylib -o $BUILD_DIR/libMissingDylib.dylib
+// BUILD:  $CC emptyMain.c $BUILD_DIR/libMissingDylib.dylib  -o $BUILD_DIR/prog_missing_dylib.exe
 // BUILD:  $CC defSymbol.c -dynamiclib -install_name $RUN_DIR/libMissingSymbols.dylib -o $BUILD_DIR/libMissingSymbols.dylib
 // BUILD:  $CC defSymbol.c -dynamiclib -install_name $RUN_DIR/libMissingSymbols.dylib -o $BUILD_DIR/libHasSymbols.dylib -DHAS_SYMBOL
 // BUILD:  $CC useSymbol.c $BUILD_DIR/libHasSymbols.dylib -o $BUILD_DIR/prog_missing_symbol.exe

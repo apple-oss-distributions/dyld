@@ -31,8 +31,8 @@
 #include <stdarg.h>
 #include <pthread.h>
 #include <Availability.h>
+#include <mach-o/dyld_priv.h>
 
-#include "mach-o/dyld_priv.h"
 #include "dyldLibSystemInterface.h"
 
 

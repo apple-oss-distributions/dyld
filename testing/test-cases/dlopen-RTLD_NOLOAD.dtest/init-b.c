@@ -14,7 +14,7 @@ void initB()
     inInitB = true;
 
     // "upward" link to libInitA.dylib
-    void* handle = dlopen("libInitA.dylib", RTLD_NOLOAD);
+    void* handle = dlopen(RUN_DIR "/libInitA.dylib", RTLD_NOLOAD);
     if ( handle == NULL ) {
         printf("[FAIL] dlopen-RTLD_NOLOAD-in-initializer: dlopen(libInitA.dylib, RTLD_NOLOAD) failed but it should have worked: %s\n", dlerror());
         return;

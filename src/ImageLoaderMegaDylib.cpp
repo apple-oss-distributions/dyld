@@ -39,14 +39,14 @@
 #include <mach/mach.h>
 #include <mach/thread_status.h>
 #include <mach-o/loader.h> 
+#include <mach-o/dyld_images.h>
 #include <libkern/OSAtomic.h>
 
 #include "ImageLoaderMegaDylib.h"
 #include "ImageLoaderMachO.h"
-#include "mach-o/dyld_images.h"
 #include "dyldLibSystemInterface.h"
 #include "Tracing.h"
-#include "dyld.h"
+#include "dyld2.h"
 
 // from dyld_gdb.cpp 
 extern void addImagesToAllImages(uint32_t infoCount, const dyld_image_info info[]);
@@ -268,11 +268,21 @@ unsigned ImageLoaderMegaDylib::findImageIndex(const LinkContext& context, const 
 	if ( hasDylib(path, &index) )
 		return index;
 
-	// <rdar://problem/26934069> Somehow we found the dylib in the cache, but it is not this literal string, try simple expansions of @rpath
-	if ( strncmp(path, "@rpath/", 7) == 0 ) {
+	if ( strncmp(path, "@rpath/libswift", 15) == 0 ) {
+		// <rdar://problem/51352017> a stable swift app built to run on pre-iOS-12.2 will use @rpath to reference swift dylibs in OS
+		const char* trailingPath = &path[7];
+		char possiblePath[strlen(trailingPath)+16];
+		strcpy(possiblePath, "/usr/lib/swift/");
+		strcat(possiblePath, trailingPath);
+		if ( hasDylib(possiblePath, &index) )
+			return index;
+	}
+	else if ( strncmp(path, "@rpath/", 7) == 0 ) {
+		// <rdar://problem/26934069> Somehow we found the dylib in the cache, but it is not this literal string, try simple expansions of @rpath
 		std::vector<const char*> rpathsFromMainExecutable;
 		context.mainExecutable->getRPaths(context, rpathsFromMainExecutable);
 		rpathsFromMainExecutable.push_back("/System/Library/Frameworks/");
+		rpathsFromMainExecutable.push_back("/usr/lib/swift/");
 		const char* trailingPath = &path[7];
 		for (const char* anRPath : rpathsFromMainExecutable) {
 			if ( anRPath[0] != '/' )
@@ -367,7 +377,7 @@ bool ImageLoaderMegaDylib::incrementCoalIterator(CoalIterator& it)
 				segOffset = read_uleb128(p, end);
 				mh = (mach_header*)getIndexedMachHeader((unsigned)it.imageIndex);
 				if ( uintptr_t segPrefAddress = ImageLoaderMachO::segPreferredAddress(mh, segIndex) )
-					it.address = segPrefAddress + segOffset + _slide;
+					it.address = segPrefAddress + (uintptr_t)segOffset + _slide;
 				else
 					dyld::throwf("BIND_OPCODE_SET_SEGMENT_AND_OFFSET_ULEB has segment %d which is too large", segIndex);
 				break;
@@ -452,7 +462,7 @@ void ImageLoaderMegaDylib::updateUsesCoalIterator(CoalIterator& it, uintptr_t va
 				segOffset = read_uleb128(p, end);
 				mh = (mach_header*)getIndexedMachHeader((unsigned)it.imageIndex);
 				if ( uintptr_t segPrefAddress = ImageLoaderMachO::segPreferredAddress(mh, segIndex) )
-					address = segPrefAddress + segOffset + _slide;
+					address = segPrefAddress + (uintptr_t)segOffset + _slide;
 				else
 					dyld::throwf("BIND_OPCODE_SET_SEGMENT_AND_OFFSET_ULEB has segment %d which is too large", segIndex);
 				break;
@@ -721,7 +731,7 @@ void ImageLoaderMegaDylib::processExportNode(const LinkContext& context, const c
 		default:
 			dyld::throwf("unsupported exported symbol kind. flags=%lu at node=%p", flags, exportNode);
 	}
-	dyld::throwf("unsupported exported symbol node=%p", exportNode);
+	//dyld::throwf("unsupported exported symbol node=%p", exportNode);
 }
 
 bool ImageLoaderMegaDylib::findInChainedTries(const LinkContext& context, const char* symbolName, unsigned definedImageIndex,
@@ -785,14 +795,9 @@ bool ImageLoaderMegaDylib::flatFindSymbol(const char* name, bool onlyInCoalesced
 		uint16_t imageIndex = _bottomUpArray[i];
 		if ( _stateFlags[imageIndex] == kStateUnused )
 			continue;
-#if USES_CHAINED_BINDS
 		const macho_header* mh = getIndexedMachHeader(imageIndex);
 		if ( onlyInCoalesced && (mh->flags & MH_WEAK_DEFINES) == 0 )
 			continue;
-#else
-		if ( onlyInCoalesced && (_imageExtras[imageIndex].weakBindingsSize == 0) )
-			continue;
-#endif
 		const uint8_t* exportNode;
 		const uint8_t* exportTrieEnd;
 		if ( exportTrieHasNode(name, imageIndex, &exportNode, &exportTrieEnd) ) {
@@ -928,18 +933,16 @@ void ImageLoaderMegaDylib::recursiveInitialization(const LinkContext& context, m
 void ImageLoaderMegaDylib::recursiveInitialization(const LinkContext& context, mach_port_t thisThread, const char* pathToInitialize,
 													InitializerTimingList& timingInfo, UninitedUpwards&)
 {
-	unsigned imageIndex;
-	if ( hasDylib(pathToInitialize, &imageIndex) ) {
-		UpwardIndexes upsBuffer[256];
-		UpwardIndexes& ups = upsBuffer[0];
-		ups.count = 0;
-		this->recursiveInitialization(context, thisThread, imageIndex, timingInfo, ups);
-		for (int i=0; i < ups.count; ++i) {
-			UpwardIndexes upsBuffer2[256];
-			UpwardIndexes& ignoreUp = upsBuffer2[0];
-			ignoreUp.count = 0;
-			this->recursiveInitialization(context, thisThread, ups.images[i], timingInfo, ignoreUp);
-		}
+	UpwardIndexes upsBuffer[256];
+	UpwardIndexes& ups = upsBuffer[0];
+	ups.count = 0;
+	unsigned imageIndex = findImageIndex(context, pathToInitialize);
+	this->recursiveInitialization(context, thisThread, imageIndex, timingInfo, ups);
+	for (int i=0; i < ups.count; ++i) {
+		UpwardIndexes upsBuffer2[256];
+		UpwardIndexes& ignoreUp = upsBuffer2[0];
+		ignoreUp.count = 0;
+		this->recursiveInitialization(context, thisThread, ups.images[i], timingInfo, ignoreUp);
 	}
 }
 

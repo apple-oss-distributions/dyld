@@ -29,6 +29,9 @@
 #include <dispatch/dispatch.h>
 #include <uuid/uuid.h>
 
+//FIXME we should include dyld_priv.h, but we need to do this to workaround a header search path bug in tapi
+typedef uint32_t dyld_platform_t;
+
 #ifdef __cplusplus
 extern "C" {
 #endif
@@ -108,8 +111,8 @@ extern void _dyld_process_info_for_each_image(dyld_process_info info, void (^cal
 // iterate all segments in an image
 extern void _dyld_process_info_for_each_segment(dyld_process_info info, uint64_t machHeaderAddress, void (^callback)(uint64_t segmentAddress, uint64_t segmentSize, const char* segmentName));
 
-
-
+// returns 0 if the platform cannot be determined, otherwise returns the platform of the remote process
+extern dyld_platform_t _dyld_process_info_get_platform(dyld_process_info info) SPI_AVAILABLE(macos(10.15), ios(13.0), tvos(13.0), watchos(6.0), bridgeos(4.0));
 
 typedef const struct dyld_process_info_notify_base* dyld_process_info_notify;
 

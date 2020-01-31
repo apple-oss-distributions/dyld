@@ -46,6 +46,7 @@
 #include "dyld_cache_format.h"
 #include "SharedCacheRuntime.h"
 #include "Loading.h"
+#include "BootArgs.h"
 
 #define ENABLE_DYLIBS_TO_OVERRIDE_CACHE_SIZE 1024
 
@@ -70,7 +71,6 @@ struct CacheInfo
     shared_file_mapping_np  mappings[3];
     uint64_t                slideInfoAddressUnslid;
     size_t                  slideInfoSize;
-    uint64_t                cachedDylibsGroupUnslid;
     uint64_t                sharedRegionStart;
     uint64_t                sharedRegionSize;
     uint64_t                maxSlide;
@@ -110,7 +110,7 @@ struct CacheInfo
 #endif
 
 
-
+#if !TARGET_OS_SIMULATOR
 static void rebaseChainV2(uint8_t* pageContent, uint16_t startOffset, uintptr_t slideAmount, const dyld_cache_slide_info2* slideInfo)
 {
     const uintptr_t   deltaMask    = (uintptr_t)(slideInfo->delta_mask);
@@ -134,8 +134,9 @@ static void rebaseChainV2(uint8_t* pageContent, uint16_t startOffset, uintptr_t 
         pageOffset += delta;
     }
 }
+#endif
 
-#if !__LP64__
+#if !__LP64__ && !TARGET_OS_SIMULATOR
 static void rebaseChainV4(uint8_t* pageContent, uint16_t startOffset, uintptr_t slideAmount, const dyld_cache_slide_info4* slideInfo)
 {
     const uintptr_t   deltaMask    = (uintptr_t)(slideInfo->delta_mask);
@@ -196,9 +197,10 @@ static void getCachePath(const SharedCacheOptions& options, size_t pathBufferSiz
         pathBuffer[len] = '\0';
     }
 #endif
+
     strlcat(pathBuffer, DYLD_SHARED_CACHE_BASE_NAME ARCH_NAME, pathBufferSize);
 
-#if __IPHONE_OS_VERSION_MIN_REQUIRED && !TARGET_IPHONE_SIMULATOR
+#if __IPHONE_OS_VERSION_MIN_REQUIRED && !TARGET_OS_SIMULATOR
     // use .development cache if it exists
     struct stat enableStatBuf;
     struct stat devCacheStatBuf;
@@ -207,7 +209,7 @@ static void getCachePath(const SharedCacheOptions& options, size_t pathBufferSiz
     bool enableFileExists = (dyld::my_stat(IPHONE_DYLD_SHARED_CACHE_DIR "enable-dylibs-to-override-cache", &enableStatBuf) == 0);
     bool devCacheExists = (dyld::my_stat(IPHONE_DYLD_SHARED_CACHE_DIR DYLD_SHARED_CACHE_BASE_NAME ARCH_NAME DYLD_SHARED_CACHE_DEVELOPMENT_EXT, &devCacheStatBuf) == 0);
     bool optCacheExists = (dyld::my_stat(IPHONE_DYLD_SHARED_CACHE_DIR DYLD_SHARED_CACHE_BASE_NAME ARCH_NAME, &optCacheStatBuf) == 0);
-    if ( developmentDevice && ((enableFileExists && (enableStatBuf.st_size < ENABLE_DYLIBS_TO_OVERRIDE_CACHE_SIZE) && devCacheExists) || !optCacheExists) )
+    if ( !BootArgs::forceCustomerCache() && developmentDevice && ((enableFileExists && (enableStatBuf.st_size < ENABLE_DYLIBS_TO_OVERRIDE_CACHE_SIZE) && devCacheExists) || !optCacheExists) )
         strlcat(pathBuffer, DYLD_SHARED_CACHE_DEVELOPMENT_EXT, pathBufferSize);
 #endif
 
@@ -244,7 +246,7 @@ static bool validPlatform(const SharedCacheOptions& options, const DyldSharedCac
     if ( cache->header.platform != (uint32_t)MachOFile::currentPlatform() )
         return false;
 
-#if TARGET_IPHONE_SIMULATOR
+#if TARGET_OS_SIMULATOR
     if ( cache->header.simulator == 0 )
         return false;
 #else
@@ -255,7 +257,7 @@ static bool validPlatform(const SharedCacheOptions& options, const DyldSharedCac
     return true;
 }
 
-
+#if !TARGET_OS_SIMULATOR
 static void verboseSharedCacheMappings(const shared_file_mapping_np mappings[3])
 {
     for (int i=0; i < 3; ++i) {
@@ -267,19 +269,21 @@ static void verboseSharedCacheMappings(const shared_file_mapping_np mappings[3])
             ((mappings[i].sfm_init_prot & VM_PROT_EXECUTE) ? "execute " : ""));
     }
 }
+#endif
 
 static bool preflightCacheFile(const SharedCacheOptions& options, SharedCacheLoadInfo* results, CacheInfo* info)
 {
+    
     // find and open shared cache file
     int fd = openSharedCacheFile(options, results);
     if ( fd == -1 ) {
-        results->errorMessage = "shared cache file cannot be opened";
+        results->errorMessage = "shared cache file open() failed";
         return false;
     }
 
     struct stat cacheStatBuf;
     if ( dyld::my_stat(results->path, &cacheStatBuf) != 0 ) {
-        results->errorMessage = "shared cache file cannot be stat()ed";
+        results->errorMessage = "shared cache file stat() failed";
         ::close(fd);
         return false;
     }
@@ -288,7 +292,7 @@ static bool preflightCacheFile(const SharedCacheOptions& options, SharedCacheLoa
     // sanity check header and mappings
     uint8_t firstPage[0x4000];
     if ( ::pread(fd, firstPage, sizeof(firstPage), 0) != sizeof(firstPage) ) {
-        results->errorMessage = "shared cache header could not be read";
+        results->errorMessage = "shared cache file pread() failed";
         ::close(fd);
         return false;
     }
@@ -383,10 +387,6 @@ static bool preflightCacheFile(const SharedCacheOptions& options, SharedCacheLoa
     info->mappings[1].sfm_init_prot |= VM_PROT_SLIDE;
     info->slideInfoAddressUnslid  = fileMappings[2].address + cache->header.slideInfoOffset - fileMappings[2].fileOffset;
     info->slideInfoSize           = (long)cache->header.slideInfoSize;
-    if ( cache->header.mappingOffset > 0xD0 )
-        info->cachedDylibsGroupUnslid = cache->header.dylibsImageGroupAddr;
-    else
-        info->cachedDylibsGroupUnslid = 0;
     if ( cache->header.mappingOffset >= 0xf8 ) {
         info->sharedRegionStart = cache->header.sharedRegionStart;
         info->sharedRegionSize  = cache->header.sharedRegionSize;
@@ -401,7 +401,7 @@ static bool preflightCacheFile(const SharedCacheOptions& options, SharedCacheLoa
 }
 
 
-#if !TARGET_IPHONE_SIMULATOR
+#if !TARGET_OS_SIMULATOR
 
 // update all __DATA pages with slide info
 static bool rebaseDataPages(bool isVerbose, CacheInfo& info, SharedCacheLoadInfo* results)
@@ -461,15 +461,17 @@ static bool rebaseDataPages(bool isVerbose, CacheInfo& info, SharedCacheLoadInfo
 #if __has_feature(ptrauth_calls)
                         uint64_t target = info.sharedRegionStart + loc->auth.offsetFromSharedCacheBase + results->slide;
                         MachOLoaded::ChainedFixupPointerOnDisk ptr;
-                        ptr.raw = *((uint64_t*)loc);
-                        loc->raw = ptr.signPointer(loc, target);
+                        ptr.raw64 = *((uint64_t*)loc);
+                        loc->raw = ptr.arm64e.signPointer(loc, target);
 #else
                         results->errorMessage = "invalid pointer kind in cache file";
                         return false;
 #endif
                      }
                      else {
-                         loc->raw = MachOLoaded::ChainedFixupPointerOnDisk::signExtend51(loc->plain.pointerValue) + results->slide;
+                        MachOLoaded::ChainedFixupPointerOnDisk ptr;
+                        ptr.raw64 = *((uint64_t*)loc);
+                        loc->raw = ptr.arm64e.unpackTarget() + results->slide;
                      }
                 } while (delta != 0);
             }
@@ -559,7 +561,7 @@ static long pickCacheASLR(CacheInfo& info)
 #endif
 
     // <rdar://problem/32031197> respect -disable_aslr boot-arg
-    if ( dyld3::bootArgsContains("-disable_aslr") )
+    if ( BootArgs::contains("-disable_aslr") )
         slide = 0;
 
     // update mappings
@@ -603,7 +605,7 @@ static bool mapCacheSystemWide(const SharedCacheOptions& options, SharedCacheLoa
     }
     return true;
 }
-#endif // TARGET_IPHONE_SIMULATOR
+#endif // TARGET_OS_SIMULATOR
 
 static bool mapCachePrivate(const SharedCacheOptions& options, SharedCacheLoadInfo* results)
 {
@@ -614,16 +616,23 @@ static bool mapCachePrivate(const SharedCacheOptions& options, SharedCacheLoadIn
 
     // compute ALSR slide
     results->slide = 0;
-#if !TARGET_IPHONE_SIMULATOR // simulator caches do not support sliding
+#if !TARGET_OS_SIMULATOR // simulator caches do not support sliding
     if ( info.slideInfoSize != 0 ) {
         results->slide = pickCacheASLR(info);
     }
 #endif
     results->loadAddress = (const DyldSharedCache*)(info.mappings[0].sfm_address);
 
-    // remove the shared region sub-map
-    vm_deallocate(mach_task_self(), (vm_address_t)info.sharedRegionStart, (vm_size_t)info.sharedRegionSize);
-    
+    // deallocate any existing system wide shared cache
+    deallocateExistingSharedCache();
+
+#if TARGET_OS_SIMULATOR && TARGET_OS_WATCH
+    // <rdar://problem/50887685> watchOS 32-bit cache does not overlap macOS dyld cache address range
+    // mmap() of a file needs a vm_allocation behind it, so make one
+    vm_address_t loadAddress = 0x40000000;
+    ::vm_allocate(mach_task_self(), &loadAddress, 0x40000000, VM_FLAGS_FIXED);
+#endif
+
     // map cache just for this process with mmap()
     for (int i=0; i < 3; ++i) {
         void* mmapAddress = (void*)(uintptr_t)(info.mappings[i].sfm_address);
@@ -640,15 +649,17 @@ static bool mapCachePrivate(const SharedCacheOptions& options, SharedCacheLoadIn
         if ( ::mmap(mmapAddress, size, protection, MAP_FIXED | MAP_PRIVATE, info.fd, offset) != mmapAddress ) {
             // failed to map some chunk of this shared cache file
             // clear shared region
-            vm_deallocate(mach_task_self(), (vm_address_t)info.sharedRegionStart, (vm_size_t)info.sharedRegionSize);
+            ::mmap((void*)((long)SHARED_REGION_BASE), SHARED_REGION_SIZE, PROT_NONE, MAP_FIXED | MAP_PRIVATE| MAP_ANON, 0, 0);
             // return failure
             results->loadAddress        = nullptr;
             results->errorMessage       = "could not mmap() part of dyld cache";
+            ::close(info.fd);
             return false;
         }
     }
+    ::close(info.fd);
 
-#if TARGET_IPHONE_SIMULATOR // simulator caches do not support sliding
+#if TARGET_OS_SIMULATOR // simulator caches do not support sliding
     return true;
 #else
     bool success = rebaseDataPages(options.verbose, info, results);
@@ -669,7 +680,7 @@ bool loadDyldCache(const SharedCacheOptions& options, SharedCacheLoadInfo* resul
     results->slide              = 0;
     results->errorMessage       = nullptr;
 
-#if TARGET_IPHONE_SIMULATOR
+#if TARGET_OS_SIMULATOR
     // simulator only supports mmap()ing cache privately into process
     return mapCachePrivate(options, results);
 #else
@@ -770,13 +781,26 @@ bool findInSharedCacheImage(const SharedCacheLoadInfo& loadInfo, const char* dyl
 
 bool pathIsInSharedCacheImage(const SharedCacheLoadInfo& loadInfo, const char* dylibPathToFind)
 {
-    if ( (loadInfo.loadAddress == nullptr) || (loadInfo.loadAddress->header.formatVersion != closure::kFormatVersion) )
+    if ( (loadInfo.loadAddress == nullptr) )
         return false;
 
     uint32_t imageIndex;
     return loadInfo.loadAddress->hasImagePath(dylibPathToFind, imageIndex);
 }
 
+void deallocateExistingSharedCache()
+{
+#if TARGET_OS_SIMULATOR
+    // dyld deallocated macOS shared cache before jumping into dyld_sim
+#else
+    // <rdar://problem/5077374> remove the shared region sub-map
+    uint64_t existingCacheAddress = 0;
+    if ( __shared_region_check_np(&existingCacheAddress) == 0 ) {
+        ::mmap((void*)((long)SHARED_REGION_BASE), SHARED_REGION_SIZE, PROT_NONE, MAP_FIXED | MAP_PRIVATE| MAP_ANON, 0, 0);
+    }
+#endif
+
+}
 
 } // namespace dyld3
 

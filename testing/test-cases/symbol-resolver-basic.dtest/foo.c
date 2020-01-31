@@ -16,10 +16,11 @@ static int foo_zero()
 void* foo()
 {
 	__asm__(".symbol_resolver _foo");  // magic until we have compiler support
-	if ( getenv("TEN") != NULL )
+#if TEN
 		return &foo_ten;
-	else
+#else
 		return &foo_zero;
+#endif
 }
 
 

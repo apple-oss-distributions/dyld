@@ -85,20 +85,19 @@ void Diagnostics::error(const char* format, ...)
 
 void Diagnostics::error(const char* format, va_list list)
 {
+    //FIXME: this should be assertNoError(), but we currently overwrite some errors
+    //assertNoError();
     _buffer = _simple_salloc();
     _simple_vsprintf(_buffer, format, list);
 
 #if BUILDING_CACHE_BUILDER
     if ( !_verbose )
         return;
-    
-    char *output_string;
-    vasprintf(&output_string, format, list);
-    
+
     if (_prefix.empty()) {
-        fprintf(stderr, "%s", output_string);
+        fprintf(stderr, "%s", _simple_string(_buffer));
     } else {
-        fprintf(stderr, "[%s] %s", _prefix.c_str(), output_string);
+        fprintf(stderr, "[%s] %s", _prefix.c_str(), _simple_string(_buffer));
     }
 #endif
 }
@@ -166,6 +165,7 @@ void Diagnostics::verbose(const char* format, ...)
     } else {
         fprintf(stderr, "[%s] %s", _prefix.c_str(), output_string);
     }
+    free(output_string);
 }
 
 const std::string Diagnostics::prefix() const
@@ -186,7 +186,7 @@ std::string Diagnostics::errorMessage() const
     if ( _buffer != nullptr )
         return _simple_string(_buffer);
     else
-        return std::string();
+        return "";
 }
 
 const std::set<std::string> Diagnostics::warnings() const

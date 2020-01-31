@@ -82,7 +82,7 @@ public:
     void                                        writeFile(const std::string& path);
     void                                        writeBuffer(uint8_t*& buffer, uint64_t& size);
     void                                        writeMapFile(const std::string& path);
-    void                                        writeMapFileBuffer(uint8_t*& buffer, uint64_t& bufferSize);
+    std::string                                 getMapFileBuffer(const std::string& cacheDisposition) const;
     void                                        deleteBuffer();
     std::string                                 errorMessage();
     const std::set<std::string>                 warnings();
@@ -90,6 +90,7 @@ public:
     const bool                                  agileSignature();
     const std::string                           cdHashFirst();
     const std::string                           cdHashSecond();
+    const std::string                           uuid() const;
 
     void forEachCacheDylib(void (^callback)(const std::string& path));
 
@@ -100,8 +101,47 @@ public:
         uint64_t        dstCacheUnslidAddress;
         uint32_t        dstCacheFileOffset;
         uint32_t        dstCacheSegmentSize;
+        uint32_t        dstCacheFileSize;
         uint32_t        copySegmentSize;
         uint32_t        srcSegmentIndex;
+    };
+
+    struct DylibTextCoalescer {
+
+        typedef std::map<uint32_t, uint32_t> DylibSectionOffsetToCacheSectionOffset;
+
+        DylibSectionOffsetToCacheSectionOffset objcClassNames;
+        DylibSectionOffsetToCacheSectionOffset objcMethNames;
+        DylibSectionOffsetToCacheSectionOffset objcMethTypes;
+
+        bool sectionWasCoalesced(std::string_view sectionName) const;
+        DylibSectionOffsetToCacheSectionOffset& getSectionCoalescer(std::string_view sectionName);
+        const DylibSectionOffsetToCacheSectionOffset& getSectionCoalescer(std::string_view sectionName) const;
+    };
+
+    struct CacheCoalescedText {
+        static const char* SupportedSections[3];
+        struct StringSection {
+            // Map from class name strings to offsets in to the class names buffer
+            std::map<std::string_view, uint32_t> stringsToOffsets;
+            uint8_t*                             bufferAddr       = nullptr;
+            uint32_t                             bufferSize       = 0;
+            uint64_t                             bufferVMAddr     = 0;
+
+            // Note this is for debugging only
+            uint64_t                             savedSpace       = 0;
+        };
+
+        StringSection objcClassNames;
+        StringSection objcMethNames;
+        StringSection objcMethTypes;
+
+        void parseCoalescableText(const dyld3::MachOAnalyzer* ma,
+                                   DylibTextCoalescer& textCoalescer);
+        void clear();
+
+        StringSection& getSectionData(std::string_view sectionName);
+        const StringSection& getSectionData(std::string_view sectionName) const;
     };
 
     class ASLR_Tracker
@@ -115,6 +155,7 @@ public:
         bool        has(void* p);
         const bool* bitmap()        { return _bitmap; }
         unsigned    dataPageCount() { return _pageCount; }
+        void        disable() { _enabled = false; };
 
     private:
 
@@ -123,6 +164,7 @@ public:
         bool*        _bitmap         = nullptr;
         unsigned     _pageCount      = 0;
         unsigned     _pageSize       = 4096;
+        bool         _enabled        = true;
     };
 
     typedef std::map<uint64_t, std::set<void*>> LOH_Tracker;
@@ -144,20 +186,20 @@ private:
     {
         uint64_t    sharedMemoryStart;
         uint64_t    sharedMemorySize;
+        uint64_t    textAndDataMaxSize;
         uint64_t    sharedRegionPadding;
         uint64_t    pointerDeltaMask;
         const char* archName;
-        uint32_t    branchPoolTextSize;
-        uint32_t    branchPoolLinkEditSize;
-        uint32_t    branchReach;
         uint8_t     sharedRegionAlignP2;
         uint8_t     slideInfoBytesPerPage;
         bool        sharedRegionsAreDiscontiguous;
         bool        is64;
+        bool        useValueAdd;
     };
 
     static const ArchLayout  _s_archLayout[];
-    static const char* const _s_neverStubEliminate[];
+    static const char* const _s_neverStubEliminateDylibs[];
+    static const char* const _s_neverStubEliminateSymbols[];
 
     struct UnmappedRegion
     {
@@ -171,9 +213,12 @@ private:
         const LoadedMachO*              input;
         std::string                     runtimePath;
         std::vector<SegmentMappingInfo> cacheLocation;
+        DylibTextCoalescer              textCoalescer;
     };
 
     void        makeSortedDylibs(const std::vector<LoadedMachO>& dylibs, const std::unordered_map<std::string, unsigned> sortOrder);
+    void        processSelectorStrings(const std::vector<LoadedMachO>& executables);
+    void        parseCoalescableSegments();
     void        assignSegmentAddresses();
 
     uint64_t    cacheOverflowAmount();
@@ -211,17 +256,19 @@ private:
     void        adjustDylibSegments(const DylibInfo& dylib, Diagnostics& diag) const;
 
     // implemented in OptimizerLinkedit.cpp
-    void        optimizeLinkedit(const std::vector<uint64_t>& branchPoolOffsets);
+    void        optimizeLinkedit();
 
     // implemented in OptimizerObjC.cpp
     void        optimizeObjC();
+    uint32_t    computeReadOnlyObjC(uint32_t selRefCount, uint32_t classDefCount, uint32_t protocolDefCount);
+    uint32_t    computeReadWriteObjC(uint32_t imageCount, uint32_t protocolDefCount);
 
     // implemented in OptimizerBranches.cpp
-    void        optimizeAwayStubs(const std::vector<uint64_t>& branchPoolStartAddrs, uint64_t branchPoolsLinkEditStartAddr);
-
+    void        optimizeAwayStubs();
 
     typedef std::unordered_map<std::string, const dyld3::MachOAnalyzer*> InstallNameToMA;
 
+    typedef uint64_t                                                CacheOffset;
 
     const DyldSharedCache::CreateOptions&       _options;
     const dyld3::closure::FileSystem&           _fileSystem;
@@ -238,7 +285,14 @@ private:
     uint32_t                                    _aliasCount;
     uint64_t                                    _slideInfoFileOffset;
     uint64_t                                    _slideInfoBufferSizeAllocated;
+    uint8_t*                                    _objcReadOnlyBuffer;
+    uint64_t                                    _objcReadOnlyBufferSizeUsed;
+    uint64_t                                    _objcReadOnlyBufferSizeAllocated;
+    uint8_t*                                    _objcReadWriteBuffer;
+    uint64_t                                    _objcReadWriteBufferSizeAllocated;
     uint64_t                                    _allocatedBufferSize;
+    CacheCoalescedText                          _coalescedText;
+    uint64_t                                    _selectorStringsFromExecutables;
     std::vector<DylibInfo>                      _sortedDylibs;
     InstallNameToMA                             _installNameToCacheDylib;
     std::unordered_map<std::string, uint32_t>   _dataDirtySegsOrder;
@@ -248,10 +302,12 @@ private:
     mutable LOH_Tracker                         _lohTracker;
     const dyld3::closure::ImageArray*           _imageArray;
     uint32_t                                    _sharedStringsPoolVmOffset;
-    std::vector<uint64_t>                       _branchPoolStarts;
-    uint64_t                                    _branchPoolsLinkEditStartAddr;
     uint8_t                                     _cdHashFirst[20];
     uint8_t                                     _cdHashSecond[20];
+    std::unordered_map<const dyld3::MachOLoaded*, std::set<CacheOffset>>        _dylibToItsExports;
+    std::set<std::pair<const dyld3::MachOLoaded*, CacheOffset>>                 _dylibWeakExports;
+    std::unordered_map<CacheOffset, std::vector<dyld_cache_patchable_location>> _exportsToUses;
+    std::unordered_map<CacheOffset, std::string>                                _exportsToName;
 };
 
 

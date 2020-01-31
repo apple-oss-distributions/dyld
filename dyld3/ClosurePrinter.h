@@ -26,6 +26,7 @@
 #define ClosurePrinter_h
 
 #include <stdio.h>
+#include <iostream>
 
 #include "Closure.h"
 #include "DyldSharedCache.h"
@@ -35,11 +36,15 @@ namespace dyld3 {
 namespace closure {
 
 
-void printClosureAsJSON(   const LaunchClosure* cls,     const Array<const ImageArray*>& imagesArrays, bool printFixups=false, FILE* out=stdout);
-void printClosureAsJSON(   const DlopenClosure* cls,     const Array<const ImageArray*>& imagesArrays, bool printFixups=false, FILE* out=stdout);
-void printImageAsJSON(     const Image* image,           const Array<const ImageArray*>& imagesArrays, bool printFixups=false, FILE* out=stdout);
+void printClosureAsJSON(   const LaunchClosure* cls,     const Array<const ImageArray*>& imagesArrays, bool printFixups=false,
+                           bool printRaw = false,        const DyldSharedCache* dyldCache=nullptr, std::ostream& out = std::cout);
+void printClosureAsJSON(   const DlopenClosure* cls,     const Array<const ImageArray*>& imagesArrays, bool printFixups=false,
+                           bool printRaw = false,        const DyldSharedCache* dyldCache=nullptr, std::ostream& out = std::cout);
+void printImageAsJSON(     const Image* image,           const Array<const ImageArray*>& imagesArrays, bool printFixups=false,
+                           bool printRaw = false,        const DyldSharedCache* dyldCache=nullptr, std::ostream& out = std::cout);
 
-void printDyldCacheImagesAsJSON(const DyldSharedCache* dyldCache, bool printFixups=false, FILE* out=stdout);
+void printDyldCacheImagesAsJSON(const DyldSharedCache* dyldCache, bool printFixups=false, bool printRaw = false,
+                                std::ostream& out = std::cout);
 
 
 } //  namespace closure

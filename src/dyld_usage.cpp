@@ -114,15 +114,24 @@ mach_to_nano(uint64_t mach)
     return nanoseconds;
 }
 
+static
+std::string safeStringFromCString(const char *str) {
+    if (str) {
+        return str;
+    }
+    return "";
+}
+
 struct output_renderer {
     output_renderer(ktrace_session_t S, ktrace_event_t E) :
-    _commandName(ktrace_get_execname_for_thread(s, E->threadid)),
-    _threadid(E->threadid), _pid(ktrace_get_pid_for_thread(s, E->threadid)) {}
+    _commandName(safeStringFromCString(ktrace_get_execname_for_thread(s, E->threadid))),
+    _threadid((unsigned long)(E->threadid)), _pid(ktrace_get_pid_for_thread(s, E->threadid)) {}
     void recordEvent(ktrace_event_t event) {
         uint32_t code = event->debugid & KDBG_EVENTID_MASK;
         if (event->debugid & DBG_FUNC_START) {
             switch(code) {
                 case DBG_DYLD_TIMING_DLOPEN: enqueueEvent<dlopen>(event, true); break;
+                case DBG_DYLD_TIMING_DLOPEN_PREFLIGHT: enqueueEvent<dlopen_preflight>(event, true); break;
                 case DBG_DYLD_TIMING_LAUNCH_EXECUTABLE: enqueueEvent<app_launch>(event, true); break;
                 case DBG_DYLD_TIMING_DLSYM: enqueueEvent<dlsym>(event, true); break;
                 case DBG_DYLD_TIMING_STATIC_INITIALIZER: enqueueEvent<static_init>(event, false); break;
@@ -142,6 +151,9 @@ struct output_renderer {
                 case DBG_DYLD_TIMING_DLOPEN: dequeueEvent<dlopen>(event, [&](dlopen* endEvent){
                     endEvent->result = event->arg2;
                 }); break;
+                case DBG_DYLD_TIMING_DLOPEN_PREFLIGHT: dequeueEvent<dlopen_preflight>(event, [&](dlopen_preflight* endEvent){
+                    endEvent->result = event->arg2;
+                }); break;
                 case DBG_DYLD_TIMING_LAUNCH_EXECUTABLE: dequeueEvent<app_launch>(event, [&](app_launch* endEvent){
                     endEvent->launchMode = event->arg4;
                 }); break;
@@ -154,7 +166,9 @@ struct output_renderer {
                 }); break;
                 case DBG_DYLD_TIMING_APPLY_FIXUPS: dequeueEvent<apply_fixups>(event, [&](apply_fixups* endEvent){}); break;
                 case DBG_DYLD_TIMING_ATTACH_CODESIGNATURE: dequeueEvent<attach_signature>(event, [&](attach_signature* endEvent){}); break;
-                case DBG_DYLD_TIMING_BUILD_CLOSURE: dequeueEvent<build_closure>(event, [&](build_closure* endEvent){}); break;
+                case DBG_DYLD_TIMING_BUILD_CLOSURE: dequeueEvent<build_closure>(event, [&](build_closure* endEvent){
+                    endEvent->closureBuildState = event->arg2;
+                }); break;
                 case DBG_DYLD_TIMING_DLCLOSE: dequeueEvent<dlclose>(event, [&](dlclose* endEvent){
                     endEvent->result = (int)event->arg2;
                 }); break;
@@ -201,7 +215,7 @@ private:
     }
 
     struct event_pair {
-        event_pair(ktrace_event_t E) : _startTime(E->timestamp), _walltime(E->walltime), _threadid(E->threadid), _depth(0),
+        event_pair(ktrace_event_t E) : _startTime(E->timestamp), _walltime(E->walltime), _threadid((unsigned long)(E->threadid)), _depth(0),
                                        _eventCode(KDBG_EXTRACT_CODE(E->debugid)) {};
         virtual ~event_pair(){}
         std::vector<std::shared_ptr<event_pair>>& children() { return _children; }
@@ -245,7 +259,7 @@ private:
         result << _timestampStr;
 
         if (extended) {
-            result << "." << std::setw(6) << std::setfill(' ') << std::to_string(now_walltime.tv_usec);
+            result << "." << std::setw(6) << std::setfill('0') << std::to_string(now_walltime.tv_usec);
         }
         return result.str();
     }
@@ -277,6 +291,8 @@ public:
         bool extended = false;
         if (auto dlopenNode = dynamic_cast<dlopen *>(node.get())) {
             line << "dlopen(\"" << dlopenNode->path << "\", " << dlopenNode->flagString() << ") -> 0x" << dlopenNode->result;
+        } else if (auto dlopenPreflightNode = dynamic_cast<dlopen_preflight *>(node.get())) {
+            line << "dlopen_preflight(\"" << dlopenPreflightNode->path << ") -> 0x" << dlopenPreflightNode->result;
         } else if (auto dlsymNode = dynamic_cast<dlsym *>(node.get())) {
             line << "dlsym(0x" << std::hex << dlsymNode->handle << ", \"" << dlsymNode->symbol << "\") -> " << dlsymNode->result;
         } else if (auto mapImageNode = dynamic_cast<map_image *>(node.get())) {
@@ -284,7 +300,7 @@ public:
         } else if (auto sigNode = dynamic_cast<attach_signature *>(node.get())) {
             line << "attach codesignature";
         } else if (auto buildClosureNode = dynamic_cast<build_closure *>(node.get())) {
-            line << "build closure";
+            line << "build closure -> " << buildClosureNode->buildStateString();
         } else if (auto launchNode = dynamic_cast<app_launch *>(node.get())) {
             line << "app launch (dyld" << std::dec << launchNode->launchMode << ") -> 0x" << std::hex << launchNode->address;
         } else if (auto initNode  = dynamic_cast<static_init *>(node.get())) {
@@ -314,7 +330,7 @@ public:
         std::string lineStr = line.str();
         std::string commandStr = process(node, extended);
         std::string durationStr = duration(node);
-        uint64_t lineMax = width - (timestampStr.length() + commandStr.length() + durationStr.length() + 2*depth + 3);
+        size_t lineMax = (size_t)width - (timestampStr.length() + commandStr.length() + durationStr.length() + 2*(size_t)depth + 3);
         lineStr.resize(lineMax, ' ');
 
         sstr << timestampStr << " ";
@@ -331,6 +347,10 @@ public:
             sstr << std::hex;
             sstr << "{\"type\":\"dlopen\",\"path\":\"" << dlopenNode->path << "\",\"flags\":\"0x" << dlopenNode->flags << "\"";
             sstr << ",\"result\":\"" << dlopenNode->result << "\"";
+        } else if (auto dlopenPreflightNode = dynamic_cast<dlopen_preflight *>(node.get())) {
+            sstr << std::hex;
+            sstr << "{\"type\":\"dlopen_preflight\",\"path\":\"" << dlopenPreflightNode->path << "\"";
+            sstr << ",\"result\":\"" << dlopenPreflightNode->result << "\"";
         } else if (auto dlsymNode = dynamic_cast<dlsym *>(node.get())) {
             sstr << std::hex  << "{\"type\":\"dlsym\",\"symbol\":\"" << dlsymNode->symbol << "\",\"handle\":\"0x";
             sstr << dlsymNode->handle << "\",\"result\":\"0x" << dlsymNode->result << "\"";
@@ -340,7 +360,7 @@ public:
         } else if (auto sigNode = dynamic_cast<attach_signature *>(node.get())) {
             sstr << "{\"type\":\"attach_codesignature\"";
         } else if (auto buildClosureNode = dynamic_cast<build_closure *>(node.get())) {
-            sstr << "{\"type\":\"build_closure\"";
+            sstr << "{\"type\":\"build_closure\", \"state\":\"" << buildClosureNode->buildStateString() << "\"";
         } else if (auto launchNode = dynamic_cast<app_launch *>(node.get())) {
             sstr << std::hex;
             sstr << "{\"type\":\"app_launch\",\"address\":\"0x";
@@ -382,6 +402,8 @@ public:
         auto emitEventInfo = [&](bool isStart) {
             if (auto dlopenNode = dynamic_cast<dlopen *>(node.get())) {
                 sstr << "{\"name\": \"dlopen(" << dlopenNode->path << ")\", \"cat\": \"" << "dlopen" << "\"";
+            } else if (auto dlopenPreflightNode = dynamic_cast<dlopen_preflight *>(node.get())) {
+                sstr << "{\"name\": \"dlopen_preflight(" << dlopenPreflightNode->path << ")\", \"cat\": \"" << "dlopen_preflight" << "\"";
             } else if (auto dlsymNode = dynamic_cast<dlsym *>(node.get())) {
                 sstr << "{\"name\": \"dlsym(" << dlsymNode->symbol << ")\", \"cat\": \"" << "dlsym" << "\"";
             } else if (auto mapImageNode = dynamic_cast<map_image *>(node.get())) {
@@ -502,6 +524,12 @@ private:
         uint64_t result;
     };
 
+    struct dlopen_preflight : event_pair {
+    dlopen_preflight(ktrace_event_t E) : event_pair(E), path(stringForID(E->arg2)) {}
+        std::string path;
+        uint64_t result;
+    };
+
     struct dlsym : event_pair {
         dlsym(ktrace_event_t E) : event_pair(E), handle(E->arg2), symbol(stringForID(E->arg3)) {}
         std::string symbol;
@@ -551,7 +579,25 @@ private:
     };
 
     struct build_closure : event_pair {
-        build_closure(ktrace_event_t E) : event_pair(E) {}
+        build_closure(ktrace_event_t E) : event_pair(E), closureBuildState(0) {}
+        uint64_t closureBuildState;
+
+        std::string buildStateString() const {
+            switch ((dyld3::DyldTimingBuildClosure)closureBuildState) {
+                case dyld3::DyldTimingBuildClosure::ClosureBuildFailure:
+                    return "failed to build closure";
+                case dyld3::DyldTimingBuildClosure::LaunchClosure_Built:
+                    return "built launch closure";
+                case dyld3::DyldTimingBuildClosure::DlopenClosure_UsedSharedCacheDylib:
+                    return "used shared cache dylib closure";
+                case dyld3::DyldTimingBuildClosure::DlopenClosure_UsedSharedCacheOther:
+                    return "used shared cache dlopen closure";
+                case dyld3::DyldTimingBuildClosure::DlopenClosure_NoLoad:
+                    return "dlopen was no load";
+                case dyld3::DyldTimingBuildClosure::DlopenClosure_Built:
+                    return "built dlopen closure";
+            }
+        };
     };
 
     struct add_image_callback : event_pair {
@@ -656,11 +702,12 @@ setup_ktrace_callbacks(void)
     // Event though our events are paired, we process them individually so we can
     // render nested events
     ktrace_events_range(s, KDBG_EVENTID(DBG_DYLD, DBG_DYLD_INTERNAL_SUBCLASS, 0), KDBG_EVENTID(DBG_DYLD, DBG_DYLD_API_SUBCLASS+1, 0), ^(ktrace_event_t event){
-        assert((event->debugid & KDBG_FUNC_MASK) != 0);
-        auto i = sOutputManager.sOutputRenders.find(event->threadid);
+        if ((event->debugid & KDBG_FUNC_MASK) == 0)
+            return;
+        auto i = sOutputManager.sOutputRenders.find((size_t)(event->threadid));
         if (i == sOutputManager.sOutputRenders.end()) {
             sOutputManager.sOutputRenders.emplace(std::make_pair(event->threadid, std::make_unique<output_renderer>(s, event)));
-            i = sOutputManager.sOutputRenders.find(event->threadid);
+            i = sOutputManager.sOutputRenders.find((size_t)(event->threadid));
         }
         i->second->recordEvent(event);
         if (i->second->empty()) {

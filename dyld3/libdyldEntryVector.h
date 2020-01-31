@@ -27,6 +27,7 @@
 #define __DYLD_ENTRY_VECTOR_H__
 
 #include <mach-o/loader.h>
+#include <Availability.h>
 
 #include "Loading.h"
 
@@ -38,7 +39,9 @@ namespace dyld3 {
 
 struct LibDyldEntryVector
 {
-    enum { kCurrentVectorVersion = 6 };
+    enum { kCurrentVectorVersion = 7 };
+    // The 32-bit caches steal bits to make rebase chains, so use 32-bits for the binary format version storage, but mask only some to actually use
+    enum { kBinaryFormatVersionMask = 0x00FFFFFF };
 
     uint32_t    vectorVersion;              // should be kCurrentVectorVersion
     uint32_t    binaryFormatVersion;        // should be dyld3::closure::kFormatVersion
@@ -47,7 +50,7 @@ struct LibDyldEntryVector
     void        (*setOldAllImageInfo)(dyld_all_image_infos*);
     void        (*setInitialImageList)(const closure::LaunchClosure* closure,
                                         const DyldSharedCache* dyldCacheLoadAddress, const char* dyldCachePath,
-                                        const Array<LoadedImage>& initialImages, const LoadedImage& libSystem);
+                                        const Array<LoadedImage>& initialImages, LoadedImage& libSystem);
     void        (*runInitialzersBottomUp)(const mach_header* topImageLoadAddress);
     void        (*startFunc)();
     // added in version 3
@@ -55,15 +58,19 @@ struct LibDyldEntryVector
     // added in version 4
     void        (*setLogFunction)(void (*logFunction)(const char* format, va_list list));
     // added in version 5
-    void        (*setRestrictions)(bool allowAtPaths, bool allowEnvVars);
+    void        (*setRestrictions)(bool allowAtPaths, bool allowEnvVars, bool allowFallbackPaths);
     // added in version 6
     void        (*setNotifyMonitoringDyldMain)(void (*notifyMonitoringDyldMain)());
     void        (*setNotifyMonitoringDyld)(void (*notifyMonitoringDyldMain)(bool unloading, unsigned imageCount,
                                                                             const struct mach_header* loadAddresses[],
                                                                             const char* imagePaths[]));
+    // added in version 7
+    void        (*setHasCacheOverrides)(bool someCacheImageOverriden);
 };
 
 extern const LibDyldEntryVector entryVectorForDyld;
+
+extern int compatFuncLookup(const char* name, void** address) __API_AVAILABLE(ios(13.0));
 
 } // namespace dyld3
 

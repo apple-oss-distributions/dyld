@@ -2,10 +2,10 @@
 // BUILD:  mkdir -p $TEMP_DIR/Foo.framework $BUILD_DIR/FallbackFrameworks/Foo.framework
 // BUILD:  $CC foo.c -dynamiclib -o $TEMP_DIR/Foo.framework/Foo                     -install_name $RUN_DIR/Foo.framework/Foo -DVALUE=1
 // BUILD:  $CC foo.c -dynamiclib -o $BUILD_DIR/FallbackFrameworks/Foo.framework/Foo -install_name $RUN_DIR/Foo.framework/Foo -DVALUE=42
-// BUILD:  $CC main.c            -o $BUILD_DIR/main.exe $TEMP_DIR/Foo.framework/Foo
-// BUILD:  $DYLD_ENV_VARS_ENABLE $BUILD_DIR/main.exe
+// BUILD:  $CC main.c            -o $BUILD_DIR/env-DYLD_FALLBACK_FRAMEWORK_PATH.exe $TEMP_DIR/Foo.framework/Foo
+// BUILD:  $DYLD_ENV_VARS_ENABLE $BUILD_DIR/env-DYLD_FALLBACK_FRAMEWORK_PATH.exe
 
-// RUN:  DYLD_FALLBACK_FRAMEWORK_PATH=$RUN_DIR/FallbackFrameworks/ ./main.exe
+// RUN:  DYLD_FALLBACK_FRAMEWORK_PATH=$RUN_DIR/FallbackFrameworks/ ./env-DYLD_FALLBACK_FRAMEWORK_PATH.exe
 
 #include <stdio.h>
 #include <stdlib.h>

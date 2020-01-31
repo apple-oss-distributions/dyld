@@ -41,6 +41,7 @@
 #include <CommonCrypto/CommonDigest.h>
 #include <CommonCrypto/CommonDigestSPI.h>
 #include <pthread/pthread.h>
+#include <apfs/apfs_fsctl.h>
 
 #include <string>
 #include <vector>
@@ -57,6 +58,7 @@
 #include "Diagnostics.h"
 #include "ClosureBuilder.h"
 #include "Closure.h"
+#include "ClosureFileSystemNull.h"
 #include "StringUtils.h"
 
 #if __has_include("dyld_cache_config.h")
@@ -65,7 +67,7 @@
     #define ARM_SHARED_REGION_START      0x1A000000ULL
     #define ARM_SHARED_REGION_SIZE       0x26000000ULL
     #define ARM64_SHARED_REGION_START   0x180000000ULL
-    #define ARM64_SHARED_REGION_SIZE     0x40000000ULL
+    #define ARM64_SHARED_REGION_SIZE     0x100000000ULL
 #endif
 
 #ifndef ARM64_32_SHARED_REGION_START
@@ -73,26 +75,296 @@
     #define ARM64_32_SHARED_REGION_SIZE  0x26000000ULL
 #endif
 
+#if ARM_SHARED_REGION_SIZE > 0x26000000ULL
+  #define  ARMV7K_CHAIN_BITS    0xC0000000
+  #define  ARMV7K_MAX           0x0
+#else
+  #define  ARMV7K_CHAIN_BITS    0xE0000000
+  #define  ARMV7K_MAX           0x20000000
+#endif
+
 const CacheBuilder::ArchLayout CacheBuilder::_s_archLayout[] = {
-    { 0x7FFF20000000ULL,            0xEFE00000ULL,              0x40000000, 0xFFFF000000000000, "x86_64",  0,          0,          0,          12, 2, true,  true  },
-    { 0x7FFF20000000ULL,            0xEFE00000ULL,              0x40000000, 0xFFFF000000000000, "x86_64h", 0,          0,          0,          12, 2, true,  true  },
-    { SHARED_REGION_BASE_I386,      SHARED_REGION_SIZE_I386,    0x00200000,                0x0, "i386",    0,          0,          0,          12, 0, false, false },
-    { ARM64_SHARED_REGION_START,    ARM64_SHARED_REGION_SIZE,   0x02000000, 0x00FFFF0000000000, "arm64",   0x0000C000, 0x00100000, 0x07F00000, 14, 2, false, true  },
+    { 0x7FFF20000000ULL,            0xEFE00000ULL,              0x0,         0x40000000, 0x00FFFF0000000000, "x86_64",   12, 2, true,  true,  true  },
+    { 0x7FFF20000000ULL,            0xEFE00000ULL,              0x0,         0x40000000, 0x00FFFF0000000000, "x86_64h",  12, 2, true,  true,  true  },
+    { SHARED_REGION_BASE_I386,      SHARED_REGION_SIZE_I386,    0x0,         0x00200000,                0x0, "i386",     12, 0, false, false, true  },
+    { ARM64_SHARED_REGION_START,    ARM64_SHARED_REGION_SIZE,   0x0,         0x02000000, 0x00FFFF0000000000, "arm64",    14, 2, false, true,  false },
 #if SUPPORT_ARCH_arm64e
-    { ARM64_SHARED_REGION_START,    ARM64_SHARED_REGION_SIZE,   0x02000000, 0x00FFFF0000000000, "arm64e",  0x0000C000, 0x00100000, 0x07F00000, 14, 2, false, true  },
+    { ARM64_SHARED_REGION_START,    ARM64_SHARED_REGION_SIZE,   0x0,         0x02000000, 0x00FFFF0000000000, "arm64e",   14, 2, false, true,  false },
 #endif
 #if SUPPORT_ARCH_arm64_32
-    { ARM64_32_SHARED_REGION_START, ARM64_32_SHARED_REGION_SIZE,0x02000000,         0xC0000000, "arm64_32",0x0000C000, 0x00100000, 0x07F00000, 14, 6, false, false },
+    { ARM64_32_SHARED_REGION_START, ARM64_32_SHARED_REGION_SIZE,0x0,         0x02000000,         0xC0000000, "arm64_32", 14, 6, false, false, true  },
 #endif
-    { ARM_SHARED_REGION_START,      ARM_SHARED_REGION_SIZE,     0x02000000,         0xE0000000, "armv7s",  0,          0,          0,          14, 4, false, false },
-    { ARM_SHARED_REGION_START,      ARM_SHARED_REGION_SIZE,     0x00400000,         0xE0000000, "armv7k",  0,          0,          0,          14, 4, false, false },
-    { 0x40000000,                   0x40000000,                 0x02000000,                0x0, "sim-x86", 0,          0,          0,          14, 0, false, false }
+    { ARM_SHARED_REGION_START,      ARM_SHARED_REGION_SIZE,     0x0,         0x02000000,         0xE0000000, "armv7s",   14, 4, false, false, true  },
+    { ARM_SHARED_REGION_START,      ARM_SHARED_REGION_SIZE,     ARMV7K_MAX,  0x00400000,  ARMV7K_CHAIN_BITS, "armv7k",   14, 4, false, false, true  },
+    { 0x40000000,                   0x40000000,                 0x0,         0x02000000,                0x0, "sim-x86",  14, 0, false, false, true  }
 };
 
 
 // These are dylibs that may be interposed, so stubs calling into them should never be bypassed
-const char* const CacheBuilder::_s_neverStubEliminate[] = {
+const char* const CacheBuilder::_s_neverStubEliminateDylibs[] = {
     "/usr/lib/system/libdispatch.dylib",
+    nullptr
+};
+
+// These are functions that are interposed by Instruments.app or ASan
+const char* const CacheBuilder::_s_neverStubEliminateSymbols[] = {
+    "___bzero",
+    "___cxa_atexit",
+    "___cxa_throw",
+    "__longjmp",
+    "__objc_autoreleasePoolPop",
+    "_accept",
+    "_access",
+    "_asctime",
+    "_asctime_r",
+    "_asprintf",
+    "_atoi",
+    "_atol",
+    "_atoll",
+    "_calloc",
+    "_chmod",
+    "_chown",
+    "_close",
+    "_confstr",
+    "_ctime",
+    "_ctime_r",
+    "_dispatch_after",
+    "_dispatch_after_f",
+    "_dispatch_async",
+    "_dispatch_async_f",
+    "_dispatch_barrier_async_f",
+    "_dispatch_group_async",
+    "_dispatch_group_async_f",
+    "_dispatch_source_set_cancel_handler",
+    "_dispatch_source_set_event_handler",
+    "_dispatch_sync_f",
+    "_dlclose",
+    "_dlopen",
+    "_dup",
+    "_dup2",
+    "_endgrent",
+    "_endpwent",
+    "_ether_aton",
+    "_ether_hostton",
+    "_ether_line",
+    "_ether_ntoa",
+    "_ether_ntohost",
+    "_fchmod",
+    "_fchown",
+    "_fclose",
+    "_fdopen",
+    "_fflush",
+    "_fopen",
+    "_fork",
+    "_fprintf",
+    "_free",
+    "_freopen",
+    "_frexp",
+    "_frexpf",
+    "_frexpl",
+    "_fscanf",
+    "_fstat",
+    "_fstatfs",
+    "_fstatfs64",
+    "_fsync",
+    "_ftime",
+    "_getaddrinfo",
+    "_getattrlist",
+    "_getcwd",
+    "_getgrent",
+    "_getgrgid",
+    "_getgrgid_r",
+    "_getgrnam",
+    "_getgrnam_r",
+    "_getgroups",
+    "_gethostbyaddr",
+    "_gethostbyname",
+    "_gethostbyname2",
+    "_gethostent",
+    "_getifaddrs",
+    "_getitimer",
+    "_getnameinfo",
+    "_getpass",
+    "_getpeername",
+    "_getpwent",
+    "_getpwnam",
+    "_getpwnam_r",
+    "_getpwuid",
+    "_getpwuid_r",
+    "_getsockname",
+    "_getsockopt",
+    "_gmtime",
+    "_gmtime_r",
+    "_if_indextoname",
+    "_if_nametoindex",
+    "_index",
+    "_inet_aton",
+    "_inet_ntop",
+    "_inet_pton",
+    "_initgroups",
+    "_ioctl",
+    "_lchown",
+    "_lgamma",
+    "_lgammaf",
+    "_lgammal",
+    "_link",
+    "_listxattr",
+    "_localtime",
+    "_localtime_r",
+    "_longjmp",
+    "_lseek",
+    "_lstat",
+    "_malloc",
+    "_malloc_create_zone",
+    "_malloc_default_purgeable_zone",
+    "_malloc_default_zone",
+    "_malloc_good_size",
+    "_malloc_make_nonpurgeable",
+    "_malloc_make_purgeable",
+    "_malloc_set_zone_name",
+    "_mbsnrtowcs",
+    "_mbsrtowcs",
+    "_mbstowcs",
+    "_memchr",
+    "_memcmp",
+    "_memcpy",
+    "_memmove",
+    "_memset",
+    "_mktime",
+    "_mlock",
+    "_mlockall",
+    "_modf",
+    "_modff",
+    "_modfl",
+    "_munlock",
+    "_munlockall",
+    "_objc_autoreleasePoolPop",
+    "_objc_setProperty",
+    "_objc_setProperty_atomic",
+    "_objc_setProperty_atomic_copy",
+    "_objc_setProperty_nonatomic",
+    "_objc_setProperty_nonatomic_copy",
+    "_objc_storeStrong",
+    "_open",
+    "_opendir",
+    "_poll",
+    "_posix_memalign",
+    "_pread",
+    "_printf",
+    "_pthread_attr_getdetachstate",
+    "_pthread_attr_getguardsize",
+    "_pthread_attr_getinheritsched",
+    "_pthread_attr_getschedparam",
+    "_pthread_attr_getschedpolicy",
+    "_pthread_attr_getscope",
+    "_pthread_attr_getstack",
+    "_pthread_attr_getstacksize",
+    "_pthread_condattr_getpshared",
+    "_pthread_create",
+    "_pthread_getschedparam",
+    "_pthread_join",
+    "_pthread_mutex_lock",
+    "_pthread_mutex_unlock",
+    "_pthread_mutexattr_getprioceiling",
+    "_pthread_mutexattr_getprotocol",
+    "_pthread_mutexattr_getpshared",
+    "_pthread_mutexattr_gettype",
+    "_pthread_rwlockattr_getpshared",
+    "_pwrite",
+    "_rand_r",
+    "_read",
+    "_readdir",
+    "_readdir_r",
+    "_readv",
+    "_readv$UNIX2003",
+    "_realloc",
+    "_realpath",
+    "_recv",
+    "_recvfrom",
+    "_recvmsg",
+    "_remquo",
+    "_remquof",
+    "_remquol",
+    "_scanf",
+    "_send",
+    "_sendmsg",
+    "_sendto",
+    "_setattrlist",
+    "_setgrent",
+    "_setitimer",
+    "_setlocale",
+    "_setpwent",
+    "_shm_open",
+    "_shm_unlink",
+    "_sigaction",
+    "_sigemptyset",
+    "_sigfillset",
+    "_siglongjmp",
+    "_signal",
+    "_sigpending",
+    "_sigprocmask",
+    "_sigwait",
+    "_snprintf",
+    "_sprintf",
+    "_sscanf",
+    "_stat",
+    "_statfs",
+    "_statfs64",
+    "_strcasecmp",
+    "_strcat",
+    "_strchr",
+    "_strcmp",
+    "_strcpy",
+    "_strdup",
+    "_strerror",
+    "_strerror_r",
+    "_strlen",
+    "_strncasecmp",
+    "_strncat",
+    "_strncmp",
+    "_strncpy",
+    "_strptime",
+    "_strtoimax",
+    "_strtol",
+    "_strtoll",
+    "_strtoumax",
+    "_tempnam",
+    "_time",
+    "_times",
+    "_tmpnam",
+    "_tsearch",
+    "_unlink",
+    "_valloc",
+    "_vasprintf",
+    "_vfprintf",
+    "_vfscanf",
+    "_vprintf",
+    "_vscanf",
+    "_vsnprintf",
+    "_vsprintf",
+    "_vsscanf",
+    "_wait",
+    "_wait$UNIX2003",
+    "_wait3",
+    "_wait4",
+    "_waitid",
+    "_waitid$UNIX2003",
+    "_waitpid",
+    "_waitpid$UNIX2003",
+    "_wcslen",
+    "_wcsnrtombs",
+    "_wcsrtombs",
+    "_wcstombs",
+    "_wordexp",
+    "_write",
+    "_writev",
+    "_writev$UNIX2003",
+    // <rdar://problem/22050956> always use stubs for C++ symbols that can be overridden
+    "__ZdaPv",
+    "__ZdlPv",
+    "__Znam",
+    "__Znwm",
+
     nullptr
 };
 
@@ -107,11 +379,11 @@ CacheBuilder::CacheBuilder(const DyldSharedCache::CreateOptions& options, const 
     , _slideInfoFileOffset(0)
     , _slideInfoBufferSizeAllocated(0)
     , _allocatedBufferSize(0)
-    , _branchPoolsLinkEditStartAddr(0)
+    , _selectorStringsFromExecutables(0)
 {
 
-    std::string targetArch = options.archName;
-    if ( options.forSimulator && (options.archName == "i386") )
+    std::string targetArch = options.archs->name();
+    if ( options.forSimulator && (options.archs == &dyld3::GradedArchs::i386) )
         targetArch = "sim-x86";
 
     for (const ArchLayout& layout : _s_archLayout) {
@@ -144,9 +416,20 @@ const std::set<const dyld3::MachOAnalyzer*> CacheBuilder::evictions()
 
 void CacheBuilder::deleteBuffer()
 {
+    // Cache buffer
     vm_deallocate(mach_task_self(), _fullAllocatedBuffer, _archLayout->sharedMemorySize);
     _fullAllocatedBuffer = 0;
     _allocatedBufferSize = 0;
+    // Local symbols buffer
+    if ( _localSymbolsRegion.bufferSize != 0 ) {
+        vm_deallocate(mach_task_self(), (vm_address_t)_localSymbolsRegion.buffer, _localSymbolsRegion.bufferSize);
+        _localSymbolsRegion.buffer = 0;
+        _localSymbolsRegion.bufferSize = 0;
+    }
+    // Code singatures
+    vm_deallocate(mach_task_self(), (vm_address_t)_codeSignatureRegion.buffer, _codeSignatureRegion.bufferSize);
+    _codeSignatureRegion.buffer = 0;
+    _codeSignatureRegion.bufferSize = 0;
 }
 
 
@@ -171,8 +454,15 @@ void CacheBuilder::makeSortedDylibs(const std::vector<LoadedMachO>& dylibs, cons
             return true;
         else if ( foundB )
              return false;
-        else
-             return a.input->mappedFile.runtimePath < b.input->mappedFile.runtimePath;
+        
+        // Sort mac before iOSMac
+        bool isIOSMacA = strncmp(a.input->mappedFile.runtimePath.c_str(), "/System/iOSSupport/", 19) == 0;
+        bool isIOSMacB = strncmp(b.input->mappedFile.runtimePath.c_str(), "/System/iOSSupport/", 19) == 0;
+        if (isIOSMacA != isIOSMacB)
+            return !isIOSMacA;
+        
+        // Finally sort by path
+        return a.input->mappedFile.runtimePath < b.input->mappedFile.runtimePath;
     });
 }
 
@@ -202,13 +492,21 @@ uint64_t CacheBuilder::cacheOverflowAmount()
         if ( _readOnlyRegion.sizeInUse > 0x3FE00000 )
             return (_readOnlyRegion.sizeInUse - 0x3FE00000);
     }
+    else if ( _archLayout->textAndDataMaxSize != 0 ) {
+        // for armv7k, limit is 512MB of TEX+DATA
+        uint64_t totalTextAndData = _readWriteRegion.unslidLoadAddress + _readWriteRegion.sizeInUse - _readExecuteRegion.unslidLoadAddress;
+        if ( totalTextAndData < _archLayout->textAndDataMaxSize )
+            return 0;
+        else
+            return totalTextAndData - _archLayout->textAndDataMaxSize;
+    }
     else {
         bool alreadyOptimized = (_readOnlyRegion.sizeInUse != _readOnlyRegion.bufferSize);
         uint64_t vmSize = _readOnlyRegion.unslidLoadAddress - _readExecuteRegion.unslidLoadAddress;
         if ( alreadyOptimized )
             vmSize += _readOnlyRegion.sizeInUse;
         else if ( _options.excludeLocalSymbols )
-            vmSize += (_readOnlyRegion.sizeInUse * 37/100); // assume locals removal and LINKEDIT optimzation reduces LINKEDITs %25 of original size
+            vmSize += (_readOnlyRegion.sizeInUse * 37/100); // assume locals removal and LINKEDIT optimzation reduces LINKEDITs %37 of original size
         else
             vmSize += (_readOnlyRegion.sizeInUse * 80/100); // assume LINKEDIT optimzation reduces LINKEDITs to %80 of original size
         if ( vmSize > _archLayout->sharedMemorySize )
@@ -220,35 +518,86 @@ uint64_t CacheBuilder::cacheOverflowAmount()
 
 size_t CacheBuilder::evictLeafDylibs(uint64_t reductionTarget, std::vector<const LoadedMachO*>& overflowDylibs)
 {
-    // build count of how many references there are to each dylib
-    __block std::map<std::string, unsigned int> referenceCount;
+    // build a reverse map of all dylib dependencies
+    __block std::map<std::string, std::set<std::string>> references;
+    std::map<std::string, std::set<std::string>>* referencesPtr = &references;
     for (const DylibInfo& dylib : _sortedDylibs) {
+        // Esnure we have an entry (even if it is empty)
+        if (references.count(dylib.input->mappedFile.mh->installName()) == 0) {
+            references[dylib.input->mappedFile.mh->installName()] = std::set<std::string>();
+        };
         dylib.input->mappedFile.mh->forEachDependentDylib(^(const char* loadPath, bool isWeak, bool isReExport, bool isUpward, uint32_t compatVersion, uint32_t curVersion, bool &stop) {
-            referenceCount[loadPath] += 1;
+            references[loadPath].insert(dylib.input->mappedFile.mh->installName());
         });
     }
 
-    // find all dylibs not referenced
-    std::vector<DylibAndSize> unreferencedDylibs;
+    // Find the sizes of all the dylibs
+    std::vector<DylibAndSize> dylibsToSort;
+    std::vector<DylibAndSize> sortedDylibs;
     for (const DylibInfo& dylib : _sortedDylibs) {
         const char* installName = dylib.input->mappedFile.mh->installName();
-        if ( referenceCount.count(installName) == 0 ) {
-            // conservative: sum up all segments except LINKEDIT
-            __block uint64_t segsSize = 0;
-            dylib.input->mappedFile.mh->forEachSegment(^(const dyld3::MachOFile::SegmentInfo& info, bool& stop) {
-                if ( strcmp(info.segName, "__LINKEDIT") != 0 )
-                    segsSize += info.vmSize;
+        __block uint64_t segsSize = 0;
+        dylib.input->mappedFile.mh->forEachSegment(^(const dyld3::MachOFile::SegmentInfo& info, bool& stop) {
+            if ( strcmp(info.segName, "__LINKEDIT") != 0 )
+                segsSize += info.vmSize;
+        });
+        dylibsToSort.push_back({ dylib.input, installName, segsSize });
+    }
+
+    // Build an ordered list of what to remove. At each step we do following
+    // 1) Find all dylibs that nothing else depends on
+    // 2a) If any of those dylibs are not in the order select the largest one of them
+    // 2b) If all the leaf dylibs are in the order file select the last dylib that appears last in the order file
+    // 3) Remove all entries to the removed file from the reverse dependency map
+    // 4) Go back to one and repeat until there are no more evictable dylibs
+    // This results in us always choosing the locally optimal selection, and then taking into account how that impacts
+    // the dependency graph for subsequent selections
+    
+    bool candidateFound = true;
+    while (candidateFound) {
+        candidateFound = false;
+        DylibAndSize candidate;
+        uint64_t candidateOrder = 0;
+        for(const auto& dylib : dylibsToSort) {
+            const auto &i = referencesPtr->find(dylib.installName);
+            assert(i != referencesPtr->end());
+            if (!i->second.empty()) {
+                continue;
+            }
+            const auto& j = _options.dylibOrdering.find(dylib.input->mappedFile.runtimePath);
+            uint64_t order = 0;
+            if (j != _options.dylibOrdering.end()) {
+                order = j->second;
+            } else {
+                // Not in the order file, set order sot it goes to the front of the list
+                order = UINT64_MAX;
+            }
+            if (order > candidateOrder ||
+                (order == UINT64_MAX && candidate.size < dylib.size)) {
+                    // The new file is either a lower priority in the order file
+                    // or the same priority as the candidate but larger
+                    candidate = dylib;
+                    candidateOrder = order;
+                    candidateFound = true;
+            }
+        }
+        if (candidateFound) {
+            sortedDylibs.push_back(candidate);
+            referencesPtr->erase(candidate.installName);
+            for (auto& dependent : references) {
+                (void)dependent.second.erase(candidate.installName);
+            }
+            auto j = std::find_if(dylibsToSort.begin(), dylibsToSort.end(), [&candidate](const DylibAndSize& dylib) {
+                return (strcmp(candidate.installName, dylib.installName) == 0);
             });
-            unreferencedDylibs.push_back({ dylib.input, installName, segsSize });
+            if (j != dylibsToSort.end()) {
+                dylibsToSort.erase(j);
+            }
         }
     }
-    // sort leaf dylibs by size
-    std::sort(unreferencedDylibs.begin(), unreferencedDylibs.end(), [&](const DylibAndSize& a, const DylibAndSize& b) {
-        return ( a.size > b.size );
-    });
 
      // build set of dylibs that if removed will allow cache to build
-    for (DylibAndSize& dylib : unreferencedDylibs) {
+    for (DylibAndSize& dylib : sortedDylibs) {
         if ( _options.verbose )
             _diagnostics.warning("to prevent cache overflow, not caching %s", dylib.installName);
         _evictions.insert(dylib.input->mappedFile.mh);
@@ -271,8 +620,8 @@ size_t CacheBuilder::evictLeafDylibs(uint64_t reductionTarget, std::vector<const
 class CacheInputBuilder {
 public:
     CacheInputBuilder(const dyld3::closure::FileSystem& fileSystem,
-                      std::string reqArchitecture, dyld3::Platform reqPlatform)
-    : fileSystem(fileSystem), reqArchitecture(reqArchitecture), reqPlatform(reqPlatform) { }
+                      const dyld3::GradedArchs& archs, dyld3::Platform reqPlatform)
+    : fileSystem(fileSystem), reqArchs(archs), reqPlatform(reqPlatform) { }
 
     // Loads and maps any MachOs in the given list of files.
     void loadMachOs(std::vector<CacheBuilder::InputFile>& inputFiles,
@@ -283,7 +632,8 @@ public:
 
         std::map<std::string, uint64_t> dylibInstallNameMap;
         for (CacheBuilder::InputFile& inputFile : inputFiles) {
-            dyld3::closure::LoadedFileInfo loadedFileInfo = dyld3::MachOAnalyzer::load(inputFile.diag, fileSystem, inputFile.path, reqArchitecture.c_str(), reqPlatform);
+            char realerPath[MAXPATHLEN];
+            dyld3::closure::LoadedFileInfo loadedFileInfo = dyld3::MachOAnalyzer::load(inputFile.diag, fileSystem, inputFile.path, reqArchs, reqPlatform, realerPath);
             const dyld3::MachOAnalyzer* ma = (const dyld3::MachOAnalyzer*)loadedFileInfo.fileContent;
             if (ma == nullptr) {
                 couldNotLoadFiles.emplace_back((CacheBuilder::LoadedMachO){ DyldSharedCache::MappedMachO(), loadedFileInfo, &inputFile });
@@ -309,6 +659,12 @@ public:
                 })) {
                     // TODO: Add exclusion lists here?
                     // Probably not as we already applied the dylib exclusion list.
+                    if (!ma->canHavePrecomputedDlopenClosure(inputFile.path, ^(const char* msg) {
+                        inputFile.diag.verbose("Dylib located at '%s' cannot prebuild dlopen closure in cache because: %s", inputFile.path, msg);
+                    }) ) {
+                        fileSystem.unloadFile(loadedFileInfo);
+                        continue;
+                    }
                     otherDylibs.emplace_back((CacheBuilder::LoadedMachO){ mappedFile, loadedFileInfo, &inputFile });
                     continue;
                 }
@@ -339,6 +695,12 @@ public:
                 }
             } else if (ma->isBundle()) {
                 // TODO: Add exclusion lists here?
+                if (!ma->canHavePrecomputedDlopenClosure(inputFile.path, ^(const char* msg) {
+                    inputFile.diag.verbose("Dylib located at '%s' cannot prebuild dlopen closure in cache because: %s", inputFile.path, msg);
+                }) ) {
+                    fileSystem.unloadFile(loadedFileInfo);
+                    continue;
+                }
                 otherDylibs.emplace_back((CacheBuilder::LoadedMachO){ mappedFile, loadedFileInfo, &inputFile });
             } else if (ma->isDynamicExecutable()) {
                 if (platformExcludesExecutablePath_macOS(inputFile.path)) {
@@ -406,6 +768,8 @@ private:
                 return false;
             case dyld3::Platform::watchOS_simulator:
                 return false;
+            case dyld3::Platform::driverKit:
+                return false;
         }
     }
 
@@ -463,11 +827,13 @@ private:
                 return false;
             case dyld3::Platform::watchOS_simulator:
                 return false;
+            case dyld3::Platform::driverKit:
+                return false;
         }
     }
 
     const dyld3::closure::FileSystem&                   fileSystem;
-    std::string                                         reqArchitecture;
+    const dyld3::GradedArchs&                           reqArchs;
     dyld3::Platform                                     reqPlatform;
 };
 
@@ -567,7 +933,6 @@ static void verifySelfContained(std::vector<CacheBuilder::LoadedMachO>& dylibsTo
             }
 
             // find all dylibs not referenced
-            std::vector<DylibAndSize> unreferencedDylibs;
             for (const CacheBuilder::LoadedMachO& dylib : dylibsToCache) {
                 if ( badDylibs.count(dylib.mappedFile.runtimePath) != 0 )
                     continue;
@@ -603,7 +968,7 @@ static void verifySelfContained(std::vector<CacheBuilder::LoadedMachO>& dylibsTo
 void CacheBuilder::build(std::vector<CacheBuilder::InputFile>& inputFiles,
                          std::vector<DyldSharedCache::FileAlias>& aliases) {
     // First filter down to files which are actually MachO's
-    CacheInputBuilder cacheInputBuilder(_fileSystem, _archLayout->archName, _options.platform);
+    CacheInputBuilder cacheInputBuilder(_fileSystem, *_options.archs, _options.platform);
 
     std::vector<LoadedMachO> dylibsToCache;
     std::vector<LoadedMachO> otherDylibs;
@@ -763,6 +1128,8 @@ void CacheBuilder::build(const std::vector<LoadedMachO>& dylibs,
     }
 
     // assign addresses for each segment of each dylib in new cache
+    parseCoalescableSegments();
+    processSelectorStrings(osExecutables);
     assignSegmentAddresses();
     std::vector<const LoadedMachO*> overflowDylibs;
     while ( cacheOverflowAmount() != 0 ) {
@@ -774,6 +1141,9 @@ void CacheBuilder::build(const std::vector<LoadedMachO>& dylibs,
         // re-layout cache
         for (DylibInfo& dylib : _sortedDylibs)
             dylib.cacheLocation.clear();
+        _coalescedText.clear();
+        parseCoalescableSegments();
+        processSelectorStrings(osExecutables);
         assignSegmentAddresses();
 
         _diagnostics.verbose("cache overflow, evicted %lu leaf dylibs\n", evictionCount);
@@ -788,6 +1158,8 @@ void CacheBuilder::build(const std::vector<LoadedMachO>& dylibs,
     // rebase all dylibs for new location in cache
     uint64_t t3 = mach_absolute_time();
     _aslrTracker.setDataRegion(_readWriteRegion.buffer, _readWriteRegion.sizeInUse);
+    if ( !_options.cacheSupportsASLR )
+        _aslrTracker.disable();
     adjustAllImagesForNewSegmentLocations();
     if ( _diagnostics.hasError() )
         return;
@@ -809,18 +1181,8 @@ void CacheBuilder::build(const std::vector<LoadedMachO>& dylibs,
 
     // optimize away stubs
     uint64_t t6 = mach_absolute_time();
-    std::vector<uint64_t> branchPoolOffsets;
-    uint64_t cacheStartAddress = _archLayout->sharedMemoryStart;
-    if ( _options.optimizeStubs ) {
-        std::vector<uint64_t> branchPoolStartAddrs;
-        const uint64_t* p = (uint64_t*)((uint8_t*)dyldCache + dyldCache->header.branchPoolsOffset);
-        for (uint32_t i=0; i < dyldCache->header.branchPoolsCount; ++i) {
-            uint64_t poolAddr = p[i];
-            branchPoolStartAddrs.push_back(poolAddr);
-            branchPoolOffsets.push_back(poolAddr - cacheStartAddress);
-        }
-        optimizeAwayStubs(branchPoolStartAddrs, _branchPoolsLinkEditStartAddr);
-    }
+    if ( _options.optimizeStubs )
+         optimizeAwayStubs();
 
 
     // FIPS seal corecrypto, This must be done after stub elimination (so that __TEXT,__text is not changed after sealing)
@@ -828,23 +1190,26 @@ void CacheBuilder::build(const std::vector<LoadedMachO>& dylibs,
 
     // merge and compact LINKEDIT segments
     uint64_t t7 = mach_absolute_time();
-    optimizeLinkedit(branchPoolOffsets);
+    optimizeLinkedit();
 
     // copy ImageArray to end of read-only region
     addImageArray();
     if ( _diagnostics.hasError() )
         return;
-
-    // compute and add dlopen closures for all other dylibs
-    addOtherImageArray(otherOsDylibsInput, overflowDylibs);
-    if ( _diagnostics.hasError() )
-        return;
-
-    // compute and add launch closures to end of read-only region
     uint64_t t8 = mach_absolute_time();
-    addClosures(osExecutables);
-    if ( _diagnostics.hasError() )
-        return;
+
+    // don't add dyld3 closures to simulator cache
+    if ( !dyld3::MachOFile::isSimulatorPlatform(_options.platform) ) {
+        // compute and add dlopen closures for all other dylibs
+        addOtherImageArray(otherOsDylibsInput, overflowDylibs);
+        if ( _diagnostics.hasError() )
+            return;
+
+        // compute and add launch closures to end of read-only region
+        addClosures(osExecutables);
+        if ( _diagnostics.hasError() )
+            return;
+    }
 
     // update final readOnly region size
     dyld_cache_mapping_info* mappings = (dyld_cache_mapping_info*)(_readExecuteRegion.buffer + dyldCache->header.mappingOffset);
@@ -861,7 +1226,11 @@ void CacheBuilder::build(const std::vector<LoadedMachO>& dylibs,
         dyldCache->header.maxSlide = std::min(std::min(maxSlide0, maxSlide1), maxSlide2);
     }
     else {
-        dyldCache->header.maxSlide = (_archLayout->sharedMemoryStart + _archLayout->sharedMemorySize) - (_readOnlyRegion.unslidLoadAddress + _readOnlyRegion.sizeInUse);
+        // <rdar://problem/49852839> branch predictor on arm64 currently only looks at low 32-bits, so don't slide cache more than 2GB
+        if ( (_archLayout->sharedMemorySize == 0x100000000) && (_readExecuteRegion.sizeInUse < 0x80000000) )
+            dyldCache->header.maxSlide = 0x80000000 - _readExecuteRegion.sizeInUse;
+        else
+            dyldCache->header.maxSlide = (_archLayout->sharedMemoryStart + _archLayout->sharedMemorySize) - (_readOnlyRegion.unslidLoadAddress + _readOnlyRegion.sizeInUse);
     }
 
     uint64_t t9 = mach_absolute_time();
@@ -876,12 +1245,11 @@ void CacheBuilder::build(const std::vector<LoadedMachO>& dylibs,
 #endif
         if ( _archLayout->is64 )
             writeSlideInfoV2<Pointer64<LittleEndian>>(_aslrTracker.bitmap(), _aslrTracker.dataPageCount());
-        else
-#if SUPPORT_ARCH_arm64_32
-        if ( strcmp(_archLayout->archName, "arm64_32") == 0 )
+#if SUPPORT_ARCH_arm64_32 || SUPPORT_ARCH_armv7k
+        else if ( _archLayout->pointerDeltaMask == 0xC0000000 )
             writeSlideInfoV4<Pointer32<LittleEndian>>(_aslrTracker.bitmap(), _aslrTracker.dataPageCount());
-        else
 #endif
+        else
             writeSlideInfoV2<Pointer32<LittleEndian>>(_aslrTracker.bitmap(), _aslrTracker.dataPageCount());
     }
 
@@ -921,8 +1289,8 @@ void CacheBuilder::writeCacheHeader()
 {
     // "dyld_v1" + spaces + archName(), with enough spaces to pad to 15 bytes
     std::string magic = "dyld_v1";
-    magic.append(15 - magic.length() - _options.archName.length(), ' ');
-    magic.append(_options.archName);
+    magic.append(15 - magic.length() - strlen(_options.archs->name()), ' ');
+    magic.append(_options.archs->name());
     assert(magic.length() == 15);
 
     // fill in header
@@ -930,7 +1298,7 @@ void CacheBuilder::writeCacheHeader()
     memcpy(dyldCacheHeader->magic, magic.c_str(), 16);
     dyldCacheHeader->mappingOffset        = sizeof(dyld_cache_header);
     dyldCacheHeader->mappingCount         = 3;
-    dyldCacheHeader->imagesOffset         = (uint32_t)(dyldCacheHeader->mappingOffset + 3*sizeof(dyld_cache_mapping_info) + sizeof(uint64_t)*_branchPoolStarts.size());
+    dyldCacheHeader->imagesOffset         = (uint32_t)(dyldCacheHeader->mappingOffset + 3*sizeof(dyld_cache_mapping_info));
     dyldCacheHeader->imagesCount          = (uint32_t)_sortedDylibs.size() + _aliasCount;
     dyldCacheHeader->dyldBaseAddress      = 0;
     dyldCacheHeader->codeSignatureOffset  = 0;
@@ -943,14 +1311,14 @@ void CacheBuilder::writeCacheHeader()
     dyldCacheHeader->accelerateInfoAddr   = 0;
     dyldCacheHeader->accelerateInfoSize   = 0;
     bzero(dyldCacheHeader->uuid, 16);// overwritten later by recomputeCacheUUID()
-    dyldCacheHeader->branchPoolsOffset    = dyldCacheHeader->mappingOffset + 3*sizeof(dyld_cache_mapping_info);
-    dyldCacheHeader->branchPoolsCount     = (uint32_t)_branchPoolStarts.size();
+    dyldCacheHeader->branchPoolsOffset    = 0;
+    dyldCacheHeader->branchPoolsCount     = 0;
     dyldCacheHeader->imagesTextOffset     = dyldCacheHeader->imagesOffset + sizeof(dyld_cache_image_info)*dyldCacheHeader->imagesCount;
     dyldCacheHeader->imagesTextCount      = _sortedDylibs.size();
-    dyldCacheHeader->dylibsImageGroupAddr = 0;
-    dyldCacheHeader->dylibsImageGroupSize = 0;
-    dyldCacheHeader->otherImageGroupAddr  = 0;
-    dyldCacheHeader->otherImageGroupSize  = 0;
+    dyldCacheHeader->patchInfoAddr        = 0;
+    dyldCacheHeader->patchInfoSize        = 0;
+    dyldCacheHeader->otherImageGroupAddrUnused  = 0;
+    dyldCacheHeader->otherImageGroupSizeUnused  = 0;
     dyldCacheHeader->progClosuresAddr     = 0;
     dyldCacheHeader->progClosuresSize     = 0;
     dyldCacheHeader->progClosuresTrieAddr = 0;
@@ -960,6 +1328,7 @@ void CacheBuilder::writeCacheHeader()
     dyldCacheHeader->dylibsExpectedOnDisk = !_options.dylibsRemovedDuringMastering;
     dyldCacheHeader->simulator            = _options.forSimulator;
     dyldCacheHeader->locallyBuiltCache    = _options.isLocallyBuiltCache;
+    dyldCacheHeader->builtFromChainedFixups= (strcmp(_options.archs->name(), "arm64e") == 0); // FIXME
     dyldCacheHeader->formatVersion        = dyld3::closure::kFormatVersion;
     dyldCacheHeader->sharedRegionStart    = _archLayout->sharedMemoryStart;
     dyldCacheHeader->sharedRegionSize     = _archLayout->sharedMemorySize;
@@ -981,12 +1350,6 @@ void CacheBuilder::writeCacheHeader()
     mappings[2].size       = _readOnlyRegion.sizeInUse;
     mappings[2].maxProt    = VM_PROT_READ;
     mappings[2].initProt   = VM_PROT_READ;
-
-    // fill in branch pool addresses
-    uint64_t* p = (uint64_t*)(_readExecuteRegion.buffer + dyldCacheHeader->branchPoolsOffset);
-    for (uint64_t pool : _branchPoolStarts) {
-        *p++ = pool;
-    }
 
     // fill in image table
     dyld_cache_image_info* images = (dyld_cache_image_info*)(_readExecuteRegion.buffer + dyldCacheHeader->imagesOffset);
@@ -1056,12 +1419,20 @@ void CacheBuilder::copyRawSegments()
         const DylibInfo& dylib = _sortedDylibs[index];
         for (const SegmentMappingInfo& info : dylib.cacheLocation) {
             if (log) fprintf(stderr, "copy %s segment %s (0x%08X bytes) from %p to %p (logical addr 0x%llX) for %s\n",
-                             _options.archName.c_str(), info.segName, info.copySegmentSize, info.srcSegment, info.dstSegment, info.dstCacheUnslidAddress, dylib.input->mappedFile.runtimePath.c_str());
+                             _options.archs->name(), info.segName, info.copySegmentSize, info.srcSegment, info.dstSegment, info.dstCacheUnslidAddress, dylib.input->mappedFile.runtimePath.c_str());
             ::memcpy(info.dstSegment, info.srcSegment, info.copySegmentSize);
-            if (uint64_t paddingSize = info.dstCacheSegmentSize - info.copySegmentSize) {
-                ::memset((char*)info.dstSegment + info.copySegmentSize, 0, paddingSize);
-            }
         }
+    });
+
+    // Copy the coalesced sections
+    const uint64_t numCoalescedSections = sizeof(CacheCoalescedText::SupportedSections) / sizeof(*CacheCoalescedText::SupportedSections);
+    dispatch_apply(numCoalescedSections, DISPATCH_APPLY_AUTO, ^(size_t index) {
+        const CacheCoalescedText::StringSection& cacheStringSection = _coalescedText.getSectionData(CacheCoalescedText::SupportedSections[index]);
+        if (log) fprintf(stderr, "copy %s __TEXT_COAL section %s (0x%08X bytes) to %p (logical addr 0x%llX)\n",
+                         _options.archs->name(), CacheCoalescedText::SupportedSections[index],
+                         cacheStringSection.bufferSize, cacheStringSection.bufferAddr, cacheStringSection.bufferVMAddr);
+        for (const auto& stringAndOffset : cacheStringSection.stringsToOffsets)
+            ::memcpy(cacheStringSection.bufferAddr + stringAndOffset.second, stringAndOffset.first.data(), stringAndOffset.first.size() + 1);
     });
 }
 
@@ -1091,14 +1462,62 @@ void CacheBuilder::adjustAllImagesForNewSegmentLocations()
     }
 }
 
+void CacheBuilder::processSelectorStrings(const std::vector<LoadedMachO>& executables) {
+    const bool log = false;
+
+    _selectorStringsFromExecutables = 0;
+
+    // Don't do this optimisation on watchOS where the shared cache is too small
+    if (_options.platform == dyld3::Platform::watchOS)
+        return;
+
+    // Get the method name coalesced section as that is where we need to put these strings
+    CacheBuilder::CacheCoalescedText::StringSection& cacheStringSection = _coalescedText.getSectionData("__objc_methname");
+    for (const LoadedMachO& executable : executables) {
+        const dyld3::MachOAnalyzer* ma = (const dyld3::MachOAnalyzer*)executable.loadedFileInfo.fileContent;
+
+        uint64_t sizeBeforeProcessing = cacheStringSection.bufferSize;
+
+        ma->forEachObjCMethodName(^(const char *methodName) {
+            std::string_view str = methodName;
+            auto itAndInserted = cacheStringSection.stringsToOffsets.insert({ str, cacheStringSection.bufferSize });
+            if (itAndInserted.second) {
+                // If we inserted the string then we need to include it in the total
+                cacheStringSection.bufferSize += str.size() + 1;
+                // if (log) printf("Selector: %s -> %s\n", ma->installName(), methodName);
+                ++_selectorStringsFromExecutables;
+            }
+        });
+
+        uint64_t sizeAfterProcessing = cacheStringSection.bufferSize;
+        if ( log && (sizeBeforeProcessing != sizeAfterProcessing) ) {
+            printf("Pulled in % 6lld bytes of selectors from %s\n",
+                   sizeAfterProcessing - sizeBeforeProcessing, executable.loadedFileInfo.path);
+        }
+    }
+
+    _diagnostics.verbose("Pulled in %lld selector strings from executables\n", _selectorStringsFromExecutables);
+}
+
+void CacheBuilder::parseCoalescableSegments() {
+    const bool log = false;
+
+    for (DylibInfo& dylib : _sortedDylibs)
+        _coalescedText.parseCoalescableText(dylib.input->mappedFile.mh, dylib.textCoalescer);
+
+    if (log) {
+        for (const char* section : CacheCoalescedText::SupportedSections) {
+            CacheCoalescedText::StringSection& sectionData = _coalescedText.getSectionData(section);
+            printf("Coalesced %s from % 10lld -> % 10d, saving % 10lld bytes\n", section,
+                   sectionData.bufferSize + sectionData.savedSpace, sectionData.bufferSize, sectionData.savedSpace);
+        }
+    }
+}
+
 void CacheBuilder::assignSegmentAddresses()
 {
     // calculate size of header info and where first dylib's mach_header should start
     size_t startOffset = sizeof(dyld_cache_header) + 3*sizeof(dyld_cache_mapping_info);
-    size_t maxPoolCount = 0;
-    if ( _archLayout->branchReach != 0 )
-        maxPoolCount = (_archLayout->sharedMemorySize / _archLayout->branchReach);
-    startOffset += maxPoolCount * sizeof(uint64_t);
     startOffset += sizeof(dyld_cache_image_info) * _sortedDylibs.size();
     startOffset += sizeof(dyld_cache_image_text_info) * _sortedDylibs.size();
     for (const DylibInfo& dylib : _sortedDylibs) {
@@ -1107,8 +1526,6 @@ void CacheBuilder::assignSegmentAddresses()
     //fprintf(stderr, "%s total header size = 0x%08lX\n", _options.archName.c_str(), startOffset);
     startOffset = align(startOffset, 12);
 
-    _branchPoolStarts.clear();
-
     // assign TEXT segment addresses
     _readExecuteRegion.buffer               = (uint8_t*)_fullAllocatedBuffer;
     _readExecuteRegion.bufferSize           = 0;
@@ -1116,7 +1533,6 @@ void CacheBuilder::assignSegmentAddresses()
     _readExecuteRegion.unslidLoadAddress    = _archLayout->sharedMemoryStart;
     _readExecuteRegion.cacheFileOffset      = 0;
     __block uint64_t addr = _readExecuteRegion.unslidLoadAddress + startOffset; // header
-    __block uint64_t lastPoolAddress = addr;
     for (DylibInfo& dylib : _sortedDylibs) {
         __block uint64_t textSegVmAddr = 0;
         dylib.input->mappedFile.mh->forEachSegment(^(const dyld3::MachOFile::SegmentInfo& segInfo, bool& stop) {
@@ -1124,13 +1540,21 @@ void CacheBuilder::assignSegmentAddresses()
                 textSegVmAddr = segInfo.vmAddr;
             if ( segInfo.protections != (VM_PROT_READ | VM_PROT_EXECUTE) )
                 return;
-            // Insert branch island pools every 128MB for arm64
-            if ( (_archLayout->branchPoolTextSize != 0) && ((addr + segInfo.vmSize - lastPoolAddress) > _archLayout->branchReach) ) {
-                _branchPoolStarts.push_back(addr);
-                _diagnostics.verbose("adding branch pool at 0x%llX\n", addr);
-                lastPoolAddress = addr;
-                addr += _archLayout->branchPoolTextSize;
-            }
+            // We may have coalesced the sections at the end of this segment.  In that case, shrink the segment to remove them.
+            __block size_t sizeOfSections = 0;
+            __block bool foundCoalescedSection = false;
+            dylib.input->mappedFile.mh->forEachSection(^(const dyld3::MachOAnalyzer::SectionInfo &sectInfo, bool malformedSectionRange, bool &stopSection) {
+                if (strcmp(sectInfo.segInfo.segName, segInfo.segName) != 0)
+                    return;
+                if ( dylib.textCoalescer.sectionWasCoalesced(sectInfo.sectName)) {
+                    foundCoalescedSection = true;
+                } else {
+                    sizeOfSections = sectInfo.sectAddr + sectInfo.sectSize - segInfo.vmAddr;
+                }
+            });
+            if (!foundCoalescedSection)
+                sizeOfSections = segInfo.sizeOfSections;
+
             // Keep __TEXT segments 4K or more aligned
             addr = align(addr, std::max((int)segInfo.p2align, (int)12));
             uint64_t offsetInRegion = addr - _readExecuteRegion.unslidLoadAddress;
@@ -1140,17 +1564,83 @@ void CacheBuilder::assignSegmentAddresses()
             loc.dstSegment             = _readExecuteRegion.buffer + offsetInRegion;
             loc.dstCacheUnslidAddress  = addr;
             loc.dstCacheFileOffset     = (uint32_t)offsetInRegion;
-            loc.dstCacheSegmentSize    = (uint32_t)align(segInfo.sizeOfSections, 12);
-            loc.copySegmentSize        = (uint32_t)align(segInfo.sizeOfSections, 12);
+            loc.dstCacheSegmentSize    = (uint32_t)align(sizeOfSections, 12);
+            loc.dstCacheFileSize       = (uint32_t)align(sizeOfSections, 12);
+            loc.copySegmentSize        = (uint32_t)sizeOfSections;
             loc.srcSegmentIndex        = segInfo.segIndex;
             dylib.cacheLocation.push_back(loc);
             addr += loc.dstCacheSegmentSize;
         });
     }
+    // move read-only segments to end of TEXT
+    if ( _archLayout->textAndDataMaxSize != 0 ) {
+       for (DylibInfo& dylib : _sortedDylibs) {
+            __block uint64_t textSegVmAddr = 0;
+            dylib.input->mappedFile.mh->forEachSegment(^(const dyld3::MachOFile::SegmentInfo& segInfo, bool& stop) {
+                if ( strcmp(segInfo.segName, "__TEXT") == 0 )
+                    textSegVmAddr = segInfo.vmAddr;
+                if ( segInfo.protections != VM_PROT_READ )
+                    return;
+                if ( strcmp(segInfo.segName, "__LINKEDIT") == 0 )
+                    return;
+
+                // Keep segments segments 4K or more aligned
+                addr = align(addr, std::max((int)segInfo.p2align, (int)12));
+                uint64_t offsetInRegion = addr - _readExecuteRegion.unslidLoadAddress;
+                SegmentMappingInfo loc;
+                loc.srcSegment             = (uint8_t*)dylib.input->mappedFile.mh + segInfo.vmAddr - textSegVmAddr;
+                loc.segName                = segInfo.segName;
+                loc.dstSegment             = _readExecuteRegion.buffer + offsetInRegion;
+                loc.dstCacheUnslidAddress  = addr;
+                loc.dstCacheFileOffset     = (uint32_t)(_readExecuteRegion.cacheFileOffset + offsetInRegion);
+                loc.dstCacheSegmentSize    = (uint32_t)align(segInfo.sizeOfSections, 12);
+                loc.dstCacheFileSize       = (uint32_t)segInfo.sizeOfSections;
+                loc.copySegmentSize        = (uint32_t)segInfo.sizeOfSections;
+                loc.srcSegmentIndex        = segInfo.segIndex;
+                dylib.cacheLocation.push_back(loc);
+                addr += loc.dstCacheSegmentSize;
+            });
+        }
+    }
+
+    // reserve space for objc optimization tables and deduped strings
+    uint64_t objcReadOnlyBufferVMAddr = addr;
+    _objcReadOnlyBuffer = _readExecuteRegion.buffer + (addr - _readExecuteRegion.unslidLoadAddress);
+
+    // First the strings as we'll fill in the objc tables later in the optimizer
+    for (const char* section: CacheCoalescedText::SupportedSections) {
+        CacheCoalescedText::StringSection& cacheStringSection = _coalescedText.getSectionData(section);
+        cacheStringSection.bufferAddr = _readExecuteRegion.buffer + (addr - _readExecuteRegion.unslidLoadAddress);
+        cacheStringSection.bufferVMAddr = addr;
+        addr += cacheStringSection.bufferSize;
+    }
+
+    addr = align(addr, 14);
+    _objcReadOnlyBufferSizeUsed = addr - objcReadOnlyBufferVMAddr;
+
+    uint32_t totalSelectorRefCount = (uint32_t)_selectorStringsFromExecutables;
+    uint32_t totalClassDefCount    = 0;
+    uint32_t totalProtocolDefCount = 0;
+    for (DylibInfo& dylib : _sortedDylibs) {
+        dyld3::MachOAnalyzer::ObjCInfo info = dylib.input->mappedFile.mh->getObjCInfo();
+        totalSelectorRefCount   += info.selRefCount;
+        totalClassDefCount      += info.classDefCount;
+        totalProtocolDefCount   += info.protocolDefCount;
+    }
+
+    // now that shared cache coalesces all selector strings, use that better count
+    uint32_t coalescedSelectorCount = (uint32_t)_coalescedText.objcMethNames.stringsToOffsets.size();
+    if ( coalescedSelectorCount > totalSelectorRefCount )
+        totalSelectorRefCount = coalescedSelectorCount;
+    addr += align(computeReadOnlyObjC(totalSelectorRefCount, totalClassDefCount, totalProtocolDefCount), 14);
+    _objcReadOnlyBufferSizeAllocated = addr - objcReadOnlyBufferVMAddr;
+
+
     // align TEXT region end
     uint64_t endTextAddress = align(addr, _archLayout->sharedRegionAlignP2);
     _readExecuteRegion.bufferSize = endTextAddress - _readExecuteRegion.unslidLoadAddress;
     _readExecuteRegion.sizeInUse  = _readExecuteRegion.bufferSize;
+
 
     // assign __DATA* addresses
     if ( _archLayout->sharedRegionsAreDiscontiguous )
@@ -1168,6 +1658,8 @@ void CacheBuilder::assignSegmentAddresses()
     for (DylibInfo& dylib : _sortedDylibs) {
         __block uint64_t textSegVmAddr = 0;
        dylib.input->mappedFile.mh->forEachSegment(^(const dyld3::MachOFile::SegmentInfo& segInfo, bool& stop) {
+           if ( _options.platform == dyld3::Platform::watchOS_simulator)
+               return;
             if ( strcmp(segInfo.segName, "__TEXT") == 0 )
                 textSegVmAddr = segInfo.vmAddr;
             if ( segInfo.protections != (VM_PROT_READ | VM_PROT_WRITE) )
@@ -1186,6 +1678,7 @@ void CacheBuilder::assignSegmentAddresses()
             loc.dstCacheUnslidAddress  = addr;
             loc.dstCacheFileOffset     = (uint32_t)(_readWriteRegion.cacheFileOffset + offsetInRegion);
             loc.dstCacheSegmentSize    = (uint32_t)segInfo.sizeOfSections;
+            loc.dstCacheFileSize       = (uint32_t)copySize;
             loc.copySegmentSize        = (uint32_t)copySize;
             loc.srcSegmentIndex        = segInfo.segIndex;
             dylib.cacheLocation.push_back(loc);
@@ -1201,11 +1694,19 @@ void CacheBuilder::assignSegmentAddresses()
                 textSegVmAddr = segInfo.vmAddr;
             if ( segInfo.protections != (VM_PROT_READ | VM_PROT_WRITE) )
                 return;
-            if ( strcmp(segInfo.segName, "__DATA_CONST") == 0 )
-                return;
-            if ( strcmp(segInfo.segName, "__DATA_DIRTY") == 0 )
-                return;
-            if ( dataConstSegmentCount > 10 ) {
+            if ( _options.platform != dyld3::Platform::watchOS_simulator) {
+                if ( strcmp(segInfo.segName, "__DATA_CONST") == 0 )
+                    return;
+                if ( strcmp(segInfo.segName, "__DATA_DIRTY") == 0 )
+                    return;
+            }
+            bool forcePageAlignedData = false;
+            if (_options.platform == dyld3::Platform::macOS) {
+                forcePageAlignedData = dylib.input->mappedFile.mh->hasUnalignedPointerFixups();
+                //if ( forcePageAlignedData )
+                //    warning("unaligned pointer in %s\n", dylib.input->mappedFile.runtimePath.c_str());
+            }
+            if ( (dataConstSegmentCount > 10) && !forcePageAlignedData ) {
                 // Pack __DATA segments only if we also have __DATA_CONST segments
                 addr = align(addr, segInfo.p2align);
             }
@@ -1222,6 +1723,7 @@ void CacheBuilder::assignSegmentAddresses()
             loc.dstCacheUnslidAddress  = addr;
             loc.dstCacheFileOffset     = (uint32_t)(_readWriteRegion.cacheFileOffset + offsetInRegion);
             loc.dstCacheSegmentSize    = (uint32_t)segInfo.sizeOfSections;
+            loc.dstCacheFileSize       = (uint32_t)copySize;
             loc.copySegmentSize        = (uint32_t)copySize;
             loc.srcSegmentIndex        = segInfo.segIndex;
             dylib.cacheLocation.push_back(loc);
@@ -1256,6 +1758,8 @@ void CacheBuilder::assignSegmentAddresses()
         DylibInfo& dylib  = _sortedDylibs[dirtyDataSortIndexes[i]];
         __block uint64_t textSegVmAddr = 0;
         dylib.input->mappedFile.mh->forEachSegment(^(const dyld3::MachOFile::SegmentInfo& segInfo, bool& stop) {
+            if ( _options.platform == dyld3::Platform::watchOS_simulator)
+                return;
             if ( strcmp(segInfo.segName, "__TEXT") == 0 )
                 textSegVmAddr = segInfo.vmAddr;
             if ( segInfo.protections != (VM_PROT_READ | VM_PROT_WRITE) )
@@ -1273,12 +1777,19 @@ void CacheBuilder::assignSegmentAddresses()
             loc.dstCacheUnslidAddress  = addr;
             loc.dstCacheFileOffset     = (uint32_t)(_readWriteRegion.cacheFileOffset + offsetInRegion);
             loc.dstCacheSegmentSize    = (uint32_t)segInfo.sizeOfSections;
+            loc.dstCacheFileSize       = (uint32_t)copySize;
             loc.copySegmentSize        = (uint32_t)copySize;
             loc.srcSegmentIndex        = segInfo.segIndex;
             dylib.cacheLocation.push_back(loc);
             addr += loc.dstCacheSegmentSize;
         });
     }
+
+    // reserve space for objc r/w optimization tables
+    _objcReadWriteBufferSizeAllocated = align(computeReadWriteObjC((uint32_t)_sortedDylibs.size(), totalProtocolDefCount), 14);
+    addr = align(addr, 4); // objc r/w section contains pointer and must be at least pointer align
+    _objcReadWriteBuffer = _readWriteRegion.buffer + (addr - _readWriteRegion.unslidLoadAddress);
+    addr += _objcReadWriteBufferSizeAllocated;
 
     // align DATA region end
     uint64_t endDataAddress = align(addr, _archLayout->sharedRegionAlignP2);
@@ -1308,30 +1819,34 @@ void CacheBuilder::assignSegmentAddresses()
     }
 
     // layout all read-only (but not LINKEDIT) segments
-    for (DylibInfo& dylib : _sortedDylibs) {
-        __block uint64_t textSegVmAddr = 0;
-        dylib.input->mappedFile.mh->forEachSegment(^(const dyld3::MachOFile::SegmentInfo& segInfo, bool& stop) {
-            if ( strcmp(segInfo.segName, "__TEXT") == 0 )
-                textSegVmAddr = segInfo.vmAddr;
-            if ( segInfo.protections != VM_PROT_READ )
-                return;
-            if ( strcmp(segInfo.segName, "__LINKEDIT") == 0 )
-                return;
-            // Keep segments segments 4K or more aligned
-            addr = align(addr, std::max((int)segInfo.p2align, (int)12));
-            uint64_t offsetInRegion = addr - _readOnlyRegion.unslidLoadAddress;
-            SegmentMappingInfo loc;
-            loc.srcSegment             = (uint8_t*)dylib.input->mappedFile.mh + segInfo.vmAddr - textSegVmAddr;
-            loc.segName                = segInfo.segName;
-            loc.dstSegment             = _readOnlyRegion.buffer + offsetInRegion;
-            loc.dstCacheUnslidAddress  = addr;
-            loc.dstCacheFileOffset     = (uint32_t)(_readOnlyRegion.cacheFileOffset + offsetInRegion);
-            loc.dstCacheSegmentSize    = (uint32_t)align(segInfo.sizeOfSections, 12);
-            loc.copySegmentSize        = (uint32_t)segInfo.sizeOfSections;
-            loc.srcSegmentIndex        = segInfo.segIndex;
-            dylib.cacheLocation.push_back(loc);
-            addr += loc.dstCacheSegmentSize;
-        });
+    if ( _archLayout->textAndDataMaxSize == 0 ) {
+        for (DylibInfo& dylib : _sortedDylibs) {
+            __block uint64_t textSegVmAddr = 0;
+            dylib.input->mappedFile.mh->forEachSegment(^(const dyld3::MachOFile::SegmentInfo& segInfo, bool& stop) {
+                if ( strcmp(segInfo.segName, "__TEXT") == 0 )
+                    textSegVmAddr = segInfo.vmAddr;
+                if ( segInfo.protections != VM_PROT_READ )
+                    return;
+                if ( strcmp(segInfo.segName, "__LINKEDIT") == 0 )
+                    return;
+
+                // Keep segments segments 4K or more aligned
+                addr = align(addr, std::max((int)segInfo.p2align, (int)12));
+                uint64_t offsetInRegion = addr - _readOnlyRegion.unslidLoadAddress;
+                SegmentMappingInfo loc;
+                loc.srcSegment             = (uint8_t*)dylib.input->mappedFile.mh + segInfo.vmAddr - textSegVmAddr;
+                loc.segName                = segInfo.segName;
+                loc.dstSegment             = _readOnlyRegion.buffer + offsetInRegion;
+                loc.dstCacheUnslidAddress  = addr;
+                loc.dstCacheFileOffset     = (uint32_t)(_readOnlyRegion.cacheFileOffset + offsetInRegion);
+                loc.dstCacheSegmentSize    = (uint32_t)align(segInfo.sizeOfSections, 12);
+                loc.dstCacheFileSize       = (uint32_t)segInfo.sizeOfSections;
+                loc.copySegmentSize        = (uint32_t)segInfo.sizeOfSections;
+                loc.srcSegmentIndex        = segInfo.segIndex;
+                dylib.cacheLocation.push_back(loc);
+                addr += loc.dstCacheSegmentSize;
+            });
+        }
     }
     // layout all LINKEDIT segments (after other read-only segments), aligned to 16KB
     addr = align(addr, 14);
@@ -1356,15 +1871,13 @@ void CacheBuilder::assignSegmentAddresses()
             loc.dstCacheUnslidAddress  = addr;
             loc.dstCacheFileOffset     = (uint32_t)(_readOnlyRegion.cacheFileOffset + offsetInRegion);
             loc.dstCacheSegmentSize    = (uint32_t)align(segInfo.sizeOfSections, 12);
+            loc.dstCacheFileSize       = (uint32_t)copySize;
             loc.copySegmentSize        = (uint32_t)copySize;
             loc.srcSegmentIndex        = segInfo.segIndex;
             dylib.cacheLocation.push_back(loc);
             addr += loc.dstCacheSegmentSize;
         });
     }
-    // add room for branch pool linkedits
-    _branchPoolsLinkEditStartAddr = addr;
-    addr += (_branchPoolStarts.size() * _archLayout->branchPoolLinkEditSize);
 
     // align r/o region end
     uint64_t endReadOnlyAddress = align(addr, _archLayout->sharedRegionAlignP2);
@@ -1441,8 +1954,8 @@ bool CacheBuilder::makeRebaseChainV2(uint8_t* pageContent, uint16_t lastLocation
         std::string dylibName;
         std::string segName;
         findDylibAndSegment((void*)pageContent, dylibName, segName);
-        _diagnostics.error("rebase pointer does not point within cache. lastOffset=0x%04X, seg=%s, dylib=%s\n",
-                            lastLocationOffset, segName.c_str(), dylibName.c_str());
+        _diagnostics.error("rebase pointer (0x%0lX) does not point within cache. lastOffset=0x%04X, seg=%s, dylib=%s\n",
+                            (long)lastValue, lastLocationOffset, segName.c_str(), dylibName.c_str());
         return false;
     }
     if ( offset <= (lastLocationOffset+maxDelta) ) {
@@ -1579,7 +2092,7 @@ void CacheBuilder::writeSlideInfoV2(const bool bitmap[], unsigned dataPageCount)
     info->version    = 2;
     info->page_size  = pageSize;
     info->delta_mask = _archLayout->pointerDeltaMask;
-    info->value_add  = (sizeof(pint_t) == 8) ? 0 : _archLayout->sharedMemoryStart;  // only value_add for 32-bit archs
+    info->value_add  = _archLayout->useValueAdd ? _archLayout->sharedMemoryStart : 0;
 
     // set page starts and extras for each page
     std::vector<uint16_t> pageStarts;
@@ -1617,6 +2130,7 @@ void CacheBuilder::writeSlideInfoV2(const bool bitmap[], unsigned dataPageCount)
     //fprintf(stderr, "pageCount=%u, page_starts_count=%lu, page_extras_count=%lu\n", dataPageCount, pageStarts.size(), pageExtras.size());
 }
 
+#if SUPPORT_ARCH_arm64_32 || SUPPORT_ARCH_armv7k
 // fits in to int16_t
 static bool smallValue(uint64_t value)
 {
@@ -1782,7 +2296,7 @@ void CacheBuilder::writeSlideInfoV4(const bool bitmap[], unsigned dataPageCount)
     info->version    = 4;
     info->page_size  = pageSize;
     info->delta_mask = _archLayout->pointerDeltaMask;
-    info->value_add  = (sizeof(pint_t) == 8) ? 0 : _archLayout->sharedMemoryStart;  // only value_add for 32-bit archs
+    info->value_add  = info->value_add  = _archLayout->useValueAdd ? _archLayout->sharedMemoryStart : 0;
 
     // set page starts and extras for each page
     std::vector<uint16_t> pageStarts;
@@ -1817,7 +2331,7 @@ void CacheBuilder::writeSlideInfoV4(const bool bitmap[], unsigned dataPageCount)
     ((dyld_cache_header*)_readExecuteRegion.buffer)->slideInfoSize = slideInfoSize;
     //fprintf(stderr, "pageCount=%u, page_starts_count=%lu, page_extras_count=%lu\n", dataPageCount, pageStarts.size(), pageExtras.size());
 }
-
+#endif
 
 /*
 void CacheBuilder::writeSlideInfoV1()
@@ -1893,14 +2407,14 @@ uint16_t CacheBuilder::pageStartV3(uint8_t* pageContent, uint32_t pageSize, cons
             dyld3::MachOLoaded::ChainedFixupPointerOnDisk* loc = (dyld3::MachOLoaded::ChainedFixupPointerOnDisk*)(pageContent + i*4);;
             if ( lastLoc != nullptr ) {
                 // update chain (original chain may be wrong because of segment packing)
-                lastLoc->plainRebase.next = loc - lastLoc;
+                lastLoc->arm64e.rebase.next = loc - lastLoc;
             }
             lastLoc = loc;
         }
     }
     if ( lastLoc != nullptr ) {
         // mark last one as end of chain
-        lastLoc->plainRebase.next = 0;
+        lastLoc->arm64e.rebase.next = 0;
 	}
     return result;
 }
@@ -1985,10 +2499,14 @@ void CacheBuilder::codeSign()
         case DyldSharedCache::Agile:
             agile = true;
             // Fall through to SHA1, because the main code directory remains SHA1 for compatibility.
+            [[clang::fallthrough]];
         case DyldSharedCache::SHA1only:
+#pragma clang diagnostic push
+#pragma clang diagnostic ignored "-Wdeprecated-declarations"
             dscHashType     = CS_HASHTYPE_SHA1;
             dscHashSize     = CS_HASH_SIZE_SHA1;
             dscDigestFormat = kCCDigestSHA1;
+#pragma clang diagnostic pop
             break;
         case DyldSharedCache::SHA256only:
             dscHashType     = CS_HASHTYPE_SHA256;
@@ -2001,12 +2519,13 @@ void CacheBuilder::codeSign()
             return;
     }
 
-    std::string cacheIdentifier = "com.apple.dyld.cache." + _options.archName;
+    std::string cacheIdentifier = "com.apple.dyld.cache.";
+    cacheIdentifier +=  _options.archs->name();
     if ( _options.dylibsRemovedDuringMastering ) {
         if ( _options.optimizeStubs  )
-            cacheIdentifier = "com.apple.dyld.cache." + _options.archName + ".release";
+            cacheIdentifier +=  ".release";
         else
-            cacheIdentifier = "com.apple.dyld.cache." + _options.archName + ".development";
+            cacheIdentifier += ".development";
     }
     // get pointers into shared cache buffer
     size_t          inBbufferSize = _readExecuteRegion.sizeInUse+_readWriteRegion.sizeInUse+_readOnlyRegion.sizeInUse+_localSymbolsRegion.sizeInUse;
@@ -2181,19 +2700,19 @@ void CacheBuilder::codeSign()
         codeSignPage(i);
     });
 
-    // Now that we have a code signature, compute a UUID from it.
-
-    // Clear existing UUID, then MD5 whole cache buffer.
+    // Now that we have a code signature, compute a cache UUID by hashing the code signature blob
     {
         uint8_t* uuidLoc = cache->uuid;
         assert(uuid_is_null(uuidLoc));
         static_assert(offsetof(dyld_cache_header, uuid) / CS_PAGE_SIZE == 0, "uuid is expected in the first page of the cache");
-        CC_MD5((const void*)cd, (unsigned)cdSize, uuidLoc);
+        uint8_t fullDigest[CC_SHA256_DIGEST_LENGTH];
+        CC_SHA256((const void*)cd, (unsigned)cdSize, fullDigest);
+        memcpy(uuidLoc, fullDigest, 16);
         // <rdar://problem/6723729> uuids should conform to RFC 4122 UUID version 4 & UUID version 5 formats
         uuidLoc[6] = ( uuidLoc[6] & 0x0F ) | ( 3 << 4 );
         uuidLoc[8] = ( uuidLoc[8] & 0x3F ) | 0x80;
 
-        // Now codesign page 0 again
+        // Now codesign page 0 again, because we modified it by setting uuid in header
         codeSignPage(0);
     }
 
@@ -2236,12 +2755,45 @@ const std::string CacheBuilder::cdHashSecond()
     return cdHash(_cdHashSecond);
 }
 
+const std::string CacheBuilder::uuid() const
+{
+    dyld_cache_header* cache = (dyld_cache_header*)_readExecuteRegion.buffer;
+    uuid_string_t uuidStr;
+    uuid_unparse(cache->uuid, uuidStr);
+    return uuidStr;
+}
+
+static dyld_cache_patchable_location makePatchLocation(size_t cacheOff, uint64_t ad) {
+    int64_t signedAddend = (int64_t)ad;
+    assert(((signedAddend << 52) >> 52) == signedAddend);
+    dyld_cache_patchable_location patch;
+    patch.cacheOffset           = cacheOff;
+    patch.addend                = ad;
+    patch.authenticated         = 0;
+    patch.usesAddressDiversity  = 0;
+    patch.key                   = 0;
+    patch.discriminator         = 0;
+    return patch;
+}
+
+static dyld_cache_patchable_location makePatchLocation(size_t cacheOff, uint64_t ad,
+                                                       dyld3::MachOLoaded::ChainedFixupPointerOnDisk authInfo) {
+    int64_t signedAddend = (int64_t)ad;
+    assert(((signedAddend << 52) >> 52) == signedAddend);
+    dyld_cache_patchable_location patch;
+    patch.cacheOffset           = cacheOff;
+    patch.addend                = ad;
+    patch.authenticated         = authInfo.arm64e.authBind.auth;
+    patch.usesAddressDiversity  = authInfo.arm64e.authBind.addrDiv;
+    patch.key                   = authInfo.arm64e.authBind.key;
+    patch.discriminator         = authInfo.arm64e.authBind.diversity;
+    return patch;
+}
+
 
 void CacheBuilder::buildImageArray(std::vector<DyldSharedCache::FileAlias>& aliases)
 {
     typedef dyld3::closure::ClosureBuilder::CachedDylibInfo         CachedDylibInfo;
-    typedef dyld3::closure::Image::PatchableExport::PatchLocation   PatchLocation;
-    typedef uint64_t                                                CacheOffset;
 
     // convert STL data structures to simple arrays to passe to makeDyldCacheImageArray()
     __block std::vector<CachedDylibInfo> dylibInfos;
@@ -2267,60 +2819,118 @@ void CacheBuilder::buildImageArray(std::vector<DyldSharedCache::FileAlias>& alia
     for (const auto& alias : aliases)
         dylibAliases.push_back({ alias.realPath.c_str(), alias.aliasPath.c_str() });
 
-
-    __block std::unordered_map<const dyld3::MachOLoaded*, std::set<CacheOffset>>    dylibToItsExports;
-    __block std::unordered_map<CacheOffset, std::vector<PatchLocation>>             exportsToUses;
-    __block std::unordered_map<CacheOffset, const char*>                            exportsToName;
-
     dyld3::closure::ClosureBuilder::CacheDylibsBindingHandlers handlers;
 
     handlers.chainedBind = ^(dyld3::closure::ImageNum, const dyld3::MachOLoaded* imageLoadAddress,
-                             const dyld3::Array<uint64_t>& starts,
+                             const  dyld_chained_starts_in_image* starts,
                              const dyld3::Array<dyld3::closure::Image::ResolvedSymbolTarget>& targets,
                              const dyld3::Array<dyld3::closure::ClosureBuilder::ResolvedTargetInfo>& targetInfos) {
-        for (uint64_t start : starts) {
-            dyld3::closure::Image::forEachChainedFixup((void*)imageLoadAddress, start, ^(uint64_t* fixupLoc, dyld3::MachOLoaded::ChainedFixupPointerOnDisk fixupInfo, bool& stop) {
-                 // record location in aslr tracker so kernel can slide this on page-in
-                _aslrTracker.add(fixupLoc);
-
-                // if bind, record info for patch table and convert to rebase
-                if ( fixupInfo.plainBind.bind ) {
-                    dyld3::closure::Image::ResolvedSymbolTarget               target     = targets[fixupInfo.plainBind.ordinal];
-                    const dyld3::closure::ClosureBuilder::ResolvedTargetInfo& targetInfo = targetInfos[fixupInfo.plainBind.ordinal];
-                    dyld3::MachOLoaded::ChainedFixupPointerOnDisk*            loc;
-                    uint64_t                                                  offsetInCache;
-                    switch ( target.sharedCache.kind ) {
-                        case dyld3::closure::Image::ResolvedSymbolTarget::kindSharedCache:
-                            loc = (dyld3::MachOLoaded::ChainedFixupPointerOnDisk*)fixupLoc;
-                            offsetInCache = target.sharedCache.offset - targetInfo.addend;
-                            dylibToItsExports[targetInfo.foundInDylib].insert(offsetInCache);
-                            exportsToName[offsetInCache] = targetInfo.foundSymbolName;
-                            if ( fixupInfo.authBind.auth ) {
-                                // turn this auth bind into an auth rebase into the cache
-                                loc->authRebase.bind = 0;
-                                loc->authRebase.target = target.sharedCache.offset;
-                                exportsToUses[offsetInCache].push_back(PatchLocation((uint8_t*)fixupLoc - _readExecuteRegion.buffer, targetInfo.addend, *loc));
-                            }
-                            else {
-                                // turn this plain bind into an plain rebase into the cache
-                                loc->plainRebase.bind = 0;
-                                loc->plainRebase.target = _archLayout->sharedMemoryStart + target.sharedCache.offset;
-                                exportsToUses[offsetInCache].push_back(PatchLocation((uint8_t*)fixupLoc - _readExecuteRegion.buffer, targetInfo.addend));
-                            }
-                            break;
-                        case dyld3::closure::Image::ResolvedSymbolTarget::kindAbsolute:
-                             if ( _archLayout->is64 )
-                                *((uint64_t*)fixupLoc) = target.absolute.value;
-                            else
-                                *((uint32_t*)fixupLoc) = (uint32_t)(target.absolute.value);
-                            // don't record absolute targets for ASLR
-                            break;
-                        default:
-                            assert(0 && "unsupported ResolvedSymbolTarget kind in dyld cache");
+        imageLoadAddress->forEachFixupInAllChains(_diagnostics, starts, false, ^(dyld3::MachOLoaded::ChainedFixupPointerOnDisk* fixupLoc, const dyld_chained_starts_in_segment* segInfo, bool& stop) {
+            uint64_t                                                  offsetInCache;
+            dyld3::closure::Image::ResolvedSymbolTarget               target;
+            const dyld3::closure::ClosureBuilder::ResolvedTargetInfo* targetInfo;
+            switch (segInfo->pointer_format) {
+                case DYLD_CHAINED_PTR_ARM64E:
+                    if ( fixupLoc->arm64e.bind.bind ) {
+                        target     = targets[fixupLoc->arm64e.bind.ordinal];
+                        targetInfo = &targetInfos[fixupLoc->arm64e.bind.ordinal];
+                        switch ( target.sharedCache.kind ) {
+                            case dyld3::closure::Image::ResolvedSymbolTarget::kindSharedCache:
+                                offsetInCache = target.sharedCache.offset - targetInfo->addend;
+                                _dylibToItsExports[targetInfo->foundInDylib].insert(offsetInCache);
+                                _exportsToName[offsetInCache] = targetInfo->foundSymbolName;
+                                if ( fixupLoc->arm64e.authBind.auth ) {
+                                    // turn this auth bind into an auth rebase into the cache
+                                    fixupLoc->arm64e.authRebase.bind   = 0;
+                                    fixupLoc->arm64e.authRebase.target = target.sharedCache.offset;
+                                    _exportsToUses[offsetInCache].push_back(makePatchLocation((uint8_t*)fixupLoc - _readExecuteRegion.buffer, targetInfo->addend, *fixupLoc));
+                                }
+                                else {
+                                    // turn this plain bind into an plain rebase into the cache
+                                    fixupLoc->arm64e.rebase.bind   = 0;
+                                    fixupLoc->arm64e.rebase.target = _archLayout->sharedMemoryStart + target.sharedCache.offset;
+                                    _exportsToUses[offsetInCache].push_back(makePatchLocation((uint8_t*)fixupLoc - _readExecuteRegion.buffer, targetInfo->addend));
+                                }
+                                _aslrTracker.add(fixupLoc);
+                                break;
+                            case dyld3::closure::Image::ResolvedSymbolTarget::kindAbsolute:
+                                fixupLoc->raw64 = target.absolute.value;
+                                // don't record absolute targets for ASLR
+                                // HACK: Split seg may have added a target.  Remove it
+                                _aslrTracker.remove(fixupLoc);
+                                if ( (targetInfo->libOrdinal > 0) && (targetInfo->libOrdinal <= (int)(imageLoadAddress->dependentDylibCount())) ) {
+                                    _missingWeakImports[fixupLoc] = imageLoadAddress->dependentDylibLoadPath(targetInfo->libOrdinal - 1);
+                                }
+                               break;
+                            default:
+                                assert(0 && "unsupported ResolvedSymbolTarget kind in dyld cache");
+                        }
+                    } else {
+                        _aslrTracker.add(fixupLoc);
                     }
-                }
-            });
-        }
+                    break;
+                case DYLD_CHAINED_PTR_64:
+                    if ( fixupLoc->generic64.bind.bind ) {
+                        target     = targets[fixupLoc->generic64.bind.ordinal];
+                        targetInfo = &targetInfos[fixupLoc->generic64.bind.ordinal];
+                        switch ( target.sharedCache.kind ) {
+                            case dyld3::closure::Image::ResolvedSymbolTarget::kindSharedCache:
+                                offsetInCache = target.sharedCache.offset - targetInfo->addend;
+                                _dylibToItsExports[targetInfo->foundInDylib].insert(offsetInCache);
+                                _exportsToName[offsetInCache] = targetInfo->foundSymbolName;
+                                // turn this bind into a rebase into the cache
+                                fixupLoc->generic64.rebase.bind     = 0;
+                                fixupLoc->generic64.rebase.next     = 0; // rechained later
+                                fixupLoc->generic64.rebase.reserved = 0;
+                                fixupLoc->generic64.rebase.high8    = 0;
+                                fixupLoc->generic64.rebase.target   = target.sharedCache.offset;
+                                _exportsToUses[offsetInCache].push_back(makePatchLocation((uint8_t*)fixupLoc - _readExecuteRegion.buffer, targetInfo->addend));
+                                _aslrTracker.add(fixupLoc);
+                                break;
+                            case dyld3::closure::Image::ResolvedSymbolTarget::kindAbsolute:
+                                fixupLoc->raw64 = target.absolute.value;
+                                 // don't record absolute targets for ASLR
+                                if ( (targetInfo->libOrdinal > 0) && (targetInfo->libOrdinal <= (int)(imageLoadAddress->dependentDylibCount())) ) {
+                                    _missingWeakImports[fixupLoc] = imageLoadAddress->dependentDylibLoadPath(targetInfo->libOrdinal - 1);
+                                }
+                                break;
+                            default:
+                                assert(0 && "unsupported ResolvedSymbolTarget kind in dyld cache");
+                        }
+                    }
+                    break;
+                case DYLD_CHAINED_PTR_32:
+                    if ( fixupLoc->generic32.bind.bind ) {
+                        target     = targets[fixupLoc->generic32.bind.ordinal];
+                        targetInfo = &targetInfos[fixupLoc->generic32.bind.ordinal];
+                        switch ( target.sharedCache.kind ) {
+                            case dyld3::closure::Image::ResolvedSymbolTarget::kindSharedCache:
+                                offsetInCache = target.sharedCache.offset - targetInfo->addend;
+                                _dylibToItsExports[targetInfo->foundInDylib].insert(offsetInCache);
+                                _exportsToName[offsetInCache] = targetInfo->foundSymbolName;
+                                // turn this bind into a rebase into the cache
+                                fixupLoc->cache32.next   = 0; // rechained later
+                                fixupLoc->cache32.target = (uint32_t)(target.sharedCache.offset);
+                                _exportsToUses[offsetInCache].push_back(makePatchLocation((uint8_t*)fixupLoc - _readExecuteRegion.buffer, targetInfo->addend));
+                                _aslrTracker.add(fixupLoc);
+                                break;
+                            case dyld3::closure::Image::ResolvedSymbolTarget::kindAbsolute:
+                                fixupLoc->raw32 = (uint32_t)target.absolute.value;
+                                 // don't record absolute targets for ASLR
+                                if ( (targetInfo->libOrdinal > 0) && (targetInfo->libOrdinal <= (int)(imageLoadAddress->dependentDylibCount())) ) {
+                                    _missingWeakImports[fixupLoc] = imageLoadAddress->dependentDylibLoadPath(targetInfo->libOrdinal - 1);
+                                }
+                                break;
+                            default:
+                                assert(0 && "unsupported ResolvedSymbolTarget kind in dyld cache");
+                        }
+                    }
+                   break;
+                default:
+                    assert(0 && "unsupported chained bind type");
+            }
+
+        });
     };
 
     handlers.rebase = ^(dyld3::closure::ImageNum imageNum, const dyld3::MachOLoaded* imageToFix, uint32_t runtimeOffset) {
@@ -2342,9 +2952,11 @@ void CacheBuilder::buildImageArray(std::vector<DyldSharedCache::FileAlias>& alia
         switch ( target.sharedCache.kind ) {
             case dyld3::closure::Image::ResolvedSymbolTarget::kindSharedCache:
                 offsetInCache = target.sharedCache.offset - targetInfo.addend;
-                dylibToItsExports[targetInfo.foundInDylib].insert(offsetInCache);
-                exportsToUses[offsetInCache].push_back(PatchLocation(fixupLoc - _readExecuteRegion.buffer, targetInfo.addend));
-                exportsToName[offsetInCache] = targetInfo.foundSymbolName;
+                _dylibToItsExports[targetInfo.foundInDylib].insert(offsetInCache);
+                if (targetInfo.isWeakDef)
+                    _dylibWeakExports.insert({ targetInfo.foundInDylib, offsetInCache });
+                _exportsToUses[offsetInCache].push_back(makePatchLocation(fixupLoc - _readExecuteRegion.buffer, targetInfo.addend));
+                _exportsToName[offsetInCache] = targetInfo.foundSymbolName;
                 if ( !weakDefUseAlreadySet ) {
                     if ( _archLayout->is64 )
                         *((uint64_t*)fixupLoc) = _archLayout->sharedMemoryStart + target.sharedCache.offset;
@@ -2362,7 +2974,7 @@ void CacheBuilder::buildImageArray(std::vector<DyldSharedCache::FileAlias>& alia
                 // don't record absolute targets for ASLR
                 // HACK: Split seg may have added a target.  Remove it
                 _aslrTracker.remove(fixupLoc);
-                if ( (targetInfo.libOrdinal > 0) && (targetInfo.libOrdinal <= mh->dependentDylibCount()) ) {
+                if ( (targetInfo.libOrdinal > 0) && (targetInfo.libOrdinal <= (int)(mh->dependentDylibCount())) ) {
                     _missingWeakImports[fixupLoc] = mh->dependentDylibLoadPath(targetInfo.libOrdinal - 1);
                 }
                 break;
@@ -2371,24 +2983,10 @@ void CacheBuilder::buildImageArray(std::vector<DyldSharedCache::FileAlias>& alia
         }
     };
 
-    handlers.forEachExportsPatch = ^(dyld3::closure::ImageNum imageNum, void (^handler)(const dyld3::closure::ClosureBuilder::CacheDylibsBindingHandlers::PatchInfo&)) {
-        const dyld3::MachOLoaded* ml = imageNumToML[imageNum];
-        for (CacheOffset exportCacheOffset : dylibToItsExports[ml]) {
-            dyld3::closure::ClosureBuilder::CacheDylibsBindingHandlers::PatchInfo info;
-            std::vector<PatchLocation>& uses = exportsToUses[exportCacheOffset];
-            uses.erase(std::unique(uses.begin(), uses.end()), uses.end());
-            info.exportCacheOffset = (uint32_t)exportCacheOffset;
-            info.exportSymbolName  = exportsToName[exportCacheOffset];
-            info.usesCount         = (uint32_t)uses.size();
-            info.usesArray         = &uses.front();
-            handler(info);
-        }
-    };
-
-
     // build ImageArray for all dylibs in dyld cache
     dyld3::closure::PathOverrides pathOverrides;
-    dyld3::closure::ClosureBuilder cb(dyld3::closure::kFirstDyldCacheImageNum, _fileSystem, cache, false, pathOverrides, dyld3::closure::ClosureBuilder::AtPath::none, nullptr, _archLayout->archName, _options.platform, &handlers);
+    dyld3::closure::ClosureBuilder cb(dyld3::closure::kFirstDyldCacheImageNum, _fileSystem, cache, false, *_options.archs, pathOverrides,
+                                      dyld3::closure::ClosureBuilder::AtPath::none, false, nullptr, _options.platform, &handlers);
     dyld3::Array<CachedDylibInfo> dylibs(&dylibInfos[0], dylibInfos.size(), dylibInfos.size());
     const dyld3::Array<dyld3::closure::ClosureBuilder::CachedDylibAlias> aliasesArray(dylibAliases.data(), dylibAliases.size(), dylibAliases.size());
     _imageArray = cb.makeDyldCacheImageArray(_options.optimizeStubs, dylibs, aliasesArray);
@@ -2396,6 +2994,10 @@ void CacheBuilder::buildImageArray(std::vector<DyldSharedCache::FileAlias>& alia
         _diagnostics.error("%s", cb.diagnostics().errorMessage().c_str());
         return;
     }
+}
+
+static bool operator==(const dyld_cache_patchable_location& a, const dyld_cache_patchable_location& b) {
+    return a.cacheOffset == b.cacheOffset;
 }
 
 void CacheBuilder::addImageArray()
@@ -2414,12 +3016,117 @@ void CacheBuilder::addImageArray()
     while ( (trieBytes.size() % 4) != 0 )
         trieBytes.push_back(0);
 
+    // build set of functions to never stub-eliminate because tools may need to override them
+    std::unordered_set<std::string> alwaysGeneratePatch;
+    for (const char* const* p=_s_neverStubEliminateSymbols; *p != nullptr; ++p)
+        alwaysGeneratePatch.insert(*p);
+
+    // Add the patches for the image array.
+    __block uint64_t numPatchImages             = _imageArray->size();
+    __block uint64_t numPatchExports            = 0;
+    __block uint64_t numPatchLocations          = 0;
+    __block uint64_t numPatchExportNameBytes    = 0;
+
+    auto needsPatch = [&](bool dylibNeedsPatching, const dyld3::MachOLoaded* mh,
+                          CacheOffset offset) -> bool {
+        if (dylibNeedsPatching)
+            return true;
+        if (_dylibWeakExports.find({ mh, offset }) != _dylibWeakExports.end())
+            return true;
+        const std::string& exportName = _exportsToName[offset];
+        return alwaysGeneratePatch.find(exportName) != alwaysGeneratePatch.end();
+    };
+
+    std::set<std::string> alwaysPatchDylibs;
+    for (const char* const* d= _s_neverStubEliminateDylibs; *d != nullptr; ++d)
+        alwaysPatchDylibs.insert(*d);
+
+    // First calculate how much space we need
+    const DyldSharedCache* cache = (DyldSharedCache*)_readExecuteRegion.buffer;
+    cache->forEachImage(^(const mach_header* mh, const char* installName) {
+        const dyld3::MachOLoaded* ml = (const dyld3::MachOLoaded*)mh;
+        const std::set<CacheOffset>& dylibExports = _dylibToItsExports[ml];
+
+        // On a customer cache, only store patch locations for interposable dylibs and weak binding
+        bool dylibNeedsPatching = !_options.optimizeStubs || alwaysPatchDylibs.count(installName);
+
+        uint64_t numDylibExports = 0;
+        for (CacheOffset exportCacheOffset : dylibExports) {
+            if (!needsPatch(dylibNeedsPatching, ml, exportCacheOffset))
+                continue;
+            std::vector<dyld_cache_patchable_location>& uses = _exportsToUses[exportCacheOffset];
+            uses.erase(std::unique(uses.begin(), uses.end()), uses.end());
+            numPatchLocations += uses.size();
+
+            std::string exportName = _exportsToName[exportCacheOffset];
+            numPatchExportNameBytes += exportName.size() + 1;
+        }
+        numPatchExports += numDylibExports;
+    });
+
+    // Now reserve the space
+    __block std::vector<dyld_cache_image_patches>       patchImages;
+    __block std::vector<dyld_cache_patchable_export>    patchExports;
+    __block std::vector<dyld_cache_patchable_location>  patchLocations;
+    __block std::vector<char>                           patchExportNames;
+
+    patchImages.reserve(numPatchImages);
+    patchExports.reserve(numPatchExports);
+    patchLocations.reserve(numPatchLocations);
+    patchExportNames.reserve(numPatchExportNameBytes);
+
+    // And now fill it with the patch data
+    cache->forEachImage(^(const mach_header* mh, const char* installName) {
+        const dyld3::MachOLoaded* ml = (const dyld3::MachOLoaded*)mh;
+        const std::set<CacheOffset>& dylibExports = _dylibToItsExports[ml];
+
+        // On a customer cache, only store patch locations for interposable dylibs and weak binding
+        bool dylibNeedsPatching = !_options.optimizeStubs || alwaysPatchDylibs.count(installName);
+
+        // Add the patch image which points in to the exports
+        dyld_cache_image_patches patchImage;
+        patchImage.patchExportsStartIndex   = (uint32_t)patchExports.size();
+        patchImage.patchExportsCount        = 0;
+
+        // Then add each export which points to a list of locations and a name
+        for (CacheOffset exportCacheOffset : dylibExports) {
+            if (!needsPatch(dylibNeedsPatching, ml, exportCacheOffset))
+                continue;
+            ++patchImage.patchExportsCount;
+            std::vector<dyld_cache_patchable_location>& uses = _exportsToUses[exportCacheOffset];
+
+            dyld_cache_patchable_export cacheExport;
+            cacheExport.cacheOffsetOfImpl           = (uint32_t)exportCacheOffset;
+            cacheExport.patchLocationsStartIndex    = (uint32_t)patchLocations.size();
+            cacheExport.patchLocationsCount         = (uint32_t)uses.size();
+            cacheExport.exportNameOffset            = (uint32_t)patchExportNames.size();
+            patchExports.push_back(cacheExport);
+
+            // Now add the list of locations.
+            patchLocations.insert(patchLocations.end(), uses.begin(), uses.end());
+
+            // And add the export name
+            const std::string& exportName = _exportsToName[exportCacheOffset];
+            patchExportNames.insert(patchExportNames.end(), &exportName[0], &exportName[0] + exportName.size() + 1);
+        }
+        patchImages.push_back(patchImage);
+    });
+
+    while ( (patchExportNames.size() % 4) != 0 )
+        patchExportNames.push_back('\0');
+
+    uint64_t patchInfoSize = sizeof(dyld_cache_patch_info);
+    patchInfoSize += sizeof(dyld_cache_image_patches) * patchImages.size();
+    patchInfoSize += sizeof(dyld_cache_patchable_export) * patchExports.size();
+    patchInfoSize += sizeof(dyld_cache_patchable_location) * patchLocations.size();
+    patchInfoSize += patchExportNames.size();
+
     // check for fit
     uint64_t imageArraySize = _imageArray->size();
     size_t freeSpace = _readOnlyRegion.bufferSize - _readOnlyRegion.sizeInUse;
-    if ( imageArraySize+trieBytes.size() > freeSpace ) {
-        _diagnostics.error("cache buffer too small to hold ImageArray and Trie (buffer size=%lldMB, imageArray size=%lldMB, trie size=%luKB, free space=%ldMB)",
-                            _allocatedBufferSize/1024/1024, imageArraySize/1024/1024, trieBytes.size()/1024, freeSpace/1024/1024);
+    if ( (imageArraySize+trieBytes.size()+patchInfoSize) > freeSpace ) {
+        _diagnostics.error("cache buffer too small to hold ImageArray and Trie (buffer size=%lldMB, imageArray size=%lldMB, trie size=%luKB, patch size=%lluKB, free space=%ldMB)",
+                            _allocatedBufferSize/1024/1024, imageArraySize/1024/1024, trieBytes.size()/1024, patchInfoSize/1024, freeSpace/1024/1024);
         return;
     }
 
@@ -2431,19 +3138,48 @@ void CacheBuilder::addImageArray()
     dyldCache->header.dylibsTrieSize       = trieBytes.size();
     ::memcpy(_readOnlyRegion.buffer + _readOnlyRegion.sizeInUse, _imageArray, imageArraySize);
     ::memcpy(_readOnlyRegion.buffer + _readOnlyRegion.sizeInUse + imageArraySize, &trieBytes[0], trieBytes.size());
-    _readOnlyRegion.sizeInUse += align(imageArraySize+trieBytes.size(),14);
+
+    // Also write out the patch info
+    dyldCache->header.patchInfoAddr = dyldCache->header.dylibsTrieAddr + dyldCache->header.dylibsTrieSize;
+    dyldCache->header.patchInfoSize = patchInfoSize;
+    dyld_cache_patch_info patchInfo;
+    patchInfo.patchTableArrayAddr = dyldCache->header.patchInfoAddr + sizeof(dyld_cache_patch_info);
+    patchInfo.patchTableArrayCount = patchImages.size();
+    patchInfo.patchExportArrayAddr = patchInfo.patchTableArrayAddr + (patchInfo.patchTableArrayCount * sizeof(dyld_cache_image_patches));
+    patchInfo.patchExportArrayCount = patchExports.size();
+    patchInfo.patchLocationArrayAddr = patchInfo.patchExportArrayAddr + (patchInfo.patchExportArrayCount * sizeof(dyld_cache_patchable_export));
+    patchInfo.patchLocationArrayCount = patchLocations.size();
+    patchInfo.patchExportNamesAddr = patchInfo.patchLocationArrayAddr + (patchInfo.patchLocationArrayCount * sizeof(dyld_cache_patchable_location));
+    patchInfo.patchExportNamesSize = patchExportNames.size();
+    ::memcpy(_readOnlyRegion.buffer + dyldCache->header.patchInfoAddr - _readOnlyRegion.unslidLoadAddress,
+             &patchInfo, sizeof(dyld_cache_patch_info));
+    ::memcpy(_readOnlyRegion.buffer + patchInfo.patchTableArrayAddr - _readOnlyRegion.unslidLoadAddress,
+             &patchImages[0], sizeof(patchImages[0]) * patchImages.size());
+    ::memcpy(_readOnlyRegion.buffer + patchInfo.patchExportArrayAddr - _readOnlyRegion.unslidLoadAddress,
+             &patchExports[0], sizeof(patchExports[0]) * patchExports.size());
+    ::memcpy(_readOnlyRegion.buffer + patchInfo.patchLocationArrayAddr - _readOnlyRegion.unslidLoadAddress,
+             &patchLocations[0], sizeof(patchLocations[0]) * patchLocations.size());
+    ::memcpy(_readOnlyRegion.buffer + patchInfo.patchExportNamesAddr - _readOnlyRegion.unslidLoadAddress,
+             &patchExportNames[0], patchExportNames.size());
+
+    _readOnlyRegion.sizeInUse += align(imageArraySize+trieBytes.size()+patchInfoSize,14);
+
+    // Free the underlying image array buffer
+    _imageArray->deallocate();
 }
 
 void CacheBuilder::addOtherImageArray(const std::vector<LoadedMachO>& otherDylibsAndBundles, std::vector<const LoadedMachO*>& overflowDylibs)
 {
     DyldSharedCache* cache = (DyldSharedCache*)_readExecuteRegion.buffer;
     dyld3::closure::PathOverrides pathOverrides;
-    dyld3::closure::ClosureBuilder cb(dyld3::closure::kFirstOtherOSImageNum, _fileSystem, cache, false, pathOverrides, dyld3::closure::ClosureBuilder::AtPath::none, nullptr, _archLayout->archName, _options.platform);
+    dyld3::closure::FileSystemNull nullFileSystem;
+    dyld3::closure::ClosureBuilder cb(dyld3::closure::kFirstOtherOSImageNum, nullFileSystem, cache, false, *_options.archs, pathOverrides,
+                                      dyld3::closure::ClosureBuilder::AtPath::none, false, nullptr, _options.platform);
 
     // make ImageArray for other dylibs and bundles
     STACK_ALLOC_ARRAY(dyld3::closure::LoadedFileInfo, others, otherDylibsAndBundles.size() + overflowDylibs.size());
     for (const LoadedMachO& other : otherDylibsAndBundles) {
-        if ( !contains(other.loadedFileInfo.path, ".app/") )
+        if ( !contains(other.loadedFileInfo.path, "staged_system_apps/") )
             others.push_back(other.loadedFileInfo);
     }
 
@@ -2455,6 +3191,11 @@ void CacheBuilder::addOtherImageArray(const std::vector<LoadedMachO>& otherDylib
     // Sort the others array by name so that it is deterministic
     std::sort(others.begin(), others.end(),
               [](const dyld3::closure::LoadedFileInfo& a, const dyld3::closure::LoadedFileInfo& b) {
+                  // Sort mac before iOSMac
+                  bool isIOSMacA = strncmp(a.path, "/System/iOSSupport/", 19) == 0;
+                  bool isIOSMacB = strncmp(b.path, "/System/iOSSupport/", 19) == 0;
+                  if (isIOSMacA != isIOSMacB)
+                      return !isIOSMacA;
                   return strcmp(a.path, b.path) < 0;
               });
 
@@ -2490,6 +3231,9 @@ void CacheBuilder::addOtherImageArray(const std::vector<LoadedMachO>& otherDylib
     ::memcpy(_readOnlyRegion.buffer + _readOnlyRegion.sizeInUse, otherImageArray, imageArraySize);
     ::memcpy(_readOnlyRegion.buffer + _readOnlyRegion.sizeInUse + imageArraySize, &trieBytes[0], trieBytes.size());
     _readOnlyRegion.sizeInUse += align(imageArraySize+trieBytes.size(),14);
+
+    // Free the underlying buffer
+    otherImageArray->deallocate();
 }
 
 
@@ -2509,10 +3253,11 @@ void CacheBuilder::addClosures(const std::vector<LoadedMachO>& osExecutables)
             return;
         }
         dyld3::closure::PathOverrides pathOverrides;
-        dyld3::closure::ClosureBuilder builder(dyld3::closure::kFirstLaunchClosureImageNum, _fileSystem, dyldCache, false, pathOverrides, dyld3::closure::ClosureBuilder::AtPath::all, nullptr, _archLayout->archName, _options.platform, nullptr);
+        dyld3::closure::ClosureBuilder builder(dyld3::closure::kFirstLaunchClosureImageNum, _fileSystem, dyldCache, false, *_options.archs, pathOverrides,
+                                               dyld3::closure::ClosureBuilder::AtPath::all, false, nullptr, _options.platform, nullptr);
         bool issetuid = false;
-        if ( this->_options.platform == dyld3::Platform::macOS )
-            _fileSystem.fileExists(loadedMachO.loadedFileInfo.path, nullptr, nullptr, &issetuid);
+        if ( this->_options.platform == dyld3::Platform::macOS || dyld3::MachOFile::isSimulatorPlatform(this->_options.platform) )
+            _fileSystem.fileExists(loadedMachO.loadedFileInfo.path, nullptr, nullptr, &issetuid, nullptr);
         const dyld3::closure::LaunchClosure* mainClosure = builder.makeLaunchClosure(loadedMachO.loadedFileInfo, issetuid);
         if ( builder.diagnostics().hasError() ) {
            osExecutablesDiags[index].error("%s", builder.diagnostics().errorMessage().c_str());
@@ -2623,20 +3368,52 @@ void CacheBuilder::writeFile(const std::string& path)
 {
     std::string pathTemplate = path + "-XXXXXX";
     size_t templateLen = strlen(pathTemplate.c_str())+2;
-    char pathTemplateSpace[templateLen];
+    BLOCK_ACCCESSIBLE_ARRAY(char, pathTemplateSpace, templateLen);
     strlcpy(pathTemplateSpace, pathTemplate.c_str(), templateLen);
     int fd = mkstemp(pathTemplateSpace);
     if ( fd != -1 ) {
         auto cacheSizeCallback = ^(uint64_t size) {
+            // if making macOS dyld cache for current OS into standard location
+            if ( (_options.platform == dyld3::Platform::macOS) && startsWith(path, MACOSX_DYLD_SHARED_CACHE_DIR) ) {
+                // <rdar://48687550> pin cache file to SSD on fusion drives
+                apfs_data_pin_location_t where = APFS_PIN_DATA_TO_MAIN;
+                ::fsctl(pathTemplateSpace, APFSIOC_PIN_DATA, &where, 0);
+            }
+            // set final cache file size (may help defragment file)
             ::ftruncate(fd, size);
         };
         auto copyCallback = ^(const uint8_t* src, uint64_t size, uint64_t dstOffset) {
             uint64_t writtenSize = pwrite(fd, src, size, dstOffset);
             return writtenSize == size;
         };
+        // <rdar://problem/55370916> TOCTOU: verify path is still a realpath (not changed)
+        char tempPath[MAXPATHLEN];
+        if ( ::fcntl(fd, F_GETPATH, tempPath) == 0 ) {
+            size_t tempPathLen = strlen(tempPath);
+            if ( tempPathLen > 7 )
+                tempPath[tempPathLen-7] = '\0'; // remove trailing -xxxxxx
+            if ( path != tempPath ) {
+                _diagnostics.error("output file path changed from: '%s' to: '%s'", path.c_str(), tempPath);
+                ::close(fd);
+                return;
+            }
+        }
+        else {
+            _diagnostics.error("unable to fcntl(fd, F_GETPATH) on output file");
+            ::close(fd);
+            return;
+        }
         bool fullyWritten = writeCache(cacheSizeCallback, copyCallback);
         if ( fullyWritten ) {
-            ::fchmod(fd, S_IRUSR|S_IWUSR|S_IRGRP|S_IROTH); // mkstemp() makes file "rw-------", switch it to "rw-r--r--"
+            ::fchmod(fd, S_IRUSR|S_IRGRP|S_IROTH); // mkstemp() makes file "rw-------", switch it to "r--r--r--"
+            // <rdar://problem/55370916> TOCTOU: verify path is still a realpath (not changed)
+            char resolvedPath[PATH_MAX];
+            ::realpath(path.c_str(), resolvedPath);
+            // Note: if the target cache file does not already exist, realpath() will return NULL, but still fill in the path buffer
+            if ( path != resolvedPath ) {
+                _diagnostics.error("output file path changed from: '%s' to: '%s'", path.c_str(), resolvedPath);
+                return;
+            }
             if ( ::rename(pathTemplateSpace, path.c_str()) == 0) {
                 ::close(fd);
                 return; // success
@@ -2673,13 +3450,10 @@ void CacheBuilder::writeMapFile(const std::string& path)
     safeSave(mapContent.c_str(), mapContent.size(), path);
 }
 
-void CacheBuilder::writeMapFileBuffer(uint8_t*& buffer, uint64_t& bufferSize)
+std::string CacheBuilder::getMapFileBuffer(const std::string& cacheDisposition) const
 {
     const DyldSharedCache* cache = (DyldSharedCache*)_readExecuteRegion.buffer;
-    std::string mapContent = cache->mapFile();
-    buffer = (uint8_t*)malloc(mapContent.size() + 1);
-    bufferSize = mapContent.size() + 1;
-    memcpy(buffer, mapContent.data(), bufferSize);
+    return cache->generateJSONMap(cacheDisposition.c_str());
 }
 
 
@@ -2705,6 +3479,8 @@ void CacheBuilder::ASLR_Tracker::setDataRegion(const void* rwRegionStart, size_t
 
 void CacheBuilder::ASLR_Tracker::add(void* loc)
 {
+    if (!_enabled)
+        return;
     uint8_t* p = (uint8_t*)loc;
     assert(p >= _regionStart);
     assert(p < _endStart);
@@ -2713,6 +3489,8 @@ void CacheBuilder::ASLR_Tracker::add(void* loc)
 
 void CacheBuilder::ASLR_Tracker::remove(void* loc)
 {
+    if (!_enabled)
+        return;
     uint8_t* p = (uint8_t*)loc;
     assert(p >= _regionStart);
     assert(p < _endStart);
@@ -2721,6 +3499,8 @@ void CacheBuilder::ASLR_Tracker::remove(void* loc)
 
 bool CacheBuilder::ASLR_Tracker::has(void* loc)
 {
+    if (!_enabled)
+        return true;
     uint8_t* p = (uint8_t*)loc;
     assert(p >= _regionStart);
     assert(p < _endStart);
@@ -2728,5 +3508,148 @@ bool CacheBuilder::ASLR_Tracker::has(void* loc)
 }
 
 
+////////////////////////////  DylibTextCoalescer ////////////////////////////////////
+
+bool CacheBuilder::DylibTextCoalescer::sectionWasCoalesced(std::string_view sectionName) const {
+    if (sectionName.size() > 16)
+        sectionName = sectionName.substr(0, 16);
+    std::map<std::string_view, const DylibSectionOffsetToCacheSectionOffset*> supportedSections = {
+        { "__objc_classname", &objcClassNames },
+        { "__objc_methname", &objcMethNames },
+        { "__objc_methtype", &objcMethTypes }
+    };
+    auto it = supportedSections.find(sectionName);
+    if (it == supportedSections.end())
+        return false;
+    return !it->second->empty();
+}
+
+CacheBuilder::DylibTextCoalescer::DylibSectionOffsetToCacheSectionOffset& CacheBuilder::DylibTextCoalescer::getSectionCoalescer(std::string_view sectionName) {
+    if (sectionName.size() > 16)
+        sectionName = sectionName.substr(0, 16);
+    std::map<std::string_view, DylibSectionOffsetToCacheSectionOffset*> supportedSections = {
+        { "__objc_classname", &objcClassNames },
+        { "__objc_methname", &objcMethNames },
+        { "__objc_methtype", &objcMethTypes }
+    };
+    auto it = supportedSections.find(sectionName);
+    assert(it != supportedSections.end());
+    return *it->second;
+}
+
+const CacheBuilder::DylibTextCoalescer::DylibSectionOffsetToCacheSectionOffset& CacheBuilder::DylibTextCoalescer::getSectionCoalescer(std::string_view sectionName) const {
+    if (sectionName.size() > 16)
+        sectionName = sectionName.substr(0, 16);
+    std::map<std::string_view, const DylibSectionOffsetToCacheSectionOffset*> supportedSections = {
+        { "__objc_classname", &objcClassNames },
+        { "__objc_methname", &objcMethNames },
+        { "__objc_methtype", &objcMethTypes }
+    };
+    auto it = supportedSections.find(sectionName);
+    assert(it != supportedSections.end());
+    return *it->second;
+}
+
+////////////////////////////  CacheCoalescedText ////////////////////////////////////
+const char* CacheBuilder::CacheCoalescedText::SupportedSections[] = {
+    "__objc_classname",
+    "__objc_methname",
+    "__objc_methtype",
+};
+
+void CacheBuilder::CacheCoalescedText::parseCoalescableText(const dyld3::MachOAnalyzer *ma,
+                                                            DylibTextCoalescer& textCoalescer) {
+    static const bool log = false;
+
+    // We can only remove sections if we know we have split seg v2 to point to it
+    // Otherwise, a PC relative load in the __TEXT segment wouldn't know how to point to the new strings
+    // which are no longer in the same segment
+    uint32_t splitSegSize = 0;
+    const void* splitSegStart = ma->getSplitSeg(splitSegSize);
+    if (!splitSegStart)
+        return;
+
+    if ((*(const uint8_t*)splitSegStart) != DYLD_CACHE_ADJ_V2_FORMAT)
+        return;
+
+    // We can only remove sections from the end of a segment, so cache them all and walk backwards.
+    __block std::vector<std::pair<std::string, dyld3::MachOAnalyzer::SectionInfo>> textSectionInfos;
+    ma->forEachSection(^(const dyld3::MachOAnalyzer::SectionInfo &sectInfo, bool malformedSectionRange, bool &stop) {
+        if (strcmp(sectInfo.segInfo.segName, "__TEXT") != 0)
+            return;
+        assert(!malformedSectionRange);
+        textSectionInfos.push_back({ sectInfo.sectName, sectInfo });
+    });
+
+    const std::set<std::string_view> supportedSections(std::begin(SupportedSections), std::end(SupportedSections));
+    int64_t slide = ma->getSlide();
+
+    for (auto sectionInfoIt = textSectionInfos.rbegin(); sectionInfoIt != textSectionInfos.rend(); ++sectionInfoIt) {
+        const std::string& sectionName = sectionInfoIt->first;
+        const dyld3::MachOAnalyzer::SectionInfo& sectInfo = sectionInfoIt->second;
+
+        // If we find a section we can't handle then stop here.  Hopefully we coalesced some from the end.
+        if (supportedSections.find(sectionName) == supportedSections.end())
+            break;
+
+        StringSection& cacheStringSection = getSectionData(sectionName);
+
+        DylibTextCoalescer::DylibSectionOffsetToCacheSectionOffset& sectionStringData = textCoalescer.getSectionCoalescer(sectionName);
+
+        // Walk the strings in this section
+        const uint8_t* content = (uint8_t*)(sectInfo.sectAddr + slide);
+        const char* s   = (char*)content;
+        const char* end = s + sectInfo.sectSize;
+        while ( s < end ) {
+            std::string_view str = s;
+            auto itAndInserted = cacheStringSection.stringsToOffsets.insert({ str, cacheStringSection.bufferSize });
+            if (itAndInserted.second) {
+                // If we inserted the string then we need to include it in the total
+                cacheStringSection.bufferSize += str.size() + 1;
+                if (log)
+                    printf("Selector: %s -> %s\n", ma->installName(), s);
+            } else {
+                // Debugging only.  If we didn't include the string then we saved that many bytes
+                cacheStringSection.savedSpace += str.size() + 1;
+            }
+
+            // Now keep track of this offset in our source dylib as pointing to this offset
+            uint32_t sourceSectionOffset = (uint32_t)((uint64_t)s - (uint64_t)content);
+            uint32_t cacheSectionOffset = itAndInserted.first->second;
+            sectionStringData[sourceSectionOffset] = cacheSectionOffset;
+            s += str.size() + 1;
+        }
+    }
+}
+
+void CacheBuilder::CacheCoalescedText::clear() {
+    *this = CacheBuilder::CacheCoalescedText();
+}
 
 
+CacheBuilder::CacheCoalescedText::StringSection& CacheBuilder::CacheCoalescedText::getSectionData(std::string_view sectionName) {
+    if (sectionName.size() > 16)
+        sectionName = sectionName.substr(0, 16);
+    std::map<std::string_view, StringSection*> supportedSections = {
+        { "__objc_classname", &objcClassNames },
+        { "__objc_methname", &objcMethNames },
+        { "__objc_methtype", &objcMethTypes }
+    };
+    auto it = supportedSections.find(sectionName);
+    assert(it != supportedSections.end());
+    return *it->second;
+}
+
+
+const CacheBuilder::CacheCoalescedText::StringSection& CacheBuilder::CacheCoalescedText::getSectionData(std::string_view sectionName) const {
+    if (sectionName.size() > 16)
+        sectionName = sectionName.substr(0, 16);
+    std::map<std::string_view, const StringSection*> supportedSections = {
+        { "__objc_classname", &objcClassNames },
+        { "__objc_methname", &objcMethNames },
+        { "__objc_methtype", &objcMethTypes }
+    };
+    auto it = supportedSections.find(sectionName);
+    assert(it != supportedSections.end());
+    return *it->second;
+}

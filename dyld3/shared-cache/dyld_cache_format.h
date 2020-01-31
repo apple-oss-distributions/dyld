@@ -50,20 +50,21 @@ struct dyld_cache_header
     uint64_t    accelerateInfoSize;     // size of optimization info
     uint64_t    imagesTextOffset;       // file offset to first dyld_cache_image_text_info
     uint64_t    imagesTextCount;        // number of dyld_cache_image_text_info entries
-    uint64_t    dylibsImageGroupAddr;   // (unslid) address of ImageGroup for dylibs in this cache
-    uint64_t    dylibsImageGroupSize;   // size of ImageGroup for dylibs in this cache
-    uint64_t    otherImageGroupAddr;    // (unslid) address of ImageGroup for other OS dylibs
-    uint64_t    otherImageGroupSize;    // size of oImageGroup for other OS dylibs
+    uint64_t    patchInfoAddr;          // (unslid) address of dyld_cache_patch_info
+    uint64_t    patchInfoSize;          // Size of all of the patch information pointed to via the dyld_cache_patch_info
+    uint64_t    otherImageGroupAddrUnused;    // unused
+    uint64_t    otherImageGroupSizeUnused;    // unused
     uint64_t    progClosuresAddr;       // (unslid) address of list of program launch closures
     uint64_t    progClosuresSize;       // size of list of program launch closures
     uint64_t    progClosuresTrieAddr;   // (unslid) address of trie of indexes into program launch closures
     uint64_t    progClosuresTrieSize;   // size of trie of indexes into program launch closures
     uint32_t    platform;               // platform number (macOS=1, etc)
-    uint32_t    formatVersion        : 8,  // dyld3::closure::kFormatVersion
-                dylibsExpectedOnDisk : 1,  // dyld should expect the dylib exists on disk and to compare inode/mtime to see if cache is valid
-                simulator            : 1,  // for simulator of specified platform
-                locallyBuiltCache    : 1,  // 0 for B&I built cache, 1 for locally built cache
-                padding              : 21; // TBD
+    uint32_t    formatVersion          : 8,  // dyld3::closure::kFormatVersion
+                dylibsExpectedOnDisk   : 1,  // dyld should expect the dylib exists on disk and to compare inode/mtime to see if cache is valid
+                simulator              : 1,  // for simulator of specified platform
+                locallyBuiltCache      : 1,  // 0 for B&I built cache, 1 for locally built cache
+                builtFromChainedFixups : 1,  // some dylib in cache was built using chained fixups, so patch tables must be used for overrides
+                padding                : 20; // TBD
     uint64_t    sharedRegionStart;      // base load address of cache if not slid
     uint64_t    sharedRegionSize;       // overall size of region cache can be mapped into
     uint64_t    maxSlide;               // runtime slide of cache can be between zero and this value
@@ -76,6 +77,9 @@ struct dyld_cache_header
     uint64_t    otherTrieAddr;          // (unslid) address of trie of indexes of all dylibs and bundles with dlopen closures
     uint64_t    otherTrieSize;          // size of trie of dylibs and bundles with dlopen closures
 };
+
+// Uncomment this and check the build errors for the current mapping offset to check against when adding new fields.
+// template<size_t size> class A { int x[-size]; }; A<sizeof(dyld_cache_header)> a;
 
 
 struct dyld_cache_mapping_info {
@@ -168,6 +172,10 @@ struct dyld_cache_slide_info
     uint32_t    entries_size;  // currently 128 
     // uint16_t toc[toc_count];
     // entrybitmap entries[entries_count];
+};
+
+struct dyld_cache_slide_info_entry {
+    uint8_t  bits[4096/(8*4)]; // 128-byte bitmap
 };
 
 
@@ -437,11 +445,51 @@ struct dyld_cache_local_symbols_entry
     uint32_t    nlistCount;         // number of local symbols for this dylib
 };
 
+struct dyld_cache_patch_info
+{
+    uint64_t    patchTableArrayAddr;    // (unslid) address of array for dyld_cache_image_patches for each image
+    uint64_t    patchTableArrayCount;   // count of patch table entries
+    uint64_t    patchExportArrayAddr;   // (unslid) address of array for patch exports for each image
+    uint64_t    patchExportArrayCount;  // count of patch exports entries
+    uint64_t    patchLocationArrayAddr; // (unslid) address of array for patch locations for each patch
+    uint64_t    patchLocationArrayCount;// count of patch location entries
+    uint64_t    patchExportNamesAddr;   // blob of strings of export names for patches
+    uint64_t    patchExportNamesSize;   // size of string blob of export names for patches
+};
+
+struct dyld_cache_image_patches
+{
+    uint32_t    patchExportsStartIndex;
+    uint32_t    patchExportsCount;
+};
+
+struct dyld_cache_patchable_export
+{
+    uint32_t    cacheOffsetOfImpl;
+    uint32_t    patchLocationsStartIndex;
+    uint32_t    patchLocationsCount;
+    uint32_t    exportNameOffset;
+};
+
+struct dyld_cache_patchable_location
+{
+    uint64_t    cacheOffset             : 32,
+                addend                  : 12,    // +/- 2048
+                authenticated           : 1,
+                usesAddressDiversity    : 1,
+                key                     : 2,
+                discriminator           : 16;
+};
+
 
 
 #define MACOSX_DYLD_SHARED_CACHE_DIR       "/private/var/db/dyld/"
 #define IPHONE_DYLD_SHARED_CACHE_DIR       "/System/Library/Caches/com.apple.dyld/"
-#define DYLD_SHARED_CACHE_BASE_NAME        "dyld_shared_cache_"
+#if !TARGET_OS_SIMULATOR
+  #define DYLD_SHARED_CACHE_BASE_NAME        "dyld_shared_cache_"
+#else
+  #define DYLD_SHARED_CACHE_BASE_NAME        "dyld_sim_shared_cache_"
+#endif
 #define DYLD_SHARED_CACHE_DEVELOPMENT_EXT  ".development"
 
 static const uint64_t kDyldSharedCacheTypeDevelopment = 0;

@@ -27,7 +27,6 @@
 
 
 #include <stdint.h>
-#include <stdio.h>
 #include <assert.h>
 #include <uuid/uuid.h>
 #include <mach/mach.h>
@@ -37,6 +36,10 @@
 #include "Array.h"
 #include "MachOLoaded.h"
 #include "SupportedArchs.h"
+
+namespace objc_opt {
+struct objc_opt_t;
+}
 
 namespace dyld3 {
 namespace closure {
@@ -56,6 +59,9 @@ const ImageNum kLastOtherOSImageNum         = 0x00001FFF;
 const ImageNum kFirstLaunchClosureImageNum  = 0x00002000;
 const ImageNum kMissingWeakLinkedImage      = 0x0FFFFFFF;
 
+class ObjCSelectorOpt;
+class ObjCClassOpt;
+class ObjCClassDuplicatesOpt;
 
 //
 //  Generic typed range of bytes (similar to load commands)
@@ -63,10 +69,7 @@ const ImageNum kMissingWeakLinkedImage      = 0x0FFFFFFF;
 //
 struct VIS_HIDDEN TypedBytes
 {
-    uint32_t     type          : 8,
-                 payloadLength : 24;
-
-    enum class Type {
+    enum class Type : uint32_t {
         // containers which have an overall length and TypedBytes inside their content
         launchClosure    =  1, // contains TypedBytes of closure attributes including imageArray
         imageArray       =  2, // sizeof(ImageArray) + sizeof(uint32_t)*count + size of all images
@@ -77,7 +80,7 @@ struct VIS_HIDDEN TypedBytes
         imageFlags       =  7, // sizeof(Image::Flags)
         pathWithHash     =  8, // len = uint32_t + length path + 1, use multiple entries for aliases
         fileInodeAndTime =  9, // sizeof(FileInfo)
-        cdHash           = 10, // 20
+        cdHash           = 10, // 20, use multiple entries on watchOS for all hashes
         uuid             = 11, // 16
         mappingInfo      = 12, // sizeof(MappingInfo)
         diskSegment      = 13, // sizeof(DiskSegment) * count
@@ -89,31 +92,44 @@ struct VIS_HIDDEN TypedBytes
         fairPlayLoc      = 19, // sizeof(FairPlayRange)
         rebaseFixups     = 20, // sizeof(RebasePattern) * count
         bindFixups       = 21, // sizeof(BindPattern) * count
-        cachePatchInfo   = 22, // sizeof(PatchableExport) + count*sizeof(PatchLocation) + strlen(name) // only in dyld cache Images
+        cachePatchInfo   = 22, // deprecated
         textFixups       = 23, // sizeof(TextFixupPattern) * count
         imageOverride    = 24, // sizeof(ImageNum)
         initBefores      = 25, // sizeof(ImageNum) * count
-        chainedFixupsStarts  = 26, // sizeof(uint64_t) * count
+        initsSection     = 26, // sizeof(InitializerSectionRange)
         chainedFixupsTargets = 27, // sizeof(ResolvedSymbolTarget) * count
+        termOffsets      = 28, // sizeof(uint32_t) * count
+        chainedStartsOffset = 29, // sizeof(uint64_t)
+        objcFixups       = 30,   // sizeof(ResolvedSymbolTarget) + (sizeof(uint32_t) * 2) + (sizeof(ProtocolISAFixup) * count) + (sizeof(SelectorReferenceFixup) * count)
 
         // attributes for Closures (launch or dlopen)
-        closureFlags     = 32,  // sizeof(Closure::Flags)
-        dyldCacheUUID    = 33,  // 16
-        missingFiles     = 34,
-        envVar           = 35,  // "DYLD_BLAH=stuff"
-        topImage         = 36,  // sizeof(ImageNum)
-        libDyldEntry     = 37,  // sizeof(ResolvedSymbolTarget)
-        libSystemNum     = 38,  // sizeof(ImageNum)
-        bootUUID         = 39,  // c-string 40
-        mainEntry        = 40,  // sizeof(ResolvedSymbolTarget)
-        startEntry       = 41,  // sizeof(ResolvedSymbolTarget)     // used by programs built with crt1.o
-        cacheOverrides   = 42,  // sizeof(PatchEntry) * count       // used if process uses interposing or roots (cached dylib overrides)
-        interposeTuples  = 43,  // sizeof(InterposingTuple) * count
+        closureFlags            = 32,  // sizeof(Closure::Flags)
+        dyldCacheUUID           = 33,  // 16
+        missingFiles            = 34,
+        envVar                  = 35,  // "DYLD_BLAH=stuff"
+        topImage                = 36,  // sizeof(ImageNum)
+        libDyldEntry            = 37,  // sizeof(ResolvedSymbolTarget)
+        libSystemNum            = 38,  // sizeof(ImageNum)
+        bootUUID                = 39,  // c-string 40
+        mainEntry               = 40,  // sizeof(ResolvedSymbolTarget)
+        startEntry              = 41,  // sizeof(ResolvedSymbolTarget)     // used by programs built with crt1.o
+        cacheOverrides          = 42,  // sizeof(PatchEntry) * count       // used if process uses interposing or roots (cached dylib overrides)
+        interposeTuples         = 43,  // sizeof(InterposingTuple) * count
+        existingFiles           = 44,  // uint64_t + (SkippedFiles * count)
+        selectorTable           = 45,  // uint32_t + (sizeof(ObjCSelectorImage) * count) + hashTable size
+        classTable              = 46,  // (3 * uint32_t) + (sizeof(ObjCClassImage) * count) + classHashTable size + protocolHashTable size
+        warning                 = 47,  // len = uint32_t + length path + 1, use one entry per warning
+        duplicateClassesTable   = 48, // duplicateClassesHashTable
    };
+
+    Type         type          : 8;
+    uint32_t     payloadLength : 24;
 
     const void*     payload() const;
     void*           payload();
 };
+
+static_assert(sizeof(TypedBytes) == 4, "Wrong size for TypedBytes");
 
 
 //
@@ -148,6 +164,10 @@ struct VIS_HIDDEN Image : ContainerTypedBytes
     bool                inDyldCache() const;
     bool                hasObjC() const;
     bool                hasInitializers() const;
+    bool                hasPrecomputedObjC() const;
+    bool                hasTerminators() const;
+    bool                hasReadOnlyData() const;
+    bool                hasChainedFixups() const;
     bool                isBundle() const;
     bool                isDylib() const;
     bool                isExecutable() const;
@@ -159,12 +179,14 @@ struct VIS_HIDDEN Image : ContainerTypedBytes
     bool                isPlatformBinary() const;
     bool                overridableDylib() const;
     bool                hasFileModTimeAndInode(uint64_t& inode, uint64_t& mTime) const;
-    bool                hasCdHash(uint8_t cdHash[20]) const;
+    void                forEachCDHash(void (^handler)(const uint8_t cdHash[20], bool& stop)) const;
     void                forEachAlias(void (^handler)(const char* aliasPath, bool& stop)) const;
     void                forEachDependentImage(void (^handler)(uint32_t dependentIndex, LinkKind kind, ImageNum imageNum, bool& stop)) const;
     ImageNum            dependentImageNum(uint32_t depIndex) const;
     bool                containsAddress(const void* addr, const void* imageLoadAddress, uint8_t* permissions=nullptr) const;
+    bool                forEachInitializerSection(void (^handler)(uint32_t sectionOffset, uint32_t sectionSize)) const;
     void                forEachInitializer(const void* imageLoadAddress, void (^handler)(const void* initializer)) const;
+    void                forEachTerminator(const void* imageLoadAddress, void (^handler)(const void* terminator)) const;
     void                forEachImageToInitBefore(void (^handler)(ImageNum imageToInit, bool& stop)) const;
     void                forEachDOF(const void* imageLoadAddress, void (^handler)(const void* initializer)) const;
     bool                hasPathWithHash(const char* path, uint32_t hash) const;
@@ -206,6 +228,109 @@ struct VIS_HIDDEN Image : ContainerTypedBytes
         }
      };
 
+
+    // ObjC optimisations
+    struct ObjCImageOffset {
+        union {
+            uint32_t raw = 0;
+            struct {
+                uint32_t imageIndex  : 8;
+                uint32_t imageOffset : 24;
+            };
+        };
+
+        enum : uint32_t {
+            // The unused value so that we have a sentinel in our hash table
+            sentinelValue = 0xFFFFFFFF,
+
+            // The maximum image index
+            maximumImageIndex = (1U << 8) - 1,
+
+            // The maximum offset from the start of the strings section
+            maximumOffset = (1U << 24) - 1
+        };
+    };
+    
+    struct ObjCClassNameImageOffset {
+        union {
+            uint32_t raw = 0;
+            struct {
+                uint32_t classNameImageIndex  : 8;
+                uint32_t classNameImageOffset : 24;
+            };
+        };
+        
+        enum : uint32_t {
+            // The unused value so that we have a sentinel in our hash table
+            sentinelValue = 0xFFFFFFFF,
+
+            // The maximum image index
+            maximumImageIndex = (1U << 8) - 1,
+
+            // The maximum offset from the start of the strings section
+            maximumOffset = (1U << 24) - 1
+        };
+    };
+    
+    struct ObjCClassImageOffset {
+        union {
+            uint32_t raw = 0;
+            struct {
+                uint32_t imageIndex         : 8;
+                uint32_t imageOffset        : 23;
+                uint32_t isDuplicate        : 1; // == 0
+            } classData;
+            struct {
+                uint32_t count              : 8;
+                uint32_t index              : 23;
+                uint32_t isDuplicate        : 1; // == 1
+            } duplicateData;
+        };
+        
+        enum : uint32_t {
+            // The unused value so that we have a sentinel in our hash table
+            sentinelValue = 0xFFFFFFFF,
+
+            // The maximum image index
+            maximumImageIndex = (1U << 8) - 1,
+
+            // The maximum offset from the start of the class data section
+            maximumOffset = (1U << 23) - 1
+        };
+    };
+
+    static_assert(sizeof(ObjCClassImageOffset) == 4, "Invalid size");
+
+    static_assert(ObjCClassNameImageOffset::maximumImageIndex == ObjCClassImageOffset::maximumImageIndex , "Invalid indices");
+
+    struct ObjCDuplicateClass {
+        union {
+            uint32_t raw = 0;
+            struct {
+                uint32_t sharedCacheClassOptIndex : 20;
+                uint32_t sharedCacheClassDuplicateIndex : 12;
+            };
+        };
+
+        enum : uint32_t {
+            // The unused value so that we have a sentinel in our hash table
+            sentinelValue = 0xFFFFFFFF
+        };
+    };
+
+    static_assert(sizeof(ObjCDuplicateClass) == 4, "Invalid size");
+
+    struct ObjCSelectorImage {
+        ImageNum imageNum;
+        uint32_t offset;
+    };
+    
+    struct ObjCClassImage {
+        ImageNum imageNum;
+        uint32_t offsetOfClassNames;
+        uint32_t offsetOfClasses;
+    };
+
     typedef MachOLoaded::ChainedFixupPointerOnDisk ChainedFixupPointerOnDisk;
 
     // the following are only valid if inDyldCache() returns true
@@ -220,86 +345,59 @@ struct VIS_HIDDEN Image : ContainerTypedBytes
     uint64_t            sliceOffsetInFile() const;
     bool                hasCodeSignature(uint32_t& fileOffset, uint32_t& size) const;
     bool                isFairPlayEncrypted(uint32_t& textOffset, uint32_t& size) const;
-    void                forEachDiskSegment(void (^handler)(uint32_t segIndex, uint32_t fileOffset, uint32_t fileSize, int64_t vmOffset, uint64_t vmSize, uint8_t permissions, bool& stop)) const;
+    void                forEachDiskSegment(void (^handler)(uint32_t segIndex, uint32_t fileOffset, uint32_t fileSize, int64_t vmOffset, uint64_t vmSize,
+                                                          uint8_t permissions, bool laterReadOnly, bool& stop)) const;
     void                forEachFixup(void (^rebase)(uint64_t imageOffsetToRebase, bool& stop),
                                      void (^bind)(uint64_t imageOffsetToBind, ResolvedSymbolTarget bindTarget, bool& stop),
-                                     void (^chainedFixupStart)(uint64_t imageOffsetStart, const Array<ResolvedSymbolTarget>& targets, bool& stop)) const;
+                                     void (^chainedFixups)(uint64_t imageOffsetToStarts, const Array<ResolvedSymbolTarget>& targets, bool& stop),
+                                     void (^fixupObjCImageInfo)(uint64_t imageOffsetToFixup),
+                                     void (^fixupObjCProtocol)(uint64_t imageOffsetToBind, ResolvedSymbolTarget bindTarget, bool& stop),
+                                     void (^fixupObjCSelRef)(uint64_t imageOffsetToFixup, uint32_t selectorIndex, bool inSharedCache, bool& stop),
+                                     void (^fixupObjCStableSwift)(uint64_t imageOffsetToFixup, bool& stop),
+                                     void (^fixupObjCMethodList)(uint64_t imageOffsetToFixup, bool& stop)) const;
     void                forEachTextReloc(void (^rebase)(uint32_t imageOffsetToRebase, bool& stop),
                                          void (^bind)(uint32_t imageOffsetToBind, ResolvedSymbolTarget bindTarget, bool& stop)) const;
-    static void         forEachChainedFixup(void* imageLoadAddress, uint64_t imageOffsetChainStart,
-                                        void (^chainedFixupStart)(uint64_t* fixupLoc, ChainedFixupPointerOnDisk fixupInfo, bool& stop));
 
  	static_assert(sizeof(ResolvedSymbolTarget) == 8, "Overflow in size of SymbolTargetLocation");
 
     static uint32_t     hashFunction(const char*);
 
-
-	// only in Image for cached dylibs
-    struct PatchableExport
-    {
-        struct PatchLocation
-        {
-            uint64_t    cacheOffset             : 32,
-                        addend                  : 12,    // +/- 2048
-                        authenticated           : 1,
-                        usesAddressDiversity    : 1,
-                        key                     : 2,
-                        discriminator           : 16;
-
-                        PatchLocation(size_t cacheOffset, uint64_t addend);
-                        PatchLocation(size_t cacheOffset, uint64_t addend, dyld3::MachOLoaded::ChainedFixupPointerOnDisk authInfo);
-
-            uint64_t getAddend() const {
-                uint64_t unsingedAddend = addend;
-                int64_t signedAddend = (int64_t)unsingedAddend;
-                signedAddend = (signedAddend << 52) >> 52;
-                return (uint64_t)signedAddend;
-            }
-                        
-            const char* keyName() const;
-            bool operator==(const PatchLocation& other) const {
-                return this->cacheOffset == other.cacheOffset;
-            }
-        };
-
-        uint32_t       cacheOffsetOfImpl;
-        uint32_t       patchLocationsCount;
-        PatchLocation  patchLocations[];
-        // export name
-    };
-    uint32_t            patchableExportCount() const;
-    void                forEachPatchableExport(void (^handler)(uint32_t cacheOffsetOfImpl, const char* exportName)) const;
-    void                forEachPatchableUseOfExport(uint32_t cacheOffsetOfImpl, void (^handler)(PatchableExport::PatchLocation patchLocation)) const;
-
 private:
     friend struct Closure;
     friend class ImageWriter;
     friend class ClosureBuilder;
+    friend class ClosureWriter;
     friend class LaunchClosureWriter;
 
     uint32_t             pageSize() const;
 
     struct Flags
     {
-        uint64_t        imageNum         : 16,
-                        maxLoadCount     : 12,
-                        isInvalid        : 1,       // an error occurred creating the info for this image
-                        has16KBpages     : 1,
-                        is64             : 1,
-                        hasObjC          : 1,
-                        mayHavePlusLoads : 1,
-                        isEncrypted      : 1,       // image is DSMOS or FairPlay encrypted
-                        hasWeakDefs      : 1,
-                        neverUnload      : 1,
-                        cwdSameAsThis    : 1,       // dylibs use file system relative paths, cwd must be main's dir
-                        isPlatformBinary : 1,       // part of OS - can be loaded into LV process
-                        isBundle         : 1,
-                        isDylib          : 1,
-                        isExecutable     : 1,
-                        overridableDylib : 1,       // only applicable to cached dylibs
-                        inDyldCache      : 1,
-                        padding          : 21;
+        uint64_t        imageNum                     : 16,
+                        maxLoadCount                 : 12,
+                        isInvalid                    : 1,       // an error occurred creating the info for this image
+                        has16KBpages                 : 1,
+                        is64                         : 1,
+                        hasObjC                      : 1,
+                        mayHavePlusLoads             : 1,
+                        isEncrypted                  : 1,       // image is DSMOS or FairPlay encrypted
+                        hasWeakDefs                  : 1,
+                        neverUnload                  : 1,
+                        cwdSameAsThis                : 1,       // dylibs use file system relative paths, cwd must be main's dir
+                        isPlatformBinary             : 1,       // part of OS - can be loaded into LV process
+                        isBundle                     : 1,
+                        isDylib                      : 1,
+                        isExecutable                 : 1,
+                        overridableDylib             : 1,       // only applicable to cached dylibs
+                        inDyldCache                  : 1,
+                        hasTerminators               : 1,
+                        hasReadOnlyData              : 1,
+                        hasChainedFixups             : 1,
+                        hasPrecomputedObjC           : 1,
+                        padding                      : 17;
     };
+
+    static_assert(sizeof(Flags) == sizeof(uint64_t), "Flags overflow");
 
     const Flags&        getFlags() const;
 
@@ -320,6 +418,12 @@ private:
                     vmPageCount     : 30,
                     permissions     : 3,
                     paddingNotSeg   : 1;
+
+        // We only have three bits for permissions, and need a way to
+        // encode segments that are initially r/w then made read-only
+        // after fixups are done.  Previously, the only valid patterns
+        // were: ---, r--, rw-, r-x.  We now add -w- to mean r/w -> r/o.
+        enum { kReadOnlyDataPermissions = VM_PROT_WRITE };
     };
 
 
@@ -346,14 +450,20 @@ private:
 
     struct FairPlayRange
     {
-        uint32_t     textPageCount : 28,
-                     textStartPage : 4;
+        uint32_t rangeStart;    // The byte offset of the start of the range.
+        uint32_t rangeLength;   // How long is the fairplay range in bytes
     };
 
     struct MappingInfo
     {
         uint32_t     totalVmPages;
         uint32_t     sliceOffsetIn4K;
+    };
+
+    struct InitializerSectionRange
+    {
+        uint32_t     sectionOffset;
+        uint32_t     sectionSize;
     };
 
     struct LinkedImage {
@@ -402,6 +512,47 @@ private:
     };
     const Array<BindPattern> bindFixups() const;
 
+    // An optimzied selector reference bind will either point to the shared cache
+    // or a binary optimized in our launch closure.  We can use the index in to each
+    // of their respective selector hash tables as the target or the bind.
+    union SelectorReferenceFixup
+    {
+        uint32_t chainStartVMOffset;
+        struct {
+            uint32_t    index         : 24, // max 16m entries in the table
+                        next          : 7,  // (next * 4) -> offset to next fixup
+                        inSharedCache : 1;  // 0 -> in the closure.  1 -> in the cache
+        } chainEntry;
+    };
+
+    struct ProtocolISAFixup
+    {
+        uint64_t                        startVmOffset : 40, // max 1TB offset
+                                        skipCount     :  8,
+                                        repeatCount   : 16;
+    };
+
+    struct ClassStableSwiftFixup
+    {
+        uint64_t                        startVmOffset : 40, // max 1TB offset
+                                        skipCount     :  8,
+                                        repeatCount   : 16;
+    };
+
+    struct MethodListFixup
+    {
+        uint64_t                        startVmOffset : 40, // max 1TB offset
+                                        skipCount     :  8,
+                                        repeatCount   : 16;
+    };
+
+    void objcFixups(ResolvedSymbolTarget& objcProtocolClassTarget,
+                    uint64_t& objcImageInfoVMOffset,
+                    Array<ProtocolISAFixup>& protocolISAFixups,
+                    Array<SelectorReferenceFixup>& selRefFixups,
+                    Array<ClassStableSwiftFixup>& classStableSwiftFixups,
+                    Array<MethodListFixup>& methodListFixups) const;
+
     struct TextFixupPattern
     {
         Image::ResolvedSymbolTarget     target;
@@ -412,7 +563,7 @@ private:
     const Array<TextFixupPattern> textFixups() const;
 
     // for use with chained fixups
-    const Array<uint64_t>                     chainedStarts() const;
+    uint64_t                                  chainedStartsOffset() const;
     const Array<Image::ResolvedSymbolTarget>  chainedTargets() const;
 
 };
@@ -475,6 +626,7 @@ struct VIS_HIDDEN ImageArray : public TypedBytes
     void                forEachImage(void (^callback)(const Image* image, bool& stop)) const;
     bool                hasPath(const char* path, ImageNum& num) const;
     const Image*        imageForNum(ImageNum) const;
+    void                deallocate() const;
 
     static const Image* findImage(const Array<const ImageArray*> imagesArrays, ImageNum imageNum);
 
@@ -482,7 +634,8 @@ private:
     friend class ImageArrayWriter;
     
     uint32_t        firstImageNum;
-    uint32_t        count;
+    uint32_t        count       : 31;
+    uint32_t        hasRoots    : 1; // True if this ImageArray contains roots with imageNum's below firstImageNum
     uint32_t        offsets[];
     // Image data
 };
@@ -513,7 +666,19 @@ struct VIS_HIDDEN Closure : public ContainerTypedBytes
         uint32_t                    exportCacheOffset;
         Image::ResolvedSymbolTarget replacement;
     };
+
+    struct Warning
+    {
+        enum Type : uint32_t {
+            duplicateObjCClass = 0
+        };
+
+        Type        type;
+        char        message[];
+    };
+
     void                forEachPatchEntry(void (^handler)(const PatchEntry& entry)) const;
+    void                forEachWarning(Warning::Type type, void (^handler)(const char* warning, bool& stop)) const;
 };
 
 
@@ -522,9 +687,18 @@ struct VIS_HIDDEN Closure : public ContainerTypedBytes
 //
 struct VIS_HIDDEN LaunchClosure : public Closure
 {
+    // Represents a file on disk we tried to load but skipped as it wasn't valid for our use
+    struct SkippedFile
+    {
+        const char* path;
+        uint64_t    inode;
+        uint64_t    mtime;
+    };
+
     bool                builtAgainstDyldCache(uuid_t cacheUUID) const;
     const char*         bootUUID() const;
     void                forEachMustBeMissingFile(void (^handler)(const char* path, bool& stop)) const;
+    void                forEachSkipIfExistsFile(void (^handler)(const SkippedFile& file, bool& stop)) const;
     void                forEachEnvVar(void (^handler)(const char* keyEqualValue, bool& stop)) const;
     ImageNum            libSystemImageNum() const;
     void                libDyldEntry(Image::ResolvedSymbolTarget& loc) const;
@@ -534,7 +708,17 @@ struct VIS_HIDDEN LaunchClosure : public Closure
     void                forEachInterposingTuple(void (^handler)(const InterposingTuple& tuple, bool& stop)) const;
     bool                usedAtPaths() const;
     bool                usedFallbackPaths() const;
-
+    bool                selectorHashTable(Array<Image::ObjCSelectorImage>& imageNums,
+                                          const ObjCSelectorOpt*& hashTable) const;
+    bool                classAndProtocolHashTables(Array<Image::ObjCClassImage>& imageNums,
+                                                   const ObjCClassOpt*& classHashTable,
+                                                   const ObjCClassOpt*& protocolHashTable) const;
+    void                duplicateClassesHashTable(const ObjCClassDuplicatesOpt*& duplicateClassesHashTable) const;
+    bool                hasInsertedLibraries() const;
+    bool                hasInterposings() const;
+    
+    static bool         buildClosureCachePath(const char* mainExecutablePath, char closurePath[], const char* tempDir,
+                                              bool makeDirsIfMissing);
 
 private:
     friend class LaunchClosureWriter;
@@ -544,7 +728,8 @@ private:
         uint32_t        usedAtPaths              :  1,
                         usedFallbackPaths        :  1,
                         initImageCount           : 16,
-                        padding                  : 14;
+                        hasInsertedLibraries     :  1,
+                        padding                  : 13;
     };
     const Flags&        getFlags() const;
 };
@@ -559,7 +744,208 @@ struct VIS_HIDDEN DlopenClosure : public Closure
 
 };
 
+// Precomputed perfect hash table of strings.
+// Base class for closure precomputed selector table and class table.
+class VIS_HIDDEN ObjCStringTable {
+public:
+    typedef uint32_t StringTarget;
 
+private:
+    typedef uint8_t StringHashCheckByte;
+
+protected:
+
+    uint32_t capacity;
+    uint32_t occupied;
+    uint32_t shift;
+    uint32_t mask;
+    StringTarget sentinelTarget;
+    uint32_t roundedTabSize;
+    uint64_t salt;
+
+    uint32_t scramble[256];
+    uint8_t tab[0];                   /* tab[mask+1] (always power-of-2). Rounded up to roundedTabSize */
+    // uint8_t checkbytes[capacity];  /* check byte for each string */
+    // int32_t offsets[capacity];     /* offsets from &capacity to cstrings */
+
+    StringHashCheckByte* checkBytesOffset() {
+        return &tab[roundedTabSize];
+    }
+
+    const StringHashCheckByte* checkBytesOffset() const {
+        return &tab[roundedTabSize];
+    }
+
+    StringTarget* targetsOffset() {
+        return (StringTarget*)(checkBytesOffset() + capacity);
+    }
+
+    const StringTarget* targetsOffset() const {
+        return (StringTarget*)(checkBytesOffset() + capacity);
+    }
+
+    dyld3::Array<StringHashCheckByte> checkBytes() {
+        return dyld3::Array<StringHashCheckByte>((StringHashCheckByte *)checkBytesOffset(), capacity, capacity);
+    }
+    const dyld3::Array<StringHashCheckByte> checkBytes() const {
+        return dyld3::Array<StringHashCheckByte>((StringHashCheckByte *)checkBytesOffset(), capacity, capacity);
+    }
+
+    dyld3::Array<StringTarget> targets() {
+        return dyld3::Array<StringTarget>((StringTarget *)targetsOffset(), capacity, capacity);
+    }
+    const dyld3::Array<StringTarget> targets() const {
+        return dyld3::Array<StringTarget>((StringTarget *)targetsOffset(), capacity, capacity);
+    }
+
+    uint32_t hash(const char *key, size_t keylen) const;
+
+    uint32_t hash(const char *key) const
+    {
+        return hash(key, strlen(key));
+    }
+
+    // The check bytes areused to reject strings that aren't in the table
+    // without paging in the table's cstring data. This checkbyte calculation
+    // catches 4785/4815 rejects when launching Safari; a perfect checkbyte
+    // would catch 4796/4815.
+    StringHashCheckByte checkbyte(const char *key, size_t keylen) const
+    {
+        return ((key[0] & 0x7) << 5) | ((uint8_t)keylen & 0x1f);
+    }
+
+    StringHashCheckByte checkbyte(const char *key) const
+    {
+        return checkbyte(key, strlen(key));
+    }
+
+    StringTarget getPotentialTarget(const char *key) const
+    {
+        uint32_t index = getIndex(key);
+        if (index == indexNotFound)
+            return sentinelTarget;
+        return targets()[index];
+
+    }
+
+public:
+
+    enum : uint32_t {
+        indexNotFound = ~0U
+    };
+
+    uint32_t getIndex(const char *key) const
+    {
+        size_t keylen = strlen(key);
+        uint32_t h = hash(key, keylen);
+
+        // Use check byte to reject without paging in the table's cstrings
+        StringHashCheckByte h_check = checkBytes()[h];
+        StringHashCheckByte key_check = checkbyte(key, keylen);
+        if (h_check != key_check)
+            return indexNotFound;
+        return h;
+    }
+
+    template<typename PerfectHashT>
+    static size_t size(const PerfectHashT& phash) {
+        // Round tab[] to at least 4 in length to ensure the uint32_t's after are aligned
+        uint32_t roundedTabSize = std::max(phash.mask+1, 4U);
+        size_t tableSize = 0;
+        tableSize += sizeof(ObjCStringTable);
+        tableSize += roundedTabSize;
+        tableSize += phash.capacity * sizeof(StringHashCheckByte);
+        tableSize += phash.capacity * sizeof(StringTarget);
+        return tableSize;
+    }
+    
+    // Get a string if it has an entry in the table
+    const char* getString(const char* selName, const Array<uintptr_t>& baseAddresses) const;
+
+    void forEachString(const Array<Image::ObjCSelectorImage>& selectorImages,
+                       void (^callback)(uint64_t selVMOffset, ImageNum imageNum)) const;
+
+    template<typename PerfectHashT, typename ImageOffsetT>
+    void write(const PerfectHashT& phash, const Array<std::pair<const char*, ImageOffsetT>>& strings);
+};
+
+class VIS_HIDDEN ObjCSelectorOpt : public ObjCStringTable {
+public:
+    // Get a string if it has an entry in the table
+    // Returns true if an entry is found and sets the imageNum and vmOffset.
+    bool getStringLocation(uint32_t index, const Array<closure::Image::ObjCSelectorImage>& selImages,
+                           ImageNum& imageNum, uint64_t& vmOffset) const;
+
+    void forEachString(const Array<Image::ObjCSelectorImage>& selectorImages,
+                       void (^callback)(uint64_t selVMOffset, ImageNum imageNum)) const;
+};
+
+class VIS_HIDDEN ObjCClassOpt : public ObjCStringTable {
+private:
+    // ...ObjCStringTable fields...
+    // ClassTarget classOffsets[capacity]; /* offsets from &capacity to class_t and header_info */
+    // DuplicateCount duplicateCount;
+    // ClassTarget duplicateOffsets[duplicatedClasses];
+    
+    typedef uint32_t DuplicateCount;
+    typedef Image::ObjCClassImageOffset ClassTarget;
+
+    ClassTarget *classOffsetsStart() { return (ClassTarget *)&targetsOffset()[capacity]; }
+    const ClassTarget *classOffsetsStart() const { return (const ClassTarget *)&targetsOffset()[capacity]; }
+    
+    dyld3::Array<ClassTarget> classOffsets() {
+        return dyld3::Array<ClassTarget>((ClassTarget *)classOffsetsStart(), capacity, capacity);
+    }
+    const dyld3::Array<ClassTarget> classOffsets() const {
+        return dyld3::Array<ClassTarget>((ClassTarget *)classOffsetsStart(), capacity, capacity);
+    }
+    
+    DuplicateCount& duplicateCount() { return *(DuplicateCount *)&classOffsetsStart()[capacity]; }
+    const DuplicateCount& duplicateCount() const { return *(const DuplicateCount *)&classOffsetsStart()[capacity]; }
+
+    ClassTarget *duplicateOffsetsStart() { return (ClassTarget *)(&duplicateCount()+1); }
+    const ClassTarget *duplicateOffsetsStart() const { return (const ClassTarget *)(&duplicateCount()+1); }
+    
+    dyld3::Array<ClassTarget> duplicateOffsets(uint32_t preCalculatedDuplicateCount) {
+        return dyld3::Array<ClassTarget>((ClassTarget *)duplicateOffsetsStart(), preCalculatedDuplicateCount, duplicateCount());
+    }
+    const dyld3::Array<ClassTarget> duplicateOffsets(uint32_t preCalculatedDuplicateCount) const {
+        return dyld3::Array<ClassTarget>((ClassTarget *)duplicateOffsetsStart(), preCalculatedDuplicateCount, duplicateCount());
+    }
+
+public:
+    
+    template<typename PerfectHashT>
+    static size_t size(PerfectHashT& phash, uint32_t duplicateCount)
+    {
+        size_t tableSize = 0;
+        tableSize += ObjCStringTable::size(phash);
+        tableSize += phash.capacity * sizeof(ClassTarget);
+        tableSize += sizeof(DuplicateCount);
+        tableSize += duplicateCount * sizeof(ClassTarget);
+        return tableSize;
+    }
+
+    void forEachClass(const char* className,
+                      const Array<std::pair<uintptr_t, uintptr_t>>& nameAndDataBaseAddresses,
+                      void (^callback)(void* classPtr, bool isLoaded, bool* stop)) const;
+
+    void forEachClass(const Array<Image::ObjCClassImage>& classImages,
+                      void (^nameCallback)(uint64_t classNameVMOffset, ImageNum imageNum),
+                      void (^implCallback)(uint64_t classVMOffset, ImageNum imageNum)) const;
+    
+    template<typename PerfectHashT, typename ImageOffsetT, typename ClassesMapT>
+    void write(const PerfectHashT& phash, const Array<std::pair<const char*, ImageOffsetT>>& strings,
+               const ClassesMapT& classes, uint32_t preCalculatedDuplicateCount);
+};
+
+class VIS_HIDDEN ObjCClassDuplicatesOpt : public ObjCStringTable {
+public:
+    // Get a class if it has an entry in the table
+    bool getClassLocation(const char* className, const objc_opt::objc_opt_t* objCOpt, void*& classImpl) const;
+
+    void forEachClass(void (^callback)(Image::ObjCDuplicateClass duplicateClass)) const;
+};
 
 } //  namespace closure
 } //  namespace dyld3

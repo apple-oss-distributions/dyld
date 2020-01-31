@@ -27,6 +27,7 @@
 #define __DYLDLIBSYSTEMHELPERS__
 
 #include <stdint.h>
+#include <mach/mach.h>
 
 struct __cxa_range_t { const void* addr; size_t length; };
 

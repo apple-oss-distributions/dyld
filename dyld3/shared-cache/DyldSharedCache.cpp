@@ -34,8 +34,6 @@
 #include <assert.h>
 #include <unistd.h>
 #include <dlfcn.h>
-#include <CommonCrypto/CommonDigest.h>
-#include <CommonCrypto/CommonDigestSPI.h>
 
 #if BUILDING_CACHE_BUILDER
 #include <set>
@@ -43,32 +41,33 @@
 #include <vector>
 #include <unordered_map>
 #include <unordered_set>
+#include "CacheBuilder.h"
+#include "FileUtils.h"
 #endif
 
 #define NO_ULEB
 #include "MachOLoaded.h"
 #include "ClosureFileSystemPhysical.h"
-#include "CacheBuilder.h"
 #include "DyldSharedCache.h"
 #include "Trie.hpp"
 #include "StringUtils.h"
-#include "FileUtils.h"
 
+#include "objc-shared-cache.h"
+
+#if !(BUILDING_LIBDYLD || BUILDING_DYLD)
+#include "JSONWriter.h"
+#include <sstream>
+#endif
 
 
 #if BUILDING_CACHE_BUILDER
-DyldSharedCache::CreateResults DyldSharedCache::create(const CreateOptions&             options,
-                                                       const std::vector<MappedMachO>&  dylibsToCache,
-                                                       const std::vector<MappedMachO>&  otherOsDylibs,
-                                                       const std::vector<MappedMachO>&  osExecutables)
+DyldSharedCache::CreateResults DyldSharedCache::create(const CreateOptions&               options,
+                                                       const dyld3::closure::FileSystem&  fileSystem,
+                                                       const std::vector<MappedMachO>&    dylibsToCache,
+                                                       const std::vector<MappedMachO>&    otherOsDylibs,
+                                                       const std::vector<MappedMachO>&    osExecutables)
 {
     CreateResults  results;
-    const char* prefix = nullptr;
-    if ( (options.pathPrefixes.size() == 1) && !options.pathPrefixes[0].empty() )
-        prefix = options.pathPrefixes[0].c_str();
-    // FIXME: This prefix will be applied to dylib closures and executable closures, even though
-    // the old code didn't have a prefix on cache dylib closures
-    dyld3::closure::FileSystemPhysical fileSystem(prefix);
     CacheBuilder   cache(options, fileSystem);
     if (!cache.errorMessage().empty()) {
         results.errorMessage = cache.errorMessage();
@@ -86,6 +85,7 @@ DyldSharedCache::CreateResults DyldSharedCache::create(const CreateOptions&     
             aliases.push_back({"/usr/lib/libstdc++.6.dylib",                                  "/usr/lib/libstdc++.6.0.9.dylib"});
             aliases.push_back({"/usr/lib/libz.1.dylib",                                       "/usr/lib/libz.dylib"});
             aliases.push_back({"/usr/lib/libSystem.B.dylib",                                  "/usr/lib/libSystem.dylib"});
+            aliases.push_back({"/System/Library/Frameworks/Foundation.framework/Foundation",  "/usr/lib/libextension.dylib"}); // <rdar://44315703>
             break;
         default:
             break;
@@ -113,7 +113,10 @@ DyldSharedCache::CreateResults DyldSharedCache::create(const CreateOptions&     
     return results;
 }
 
-bool DyldSharedCache::verifySelfContained(std::vector<MappedMachO>& dylibsToCache, MappedMachO (^loader)(const std::string& runtimePath), std::vector<std::pair<DyldSharedCache::MappedMachO, std::set<std::string>>>& rejected)
+bool DyldSharedCache::verifySelfContained(std::vector<MappedMachO>& dylibsToCache,
+                                          std::unordered_set<std::string>& badZippered,
+                                          MappedMachO (^loader)(const std::string& runtimePath),
+                                          std::vector<std::pair<DyldSharedCache::MappedMachO, std::set<std::string>>>& rejected)
 {
     // build map of dylibs
     __block std::map<std::string, std::set<std::string>> badDylibs;
@@ -123,6 +126,8 @@ bool DyldSharedCache::verifySelfContained(std::vector<MappedMachO>& dylibsToCach
         if ( dylib.mh->canBePlacedInDyldCache(dylib.runtimePath.c_str(), ^(const char* msg) { badDylibs[dylib.runtimePath].insert(msg);}) ) {
             knownDylibs.insert(dylib.runtimePath);
             knownDylibs.insert(dylib.mh->installName());
+        } else {
+            badDylibs[dylib.runtimePath].insert("");
         }
     }
 
@@ -138,6 +143,14 @@ bool DyldSharedCache::verifySelfContained(std::vector<MappedMachO>& dylibsToCach
             dylib.mh->forEachDependentDylib(^(const char* loadPath, bool isWeak, bool isReExport, bool isUpward, uint32_t compatVersion, uint32_t curVersion, bool& stop) {
                 if ( knownDylibs.count(loadPath) == 0 ) {
                     doAgain = true;
+                    if ( badZippered.count(loadPath) != 0 ) {
+                        badDylibs[dylib.runtimePath].insert("");
+                        knownDylibs.erase(dylib.runtimePath);
+                        knownDylibs.erase(dylib.mh->installName());
+                        badZippered.insert(dylib.runtimePath);
+                        badZippered.insert(dylib.mh->installName());
+                        return;
+                    }
                     MappedMachO foundMapping;
                     if ( badDylibs.count(loadPath) == 0 )
                         foundMapping = loader(loadPath);
@@ -162,6 +175,8 @@ bool DyldSharedCache::verifySelfContained(std::vector<MappedMachO>& dylibsToCach
                             knownDylibs.insert(loadPath);
                             knownDylibs.insert(foundMapping.runtimePath);
                             knownDylibs.insert(foundMapping.mh->installName());
+                        } else {
+                            badDylibs[dylib.runtimePath].insert("");
                         }
                    }
                 }
@@ -173,7 +188,9 @@ bool DyldSharedCache::verifySelfContained(std::vector<MappedMachO>& dylibsToCach
         dylibsToCache.erase(std::remove_if(dylibsToCache.begin(), dylibsToCache.end(), [&](const DyldSharedCache::MappedMachO& dylib) {
             auto i = badDylibsCopy.find(dylib.runtimePath);
             if ( i !=  badDylibsCopy.end()) {
-                rejected.push_back(std::make_pair(dylib, i->second));
+                // Only add the warning if we are not a bad zippered dylib
+                if ( badZippered.count(dylib.runtimePath) == 0 )
+                    rejected.push_back(std::make_pair(dylib, i->second));
                 return true;
              }
              else {
@@ -186,8 +203,21 @@ bool DyldSharedCache::verifySelfContained(std::vector<MappedMachO>& dylibsToCach
 }
 #endif
 
+template<typename T>
+const T DyldSharedCache::getAddrField(uint64_t addr) const {
+    uint64_t slide = (uint64_t)this - unslidLoadAddress();
+    return (const T)(addr + slide);
+}
+
 void DyldSharedCache::forEachRegion(void (^handler)(const void* content, uint64_t vmAddr, uint64_t size, uint32_t permissions)) const
 {
+    // <rdar://problem/49875993> sanity check cache header
+    if ( strncmp(header.magic, "dyld_v1", 7) != 0 )
+        return;
+    if ( header.mappingOffset > 1024 )
+        return;
+    if ( header.mappingCount > 20 )
+        return;
     const dyld_cache_mapping_info* mappings = (dyld_cache_mapping_info*)((char*)this + header.mappingOffset);
     const dyld_cache_mapping_info* mappingsEnd = &mappings[header.mappingCount];
     for (const dyld_cache_mapping_info* m=mappings; m < mappingsEnd; ++m) {
@@ -307,7 +337,7 @@ bool DyldSharedCache::addressInText(uint32_t cacheOffset, uint32_t* imageIndex) 
 
 const char* DyldSharedCache::archName() const
 {
-    const char* archSubString = ((char*)this) + 8;
+    const char* archSubString = ((char*)this) + 7;
     while (*archSubString == ' ')
         ++archSubString;
     return archSubString;
@@ -443,6 +473,19 @@ bool DyldSharedCache::hasImagePath(const char* dylibPath, uint32_t& imageIndex) 
     return false;
 }
 
+bool DyldSharedCache::hasNonOverridablePath(const char* dylibPath) const
+{
+    // all dylibs in customer dyld cache cannot be overridden except libdispatch.dylib
+    bool pathIsInDyldCacheWhichCannotBeOverridden = false;
+    if ( header.cacheType == kDyldSharedCacheTypeProduction ) {
+        uint32_t imageIndex;
+        pathIsInDyldCacheWhichCannotBeOverridden = this->hasImagePath(dylibPath, imageIndex);
+        if ( pathIsInDyldCacheWhichCannotBeOverridden && (strcmp(dylibPath, "/usr/lib/system/libdispatch.dylib") == 0) )
+            pathIsInDyldCacheWhichCannotBeOverridden = false;
+    }
+    return pathIsInDyldCacheWhichCannotBeOverridden;
+}
+
 const dyld3::closure::Image* DyldSharedCache::findDlopenOtherImage(const char* path) const
 {
     const dyld_cache_mapping_info* mappings = (dyld_cache_mapping_info*)((char*)this + header.mappingOffset);
@@ -563,8 +606,293 @@ const dyld3::closure::ImageArray* DyldSharedCache::otherOSImageArray() const
 }
 
 
+uint32_t DyldSharedCache::patchableExportCount(uint32_t imageIndex) const {
+    if ( header.patchInfoAddr == 0 )
+        return 0;
+
+    const dyld_cache_patch_info* patchInfo = getAddrField<dyld_cache_patch_info*>(header.patchInfoAddr);
+    const dyld_cache_image_patches* patchArray = getAddrField<dyld_cache_image_patches*>(patchInfo->patchTableArrayAddr);
+    if (imageIndex > patchInfo->patchTableArrayCount)
+        return 0;
+    return patchArray[imageIndex].patchExportsCount;
+}
+
+void DyldSharedCache::forEachPatchableExport(uint32_t imageIndex, void (^handler)(uint32_t cacheOffsetOfImpl, const char* exportName)) const {
+    if ( header.patchInfoAddr == 0 )
+        return;
+
+    const dyld_cache_patch_info* patchInfo = getAddrField<dyld_cache_patch_info*>(header.patchInfoAddr);
+    const dyld_cache_image_patches* patchArray = getAddrField<dyld_cache_image_patches*>(patchInfo->patchTableArrayAddr);
+    if (imageIndex > patchInfo->patchTableArrayCount)
+        return;
+    const dyld_cache_image_patches& patch = patchArray[imageIndex];
+    if ( (patch.patchExportsStartIndex + patch.patchExportsCount) > patchInfo->patchExportArrayCount )
+        return;
+    const dyld_cache_patchable_export* patchExports = getAddrField<dyld_cache_patchable_export*>(patchInfo->patchExportArrayAddr);
+    const char* exportNames = getAddrField<char*>(patchInfo->patchExportNamesAddr);
+    for (uint64_t exportIndex = 0; exportIndex != patch.patchExportsCount; ++exportIndex) {
+        const dyld_cache_patchable_export& patchExport = patchExports[patch.patchExportsStartIndex + exportIndex];
+        const char* exportName = ( patchExport.exportNameOffset < patchInfo->patchExportNamesSize ) ? &exportNames[patchExport.exportNameOffset] : "";
+        handler(patchExport.cacheOffsetOfImpl, exportName);
+    }
+}
+
+void DyldSharedCache::forEachPatchableUseOfExport(uint32_t imageIndex, uint32_t cacheOffsetOfImpl,
+                                                  void (^handler)(dyld_cache_patchable_location patchLocation)) const {
+    if ( header.patchInfoAddr == 0 )
+        return;
+
+    // Loading a new cache so get the data from the cache header
+    const dyld_cache_patch_info* patchInfo = getAddrField<dyld_cache_patch_info*>(header.patchInfoAddr);
+    const dyld_cache_image_patches* patchArray = getAddrField<dyld_cache_image_patches*>(patchInfo->patchTableArrayAddr);
+    if (imageIndex > patchInfo->patchTableArrayCount)
+        return;
+    const dyld_cache_image_patches& patch = patchArray[imageIndex];
+    if ( (patch.patchExportsStartIndex + patch.patchExportsCount) > patchInfo->patchExportArrayCount )
+        return;
+    const dyld_cache_patchable_export* patchExports = getAddrField<dyld_cache_patchable_export*>(patchInfo->patchExportArrayAddr);
+    const dyld_cache_patchable_location* patchLocations = getAddrField<dyld_cache_patchable_location*>(patchInfo->patchLocationArrayAddr);
+    for (uint64_t exportIndex = 0; exportIndex != patch.patchExportsCount; ++exportIndex) {
+        const dyld_cache_patchable_export& patchExport = patchExports[patch.patchExportsStartIndex + exportIndex];
+        if ( patchExport.cacheOffsetOfImpl != cacheOffsetOfImpl )
+            continue;
+        if ( (patchExport.patchLocationsStartIndex + patchExport.patchLocationsCount) > patchInfo->patchLocationArrayCount )
+            return;
+        for (uint64_t locationIndex = 0; locationIndex != patchExport.patchLocationsCount; ++locationIndex) {
+            const dyld_cache_patchable_location& patchLocation = patchLocations[patchExport.patchLocationsStartIndex + locationIndex];
+            handler(patchLocation);
+        }
+    }
+}
+
+#if !(BUILDING_LIBDYLD || BUILDING_DYLD)
+// MRM map file generator
+std::string DyldSharedCache::generateJSONMap(const char* disposition) const {
+    dyld3::json::Node cacheNode;
+
+    cacheNode.map["version"].value = "1";
+    cacheNode.map["disposition"].value = disposition;
+    cacheNode.map["base-address"].value = dyld3::json::hex(unslidLoadAddress());
+    uuid_t cache_uuid;
+    getUUID(cache_uuid);
+    uuid_string_t cache_uuidStr;
+    uuid_unparse(cache_uuid, cache_uuidStr);
+    cacheNode.map["uuid"].value = cache_uuidStr;
+
+    __block dyld3::json::Node imagesNode;
+    forEachImage(^(const mach_header *mh, const char *installName) {
+        dyld3::json::Node imageNode;
+        imageNode.map["path"].value = installName;
+        dyld3::MachOAnalyzer* ma = (dyld3::MachOAnalyzer*)mh;
+        uuid_t uuid;
+        if (ma->getUuid(uuid)) {
+            uuid_string_t uuidStr;
+            uuid_unparse(uuid, uuidStr);
+            imageNode.map["uuid"].value = uuidStr;
+        }
+
+        __block dyld3::json::Node segmentsNode;
+        ma->forEachSegment(^(const dyld3::MachOAnalyzer::SegmentInfo &info, bool &stop) {
+            dyld3::json::Node segmentNode;
+            segmentNode.map["name"].value = info.segName;
+            segmentNode.map["start-vmaddr"].value = dyld3::json::hex(info.vmAddr);
+            segmentNode.map["end-vmaddr"].value = dyld3::json::hex(info.vmAddr + info.vmSize);
+            segmentsNode.array.push_back(segmentNode);
+        });
+        imageNode.map["segments"] = segmentsNode;
+        imagesNode.array.push_back(imageNode);
+    });
+
+    cacheNode.map["images"] = imagesNode;
+
+    std::stringstream stream;
+    printJSON(cacheNode, 0, stream);
+
+    return stream.str();
+}
+
+std::string DyldSharedCache::generateJSONDependents() const {
+    std::unordered_map<std::string, std::set<std::string>> dependents;
+    computeTransitiveDependents(dependents);
+
+    std::stringstream stream;
+
+    stream << "{";
+    bool first = true;
+    for (auto p : dependents) {
+        if (!first) stream << "," << std::endl;
+        first = false;
+
+        stream << "\"" << p.first << "\" : [" << std::endl;
+        bool firstDependent = true;
+        for (const std::string & dependent : p.second) {
+            if (!firstDependent) stream << "," << std::endl;
+            firstDependent = false;
+            stream << "  \"" << dependent << "\"";
+        }
+        stream << "]" <<  std::endl;
+    }
+    stream << "}" << std::endl;
+    return stream.str();
+}
+
+#endif
 
 
 
+const dyld_cache_slide_info* DyldSharedCache::slideInfo() const
+{
+    const dyld_cache_mapping_info* mappings = (dyld_cache_mapping_info*)((char*)this + header.mappingOffset);
+    uintptr_t slide = (uintptr_t)this - (uintptr_t)(mappings[0].address);
 
+    uint64_t offsetInLinkEditRegion = (header.slideInfoOffset - mappings[2].fileOffset);
+    return (dyld_cache_slide_info*)((uint8_t*)(mappings[2].address) + slide + offsetInLinkEditRegion);
+}
 
+const uint8_t* DyldSharedCache::dataRegionStart() const
+{
+    const dyld_cache_mapping_info* mappings = (dyld_cache_mapping_info*)((char*)this + header.mappingOffset);
+    uintptr_t slide = (uintptr_t)this - (uintptr_t)(mappings[0].address);
+    
+    return (uint8_t*)(mappings[1].address) + slide;
+}
+
+const objc_opt::objc_opt_t* DyldSharedCache::objcOpt() const {
+    // Find the objc image
+    const dyld3::MachOAnalyzer* objcMA = nullptr;
+
+    uint32_t imageIndex;
+    if ( hasImagePath("/usr/lib/libobjc.A.dylib", imageIndex) ) {
+        const dyld3::closure::ImageArray* images = cachedDylibsImageArray();
+        const dyld3::closure::Image* image = images->imageForNum(imageIndex+1);
+        objcMA = (const dyld3::MachOAnalyzer*)((uintptr_t)this + image->cacheOffset());
+    } else {
+        return nullptr;
+    }
+
+    // If we found the objc image, then try to find the read-only data inside.
+    __block const uint8_t* objcROContent = nullptr;
+    int64_t slide = objcMA->getSlide();
+    objcMA->forEachSection(^(const dyld3::MachOAnalyzer::SectionInfo& info, bool malformedSectionRange, bool& stop) {
+        if (strcmp(info.segInfo.segName, "__TEXT") != 0)
+            return;
+        if (strcmp(info.sectName, "__objc_opt_ro") != 0)
+            return;
+        if ( malformedSectionRange ) {
+            stop = true;
+            return;
+        }
+        objcROContent = (uint8_t*)(info.sectAddr + slide);
+    });
+
+    if (objcROContent == nullptr)
+        return nullptr;
+
+    const objc_opt::objc_opt_t* optObjCHeader = (const objc_opt::objc_opt_t*)objcROContent;
+    return optObjCHeader->version == objc_opt::VERSION ? optObjCHeader : nullptr;
+}
+
+const void* DyldSharedCache::objcOptPtrs() const {
+    // Find the objc image
+    const dyld3::MachOAnalyzer* objcMA = nullptr;
+
+    uint32_t imageIndex;
+    if ( hasImagePath("/usr/lib/libobjc.A.dylib", imageIndex) ) {
+        const dyld3::closure::ImageArray* images = cachedDylibsImageArray();
+        const dyld3::closure::Image* image = images->imageForNum(imageIndex+1);
+        objcMA = (const dyld3::MachOAnalyzer*)((uintptr_t)this + image->cacheOffset());
+    } else {
+        return nullptr;
+    }
+
+    // If we found the objc image, then try to find the read-only data inside.
+    __block const void* objcPointersContent = nullptr;
+    int64_t slide = objcMA->getSlide();
+    uint32_t pointerSize = objcMA->pointerSize();
+    objcMA->forEachSection(^(const dyld3::MachOAnalyzer::SectionInfo& info, bool malformedSectionRange, bool& stop) {
+        if ( strncmp(info.segInfo.segName, "__DATA", 6) != 0 )
+            return;
+        if (strcmp(info.sectName, "__objc_opt_ptrs") != 0)
+            return;
+        if ( info.sectSize != pointerSize ) {
+            stop = true;
+            return;
+        }
+        if ( malformedSectionRange ) {
+            stop = true;
+            return;
+        }
+        objcPointersContent = (uint8_t*)(info.sectAddr + slide);
+    });
+
+    return objcPointersContent;
+}
+
+#if !(BUILDING_LIBDYLD || BUILDING_DYLD)
+void DyldSharedCache::fillMachOAnalyzersMap(std::unordered_map<std::string,dyld3::MachOAnalyzer*> & dylibAnalyzers) const {
+    forEachImage(^(const mach_header *mh, const char *iteratedInstallName) {
+        dylibAnalyzers[std::string(iteratedInstallName)] = (dyld3::MachOAnalyzer*)mh;
+    });
+}
+
+void DyldSharedCache::computeReverseDependencyMapForDylib(std::unordered_map<std::string, std::set<std::string>> &reverseDependencyMap, const std::unordered_map<std::string,dyld3::MachOAnalyzer*> & dylibAnalyzers, const std::string &loadPath) const {
+    dyld3::MachOAnalyzer *ma = dylibAnalyzers.at(loadPath);
+    if (reverseDependencyMap.find(loadPath) != reverseDependencyMap.end()) return;
+    reverseDependencyMap[loadPath] = std::set<std::string>();
+
+    ma->forEachDependentDylib(^(const char *dependencyLoadPath, bool isWeak, bool isReExport, bool isUpward, uint32_t compatVersion, uint32_t curVersion, bool &stop) {
+        if (isUpward) return;
+        std::string dependencyLoadPathString = std::string(dependencyLoadPath);
+        computeReverseDependencyMapForDylib(reverseDependencyMap, dylibAnalyzers, dependencyLoadPathString);
+        reverseDependencyMap[dependencyLoadPathString].insert(loadPath);
+    });
+}
+
+// Walks the shared cache and construct the reverse dependency graph (if dylib A depends on B,
+// constructs the graph with B -> A edges)
+void DyldSharedCache::computeReverseDependencyMap(std::unordered_map<std::string, std::set<std::string>> &reverseDependencyMap) const {
+    std::unordered_map<std::string,dyld3::MachOAnalyzer*> dylibAnalyzers;
+
+    fillMachOAnalyzersMap(dylibAnalyzers);
+    forEachImage(^(const mach_header *mh, const char *installName) {
+        computeReverseDependencyMapForDylib(reverseDependencyMap, dylibAnalyzers, std::string(installName));
+    });
+}
+
+// uses the reverse dependency graph constructed above to find the recursive set of dependents for each dylib
+void DyldSharedCache::findDependentsRecursively(std::unordered_map<std::string, std::set<std::string>> &transitiveDependents, const std::unordered_map<std::string, std::set<std::string>> &reverseDependencyMap, std::set<std::string> & visited, const std::string &loadPath) const {
+
+    if (transitiveDependents.find(loadPath) != transitiveDependents.end()) {
+        return;
+    }
+
+    if (visited.find(loadPath) != visited.end()) {
+        return;
+    }
+
+    visited.insert(loadPath);
+
+    std::set<std::string> dependents;
+
+    for (const std::string & dependent : reverseDependencyMap.at(loadPath)) {
+        findDependentsRecursively(transitiveDependents, reverseDependencyMap, visited, dependent);
+        if (transitiveDependents.find(dependent) != transitiveDependents.end()) {
+            std::set<std::string> & theseTransitiveDependents = transitiveDependents.at(dependent);
+            dependents.insert(theseTransitiveDependents.begin(), theseTransitiveDependents.end());
+        }
+        dependents.insert(dependent);
+    }
+
+    transitiveDependents[loadPath] = dependents;
+}
+
+// Fills a map from each install name N to the set of install names depending on N
+void DyldSharedCache::computeTransitiveDependents(std::unordered_map<std::string, std::set<std::string>> & transitiveDependents) const {
+    std::unordered_map<std::string, std::set<std::string>> reverseDependencyMap;
+    computeReverseDependencyMap(reverseDependencyMap);
+    forEachImage(^(const mach_header *mh, const char *installName) {
+        std::set<std::string> visited;
+        findDependentsRecursively(transitiveDependents, reverseDependencyMap, visited, std::string(installName));
+    });
+}
+#endif

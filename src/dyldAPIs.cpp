@@ -45,28 +45,24 @@
 #include <sys/sysctl.h>
 #include <mach/mach_traps.h> // for task_self_trap()
 
-
-#include "mach-o/dyld_images.h"
-#include "mach-o/dyld.h"
-#include "mach-o/dyld_priv.h"
+#include <mach-o/dyld_images.h>
+#include <mach-o/dyld.h>
+#include <mach-o/dyld_priv.h>
 
 #include "ImageLoader.h"
 #include "ImageLoaderMachO.h"
-#include "dyld.h"
+#include "dyld2.h"
 #include "dyldLibSystemInterface.h"
 #include "DyldSharedCache.h"
 #include "MachOFile.h"
 
 #undef _POSIX_C_SOURCE
-#include "dlfcn.h"
+#include <dlfcn.h>
 
 #if __has_feature(ptrauth_calls)
   #include <ptrauth.h>
 #endif
 
-#ifndef CPU_SUBTYPE_ARM64_E
-	#define CPU_SUBTYPE_ARM64_E    2
-#endif
 
 // relocation_info.r_length field has value 3 for 64-bit executables and value 2 for 32-bit executables
 #if __LP64__
@@ -166,7 +162,7 @@ struct dyld_func {
     void*		implementation;
 };
 
-static struct dyld_func dyld_funcs[] = {
+static const struct dyld_func dyld_funcs[] = {
     {"__dyld_register_func_for_add_image",				(void*)_dyld_register_func_for_add_image },
     {"__dyld_register_func_for_remove_image",			(void*)_dyld_register_func_for_remove_image },
     {"__dyld_dladdr",									(void*)dladdr },
@@ -201,6 +197,7 @@ static struct dyld_func dyld_funcs[] = {
 	{"__dyld_process_is_restricted",					(void*)dyld::processIsRestricted },
 	{"__dyld_dynamic_interpose",						(void*)dyld_dynamic_interpose },
 	{"__dyld_shared_cache_file_path",					(void*)dyld::getStandardSharedCacheFilePath },
+	{"__dyld_has_inserted_or_interposing_libraries",	(void*)dyld::hasInsertedOrInterposingLibraries },
     {"__dyld_get_image_header_containing_address",		(void*)dyld_image_header_containing_address },
     {"__dyld_is_memory_immutable",						(void*)_dyld_is_memory_immutable },
     {"__dyld_objc_notify_register",						(void*)_dyld_objc_notify_register },
@@ -208,9 +205,13 @@ static struct dyld_func dyld_funcs[] = {
     {"__dyld_get_shared_cache_range",					(void*)_dyld_get_shared_cache_range },
     {"__dyld_images_for_addresses",						(void*)_dyld_images_for_addresses },
     {"__dyld_register_for_image_loads",					(void*)_dyld_register_for_image_loads },
+    {"__dyld_register_for_bulk_image_loads",			(void*)_dyld_register_for_bulk_image_loads },
+    {"__dyld_register_driverkit_main",					(void*)_dyld_register_driverkit_main },
 
-	// deprecated
+
 #if DEPRECATED_APIS_SUPPORTED
+#pragma clang diagnostic push
+#pragma clang diagnostic ignored "-Wdeprecated-declarations"
     {"__dyld_lookup_and_bind",						(void*)client_dyld_lookup_and_bind },
     {"__dyld_lookup_and_bind_with_hint",			(void*)_dyld_lookup_and_bind_with_hint },
     {"__dyld_lookup_and_bind_fully",				(void*)_dyld_lookup_and_bind_fully },
@@ -252,6 +253,7 @@ static struct dyld_func dyld_funcs[] = {
 #if OLD_LIBSYSTEM_SUPPORT
     {"__dyld_link_module",							(void*)_dyld_link_module },
 #endif
+#pragma clang diagnostic pop
 #endif //DEPRECATED_APIS_SUPPORTED
 
     {NULL, 0}
@@ -416,7 +418,7 @@ const struct mach_header * dyld_image_header_containing_address(const void* addr
 		return mh;
 #endif
 	ImageLoader* image = dyld::findImageContainingAddress(address);
-	if ( image != NULL ) 
+	if ( image != NULL )
 		return image->machHeader();
 	return NULL;
 }
@@ -608,7 +610,6 @@ const struct mach_header* addImage(void* callerAddress, const char* path, bool s
 		context.mustBeBundle		= false;
 		context.mustBeDylib			= true;
 		context.canBePIE			= false;
-		context.enforceIOSMac		= false;
 		context.origin				= callerImage != NULL ? callerImage->getPath() : NULL; // caller's image's path
 		context.rpath				= &callersRPaths; 	// rpaths from caller and main executable
 
@@ -853,7 +854,6 @@ NSObjectFileImageReturnCode NSCreateObjectFileImageFromFile(const char* pathName
 		context.mustBeBundle		= true;
 		context.mustBeDylib			= false;
 		context.canBePIE			= false;
-		context.enforceIOSMac		= false;
 		context.origin				= callerImage != NULL ? callerImage->getPath() : NULL; // caller's image's path
 		context.rpath				= NULL; // support not yet implemented
 
@@ -1401,7 +1401,18 @@ bool dlopen_preflight_internal(const char* path, void* callerAddress)
 	// if requested path is to something in the dyld shared cache, always succeed
 	if ( dyld::inSharedCache(path) )
 		return true;
-	
+
+#if __MAC_OS_X_VERSION_MIN_REQUIRED
+	// <rdar://problem/47464387> dlopen_preflight() on symlink to image in shared cache leaves it half loaded
+	if ( strncmp(path, "/System/Library/", 16) == 0 ) {
+		char canonicalPath[PATH_MAX];
+		if ( realpath(path, canonicalPath) ) {
+			if ( dyld::inSharedCache(canonicalPath) )
+				return true;
+		}
+	}
+#endif
+
 	bool result = false;
 	std::vector<const char*> rpathsFromCallerImage;
 	try {
@@ -1425,7 +1436,6 @@ bool dlopen_preflight_internal(const char* path, void* callerAddress)
 		context.mustBeBundle	= false;
 		context.mustBeDylib		= false;
 		context.canBePIE		= true;
-		context.enforceIOSMac	= false;
 		context.origin			= callerImage != NULL ? callerImage->getPath() : NULL; // caller's image's path
 		context.rpath			= &callersRPaths;	// rpaths from caller and main executable
 
@@ -1560,7 +1570,6 @@ void* dlopen_internal(const char* path, int mode, void* callerAddress)
 		context.mustBeBundle	= false;
 		context.mustBeDylib		= false;
 		context.canBePIE		= true;
-		context.enforceIOSMac	= false;
 		context.origin			= callerImage != NULL ? callerImage->getPath() : NULL; // caller's image's path
 		context.rpath			= &callersRPaths;				// rpaths from caller and main executable
 
@@ -1821,7 +1830,7 @@ void* dlsym_internal(void* handle, const char* symbolName, void* callerAddress)
 			// Sign the pointer if it points to a function
 			// Note we only do this if the main executable is arm64e as otherwise we
 			// may end up calling containsAddress on the accelerator tables.
-			if ( result && (dyld::gLinkContext.mainExecutable->machHeader()->cpusubtype == CPU_SUBTYPE_ARM64_E) ) {
+			if ( result && (dyld::gLinkContext.mainExecutable->machHeader()->cpusubtype == CPU_SUBTYPE_ARM64E) ) {
 				const ImageLoader* symbolImage = image;
 				if (!symbolImage->containsAddress(result)) {
 					symbolImage = dyld::findImageContainingAddress(result);
@@ -1855,7 +1864,7 @@ void* dlsym_internal(void* handle, const char* symbolName, void* callerAddress)
 			// Sign the pointer if it points to a function
 			// Note we only do this if the main executable is arm64e as otherwise we
 			// may end up calling containsAddress on the accelerator tables.
-			if ( result && (dyld::gLinkContext.mainExecutable->machHeader()->cpusubtype == CPU_SUBTYPE_ARM64_E) ) {
+			if ( result && (dyld::gLinkContext.mainExecutable->machHeader()->cpusubtype == CPU_SUBTYPE_ARM64E) ) {
 				const ImageLoader* symbolImage = image;
 				if (!symbolImage->containsAddress(result)) {
 					symbolImage = dyld::findImageContainingAddress(result);
@@ -1901,7 +1910,7 @@ void* dlsym_internal(void* handle, const char* symbolName, void* callerAddress)
 			// Sign the pointer if it points to a function
 			// Note we only do this if the main executable is arm64e as otherwise we
 			// may end up calling containsAddress on the accelerator tables.
-			if ( result && (dyld::gLinkContext.mainExecutable->machHeader()->cpusubtype == CPU_SUBTYPE_ARM64_E) ) {
+			if ( result && (dyld::gLinkContext.mainExecutable->machHeader()->cpusubtype == CPU_SUBTYPE_ARM64E) ) {
 				const ImageLoader* symbolImage = image;
 				if (!symbolImage->containsAddress(result)) {
 					symbolImage = dyld::findImageContainingAddress(result);
@@ -1946,7 +1955,7 @@ void* dlsym_internal(void* handle, const char* symbolName, void* callerAddress)
 			// Sign the pointer if it points to a function
 			// Note we only do this if the main executable is arm64e as otherwise we
 			// may end up calling containsAddress on the accelerator tables.
-			if ( result && (dyld::gLinkContext.mainExecutable->machHeader()->cpusubtype == CPU_SUBTYPE_ARM64_E) ) {
+			if ( result && (dyld::gLinkContext.mainExecutable->machHeader()->cpusubtype == CPU_SUBTYPE_ARM64E) ) {
 				const ImageLoader* symbolImage = image;
 				if (!symbolImage->containsAddress(result)) {
 					symbolImage = dyld::findImageContainingAddress(result);
@@ -1997,7 +2006,7 @@ void* dlsym_internal(void* handle, const char* symbolName, void* callerAddress)
 			// Sign the pointer if it points to a function
 			// Note we only do this if the main executable is arm64e as otherwise we
 			// may end up calling containsAddress on the accelerator tables.
-			if ( result && (dyld::gLinkContext.mainExecutable->machHeader()->cpusubtype == CPU_SUBTYPE_ARM64_E) ) {
+			if ( result && (dyld::gLinkContext.mainExecutable->machHeader()->cpusubtype == CPU_SUBTYPE_ARM64E) ) {
 				const ImageLoader* symbolImage = image;
 				if (!symbolImage->containsAddress(result)) {
 					symbolImage = dyld::findImageContainingAddress(result);
@@ -2090,8 +2099,9 @@ const char* dyld_image_path_containing_address(const void* address)
 #endif
 
 	ImageLoader* image = dyld::findImageContainingAddress(address);
-	if ( image != NULL )
+	if ( image != NULL ) {
 		return image->getRealPath();
+	}
 	return NULL;
 }
 
@@ -2203,7 +2213,7 @@ void _dyld_images_for_addresses(unsigned count, const void* addresses[], struct 
 			infos[i].image         = mh;
 			infos[i].offsetInImage = (uintptr_t)addr - (uintptr_t)mh;
 			((dyld3::MachOFile*)mh)->getUuid(infos[i].uuid);
-			break;
+			continue;
 		}
 #endif
 		ImageLoader* image = dyld::findImageContainingAddress(addr);
@@ -2222,6 +2232,16 @@ void _dyld_register_for_image_loads(void (*func)(const mach_header* mh, const ch
 	dyld::registerLoadCallback(func);
 }
 
+void _dyld_register_for_bulk_image_loads(void (*func)(unsigned imageCount, const struct mach_header* mhs[], const char* paths[]))
+{
+	if ( dyld::gLogAPIs )
+		dyld::log("%s(%p)\n", __func__, (void *)func);
+	dyld::registerBulkLoadCallback(func);
+}
 
+void _dyld_register_driverkit_main(void (*mainFunc)())
+{
+	dyld::setMainEntry(mainFunc);
+}
 
 

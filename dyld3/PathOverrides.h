@@ -66,36 +66,40 @@ public:
     void                            setFallbackPathHandling(FallbackPathMode mode);
     void                            setEnvVars(const char* envp[], const dyld3::MachOFile* mainExe, const char* mainExePath);
     void                            setMainExecutable(const dyld3::MachOFile* mainExe, const char* mainExePath);
-    void                            forEachPathVariant(const char* requestedPath, void (^handler)(const char* possiblePath, bool isFallbackPath, bool& stop),
+    void                            forEachPathVariant(const char* requestedPath, bool pathIsInDyldCacheWhichCannotBeOverridden, void (^handler)(const char* possiblePath, bool isFallbackPath, bool& stop),
                                                        Platform plat=MachOFile::currentPlatform()) const;
 
-    uint32_t                        envVarCount() const;
     void                            forEachEnvVar(void (^handler)(const char* envVar)) const;
-    void                            forEachInsertedDylib(void (^handler)(const char* dylibPath)) const;
+    void                            forEachExecutableEnvVar(void (^handler)(const char* envVar)) const;
+    void                            forEachInsertedDylib(void (^handler)(const char* dylibPath, bool &stop)) const;
 
 private:
     void                            setString(const char*& var, const char* value);
     const char*                     addString(const char* str);
-    static void                     forEachInColonList(const char* list, void (^callback)(const char* path, bool& stop));
-    void                            addEnvVar(const char* keyEqualsValue);
+    static void                     forEachInColonList(const char* list1, const char* list2, void (^callback)(const char* path, bool& stop));
+    void                            addEnvVar(const char* keyEqualsValue, bool forExecutable);
     const char*                     getFrameworkPartialPath(const char* path) const;
     static const char*              getLibraryLeafName(const char* path);
     void                            handleListEnvVar(const char* key, const char** list, void (^handler)(const char* envVar)) const;
     void                            handleEnvVar(const char* key, const char* value, void (^handler)(const char* envVar)) const;
     void                            forEachDylibFallback(Platform platform, void (^handler)(const char* fallbackDir, bool& stop)) const;
     void                            forEachFrameworkFallback(Platform platform, void (^handler)(const char* fallbackDir, bool& stop)) const;
-    void                            forEachImageSuffix(const char* path, bool isFallbackPath, bool& stop, void (^handler)(const char* possiblePath, bool isFallbackPath, bool& stop)) const;
+    void                            forEachImageSuffix(const char* path, bool isFallbackPath, bool pathIsInDyldCacheWhichCannotBeOverridden, bool& stop, void (^handler)(const char* possiblePath, bool isFallbackPath, bool& stop)) const;
     void                            addSuffix(const char* path, const char* suffix, char* result) const;
 
-    PathPool*                       _pathPool                   = nullptr;
-    const char*                     _dylibPathOverrides         = nullptr;
-    const char*                     _frameworkPathOverrides     = nullptr;
-    const char*                     _dylibPathFallbacks         = nullptr;
-    const char*                     _frameworkPathFallbacks     = nullptr;
-    const char*                     _insertedDylibs             = nullptr;
-    const char*                     _imageSuffix                = nullptr;
-    const char*                     _rootPath                   = nullptr;  // simulator only
-    FallbackPathMode                _fallbackPathMode           = FallbackPathMode::classic;
+    PathPool*                       _pathPool                    = nullptr;
+    const char*                     _dylibPathOverridesEnv       = nullptr;
+    const char*                     _frameworkPathOverridesEnv   = nullptr;
+    const char*                     _dylibPathFallbacksEnv       = nullptr;
+    const char*                     _frameworkPathFallbacksEnv   = nullptr;
+    const char*                     _dylibPathOverridesExeLC     = nullptr;
+    const char*                     _frameworkPathOverridesExeLC = nullptr;
+    const char*                     _dylibPathFallbacksExeLC     = nullptr;
+    const char*                     _frameworkPathFallbacksExeLC = nullptr;
+    const char*                     _insertedDylibs              = nullptr;
+    const char*                     _imageSuffix                 = nullptr;
+    const char*                     _rootPath                    = nullptr;  // simulator only
+    FallbackPathMode                _fallbackPathMode            = FallbackPathMode::classic;
 };
 
 #if BUILDING_LIBDYLD

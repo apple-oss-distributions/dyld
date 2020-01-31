@@ -30,12 +30,12 @@
 #include <mach/mach_vm.h>
 #include <libkern/OSAtomic.h>
 #include <execinfo.h>
+#include <mach-o/dyld_priv.h>
+#include <mach-o/dyld_process_info.h>
+#include <mach-o/dyld_images.h>
 
 
-#include "dyld_process_info.h"
 #include "dyld_process_info_internal.h"
-#include "dyld_images.h"
-#include "dyld_priv.h"
 
 #include "Loading.h"
 #include "AllImages.h"
@@ -167,7 +167,7 @@ dyld_process_info_notify_base::dyld_process_info_notify_base(dispatch_queue_t qu
         return;
     }
     // Poke the portname of our port into the target task
-    _remoteAllImageInfoBuffer = RemoteBuffer(_targetTask, taskDyldInfo.all_image_info_addr, taskDyldInfo.all_image_info_size, true, false);
+    _remoteAllImageInfoBuffer = RemoteBuffer(_targetTask, taskDyldInfo.all_image_info_addr, (size_t)taskDyldInfo.all_image_info_size, true, false);
     *kr = _remoteAllImageInfoBuffer.getKernelReturn();
     if (*kr) {
         (void)mach_port_deallocate(_targetTask, _sendPortInTarget);
@@ -412,12 +412,15 @@ namespace dyld3 {
 
 void AllImages::notifyMonitorMain()
 {
+#if !TARGET_OS_DRIVERKIT
     assert(sNotifyMonitoringDyldMain != nullptr);
     sNotifyMonitoringDyldMain();
+#endif
 }
 
 void AllImages::notifyMonitorLoads(const Array<LoadedImage>& newImages)
 {
+#if !TARGET_OS_DRIVERKIT
     assert(sNotifyMonitoringDyld != nullptr);
     const struct mach_header* loadAddresses[newImages.count()];
     const char* loadPaths[newImages.count()];
@@ -426,10 +429,12 @@ void AllImages::notifyMonitorLoads(const Array<LoadedImage>& newImages)
         loadPaths[i] = newImages[i].image()->path();
     }
     sNotifyMonitoringDyld(false, (unsigned)newImages.count(), loadAddresses, loadPaths);
+#endif
 }
 
 void AllImages::notifyMonitorUnloads(const Array<LoadedImage>& unloadingImages)
 {
+#if !TARGET_OS_DRIVERKIT
     assert(sNotifyMonitoringDyld != nullptr);
     const struct mach_header* loadAddresses[unloadingImages.count()];
     const char* loadPaths[unloadingImages.count()];
@@ -438,6 +443,7 @@ void AllImages::notifyMonitorUnloads(const Array<LoadedImage>& unloadingImages)
         loadPaths[i] = unloadingImages[i].image()->path();
     }
     sNotifyMonitoringDyld(true, (unsigned)unloadingImages.count(), loadAddresses, loadPaths);
+#endif
 }
 
 } // namespace dyld3

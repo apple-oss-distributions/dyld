@@ -103,11 +103,34 @@ static void verifyhide()
     }
 }
 
+// checks DSO handle
+static void verifyDSOHandle()
+{
+    Dl_info info;
+    if ( dladdr(&__dso_handle, &info) == 0 ) {
+        printf("[FAIL] dladdr(&__dso_handle, xx) failed\n");
+        exit(0);
+    }
+    if ( strcmp(info.dli_sname, "__dso_handle") != 0 ) {
+        printf("[FAIL] dladdr()->dli_sname is \"%s\" instead of \"__dso_handle\"\n", info.dli_sname);
+        exit(0);
+    }
+    if ( info.dli_saddr != stripPointer(&__dso_handle) ) {
+        printf("[FAIL] dladdr()->dli_saddr is not &__dso_handle\n");
+        exit(0);
+    }
+    if ( info.dli_fbase != &__dso_handle ) {
+        printf("[FAIL] dladdr()->dli_fbase is not image that contains &__dso_handle\n");
+        exit(0);
+    }
+}
+
 
 void verifyDylib()
 {
     verifybar();
     verifyfoo();
     verifyhide();
+    verifyDSOHandle();
 }
 

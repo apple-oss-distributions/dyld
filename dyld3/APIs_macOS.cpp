@@ -33,11 +33,12 @@
 #include <fcntl.h>
 #include <TargetConditionals.h>
 #include <malloc/malloc.h>
+#include <mach-o/dyld_priv.h>
+#include <mach-o/dyld_images.h>
 
 #include <algorithm>
 
 #include "dlfcn.h"
-#include "dyld_priv.h"
 
 #include "AllImages.h"
 #include "Loading.h"
@@ -97,19 +98,13 @@ NSObjectFileImageReturnCode NSCreateObjectFileImageFromMemory(const void* memIma
     bool usable = false;
     const MachOFile* mf = (MachOFile*)memImage;
     if ( mf->hasMachOMagic() && mf->isMachO(diag, memImageSize) ) {
-        if ( strcmp(mf->archName(), MachOFile::currentArchName()) == 0 )
-            usable = true;
-#if __x86_64__
-        // <rdar://problem/42727628> support thin x86_64 on haswell machines
-        else if ( (strcmp(MachOFile::currentArchName(), "x86_64h") == 0) && (strcmp(mf->archName(), "x86_64") == 0) )
-            usable = true;
-#endif
+        usable = (gAllImages.archs().grade(mf->cputype, mf->cpusubtype) != 0);
     }
     else if ( const FatFile* ff = FatFile::isFatFile(memImage) ) {
         uint64_t sliceOffset;
         uint64_t sliceLen;
         bool     missingSlice;
-        if ( ff->isFatFileWithSlice(diag, memImageSize, MachOFile::currentArchName(), sliceOffset, sliceLen, missingSlice) ) {
+        if ( ff->isFatFileWithSlice(diag, memImageSize, gAllImages.archs(), sliceOffset, sliceLen, missingSlice) ) {
             mf = (MachOFile*)((long)memImage+sliceOffset);
             if ( mf->isMachO(diag, sliceLen) ) {
                 usable = true;
@@ -155,24 +150,27 @@ NSModule NSLinkModule(NSObjectFileImage ofi, const char* moduleName, uint32_t op
         // if this is memory based image, write to temp file, then use file based loading
         if ( image.memSource != nullptr ) {
             // make temp file with content of memory buffer
-            bool successfullyWritten = false;
-            image.path = ::tempnam(nullptr, "NSCreateObjectFileImageFromMemory-");
-            if ( image.path != nullptr ) {
-                int fd = ::open(image.path, O_WRONLY | O_CREAT | O_EXCL, 0644);
-                if ( fd != -1 ) {
-                    ssize_t writtenSize = ::pwrite(fd, image.memSource, image.memLength, 0);
-                    if ( writtenSize == image.memLength )
-                        successfullyWritten = true;
-                    ::close(fd);
-                }
+            image.path = nullptr;
+            char tempFileName[PATH_MAX];
+            const char* tmpDir = getenv("TMPDIR");
+            if ( (tmpDir != nullptr) && (strlen(tmpDir) > 2) ) {
+                strlcpy(tempFileName, tmpDir, PATH_MAX);
+                if ( tmpDir[strlen(tmpDir)-1] != '/' )
+                    strlcat(tempFileName, "/", PATH_MAX);
             }
-            if ( !successfullyWritten ) {
-                if ( image.path != nullptr ) {
-                    free((void*)image.path);
-                    image.path = nullptr;
+            else
+                strlcpy(tempFileName,"/tmp/", PATH_MAX);
+            strlcat(tempFileName, "NSCreateObjectFileImageFromMemory-XXXXXXXX", PATH_MAX);
+            int fd = ::mkstemp(tempFileName);
+            if ( fd != -1 ) {
+                ssize_t writtenSize = ::pwrite(fd, image.memSource, image.memLength, 0);
+                if ( writtenSize == image.memLength ) {
+                    image.path = strdup(tempFileName);
                 }
-                log_apis("NSLinkModule() => NULL (could not save memory image to temp file)\n");
-                return;
+                else {
+                    log_apis("NSLinkModule() => NULL (could not save memory image to temp file)\n");
+                }
+                ::close(fd);
             }
         }
         path = image.path;
@@ -190,7 +188,7 @@ NSModule NSLinkModule(NSObjectFileImage ofi, const char* moduleName, uint32_t op
     // dlopen the binary outside of the read lock as we don't want to risk deadlock
     Diagnostics diag;
     void* callerAddress = __builtin_return_address(1); // note layers: 1: real client, 0: libSystem glue
-    const MachOLoaded* loadAddress = gAllImages.dlopen(diag, path, false, false, false, true, callerAddress);
+    const MachOLoaded* loadAddress = gAllImages.dlopen(diag, path, false, false, false, false, true, callerAddress);
     if ( diag.hasError() ) {
         log_apis("   NSLinkModule: failed: %s\n", diag.errorMessage());
         return nullptr;

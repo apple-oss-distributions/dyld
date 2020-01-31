@@ -67,35 +67,29 @@ The dynamic linker searches these directories before it searches for the
 framework by its install name.
 It allows you to test new versions of existing
 frameworks. (A framework is a library install name that ends in the form
-XXX.framework/Versions/YYY/XXX or XXX.framework/XXX, where XXX and YYY are any
+XXX.framework/Versions/A/XXX or XXX.framework/XXX, where XXX and A are any
 name.)
 .IP
 For each framework that a program uses, the dynamic linker looks for the
 framework in each directory in 
 .SM DYLD_FRAMEWORK_PATH
-in turn. If it looks in all the directories and can't find the framework, it
-searches the directories in  
-.SM DYLD_LIBRARY_PATH
-in turn. If it still can't find the framework, it then searches 
-.SM DYLD_FALLBACK_FRAMEWORK_PATH
-and
-.SM DYLD_FALLBACK_LIBRARY_PATH
-in turn.
+in turn. If it looks in all those directories and can't find the framework, it
+uses whatever it would have loaded if DYLD_FRAMEWORK_PATH had not been set.
 .IP
 Use the
 .B \-L
 option to 
-.IR otool (1).
+.IR otool (1)
 to discover the frameworks and shared libraries that the executable
 is linked against.
 .TP
 .B DYLD_FALLBACK_FRAMEWORK_PATH
 This is a colon separated list of directories that contain frameworks.
-It is used as the default location for frameworks not found in their install
-path.
+If a framework is not found at its install path, dyld uses this
+as a list of directories to search for the framework.
 
 By default, it is set to
-/Library/Frameworks:/Network/Library/Frameworks:/System/Library/Frameworks
+/Library/Frameworks:/System/Library/Frameworks
 .TP
 .B DYLD_VERSIONED_FRAMEWORK_PATH
 This is a colon separated list of directories that contain potential override frameworks. 
@@ -104,7 +98,7 @@ each framework found dyld looks at its LC_ID_DYLIB and gets the current_version
 and install name.  Dyld then looks for the framework at the install name path.
 Whichever has the larger current_version value will be used in the process whenever
 a framework with that install name is required.  This is similar to DYLD_FRAMEWORK_PATH
-except instead of always overriding, it only overrides is the supplied framework is newer.
+except instead of always overriding, it only overrides if the supplied framework is newer.
 Note: dyld does not check the framework's Info.plist to find its version.  Dyld only
 checks the -currrent_version number supplied when the framework was created.
 .TP
@@ -114,28 +108,23 @@ dynamic linker searches these directories before it searches the default
 locations for libraries. It allows you to test new versions of existing
 libraries. 
 .IP
-For each library that a program uses, the dynamic linker looks for it in each
-directory in 
-.SM DYLD_LIBRARY_PATH
-in turn. If it still can't find the library, it then searches 
-.SM DYLD_FALLBACK_FRAMEWORK_PATH
-and
-.SM DYLD_FALLBACK_LIBRARY_PATH
-in turn.
+For each dylib that a program uses, the dynamic linker looks for its
+leaf name in each directory in
+.SM DYLD_LIBRARY_PATH.
 .IP
 Use the
 .B \-L
 option to 
-.IR otool (1).
+.IR otool (1)
 to discover the frameworks and shared libraries that the executable
 is linked against.
 .TP
 .B DYLD_FALLBACK_LIBRARY_PATH
 This is a colon separated list of directories that contain libraries.
-It is used as the default location for libraries not found in their install
-path.
+If a dylib is not found at its install  path,
+dyld uses this as a list of directories to search for the dylib.
 By default, it is set
-to $(HOME)/lib:/usr/local/lib:/lib:/usr/lib.
+to /usr/local/lib:/usr/lib.
 .TP
 .B DYLD_VERSIONED_LIBRARY_PATH
 This is a colon separated list of directories that contain potential override libraries. 
@@ -201,7 +190,7 @@ is getting what you want.
 .TP
 .B DYLD_BIND_AT_LAUNCH
 When this is set, the dynamic linker binds all undefined symbols
-the program needs at launch time. This includes function symbols that can are normally 
+the program needs at launch time. This includes function symbols that are normally 
 lazily bound at the time of their first call.
 .TP
 .B DYLD_PRINT_STATISTICS
@@ -213,11 +202,11 @@ Right before the process's main() is called, dyld prints out detailed informatio
 dyld spent its time.  Useful for analyzing launch performance.
 .TP
 .B DYLD_DISABLE_DOFS
-Causes dyld not register dtrace static probes with the kernel.
+Causes dyld to not register dtrace static probes with the kernel.
 .TP
 .B DYLD_PRINT_INITIALIZERS
-Causes dyld to print out a line when running each initializers in every image.  Initializers
-run by dyld included constructors for C++ statically allocated objects, functions marked with
+Causes dyld to print out a line when running each initializer in every image.  Initializers
+run by dyld include constructors for C++ statically allocated objects, functions marked with
 __attribute__((constructor)), and -init functions.
 .TP
 .B DYLD_PRINT_APIS
