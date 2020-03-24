@@ -1470,6 +1470,25 @@ void removeImage(ImageLoader* image)
 		}
 	}
 
+	// If this image is the potential canonical definition of any weak defs, then set them to a tombstone value
+	if ( gLinkContext.weakDefMapInitialized && image->hasCoalescedExports() ) {
+		Diagnostics diag;
+		const dyld3::MachOAnalyzer* ma = (const dyld3::MachOAnalyzer*)image->machHeader();
+		ma->forEachWeakDef(diag, ^(const char *symbolName, uintptr_t imageOffset, bool isFromExportTrie) {
+			auto it = gLinkContext.weakDefMap.find(symbolName);
+			assert(it != gLinkContext.weakDefMap.end());
+			it->second = { nullptr, 0 };
+			if ( !isFromExportTrie ) {
+				// The string was already duplicated if we are an export trie
+				// so only strdup as we are the nlist
+				size_t hash1 = ImageLoader::HashCString::hash(it->first);
+				it->first = strdup(it->first);
+				size_t hash2 = ImageLoader::HashCString::hash(it->first);
+				assert(hash1 == hash2);
+			}
+		});
+	}
+
 	// log if requested
 	if ( gLinkContext.verboseLoading || (sEnv.DYLD_PRINT_LIBRARIES_POST_LAUNCH && (sMainExecutable!=NULL) && sMainExecutable->isLinked()) ) {
 		const char *imagePath = image->getPath();

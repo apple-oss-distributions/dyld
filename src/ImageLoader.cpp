@@ -36,6 +36,7 @@
 #include <sys/mount.h>
 #include <sys/sysctl.h>
 #include <libkern/OSAtomic.h>
+#include <string_view>
 
 #include <atomic>
 
@@ -968,12 +969,27 @@ static const char* const sTreatAsWeak[] = {
     "__ZdaPvSt11align_val_t", "__ZdaPvSt11align_val_tRKSt9nothrow_t", "__ZdaPvmSt11align_val_t"
 };
 
+size_t ImageLoader::HashCString::hash(const char* v) {
+    // FIXME: Use hash<string_view> when it has the correct visibility markup
+    return std::hash<std::string_view>{}(v);
+}
+
+bool ImageLoader::EqualCString::equal(const char* s1, const char* s2) {
+    return strcmp(s1, s2) == 0;
+}
 
 void ImageLoader::weakBind(const LinkContext& context)
 {
+
+	if (!context.useNewWeakBind) {
+		weakBindOld(context);
+		return;
+	}
+
 	if ( context.verboseWeakBind )
 		dyld::log("dyld: weak bind start:\n");
 	uint64_t t1 = mach_absolute_time();
+
 	// get set of ImageLoaders that participate in coalecsing
 	ImageLoader* imagesNeedingCoalescing[fgImagesRequiringCoalescing];
 	unsigned imageIndexes[fgImagesRequiringCoalescing];
@@ -991,9 +1007,65 @@ void ImageLoader::weakBind(const LinkContext& context)
 
 	// don't need to do any coalescing if only one image has overrides, or all have already been done
 	if ( (countOfImagesWithWeakDefinitionsNotInSharedCache > 0) && (countNotYetWeakBound > 0) ) {
+		if (!context.weakDefMapInitialized) {
+			// Initialize the weak def map as the link context doesn't run static initializers
+			new (&context.weakDefMap) dyld3::Map<const char*, std::pair<const ImageLoader*, uintptr_t>, ImageLoader::HashCString, ImageLoader::EqualCString>();
+			context.weakDefMapInitialized = true;
+		}
 #if __MAC_OS_X_VERSION_MIN_REQUIRED
 	  // only do alternate algorithm for dlopen(). Use traditional algorithm for launch
 	  if ( !context.linkingMainExecutable ) {
+		  // Don't take the memory hit of weak defs on the launch path until we hit a dlopen with more weak symbols to bind
+		  if (!context.weakDefMapProcessedLaunchDefs) {
+			  context.weakDefMapProcessedLaunchDefs = true;
+
+			  // Walk the nlist for all binaries from launch and fill in the map with any other weak defs
+			  for (int i=0; i < count; ++i) {
+				  const ImageLoader* image = imagesNeedingCoalescing[i];
+				  // skip images without defs.  We've processed launch time refs already
+				  if ( !image->hasCoalescedExports() )
+					  continue;
+				  // Only process binaries which have had their weak symbols bound, ie, not the new ones we are processing now
+				  // from this dlopen
+				  if ( !image->weakSymbolsBound(imageIndexes[i]) )
+					  continue;
+
+				  Diagnostics diag;
+				  const dyld3::MachOAnalyzer* ma = (const dyld3::MachOAnalyzer*)image->machHeader();
+				  ma->forEachWeakDef(diag, ^(const char *symbolName, uintptr_t imageOffset, bool isFromExportTrie) {
+					  uintptr_t targetAddr = (uintptr_t)ma + imageOffset;
+					  if ( isFromExportTrie ) {
+						  // Avoid duplicating the string if we already have the symbol name
+						  if ( context.weakDefMap.find(symbolName) != context.weakDefMap.end() )
+							  return;
+						  symbolName = strdup(symbolName);
+					  }
+					  context.weakDefMap.insert({ symbolName, { image, targetAddr } });
+				  });
+			  }
+		  }
+
+		  // Walk the nlist for all binaries in dlopen and fill in the map with any other weak defs
+		  for (int i=0; i < count; ++i) {
+			  const ImageLoader* image = imagesNeedingCoalescing[i];
+			  if ( image->weakSymbolsBound(imageIndexes[i]) )
+				  continue;
+			  // skip images without defs.  We'll process refs later
+			  if ( !image->hasCoalescedExports() )
+				  continue;
+			  Diagnostics diag;
+			  const dyld3::MachOAnalyzer* ma = (const dyld3::MachOAnalyzer*)image->machHeader();
+			  ma->forEachWeakDef(diag, ^(const char *symbolName, uintptr_t imageOffset, bool isFromExportTrie) {
+				  uintptr_t targetAddr = (uintptr_t)ma + imageOffset;
+				  if ( isFromExportTrie ) {
+					  // Avoid duplicating the string if we already have the symbol name
+					  if ( context.weakDefMap.find(symbolName) != context.weakDefMap.end() )
+						  return;
+					  symbolName = strdup(symbolName);
+				  }
+				  context.weakDefMap.insert({ symbolName, { image, targetAddr } });
+			  });
+		  }
 		// for all images that need weak binding
 		for (int i=0; i < count; ++i) {
 			ImageLoader* imageBeingFixedUp = imagesNeedingCoalescing[i];
@@ -1010,40 +1082,51 @@ void ImageLoader::weakBind(const LinkContext& context)
 				const char*         nameToCoalesce = coalIterator.symbolName;
 				uintptr_t           targetAddr     = 0;
 				const ImageLoader*  targetImage;
-				// scan all images looking for definition to use
-				for (int j=0; j < count; ++j) {
-					const ImageLoader* anImage = imagesNeedingCoalescing[j];
-					bool anImageInCache = anImage->inSharedCache();
-					// <rdar://problem/47986398> Don't look at images in dyld cache because cache is
-					//  already coalesced.  Only images outside cache can potentially override something in cache.
-					if ( anImageInCache && imageBeingFixedUpInCache )
-						continue;
+				// Seatch the map for a previous definition to use
+				auto weakDefIt = context.weakDefMap.find(nameToCoalesce);
+				if ( (weakDefIt != context.weakDefMap.end()) && (weakDefIt->second.first != nullptr) ) {
+					// Found a previous defition
+					targetImage = weakDefIt->second.first;
+					targetAddr = weakDefIt->second.second;
+				} else {
+					// scan all images looking for definition to use
+					for (int j=0; j < count; ++j) {
+						const ImageLoader* anImage = imagesNeedingCoalescing[j];
+						bool anImageInCache = anImage->inSharedCache();
+						// <rdar://problem/47986398> Don't look at images in dyld cache because cache is
+						//  already coalesced.  Only images outside cache can potentially override something in cache.
+						if ( anImageInCache && imageBeingFixedUpInCache )
+							continue;
 
-					//dyld::log("looking for %s in %s\n", nameToCoalesce, anImage->getPath());
-					const ImageLoader* foundIn;
-					const Symbol* sym = anImage->findExportedSymbol(nameToCoalesce, false, &foundIn);
-					if ( sym != NULL ) {
-						if ( (foundIn->getExportedSymbolInfo(sym) & ImageLoader::kWeakDefinition) == 0 ) {
-							// found non-weak def, use it and stop looking
+						//dyld::log("looking for %s in %s\n", nameToCoalesce, anImage->getPath());
+						const ImageLoader* foundIn;
+						const Symbol* sym = anImage->findExportedSymbol(nameToCoalesce, false, &foundIn);
+						if ( sym != NULL ) {
 							targetAddr = foundIn->getExportedSymbolAddress(sym, context);
 							targetImage = foundIn;
 							if ( context.verboseWeakBind )
-								dyld::log("dyld:   found strong %s at 0x%lX in %s\n", nameToCoalesce, targetAddr, foundIn->getPath());
+								dyld::log("dyld:   found weak %s at 0x%lX in %s\n", nameToCoalesce, targetAddr, foundIn->getPath());
 							break;
-						}
-						else {
-							// found weak-def, only use if no weak found yet
-							if ( targetAddr == 0 ) {
-								targetAddr = foundIn->getExportedSymbolAddress(sym, context);
-								targetImage = foundIn;
-								if ( context.verboseWeakBind )
-									dyld::log("dyld:   found weak %s at 0x%lX in %s\n", nameToCoalesce, targetAddr, foundIn->getPath());
-							}
 						}
 					}
 				}
 				if ( (targetAddr != 0) && (coalIterator.image != targetImage) ) {
 					coalIterator.image->updateUsesCoalIterator(coalIterator, targetAddr, (ImageLoader*)targetImage, 0, context);
+					if (weakDefIt == context.weakDefMap.end()) {
+						if (targetImage->neverUnload()) {
+							// Add never unload defs to the map for next time
+							context.weakDefMap.insert({ nameToCoalesce, { targetImage, targetAddr } });
+							if ( context.verboseWeakBind ) {
+								dyld::log("dyld: weak binding adding %s to map\n", nameToCoalesce);
+							}
+						} else {
+							// Add a placeholder for unloadable symbols which makes us fall back to the regular search
+							context.weakDefMap.insert({ nameToCoalesce, { targetImage, targetAddr } });
+							if ( context.verboseWeakBind ) {
+								dyld::log("dyld: weak binding adding unloadable placeholder %s to map\n", nameToCoalesce);
+							}
+						}
+					}
 					if ( context.verboseWeakBind )
 						dyld::log("dyld:     adjusting uses of %s in %s to use definition from %s\n", nameToCoalesce, coalIterator.image->getPath(), targetImage->getPath());
 				}
@@ -1137,6 +1220,14 @@ void ImageLoader::weakBind(const LinkContext& context)
 							iterators[i].symbolMatches = false; 
 						}
 					}
+					if (targetImage->neverUnload()) {
+						// Add never unload defs to the map for next time
+						context.weakDefMap.insert({ nameToCoalesce, { targetImage, targetAddr } });
+						if ( context.verboseWeakBind ) {
+							dyld::log("dyld: weak binding adding %s to map\n",
+										nameToCoalesce);
+						}
+					}
 				}
 
 			}
@@ -1181,6 +1272,223 @@ void ImageLoader::weakBind(const LinkContext& context)
 	uint64_t t2 = mach_absolute_time();
 	fgTotalWeakBindTime += t2  - t1;
 	
+	if ( context.verboseWeakBind )
+		dyld::log("dyld: weak bind end\n");
+}
+
+
+void ImageLoader::weakBindOld(const LinkContext& context)
+{
+	if ( context.verboseWeakBind )
+		dyld::log("dyld: weak bind start:\n");
+	uint64_t t1 = mach_absolute_time();
+	// get set of ImageLoaders that participate in coalecsing
+	ImageLoader* imagesNeedingCoalescing[fgImagesRequiringCoalescing];
+	unsigned imageIndexes[fgImagesRequiringCoalescing];
+	int count = context.getCoalescedImages(imagesNeedingCoalescing, imageIndexes);
+
+	// count how many have not already had weakbinding done
+	int countNotYetWeakBound = 0;
+	int countOfImagesWithWeakDefinitionsNotInSharedCache = 0;
+	for(int i=0; i < count; ++i) {
+		if ( ! imagesNeedingCoalescing[i]->weakSymbolsBound(imageIndexes[i]) )
+			++countNotYetWeakBound;
+		if ( ! imagesNeedingCoalescing[i]->inSharedCache() )
+			++countOfImagesWithWeakDefinitionsNotInSharedCache;
+	}
+
+	// don't need to do any coalescing if only one image has overrides, or all have already been done
+	if ( (countOfImagesWithWeakDefinitionsNotInSharedCache > 0) && (countNotYetWeakBound > 0) ) {
+#if __MAC_OS_X_VERSION_MIN_REQUIRED
+	  // only do alternate algorithm for dlopen(). Use traditional algorithm for launch
+	  if ( !context.linkingMainExecutable ) {
+		// for all images that need weak binding
+		for (int i=0; i < count; ++i) {
+			ImageLoader* imageBeingFixedUp = imagesNeedingCoalescing[i];
+			if ( imageBeingFixedUp->weakSymbolsBound(imageIndexes[i]) )
+				continue; // weak binding already completed
+			bool imageBeingFixedUpInCache = imageBeingFixedUp->inSharedCache();
+
+			if ( context.verboseWeakBind )
+				dyld::log("dyld: checking for weak symbols in %s\n", imageBeingFixedUp->getPath());
+			// for all symbols that need weak binding in this image
+			ImageLoader::CoalIterator coalIterator;
+			imageBeingFixedUp->initializeCoalIterator(coalIterator, i, imageIndexes[i]);
+			while ( !imageBeingFixedUp->incrementCoalIterator(coalIterator) ) {
+				const char*         nameToCoalesce = coalIterator.symbolName;
+				uintptr_t           targetAddr     = 0;
+				const ImageLoader*  targetImage;
+				// scan all images looking for definition to use
+				for (int j=0; j < count; ++j) {
+					const ImageLoader* anImage = imagesNeedingCoalescing[j];
+					bool anImageInCache = anImage->inSharedCache();
+					// <rdar://problem/47986398> Don't look at images in dyld cache because cache is
+					//  already coalesced.  Only images outside cache can potentially override something in cache.
+					if ( anImageInCache && imageBeingFixedUpInCache )
+						continue;
+
+					//dyld::log("looking for %s in %s\n", nameToCoalesce, anImage->getPath());
+					const ImageLoader* foundIn;
+					const Symbol* sym = anImage->findExportedSymbol(nameToCoalesce, false, &foundIn);
+					if ( sym != NULL ) {
+						if ( (foundIn->getExportedSymbolInfo(sym) & ImageLoader::kWeakDefinition) == 0 ) {
+							// found non-weak def, use it and stop looking
+							targetAddr = foundIn->getExportedSymbolAddress(sym, context);
+							targetImage = foundIn;
+							if ( context.verboseWeakBind )
+								dyld::log("dyld:   found strong %s at 0x%lX in %s\n", nameToCoalesce, targetAddr, foundIn->getPath());
+							break;
+						}
+						else {
+							// found weak-def, only use if no weak found yet
+							if ( targetAddr == 0 ) {
+								targetAddr = foundIn->getExportedSymbolAddress(sym, context);
+								targetImage = foundIn;
+								if ( context.verboseWeakBind )
+									dyld::log("dyld:   found weak %s at 0x%lX in %s\n", nameToCoalesce, targetAddr, foundIn->getPath());
+							}
+						}
+					}
+				}
+				if ( (targetAddr != 0) && (coalIterator.image != targetImage) ) {
+					coalIterator.image->updateUsesCoalIterator(coalIterator, targetAddr, (ImageLoader*)targetImage, 0, context);
+					if ( context.verboseWeakBind )
+						dyld::log("dyld:     adjusting uses of %s in %s to use definition from %s\n", nameToCoalesce, coalIterator.image->getPath(), targetImage->getPath());
+				}
+			}
+			imageBeingFixedUp->setWeakSymbolsBound(imageIndexes[i]);
+		}
+	  }
+	  else
+#endif // __MAC_OS_X_VERSION_MIN_REQUIRED
+	  {
+		// make symbol iterators for each
+		ImageLoader::CoalIterator iterators[count];
+		ImageLoader::CoalIterator* sortedIts[count];
+		for(int i=0; i < count; ++i) {
+			imagesNeedingCoalescing[i]->initializeCoalIterator(iterators[i], i, imageIndexes[i]);
+			sortedIts[i] = &iterators[i];
+			if ( context.verboseWeakBind )
+				dyld::log("dyld: weak bind load order %d/%d for %s\n", i, count, imagesNeedingCoalescing[i]->getIndexedPath(imageIndexes[i]));
+		}
+
+		// walk all symbols keeping iterators in sync by
+		// only ever incrementing the iterator with the lowest symbol
+		int doneCount = 0;
+		while ( doneCount != count ) {
+			//for(int i=0; i < count; ++i)
+			//	dyld::log("sym[%d]=%s ", sortedIts[i]->loadOrder, sortedIts[i]->symbolName);
+			//dyld::log("\n");
+			// increment iterator with lowest symbol
+			if ( sortedIts[0]->image->incrementCoalIterator(*sortedIts[0]) )
+				++doneCount;
+			// re-sort iterators
+			for(int i=1; i < count; ++i) {
+				int result = strcmp(sortedIts[i-1]->symbolName, sortedIts[i]->symbolName);
+				if ( result == 0 )
+					sortedIts[i-1]->symbolMatches = true;
+				if ( result > 0 ) {
+					// new one is bigger then next, so swap
+					ImageLoader::CoalIterator* temp = sortedIts[i-1];
+					sortedIts[i-1] = sortedIts[i];
+					sortedIts[i] = temp;
+				}
+				if ( result < 0 )
+					break;
+			}
+			// process all matching symbols just before incrementing the lowest one that matches
+			if ( sortedIts[0]->symbolMatches && !sortedIts[0]->done ) {
+				const char* nameToCoalesce = sortedIts[0]->symbolName;
+				// pick first symbol in load order (and non-weak overrides weak)
+				uintptr_t targetAddr = 0;
+				ImageLoader* targetImage = NULL;
+				unsigned targetImageIndex = 0;
+				for(int i=0; i < count; ++i) {
+					if ( strcmp(iterators[i].symbolName, nameToCoalesce) == 0 ) {
+						if ( context.verboseWeakBind )
+							dyld::log("dyld: weak bind, found %s weak=%d in %s \n", nameToCoalesce, iterators[i].weakSymbol, iterators[i].image->getIndexedPath((unsigned)iterators[i].imageIndex));
+						if ( iterators[i].weakSymbol ) {
+							if ( targetAddr == 0 ) {
+								targetAddr = iterators[i].image->getAddressCoalIterator(iterators[i], context);
+								if ( targetAddr != 0 ) {
+									targetImage = iterators[i].image;
+									targetImageIndex = (unsigned)iterators[i].imageIndex;
+								}
+							}
+						}
+						else {
+							targetAddr = iterators[i].image->getAddressCoalIterator(iterators[i], context);
+							if ( targetAddr != 0 ) {
+								targetImage = iterators[i].image;
+								targetImageIndex = (unsigned)iterators[i].imageIndex;
+								// strong implementation found, stop searching
+								break;
+							}
+						}
+					}
+				}
+				// tell each to bind to this symbol (unless already bound)
+				if ( targetAddr != 0 ) {
+					if ( context.verboseWeakBind ) {
+						dyld::log("dyld: weak binding all uses of %s to copy from %s\n",
+									nameToCoalesce, targetImage->getIndexedShortName(targetImageIndex));
+					}
+					for(int i=0; i < count; ++i) {
+						if ( strcmp(iterators[i].symbolName, nameToCoalesce) == 0 ) {
+							if ( context.verboseWeakBind ) {
+								dyld::log("dyld: weak bind, setting all uses of %s in %s to 0x%lX from %s\n",
+											nameToCoalesce, iterators[i].image->getIndexedShortName((unsigned)iterators[i].imageIndex),
+											targetAddr, targetImage->getIndexedShortName(targetImageIndex));
+							}
+							if ( ! iterators[i].image->weakSymbolsBound(imageIndexes[i]) )
+								iterators[i].image->updateUsesCoalIterator(iterators[i], targetAddr, targetImage, targetImageIndex, context);
+							iterators[i].symbolMatches = false;
+						}
+					}
+				}
+
+			}
+		}
+
+		for (int i=0; i < count; ++i) {
+			if ( imagesNeedingCoalescing[i]->weakSymbolsBound(imageIndexes[i]) )
+				continue;	// skip images already processed
+
+			if ( imagesNeedingCoalescing[i]->usesChainedFixups() ) {
+				// during binding of references to weak-def symbols, the dyld cache was patched
+				// but if main executable has non-weak override of operator new or delete it needs is handled here
+				for (const char* weakSymbolName : sTreatAsWeak) {
+					const ImageLoader* dummy;
+					imagesNeedingCoalescing[i]->resolveWeak(context, weakSymbolName, true, false, &dummy);
+				}
+			}
+#if __arm64e__
+			else {
+				// support traditional arm64 app on an arm64e device
+				// look for weak def symbols in this image which may override the cache
+				ImageLoader::CoalIterator coaler;
+				imagesNeedingCoalescing[i]->initializeCoalIterator(coaler, i, 0);
+				imagesNeedingCoalescing[i]->incrementCoalIterator(coaler);
+				while ( !coaler.done ) {
+					const ImageLoader* dummy;
+					// a side effect of resolveWeak() is to patch cache
+					imagesNeedingCoalescing[i]->resolveWeak(context, coaler.symbolName, true, false, &dummy);
+					imagesNeedingCoalescing[i]->incrementCoalIterator(coaler);
+				}
+			}
+#endif
+		}
+
+		// mark all as having all weak symbols bound
+		for(int i=0; i < count; ++i) {
+			imagesNeedingCoalescing[i]->setWeakSymbolsBound(imageIndexes[i]);
+		}
+	  }
+	}
+
+	uint64_t t2 = mach_absolute_time();
+	fgTotalWeakBindTime += t2  - t1;
+
 	if ( context.verboseWeakBind )
 		dyld::log("dyld: weak bind end\n");
 }

@@ -202,13 +202,13 @@ struct VIS_HIDDEN Image : ContainerTypedBytes
                         unused          : 62;       // all zeros
         };
         struct SharedCache {
-            uint64_t    kind            :  2,       // kindSharedCache
-                        offset          : 62;
+            uint64_t    kind            :  2;       // kindSharedCache
+            int64_t     offset          : 62;
         };
         struct Image {
             uint64_t    kind            :  2,       // kindImage
-                        imageNum        : 22,       // ImageNum
-                        offset          : 40;
+                        imageNum        : 22;       // ImageNum
+            int64_t     offset          : 40;
         };
         struct Absolute {
             uint64_t    kind            :  2,       // kindAbsolute
@@ -227,6 +227,7 @@ struct VIS_HIDDEN Image : ContainerTypedBytes
             return (raw != rhs.raw);
         }
      };
+     static_assert(sizeof(ResolvedSymbolTarget) == 8);
 
 
     // ObjC optimisations

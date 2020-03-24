@@ -190,6 +190,7 @@ private:
         uint64_t    sharedRegionPadding;
         uint64_t    pointerDeltaMask;
         const char* archName;
+        uint16_t    csPageSize;
         uint8_t     sharedRegionAlignP2;
         uint8_t     slideInfoBytesPerPage;
         bool        sharedRegionsAreDiscontiguous;

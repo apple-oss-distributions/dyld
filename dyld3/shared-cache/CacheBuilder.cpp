@@ -84,19 +84,19 @@
 #endif
 
 const CacheBuilder::ArchLayout CacheBuilder::_s_archLayout[] = {
-    { 0x7FFF20000000ULL,            0xEFE00000ULL,              0x0,         0x40000000, 0x00FFFF0000000000, "x86_64",   12, 2, true,  true,  true  },
-    { 0x7FFF20000000ULL,            0xEFE00000ULL,              0x0,         0x40000000, 0x00FFFF0000000000, "x86_64h",  12, 2, true,  true,  true  },
-    { SHARED_REGION_BASE_I386,      SHARED_REGION_SIZE_I386,    0x0,         0x00200000,                0x0, "i386",     12, 0, false, false, true  },
-    { ARM64_SHARED_REGION_START,    ARM64_SHARED_REGION_SIZE,   0x0,         0x02000000, 0x00FFFF0000000000, "arm64",    14, 2, false, true,  false },
+    { 0x7FFF20000000ULL,            0xEFE00000ULL,              0x0,         0x40000000, 0x00FFFF0000000000, "x86_64",   CS_PAGE_SIZE_4K,  12, 2, true,  true,  true  },
+    { 0x7FFF20000000ULL,            0xEFE00000ULL,              0x0,         0x40000000, 0x00FFFF0000000000, "x86_64h",  CS_PAGE_SIZE_4K,  12, 2, true,  true,  true  },
+    { SHARED_REGION_BASE_I386,      SHARED_REGION_SIZE_I386,    0x0,         0x00200000,                0x0, "i386",     CS_PAGE_SIZE_4K,  12, 0, false, false, true  },
+    { ARM64_SHARED_REGION_START,    ARM64_SHARED_REGION_SIZE,   0x0,         0x02000000, 0x00FFFF0000000000, "arm64",    CS_PAGE_SIZE_4K,  14, 2, false, true,  false },
 #if SUPPORT_ARCH_arm64e
-    { ARM64_SHARED_REGION_START,    ARM64_SHARED_REGION_SIZE,   0x0,         0x02000000, 0x00FFFF0000000000, "arm64e",   14, 2, false, true,  false },
+    { ARM64_SHARED_REGION_START,    ARM64_SHARED_REGION_SIZE,   0x0,         0x02000000, 0x00FFFF0000000000, "arm64e",   CS_PAGE_SIZE_16K, 14, 2, false, true,  false },
 #endif
 #if SUPPORT_ARCH_arm64_32
-    { ARM64_32_SHARED_REGION_START, ARM64_32_SHARED_REGION_SIZE,0x0,         0x02000000,         0xC0000000, "arm64_32", 14, 6, false, false, true  },
+    { ARM64_32_SHARED_REGION_START, ARM64_32_SHARED_REGION_SIZE,0x0,         0x02000000,         0xC0000000, "arm64_32", CS_PAGE_SIZE_16K, 14, 6, false, false, true  },
 #endif
-    { ARM_SHARED_REGION_START,      ARM_SHARED_REGION_SIZE,     0x0,         0x02000000,         0xE0000000, "armv7s",   14, 4, false, false, true  },
-    { ARM_SHARED_REGION_START,      ARM_SHARED_REGION_SIZE,     ARMV7K_MAX,  0x00400000,  ARMV7K_CHAIN_BITS, "armv7k",   14, 4, false, false, true  },
-    { 0x40000000,                   0x40000000,                 0x0,         0x02000000,                0x0, "sim-x86",  14, 0, false, false, true  }
+    { ARM_SHARED_REGION_START,      ARM_SHARED_REGION_SIZE,     0x0,         0x02000000,         0xE0000000, "armv7s",   CS_PAGE_SIZE_4K,  14, 4, false, false, true  },
+    { ARM_SHARED_REGION_START,      ARM_SHARED_REGION_SIZE,     ARMV7K_MAX,  0x00400000,  ARMV7K_CHAIN_BITS, "armv7k",   CS_PAGE_SIZE_4K,  14, 4, false, false, true  },
+    { 0x40000000,                   0x40000000,                 0x0,         0x02000000,                0x0, "sim-x86",  CS_PAGE_SIZE_4K,  14, 0, false, false, true  }
 };
 
 
@@ -2530,10 +2530,12 @@ void CacheBuilder::codeSign()
     // get pointers into shared cache buffer
     size_t          inBbufferSize = _readExecuteRegion.sizeInUse+_readWriteRegion.sizeInUse+_readOnlyRegion.sizeInUse+_localSymbolsRegion.sizeInUse;
 
+    const uint16_t pageSize = _archLayout->csPageSize;
+
     // layout code signature contents
     uint32_t blobCount     = agile ? 4 : 3;
     size_t   idSize        = cacheIdentifier.size()+1; // +1 for terminating 0
-    uint32_t slotCount     = (uint32_t)((inBbufferSize + CS_PAGE_SIZE - 1) / CS_PAGE_SIZE);
+    uint32_t slotCount     = (uint32_t)((inBbufferSize + pageSize - 1) / pageSize);
     uint32_t xSlotCount    = CSSLOT_REQUIREMENTS;
     size_t   idOffset      = offsetof(CS_CodeDirectory, end_withExecSeg);
     size_t   hashOffset    = idOffset+idSize + dscHashSize*xSlotCount;
@@ -2595,7 +2597,7 @@ void CacheBuilder::codeSign()
     cd->hashSize        = dscHashSize;
     cd->hashType        = dscHashType;
     cd->platform        = 0;                            // not platform binary
-    cd->pageSize        = __builtin_ctz(CS_PAGE_SIZE);  // log2(CS_PAGE_SIZE);
+    cd->pageSize        = __builtin_ctz(pageSize);      // log2(CS_PAGE_SIZE);
     cd->spare2          = 0;                            // unused (must be zero)
     cd->scatterOffset   = 0;                            // not supported anymore
     cd->teamOffset      = 0;                            // no team ID
@@ -2635,7 +2637,7 @@ void CacheBuilder::codeSign()
         cd256->hashSize        = CS_HASH_SIZE_SHA256;
         cd256->hashType        = CS_HASHTYPE_SHA256;
         cd256->platform        = 0;                            // not platform binary
-        cd256->pageSize        = __builtin_ctz(CS_PAGE_SIZE);  // log2(CS_PAGE_SIZE);
+        cd256->pageSize        = __builtin_ctz(pageSize);      // log2(CS_PAGE_SIZE);
         cd256->spare2          = 0;                            // unused (must be zero)
         cd256->scatterOffset   = 0;                            // not supported anymore
         cd256->teamOffset      = 0;                            // no team ID
@@ -2673,25 +2675,25 @@ void CacheBuilder::codeSign()
     cache->codeSignatureOffset  = inBbufferSize;
     cache->codeSignatureSize    = sigSize;
 
-    const uint32_t rwSlotStart = (uint32_t)(_readExecuteRegion.sizeInUse / CS_PAGE_SIZE);
-    const uint32_t roSlotStart = (uint32_t)(rwSlotStart + _readWriteRegion.sizeInUse / CS_PAGE_SIZE);
-    const uint32_t localsSlotStart = (uint32_t)(roSlotStart + _readOnlyRegion.sizeInUse / CS_PAGE_SIZE);
+    const uint32_t rwSlotStart = (uint32_t)(_readExecuteRegion.sizeInUse / pageSize);
+    const uint32_t roSlotStart = (uint32_t)(rwSlotStart + _readWriteRegion.sizeInUse / pageSize);
+    const uint32_t localsSlotStart = (uint32_t)(roSlotStart + _readOnlyRegion.sizeInUse / pageSize);
     auto codeSignPage = ^(size_t i) {
         const uint8_t* code = nullptr;
         // move to correct region
         if ( i < rwSlotStart )
-            code = _readExecuteRegion.buffer + (i * CS_PAGE_SIZE);
+            code = _readExecuteRegion.buffer + (i * pageSize);
         else if ( i >= rwSlotStart && i < roSlotStart )
-            code = _readWriteRegion.buffer + ((i - rwSlotStart) * CS_PAGE_SIZE);
+            code = _readWriteRegion.buffer + ((i - rwSlotStart) * pageSize);
         else if ( i >= roSlotStart && i < localsSlotStart )
-            code = _readOnlyRegion.buffer + ((i - roSlotStart) * CS_PAGE_SIZE);
+            code = _readOnlyRegion.buffer + ((i - roSlotStart) * pageSize);
         else
-            code = _localSymbolsRegion.buffer + ((i - localsSlotStart) * CS_PAGE_SIZE);
+            code = _localSymbolsRegion.buffer + ((i - localsSlotStart) * pageSize);
 
-        CCDigest(dscDigestFormat, code, CS_PAGE_SIZE, hashSlot + (i * dscHashSize));
+        CCDigest(dscDigestFormat, code, pageSize, hashSlot + (i * dscHashSize));
 
         if ( agile ) {
-            CCDigest(kCCDigestSHA256, code, CS_PAGE_SIZE, hash256Slot + (i * CS_HASH_SIZE_SHA256));
+            CCDigest(kCCDigestSHA256, code, pageSize, hash256Slot + (i * CS_HASH_SIZE_SHA256));
         }
     };
 
@@ -2704,7 +2706,7 @@ void CacheBuilder::codeSign()
     {
         uint8_t* uuidLoc = cache->uuid;
         assert(uuid_is_null(uuidLoc));
-        static_assert(offsetof(dyld_cache_header, uuid) / CS_PAGE_SIZE == 0, "uuid is expected in the first page of the cache");
+        static_assert(offsetof(dyld_cache_header, uuid) / CS_PAGE_SIZE_4K == 0, "uuid is expected in the first page of the cache");
         uint8_t fullDigest[CC_SHA256_DIGEST_LENGTH];
         CC_SHA256((const void*)cd, (unsigned)cdSize, fullDigest);
         memcpy(uuidLoc, fullDigest, 16);

@@ -52,6 +52,8 @@
 
 #include "DyldSharedCache.h"
 
+#include "Map.h"
+
 #if __arm__
  #include <mach/vm_page_size.h>
 #endif
@@ -242,6 +244,14 @@ public:
 	};
 
 	typedef void (^CoalesceNotifier)(const Symbol* implSym, const ImageLoader* implIn, const mach_header* implMh);
+
+    struct HashCString {
+        static size_t hash(const char* v);
+    };
+
+    struct EqualCString {
+        static bool equal(const char* s1, const char* s2);
+    };
 	
 	struct LinkContext {
 		ImageLoader*	(*loadLibrary)(const char* libraryName, bool search, const char* origin, const RPathChain* rpaths, unsigned& cacheIndex);
@@ -291,6 +301,10 @@ public:
 		size_t			dynamicInterposeCount;
 		PrebindMode		prebindUsage;
 		SharedRegionMode sharedRegionMode;
+		mutable dyld3::Map<const char*, std::pair<const ImageLoader*, uintptr_t>, HashCString, EqualCString> weakDefMap;
+		mutable bool	weakDefMapInitialized = false;
+		mutable bool	weakDefMapProcessedLaunchDefs = false;
+		mutable bool	useNewWeakBind = false;
 		bool			dyldLoadedAtSameAddressNeededBySharedCache;
 		bool			strictMachORequired;
 		bool			allowAtPaths;
@@ -789,7 +803,7 @@ protected:
 								// in mach-o a parent library knows name of sub libraries it re-exports..
 	virtual	bool				hasSubLibrary(const LinkContext& context, const ImageLoader* child) const  = 0;
 
-	virtual bool				weakSymbolsBound(unsigned index) { return fWeakSymbolsBound; }
+	virtual bool				weakSymbolsBound(unsigned index) const { return fWeakSymbolsBound; }
 	virtual void				setWeakSymbolsBound(unsigned index) { fWeakSymbolsBound = true; }
 
 								// set fState to dyld_image_state_memory_mapped
@@ -851,6 +865,8 @@ private:
 
 	void						processInitializers(const LinkContext& context, mach_port_t this_thread,
 													InitializerTimingList& timingInfo, ImageLoader::UninitedUpwards& ups);
+
+	void						weakBindOld(const LinkContext& context);
 
 
 	recursive_lock*				fInitializerRecursiveLock;

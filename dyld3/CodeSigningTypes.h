@@ -42,7 +42,8 @@ enum {
 };
 
 enum {
-    CS_PAGE_SIZE                = 4096,
+    CS_PAGE_SIZE_4K                = 4096,
+    CS_PAGE_SIZE_16K               = 16384,
 
     CS_HASHTYPE_SHA1              = 1,
     CS_HASHTYPE_SHA256            = 2,

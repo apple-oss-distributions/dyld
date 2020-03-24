@@ -672,6 +672,10 @@ void ClosureBuilder::recursiveLoadDependents(LoadedImageChain& forImageChain, bo
         }
         else if ( isWeak ) {
             _dependencies.push_back(Image::LinkedImage(Image::LinkKind::weak, kMissingWeakLinkedImage));
+            // <rdar://problem/54387345> don't let an error loading weak dylib cause everything to fail
+            // _diag is checked after each dependent load, so if there is an error it was with loading the current dylib.
+            // Since it is a weak load, it is ok to ignore and and go on.
+            _diag.clearError();
         }
         else {
             BLOCK_ACCCESSIBLE_ARRAY(char, extra, 4096);
@@ -1505,13 +1509,17 @@ bool ClosureBuilder::findSymbolInImage(const MachOAnalyzer* macho, const char* s
             target.absolute.value  = foundInfo.value + addend;
         }
         else if ( impDylib->inDyldCache() ) {
+            uint64_t offsetValue = (uint8_t*)impDylib - (uint8_t*)_dyldCache + foundInfo.value + addend;
             target.sharedCache.kind   = Image::ResolvedSymbolTarget::kindSharedCache;
-            target.sharedCache.offset = (uint8_t*)impDylib - (uint8_t*)_dyldCache + foundInfo.value + addend;
+            target.sharedCache.offset = offsetValue;
+            assert(target.sharedCache.offset == offsetValue);
         }
         else {
+            uint64_t offsetValue = foundInfo.value + addend;
             target.image.kind     = Image::ResolvedSymbolTarget::kindImage;
             target.image.imageNum = findLoadedImage(impDylib).imageNum;
-            target.image.offset   = foundInfo.value + addend;
+            target.image.offset   = offsetValue;
+            assert(target.image.offset == offsetValue);
         }
         return true;
     }

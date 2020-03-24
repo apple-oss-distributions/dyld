@@ -292,6 +292,8 @@ struct VIS_HIDDEN MachOAnalyzer : public MachOLoaded
     bool hasObjCMessageReferences() const;
 
     const ObjCImageInfo* objcImageInfo() const;
+
+    void forEachWeakDef(Diagnostics& diag, void (^handler)(const char* symbolName, uintptr_t imageOffset, bool isFromExportTrie)) const;
     
 private:
 
@@ -341,7 +343,7 @@ private:
     bool                    contentIsRegularStub(const uint8_t* helperContent) const;
     uint64_t                entryAddrFromThreadCmd(const thread_command* cmd) const;
     void                    recurseTrie(Diagnostics& diag, const uint8_t* const start, const uint8_t* p, const uint8_t* const end,
-                                        char* cummulativeString, int curStrOffset, bool& stop, MachOAnalyzer::ExportsCallback callback) const;
+                                        OverflowSafeArray<char>& cummulativeString, int curStrOffset, bool& stop, MachOAnalyzer::ExportsCallback callback) const;
     void                    analyzeSegmentsLayout(uint64_t& vmSpace, bool& hasZeroFill) const;
 
 };

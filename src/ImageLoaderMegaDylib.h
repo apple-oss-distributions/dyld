@@ -186,7 +186,7 @@ protected:
 			bool						allDependentLibrariesAsWhenPreBound() const { unreachable(); }
 	virtual	bool						isSubframeworkOf(const LinkContext& context, const ImageLoader* image) const { return false; }
 	virtual	bool						hasSubLibrary(const LinkContext& context, const ImageLoader* child) const { return false; }
-	virtual bool						weakSymbolsBound(unsigned index);
+	virtual bool						weakSymbolsBound(unsigned index) const;
 	virtual void						setWeakSymbolsBound(unsigned index);
 
 private:

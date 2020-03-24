@@ -654,7 +654,6 @@ static int sharedCacheIsValid(const void* mapped_cache, uint64_t size) {
     size_t inBbufferSize = 0;
     for (auto& sharedCacheRegion : sharedCacheRegions)
         inBbufferSize += (sharedCacheRegion.second - sharedCacheRegion.first);
-    uint32_t slotCountFromRegions = (uint32_t)((inBbufferSize + CS_PAGE_SIZE - 1) / CS_PAGE_SIZE);
 
     // Now take the cd hash from the cache itself and validate the regions we found.
     uint8_t* codeSignatureRegion = (uint8_t*)mapped_cache + dyldSharedCache->header.codeSignatureOffset;
@@ -695,6 +694,8 @@ static int sharedCacheIsValid(const void* mapped_cache, uint64_t size) {
         return -1;
     }
 
+    uint32_t pageSize = 1 << cd->pageSize;
+    uint32_t slotCountFromRegions = (uint32_t)((inBbufferSize + pageSize - 1) / pageSize);
     if ( ntohl(cd->nCodeSlots) < slotCountFromRegions ) {
         fprintf(stderr, "Error: dyld shared cache code signature directory num slots is incorrect.\n");
         return -1;
@@ -728,7 +729,7 @@ static int sharedCacheIsValid(const void* mapped_cache, uint64_t size) {
                 continue;
             inBbufferSize += (sharedCacheRegion.second - sharedCacheRegion.first);
         }
-        uint32_t slotCountToProcess = (uint32_t)((inBbufferSize + CS_PAGE_SIZE - 1) / CS_PAGE_SIZE);
+        uint32_t slotCountToProcess = (uint32_t)((inBbufferSize + pageSize - 1) / pageSize);
 
         for (unsigned i = 0; i != slotCountToProcess; ++i) {
             // Skip data pages as those may have been slid by ASLR in the extracted file

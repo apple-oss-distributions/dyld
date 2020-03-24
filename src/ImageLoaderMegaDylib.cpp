@@ -518,7 +518,7 @@ void ImageLoaderMegaDylib::appendImagesNeedingCoalescing(ImageLoader* images[], 
 }
 
 
-bool ImageLoaderMegaDylib::weakSymbolsBound(unsigned index)
+bool ImageLoaderMegaDylib::weakSymbolsBound(unsigned index) const
 {
 	return ( _stateFlags[index] >= kStateFlagWeakBound );
 }

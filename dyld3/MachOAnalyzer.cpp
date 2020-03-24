@@ -2881,7 +2881,7 @@ bool MachOAnalyzer::hasUnalignedPointerFixups() const
 }
 
 void MachOAnalyzer::recurseTrie(Diagnostics& diag, const uint8_t* const start, const uint8_t* p, const uint8_t* const end,
-                                char* cummulativeString, int curStrOffset, bool& stop, ExportsCallback callback) const
+                                OverflowSafeArray<char>& cummulativeString, int curStrOffset, bool& stop, ExportsCallback callback) const
 {
     if ( p >= end ) {
         diag.error("malformed trie, node past end");
@@ -2907,7 +2907,7 @@ void MachOAnalyzer::recurseTrie(Diagnostics& diag, const uint8_t* const start, c
         }
         if ( diag.hasError() )
             return;
-        callback(cummulativeString, imageOffset, flags, other, importName, stop);
+        callback(cummulativeString.begin(), imageOffset, flags, other, importName, stop);
         if ( stop )
             return;
     }
@@ -2920,6 +2920,7 @@ void MachOAnalyzer::recurseTrie(Diagnostics& diag, const uint8_t* const start, c
     for (uint8_t i=0; i < childrenCount; ++i) {
         int edgeStrLen = 0;
         while (*s != '\0') {
+            cummulativeString.resize(curStrOffset+edgeStrLen + 1);
             cummulativeString[curStrOffset+edgeStrLen] = *s++;
             ++edgeStrLen;
             if ( s > end ) {
@@ -2927,6 +2928,7 @@ void MachOAnalyzer::recurseTrie(Diagnostics& diag, const uint8_t* const start, c
                 return;
             }
        }
+        cummulativeString.resize(curStrOffset+edgeStrLen + 1);
         cummulativeString[curStrOffset+edgeStrLen] = *s++;
         uint64_t childNodeOffset = read_uleb128(diag, s, end);
         if (childNodeOffset == 0) {
@@ -2949,7 +2951,7 @@ void MachOAnalyzer::forEachExportedSymbol(Diagnostics& diag, ExportsCallback cal
     if ( const uint8_t* trieStart = getExportsTrie(leInfo, trieSize) ) {
         const uint8_t* trieEnd   = trieStart + trieSize;
         bool stop = false;
-        char cummulativeString[trieSize];
+        STACK_ALLOC_OVERFLOW_SAFE_ARRAY(char, cummulativeString, 4096);
         recurseTrie(diag, trieStart, trieStart, trieEnd, cummulativeString, 0, stop, callback);
    }
 }
@@ -3911,6 +3913,25 @@ uint32_t MachOAnalyzer::loadCommandsFreeSpace() const
     return firstSectionFileOffset - firstSegmentFileOffset - existSpaceUsed;
 }
 
+void MachOAnalyzer::forEachWeakDef(Diagnostics& diag,
+                                   void (^handler)(const char* symbolName, uintptr_t imageOffset, bool isFromExportTrie)) const {
+    uint64_t baseAddress = preferredLoadAddress();
+    forEachGlobalSymbol(diag, ^(const char *symbolName, uint64_t n_value, uint8_t n_type, uint8_t n_sect, uint16_t n_desc, bool &stop) {
+        if ( (n_desc & N_WEAK_DEF) != 0 ) {
+            handler(symbolName, n_value - baseAddress, false);
+        }
+    });
+    forEachExportedSymbol(diag, ^(const char *symbolName, uint64_t imageOffset, uint64_t flags, uint64_t other, const char *importName, bool &stop) {
+        if ( (flags & EXPORT_SYMBOL_FLAGS_WEAK_DEFINITION ) == 0 )
+            return;
+        // Skip resolvers and re-exports
+        if ( (flags & EXPORT_SYMBOL_FLAGS_REEXPORT ) != 0 )
+            return;
+        if ( (flags & EXPORT_SYMBOL_FLAGS_STUB_AND_RESOLVER ) != 0 )
+            return;
+        handler(symbolName, imageOffset, true);
+    });
+}
 
 } // dyld3
 
