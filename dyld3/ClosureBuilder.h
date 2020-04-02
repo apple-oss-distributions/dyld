@@ -104,6 +104,7 @@ public:
     ImageNum                    nextFreeImageNum() const { return _startImageNum + _nextIndex; }
 
     void                        setDyldCacheInvalidFormatVersion();
+    void                        disableInterposing() { _interposingDisabled = true; }
 
 
     struct PatchableExport
@@ -344,12 +345,14 @@ private:
     bool                                    _makingCustomerCache            = false;
     bool                                    _allowRelativePaths             = false;
     bool                                    _atPathUsed                     = false;
+    bool                                    _interposingTuplesUsed          = false;
     bool                                    _fallbackPathUsed               = false;
     bool                                    _allowMissingLazies             = false;
     bool                                    _dyldCacheInvalidFormatVersion  = false;
     bool                                    _foundNonCachedImage            = false;    // true means we have one or more images from disk we need to build closure(s) for
     bool                                    _foundDyldCacheRoots            = false;    // true if one or more images are roots of the shared cache
     bool                                    _foundMissingLazyBinds          = false;    // true if one or more images having missing lazy binds
+    bool                                    _interposingDisabled            = false;
     ImageNum                                _libDyldImageNum                = 0;
     ImageNum                                _libSystemImageNum              = 0;
 };

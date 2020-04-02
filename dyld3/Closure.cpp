@@ -1155,6 +1155,11 @@ bool LaunchClosure::hasInsertedLibraries() const
     return getFlags().hasInsertedLibraries;
 }
 
+bool LaunchClosure::usedInterposing() const
+{
+    return getFlags().usedInterposing;
+}
+
 bool LaunchClosure::hasInterposings() const
 {
     __block bool result = false;

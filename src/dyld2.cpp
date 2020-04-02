@@ -62,6 +62,7 @@
 #include <kern/kcdata.h>
 #include <sys/attr.h>
 #include <sys/fsgetpath.h>
+#include <System/sys/content_protection.h>
 
 #if TARGET_OS_SIMULATOR
 	enum {
@@ -74,11 +75,13 @@
 		AMFI_DYLD_OUTPUT_ALLOW_FALLBACK_PATHS = (1 << 3),
 		AMFI_DYLD_OUTPUT_ALLOW_PRINT_VARS = (1 << 4),
 		AMFI_DYLD_OUTPUT_ALLOW_FAILED_LIBRARY_INSERTION = (1 << 5),
+		AMFI_DYLD_OUTPUT_ALLOW_LIBRARY_INTERPOSING = (1 << 6),
 	};
 	extern "C" int amfi_check_dyld_policy_self(uint64_t input_flags, uint64_t* output_flags);
 #else
 	#include <libamfi.h>
 #endif
+
 #include <sandbox.h>
 #include <sandbox/private.h>
 #if __has_feature(ptrauth_calls)
@@ -3813,6 +3816,16 @@ static ImageLoader* loadPhase1(const char* path, const char* orgPath, const Load
 			return image;
 	}
 
+#if SUPPORT_VERSIONED_PATHS
+    // <rdar://problem/53215116> DYLD_VERSIONED_FRAMEWORK_PATH fails to load a framework if it does not also exist at the system install path
+    // Scan to see if the dylib appears in a versioned path. Don't worry if we find the newest, that will handled later
+    if ( !context.dontLoad  && (exceptions != NULL) && ((sEnv.DYLD_VERSIONED_FRAMEWORK_PATH != NULL) || (sEnv.DYLD_VERSIONED_LIBRARY_PATH != NULL)) ) {
+        image = loadPhase2(path, orgPath, context, sEnv.DYLD_VERSIONED_FRAMEWORK_PATH, sEnv.DYLD_VERSIONED_LIBRARY_PATH, cacheIndex, exceptions);
+        if ( image != NULL )
+            return image;
+    }
+#endif
+
 	return NULL;
 }
 
@@ -5083,6 +5096,11 @@ static void configureProcessRestrictions(const macho_header* mainExecutableMH, c
 		gLinkContext.allowEnvVarsSharedCache	= (amfiOutputFlags & AMFI_DYLD_OUTPUT_ALLOW_CUSTOM_SHARED_CACHE);
 		gLinkContext.allowClassicFallbackPaths	= (amfiOutputFlags & AMFI_DYLD_OUTPUT_ALLOW_FALLBACK_PATHS);
 		gLinkContext.allowInsertFailures    	= (amfiOutputFlags & AMFI_DYLD_OUTPUT_ALLOW_FAILED_LIBRARY_INSERTION);
+#ifdef AMFI_RETURNS_INTERPOSING_FLAG
+		gLinkContext.allowInterposing	    	= (amfiOutputFlags & AMFI_DYLD_OUTPUT_ALLOW_LIBRARY_INTERPOSING);
+#else
+		gLinkContext.allowInterposing	    	= true;
+#endif
 	}
 	else {
 #if __MAC_OS_X_VERSION_MIN_REQUIRED
@@ -5112,6 +5130,7 @@ static void configureProcessRestrictions(const macho_header* mainExecutableMH, c
 		gLinkContext.allowEnvVarsSharedCache     = !libraryValidation || !usingSIP;
 		gLinkContext.allowClassicFallbackPaths   = !isRestricted;
 		gLinkContext.allowInsertFailures         = false;
+		gLinkContext.allowInterposing         	 = true;
 #else
 		halt("amfi_check_dyld_policy_self() failed\n");
 #endif
@@ -5793,7 +5812,11 @@ static bool closureValid(const dyld3::closure::LaunchClosure* mainClosure, const
 			dyld::log("dyld: closure %p not used because is used default fallback paths, but process does not allow that\n", mainClosure);
 		return false;
 	}
-
+	if ( mainClosure->usedInterposing() && !gLinkContext.allowInterposing ) {
+		if ( gLinkContext.verboseWarnings )
+			dyld::log("dyld: closure %p not used because is uses interposing, but process does not allow that\n", mainClosure);
+		return false;
+	}
 	return !foundFileThatInvalidatesClosure;
 }
 
@@ -6009,6 +6032,8 @@ static const dyld3::closure::LaunchClosure* buildLaunchClosure(const uint8_t* ma
 										   archs, pathOverrides, atPathHanding, gLinkContext.allowEnvVarsPath, errorInfo);
 	if (sForceInvalidSharedCacheClosureFormat)
 		builder.setDyldCacheInvalidFormatVersion();
+	if ( !gLinkContext.allowInterposing )
+		builder.disableInterposing();
 	const dyld3::closure::LaunchClosure* result = builder.makeLaunchClosure(mainFileInfo, gLinkContext.allowInsertFailures);
 	if ( builder.diagnostics().hasError() ) {
 		const char* errMsg = builder.diagnostics().errorMessage();
@@ -6057,7 +6082,11 @@ static const dyld3::closure::LaunchClosure* buildLaunchClosure(const uint8_t* ma
 		putHexByte(mypid, s);
 		*s = '\0';
 		strlcat(closurePathTemp, pidBuf, PATH_MAX);
+#if __MAC_OS_X_VERSION_MIN_REQUIRED
 		int fd = ::open(closurePathTemp, O_WRONLY|O_CREAT, S_IRUSR|S_IWUSR);
+#else
+		int fd = ::open_dprotected_np(closurePathTemp, O_WRONLY|O_CREAT, PROTECTION_CLASS_D, 0, S_IRUSR|S_IWUSR);
+#endif
 		if ( fd != -1 ) {
 			::ftruncate(fd, result->size());
 			::write(fd, result, result->size());
@@ -6613,20 +6642,24 @@ reloadAllImages:
 				link(image, sEnv.DYLD_BIND_AT_LAUNCH, true, ImageLoader::RPathChain(NULL, NULL), -1);
 				image->setNeverUnloadRecursive();
 			}
-			// only INSERTED libraries can interpose
-			// register interposing info after all inserted libraries are bound so chaining works
-			for(unsigned int i=0; i < sInsertedDylibCount; ++i) {
-				ImageLoader* image = sAllImages[i+1];
-				image->registerInterposing(gLinkContext);
+			if ( gLinkContext.allowInterposing ) {
+				// only INSERTED libraries can interpose
+				// register interposing info after all inserted libraries are bound so chaining works
+				for(unsigned int i=0; i < sInsertedDylibCount; ++i) {
+					ImageLoader* image = sAllImages[i+1];
+					image->registerInterposing(gLinkContext);
+				}
 			}
 		}
 
-		// <rdar://problem/19315404> dyld should support interposition even without DYLD_INSERT_LIBRARIES
-		for (long i=sInsertedDylibCount+1; i < sAllImages.size(); ++i) {
-			ImageLoader* image = sAllImages[i];
-			if ( image->inSharedCache() )
-				continue;
-			image->registerInterposing(gLinkContext);
+		if ( gLinkContext.allowInterposing ) {
+			// <rdar://problem/19315404> dyld should support interposition even without DYLD_INSERT_LIBRARIES
+			for (long i=sInsertedDylibCount+1; i < sAllImages.size(); ++i) {
+				ImageLoader* image = sAllImages[i];
+				if ( image->inSharedCache() )
+					continue;
+				image->registerInterposing(gLinkContext);
+			}
 		}
 	#if SUPPORT_ACCELERATE_TABLES
 		if ( (sAllCacheImagesProxy != NULL) && ImageLoader::haveInterposingTuples() ) {

@@ -313,6 +313,7 @@ public:
 		bool			allowEnvVarsSharedCache;
 		bool			allowClassicFallbackPaths;
 		bool			allowInsertFailures;
+		bool			allowInterposing;
 		bool			mainExecutableCodeSigned;
 		bool			prebinding;
 		bool			bindFlat;

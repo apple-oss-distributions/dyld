@@ -154,6 +154,7 @@ public:
     void                    setStartEntry(Image::ResolvedSymbolTarget start);
     void                    setUsedFallbackPaths(bool);
     void                    setUsedAtPaths(bool);
+    void                    setUsedInterposing(bool);
     void                    setHasInsertedLibraries(bool);
     void                    setMustBeMissingFiles(const Array<const char*>& paths);
     void                    setMustExistFiles(const Array<LaunchClosure::SkippedFile>& files);

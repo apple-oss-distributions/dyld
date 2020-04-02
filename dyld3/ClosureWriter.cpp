@@ -521,6 +521,11 @@ void LaunchClosureWriter::setUsedAtPaths(bool value)
     getFlags().usedAtPaths = value;
 }
 
+void LaunchClosureWriter::setUsedInterposing(bool value)
+{
+    getFlags().usedInterposing = value;
+}
+
 void LaunchClosureWriter::setHasInsertedLibraries(bool value)
 {
     getFlags().hasInsertedLibraries = value;

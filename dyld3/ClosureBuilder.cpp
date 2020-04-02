@@ -1133,6 +1133,7 @@ void ClosureBuilder::addInterposingTuples(LaunchClosureWriter& writer, const Ima
                 goodTuples.push_back(resolvedTuples[i]);
         }
         writer.addInterposingTuples(goodTuples);
+        _interposingTuplesUsed = !goodTuples.empty();
 
         // if the target of the interposing is in the dyld shared cache, add a PatchEntry so the cache is fixed up at launch
         STACK_ALLOC_ARRAY(Closure::PatchEntry, patches, goodTuples.count());
@@ -3173,16 +3174,19 @@ const LaunchClosure* ClosureBuilder::makeLaunchClosure(const LoadedFileInfo& fil
         closureWriter.setBootUUID(bootSessionUUID);
 #endif
 
-     // record any interposing info
-    imageArray->forEachImage(^(const Image* image, bool &stop) {
-        if ( !image->inDyldCache() )
-            addInterposingTuples(closureWriter, image, findLoadedImage(image->imageNum()).loadAddress());
-    });
+    // record any interposing info
+    if ( !_interposingDisabled ) {
+        imageArray->forEachImage(^(const Image* image, bool &stop) {
+            if ( !image->inDyldCache() )
+                addInterposingTuples(closureWriter, image, findLoadedImage(image->imageNum()).loadAddress());
+        });
+    }
 
     // modify fixups in contained Images by applying interposing tuples
     closureWriter.applyInterposing((const LaunchClosure*)closureWriter.currentTypedBytes());
 
     // set flags
+    closureWriter.setUsedInterposing(_interposingTuplesUsed);
     closureWriter.setUsedAtPaths(_atPathUsed);
     closureWriter.setUsedFallbackPaths(_fallbackPathUsed);
     closureWriter.setHasInsertedLibraries(_mainProgLoadIndex > 0);

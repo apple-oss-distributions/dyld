@@ -709,6 +709,7 @@ struct VIS_HIDDEN LaunchClosure : public Closure
     void                forEachInterposingTuple(void (^handler)(const InterposingTuple& tuple, bool& stop)) const;
     bool                usedAtPaths() const;
     bool                usedFallbackPaths() const;
+    bool                usedInterposing() const;
     bool                selectorHashTable(Array<Image::ObjCSelectorImage>& imageNums,
                                           const ObjCSelectorOpt*& hashTable) const;
     bool                classAndProtocolHashTables(Array<Image::ObjCClassImage>& imageNums,
@@ -730,7 +731,8 @@ private:
                         usedFallbackPaths        :  1,
                         initImageCount           : 16,
                         hasInsertedLibraries     :  1,
-                        padding                  : 13;
+                        usedInterposing          :  1,
+                        padding                  : 12;
     };
     const Flags&        getFlags() const;
 };
