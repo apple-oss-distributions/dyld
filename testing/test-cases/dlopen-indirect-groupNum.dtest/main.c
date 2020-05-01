@@ -18,82 +18,71 @@
 #include <dlfcn.h>
 #include <mach-o/dyld.h>
 
+#include "test_support.h"
 
 static void checkBundle(const char* path, bool unlinkBeforeDestroy)
 {
 	int fd = open(path, O_RDONLY, 0);
 	if ( fd == -1 ) {
-		printf("[FAIL] open(%s) failed", path);
-		exit(0);
+		FAIL("open(%s) failed", path);
 	}
 
 	struct stat stat_buf;
 	if ( fstat(fd, &stat_buf) == -1) {
-		printf("[FAIL] fstat() failed\n");
-		exit(0);
+		FAIL("fstat() failed");
 	}
 
 	void* loadAddress = mmap(NULL, stat_buf.st_size, PROT_READ, MAP_FILE | MAP_PRIVATE, fd, 0);
 	if ( loadAddress == ((void*)(-1)) ) {
-		printf("[FAIL] mmap() failed\n");
-		exit(0);
+		FAIL("mmap() failed");
 	}
 
 	close(fd);
 
 	NSObjectFileImage ofi;
 	if ( NSCreateObjectFileImageFromMemory(loadAddress, stat_buf.st_size, &ofi) != NSObjectFileImageSuccess ) {
-		printf("[FAIL] NSCreateObjectFileImageFromMemory failed\n");
-		exit(0);
+		FAIL("NSCreateObjectFileImageFromMemory failed");
 	}
 
 	NSModule mod = NSLinkModule(ofi, path, NSLINKMODULE_OPTION_NONE);
 	if ( mod == NULL ) {
-		printf("[FAIL] NSLinkModule failed\n");
-		exit(0);
+		FAIL("NSLinkModule failed");
 	}
 	
    if ( !unlinkBeforeDestroy ) {
         // API lets you destroy ofi and NSModule lives on
         if ( !NSDestroyObjectFileImage(ofi) ) {
-            printf("[FAIL] NSDestroyObjectFileImage failed\n");
-            exit(0);
+            FAIL("NSDestroyObjectFileImage failed");
         }
     }
 
 	NSSymbol sym = NSLookupSymbolInModule(mod, "_fooInBundle");
 	if ( sym == NULL ) {
-		printf("[FAIL] NSLookupSymbolInModule failed\n");
-		exit(0);
+		FAIL("NSLookupSymbolInModule failed");
 	}
 
 	void* func = NSAddressOfSymbol(sym);
 	if ( func == NULL ) {
-		printf("[FAIL] NSAddressOfSymbol failed\n");
-		exit(0);
+		FAIL("NSAddressOfSymbol failed");
 	}
 
     Dl_info info;
     if ( dladdr(func, &info) == 0 ) {
-        printf("[FAIL] dladdr(&p, xx) failed\n");
-        exit(0);
+        FAIL("dladdr(&p, xx) failed");
     }
-    //printf("_fooInBundle found in %s\n", info.dli_fname);
+    LOG("_fooInBundle found in %s", info.dli_fname);
 
     if ( !NSUnLinkModule(mod, NSUNLINKMODULE_OPTION_NONE) ) {
-            printf("[FAIL] NSUnLinkModule failed\n");
-            exit(0);
+            FAIL("NSUnLinkModule failed");
     }
 
     if ( dladdr(func, &info) != 0 ) {
-        printf("[FAIL] dladdr(&p, xx) found but should not have\n");
-        exit(0);
+       FAIL("dladdr(&p, xx) found but should not have");
     }
 
     if ( unlinkBeforeDestroy ) {
         if ( !NSDestroyObjectFileImage(ofi) ) {
-            printf("[FAIL] NSDestroyObjectFileImage failed\n");
-            exit(0);
+            FAIL("NSDestroyObjectFileImage failed");
         }
     }
 }
@@ -104,31 +93,22 @@ static void tryImage(const char* path, const char* symbol)
 {
     void* handle = dlopen(path, RTLD_LAZY);
     if ( handle == NULL ) {
-        printf("dlerror(): %s\n", dlerror());
-        printf("[FAIL] dlopen-indirect-groupNum %s\n", path);
-        exit(0);
+        FAIL("dlopen(%s) error: %s", path, dlerror());
     }
     
     void* sym = dlsym(handle, symbol);
     if ( sym == NULL ) {
-        printf("dlerror(): %s\n", dlerror());
-        printf("[FAIL] dlopen-indirect-groupNum %s\n", path);
-        exit(0);
+        FAIL("dlsym(%s) error: %s", symbol, dlerror());
     }
     
     int result = dlclose(handle);
     if ( result != 0 ) {
-        printf("dlclose() returned %c\n", result);
-        printf("[FAIL] dlopen-indirect-groupNum %s\n", path);
-        exit(0);
+        FAIL("dlclose(%s) returned %c", path, result);
     }
 }
 
 
-int main(int argc, const char* argv[])
-{
-    printf("[BEGIN] dlopen-indirect-groupNum\n");
-
+int main(int argc, const char* argv[], const char* envp[], const char* apple[]) {
     checkBundle(argv[1], true);
     checkBundle(argv[1], false);
 
@@ -142,6 +122,5 @@ int main(int argc, const char* argv[])
     // And now open baz.dylib which depends on bar.dylib
     tryImage(argv[3], "bazInDylib");
 
-    printf("[PASS] dlopen-indirect-groupNum\n");
-    return 0;
+    PASS("Success");
 }

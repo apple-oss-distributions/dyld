@@ -165,6 +165,11 @@ bool MachOAnalyzer::validMachOForArchAndPlatform(Diagnostics& diag, size_t slice
         case MH_BUNDLE:
         case MH_DYLINKER:
            break;
+#if BUILDING_DYLDINFO
+        // Allow offline tools to analyze binaries dyld doesn't load
+        case MH_KEXT_BUNDLE:
+            break;
+#endif
         default:
             diag.error("could not use '%s' because it is not a dylib, bundle, or executable, filetype=0x%08X", path, this->filetype);
            return false;
@@ -177,8 +182,11 @@ bool MachOAnalyzer::validMachOForArchAndPlatform(Diagnostics& diag, size_t slice
 
     // filter out static executables
     if ( (this->filetype == MH_EXECUTE) && !isDynamicExecutable() ) {
+#if !BUILDING_DYLDINFO
+        // dyldinfo should be able to inspect static executables such as the kernel
         diag.error("could not use '%s' because it is a static executable", path);
         return false;
+#endif
     }
 
     // must match requested platform (do this after load commands are validated)
@@ -212,10 +220,16 @@ bool MachOAnalyzer::validLinkedit(Diagnostics& diag, const char* path) const
     if ( !validLinkeditLayout(diag, path) )
         return false;
 
-    if ( hasChainedFixups() ) {
+    if ( hasLoadCommand(LC_DYLD_CHAINED_FIXUPS) ) {
         if ( !validChainedFixupsInfo(diag, path) )
             return false;
     }
+#if SUPPORT_ARCH_arm64e
+    else if ( (this->cputype == CPU_TYPE_ARM64) && (this->cpusubtype == CPU_SUBTYPE_ARM64E) ) {
+        if ( !validChainedFixupsInfoOldArm64e(diag, path) )
+            return false;
+    }
+#endif
     else {
         // validate rebasing info
         if ( !validRebaseInfo(diag, path) )
@@ -486,7 +500,7 @@ bool MachOAnalyzer::validEmbeddedPaths(Diagnostics& diag, Platform platform, con
         }
     }
 
-    if ( (dependentsCount == 0) && (this->filetype == MH_EXECUTE)  ) {
+    if ( (dependentsCount == 0) && (this->filetype == MH_EXECUTE) && isDynamicExecutable() ) {
         diag.error("in '%s' missing LC_LOAD_DYLIB (must link with at least libSystem.dylib)", path);
         return false;
     }
@@ -640,8 +654,9 @@ bool MachOAnalyzer::validSegments(Diagnostics& diag, const char* path, size_t fi
             }
             if ( (info1.segIndex < info2.segIndex) && !stop1 ) {
                 if ( (info1.vmAddr > info2.vmAddr) || ((info1.fileOffset > info2.fileOffset ) && (info1.fileOffset != 0) && (info2.fileOffset  != 0)) ){
-                    if ( !inDyldCache() && enforceFormat(Malformed::segmentOrder) ) {
+                    if ( !inDyldCache() && enforceFormat(Malformed::segmentOrder) && !isStaticExecutable() ) {
                         // dyld cache __DATA_* segments are moved around
+                        // The static kernel also has segments with vmAddr's before __TEXT
                         diag.error("in '%s' segment load commands out of order with respect to layout for %s and %s", path, info1.segName, info2.segName);
                         badSegments = true;
                         stop1 = true;
@@ -746,6 +761,23 @@ bool MachOAnalyzer::validMain(Diagnostics& diag, const char* path) const
                     diag.error("LC_UNIXTHREAD not valid for arch %s", archName());
                     stop = true;
                 }
+#if BUILDING_DYLDINFO
+                else if ( isStaticExecutable() ) {
+                    __block bool foundSegment = false;
+                    forEachSegment(^(const SegmentInfo& info, bool& stopSegment) {
+                        // Skip segments which don't contain this address
+                        if ( (startAddress < info.vmAddr) || (startAddress >= info.vmAddr+info.vmSize) )
+                            return;
+                        foundSegment = true;
+                        if ( (info.protections & VM_PROT_EXECUTE) == 0 )
+                            diag.error("LC_UNIXTHREAD points to non-executable segment");
+                        stopSegment = true;
+                    });
+                    if (!foundSegment)
+                        diag.error("LC_UNIXTHREAD entry is out of range");
+                    stop = true;
+                }
+#endif
                 else if ( (startAddress < textSegStartAddr) || (startAddress >= textSegStartAddr+textSegStartSize) ) {
                     diag.error("LC_UNIXTHREAD entry not in __TEXT segment");
                     stop = true;
@@ -1206,6 +1238,9 @@ void MachOAnalyzer::forEachRebase(Diagnostics& diag,
             }
         }
     }
+    else if ( leInfo.chainedFixups != nullptr ) {
+        // binary uses chained fixups, so do nothing
+    }
     else {
         // old binary, walk relocations
         const uint64_t                  relocsStartAddress = relocBaseAddress(segmentsInfo, leInfo.layout.linkeditSegIndex);
@@ -1341,6 +1376,7 @@ void MachOAnalyzer::forEachIndirectPointer(Diagnostics& diag, void (^handler)(ui
                 return;
             }
             uint16_t n_desc = is64Bit ? symbols64[symNum].n_desc : symbols32[symNum].n_desc;
+            uint8_t  n_type     = is64Bit ? symbols64[symNum].n_type : symbols32[symNum].n_type;
             uint32_t libOrdinal = libOrdinalFromDesc(n_desc);
             uint32_t strOffset = is64Bit ? symbols64[symNum].n_un.n_strx : symbols32[symNum].n_un.n_strx;
             if ( strOffset > poolSize ) {
@@ -1351,6 +1387,9 @@ void MachOAnalyzer::forEachIndirectPointer(Diagnostics& diag, void (^handler)(ui
             const char* symbolName  = stringPool + strOffset;
             bool        weakImport  = (n_desc & N_WEAK_REF);
             bool        lazy        = (sectionType == S_LAZY_SYMBOL_POINTERS);
+            // Handle defined weak def symbols which need to get a special ordinal
+            if ( ((n_type & N_TYPE) == N_SECT) && ((n_type & N_EXT) != 0) && ((n_desc & N_WEAK_DEF) != 0) )
+                libOrdinal = BIND_SPECIAL_DYLIB_WEAK_LOOKUP;
             handler(sectInfo.sectAddr+i*elementSize, true, libOrdinal, symbolName, weakImport, lazy, selfModifyingStub, stop);
         }
         sectionStop = stop;
@@ -1774,6 +1813,9 @@ void MachOAnalyzer::forEachBind(Diagnostics& diag,
             }
         }
     }
+    else if ( leInfo.chainedFixups != nullptr ) {
+        // binary uses chained fixups, so do nothing
+    }
     else {
         // old binary, process external relocations
         const uint64_t                  relocsStartAddress = relocBaseAddress(segmentsInfo, leInfo.layout.linkeditSegIndex);
@@ -1807,6 +1849,7 @@ void MachOAnalyzer::forEachBind(Diagnostics& diag,
                 else {
                     uint32_t strOffset  = is64Bit ? symbols64[symbolIndex].n_un.n_strx : symbols32[symbolIndex].n_un.n_strx;
                     uint16_t n_desc     = is64Bit ? symbols64[symbolIndex].n_desc : symbols32[symbolIndex].n_desc;
+                    uint8_t  n_type     = is64Bit ? symbols64[symbolIndex].n_type : symbols32[symbolIndex].n_type;
                     uint32_t libOrdinal = libOrdinalFromDesc(n_desc);
                     if ( strOffset >= poolSize ) {
                         diag.error("external relocation has r_symbolnum=%d which has out of range n_strx", symbolIndex);
@@ -1817,6 +1860,9 @@ void MachOAnalyzer::forEachBind(Diagnostics& diag,
                         bool            weakImport = (n_desc & N_WEAK_REF);
                         const uint8_t*  content    = (uint8_t*)this + segmentsInfo[segIndex].vmAddr - leInfo.layout.textUnslidVMAddr + segOffset;
                         uint64_t        addend     = is64Bit ? *((uint64_t*)content) : *((uint32_t*)content);
+                        // Handle defined weak def symbols which need to get a special ordinal
+                        if ( ((n_type & N_TYPE) == N_SECT) && ((n_type & N_EXT) != 0) && ((n_desc & N_WEAK_DEF) != 0) )
+                            libOrdinal = BIND_SPECIAL_DYLIB_WEAK_LOOKUP;
                         handler("external relocation", leInfo, segmentsInfo, true, true, dylibCount, libOrdinal,
                                 ptrSize, segIndex, segOffset, BIND_TYPE_POINTER, symbolName, weakImport, false, addend, stop);
                     }
@@ -1847,8 +1893,158 @@ void MachOAnalyzer::forEachBind(Diagnostics& diag,
 
 }
 
-
 bool MachOAnalyzer::validChainedFixupsInfo(Diagnostics& diag, const char* path) const
+{
+    LinkEditInfo leInfo;
+    getLinkEditPointers(diag, leInfo);
+    if ( diag.hasError() )
+        return false;
+
+    BLOCK_ACCCESSIBLE_ARRAY(SegmentInfo, segmentsInfo, leInfo.layout.linkeditSegIndex+1);
+    getAllSegmentsInfos(diag, segmentsInfo);
+    if ( diag.hasError() )
+        return false;
+
+    // validate dyld_chained_fixups_header
+    const dyld_chained_fixups_header* chainsHeader = (dyld_chained_fixups_header*)getLinkEditContent(leInfo.layout, leInfo.chainedFixups->dataoff);
+    if ( chainsHeader->fixups_version != 0 ) {
+        diag.error("chained fixups, unknown header version");
+        return false;
+    }
+    if ( chainsHeader->starts_offset >= leInfo.chainedFixups->datasize )  {
+        diag.error("chained fixups, starts_offset exceeds LC_DYLD_CHAINED_FIXUPS size");
+        return false;
+    }
+    if ( chainsHeader->imports_offset >= leInfo.chainedFixups->datasize )  {
+        diag.error("chained fixups, imports_offset exceeds LC_DYLD_CHAINED_FIXUPS size");
+        return false;
+    }
+    if ( chainsHeader->imports_count >= 0xFFFF )  {
+        diag.error("chained fixups, imports_count exceeds 64K");
+        return false;
+    }
+    uint32_t formatEntrySize;
+    switch ( chainsHeader->imports_format ) {
+        case DYLD_CHAINED_IMPORT:
+            formatEntrySize = sizeof(dyld_chained_import);
+            break;
+        case DYLD_CHAINED_IMPORT_ADDEND:
+            formatEntrySize = sizeof(dyld_chained_import_addend);
+            break;
+        case DYLD_CHAINED_IMPORT_ADDEND64:
+            formatEntrySize = sizeof(dyld_chained_import_addend64);
+            break;
+        default:
+            diag.error("chained fixups, unknown imports_format");
+            return false;
+    }
+    if ( greaterThanAddOrOverflow(chainsHeader->imports_offset, (formatEntrySize * chainsHeader->imports_count), chainsHeader->symbols_offset) ) {
+         diag.error("chained fixups, imports array overlaps symbols");
+         return false;
+    }
+    if ( chainsHeader->symbols_format != 0 )  {
+         diag.error("chained fixups, symbols_format unknown");
+         return false;
+    }
+
+    // validate dyld_chained_starts_in_image
+    const dyld_chained_starts_in_image* startsInfo = (dyld_chained_starts_in_image*)((uint8_t*)chainsHeader + chainsHeader->starts_offset);
+    if ( startsInfo->seg_count != leInfo.layout.linkeditSegIndex+1 ) {
+         diag.error("chained fixups, seg_count does not match number of segments");
+         return false;
+    }
+    const uint64_t baseAddress = preferredLoadAddress();
+    uint32_t maxValidPointerSeen = 0;
+    const uint8_t* endOfStarts = (uint8_t*)chainsHeader + chainsHeader->imports_offset;
+    for (uint32_t i=0; i < startsInfo->seg_count; ++i) {
+        uint32_t segInfoOffset = startsInfo->seg_info_offset[i];
+        // 0 offset means this segment has no fixups
+        if ( segInfoOffset == 0 )
+            continue;
+        const dyld_chained_starts_in_segment* segInfo = (dyld_chained_starts_in_segment*)((uint8_t*)startsInfo + segInfoOffset);
+        if ( segInfo->size > (endOfStarts - (uint8_t*)segInfo) ) {
+             diag.error("chained fixups, dyld_chained_starts_in_segment for segment #%d overruns imports table", i);
+             return false;
+        }
+
+        // validate dyld_chained_starts_in_segment
+        if ( (segInfo->page_size != 0x1000) && (segInfo->page_size != 0x4000) ) {
+            diag.error("chained fixups, page_size not 4KB or 16KB in segment #%d", i);
+            return false;
+        }
+        if ( segInfo->pointer_format > 10 ) {
+            diag.error("chained fixups, unknown pointer_format %d in segment #%d", segInfo->pointer_format, i);
+            return false;
+        }
+        if ( segInfo->segment_offset != (segmentsInfo[i].vmAddr - baseAddress) ) {
+            diag.error("chained fixups, segment_offset does not match vmaddr from LC_SEGMENT in segment #%d", i);
+            return false;
+        }
+        if ( segInfo->max_valid_pointer != 0 ) {
+            if ( maxValidPointerSeen == 0 ) {
+                // record max_valid_pointer values seen
+                maxValidPointerSeen = segInfo->max_valid_pointer;
+            }
+            else if ( maxValidPointerSeen != segInfo->max_valid_pointer ) {
+                diag.error("chained fixups, different max_valid_pointer values seen in different segments");
+                return false;
+            }
+        }
+        // validate starts table in segment
+        if ( offsetof(dyld_chained_starts_in_segment, page_start[segInfo->page_count]) > segInfo->size ) {
+            diag.error("chained fixups, page_start array overflows size");
+            return false;
+        }
+        uint32_t maxOverflowIndex = (uint32_t)(segInfo->size - offsetof(dyld_chained_starts_in_segment, page_start[segInfo->page_count]))/sizeof(uint16_t);
+        for (int pageIndex=0; pageIndex < segInfo->page_count; ++pageIndex) {
+            uint16_t offsetInPage = segInfo->page_start[pageIndex];
+            if ( offsetInPage == DYLD_CHAINED_PTR_START_NONE )
+                continue;
+            if ( (offsetInPage & DYLD_CHAINED_PTR_START_MULTI) == 0 ) {
+                // this is the offset into the page where the first fixup is
+                if ( offsetInPage > segInfo->page_size ) {
+                    diag.error("chained fixups, in segment #%d page_start[%d]=0x%04X exceeds page size", i, pageIndex, offsetInPage);
+                }
+            }
+            else {
+                // this is actually an index into chain_starts[]
+                uint32_t overflowIndex = offsetInPage & ~DYLD_CHAINED_PTR_START_MULTI;
+                // now verify all starts are within the page and in ascending order
+                uint16_t lastOffsetInPage = 0;
+                do {
+                    if ( overflowIndex > maxOverflowIndex )  {
+                        diag.error("chain overflow index out of range %d (max=%d) in segment %s", overflowIndex, maxOverflowIndex, segmentName(i));
+                        return false;
+                    }
+                    offsetInPage = (segInfo->page_start[overflowIndex] & ~DYLD_CHAINED_PTR_START_LAST);
+                    if ( offsetInPage > segInfo->page_size ) {
+                        diag.error("chained fixups, in segment #%d overflow page_start[%d]=0x%04X exceeds page size", i, overflowIndex, offsetInPage);
+                        return false;
+                    }
+                    if ( (offsetInPage <= lastOffsetInPage) && (lastOffsetInPage != 0) )  {
+                        diag.error("chained fixups, in segment #%d overflow page_start[%d]=0x%04X is before previous at 0x%04X\n", i, overflowIndex, offsetInPage, lastOffsetInPage);
+                        return false;
+                    }
+                    lastOffsetInPage = offsetInPage;
+                    ++overflowIndex;
+                } while ( (segInfo->page_start[overflowIndex] & DYLD_CHAINED_PTR_START_LAST) == 0 );
+           }
+        }
+
+    }
+    // validate max_valid_pointer is larger than last segment
+    if ( (maxValidPointerSeen != 0) && !inDyldCache() ) {
+        uint64_t lastSegmentLastVMAddr = segmentsInfo[leInfo.layout.linkeditSegIndex-1].vmAddr + segmentsInfo[leInfo.layout.linkeditSegIndex-1].vmSize;
+        if ( maxValidPointerSeen < lastSegmentLastVMAddr ) {
+            diag.error("chained fixups, max_valid_pointer too small for image");
+            return false;
+        }
+    }
+
+    return diag.noError();
+}
+
+bool MachOAnalyzer::validChainedFixupsInfoOldArm64e(Diagnostics& diag, const char* path) const
 {
     __block uint32_t maxTargetCount = 0;
     __block uint32_t currentTargetCount = 0;
@@ -2049,7 +2245,7 @@ void MachOAnalyzer::forEachChainedFixupTarget(Diagnostics& diag, void (^callback
         switch (header->imports_format) {
             case DYLD_CHAINED_IMPORT:
                 imports = (dyld_chained_import*)((uint8_t*)header + header->imports_offset);
-                for (uint32_t i=0; i < header->imports_count; ++i) {
+                for (uint32_t i=0; i < header->imports_count && !stop; ++i) {
                     const char* symbolName = &symbolsPool[imports[i].name_offset];
                     if ( imports[i].name_offset > maxSymbolOffset ) {
                         diag.error("malformed import table, string overflow");
@@ -2065,7 +2261,7 @@ void MachOAnalyzer::forEachChainedFixupTarget(Diagnostics& diag, void (^callback
                 break;
             case DYLD_CHAINED_IMPORT_ADDEND:
                 importsA32 = (dyld_chained_import_addend*)((uint8_t*)header + header->imports_offset);
-                for (uint32_t i=0; i < header->imports_count; ++i) {
+                for (uint32_t i=0; i < header->imports_count && !stop; ++i) {
                     const char* symbolName = &symbolsPool[importsA32[i].name_offset];
                     if ( importsA32[i].name_offset > maxSymbolOffset ) {
                         diag.error("malformed import table, string overflow");
@@ -2076,12 +2272,12 @@ void MachOAnalyzer::forEachChainedFixupTarget(Diagnostics& diag, void (^callback
                         libOrdinal = (int8_t)libVal;
                     else
                         libOrdinal = libVal;
-                   callback(libOrdinal, symbolName, importsA32[i].addend, importsA32[i].weak_import, stop);
+                    callback(libOrdinal, symbolName, importsA32[i].addend, importsA32[i].weak_import, stop);
                 }
                 break;
             case DYLD_CHAINED_IMPORT_ADDEND64:
                 importsA64 = (dyld_chained_import_addend64*)((uint8_t*)header + header->imports_offset);
-                for (uint32_t i=0; i < header->imports_count; ++i) {
+                for (uint32_t i=0; i < header->imports_count && !stop; ++i) {
                     const char* symbolName = &symbolsPool[importsA64[i].name_offset];
                     if ( importsA64[i].name_offset > maxSymbolOffset ) {
                         diag.error("malformed import table, string overflow");
@@ -2144,6 +2340,37 @@ bool MachOAnalyzer::hasCodeSignature(uint32_t& fileOffset, uint32_t& size) const
     }
 
     return true;
+}
+
+bool MachOAnalyzer::hasProgramVars(Diagnostics& diag, uint32_t& progVarsOffset) const
+{
+    if ( this->filetype != MH_EXECUTE )
+        return false;
+
+    // macOS 10.8+              program uses LC_MAIN and ProgramVars are in libdyld.dylib
+    // macOS 10.6 -> 10.7       ProgramVars are in __program_vars section in main executable
+    // macOS 10.5               ProgramVars are in __dyld section in main executable and 7 pointers in size
+    // macOS 10.4 and earlier   ProgramVars need to be looked up by name in nlist of main executable
+
+    uint32_t offset;
+    bool     usesCRT;
+    if ( getEntry(offset, usesCRT) && usesCRT ) {
+        // is pre-10.8 program
+        uint64_t sectionSize;
+        if ( const void* progVarsSection = findSectionContent("__DATA", "__program_vars", sectionSize) ) {
+            progVarsOffset = (uint32_t)((uint8_t*)progVarsSection - (uint8_t*)this);
+            return true;
+        }
+        else if ( const void* dyldSection = findSectionContent("__DATA", "__dyld", sectionSize) ) {
+            if ( sectionSize >= 7*pointerSize() ) {
+                progVarsOffset = (uint32_t)((uint8_t*)dyldSection - (uint8_t*)this) + 2*pointerSize();
+                return true;
+            }
+        }
+        diag.error("pre-macOS 10.5 binaries not supported");
+        return true;
+    }
+    return false;
 }
 
 bool MachOAnalyzer::hasInitializer(Diagnostics& diag, bool contentRebased, const void* dyldCache) const
@@ -2338,8 +2565,8 @@ void MachOAnalyzer::forEachInitializer(Diagnostics& diag, bool contentRebased, v
         const uint32_t* initsEnd   = (uint32_t*)((uint8_t*)content + info.sectSize);
         for (const uint32_t* p=initsStart; p < initsEnd; ++p) {
             uint32_t anInitOffset = *p;
-            if ( anInitOffset > executableSegments.segments[0].fileSize ) {
-                 diag.error("initializer 0x%0X is not an offset within __TEXT segment", anInitOffset);
+            if ( !executableSegments.contains(loadAddress + anInitOffset) ) {
+                 diag.error("initializer 0x%08X does not an offset to an executable segment", anInitOffset);
                  stop = true;
                  break;
             }
@@ -2963,6 +3190,9 @@ bool MachOAnalyzer::canBePlacedInDyldCache(const char* path, void (^failureReaso
     if ( !(isArch("x86_64") || isArch("x86_64h")) )
         return true;
 
+    if ( hasChainedFixups() )
+        return true;
+
     __block bool rebasesOk = true;
     Diagnostics diag;
     uint64_t startVMAddr = preferredLoadAddress();
@@ -2992,35 +3222,50 @@ bool MachOAnalyzer::canBePlacedInDyldCache(const char* path, void (^failureReaso
 
 uint64_t MachOAnalyzer::chainStartsOffset() const
 {
+    const dyld_chained_fixups_header* header = chainedFixupsHeader();
+    // old arm64e binary has no dyld_chained_fixups_header
+    if ( header == nullptr )
+        return 0;
+    return header->starts_offset + ((uint8_t*)header - (uint8_t*)this);
+}
+
+const dyld_chained_fixups_header* MachOAnalyzer::chainedFixupsHeader() const
+{
     Diagnostics diag;
     LinkEditInfo leInfo;
     getLinkEditPointers(diag, leInfo);
     if ( diag.hasError() || (leInfo.chainedFixups == nullptr) )
-        return 0;
+        return nullptr;
 
-    const dyld_chained_fixups_header* header = (dyld_chained_fixups_header*)getLinkEditContent(leInfo.layout, leInfo.chainedFixups->dataoff);
-    return header->starts_offset + ((uint8_t*)header - (uint8_t*)this);
+    return (dyld_chained_fixups_header*)getLinkEditContent(leInfo.layout, leInfo.chainedFixups->dataoff);
+}
+
+uint16_t MachOAnalyzer::chainedPointerFormat(const dyld_chained_fixups_header* header)
+{
+    const dyld_chained_starts_in_image* startsInfo = (dyld_chained_starts_in_image*)((uint8_t*)header + header->starts_offset);
+    for (uint32_t i=0; i < startsInfo->seg_count; ++i) {
+        uint32_t segInfoOffset = startsInfo->seg_info_offset[i];
+        // 0 offset means this segment has no fixups
+        if ( segInfoOffset == 0 )
+            continue;
+        const dyld_chained_starts_in_segment* segInfo = (dyld_chained_starts_in_segment*)((uint8_t*)startsInfo + segInfoOffset);
+        if ( segInfo->page_count != 0 )
+            return segInfo->pointer_format;
+    }
+    return 0;  // no chains (perhaps no __DATA segment)
 }
 
 uint16_t MachOAnalyzer::chainedPointerFormat() const
 {
-    uint64_t infoOffset = chainStartsOffset();
-    if ( infoOffset != 0 ) {
+    const dyld_chained_fixups_header* header = chainedFixupsHeader();
+    if ( header != nullptr ) {
         // get pointer format from chain info struct in LINKEDIT
-        const dyld_chained_starts_in_image* startsInfo = (dyld_chained_starts_in_image*)((uint8_t*)this + infoOffset);
-        for (uint32_t i=0; i < startsInfo->seg_count; ++i) {
-            uint32_t segInfoOffset = startsInfo->seg_info_offset[i];
-            // 0 offset means this segment has no fixups
-            if ( segInfoOffset == 0 )
-                continue;
-            const dyld_chained_starts_in_segment* segInfo = (dyld_chained_starts_in_segment*)((uint8_t*)startsInfo + segInfoOffset);
-            if ( segInfo->page_count != 0 )
-                return segInfo->pointer_format;
-        }
+        return chainedPointerFormat(header);
     }
     assert(this->cputype == CPU_TYPE_ARM64 && this->cpusubtype == CPU_SUBTYPE_ARM64E && "chainedPointerFormat() called on non-chained binary");
     return DYLD_CHAINED_PTR_ARM64E;
 }
+
 
 #if (BUILDING_DYLD || BUILDING_LIBDYLD) && !__arm64e__
   #define SUPPORT_OLD_ARM64E_FORMAT 0
@@ -3175,6 +3420,10 @@ uint64_t MachOAnalyzer::ObjCClassInfo::getReadOnlyDataField(ObjCClassInfo::ReadO
             return convertToVMAddr(classData->nameVMAddr, vmAddrConverter);
         case ObjCClassInfo::ReadOnlyDataField::baseMethods:
             return convertToVMAddr(classData->baseMethodsVMAddr, vmAddrConverter);
+        case ObjCClassInfo::ReadOnlyDataField::baseProperties:
+            return convertToVMAddr(classData->basePropertiesVMAddr, vmAddrConverter);
+        case ObjCClassInfo::ReadOnlyDataField::flags:
+            return classData->flags;
         }
     } else {
         typedef uint32_t PtrTy;
@@ -3202,6 +3451,10 @@ uint64_t MachOAnalyzer::ObjCClassInfo::getReadOnlyDataField(ObjCClassInfo::ReadO
                 return convertToVMAddr(classData->nameVMAddr, vmAddrConverter);
             case ObjCClassInfo::ReadOnlyDataField::baseMethods:
                 return convertToVMAddr(classData->baseMethodsVMAddr, vmAddrConverter);
+            case ObjCClassInfo::ReadOnlyDataField::baseProperties:
+                return convertToVMAddr(classData->basePropertiesVMAddr, vmAddrConverter);
+            case ObjCClassInfo::ReadOnlyDataField::flags:
+                return classData->flags;
         }
     }
 }
@@ -3257,8 +3510,8 @@ const char* MachOAnalyzer::getPrintableString(uint64_t stringVMAddr, MachOAnalyz
             return;
         }
 
-        // We can't scan this section if its protected or not cstrings.
-        if ( sectInfo.segInfo.isProtected || ( (sectInfo.sectFlags & SECTION_TYPE) != S_CSTRING_LITERALS ) ) {
+        // We can't scan this section if its protected
+        if ( sectInfo.segInfo.isProtected ) {
             result = PrintableStringResult::ProtectedSection;
             stop = true;
             return;
@@ -3291,6 +3544,15 @@ const char* MachOAnalyzer::getPrintableString(uint64_t stringVMAddr, MachOAnalyz
         result = PrintableStringResult::CanPrint;
         stop = true;
     });
+
+#if BUILDING_SHARED_CACHE_UTIL
+    // The shared cache coalesces strings in to their own section.
+    // Assume its a valid pointer
+    if (result == PrintableStringResult::UnknownSection) {
+        result = PrintableStringResult::CanPrint;
+        return (const char*)(stringVMAddr + getSlide());
+    }
+#endif
 
     if (result == PrintableStringResult::CanPrint)
         return (const char*)(stringVMAddr + getSlide());
@@ -3448,7 +3710,7 @@ void MachOAnalyzer::forEachObjCClass(Diagnostics& diag, bool contentRebased,
                 objcMetaClass.swiftClassFlags   = (objcMetaClass.isSwiftLegacy || objcMetaClass.isSwiftStable) ? swiftMetaClassPtr->swiftClassFlags : 0;
                 classSuperclassVMAddr = objcClass.isaVMAddr + offsetof(objc_class_t, superclassVMAddr);
                 classDataVMAddr       = objcClass.isaVMAddr + offsetof(objc_class_t, dataVMAddrAndFastFlags);
-                handler(diag, classVMAddr, classSuperclassVMAddr, classDataVMAddr, objcMetaClass, true);
+                handler(diag, objcClass.isaVMAddr, classSuperclassVMAddr, classDataVMAddr, objcMetaClass, true);
                 if (diag.hasError())
                     return;
             }
@@ -3503,7 +3765,7 @@ void MachOAnalyzer::forEachObjCClass(Diagnostics& diag, bool contentRebased,
                 objcMetaClass.swiftClassFlags   = (objcMetaClass.isSwiftLegacy || objcMetaClass.isSwiftStable) ? swiftMetaClassPtr->swiftClassFlags : 0;
                 classSuperclassVMAddr = objcClass.isaVMAddr + offsetof(objc_class_t, superclassVMAddr);
                 classDataVMAddr       = objcClass.isaVMAddr + offsetof(objc_class_t, dataVMAddrAndFastFlags);
-                handler(diag, classVMAddr, classSuperclassVMAddr, classDataVMAddr, objcMetaClass, true);
+                handler(diag, objcClass.isaVMAddr, classSuperclassVMAddr, classDataVMAddr, objcMetaClass, true);
                 if (diag.hasError())
                     return;
             }
@@ -3768,6 +4030,79 @@ void MachOAnalyzer::forEachObjCMethod(uint64_t methodListVMAddr, bool contentReb
             method.impVMAddr    = convertToVMAddr(methodPtr->impVMAddr, vmAddrConverter);
             method.nameLocationVMAddr = methodVMAddr + offsetof(method_t, nameVMAddr);
             handler(methodVMAddr, method);
+        }
+    }
+}
+
+void MachOAnalyzer::forEachObjCProperty(uint64_t propertyListVMAddr, bool contentRebased,
+                                        void (^handler)(uint64_t propertyVMAddr, const ObjCProperty& property)) const {
+    if ( propertyListVMAddr == 0 )
+        return;
+
+    const uint64_t ptrSize = pointerSize();
+    intptr_t slide = getSlide();
+
+    MachOAnalyzer::VMAddrConverter vmAddrConverter;
+    vmAddrConverter.preferredLoadAddress   = preferredLoadAddress();
+    vmAddrConverter.slide                  = slide;
+    vmAddrConverter.chainedPointerFormat   = hasChainedFixups() ? chainedPointerFormat() : 0;
+    vmAddrConverter.contentRebased         = contentRebased;
+
+    if ( ptrSize == 8 ) {
+        typedef uint64_t PtrTy;
+        struct property_list_t {
+            uint32_t    entsize;
+            uint32_t    count;
+            PtrTy       propertyArrayBase; // Note this is the start the array property_t[0]
+
+            uint32_t getEntsize() const {
+                return (entsize) & ~(uint32_t)3;
+            }
+        };
+
+        struct property_t {
+            PtrTy nameVMAddr;   // SEL
+            PtrTy attributesVMAddr;  // const char *
+        };
+
+        const property_list_t* propertyList = (const property_list_t*)(propertyListVMAddr + slide);
+        uint64_t propertyListArrayBaseVMAddr = propertyListVMAddr + offsetof(property_list_t, propertyArrayBase);
+        for (unsigned i = 0; i != propertyList->count; ++i) {
+            uint64_t propertyEntryOffset = i * propertyList->getEntsize();
+            uint64_t propertyVMAddr = propertyListArrayBaseVMAddr + propertyEntryOffset;
+            const property_t* propertyPtr = (const property_t*)(propertyVMAddr + slide);
+            ObjCProperty property;
+            property.nameVMAddr         = convertToVMAddr(propertyPtr->nameVMAddr, vmAddrConverter);
+            property.attributesVMAddr   = convertToVMAddr(propertyPtr->attributesVMAddr, vmAddrConverter);
+            handler(propertyVMAddr, property);
+        }
+    } else {
+        typedef uint32_t PtrTy;
+        struct property_list_t {
+            uint32_t    entsize;
+            uint32_t    count;
+            PtrTy       propertyArrayBase; // Note this is the start the array property_t[0]
+
+            uint32_t getEntsize() const {
+                return (entsize) & ~(uint32_t)3;
+            }
+        };
+
+        struct property_t {
+            PtrTy nameVMAddr;   // SEL
+            PtrTy attributesVMAddr;  // const char *
+        };
+
+        const property_list_t* propertyList = (const property_list_t*)(propertyListVMAddr + slide);
+        uint64_t propertyListArrayBaseVMAddr = propertyListVMAddr + offsetof(property_list_t, propertyArrayBase);
+        for (unsigned i = 0; i != propertyList->count; ++i) {
+            uint64_t propertyEntryOffset = i * propertyList->getEntsize();
+            uint64_t propertyVMAddr = propertyListArrayBaseVMAddr + propertyEntryOffset;
+            const property_t* propertyPtr = (const property_t*)(propertyVMAddr + slide);
+            ObjCProperty property;
+            property.nameVMAddr         = convertToVMAddr(propertyPtr->nameVMAddr, vmAddrConverter);
+            property.attributesVMAddr   = convertToVMAddr(propertyPtr->attributesVMAddr, vmAddrConverter);
+            handler(propertyVMAddr, property);
         }
     }
 }

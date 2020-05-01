@@ -4,7 +4,9 @@
 // BUILD_ONLY: MacOSX
 
 // BUILD:  $CC main.c -o $BUILD_DIR/unix-conformance.exe -D_XOPEN_SOURCE=600
-// BUILD:  $CC main.c -o $TEMP_DIR/scratch.exe -D_XOPEN_SOURCE=600 -D_POSIX_C_SOURCE=200112
+// BUILD:  $CC main.c -o $BUILD_DIR/scratch.exe -D_XOPEN_SOURCE=600 -D_POSIX_C_SOURCE=200112
+
+// BUILD: $SKIP_INSTALL $BUILD_DIR/scratch.exe
 
 // RUN:  ./unix-conformance.exe
 
@@ -13,11 +15,9 @@
 #include <string.h> 
 #include <dlfcn.h> 
 
-int main()
-{
-    printf("[BEGIN] unix-conformance.dtest\n");
+#include "test_support.h"
 
-    printf("[PASS] unix-conformance.dtest\n");
-    return 0;
+int main(int argc, const char* argv[], const char* envp[], const char* apple[]) {
+    PASS("Success");
 }
 

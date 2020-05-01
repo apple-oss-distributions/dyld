@@ -154,6 +154,7 @@ public:
     void                    setStartEntry(Image::ResolvedSymbolTarget start);
     void                    setUsedFallbackPaths(bool);
     void                    setUsedAtPaths(bool);
+    void                    setUsedInterposing(bool);
     void                    setHasInsertedLibraries(bool);
     void                    setMustBeMissingFiles(const Array<const char*>& paths);
     void                    setMustExistFiles(const Array<LaunchClosure::SkippedFile>& files);
@@ -165,6 +166,7 @@ public:
     void                    setObjCClassAndProtocolInfo(const Array<uint8_t>& classHashTable, const Array<uint8_t>& protocolHashTable,
                                                         const Array<Image::ObjCClassImage>& hashTableImages);
     void                    setObjCDuplicateClassesInfo(const Array<uint8_t>& hashTable);
+    void                    setHasProgramVars(uint32_t offset);
 
 private:
     LaunchClosure::Flags&   getFlags();

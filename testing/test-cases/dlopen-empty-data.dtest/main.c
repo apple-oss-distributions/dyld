@@ -9,19 +9,16 @@
 #include <stdio.h>
 #include <dlfcn.h>
 
+#include "test_support.h"
+
 // libfoo-static.dylib and libfoo-dynamic.dylib each have an empty (no disk size) DATA segment
 
-int main()
-{
-    printf("[BEGIN] dlopen-empty-data\n");
-
+int main(int argc, const char* argv[], const char* envp[], const char* apple[]) {
     void* handle = dlopen(RUN_DIR "/libfoo-dynamic.dylib", RTLD_LAZY);
     if ( handle == NULL ) {
-        printf("[FAIL]  dlopen-empty-data: libfoo-dynamic.dylib could not be loaded: %s\n", dlerror());
-        return 0;
+        FAIL("libfoo-dynamic.dylib could not be loaded: %s", dlerror());
     }
 
-    printf("[PASS]  dlopen-empty-data\n");
-    return 0;
+    PASS("Success");
 }
 

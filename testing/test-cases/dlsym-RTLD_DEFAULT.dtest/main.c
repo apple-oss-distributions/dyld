@@ -10,6 +10,7 @@
 #include <string.h>
 #include <mach-o/dyld_priv.h>
 
+#include "test_support.h"
 
 // verify RTLD_DEFAULT search order
 
@@ -33,54 +34,42 @@ static bool symbolInImage(const char* symName, const char* image)
 
 
 
-
-int main()
-{
-    printf("[BEGIN] dlsym-RTLD_DEFAULT\n");
-
+int main(int argc, const char* argv[], const char* envp[], const char* apple[]) {
     // verify mainSymbol is found in main executable
     if ( !symbolInImage("mainSymbol", "dlsym-RTLD_DEFAULT") ) {
-        printf("[FAIL]  dlsym-RTLD_DEFAULT: mainSymbol\n");
-        return 0;
+        FAIL("mainSymbol");
     }
 
     // verify free is found in main executable, overrideing one in OS
     if ( !symbolInImage("free", "dlsym-RTLD_DEFAULT") ) {
-        printf("[FAIL]  dlsym-RTLD_DEFAULT: free\n");
-        return 0;
+        FAIL("free");
     }
 
     // verify foo is found in libfoo-static.dylib
     if ( !symbolInImage("foo", "libfoo-static.dylib") ) {
-        printf("[FAIL]  dlsym-RTLD_DEFAULT: foo not in libfoo-static.dylib\n");
-        return 0;
+        FAIL("foo not in libfoo-static.dylib");
     }
 
     void* handle = dlopen(RUN_DIR "/libfoo-dynamic.dylib", RTLD_LAZY);
     if ( handle == NULL ) {
-        printf("[FAIL]  dlsym-RTLD_DEFAULT: libfoo-dynamic.dylib could not be loaded\n");
-        return 0;
+        FAIL("libfoo-dynamic.dylib could not be loaded");
     }
 
     // verify foo is still found in statically linked lib
     if ( !symbolInImage("foo", "libfoo-static.dylib") ) {
-        printf("[FAIL]  dlsym-RTLD_DEFAULT: foo not in libfoo-static.dylib\n");
-        return 0;
+        FAIL("foo not in libfoo-static.dylib");
     }
 
     // verify foo2 is found in libfoo-dynamic.dylib"
     if ( !symbolInImage("foo2", "libfoo-dynamic.dylib") ) {
-        printf("[FAIL]  dlsym-RTLD_DEFAULT: foo2 not in libfoo-dynamic.dylib\n");
-        return 0;
+        FAIL("foo2 not in libfoo-dynamic.dylib");
     }
 
     // renamed and re-exported symbols work
     if ( dlsym(RTLD_DEFAULT, "strcmp") == NULL ) {
-        printf("[FAIL]  dlsym-RTLD_DEFAULT: strcmp not found\n");
-        return 0;
+        FAIL("strcmp not found");
     }
     
-    printf("[PASS]  dlsym-RTLD_DEFAULT\n");
-	return 0;
+    PASS("Success");
 }
 

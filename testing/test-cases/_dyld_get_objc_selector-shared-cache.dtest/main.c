@@ -9,11 +9,9 @@
 #include <mach-o/dyld.h>
 #include <mach-o/dyld_priv.h>
 
+#include "test_support.h"
 
-int main()
-{
-    printf("[BEGIN] _dyld_get_objc_selector-shared-cache\n");
-
+int main(int argc, const char* argv[], const char* envp[], const char* apple[]) {
     size_t cacheLen;
     uintptr_t cacheStart = (uintptr_t)_dyld_get_shared_cache_range(&cacheLen);
 
@@ -22,24 +20,20 @@ int main()
     if ( cacheStart != 0 ) {
         // We have a shared cache, so the selector should be there
         if ( selName == NULL ) {
-            printf("[FAIL] _dyld_get_objc_selector() returned null for selector in shared cache\n");
-            return 0;
+            FAIL("_dyld_get_objc_selector() returned null for selector in shared cache");
         }
 
         if ( ((uintptr_t)selName < cacheStart) || ((uintptr_t)selName >= (cacheStart + cacheLen)) ) {
-            printf("[FAIL] _dyld_get_objc_selector() pointer outside of shared cache range\n");
-            return 0;
+            FAIL("_dyld_get_objc_selector() pointer outside of shared cache range");
         }
     } else {
         // No shared cache, so the selector should not be found.
         // FIXME: This assumption may be false once the selectors are in the closure.
         if ( selName != NULL ) {
-            printf("[FAIL] _dyld_get_objc_selector() returned non-null for selector without shared cache\n");
-            return 0;
+            FAIL("_dyld_get_objc_selector() returned non-null for selector without shared cache");
         }
     }
 
-    printf("[PASS] _dyld_get_objc_selector-shared-cache\n");
-    return 0;
+    PASS("Success");
 }
 

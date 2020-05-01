@@ -12,69 +12,59 @@
 #include <mach-o/dyld.h>
 #include <vector>
 
-int main(int argc, const char* argv[])
-{
-    printf("[BEGIN] NSCreateObjectFileImageFromFile-basic\n");
+#include "test_support.h"
 
+int main(int argc, const char* argv[], const char* envp[], const char* apple[]) {
     const char* path = argv[1];
 
     std::vector<NSObjectFileImage> ofis;
     for (unsigned i = 0; i != 32; ++i) {
-		NSObjectFileImage ofi;
-		if ( NSCreateObjectFileImageFromFile(path, &ofi) != NSObjectFileImageSuccess ) {
-			printf("[FAIL] NSCreateObjectFileImageFromFile failed\n");
-			return 0;
-		}
-		ofis.push_back(ofi);
-	}
-	
-	for (unsigned i = 0; i != 32; ++i) {
-		NSObjectFileImage ofi = ofis[i];
-		NSModule mod = NSLinkModule(ofi, path, NSLINKMODULE_OPTION_NONE);
-		if ( mod == NULL ) {
-			printf("[FAIL] NSLinkModule failed\n");
-			return 0;
-		}
-		
-		NSSymbol sym = NSLookupSymbolInModule(mod, "_fooInBundle");
-		if ( sym == NULL ) {
-			printf("[FAIL] NSLookupSymbolInModule failed\n");
-			return 0;
-		}
+        NSObjectFileImage ofi;
+        if ( NSCreateObjectFileImageFromFile(path, &ofi) != NSObjectFileImageSuccess ) {
+            FAIL("NSCreateObjectFileImageFromFile failed");
+        }
+        ofis.push_back(ofi);
+    }
 
-		void* func = NSAddressOfSymbol(sym);
-		if ( func == NULL ) {
-			printf("[FAIL] NSAddressOfSymbol failed\n");
-			return 0;
-		}
+    for(unsigned i = 0; i != 32; ++i) {
+    NSObjectFileImage ofi = ofis[i];
+    NSModule mod = NSLinkModule(ofi, path, NSLINKMODULE_OPTION_NONE);
+        if ( mod == NULL ) {
+            FAIL("NSLinkModule failed");
+        }
 
-	    Dl_info info;
-	    if ( dladdr(func, &info) == 0 ) {
-	        printf("[FAIL] dladdr(&p, xx) failed");
-			return 0;
-	    }
-	    //printf("_fooInBundle found in %s\n", info.dli_fname);
+        NSSymbol sym = NSLookupSymbolInModule(mod, "_fooInBundle");
+        if ( sym == NULL ) {
+            FAIL("NSLookupSymbolInModule failed");
+        }
 
-		if ( !NSUnLinkModule(mod, NSUNLINKMODULE_OPTION_NONE) ) {
-			printf("[FAIL] NSUnLinkModule failed\n");
-			return 0;
-		}
+        void* func = NSAddressOfSymbol(sym);
+        if ( func == NULL ) {
+            FAIL("NSAddressOfSymbol failed");
+        }
 
-	    if ( dladdr(func, &info) != 0 ) {
-	        printf("[FAIL] dladdr(&p, xx) found but should not have\n");
-			return 0;
-	    }
-	}
+        Dl_info info;
+        if ( dladdr(func, &info) == 0 ) {
+            FAIL("dladdr(&p, xx) fail");
+        }
+        LOG("_fooInBundle found in %s", info.dli_fname);
 
-	for (unsigned i = 0; i != 32; ++i) {
-		NSObjectFileImage ofi = ofis[i];
-		if ( !NSDestroyObjectFileImage(ofi) ) {
-			printf("[FAIL] NSDestroyObjectFileImage failed\n");
-			return 0;
-		}
-	}
+        if ( !NSUnLinkModule(mod, NSUNLINKMODULE_OPTION_NONE) ) {
+            FAIL("NSUnLinkModule failed");
+        }
 
-    printf("[PASS] NSCreateObjectFileImageFromFile-basic\n");
-	return 0;
+        if ( dladdr(func, &info) != 0 ) {
+            FAIL("dladdr(&p, xx) found but should not have");
+        }
+    }
+
+    for (unsigned i = 0; i != 32; ++i) {
+        NSObjectFileImage ofi = ofis[i];
+        if ( !NSDestroyObjectFileImage(ofi) ) {
+            FAIL("NSDestroyObjectFileImage failed");
+        }
+    }
+
+    PASS("Success");
 }
 

@@ -43,6 +43,7 @@
 #include "MachOFileAbstraction.hpp"
 #include "MachOLoaded.h"
 #include "MachOAnalyzer.h"
+#include "mach-o/fixup-chains.h"
 
 
 #ifndef EXPORT_SYMBOL_FLAGS_KIND_ABSOLUTE
@@ -69,6 +70,7 @@ private:
                                     CacheBuilder::ASLR_Tracker& aslrTracker, CacheBuilder::LOH_Tracker* lohTracker,
                                     uint32_t*& lastMappedAddr32, uint32_t& lastKind, uint64_t& lastToNewAddress);
     void            adjustDataPointers(CacheBuilder::ASLR_Tracker& aslrTracker);
+    void            adjustRebaseChains(CacheBuilder::ASLR_Tracker& aslrTracker);
     void            slidePointer(int segIndex, uint64_t segOffset, uint8_t type, CacheBuilder::ASLR_Tracker& aslrTracker);
     void            adjustSymbolTable();
     void            adjustChainedFixups();
@@ -78,6 +80,9 @@ private:
     void            adjustInstruction(uint8_t kind, uint8_t* textLoc, uint64_t codeToDataDelta);
     void            rebuildLinkEditAndLoadCommands(const CacheBuilder::DylibTextCoalescer& textCoalescer);
     uint64_t        slideForOrigAddress(uint64_t addr);
+    void            convertGeneric64RebaseToIntermediate(dyld3::MachOLoaded::ChainedFixupPointerOnDisk* chainPtr, CacheBuilder::ASLR_Tracker& aslrTracker, uint64_t targetSlide);
+    void            convertArm64eRebaseToIntermediate(dyld3::MachOLoaded::ChainedFixupPointerOnDisk* chainPtr, CacheBuilder::ASLR_Tracker& aslrTracker, uint64_t targetSlide);
+
 
     typedef typename P::uint_t pint_t;
     typedef typename P::E E;
@@ -98,6 +103,7 @@ private:
     macho_linkedit_data_command<P>*                         _dataInCodeCmd      = nullptr;
     macho_linkedit_data_command<P>*                         _exportTrieCmd      = nullptr;
     macho_linkedit_data_command<P>*                         _chainedFixupsCmd   = nullptr;
+    uint16_t                                                _chainedFixupsFormat = 0;
     std::vector<uint64_t>                                   _segOrigStartAddresses;
     std::vector<uint64_t>                                   _segSlides;
     std::vector<macho_segment_command<P>*>                  _segCmds;
@@ -140,6 +146,7 @@ Adjustor<P>::Adjustor(DyldSharedCache* cacheBuffer, macho_header<P>* mh, const s
                 break;
             case LC_DYLD_CHAINED_FIXUPS:
                 _chainedFixupsCmd = (macho_linkedit_data_command<P>*)cmd;
+                _chainedFixupsFormat = dyld3::MachOAnalyzer::chainedPointerFormat((dyld_chained_fixups_header*)&_linkeditBias[_chainedFixupsCmd->dataoff()]);
                 break;
             case LC_DYLD_EXPORTS_TRIE:
                 _exportTrieCmd = (macho_linkedit_data_command<P>*)cmd;
@@ -178,6 +185,13 @@ void Adjustor<P>::adjustImageForNewSegmentLocations(CacheBuilder::ASLR_Tracker& 
         return;
     if ( _splitSegInfoV2 ) {
         adjustReferencesUsingInfoV2(aslrTracker, lohTracker, coalescedText, textCoalescer);
+        adjustChainedFixups();
+    }
+    else if ( _chainedFixupsCmd != nullptr ) {
+        // need to adjust the chain fixup segment_offset fields in LINKEDIT before chains can be walked
+        adjustChainedFixups();
+        adjustRebaseChains(aslrTracker);
+        adjustCode();
     }
     else {
         adjustDataPointers(aslrTracker);
@@ -188,7 +202,6 @@ void Adjustor<P>::adjustImageForNewSegmentLocations(CacheBuilder::ASLR_Tracker& 
     adjustSymbolTable();
     if ( _diagnostics.hasError() )
         return;
-    adjustChainedFixups();
     if ( _diagnostics.hasError() )
         return;
     rebuildLinkEditAndLoadCommands(textCoalescer);
@@ -539,6 +552,80 @@ static uint32_t setArmWord(uint32_t instruction, uint16_t word) {
     return (instruction & 0xFFF0F000) | (imm4 << 16) | imm12;
 }
 
+
+template <typename P>
+void Adjustor<P>::convertArm64eRebaseToIntermediate(dyld3::MachOLoaded::ChainedFixupPointerOnDisk* chainPtr, CacheBuilder::ASLR_Tracker& aslrTracker, uint64_t targetSlide)
+{
+    assert(chainPtr->arm64e.authRebase.bind == 0);
+    dyld3::MachOLoaded::ChainedFixupPointerOnDisk orgPtr = *chainPtr;
+    dyld3::MachOLoaded::ChainedFixupPointerOnDisk tmp;
+    if ( chainPtr->arm64e.authRebase.auth ) {
+        uint64_t targetVMAddr = orgPtr.arm64e.authRebase.target + _segOrigStartAddresses[0] + targetSlide;
+        // we need to change the rebase to point to the new address in the dyld cache, but it may not fit
+        tmp.arm64e.authRebase.target = targetVMAddr;
+        if ( tmp.arm64e.authRebase.target == targetVMAddr ) {
+            // everything fits, just update target
+            chainPtr->arm64e.authRebase.target = targetVMAddr;
+            return;
+        }
+        // see if it fits in a plain rebase
+        tmp.arm64e.rebase.target = targetVMAddr;
+        if ( tmp.arm64e.rebase.target == targetVMAddr ) {
+            // does fit in plain rebase, so convert to that and store auth data in side table
+            aslrTracker.setAuthData(chainPtr, chainPtr->arm64e.authRebase.diversity, chainPtr->arm64e.authRebase.addrDiv, chainPtr->arm64e.authRebase.key);
+            chainPtr->arm64e.rebase.target = targetVMAddr;
+            chainPtr->arm64e.rebase.high8  = 0;
+            chainPtr->arm64e.rebase.next   = orgPtr.arm64e.rebase.next;
+            chainPtr->arm64e.rebase.bind   = 0;
+            chainPtr->arm64e.rebase.auth   = 0;
+            return;
+        }
+        // target cannot fit into rebase chain, so store target in side table
+        aslrTracker.setAuthData(chainPtr, chainPtr->arm64e.authRebase.diversity, chainPtr->arm64e.authRebase.addrDiv, chainPtr->arm64e.authRebase.key);
+        aslrTracker.setRebaseTarget64(chainPtr, targetVMAddr);
+        chainPtr->arm64e.rebase.target = CacheBuilder::kRebaseTargetInSideTableArm64e; // magic value that means look in side table
+        chainPtr->arm64e.rebase.high8  = 0;
+        chainPtr->arm64e.rebase.next   = orgPtr.arm64e.rebase.next;
+        chainPtr->arm64e.rebase.bind   = 0;
+        chainPtr->arm64e.rebase.auth   = 0;
+        return;
+    }
+    else {
+        uint64_t targetVMAddr = orgPtr.arm64e.rebase.target + targetSlide;
+        tmp.arm64e.rebase.target = targetVMAddr;
+        if ( tmp.arm64e.rebase.target == targetVMAddr ) {
+            // target dyld cache address fits in plain rebase, so all we need to do is adjust that
+            chainPtr->arm64e.rebase.target = targetVMAddr;
+            return;
+        }
+        // target cannot fit into rebase chain, so store target in side table
+        aslrTracker.setRebaseTarget64(chainPtr, targetVMAddr);
+        chainPtr->arm64e.rebase.target = CacheBuilder::kRebaseTargetInSideTableArm64e; // magic value that means look in side table
+    }
+}
+
+
+template <typename P>
+void Adjustor<P>::convertGeneric64RebaseToIntermediate(dyld3::MachOLoaded::ChainedFixupPointerOnDisk* chainPtr, CacheBuilder::ASLR_Tracker& aslrTracker, uint64_t targetSlide)
+{
+    dyld3::MachOLoaded::ChainedFixupPointerOnDisk orgPtr = *chainPtr;
+    dyld3::MachOLoaded::ChainedFixupPointerOnDisk tmp;
+
+    uint64_t targetVMAddr = orgPtr.generic64.rebase.target + targetSlide;
+    // we need to change the rebase to point to the new address in the dyld cache, but it may not fit
+    tmp.generic64.rebase.target = targetVMAddr;
+    if ( tmp.generic64.rebase.target == targetVMAddr ) {
+        // everything fits, just update target
+        chainPtr->generic64.rebase.target = targetVMAddr;
+        return;
+    }
+
+    // target cannot fit into rebase chain, so store target in side table
+     aslrTracker.setRebaseTarget64(chainPtr, targetVMAddr);
+     chainPtr->generic64.rebase.target = CacheBuilder::kRebaseTargetInSideTableArm64; // magic value that means look in side table
+}
+
+
 template <typename P>
 void Adjustor<P>::adjustReference(uint32_t kind, uint8_t* mappedAddr, uint64_t fromNewAddress, uint64_t toNewAddress,
                                   int64_t adjust, int64_t targetSlide, uint64_t imageStartAddress, uint64_t imageEndAddress,
@@ -550,7 +637,7 @@ void Adjustor<P>::adjustReference(uint32_t kind, uint8_t* mappedAddr, uint64_t f
     uint32_t value32;
     uint32_t* mappedAddr32 = 0;
     uint32_t instruction;
-    dyld3::MachOLoaded::ChainedFixupPointerOnDisk chainPtr;
+    dyld3::MachOLoaded::ChainedFixupPointerOnDisk* chainPtr;
     int64_t offsetAdjust;
     int64_t delta;
     switch ( kind ) {
@@ -567,37 +654,84 @@ void Adjustor<P>::adjustReference(uint32_t kind, uint8_t* mappedAddr, uint64_t f
             break;
         case DYLD_CACHE_ADJ_V2_POINTER_32:
             mappedAddr32 = (uint32_t*)mappedAddr;
-            if ( toNewAddress != (uint64_t)(E::get32(*mappedAddr32) + targetSlide) ) {
-                _diagnostics.error("bad DYLD_CACHE_ADJ_V2_POINTER_32 value not as expected at address 0x%llX in %s", fromNewAddress, _installName);
-                return;
+            if ( _chainedFixupsCmd != nullptr ) {
+                chainPtr = (dyld3::MachOLoaded::ChainedFixupPointerOnDisk*)mappedAddr32;
+                switch (_chainedFixupsFormat) {
+                    case DYLD_CHAINED_PTR_32:
+                        // ignore binds, fix up rebases to have new targets
+                        if ( chainPtr->generic32.rebase.bind == 0 ) {
+                            // there is not enough space in 32-bit pointer to store new vmaddr in cache in 26-bit target
+                            // so store target in side table that will be applied when binds are resolved
+                            aslrTracker.add(mappedAddr32);
+                            uint32_t target = (uint32_t)(chainPtr->generic32.rebase.target + targetSlide);
+                            aslrTracker.setRebaseTarget32(chainPtr, target);
+                            chainPtr->generic32.rebase.target = CacheBuilder::kRebaseTargetInSideTableGeneric32;
+                        }
+                        break;
+                    default:
+                        _diagnostics.error("unknown 32-bit chained fixup format %d in %s", _chainedFixupsFormat, _installName);
+                        break;
+                }
             }
-            E::set32(*mappedAddr32, (uint32_t)toNewAddress);
-            aslrTracker.add(mappedAddr32);
+            else {
+                if ( toNewAddress != (uint64_t)(E::get32(*mappedAddr32) + targetSlide) ) {
+                    _diagnostics.error("bad DYLD_CACHE_ADJ_V2_POINTER_32 value not as expected at address 0x%llX in %s", fromNewAddress, _installName);
+                    return;
+                }
+                E::set32(*mappedAddr32, (uint32_t)toNewAddress);
+                aslrTracker.add(mappedAddr32);
+            }
             break;
         case DYLD_CACHE_ADJ_V2_POINTER_64:
             mappedAddr64 = (uint64_t*)mappedAddr;
-            if ( toNewAddress != (E::get64(*mappedAddr64) + targetSlide) ) {
-                _diagnostics.error("bad DYLD_CACHE_ADJ_V2_POINTER_64 value not as expected at address 0x%llX in %s", fromNewAddress, _installName);
-                return;
+            if ( _chainedFixupsCmd != nullptr ) {
+                chainPtr = (dyld3::MachOLoaded::ChainedFixupPointerOnDisk*)mappedAddr64;
+                switch (_chainedFixupsFormat) {
+                    case DYLD_CHAINED_PTR_ARM64E:
+                        // ignore binds and adjust rebases to new segment locations
+                        if ( chainPtr->arm64e.authRebase.bind == 0 ) {
+                            convertArm64eRebaseToIntermediate(chainPtr, aslrTracker, targetSlide);
+                            // Note, the pointer remains a chain with just the target of the rebase adjusted to the new target location
+                            aslrTracker.add(chainPtr);
+                        }
+                        break;
+                    case DYLD_CHAINED_PTR_64:
+                        // ignore binds and adjust rebases to new segment locations
+                        if ( chainPtr->generic64.rebase.bind == 0 ) {
+                            convertGeneric64RebaseToIntermediate(chainPtr, aslrTracker, targetSlide);
+                            // Note, the pointer remains a chain with just the target of the rebase adjusted to the new target location
+                            aslrTracker.add(chainPtr);
+                        }
+                        break;
+                    case DYLD_CHAINED_PTR_64_OFFSET:
+                    case DYLD_CHAINED_PTR_ARM64E_OFFSET:
+                        _diagnostics.error("unhandled 64-bit chained fixup format %d in %s", _chainedFixupsFormat, _installName);
+                        break;
+                    default:
+                        _diagnostics.error("unknown 64-bit chained fixup format %d in %s", _chainedFixupsFormat, _installName);
+                        break;
+                }
             }
-            E::set64(*mappedAddr64, toNewAddress);
-            aslrTracker.add(mappedAddr64);
+            else {
+                if ( toNewAddress != (E::get64(*mappedAddr64) + targetSlide) ) {
+                    _diagnostics.error("bad DYLD_CACHE_ADJ_V2_POINTER_64 value not as expected at address 0x%llX in %s", fromNewAddress, _installName);
+                    return;
+                }
+                E::set64(*mappedAddr64, toNewAddress);
+                aslrTracker.add(mappedAddr64);
+                uint8_t high8 = toNewAddress >> 56;
+                if ( high8 )
+                    aslrTracker.setHigh8(mappedAddr64, high8);
+            }
             break;
         case DYLD_CACHE_ADJ_V2_THREADED_POINTER_64:
-            mappedAddr64 = (uint64_t*)mappedAddr;
-            chainPtr.raw64 = E::get64(*mappedAddr64);
-            // ignore binds, fix up rebases to have new targets
-            if ( chainPtr.arm64e.authRebase.bind == 0 ) {
-                if ( chainPtr.arm64e.authRebase.auth ) {
-                    // auth pointer target is offset in dyld cache
-                    chainPtr.arm64e.authRebase.target += (((dyld3::MachOAnalyzer*)_mh)->preferredLoadAddress() + targetSlide - _cacheBuffer->header.sharedRegionStart);
-                }
-                else {
-                    // plain pointer target is unslid address of target
-                    chainPtr.arm64e.rebase.target += targetSlide;
-                }
+            // old style arm64e binary
+            chainPtr = (dyld3::MachOLoaded::ChainedFixupPointerOnDisk*)mappedAddr;
+            // ignore binds, they are proccessed later
+            if ( chainPtr->arm64e.authRebase.bind == 0 ) {
+                convertArm64eRebaseToIntermediate(chainPtr, aslrTracker, targetSlide);
                 // Note, the pointer remains a chain with just the target of the rebase adjusted to the new target location
-                E::set64(*mappedAddr64, chainPtr.raw64);
+                aslrTracker.add(chainPtr);
             }
             break;
        case DYLD_CACHE_ADJ_V2_DELTA_64:
@@ -919,7 +1053,7 @@ void Adjustor<P>::adjustReferencesUsingInfoV2(CacheBuilder::ASLR_Tracker& aslrTr
                 for (uint64_t l=0; l < fromSectDeltaCount; ++l) {
                     uint64_t delta = read_uleb128(p, infoEnd);
                     fromSectionOffset += delta;
-                    //if (log) printf("   kind=%lld, from offset=0x%0llX, to offset=0x%0llX, adjust=0x%llX, targetSlide=0x%llX\n", kind, fromSectionOffset, toSectionOffset, deltaAdjust, toSectionSlide);
+                    //if (log) printf("   kind=%lld, from offset=0x%0llX, to offset=0x%0llX, adjust=0x%llX, targetSlide=0x%llX\n", kind, fromSectionOffset, toSectionOffset, delta, toSectionSlide);
 
                     uint8_t*  fromMappedAddr = fromSectionMappedAddress + fromSectionOffset;
                     uint64_t toNewAddress = toSectionNewAddress + toSectionOffset;
@@ -958,6 +1092,36 @@ void Adjustor<P>::adjustReferencesUsingInfoV2(CacheBuilder::ASLR_Tracker& aslrTr
     }
 
 }
+
+
+template <typename P>
+void Adjustor<P>::adjustRebaseChains(CacheBuilder::ASLR_Tracker& aslrTracker)
+{
+    const dyld3::MachOAnalyzer* ma = (dyld3::MachOAnalyzer*)_mh;
+    const dyld_chained_fixups_header* chainHeader = (dyld_chained_fixups_header*)(&_linkeditBias[_chainedFixupsCmd->dataoff()]);
+    const dyld_chained_starts_in_image* startsInfo = (dyld_chained_starts_in_image*)((uint8_t*)chainHeader + chainHeader->starts_offset);
+    ma->forEachFixupInAllChains(_diagnostics, startsInfo, false,
+        ^(dyld3::MachOLoaded::ChainedFixupPointerOnDisk* fixupLoc, const dyld_chained_starts_in_segment* segInfo, bool& stop) {
+            switch ( segInfo->pointer_format ) {
+                case DYLD_CHAINED_PTR_64:
+                    // only look at rebases
+                    if ( fixupLoc->generic64.rebase.bind == 0 ) {
+                        uint64_t rebaseTargetInDylib = fixupLoc->generic64.rebase.target;
+                        uint64_t rebaseTargetInDyldcache = fixupLoc->generic64.rebase.target + slideForOrigAddress(rebaseTargetInDylib);
+                        convertGeneric64RebaseToIntermediate(fixupLoc, aslrTracker, rebaseTargetInDyldcache);
+                        aslrTracker.add(fixupLoc);
+                    }
+                    break;
+                case DYLD_CHAINED_PTR_64_OFFSET:
+                    _diagnostics.error("unhandled 64-bit chained fixup format %d in %s", _chainedFixupsFormat, _installName);
+                    break;
+                default:
+                    _diagnostics.error("unsupported chained fixup format %d", segInfo->pointer_format);
+                    stop = true;
+            }
+    });
+}
+
 
 template <typename P>
 void Adjustor<P>::adjustDataPointers(CacheBuilder::ASLR_Tracker& aslrTracker)
@@ -1231,7 +1395,7 @@ void Adjustor<P>::adjustExportsTrie(std::vector<uint8_t>& newTrieBytes)
 void CacheBuilder::adjustDylibSegments(const DylibInfo& dylib, Diagnostics& diag) const
 {
     DyldSharedCache* cache = (DyldSharedCache*)_readExecuteRegion.buffer;
-    if ( _archLayout->is64 ) {
+    if ( _is64 ) {
         Adjustor<Pointer64<LittleEndian>> adjustor64(cache, (macho_header<Pointer64<LittleEndian>>*)dylib.cacheLocation[0].dstSegment, dylib.cacheLocation, diag);
         adjustor64.adjustImageForNewSegmentLocations(_aslrTracker, _lohTracker, _coalescedText, dylib.textCoalescer);
     }

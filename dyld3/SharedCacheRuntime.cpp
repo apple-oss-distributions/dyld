@@ -307,7 +307,7 @@ static bool preflightCacheFile(const SharedCacheOptions& options, SharedCacheLoa
         ::close(fd);
         return false;
     }
-    if ( (cache->header.mappingCount != 3) || (cache->header.mappingOffset > 0x138) ) {
+    if ( (cache->header.mappingCount != 3) || (cache->header.mappingOffset > 0x148) ) {
         results->errorMessage = "shared cache file mappings are invalid";
         ::close(fd);
         return false;

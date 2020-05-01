@@ -16,6 +16,8 @@
 
 #include <TargetConditionals.h>
 
+#include "test_support.h"
+
 static pthread_t sMainThread;
 static pthread_t sWorker1;
 static pthread_t sWorker2;
@@ -136,8 +138,7 @@ static void* work1(void* arg)
     s.doWork();
 
 	if ( pthread_create(&sWorker2, NULL, work2, NULL) != 0 ) {
-        printf("[FAIL] thread-local-destructors, pthread_create\n");
-		exit(0);
+        FAIL("pthread_create");
 	}
  	void* dummy;
 	pthread_join(sWorker2, &dummy);
@@ -157,17 +158,14 @@ void checkMainThreadFinalizer() {
     bool shouldFinalize = false;
 #endif
     if ( sMainThreadFinalized != shouldFinalize )
-        printf("[FAIL] thread-local-destructors, main thread finalisation not as expected\n");
+        FAIL("Main thread finalisation not as expected");
     else if ( sMainThreadFinalized_Another != shouldFinalize )
-        printf("[FAIL] thread-local-destructors, main thread other struct finalisation not as expected\n");
+        FAIL("Main thread other struct finalisation not as expected");
     else
-        printf("[PASS] thread-local-destructors\n");
+        PASS("Success");
 }
 
-int main()
-{
-    printf("[BEGIN] thread-local-destructors\n");
-
+int main(int argc, const char* argv[], const char* envp[], const char* apple[]) {
     sMainThread = pthread_self();
     s.doWork();
 
@@ -178,8 +176,7 @@ int main()
     atexit(&checkMainThreadFinalizer);
 
 	if ( pthread_create(&sWorker1, NULL, work1, NULL) != 0 ) {
-        printf("[FAIL] thread-local-destructors, pthread_create\n");
-		return 0;
+        FAIL("pthread_create");
 	}
 
  	void* dummy;
@@ -187,25 +184,25 @@ int main()
 
     // validate each thread had different addresses for all TLVs
     if ( !sMainThreadInitialized )
-        printf("[FAIL] thread-local-destructors, main thread was not initialized\n");
+        FAIL("Main thread was not initialized");
     else if ( !sWorker1Initialized )
-        printf("[FAIL] thread-local-destructors, thread 1 was not initialized\n");
+        FAIL("Thread 1 was not initialized");
     else if ( !sWorker2Initialized )
-        printf("[FAIL] thread-local-destructors, thread 2 was not initialized\n");
+        FAIL("Thread 2 was not initialized");
     else if ( !sWorker1Finalized )
-        printf("[FAIL] thread-local-destructors, thread 1 was not finalised\n");
+        FAIL("Thread 1 was not finalised");
     else if ( !sWorker2Finalized )
-        printf("[FAIL] thread-local-destructors, thread 2 was not finalised\n");
+        FAIL("Thread 2 was not finalised");
     else if ( !sMainThreadInitialized_Another )
-        printf("[FAIL] thread-local-destructors, main thread other variable was not initialized\n");
+        FAIL("Main thread other variable was not initialized");
     else if ( !sWorker1Initialized_Another )
-        printf("[FAIL] thread-local-destructors, thread 1 other variable was not initialized\n");
+        FAIL("Thread 1 other variable was not initialized");
     else if ( !sWorker2Initialized_Another )
-        printf("[FAIL] thread-local-destructors, thread 2 other variable was not initialized\n");
+        FAIL("Thread 2 other variable was not initialized");
     else if ( !sWorker1Finalized_Another )
-        printf("[FAIL] thread-local-destructors, thread 1 other variable was not finalised\n");
+        FAIL("Thread 1 other variable was not finalised");
     else if ( !sWorker2Finalized_Another )
-        printf("[FAIL] thread-local-destructors, thread 2 other variable was not finalised\n");
+        FAIL("Thread 2 other variable was not finalised");
     else
         passedChecksInMain = true;
 

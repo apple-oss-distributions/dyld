@@ -1,5 +1,5 @@
 int bar()
 {
-	return 0;
+    return 0;
 }
 

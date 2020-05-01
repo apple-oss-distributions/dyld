@@ -11,18 +11,15 @@
 #include <stdlib.h>
 #include <string.h>
 
-int main()
-{
-    printf("[BEGIN] flat-namespace\n");
+#include "test_support.h"
 
+int main(int argc, const char* argv[], const char* envp[], const char* apple[]) {
     // check that the malloc in libfoo.dylib was used by looking at the content the allocated buffer
     // <rdar://problem/31921090> strncmp is tricky for flat namespace because it is re-exporte and renamed
     char* p1 = malloc(10);
     if ( strncmp(p1, "##########", 10) != 0 ) {
-        printf("[FAIL] malloc() from main executable not interposed\n");
-        return 0;
+        FAIL("malloc() from main executable not interposed");
     }
 
-    printf("[PASS] flat-namespace\n");
-	return 0;
+    PASS("Success");
 }

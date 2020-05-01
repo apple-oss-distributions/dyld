@@ -16,6 +16,8 @@
 
 #include <unordered_set>
 
+#include "test_support.h"
+
 extern "C" void foo();
 
 extern mach_header __dso_handle;
@@ -24,13 +26,13 @@ static std::unordered_set<const mach_header*> sCurrentImages;
 
 static void notify(unsigned count, const mach_header* mhs[], const char* paths[])
 {
-    fprintf(stderr, "notification:\n");
+    LOG("notification:");
     for (unsigned i=0; i < count; ++i) {
         const mach_header* mh   = mhs[i];
         const char*        path = paths[i];
-        fprintf(stderr, "  %3d  mh=%p, path=%s\n", i, mh, path);
+        LOG("  %3d  mh=%p, path=%s", i, mh, path);
         if ( sCurrentImages.count(mh) != 0 ) {
-            printf("[FAIL] _dyld_register_for_image_loads: notified twice about %p\n", mh);
+            FAIL("notified twice about %p", mh);
             exit(0);
         }
         sCurrentImages.insert(mh);
@@ -38,49 +40,39 @@ static void notify(unsigned count, const mach_header* mhs[], const char* paths[]
 }
 
 
-int main()
-{
-    printf("[BEGIN] _dyld_register_for_bulk_image_loads\n");
-
+int main(int argc, const char* argv[], const char* envp[], const char* apple[]) {
     _dyld_register_for_bulk_image_loads(&notify);
 
     // verify we were notified about already loaded images
     if ( sCurrentImages.count(&__dso_handle) == 0 ) {
-		printf("[FAIL] _dyld_register_for_bulk_image_loads() did not notify us about main executable\n");
-		exit(0);
+        FAIL("did not notify us about main executable");
     }
     const mach_header* libSysMH = dyld_image_header_containing_address((void*)&printf);
     if ( sCurrentImages.count(libSysMH) == 0 ) {
-		printf("[FAIL] _dyld_register_for_bulk_image_loads() did not notify us about libsystem_c.dylib\n");
-		exit(0);
+        FAIL("did not notify us about libsystem_c.dylib");
     }
     const mach_header* libFoo = dyld_image_header_containing_address((void*)&foo);
     if ( sCurrentImages.count(libFoo) == 0 ) {
-        printf("[FAIL] _dyld_register_for_bulk_image_loads() did not notify us about libfoo.dylib\n");
-        exit(0);
+        FAIL("did not notify us about libfoo.dylib");
     }
 
     // verify we were notified about load of libfoo2.dylib and libz.dylib
-	void* handle2 = dlopen(RUN_DIR "/libfoo2.dylib", RTLD_FIRST);
-	if ( handle2 == NULL ) {
-		printf("[FAIL] dlopen(\"%s\") failed with: %s\n", RUN_DIR "/libfoo.dylib", dlerror());
-		exit(0);
-	}
+    void* handle2 = dlopen(RUN_DIR "/libfoo2.dylib", RTLD_FIRST);
+    if ( handle2 == NULL ) {
+        FAIL("dlopen(\"%s\") failed with: %s", RUN_DIR "/libfoo.dylib", dlerror());
+    }
     const void* libfoo2Foo = dlsym(handle2, "foo");
     const mach_header* libfoo2MH = dyld_image_header_containing_address(libfoo2Foo);
     if ( sCurrentImages.count(libfoo2MH) == 0 ) {
-		printf("[FAIL] _dyld_register_for_bulk_image_loads() did not notify us about libfoo2.dylib\n");
-		exit(0);
+        FAIL("did not notify us about libfoo2.dylib");
     }
     const void* inflateSym = dlsym(RTLD_DEFAULT, "inflate");
     if ( inflateSym == NULL ) {
-        printf("[FAIL] _dyld_register_for_bulk_image_loads() did not load libz.dylib\n");
-        exit(0);
+       FAIL("did not load libz.dylib");
     }
     const mach_header* libzMH = dyld_image_header_containing_address(inflateSym);
     if ( sCurrentImages.count(libzMH) == 0 ) {
-        printf("[FAIL] _dyld_register_for_bulk_image_loads() did not notify us about libz.dylib\n");
-        exit(0);
+        FAIL("did not notify us about libz.dylib");
     }
     
     // Upward linking with dlopen may confuse the notifier as we may try to notify twice on the upwardly linked image
@@ -91,11 +83,9 @@ int main()
     // We should not get a duplicate notification on libup
     void* handleBar = dlopen(RUN_DIR "/libbar.dylib", RTLD_FIRST);
     if ( handleBar == NULL ) {
-        printf("[FAIL] dlopen(\"%s\") failed with: %s\n", RUN_DIR "/libbar.dylib", dlerror());
-        exit(0);
+        FAIL("dlopen(\"%s\") failed with: %s", RUN_DIR "/libbar.dylib", dlerror());
     }
 
-    printf("[PASS] _dyld_register_for_bulk_image_loads\n");
-    return 0;
+    PASS("SUuccess");
 }
 

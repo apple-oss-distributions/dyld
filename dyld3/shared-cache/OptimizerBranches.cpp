@@ -42,7 +42,7 @@
 #include "MachOAnalyzer.h"
 #include "Diagnostics.h"
 #include "DyldSharedCache.h"
-#include "CacheBuilder.h"
+#include "SharedCacheBuilder.h"
 
 static const bool verbose = false;
 
@@ -120,7 +120,6 @@ private:
     macho_header<P>*                        _mh;
     int64_t                                 _cacheSlide          = 0;
     uint64_t                                _cacheUnslideAddr    = 0;
-    bool                                    _chainedFixups       = false;
     uint32_t                                _linkeditSize        = 0;
     uint64_t                                _linkeditAddr        = 0;
     const uint8_t*                          _linkeditBias        = nullptr;
@@ -149,11 +148,6 @@ StubOptimizer<P>::StubOptimizer(const DyldSharedCache* cache, macho_header<P>* m
 {
     _cacheSlide = (long)cache - cache->unslidLoadAddress();
     _cacheUnslideAddr = cache->unslidLoadAddress();
-#if SUPPORT_ARCH_arm64e
-    _chainedFixups = (strcmp(cache->archName(), "arm64e") == 0);
-#else
-    _chainedFixups = false;
-#endif
     const macho_load_command<P>* const cmds = (macho_load_command<P>*)((uint8_t*)mh + sizeof(macho_header<P>));
     const uint32_t cmd_count = mh->ncmds();
     macho_segment_command<P>* segCmd;
@@ -415,20 +409,6 @@ void StubOptimizer<P>::buildStubMap(const std::unordered_set<std::string>& never
                                 break;
                             default:
                                 lpValue = (pint_t)P::getP(lpContent[j]);
-
-                                // Fixup threaded rebase/bind
-                                if ( _chainedFixups ) {
-                                    dyld3::MachOLoaded::ChainedFixupPointerOnDisk ptr;
-                                    ptr.raw64 = lpValue;
-                                    assert(ptr.arm64e.authRebase.bind == 0);
-                                    if ( ptr.arm64e.authRebase.auth ) {
-                                        lpValue = (pint_t)(_cacheUnslideAddr + ptr.arm64e.authRebase.target);
-                                    }
-                                    else {
-                                        lpValue = (pint_t)ptr.arm64e.unpackTarget();
-                                    }
-                                }
-
                                 lpVMAddr = (pint_t)sect->addr() + j * sizeof(pint_t);
                                 if ( symbolIndex >= _symTabCmd->nsyms() ) {
                                     _diagnostics.warning("symbol index out of range (%d of %d) for lazy pointer at addr 0x%0llX in %s",
@@ -954,7 +934,7 @@ void bypassStubs(DyldSharedCache* cache, const std::string& archName, std::unord
         delete op;
 }
 
-void CacheBuilder::optimizeAwayStubs()
+void SharedCacheBuilder::optimizeAwayStubs()
 {
     std::unordered_map<uint64_t, uint64_t> targetAddrToOptStubAddr;
 

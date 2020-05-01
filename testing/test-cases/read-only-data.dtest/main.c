@@ -17,6 +17,8 @@
 #include <mach-o/dyld_priv.h>
 #include <mach-o/getsect.h>
 
+#include "test_support.h"
+
 extern bool isReadOnly(const void* addr);
 extern bool testLib();
 
@@ -24,13 +26,11 @@ const void* const funcs[] = { &malloc, &free, &strcmp, &printf };
 
 typedef bool (*TestFunc)(void);
 
-static bool sBadImage = false;
-
 static void notify(const struct mach_header* mh, intptr_t slide)
 {
     // only look at images not in dyld shared cache
     if ( (mh->flags & 0x80000000) == 0 ) {
-        //fprintf(stderr, "mh=%p flags=0x%08X\n", mh, mh->flags);
+        LOG("mh=%p flags=0x%08X", mh, mh->flags);
         const char* path = dyld_image_path_containing_address(mh);
         bool inTestDir = (strstr(path, RUN_DIR) != NULL);
         unsigned long size;
@@ -40,27 +40,21 @@ static void notify(const struct mach_header* mh, intptr_t slide)
         uint8_t* p = getsectiondata(mh, "__DATA_CONST", "__const", &size);
     #endif
         if ( (p != NULL) && inTestDir && !isReadOnly(p) ) {
-            printf("[FAIL]  read-only-data __DATA_CONST,__const section not read-only in %p %s\n", mh, path);
-            sBadImage = true;
+            FAIL("read-only-data __DATA_CONST,__const section not read-only in %p %s", mh, path);
         }
     }
 }
 
 
-int main()
-{
-    printf("[BEGIN] read-only-data\n");
-
+int main(int argc, const char* argv[], const char* envp[], const char* apple[]) {
     // test __DATA_CONST in main is read-only
     if ( !isReadOnly(&funcs[2]) ) {
-        printf("[FAIL]  read-only-data main executable not read-only\n");
-        return 0;
+        FAIL("main executable not read-only");
     }
 
     // test __DATA_CONST in linked dylib is read-only
     if ( !testLib() ) {
-        printf("[FAIL]  read-only-data librotest.dylib not read-only\n");
-        return 0;
+        FAIL("librotest.dylib not read-only");
     }
 
     _dyld_register_func_for_add_image(&notify);
@@ -68,18 +62,13 @@ int main()
     // test __DATA_CONST in dlopen'ed bundle is read-only
     void* h = dlopen(RUN_DIR "/test.bundle", 0);
     if ( h == NULL ) {
-        printf("[FAIL]  read-only-data test.bundle not loaded\n");
-        return 0;
+        FAIL("test.bundle not loaded");
     }
     TestFunc tb = (TestFunc)dlsym(h, "testBundle");
     if ( !tb() ) {
-        printf("[FAIL]  read-only-data test.bundle not read-only\n");
-        return 0;
+        FAIL("test.bundle not read-only");
     }
 
-    if ( !sBadImage )
-        printf("[PASS]  read-only-data\n");
-
-	return 0;
+    PASS("Success");
 }
 

@@ -16,6 +16,8 @@
 #include <stdlib.h>
 #include <dispatch/dispatch.h>
 
+#include "test_support.h"
+
 // main deps on A
 // main dlopens B which deps on C
 // main dlopens D which deps on C
@@ -25,39 +27,31 @@
 extern void a(const char*);
 extern void setState(const char* from);
 
-int main()
-{
-    printf("[BEGIN] dlopen-intertwined\n");
-
+int main(int argc, const char* argv[], const char* envp[], const char* apple[]) {
     a("main");
     
     void* handle = dlopen(RUN_DIR "/libB.dylib", RTLD_LAZY);
     if ( handle == NULL ) {
-        printf("[FAIL] dlopen-intertwined: %s\n", dlerror());
-        exit(0);
+        FAIL("Error: %s", dlerror());
     }
 
     handle = dlopen(RUN_DIR "/libD.dylib", RTLD_LAZY);
     if ( handle == NULL ) {
-        printf("[FAIL] dlopen-intertwined: %s\n", dlerror());
-        exit(0);
+        FAIL("Error: %s", dlerror());
     }
 
     handle = dlopen(RUN_DIR "/libE.dylib", RTLD_LAZY);
     if ( handle == NULL ) {
-        printf("[FAIL] dlopen-intertwined: %s\n", dlerror());
-        exit(0);
+        FAIL("Error: %s", dlerror());
     }
 
     handle = dlopen(RUN_DIR "/libF.dylib", RTLD_LAZY);
     if ( handle == NULL ) {
-        printf("[FAIL] dlopen-intertwined: %s\n", dlerror());
-        exit(0);
+        FAIL("Error: %s", dlerror());
     }
 
     setState("DONE");
 
-    printf("[PASS] dlopen-intertwined\n");
-	return 0;
+    PASS("Success");
 }
 

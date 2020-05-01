@@ -11,23 +11,19 @@
 #include <stdbool.h>
 #include <dlfcn.h>
 
+#include "test_support.h"
 
 extern bool initsInWrongOrder;
 extern bool allInitsDone();
 
-int main()
-{
-    printf("[BEGIN] dlopen-RTLD_NOLOAD-in-initializer\n");
-
+int main(int argc, const char* argv[], const char* envp[], const char* apple[]) {
     ///
     /// This tests that using RTLD_NOLOAD in an initializer does not trigger out of order initializers
     ///
     if ( initsInWrongOrder )
-        printf("[FAIL] dlopen-RTLD_NOLOAD-in-initializer: wrong init order\n");
+        FAIL("wrong init order");
     else if ( !allInitsDone() )
-        printf("[FAIL] dlopen-RTLD_NOLOAD-in-initializer: all initializers not run\n");
+        FAIL("all initializers not run");
     else
-        printf("[PASS] dlopen-RTLD_NOLOAD-in-initializer\n");
-
-    return 0;
+        PASS("Success");
 }

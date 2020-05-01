@@ -10,39 +10,30 @@
 #include <stdio.h>
 #include <dlfcn.h>
 
-int main() {
-  printf("[BEGIN] dlopen-signing\n");
+#include "test_support.h"
+
+int main(int argc, const char* argv[], const char* envp[], const char* apple[]) {
   void* handle = dlopen("signed.dylib", RTLD_LAZY);
   if ( handle == NULL ) {
-     printf("dlerror(): %s\n", dlerror());
-     printf("[FAIL] dlopen-signing (signed loading signed)\n");
-     return 0;
+     FAIL("dlerror(): %s", dlerror());
   } else {
     int result = dlclose(handle);
     if ( result != 0 ) {
-       printf("dlclose() returned %c\n", result);
-       printf("[FAIL] dlopen-signing (signed unloading signed)\n");
-       return 0;
+       FAIL("dlclose() returned %c", result);
     }
   }
 
   handle = dlopen("unsigned.dylib", RTLD_LAZY);
   if ( handle != NULL ) {
-     printf("dlerror(): %s\n", dlerror());
-     printf("[FAIL] dlopen-signing (signed loading unsigned)\n");
-     return 0;
+     FAIL("dlerror(): %s", dlerror());
   } else {
     int result = dlclose(handle);
     if ( result != 0 ) {
-       printf("dlclose() returned %c\n", result);
-       printf("[FAIL] dlopen-signing (signed unloading signed)\n");
-       return 0;
+       FAIL("dlclose() returned %c", result);
     }
   }
 
-  printf("[PASS] dlopen-signing\n");
-
-  return 0;
+  PASS("Success");
 }
 
 

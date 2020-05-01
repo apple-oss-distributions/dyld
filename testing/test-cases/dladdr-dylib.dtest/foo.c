@@ -9,6 +9,8 @@
     #include <ptrauth.h>
 #endif
 
+#include "test_support.h"
+
 extern void* __dso_handle;
 
 
@@ -42,20 +44,16 @@ static void verifybar()
 {
     Dl_info info;
     if ( dladdr(&dylib_bar, &info) == 0 ) {
-        printf("[FAIL] dladdr(&dylib_bar, xx) failed\n");
-        exit(0);
+        FAIL("dladdr(&dylib_bar, xx) failed");
     }
     if ( strcmp(info.dli_sname, "dylib_bar") != 0 ) {
-        printf("[FAIL] dladdr()->dli_sname is \"%s\" instead of \"dylib_bar\"\n", info.dli_sname);
-        exit(0);
+        FAIL("dladdr()->dli_sname is \"%s\" instead of \"dylib_bar\"", info.dli_sname);
     }
     if ( info.dli_saddr != stripPointer(&dylib_bar) ) {
-        printf("[FAIL] dladdr()->dli_saddr is not &dylib_bar\n");
-        exit(0);
+        FAIL("dladdr()->dli_saddr is not &dylib_bar");
     }
     if ( info.dli_fbase != &__dso_handle ) {
-        printf("[FAIL] dladdr()->dli_fbase is not image that contains &dylib_bar\n");
-        exit(0);
+        FAIL("dladdr()->dli_fbase is not image that contains &dylib_bar");
     }
 }
 
@@ -64,20 +62,16 @@ static void verifyfoo()
 {
     Dl_info info;
     if ( dladdr(&dylib_foo, &info) == 0 ) {
-        printf("[FAIL] dladdr(&dylib_foo, xx) failed\n");
-        exit(0);
+        FAIL("dladdr(&dylib_foo, xx) failed");
     }
     if ( strcmp(info.dli_sname, "dylib_foo") != 0 ) {
-        printf("[FAIL] dladdr()->dli_sname is \"%s\" instead of \"dylib_foo\"\n", info.dli_sname);
-        exit(0);
+        FAIL("dladdr()->dli_sname is \"%s\" instead of \"dylib_foo\"", info.dli_sname);
     }
     if ( info.dli_saddr != stripPointer(&dylib_foo) ) {
-        printf("[FAIL] dladdr()->dli_saddr is not &dylib_foo\n");
-        exit(0);
+        FAIL("dladdr()->dli_saddr is not &dylib_foo");
     }
     if ( info.dli_fbase != &__dso_handle ) {
-        printf("[FAIL] dladdr()->dli_fbase is not image that contains &dylib_foo\n");
-        exit(0);
+        FAIL("dladdr()->dli_fbase is not image that contains &dylib_foo");
     }
 }
 
@@ -86,20 +80,16 @@ static void verifyhide()
 { 
     Dl_info info;
     if ( dladdr(&dylib_hide, &info) == 0 ) {
-        printf("[FAIL] dladdr(&dylib_hide, xx) failed\n");
-        exit(0);
+        FAIL("dladdr(&dylib_hide, xx) failed");
     }
     if ( strcmp(info.dli_sname, "dylib_hide") != 0 ) {
-        printf("[FAIL] dladdr()->dli_sname is \"%s\" instead of \"dylib_hide\"\n", info.dli_sname);
-        exit(0);
+        FAIL("dladdr()->dli_sname is \"%s\" instead of \"dylib_hide\"", info.dli_sname);
     }
     if ( info.dli_saddr != stripPointer(&dylib_hide) ) {
-        printf("[FAIL] dladdr()->dli_saddr is not &dylib_hide\n");
-        exit(0);
+        FAIL("dladdr()->dli_saddr is not &dylib_hide");
     }
     if ( info.dli_fbase != &__dso_handle ) {
-        printf("[FAIL] dladdr()->dli_fbase is not image that contains &dylib_hide\n");
-        exit(0);
+        FAIL("dladdr()->dli_fbase is not image that contains &dylib_hide");
     }
 }
 
@@ -108,20 +98,16 @@ static void verifyDSOHandle()
 {
     Dl_info info;
     if ( dladdr(&__dso_handle, &info) == 0 ) {
-        printf("[FAIL] dladdr(&__dso_handle, xx) failed\n");
-        exit(0);
+        FAIL("dladdr(&__dso_handle, xx) failed");
     }
     if ( strcmp(info.dli_sname, "__dso_handle") != 0 ) {
-        printf("[FAIL] dladdr()->dli_sname is \"%s\" instead of \"__dso_handle\"\n", info.dli_sname);
-        exit(0);
+        FAIL("dladdr()->dli_sname is \"%s\" instead of \"__dso_handle\"", info.dli_sname);
     }
     if ( info.dli_saddr != stripPointer(&__dso_handle) ) {
-        printf("[FAIL] dladdr()->dli_saddr is not &__dso_handle\n");
-        exit(0);
+        FAIL("dladdr()->dli_saddr is not &__dso_handle");
     }
     if ( info.dli_fbase != &__dso_handle ) {
-        printf("[FAIL] dladdr()->dli_fbase is not image that contains &__dso_handle\n");
-        exit(0);
+        FAIL("dladdr()->dli_fbase is not image that contains &__dso_handle");
     }
 }
 

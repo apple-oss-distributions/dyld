@@ -1,8 +1,7 @@
 
 // BOOT_ARGS: dyld_flags=2
 
-// BUILD:  mkdir -p $BUILD_DIR/lib
-// BUILD:  $CC main.cpp -std=c++11 -o $BUILD_DIR/rpath_insert_main.exe  -Wl,-rpath,$RUN_DIR/lib
+// BUILD:  $CXX main.cpp -std=c++11 -o $BUILD_DIR/rpath_insert_main.exe  -Wl,-rpath,$RUN_DIR/lib
 // BUILD:  $CC foo.c -dynamiclib -install_name $RUN_DIR/libfoo.dylib -o $BUILD_DIR/lib/libfoo.dylib
 // BUILD:  $CC bar.c -dynamiclib -install_name $RUN_DIR/libbar.dylib -o $BUILD_DIR/libbar.dylib
 // BUILD:  $CC baz.c -dynamiclib -install_name $RUN_DIR/libbaz.dylib -o $BUILD_DIR/libbaz.dylib
@@ -22,6 +21,8 @@
 #include <string.h>
 #include <mach-o/dyld_priv.h>
 
+#include "test_support.h"
+
 bool gFoundLibrary = false;
 const char* gLibraryName = NULL;
 
@@ -36,13 +37,9 @@ bool wasImageLoaded(const char* libraryName) {
 	return gFoundLibrary;
 }
 
-int main(int argc, const char* argv[])
-{
-    printf("[BEGIN] dyld-insert-library-rpath\n");
-
+int main(int argc, const char* argv[], const char* envp[], const char* apple[]) {
     if (argc != 2) {
-		printf("[FAIL] dyld-insert-library-rpath: expected library name\n");
-		return 0;
+        FAIL("Expected library name");
     }
 
     bool expectInsertFailure = getenv("DYLD_AMFI_FAKE") != NULL;
@@ -50,18 +47,14 @@ int main(int argc, const char* argv[])
     if (wasImageLoaded(argv[1])) {   
         // Image was loaded, but make sure that is what we wanted to happen
         if ( expectInsertFailure ) {
-            printf("[FAIL] dyld-insert-library-rpath: expected insert to fail for '%s'\n", argv[1]);
-            return 0;       
+            FAIL("Expected insert to fail for '%s'", argv[1]);
         }
     } else {
         // Image was not loaded, so make sure we are ok with that
         if ( !expectInsertFailure ) {
-            printf("[FAIL] dyld-insert-library-rpath: expected insert to pass for '%s'\n", argv[1]);
-            return 0;       
+            FAIL("Expected insert to pass for '%s'", argv[1]);
         }
     }
 
-    printf("[PASS]  dyld-insert-library-rpath\n");
-
-	return 0;
+    PASS("Success");
 }

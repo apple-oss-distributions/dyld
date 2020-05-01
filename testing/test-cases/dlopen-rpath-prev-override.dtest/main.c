@@ -1,5 +1,4 @@
 
-// BUILD:  mkdir -p $BUILD_DIR/dir $BUILD_DIR/good $BUILD_DIR/bad
 // BUILD:  $CC good.c -dynamiclib -install_name @rpath/libtest.dylib     -o $BUILD_DIR/good/libtest.dylib
 // BUILD:  $CC bad.c  -dynamiclib -install_name @rpath/libtest.dylib     -o $BUILD_DIR/bad/libtest.dylib
 // BUILD:  $CC dyn.c  -dynamiclib -install_name @rpath/libdynamic.dylib  -o $BUILD_DIR/dir/libdynamic.dylib $BUILD_DIR/good/libtest.dylib -rpath @loader_path/../bad
@@ -16,18 +15,14 @@
 #include <stdio.h>
 #include <dlfcn.h>
 
-int main()
-{
-    printf("[BEGIN] dlopen-rpath-prev-override\n");
+#include "test_support.h"
 
-	void* handle = dlopen(RUN_DIR "/dir/libdynamic.dylib", RTLD_LAZY);
-	if ( handle == NULL ) {
-        printf("dlerror(): %s\n", dlerror());
-        printf("[FAIL]  dlopen-rpath-prev-override\n");
-		return 0;
-	}
+int main(int argc, const char* argv[], const char* envp[], const char* apple[]) {
+    void* handle = dlopen(RUN_DIR "/dir/libdynamic.dylib", RTLD_LAZY);
+    if ( handle == NULL ) {
+        FAIL("dlerror(): %s", dlerror());
+    }
 
-    printf("[PASS]  dlopen-rpath-prev-override\n");
-	return 0;
+    PASS("Success");
 }
 

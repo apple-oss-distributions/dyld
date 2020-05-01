@@ -9,25 +9,21 @@
 #include <stdlib.h>
 #include <dispatch/dispatch.h>
 
+#include "test_support.h"
 
-
-int main()
-{
-    printf("[BEGIN] dlopen-read\n");
-
+int main(int argc, const char* argv[], const char* envp[], const char* apple[]) {
     __block bool allGood = true;
     dispatch_apply(6, dispatch_get_global_queue(DISPATCH_QUEUE_PRIORITY_DEFAULT, 0), ^(size_t index) {
         for (int i=0; i < 500; ++i) {
             void* handle = dlopen(RUN_DIR "/libfoo.dylib", RTLD_LAZY);
             if ( handle == NULL ) {
-                printf("[FAIL] dlopen-read: %s\n", dlerror());
-                exit(0);
+                FAIL("dlopen-read: %s", dlerror());
             }
             dlclose(handle);
         }
     });
 
-    printf("[PASS] dlopen-read\n");
+    PASS("Success");
 	return 0;
 }
 

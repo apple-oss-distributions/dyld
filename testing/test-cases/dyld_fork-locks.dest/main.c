@@ -7,6 +7,8 @@
 #include <dlfcn.h>
 #include <mach-o/dyld_priv.h>
 
+#include "test_support.h"
+
 bool isParent = true;
 
 static void notifyBeforeFork(const struct mach_header* mh, intptr_t vmaddr_slide)
@@ -19,8 +21,7 @@ static void notifyBeforeFork(const struct mach_header* mh, intptr_t vmaddr_slide
     // fork and exec child
     pid_t sChildPid = fork();
     if ( sChildPid < 0 ) {
-        printf("[FAIL] dyld_fork_test didn't fork\n");
-        return;
+        FAIL("Didn't fork");
     }
     if ( sChildPid == 0 ) {
         // child side
@@ -28,14 +29,11 @@ static void notifyBeforeFork(const struct mach_header* mh, intptr_t vmaddr_slide
     }
 }
 
-int main(int argc, const char* argv[])
-{
-    printf("[BEGIN] dyld_fork_test\n");
-
+int main(int argc, const char* argv[], const char* envp[], const char* apple[]) {
     _dyld_register_func_for_add_image(&notifyBeforeFork);
 
     if (isParent) {
-        printf("[PASS] dyld_fork_test\n");
+        PASS("Success");
     }
 
     return 0;

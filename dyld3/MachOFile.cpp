@@ -430,6 +430,12 @@ bool MachOFile::supportsPlatform(Platform reqPlatform) const
             return true;
     }
 
+#if BUILDING_DYLDINFO
+    // Allow offline tools to analyze binaries dyld doesn't load, ie, those with platforms
+    if ( !foundOtherPlatform && (reqPlatform == Platform::unknown) )
+        return true;
+#endif
+
     return false;
 }
 

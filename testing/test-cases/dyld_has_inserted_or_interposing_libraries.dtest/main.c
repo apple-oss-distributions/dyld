@@ -15,15 +15,15 @@
 #include <string.h>
 #include <mach-o/dyld_priv.h>
 
-int main(int argc, const char* argv[])
-{
-    printf("[BEGIN] dyld_has_inserted_or_interposing_libraries\n");
+#include "test_support.h"
 
+int main(int argc, const char* argv[], const char* envp[], const char* apple[]) {
     bool actual = dyld_has_inserted_or_interposing_libraries();
     bool expected = (argc == 2) && (strcmp(argv[1], "true") == 0);
 
-    const char* result = (actual == expected) ? "PASS" : "FAIL";
-    printf("[%s]  dyld_has_inserted_or_interposing_libraries\n", result);
+    if (actual != expected) {
+        FAIL("dyld_has_inserted_or_interposing_libraries");
+    }
 
-	return 0;
+    PASS("Success");
 }

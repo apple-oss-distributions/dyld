@@ -2,6 +2,8 @@
 #include <stdlib.h>
 #include <string.h>
 
+#include "test_support.h"
+
 static const char* expectedStrings[] = {
     "a() from main",
     "initC",
@@ -16,10 +18,9 @@ static const char** curState = expectedStrings;
 
 void setState(const char* from)
 {
-    printf("%s\n", from);
+//    LOG("%s", from);
     if ( strcmp(*curState, from) != 0 ) {
-        printf("[FAIL] dlopen-intertwined: expected %s\n", *curState);
-        exit(0);
+        FAIL("Expected %s", *curState);
     }
     ++curState;
 }

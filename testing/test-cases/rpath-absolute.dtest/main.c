@@ -12,14 +12,13 @@
 
 #include <stdio.h>
 
+#include "test_support.h"
+
 extern int foo;
 
 
-int main()
-{
-    printf("[BEGIN] rpath-absolute.exe\n");
-    printf("[PASS]  rpath-absolute.exe\n");
-	return 0;
+int main(int argc, const char* argv[], const char* envp[], const char* apple[]) {
+    PASS("Success");
 }
 
 

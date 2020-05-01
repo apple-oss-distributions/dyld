@@ -7,30 +7,21 @@
 #include <stdio.h>
 #include <dlfcn.h>
 
+#include "test_support.h"
 
-
-
-
-int main()
-{
-    printf("[BEGIN] thread-local-cleanup\n");
-
+int main(int argc, const char* argv[], const char* envp[], const char* apple[]) {
     for (int i=0; i < 1000; ++i) {
         void* handle = dlopen(RUN_DIR "/libtlv.dylib", RTLD_FIRST);
         if ( handle == NULL ) {
-            printf("[FAIL] thread-local-cleanup: iteration %d %s\n", i, dlerror());
-            return 0;
+            FAIL("dlopen error: iteration %d %s", i, dlerror());
         }
 
         int result = dlclose(handle);
         if ( result != 0 ) {
-            printf("[FAIL] thread-local-cleanup: iteration %d %s\n", i, dlerror());
-            return 0;
+            FAIL("dlclose error: iteration %d %s", i, dlerror());
         }
     }
-    
-    printf("[PASS] thread-local-cleanup\n");
 
-	return 0;
+    PASS("Success");
 }
 

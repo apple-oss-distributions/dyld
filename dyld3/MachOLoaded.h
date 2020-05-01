@@ -30,7 +30,7 @@
 #include "MachOFile.h"
 
 
-class CacheBuilder;
+class SharedCacheBuilder;
 
 namespace dyld3 {
 
@@ -156,7 +156,7 @@ struct VIS_HIDDEN MachOLoaded : public MachOFile
     void                    forEachFixupInAllChains(Diagnostics& diag, const dyld_chained_starts_in_image* starts, bool notifyNonPointers,
                                                     void (^callback)(ChainedFixupPointerOnDisk* fixupLocation, const dyld_chained_starts_in_segment* segInfo, bool& stop)) const;
 protected:
-    friend CacheBuilder;
+    friend SharedCacheBuilder;
 
     struct FoundSymbol {
         enum class Kind { headerOffset, absolute, resolverOffset };
@@ -168,10 +168,6 @@ protected:
         uint32_t            resolverFuncOffset;
         const char*         foundSymbolName;
     };
-
-
-protected:
-    friend CacheBuilder;
 
     bool                    findExportedSymbol(Diagnostics& diag, const char* symbolName, bool weakImport, FoundSymbol& foundInfo, DependentToMachOLoaded finder) const;
 

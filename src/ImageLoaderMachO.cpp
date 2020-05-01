@@ -556,6 +556,10 @@ void ImageLoaderMachO::sniffLoadCommands(const macho_header* mh, const char* pat
 
 	if ( needsAddedLibSystemDepency(*libCount, mh) )
 		*libCount = 1;
+
+	// dylibs that use LC_DYLD_CHAINED_FIXUPS have that load command removed when put in the dyld cache
+	if ( !*compressed && (mh->flags & MH_DYLIB_IN_CACHE) )
+		*compressed = true;
 }
 
 
@@ -2343,8 +2347,8 @@ void ImageLoaderMachO::doModInitFunctions(const LinkContext& context)
 							dyld::throwf("__init_offsets section is not in read-only segment %s\n", this->getPath());
 						for (size_t j=0; j < count; ++j) {
 							uint32_t funcOffset = inits[j];
-							// verify initializers are in TEXT segment
-							if ( funcOffset > seg->filesize ) {
+							// verify initializers are in image
+							if ( ! this->containsAddress((uint8_t*)this->machHeader() + funcOffset) ) {
 								dyld::throwf("initializer function offset 0x%08X not in mapped image for %s\n", funcOffset, this->getPath());
 							}
 							if ( ! dyld::gProcessInfo->libSystemInitialized ) {
@@ -2356,6 +2360,9 @@ void ImageLoaderMachO::doModInitFunctions(const LinkContext& context)
                             Initializer func = (Initializer)((uint8_t*)this->machHeader() + funcOffset);
 							if ( context.verboseInit )
 								dyld::log("dyld: calling initializer function %p in %s\n", func, this->getPath());
+#if __has_feature(ptrauth_calls)
+							func = (Initializer)__builtin_ptrauth_sign_unauthenticated((void*)func, ptrauth_key_asia, 0);
+#endif
 							bool haveLibSystemHelpersBefore = (dyld::gLibSystemHelpers != NULL);
 							{
 								dyld3::ScopedTimer(DBG_DYLD_TIMING_STATIC_INITIALIZER, (uint64_t)fMachOData, (uint64_t)func, 0);

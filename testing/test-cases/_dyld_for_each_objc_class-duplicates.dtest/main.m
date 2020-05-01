@@ -11,6 +11,8 @@
 
 #import <Foundation/NSObject.h>
 
+#include "test_support.h"
+
 // All the libraries have a copy of NSString
 @interface NSString : NSObject
 @end
@@ -57,8 +59,6 @@ Class getMainNSString() {
   return (Class)&OBJC_CLASS_$_NSString;
 }
 
-extern int printf(const char*, ...);
-
 extern id objc_getClass(const char *name);
 
 // Get the NSString from liblinked1.dylib
@@ -72,20 +72,18 @@ static bool gotNSStringLinked = false;
 static bool gotNSStringLinked2 = false;
 static bool gotNSStringFoundation = false;
 
-bool testDuplicate(const char* className, Class nonCacheClass) {
+void testDuplicate(const char* className, Class nonCacheClass) {
   // Walk all the implementations of the class.  There should be 2.  One in the executable and one in the shared cache
   // The shared cache one should be returned first.
 
   // The objc runtime should have chosen the Foundation one as the canonical definition.
   Class objcRuntimeClassImpl = (Class)objc_getClass(className);
   if (objcRuntimeClassImpl == nil) {
-    printf("[FAIL] _dyld_for_each_objc_class-duplicates: class %s not found via runtime\n", className);
-    return false;
+    FAIL("class %s not found via runtime", className);
   }
 
   if (objcRuntimeClassImpl == nonCacheClass) {
-    printf("[FAIL] _dyld_for_each_objc_class-duplicates: class %s from runtime should not match main exexutable\n", className);
-    return false;
+    FAIL("class %s from runtime should not match main exexutable", className);
   }
 
   __block bool foundSharedCacheImpl = false;
@@ -98,60 +96,43 @@ bool testDuplicate(const char* className, Class nonCacheClass) {
     // We should walk these in the order Foundation, main exe
     if (!foundSharedCacheImpl) {
       if (classPtr != objcRuntimeClassImpl) {
-        printf("[FAIL] _dyld_for_each_objc_class-duplicates: Optimized class %s should have come from Foundation\n", className);
-        *stop = true;
-        return;
+        FAIL("Optimized class %s should have come from Foundation", className);
       }
       if (!isLoaded) {
-        printf("[FAIL] _dyld_for_each_objc_class-duplicates: Optimized class %s isLoaded should have been set on Foundation\n", className);
-        *stop = true;
-        return;
+        FAIL("Optimized class %s isLoaded should have been set on Foundation", className);
       }
       foundSharedCacheImpl = true;
       return;
     }
     if (!foundMainExecutableImpl) {
       if (classPtr != nonCacheClass) {
-        printf("[FAIL] _dyld_for_each_objc_class-duplicates: Optimized class %s should have come from main executable\n", className);
-        *stop = true;
-        return;
+        FAIL("Optimized class %s should have come from main executable", className);
       }
       if (!isLoaded) {
-        printf("[FAIL] _dyld_for_each_objc_class-duplicates: Optimized class %s isLoaded should have been set on main executable\n", className);
-        *stop = true;
-        return;
+        FAIL("Optimized class %s isLoaded should have been set on main executable", className);
       }
       foundMainExecutableImpl = true;
       return;
     }
 
     foundTooManyClasses = true;
-    printf("[FAIL] _dyld_for_each_objc_class-duplicates: class %s found somewhere other than main executable and Foundation\n", className);
-    *stop = true;
-    return;
+    FAIL("class %s found somewhere other than main executable and Foundation", className);
   });
 
   if (!foundAnyClass) {
-    printf("[FAIL] _dyld_for_each_objc_class-duplicates: class %s not found\n", className);
-    return false;
+    FAIL("class %s not found", className);
   }
 
   if (foundTooManyClasses) {
-    printf("[FAIL] _dyld_for_each_objc_class-duplicates: class %s found too many times\n", className);
-    return false;
+    FAIL("class %s found too many times", className);
   }
 
   if (!foundSharedCacheImpl || !foundMainExecutableImpl) {
-    printf("[FAIL] _dyld_for_each_objc_class-duplicates: class %s not found for shared cache or main executable\n", className);
-    return false;
+    FAIL("class %s not found for shared cache or main executable", className);
   }
-
-  return true;
 }
 
-int main() {
-  printf("[BEGIN] _dyld_for_each_objc_class-duplicates\n");
-
+int main(int argc, const char* argv[], const char* envp[], const char* apple[]) {
   // This API is only available with dyld3 and shared caches.  If we have dyld2 then don't do anything
   const char* testDyldMode = getenv("TEST_DYLD_MODE");
   assert(testDyldMode);
@@ -166,22 +147,18 @@ int main() {
       sawClass = true;
     });
     if (sawClass) {
-      printf("[FAIL] _dyld_for_each_objc_class-duplicates: dyld2 shouldn't see any classes\n");
-      return 0;
+      FAIL("dyld2 shouldn't see any classes");
     }
-    printf("[PASS] _dyld_for_each_objc_class-duplicates (dyld2 or no shared cache)\n");
-    return 0;
+    PASS("dyld2 or no shared cache)");
   }
 
   // Check that NSString comes from Foundation as the shared cache should win here.
   id runtimeNSString = objc_getClass("NSString");
   if ( (uint64_t)runtimeNSString < (uint64_t)sharedCacheStart ) {
-    printf("[FAIL] _dyld_for_each_objc_class-duplicates: NSString should have come from Foundation but instead was %p\n", runtimeNSString);
-    return 0;
+    FAIL("NSString should have come from Foundation but instead was %p", runtimeNSString);
   }
   if ( (uint64_t)runtimeNSString >= ((uint64_t)sharedCacheStart + sharedCacheLen) ) {
-    printf("[FAIL] _dyld_for_each_objc_class-duplicates: NSString should have come from Foundation but instead was %p\n", runtimeNSString);
-    return 0;
+    FAIL("NSString should have come from Foundation but instead was %p", runtimeNSString);
   }
 
   // Walk all the implementations of "NSString"
@@ -189,67 +166,49 @@ int main() {
     // We should walk these in the order Foundation, liblinked2, liblinked, main exe
     if (!gotNSStringFoundation) {
       if (classPtr != runtimeNSString) {
-        printf("[FAIL] _dyld_for_each_objc_class-duplicates: Optimized NSString should have come from Foundation\n");
-        *stop = true;
-        return;
+        FAIL("Optimized NSString should have come from Foundation");
       }
       if (!isLoaded) {
-        printf("[FAIL] _dyld_for_each_objc_class-duplicates: Optimized NSString isLoaded should have been set on Foundation\n");
-        *stop = true;
-        return;
+        FAIL("Optimized NSString isLoaded should have been set on Foundation");
       }
       gotNSStringFoundation = true;
       return;
     }
     if (!gotNSStringLinked2) {
       if (classPtr != getLinked2NSString()) {
-        printf("[FAIL] _dyld_for_each_objc_class-duplicates: Optimized NSString should have come from liblinked2\n");
-        *stop = true;
-        return;
+        FAIL("Optimized NSString should have come from liblinked2");
       }
       if (!isLoaded) {
-        printf("[FAIL] _dyld_for_each_objc_class-duplicates: Optimized NSString isLoaded should have been set on liblinked2\n");
-        *stop = true;
-        return;
+        FAIL("Optimized NSString isLoaded should have been set on liblinked2");
       }
       gotNSStringLinked2 = true;
       return;
     }
     if (!gotNSStringLinked) {
       if (classPtr != getLinked1NSString()) {
-        printf("[FAIL] _dyld_for_each_objc_class-duplicates: Optimized NSString should have come from liblinked\n");
-        *stop = true;
-        return;
+        FAIL("Optimized NSString should have come from liblinked");
       }
       if (!isLoaded) {
-        printf("[FAIL] _dyld_for_each_objc_class-duplicates: Optimized NSString isLoaded should have been set on liblinked\n");
-        *stop = true;
-        return;
+        FAIL("Optimized NSString isLoaded should have been set on liblinked");
       }
       gotNSStringLinked = true;
       return;
     }
     if (!gotNSStringMain) {
       if (classPtr != getMainNSString()) {
-        printf("[FAIL] _dyld_for_each_objc_class-duplicates: Optimized NSString should have come from main exe\n");
-        *stop = true;
-        return;
+        FAIL("Optimized NSString should have come from main exe");
       }
       if (!isLoaded) {
-        printf("[FAIL] _dyld_for_each_objc_class-duplicates: Optimized NSString isLoaded should have been set on main exe\n");
-        *stop = true;
-        return;
+        FAIL("Optimized NSString isLoaded should have been set on main exe");
       }
       gotNSStringMain = true;
       return;
     }
-    printf("[FAIL] _dyld_for_each_objc_class-duplicates: Unexpected Optimized NSString\n");
-    return;
+    FAIL("Unexpected Optimized NSString");
   });
 
   if ( !gotNSStringFoundation || !gotNSStringLinked2 || !gotNSStringLinked || !gotNSStringMain) {
-    printf("[FAIL] _dyld_for_each_objc_class-duplicates: Failed to find all duplicates of 'NSString'\n");
-    return 0;
+    FAIL("Failed to find all duplicates of 'NSString'");
   }
 
   // Visit again, and return Foundation's NSString
@@ -259,23 +218,13 @@ int main() {
     *stop = true;
   });
   if (NSStringImpl != runtimeNSString) {
-    printf("[FAIL] _dyld_for_each_objc_class-duplicates: _dyld_for_each_objc_class should have returned NSString from Foundation\n");
-    return 0;
+    FAIL("_dyld_for_each_objc_class should have returned NSString from Foundation");
   }
 
-  if (!testDuplicate("NSDictionary", (Class)&OBJC_CLASS_$_NSDictionary))
-    return 0;
+  testDuplicate("NSDictionary", (Class)&OBJC_CLASS_$_NSDictionary);
+  testDuplicate("NSError", (Class)&OBJC_CLASS_$_NSError);
+  testDuplicate("NSSet", (Class)&OBJC_CLASS_$_NSSet);
+  testDuplicate("NSArray", (Class)&OBJC_CLASS_$_NSArray);
 
-  if (!testDuplicate("NSError", (Class)&OBJC_CLASS_$_NSError))
-    return 0;
-
-  if (!testDuplicate("NSSet", (Class)&OBJC_CLASS_$_NSSet))
-    return 0;
-
-  if (!testDuplicate("NSArray", (Class)&OBJC_CLASS_$_NSArray))
-    return 0;
-
-  printf("[PASS] _dyld_for_each_objc_class-duplicates\n");
-
-  return 0;
+  PASS("Success");
 }

@@ -10,6 +10,8 @@
 #include <uuid/uuid.h>
 #include <mach-o/dyld_priv.h>
 
+#include "test_support.h"
+
 extern void* __dso_handle;
 
 extern int foo1();
@@ -36,9 +38,7 @@ int mydata = 5;
 int myarray[10];
 
 
-int main()
-{
-    printf("[BEGIN] _dyld_images_for_addresses\n");
+int main(int argc, const char* argv[], const char* envp[], const char* apple[]) {
     int mylocal;
 
     const void* addresses[12];
@@ -61,51 +61,50 @@ int main()
     for (int i=0; i < 12; ++i) {
         uuid_string_t str;
         uuid_unparse_upper(infos[i].uuid, str);
-        printf("0x%09llX 0x%08llX %s\n", (long long)infos[i].image, infos[i].offsetInImage, str);
+        LOG("0x%09llX 0x%08llX %s", (long long)infos[i].image, infos[i].offsetInImage, str);
     }
 
     if ( infos[0].image != infos[1].image )
-        printf("[FAIL] _dyld_images_for_addresses 0 vs 1\n");
+        FAIL("0 vs 1");
     else if ( infos[0].image != infos[2].image )
-        printf("[FAIL] _dyld_images_for_addresses 0 vs 2\n");
+        FAIL("0 vs 2");
     else if ( infos[0].image != infos[3].image )
-        printf("[FAIL] _dyld_images_for_addresses 0 vs 3\n");
+        FAIL("0 vs 3");
     else if ( infos[0].image != infos[4].image )
-        printf("[FAIL] _dyld_images_for_addresses 0 vs 4\n");
+        FAIL("0 vs 4");
     else if ( infos[0].image != infos[5].image )
-        printf("[FAIL] _dyld_images_for_addresses 0 vs 5\n");
+        FAIL("0 vs 5");
     else if ( infos[6].image != NULL )
-        printf("[FAIL] _dyld_images_for_addresses 6 vs null \n");
+        FAIL("6 vs null ");
     else if ( infos[7].image != infos[8].image )
-        printf("[FAIL] _dyld_images_for_addresses 7 vs 8\n");
+        FAIL("7 vs 8");
     else if ( infos[7].image != infos[9].image )
-        printf("[FAIL] _dyld_images_for_addresses 7 vs 9\n");
+        FAIL("7 vs 9");
     else if ( infos[0].image == infos[7].image )
-        printf("[FAIL] _dyld_images_for_addresses 0 vs 7\n");
+        FAIL("0 vs 7");
     else if ( infos[10].image != infos[11].image )
-        printf("[FAIL] _dyld_images_for_addresses 10 vs 11\n");
+        FAIL("10 vs 11");
     else if ( uuid_compare(infos[0].uuid, infos[1].uuid) != 0  )
-        printf("[FAIL] _dyld_images_for_addresses uuid 0 vs 1\n");
+        FAIL("uuid 0 vs 1");
     else if ( uuid_compare(infos[0].uuid, infos[2].uuid) != 0 )
-        printf("[FAIL] _dyld_images_for_addresses uuid 0 vs 2\n");
+        FAIL("uuid 0 vs 2");
     else if ( uuid_compare(infos[0].uuid, infos[3].uuid) != 0 )
-        printf("[FAIL] _dyld_images_for_addresses uuid 0 vs 3\n");
+        FAIL("uuid 0 vs 3");
     else if ( uuid_compare(infos[0].uuid, infos[4].uuid) != 0 )
-        printf("[FAIL] _dyld_images_for_addresses uuid 0 vs 4\n");
+        FAIL("uuid 0 vs 4");
     else if ( uuid_compare(infos[0].uuid, infos[5].uuid) != 0 )
-        printf("[FAIL] _dyld_images_for_addresses uuid 0 vs 5\n");
+        FAIL("uuid 0 vs 5");
     else if ( uuid_is_null(infos[6].uuid) == 0 )
-        printf("[FAIL] _dyld_images_for_addresses uuid 6 vs null\n");
+        FAIL("uuid 6 vs null");
     else if ( uuid_compare(infos[7].uuid, infos[8].uuid) != 0 )
-        printf("[FAIL] _dyld_images_for_addresses uuid 7 vs 8\n");
+        FAIL("uuid 7 vs 8");
     else if ( uuid_compare(infos[7].uuid, infos[9].uuid) != 0 )
-        printf("[FAIL] _dyld_images_for_addresses uuid 7 vs 9\n");
+        FAIL("uuid 7 vs 9");
     else if ( uuid_compare(infos[0].uuid, infos[7].uuid) == 0 )
-        printf("[FAIL] _dyld_images_for_addresses uuid 0 vs 7\n");
+        FAIL("uuid 0 vs 7");
     else if ( uuid_compare(infos[10].uuid, infos[11].uuid) != 0 )
-        printf("[FAIL] _dyld_images_for_addresses uuid 10 vs 11\n");
+        FAIL("uuid 10 vs 11");
     else
-        printf("[PASS] _dyld_images_for_addresses\n");
-    return 0;
+        PASS("Success");
 }
 

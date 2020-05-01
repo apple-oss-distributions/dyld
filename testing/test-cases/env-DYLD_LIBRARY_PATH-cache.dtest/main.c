@@ -1,6 +1,4 @@
 
-// BUILD:  mkdir -p $BUILD_DIR/override
-// BUILD:  mkdir -p $BUILD_DIR/re-export-override
 // BUILD:  $CC myzlib.c -dynamiclib -o $BUILD_DIR/override/libz.1.dylib -install_name /usr/lib/libz.1.dylib -compatibility_version 1.0 -framework CoreFoundation
 // BUILD:  $CC reexported-myzlib.c -dynamiclib -o $BUILD_DIR/re-export-override/reexported.dylib -compatibility_version 1.0 -framework CoreFoundation -install_name $RUN_DIR/re-export-override/reexported.dylib
 // BUILD:  $CC reexporter.c -dynamiclib -o $BUILD_DIR/re-export-override/libz.1.dylib -install_name /usr/lib/libz.1.dylib -compatibility_version 1.0 -Wl,-reexport_library,$BUILD_DIR/re-export-override/reexported.dylib -Wl,-debug_variant
@@ -18,21 +16,18 @@
 #include <stdbool.h>
 #include <mach-o/dyld_priv.h>
 
+#include "test_support.h"
+
 // The test here is to override libz.1.dylib which is in the dyld cache with our own implementation.
 
-int main()
-{
+int main(int argc, const char* argv[], const char* envp[], const char* apple[]) {
     bool expectMyDylib = (getenv("DYLD_LIBRARY_PATH") != NULL) && !_dyld_shared_cache_optimized();
-
-    printf("[BEGIN] env-DYLD_LIBRARY_PATH-cache, %s\n", expectMyDylib ? "my" : "os");
 
     bool usingMyDylib = (strcmp(zlibVersion(), "my") == 0);
 
 	if ( usingMyDylib == expectMyDylib )
-        printf("[PASS] env-DYLD_LIBRARY_PATH-cache, %s\n", expectMyDylib ? "my" : "os");
+        PASS("Succes");
     else
-        printf("[FAIL] env-DYLD_LIBRARY_PATH-cache, %s\n", expectMyDylib ? "my" : "os");
-
-	return 0;
+        FAIL("Expected %s, got %s", expectMyDylib ? "my" : "os", expectMyDylib ? "os" : "my");
 }
 

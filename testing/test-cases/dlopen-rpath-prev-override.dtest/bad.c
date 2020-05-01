@@ -1,10 +1,7 @@
-#include <stdio.h>
-#include <stdlib.h>
-
+#include "test_support.h"
 
 __attribute__((constructor))
-void init()
+void init(int argc, const char* argv[], const char* envp[], const char* apple[])
 {
-    printf("[FAIL]  dlopen-rpath-prev-override\n");
-    exit(0);
+    FAIL("Bad dylib loaded");
 }

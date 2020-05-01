@@ -1,6 +1,6 @@
 /* -*- mode: C++; c-basic-offset: 4; tab-width: 4 -*- 
  *
- * Copyright (c) 2008-2010 Apple Inc. All rights reserved.
+ * Copyright (c) 2018-2019 Apple Inc. All rights reserved.
  *
  * @APPLE_LICENSE_HEADER_START@
  * 
@@ -42,10 +42,6 @@
 #include "MachOLoaded.h"
 #include "MachOAnalyzer.h"
 #include "ClosureFileSystemPhysical.h"
-
-static bool printSharedRegion = false;
-static bool printFunctionStarts = false;
-static bool printDataCode = false;
 
 
 static void versionToString(uint32_t value, char buffer[32])
@@ -141,8 +137,12 @@ static const char* pointerFormat(uint16_t format)
     switch (format) {
         case DYLD_CHAINED_PTR_ARM64E:
             return "authenticated arm64e";
+        case DYLD_CHAINED_PTR_ARM64E_OFFSET:
+            return "authenticated arm64e offset";
         case DYLD_CHAINED_PTR_64:
             return "generic 64-bit";
+        case DYLD_CHAINED_PTR_64_OFFSET:
+            return "generic 64-bit offset";
         case DYLD_CHAINED_PTR_32:
             return "generic 32-bit";
         case DYLD_CHAINED_PTR_32_CACHE:
@@ -167,12 +167,100 @@ static void printChains(const dyld3::MachOAnalyzer* ma)
             printf("  segment_offset:  0x%08llX\n",   seg->segment_offset);
             printf("  max_pointer:     0x%08X\n",     seg->max_valid_pointer);
             printf("  pages:         %d\n",           seg->page_count);
-            for (int p=0; p < seg->page_count; ++p) {
-                printf("    start[% 2d]:  0x%04X\n",   p, seg->page_start[p]);
+            for (int pageIndex=0; pageIndex < seg->page_count; ++pageIndex) {
+                uint16_t offsetInPage = seg->page_start[pageIndex];
+                if ( offsetInPage == DYLD_CHAINED_PTR_START_NONE )
+                    continue;
+                if ( offsetInPage & DYLD_CHAINED_PTR_START_MULTI ) {
+                    // 32-bit chains which may need multiple starts per page
+                    uint32_t overflowIndex = offsetInPage & ~DYLD_CHAINED_PTR_START_MULTI;
+                    bool chainEnd = false;
+                    while (!chainEnd) {
+                        chainEnd = (seg->page_start[overflowIndex] & DYLD_CHAINED_PTR_START_LAST);
+                        offsetInPage = (seg->page_start[overflowIndex] & ~DYLD_CHAINED_PTR_START_LAST);
+                        printf("    start[% 2d]:  0x%04X\n",   pageIndex, offsetInPage);
+                        ++overflowIndex;
+                    }
+                }
+                else {
+                    // one chain per page
+                    printf("    start[% 2d]:  0x%04X\n",   pageIndex, offsetInPage);
+                }
             }
         }
    });
 }
+
+
+static void printChainDetails(const dyld3::MachOAnalyzer* ma)
+{
+    __block Diagnostics diag;
+    ma->withChainStarts(diag, 0, ^(const dyld_chained_starts_in_image* starts) {
+        ma->forEachFixupInAllChains(diag, starts, true, ^(dyld3::MachOLoaded::ChainedFixupPointerOnDisk* fixupLoc, const dyld_chained_starts_in_segment* segInfo, bool& stop) {
+            uint64_t vmOffset = (uint8_t*)fixupLoc - (uint8_t*)ma;
+            switch (segInfo->pointer_format) {
+                case DYLD_CHAINED_PTR_ARM64E:
+                case DYLD_CHAINED_PTR_ARM64E_OFFSET:
+                   if ( fixupLoc->arm64e.authRebase.auth ) {
+                        if ( fixupLoc->arm64e.authBind.bind ) {
+                             printf("  0x%08llX:  raw: 0x%016llX    auth-bind: (next: %03d, key: %s, addrDiv: %d, diversity: 0x%04X, ordinal: %04X)\n", vmOffset, fixupLoc->raw64,
+                                   fixupLoc->arm64e.authBind.next, fixupLoc->arm64e.keyName(),
+                                   fixupLoc->arm64e.authBind.addrDiv, fixupLoc->arm64e.authBind.diversity, fixupLoc->arm64e.authBind.ordinal);
+                        }
+                        else {
+                            printf("  0x%08llX:  raw: 0x%016llX  auth-rebase: (next: %03d, key: %s, addrDiv: %d, diversity: 0x%04X, target: 0x%08X)\n", vmOffset, fixupLoc->raw64,
+                                  fixupLoc->arm64e.authRebase.next,  fixupLoc->arm64e.keyName(),
+                                  fixupLoc->arm64e.authBind.addrDiv, fixupLoc->arm64e.authBind.diversity, fixupLoc->arm64e.authRebase.target);
+                        }
+                    }
+                    else {
+                        if ( fixupLoc->arm64e.rebase.bind ) {
+                            printf("  0x%08llX:  raw: 0x%016llX         bind: (next: %03d, ordinal: %04X, addend: %d)\n", vmOffset, fixupLoc->raw64,
+                                  fixupLoc->arm64e.bind.next, fixupLoc->arm64e.bind.ordinal, fixupLoc->arm64e.bind.addend);
+                        }
+                        else {
+                            printf("  0x%08llX:  raw: 0x%016llX       rebase: (next: %03d, target: 0x%011llX, high8: 0x%02X)\n", vmOffset, fixupLoc->raw64,
+                                  fixupLoc->arm64e.rebase.next, fixupLoc->arm64e.rebase.target, fixupLoc->arm64e.rebase.high8);
+                        }
+                    }
+                    break;
+                case DYLD_CHAINED_PTR_64:
+                case DYLD_CHAINED_PTR_64_OFFSET:
+                    if ( fixupLoc->generic64.rebase.bind ) {
+                        printf("  0x%08llX:  raw: 0x%016llX         bind: (next: %03d, ordinal: %06X, addend: %d)\n", vmOffset, fixupLoc->raw64,
+                              fixupLoc->generic64.bind.next, fixupLoc->generic64.bind.ordinal, fixupLoc->generic64.bind.addend);
+                    }
+                    else {
+                         printf("  0x%08llX:  raw: 0x%016llX       rebase: (next: %03d, target: 0x%011llX, high8: 0x%02X)\n", vmOffset, fixupLoc->raw64,
+                               fixupLoc->generic64.rebase.next, fixupLoc->generic64.rebase.target, fixupLoc->generic64.rebase.high8);
+                    }
+                    break;
+                case DYLD_CHAINED_PTR_32:
+                    if ( fixupLoc->generic32.bind.bind ) {
+                        printf("  0x%08llX:  raw: 0x%08X    bind: (next:%02d ordinal:%05X addend:%d)\n", vmOffset, fixupLoc->raw32,
+                              fixupLoc->generic32.bind.next, fixupLoc->generic32.bind.ordinal, fixupLoc->generic32.bind.addend);
+                    }
+                    else if ( fixupLoc->generic32.rebase.target > segInfo->max_valid_pointer ) {
+                        uint32_t bias  = (0x04000000 + segInfo->max_valid_pointer)/2;
+                        uint32_t value = fixupLoc->generic32.rebase.target - bias;
+                        printf("  0x%08llX:  raw: 0x%08X  nonptr: (next:%02d value: 0x%08X)\n", vmOffset, fixupLoc->raw32,
+                              fixupLoc->generic32.rebase.next, value);
+                    }
+                    else {
+                        printf("  0x%08llX:  raw: 0x%08X  rebase: (next:%02d target: 0x%07X)\n", vmOffset, fixupLoc->raw32,
+                              fixupLoc->generic32.rebase.next, fixupLoc->generic32.rebase.target);
+                    }
+                    break;
+                default:
+                    fprintf(stderr, "unknown pointer type %d\n", segInfo->pointer_format);
+                    break;
+            }
+         });
+    });
+    if ( diag.hasError() )
+        fprintf(stderr, "dyldinfo: %s\n", diag.errorMessage());
+}
+
 
 struct FixupInfo
 {
@@ -229,6 +317,8 @@ public:
     const char*      segmentName(uint64_t vmOffset) const;
     const char*      sectionName(uint64_t vmOffset) const;
     uint64_t         baseAddress() const { return _baseAddress; }
+    uint64_t         currentSectionAddress() const { return _lastSection.sectAddr; }
+    bool             isNewSection(uint64_t vmOffset) const;
 
 private:
     void             updateLastSection(uint64_t vmOffset) const;
@@ -247,10 +337,16 @@ SectionFinder::SectionFinder(const dyld3::MachOAnalyzer* ma)
     _lastSection.sectSize = 0;
 }
 
-void SectionFinder::updateLastSection(uint64_t vmOffset) const
+bool SectionFinder::isNewSection(uint64_t vmOffset) const
 {
     uint64_t vmAddr = _baseAddress + vmOffset;
-    if ( (vmAddr < _lastSection.sectAddr) || (vmAddr >= _lastSection.sectAddr+_lastSection.sectSize) ) {
+    return ( (vmAddr < _lastSection.sectAddr) || (vmAddr >= _lastSection.sectAddr+_lastSection.sectSize) );
+}
+
+void SectionFinder::updateLastSection(uint64_t vmOffset) const
+{
+    if ( isNewSection(vmOffset) ) {
+        uint64_t vmAddr = _baseAddress + vmOffset;
         _ma->forEachSection(^(const dyld3::MachOFile::SectionInfo& sectInfo, bool malformedSectionRange, bool& sectStop) {
             if ( (sectInfo.sectAddr <= vmAddr) && (vmAddr < sectInfo.sectAddr+sectInfo.sectSize) ) {
                 _lastSection = sectInfo;
@@ -332,7 +428,7 @@ static void printChainedFixups(const dyld3::MachOAnalyzer* ma)
 
     uint64_t baseAddress = ma->preferredLoadAddress();
 
-    printf("        segment     section           address       type             (dvrsty  addr  key)  target\n");
+    printf("        segment      section          address         type          (dvrsty  addr  key)  target\n");
     SectionFinder namer(ma);
     ma->withChainStarts(diag, 0, ^(const dyld_chained_starts_in_image* starts) {
         ma->forEachFixupInAllChains(diag, starts, false, ^(dyld3::MachOLoaded::ChainedFixupPointerOnDisk* fixupLoc, const dyld_chained_starts_in_segment* segInfo, bool& stop) {
@@ -342,16 +438,17 @@ static void printChainedFixups(const dyld3::MachOAnalyzer* ma)
                    if ( fixupLoc->arm64e.authRebase.auth ) {
                         if ( fixupLoc->arm64e.authBind.bind ) {
                             const FixupTarget& bindTarget = targets[fixupLoc->arm64e.authBind.ordinal];
+                            const char* weakImportString  =  bindTarget.weakImport ? " [weak-import]" : "";
                             if ( bindTarget.addend )
-                                printf("        %-12s %-16s 0x%08llX  %16s  (0x%04X   %d     %s)   %s/%s + 0x%llX\n",
+                                printf("        %-12s %-16s 0x%08llX  %16s  (0x%04X   %d     %s)   %s/%s + 0x%llX%s\n",
                                        namer.segmentName(vmOffset), namer.sectionName(vmOffset), vmOffset+namer.baseAddress(), "bind authptr",
                                        fixupLoc->arm64e.authBind.diversity, fixupLoc->arm64e.authBind.addrDiv,
-                                       fixupLoc->arm64e.keyName(), bindTarget.dylib, bindTarget.symbolName, bindTarget.addend);
+                                       fixupLoc->arm64e.keyName(), bindTarget.dylib, bindTarget.symbolName, bindTarget.addend, weakImportString);
                             else
-                                printf("        %-12s %-16s 0x%08llX  %16s  (0x%04X   %d     %s)   %s/%s\n",
+                                printf("        %-12s %-16s 0x%08llX  %16s  (0x%04X   %d     %s)   %s/%s%s\n",
                                        namer.segmentName(vmOffset), namer.sectionName(vmOffset), vmOffset+namer.baseAddress(), "bind authptr",
                                        fixupLoc->arm64e.authBind.diversity, fixupLoc->arm64e.authBind.addrDiv,
-                                       fixupLoc->arm64e.keyName(), bindTarget.dylib, bindTarget.symbolName);
+                                       fixupLoc->arm64e.keyName(), bindTarget.dylib, bindTarget.symbolName, weakImportString);
                          }
                         else {
                             uint64_t targetAddr = fixupLoc->arm64e.authRebase.target + baseAddress;
@@ -365,17 +462,64 @@ static void printChainedFixups(const dyld3::MachOAnalyzer* ma)
                         if ( fixupLoc->arm64e.rebase.bind ) {
                             const FixupTarget& bindTarget = targets[fixupLoc->arm64e.bind.ordinal];
                             uint64_t fullAddend = bindTarget.addend + fixupLoc->arm64e.signExtendedAddend();
+                            const char* weakImportString  =  bindTarget.weakImport ? " [weak-import]" : "";
                             if ( fullAddend )
-                                printf("        %-12s %-16s 0x%08llX  %16s                        %s/%s + 0x%llX\n",
+                                printf("        %-12s %-16s 0x%08llX  %16s                        %s/%s + 0x%llX%s\n",
                                         namer.segmentName(vmOffset), namer.sectionName(vmOffset), vmOffset+namer.baseAddress(),
-                                        "bind pointer", bindTarget.dylib, bindTarget.symbolName, fullAddend);
+                                        "bind pointer", bindTarget.dylib, bindTarget.symbolName, fullAddend, weakImportString);
                             else
-                                printf("        %-12s %-16s 0x%08llX  %16s                        %s/%s\n",
+                                printf("        %-12s %-16s 0x%08llX  %16s                        %s/%s%s\n",
                                         namer.segmentName(vmOffset), namer.sectionName(vmOffset), vmOffset+namer.baseAddress(),
-                                        "bind pointer", bindTarget.dylib, bindTarget.symbolName);
+                                        "bind pointer", bindTarget.dylib, bindTarget.symbolName, weakImportString);
                         }
                         else {
                             uint64_t targetAddr = fixupLoc->arm64e.unpackTarget();
+                            printf("        %-12s %-16s 0x%08llX  %16s                        0x%08llX\n",
+                                    namer.segmentName(vmOffset), namer.sectionName(vmOffset), vmOffset+namer.baseAddress(),
+                                    "rebase pointer", targetAddr);
+                        }
+                    }
+                    break;
+                case DYLD_CHAINED_PTR_ARM64E_OFFSET:
+                   if ( fixupLoc->arm64e.authRebase.auth ) {
+                        if ( fixupLoc->arm64e.authBind.bind ) {
+                            const FixupTarget& bindTarget = targets[fixupLoc->arm64e.authBind.ordinal];
+                            const char* weakImportString  =  bindTarget.weakImport ? " [weak-import]" : "";
+                            if ( bindTarget.addend )
+                                printf("        %-12s %-16s 0x%08llX  %16s  (0x%04X   %d     %s)   %s/%s + 0x%llX%s\n",
+                                       namer.segmentName(vmOffset), namer.sectionName(vmOffset), vmOffset+namer.baseAddress(), "bind authptr",
+                                       fixupLoc->arm64e.authBind.diversity, fixupLoc->arm64e.authBind.addrDiv,
+                                       fixupLoc->arm64e.keyName(), bindTarget.dylib, bindTarget.symbolName, bindTarget.addend, weakImportString);
+                            else
+                                printf("        %-12s %-16s 0x%08llX  %16s  (0x%04X   %d     %s)   %s/%s%s\n",
+                                       namer.segmentName(vmOffset), namer.sectionName(vmOffset), vmOffset+namer.baseAddress(), "bind authptr",
+                                       fixupLoc->arm64e.authBind.diversity, fixupLoc->arm64e.authBind.addrDiv,
+                                       fixupLoc->arm64e.keyName(), bindTarget.dylib, bindTarget.symbolName, weakImportString);
+                         }
+                        else {
+                            uint64_t targetAddr = fixupLoc->arm64e.authRebase.target + baseAddress;
+                            printf("        %-12s %-16s 0x%08llX  %16s  (0x%04X   %d     %s)   0x%08llX\n",
+                                   namer.segmentName(vmOffset), namer.sectionName(vmOffset), vmOffset+namer.baseAddress(), "rebase authptr",
+                                   fixupLoc->arm64e.authBind.diversity, fixupLoc->arm64e.authBind.addrDiv,
+                                   fixupLoc->arm64e.keyName(), targetAddr);
+                        }
+                    }
+                    else {
+                        if ( fixupLoc->arm64e.rebase.bind ) {
+                            const FixupTarget& bindTarget = targets[fixupLoc->arm64e.bind.ordinal];
+                            uint64_t fullAddend = bindTarget.addend + fixupLoc->arm64e.signExtendedAddend();
+                            const char* weakImportString  =  bindTarget.weakImport ? " [weak-import]" : "";
+                            if ( fullAddend )
+                                printf("        %-12s %-16s 0x%08llX  %16s                        %s/%s + 0x%llX%s\n",
+                                        namer.segmentName(vmOffset), namer.sectionName(vmOffset), vmOffset+namer.baseAddress(),
+                                        "bind pointer", bindTarget.dylib, bindTarget.symbolName, fullAddend, weakImportString);
+                            else
+                                printf("        %-12s %-16s 0x%08llX  %16s                        %s/%s%s\n",
+                                        namer.segmentName(vmOffset), namer.sectionName(vmOffset), vmOffset+namer.baseAddress(),
+                                        "bind pointer", bindTarget.dylib, bindTarget.symbolName, weakImportString);
+                        }
+                        else {
+                            uint64_t targetAddr = fixupLoc->arm64e.unpackTarget() + baseAddress;
                             printf("        %-12s %-16s 0x%08llX  %16s                        0x%08llX\n",
                                     namer.segmentName(vmOffset), namer.sectionName(vmOffset), vmOffset+namer.baseAddress(),
                                     "rebase pointer", targetAddr);
@@ -386,17 +530,39 @@ static void printChainedFixups(const dyld3::MachOAnalyzer* ma)
                     if ( fixupLoc->generic64.rebase.bind ) {
                         const FixupTarget& bindTarget = targets[fixupLoc->generic64.bind.ordinal];
                         uint64_t fullAddend = bindTarget.addend + fixupLoc->generic64.signExtendedAddend();
+                        const char* weakImportString  =  bindTarget.weakImport ? " [weak-import]" : "";
                         if ( fullAddend )
-                            printf("        %-12s %-16s 0x%08llX  %16s                        %s/%s + 0x%llX\n",
+                            printf("        %-12s %-16s 0x%08llX  %16s                        %s/%s + 0x%llX%s\n",
                                    namer.segmentName(vmOffset), namer.sectionName(vmOffset), vmOffset+namer.baseAddress(),
-                                    "bind pointer", bindTarget.dylib, bindTarget.symbolName, fullAddend);
+                                    "bind pointer", bindTarget.dylib, bindTarget.symbolName, fullAddend, weakImportString);
                         else
-                            printf("        %-12s %-16s 0x%08llX  %16s                        %s/%s\n",
+                            printf("        %-12s %-16s 0x%08llX  %16s                        %s/%s%s\n",
                                     namer.segmentName(vmOffset), namer.sectionName(vmOffset), vmOffset+namer.baseAddress(),
-                                    "bind pointer", bindTarget.dylib, bindTarget.symbolName);
+                                    "bind pointer", bindTarget.dylib, bindTarget.symbolName, weakImportString);
                     }
                     else {
                         uint64_t targetAddr = fixupLoc->generic64.unpackedTarget();
+                        printf("        %-12s %-16s 0x%08llX  %16s                        0x%08llX\n",
+                                namer.segmentName(vmOffset), namer.sectionName(vmOffset), vmOffset+namer.baseAddress(),
+                                "rebase pointer", targetAddr);
+                    }
+                    break;
+                case DYLD_CHAINED_PTR_64_OFFSET:
+                    if ( fixupLoc->generic64.rebase.bind ) {
+                        const FixupTarget& bindTarget = targets[fixupLoc->generic64.bind.ordinal];
+                        uint64_t fullAddend = bindTarget.addend + fixupLoc->generic64.signExtendedAddend();
+                        const char* weakImportString  =  bindTarget.weakImport ? " [weak-import]" : "";
+                        if ( fullAddend )
+                            printf("        %-12s %-16s 0x%08llX  %16s                        %s/%s + 0x%llX%s\n",
+                                   namer.segmentName(vmOffset), namer.sectionName(vmOffset), vmOffset+namer.baseAddress(),
+                                    "bind pointer", bindTarget.dylib, bindTarget.symbolName, fullAddend, weakImportString);
+                        else
+                            printf("        %-12s %-16s 0x%08llX  %16s                        %s/%s%s\n",
+                                    namer.segmentName(vmOffset), namer.sectionName(vmOffset), vmOffset+namer.baseAddress(),
+                                    "bind pointer", bindTarget.dylib, bindTarget.symbolName, weakImportString);
+                    }
+                    else {
+                        uint64_t targetAddr = fixupLoc->generic64.unpackedTarget() + baseAddress;
                         printf("        %-12s %-16s 0x%08llX  %16s                        0x%08llX\n",
                                 namer.segmentName(vmOffset), namer.sectionName(vmOffset), vmOffset+namer.baseAddress(),
                                 "rebase pointer", targetAddr);
@@ -406,14 +572,15 @@ static void printChainedFixups(const dyld3::MachOAnalyzer* ma)
                     if ( fixupLoc->generic32.rebase.bind ) {
                         const FixupTarget& bindTarget = targets[fixupLoc->generic32.bind.ordinal];
                         uint32_t fullAddend = (uint32_t)bindTarget.addend + fixupLoc->generic32.bind.addend;
+                        const char* weakImportString  =  bindTarget.weakImport ? " [weak-import]" : "";
                         if ( fullAddend )
-                            printf("        %-12s %-16s 0x%08llX  %16s                        %s/%s + 0x%X\n",
+                            printf("        %-12s %-16s 0x%08llX  %16s                        %s/%s + 0x%X%s\n",
                                     namer.segmentName(vmOffset), namer.sectionName(vmOffset), vmOffset+namer.baseAddress(),
-                                    "bind pointer", bindTarget.dylib, bindTarget.symbolName, fullAddend);
+                                    "bind pointer", bindTarget.dylib, bindTarget.symbolName, fullAddend, weakImportString);
                         else
-                            printf("        %-12s %-16s 0x%08llX  %16s                        %s/%s\n",
+                            printf("        %-12s %-16s 0x%08llX  %16s                        %s/%s%s\n",
                                     namer.segmentName(vmOffset), namer.sectionName(vmOffset), vmOffset+namer.baseAddress(),
-                                    "bind pointer", bindTarget.dylib, bindTarget.symbolName);
+                                    "bind pointer", bindTarget.dylib, bindTarget.symbolName, weakImportString);
                     }
                     else {
                         uint32_t targetAddr = fixupLoc->generic32.rebase.target;
@@ -428,6 +595,8 @@ static void printChainedFixups(const dyld3::MachOAnalyzer* ma)
             }
          });
     });
+    if ( diag.hasError() )
+        fprintf(stderr, "dyldinfo: %s\n", diag.errorMessage());
 }
 
 static void printOpcodeFixups(const dyld3::MachOAnalyzer* ma)
@@ -500,11 +669,304 @@ static void printOpcodeFixups(const dyld3::MachOAnalyzer* ma)
 
 }
 
+static inline std::string decimal(int64_t value) {
+    char buff[64];
+    sprintf(buff, "%lld", value);
+    return buff;
+}
+
+static std::string rebaseTargetString(const dyld3::MachOAnalyzer* ma, uint64_t vmAddr)
+{
+    uint64_t    targetLoadAddr = (uint64_t)ma+vmAddr;
+    const char* targetSymbolName;
+    uint64_t    targetSymbolLoadAddr;
+    if ( ma->findClosestSymbol(targetLoadAddr, &targetSymbolName, &targetSymbolLoadAddr) ) {
+        uint64_t delta = targetLoadAddr - targetSymbolLoadAddr;
+        if ( delta == 0 ) {
+            return targetSymbolName;
+        }
+        else {
+            return std::string(targetSymbolName) + std::string("+") + decimal(delta);
+        }
+    }
+    else {
+        __block std::string result;
+        ma->forEachSection(^(const dyld3::MachOAnalyzer::SectionInfo& sectInfo, bool malformedSectionRange, bool& stop) {
+            if ( (sectInfo.sectAddr <= vmAddr) && (vmAddr < sectInfo.sectAddr+sectInfo.sectSize) ) {
+                if ( (sectInfo.sectFlags & SECTION_TYPE) == S_CSTRING_LITERALS ) {
+                    const char* cstring = (char*)ma + (vmAddr-ma->preferredLoadAddress());
+                    result = std::string("\"") + cstring + std::string("\"");
+                }
+                else {
+                    result = std::string(sectInfo.segInfo.segName) + "/" + sectInfo.sectName + "+" + decimal(vmAddr - sectInfo.sectAddr);
+                }
+            }
+        });
+       return result;
+    }
+}
+
+static void printSymbolicChainedFixups(const dyld3::MachOAnalyzer* ma)
+{
+    // build array of targets
+    __block Diagnostics diag;
+    __block std::vector<FixupTarget> targets;
+    ma->forEachChainedFixupTarget(diag, ^(int libOrdinal, const char* symbolName, uint64_t addend, bool weakImport, bool& stop) {
+        FixupTarget target;
+        target.value      = 0;
+        target.dylib      = ordinalName(ma, libOrdinal);
+        target.symbolName = symbolName;
+        target.addend     = addend;
+        target.weakImport = weakImport;
+        targets.push_back(target);
+    });
+    if ( diag.hasError() )
+        return;
+
+    // walk all fixup chains
+    uint64_t baseAddress = ma->preferredLoadAddress();
+    SectionFinder sectionInfo(ma);
+    __block uint64_t lastSymbolVmOffset = 0;
+    __block bool     lastSymbolIsSectionStart = false;
+    ma->withChainStarts(diag, 0, ^(const dyld_chained_starts_in_image* starts) {
+        ma->forEachFixupInAllChains(diag, starts, false, ^(dyld3::MachOLoaded::ChainedFixupPointerOnDisk* fixupLoc, const dyld_chained_starts_in_segment* segInfo, bool& stop) {
+            uint64_t fixupVmOffset = (uint8_t*)fixupLoc - (uint8_t*)ma;
+            if ( sectionInfo.isNewSection(fixupVmOffset) ) {
+                printf("        0x%08llX %-12s %-16s \n", sectionInfo.currentSectionAddress(), sectionInfo.segmentName(fixupVmOffset), sectionInfo.sectionName(fixupVmOffset));
+                lastSymbolVmOffset = sectionInfo.currentSectionAddress()-sectionInfo.baseAddress();
+                lastSymbolIsSectionStart = true;
+            }
+            const char* symbolName;
+            uint64_t    symbolLoadAddr = 0;
+            if ( ma->findClosestSymbol((uint64_t)fixupLoc, &symbolName, &symbolLoadAddr) ) {
+                uint64_t symbolVmOffset = symbolLoadAddr - (uint64_t)ma;
+                if ( (symbolVmOffset != lastSymbolVmOffset) || lastSymbolIsSectionStart ) {
+                    printf("        %s:\n", symbolName);
+                    lastSymbolVmOffset = symbolVmOffset;
+                    lastSymbolIsSectionStart = false;
+                }
+            }
+            const char* fixupKind = "";
+            std::string fixupTarget;
+            char authInfo[64];
+            switch (segInfo->pointer_format) {
+                case DYLD_CHAINED_PTR_ARM64E:
+                    if ( fixupLoc->arm64e.authRebase.auth ) {
+                        sprintf(authInfo, "(0x%04X   %d     %s)", fixupLoc->arm64e.authBind.diversity, fixupLoc->arm64e.authBind.addrDiv, fixupLoc->arm64e.keyName());
+                        if ( fixupLoc->arm64e.authBind.bind ) {
+                            const FixupTarget& bindTarget = targets[fixupLoc->arm64e.authBind.ordinal];
+                            fixupKind = "bind authptr";
+                            fixupTarget = std::string(bindTarget.dylib) + "/" + bindTarget.symbolName;
+                            if ( bindTarget.addend )
+                                fixupTarget += std::string("+") + decimal(bindTarget.addend);
+                            if ( bindTarget.weakImport )
+                                fixupTarget += " [weak-import]";
+                        }
+                        else {
+                            uint64_t targetVmAddr = fixupLoc->arm64e.authRebase.target + baseAddress;
+                            fixupKind = "rebase authptr";
+                            fixupTarget = rebaseTargetString(ma, targetVmAddr);
+                        }
+                    }
+                    else {
+                        authInfo[0] = '\0';
+                        if ( fixupLoc->arm64e.rebase.bind ) {
+                            const FixupTarget& bindTarget = targets[fixupLoc->arm64e.bind.ordinal];
+                            uint64_t fullAddend = bindTarget.addend + fixupLoc->arm64e.signExtendedAddend();
+                            fixupKind = "bind pointer";
+                            fixupTarget = std::string(bindTarget.dylib) + "/" + bindTarget.symbolName;
+                            if ( fullAddend )
+                                fixupTarget += std::string("+") + decimal(fullAddend);
+                            if ( bindTarget.weakImport )
+                                fixupTarget += " [weak-import]";
+                        }
+                        else {
+                            uint64_t targetVmAddr = fixupLoc->arm64e.unpackTarget();
+                            fixupKind = "rebase pointer";
+                            fixupTarget = rebaseTargetString(ma, targetVmAddr);
+                        }
+                    }
+                    printf("           +0x%04llX  %16s  %30s   %s\n", fixupVmOffset-lastSymbolVmOffset, fixupKind, authInfo, fixupTarget.c_str());
+                    break;
+                case DYLD_CHAINED_PTR_ARM64E_OFFSET:
+                    if ( fixupLoc->arm64e.authRebase.auth ) {
+                        sprintf(authInfo, "(0x%04X   %d     %s)", fixupLoc->arm64e.authBind.diversity, fixupLoc->arm64e.authBind.addrDiv, fixupLoc->arm64e.keyName());
+                        if ( fixupLoc->arm64e.authBind.bind ) {
+                            const FixupTarget& bindTarget = targets[fixupLoc->arm64e.authBind.ordinal];
+                            fixupKind = "bind authptr";
+                            fixupTarget = std::string(bindTarget.dylib) + "/" + bindTarget.symbolName;
+                            if ( bindTarget.addend )
+                                fixupTarget += std::string("+") + decimal(bindTarget.addend);
+                            if ( bindTarget.weakImport )
+                                fixupTarget += " [weak-import]";
+                        }
+                        else {
+                            uint64_t targetVmAddr = fixupLoc->arm64e.authRebase.target + baseAddress;
+                            fixupKind = "rebase authptr";
+                            fixupTarget = rebaseTargetString(ma, targetVmAddr);
+                        }
+                    }
+                    else {
+                        authInfo[0] = '\0';
+                        if ( fixupLoc->arm64e.rebase.bind ) {
+                            const FixupTarget& bindTarget = targets[fixupLoc->arm64e.bind.ordinal];
+                            uint64_t fullAddend = bindTarget.addend + fixupLoc->arm64e.signExtendedAddend();
+                            fixupKind = "bind pointer";
+                            fixupTarget = std::string(bindTarget.dylib) + "/" + bindTarget.symbolName;
+                            if ( fullAddend )
+                                fixupTarget += std::string("+") + decimal(fullAddend);
+                            if ( bindTarget.weakImport )
+                                fixupTarget += " [weak-import]";
+                        }
+                        else {
+                            uint64_t targetVmAddr = fixupLoc->arm64e.unpackTarget() + baseAddress;
+                            fixupKind = "rebase pointer";
+                            fixupTarget = rebaseTargetString(ma, targetVmAddr);
+                        }
+                    }
+                    printf("           +0x%04llX  %16s  %30s   %s\n", fixupVmOffset-lastSymbolVmOffset, fixupKind, authInfo, fixupTarget.c_str());
+                    break;
+                case DYLD_CHAINED_PTR_64:
+                    if ( fixupLoc->generic64.rebase.bind ) {
+                        const FixupTarget& bindTarget = targets[fixupLoc->generic64.bind.ordinal];
+                        fixupKind = "bind pointer";
+                        uint64_t fullAddend = bindTarget.addend + fixupLoc->generic64.signExtendedAddend();
+                        fixupTarget = std::string(bindTarget.dylib) + "/" + bindTarget.symbolName;
+                        if ( fullAddend )
+                            fixupTarget += std::string("+") + decimal(fullAddend);
+                        if ( bindTarget.weakImport )
+                            fixupTarget += " [weak-import]";
+                    }
+                    else {
+                        uint64_t targetVmAddr = fixupLoc->generic64.unpackedTarget();
+                        fixupKind = "rebase pointer";
+                        fixupTarget = rebaseTargetString(ma, targetVmAddr);
+                    }
+                    printf("           +0x%04llX  %16s   %s\n", fixupVmOffset-lastSymbolVmOffset, fixupKind, fixupTarget.c_str());
+                    break;
+                case DYLD_CHAINED_PTR_64_OFFSET:
+                    if ( fixupLoc->generic64.rebase.bind ) {
+                        const FixupTarget& bindTarget = targets[fixupLoc->generic64.bind.ordinal];
+                        fixupKind = "bind pointer";
+                        uint64_t fullAddend = bindTarget.addend + fixupLoc->generic64.signExtendedAddend();
+                        fixupTarget = std::string(bindTarget.dylib) + "/" + bindTarget.symbolName;
+                        if ( fullAddend )
+                            fixupTarget += std::string("+") + decimal(fullAddend);
+                        if ( bindTarget.weakImport )
+                            fixupTarget += " [weak-import]";
+                    }
+                    else {
+                        uint64_t targetVmAddr = fixupLoc->generic64.unpackedTarget() + baseAddress;
+                        fixupKind = "rebase pointer";
+                        fixupTarget = rebaseTargetString(ma, targetVmAddr);
+                    }
+                    printf("           +0x%04llX  %16s   %s\n", fixupVmOffset-lastSymbolVmOffset, fixupKind, fixupTarget.c_str());
+                    break;
+                case DYLD_CHAINED_PTR_32:
+                    if ( fixupLoc->generic32.rebase.bind ) {
+                        const FixupTarget& bindTarget = targets[fixupLoc->generic32.bind.ordinal];
+                        uint32_t fullAddend = (uint32_t)bindTarget.addend + fixupLoc->generic32.bind.addend;
+                        fixupKind = "bind pointer";
+                        fixupTarget = std::string(bindTarget.dylib) + "/" + bindTarget.symbolName;
+                        if ( fullAddend )
+                            fixupTarget += std::string("+") + decimal(fullAddend);
+                        if ( bindTarget.weakImport )
+                            fixupTarget += " [weak-import]";
+                    }
+                    else {
+                        uint32_t targetAddr = fixupLoc->generic32.rebase.target;
+                        fixupKind = "rebase pointer";
+                        fixupTarget = rebaseTargetString(ma, targetAddr);
+                    }
+                    printf("           +0x%04llX  %16s   %s\n", fixupVmOffset-lastSymbolVmOffset, fixupKind, fixupTarget.c_str());
+                    break;
+                default:
+                    fprintf(stderr, "unknown pointer type %d\n", segInfo->pointer_format);
+                    break;
+            }
+         });
+    });
+    if ( diag.hasError() )
+        fprintf(stderr, "dyldinfo: %s\n", diag.errorMessage());
+}
+
+struct SymbolicFixupInfo
+{
+    uint64_t    address;
+    const char* kind;
+    std::string target;
+};
+
+static void printSymbolicOpcodeFixups(const dyld3::MachOAnalyzer* ma)
+{
+    Diagnostics diag;
+    __block std::vector<SymbolicFixupInfo> fixups;
+    SectionFinder namer(ma);
+    ma->forEachRebase(diag, ^(const char* opcodeName, const dyld3::MachOLoaded::LinkEditInfo& leInfo, const dyld3::MachOFile::SegmentInfo segments[],
+                              bool segIndexSet, uint32_t pointerSize, uint8_t segIndex, uint64_t segOffset, uint8_t type, bool& stop) {
+        const dyld3::MachOFile::SegmentInfo& segment = segments[segIndex];
+        uint64_t locVmAddr = segment.vmAddr + segOffset;
+        uint64_t runtimeOffset = locVmAddr - namer.baseAddress();
+        const uint8_t* loc = ((uint8_t*)ma + runtimeOffset);
+        uint64_t value = (pointerSize == 8) ? *((uint64_t*)(loc)) : *((uint32_t*)(loc));
+        SymbolicFixupInfo fixup;
+        fixup.address      = locVmAddr;
+        fixup.kind         = rebaseTypeName(type);
+        fixup.target       = rebaseTargetString(ma, value);
+        fixups.push_back(fixup);
+    });
+
+    ma->forEachBind(diag, ^(const char* opcodeName, const dyld3::MachOLoaded::LinkEditInfo& leInfo, const dyld3::MachOFile::SegmentInfo segments[],
+                            bool segIndexSet,  bool libraryOrdinalSet, uint32_t dylibCount, int libOrdinal,
+                            uint32_t pointerSize, uint8_t segIndex, uint64_t segOffset,
+                            uint8_t type, const char* symbolName, bool weakImport, bool lazyBind, uint64_t addend, bool& stop) {
+        const dyld3::MachOFile::SegmentInfo& segment = segments[segIndex];
+        uint64_t locVmAddr = segment.vmAddr + segOffset;
+        SymbolicFixupInfo fixup;
+        fixup.address      = locVmAddr;
+        fixup.kind         = bindTypeName(type);
+        fixup.target       = std::string(ordinalName(ma, libOrdinal)) + "/" + symbolName;
+        if ( addend != 0 )
+            fixup.target += std::string("+") + decimal(addend);
+        if ( weakImport )
+            fixup.target += " [weak-import]";
+        fixups.push_back(fixup);
+    },^(const char* symbolName) {
+    },^() { });
+
+
+    std::sort(fixups.begin(), fixups.end(), [](const SymbolicFixupInfo& l, const SymbolicFixupInfo& r) {
+        if ( &l == &r )
+            return false;
+        return ( l.address < r.address );
+    });
+
+    SectionFinder sectionTracker(ma);
+    uint64_t lastSymbolVmOffset = 0;
+    for (const SymbolicFixupInfo& fixup : fixups) {
+        uint64_t vmOffset = fixup.address;
+        uint64_t vmAddr   = sectionTracker.baseAddress() + vmOffset;
+        if ( sectionTracker.isNewSection(vmOffset) ) {
+            printf("        0x%08llX %-12s %-16s \n", vmAddr, sectionTracker.segmentName(vmOffset), sectionTracker.sectionName(vmOffset));
+            lastSymbolVmOffset = vmOffset;
+        }
+        const char* symbolName;
+        uint64_t    symbolLoadAddr = 0;
+        if ( ma->findClosestSymbol((uint64_t)ma+vmOffset, &symbolName, &symbolLoadAddr) ) {
+            uint64_t symbolVmOffset = symbolLoadAddr - (uint64_t)ma;
+            if ( symbolVmOffset != lastSymbolVmOffset ) {
+                printf("        %s:\n", symbolName);
+                lastSymbolVmOffset = symbolVmOffset;
+            }
+        }
+        printf("           +0x%04llX  %16s   %s\n", vmOffset - lastSymbolVmOffset, fixup.kind, fixup.target.c_str());
+    }
+}
 
 static void printFixups(const dyld3::MachOAnalyzer* ma)
 {
     printf("    -fixups:\n");
-    if ( ma->isPreload() || ma->isStaticExecutable() ) {
+    if ( ma->isPreload() || (ma->isStaticExecutable() && !ma->hasChainedFixups()) ) {
         printPreloadChainedFixups(ma);
     }
     else if ( ma->hasChainedFixups() ) {
@@ -513,7 +975,23 @@ static void printFixups(const dyld3::MachOAnalyzer* ma)
     else {
         printOpcodeFixups(ma);
     }
- }
+}
+
+
+static void printSymbolicFixups(const dyld3::MachOAnalyzer* ma)
+{
+    printf("    -symbolic_fixups:\n");
+    if ( ma->isPreload() || ma->isStaticExecutable() ) {
+        printPreloadChainedFixups(ma);
+    }
+    else if ( ma->hasChainedFixups() ) {
+        printSymbolicChainedFixups(ma);
+    }
+    else {
+        printSymbolicOpcodeFixups(ma);
+    }
+}
+
 
 
 static void printExports(const dyld3::MachOAnalyzer* ma)
@@ -841,6 +1319,14 @@ int main(int argc, const char* argv[])
                 else if ( strcmp(arg, "-fixup_chains") == 0 ) {
                     printChains(ma);
                     somethingPrinted = true;
+                }
+                else if ( strcmp(arg, "-fixup_chain_details") == 0 ) {
+                    printChainDetails(ma);
+                    somethingPrinted = true;
+                }
+                else if ( strcmp(arg, "-symbolic_fixups") == 0 ) {
+                     printSymbolicFixups(ma);
+                     somethingPrinted = true;
                 }
                 else if ( strcmp(arg, "-opcodes") == 0 ) {
                 }

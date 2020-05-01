@@ -159,6 +159,8 @@ static const char* nameForType(TypedBytes::Type type) {
         return "warning";
     case TypedBytes::Type::duplicateClassesTable:
         return "duplicateClassesTable";
+    case TypedBytes::Type::progVars:
+        return "programVars";
     }
 }
 
@@ -698,6 +700,11 @@ static Node buildClosureNode(const LaunchClosure* closure, const Array<const Ima
         warningNode.value = warning;
         root.map["objc-duplicate-class-warnings"].array.push_back(warningNode);
     });
+
+    // add program vars info for old macOS binaries
+    uint32_t progVarsOffset;
+    if ( closure->hasProgramVars(progVarsOffset) )
+        root.map["program-vars-offset"].value = hex8(progVarsOffset);
 
 #if 0
 

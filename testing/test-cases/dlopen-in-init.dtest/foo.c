@@ -1,16 +1,7 @@
-
-
-#include <stdio.h>
 #include <dlfcn.h>
-#include <stdlib.h>
-#include <dispatch/dispatch.h>
-#include <stdbool.h>
-#include <stdio.h>
-#include <stdlib.h>
 #include <pthread.h>
-#include <assert.h>
-#include <unistd.h>
 
+#include "test_support.h"
 
 static void* work1(void* arg)
 {
@@ -21,13 +12,11 @@ static void* work1(void* arg)
 
 
 __attribute__((constructor))
-void myinit()
-{
+void myinit(int argc, const char* argv[], const char* envp[], const char* apple[]) {
     pthread_t workerThread;
 
     if ( pthread_create(&workerThread, NULL, work1, NULL) != 0 ) {
-        printf("[FAIL]  dlopen-in-init, pthread_create\n");
-        return;
+        FAIL("pthread_create");
     }
 
     void* dummy;

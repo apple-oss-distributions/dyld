@@ -1,19 +1,14 @@
-#include <stddef.h>
-#include <stdio.h>
+#include "test_support.h"
 
 extern int foo __attribute__((weak_import));
 
 
-int main()
-{
-    printf("[BEGIN] dylib-static-weak-link missing\n");
+int main(int argc, const char* argv[], const char* envp[], const char* apple[]) {
     // dylib won't be found at runtime, so &foo should be NULL
     if ( &foo == NULL )
-        printf("[PASS] dylib-static-weak-link missing\n");
+        PASS("Success");
     else
-        printf("[FAIL] dylib-static-weak-link missing, &foo != NULL\n");
-
-	return 0;
+        FAIL("&foo != NULL");
 }
 
 

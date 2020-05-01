@@ -1,5 +1,4 @@
 
-// BUILD:  mkdir -p $BUILD_DIR/Bar.framework
 // BUILD:  $CC foo.c -dynamiclib -o $BUILD_DIR/libfoo.dylib            -install_name $RUN_DIR/libfoo.dylib -DVALUE=1
 // BUILD:  $CC foo.c -dynamiclib -o $BUILD_DIR/libfoo_other.dylib      -install_name $RUN_DIR/libfoo.dylib -DVALUE=42
 // BUILD:  $CC bar.c -dynamiclib -o $BUILD_DIR/Bar.framework/Bar       -install_name $RUN_DIR/Bar.framework/Bar  -DVALUE=1
@@ -26,17 +25,17 @@
 #include <string.h>
 #include <dlfcn.h>
 
+#include "test_support.h"
+
 extern int foo();
 extern int bar();
 
 typedef int (*IntProc)();
 
-int main()
-{
+int main(int argc, const char* argv[], const char* envp[], const char* apple[]) {
     const char* suffix = getenv("DYLD_IMAGE_SUFFIX");
     if ( suffix == NULL )
         suffix = "";
-    printf("[BEGIN] env-DYLD_IMAGE_SUFFIX-%s\n", suffix);
 
     const int expectedFoo = (strstr(suffix, "_other") != NULL) ? 42 : 1;
     const int expectedBar = (strstr(suffix, "_alt") != NULL) ? 42 : 1;;
@@ -44,23 +43,19 @@ int main()
 #ifdef RUN_DIR
     void* fooHandle = dlopen(RUN_DIR "/libfoo.dylib", RTLD_LAZY);
     if ( fooHandle == NULL ) {
-        printf("[FAIL]  env-DYLD_IMAGE_SUFFIX-%s, libfoo.dylib could not be loaded, %s\n", suffix, dlerror());
-        return 0;
+        FAIL("libfoo.dylib could not be loaded, %s", dlerror());
     }
     void* barHandle = dlopen(RUN_DIR "/Bar.framework/Bar", RTLD_LAZY);
     if ( barHandle == NULL ) {
-        printf("[FAIL]  env-DYLD_IMAGE_SUFFIX-%s, Bar.framework/Bar could not be loaded, %s\n", suffix, dlerror());
-        return 0;
+        FAIL("Bar.framework/Bar could not be loaded, %s", dlerror());
     }
     IntProc fooProc = (IntProc)dlsym(fooHandle, "foo");
     if ( fooProc == NULL ) {
-        printf("[FAIL]  env-DYLD_IMAGE_SUFFIX-%s, symbol 'foo' not found %s\n", suffix, dlerror());
-        return 0;
+        FAIL("symbol 'foo' not found %s", dlerror());
     }
     IntProc barProc = (IntProc)dlsym(barHandle, "bar");
     if ( barProc == NULL ) {
-        printf("[FAIL]  env-DYLD_IMAGE_SUFFIX-%s, symbol 'bar' not found %s\n", suffix, dlerror());
-        return 0;
+        FAIL("symbol 'bar' not found %s", dlerror());
     }
     int fooValue = (*fooProc)();
     int barValue = (*barProc)();
@@ -69,12 +64,10 @@ int main()
     int barValue = bar();
 #endif
 	if ( fooValue != expectedFoo )
-        printf("[FAIL]  env-DYLD_IMAGE_SUFFIX-%s, foo()=%d expected=%d\n", suffix, fooValue, expectedFoo);
+        FAIL("foo()=%d expected=%d", fooValue, expectedFoo);
     else if ( barValue != expectedBar )
-        printf("[FAIL]  env-DYLD_IMAGE_SUFFIX-%s, bar()=%d expected=%d\n", suffix, barValue, expectedBar);
+        FAIL("bar()=%d expected=%d", barValue, expectedBar);
     else
-        printf("[PASS]  env-DYLD_IMAGE_SUFFIX-%s\n", suffix);
-
-	return 0;
+        PASS("Success");
 }
 

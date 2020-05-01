@@ -7,6 +7,8 @@
 #include <stdlib.h>
 #include <pthread.h>
 
+#include "test_support.h"
+
 // We create an A and a B.
 // While destroying B we create a C
 // Given that tlv_finalize has "destroy in reverse order of construction", we
@@ -42,15 +44,14 @@ State state;
 
 A::A() {
     if ( state != None ) {
-        printf("[FAIL] thread-local-atexit: should be in the 'None' state\n");
+        FAIL("Should be in the 'None' state");
     }
     state = ConstructedA;
 }
 
 B::B() {
     if ( state != ConstructedA ) {
-        printf("[FAIL] thread-local-atexit: should be in the 'ConstructedA' state\n");
-        _Exit(0);
+        FAIL("Should be in the 'ConstructedA' state");
     }
     state = ConstructedB;
 }
@@ -58,8 +59,7 @@ B::B() {
 C::C() {
     // We construct C during B's destructor
     if ( state != DestroyingB ) {
-        printf("[FAIL] thread-local-atexit: should be in the 'DestroyingB' state\n");
-        _Exit(0);
+        FAIL("Should be in the 'DestroyingB' state");
     }
     state = ConstructedC;
 }
@@ -67,14 +67,12 @@ C::C() {
 // We destroy B first
 B::~B() {
     if ( state != ConstructedB ) {
-        printf("[FAIL] thread-local-atexit: should be in the 'ConstructedB' state\n");
-        _Exit(0);
+        FAIL("Should be in the 'ConstructedB' state");
     }
     state = DestroyingB;
     static thread_local C c;
     if ( state != ConstructedC ) {
-        printf("[FAIL] thread-local-atexit: should be in the 'ConstructedC' state\n");
-        _Exit(0);
+        FAIL("Should be in the 'ConstructedC' state");
     }
     state = DestroyedB;
 }
@@ -82,8 +80,7 @@ B::~B() {
 // Then we destroy C
 C::~C() {
     if ( state != DestroyedB ) {
-        printf("[FAIL] thread-local-atexit: should be in the 'DestroyedB' state\n");
-        _Exit(0);
+        FAIL("Should be in the 'DestroyedB' state");
     }
     state = DestroyedC;
 }
@@ -91,11 +88,10 @@ C::~C() {
 // And finally destroy A
 A::~A() {
     if ( state != DestroyedC ) {
-        printf("[FAIL] thread-local-atexit: should be in the 'DestroyedC' state\n");
-        _Exit(0);
+        FAIL("Should be in the 'DestroyedC' state");
     }
     state = DestroyedA;
-    printf("[PASS] thread-local-atexit\n");
+    PASS("Success");
 }
 
 static void* work(void* arg)
@@ -106,13 +102,10 @@ static void* work(void* arg)
     return NULL;
 }
 
-int main() {
-    printf("[BEGIN] thread-local-atexit\n");
-
+int main(int argc, const char* argv[], const char* envp[], const char* apple[]) {
     pthread_t worker;
     if ( pthread_create(&worker, NULL, work, NULL) != 0 ) {
-        printf("[FAIL] thread-local-atexit, pthread_create\n");
-        return 0;
+        FAIL("pthread_create");
     }
 
     void* dummy;

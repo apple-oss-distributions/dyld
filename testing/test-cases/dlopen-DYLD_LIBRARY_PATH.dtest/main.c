@@ -1,5 +1,4 @@
 
-// BUILD:  mkdir -p $BUILD_DIR/door1 $BUILD_DIR/door2
 // BUILD:  $CC bar.c -dynamiclib -o $BUILD_DIR/door1/libbar.dylib -install_name $RUN_DIR/libbar.dylib -DVALUE=3
 // BUILD:  $CC bar.c -dynamiclib -o $BUILD_DIR/door2/libbar.dylib -install_name $RUN_DIR/libbar.dylib -DVALUE=17
 // BUILD:  $CC foo.c -dynamiclib -o $BUILD_DIR/door1/libfoo.dylib -install_name $RUN_DIR/libfoo.dylib -DVALUE=10  $BUILD_DIR/door1/libbar.dylib
@@ -15,70 +14,52 @@
 #include <dlfcn.h>
 #include <stdlib.h>
 
+#include "test_support.h"
+
 // Program dlopen()s libfoo.dylib which was linked against libbar.dylib
 // Neither have valid paths and must be found via DYLD_LIBRARY_PATH
 // This test direct and indirect loading.
 
-int main(int argc, const char* argv[])
-{
+int main(int argc, const char* argv[], const char* envp[], const char* apple[]) {
     const char* env = getenv("DYLD_LIBRARY_PATH");
     if ( env == NULL ) {
-        printf("[BEGIN] dlopen-DYLD_LIBRARY_PATH\n");
-        printf("[FAIL] dlopen-DYLD_LIBRARY_PATH, env not set\n");
-		return 0;
+        FAIL("env not set");
     }
     const char* valueStr = argv[1];
     if ( valueStr == NULL ) {
-        printf("[BEGIN] dlopen-DYLD_LIBRARY_PATH\n");
-        printf("[FAIL] dlopen-DYLD_LIBRARY_PATH, arg1 value not set\n");
-		return 0;
+        FAIL("arg1 value not set");
     }
     char* end;
     long value = strtol(valueStr, &end, 0);
 
-    printf("[BEGIN] dlopen-DYLD_LIBRARY_PATH %s\n", env);
 
-	void* handle = dlopen("/bogus/libfoo.dylib", RTLD_LAZY);
-	if ( handle == NULL ) {
-        printf("dlerror(): %s\n", dlerror());
-        printf("[FAIL] dlopen-DYLD_LIBRARY_PATH %s\n", env);
-		return 0;
-	}
-	
+    void* handle = dlopen("/bogus/libfoo.dylib", RTLD_LAZY);
+    if ( handle == NULL ) {
+        FAIL("dlerror(\"/bogus/libfoo.dylib\"): %s", dlerror());
+    }
+
     typedef int (*FooProc)();
 
-	FooProc sym = (FooProc)dlsym(handle, "foo");
-	if ( sym == NULL ) {
-        printf("dlerror(): %s\n", dlerror());
-        printf("[FAIL] dlopen-DYLD_LIBRARY_PATH %s\n", env);
-		return 0;
-	}
+    FooProc sym = (FooProc)dlsym(handle, "foo");
+    if ( sym == NULL ) {
+        FAIL("dlerror(): %s", dlerror());
+    }
 
     int result = (*sym)();
     if ( result != value ) {
-        printf("result=%d, expected %ld (str=%s)\n", result, value, valueStr);
-        printf("[FAIL] dlopen-DYLD_LIBRARY_PATH %s\n", env);
-		return 0;
-	}
+        FAIL("result=%d, expected %ld (str=%s)", result, value, valueStr);
+    }
 
 	int r = dlclose(handle);
 	if ( r != 0 ) {
-        printf("dlclose() returned %d\n", r);
-        printf("[FAIL] dlopen-DYLD_LIBRARY_PATH %s\n", env);
-		return 0;
-	}
+        FAIL("dlclose() returned %d", r);
+    }
 
-	void* handle2 = dlopen("/junk/libfoo.dylib", RTLD_LAZY);
-	if ( handle2 == NULL ) {
-        printf("dlerror(): %s\n", dlerror());
-        printf("[FAIL] dlopen-DYLD_LIBRARY_PATH %s\n", env);
-		return 0;
-	}
+    void* handle2 = dlopen("/junk/libfoo.dylib", RTLD_LAZY);
+    if ( handle2 == NULL ) {
+        FAIL("dlerror(\"/junk/libfoo.dylib\"): %s", dlerror());
+    }
 
-
-
-    printf("[PASS] dlopen-DYLD_LIBRARY_PATH %s\n", env);
-
-	return 0;
+    PASS("Success");
 }
 

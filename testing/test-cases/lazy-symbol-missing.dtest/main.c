@@ -1,11 +1,13 @@
 // note: -Os is needed for armv7 to work around compiler issue where at -O0 it computes pointer to function and calls that
 
 // BUILD:  $CC foo.c -dynamiclib -o $BUILD_DIR/libfoo.dylib         -install_name $RUN_DIR/libfoo.dylib
-// BUILD:  $CC foo.c -dynamiclib -o $TEMP_DIR/libfoo-present.dylib  -install_name $RUN_DIR/libfoo.dylib -DHAS_SYMBOL=1
-// BUILD:  $CC main.c            -o $BUILD_DIR/lazy-symbol-missing.exe        $TEMP_DIR/libfoo-present.dylib -Os
+// BUILD:  $CC foo.c -dynamiclib -o $BUILD_DIR/libfoo-present.dylib  -install_name $RUN_DIR/libfoo.dylib -DHAS_SYMBOL=1
+// BUILD:  $CC main.c            -o $BUILD_DIR/lazy-symbol-missing.exe        $BUILD_DIR/libfoo-present.dylib -Os
 // BUILD:  $CC main.c            -o $BUILD_DIR/lazy-symbol-missing-flat.exe   -undefined dynamic_lookup      -Os -DFLAT=1
-// BUILD:  $CC main-call.c       -o $BUILD_DIR/lazy-symbol-missing-called.exe $TEMP_DIR/libfoo-present.dylib -Os
-// BUILD:  $CC runner.c          -o $BUILD_DIR/lazy-symbol-runner.exe -DRUN_DIR="$RUN_DIR"
+// BUILD:  $CC main-call.c       -o $BUILD_DIR/lazy-symbol-missing-called.exe $BUILD_DIR/libfoo-present.dylib -Os
+// BUILD:  $CXX runner.cpp         -o $BUILD_DIR/lazy-symbol-runner.exe -DRUN_DIR="$RUN_DIR"
+
+// BUILD: $SKIP_INSTALL $BUILD_DIR/libfoo-present.dylib
 
 // NO_CRASH_LOG: lazy-symbol-missing-called.exe
 
@@ -17,6 +19,8 @@
 #include <stdio.h>
 #include <stdbool.h>
 #include <mach-o/getsect.h>
+
+#include "test_support.h"
 
 #if __LP64__
 extern struct mach_header_64 __dso_handle;
@@ -32,10 +36,7 @@ extern int slipperySymbol();
   #define TESTNAME "lazy-symbol-missing"
 #endif
 
-int main(int argc, const char* argv[])
-{
-    printf("[BEGIN] " TESTNAME "\n");
-
+int main(int argc, const char* argv[], const char* envp[], const char* apple[]) {
 #if __arm64e__
     // arm64e always uses chained binds which does not support lazy binding
     bool supportsLazyBinding = false;
@@ -55,9 +56,6 @@ int main(int argc, const char* argv[])
         if ( argc < 0 )
             slipperySymbol();
     }
-
-    printf("[PASS]  " TESTNAME "\n");
-
-	return 0;
+    PASS("%s", TESTNAME);
 }
 

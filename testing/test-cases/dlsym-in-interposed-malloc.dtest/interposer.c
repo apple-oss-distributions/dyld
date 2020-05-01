@@ -5,6 +5,8 @@
 #include <string.h>
 #include <mach-o/dyld-interposing.h>
 
+#include "test_support.h"
+
 static bool inMalloc = false;
 static bool forceSystemMalloc = false;
 
@@ -18,8 +20,7 @@ void* mymalloc(size_t size)
     if (inMalloc) {
         // Recursion!   This shouldn't happen.
         forceSystemMalloc = true;
-        printf("[FAIL] dlsym-in-interposed-malloc mymalloc() is recursive\n");
-        exit(1);
+        FAIL("mymalloc() is recursive");
     }
 
     inMalloc = true;
@@ -28,14 +29,12 @@ void* mymalloc(size_t size)
     void* sym = dlsym(RTLD_DEFAULT, "malloc");
     if (sym == NULL) {
         forceSystemMalloc = true;
-        printf("[FAIL] dlsym-in-interposed-malloc dlsym failed\n");
-        exit(1);
+        FAIL("dlsym failed");
     }
 
     if (sym != mymalloc) {
         forceSystemMalloc = true;
-        printf("[FAIL] dlsym-in-interposed-malloc dlsym result %p != mymalloc %p\n", sym, &mymalloc);
-        exit(1);
+        FAIL("dlsym result %p != mymalloc %p", sym, &mymalloc);
     }
     void* result = malloc(size);
 

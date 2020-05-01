@@ -552,11 +552,13 @@ kern_return_t mach_timebase_info(mach_timebase_info_t info) {
 	return gSyscallHelpers->mach_timebase_info(info);
 }
 
-bool OSAtomicCompareAndSwapPtrBarrier(void* old, void* new, void * volatile *value) {
+bool myOSAtomicCompareAndSwapPtrBarrier(void* old, void* new, void * volatile *value) __asm("_OSAtomicCompareAndSwapPtrBarrier");
+bool myOSAtomicCompareAndSwapPtrBarrier(void* old, void* new, void * volatile *value) {
 	return gSyscallHelpers->OSAtomicCompareAndSwapPtrBarrier(old, new, value);
 }
 
-void OSMemoryBarrier()  {
+void myOSMemoryBarrier(void) __asm("_OSMemoryBarrier");
+void myOSMemoryBarrier()  {
 	return gSyscallHelpers->OSMemoryBarrier();
 }
 
@@ -931,7 +933,7 @@ uint64_t kdebug_trace_string(uint32_t debugid, uint64_t str_id, const char *str)
     return 0;
 }
 
-uint64_t amfi_check_dyld_policy_self(uint64_t inFlags, uint64_t* outFlags)
+int amfi_check_dyld_policy_self(uint64_t inFlags, uint64_t* outFlags)
 {
     if ( gSyscallHelpers->version >= 10 )
         return gSyscallHelpers->amfi_check_dyld_policy_self(inFlags, outFlags);

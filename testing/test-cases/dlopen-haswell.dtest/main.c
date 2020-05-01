@@ -13,6 +13,8 @@
 #include <mach/mach.h>
 #include <mach/mach_host.h>
 
+#include "test_support.h"
+
 typedef bool (*BoolFunc)(void);
 
 
@@ -30,22 +32,15 @@ bool isHaswell_dynamic()
 }
 
 
-int main(int arg, const char* argv[])
-{
-    printf("[BEGIN] dlopen-haswell\n");
-
+int main(int argc, const char* argv[], const char* envp[], const char* apple[]) {
     void* handle = dlopen(RUN_DIR "/libHaswellCheck.dylib", RTLD_LAZY);
     if ( handle == NULL ) {
-        printf("dlerror(): %s\n", dlerror());
-        printf("[FAIL] dlopen-haswell dlopen\n");
-        return 0;
+        FAIL("dlopen(\"" RUN_DIR "/libHaswellCheck.dylib\") error: %s", dlerror());
     }
 
     BoolFunc libFunc = (BoolFunc)dlsym(handle, "isHaswell");
     if ( libFunc == NULL ) {
-        printf("dlerror(): %s\n", dlerror());
-        printf("[FAIL] dlopen-haswell dlsym\n");
-        return 0;
+        FAIL("dlsym(\"isHaswell\") error: %s", dlerror());
     }
 
     // check if haswell slice of libHaswellCheck.dylib was loaded on haswell machines
@@ -53,11 +48,9 @@ int main(int arg, const char* argv[])
     bool runtimeIsHaswell = isHaswell_dynamic();
 
 	if ( dylibIsHaswellSlice != runtimeIsHaswell )
-        printf("[FAIL] dlopen-haswell, dylibIsHaswellSlice=%d, runtimeIsHaswell=%d\n", dylibIsHaswellSlice, runtimeIsHaswell);
+        FAIL("dlopen-haswell, dylibIsHaswellSlice=%d, runtimeIsHaswell=%d", dylibIsHaswellSlice, runtimeIsHaswell);
 	else
-        printf("[PASS] dlopen-haswell\n");
-
-	return 0;
+        PASS("Success");
 }
 
 

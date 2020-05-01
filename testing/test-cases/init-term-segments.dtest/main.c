@@ -9,42 +9,35 @@
 #include <dlfcn.h>
 #include <stdlib.h>
 
+#include "test_support.h"
+
 extern bool foo(bool* ptr);
 
-int main()
-{
-    printf("[BEGIN] init-term-segments\n");
-
+int main(int argc, const char* argv[], const char* envp[], const char* apple[]) {
     void* h = dlopen(RUN_DIR "/libfoo.dylib", RTLD_NOW);
     if (h == NULL) {
-		printf("[FAIL]  init-term-segments - dlerror = %s\n", dlerror());
-		return 0;
+		FAIL("dlerror = %s", dlerror());
     }
 
     void* fooSym = dlsym(RTLD_DEFAULT, "foo");
     if ( fooSym == NULL ) {
-		printf("[FAIL]  init-term-segments - dlsym failure\n");
-		return 0;
+        FAIL("dlsym failure");
     }
 
     bool ranTerm = false;
     bool ranInit = ((__typeof(&foo))fooSym)(&ranTerm);
     if (!ranInit) {
-		printf("[FAIL]  init-term-segments - didn't run init\n");
-		return 0;
+        FAIL("didn't run init");
     }
 
     if ( dlclose(h) != 0 ) {
-		printf("[FAIL]  init-term-segments - didn't dlclose\n");
-		return 0;
+        FAIL("didn't dlclose");
     }
 
     if (!ranTerm) {
-		printf("[FAIL]  init-term-segments - didn't run term\n");
-		return 0;
+        FAIL("didn't run term");
     }
 
-    printf("[PASS]  init-term-segments\n");
-	return 0;
+    PASS("Success");
 }
 

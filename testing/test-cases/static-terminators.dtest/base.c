@@ -1,6 +1,7 @@
 #include <stddef.h>
-#include <stdio.h>
 #include <stdbool.h>
+
+#include "test_support.h"
 
 static bool mainCalled           = false;
 static bool libCalled            = false;
@@ -23,12 +24,12 @@ static __attribute__((destructor))
 void myTerm()
 {
     if ( !mainCalled )
-        printf("[FAIL] static-terminators, main's terminator not called\n");
+        FAIL("main's terminator not called");
     else if ( !libCalled )
-        printf("[FAIL] static-terminators, libDynamic's terminator not called\n");
+        FAIL("libDynamic's terminator not called");
     else if ( !libCalledBeforeMain )
-        printf("[FAIL] static-terminators, libDynamic's terminator called out of order\n");
+        FAIL("libDynamic's terminator called out of order");
     else
-        printf("[PASS] static-terminators\n");
+        PASS("Success");
 }
 

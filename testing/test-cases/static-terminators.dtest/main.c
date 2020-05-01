@@ -10,6 +10,7 @@
 #include <dlfcn.h>
 #include <mach-o/dyld_priv.h>
 
+#include "test_support.h"
 
 // verify all static terminators run in proper order
 
@@ -19,24 +20,18 @@ extern void mainTerminated();
 static __attribute__((destructor))
 void myTerm()
 {
-    //fprintf(stderr, "main's static terminator\n");
+    LOG("main's static terminator");
     mainTerminated();
 }
 
 
-int main()
-{
-    printf("[BEGIN] static-terminators\n");
-
+int main(int argc, const char* argv[], const char* envp[], const char* apple[]) {
     // load dylib
     void* handle = dlopen(RUN_DIR "/libdynamic.dylib", RTLD_LAZY);
     if ( handle == NULL ) {
-        printf("[FAIL]  dlclose-static-terminator: libdynamic.dylib could not be loaded, %s\n", dlerror());
-        return 0;
+        FAIL("libdynamic.dylib could not be loaded, %s", dlerror());
     }
 
     // PASS is printed in libbase.dylib terminator
-
-	return 0;
 }
 

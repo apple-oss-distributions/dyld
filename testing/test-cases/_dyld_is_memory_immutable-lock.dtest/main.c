@@ -11,6 +11,7 @@
 #include <pthread.h>
 #include <mach-o/dyld_priv.h>
 
+#include "test_support.h"
 
 static void* work(void* mh)
 {
@@ -27,8 +28,7 @@ static void notify(const struct mach_header* mh, intptr_t vmaddr_slide)
     // for each image notified that is not in the dyld cache, spin up a thread which calls _dyld_is_memory_immutable()
     pthread_t workerThread;
     if ( pthread_create(&workerThread, NULL, &work, (void*)mh) != 0 ) {
-        printf("[FAIL]  _dyld_is_memory_immutable-lock, pthread_create\n");
-        exit(0);
+        FAIL("pthread_create");
     }
     void* dummy;
     pthread_join(workerThread, &dummy);
@@ -36,20 +36,14 @@ static void notify(const struct mach_header* mh, intptr_t vmaddr_slide)
 
 
 
-int main()
-{
-    printf("[BEGIN] _dyld_is_memory_immutable-lock\n");
-
+int main(int argc, const char* argv[], const char* envp[], const char* apple[]) {
     _dyld_register_func_for_add_image(&notify);
 
     void* h = dlopen(RUN_DIR "/lock.bundle", 0);
     if ( h == NULL ) {
-        printf("dlopen(lock.bundle) failed with error: %s\n", dlerror());
-        printf("[FAIL]  _dyld_is_memory_immutable-lock, lock.bundle not loaded\n");
-        return 0;
+        FAIL("lock.bundle not loaded, dlopen(lock.bundle) failed with error: %s", dlerror());
     }
 
-    printf("[PASS]  _dyld_is_memory_immutable-lock\n");
-	return 0;
+    PASS("Success");
 }
 

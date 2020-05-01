@@ -9,6 +9,8 @@
 #include <crt_externs.h>
 #include <mach-o/ldsyms.h>
 
+#include "test_support.h"
+
 // This struct is passed as fifth parameter to libSystem.dylib's initializer so it record
 // the address of crt global variables.
 struct ProgramVars
@@ -36,65 +38,46 @@ myInit(int argc, const char* argv[], const char* envp[], const char* apple[], co
     sVars = vars;
 }
 
-
-int main(int argc, const char* argv[])
-{
-    printf("[BEGIN] crt-vars-libSystem\n");
-    bool success = true;
-
+int main(int argc, const char* argv[], const char* envp[], const char* apple[]) {
     if ( _NSGetArgv() != &NXArgv ) {
-        printf("[FAIL] crt-libSystem: _NSGetArgv() != &NXArgv (%p!=%p) for %s", _NSGetArgv(), &NXArgv, argv[0]);
-        success = false;
+        FAIL("_NSGetArgv() != &NXArgv (%p!=%p) for %s", _NSGetArgv(), &NXArgv, argv[0]);
     }
 
     if ( _NSGetArgc() != &NXArgc ) {
-        printf("[FAIL] crt-libSystem: _NSGetArgc() != &NXArgc (%p!=%p) for %s", _NSGetArgc(), &NXArgc, argv[0]);
-        success = false;
+        FAIL("_NSGetArgc() != &NXArgc (%p!=%p) for %s", _NSGetArgc(), &NXArgc, argv[0]);
     }
 
     if ( _NSGetEnviron() != &environ ) {
-        printf("[FAIL] crt-libSystem: _NSGetEnviron() != &environv (%p!=%p) for %s", _NSGetEnviron(), &environ, argv[0]);
-        success = false;
+        FAIL("_NSGetEnviron() != &environv (%p!=%p) for %s", _NSGetEnviron(), &environ, argv[0]);
     }
 
     if ( _NSGetProgname() != &__progname ) {
-        printf("[FAIL] crt-libSystem: _NSGetProgname() != &__progname (%p!=%p) for %s", _NSGetProgname(), &__progname, argv[0]);
-        success = false;
+        FAIL("_NSGetProgname() != &__progname (%p!=%p) for %s", _NSGetProgname(), &__progname, argv[0]);
     }
 
     if ( _NSGetMachExecuteHeader() != &_mh_execute_header ) {
-        printf("[FAIL] crt-libSystem: _NSGetMachExecuteHeader() != &_mh_execute_headerv (%p!=%p) for %s", _NSGetMachExecuteHeader(), &_mh_execute_header, argv[0]);
-        success = false;
+        FAIL("_NSGetMachExecuteHeader() != &_mh_execute_headerv (%p!=%p) for %s", _NSGetMachExecuteHeader(), &_mh_execute_header, argv[0]);
     }
 
     if ( sVars->NXArgvPtr != &NXArgv ) {
-        printf("[FAIL] crt-libSystem: sVars->NXArgvPtr != &NXArg (%p!=%p) for %s", sVars->NXArgvPtr, &NXArgv, argv[0]);
-        success = false;
+        FAIL("sVars->NXArgvPtr != &NXArg (%p!=%p) for %s", sVars->NXArgvPtr, &NXArgv, argv[0]);
     }
 
     if ( sVars->NXArgcPtr != &NXArgc ) {
-        printf("[FAIL] crt-libSystem: sVars->NXArgcPtr != &NXArgc (%p!=%p) for %s", sVars->NXArgcPtr, &NXArgc, argv[0]);
-        success = false;
+        FAIL("sVars->NXArgcPtr != &NXArgc (%p!=%p) for %s", sVars->NXArgcPtr, &NXArgc, argv[0]);
     }
 
     if ( sVars->environPtr != &environ ) {
-        printf("[FAIL] crt-libSystem: sVars->environPtr != &environ (%p!=%p) for %s", sVars->environPtr, &environ, argv[0]);
-        success = false;
+        FAIL("sVars->environPtr != &environ (%p!=%p) for %s", sVars->environPtr, &environ, argv[0]);
     }
 
     if ( sVars->__prognamePtr != &__progname ) {
-        printf("[FAIL] crt-libSystem: sVars->__prognamePtr != &__progname (%p!=%p) for %s", sVars->__prognamePtr, &__progname, argv[0]);
-        success = false;
+        FAIL("sVars->__prognamePtr != &__progname (%p!=%p) for %s", sVars->__prognamePtr, &__progname, argv[0]);
     }
 
     if ( sVars->mh != &_mh_execute_header ) {
-        printf("[FAIL] crt-libSystem: sVars->mh != &_mh_execute_header (%p!=%p) for %s", sVars->mh, &_mh_execute_header, argv[0]);
-        success = false;
+        FAIL("sVars->mh != &_mh_execute_header (%p!=%p) for %s", sVars->mh, &_mh_execute_header, argv[0]);
     }
-
-    if ( success )
-        printf("[PASS] crt-vars-libSystem\n");
-
-    return 0;
+    PASS("Success");
 }
 

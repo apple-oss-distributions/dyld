@@ -402,10 +402,8 @@ uintptr_t ImageLoader::interposedAddress(const LinkContext& context, uintptr_t a
 void ImageLoader::applyInterposingToDyldCache(const LinkContext& context) {
 	if (!context.dyldCache)
 		return;
-#if !__arm64e__ // until arm64e cache builder sets builtFromChainedFixups
 	if (!context.dyldCache->header.builtFromChainedFixups)
 		return;
-#endif
 	if (fgInterposingTuples.empty())
 		return;
 	// For each of the interposed addresses, see if any of them are in the shared cache.  If so, find

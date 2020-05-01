@@ -491,6 +491,7 @@ public:
         if (instanceProperties)      aslrTracker.add(&instanceProperties);
         if (extendedMethodTypes)     aslrTracker.add(&extendedMethodTypes);
         if (demangledName)           aslrTracker.add(&demangledName);
+        if (classProperties)         aslrTracker.add(&classProperties);
     }
 };
 

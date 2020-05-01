@@ -583,6 +583,15 @@ bool MachOLoaded::findClosestSymbol(uint64_t address, const char** symbolName, u
         return false;
     uint64_t targetUnslidAddress = address - leInfo.layout.slide;
 
+    // find section index the address is in to validate n_sect
+    __block uint32_t sectionIndexForTargetAddress = 0;
+    forEachSection(^(const SectionInfo& sectInfo, bool malformedSectionRange, bool& stop) {
+        ++sectionIndexForTargetAddress;
+        if ( (sectInfo.sectAddr <= targetUnslidAddress) && (targetUnslidAddress < sectInfo.sectAddr+sectInfo.sectSize) ) {
+            stop = true;
+        }
+    });
+
     uint32_t               maxStringOffset  = leInfo.symTab->strsize;
     const char*            stringPool       =             (char*)getLinkEditContent(leInfo.layout, leInfo.symTab->stroff);
     const struct nlist*    symbols          = (struct nlist*)   (getLinkEditContent(leInfo.layout, leInfo.symTab->symoff));
@@ -595,10 +604,10 @@ bool MachOLoaded::findClosestSymbol(uint64_t address, const char** symbolName, u
         for (const struct nlist_64* s = globalsStart; s < globalsEnd; ++s) {
             if ( (s->n_type & N_TYPE) == N_SECT ) {
                 if ( bestSymbol == nullptr ) {
-                    if ( s->n_value <= targetUnslidAddress )
+                    if ( (s->n_value <= targetUnslidAddress) && (s->n_sect == sectionIndexForTargetAddress) )
                         bestSymbol = s;
                 }
-                else if ( (s->n_value <= targetUnslidAddress) && (bestSymbol->n_value < s->n_value) ) {
+                else if ( (s->n_value <= targetUnslidAddress) && (bestSymbol->n_value < s->n_value) && (s->n_sect == sectionIndexForTargetAddress) ) {
                     bestSymbol = s;
                 }
             }
@@ -609,10 +618,10 @@ bool MachOLoaded::findClosestSymbol(uint64_t address, const char** symbolName, u
         for (const struct nlist_64* s = localsStart; s < localsEnd; ++s) {
              if ( ((s->n_type & N_TYPE) == N_SECT) && ((s->n_type & N_STAB) == 0) ) {
                 if ( bestSymbol == nullptr ) {
-                    if ( s->n_value <= targetUnslidAddress )
+                    if ( (s->n_value <= targetUnslidAddress) && (s->n_sect == sectionIndexForTargetAddress) )
                         bestSymbol = s;
                 }
-                else if ( (s->n_value <= targetUnslidAddress) && (bestSymbol->n_value < s->n_value) ) {
+                else if ( (s->n_value <= targetUnslidAddress) && (bestSymbol->n_value < s->n_value) && (s->n_sect == sectionIndexForTargetAddress) ) {
                     bestSymbol = s;
                 }
             }
@@ -632,10 +641,10 @@ bool MachOLoaded::findClosestSymbol(uint64_t address, const char** symbolName, u
         for (const struct nlist* s = globalsStart; s < globalsEnd; ++s) {
             if ( (s->n_type & N_TYPE) == N_SECT ) {
                 if ( bestSymbol == nullptr ) {
-                    if ( s->n_value <= targetUnslidAddress )
+                    if ( (s->n_value <= targetUnslidAddress) && (s->n_sect == sectionIndexForTargetAddress) )
                         bestSymbol = s;
                 }
-                else if ( (s->n_value <= targetUnslidAddress) && (bestSymbol->n_value < s->n_value) ) {
+                else if ( (s->n_value <= targetUnslidAddress) && (bestSymbol->n_value < s->n_value) && (s->n_sect == sectionIndexForTargetAddress) ) {
                     bestSymbol = s;
                 }
             }
@@ -646,10 +655,10 @@ bool MachOLoaded::findClosestSymbol(uint64_t address, const char** symbolName, u
         for (const struct nlist* s = localsStart; s < localsEnd; ++s) {
              if ( ((s->n_type & N_TYPE) == N_SECT) && ((s->n_type & N_STAB) == 0) ) {
                 if ( bestSymbol == nullptr ) {
-                    if ( s->n_value <= targetUnslidAddress )
+                    if ( (s->n_value <= targetUnslidAddress) && (s->n_sect == sectionIndexForTargetAddress) )
                         bestSymbol = s;
                 }
-                else if ( (s->n_value <= targetUnslidAddress) && (bestSymbol->n_value < s->n_value) ) {
+                else if ( (s->n_value <= targetUnslidAddress) && (bestSymbol->n_value < s->n_value) && (s->n_sect == sectionIndexForTargetAddress) ) {
                     bestSymbol = s;
                 }
             }
@@ -1026,10 +1035,29 @@ bool MachOLoaded::ChainedFixupPointerOnDisk::isRebase(uint16_t pointerFormat, ui
                 return true;
             }
             break;
+       case DYLD_CHAINED_PTR_ARM64E_OFFSET:
+       case DYLD_CHAINED_PTR_ARM64E_USERLAND:
+            if ( this->arm64e.bind.bind )
+                return false;
+            if ( this->arm64e.authRebase.auth ) {
+                targetRuntimeOffset = this->arm64e.authRebase.target;
+                return true;
+            }
+            else {
+                targetRuntimeOffset = this->arm64e.unpackTarget();
+                return true;
+            }
+            break;
         case DYLD_CHAINED_PTR_64:
             if ( this->generic64.bind.bind )
                 return false;
             targetRuntimeOffset = this->generic64.unpackedTarget() - preferedLoadAddress;
+            return true;
+            break;
+        case DYLD_CHAINED_PTR_64_OFFSET:
+            if ( this->generic64.bind.bind )
+                return false;
+            targetRuntimeOffset = this->generic64.unpackedTarget();
             return true;
             break;
         case DYLD_CHAINED_PTR_32:
@@ -1048,6 +1076,8 @@ bool MachOLoaded::ChainedFixupPointerOnDisk::isBind(uint16_t pointerFormat, uint
 {
     switch (pointerFormat) {
         case DYLD_CHAINED_PTR_ARM64E:
+        case DYLD_CHAINED_PTR_ARM64E_OFFSET:
+        case DYLD_CHAINED_PTR_ARM64E_USERLAND:
             if ( !this->arm64e.authBind.bind )
                 return false;
             if ( this->arm64e.authBind.auth ) {
@@ -1060,6 +1090,7 @@ bool MachOLoaded::ChainedFixupPointerOnDisk::isBind(uint16_t pointerFormat, uint
             }
             break;
         case DYLD_CHAINED_PTR_64:
+        case DYLD_CHAINED_PTR_64_OFFSET:
             if ( !this->generic64.bind.bind )
                 return false;
             bindOrdinal = this->generic64.bind.ordinal;
@@ -1127,6 +1158,48 @@ void MachOLoaded::fixupAllChainedFixups(Diagnostics& diag, const dyld_chained_st
                     logFixup(fixupLoc, newValue);
                 fixupLoc->raw64 = (uintptr_t)newValue;
                 break;
+            case DYLD_CHAINED_PTR_ARM64E_OFFSET:
+            case DYLD_CHAINED_PTR_ARM64E_USERLAND:
+                if ( fixupLoc->arm64e.authRebase.auth ) {
+                     if ( fixupLoc->arm64e.authBind.bind ) {
+                         if ( fixupLoc->arm64e.authBind.ordinal >= bindTargets.count() ) {
+                             diag.error("out of range bind ordinal %d (max %lu)", fixupLoc->arm64e.authBind.ordinal, bindTargets.count());
+                             stop = true;
+                             break;
+                         }
+                         else {
+                             // authenticated bind
+                             newValue = (void*)(bindTargets[fixupLoc->arm64e.bind.ordinal]);
+                             if (newValue != 0)  // Don't sign missing weak imports
+                                 newValue = (void*)fixupLoc->arm64e.signPointer(fixupLoc, (uintptr_t)newValue);
+                         }
+                     }
+                     else {
+                         // authenticated rebase
+                         newValue = (void*)fixupLoc->arm64e.signPointer(fixupLoc, (uintptr_t)this + fixupLoc->arm64e.authRebase.target);
+                     }
+                 }
+                 else {
+                     if ( fixupLoc->arm64e.bind.bind ) {
+                         if ( fixupLoc->arm64e.bind.ordinal >= bindTargets.count() ) {
+                             diag.error("out of range bind ordinal %d (max %lu)", fixupLoc->arm64e.bind.ordinal, bindTargets.count());
+                             stop = true;
+                             break;
+                         }
+                         else {
+                             // plain bind
+                             newValue = (void*)((long)bindTargets[fixupLoc->arm64e.bind.ordinal] + fixupLoc->arm64e.signExtendedAddend());
+                         }
+                     }
+                     else {
+                         // plain rebase
+                         newValue = (void*)((uintptr_t)this + fixupLoc->arm64e.unpackTarget());
+                    }
+                 }
+                 if ( logFixup )
+                     logFixup(fixupLoc, newValue);
+                 fixupLoc->raw64 = (uintptr_t)newValue;
+                 break;
   #endif
             case DYLD_CHAINED_PTR_64:
                 if ( fixupLoc->generic64.bind.bind ) {
@@ -1141,6 +1214,24 @@ void MachOLoaded::fixupAllChainedFixups(Diagnostics& diag, const dyld_chained_st
                 }
                 else {
                     newValue = (void*)(fixupLoc->generic64.unpackedTarget()+slide);
+                }
+                if ( logFixup )
+                    logFixup(fixupLoc, newValue);
+                fixupLoc->raw64 = (uintptr_t)newValue;
+               break;
+            case DYLD_CHAINED_PTR_64_OFFSET:
+                if ( fixupLoc->generic64.bind.bind ) {
+                    if ( fixupLoc->generic64.bind.ordinal >= bindTargets.count() ) {
+                        diag.error("out of range bind ordinal %d (max %lu)", fixupLoc->generic64.bind.ordinal, bindTargets.count());
+                        stop = true;
+                        break;
+                    }
+                    else {
+                        newValue = (void*)((long)bindTargets[fixupLoc->generic64.bind.ordinal] + fixupLoc->generic64.signExtendedAddend());
+                    }
+                }
+                else {
+                    newValue = (void*)((uintptr_t)this + fixupLoc->generic64.unpackedTarget());
                 }
                 if ( logFixup )
                     logFixup(fixupLoc, newValue);
@@ -1196,12 +1287,15 @@ bool MachOLoaded::walkChain(Diagnostics& diag, const dyld_chained_starts_in_segm
         if ( !stop ) {
             switch (segInfo->pointer_format) {
                 case DYLD_CHAINED_PTR_ARM64E:
+                case DYLD_CHAINED_PTR_ARM64E_USERLAND:
                     if ( chainContent.arm64e.rebase.next == 0 )
                         chainEnd = true;
                     else
                         chain = (ChainedFixupPointerOnDisk*)((uint8_t*)chain + chainContent.arm64e.rebase.next*8);
                     break;
                 case DYLD_CHAINED_PTR_64:
+                case DYLD_CHAINED_PTR_64_OFFSET:
+                case DYLD_CHAINED_PTR_ARM64E_OFFSET:
                     if ( chainContent.generic64.rebase.next == 0 )
                         chainEnd = true;
                     else

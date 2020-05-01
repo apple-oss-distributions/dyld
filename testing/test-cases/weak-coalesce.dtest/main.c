@@ -11,16 +11,13 @@
 #include <stdio.h>
 #include <stdlib.h>
 
+#include "test_support.h"
 #include "base.h"
 
-int main()
-{
-    printf("[BEGIN] weak-coalesce\n");
+int main(int argc, const char* argv[], const char* envp[], const char* apple[]) {
+    baseVerifyCoal1("in main", &coal1);
+    baseVerifyCoal2("in main", &coal2);
 
-	baseVerifyCoal1("in main", &coal1);
-	baseVerifyCoal2("in main", &coal2);
-
-	baseCheck();
-	return 0;
+    baseCheck();
 }
 

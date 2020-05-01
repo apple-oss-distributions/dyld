@@ -9,6 +9,7 @@
 #include <dlfcn.h>
 #include <mach-o/dyld_priv.h>
 
+#include "test_support.h"
 
 // verify dlclose() runs static terminator
 
@@ -21,22 +22,17 @@ static void termNotifyFunc()
     termDidRun = true;
 }
 
-int main()
-{
-    printf("[BEGIN] dlclose-static-terminator\n");
-
+int main(int argc, const char* argv[], const char* envp[], const char* apple[]) {
     // load dylib
     void* handle = dlopen(RUN_DIR "/libterm.dylib", RTLD_LAZY);
     if ( handle == NULL ) {
-        printf("[FAIL]  dlclose-static-terminator: libterm.dylib could not be loaded, %s\n", dlerror());
-        return 0;
+        FAIL("libterm.dylib could not be loaded, %s", dlerror());
     }
 
     // stuff pointer to my notifier
     NotifyProc* pointerAddress = (NotifyProc*)dlsym(handle, "gNotifer");
     if ( pointerAddress == NULL ) {
-        printf("[FAIL]  dlclose-static-terminator: gNotifer not found in libterm.dylib\n");
-        return 0;
+        FAIL("gNotifer not found in libterm.dylib");
     }
     *pointerAddress = &termNotifyFunc;
 
@@ -44,10 +40,8 @@ int main()
     dlclose(handle);
 
     if ( termDidRun )
-        printf("[PASS]  dlclose-static-terminator\n");
+        PASS("Success");
     else
-        printf("[FAIL]  dlclose-static-terminator: terminator not run\n");
-
-	return 0;
+        FAIL("terminator not run");
 }
 

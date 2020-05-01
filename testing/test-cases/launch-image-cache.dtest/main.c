@@ -45,6 +45,8 @@
 
 #include <stdio.h>
 
+#include "test_support.h"
+
 extern int foo1();
 extern int foo2();
 extern int foo3();
@@ -78,52 +80,46 @@ extern int foo30();
 extern int foo31();
 extern int foo32();
 
-int failedCheck(int i, int j) {
+void failedCheck(int i, int j) {
     if (i != j) {
-        printf("[FAIL] launch-image-cache: expected %d but got %d\n", j, i);
-        return 1;
+        FAIL("expected %d but got %d", j, i);
     }
-    return 0;
 }
 
-int main()
-{
-    printf("[BEGIN] launch-image-cache\n");
+int main(int argc, const char* argv[], const char* envp[], const char* apple[]) {
+    failedCheck(foo1(), 1);
+    failedCheck(foo2(), 2);
+    failedCheck(foo3(), 3);
+    failedCheck(foo4(), 4);
+    failedCheck(foo5(), 5);
+    failedCheck(foo6(), 6);
+    failedCheck(foo7(), 7);
+    failedCheck(foo8(), 8);
+    failedCheck(foo9(), 9);
+    failedCheck(foo10(), 10);
+    failedCheck(foo11(), 11);
+    failedCheck(foo12(), 12);
+    failedCheck(foo13(), 13);
+    failedCheck(foo14(), 14);
+    failedCheck(foo15(), 15);
+    failedCheck(foo16(), 16);
+    failedCheck(foo17(), 17);
+    failedCheck(foo18(), 18);
+    failedCheck(foo19(), 19);
+    failedCheck(foo20(), 20);
+    failedCheck(foo21(), 21);
+    failedCheck(foo22(), 22);
+    failedCheck(foo23(), 23);
+    failedCheck(foo24(), 24);
+    failedCheck(foo25(), 25);
+    failedCheck(foo26(), 26);
+    failedCheck(foo27(), 27);
+    failedCheck(foo28(), 28);
+    failedCheck(foo29(), 29);
+    failedCheck(foo30(), 30);
+    failedCheck(foo31(), 31);
+    failedCheck(foo32(), 32);
 
-    if (failedCheck(foo1(), 1)) return 0;
-    if (failedCheck(foo2(), 2)) return 0;
-    if (failedCheck(foo3(), 3)) return 0;
-    if (failedCheck(foo4(), 4)) return 0;
-    if (failedCheck(foo5(), 5)) return 0;
-    if (failedCheck(foo6(), 6)) return 0;
-    if (failedCheck(foo7(), 7)) return 0;
-    if (failedCheck(foo8(), 8)) return 0;
-    if (failedCheck(foo9(), 9)) return 0;
-    if (failedCheck(foo10(), 10)) return 0;
-    if (failedCheck(foo11(), 11)) return 0;
-    if (failedCheck(foo12(), 12)) return 0;
-    if (failedCheck(foo13(), 13)) return 0;
-    if (failedCheck(foo14(), 14)) return 0;
-    if (failedCheck(foo15(), 15)) return 0;
-    if (failedCheck(foo16(), 16)) return 0;
-    if (failedCheck(foo17(), 17)) return 0;
-    if (failedCheck(foo18(), 18)) return 0;
-    if (failedCheck(foo19(), 19)) return 0;
-    if (failedCheck(foo20(), 20)) return 0;
-    if (failedCheck(foo21(), 21)) return 0;
-    if (failedCheck(foo22(), 22)) return 0;
-    if (failedCheck(foo23(), 23)) return 0;
-    if (failedCheck(foo24(), 24)) return 0;
-    if (failedCheck(foo25(), 25)) return 0;
-    if (failedCheck(foo26(), 26)) return 0;
-    if (failedCheck(foo27(), 27)) return 0;
-    if (failedCheck(foo28(), 28)) return 0;
-    if (failedCheck(foo29(), 29)) return 0;
-    if (failedCheck(foo30(), 30)) return 0;
-    if (failedCheck(foo31(), 31)) return 0;
-    if (failedCheck(foo32(), 32)) return 0;
-
-    printf("[PASS]  launch-image-cache\n");
-    return 0;
+    PASS("Success");
 }
 

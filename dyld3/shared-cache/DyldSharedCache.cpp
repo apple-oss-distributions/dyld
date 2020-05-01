@@ -41,7 +41,7 @@
 #include <vector>
 #include <unordered_map>
 #include <unordered_set>
-#include "CacheBuilder.h"
+#include "SharedCacheBuilder.h"
 #include "FileUtils.h"
 #endif
 
@@ -67,8 +67,8 @@ DyldSharedCache::CreateResults DyldSharedCache::create(const CreateOptions&     
                                                        const std::vector<MappedMachO>&    otherOsDylibs,
                                                        const std::vector<MappedMachO>&    osExecutables)
 {
-    CreateResults  results;
-    CacheBuilder   cache(options, fileSystem);
+    CreateResults       results;
+    SharedCacheBuilder  cache(options, fileSystem);
     if (!cache.errorMessage().empty()) {
         results.errorMessage = cache.errorMessage();
         return results;

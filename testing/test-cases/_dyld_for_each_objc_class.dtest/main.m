@@ -14,6 +14,8 @@
 
 #import <Foundation/Foundation.h>
 
+#include "test_support.h"
+
 // All the libraries have a copy of DyldClass
 @interface DyldClass : NSObject
 @end
@@ -39,8 +41,6 @@ Class getMainDyldMainClass() {
   return (Class)&OBJC_CLASS_$_DyldMainClass;
 }
 
-extern int printf(const char*, ...);
-
 extern id objc_getClass(const char *name);
 
 // Get the DyldClass from liblinked1.dylib
@@ -56,9 +56,7 @@ static bool gotDyldClassMain = false;
 static bool gotDyldClassLinked = false;
 static bool gotDyldClassLinked2 = false;
 
-int main() {
-  printf("[BEGIN] _dyld_for_each_objc_class\n");
-
+int main(int argc, const char* argv[], const char* envp[], const char* apple[]) {
   // This API is only available with dyld3 and shared caches.  If we have dyld2 then don't do anything
   const char* testDyldMode = getenv("TEST_DYLD_MODE");
   assert(testDyldMode);
@@ -71,25 +69,21 @@ int main() {
       sawClass = true;
     });
     if (sawClass) {
-      printf("[FAIL] _dyld_for_each_objc_class: dyld2 shouldn't see any classes\n");
-      return 0;
+      FAIL("dyld2 shouldn't see any classes");
     }
-    printf("[PASS] _dyld_for_each_objc_class (dyld2 or no shared cache)\n");
-    return 0;
+    PASS("dyld2 or no shared cache)");
   }
 
   // Check that DyldClass comes from liblinked2 as it is last in load order
   id runtimeDyldClass = objc_getClass("DyldClass");
   if (runtimeDyldClass != getLinked2DyldClass()) {
-    printf("[FAIL] _dyld_for_each_objc_class: DyldClass should have come from liblinked2\n");
-    return 0;
+    FAIL("DyldClass should have come from liblinked2");
   }
 
   // Check that DyldLinkedClass comes from liblinked2 as it is last in load order
   id runtimeDyldLinkedClass = objc_getClass("DyldLinkedClass");
   if (runtimeDyldLinkedClass != getLinked2DyldLinkedClass()) {
-    printf("[FAIL] _dyld_for_each_objc_class: DyldLinkedClass should have come from liblinked2\n");
-    return 0;
+    FAIL("DyldLinkedClass should have come from liblinked2");
   }
 
   // Walk all the implementations of "DyldClass"
@@ -97,53 +91,39 @@ int main() {
     // We should walk these in the order liblinked2, liblinked, main exe
     if (!gotDyldClassLinked2) {
       if (classPtr != getLinked2DyldClass()) {
-        printf("[FAIL] _dyld_for_each_objc_class: Optimized DyldClass should have come from liblinked2\n");
-        *stop = true;
-        return;
+        FAIL("Optimized DyldClass should have come from liblinked2");
       }
       if (!isLoaded) {
-        printf("[FAIL] _dyld_for_each_objc_class: Optimized DyldClass isLoaded should have been set on liblinked2\n");
-        *stop = true;
-        return;
+        FAIL("Optimized DyldClass isLoaded should have been set on liblinked2");
       }
       gotDyldClassLinked2 = true;
       return;
     }
     if (!gotDyldClassLinked) {
       if (classPtr != getLinked1DyldClass()) {
-        printf("[FAIL] _dyld_for_each_objc_class: Optimized DyldClass should have come from liblinked\n");
-        *stop = true;
-        return;
+        FAIL("Optimized DyldClass should have come from liblinked");
       }
       if (!isLoaded) {
-        printf("[FAIL] _dyld_for_each_objc_class: Optimized DyldClass isLoaded should have been set on liblinked\n");
-        *stop = true;
-        return;
+        FAIL("Optimized DyldClass isLoaded should have been set on liblinked");
       }
       gotDyldClassLinked = true;
       return;
     }
     if (!gotDyldClassMain) {
       if (classPtr != getMainDyldClass()) {
-        printf("[FAIL] _dyld_for_each_objc_class: Optimized DyldClass should have come from main exe\n");
-        *stop = true;
-        return;
+        FAIL("Optimized DyldClass should have come from main exe");
       }
       if (!isLoaded) {
-        printf("[FAIL] _dyld_for_each_objc_class: Optimized DyldClass isLoaded should have been set on main exe\n");
-        *stop = true;
-        return;
+        FAIL("Optimized DyldClass isLoaded should have been set on main exe");
       }
       gotDyldClassMain = true;
       return;
     }
-    printf("[FAIL] _dyld_for_each_objc_class: Unexpected Optimized DyldClass\n");
-    return;
+    FAIL("Unexpected Optimized DyldClass");
   });
 
   if ( !gotDyldClassLinked2 || !gotDyldClassLinked || !gotDyldClassMain) {
-    printf("[FAIL] _dyld_for_each_objc_class: Failed to find all duplicates of 'DyldClass'\n");
-    return 0;
+    FAIL("Failed to find all duplicates of 'DyldClass'");
   }
 
   // Visit again, and return liblinked2's DyldClass
@@ -153,8 +133,7 @@ int main() {
     *stop = true;
   });
   if (dyldClassImpl != getLinked2DyldClass()) {
-    printf("[FAIL] _dyld_for_each_objc_class: _dyld_for_each_objc_class should have returned DyldClass from liblinked2\n");
-    return 0;
+    FAIL("_dyld_for_each_objc_class should have returned DyldClass from liblinked2");
   }
 
   // Visit DyldMainClass and make sure it makes the callback for just the result from main.exe
@@ -164,11 +143,8 @@ int main() {
     *stop = true;
   });
   if (dyldMainClassImpl != getMainDyldMainClass()) {
-    printf("[FAIL] _dyld_for_each_objc_class: _dyld_for_each_objc_class should have returned DyldMainClass from main.exe\n");
-    return 0;
+    FAIL("_dyld_for_each_objc_class should have returned DyldMainClass from main.exe");
   }
 
-  printf("[PASS] _dyld_for_each_objc_class\n");
-
-  return 0;
+  PASS("Success");
 }

@@ -1,5 +1,4 @@
 
-// BUILD:  mkdir -p $BUILD_DIR/dir1 $BUILD_DIR/dir2
 // BUILD:  $CC sub1.c -dynamiclib -install_name @rpath/librpathstatic.dylib -o $BUILD_DIR/dir1/librpathstatic.dylib
 // BUILD:  $CC sub2.c -dynamiclib -install_name @rpath/libdynamic.dylib     -o $BUILD_DIR/dir2/libdynamic.dylib $BUILD_DIR/dir1/librpathstatic.dylib
 // BUILD:  $CC foo.c  -dynamiclib -install_name $RUN_DIR/libstatic.dylib    -o $BUILD_DIR/libstatic.dylib -rpath @loader_path/dir1 $BUILD_DIR/dir1/librpathstatic.dylib
@@ -13,18 +12,14 @@
 #include <stdio.h>
 #include <dlfcn.h>
 
-int main()
-{
-    printf("[BEGIN] dlopen-rpath-prev\n");
+#include "test_support.h"
 
-	void* handle = dlopen(RUN_DIR "/dir2/libdynamic.dylib", RTLD_LAZY);
-	if ( handle == NULL ) {
-        printf("dlerror(): %s\n", dlerror());
-        printf("[FAIL]  dlopen-rpath-prev\n");
-		return 0;
-	}
+int main(int argc, const char* argv[], const char* envp[], const char* apple[]) {
+    void* handle = dlopen(RUN_DIR "/dir2/libdynamic.dylib", RTLD_LAZY);
+    if ( handle == NULL ) {
+        FAIL("dlerror(): %s", dlerror());
+    }
 
-    printf("[PASS]  dlopen-rpath-prev\n");
-	return 0;
+    PASS("Success");
 }
 

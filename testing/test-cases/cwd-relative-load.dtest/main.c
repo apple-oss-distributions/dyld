@@ -11,18 +11,16 @@
 
 #include <stdio.h>
 
+#include "test_support.h"
+
 extern int foo;
 
 
-int main()
-{
-    printf("[BEGIN] cwd-relative-load\n");
+int main(int argc, const char* argv[], const char* envp[], const char* apple[]) {
     if ( foo == 42 )
-        printf("[PASS] cwd-relative-load\n");
+        PASS("cwd-relative-load");
     else
-        printf("[FAIL] cwd-relative-load, wrong value\n");
-
-	return 0;
+        FAIL("cwd-relative-load, wrong value");
 }
 
 

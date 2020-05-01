@@ -58,6 +58,7 @@
 #include <ptrauth.h>
 #endif
 
+extern mach_header __dso_handle;
 
 namespace dyld {
     extern dyld_all_image_infos dyld_all_image_infos;
@@ -469,8 +470,13 @@ static void dyld_get_image_versions_internal(const struct mach_header* mh, void 
         if (sdk == 0) {
             sdk = deriveVersionFromDylibs(mh);
         }
+        // HACK: We don't have time to fix all the zippered clients in the spring releases, so keep the mapping
         if (platform == dyld3::Platform::iOSMac) {
-            sdk = 0x000A0F00;
+            if (sdk >= 0x000D0400) {
+                sdk = 0x000A0F04;
+            } else {
+                sdk = 0x000A0F00;
+            }
         }
         callback((const dyld_platform_t)platform, sdk, minOS);
     });
@@ -506,29 +512,24 @@ void dyld_get_image_versions(const struct mach_header* mh, void (^callback)(dyld
     // FIXME: Once dyld2 is gone gAllImages.mainExecutable() will be valid in all cases
     // and we can stop calling _NSGetMachExecuteHeader()
     if (mh == (const struct mach_header*)_NSGetMachExecuteHeader()) {
-        // Cache the main executable and short circuit parsing the
-        if (mainExecutablePlatform == 0) {
-            dyld_get_image_versions_internal(mh, ^(dyld_platform_t platform, uint32_t sdk_version, uint32_t min_version) {
-#if 0
-                //FIXME: Reenable this once Libc supports dynamic platforms.
-                if (platform == PLATFORM_MACOS && dyld_get_active_platform() == PLATFORM_IOSMAC) {
-                    //FIXME: This version should be generated at link time
-                    mainExecutablePlatform = PLATFORM_IOSMAC;
-                    mainExecutableSDKVersion = 0x000D0000;
-                    mainExecutableMinOSVersion = 0x000D0000;
-                } else {
-                    mainExecutablePlatform = platform;
-                    mainExecutableSDKVersion = sdk_version;
-                    mainExecutableMinOSVersion = min_version;
-                }
-#else
-                mainExecutablePlatform = platform;
-                mainExecutableSDKVersion = sdk_version;
-                mainExecutableMinOSVersion = min_version;
-#endif
-                //FIXME: Assert if more than one command?
-            });
+        if (mainExecutablePlatform) {
+            return callback(mainExecutablePlatform, mainExecutableSDKVersion, mainExecutableMinOSVersion);
         }
+        mainExecutablePlatform = ::dyld_get_active_platform();
+        dyld_get_image_versions_internal(mh, ^(dyld_platform_t platform, uint32_t sdk_version, uint32_t min_version) {
+            if (platform == PLATFORM_MACOS && dyld_get_base_platform(mainExecutablePlatform) == PLATFORM_IOS) {
+                // We are running with DYLD_FORCE_PLATFORM, use the current OSes values
+                dyld_get_image_versions_internal(&__dso_handle, ^(dyld_platform_t dyld_platform, uint32_t dyld_sdk_version, uint32_t dyld_min_version) {
+                    if (dyld_get_base_platform(dyld_platform) == PLATFORM_IOS) {
+                        mainExecutableSDKVersion = dyld_sdk_version;
+                        mainExecutableMinOSVersion = dyld_min_version;
+                    }
+                });
+            } else {
+                 mainExecutableSDKVersion = sdk_version;
+                 mainExecutableMinOSVersion = min_version;
+             }
+        });
         return callback(mainExecutablePlatform, mainExecutableSDKVersion, mainExecutableMinOSVersion);
     }
 #if TARGET_OS_EMBEDDED
@@ -1387,7 +1388,14 @@ void _dyld_missing_symbol_abort()
     // dyld3 binds all such missing symbols to this one handler.
     // We need the crash log to contain the backtrace so someone can
     // figure out the symbol.
-    abort_report_np("missing lazy symbol called");
+
+    auto allImageInfos = gAllImages.oldAllImageInfo();
+    allImageInfos->errorKind           = DYLD_EXIT_REASON_SYMBOL_MISSING;
+    allImageInfos->errorClientOfDylibPath   = "<unknown>";
+    allImageInfos->errorTargetDylibPath     = "<unknown>";
+    allImageInfos->errorSymbol              = "<unknown>";
+
+    halt("missing lazy symbol called");
 }
 
 const char* _dyld_get_objc_selector(const char* selName)

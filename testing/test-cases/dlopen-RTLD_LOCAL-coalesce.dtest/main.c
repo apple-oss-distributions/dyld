@@ -11,6 +11,7 @@
 #include <string.h>
 #include <dlfcn.h>
 
+#include "test_support.h"
 
 ///
 /// This tests the interaction of RTLD_LOCAL and weak-def coalescing.
@@ -32,10 +33,7 @@ typedef int (*IntProc)(void);
 
 int __attribute__((weak)) coalA = 0;
 
-int main()
-{
-    printf("[BEGIN] dlopen-RTLD_LOCAL-coalesce\n");
-
+int main(int argc, const char* argv[], const char* envp[], const char* apple[]) {
     ///
     /// Load three foo dylibs in order
     ///
@@ -43,19 +41,15 @@ int main()
     void* handle2 = dlopen(RUN_DIR "/libfoo2.dylib", RTLD_LOCAL);
     void* handle3 = dlopen(RUN_DIR "/libfoo3.dylib", RTLD_GLOBAL);
     if ( handle1 == NULL ) {
-        printf("[FAIL] dlopen-RTLD_LOCAL-coalesce: dlopen(libfoo1.dylib, RTLD_GLOBAL) failed but it should have worked: %s\n", dlerror());
-        return 0;
+        FAIL("dlopen(\"libfoo1.dylib\", RTLD_GLOBAL) failed but it should have worked: %s", dlerror());
     }
     if ( handle2 == NULL ) {
-        printf("[FAIL] dlopen-RTLD_LOCAL-coalesce: dlopen(libfoo2.dylib, RTLD_LOCAL) failed but it should have worked: %s\n", dlerror());
-        return 0;
+        FAIL("dlopen(\"libfoo2.dylib\", RTLD_LOCAL) failed but it should have worked: %s", dlerror());
     }
     if ( handle3 == NULL ) {
-        printf("[FAIL] dlopen-RTLD_LOCAL-coalesce: dlopen(libfoo3.dylib, RTLD_GLOBAL) failed but it should have worked: %s\n", dlerror());
-        return 0;
+        FAIL("dlopen(\"libfoo3.dylib\", RTLD_GLOBAL) failed but it should have worked: %s", dlerror());
     }
 
-    
     ///
     /// Get accessor functions
     ///
@@ -70,8 +64,7 @@ int main()
     if ( !foo1_coalA || !foo1_coalB ||
          !foo2_coalA || !foo2_coalB || !foo2_coalC ||
          !foo3_coalA || !foo3_coalB || !foo3_coalC ) {
-        printf("[FAIL] dlopen-RTLD_LOCAL-coalesce: dlsym() failed\n");
-        return 0;
+        FAIL("dlsym() failed");
     }
 
     ///
@@ -85,38 +78,30 @@ int main()
     int foo3A = (*foo3_coalA)();
     int foo3B = (*foo3_coalB)();
     int foo3C = (*foo3_coalC)();
-    printf("coalA in main:    %d\n", coalA);
-    printf("coalA in libfoo1: %d\n", foo1A);
-    printf("coalA in libfoo2: %d\n", foo2A);
-    printf("coalA in libfoo3: %d\n", foo3A);
+    LOG("coalA in main:    %d", coalA);
+    LOG("coalA in libfoo1: %d", foo1A);
+    LOG("coalA in libfoo2: %d", foo2A);
+    LOG("coalA in libfoo3: %d", foo3A);
 
-    printf("coalB in libfoo1: %d\n", foo1B);
-    printf("coalB in libfoo2: %d\n", foo2B);
-    printf("coalB in libfoo3: %d\n", foo3B);
+    LOG("coalB in libfoo1: %d", foo1B);
+    LOG("coalB in libfoo2: %d", foo2B);
+    LOG("coalB in libfoo3: %d", foo3B);
 
-    printf("coalC in libfoo2: %d\n", foo2C);
-    printf("coalC in libfoo3: %d\n", foo3C);
-
-
+    LOG("coalC in libfoo2: %d", foo2C);
+    LOG("coalC in libfoo3: %d", foo3C);
 
     ///
     /// Verify coalescing was done properly (foo2 was skipped because of RTLD_LOCAL)
     ///
     if ( (foo1A != 0) || (foo2A != 0) || (foo3A != 0) || (coalA != 0) ) {
-        printf("[FAIL] dlopen-RTLD_LOCAL-coalesce: coalA was not coalesced properly\n");
-        return 0;
+        FAIL("coalA was not coalesced properly");
     }
     if ( (foo1B != 1) || (foo2B != 1) || (foo3B != 1) ) {
-        printf("[FAIL] dlopen-RTLD_LOCAL-coalesce: coalB was not coalesced properly\n");
-        return 0;
+        FAIL("coalB was not coalesced properly");
     }
     if ( (foo2C != 2) || (foo3C != 3) ) {
-        printf("[FAIL] dlopen-RTLD_LOCAL-coalesce: coalC was not coalesced properly\n");
-        return 0;
+        FAIL("coalC was not coalesced properly");
     }
 
-
-
-    printf("[PASS] dlopen-RTLD_LOCAL-coalesce\n");
-    return 0;
+    PASS("Success");
 }

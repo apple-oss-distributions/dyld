@@ -33,13 +33,14 @@
 
 struct dyld_all_image_infos;
 class DyldSharedCache;
+struct ProgramVars;
 
 namespace dyld3 {
 
 
 struct LibDyldEntryVector
 {
-    enum { kCurrentVectorVersion = 7 };
+    enum { kCurrentVectorVersion = 8 };
     // The 32-bit caches steal bits to make rebase chains, so use 32-bits for the binary format version storage, but mask only some to actually use
     enum { kBinaryFormatVersionMask = 0x00FFFFFF };
 
@@ -66,6 +67,9 @@ struct LibDyldEntryVector
                                                                             const char* imagePaths[]));
     // added in version 7
     void        (*setHasCacheOverrides)(bool someCacheImageOverriden);
+
+    // added in version 8
+    void        (*setProgramVars)(struct ProgramVars* progVars);
 };
 
 extern const LibDyldEntryVector entryVectorForDyld;

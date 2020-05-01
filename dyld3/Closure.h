@@ -119,8 +119,9 @@ struct VIS_HIDDEN TypedBytes
         selectorTable           = 45,  // uint32_t + (sizeof(ObjCSelectorImage) * count) + hashTable size
         classTable              = 46,  // (3 * uint32_t) + (sizeof(ObjCClassImage) * count) + classHashTable size + protocolHashTable size
         warning                 = 47,  // len = uint32_t + length path + 1, use one entry per warning
-        duplicateClassesTable   = 48, // duplicateClassesHashTable
-   };
+        duplicateClassesTable   = 48,  // duplicateClassesHashTable
+        progVars                = 49,  // sizeof(uint32_t)
+    };
 
     Type         type          : 8;
     uint32_t     payloadLength : 24;
@@ -227,7 +228,7 @@ struct VIS_HIDDEN Image : ContainerTypedBytes
             return (raw != rhs.raw);
         }
      };
-     static_assert(sizeof(ResolvedSymbolTarget) == 8);
+     static_assert(sizeof(ResolvedSymbolTarget) == 8, "Invalid size");
 
 
     // ObjC optimisations
@@ -709,6 +710,7 @@ struct VIS_HIDDEN LaunchClosure : public Closure
     void                forEachInterposingTuple(void (^handler)(const InterposingTuple& tuple, bool& stop)) const;
     bool                usedAtPaths() const;
     bool                usedFallbackPaths() const;
+    bool                usedInterposing() const;
     bool                selectorHashTable(Array<Image::ObjCSelectorImage>& imageNums,
                                           const ObjCSelectorOpt*& hashTable) const;
     bool                classAndProtocolHashTables(Array<Image::ObjCClassImage>& imageNums,
@@ -717,6 +719,7 @@ struct VIS_HIDDEN LaunchClosure : public Closure
     void                duplicateClassesHashTable(const ObjCClassDuplicatesOpt*& duplicateClassesHashTable) const;
     bool                hasInsertedLibraries() const;
     bool                hasInterposings() const;
+    bool                hasProgramVars(uint32_t& runtimeOffset) const;
     
     static bool         buildClosureCachePath(const char* mainExecutablePath, char closurePath[], const char* tempDir,
                                               bool makeDirsIfMissing);
@@ -730,7 +733,9 @@ private:
                         usedFallbackPaths        :  1,
                         initImageCount           : 16,
                         hasInsertedLibraries     :  1,
-                        padding                  : 13;
+                        hasProgVars              :  1,
+                        usedInterposing          :  1,
+                        padding                  : 11;
     };
     const Flags&        getFlags() const;
 };

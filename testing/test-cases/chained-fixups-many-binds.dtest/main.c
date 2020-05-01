@@ -14,8 +14,8 @@
 #include "foo.h"
 #include "uses.h"
 
-int main() {
-	printf("[BEGIN] chained-fixups-many-binds\n");
-	printf("[PASS] chained-fixups-many-binds\n");
-	return 0;
+#include "test_support.h"
+
+int main(int argc, const char* argv[], const char* envp[], const char* apple[]) {
+    PASS("Success");
 }

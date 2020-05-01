@@ -3,10 +3,9 @@
 
 // RUN:  ./operator-new.exe
 
-#include <stdio.h>
 #include <new>
 
-
+#import "test_support.h"
 
 //
 // This test case verifies that calling operator new[] in libstdc++.dylib
@@ -35,35 +34,28 @@ void operator delete(void* p) throw()
     ::free(p);
 }
 
-int main()
-{
-	printf("[BEGIN] operator-new\n");
-
+int main(int argc, const char* argv[], const char* envp[], const char* apple[]) {
     // test that OS's operator new[] redirects to my operator new
     myLastNewAllocation = NULL;
     char* stuff = new char[24];
     if ( (void*)stuff != myLastNewAllocation ) {
-        printf("[FAIL] operator-new system array allocator not redirected through my operator new\n");
-        return 0;
+        FAIL("system array allocator not redirected through my operator new");
     }
 
     // test that program uses my operator new
     myLastNewAllocation = NULL;
     Foo* foo = new Foo();
     if ( (void*)foo != myLastNewAllocation ) {
-        printf("[FAIL] operator-new allocation not redirected though my operator new\n");
-        return 0;
+        FAIL("allocation not redirected though my operator new");
     }
 
     //
     delete foo;
     if ( (void*)foo != myLastDelete ) {
-        printf("[FAIL] operator-new deallocation not redirected though my operator delete\n");
-        return 0;
+        FAIL("deallocation not redirected though my operator delete");
     }
 
-    printf("[PASS] operator-new\n");
-	return 0;
+    PASS("Success");
 }
 
 

@@ -8,6 +8,8 @@
 
 #import <Foundation/Foundation.h>
 
+#include "test_support.h"
+
 @interface DyldClass : NSObject
 @end
 
@@ -32,41 +34,32 @@
 }
 @end
 
-extern int printf(const char*, ...);
-
 extern id objc_getClass(const char *name);
 
-int main() {
-	printf("[BEGIN] _dyld_get_objc_selector-chained\n");
+int main(int argc, const char* argv[], const char* envp[], const char* apple[]) {
+    // dyldClassFoo
+    const char* sel = _dyld_get_objc_selector("dyldClassFoo");
+    if (sel) {
+        if ((SEL)sel != @selector(dyldClassFoo)) {
+            FAIL("dyldClassFoo is wrong");
+        }
+    }
 
-	// dyldClassFoo
-	const char* sel = _dyld_get_objc_selector("dyldClassFoo");
-	if (sel) {
-		if ((SEL)sel != @selector(dyldClassFoo)) {
-			printf("[FAIL] _dyld_get_objc_selector-chained: dyldClassFoo is wrong\n");
-			return 0;
-		}
-	}
+    // dyldMainClassFoo
+    sel = _dyld_get_objc_selector("dyldMainClassFoo");
+    if (sel) {
+        if ((SEL)sel != @selector(dyldMainClassFoo)) {
+            FAIL("dyldMainClassFoo is wrong");
+        }
+    }
 
-	// dyldMainClassFoo
-	sel = _dyld_get_objc_selector("dyldMainClassFoo");
-	if (sel) {
-		if ((SEL)sel != @selector(dyldMainClassFoo)) {
-			printf("[FAIL] _dyld_get_objc_selector-chained: dyldMainClassFoo is wrong\n");
-			return 0;
-		}
-	}
+    // dyldMainClassFoo2
+    sel = _dyld_get_objc_selector("dyldMainClassFoo2");
+    if (sel) {
+        if ((SEL)sel != @selector(dyldMainClassFoo2)) {
+            FAIL("dyldMainClassFoo2 is wrong");
+        }
+    }
 
-	// dyldMainClassFoo2
-	sel = _dyld_get_objc_selector("dyldMainClassFoo2");
-	if (sel) {
-		if ((SEL)sel != @selector(dyldMainClassFoo2)) {
-			printf("[FAIL] _dyld_get_objc_selector-chained: dyldMainClassFoo2 is wrong\n");
-			return 0;
-		}
-	}
-
-	printf("[PASS] _dyld_get_objc_selector-chained\n");
-
-	return 0;
+    PASS("Success");
 }

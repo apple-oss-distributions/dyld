@@ -82,7 +82,7 @@
 	#define SUPPORT_CLASSIC_MACHO			__arm__
 	#define SUPPORT_ZERO_COST_EXCEPTIONS	(!__USING_SJLJ_EXCEPTIONS__)
 	#define INITIAL_IMAGE_COUNT				150
-	#define SUPPORT_ACCELERATE_TABLES		!TARGET_OS_SIMULATOR
+	#define SUPPORT_ACCELERATE_TABLES		0
 	#define SUPPORT_ROOT_PATH				TARGET_OS_SIMULATOR
 #else
 	#define SPLIT_SEG_SHARED_REGION_SUPPORT 0
@@ -313,6 +313,7 @@ public:
 		bool			allowEnvVarsSharedCache;
 		bool			allowClassicFallbackPaths;
 		bool			allowInsertFailures;
+		bool			allowInterposing;
 		bool			mainExecutableCodeSigned;
 		bool			prebinding;
 		bool			bindFlat;

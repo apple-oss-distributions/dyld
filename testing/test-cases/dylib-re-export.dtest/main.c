@@ -9,16 +9,16 @@
 
 #include <stdio.h>
 
+#include "test_support.h"
+
 extern int bar();
 
 
-int main()
-{
-    printf("[BEGIN] dylib-re-export\n");
+int main(int argc, const char* argv[], const char* envp[], const char* apple[]) {
     if ( bar() == 42 )
-        printf("[PASS] dylib-re-export\n");
+        PASS("Success");
     else
-        printf("[FAIL] dylib-re-export, wrong value\n");
+        FAIL("Wrong value");
 
 	return 0;
 }

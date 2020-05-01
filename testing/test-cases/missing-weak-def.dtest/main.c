@@ -1,7 +1,9 @@
 
-// BUILD:  $CC bar.c -dynamiclib -install_name $RUN_DIR/libbar.dylib -o $TEMP_DIR/libbar.dylib
+// BUILD:  $CC bar.c -dynamiclib -install_name $RUN_DIR/libbar.dylib -o $BUILD_DIR/missing/libbar.dylib
 // BUILD:  $CC bar-empty.c -dynamiclib -install_name $BUILD_DIR/libbar.dylib -o $BUILD_DIR/libbar.dylib
-// BUILD:  $CC main.c $TEMP_DIR/libbar.dylib -o $BUILD_DIR/missing-weak-def.exe
+// BUILD:  $CC main.c $BUILD_DIR/missing/libbar.dylib -o $BUILD_DIR/missing-weak-def.exe
+
+// BUILD: $SKIP_INSTALL $BUILD_DIR/missing/libbar.dylib
 
 // RUN:  ./missing-weak-def.exe
 
@@ -11,20 +13,17 @@
 #include <stdio.h>
 #include <stdlib.h>
 
+#include "test_support.h"
+
 __attribute__((weak))
 __attribute__((weak_import))
 int bar();
 
-int main()
-{
-    printf("[BEGIN] missing-weak-def\n");
-
+int main(int argc, const char* argv[], const char* envp[], const char* apple[]) {
     if (&bar) {
-    	printf("[FAIL] missing-weak-def\n");
-    	return 0;
+        FAIL("bar from libbar not bound");
     }
 
-    printf("[PASS] missing-weak-def\n");
-	return 0;
+    PASS("Success");
 }
 

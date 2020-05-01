@@ -9,6 +9,7 @@
 #include <dlfcn.h>
 #include <stdlib.h>
 
+#include "test_support.h"
 
 __attribute__((constructor))
 void myinit()
@@ -17,13 +18,8 @@ void myinit()
 }
 
 
-int main()
-{
-    printf("[BEGIN] dlopen-in-init\n");
-
+int main(int argc, const char* argv[], const char* envp[], const char* apple[]) {
     // The test is for libdyld.dylib to not crash when libfoo.dylib dlopen() stuff in its initializer
-
-    printf("[PASS]  dlopen-in-init\n");
-	return 0;
+    PASS("Success");
 }
 

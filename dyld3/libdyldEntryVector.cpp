@@ -147,6 +147,12 @@ static void entry_setHasCacheOverrides(bool someCacheImageOverriden)
     gAllImages.setHasCacheOverrides(someCacheImageOverriden);
 }
 
+
+static void entry_setProgramVars(ProgramVars* progVars)
+{
+    gAllImages.setProgramVars((AllImages::ProgramVars*)progVars);
+}
+
 static_assert((closure::kFormatVersion & LibDyldEntryVector::kBinaryFormatVersionMask) == closure::kFormatVersion, "binary format version overflow");
 
 const LibDyldEntryVector entryVectorForDyld = {
@@ -163,7 +169,8 @@ const LibDyldEntryVector entryVectorForDyld = {
     &entry_setRestrictions,
     &entry_setNotifyMonitoringDyldMain,
     &entry_setNotifyMonitoringDyld,
-    &entry_setHasCacheOverrides
+    &entry_setHasCacheOverrides,
+    &entry_setProgramVars,
 };
 
 VIS_HIDDEN void _dyld_atfork_prepare()

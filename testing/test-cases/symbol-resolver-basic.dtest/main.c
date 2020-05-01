@@ -11,26 +11,27 @@
 #include <stdio.h>
 #include <stdlib.h>
 
+#include "test_support.h"
+
 extern int foo();
 extern int fooPlusOne();
 
 
-int main()
-{
+int main(int argc, const char* argv[], const char* envp[], const char* apple[]) {
 #if TEN
     if ( foo() != 10 )
-        printf("[FAIL] symbol-resolver-basic: foo() != 10\n");
+        FAIL("foo() != 10");
     else if ( fooPlusOne() != 11 )
-        printf("[FAIL] symbol-resolver-basic: fooPlusOne() != 11\n");
+        FAIL("fooPlusOne() != 11");
     else
-        printf("[PASS] symbol-resolver-basic\n");
+        PASS("Success");
 #else
     if ( foo() != 0 )
-        printf("[FAIL] symbol-resolver-basic: foo() != 0\n");
+        FAIL("foo() != 0");
     else if ( fooPlusOne() != 1 )
-        printf("[FAIL] symbol-resolver-basic: fooPlusOne() != 1\n");
+        FAIL("fooPlusOne() != 1");
     else
-        printf("[PASS] symbol-resolver-basic\n");
+        PASS("Success");
 #endif
   
 	return 0;

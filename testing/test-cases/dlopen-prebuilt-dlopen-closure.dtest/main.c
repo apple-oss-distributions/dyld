@@ -10,19 +10,14 @@
 #include <stdio.h>
 #include <dlfcn.h>
 
-int main()
-{
-	printf("[BEGIN] dlopen-prebuilt-dlopen-closure\n");
+#include "test_support.h"
 
-	void* handle = dlopen("/usr/lib/libobjc-trampolines.dylib", RTLD_LAZY);
-	if ( handle == NULL ) {
-        printf("dlerror(): %s\n", dlerror());
-        printf("[FAIL] dlopen-prebuilt-dlopen-closure\n");
-		return 0;
-	}
+int main(int argc, const char* argv[], const char* envp[], const char* apple[]) {
+    void* handle = dlopen("/usr/lib/libobjc-trampolines.dylib", RTLD_LAZY);
+    if ( handle == NULL ) {
+        FAIL("dlerror(): %s", dlerror());
+    }
 
-    printf("[PASS] dlopen-prebuilt-dlopen-closure\n");
-  
-	return 0;
+    PASS("Success");
 }
 

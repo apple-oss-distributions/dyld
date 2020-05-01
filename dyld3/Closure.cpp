@@ -1155,6 +1155,23 @@ bool LaunchClosure::hasInsertedLibraries() const
     return getFlags().hasInsertedLibraries;
 }
 
+bool LaunchClosure::hasProgramVars(uint32_t& runtimeOffset) const
+{
+    if ( !getFlags().hasProgVars )
+        return false;
+    uint32_t payloadSize = 0;
+    const uint8_t* buffer = (const uint8_t*)findAttributePayload(Type::progVars, &payloadSize);
+    if (buffer == nullptr)
+        return false;
+    runtimeOffset = *((uint32_t*)buffer);
+    return true;
+}
+
+bool LaunchClosure::usedInterposing() const
+{
+    return getFlags().usedInterposing;
+}
+
 bool LaunchClosure::hasInterposings() const
 {
     __block bool result = false;

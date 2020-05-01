@@ -59,8 +59,7 @@ struct VIS_HIDDEN MachOAnalyzer : public MachOLoaded
     uint64_t            preferredLoadAddress() const;
     void                forEachLocalSymbol(Diagnostics& diag, void (^callback)(const char* symbolName, uint64_t n_value, uint8_t n_type, uint8_t n_sect, uint16_t n_desc, bool& stop)) const;
     void                forEachRPath(void (^callback)(const char* rPath, bool& stop)) const;
-
-    bool                isEncrypted() const;
+    bool                hasProgramVars(Diagnostics& diag, uint32_t& progVarsOffset) const;
     void                forEachCDHash(void (^handler)(const uint8_t cdHash[20])) const;
     bool                hasCodeSignature(uint32_t& fileOffset, uint32_t& size) const;
     bool                usesLibraryValidation() const;
@@ -115,7 +114,9 @@ struct VIS_HIDDEN MachOAnalyzer : public MachOLoaded
     void                withChainStarts(Diagnostics& diag, uint64_t startsStructOffsetHint, void (^callback)(const dyld_chained_starts_in_image*)) const;
     uint64_t            chainStartsOffset() const;
     uint16_t            chainedPointerFormat() const;
+    static uint16_t     chainedPointerFormat(const dyld_chained_fixups_header* chainHeader);
     bool                hasUnalignedPointerFixups() const;
+    const dyld_chained_fixups_header* chainedFixupsHeader() const;
 
     const MachOAnalyzer*    remapIfZeroFill(Diagnostics& diag, const closure::FileSystem& fileSystem, closure::LoadedFileInfo& info) const;
 
@@ -170,7 +171,9 @@ struct VIS_HIDDEN MachOAnalyzer : public MachOLoaded
         // These are from the class_ro_t which data points to
         enum class ReadOnlyDataField {
             name,
-            baseMethods
+            baseMethods,
+            baseProperties,
+            flags
         };
 
         uint64_t getReadOnlyDataField(ReadOnlyDataField field, uint32_t pointerSize) const;
@@ -179,6 +182,12 @@ struct VIS_HIDDEN MachOAnalyzer : public MachOLoaded
         }
         uint64_t baseMethodsVMAddr(uint32_t pointerSize) const {
             return getReadOnlyDataField(ReadOnlyDataField::baseMethods, pointerSize);
+        }
+        uint64_t basePropertiesVMAddr(uint32_t pointerSize) const {
+            return getReadOnlyDataField(ReadOnlyDataField::baseProperties, pointerSize);
+        }
+        uint64_t flags(uint32_t pointerSize) const {
+            return getReadOnlyDataField(ReadOnlyDataField::flags, pointerSize);
         }
 
         // These are embedded in the Mach-O itself by the compiler
@@ -223,6 +232,11 @@ struct VIS_HIDDEN MachOAnalyzer : public MachOLoaded
         // We also need to know where the reference to the nameVMAddr was
         // This is so that we know how to rebind that location
         uint64_t nameLocationVMAddr;
+    };
+
+    struct ObjCProperty {
+        uint64_t nameVMAddr;        // & const char *
+        uint64_t attributesVMAddr;  // & const char *
     };
 
     struct ObjCCategory {
@@ -284,6 +298,9 @@ struct VIS_HIDDEN MachOAnalyzer : public MachOLoaded
     void forEachObjCMethod(uint64_t methodListVMAddr, bool contentRebased,
                            void (^handler)(uint64_t methodVMAddr, const ObjCMethod& method)) const;
 
+    void forEachObjCProperty(uint64_t propertyListVMAddr, bool contentRebased,
+                             void (^handler)(uint64_t propertyVMAddr, const ObjCProperty& property)) const;
+
     void forEachObjCSelectorReference(Diagnostics& diag, bool contentRebased,
                                       void (^handler)(uint64_t selRefVMAddr, uint64_t selRefTargetVMAddr)) const;
 
@@ -320,6 +337,7 @@ private:
     bool                    validBindInfo(Diagnostics& diag, const char* path) const;
     bool                    validMain(Diagnostics& diag, const char* path) const;
     bool                    validChainedFixupsInfo(Diagnostics& diag, const char* path) const;
+    bool                    validChainedFixupsInfoOldArm64e(Diagnostics& diag, const char* path) const;
 
     bool                    invalidRebaseState(Diagnostics& diag, const char* opcodeName, const char* path, const LinkEditInfo& leInfo, const SegmentInfo segments[],
                                               bool segIndexSet, uint32_t pointerSize, uint8_t segmentIndex, uint64_t segmentOffset, uint8_t type) const;

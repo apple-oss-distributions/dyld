@@ -11,18 +11,15 @@
 #include <stdlib.h>
 #include <string.h>
 
+#include "test_support.h"
+
 extern int myAbs1;
 int* ptr = &myAbs1;
 
-int main()
-{
-    printf("[BEGIN] flat-namespace-absolute-symbol\n");
-
+int main(int argc, const char* argv[], const char* envp[], const char* apple[]) {
     if ( ptr != 0 ) {
-        printf("[FAIL] absolute symbol not bound to zero with flat lookup\n");
-        return 0;
+        FAIL("Absolute symbol not bound to zero with flat lookup");
     }
 
-    printf("[PASS] flat-namespace-absolute-symbol\n");
-	return 0;
+    PASS("Success");
 }

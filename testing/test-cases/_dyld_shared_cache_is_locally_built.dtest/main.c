@@ -9,16 +9,12 @@
 #include <mach-o/dyld_priv.h>
 #include <dlfcn.h>
 
+#include "test_support.h"
 
-int main()
-{
-    printf("[BEGIN] _dyld_shared_cache_is_locally_built\n");
-
+int main(int argc, const char* argv[], const char* envp[], const char* apple[]) {
     // We can't reliably test the result of this function, but it shouldn't crash
     _dyld_shared_cache_is_locally_built();
 
-    printf("[PASS] _dyld_shared_cache_is_locally_built\n");
-
-    return 0;
+    PASS("SUCCESS");
 }
 

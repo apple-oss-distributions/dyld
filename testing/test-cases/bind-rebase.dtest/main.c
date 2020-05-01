@@ -9,6 +9,8 @@
 #include <dlfcn.h> 
 #include <assert.h>
 
+#include "test_support.h"
+
 extern char tzname[];  // a char array in libSystem.dylib
 
 
@@ -91,9 +93,7 @@ void verifyLongChains()
 }
 #endif
 
-int main()
-{
-    printf("[BEGIN] bind-rebase\n");
+int main(int argc, const char* argv[], const char* envp[], const char* apple[]) {
     verifyRebases();
     verifyBinds();
 
@@ -101,7 +101,6 @@ int main()
     verifyLongChains();
 #endif
 
-    printf("[PASS]  bind-rebase\n");
-    return 0;
+    PASS("Success");
 }
 

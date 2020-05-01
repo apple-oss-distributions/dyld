@@ -10,6 +10,7 @@
 #include <string.h>
 #include <mach-o/dyld_priv.h>
 
+#include "test_support.h"
 
 // verify RTLD_SELF search order
 
@@ -34,47 +35,37 @@ static bool symbolInImage(const char* symName, const char* image)
 
 
 
-int main()
-{
-    printf("[BEGIN] dlsym-RTLD_SELF\n");
-
+int main(int argc, const char* argv[], const char* envp[], const char* apple[]) {
     // verify mainSymbol is found
     if ( dlsym(RTLD_SELF, "mainSymbol") == NULL ) {
-        printf("[FAIL]  dlsym-RTLD_SELF: mainSymbol should have been found\n");
-        return 0;
+        FAIL("mainSymbol should have been found");
     }
 
     // verify free is found in this program - not in OS
     if ( !symbolInImage("free", "dlsym-RTLD_SELF") ) {
-        printf("[FAIL]  dlsym-RTLD_SELF: free\n");
-        return 0;
+        FAIL("free");
     }
 
     // verify foo is found in libfoo-static.dylib
     if ( !symbolInImage("foo", "libfoo-static.dylib") ) {
-        printf("[FAIL]  dlsym-RTLD_SELF: foo not in libfoo-static.dylib\n");
-        return 0;
+        FAIL("foo not in libfoo-static.dylib");
     }
 
     void* handle = dlopen(RUN_DIR "/libfoo-dynamic.dylib", RTLD_LAZY);
     if ( handle == NULL ) {
-        printf("[FAIL]  dlsym-RTLD_SELF: libfoo-dynamic.dylib could not be loaded\n");
-        return 0;
+        FAIL("libfoo-dynamic.dylib could not be loaded");
     }
 
     // verify foo is still found in statically linked lib
     if ( !symbolInImage("foo", "libfoo-static.dylib") ) {
-        printf("[FAIL]  dlsym-RTLD_SELF: foo not in libfoo-static.dylib\n");
-        return 0;
+        FAIL("foo not in libfoo-static.dylib");
     }
 
     // verify foo2 is not found in libfoo-dynamic.dylib", because RTLD_SELF only searches thing this image would have seen
     if ( symbolInImage("foo2", "libfoo-dynamic.dylib") ) {
-        printf("[FAIL]  dlsym-RTLD_SELF: foo2 found but should not have been\n");
-        return 0;
+        FAIL("foo2 found but should not have been");
     }
 
-    printf("[PASS]  dlsym-RTLD_SELF\n");
-	return 0;
+    PASS("Success");
 }
 

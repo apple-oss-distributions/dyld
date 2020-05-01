@@ -32,7 +32,7 @@
 
 #include "DyldSharedCache.h"
 #include "Diagnostics.h"
-#include "CacheBuilder.h"
+#include "SharedCacheBuilder.h"
 #include "FileAbstraction.hpp"
 #include "MachOFileAbstraction.hpp"
 #include "MachOLoaded.h"
@@ -117,27 +117,11 @@ public:
         _cacheStart         = (uint8_t*)cache;
         _cacheUnslideAddr   = cache->unslidLoadAddress();
         _slide              = (uint64_t)cache - _cacheUnslideAddr;
-#if SUPPORT_ARCH_arm64e
-        _chainedFixups      = (strcmp(cache->archName(), "arm64e") == 0);
-#else
-        _chainedFixups      = false;
-#endif
      }
 
     // Converts from an on disk vmAddr to the real vmAddr
     // That is, for a chained fixup, decodes the chain, for a non-chained fixup, does nothing.
     uint64_t vmAddrForOnDiskVMAddr(uint64_t vmaddr) {
-        if ( _chainedFixups ) {
-            dyld3::MachOLoaded::ChainedFixupPointerOnDisk ptr;
-            ptr.raw64 = vmaddr;
-            assert(ptr.arm64e.authRebase.bind == 0);
-            if ( ptr.arm64e.authRebase.auth ) {
-                vmaddr = _cacheUnslideAddr + ptr.arm64e.authRebase.target;
-            }
-            else {
-                vmaddr = ptr.arm64e.unpackTarget();
-            }
-        }
         return vmaddr;
     }
 
@@ -164,7 +148,6 @@ private:
     uint64_t                        _slide;
     uint64_t                        _cacheUnslideAddr;
     uint8_t*                        _cacheStart;
-    bool                            _chainedFixups;
 };
 
 
@@ -1102,7 +1085,7 @@ void doOptimizeObjC(DyldSharedCache* cache, bool forProduction, CacheBuilder::AS
 
 } // anon namespace
 
-void CacheBuilder::optimizeObjC()
+void SharedCacheBuilder::optimizeObjC()
 {
     uint32_t objcRwFileOffset = (uint32_t)((_objcReadWriteBuffer - _readWriteRegion.buffer) + _readWriteRegion.cacheFileOffset);
     if ( _archLayout->is64 )
@@ -1127,13 +1110,13 @@ static uint32_t hashTableSize(uint32_t maxElements, uint32_t perElementData)
 
 // The goal here is to allocate space in the dyld shared cache (while it is being laid out) that will contain
 // the objc structures that previously were in the __objc_opt_ro section.
-uint32_t CacheBuilder::computeReadOnlyObjC(uint32_t selRefCount, uint32_t classDefCount, uint32_t protocolDefCount)
+uint32_t SharedCacheBuilder::computeReadOnlyObjC(uint32_t selRefCount, uint32_t classDefCount, uint32_t protocolDefCount)
 {
     return 0xA000 + hashTableSize(selRefCount, 5) + hashTableSize(classDefCount, 12) + hashTableSize(protocolDefCount, 8);
 }
 
 // Space to replace the __objc_opt_rw section.
-uint32_t CacheBuilder::computeReadWriteObjC(uint32_t imageCount, uint32_t protocolDefCount)
+uint32_t SharedCacheBuilder::computeReadWriteObjC(uint32_t imageCount, uint32_t protocolDefCount)
 {
     return 8*imageCount + protocolDefCount*12*(_archLayout->is64 ? 8 : 4);
 }

@@ -1,3 +1,4 @@
+#include "test_support.h"
 
 static int inited = 0;
 
@@ -11,6 +12,8 @@ int barIsInited() {
 	return inited;
 }
 
-int bar() {
-	return inited ? 0 : 1;
+void bar() {
+    if (inited == 0) {
+        FAIL("libbar.dylib not initialized");
+    }
 }

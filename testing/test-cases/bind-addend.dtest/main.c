@@ -7,6 +7,8 @@
 
 #include <stdio.h>
 
+#include "test_support.h"
+
 // Note this is weak so that we have a bind
 __attribute__((weak))
 void* p = 0;
@@ -20,21 +22,15 @@ void* pMinus = (void*)((uintptr_t)&p - offset);
 extern int objc_msgSend;
 void* msgSendMinus = (void*)((uintptr_t)&objc_msgSend - offset);
 
-int main()
-{
-    printf("[BEGIN] bind-addend\n");
-
+int main(int argc, const char* argv[], const char* envp[], const char* apple[]) {
     if ( pMinus != (void*)((uintptr_t)&p - offset) ) {
-        printf("[FAIL]  bind-addend: %p != %p\n", pMinus, (void*)((uintptr_t)&p - offset));
-        return 0;
+        FAIL("bind-addend: %p != %p", pMinus, (void*)((uintptr_t)&p - offset));
     }
 
     if ( msgSendMinus != (void*)((uintptr_t)&objc_msgSend - offset) ) {
-        printf("[FAIL]  bind-addend: %p != %p\n", msgSendMinus, (void*)((uintptr_t)&objc_msgSend - offset));
-        return 0;
+        FAIL("bind-addend: %p != %p", msgSendMinus, (void*)((uintptr_t)&objc_msgSend - offset));
     }
 
-    printf("[PASS]  bind-addend\n");
-    return 0;
+    PASS("bind-addend");
 }
 

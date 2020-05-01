@@ -11,60 +11,49 @@
 #include <dlfcn.h>
 #include <mach-o/dyld.h>
 
+#include "test_support.h"
 
-int main(int argc, const char* argv[])
-{
-    printf("[BEGIN] NSCreateObjectFileImageFromFile-basic\n");
-
+int main(int argc, const char* argv[], const char* envp[], const char* apple[]) {
     const char* path = argv[1];
 
-	NSObjectFileImage ofi;
-	if ( NSCreateObjectFileImageFromFile(path, &ofi) != NSObjectFileImageSuccess ) {
-		printf("[FAIL] NSCreateObjectFileImageFromFile failed\n");
-		return 0;
-	}
-	
-	NSModule mod = NSLinkModule(ofi, path, NSLINKMODULE_OPTION_NONE);
-	if ( mod == NULL ) {
-		printf("[FAIL] NSLinkModule failed\n");
-		return 0;
-	}
-	
-	NSSymbol sym = NSLookupSymbolInModule(mod, "_fooInBundle");
-	if ( sym == NULL ) {
-		printf("[FAIL] NSLookupSymbolInModule failed\n");
-		return 0;
-	}
+    NSObjectFileImage ofi;
+    if ( NSCreateObjectFileImageFromFile(path, &ofi) != NSObjectFileImageSuccess ) {
+        FAIL("NSCreateObjectFileImageFromFile failed");
+    }
 
-	void* func = NSAddressOfSymbol(sym);
-	if ( func == NULL ) {
-		printf("[FAIL] NSAddressOfSymbol failed\n");
-		return 0;
-	}
+    NSModule mod = NSLinkModule(ofi, path, NSLINKMODULE_OPTION_NONE);
+    if ( mod == NULL ) {
+        FAIL("NSLinkModule failed");
+    }
+	
+    NSSymbol sym = NSLookupSymbolInModule(mod, "_fooInBundle");
+    if ( sym == NULL ) {
+        FAIL("NSLookupSymbolInModule failed");
+    }
+
+    void* func = NSAddressOfSymbol(sym);
+    if ( func == NULL ) {
+        FAIL("NSAddressOfSymbol failed");
+    }
 
     Dl_info info;
     if ( dladdr(func, &info) == 0 ) {
-        printf("[FAIL] dladdr(&p, xx) failed");
-		return 0;
+        FAIL("dladdr(&p, xx) fail");
     }
-    //printf("_fooInBundle found in %s\n", info.dli_fname);
+    LOG("_fooInBundle found in %s", info.dli_fname);
 
-	if ( !NSUnLinkModule(mod, NSUNLINKMODULE_OPTION_NONE) ) {
-		printf("[FAIL] NSUnLinkModule failed\n");
-		return 0;
-	}
+    if ( !NSUnLinkModule(mod, NSUNLINKMODULE_OPTION_NONE) ) {
+        FAIL("NSUnLinkModule failed");
+    }
 
     if ( dladdr(func, &info) != 0 ) {
-        printf("[FAIL] dladdr(&p, xx) found but should not have\n");
-		return 0;
+        FAIL("dladdr(&p, xx) found but should not have");
     }
 
 	if ( !NSDestroyObjectFileImage(ofi) ) {
-		printf("[FAIL] NSDestroyObjectFileImage failed\n");
-		return 0;
-	}
+        FAIL("NSDestroyObjectFileImage failed");
+    }
 
-    printf("[PASS] NSCreateObjectFileImageFromFile-basic\n");
-	return 0;
+    PASS("Success");
 }
 

@@ -1,6 +1,7 @@
 #include <stdio.h>
 #include <stdbool.h>
 
+#include "test_support.h"
 #include "base.h"
 
 static bool         wasProblem        = false;
@@ -10,19 +11,19 @@ static int			checkInCountCoal1 = 0;
 
 void baseVerifyCoal1(const char* where, int* addr)
 {
-	//fprintf(stderr, "baseVerifyCoal1(%s, %p)\n", where, addr);
-	++checkInCountCoal1;
-	if ( coal1Where == NULL ) {
-		coal1Where = where;
-		coal1Addr = addr;
-	}
-	else {
-		if ( addr != coal1Addr ) {
-			fprintf(stderr, "coal1 resolved to different locations.  %p in %s and %p in %s\n", 
-				coal1Addr, coal1Where, addr, where);
-			wasProblem = true;
-		}	
-	}
+    LOG("baseVerifyCoal1(%s, %p)", where, addr);
+    ++checkInCountCoal1;
+    if ( coal1Where == NULL ) {
+        coal1Where = where;
+        coal1Addr = addr;
+    }
+    else {
+        if ( addr != coal1Addr ) {
+            LOG("coal1 resolved to different locations.  %p in %s and %p in %s",
+                coal1Addr, coal1Where, addr, where);
+            wasProblem = true;
+        }
+    }
 }
 
 
@@ -32,32 +33,32 @@ static int			checkInCountCoal2 = 0;
 
 void baseVerifyCoal2(const char* where, int* addr)
 {
-	//fprintf(stderr, "baseVerifyCoal2(%s, %p)\n", where, addr);
-	++checkInCountCoal2;
-	if ( coal2Where == NULL ) {
-		coal2Where = where;
-		coal2Addr = addr;
-	}
-	else {
-		if ( addr != coal2Addr ) {
-			fprintf(stderr, "coal2 resolved to different locations.  %p in %s and %p in %s\n", 
-				coal2Addr, coal2Where, addr, where);
-			wasProblem = true;
-		}	
-	}
+    LOG("baseVerifyCoal2(%s, %p)", where, addr);
+    ++checkInCountCoal2;
+    if ( coal2Where == NULL ) {
+        coal2Where = where;
+        coal2Addr = addr;
+    }
+    else {
+        if ( addr != coal2Addr ) {
+            LOG("coal2 resolved to different locations.  %p in %s and %p in %s",
+                coal2Addr, coal2Where, addr, where);
+            wasProblem = true;
+        }
+    }
 }
 
 
 
 void baseCheck()
 {
-	if ( wasProblem )
-        printf("[FAIL] weak-coalesce: was problem\n");
+    if ( wasProblem )
+        FAIL("was problem");
     else if ( checkInCountCoal1 != 4 )
-        printf("[FAIL] weak-coalesce: checkInCountCoal1 != 4\n");
+        FAIL("checkInCountCoal1 != 4");
     else if ( checkInCountCoal2 != 4 )
-        printf("[FAIL] weak-coalesce: checkInCountCoal2 != 2\n");
-	else
-        printf("[PASS] weak-coalesce\n");
+        FAIL("checkInCountCoal2 != 2");
+    else
+        PASS("Success");
 }
 

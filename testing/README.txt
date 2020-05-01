@@ -12,31 +12,33 @@ Example, main.c may contain:
 
 When build lines are executed, the current directory is set to the test case's .dtest dir.
 Build lines may contain the follow variables:
-    $BUILD_DIR   - expands to the directory in $DSTROOT where this test case binaries are installed
-    $RUN_DIR     - expands to the directory in /AppleInternal/ where this test case binaries will be run
-    $TEMP_DIR    - expands to a temporary directory that will be delete after this test case is built
-    $CC          - expands to the C compiler command line for the current platform.  It includes
-                   the min-os-version option, then SDK option, and the architectures.
-    $CXX         - expands to the C++ compiler plus standard options
+    $BUILD_DIR    - expands to the directory in $DSTROOT where this test case binaries are installed
+    $RUN_DIR      - expands to the directory in /AppleInternal/ where this test case binaries will be run
+    $TEMP_DIR     - expands to a temporary directory that will be delete after this test case is built
+    $CC           - expands to the C compiler command line for the current platform.  It includes
+                    the min-os-version option, then SDK option, and the architectures.
+    $CXX          - expands to the C++ compiler plus standard options
+    $DEPENDS_ON   - adds a build time dependency to the next argument on the commandline
+    $SKIP_INSTALL - prevents the built binary from being installed
+    $SYM_LINK     - creates a symlink
+    $CP           - copies a file
 
 When run lines are executed, the current directory is set to what $RUN_DIR was during build.
 Run lines may contain the follow variables:
     $RUN_DIR       - expands to the directory in /AppleInternal/ where this test case binaries are installed
-    $REQUIRE_CRASH - expands to the 'nocr' tool which is used when a program is expected to "crash" in order to pass
 
 
-When a test program runs, it should initially print out the name of the test case. Ex:
- [BEGIN] dlfoo-thread-safe
-Then it should print a pass or fail message with the same test name. Ex:
- [PASS] dlfoo-thread-safe
+The file "test_support.h" provides support functions to correctly write tests. The primariy interfaces provided are
+three printf like functions (technially they are implemented as macros in order to capture line info for logging):
 
+    void PASS(const char* format, ...);
+    void FAIL(const char* format, ...);
+    void LOG(const char* format, ...);
 
-To support tests that dyld is supposed to terminate, use $REQUIRE_CRASH on the RUN: line
-along with setting env var NOCR_TEST_NAME to the name of the test case.  When that env
-var is set, the nocr tool wil print out the [BEGIN], then [PASS] if the test crashes
-otherwise [FAIL].  Ex:
-  // RUN:  NOCR_TEST_NAME="dylib-static-link missing" $REQUIRE_CRASH ./dylib-static-missing.exe
-
+PASS() and FAIL() will take care of appropriately formatting the messages for the various test environments that dyld_tests
+run in. LOG() will capture messages in a per image queue. By default these logs are emitted if a test fails, and they are
+ignored if a test succeeds. While debugging tests logs can be emitted even during success by setting the LOG_ON_SUCCESS
+environment variable. This allows us to leave logging statements in production dyld_tests.Fdtra
 
 To support tests that are platform specific, add the BUILD_ONLY: line which specifies the platform.
 Valid platforms are: MacOSX, iOS, watchOS, and tvOS.  When a specific platform is specified, a
@@ -44,4 +46,5 @@ new min OS version can also be specified via the BUILD_MIN_OS option.  For insta
     // BUILD_ONLY: MacOSX
     // BUILD_MIN_OS: 10.5
 
-
+Note, to run the tests as root, you need to first set "defaults write com.apple.dt.Xcode EnableRootTesting YES",
+and then check the "Debug process as root" box in the Test scheme on the ContainerizedTestRunner scheme.

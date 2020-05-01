@@ -435,15 +435,24 @@ bool ClosureBuilder::expandAtLoaderPath(const char* loadPath, bool fromLCRPATH, 
         case AtPath::all:
             break;
     }
-    if ( strncmp(loadPath, "@loader_path/", 13) != 0 )
-        return false;
-
-    strlcpy(fixedPath, loadedImage.path(), PATH_MAX);
-    char* lastSlash = strrchr(fixedPath, '/');
-    if ( lastSlash != nullptr ) {
-        strcpy(lastSlash+1, &loadPath[13]);
-        return true;
+    if ( strncmp(loadPath, "@loader_path/", 13) == 0 ) {
+        strlcpy(fixedPath, loadedImage.path(), PATH_MAX);
+        char* lastSlash = strrchr(fixedPath, '/');
+        if ( lastSlash != nullptr ) {
+            strcpy(lastSlash+1, &loadPath[13]);
+            return true;
+        }
     }
+    else if ( fromLCRPATH && (strcmp(loadPath, "@loader_path") == 0) ) {
+        // <rdar://problem/52881387> in LC_RPATH allow "@loader_path" without trailing slash
+        strlcpy(fixedPath, loadedImage.path(), PATH_MAX);
+        char* lastSlash = strrchr(fixedPath, '/');
+        if ( lastSlash != nullptr ) {
+            lastSlash[1] = '\0';
+            return true;
+        }
+    }
+
     return false;
 }
 
@@ -459,18 +468,25 @@ bool ClosureBuilder::expandAtExecutablePath(const char* loadPath, bool fromLCRPA
         case AtPath::all:
             break;
     }
-    if ( strncmp(loadPath, "@executable_path/", 17) != 0 )
-        return false;
 
-    if ( _atPathHandling != AtPath::all )
-        return false;
-
-    strlcpy(fixedPath, _mainProgLoadPath, PATH_MAX);
-    char* lastSlash = strrchr(fixedPath, '/');
-    if ( lastSlash != nullptr ) {
-        strcpy(lastSlash+1, &loadPath[17]);
-        return true;
+    if ( strncmp(loadPath, "@executable_path/", 17) == 0 ) {
+        strlcpy(fixedPath, _mainProgLoadPath, PATH_MAX);
+        char* lastSlash = strrchr(fixedPath, '/');
+        if ( lastSlash != nullptr ) {
+            strcpy(lastSlash+1, &loadPath[17]);
+            return true;
+        }
     }
+    else if ( fromLCRPATH && (strcmp(loadPath, "@executable_path") == 0) ) {
+        // <rdar://problem/52881387> in LC_RPATH allow "@executable_path" without trailing slash
+        strlcpy(fixedPath, _mainProgLoadPath, PATH_MAX);
+        char* lastSlash = strrchr(fixedPath, '/');
+        if ( lastSlash != nullptr ) {
+            lastSlash[1] = '\0';
+            return true;
+        }
+    }
+
     return false;
 }
 
@@ -1133,6 +1149,7 @@ void ClosureBuilder::addInterposingTuples(LaunchClosureWriter& writer, const Ima
                 goodTuples.push_back(resolvedTuples[i]);
         }
         writer.addInterposingTuples(goodTuples);
+        _interposingTuplesUsed = !goodTuples.empty();
 
         // if the target of the interposing is in the dyld shared cache, add a PatchEntry so the cache is fixed up at launch
         STACK_ALLOC_ARRAY(Closure::PatchEntry, patches, goodTuples.count());
@@ -1434,8 +1451,6 @@ void ClosureBuilder::addChainedFixupInfo(ImageWriter& writer, BuilderLoadedImage
         Image::ResolvedSymbolTarget target;
         ResolvedTargetInfo          targetInfo;
         if ( !findSymbol(forImage, libOrdinal, symbolName, weakImport, false, addend, target, targetInfo) ) {
-            const char* expectedInPath = forImage.loadAddress()->dependentDylibLoadPath(libOrdinal-1);
-            _diag.error("symbol '%s' not found, expected in '%s', needed by '%s'", symbolName, expectedInPath, forImage.path());
             stop = true;
             return;
         }
@@ -1535,6 +1550,7 @@ bool ClosureBuilder::findSymbol(BuilderLoadedImage& fromImage, int libOrdinal, c
     targetInfo.isWeakDef            = false;
     targetInfo.skippableWeakDef     = false;
     targetInfo.requestedSymbolName  = symbolName;
+    targetInfo.foundSymbolName      = nullptr;
     targetInfo.libOrdinal           = libOrdinal;
     if ( libOrdinal == BIND_SPECIAL_DYLIB_FLAT_LOOKUP ) {
         for (const BuilderLoadedImage& li : _loadedImages) {
@@ -2078,6 +2094,11 @@ bool ClosureBuilder::optimizeObjC(Array<ImageWriter>& writers) {
                 case DYLD_CHAINED_PTR_64:
                     // We've tested the 64-bit chained fixups.
                     break;
+                case DYLD_CHAINED_PTR_64_OFFSET:
+                case DYLD_CHAINED_PTR_ARM64E_OFFSET:
+                case DYLD_CHAINED_PTR_ARM64E_USERLAND:
+                    // FIXME: Test 64-bit offset chained fixups then enable this.
+                    continue;
                 case DYLD_CHAINED_PTR_32:
                 case DYLD_CHAINED_PTR_32_CACHE:
                 case DYLD_CHAINED_PTR_32_FIRMWARE:
@@ -3173,16 +3194,29 @@ const LaunchClosure* ClosureBuilder::makeLaunchClosure(const LoadedFileInfo& fil
         closureWriter.setBootUUID(bootSessionUUID);
 #endif
 
-     // record any interposing info
-    imageArray->forEachImage(^(const Image* image, bool &stop) {
-        if ( !image->inDyldCache() )
-            addInterposingTuples(closureWriter, image, findLoadedImage(image->imageNum()).loadAddress());
-    });
+#if __MAC_OS_X_VERSION_MIN_REQUIRED
+    uint32_t progVarsOffset;
+    if ( mainExecutable->hasProgramVars(_diag, progVarsOffset) ) {
+        // on macOS binaries may have a __dyld section that has ProgramVars to use
+        closureWriter.setHasProgramVars(progVarsOffset);
+    }
+    if ( _diag.hasError() )
+        return nullptr;
+#endif
+
+    // record any interposing info
+    if ( !_interposingDisabled ) {
+        imageArray->forEachImage(^(const Image* image, bool &stop) {
+            if ( !image->inDyldCache() )
+                addInterposingTuples(closureWriter, image, findLoadedImage(image->imageNum()).loadAddress());
+        });
+    }
 
     // modify fixups in contained Images by applying interposing tuples
     closureWriter.applyInterposing((const LaunchClosure*)closureWriter.currentTypedBytes());
 
     // set flags
+    closureWriter.setUsedInterposing(_interposingTuplesUsed);
     closureWriter.setUsedAtPaths(_atPathUsed);
     closureWriter.setUsedFallbackPaths(_fallbackPathUsed);
     closureWriter.setHasInsertedLibraries(_mainProgLoadIndex > 0);

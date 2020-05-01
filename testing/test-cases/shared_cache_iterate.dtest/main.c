@@ -18,7 +18,7 @@
     #include <ptrauth.h>
 #endif
 
-
+#include "test_support.h"
 
 struct dyld_cache_header
 {
@@ -61,10 +61,7 @@ static void forEachCacheInDir(const char* dirPath, void (^handler)(const uuid_t 
 }
 
 
-int main()
-{
-    printf("[BEGIN] shared_cache_iterate\n");
-
+int main(int argc, const char* argv[], const char* envp[], const char* apple[]) {
     size_t cacheLen;
     const void* cacheStart = _dyld_get_shared_cache_range(&cacheLen);
     uuid_t currentCacheUUID;
@@ -80,16 +77,13 @@ int main()
             ++count;
         });
         if ( result != 0 ) {
-            printf("[FAIL] shared_cache_iterate dyld_shared_cache_iterate_text() returned non-zero: %d\n", result);
-            return 0;
+            FAIL("dyld_shared_cache_iterate_text() returned non-zero: %d", result);
         }
         if ( count < 100 ) {
-            printf("[FAIL] shared_cache_iterate dyld_shared_cache_iterate_text() iterated over less than 100 images: %d\n", count);
-            return 0;
+            FAIL("dyld_shared_cache_iterate_text() iterated over less than 100 images: %d", count);
         }
         if ( badVersion ) {
-            printf("[FAIL] shared_cache_iterate dyld_shared_cache_iterate_text() some dyld_shared_cache_dylib_text_info was not 2\n");
-            return 0;
+            FAIL("dyld_shared_cache_iterate_text() some dyld_shared_cache_dylib_text_info was not 2");
         }
 
         // iterate current cache
@@ -102,16 +96,13 @@ int main()
             ++count;
         });
         if ( result != 0 ) {
-            printf("[FAIL] shared_cache_iterate dyld_shared_cache_find_iterate_text() returned non-zero: %d\n", result);
-            return 0;
+            FAIL("dyld_shared_cache_find_iterate_text() returned non-zero: %d", result);
         }
         if ( count < 100 ) {
-            printf("[FAIL] shared_cache_iterate dyld_shared_cache_find_iterate_text() iterated over less than 100 images: %d\n", count);
-            return 0;
+            FAIL("dyld_shared_cache_find_iterate_text() iterated over less than 100 images: %d", count);
         }
         if ( badVersion ) {
-            printf("[FAIL] shared_cache_iterate dyld_shared_cache_find_iterate_text() some dyld_shared_cache_dylib_text_info was not 2\n");
-            return 0;
+            FAIL("dyld_shared_cache_find_iterate_text() some dyld_shared_cache_dylib_text_info was not 2");
         }
 
         // look for non-existent cache
@@ -123,26 +114,22 @@ int main()
             ++count;
         });
         if ( result == 0 ) {
-            printf("[FAIL] shared_cache_iterate dyld_shared_cache_find_iterate_text() expected result to be nonzero: %d\n", result);
-            return 0;
+            FAIL("dyld_shared_cache_find_iterate_text() expected result to be nonzero: %d", result);
         }
         if ( count != 0 ) {
-            printf("[FAIL] shared_cache_iterate dyld_shared_cache_find_iterate_text() expected iteration count is zero: %d\n", count);
-            return 0;
+            FAIL("dyld_shared_cache_find_iterate_text() expected iteration count is zero: %d", count);
         }
 
         // find other cache
         const char* curCachePath = dyld_shared_cache_file_path();
         if ( curCachePath == NULL ) {
-            printf("[FAIL] shared_cache_iterate dyld_shared_cache_file_path() returned NULL\n");
-            return 0;
+            FAIL("dyld_shared_cache_file_path() returned NULL");
         }
         char cacheDir[PATH_MAX];
         strlcpy(cacheDir, curCachePath, PATH_MAX);
         char* end = strrchr(cacheDir, '/');
         if ( end == NULL ) {
-            printf("[FAIL] shared_cache_iterate cache path has no '/'\n");
-            return 0;
+            FAIL("cache path has no '/'");
         }
         *end = '\0';
         forEachCacheInDir(cacheDir, ^(const uuid_t uuid) {
@@ -152,22 +139,19 @@ int main()
                     ++count;
                 });
                 if ( res != 0 ) {
-                    printf("[FAIL] shared_cache_iterate dyld_shared_cache_find_iterate_text() expected result to be nonzero: %d\n", result);
-                    exit(0);
+                    FAIL("dyld_shared_cache_find_iterate_text() expected result to be nonzero: %d", result);
                 }
                 if ( count < 100 ) {
-                    printf("[FAIL] shared_cache_iterate dyld_shared_cache_find_iterate_text() iterated over less than 100 images: %d\n", count);
-                    exit(0);
+                    FAIL("dyld_shared_cache_find_iterate_text() iterated over less than 100 images: %d", count);
                 }
             }
         });
     }
     else {
-        printf("no dyld cache\n");
+        LOG("no dyld cache");
     }
 
-    printf("[PASS] shared_cache_iterate\n");
-    return 0;
+    PASS("Success");
 }
 
 

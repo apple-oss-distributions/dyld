@@ -18,42 +18,37 @@
 #include <mach/mach.h>
 #include <mach/mach_host.h>
 
+#include "test_support.h"
+
 void tryPath(const char* prog, const char* path)
 {
     void* handle = dlopen(path, RTLD_LAZY);
 #if HARDENED
     if ( handle != NULL ) {
-        printf("[FAIL]  %s dlopen(%s) unexpectedly succeeded\n", prog, path);
+        FAIL("dlopen(%s) unexpectedly succeeded", path);
         exit(0);
     }
 #else
     if ( handle == NULL ) {
-        printf("[FAIL]  %s dlopen(%s) - %s\n", prog, path, dlerror());
+        FAIL("dlopen(%s) - %s", path, dlerror());
         exit(0);
     }
 #endif
 
 }
 
-int main(int arg, const char* argv[])
-{
-    printf("[BEGIN] %s\n", argv[0]);
-
+int main(int argc, const char* argv[], const char* envp[], const char* apple[]) {
     // verify leaf name leads to dylib in /usr/lib/
     void* handle = dlopen("libc.dylib", RTLD_LAZY);
     if ( handle == NULL ) {
-        printf("[FAIL]  %s dlopen - %s\n", argv[0], dlerror());
-        return 0;
+        FAIL("dlopen - %s", dlerror());
     }
 
     // verify file system relative paths: hardened should fail
     tryPath(argv[0], "libmy.dylib");
     tryPath(argv[0], "./libmy.dylib");
     tryPath(argv[0], "../amfi-hardened-dlopen-leaf/libmy.dylib");
-
-    printf("[PASS]  %s\n", argv[0]);
-
-	return 0;
+    PASS("Succcess");
 }
 
 

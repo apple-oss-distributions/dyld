@@ -8,85 +8,69 @@
 #include <stdio.h>
 #include <dlfcn.h>
 
+#include "test_support.h"
+
 int gInitialisersCalled = 0;
 
-int main() {
-	printf("[BEGIN] dlopen-flat\n");
-	int result;
+int main(int argc, const char* argv[], const char* envp[], const char* apple[]) {
+    int result;
 
-	// Foo exports foo()
-	void* fooHandle = 0;
-	{
-		fooHandle = dlopen(RUN_DIR "/libfoo.dylib", RTLD_LAZY);
-		if (!fooHandle) {
-			printf("dlopen failed with error: %s\n", dlerror());
-			return 1;
-		}
-		if (gInitialisersCalled != 1) {
-	        printf("gInitialisersCalled != 1\n");
-	        printf("[FAIL] dlopen-flat\n");
-			return 1;
-		}
-	}
-	// Now unload foo which should do something.
-	result = dlclose(fooHandle);
-	if (result != 0) {
-        printf("dlclose() returned %c\n", result);
-        printf("[FAIL] dlopen-flat\n");
-		return 1;
-	}
+    // Foo exports foo()
+    void* fooHandle = 0;
+    {
+        fooHandle = dlopen(RUN_DIR "/libfoo.dylib", RTLD_LAZY);
+        if (!fooHandle) {
+            FAIL("dlopen(\"" RUN_DIR "/libfoo.dylib\") failed with error: %s", dlerror());
+        }
+        if (gInitialisersCalled != 1) {
+            FAIL("gInitialisersCalled != 1");
+        }
+    }
+    // Now unload foo which should do something.
+    result = dlclose(fooHandle);
+    if (result != 0) {
+        FAIL("dlclose() returned %c", result);
+    }
 
-	// Open foo again which should do something.
-	{
-		fooHandle = dlopen(RUN_DIR "/libfoo.dylib", RTLD_LAZY);
-		if (!fooHandle) {
-			printf("dlopen failed with error: %s\n", dlerror());
-			return 1;
-		}
-		if (gInitialisersCalled != 2) {
-	        printf("gInitialisersCalled != 2\n");
-	        printf("[FAIL] dlopen-flat\n");
-			return 1;
-		}
-	}
+    // Open foo again which should do something.
+    {
+        fooHandle = dlopen(RUN_DIR "/libfoo.dylib", RTLD_LAZY);
+        if (!fooHandle) {
+            FAIL("dlopen failed with error: %s", dlerror());
+        }
+        if (gInitialisersCalled != 2) {
+            FAIL("gInitialisersCalled != 2");
+        }
+    }
 
-	// Bar is going to resolve foo()
-	void* barHandle = 0;
-	{
-		barHandle = dlopen(RUN_DIR "/libbar.dylib", RTLD_LAZY);
-		if (!barHandle) {
-			printf("dlopen failed with error: %s\n", dlerror());
-			return 1;
-		}
-		if (gInitialisersCalled != 3) {
-	        printf("gInitialisersCalled != 3\n");
-	        printf("[FAIL] dlopen-flat\n");
-			return 1;
-		}
-	}
-	// Now unload foo which shouldn't do anything.
-	result = dlclose(fooHandle);
-	if (result != 0) {
-        printf("dlclose() returned %c\n", result);
-        printf("[FAIL] dlopen-flat\n");
-		return 1;
-	}
+    // Bar is going to resolve foo()
+    void* barHandle = 0;
+    {
+        barHandle = dlopen(RUN_DIR "/libbar.dylib", RTLD_LAZY);
+        if (!barHandle) {
+            FAIL("dlopen(\"" RUN_DIR "/libbar.dylib\" failed with error: %s", dlerror());
+        }
+        if (gInitialisersCalled != 3) {
+            FAIL("gInitialisersCalled != 3");
+        }
+    }
+    // Now unload foo which shouldn't do anything.
+    result = dlclose(fooHandle);
+    if (result != 0) {
+        FAIL("dlclose(\"" RUN_DIR "/libfoo.dylib\") returned %c", result);
+    }
 
-	// Open foo again which shouldn't do anything.
-	{
-		fooHandle = dlopen(RUN_DIR "/libfoo.dylib", RTLD_LAZY);
-		if (!fooHandle) {
-			printf("dlopen failed with error: %s\n", dlerror());
-			return 1;
-		}
-		if (gInitialisersCalled != 3) {
-	        printf("gInitialisersCalled != 3\n");
-	        printf("[FAIL] dlopen-flat\n");
-			return 1;
-		}
-	}
+    // Open foo again which shouldn't do anything.
+    {
+        fooHandle = dlopen(RUN_DIR "/libfoo.dylib", RTLD_LAZY);
+        if (!fooHandle) {
+            FAIL("dlopen(\"" RUN_DIR "/libfoo.dylib\" failed with error: %s", dlerror());
+        }
+        if (gInitialisersCalled != 3) {
+            FAIL("gInitialisersCalled != 3");
+        }
+    }
 
-    printf("[PASS] dlopen-flat\n");
-	return 0;
+    PASS("Success");
 }
 

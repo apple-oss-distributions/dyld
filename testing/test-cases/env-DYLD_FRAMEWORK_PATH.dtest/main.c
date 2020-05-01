@@ -1,5 +1,4 @@
 
-// BUILD:  mkdir -p $BUILD_DIR/Frameworks/Foo.framework $BUILD_DIR/Frameworks-alt/Foo.framework
 // BUILD:  $CC foo.c -dynamiclib -o $BUILD_DIR/Frameworks/Foo.framework/Foo     -install_name $RUN_DIR/Frameworks/Foo.framework/Foo -DVALUE=1
 // BUILD:  $CC foo.c -dynamiclib -o $BUILD_DIR/Frameworks-alt/Foo.framework/Foo -install_name $RUN_DIR/Frameworks/Foo.framework/Foo -DVALUE=42
 // BUILD:  $CC main.c            -o $BUILD_DIR/env-DYLD_FRAMEWORK_PATH.exe $BUILD_DIR/Frameworks/Foo.framework/Foo
@@ -11,19 +10,16 @@
 #include <stdio.h>
 #include <stdlib.h>
 
+#include "test_support.h"
+
 extern int foo();
 
-int main()
-{
+int main(int argc, const char* argv[], const char* envp[], const char* apple[]) {
     int expected = (getenv("DYLD_FRAMEWORK_PATH") != NULL) ? 42 : 1;
 
-    printf("[BEGIN] env-DYLD_FRAMEWORK_PATH, expect %d\n", expected);
-
 	if ( foo() == expected )
-        printf("[PASS] env-DYLD_FRAMEWORK_PATH\n");
+        PASS("Success");
     else
-        printf("[FAIL] env-DYLD_FRAMEWORK_PATH\n");
-
-	return 0;
+        FAIL("Incorrect libfoo.dylib loaded");
 }
 

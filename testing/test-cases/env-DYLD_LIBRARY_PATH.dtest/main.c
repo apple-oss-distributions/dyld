@@ -1,5 +1,4 @@
 
-// BUILD:  mkdir -p $BUILD_DIR/door1 $BUILD_DIR/door2
 // BUILD:  $CC foo.c -dynamiclib -o $BUILD_DIR/door1/libfoo.dylib -install_name $RUN_DIR/door1/libfoo.dylib -DVALUE=1
 // BUILD:  $CC foo.c -dynamiclib -o $BUILD_DIR/door2/libfoo.dylib -install_name $RUN_DIR/door2/libfoo.dylib -DVALUE=42
 // BUILD:  $CC main.c            -o $BUILD_DIR/env-DYLD_LIBRARY_PATH.exe $BUILD_DIR/door1/libfoo.dylib
@@ -11,19 +10,16 @@
 #include <stdio.h>
 #include <stdlib.h>
 
+#include "test_support.h"
+
 extern int foo();
 
-int main()
-{
+int main(int argc, const char* argv[], const char* envp[], const char* apple[]) {
     int expected = (getenv("DYLD_LIBRARY_PATH") != NULL) ? 42 : 1;
 
-    printf("[BEGIN] env-DYLD_LIBRARY_PATH, expect %d\n", expected);
-
 	if ( foo() == expected )
-        printf("[PASS] env-DYLD_LIBRARY_PATH\n");
+        PASS("Success");
     else
-        printf("[FAIL] env-DYLD_LIBRARY_PATH\n");
-
-	return 0;
+        FAIL("Wrong dylib loaded");
 }
 

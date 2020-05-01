@@ -1,6 +1,7 @@
 #include <stddef.h>
 #include <stdio.h>
 
+#include "test_support.h"
 
 extern void libDynamicTerminated();
 
@@ -8,7 +9,7 @@ extern void libDynamicTerminated();
 static __attribute__((destructor))
 void myTerm()
 {
-    //fprintf(stderr, "foo static terminator\n");
+    LOG("foo static terminator");
     libDynamicTerminated();
 }
 

@@ -1,5 +1,4 @@
-
-#include <stdio.h>
+#include "test_support.h"
 
 extern int bar();
 extern int bazIsInited();
@@ -9,8 +8,7 @@ int foo() {
 		return 1;
 	}
 	if ( bazIsInited() == 0 ) {
-		printf("[FAIL]  dlopen-in-init3, didn't init baz\n");
-		return 1;
+		FAIL("didn't init baz");
 	}
 	return 0;
 }

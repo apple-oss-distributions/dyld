@@ -1,5 +1,4 @@
 
-// BUILD:  mkdir -p $BUILD_DIR/dir
 // BUILD:  $CC bar.c  -dynamiclib -install_name @rpath/libbar.dylib -o $BUILD_DIR/dir/libbar.dylib
 // BUILD:  $CC test.c -dynamiclib -install_name $RUN_DIR/libtest.dylib -o $BUILD_DIR/libtest.dylib -rpath @loader_path/dir
 // BUILD:  $CC main.c -o $BUILD_DIR/dlopen-rpath-from-dylib.exe $BUILD_DIR/libtest.dylib 
@@ -10,20 +9,14 @@
 #include <dlfcn.h>
 #include <stdbool.h>
 
+#include "test_support.h"
 
 /// test that a call to dlopen() from a dylib uses the LC_RPATH from that dylib
 
-extern bool test_dlopen();
+extern void test_dlopen();
 
-int main()
-{
-    printf("[BEGIN] dlopen-rpath-from-dylib\n");
-
-    if ( test_dlopen() )
-        printf("[PASS]  dlopen-rpath-from-dylib\n");
-    else
-        printf("[FAIL]  dlopen-rpath-from-dylib\n");
-
-	return 0;
+int main(int argc, const char* argv[], const char* envp[], const char* apple[]) {
+    test_dlopen();
+    PASS("Succcess");
 }
 

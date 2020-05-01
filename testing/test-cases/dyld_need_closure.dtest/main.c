@@ -8,24 +8,18 @@
 #include <stdlib.h>
 #include <mach-o/dyld_priv.h>
 
+#include "test_support.h"
 
-int main()
-{
-    printf("[BEGIN] dyld_need_closure\n");
-
+int main(int argc, const char* argv[], const char* envp[], const char* apple[]) {
     // We only support trying to save to containerised paths, so anything not
     // of that form should fail
     if ( !dyld_need_closure("./foo.exe", "/tmp/Containers/Data/") ) {
-        printf("[FAIL] dyld_closure: Should have needed a closure for containerised path\n");
-        return 0;
+        FAIL("Should have needed a closure for containerised path");
     }
 
     if ( dyld_need_closure("./foo.exe", "/tmp/Containers/Data2/") ) {
-        printf("[FAIL] dyld_closure: Should have rejected a closure for non-containerised path\n");
-        return 0;
+        FAIL("Should have rejected a closure for non-containerised path");
     }
 
-    printf("[PASS] dyld_need_closure\n");
-
-    return 0;
+    PASS("Success");
 }

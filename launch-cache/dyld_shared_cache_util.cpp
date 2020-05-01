@@ -44,8 +44,12 @@
 #include <map>
 #include <vector>
 #include <iostream>
+#include <optional>
 
+#include "ClosureBuilder.h"
 #include "DyldSharedCache.h"
+#include "ClosureFileSystemPhysical.h"
+#include "JSONWriter.h"
 #include "Trie.hpp"
 
 #include "objc-shared-cache.h"
@@ -55,6 +59,9 @@
 #else
 #define DSC_BUNDLE_REL_PATH "../lib/dsc_extractor.bundle"
 #endif
+
+using dyld3::closure::ClosureBuilder;
+using dyld3::closure::FileSystemPhysical;
 
 // mmap() an shared cache file read/only but laid out like it would be at runtime
 static const DyldSharedCache* mapCacheFile(const char* path)
@@ -117,6 +124,8 @@ enum Mode {
     modeInfo,
     modeSize,
     modeObjCProtocols,
+    modeObjCClasses,
+    modeObjCSelectors,
     modeExtract
 };
 
@@ -248,6 +257,14 @@ int main (int argc, const char* argv[]) {
                 checkMode(options.mode);
                 options.mode = modeObjCProtocols;
             }
+            else if (strcmp(opt, "-objc-classes") == 0) {
+                checkMode(options.mode);
+                options.mode = modeObjCClasses;
+            }
+            else if (strcmp(opt, "-objc-selectors") == 0) {
+                checkMode(options.mode);
+                options.mode = modeObjCSelectors;
+            }
             else if (strcmp(opt, "-extract") == 0) {
                 checkMode(options.mode);
                 options.mode = modeExtract;
@@ -318,6 +335,10 @@ int main (int argc, const char* argv[]) {
 #endif
         if (dyldCache == nullptr) {
             fprintf(stderr, "Could not get in-memory shared cache\n");
+            return 1;
+        }
+        if ( options.mode == modeObjCClasses ) {
+            fprintf(stderr, "Cannot use -objc-info with a live cache.  Please run with a path to an on-disk cache file\n");
             return 1;
         }
     }
@@ -859,6 +880,464 @@ int main (int argc, const char* argv[]) {
             }
         }
     }
+    else if ( options.mode == modeObjCClasses ) {
+        using dyld3::json::Node;
+        using ObjCClassInfo = dyld3::MachOAnalyzer::ObjCClassInfo;
+        const bool rebased = false;
+
+        // Build a map of class vm addrs to their names so that categories know the
+        // name of the class they are attaching to
+        __block std::map<uint64_t, const char*> classVMAddrToName;
+        __block std::map<uint64_t, const char*> metaclassVMAddrToName;
+        dyldCache->forEachImage(^(const mach_header *mh, const char *installName) {
+            const dyld3::MachOAnalyzer* ma = (const dyld3::MachOAnalyzer*)mh;
+            const uint32_t pointerSize = ma->pointerSize();
+
+            auto visitClass = ^(Diagnostics& diag, uint64_t classVMAddr,
+                                uint64_t classSuperclassVMAddr, uint64_t classDataVMAddr,
+                                const dyld3::MachOAnalyzer::ObjCClassInfo& objcClass, bool isMetaClass) {
+                dyld3::MachOAnalyzer::PrintableStringResult classNameResult;
+                const char* className = ma->getPrintableString(objcClass.nameVMAddr(pointerSize), classNameResult);
+                if (classNameResult != dyld3::MachOAnalyzer::PrintableStringResult::CanPrint)
+                    return;
+
+                if (isMetaClass)
+                    metaclassVMAddrToName[classVMAddr] = className;
+                else
+                    classVMAddrToName[classVMAddr] = className;
+            };
+
+            Diagnostics diag;
+            ma->forEachObjCClass(diag, rebased, visitClass);
+        });
+
+        // These are used only for the on-disk binaries we analyze
+        __block std::vector<const char*>        onDiskChainedFixupBindTargets;
+        __block std::map<uint64_t, const char*> onDiskClassVMAddrToName;
+        __block std::map<uint64_t, const char*> onDiskMetaclassVMAddrToName;
+
+        __block Node root;
+        auto makeNode = [](std::string str) -> Node {
+            Node node;
+            node.value = str;
+            return node;
+        };
+
+        auto getProperties = ^(const dyld3::MachOAnalyzer* ma, uint64_t propertiesVMAddr) {
+            __block Node propertiesNode;
+            auto visitProperty = ^(uint64_t propertyVMAddr, const dyld3::MachOAnalyzer::ObjCProperty& property) {
+                // Get the name
+                dyld3::MachOAnalyzer::PrintableStringResult propertyNameResult;
+                const char* propertyName = ma->getPrintableString(property.nameVMAddr, propertyNameResult);
+                if (propertyNameResult != dyld3::MachOAnalyzer::PrintableStringResult::CanPrint)
+                    return;
+
+                // Get the attributes
+                dyld3::MachOAnalyzer::PrintableStringResult propertyAttributesResult;
+                const char* propertyAttributes = ma->getPrintableString(property.attributesVMAddr, propertyAttributesResult);
+                if (propertyAttributesResult != dyld3::MachOAnalyzer::PrintableStringResult::CanPrint)
+                    return;
+
+                Node propertyNode;
+                propertyNode.map["name"] = makeNode(propertyName);
+                propertyNode.map["attributes"] = makeNode(propertyAttributes);
+                propertiesNode.array.push_back(propertyNode);
+            };
+            ma->forEachObjCProperty(propertiesVMAddr, rebased, visitProperty);
+            return propertiesNode.array.empty() ? std::optional<Node>() : propertiesNode;
+        };
+
+        auto getClasses = ^(const dyld3::MachOAnalyzer* ma) {
+            Diagnostics diag;
+            const uint32_t pointerSize = ma->pointerSize();
+
+            __block Node classesNode;
+            __block bool skippedPreviousClass = false;
+            auto visitClass = ^(Diagnostics& diag, uint64_t classVMAddr,
+                                uint64_t classSuperclassVMAddr, uint64_t classDataVMAddr,
+                                const dyld3::MachOAnalyzer::ObjCClassInfo& objcClass, bool isMetaClass) {
+                if (isMetaClass) {
+                    if (skippedPreviousClass) {
+                        // If the class was bad, then skip the meta class too
+                        skippedPreviousClass = false;
+                        return;
+                    }
+                } else {
+                    skippedPreviousClass = true;
+                }
+
+                std::string classType = "-";
+                if (isMetaClass)
+                    classType = "+";
+                dyld3::MachOAnalyzer::PrintableStringResult classNameResult;
+                const char* className = ma->getPrintableString(objcClass.nameVMAddr(pointerSize), classNameResult);
+                if (classNameResult != dyld3::MachOAnalyzer::PrintableStringResult::CanPrint) {
+                    return;
+                }
+
+                const char* superClassName = nullptr;
+                if ( ma->inDyldCache() ) {
+                    if ( objcClass.superclassVMAddr != 0 ) {
+                        if (isMetaClass) {
+                            // If we are root class, then our superclass should actually point to our own class
+                            const uint32_t RO_ROOT = (1<<1);
+                            if ( objcClass.flags(pointerSize) & RO_ROOT ) {
+                                auto it = classVMAddrToName.find(objcClass.superclassVMAddr);
+                                assert(it != classVMAddrToName.end());
+                                superClassName = it->second;
+                            } else {
+                                auto it = metaclassVMAddrToName.find(objcClass.superclassVMAddr);
+                                assert(it != metaclassVMAddrToName.end());
+                                superClassName = it->second;
+                            }
+                        } else {
+                            auto it = classVMAddrToName.find(objcClass.superclassVMAddr);
+                            assert(it != classVMAddrToName.end());
+                            superClassName = it->second;
+                        }
+                    }
+                } else {
+                    // On-disk binary.  Lets crack the chain to work out what we are pointing at
+                    dyld3::MachOAnalyzer::ChainedFixupPointerOnDisk fixup;
+                    fixup.raw64 = objcClass.superclassVMAddr;
+                    assert(!fixup.arm64e.authBind.auth);
+                    if (fixup.arm64e.bind.bind) {
+                        // Bind to another image.  Use the bind table to work out which name to bind to
+                        const char* symbolName = onDiskChainedFixupBindTargets[fixup.arm64e.bind.ordinal];
+                        if (isMetaClass) {
+                            if ( strstr(symbolName, "_OBJC_METACLASS_$_") == symbolName ) {
+                                superClassName = symbolName + strlen("_OBJC_METACLASS_$_");
+                            } else {
+                                // Swift classes don't start with these prefixes so just skip them
+                                if (objcClass.isSwiftLegacy || objcClass.isSwiftStable)
+                                    return;
+                            }
+                        } else {
+                            if ( strstr(symbolName, "_OBJC_CLASS_$_") == symbolName ) {
+                                superClassName = symbolName + strlen("_OBJC_CLASS_$_");
+                            } else {
+                                // Swift classes don't start with these prefixes so just skip them
+                                if (objcClass.isSwiftLegacy || objcClass.isSwiftStable)
+                                    return;
+                            }
+                        }
+                    } else {
+                        // Rebase within this image.
+                        if (isMetaClass) {
+                            auto it = onDiskMetaclassVMAddrToName.find(objcClass.superclassVMAddr);
+                            assert(it != onDiskMetaclassVMAddrToName.end());
+                            superClassName = it->second;
+                        } else {
+                            auto it = onDiskClassVMAddrToName.find(objcClass.superclassVMAddr);
+                            assert(it != onDiskClassVMAddrToName.end());
+                            superClassName = it->second;
+                        }
+                    }
+                }
+
+                // Print the methods on this class
+                __block Node methodsNode;
+                auto visitMethod = ^(uint64_t methodVMAddr, const dyld3::MachOAnalyzer::ObjCMethod& method) {
+                    dyld3::MachOAnalyzer::PrintableStringResult methodNameResult;
+                    const char* methodName = ma->getPrintableString(method.nameVMAddr, methodNameResult);
+                    if (methodNameResult != dyld3::MachOAnalyzer::PrintableStringResult::CanPrint)
+                        return;
+                    methodsNode.array.push_back(makeNode(classType + methodName));
+                };
+                ma->forEachObjCMethod(objcClass.baseMethodsVMAddr(pointerSize), rebased,
+                                      visitMethod);
+
+                std::optional<Node> properties = getProperties(ma, objcClass.basePropertiesVMAddr(pointerSize));
+
+                if (isMetaClass) {
+                    assert(!classesNode.array.empty());
+                    Node& currentClassNode = classesNode.array.back();
+                    assert(currentClassNode.map["className"].value == className);
+                    if (!methodsNode.array.empty()) {
+                        Node& currentMethodsNode = currentClassNode.map["methods"];
+                        currentMethodsNode.array.insert(currentMethodsNode.array.end(),
+                                                        methodsNode.array.begin(),
+                                                        methodsNode.array.end());
+                    }
+                    if (properties.has_value()) {
+                        Node& currentPropertiesNode = currentClassNode.map["properties"];
+                        currentPropertiesNode.array.insert(currentPropertiesNode.array.end(),
+                                                           properties->array.begin(),
+                                                           properties->array.end());
+                    }
+                    return;
+                }
+
+                Node currentClassNode;
+                currentClassNode.map["className"] = makeNode(className);
+                if ( superClassName != nullptr )
+                    currentClassNode.map["superClassName"] = makeNode(superClassName);
+                if (!methodsNode.array.empty())
+                    currentClassNode.map["methods"] = methodsNode;
+                if (properties.has_value())
+                    currentClassNode.map["properties"] = properties.value();
+
+                // We didn't skip this class so mark it as such
+                skippedPreviousClass = false;
+
+                classesNode.array.push_back(currentClassNode);
+            };
+
+            ma->forEachObjCClass(diag, rebased, visitClass);
+            return classesNode.array.empty() ? std::optional<Node>() : classesNode;
+        };
+
+        auto getCategories = ^(const dyld3::MachOAnalyzer* ma) {
+            Diagnostics diag;
+
+            __block Node categoriesNode;
+            auto visitCategory = ^(Diagnostics& diag, uint64_t categoryVMAddr,
+                                   const dyld3::MachOAnalyzer::ObjCCategory& objcCategory) {
+                dyld3::MachOAnalyzer::PrintableStringResult categoryNameResult;
+                const char* categoryName = ma->getPrintableString(objcCategory.nameVMAddr, categoryNameResult);
+                if (categoryNameResult != dyld3::MachOAnalyzer::PrintableStringResult::CanPrint)
+                    return;
+
+                    const char* className = nullptr;
+                    if ( ma->inDyldCache() ) {
+                        auto it = classVMAddrToName.find(objcCategory.clsVMAddr);
+                        assert(it != classVMAddrToName.end());
+                        className = it->second;
+                    } else {
+                        // On-disk binary.  Lets crack the chain to work out what we are pointing at
+                        dyld3::MachOAnalyzer::ChainedFixupPointerOnDisk fixup;
+                        fixup.raw64 = objcCategory.clsVMAddr;
+                        assert(!fixup.arm64e.authBind.auth);
+                        if (fixup.arm64e.bind.bind) {
+                            // Bind to another image.  Use the bind table to work out which name to bind to
+                            const char* symbolName = onDiskChainedFixupBindTargets[fixup.arm64e.bind.ordinal];
+                            if ( strstr(symbolName, "_OBJC_CLASS_$_") == symbolName ) {
+                                className = symbolName + strlen("_OBJC_CLASS_$_");
+                            } else {
+                                // Swift classes don't start with these prefixes so just skip them
+                                // We don't know that this is a Swift class/category though, but skip it anyway
+                                return;
+                            }
+                        } else {
+                            auto it = onDiskClassVMAddrToName.find(objcCategory.clsVMAddr);
+                            if (it == onDiskClassVMAddrToName.end()) {
+                                // This is an odd binary with perhaps a Swift class.  Just skip this entry
+                                return;
+                            }
+                            className = it->second;
+                        }
+                    }
+
+                // Print the instance methods on this category
+                __block Node methodsNode;
+                auto visitInstanceMethod = ^(uint64_t methodVMAddr, const dyld3::MachOAnalyzer::ObjCMethod& method) {
+                    dyld3::MachOAnalyzer::PrintableStringResult methodNameResult;
+                    const char* methodName = ma->getPrintableString(method.nameVMAddr, methodNameResult);
+                    if (methodNameResult != dyld3::MachOAnalyzer::PrintableStringResult::CanPrint)
+                        return;
+                    methodsNode.array.push_back(makeNode(std::string("-") + methodName));
+                };
+                ma->forEachObjCMethod(objcCategory.instanceMethodsVMAddr, rebased,
+                                      visitInstanceMethod);
+
+                // Print the instance methods on this category
+                __block Node classMethodsNode;
+                auto visitClassMethod = ^(uint64_t methodVMAddr, const dyld3::MachOAnalyzer::ObjCMethod& method) {
+                    dyld3::MachOAnalyzer::PrintableStringResult methodNameResult;
+                    const char* methodName = ma->getPrintableString(method.nameVMAddr, methodNameResult);
+                    if (methodNameResult != dyld3::MachOAnalyzer::PrintableStringResult::CanPrint)
+                        return;
+                    methodsNode.array.push_back(makeNode(std::string("+") + methodName));
+                };
+                ma->forEachObjCMethod(objcCategory.classMethodsVMAddr, rebased,
+                                      visitClassMethod);
+
+                Node currentCategoryNode;
+                currentCategoryNode.map["categoryName"] = makeNode(categoryName);
+                currentCategoryNode.map["className"] = makeNode(className);
+                if (!methodsNode.array.empty())
+                    currentCategoryNode.map["methods"] = methodsNode;
+                if (std::optional<Node> properties = getProperties(ma, objcCategory.instancePropertiesVMAddr))
+                    currentCategoryNode.map["properties"] = properties.value();
+
+                categoriesNode.array.push_back(currentCategoryNode);
+            };
+
+            ma->forEachObjCCategory(diag, rebased, visitCategory);
+            return categoriesNode.array.empty() ? std::optional<Node>() : categoriesNode;
+        };
+
+        dyldCache->forEachImage(^(const mach_header *mh, const char *installName) {
+            const dyld3::MachOAnalyzer* ma = (const dyld3::MachOAnalyzer*)mh;
+
+            Node imageRecord;
+            imageRecord.map["imagePath"] = makeNode(installName);
+            imageRecord.map["imageType"] = makeNode("cache-dylib");
+            std::optional<Node> classes = getClasses(ma);
+            std::optional<Node> categories = getCategories(ma);
+
+            // Skip emitting images with no objc data
+            if (!classes.has_value() && !categories.has_value())
+                return;
+            if (classes.has_value())
+                imageRecord.map["classes"] = classes.value();
+            if (categories.has_value())
+                imageRecord.map["categories"] = categories.value();
+
+            root.array.push_back(imageRecord);
+        });
+
+        FileSystemPhysical fileSystem;
+        dyld3::Platform            platform = dyldCache->platform();
+        const dyld3::GradedArchs&  archs    = dyld3::GradedArchs::forName(dyldCache->archName(), true);
+
+        dyldCache->forEachLaunchClosure(^(const char *executableRuntimePath, const dyld3::closure::LaunchClosure *closure) {
+            Diagnostics diag;
+            char realerPath[MAXPATHLEN];
+            dyld3::closure::LoadedFileInfo loadedFileInfo = dyld3::MachOAnalyzer::load(diag, fileSystem, executableRuntimePath, archs, platform, realerPath);
+            const dyld3::MachOAnalyzer* ma = (const dyld3::MachOAnalyzer*)loadedFileInfo.fileContent;
+            uint32_t pointerSize = ma->pointerSize();
+
+            // Populate the bind targets for classes from other images
+            onDiskChainedFixupBindTargets.clear();
+            ma->forEachChainedFixupTarget(diag, ^(int libOrdinal, const char* symbolName, uint64_t addend, bool weakImport, bool& stop) {
+                onDiskChainedFixupBindTargets.push_back(symbolName);
+            });
+            if ( diag.hasError() )
+                return;
+
+            // Populate the rebase targets for class names
+            onDiskMetaclassVMAddrToName.clear();
+            onDiskClassVMAddrToName.clear();
+            auto visitClass = ^(Diagnostics& diag, uint64_t classVMAddr,
+                                uint64_t classSuperclassVMAddr, uint64_t classDataVMAddr,
+                                const dyld3::MachOAnalyzer::ObjCClassInfo& objcClass, bool isMetaClass) {
+                dyld3::MachOAnalyzer::PrintableStringResult classNameResult;
+                const char* className = ma->getPrintableString(objcClass.nameVMAddr(pointerSize), classNameResult);
+                if (classNameResult != dyld3::MachOAnalyzer::PrintableStringResult::CanPrint)
+                    return;
+
+                if (isMetaClass)
+                    onDiskMetaclassVMAddrToName[classVMAddr] = className;
+                else
+                    onDiskClassVMAddrToName[classVMAddr] = className;
+            };
+
+            ma->forEachObjCClass(diag, rebased, visitClass);
+
+            Node imageRecord;
+            imageRecord.map["imagePath"] = makeNode(executableRuntimePath);
+            imageRecord.map["imageType"] = makeNode("executable");
+            std::optional<Node> classes = getClasses(ma);
+            std::optional<Node> categories = getCategories(ma);
+
+            // Skip emitting images with no objc data
+            if (!classes.has_value() && !categories.has_value())
+                return;
+            if (classes.has_value())
+                imageRecord.map["classes"] = classes.value();
+            if (categories.has_value())
+                imageRecord.map["categories"] = categories.value();
+
+            root.array.push_back(imageRecord);
+        });
+
+        dyldCache->forEachDlopenImage(^(const char *runtimePath, const dyld3::closure::Image *image) {
+            Diagnostics diag;
+            char realerPath[MAXPATHLEN];
+            dyld3::closure::LoadedFileInfo loadedFileInfo = dyld3::MachOAnalyzer::load(diag, fileSystem, runtimePath, archs, platform, realerPath);
+            const dyld3::MachOAnalyzer* ma = (const dyld3::MachOAnalyzer*)loadedFileInfo.fileContent;
+            uint32_t pointerSize = ma->pointerSize();
+
+            // Populate the bind targets for classes from other images
+            onDiskChainedFixupBindTargets.clear();
+            ma->forEachChainedFixupTarget(diag, ^(int libOrdinal, const char* symbolName, uint64_t addend, bool weakImport, bool& stop) {
+                onDiskChainedFixupBindTargets.push_back(symbolName);
+            });
+            if ( diag.hasError() )
+                return;
+
+            // Populate the rebase targets for class names
+            onDiskMetaclassVMAddrToName.clear();
+            onDiskClassVMAddrToName.clear();
+            auto visitClass = ^(Diagnostics& diag, uint64_t classVMAddr,
+                                uint64_t classSuperclassVMAddr, uint64_t classDataVMAddr,
+                                const dyld3::MachOAnalyzer::ObjCClassInfo& objcClass, bool isMetaClass) {
+                dyld3::MachOAnalyzer::PrintableStringResult classNameResult;
+                const char* className = ma->getPrintableString(objcClass.nameVMAddr(pointerSize), classNameResult);
+                if (classNameResult != dyld3::MachOAnalyzer::PrintableStringResult::CanPrint)
+                    return;
+
+                if (isMetaClass)
+                    onDiskMetaclassVMAddrToName[classVMAddr] = className;
+                else
+                    onDiskClassVMAddrToName[classVMAddr] = className;
+            };
+
+            ma->forEachObjCClass(diag, rebased, visitClass);
+
+            Node imageRecord;
+            imageRecord.map["imagePath"] = makeNode(runtimePath);
+            imageRecord.map["imageType"] = makeNode("non-cache-dylib");
+            std::optional<Node> classes = getClasses(ma);
+            std::optional<Node> categories = getCategories(ma);
+
+            // Skip emitting images with no objc data
+            if (!classes.has_value() && !categories.has_value())
+                return;
+            if (classes.has_value())
+                imageRecord.map["classes"] = classes.value();
+            if (categories.has_value())
+                imageRecord.map["categories"] = categories.value();
+
+            root.array.push_back(imageRecord);
+        });
+
+        dyld3::json::printJSON(root, 0, std::cout);
+    }
+    else if ( options.mode == modeObjCSelectors ) {
+        if ( dyldCache->objcOpt() == nullptr ) {
+            fprintf(stderr, "Error: could not get optimized objc\n");
+            return 1;
+        }
+        const objc_opt::objc_selopt_t* selectors = dyldCache->objcOpt()->selopt();
+        if ( selectors == nullptr ) {
+            fprintf(stderr, "Error: could not get optimized objc selectors\n");
+            return 1;
+        }
+
+        std::vector<const char*> selNames;
+        for (uint64_t index = 0; index != selectors->capacity; ++index) {
+            objc_opt::objc_stringhash_offset_t offset = selectors->offsets()[index];
+            if ( offset == 0 )
+                continue;
+            const char* selName = selectors->getEntryForIndex((uint32_t)index);
+            selNames.push_back(selName);
+        }
+
+        std::sort(selNames.begin(), selNames.end(),
+                  [](const char* a, const char* b) {
+            // Sort by offset, not string value
+            return a < b;
+        });
+
+        auto makeNode = [](std::string str) {
+            dyld3::json::Node node;
+            node.value = str;
+            return node;
+        };
+
+        dyld3::json::Node root;
+        for (const char* selName : selNames) {
+            dyld3::json::Node selNode;
+            selNode.map["selectorName"] = makeNode(selName);
+            selNode.map["offset"] = makeNode(dyld3::json::decimal((uint64_t)selName - (uint64_t)dyldCache));
+
+            root.array.push_back(selNode);
+        }
+
+        dyld3::json::printJSON(root, 0, std::cout);
+    }
     else if ( options.mode == modeExtract ) {
         char pathBuffer[PATH_MAX];
         uint32_t bufferSize = PATH_MAX;
@@ -1102,6 +1581,8 @@ int main (int argc, const char* argv[]) {
             case modeSectionSizes:
             case modeStrings:
             case modeObjCProtocols:
+            case modeObjCClasses:
+            case modeObjCSelectors:
             case modeExtract:
                 break;
         }

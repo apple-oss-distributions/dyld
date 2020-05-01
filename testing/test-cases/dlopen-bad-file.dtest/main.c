@@ -1,5 +1,5 @@
 
-// BUILD:  cp bad.txt $BUILD_DIR/libnota.dylib
+// BUILD:  $CP bad.txt $BUILD_DIR/libnota.dylib
 // BUILD:  $CC main.c  -o $BUILD_DIR/dlopen-bad-file.exe -DRUN_DIR="$RUN_DIR"
 
 // RUN:  ./dlopen-bad-file.exe
@@ -8,40 +8,29 @@
 #include <dlfcn.h>
 #include <string.h>
 
+#include "test_support.h"
 
-
-int main()
-{
-    printf("[BEGIN] dlopen-bad-file\n");
-
+int main(int argc, const char* argv[], const char* envp[], const char* apple[]) {
     // try to dlopen() a text file
-	void* handle = dlopen(RUN_DIR "/libnota.dylib", RTLD_FIRST);
-	if ( handle != NULL ) {
-        printf("[FAIL] dlopen-bad-file should have failed on non-mach-o file %s\n", RUN_DIR "/libnota.dylib");
-		return 0;
-	}
+    void* handle = dlopen(RUN_DIR "/libnota.dylib", RTLD_FIRST);
+    if ( handle != NULL ) {
+        FAIL("Should have failed on non-mach-o file %s", RUN_DIR "/libnota.dylib");
+    }
     const char* message = dlerror();
     if ( (strstr(message, "mach-o") == NULL) && (strstr(message, "too short") == NULL) ) {
-        printf("dlerror: %s\n", message);
-        printf("[FAIL] dlopen-bad-file dlerror() message did not contain 'mach-o'\n");
-		return 0;
-	}
+        FAIL("dlerror() message '%s' did not contain 'mach-o'", message);
+    }
 
     // try to dlopen() a directory
-	handle = dlopen(RUN_DIR, RTLD_FIRST);
-	if ( handle != NULL ) {
-        printf("[FAIL] dlopen-bad-file should have failed on dir %s\n", RUN_DIR);
-		return 0;
-	}
+    handle = dlopen(RUN_DIR, RTLD_FIRST);
+    if ( handle != NULL ) {
+        FAIL("Should have failed on dir %s", RUN_DIR);
+    }
     message = dlerror();
     if ( strstr(message, "not a file") == NULL ) {
-        printf("dlerror: %s\n", message);
-        printf("[FAIL] dlopen-bad-file dlerror() message did not contain 'not a file'\n");
-		return 0;
-	}
+        FAIL("dlerror() message '%s' did not contain 'not a file", message);
+    }
 
-    printf("[PASS] dlopen-bad-file\n");
-
-	return 0;
+    PASS("Success");
 }
 

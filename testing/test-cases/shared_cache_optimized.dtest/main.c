@@ -9,17 +9,13 @@
 #include <mach-o/dyld_priv.h>
 #include <dlfcn.h>
 
+#include "test_support.h"
 
-int main()
-{
-    printf("[BEGIN] shared_cache_optimized\n");
-
+int main(int argc, const char* argv[], const char* envp[], const char* apple[]) {
     // tests run on internal installs which use un-optimzed dyld cache
     if ( _dyld_shared_cache_optimized() )
-        printf("[FAIL] shared_cache_optimized unexpectedly returned true\n");
+        FAIL("unexpectedly returned true");
     else
-        printf("[PASS] shared_cache_optimized\n");
-
-    return 0;
+        PASS("Success");
 }
 

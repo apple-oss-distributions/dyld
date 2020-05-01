@@ -775,8 +775,12 @@ public:
             }
         }
 
-		if (strcmp(segname, "__DATA") == 0)
-			return getSection("__DATA_CONST", sectname);
+        if (strcmp(segname, "__DATA") == 0) {
+            if (const macho_section<P>* dataConst = getSection("__DATA_CONST", sectname))
+                return dataConst;
+            if (const macho_section<P>* dataDirty = getSection("__DATA_DIRTY", sectname))
+                return dataDirty;
+        }
         return NULL;
     }
 

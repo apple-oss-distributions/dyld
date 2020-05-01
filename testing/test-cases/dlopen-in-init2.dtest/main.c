@@ -17,17 +17,14 @@
 #include <dlfcn.h>
 #include <stdlib.h>
 
+#include "test_support.h"
 
-extern int foo();
-extern int bar();
+extern void foo();
+extern void bar();
 
-int main() {
-	printf("[BEGIN] dlopen-in-init2\n");
-	if ( foo() != 0 )
-		return 0;
-	if ( bar() != 0 )
-		return 0;
-	printf("[PASS]  dlopen-in-init2\n");
-	return 0;
+int main(int argc, const char* argv[], const char* envp[], const char* apple[]) {
+    foo();
+    bar();
+    PASS("Success");
 }
 

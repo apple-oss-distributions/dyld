@@ -885,7 +885,7 @@ void ImageLoaderMachOCompressed::doBind(const LinkContext& context, bool forceLa
 	if ( this->usablePrebinding(context) ) {
 		// don't need to bind
 		// except weak which may now be inline with the regular binds
-		if (this->participatesInCoalescing()) {
+		if ( this->participatesInCoalescing() && (fDyldInfo != nullptr) ) {
 			// run through all binding opcodes
 			eachBind(context, ^(const LinkContext& ctx, ImageLoaderMachOCompressed* image,
 								uintptr_t addr, uint8_t type, const char* symbolName,
@@ -911,7 +911,7 @@ void ImageLoaderMachOCompressed::doBind(const LinkContext& context, bool forceLa
 			const dyld_chained_fixups_header* fixupsHeader = (dyld_chained_fixups_header*)(fLinkEditBase + fChainedFixups->dataoff);
 			doApplyFixups(context, fixupsHeader);
 		}
-		else {
+		else if ( fDyldInfo != nullptr ) {
 		#if TEXT_RELOC_SUPPORT
 			// if there are __TEXT fixups, temporarily make __TEXT writable
 			if ( fTextSegmentBinds )
@@ -993,14 +993,22 @@ void ImageLoaderMachOCompressed::doApplyFixups(const LinkContext& context, const
 	// build table of resolved targets for each symbol ordinal
 	STACK_ALLOC_OVERFLOW_SAFE_ARRAY(const void*, targetAddrs, 128);
 	targetAddrs.reserve(fixupsHeader->imports_count);
-	Diagnostics diag;
+	__block Diagnostics diag;
 	const dyld3::MachOAnalyzer* ma = (dyld3::MachOAnalyzer*)ml;
 	ma->forEachChainedFixupTarget(diag, ^(int libOrdinal, const char* symbolName, uint64_t addend, bool weakImport, bool& stop) {
 		const ImageLoader*	targetImage;
 		uint8_t symbolFlags = weakImport ? BIND_SYMBOL_FLAGS_WEAK_IMPORT : 0;
-		uintptr_t symbolAddress = this->resolve(context, symbolName, symbolFlags, libOrdinal, &targetImage, NULL, true);
-		targetAddrs.push_back((void*)(symbolAddress + addend));
+		try {
+			uintptr_t symbolAddress = this->resolve(context, symbolName, symbolFlags, libOrdinal, &targetImage, NULL, true);
+			targetAddrs.push_back((void*)(symbolAddress + addend));
+		}
+		catch (const char* msg) {
+			stop = true;
+			diag.error("%s", msg);
+		}
 	});
+	if ( diag.hasError() )
+		throw strdup(diag.errorMessage());
 
 	auto logFixups = ^(void* loc, void* newValue) {
 		dyld::log("dyld: fixup: %s:%p = %p\n", this->getShortName(), loc, newValue);
@@ -1009,6 +1017,8 @@ void ImageLoaderMachOCompressed::doApplyFixups(const LinkContext& context, const
 		logFixups = nullptr;
 
 	ml->fixupAllChainedFixups(diag, starts, fSlide, targetAddrs, logFixups);
+	if ( diag.hasError() )
+		throw strdup(diag.errorMessage());
 }
 
 void ImageLoaderMachOCompressed::registerInterposing(const LinkContext& context)
@@ -1838,7 +1848,7 @@ void ImageLoaderMachOCompressed::doInterpose(const LinkContext& context)
 		dyld::log("dyld: interposing %lu tuples onto image: %s\n", fgInterposingTuples.size(), this->getPath());
 
 	const dyld3::MachOAnalyzer* ma = (dyld3::MachOAnalyzer*)fMachOData;
-	if ( !ma->hasChainedFixups() ) {
+	if ( !ma->hasChainedFixups() && (fDyldInfo != nullptr) ) {
 		// Note: all binds that happen as part of normal loading and fixups will have interposing applied.
 		// There is only two cases where we need to parse bind opcodes and apply interposing:
 

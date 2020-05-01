@@ -23,7 +23,7 @@
  */
 
 #include "mrm_shared_cache_builder.h"
-#include "CacheBuilder.h"
+#include "SharedCacheBuilder.h"
 #include "ClosureFileSystem.h"
 #include "FileUtils.h"
 #include <pthread.h>
@@ -194,7 +194,7 @@ private:
 
 struct BuildInstance {
     std::unique_ptr<DyldSharedCache::CreateOptions> options;
-    std::unique_ptr<CacheBuilder>                   builder;
+    std::unique_ptr<SharedCacheBuilder>             builder;
     std::vector<CacheBuilder::InputFile>            inputFiles;
     std::vector<const char*>                        errors;
     std::vector<const char*>                        warnings;
@@ -214,8 +214,8 @@ struct BuildFileResult {
     uint64_t                                    size;
 };
 
-struct SharedCacheBuilder {
-    SharedCacheBuilder(const BuildOptions_v1* options);
+struct MRMSharedCacheBuilder {
+    MRMSharedCacheBuilder(const BuildOptions_v1* options);
     const BuildOptions_v1*          options;
     dyld3::closure::FileSystemMRM   fileSystem;
 
@@ -273,11 +273,11 @@ struct SharedCacheBuilder {
     }
 };
 
-SharedCacheBuilder::SharedCacheBuilder(const BuildOptions_v1* options) : options(options), lock(PTHREAD_MUTEX_INITIALIZER) {
+MRMSharedCacheBuilder::MRMSharedCacheBuilder(const BuildOptions_v1* options) : options(options), lock(PTHREAD_MUTEX_INITIALIZER) {
 
 }
 
-void validiateBuildOptions(const BuildOptions_v1* options, SharedCacheBuilder& builder) {
+void validiateBuildOptions(const BuildOptions_v1* options, MRMSharedCacheBuilder& builder) {
     if (options->version < kMinBuildVersion) {
         builder.error("Builder version %llu is less than minimum supported version of %llu", options->version, kMinBuildVersion);
     }
@@ -330,8 +330,8 @@ void getVersion(uint32_t *major, uint32_t *minor) {
     *minor = MinorVersion;
 }
 
-struct SharedCacheBuilder* createSharedCacheBuilder(const BuildOptions_v1* options) {
-    SharedCacheBuilder* builder = new SharedCacheBuilder(options);
+struct MRMSharedCacheBuilder* createSharedCacheBuilder(const BuildOptions_v1* options) {
+    MRMSharedCacheBuilder* builder = new MRMSharedCacheBuilder(options);
 
     // Check the option struct values are valid
     validiateBuildOptions(options, *builder);
@@ -339,10 +339,10 @@ struct SharedCacheBuilder* createSharedCacheBuilder(const BuildOptions_v1* optio
     return builder;
 }
 
-bool addFile(struct SharedCacheBuilder* builder, const char* path, uint8_t* data, uint64_t size, FileFlags fileFlags) {
+bool addFile(struct MRMSharedCacheBuilder* builder, const char* path, uint8_t* data, uint64_t size, FileFlags fileFlags) {
     __block bool success = false;
     builder->runSync(^() {
-        if (builder->state != SharedCacheBuilder::AcceptingFiles) {
+        if (builder->state != MRMSharedCacheBuilder::AcceptingFiles) {
             builder->error("Cannot add file: '%s' as we have already started building", path);
             return;
         }
@@ -388,10 +388,10 @@ bool addFile(struct SharedCacheBuilder* builder, const char* path, uint8_t* data
     return success;
 }
 
-bool addSymlink(struct SharedCacheBuilder* builder, const char* fromPath, const char* toPath) {
+bool addSymlink(struct MRMSharedCacheBuilder* builder, const char* fromPath, const char* toPath) {
     __block bool success = false;
     builder->runSync(^() {
-        if (builder->state != SharedCacheBuilder::AcceptingFiles) {
+        if (builder->state != MRMSharedCacheBuilder::AcceptingFiles) {
             builder->error("Cannot add file: '%s' as we have already started building", fromPath);
             return;
         }
@@ -481,14 +481,14 @@ static const char* dispositionName(Disposition disposition) {
     }
 }
 
-bool runSharedCacheBuilder(struct SharedCacheBuilder* builder) {
+bool runSharedCacheBuilder(struct MRMSharedCacheBuilder* builder) {
     __block bool success = false;
     builder->runSync(^() {
-        if (builder->state != SharedCacheBuilder::AcceptingFiles) {
+        if (builder->state != MRMSharedCacheBuilder::AcceptingFiles) {
             builder->error("Builder has already been run");
             return;
         }
-        builder->state = SharedCacheBuilder::Building;
+        builder->state = MRMSharedCacheBuilder::Building;
         if (builder->fileSystem.fileCount() == 0) {
             builder->error("Cannot run builder with no files");
         }
@@ -552,7 +552,7 @@ bool runSharedCacheBuilder(struct SharedCacheBuilder* builder) {
                 options->dylibOrdering = parseOrderFile(builder->dylibOrderFileData);
                 options->dirtyDataSegmentOrdering = parseOrderFile(builder->dirtyDataOrderFileData);
 
-                auto cacheBuilder = std::make_unique<CacheBuilder>(*options.get(), builder->fileSystem);
+                auto cacheBuilder = std::make_unique<SharedCacheBuilder>(*options.get(), builder->fileSystem);
                 builder->builders.emplace_back((BuildInstance) { std::move(options), std::move(cacheBuilder), inputFiles });
             }
         };
@@ -574,7 +574,7 @@ bool runSharedCacheBuilder(struct SharedCacheBuilder* builder) {
 
         // FIXME: This step can run in parallel.
         for (auto& buildInstance : builder->builders) {
-            CacheBuilder* cacheBuilder = buildInstance.builder.get();
+            SharedCacheBuilder* cacheBuilder = buildInstance.builder.get();
             cacheBuilder->build(buildInstance.inputFiles, aliases);
 
             // First put the warnings in to a vector to own them.
@@ -619,7 +619,7 @@ bool runSharedCacheBuilder(struct SharedCacheBuilder* builder) {
         // Now that we have run all of the builds, collect the results
         // First push file results for each of the shared caches we built
         for (auto& buildInstance : builder->builders) {
-            CacheBuilder* cacheBuilder = buildInstance.builder.get();
+            SharedCacheBuilder* cacheBuilder = buildInstance.builder.get();
 
             CacheResult cacheBuildResult;
             cacheBuildResult.version                = 1;
@@ -676,43 +676,43 @@ bool runSharedCacheBuilder(struct SharedCacheBuilder* builder) {
                 return;
         }
 
-        builder->state = SharedCacheBuilder::FinishedBuilding;
+        builder->state = MRMSharedCacheBuilder::FinishedBuilding;
         success = true;
     });
     return success;
 }
 
-const char* const* getErrors(const struct SharedCacheBuilder* builder, uint64_t* errorCount) {
+const char* const* getErrors(const struct MRMSharedCacheBuilder* builder, uint64_t* errorCount) {
     if (builder->errors.empty())
         return nullptr;
     *errorCount = builder->errors.size();
     return builder->errors.data();
 }
 
-const struct FileResult* const* getFileResults(struct SharedCacheBuilder* builder, uint64_t* resultCount) {
+const struct FileResult* const* getFileResults(struct MRMSharedCacheBuilder* builder, uint64_t* resultCount) {
     if (builder->fileResults.empty())
         return nullptr;
     *resultCount = builder->fileResults.size();
     return builder->fileResults.data();
 }
 
-const struct CacheResult* const* getCacheResults(struct SharedCacheBuilder* builder, uint64_t* resultCount) {
+const struct CacheResult* const* getCacheResults(struct MRMSharedCacheBuilder* builder, uint64_t* resultCount) {
     if (builder->cacheResults.empty())
         return nullptr;
     *resultCount = builder->cacheResults.size();
     return builder->cacheResults.data();
 }
 
-const char* const* getFilesToRemove(const struct SharedCacheBuilder* builder, uint64_t* fileCount) {
+const char* const* getFilesToRemove(const struct MRMSharedCacheBuilder* builder, uint64_t* fileCount) {
     if (builder->filesToRemove.empty())
         return nullptr;
     *fileCount = builder->filesToRemove.size();
     return builder->filesToRemove.data();
 }
 
-void destroySharedCacheBuilder(struct SharedCacheBuilder* builder) {
+void destroySharedCacheBuilder(struct MRMSharedCacheBuilder* builder) {
     for (auto& buildInstance : builder->builders) {
-        CacheBuilder* cacheBuilder = buildInstance.builder.get();
+        SharedCacheBuilder* cacheBuilder = buildInstance.builder.get();
         cacheBuilder->deleteBuffer();
     }
     for (auto &fileResult : builder->fileResultStorage) {

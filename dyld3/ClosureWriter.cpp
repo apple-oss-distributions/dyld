@@ -521,6 +521,11 @@ void LaunchClosureWriter::setUsedAtPaths(bool value)
     getFlags().usedAtPaths = value;
 }
 
+void LaunchClosureWriter::setUsedInterposing(bool value)
+{
+    getFlags().usedInterposing = value;
+}
+
 void LaunchClosureWriter::setHasInsertedLibraries(bool value)
 {
     getFlags().hasInsertedLibraries = value;
@@ -625,6 +630,12 @@ void LaunchClosureWriter::setBootUUID(const char* uuid)
     while ( (paddedSize % 4) != 0 )
         temp[paddedSize++] = '\0';
     append(TypedBytes::Type::bootUUID, temp, paddedSize);
+}
+
+void LaunchClosureWriter::setHasProgramVars(uint32_t offset)
+{
+    getFlags().hasProgVars = true;
+    append(TypedBytes::Type::progVars, &offset, sizeof(uint32_t));
 }
 
 void LaunchClosureWriter::setObjCSelectorInfo(const Array<uint8_t>& hashTable, const Array<Image::ObjCSelectorImage>& hashTableImages) {

@@ -10,6 +10,8 @@
 #include <stdio.h>
 #include <stdlib.h>
 
+#include "test_support.h"
+
 extern void foo();
 
 // We have our own copy of operator new.  Make sure that we call our version, but that foo calls the one from the inserted bar dylib
@@ -32,23 +34,18 @@ void operator delete(void* ptr)
     free(ptr);
 }
 
-int main()
-{
-    printf("[BEGIN] weak-coalesce-inserted-dylibs\n");
-
+int main(int argc, const char* argv[], const char* envp[], const char* apple[]) {
     // First make sure we do use our versions of new and delete.
     enableTracking = true;
 
     int* v = new int(1);
     if (!calledMainNew) {
-        printf("[FAIL] weak-coalesce-inserted-dylibs, didn't call executable operator new\n");
-        return 1;
+        FAIL("Didn't call executable operator new");
     }
 
     delete v;
     if (!calledMainDelete) {
-        printf("[FAIL] weak-coalesce-inserted-dylibs, didn't call executable operator delete\n");
-        return 1;
+        FAIL("Didn't call executable operator delete");
     }
 
     // Now make foo do the same and make sure we got the new/delete from bar
@@ -57,17 +54,13 @@ int main()
     foo();
 
     if (calledMainNew) {
-        printf("[FAIL] weak-coalesce-inserted-dylibs, didn't call bar operator new\n");
-        return 1;
+        FAIL("Didn't call bar operator new");
     }
 
     if (calledMainDelete) {
-        printf("[FAIL] weak-coalesce-inserted-dylibs, didn't call bar operator delete\n");
-        return 1;
+        FAIL("Didn't call bar operator delete");
     }
 
-    printf("[PASS] weak-coalesce-inserted-dylibs\n");
-
-    return 0;
+    PASS("Success");
 }
 

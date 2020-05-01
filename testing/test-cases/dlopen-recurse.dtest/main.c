@@ -10,17 +10,13 @@
 #include <stdlib.h>
 #include <dispatch/dispatch.h>
 
+#include "test_support.h"
 
-
-int main()
-{
-    printf("[BEGIN] dlopen-recurse\n");
-
+int main(int argc, const char* argv[], const char* envp[], const char* apple[]) {
     // libfoo's initializer calls dlopen().  If that hangs, we have a locking bug
     void* handle = dlopen(RUN_DIR "/libfoo.dylib", RTLD_LAZY);
     dlclose(handle);
 
-    printf("[PASS] dlopen-recurse\n");
-	return 0;
+    PASS("Success");
 }
 

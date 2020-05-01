@@ -17,6 +17,8 @@
 #include <string.h>
 #include <dlfcn.h>
 
+#include "test_support.h"
+
 // All the libraries have a copy of DyldProtocol
 @protocol DyldProtocol
 @end
@@ -35,8 +37,6 @@ static void* useDyldMainProtocol() {
   return (void*)@protocol(DyldMainProtocol);
 }
 
-extern int printf(const char*, ...);
-
 extern id objc_getProtocol(const char *name);
 
 static bool gotDyldProtocolMain = false;
@@ -46,15 +46,13 @@ static bool gotDyldProtocolLinked2 = false;
 static bool isInImage(void* ptr, const char* name) {
   Dl_info info;
   if ( dladdr(ptr, &info) == 0 ) {
-    printf("[FAIL] _dyld_for_each_objc_protocol dladdr(protocol, xx) failed\n");
+    FAIL("dladdr(protocol, xx) failed");
     return false;
   }
   return strstr(info.dli_fname, name) != NULL;
 }
 
-int main() {
-  printf("[BEGIN] _dyld_for_each_objc_protocol\n");
-
+int main(int argc, const char* argv[], const char* envp[], const char* apple[]) {
   // This API is only available with dyld3 and shared caches.  If we have dyld2 then don't do anything
   const char* testDyldMode = getenv("TEST_DYLD_MODE");
   assert(testDyldMode);
@@ -67,25 +65,21 @@ int main() {
       sawProtocol = true;
     });
     if (sawProtocol) {
-      printf("[FAIL] _dyld_for_each_objc_protocol: dyld2 shouldn't see any protocols\n");
-      return 0;
+      FAIL("dyld2 shouldn't see any protocols");
     }
-    printf("[PASS] _dyld_for_each_objc_protocol (dyld2 or no shared cache)\n");
-    return 0;
+    PASS("dyld2 or no shared cache");
   }
 
   // Check that DyldProtocol comes from liblinked2 as it is last in load order
   id runtimeDyldProtocol = objc_getProtocol("DyldProtocol");
   if (!isInImage(runtimeDyldProtocol, "liblinked2")) {
-    printf("[FAIL] _dyld_for_each_objc_protocol: DyldProtocol should have come from liblinked2\n");
-    return 0;
+    FAIL("DyldProtocol should have come from liblinked2");
   }
 
   // Check that DyldLinkedProtocol comes from liblinked2 as it is last in load order
   id runtimeDyldLinkedProtocol = objc_getProtocol("DyldLinkedProtocol");
   if (!isInImage(runtimeDyldLinkedProtocol, "liblinked2")) {
-    printf("[FAIL] _dyld_for_each_objc_protocol: DyldLinkedProtocol should have come from liblinked2\n");
-    return 0;
+    FAIL("DyldLinkedProtocol should have come from liblinked2");
   }
 
   // Walk all the implementations of "DyldProtocol"
@@ -93,47 +87,35 @@ int main() {
     // We should walk these in the order liblinked2, liblinked, main exe
     if (!gotDyldProtocolLinked2) {
       if (!isInImage(protocolPtr, "liblinked2")) {
-        printf("[FAIL] _dyld_for_each_objc_protocol: Optimized DyldProtocol should have come from liblinked2\n");
-        *stop = true;
-        return;
+        FAIL("Optimized DyldProtocol should have come from liblinked2");
       }
       if (!isLoaded) {
-        printf("[FAIL] _dyld_for_each_objc_protocol: Optimized DyldProtocol isLoaded should have been set on liblinked2\n");
-        *stop = true;
-        return;
+        FAIL("Optimized DyldProtocol isLoaded should have been set on liblinked2");
       }
       gotDyldProtocolLinked2 = true;
       return;
     }
     if (!gotDyldProtocolLinked) {
       if (!isInImage(protocolPtr, "liblinked1")) {
-        printf("[FAIL] _dyld_for_each_objc_protocol: Optimized DyldProtocol should have come from liblinked\n");
-        *stop = true;
-        return;
+        FAIL("Optimized DyldProtocol should have come from liblinked");
       }
       if (!isLoaded) {
-        printf("[FAIL] _dyld_for_each_objc_protocol: Optimized DyldProtocol isLoaded should have been set on liblinked\n");
-        *stop = true;
-        return;
+        FAIL("Optimized DyldProtocol isLoaded should have been set on liblinked");
       }
       gotDyldProtocolLinked = true;
       return;
     }
     if (!gotDyldProtocolMain) {
       if (!isInImage(protocolPtr, "_dyld_for_each_objc_protocol.exe")) {
-        printf("[FAIL] _dyld_for_each_objc_protocol: Optimized DyldProtocol should have come from main exe\n");
-        *stop = true;
-        return;
+        FAIL("Optimized DyldProtocol should have come from main exe");
       }
       if (!isLoaded) {
-        printf("[FAIL] _dyld_for_each_objc_protocol: Optimized DyldProtocol isLoaded should have been set on main exe\n");
-        *stop = true;
-        return;
+        FAIL("Optimized DyldProtocol isLoaded should have been set on main exe");
       }
       gotDyldProtocolMain = true;
       return;
     }
-    printf("[FAIL] _dyld_for_each_objc_protocol: Unexpected Optimized DyldProtocol\n");
+    FAIL("Unexpected Optimized DyldProtocol");
     return;
   });
 
@@ -144,8 +126,7 @@ int main() {
     *stop = true;
   });
   if (!isInImage(DyldProtocolImpl, "liblinked2")) {
-    printf("[FAIL] _dyld_for_each_objc_protocol: _dyld_for_each_objc_protocol should have returned DyldProtocol from liblinked2\n");
-    return 0;
+    FAIL("_dyld_for_each_objc_protocol should have returned DyldProtocol from liblinked2");
   }
 
   // Visit DyldMainProtocol and make sure it makes the callback for just the result from main.exe
@@ -155,11 +136,8 @@ int main() {
     *stop = true;
   });
   if (!isInImage(DyldMainProtocolImpl, "_dyld_for_each_objc_protocol.exe")) {
-    printf("[FAIL] _dyld_for_each_objc_protocol: _dyld_for_each_objc_protocol should have returned DyldMainProtocol from main.exe\n");
-    return 0;
+    FAIL("_dyld_for_each_objc_protocol should have returned DyldMainProtocol from main.exe");
   }
 
-  printf("[PASS] _dyld_for_each_objc_protocol\n");
-
-  return 0;
+  PASS("Success");
 }

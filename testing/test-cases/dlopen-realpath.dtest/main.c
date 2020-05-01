@@ -1,39 +1,34 @@
 
 // BUILD:  $CC main.c -o $BUILD_DIR/dlopen-realpath.exe
-// BUILD:  cd $BUILD_DIR && ln -s ./IOKit.framework/IOKit IOKit && ln -s /System/Library/Frameworks/IOKit.framework IOKit.framework
+// BUILD:  $SYMLINK ./IOKit.framework/IOKit  $BUILD_DIR/IOKit
+// BUILD:  $SYMLINK /System/Library/Frameworks/IOKit.framework  $BUILD_DIR/IOKit.framework
 
-// RUN:  DYLD_FALLBACK_LIBRARY_PATH=/baz  ./dlopen-realpath.exe
+//FIXME: Use something besides IOKit so we do not need to copy it into the chroot
+// R:  DYLD_FALLBACK_LIBRARY_PATH=/baz  ./dlopen-realpath.exe
 
 #include <stdio.h>
 #include <dlfcn.h>
 
+#include "test_support.h"
 
 static void tryImage(const char* path)
 {
-    printf("[BEGIN] dlopen-realpath %s\n", path);
-	void* handle = dlopen(path, RTLD_LAZY);
-	if ( handle == NULL ) {
-        printf("dlerror(): %s\n", dlerror());
-        printf("[FAIL] dlopen-realpath %s\n", path);
-		return;
-	}
+    void* handle = dlopen(path, RTLD_LAZY);
+    if ( handle == NULL ) {
+        FAIL("dlerror(\"%s\"): %s", path, dlerror());
+    }
 
-	int result = dlclose(handle);
-	if ( result != 0 ) {
-        printf("dlclose(%p): %s\n", handle, dlerror());
-        printf("[FAIL] dlopen-realpath %s\n", path);
-		return;
-	}
-
-    printf("[PASS] dlopen-realpath %s\n", path);
+    int result = dlclose(handle);
+    if ( result != 0 ) {
+        FAIL("dlclose(\"%s\"): %s", path, dlerror());
+    }
 }
 
 
 
-int main()
-{
-	tryImage("./IOKit.framework/IOKit");
-	tryImage("./././IOKit/../IOKit.framework/IOKit");
+int main(int argc, const char* argv[], const char* envp[], const char* apple[]) {
+    tryImage("./IOKit.framework/IOKit");
+    tryImage("./././IOKit/../IOKit.framework/IOKit");
     tryImage("./IOKit");
 
     // Also try libSystem which has an alias in the OS to /usr/lib/libSystem.B.dylib
@@ -44,6 +39,6 @@ int main()
     tryImage("//usr/lib/libSystem.dylib");
     tryImage("/usr/./lib/libSystem.dylib");
 
-	return 0;
+    PASS("Success");
 }
 

@@ -14,6 +14,7 @@
 #include <assert.h>
 #include <unistd.h>
 
+#include "test_support.h"
 
 extern __thread int a;
 extern __thread int b;
@@ -61,8 +62,7 @@ static void* work1(void* arg)
     checkValues();
 
 	if ( pthread_create(&sWorker2, NULL, work2, NULL) != 0 ) {
-        printf("[FAIL] thread-local-variables, pthread_create\n");
-		exit(0);
+        FAIL("pthread_create");
 	}
  	void* dummy;
 	pthread_join(sWorker2, &dummy);
@@ -83,15 +83,11 @@ static bool someMatch(int* t1, int* t2, int* t3)
     return false;
 }
 
-int main()
-{
-    printf("[BEGIN] thread-local-variables\n");
-
+int main(int argc, const char* argv[], const char* envp[], const char* apple[]) {
     checkValues();
 
 	if ( pthread_create(&sWorker1, NULL, work1, NULL) != 0 ) {
-        printf("[FAIL] thread-local-variables, pthread_create\n");
-		return 0;
+        FAIL("pthread_create");
 	}
 
     getAddresses(sAddr3);
@@ -101,15 +97,14 @@ int main()
 
     // validate each thread had different addresses for all TLVs
     if ( someMatch(sAddr1[0], sAddr2[0], sAddr3[0]) )
-        printf("[FAIL] thread-local-variables, &a is same across some threads\n");
+        FAIL("&a is same across some threads");
     else if ( someMatch(sAddr1[1], sAddr2[1], sAddr3[1]) )
-        printf("[FAIL] thread-local-variables, &b is same across some threads\n");
+        FAIL("&b is same across some threads");
     else if ( someMatch(sAddr1[2], sAddr2[2], sAddr3[2]) )
-        printf("[FAIL] thread-local-variables, &c is same across some threads\n");
+        FAIL("&c is same across some threads");
     else if ( someMatch(sAddr1[3], sAddr2[3], sAddr3[3]) )
-        printf("[FAIL] thread-local-variables, &d is same across some threads\n");
+        FAIL("&d is same across some threads");
     else
-        printf("[PASS] thread-local-variables\n");
-	return 0;
+        PASS("Success");
 }
 

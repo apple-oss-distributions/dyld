@@ -11,27 +11,25 @@
 #include <stdio.h>
 #include <stdlib.h>
 
+#include "test_support.h"
+
 extern int foo();
 int (*pFoo)() = &foo;
 
-int main()
-{
+int main(int argc, const char* argv[], const char* envp[], const char* apple[]) {
 #if INTERPOSED
-    printf("[BEGIN] interpose-resolver\n");
     if ( foo() != 11 )
-        printf("[FAIL]  interpose-resolver: foo() != 11\n");
+        FAIL("foo() != 11");
     else if ( (*pFoo)() != 11 )
-        printf("[FAIL]  interpose-resolver: *pFoo() != 11\n");
+        FAIL("*pFoo() != 11");
     else
-        printf("[PASS]  interpose-resolver\n");
+        PASS("Success");
 #else
-    printf("[BEGIN] resolver-only\n");
     if ( foo() != 10 )
-        printf("[FAIL]  resolver-only: foo() != 10\n");
+        FAIL(" foo() != 10");
     else if ( (*pFoo)() != 10 )
-        printf("[FAIL]  resolver-only: *pFoo() != 10\n");
+        FAIL(" *pFoo() != 10");
     else
-        printf("[PASS]  resolver-only\n");
+        PASS("Success");
 #endif
-	return 0;
 }

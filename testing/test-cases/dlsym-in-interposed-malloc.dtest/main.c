@@ -9,16 +9,12 @@
 #include <stdlib.h>
 #include <string.h>
 
-int main()
-{
-    printf("[BEGIN] dlsym-in-interposed-malloc\n");
+#include "test_support.h"
 
+int main(int argc, const char* argv[], const char* envp[], const char* apple[]) {
     // malloc should have been called when dyld3's libdyld was initialized, but
     // call it one more time anyway just to make sure its working
     (void)malloc(1);
     
-
-    //printf("%p %p %p %p\n", p1, p2, p3, p4);
-    printf("[PASS] dlsym-in-interposed-malloc\n");
-	return 0;
+    PASS("Success");
 }

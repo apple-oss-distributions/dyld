@@ -16,6 +16,8 @@
     #include <ptrauth.h>
 #endif
 
+#include "test_support.h"
+
 static const void* stripPointer(const void* ptr)
 {
 #if __has_feature(ptrauth_calls)
@@ -36,59 +38,44 @@ const char* myStr = "myStr";
 int myInt;
 
 
-int main()
-{
-    printf("[BEGIN] _dyld_is_memory_immutable\n");
-
+int main(int argc, const char* argv[], const char* envp[], const char* apple[]) {
     if ( !_dyld_is_memory_immutable(myStr, 6) ) {
-		printf("[FAIL] _dyld_is_memory_immutable() returned false for string in main executable\n");
-        return 0;
+        FAIL("returned false for string in main executable");
     }
 
     if ( _dyld_is_memory_immutable(strdup("hello"), 6) ) {
-		printf("[FAIL] _dyld_is_memory_immutable() returned true for result from strdup()\n");
-        return 0;
+        FAIL("returned true for result from strdup()");
     }
 
     if ( _dyld_is_memory_immutable(&myInt, 4) ) {
-		printf("[FAIL] _dyld_is_memory_immutable() returned true for global variabe in main executable\n");
-        return 0;
+        FAIL("returned true for global variabe in main executable");
     }
 
     if ( !_dyld_is_memory_immutable(foo(), 4) ) {
-		printf("[FAIL] _dyld_is_memory_immutable() returned false for string in statically linked dylib\n");
-        return 0;
+        FAIL("returned false for string in statically linked dylib");
     }
 
     if ( !_dyld_is_memory_immutable(stripPointer((void*)&strcpy), 4) ) {
-		printf("[FAIL] _dyld_is_memory_immutable() returned false for strcpy function in dyld shared cache\n");
-        return 0;
+        FAIL("returned false for strcpy function in dyld shared cache");
     }
 
     if ( _dyld_is_memory_immutable(&_cpu_capabilities, 4) ) {
-		printf("[FAIL] _dyld_is_memory_immutable() returned true for global variable in shared cache\n");
-        return 0;
+        FAIL("returned true for global variable in shared cache");
     }
 
-	void* handle = dlopen(RUN_DIR "/libbar.dylib", RTLD_FIRST);
+    void* handle = dlopen(RUN_DIR "/libbar.dylib", RTLD_FIRST);
     if ( handle == NULL ) {
-		printf("[FAIL] dlopen(libbar.dylib) failed");
-        return 0;
-    }
+        FAIL("dlopen(libbar.dylib) failed");    }
 
     BarProc proc = dlsym(handle, "bar");
     if ( proc == NULL ) {
-		printf("[FAIL] dlsym(bar) failed\n");
-        return 0;
+        FAIL("dlsym(bar) failed");
     }
     const char* barStr = (*proc)();
     if ( _dyld_is_memory_immutable(barStr, 4) ) {
-		printf("[FAIL] _dyld_is_memory_immutable() returned true for string in unloadable dylib\n");
-        return 0;
+        FAIL("returned true for string in unloadable dylib");
     }
 
-
-    printf("[PASS] _dyld_is_memory_immutable\n");
-    return 0;
+    PASS("Success");
 }
 

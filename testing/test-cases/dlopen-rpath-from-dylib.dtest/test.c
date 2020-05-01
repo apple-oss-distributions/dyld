@@ -3,17 +3,14 @@
 #include <dlfcn.h>
 #include <stdbool.h>
 
-bool test_dlopen()
+#include "test_support.h"
+
+void test_dlopen()
 {
     void* handle = dlopen("@rpath/libbar.dylib", RTLD_LAZY);
     if ( handle == NULL ) {
-        printf("[FAIL] dlopen-rpath-from-dylib: dlopen(@rpath/libbar.dylib) failed: %s\n", dlerror());
-        return false;
+        FAIL("dlopen(\"@rpath/libbar.dylib\") failed: %s", dlerror());
     }
-
     dlclose(handle);
-
-    return true;
 }
-
 

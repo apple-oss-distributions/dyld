@@ -1,7 +1,7 @@
 
 // BUILD:  $CC foo.c -dynamiclib  -install_name $RUN_DIR/libfoo.dylib -o $BUILD_DIR/libfoo.dylib
 // BUILD:  $CC main.c -DRUN_DIR="$RUN_DIR" $BUILD_DIR/libfoo.dylib -o $BUILD_DIR/dlopen-RTLD_NOLOAD-basic.exe
-// BUILD:  cd $BUILD_DIR && ln -s libfoo.dylib libfoo-sym.dylib
+// BUILD:  $SYMLINK libfoo.dylib $BUILD_DIR/libfoo-sym.dylib
 
 // RUN:  ./dlopen-RTLD_NOLOAD-basic.exe
 
@@ -10,23 +10,19 @@
 #include <string.h>
 #include <dlfcn.h>
 
+#include "test_support.h"
 
-int main()
-{
-    printf("[BEGIN] dlopen-RTLD_NOLOAD-basic\n");
-
+int main(int argc, const char* argv[], const char* envp[], const char* apple[]) {
     ///
     /// This tests that RTLD_NOLOAD finds existing dylib statically linked
     ///
     void* handle = dlopen(RUN_DIR "/libfoo.dylib", RTLD_NOLOAD);
     if ( handle == NULL ) {
-        printf("[FAIL] dlopen-RTLD_NOLOAD-basic: dlopen(libfoo.dylib, RTLD_NOLOAD) failed but it should have worked: %s\n", dlerror());
-        return 0;
+        FAIL("dlopen(\"libfoo.dylib\", RTLD_NOLOAD) failed but it should have worked: %s", dlerror());
     }
     void* sym = dlsym(handle, "foo");
     if ( sym == NULL ) {
-        printf("[FAIL] dlopen-RTLD_NOLOAD-basic: dlsym(handle, \"foo\") failed but it should have worked: %s\n", dlerror());
-        return 0;
+        FAIL("dlsym(handle, \"foo\") failed but it should have worked: %s", dlerror());
     }
 
     ///
@@ -34,8 +30,7 @@ int main()
     ///
     void* handle2 = dlopen(RUN_DIR "/libfobbulate.dylib", RTLD_NOLOAD);
     if ( handle2 != NULL ) {
-        printf("[FAIL] dlopen-RTLD_NOLOAD-basic: dlopen(libfobbulate.dylib, RTLD_NOLOAD) succeeded but it should have failed\n");
-        return 0;
+        FAIL("dlopen(\"libfobbulate.dylib\", RTLD_NOLOAD) succeeded but it should have failed");
     }
 
 
@@ -44,8 +39,7 @@ int main()
     ///
     void* handle3 = dlopen(RUN_DIR "/libfoo-sym.dylib", RTLD_NOLOAD);
     if ( handle3 == NULL ) {
-        printf("[FAIL] dlopen-RTLD_NOLOAD-basic: dlopen(libfoo-sym.dylib, RTLD_NOLOAD) failed but it should have worked: %s\n", dlerror());
-        return 0;
+        FAIL("dlopen(\"libfoo-sym.dylib\", RTLD_NOLOAD) failed but it should have worked: %s", dlerror());
     }
 
 
@@ -54,11 +48,8 @@ int main()
     ///
     void* handle4 = dlopen("/usr/lib/libz.1.dylib", RTLD_NOLOAD);
     if ( handle4 != NULL ) {
-        printf("[FAIL] dlopen-RTLD_NOLOAD-basic: dlopen(libz.dylib, RTLD_NOLOAD) worked but it should have failed\n");
-        return 0;
+        FAIL("dlopen(\"libz.dylib\", RTLD_NOLOAD) worked but it should have failed");
     }
 
-
-    printf("[PASS] dlopen-RTLD_NOLOAD-basic\n");
-    return 0;
+    PASS("Success");
 }

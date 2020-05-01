@@ -3,7 +3,8 @@
 #include <stdio.h>
 #include <unistd.h>
 
-extern int bar();
+#include "test_support.h"
+
 extern int bazInited();
 
 static void* barHandle = NULL;
@@ -12,40 +13,33 @@ static int fooInited = 0;
 static int barInited = 0;
 
 __attribute__((constructor))
-static void myinit()
-{
+static void myinit(int argc, const char* argv[], const char* envp[], const char* apple[]) {
 	fooInited = 1;
 	barHandle = dlopen(RUN_DIR "/libbar.dylib", 0);
 	if ( barHandle == NULL ) {
-		printf("[FAIL]  dlopen-in-init2, dlopen libbar.dylib: %s\n", dlerror());
-		return;
+		FAIL("dlopen libbar.dylib: %s", dlerror());
 	}
 	barSymbol = dlsym(RTLD_DEFAULT, "barIsInited");
     if ( barSymbol == NULL ) {
-		printf("[FAIL]  dlopen-in-init2, dlsym libbar.dylib\n");
-        return;
+		FAIL("dlsym libbar.dylib");
     }
     barInited = ((int(*)())barSymbol)();
 }
 
-int foo() {
+void foo() {
 	if ( fooInited == 0 ) {
-		printf("[FAIL]  dlopen-in-init2, didn't init foo\n");
-		return 1;
+		FAIL("Didn't init foo");
 	}
 	if ( barHandle == NULL ) {
-		return 1;
+        FAIL("barHandle not inited");
 	}
 	if ( barSymbol == NULL ) {
-		return 1;
+        FAIL("barSymbol not inited");
 	}
 	if ( barInited == 0 ) {
-		printf("[FAIL]  dlopen-in-init2, didn't init bar\n");
-		return 1;
+		FAIL("Didn't init bar");
 	}
 	if ( bazInited() == 0 ) {
-		printf("[FAIL]  dlopen-in-init2, didn't init baz\n");
-		return 1;
+		FAIL("Didn't init baz");
 	}
-	return 0;
 }
