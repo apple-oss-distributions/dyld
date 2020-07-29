@@ -1474,7 +1474,7 @@ void removeImage(ImageLoader* image)
 	}
 
 	// If this image is the potential canonical definition of any weak defs, then set them to a tombstone value
-	if ( gLinkContext.weakDefMapInitialized && image->hasCoalescedExports() ) {
+	if ( gLinkContext.weakDefMapInitialized && image->hasCoalescedExports() && (image->getState() >= dyld_image_state_bound) ) {
 		Diagnostics diag;
 		const dyld3::MachOAnalyzer* ma = (const dyld3::MachOAnalyzer*)image->machHeader();
 		ma->forEachWeakDef(diag, ^(const char *symbolName, uintptr_t imageOffset, bool isFromExportTrie) {
