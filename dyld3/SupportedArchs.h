@@ -25,6 +25,8 @@
 #ifndef _DYLD_SUPPORTED_ARCHS_H_
 #define _DYLD_SUPPORTED_ARCHS_H_
 
+#include <TargetConditionals.h>
+
 
 
 #endif // _DYLD_SUPPORTED_ARCHS_H_

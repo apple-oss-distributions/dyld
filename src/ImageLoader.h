@@ -71,7 +71,7 @@
 #define LOG_BINDINGS 0
 
 
-#if __IPHONE_OS_VERSION_MIN_REQUIRED          
+#if TARGET_OS_IPHONE
 	#define SPLIT_SEG_SHARED_REGION_SUPPORT 0
 	#define SPLIT_SEG_DYLIB_SUPPORT			0
 	#define PREBOUND_IMAGE_SUPPORT			__arm__
@@ -90,7 +90,7 @@
 	#define PREBOUND_IMAGE_SUPPORT			__i386__
 	#define TEXT_RELOC_SUPPORT				__i386__
 	#define SUPPORT_OLD_CRT_INITIALIZATION	__i386__
-	#define SUPPORT_LC_DYLD_ENVIRONMENT		(__i386__ || __x86_64__)
+	#define SUPPORT_LC_DYLD_ENVIRONMENT		1
 	#define SUPPORT_VERSIONED_PATHS			1
 	#define SUPPORT_CLASSIC_MACHO			1
 	#define SUPPORT_ZERO_COST_EXCEPTIONS	1
@@ -319,8 +319,9 @@ public:
 		bool			bindFlat;
 		bool			linkingMainExecutable;
 		bool			startedInitializingMainExecutable;
-#if __MAC_OS_X_VERSION_MIN_REQUIRED
+#if TARGET_OS_OSX
 		bool			iOSonMac;
+		// dyld doesn't build for driverKit, so we use the macOS define to control whether driverKit is supported
 		bool			driverKit;
 #endif
 		bool			verboseOpts;
@@ -617,7 +618,7 @@ public:
 										// when resolving symbols look in subImage if symbol can't be found
 	void								reExport(ImageLoader* subImage);
 
-	virtual void						recursiveBind(const LinkContext& context, bool forceLazysBound, bool neverUnload);
+	virtual void						recursiveBind(const LinkContext& context, bool forceLazysBound, bool neverUnload, const ImageLoader* parent);
 	void								recursiveBindWithAccounting(const LinkContext& context, bool forceLazysBound, bool neverUnload);
 	void								recursiveRebaseWithAccounting(const LinkContext& context);
 	void								weakBind(const LinkContext& context);
@@ -647,6 +648,8 @@ public:
 	void								setNeverUnload() { fNeverUnload = true; fLeaveMapped = true; }
 	void								setNeverUnloadRecursive();
 	
+	void								forEachReExportDependent( void (^callback)(const ImageLoader*, bool& stop)) const;
+
 	bool								isReferencedDownward() { return fIsReferencedDownward; }
 
 	virtual void						recursiveMakeDataReadOnly(const LinkContext& context);
@@ -752,7 +755,8 @@ protected:
 						// To link() an image, its dependent libraries are loaded, it is rebased, bound, and initialized.
 						// These methods do the above, exactly once, and it the right order
 	virtual void		recursiveLoadLibraries(const LinkContext& context, bool preflightOnly, const RPathChain& loaderRPaths, const char* loadPath);
-	virtual unsigned 	recursiveUpdateDepth(unsigned int maxDepth);
+	virtual unsigned 	recursiveUpdateDepth(unsigned int maxDepth, dyld3::Array<ImageLoader*>& danglingUpwards);
+	virtual unsigned 	updateDepth(unsigned int maxDepth);
 	virtual void		recursiveRebase(const LinkContext& context);
 	virtual void		recursiveApplyInterposing(const LinkContext& context);
 	virtual void		recursiveGetDOFSections(const LinkContext& context, std::vector<DOFInfo>& dofs);
@@ -769,7 +773,7 @@ protected:
 	virtual void				doRebase(const LinkContext& context) = 0;
 	
 								// do any symbolic fix ups in this image
-	virtual void				doBind(const LinkContext& context, bool forceLazysBound) = 0;
+	virtual void				doBind(const LinkContext& context, bool forceLazysBound, const ImageLoader* reExportParent) = 0;
 	
 								// called later via API to force all lazy pointer to be bound
 	virtual void				doBindJustLazies(const LinkContext& context) = 0;
@@ -844,6 +848,9 @@ public:
 protected:
 	static std::vector<InterposeTuple>	fgInterposingTuples;
 	
+#if __x86_64__
+	const char*                 fAotPath;
+#endif
 	const char*					fPath;
 	const char*					fRealPath;
 	dev_t						fDevice;
@@ -899,6 +906,7 @@ private:
 	static_assert(sizeof(sizeOfData) == 8, "Bad data size");
 
 	static uint16_t				fgLoadOrdinal;
+
 };
 
 

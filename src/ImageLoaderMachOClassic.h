@@ -54,7 +54,7 @@ public:
 	virtual bool						libReExported(unsigned int) const;
 	virtual bool						libIsUpward(unsigned int) const;
 	virtual void						setLibImage(unsigned int, ImageLoader*, bool, bool);
-	virtual void						doBind(const LinkContext& context, bool forceLazysBound);
+	virtual void						doBind(const LinkContext& context, bool forceLazysBound, const ImageLoader* reExportParent);
 	virtual void						doBindJustLazies(const LinkContext& context);
 	virtual uintptr_t					doBindLazySymbol(uintptr_t* lazyPointer, const LinkContext& context);
 	virtual uintptr_t					doBindFastLazySymbol(uint32_t lazyBindingInfoOffset, const LinkContext& context, void (*lock)(), void (*unlock)());

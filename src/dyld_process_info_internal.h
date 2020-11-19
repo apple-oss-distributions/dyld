@@ -67,6 +67,12 @@ struct dyld_all_image_infos_32 {
     uint32_t                        compact_dyld_image_info_addr;
     uint32_t                        compact_dyld_image_info_size;
     uint32_t                        platform;
+    // the aot fields below will not be set in the 32 bit case
+    uint32_t                        aotInfoCount;
+    std::atomic<uint64_t>           aotInfoArray;
+    uint64_t                        aotInfoArrayChangeTimestamp;
+    uint64_t                        aotSharedCacheBaseAddress;
+    std::array<uint8_t, 16>         aotSharedCacheUUID[16];
 };
 
 struct dyld_all_image_infos_64 {
@@ -102,6 +108,11 @@ struct dyld_all_image_infos_64 {
     uint64_t                compact_dyld_image_info_addr;
     uint64_t                compact_dyld_image_info_size;
     uint32_t                platform;
+    uint32_t                aotInfoCount;
+    std::atomic<uint64_t>   aotInfoArray;
+    uint64_t                aotInfoArrayChangeTimestamp;
+    uint64_t                aotSharedCacheBaseAddress;
+    std::array<uint8_t, 16> aotSharedCacheUUID[16];
 };
 
 struct dyld_image_info_32 {
@@ -113,6 +124,14 @@ struct dyld_image_info_64 {
     uint64_t                    imageLoadAddress;
     uint64_t                    imageFilePath;
     uint64_t                    imageFileModDate;
+};
+
+#define DYLD_AOT_IMAGE_KEY_SIZE 32
+struct dyld_aot_image_info_64 {
+    uint64_t                    x86LoadAddress;
+    uint64_t                    aotLoadAddress;
+    uint64_t                    aotImageSize;
+    uint8_t                     aotImageKey[DYLD_AOT_IMAGE_KEY_SIZE];
 };
 
 #define DYLD_PROCESS_INFO_NOTIFY_MAX_BUFFER_SIZE	(32*1024)

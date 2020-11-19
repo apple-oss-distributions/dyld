@@ -46,14 +46,17 @@
 //#include <dispatch/dispatch.h>
 #include <mach/vm_page_size.h>
 
+#include "ClosureFileSystemPhysical.h"
 #include "MachOFile.h"
 #include "MachOLoaded.h"
 #include "MachOAnalyzer.h"
 #include "Logging.h"
 #include "Loading.h"
+#include "RootsChecker.h"
 #include "Tracing.h"
 #include "dyld2.h"
 #include "dyld_cache_format.h"
+#include "libdyldEntryVector.h"
 
 #include "objc-shared-cache.h"
 
@@ -103,11 +106,15 @@ namespace dyld3 {
 Loader::Loader(const Array<LoadedImage>& existingImages, Array<LoadedImage>& newImagesStorage,
                const void* cacheAddress, const Array<const dyld3::closure::ImageArray*>& imagesArrays,
                const closure::ObjCSelectorOpt* selOpt, const Array<closure::Image::ObjCSelectorImage>& selImages,
-               LogFunc logLoads, LogFunc logSegments, LogFunc logFixups, LogFunc logDofs)
+               const RootsChecker& rootsChecker, dyld3::Platform platform,
+               LogFunc logLoads, LogFunc logSegments, LogFunc logFixups, LogFunc logDof,
+               bool allowMissingLazies, dyld3::LaunchErrorInfo* launchErrorInfo)
        : _existingImages(existingImages), _newImages(newImagesStorage),
          _imagesArrays(imagesArrays), _dyldCacheAddress(cacheAddress), _dyldCacheSelectorOpt(nullptr),
          _closureSelectorOpt(selOpt), _closureSelectorImages(selImages),
-         _logLoads(logLoads), _logSegments(logSegments), _logFixups(logFixups), _logDofs(logDofs)
+         _rootsChecker(rootsChecker), _allowMissingLazies(allowMissingLazies), _platform(platform),
+         _logLoads(logLoads), _logSegments(logSegments), _logFixups(logFixups), _logDofs(logDof), _launchErrorInfo(launchErrorInfo)
+
 {
 #if BUILDING_DYLD
     // This is only needed for dyld and the launch closure, not the dlopen closures
@@ -122,7 +129,7 @@ void Loader::addImage(const LoadedImage& li)
     _newImages.push_back(li);
 }
 
-LoadedImage* Loader::findImage(closure::ImageNum targetImageNum)
+LoadedImage* Loader::findImage(closure::ImageNum targetImageNum) const
 {
 #if BUILDING_DYLD
     // The launch images are different in dyld vs libdyld.  In dyld, the new images are
@@ -131,7 +138,7 @@ LoadedImage* Loader::findImage(closure::ImageNum targetImageNum)
         return info;
     }
 
-    for (uint64_t index = 0; index != _newImages.count(); ++index) {
+    for (uintptr_t index = 0; index != _newImages.count(); ++index) {
         LoadedImage& info = _newImages[index];
         if ( info.image()->representsImageNum(targetImageNum) ) {
             // Try cache this entry for next time
@@ -180,11 +187,16 @@ uintptr_t Loader::resolveTarget(closure::Image::ResolvedSymbolTarget target)
 
 void Loader::completeAllDependents(Diagnostics& diag, bool& someCacheImageOverridden)
 {
-    // accumulate all image overrides
-    STACK_ALLOC_ARRAY(ImageOverride, overrides, _existingImages.maxCount() + _newImages.maxCount());
+    bool iOSonMac = (_platform == Platform::iOSMac);
+#if (TARGET_OS_OSX && TARGET_CPU_ARM64)
+    if ( _platform == Platform::iOS )
+        iOSonMac = true;
+#endif
+    // accumulate all image overrides (512 is placeholder for max unzippered twins in dyld cache)
+    STACK_ALLOC_ARRAY(ImageOverride, overrides, _existingImages.maxCount() + _newImages.maxCount() + 512);
     for (const auto anArray : _imagesArrays) {
-        // ignore prebuilt Image* in dyld cache
-        if ( anArray->startImageNum() < dyld3::closure::kFirstLaunchClosureImageNum )
+        // ignore prebuilt Image* in dyld cache, except for MacCatalyst apps where unzipped twins can override each other
+        if ( (anArray->startImageNum() < dyld3::closure::kFirstLaunchClosureImageNum) && !iOSonMac )
             continue;
         anArray->forEachImage(^(const dyld3::closure::Image* image, bool& stop) {
             ImageOverride overrideEntry;
@@ -207,7 +219,7 @@ void Loader::completeAllDependents(Diagnostics& diag, bool& someCacheImageOverri
     uintptr_t index = 0;
     while ( (index < _newImages.count()) && diag.noError() ) {
         const closure::Image* image = _newImages[index].image();
-        //fprintf(stderr, "completeAllDependents(): looking at dependents of %s\n", image->path());
+        //dyld::log("completeAllDependents(): looking at dependents of %s\n", image->path());
         image->forEachDependentImage(^(uint32_t depIndex, closure::Image::LinkKind kind, closure::ImageNum depImageNum, bool& stop) {
             // check if imageNum needs to be changed to an override
             for (const ImageOverride& entry : overrides) {
@@ -221,7 +233,7 @@ void Loader::completeAllDependents(Diagnostics& diag, bool& someCacheImageOverri
                 // if not, look in imagesArrays
                 const closure::Image* depImage = closure::ImageArray::findImage(_imagesArrays, depImageNum);
                 if ( depImage != nullptr ) {
-                    //dyld::log("  load imageNum=0x%05X, image path=%s\n", depImageNum, depImage->path());
+                     //dyld::log("  load imageNum=0x%05X, image path=%s\n", depImageNum, depImage->path());
                      if ( _newImages.freeCount() == 0 ) {
                          diag.error("too many initial images");
                          stop = true;
@@ -241,8 +253,11 @@ void Loader::completeAllDependents(Diagnostics& diag, bool& someCacheImageOverri
     }
 }
 
-void Loader::mapAndFixupAllImages(Diagnostics& diag, bool processDOFs, bool fromOFI)
+void Loader::mapAndFixupAllImages(Diagnostics& diag, bool processDOFs, bool fromOFI, bool* closureOutOfDate, bool* recoverable)
 {
+    *closureOutOfDate = false;
+    *recoverable      = true;
+
     // scan array and map images not already loaded
     for (LoadedImage& info : _newImages) {
         if ( info.loadedAddress() != nullptr ) {
@@ -267,21 +282,21 @@ void Loader::mapAndFixupAllImages(Diagnostics& diag, bool processDOFs, bool from
         if ( info.image()->inDyldCache() ) {
             if ( info.image()->overridableDylib() ) {
                 struct stat statBuf;
-                if ( stat(info.image()->path(), &statBuf) == 0 ) {
-                    // verify file has not changed since closure was built
-                    uint64_t inode;
-                    uint64_t mtime;
-                    if ( info.image()->hasFileModTimeAndInode(inode, mtime) ) {
-                        if ( (statBuf.st_mtime != mtime) || (statBuf.st_ino != inode) ) {
+                if ( dyld3::stat(info.image()->path(), &statBuf) == 0 ) {
+                    dyld3::closure::FileSystemPhysical fileSystem;
+                    if ( _rootsChecker.onDiskFileIsRoot(info.image()->path(), (const DyldSharedCache*)_dyldCacheAddress, info.image(),
+                                                        &fileSystem, statBuf.st_ino, statBuf.st_mtime) ) {
+                        if ( ((const DyldSharedCache*)_dyldCacheAddress)->header.dylibsExpectedOnDisk ) {
                             diag.error("dylib file mtime/inode changed since closure was built for '%s'", info.image()->path());
+                        } else {
+                            diag.error("dylib file not expected on disk, must be a root '%s'", info.image()->path());
                         }
-                    }
-                    else {
-                        diag.error("dylib file not expected on disk, must be a root '%s'", info.image()->path());
+                        *closureOutOfDate = true;
                     }
                 }
                 else if ( (_dyldCacheAddress != nullptr) && ((dyld_cache_header*)_dyldCacheAddress)->dylibsExpectedOnDisk ) {
                     diag.error("dylib file missing, was in dyld shared cache '%s'", info.image()->path());
+                    *closureOutOfDate = true;
                 }
             }
             if ( diag.noError() ) {
@@ -297,28 +312,28 @@ void Loader::mapAndFixupAllImages(Diagnostics& diag, bool processDOFs, bool from
             }
         }
         else {
-            mapImage(diag, info, fromOFI);
+            mapImage(diag, info, fromOFI, closureOutOfDate);
             if ( diag.hasError() )
                 break; // out of for loop
         }
 
     }
-    if ( diag.hasError() )  {
-        // bummer, need to clean up by unmapping any images just mapped
-        for (LoadedImage& info : _newImages) {
-            if ( (info.state() == LoadedImage::State::mapped) && !info.image()->inDyldCache() && !info.leaveMapped() ) {
-                _logSegments("dyld: unmapping %s\n", info.image()->path());
-                unmapImage(info);
-            }
-        }
+    if ( diag.hasError() ) {
+        // need to clean up by unmapping any images just mapped
+        unmapAllImages();
         return;
     }
 
-    // apply fixups
+    // apply fixups to all but main executable
+    LoadedImage* mainInfo = nullptr;
     for (LoadedImage& info : _newImages) {
         // images in shared cache do not need fixups applied
         if ( info.image()->inDyldCache() )
             continue;
+        if ( info.loadedAddress()->filetype == MH_EXECUTE ) {
+            mainInfo = &info;
+            continue;
+        }
         // previously loaded images were previously fixed up
         if ( info.state() < LoadedImage::State::fixedUp ) {
             applyFixupsToImage(diag, info);
@@ -326,6 +341,26 @@ void Loader::mapAndFixupAllImages(Diagnostics& diag, bool processDOFs, bool from
                 break;
             info.setState(LoadedImage::State::fixedUp);
         }
+    }
+    if ( diag.hasError() ) {
+        // need to clean up by unmapping any images just mapped
+        unmapAllImages();
+        return;
+    }
+
+    if ( mainInfo != nullptr ) {
+        // now apply fixups to main executable
+        // we do it in this order so that if there is a problem with the dylibs in the closure
+        // the main executable is left untouched so the closure can be rebuilt
+        applyFixupsToImage(diag, *mainInfo);
+        if ( diag.hasError() ) {
+            // need to clean up by unmapping any images just mapped
+            unmapAllImages();
+            // we have already started fixing up the main executable, so we cannot retry the launch again
+            *recoverable = false;
+            return;
+        }
+        mainInfo->setState(LoadedImage::State::fixedUp);
     }
 
     // find and register dtrace DOFs
@@ -341,6 +376,18 @@ void Loader::mapAndFixupAllImages(Diagnostics& diag, bool processDOFs, bool from
             });
         }
         registerDOFs(dofImages);
+    }
+}
+
+void Loader::unmapAllImages()
+{
+    for (LoadedImage& info : _newImages) {
+        if ( !info.image()->inDyldCache() && !info.leaveMapped() ) {
+            if ( (info.state() == LoadedImage::State::mapped) || (info.state() == LoadedImage::State::fixedUp) ) {
+                _logSegments("dyld: unmapping %s\n", info.image()->path());
+                unmapImage(info);
+            }
+        }
     }
 }
 
@@ -370,7 +417,7 @@ bool Loader::sandboxBlockedStat(const char* path)
     return sandboxBlocked(path, "file-read-metadata");
 }
 
-void Loader::mapImage(Diagnostics& diag, LoadedImage& info, bool fromOFI)
+void Loader::mapImage(Diagnostics& diag, LoadedImage& info, bool fromOFI, bool* closureOutOfDate)
 {
     dyld3::ScopedTimer timer(DBG_DYLD_TIMING_MAP_IMAGE, info.image()->path(), 0, 0);
 
@@ -382,11 +429,7 @@ void Loader::mapImage(Diagnostics& diag, LoadedImage& info, bool fromOFI)
     bool                    isCodeSigned  = image->hasCodeSignature(codeSignFileOffset, codeSignFileSize);
 
     // open file
-#if BUILDING_DYLD
-    int fd = dyld::my_open(info.image()->path(), O_RDONLY, 0);
-#else
-    int fd = ::open(info.image()->path(), O_RDONLY, 0);
-#endif
+    int fd = dyld3::open(info.image()->path(), O_RDONLY, 0);
     if ( fd == -1 ) {
         int openErr = errno;
         if ( (openErr == EPERM) && sandboxBlockedOpen(image->path()) )
@@ -399,7 +442,7 @@ void Loader::mapImage(Diagnostics& diag, LoadedImage& info, bool fromOFI)
     // get file info
     struct stat statBuf;
 #if TARGET_OS_SIMULATOR
-    if ( stat(image->path(), &statBuf) != 0 ) {
+    if ( dyld3::stat(image->path(), &statBuf) != 0 ) {
 #else
     if ( fstat(fd, &statBuf) != 0 ) {
 #endif
@@ -418,6 +461,7 @@ void Loader::mapImage(Diagnostics& diag, LoadedImage& info, bool fromOFI)
     if ( image->hasFileModTimeAndInode(inode, mtime) ) {
         if ( (statBuf.st_mtime != mtime) || (statBuf.st_ino != inode) ) {
             diag.error("file mtime/inode changed since closure was built for '%s'", image->path());
+            *closureOutOfDate = true;
             close(fd);
             return;
         }
@@ -430,6 +474,23 @@ void Loader::mapImage(Diagnostics& diag, LoadedImage& info, bool fromOFI)
                 // file is now thin
                 sliceOffset = 0;
             }
+        }
+    }
+
+    if ( isCodeSigned && (sliceOffset == 0) ) {
+        uint64_t expectedFileSize = round_page_kernel(codeSignFileOffset+codeSignFileSize);
+        uint64_t actualFileSize = round_page_kernel(statBuf.st_size);
+        if ( actualFileSize < expectedFileSize ) {
+            diag.error("File size too small for code signature");
+            *closureOutOfDate = true;
+            close(fd);
+            return;
+        }
+        if ( actualFileSize != expectedFileSize ) {
+            diag.error("File size doesn't match code signature");
+            *closureOutOfDate = true;
+            close(fd);
+            return;
         }
     }
 
@@ -447,6 +508,13 @@ void Loader::mapImage(Diagnostics& diag, LoadedImage& info, bool fromOFI)
             if ( (errnoCopy == EPERM) || (errnoCopy == EBADEXEC) ) {
                 diag.error("code signature invalid (errno=%d) sliceOffset=0x%08llX, codeBlobOffset=0x%08X, codeBlobSize=0x%08X for '%s'",
                             errnoCopy, sliceOffset, codeSignFileOffset, codeSignFileSize, image->path());
+#if BUILDING_LIBDYLD
+                if ( errnoCopy == EBADEXEC ) {
+                    // dlopen closures many be prebuilt in to the shared cache with a code signature, but the dylib is replaced
+                    // with one without a code signature.  In that case, lets build a new closure
+                    *closureOutOfDate = true;
+                }
+#endif
             }
             else {
                 diag.error("fcntl(fd, F_ADDFILESIGS_RETURN) failed with errno=%d, sliceOffset=0x%08llX, codeBlobOffset=0x%08X, codeBlobSize=0x%08X for '%s'",
@@ -603,6 +671,7 @@ void Loader::mapImage(Diagnostics& diag, LoadedImage& info, bool fromOFI)
             }
         }
         if ( diag.hasError() ) {
+            *closureOutOfDate = true;
             ::vm_deallocate(mach_task_self(), loadAddress, (vm_size_t)totalVMSize);
             return;
         }
@@ -610,7 +679,7 @@ void Loader::mapImage(Diagnostics& diag, LoadedImage& info, bool fromOFI)
 
 #endif
 
-#if __IPHONE_OS_VERSION_MIN_REQUIRED && !TARGET_OS_SIMULATOR
+#if (__arm__ || __arm64__) && !TARGET_OS_SIMULATOR
     // tell kernel about fairplay encrypted regions
     uint32_t fpTextOffset;
     uint32_t fpSize;
@@ -644,7 +713,7 @@ void Loader::registerDOFs(const Array<DOFInfo>& dofs)
     if ( dofs.empty() )
         return;
 
-    int fd = open("/dev/" DTRACEMNR_HELPER, O_RDWR);
+    int fd = ::open("/dev/" DTRACEMNR_HELPER, O_RDWR);
     if ( fd < 0 ) {
         _logDofs("can't open /dev/" DTRACEMNR_HELPER " to register dtrace DOF sections\n");
     }
@@ -682,14 +751,18 @@ void Loader::registerDOFs(const Array<DOFInfo>& dofs)
 
 bool Loader::dtraceUserProbesEnabled()
 {
+#if !TARGET_OS_SIMULATOR
     uint8_t dofEnabled = *((uint8_t*)_COMM_PAGE_DTRACE_DOF_ENABLED);
     return ( (dofEnabled & 1) );
+#else
+    return false;
+#endif
 }
 
 
 void Loader::vmAccountingSetSuspended(bool suspend, LogFunc logger)
 {
-#if __arm__ || __arm64__
+#if TARGET_OS_IPHONE && !TARGET_OS_SIMULATOR
     // <rdar://problem/29099600> dyld should tell the kernel when it is doing fix-ups caused by roots
     logger("vm.footprint_suspend=%d\n", suspend);
     int newValue = suspend ? 1 : 0;
@@ -698,6 +771,21 @@ void Loader::vmAccountingSetSuspended(bool suspend, LogFunc logger)
     size_t oldlen = sizeof(oldValue);
     sysctlbyname("vm.footprint_suspend", &oldValue, &oldlen, &newValue, newlen);
 #endif
+}
+
+static const char* targetString(const MachOAnalyzerSet::FixupTarget& target)
+{
+    switch (target.kind ) {
+        case MachOAnalyzerSet::FixupTarget::Kind::rebase:
+            return "rebase";
+        case MachOAnalyzerSet::FixupTarget::Kind::bindAbsolute:
+            return "abolute";
+        case MachOAnalyzerSet::FixupTarget::Kind::bindToImage:
+            return target.foundSymbolName;
+        case MachOAnalyzerSet::FixupTarget::Kind::bindMissingSymbol:
+            return "missing";
+    }
+    return "";
 }
 
 void Loader::applyFixupsToImage(Diagnostics& diag, LoadedImage& info)
@@ -712,93 +800,186 @@ void Loader::applyFixupsToImage(Diagnostics& diag, LoadedImage& info)
     
     if ( overrideOfCache )
         vmAccountingSetSuspended(true, _logFixups);
-    image->forEachFixup(^(uint64_t imageOffsetToRebase, bool& stop) {
-        // this is a rebase, add slide
-        uintptr_t* fixUpLoc = (uintptr_t*)(imageLoadAddress + imageOffsetToRebase);
-        *fixUpLoc += slide;
-        _logFixups("dyld: fixup: %s:%p += %p\n", leafName, fixUpLoc, (void*)slide);
-    },
-    ^(uint64_t imageOffsetToBind, closure::Image::ResolvedSymbolTarget bindTarget, bool& stop) {
-        // this is a bind, set to target
-        uintptr_t* fixUpLoc = (uintptr_t*)(imageLoadAddress + imageOffsetToBind);
-        uintptr_t value = resolveTarget(bindTarget);
-        _logFixups("dyld: fixup: %s:%p = %p\n", leafName, fixUpLoc, (void*)value);
-        *fixUpLoc = value;
-    },
-    ^(uint64_t imageOffsetToStartsInfo, const Array<closure::Image::ResolvedSymbolTarget>& targets, bool& stop) {
-        // this is a chain of fixups, fix up all
-        STACK_ALLOC_OVERFLOW_SAFE_ARRAY(const void*, targetAddrs, 128);
-        targetAddrs.reserve(targets.count());
-        for (uint32_t i=0; i < targets.count(); ++i)
-            targetAddrs.push_back((void*)resolveTarget(targets[i]));
-        ((dyld3::MachOAnalyzer*)(info.loadedAddress()))->withChainStarts(diag, imageOffsetToStartsInfo, ^(const dyld_chained_starts_in_image* starts) {
-            info.loadedAddress()->fixupAllChainedFixups(diag, starts, slide, targetAddrs, ^(void* loc, void* newValue) {
-                _logFixups("dyld: fixup: %s:%p = %p\n", leafName, loc, newValue);
+    if ( image->fixupsNotEncoded() ) {
+        WrappedMachO wmo((MachOAnalyzer*)info.loadedAddress(), this, (void*)info.image());
+        wmo.forEachFixup(diag,
+        ^(uint64_t fixupLocRuntimeOffset, PointerMetaData pmd, const FixupTarget& target, bool& stop) {
+            uintptr_t* fixUpLoc = (uintptr_t*)(imageLoadAddress + fixupLocRuntimeOffset);
+            uintptr_t value;
+            switch ( target.kind ) {
+                case MachOAnalyzerSet::FixupTarget::Kind::rebase:
+                case MachOAnalyzerSet::FixupTarget::Kind::bindToImage:
+                    value = (uintptr_t)(target.foundInImage._mh) + target.offsetInImage;
+                    break;
+                case MachOAnalyzerSet::FixupTarget::Kind::bindAbsolute:
+                    value = (uintptr_t)target.offsetInImage;
+                    break;
+                case MachOAnalyzerSet::FixupTarget::Kind::bindMissingSymbol:
+                    if ( _launchErrorInfo ) {
+                        _launchErrorInfo->kind              = DYLD_EXIT_REASON_SYMBOL_MISSING;
+                        _launchErrorInfo->clientOfDylibPath = info.image()->path();
+                        _launchErrorInfo->targetDylibPath   = target.foundInImage.path();
+                        _launchErrorInfo->symbol            = target.requestedSymbolName;
+                    }
+                    // we have no value to set, and forEachFixup() is about to finish
+                    return;
+            }
+    #if __has_feature(ptrauth_calls)
+            if ( pmd.authenticated )
+                value = MachOLoaded::ChainedFixupPointerOnDisk::Arm64e::signPointer(value, fixUpLoc, pmd.usesAddrDiversity, pmd.diversity, pmd.key);
+    #endif
+            if ( pmd.high8 )
+                value |= ((uint64_t)pmd.high8 << 56);
+            _logFixups("dyld: fixup: %s:%p = %p (%s)\n", leafName, fixUpLoc, (void*)value, targetString(target));
+            *fixUpLoc = value;
+        },
+        ^(uint32_t cachedDylibIndex, uint32_t exportCacheOffset, const FixupTarget& target) {
+#if BUILDING_LIBDYLD && __x86_64__
+            // Full dlopen closures don't patch weak defs.  Bail out early if we are libdyld to match this behaviour
+            return;
+#endif
+            ((const DyldSharedCache*)_dyldCacheAddress)->forEachPatchableUseOfExport(cachedDylibIndex, exportCacheOffset, ^(dyld_cache_patchable_location patchLoc) {
+                uintptr_t* loc     = (uintptr_t*)(((uint8_t*)_dyldCacheAddress)+patchLoc.cacheOffset);
+                uintptr_t  newImpl = (uintptr_t)(target.foundInImage._mh) + target.offsetInImage + DyldSharedCache::getAddend(patchLoc);
+    #if __has_feature(ptrauth_calls)
+                if ( patchLoc.authenticated )
+                    newImpl = MachOLoaded::ChainedFixupPointerOnDisk::Arm64e::signPointer(newImpl, loc, patchLoc.usesAddressDiversity, patchLoc.discriminator, patchLoc.key);
+    #endif
+                // ignore duplicate patch entries
+                if ( *loc != newImpl ) {
+                    _logFixups("dyld: cache patch: %p = 0x%0lX\n", loc, newImpl);
+                    *loc = newImpl;
+                }
             });
         });
-    },
-    ^(uint64_t imageOffsetToFixup) {
-        uintptr_t* fixUpLoc = (uintptr_t*)(imageLoadAddress + imageOffsetToFixup);
-        _logFixups("dyld: fixup objc image info: %s Setting objc image info for precomputed objc\n", leafName);
-
-        MachOAnalyzer::ObjCImageInfo *imageInfo = (MachOAnalyzer::ObjCImageInfo *)fixUpLoc;
-        ((MachOAnalyzer::ObjCImageInfo *)imageInfo)->flags |= MachOAnalyzer::ObjCImageInfo::dyldPreoptimized;
-    },
-    ^(uint64_t imageOffsetToBind, closure::Image::ResolvedSymbolTarget bindTarget, bool& stop) {
-        // this is a bind, set to target
-        uintptr_t* fixUpLoc = (uintptr_t*)(imageLoadAddress + imageOffsetToBind);
-        uintptr_t value = resolveTarget(bindTarget);
-        _logFixups("dyld: fixup objc protocol: %s:%p = %p\n", leafName, fixUpLoc, (void*)value);
-        *fixUpLoc = value;
-    },
-    ^(uint64_t imageOffsetToFixup, uint32_t selectorIndex, bool inSharedCache, bool &stop) {
-        // fixupObjCSelRefs
-        closure::Image::ResolvedSymbolTarget fixupTarget;
-        if ( inSharedCache ) {
-            const char* selectorString = _dyldCacheSelectorOpt->getEntryForIndex(selectorIndex);
-            fixupTarget.sharedCache.kind     = closure::Image::ResolvedSymbolTarget::kindSharedCache;
-            fixupTarget.sharedCache.offset   = (uint64_t)selectorString - (uint64_t)_dyldCacheAddress;
-        } else {
-            closure::ImageNum imageNum;
-            uint64_t vmOffset;
-            bool gotLocation = _closureSelectorOpt->getStringLocation(selectorIndex, _closureSelectorImages, imageNum, vmOffset);
-            assert(gotLocation);
-            fixupTarget.image.kind = closure::Image::ResolvedSymbolTarget::kindImage;
-            fixupTarget.image.imageNum = imageNum;
-            fixupTarget.image.offset = vmOffset;
+#if BUILDING_LIBDYLD && TARGET_OS_OSX
+        // <rdar://problem/59265987> support old licenseware plugins on macOS using minimal closures
+        __block bool oldBinary = true;
+        info.loadedAddress()->forEachSupportedPlatform(^(Platform platform, uint32_t minOS, uint32_t sdk) {
+            if ( (platform == Platform::macOS) && (sdk >= 0x000A0F00) )
+                oldBinary = false;
+        });
+        if ( oldBinary ) {
+            // look for __DATA,__dyld section
+            info.loadedAddress()->forEachSection(^(const MachOAnalyzer::SectionInfo& sectInfo, bool malformedSectionRange, bool& stop) {
+                if ( (strcmp(sectInfo.sectName, "__dyld") == 0) && (strcmp(sectInfo.segInfo.segName, "__DATA") == 0) ) {
+                    // dyld_func_lookup is second pointer in __dyld section
+                    uintptr_t* dyldSection = (uintptr_t*)(sectInfo.sectAddr + (uintptr_t)info.loadedAddress());
+                    _logFixups("dyld: __dyld section: %p = %p\n", &dyldSection[1], &dyld3::compatFuncLookup);
+                    dyldSection[1] = (uintptr_t)&dyld3::compatFuncLookup;
+                 }
+            });
         }
+#endif
+    }
+    else {
+        if ( image->rebasesNotEncoded() ) {
+            // <rdar://problem/56172089> some apps have so many rebases the closure file is too big, instead we go back to rebase opcodes
+            ((MachOAnalyzer*)imageLoadAddress)->forEachRebase(diag, true, ^(uint64_t imageOffsetToRebase, bool& stop) {
+                // this is a rebase, add slide
+                uintptr_t* fixUpLoc = (uintptr_t*)(imageLoadAddress + imageOffsetToRebase);
+                *fixUpLoc += slide;
+                _logFixups("dyld: fixup: %s:%p += %p\n", leafName, fixUpLoc, (void*)slide);
+            });
+        }
+        image->forEachFixup(^(uint64_t imageOffsetToRebase, bool& stop) {
+            // this is a rebase, add slide
+            uintptr_t* fixUpLoc = (uintptr_t*)(imageLoadAddress + imageOffsetToRebase);
+            *fixUpLoc += slide;
+            _logFixups("dyld: fixup: %s:%p += %p\n", leafName, fixUpLoc, (void*)slide);
+        },
+        ^(uint64_t imageOffsetToBind, closure::Image::ResolvedSymbolTarget bindTarget, bool& stop) {
+            // this is a bind, set to target
+            uintptr_t* fixUpLoc = (uintptr_t*)(imageLoadAddress + imageOffsetToBind);
+            uintptr_t value = resolveTarget(bindTarget);
+            _logFixups("dyld: fixup: %s:%p = %p\n", leafName, fixUpLoc, (void*)value);
+            *fixUpLoc = value;
+        },
+        ^(uint64_t imageOffsetToStartsInfo, const Array<closure::Image::ResolvedSymbolTarget>& targets, bool& stop) {
+            // this is a chain of fixups, fix up all
+            STACK_ALLOC_OVERFLOW_SAFE_ARRAY(const void*, targetAddrs, 128);
+            targetAddrs.reserve(targets.count());
+            for (uint32_t i=0; i < targets.count(); ++i)
+                targetAddrs.push_back((void*)resolveTarget(targets[i]));
+            ((dyld3::MachOAnalyzer*)(info.loadedAddress()))->withChainStarts(diag, imageOffsetToStartsInfo, ^(const dyld_chained_starts_in_image* starts) {
+                info.loadedAddress()->fixupAllChainedFixups(diag, starts, slide, targetAddrs, ^(void* loc, void* newValue) {
+                    _logFixups("dyld: fixup: %s:%p = %p\n", leafName, loc, newValue);
+                });
+            });
+        },
+        ^(uint64_t imageOffsetToFixup) {
+            uintptr_t* fixUpLoc = (uintptr_t*)(imageLoadAddress + imageOffsetToFixup);
+            _logFixups("dyld: fixup objc image info: %s Setting objc image info for precomputed objc\n", leafName);
 
-        uintptr_t* fixUpLoc = (uintptr_t*)(imageLoadAddress + imageOffsetToFixup);
-        uintptr_t value = resolveTarget(fixupTarget);
-        _logFixups("dyld: fixup objc selector: %s:%p(was '%s') = %p(now '%s')\n", leafName, fixUpLoc, (const char*)*fixUpLoc, (void*)value, (const char*)value);
-        *fixUpLoc = value;
-    }, ^(uint64_t imageOffsetToFixup, bool &stop) {
-        // fixupObjCStableSwift
-        // Class really is stable Swift, pretending to be pre-stable.
-        // Fix its lie.
-        uintptr_t* fixUpLoc = (uintptr_t*)(imageLoadAddress + imageOffsetToFixup);
-        uintptr_t value = ((*fixUpLoc) | MachOAnalyzer::ObjCClassInfo::FAST_IS_SWIFT_STABLE) & ~MachOAnalyzer::ObjCClassInfo::FAST_IS_SWIFT_LEGACY;
-        _logFixups("dyld: fixup objc stable Swift: %s:%p = %p\n", leafName, fixUpLoc, (void*)value);
-        *fixUpLoc = value;
-    }, ^(uint64_t imageOffsetToFixup, bool &stop) {
-        // TODO: Implement this
-    });
+            MachOAnalyzer::ObjCImageInfo *imageInfo = (MachOAnalyzer::ObjCImageInfo *)fixUpLoc;
+            ((MachOAnalyzer::ObjCImageInfo *)imageInfo)->flags |= MachOAnalyzer::ObjCImageInfo::dyldPreoptimized;
+        },
+        ^(uint64_t imageOffsetToBind, closure::Image::ResolvedSymbolTarget bindTarget, bool& stop) {
+            // this is a bind, set to target
+            uintptr_t* fixUpLoc = (uintptr_t*)(imageLoadAddress + imageOffsetToBind);
+            uintptr_t value = resolveTarget(bindTarget);
+#if __has_feature(ptrauth_calls)
+            // Sign the ISA on arm64e.
+            // Unfortunately a hard coded value here is not ideal, but this is ABI so we aren't going to change it
+            // This matches the value in libobjc __objc_opt_ptrs: .quad x@AUTH(da, 27361, addr)
+            value = MachOLoaded::ChainedFixupPointerOnDisk::Arm64e::signPointer(value, fixUpLoc, true, 27361, 2);
+#endif
+            _logFixups("dyld: fixup objc protocol: %s:%p = %p\n", leafName, fixUpLoc, (void*)value);
+            *fixUpLoc = value;
+        },
+        ^(uint64_t imageOffsetToFixup, uint32_t selectorIndex, bool inSharedCache, bool &stop) {
+            // fixupObjCSelRefs
+            closure::Image::ResolvedSymbolTarget fixupTarget;
+            if ( inSharedCache ) {
+                const char* selectorString = _dyldCacheSelectorOpt->getEntryForIndex(selectorIndex);
+                fixupTarget.sharedCache.kind     = closure::Image::ResolvedSymbolTarget::kindSharedCache;
+                fixupTarget.sharedCache.offset   = (uint64_t)selectorString - (uint64_t)_dyldCacheAddress;
+            } else {
+                closure::ImageNum imageNum;
+                uint64_t vmOffset;
+                bool gotLocation = _closureSelectorOpt->getStringLocation(selectorIndex, _closureSelectorImages, imageNum, vmOffset);
+                assert(gotLocation);
+                fixupTarget.image.kind = closure::Image::ResolvedSymbolTarget::kindImage;
+                fixupTarget.image.imageNum = imageNum;
+                fixupTarget.image.offset = vmOffset;
+            }
+            uintptr_t* fixUpLoc = (uintptr_t*)(imageLoadAddress + imageOffsetToFixup);
+            uintptr_t value = resolveTarget(fixupTarget);
+            _logFixups("dyld: fixup objc selector: %s:%p(was '%s') = %p(now '%s')\n", leafName, fixUpLoc, (const char*)*fixUpLoc, (void*)value, (const char*)value);
+            *fixUpLoc = value;
+        }, ^(uint64_t imageOffsetToFixup, bool &stop) {
+            // fixupObjCStableSwift
+            // Class really is stable Swift, pretending to be pre-stable.
+            // Fix its lie.
+            uintptr_t* fixUpLoc = (uintptr_t*)(imageLoadAddress + imageOffsetToFixup);
+            uintptr_t value = ((*fixUpLoc) | MachOAnalyzer::ObjCClassInfo::FAST_IS_SWIFT_STABLE) & ~MachOAnalyzer::ObjCClassInfo::FAST_IS_SWIFT_LEGACY;
+            _logFixups("dyld: fixup objc stable Swift: %s:%p = %p\n", leafName, fixUpLoc, (void*)value);
+            *fixUpLoc = value;
+        }, ^(uint64_t imageOffsetToFixup, bool &stop) {
+            // fixupObjCMethodList
+            // Set the method list to have the uniqued bit set
+            uint32_t* fixUpLoc = (uint32_t*)(imageLoadAddress + imageOffsetToFixup);
+            uint32_t value = (*fixUpLoc) | MachOAnalyzer::ObjCMethodList::methodListIsUniqued;
+            _logFixups("dyld: fixup objc method list: %s:%p = 0x%08x\n", leafName, fixUpLoc, value);
+            *fixUpLoc = value;
+        });
 
 #if __i386__
-    __block bool segmentsMadeWritable = false;
-    image->forEachTextReloc(^(uint32_t imageOffsetToRebase, bool& stop) {
-        if ( !segmentsMadeWritable )
-            setSegmentProtects(info, true);
-        uintptr_t* fixUpLoc = (uintptr_t*)(imageLoadAddress + imageOffsetToRebase);
-        *fixUpLoc += slide;
-        _logFixups("dyld: fixup: %s:%p += %p\n", leafName, fixUpLoc, (void*)slide);
-     },
-    ^(uint32_t imageOffsetToBind, closure::Image::ResolvedSymbolTarget bindTarget, bool& stop) {
-        // FIXME
-    });
-    if ( segmentsMadeWritable )
-        setSegmentProtects(info, false);
+        __block bool segmentsMadeWritable = false;
+        image->forEachTextReloc(^(uint32_t imageOffsetToRebase, bool& stop) {
+            if ( !segmentsMadeWritable )
+                setSegmentProtects(info, true);
+            uintptr_t* fixUpLoc = (uintptr_t*)(imageLoadAddress + imageOffsetToRebase);
+            *fixUpLoc += slide;
+            _logFixups("dyld: fixup: %s:%p += %p\n", leafName, fixUpLoc, (void*)slide);
+         },
+        ^(uint32_t imageOffsetToBind, closure::Image::ResolvedSymbolTarget bindTarget, bool& stop) {
+            // FIXME
+        });
+        if ( segmentsMadeWritable )
+            setSegmentProtects(info, false);
 #endif
+    }
 
     // make any read-only data segments read-only
     if ( image->hasReadOnlyData() && !image->inDyldCache() ) {
@@ -828,13 +1009,112 @@ void Loader::setSegmentProtects(const LoadedImage& info, bool write)
 }
 #endif
 
+
+void Loader::forEachImage(void (^handler)(const LoadedImage& li, bool& stop)) const
+{
+    bool stop = false;
+    for (const LoadedImage& li : _existingImages) {
+        handler(li, stop);
+        if ( stop )
+            return;
+    }
+    for (const LoadedImage& li : _newImages) {
+        handler(li, stop);
+        if ( stop )
+            return;
+    }
+}
+
+void Loader::mas_forEachImage(void (^handler)(const WrappedMachO& wmo, bool hidden, bool& stop)) const
+{
+    forEachImage(^(const LoadedImage& li, bool& stop) {
+        WrappedMachO wmo((MachOAnalyzer*)li.loadedAddress(), this, (void*)li.image());
+        handler(wmo, li.hideFromFlatSearch(), stop);
+    });
+}
+
+
+bool Loader::wmo_missingSymbolResolver(const WrappedMachO* fromWmo, bool weakImport, bool lazyBind, const char* symbolName, const char* expectedInDylibPath, const char* clientPath, FixupTarget& target) const
+{
+    if ( weakImport ) {
+        target.offsetInImage = 0;
+        target.kind  = FixupTarget::Kind::bindAbsolute;
+        return true;
+    }
+
+    if ( lazyBind && _allowMissingLazies ) {
+        __block bool result = false;
+        forEachImage(^(const LoadedImage& li, bool& stop) {
+            if ( li.loadedAddress()->isDylib() && (strcmp(li.loadedAddress()->installName(), "/usr/lib/system/libdyld.dylib") == 0) ) {
+                WrappedMachO libdyldWmo((MachOAnalyzer*)li.loadedAddress(), this, (void*)li.image());
+                Diagnostics  diag;
+                if ( libdyldWmo.findSymbolIn(diag, "__dyld_missing_symbol_abort", 0, target) ) {
+                     // <rdar://problem/44315944> closures should bind missing lazy-bind symbols to a missing symbol handler in libdyld in flat namespace
+                     result = true;
+                }
+                stop = true;
+            }
+        });
+        return result;
+    }
+
+    // FIXME
+    return false;
+}
+
+
+void Loader::mas_mainExecutable(WrappedMachO& mainWmo) const
+{
+    forEachImage(^(const LoadedImage& li, bool& stop) {
+        if ( li.loadedAddress()->isMainExecutable() ) {
+            WrappedMachO wmo((MachOAnalyzer*)li.loadedAddress(), this, (void*)li.image());
+            mainWmo = wmo;
+            stop = true;
+        }
+    });
+}
+
+void* Loader::mas_dyldCache() const
+{
+    return (void*)_dyldCacheAddress;
+}
+
+
+bool Loader::wmo_dependent(const WrappedMachO* wmo, uint32_t depIndex, WrappedMachO& childWmo, bool& missingWeakDylib) const
+{
+    const closure::Image* image = (closure::Image*)(wmo->_other);
+    closure::ImageNum depImageNum = image->dependentImageNum(depIndex);
+    if ( depImageNum == closure::kMissingWeakLinkedImage ) {
+        missingWeakDylib = true;
+        return true;
+    }
+    else {
+        if ( LoadedImage* li = findImage(depImageNum) ) {
+            WrappedMachO foundWmo((MachOAnalyzer*)li->loadedAddress(), this, (void*)li->image());
+            missingWeakDylib = false;
+            childWmo = foundWmo;
+            return true;
+        }
+    }
+    return false;
+}
+
+
+const char* Loader::wmo_path(const WrappedMachO* wmo) const
+{
+    const closure::Image* image = (closure::Image*)(wmo->_other);
+    return image->path();
+}
+
+
+
 #if BUILDING_DYLD
 LoadedImage* Loader::LaunchImagesCache::findImage(closure::ImageNum imageNum,
                                                   Array<LoadedImage>& images) const {
     if ( (imageNum < _firstImageNum) || (imageNum >= _lastImageNum) )
         return nullptr;
 
-    uint64_t cacheIndex = imageNum - _firstImageNum;
+    unsigned int cacheIndex = imageNum - _firstImageNum;
     uint32_t imagesIndex = _imageIndices[cacheIndex];
     if ( imagesIndex == 0 )
         return nullptr;
@@ -843,16 +1123,17 @@ LoadedImage* Loader::LaunchImagesCache::findImage(closure::ImageNum imageNum,
     return &images[imagesIndex - 1];
 }
 
-void Loader::LaunchImagesCache::tryAddImage(closure::ImageNum imageNum,
-                                            uint64_t allImagesIndex) {
+void Loader::LaunchImagesCache::tryAddImage(closure::ImageNum imageNum, uint64_t allImagesIndex) const {
     if ( (imageNum < _firstImageNum) || (imageNum >= _lastImageNum) )
         return;
 
-    uint64_t cacheIndex = imageNum - _firstImageNum;
+    unsigned int cacheIndex = imageNum - _firstImageNum;
 
     // Note the index is offset by 1 so that 0's are not yet set
     _imageIndices[cacheIndex] = (uint32_t)allImagesIndex + 1;
 }
+ #endif
+
 
 void forEachLineInFile(const char* buffer, size_t bufferLen, void (^lineHandler)(const char* line, bool& stop))
 {
@@ -876,7 +1157,7 @@ void forEachLineInFile(const char* buffer, size_t bufferLen, void (^lineHandler)
 
 void forEachLineInFile(const char* path, void (^lineHandler)(const char* line, bool& stop))
 {
-    int fd = dyld::my_open(path, O_RDONLY, 0);
+    int fd = dyld3::open(path, O_RDONLY, 0);
     if ( fd != -1 ) {
         struct stat statBuf;
         if ( fstat(fd, &statBuf) == 0 ) {
@@ -890,14 +1171,13 @@ void forEachLineInFile(const char* path, void (^lineHandler)(const char* line, b
     }
 }
 
-#endif
 
 #if (BUILDING_LIBDYLD || BUILDING_DYLD)
     bool internalInstall()
     {
 #if TARGET_OS_SIMULATOR
         return false;
-#elif __IPHONE_OS_VERSION_MIN_REQUIRED
+#elif TARGET_OS_IPHONE
         uint32_t devFlags = *((uint32_t*)_COMM_PAGE_DEV_FIRM);
         return ( (devFlags & 1) == 1 );
 #else

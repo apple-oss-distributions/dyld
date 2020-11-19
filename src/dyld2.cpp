@@ -41,6 +41,7 @@
 #include <sys/un.h>
 #include <sys/syslog.h>
 #include <sys/uio.h>
+#include <sys/xattr.h>
 #include <mach/mach.h>
 #include <mach-o/fat.h>
 #include <mach-o/loader.h> 
@@ -63,6 +64,27 @@
 #include <sys/attr.h>
 #include <sys/fsgetpath.h>
 #include <System/sys/content_protection.h>
+
+#define SUPPORT_LOGGING_TO_CONSOLE !(__i386__ || __x86_64__ || TARGET_OS_SIMULATOR)
+#if SUPPORT_LOGGING_TO_CONSOLE
+#include <paths.h> // for logging to console
+#endif
+
+#if !TARGET_OS_SIMULATOR
+
+// The comm page is being renamed, so set our define to the new value if the old
+// value is missing
+#ifndef _COMM_PAGE_DYLD_SYSTEM_FLAGS
+
+#ifndef _COMM_PAGE_DYLD_FLAGS
+#error Must define _COMM_PAGE_DYLD_FLAGS or _COMM_PAGE_DYLD_SYSTEM_FLAGS
+#endif
+
+#define _COMM_PAGE_DYLD_SYSTEM_FLAGS _COMM_PAGE_DYLD_FLAGS
+
+#endif
+
+#endif
 
 #if TARGET_OS_SIMULATOR
 	enum {
@@ -124,6 +146,8 @@ extern "C" int __fork();
 #include "ClosureFileSystemPhysical.h"
 #include "FileUtils.h"
 #include "BootArgs.h"
+#include "Defines.h"
+#include "RootsChecker.h"
 
 #ifndef MH_HAS_OBJC
   #define MH_HAS_OBJC			0x40000000
@@ -150,7 +174,7 @@ extern "C" ssize_t __sendto(int, const void *, size_t, int, const struct sockadd
 	#define macho_section			section
 #endif
 
-
+#define DYLD_CLOSURE_XATTR_NAME "com.apple.dyld"
 
 #define CPU_TYPE_MASK 0x00FFFFFF	/* complement of CPU_ARCH_MASK */
 
@@ -158,6 +182,7 @@ extern "C" ssize_t __sendto(int, const void *, size_t, int, const struct sockadd
 /* implemented in dyld_gdb.cpp */
 extern void resetAllImages();
 extern void addImagesToAllImages(uint32_t infoCount, const dyld_image_info info[]);
+extern void addAotImagesToAllAotImages(uint32_t aotInfoCount, const dyld_aot_image_info aotInfo[]);
 extern void removeImageFromAllImages(const mach_header* mh);
 extern void addNonSharedCacheImageUUID(const dyld_uuid_info& info);
 extern const char* notifyGDB(enum dyld_image_states state, uint32_t infoCount, const dyld_image_info info[]);
@@ -271,7 +296,7 @@ static void*						sSingleHandlers[7][3];
 static void*						sBatchHandlers[7][3];
 static ImageLoader*					sLastImageByAddressCache;
 static EnvironmentVariables			sEnv;
-#if __MAC_OS_X_VERSION_MIN_REQUIRED
+#if TARGET_OS_OSX
 static const char*					sFrameworkFallbackPaths[] = { "$HOME/Library/Frameworks", "/Library/Frameworks", "/Network/Library/Frameworks", "/System/Library/Frameworks", NULL };
 static const char*					sLibraryFallbackPaths[] = { "$HOME/lib", "/usr/local/lib", "/usr/lib", NULL };
 static const char*					sRestrictedFrameworkFallbackPaths[] = { "/System/Library/Frameworks", NULL };
@@ -315,7 +340,7 @@ static _dyld_objc_notify_mapped		sNotifyObjCMapped;
 static _dyld_objc_notify_init		sNotifyObjCInit;
 static _dyld_objc_notify_unmapped	sNotifyObjCUnmapped;
 
-#if __IPHONE_OS_VERSION_MIN_REQUIRED && !TARGET_OS_SIMULATOR
+#if TARGET_OS_IPHONE && !TARGET_OS_SIMULATOR
 static bool							sForceStderr = false;
 #endif
 
@@ -327,10 +352,17 @@ static bool							sDisableAcceleratorTables = true;
 #endif
 
 bool								gUseDyld3 = false;
+static uint32_t						sLaunchModeUsed = 0;
 static bool							sSkipMain = false;
-static void                       (*sEntryOveride)() = nullptr;
+static void                       (*sEntryOverride)() = nullptr;
 static bool							sJustBuildClosure = false;
+#if !TARGET_OS_SIMULATOR
 static bool							sLogClosureFailure = false;
+#endif
+static bool 						sKeysDisabled = false;
+static bool							sOnlyPlatformArm64e = false; // arm64e binaries can only be loaded if they are part of the OS
+
+static dyld3::RootsChecker			sRootsChecker;
 
 enum class ClosureMode {
 	// Unset means we haven't provided an env variable or boot-arg to explicitly choose a mode
@@ -342,12 +374,38 @@ enum class ClosureMode {
 	// -force_dyld2=1 env variable or an internal cache on iOS
 	Off,
 	// PreBuiltOnly means only use a shared cache closure and don't try build a new one
-	PreBuiltOnly
+	PreBuiltOnly,
+};
+
+enum class ClosureKind {
+	unset,
+	full,
+	minimal,
 };
 
 static ClosureMode					sClosureMode = ClosureMode::Unset;
+static ClosureKind					sClosureKind = ClosureKind::unset;
 static bool							sForceInvalidSharedCacheClosureFormat = false;
 static uint64_t						launchTraceID = 0;
+
+// These flags are the values in the 64-bit _COMM_PAGE_DYLD_SYSTEM_FLAGS entry
+// Note we own this and can write it from PID 1
+enum CommPageFlags : uint64_t {
+    None                                = 0,
+
+	// The boot args can set the low 32-bits of the comm page.  We'll reserve the high 32-bits
+	// for runtime (launchd) set values.
+	CommPageBootArgMask					= 0xFFFFFFFF,
+
+	// Are the simulator support dylibs definitely roots when launchd scanned them
+	libsystemKernelIsRoot 				= 1ULL << 32,
+	libsystemPlatformIsRoot				= 1ULL << 33,
+	libsystemPThreadIsRoot 				= 1ULL << 34,
+
+	// Is the file system writable, ie, could the simulator support dylibs be written
+	// later, after PID 1
+	fileSystemCanBeModified				= 1ULL << 35
+};
 
 //
 // The MappedRanges structure is used for fast address->image lookups.
@@ -546,7 +604,7 @@ static void socket_syslogv(int priority, const char* format, va_list list)
 
 void vlog(const char* format, va_list list)
 {
-#if __IPHONE_OS_VERSION_MIN_REQUIRED && !TARGET_OS_SIMULATOR
+#if TARGET_OS_IPHONE && !TARGET_OS_SIMULATOR
 	// <rdar://problem/25965832> log to console when running iOS app from Xcode
 	if ( !sLogToFile && !sForceStderr && useSyslog() )
 #else
@@ -579,6 +637,21 @@ void warn(const char* format, ...)
 	va_start(list, format);
 	vwarn(format, list);
 	va_end(list);
+}
+
+void logToConsole(const char* format, ...) {
+#if SUPPORT_LOGGING_TO_CONSOLE
+    int cfd = open(_PATH_CONSOLE, O_WRONLY|O_NOCTTY);
+    if (cfd == -1)
+        return;
+
+    va_list list;
+    va_start(list, format);
+    _simple_vdprintf(cfd, format, list);
+    va_end(list);
+
+    close(cfd);
+#endif
 }
 
 #else
@@ -618,7 +691,7 @@ private:
 FileOpener::FileOpener(const char* path)
  : fd(-1)
 {
-	fd = my_open(path, O_RDONLY, 0);
+	fd = dyld3::open(path, O_RDONLY, 0);
 }
 
 FileOpener::~FileOpener()
@@ -675,7 +748,7 @@ static void	registerDOFs(const std::vector<ImageLoader::DOFInfo>& dofs)
 
 static void	unregisterDOF(int registrationID)
 {
-	int fd = open("/dev/" DTRACEMNR_HELPER, O_RDWR);
+	int fd = open("/dev/" DTRACEMNR_HELPER, O_RDWR, 0);
 	if ( fd < 0 ) {
 		dyld::warn("can't open /dev/" DTRACEMNR_HELPER " to unregister dtrace DOF section\n");
 	}
@@ -835,8 +908,11 @@ static void notifyMonitoringDyld(bool unloading, unsigned imageCount, const stru
 		for (unsigned j=0; j < imageCount; ++j) {
 			pathsSize += (strlen(imagePaths[j]) + 1);
 		}
-		unsigned totalSize = (sizeof(dyld_process_info_notify_header) + entriesSize + pathsSize + 127) & -128;   // align
-		if ( totalSize > DYLD_PROCESS_INFO_NOTIFY_MAX_BUFFER_SIZE ) {
+
+		unsigned totalSize = (sizeof(struct dyld_process_info_notify_header) + entriesSize + pathsSize + 127) & -128;   // align
+		// The reciever has a fixed buffer of DYLD_PROCESS_INFO_NOTIFY_MAX_BUFFER_SIZE, whcih needs to hold both the message and a trailer.
+		// If the total size exceeds that we need to fragment the message.
+		if ( (totalSize + MAX_TRAILER_SIZE) > DYLD_PROCESS_INFO_NOTIFY_MAX_BUFFER_SIZE ) {
 			// Putting all image paths into one message would make buffer too big.
 			// Instead split into two messages.  Recurse as needed until paths fit in buffer.
 			unsigned imageHalfCount = imageCount/2;
@@ -867,9 +943,9 @@ static void notifyMonitoringDyld(bool unloading, unsigned imageCount, const stru
 			++entries;
 		}
 		if (unloading) {
-			sendMessage(slot, DYLD_PROCESS_INFO_NOTIFY_UNLOAD_ID, totalSize, (mach_msg_header_t*)buffer, totalSize+MAX_TRAILER_SIZE);
+			sendMessage(slot, DYLD_PROCESS_INFO_NOTIFY_UNLOAD_ID, totalSize, (mach_msg_header_t*)buffer, totalSize);
 		} else {
-			sendMessage(slot, DYLD_PROCESS_INFO_NOTIFY_LOAD_ID, totalSize, (mach_msg_header_t*)buffer, totalSize+MAX_TRAILER_SIZE);
+			sendMessage(slot, DYLD_PROCESS_INFO_NOTIFY_LOAD_ID, totalSize, (mach_msg_header_t*)buffer, totalSize);
 		}
 	}
 }
@@ -927,7 +1003,9 @@ static void notifySingle(dyld_image_states state, const ImageLoader* image, Imag
 	}
 	if ( state == dyld_image_state_mapped ) {
 		// <rdar://problem/7008875> Save load addr + UUID for images from outside the shared cache
-		if ( !image->inSharedCache() ) {
+		// <rdar://problem/50432671> Include UUIDs for shared cache dylibs in all image info when using private mapped shared caches
+		if (!image->inSharedCache()
+			|| (gLinkContext.sharedRegionMode == ImageLoader::kUsePrivateSharedRegion)) {
 			dyld_uuid_info info;
 			if ( image->getUUID(info.imageUUID) ) {
 				info.imageLoadAddress = image->machHeader();
@@ -1181,7 +1259,7 @@ static void notifyBatch(dyld_image_states state, bool preflightOnly)
 	notifyBatchPartial(state, false, NULL, preflightOnly, false);
 }
 
-#if __MAC_OS_X_VERSION_MIN_REQUIRED
+#if TARGET_OS_OSX
 static
 void coresymbolication_load_notifier(void* connection, uint64_t timestamp, const char* path, const struct mach_header* mh)
 {
@@ -1474,10 +1552,10 @@ void removeImage(ImageLoader* image)
 	}
 
 	// If this image is the potential canonical definition of any weak defs, then set them to a tombstone value
-	if ( gLinkContext.weakDefMapInitialized && image->hasCoalescedExports() ) {
+	if ( gLinkContext.weakDefMapInitialized && image->hasCoalescedExports() && (image->getState() >= dyld_image_state_bound) ) {
 		Diagnostics diag;
 		const dyld3::MachOAnalyzer* ma = (const dyld3::MachOAnalyzer*)image->machHeader();
-		ma->forEachWeakDef(diag, ^(const char *symbolName, uintptr_t imageOffset, bool isFromExportTrie) {
+		ma->forEachWeakDef(diag, ^(const char *symbolName, uint64_t imageOffset, bool isFromExportTrie) {
 			auto it = gLinkContext.weakDefMap.find(symbolName);
 			assert(it != gLinkContext.weakDefMap.end());
 			it->second = { nullptr, 0 };
@@ -1849,7 +1927,7 @@ static void	appendParsedColonList(const char* list, const char* mainExecutableDi
 	}
 }
 
-#if __MAC_OS_X_VERSION_MIN_REQUIRED
+#if TARGET_OS_OSX
 static void paths_expand_roots(const char **paths, const char *key, const char *val)
 {
 // 	assert(val != NULL);
@@ -1998,13 +2076,13 @@ void processDyldEnvironmentVariable(const char* key, const char* value, const ch
 	}
 	else if ( strcmp(key, "DYLD_PRINT_STATISTICS") == 0 ) {
 		sEnv.DYLD_PRINT_STATISTICS = true;
-#if __IPHONE_OS_VERSION_MIN_REQUIRED && !TARGET_OS_SIMULATOR
+#if TARGET_OS_IPHONE && !TARGET_OS_SIMULATOR
 		// <rdar://problem/26614838> DYLD_PRINT_STATISTICS no longer logs to xcode console for device apps
 		sForceStderr = true;
 #endif
 	}
 	else if ( strcmp(key, "DYLD_PRINT_TO_STDERR") == 0 ) {
-#if __IPHONE_OS_VERSION_MIN_REQUIRED && !TARGET_OS_SIMULATOR
+#if TARGET_OS_IPHONE && !TARGET_OS_SIMULATOR
 		// <rdar://problem/26633440> DYLD_PRINT_STATISTICS no longer logs to xcode console for device apps
 		sForceStderr = true;
 #endif
@@ -2107,7 +2185,7 @@ void processDyldEnvironmentVariable(const char* key, const char* value, const ch
 #endif
 #if !TARGET_OS_SIMULATOR
 	else if ( (strcmp(key, "DYLD_PRINT_TO_FILE") == 0) && (mainExecutableDir == NULL) && gLinkContext.allowEnvVarsSharedCache ) {
-		int fd = open(value, O_WRONLY | O_CREAT | O_APPEND, 0644);
+		int fd = dyld3::open(value, O_WRONLY | O_CREAT | O_APPEND, 0644);
 		if ( fd != -1 ) {
 			sLogfile = fd;
 			sLogToFile = true;
@@ -2220,7 +2298,7 @@ static void checkVersionedPaths()
 #endif	
 
 
-#if __MAC_OS_X_VERSION_MIN_REQUIRED
+#if TARGET_OS_OSX
 //
 // For security, setuid programs ignore DYLD_* environment variables.
 // Additionally, the DYLD_* enviroment variables are removed
@@ -2272,7 +2350,7 @@ static void pruneEnvironmentVariables(const char* envp[], const char*** applep)
 
 static void defaultUninitializedFallbackPaths(const char* envp[])
 {
-#if __MAC_OS_X_VERSION_MIN_REQUIRED
+#if TARGET_OS_OSX
 	if ( !gLinkContext.allowClassicFallbackPaths ) {
 		sEnv.DYLD_FALLBACK_FRAMEWORK_PATH = sRestrictedFrameworkFallbackPaths;
 		sEnv.DYLD_FALLBACK_LIBRARY_PATH   = sRestrictedLibraryFallbackPaths;
@@ -2440,7 +2518,7 @@ static void getHostInfo(const macho_header* mainExecutableMH, uintptr_t mainExec
 
 static void checkSharedRegionDisable(const dyld3::MachOLoaded* mainExecutableMH, uintptr_t mainExecutableSlide)
 {
-#if __MAC_OS_X_VERSION_MIN_REQUIRED
+#if TARGET_OS_OSX
 	// if main executable has segments that overlap the shared region,
 	// then disable using the shared region
 	if ( mainExecutableMH->intersectsRange(SHARED_REGION_BASE, SHARED_REGION_SIZE) ) {
@@ -2454,6 +2532,9 @@ static void checkSharedRegionDisable(const dyld3::MachOLoaded* mainExecutableMH,
 		gLinkContext.sharedRegionMode = ImageLoader::kUsePrivateSharedRegion;
 	}
 #endif
+#endif
+#if TARGET_OS_SIMULATOR
+	gLinkContext.sharedRegionMode = ImageLoader::kUsePrivateSharedRegion;
 #endif
 	// iOS cannot run without shared region
 }
@@ -2655,33 +2736,28 @@ static const cpu_subtype_t kARM[kARM_RowCount][9] = {
 };
 #endif
 
-#if __arm64__
-//
-//     ARM64 sub-type lists
-//
-const int kARM64_RowCount = 2;
-static const cpu_subtype_t kARM64[kARM64_RowCount][4] = {
-
-	// armv64e can run: 64e, 64
-	{  CPU_SUBTYPE_ARM64E, CPU_SUBTYPE_ARM64_V8, CPU_SUBTYPE_ARM64_ALL, CPU_SUBTYPE_END_OF_LIST },
-
-	// armv64 can run: 64
-	{  CPU_SUBTYPE_ARM64_V8, CPU_SUBTYPE_ARM64_ALL, CPU_SUBTYPE_END_OF_LIST },
-};
-
 #if __ARM64_ARCH_8_32__
-const int kARM64_32_RowCount = 2;
-static const cpu_subtype_t kARM64_32[kARM64_32_RowCount][4] = {
-
-	// armv64_32 can run: v8
-	{  CPU_SUBTYPE_ARM64_32_V8, CPU_SUBTYPE_END_OF_LIST },
-
-	// armv64 can run: 64
-	{  CPU_SUBTYPE_ARM64_V8, CPU_SUBTYPE_ARM64_ALL, CPU_SUBTYPE_END_OF_LIST },
-};
+//
+//    arm64_32 sub-type lists
+//
+	static const cpu_subtype_t kARM64_32[] = { CPU_SUBTYPE_ARM64_32_V8, CPU_SUBTYPE_END_OF_LIST };
 #endif
-	
+
+#if __arm64__ && __LP64__
+//
+//     arm64[e] sub-type handing
+//
+	#if __arm64e__
+		// arm64e with keys on
+		static const cpu_subtype_t kARM64e[]        = { CPU_SUBTYPE_ARM64E, CPU_SUBTYPE_END_OF_LIST };
+		// arm64 or arm64e with keys off
+		static const cpu_subtype_t kARM64eKeysOff[] = { CPU_SUBTYPE_ARM64E, CPU_SUBTYPE_ARM64_V8, CPU_SUBTYPE_ARM64_ALL, CPU_SUBTYPE_END_OF_LIST };
+	#else
+		// arm64 main binary
+		static const cpu_subtype_t kARM64[] = { CPU_SUBTYPE_ARM64_V8, CPU_SUBTYPE_ARM64_ALL, CPU_SUBTYPE_END_OF_LIST };
+	#endif // __arm64e__
 #endif
+
 
 #if __x86_64__
 //      
@@ -2713,21 +2789,20 @@ static const cpu_subtype_t* findCPUSubtypeList(cpu_type_t cpu, cpu_subtype_t sub
 			break;
 #endif
 #if __arm64__
+	#if __LP64__
 		case CPU_TYPE_ARM64:
-			for (int i=0; i < kARM64_RowCount ; ++i) {
-				if ( kARM64[i][0] == subtype )
-					return kARM64[i];
-			}
+		#if __arm64e__
+			return ( sKeysDisabled ? kARM64eKeysOff : kARM64e);
+		#else
+			return kARM64;
+		#endif
 			break;
+	#endif
 
-#if __ARM64_ARCH_8_32__
+	#if !__LP64__
 		case CPU_TYPE_ARM64_32:
-			for (int i=0; i < kARM64_32_RowCount ; ++i) {
-				if ( kARM64_32[i][0] == subtype )
-					return kARM64_32[i];
-			}
-			break;
-#endif
+			return kARM64_32;
+	#endif
 
 #endif
 #if __x86_64__
@@ -2743,18 +2818,26 @@ static const cpu_subtype_t* findCPUSubtypeList(cpu_type_t cpu, cpu_subtype_t sub
 }
 
 
-
-
 // scan fat table-of-contents for best most preferred subtype
-static bool fatFindBestFromOrderedList(cpu_type_t cpu, const cpu_subtype_t list[], const fat_header* fh, uint64_t* offset, uint64_t* len)
+static bool fatFindBestFromOrderedList(cpu_type_t cpu, const cpu_subtype_t list[], const fat_header* fh, int fd, uint64_t* offset, uint64_t* len)
 {
 	const fat_arch* const archs = (fat_arch*)(((char*)fh)+sizeof(fat_header));
 	for (uint32_t subTypeIndex=0; list[subTypeIndex] != CPU_SUBTYPE_END_OF_LIST; ++subTypeIndex) {
 		for(uint32_t fatIndex=0; fatIndex < OSSwapBigToHostInt32(fh->nfat_arch); ++fatIndex) {
-			if ( ((cpu_type_t)OSSwapBigToHostInt32(archs[fatIndex].cputype) == cpu) 
-				&& (list[subTypeIndex] == (cpu_subtype_t)OSSwapBigToHostInt32(archs[fatIndex].cpusubtype)) ) {
-				*offset = OSSwapBigToHostInt32(archs[fatIndex].offset);
-				*len = OSSwapBigToHostInt32(archs[fatIndex].size);
+			cpu_type_t    sliceCpuType    = OSSwapBigToHostInt32(archs[fatIndex].cputype);
+			cpu_subtype_t sliceCpuSubType = OSSwapBigToHostInt32(archs[fatIndex].cpusubtype) & ~CPU_SUBTYPE_MASK;
+			uint64_t      sliceOffset     = OSSwapBigToHostInt32(archs[fatIndex].offset);
+			uint64_t      sliceLen        = OSSwapBigToHostInt32(archs[fatIndex].size);
+			if ( (sliceCpuType == cpu) && ((list[subTypeIndex] & ~CPU_SUBTYPE_MASK) == sliceCpuSubType) ) {
+#if TARGET_OS_OSX && __has_feature(ptrauth_calls)
+				if ( sOnlyPlatformArm64e && (sliceCpuType == CPU_TYPE_ARM64) && (sliceCpuSubType == CPU_SUBTYPE_ARM64E) ) {
+					// if we can only load arm64e slices that are platform binaries, skip over slices that are not
+					if ( !dyld3::MachOAnalyzer::sliceIsOSBinary(fd, sliceOffset, sliceLen) )
+						continue;
+				}
+#endif
+				*offset = sliceOffset;
+				*len    = sliceLen;
 				return true;
 			}
 		}
@@ -2762,6 +2845,7 @@ static bool fatFindBestFromOrderedList(cpu_type_t cpu, const cpu_subtype_t list[
 	return false;
 }
 
+#if !TARGET_OS_OSX || !__has_feature(ptrauth_calls)
 // scan fat table-of-contents for exact match of cpu and cpu-sub-type
 static bool fatFindExactMatch(cpu_type_t cpu, cpu_subtype_t subtype, const fat_header* fh, uint64_t* offset, uint64_t* len)
 {
@@ -2776,6 +2860,7 @@ static bool fatFindExactMatch(cpu_type_t cpu, cpu_subtype_t subtype, const fat_h
 	}
 	return false;
 }
+#endif
 
 // scan fat table-of-contents for image with matching cpu-type and runs-on-all-sub-types
 static bool fatFindRunsOnAllCPUs(cpu_type_t cpu, const fat_header* fh, uint64_t* offset, uint64_t* len)
@@ -2884,7 +2969,7 @@ static bool fatValidate(const fat_header* fh)
 // each optimized for a different cpu-sub-type (e.g G3 or G5).
 // This routine picks the optimal sub-image.
 //
-static bool fatFindBest(const fat_header* fh, uint64_t* offset, uint64_t* len)
+static bool fatFindBest(const fat_header* fh, uint64_t* offset, uint64_t* len, int fd=-1)
 {
 	if ( !fatValidate(fh) )
 		return false;
@@ -2900,13 +2985,17 @@ static bool fatFindBest(const fat_header* fh, uint64_t* offset, uint64_t* len)
 	
 		// use ordered list to find best sub-image in fat file
 		if ( subTypePreferenceList != NULL ) {
-			if ( fatFindBestFromOrderedList(cpu, subTypePreferenceList, fh, offset, len) )
+			if ( fatFindBestFromOrderedList(cpu, subTypePreferenceList, fh, fd, offset, len) )
 				return true;
 		}
-
+#if TARGET_OS_OSX && __has_feature(ptrauth_calls)
+		// don't use fallbacks for macOS arm64e to ensure only compatible binaries are loaded
+		return false;
+#else
 		// if running cpu is not in list, try for an exact match
 		if ( fatFindExactMatch(cpu, sHostCPUsubtype, fh, offset, len) )
 			return true;
+#endif
 	}
 	
 	// running on an uknown cpu, can only load generic code
@@ -2925,12 +3014,21 @@ static bool fatFindBest(const fat_header* fh, uint64_t* offset, uint64_t* len)
 #endif
 }
 
+#if defined(__x86_64__) && !TARGET_OS_SIMULATOR
+#ifndef kIsTranslated
+   #define kIsTranslated  0x4000000000000000ULL
+#endif
+bool isTranslated()
+{
+	return ((*(uint64_t*)_COMM_PAGE_CPU_CAPABILITIES64) & kIsTranslated);
+}
+#endif
 
 
 //
 // This is used to validate if a non-fat (aka thin or raw) mach-o file can be used
 // on the current processor. //
-bool isCompatibleMachO(const uint8_t* firstPage, const char* path)
+bool isCompatibleMachO(const uint8_t* firstPage, const char* path, int fd=-1, uint64_t sliceOffset=0, uint64_t sliceLen=-1)
 {
 #if CPU_SUBTYPES_SUPPORTED
 	// It is deemed compatible if any of the following are true:
@@ -2941,22 +3039,31 @@ bool isCompatibleMachO(const uint8_t* firstPage, const char* path)
 	if ( mh->magic == sMainExecutableMachHeader->magic ) {
 		if ( mh->cputype == sMainExecutableMachHeader->cputype ) {
 			if ( mh->cputype == sHostCPU ) {
+				const cpu_subtype_t mhCPUSubtype = mh->cpusubtype & ~CPU_SUBTYPE_MASK;
 				// get preference ordered list of subtypes that this machine can use
 				const cpu_subtype_t* subTypePreferenceList = findCPUSubtypeList(mh->cputype, sHostCPUsubtype);
 				if ( subTypePreferenceList != NULL ) {
 					// if image's subtype is in the list, it is compatible
 					for (const cpu_subtype_t* p = subTypePreferenceList; *p != CPU_SUBTYPE_END_OF_LIST; ++p) {
-						if ( *p == mh->cpusubtype )
+						if ( *p == mhCPUSubtype ) {
+	#if TARGET_OS_OSX && __has_feature(ptrauth_calls)
+							if ( mhCPUSubtype == CPU_SUBTYPE_ARM64E ) {
+								if ( !sOnlyPlatformArm64e || dyld3::MachOAnalyzer::sliceIsOSBinary(fd, sliceOffset, sliceLen) )
+									return true;
+							}
+							else
+	#endif
 							return true;
+						}
 					}
 					// have list and not in list, so not compatible
-					throwf("incompatible cpu-subtype: 0x%08X in %s", mh->cpusubtype, path);
+					throwf("incompatible cpu-subtype: 0x%08X in %s", mhCPUSubtype, path);
 				}
 				// unknown cpu sub-type, but if exact match for current subtype then ok to use
-				if ( mh->cpusubtype == sHostCPUsubtype ) 
+				if ( mhCPUSubtype == sHostCPUsubtype )
 					return true;
 			}
-			
+
 			// cpu type has no ordered list of subtypes
 			switch (mh->cputype) {
 				case CPU_TYPE_I386:
@@ -2987,13 +3094,13 @@ bool isCompatibleMachO(const uint8_t* firstPage, const char* path)
 static ImageLoaderMachO* instantiateFromLoadedImage(const macho_header* mh, uintptr_t slide, const char* path)
 {
 	// try mach-o loader
-	if ( isCompatibleMachO((const uint8_t*)mh, path) ) {
+//	if ( isCompatibleMachO((const uint8_t*)mh, path) ) {
 		ImageLoader* image = ImageLoaderMachO::instantiateMainExecutable(mh, slide, path, gLinkContext);
 		addImage(image);
 		return (ImageLoaderMachO*)image;
-	}
+//	}
 	
-	throw "main executable not a known format";
+//	throw "main executable not a known format";
 }
 
 #if SUPPORT_ACCELERATE_TABLES
@@ -3111,7 +3218,7 @@ static bool isSimulatorBinary(const uint8_t* firstPages, const char* path)
 				    (strcmp(path, "/usr/lib/system/libsystem_pthread_debug.dylib") == 0) ||
 				    (strcmp(path, "/sbin/launchd_sim_trampoline") == 0) ||
 				    (strcmp(path, "/usr/sbin/iokitsimd") == 0) ||
-				    (strcmp(path, "/usr/lib/system/host/liblaunch_sim.dylib") == 0))
+					(strcmp(path, "/usr/lib/system/host/liblaunch_sim.dylib") == 0))
 					return true;
 				return false;
 			case LC_BUILD_VERSION:
@@ -3124,10 +3231,6 @@ static bool isSimulatorBinary(const uint8_t* firstPages, const char* path)
 					case PLATFORM_WATCHOSSIMULATOR:
 					case PLATFORM_WATCHOS:
 						return true;
-	#if TARGET_OS_IOSMAC
-					case 6:
-						return true;
-	#endif
 					case PLATFORM_MACOS:
 						if ((strcmp(path, "/usr/lib/system/libsystem_kernel.dylib") == 0) ||
 							(strcmp(path, "/usr/lib/system/libsystem_platform.dylib") == 0) ||
@@ -3149,31 +3252,6 @@ static bool isSimulatorBinary(const uint8_t* firstPages, const char* path)
 }
 #endif
 
-#if __MAC_OS_X_VERSION_MIN_REQUIRED
-static bool iOSonMacDenied(const char* path)
-{
-	static char*  blackListBuffer 	= nullptr;
-	static size_t blackListSize 	= 0;
-	static bool   tried 			= false;
-	if ( !tried ) {
-		// only try to map file once
-		blackListBuffer = (char*)mapFileReadOnly("/System/iOSSupport/dyld/macOS-deny-list.txt", blackListSize);
-		tried = true;
-	}
-	__block bool result = false;
-	if ( blackListBuffer != nullptr ) {
-		dyld3::forEachLineInFile(blackListBuffer, blackListSize, ^(const char* line, bool& stop) {
-			// lines in the file are prefixes.  Any path that starts with one of these lines is allowed to be unzippered
-			size_t lineLen = strlen(line);
-			if ( (*line == '/') && strncmp(line, path, lineLen) == 0 ) {
-				result = true;
-				stop = true;
-			}
-		});
-	}
-	return result;
-}
-#endif
 
 // map in file and instantiate an ImageLoader
 static ImageLoader* loadPhase6(int fd, const struct stat& stat_buf, const char* path, const LoadContext& context)
@@ -3187,7 +3265,6 @@ static ImageLoader* loadPhase6(int fd, const struct stat& stat_buf, const char* 
 		throw "not a file";
 
 	uint8_t firstPages[MAX_MACH_O_HEADER_AND_LOAD_COMMANDS_SIZE];
-	uint8_t *firstPagesPtr = firstPages;
 	bool shortPage = false;
 	
 	// min mach-o file is 4K
@@ -3207,7 +3284,7 @@ static ImageLoader* loadPhase6(int fd, const struct stat& stat_buf, const char* 
 	if ( fileStartAsFat->magic == OSSwapBigToHostInt32(FAT_MAGIC) ) {
 		if ( OSSwapBigToHostInt32(fileStartAsFat->nfat_arch) > ((4096 - sizeof(fat_header)) / sizeof(fat_arch)) )
 			throwf("fat header too large: %u entries", OSSwapBigToHostInt32(fileStartAsFat->nfat_arch));
-		if ( fatFindBest(fileStartAsFat, &fileOffset, &fileLength) ) {
+		if ( fatFindBest(fileStartAsFat, &fileOffset, &fileLength, fd) ) {
 			if ( (fileOffset+fileLength) > (uint64_t)(stat_buf.st_size) )
 				throwf("truncated fat file.  file length=%llu, but needed slice goes to %llu", stat_buf.st_size, fileOffset+fileLength);
 			if (pread(fd, firstPages, 4096, fileOffset) != 4096)
@@ -3222,7 +3299,7 @@ static ImageLoader* loadPhase6(int fd, const struct stat& stat_buf, const char* 
 	if ( shortPage ) 
 		throw "file too short";
 
-	if ( isCompatibleMachO(firstPages, path) ) {
+	if ( isCompatibleMachO(firstPages, path, fd, fileOffset, fileLength) ) {
 
 		// only MH_BUNDLE, MH_DYLIB, and some MH_EXECUTE can be dynamically loaded
 		const mach_header* mh = (mach_header*)firstPages;
@@ -3236,60 +3313,45 @@ static ImageLoader* loadPhase6(int fd, const struct stat& stat_buf, const char* 
 		}
 
 		uint32_t headerAndLoadCommandsSize = sizeof(macho_header) + mh->sizeofcmds;
-		if ( headerAndLoadCommandsSize > MAX_MACH_O_HEADER_AND_LOAD_COMMANDS_SIZE )
-			throwf("malformed mach-o: load commands size (%u) > %u", headerAndLoadCommandsSize, MAX_MACH_O_HEADER_AND_LOAD_COMMANDS_SIZE);
-
 		if ( headerAndLoadCommandsSize > fileLength )
 			dyld::throwf("malformed mach-o: load commands size (%u) > mach-o file size (%llu)", headerAndLoadCommandsSize, fileLength);
 
-		if ( headerAndLoadCommandsSize > 4096 ) {
+		vm_address_t vmAllocatedFirstPages = 0;
+		if ( headerAndLoadCommandsSize > MAX_MACH_O_HEADER_AND_LOAD_COMMANDS_SIZE ) {
+			if ( ::vm_allocate(mach_task_self(), &vmAllocatedFirstPages, headerAndLoadCommandsSize, VM_FLAGS_ANYWHERE) == 0 ) {
+				if ( ::pread(fd, (void*)vmAllocatedFirstPages, headerAndLoadCommandsSize, fileOffset) != headerAndLoadCommandsSize )
+					throwf("pread of all load commands failed: %d", errno);
+				mh = (mach_header*)vmAllocatedFirstPages;
+			}
+			else {
+				throwf("malformed mach-o: load commands size (%u) > %u", headerAndLoadCommandsSize, MAX_MACH_O_HEADER_AND_LOAD_COMMANDS_SIZE);
+			}
+		}
+		else if ( headerAndLoadCommandsSize > 4096 ) {
 			// read more pages
 			unsigned readAmount = headerAndLoadCommandsSize - 4096;
 			if ( pread(fd, &firstPages[4096], readAmount, fileOffset+4096) != readAmount )
 				throwf("pread of extra load commands past 4KB failed: %d", errno);
 		}
 
-#if TARGET_OS_SIMULATOR	
-		// <rdar://problem/14168872> dyld_sim should restrict loading osx binaries
-		if ( !isSimulatorBinary(firstPages, path) ) {
-	#if TARGET_OS_WATCH
-			throw "mach-o, but not built for watchOS simulator";
-	#elif TARGET_OS_TV
-			throw "mach-o, but not built for tvOS simulator";
-	#else
-			throw "mach-o, but not built for iOS simulator";
-	#endif
+		if ( !((dyld3::MachOFile*)mh)->loadableIntoProcess((dyld3::Platform)gProcessInfo->platform, path) ) {
+			throwf("mach-o, but not built for platform %s", dyld3::MachOFile::platformName((dyld3::Platform)gProcessInfo->platform));
 		}
-#endif
 
-#if __MAC_OS_X_VERSION_MIN_REQUIRED
-		if ( gLinkContext.iOSonMac ) {
-			const dyld3::MachOFile* mf = (dyld3::MachOFile*)firstPages;
-			bool supportsiOSMac = mf->supportsPlatform(dyld3::Platform::iOSMac);
-			if ( !supportsiOSMac && iOSonMacDenied(path) ) {
-				throw "mach-o, but not built for UIKitForMac";
-			}
-		}
-		else if ( gLinkContext.driverKit ) {
-			const dyld3::MachOFile* mf = (dyld3::MachOFile*)firstPages;
-			bool isDriverKitDylib = mf->supportsPlatform(dyld3::Platform::driverKit);
-			if ( !isDriverKitDylib ) {
-				throw "mach-o, but not built for driverkit";
-			}
-		}
-#endif
-
-#if __arm64e__
-		if ( (sMainExecutableMachHeader->cpusubtype == CPU_SUBTYPE_ARM64E) && (mh->cpusubtype != CPU_SUBTYPE_ARM64E) )
+#if __has_feature(ptrauth_calls)
+		if ( !sKeysDisabled && ((sMainExecutableMachHeader->cpusubtype & ~CPU_SUBTYPE_MASK) == CPU_SUBTYPE_ARM64E) && ((mh->cpusubtype & ~CPU_SUBTYPE_MASK) != CPU_SUBTYPE_ARM64E) )
 			throw "arm64 dylibs cannot be loaded into arm64e processes";
 #endif
 		ImageLoader* image = nullptr;
 		{
 			dyld3::ScopedTimer timer(DBG_DYLD_TIMING_MAP_IMAGE, path, 0, 0);
-			image = ImageLoaderMachO::instantiateFromFile(path, fd, firstPagesPtr, headerAndLoadCommandsSize, fileOffset, fileLength, stat_buf, gLinkContext);
+			image = ImageLoaderMachO::instantiateFromFile(path, fd, (uint8_t*)mh, headerAndLoadCommandsSize, fileOffset, fileLength, stat_buf, gLinkContext);
 			timer.setData4((uint64_t)image->machHeader());
 		}
-		
+
+		if ( vmAllocatedFirstPages != 0 )
+			::vm_deallocate(mach_task_self(), (vm_address_t)vmAllocatedFirstPages, headerAndLoadCommandsSize);
+
 		// validate
 		return checkandAddImage(image, context);
 	}
@@ -3356,6 +3418,8 @@ static bool isFileRelativePath(const char* path)
 	return false;
 }
 
+static ImageLoader* loadPhase5check(const char* path, const char* orgPath, const LoadContext& context);
+
 
 // try to open file
 static ImageLoader* loadPhase5load(const char* path, const char* orgPath, const LoadContext& context, unsigned& cacheIndex, std::vector<const char*>* exceptions)
@@ -3391,13 +3455,6 @@ static ImageLoader* loadPhase5load(const char* path, const char* orgPath, const 
 #else
 
 	auto findSharedCacheImage = ^() {
-#if __MAC_OS_X_VERSION_MIN_REQUIRED
-		if ( gLinkContext.iOSonMac ) {
-			// On iOSMac, we are also running with DYLD_ROOT_PATH set, but want to look up the orgPath
-			if ( dyld3::findInSharedCacheImage(sSharedCacheLoadInfo, orgPath, &shareCacheResults) )
-				return true;
-		}
-#endif
 		return dyld3::findInSharedCacheImage(sSharedCacheLoadInfo, path, &shareCacheResults);
 	};
 
@@ -3413,7 +3470,7 @@ static ImageLoader* loadPhase5load(const char* path, const char* orgPath, const 
 		// if RTLD_NOLOAD, do nothing if not already loaded
 		if ( context.dontLoad ) {
 			// <rdar://33412890> possible that there is an override of cache
-			if ( my_stat(path, &statBuf) == 0 ) {
+			if ( dyld3::stat(path, &statBuf) == 0 ) {
 				ImageLoader* imageLoader = findLoadedImage(statBuf);
 				if ( imageLoader != NULL )
 					return imageLoader;
@@ -3423,7 +3480,7 @@ static ImageLoader* loadPhase5load(const char* path, const char* orgPath, const 
 		bool useCache = false;
 		if ( shareCacheResults.image == nullptr ) {
 			// HACK to support old caches
-			existsOnDisk = ( my_stat(path, &statBuf) == 0 );
+			existsOnDisk = ( dyld3::stat(path, &statBuf) == 0 );
 			didStat = true;
 			statErrNo = errno;
 			useCache = !existsOnDisk;
@@ -3432,44 +3489,58 @@ static ImageLoader* loadPhase5load(const char* path, const char* orgPath, const 
 			// <rdar://problem/7014995> zero out stat buffer so mtime, etc are zero for items from the shared cache
 			bzero(&statBuf, sizeof(statBuf));
 			if ( shareCacheResults.image->overridableDylib() ) {
-				existsOnDisk = ( my_stat(path, &statBuf) == 0 );
-				didStat = true;
+				existsOnDisk = ( dyld3::stat(path, &statBuf) == 0 );
 				statErrNo = errno;
 				if ( sSharedCacheLoadInfo.loadAddress->header.dylibsExpectedOnDisk ) {
+					// old style macOS with dylibs on disk
 					uint64_t expectedINode;
 					uint64_t expectedMtime;
 					if ( shareCacheResults.image->hasFileModTimeAndInode(expectedINode, expectedMtime) ) {
+						// if dylib found has same inode/mtime as one in cache, use one in cache
 						if ( (expectedMtime == statBuf.st_mtime) && (expectedINode == statBuf.st_ino) )
 							useCache = true;
 					}
 				}
 				else {
-					if ( !existsOnDisk )
+					// MRM style where dylibs are not on disk
+					if ( !existsOnDisk ) {
+						// looking at path where dylib should be, and we expect it to not be there but rather in the cache
+						// Its possible we are looking at a deleted symlink path.  For example, we are trying to open .../AppKit but
+						// there's already a loaded root of .../Versions/C/AppKit.  That used to work when the symlink was on-disk as
+						// we'd realpath to find the shared cache path.  Now we record the aliases in the cache and delete the symlinks.
+						const char* pathInSharedCache = shareCacheResults.image->path();
+						if ( strcmp(path, pathInSharedCache) != 0 ) {
+							ImageLoader* imageLoader = loadPhase5check(pathInSharedCache, orgPath, context);
+							if ( imageLoader != NULL )
+								return imageLoader;
+						}
 						useCache = true;
+					}
+					else if ( !sRootsChecker.onDiskFileIsRoot(path, sSharedCacheLoadInfo.loadAddress,
+															  shareCacheResults.image, nullptr, statBuf.st_ino, statBuf.st_mtime) ) {
+						// we found a file on disk, at the same path as the dyld cache has a dylib and it is one of the magic three
+						useCache = true;
+					}
 				}
 			}
 			else {
+				// we are trying to override a dylib in the cache that does not allow overrides, ignore override and use cache
 				useCache = true;
 			}
 		}
 		if ( useCache ) {
-#if __MAC_OS_X_VERSION_MIN_REQUIRED
-			if ( gLinkContext.iOSonMac ) {
-				const dyld3::MachOFile* mf = (dyld3::MachOFile*)shareCacheResults.mhInCache;
-				bool supportsiOSMac = mf->supportsPlatform(dyld3::Platform::iOSMac);
-				if ( !supportsiOSMac && iOSonMacDenied(path) ) {
-					throw "mach-o, but not built for UIKitForMac";
-				}
-			}
-#endif
-			ImageLoader* imageLoader = ImageLoaderMachO::instantiateFromCache((macho_header*)shareCacheResults.mhInCache, shareCacheResults.pathInCache, shareCacheResults.slideInCache, statBuf, gLinkContext);
+			const dyld3::MachOFile* cacheDylibMH = (dyld3::MachOFile*)shareCacheResults.mhInCache;
+			if ( !cacheDylibMH->loadableIntoProcess((dyld3::Platform)gProcessInfo->platform, path) )
+				throwf("mach-o, but not built for platform %s", dyld3::MachOFile::platformName((dyld3::Platform)gProcessInfo->platform));
+
+			ImageLoader* imageLoader = ImageLoaderMachO::instantiateFromCache((macho_header*)cacheDylibMH, shareCacheResults.pathInCache, shareCacheResults.slideInCache, statBuf, gLinkContext);
 			return checkandAddImage(imageLoader, context);
 		}
 	}
 
 	// not in cache or cache not usable
 	if ( !didStat ) {
-		existsOnDisk = ( my_stat(path, &statBuf) == 0 );
+		existsOnDisk = ( dyld3::stat(path, &statBuf) == 0 );
 		statErrNo = errno;
 	}
 	if ( existsOnDisk ) {
@@ -3748,8 +3819,18 @@ static ImageLoader* loadPhase2(const char* path, const char* orgPath, const Load
 				if ( image != NULL ) {
 					// if original path is in the dyld cache, then mark this one found as an override
 					dyld3::SharedCacheFindDylibResults shareCacheResults;
-					if ( dyld3::findInSharedCacheImage(sSharedCacheLoadInfo, path, &shareCacheResults) && (shareCacheResults.image != nullptr) )
+					if ( dyld3::findInSharedCacheImage(sSharedCacheLoadInfo, path, &shareCacheResults) && (shareCacheResults.image != nullptr) ) {
 						image->setOverridesCachedDylib(shareCacheResults.image->imageNum());
+					}
+#if SUPPORT_ROOT_PATH
+					else if ( (gLinkContext.rootPaths != nullptr)
+							   && dyld3::findInSharedCacheImage(sSharedCacheLoadInfo, orgPath, &shareCacheResults)
+							   && (shareCacheResults.image != nullptr) ) {
+						// DYLD_ROOT_PATH, ie, iOSMac, also needs to check if the original path is overridden
+						// as the root prefix has been applied to 'path', but the framework path searches without a root path prefix
+						image->setOverridesCachedDylib(shareCacheResults.image->imageNum());
+					}
+#endif
 					return image;
 				}
 			}
@@ -3772,11 +3853,21 @@ static ImageLoader* loadPhase2(const char* path, const char* orgPath, const Load
 				image = loadPhase2cache(libpath, orgPath, context, cacheIndex, exceptions);
 			if ( image != NULL ) {
 				// if original path is in the dyld cache, then mark this one found as an override
-				dyld3::SharedCacheFindDylibResults shareCacheResults;
-				if ( dyld3::findInSharedCacheImage(sSharedCacheLoadInfo, path, &shareCacheResults) && (shareCacheResults.image != nullptr) )
-					image->setOverridesCachedDylib(shareCacheResults.image->imageNum());
-				return image;
-			}
+			    dyld3::SharedCacheFindDylibResults shareCacheResults;
+			    if ( dyld3::findInSharedCacheImage(sSharedCacheLoadInfo, path, &shareCacheResults) && (shareCacheResults.image != nullptr) ) {
+				    image->setOverridesCachedDylib(shareCacheResults.image->imageNum());
+			    }
+#if SUPPORT_ROOT_PATH
+				else if ( (gLinkContext.rootPaths != nullptr)
+						   && dyld3::findInSharedCacheImage(sSharedCacheLoadInfo, orgPath, &shareCacheResults)
+						   && (shareCacheResults.image != nullptr) ) {
+				    // DYLD_ROOT_PATH, ie, iOSMac, also needs to check if the original path is overridden
+				    // as the root prefix has been applied to 'path', but the library path searches without a root path prefix
+				    image->setOverridesCachedDylib(shareCacheResults.image->imageNum());
+			    }
+#endif
+			    return image;
+		   }
 		}
 	}
 	return NULL;
@@ -3851,7 +3942,7 @@ static ImageLoader* loadPhase0(const char* path, const char* orgPath, const Load
 {
 	//dyld::log("%s(%s, %p)\n", __func__ , path, exceptions);
 
-#if __MAC_OS_X_VERSION_MIN_REQUIRED
+#if TARGET_OS_OSX
 	// handle macOS dylibs dlopen()ing versioned path which needs to map to flat path in mazipan simulator
 	if ( gLinkContext.iOSonMac && strstr(path, ".framework/Versions/")) {
 		uintptr_t sourceOffset = 0;
@@ -3949,6 +4040,11 @@ ImageLoader* load(const char* path, const LoadContext& context, unsigned& cacheI
 		if ( !gSharedCacheOverridden && !image->inSharedCache() && image->isDylib() && dyld3::MachOFile::isSharedCacheEligiblePath(path) && inSharedCache(path) ) {
 			gSharedCacheOverridden = true;
 		}
+		// <rdar://problem/59327556> if file loaded via symlink to a root of something in dyld cache, mark it as an override
+		dyld3::SharedCacheFindDylibResults shareCacheResults;
+		if ( !image->inSharedCache() && dyld3::findInSharedCacheImage(sSharedCacheLoadInfo, image->getRealPath(), &shareCacheResults) && (shareCacheResults.image != nullptr) )
+			image->setOverridesCachedDylib(shareCacheResults.image->imageNum());
+		
 		return image;
 	}
 	else if ( exceptions.size() == 0 ) {
@@ -3979,19 +4075,20 @@ ImageLoader* load(const char* path, const LoadContext& context, unsigned& cacheI
 
 
 
-static void mapSharedCache()
+static void mapSharedCache(uintptr_t mainExecutableSlide)
 {
 	dyld3::SharedCacheOptions opts;
 	opts.cacheDirOverride	= sSharedCacheOverrideDir;
 	opts.forcePrivate		= (gLinkContext.sharedRegionMode == ImageLoader::kUsePrivateSharedRegion);
-
-
 #if __x86_64__ && !TARGET_OS_SIMULATOR
 	opts.useHaswell			= sHaswell;
 #else
 	opts.useHaswell			= false;
 #endif
 	opts.verbose			= gLinkContext.verboseMapping;
+    // <rdar://problem/32031197> respect -disable_aslr boot-arg
+    // <rdar://problem/56299169> kern.bootargs is now blocked
+	opts.disableASLR		= (mainExecutableSlide == 0) && dyld3::internalInstall(); // infer ASLR is off if main executable is not slid
 	loadDyldCache(opts, &sSharedCacheLoadInfo);
 
 	// update global state
@@ -4004,7 +4101,7 @@ static void mapSharedCache()
 		dyld3::kdebug_trace_dyld_image(DBG_DYLD_UUID_SHARED_CACHE_A, sSharedCacheLoadInfo.path, (const uuid_t *)&dyld::gProcessInfo->sharedCacheUUID[0], {0,0}, {{ 0, 0 }}, (const mach_header *)sSharedCacheLoadInfo.loadAddress);
 	}
 
-//#if __IPHONE_OS_VERSION_MIN_REQUIRED && !TARGET_OS_SIMULATOR
+//#if TARGET_OS_IPHONE && !TARGET_OS_SIMULATOR
 // RAM disk booting does not have shared cache yet
 // Don't make lack of a shared cache fatal in that case
 //	if ( sSharedCacheLoadInfo.loadAddress == nullptr ) {
@@ -4187,6 +4284,24 @@ void halt(const char* message)
 		strlcpy(error_string, "dyld cache load error: ", sizeof(error_string));
 		strlcat(error_string, sSharedCacheLoadInfo.errorMessage, sizeof(error_string));
 		strlcat(error_string, "\n", sizeof(error_string));
+		strlcat(error_string, message, sizeof(error_string));
+	} else if ( dyld::gProcessInfo->errorKind == DYLD_EXIT_REASON_DYLIB_MISSING ) {
+		// If a dylib is missing, but we have the cache, print the cache UUID to make it easier
+		// to see what might have gone wrong
+		if ( sSharedCacheLoadInfo.loadAddress == nullptr ) {
+			strlcpy(error_string, "dyld: No shared cache present\n", sizeof(error_string));
+		} else {
+			uuid_t cacheUUID;
+			sSharedCacheLoadInfo.loadAddress->getUUID(cacheUUID);
+			uuid_string_t uuidStr;
+			uuid_unparse_upper(cacheUUID, uuidStr);
+
+			strlcpy(error_string, "dyld: Using shared cache: ", sizeof(error_string));
+			strlcat(error_string, uuidStr, sizeof(error_string));
+			strlcat(error_string, "\n", sizeof(error_string));
+		}
+
+		dyld::log("dyld: %s\n", message);
 		strlcat(error_string, message, sizeof(error_string));
 	}
 	else {
@@ -4731,7 +4846,7 @@ static void setContext(const macho_header* mainExecutableMH, int argc, const cha
 // Its presences means that the binary wants to have DYLD ignore
 // DYLD_ environment variables.
 //
-#if __MAC_OS_X_VERSION_MIN_REQUIRED
+#if TARGET_OS_OSX
 static bool hasRestrictedSegment(const macho_header* mh)
 {
 	const uint32_t cmd_count = mh->ncmds;
@@ -4762,7 +4877,7 @@ static bool hasRestrictedSegment(const macho_header* mh)
 }
 #endif
 
-#if __IPHONE_OS_VERSION_MIN_REQUIRED && !TARGET_OS_SIMULATOR
+#if TARGET_OS_IPHONE && !TARGET_OS_SIMULATOR
 static bool isFairPlayEncrypted(const macho_header* mh)
 {
 	const uint32_t cmd_count = mh->ncmds;
@@ -5091,18 +5206,21 @@ static void configureProcessRestrictions(const macho_header* mainExecutableMH, c
 	uint64_t amfiInputFlags = 0;
 #if TARGET_OS_SIMULATOR
 	amfiInputFlags |= AMFI_DYLD_INPUT_PROC_IN_SIMULATOR;
-#elif __MAC_OS_X_VERSION_MIN_REQUIRED
+#elif TARGET_OS_OSX
 	if ( hasRestrictedSegment(mainExecutableMH) )
 		amfiInputFlags |= AMFI_DYLD_INPUT_PROC_HAS_RESTRICT_SEG;
-#elif __IPHONE_OS_VERSION_MIN_REQUIRED
+#elif TARGET_OS_IPHONE
 	if ( isFairPlayEncrypted(mainExecutableMH) )
 		amfiInputFlags |= AMFI_DYLD_INPUT_PROC_IS_ENCRYPTED;
 #endif
 	uint64_t amfiOutputFlags = 0;
 	const char* amfiFake = nullptr;
-	if ( dyld3::internalInstall() && dyld3::BootArgs::enableDyldTestMode() ) {
+	if constexpr(BUILD_FOR_TESTING == 1) {
+		amfiFake = _simple_getenv(envp, "DYLD_AMFI_FAKE");
+	} else if ( dyld3::internalInstall() && dyld3::BootArgs::enableDyldTestMode() ) {
 		amfiFake = _simple_getenv(envp, "DYLD_AMFI_FAKE");
 	}
+
 	if ( amfiFake != nullptr ) {
 		amfiOutputFlags = hexToUInt64(amfiFake, nullptr);
 	}
@@ -5120,7 +5238,7 @@ static void configureProcessRestrictions(const macho_header* mainExecutableMH, c
 #endif
 	}
 	else {
-#if __MAC_OS_X_VERSION_MIN_REQUIRED
+#if TARGET_OS_OSX
 		// support chrooting from old kernel
 		bool isRestricted = false;
 		bool libraryValidation = false;
@@ -5157,15 +5275,15 @@ static void configureProcessRestrictions(const macho_header* mainExecutableMH, c
 // called by _dyld_register_driverkit_main()
 void setMainEntry(void (*main)())
 {
-	if ( sEntryOveride == nullptr )
-		sEntryOveride = main;
+	if ( sEntryOverride == nullptr )
+		sEntryOverride = main;
 	else
 		halt("_dyld_register_driverkit_main() may only be called once");
 }
 
 bool processIsRestricted()
 {
-#if __MAC_OS_X_VERSION_MIN_REQUIRED
+#if TARGET_OS_OSX
 	return !gLinkContext.allowEnvVarsPath;
 #else
 	return false;
@@ -5204,7 +5322,7 @@ void notifyKernelAboutImage(const struct macho_header* mh, const char* fileInfo)
 	fsobj_id_t fsobj_id = {0};
 	if (endptr != nullptr) {
 		fsobj_id_scalar = hexToUInt64(endptr+1, &endptr);
-		fsobj_id = *reinterpret_cast<fsobj_id_t *>(&tmp);
+		fsobj_id = *reinterpret_cast<fsobj_id_t *>(&fsobj_id_scalar);
 	}
 	const uint32_t cmd_count = mh->ncmds;
 	const struct load_command* const cmds = (struct load_command*)((char*)mh + sizeof(macho_header));
@@ -5226,10 +5344,10 @@ void notifyKernelAboutImage(const struct macho_header* mh, const char* fileInfo)
 	}
 }
 
-#if __MAC_OS_X_VERSION_MIN_REQUIRED
+#if TARGET_OS_OSX
 static void* getProcessInfo() { return dyld::gProcessInfo; }
 static const SyscallHelpers sSysCalls = {
-		12,
+		13,
 		// added in version 1
 		&open,
 		&close, 
@@ -5299,7 +5417,10 @@ static const SyscallHelpers sSysCalls = {
 		// Add in version 12
 		&mach_msg_destroy,
 		&mach_port_construct,
-		&mach_port_destruct
+		&mach_port_destruct,
+		// Add in version 13
+		&fstat,
+		&vm_copy
 };
 
 __attribute__((noinline))
@@ -5342,7 +5463,7 @@ static const char* useSimulatorDyld(int fd, const macho_header* mainExecutableMH
 		if ( pread(fd, firstPage, 4096, fileOffset) != 4096 )
 			return "pread(dyld_sim) failed";
 	}
-	else if ( !isCompatibleMachO(firstPage, dyldPath) ) {
+	else if ( !isCompatibleMachO(firstPage, dyldPath, fd, fileOffset, fileLength) ) {
 		return "dyld_sim is not compatible with the loaded process, likely due to architecture mismatch";
 	}
 	
@@ -5474,34 +5595,22 @@ static const char* useSimulatorDyld(int fd, const macho_header* mainExecutableMH
 	}
 	close(fd);
 
-	// walk newly mapped dyld_sim __TEXT load commands to find entry point
+	// Walk newly mapped dyld_sim load commands to find entry point
 	uintptr_t entry = 0;
-	cmd = (struct load_command*)(((char*)loadAddress)+sizeof(macho_header));
-	const uint32_t count = ((macho_header*)(loadAddress))->ncmds;
-	for (uint32_t i = 0; i < count; ++i) {
-		if (cmd->cmd == LC_UNIXTHREAD) {
-		#if __i386__
-			const i386_thread_state_t* registers = (i386_thread_state_t*)(((char*)cmd) + 16);
-			// entry point must be in first segment
-			if ( registers->__eip < firstSeg->vmaddr )
-				return "dyld_sim entry point not in __TEXT segment";
-			if ( registers->__eip > (firstSeg->vmaddr + firstSeg->vmsize) )
-				return "dyld_sim entry point not in __TEXT segment";
-			entry = (registers->__eip + loadAddress - preferredLoadAddress);
-		#elif __x86_64__
-			const x86_thread_state64_t* registers = (x86_thread_state64_t*)(((char*)cmd) + 16);
-			// entry point must be in first segment
-			if ( registers->__rip < firstSeg->vmaddr )
-				return "dyld_sim entry point not in __TEXT segment";
-			if ( registers->__rip > (firstSeg->vmaddr + firstSeg->vmsize) )
-				return "dyld_sim entry point not in __TEXT segment";
-			entry = (registers->__rip + loadAddress - preferredLoadAddress);
-		#endif
-		}
-		cmd = (const struct load_command*)(((char*)cmd)+cmd->cmdsize);
-	}
-	if ( entry == 0 )
+	bool unusedUsesCRT = false;
+	uint64_t entryOffset = 0;
+	if ( !((dyld3::MachOAnalyzer*)loadAddress)->getEntry(entryOffset, unusedUsesCRT) ) {
 		return "dyld_sim entry not found";
+	}
+
+	// Translate the load address by the entry offset in order to get the runtime address.
+	entry = (uintptr_t)loadAddress;
+	entry += entryOffset;
+
+#if __arm64e__
+	// It's necessary to sign the entry pointer.
+	entry = (uint64_t)__builtin_ptrauth_sign_unauthenticated((void*)entry, ptrauth_key_asia, 0);
+#endif
 
 	// notify debugger that dyld_sim is loaded
 	dyld_image_info info;
@@ -5517,7 +5626,7 @@ static const char* useSimulatorDyld(int fd, const macho_header* mainExecutableMH
 	fsobj.fid_objno = (uint32_t)inode;
 	fsobj.fid_generation = (uint32_t)(inode>>32);
 	fsid.val[0] = sb.st_dev;
-	dyld3::kdebug_trace_dyld_image(DBG_DYLD_UUID_MAP_A, dyldPath, (const uuid_t *)&uuidCmd->uuid[0], fsobj, fsid, (const mach_header *)mh);
+	dyld3::kdebug_trace_dyld_image(DBG_DYLD_UUID_MAP_A, dyldPath, (const uuid_t *)&uuidCmd->uuid[0], fsobj, fsid, (const mach_header *)loadAddress);
 
 	const char** appleParams = apple;
 
@@ -5654,33 +5763,6 @@ static bool closureValid(const dyld3::closure::LaunchClosure* mainClosure, const
 				return false;
 			}
 		}
-#if __IPHONE_OS_VERSION_MIN_REQUIRED
-		// verify this closure is not from a previous reboot
-		const char* expectedBootUUID = mainClosure->bootUUID();
-		char actualBootSessionUUID[256] = { 0 };
-		size_t bootSize = sizeof(actualBootSessionUUID);
-		bool gotActualBootUUID = (sysctlbyname("kern.bootsessionuuid", actualBootSessionUUID, &bootSize, NULL, 0) == 0);
-		if ( gotActualBootUUID ) {
-			// If we got a boot UUID then we should have also recorded it in the closure
-			if ( expectedBootUUID == nullptr) {
-				// The closure didn't have a UUID but now we do.  This isn't valid.
-				if ( gLinkContext.verboseWarnings )
-					dyld::log("dyld: closure %p missing boot-UUID\n", mainClosure);
-				return false;
-			} else if ( strcmp(expectedBootUUID, actualBootSessionUUID) != 0 ) {
-				if ( gLinkContext.verboseWarnings )
-					dyld::log("dyld: closure %p built in different boot context\n", mainClosure);
-				return false;
-			}
-		} else {
-			// We didn't get a UUID now, which is ok so long as the closure also doesn't have one.
-			if ( expectedBootUUID != nullptr) {
-				if ( gLinkContext.verboseWarnings )
-					dyld::log("dyld: closure %p has boot-UUID\n", mainClosure);
-				return false;
-			}
-		}
-#endif
 	}
 
 	// verify all mach-o files have not changed since closure was built
@@ -5690,7 +5772,7 @@ static bool closureValid(const dyld3::closure::LaunchClosure* mainClosure, const
 		__block uint64_t expectedMtime;
 		if ( image->hasFileModTimeAndInode(expectedInode, expectedMtime) ) {
 			struct stat statBuf;
-			if ( ::stat(image->path(), &statBuf) == 0 ) {
+			if ( dyld3::stat(image->path(), &statBuf) == 0 ) {
 				if ( (statBuf.st_mtime != expectedMtime) || (statBuf.st_ino != expectedInode) ) {
 					if ( gLinkContext.verboseWarnings )
 						dyld::log("dyld: closure %p not used because mtime/inode for '%s' has changed since closure was built\n", mainClosure, image->path());
@@ -5710,7 +5792,7 @@ static bool closureValid(const dyld3::closure::LaunchClosure* mainClosure, const
 		return false;
 
 	// verify cdHash of main executable is same as recorded in closure
-	const dyld3::closure::Image* mainImage = mainClosure->images()->imageForNum(mainClosure->topImage());
+	const dyld3::closure::Image* mainImage = mainClosure->topImage();
 
 	__block bool foundCDHash = false;
 	__block bool foundValidCDHash = false;
@@ -5794,7 +5876,7 @@ static bool closureValid(const dyld3::closure::LaunchClosure* mainClosure, const
 	// verify files that are supposed to be missing actually are missing
 	mainClosure->forEachMustBeMissingFile(^(const char* path, bool& stop) {
 		struct stat statBuf;
-		if ( ::stat(path, &statBuf) == 0 ) {
+		if ( dyld3::stat(path, &statBuf) == 0 ) {
 			stop = true;
 			foundFileThatInvalidatesClosure = true;
 			if ( gLinkContext.verboseWarnings )
@@ -5805,7 +5887,7 @@ static bool closureValid(const dyld3::closure::LaunchClosure* mainClosure, const
 	// verify files that are supposed to exist are there with the
 	mainClosure->forEachSkipIfExistsFile(^(const dyld3::closure::LaunchClosure::SkippedFile &file, bool &stop) {
 		struct stat statBuf;
-		if ( ::stat(file.path, &statBuf) == 0 ) {
+		if ( dyld3::stat(file.path, &statBuf) == 0 ) {
 			if ( (statBuf.st_mtime != file.mtime) || (statBuf.st_ino != file.inode) ) {
 				if ( gLinkContext.verboseWarnings )
 					dyld::log("dyld: closure %p not used because mtime/inode for '%s' has changed since closure was built\n", mainClosure, file.path);
@@ -5851,9 +5933,12 @@ static bool dolog(const char* format, ...)
 static bool launchWithClosure(const dyld3::closure::LaunchClosure* mainClosure,
 							  const DyldSharedCache* dyldCache,
 							  const dyld3::MachOLoaded* mainExecutableMH, uintptr_t mainExecutableSlide,
-							  int argc, const char* argv[], const char* envp[], const char* apple[],
-							  uintptr_t* entry, uintptr_t* startGlue)
+							  int argc, const char* argv[], const char* envp[], const char* apple[], Diagnostics& diag,
+							  uintptr_t* entry, uintptr_t* startGlue, bool* closureOutOfDate, bool* recoverable)
 {
+	*closureOutOfDate = false;
+	*recoverable      = true;
+
 	// build list of all known ImageArrays (at most three: cached dylibs, other OS dylibs, and main prog)
 	STACK_ALLOC_ARRAY(const dyld3::closure::ImageArray*, imagesArrays, 3);
 	const dyld3::closure::ImageArray* mainClosureImages = mainClosure->images();
@@ -5866,19 +5951,23 @@ static bool launchWithClosure(const dyld3::closure::LaunchClosure* mainClosure,
 
 	// allocate space for Array<LoadedImage>
 	STACK_ALLOC_ARRAY(dyld3::LoadedImage, allImages, mainClosure->initialLoadCount());
+	STACK_ALLOC_ARRAY(dyld3::LoadedImage, noImages, 1);
 
 	// Get the pre-optimized Objective-C so that we can bind the selectors
 	const dyld3::closure::ObjCSelectorOpt* 					selectorOpt = nullptr;
 	dyld3::Array<dyld3::closure::Image::ObjCSelectorImage> 	selectorImages;
 	mainClosure->selectorHashTable(selectorImages, selectorOpt);
 
-	__block dyld3::Loader loader({}, allImages, dyldCache, imagesArrays,
-								 selectorOpt, selectorImages,
+	__block dyld3::Loader loader(noImages, allImages, dyldCache, imagesArrays,
+								 selectorOpt, selectorImages, sRootsChecker,
+								 (dyld3::Platform)gProcessInfo->platform,
 								 (gLinkContext.verboseLoading ? &dolog : &nolog),
 								 (gLinkContext.verboseMapping ? &dolog : &nolog),
 								 (gLinkContext.verboseBind    ? &dolog : &nolog),
-								 (gLinkContext.verboseDOF     ? &dolog : &nolog));
-	dyld3::closure::ImageNum mainImageNum = mainClosure->topImage();
+								 (gLinkContext.verboseDOF     ? &dolog : &nolog),
+								 (sClosureKind == ClosureKind::minimal),
+								 (dyld3::LaunchErrorInfo*)&gProcessInfo->errorKind);
+	dyld3::closure::ImageNum mainImageNum = mainClosure->topImageNum();
 	mainClosureImages->forEachImage(^(const dyld3::closure::Image* image, bool& stop) {
 		if ( image->imageNum() == mainImageNum ) {
 			// add main executable (which is already mapped by kernel) to list
@@ -5896,13 +5985,32 @@ static bool launchWithClosure(const dyld3::closure::LaunchClosure* mainClosure,
 
 	// recursively load all dependents and fill in allImages array
 	bool someCacheImageOverridden = false;
-	Diagnostics diag;
 	loader.completeAllDependents(diag, someCacheImageOverridden);
 	if ( diag.noError() )
-		loader.mapAndFixupAllImages(diag, dyld3::Loader::dtraceUserProbesEnabled());
+		loader.mapAndFixupAllImages(diag, dyld3::Loader::dtraceUserProbesEnabled(), false, closureOutOfDate, recoverable);
 	if ( diag.hasError() ) {
 		if ( gLinkContext.verboseWarnings )
 			dyld::log("dyld: %s\n", diag.errorMessage());
+		if ( !*recoverable ) {
+			// we won't make it to libDyldEntry, so the image list will never be set up
+			// hack together an image list here so crash reports show the binaries involved
+			__block unsigned loadImageCount = 0;
+			loader.forEachImage(^(const dyld3::LoadedImage& li, bool& stop) {
+				++loadImageCount;
+			});
+			dyld_image_info* tempArray = new dyld_image_info[loadImageCount];
+			__block unsigned i = 0;
+			loader.forEachImage(^(const dyld3::LoadedImage& li, bool& stop) {
+				tempArray[i].imageFilePath    = li.image()->path();
+				tempArray[i].imageLoadAddress = li.loadedAddress();
+				tempArray[i].imageFileModDate = 0;
+				++i;
+			});
+			dyld::gProcessInfo->infoArray        = tempArray;
+			dyld::gProcessInfo->infoArrayCount   = loadImageCount;
+			dyld::gProcessInfo->initialImageCount= loadImageCount;
+			dyld::gProcessInfo->infoArrayChangeTimestamp = mach_absolute_time();
+		}
 		return false;
 	}
 
@@ -5917,8 +6025,8 @@ static bool launchWithClosure(const dyld3::closure::LaunchClosure* mainClosure,
 	const dyld3::LibDyldEntryVector* libDyldEntry = (dyld3::LibDyldEntryVector*)loader.resolveTarget(dyldEntry);
 
 	// send info on all images to libdyld.dylb
-	libDyldEntry->setVars(mainExecutableMH, argc, argv, envp, apple);
-#if __MAC_OS_X_VERSION_MIN_REQUIRED
+	libDyldEntry->setVars(mainExecutableMH, argc, argv, envp, apple, sKeysDisabled, sOnlyPlatformArm64e);
+#if TARGET_OS_OSX
 	uint32_t progVarsOffset;
 	if ( mainClosure->hasProgramVars(progVarsOffset) ) {
 		if ( libDyldEntry->vectorVersion >= 8 ) {
@@ -5950,6 +6058,10 @@ static bool launchWithClosure(const dyld3::closure::LaunchClosure* mainClosure,
 	if ( libDyldEntry->vectorVersion > 3 )
 		libDyldEntry->setLogFunction(&dyld::vlog);
 #endif
+	if ( libDyldEntry->vectorVersion >= 9 )
+		libDyldEntry->setLaunchMode(sLaunchModeUsed);
+
+
 	libDyldEntry->setOldAllImageInfo(gProcessInfo);
 	dyld3::LoadedImage* libSys = loader.findImage(mainClosure->libSystemImageNum());
 	libDyldEntry->setInitialImageList(mainClosure, dyldCache, sSharedCacheLoadInfo.path, allImages, *libSys);
@@ -5961,11 +6073,14 @@ static bool launchWithClosure(const dyld3::closure::LaunchClosure* mainClosure,
 	if (dyld3::kdebug_trace_dyld_enabled(DBG_DYLD_TIMING_LAUNCH_EXECUTABLE)) {
 		dyld3::kdebug_trace_dyld_duration_end(launchTraceID, DBG_DYLD_TIMING_LAUNCH_EXECUTABLE, 0, 0, 3);
 	}
-#if __MAC_OS_X_VERSION_MIN_REQUIRED
+#if TARGET_OS_OSX
 	if ( gLinkContext.driverKit ) {
-		*entry = (uintptr_t)sEntryOveride;
+		if (libDyldEntry->vectorVersion >= 10)
+			*entry = (uintptr_t)libDyldEntry->getDriverkitMain();
 		if ( *entry == 0 )
 			halt("no entry point registered");
+		if ( sClosureKind != ClosureKind::minimal )
+			halt("driverkit process should run with minimal closures");
 		*startGlue = (uintptr_t)(libDyldEntry->startFunc);
 	}
 	else
@@ -5978,6 +6093,10 @@ static bool launchWithClosure(const dyld3::closure::LaunchClosure* mainClosure,
 			// set entry to "main" function in program
 			*startGlue = (uintptr_t)(libDyldEntry->startFunc);
 			*entry     = loader.resolveTarget(progEntry);
+#if __has_feature(ptrauth_calls)
+			// start() calls the result pointer as a function pointer so we need to sign it.
+			*entry = (uintptr_t)__builtin_ptrauth_sign_unauthenticated((void*)*entry, 0, 0);
+#endif
 		}
 		else if ( mainClosure->startEntry(progEntry) ) {
 			// old style app linked with crt1.o
@@ -5994,29 +6113,17 @@ static bool launchWithClosure(const dyld3::closure::LaunchClosure* mainClosure,
 }
 
 
-static const char* getTempDir(const char* envp[])
-{
-	if (const char* tempDir = _simple_getenv(envp, "TMPDIR"))
-		return tempDir;
-
-#if __MAC_OS_X_VERSION_MIN_REQUIRED
-	return "/private/tmp/";
-#else
-	return "/private/var/tmp/";
-#endif
-}
-
 static const dyld3::closure::LaunchClosure* mapClosureFile(const char* closurePath)
 {
 	struct stat statbuf;
-	if ( ::stat(closurePath, &statbuf) == -1 )
+	if ( dyld3::stat(closurePath, &statbuf) == -1 )
 		return nullptr;
 
 	// check for tombstone file
 	if ( statbuf.st_size == 0 )
 		return nullptr;
 
-	int fd = ::open(closurePath, O_RDONLY);
+	int fd = dyld3::open(closurePath, O_RDONLY, 0);
 	if ( fd < 0 )
 		return nullptr;
 
@@ -6036,10 +6143,11 @@ static bool needsDyld2ErrorMessage(const char* msg)
 	return false;
 }
 
-
 // Note: buildLaunchClosure calls halt() if there is an error building the closure
 static const dyld3::closure::LaunchClosure* buildLaunchClosure(const uint8_t* mainExecutableCDHash,
-															   const dyld3::closure::LoadedFileInfo& mainFileInfo, const char* envp[])
+															   const dyld3::closure::LoadedFileInfo& mainFileInfo,
+															   const char* envp[],
+															   const dyld3::Array<uint8_t>& bootToken)
 {
 	const dyld3::MachOLoaded* mainExecutableMH = (const dyld3::MachOLoaded*)mainFileInfo.fileContent;
 	dyld3::closure::PathOverrides pathOverrides;
@@ -6053,24 +6161,30 @@ static const dyld3::closure::LaunchClosure* buildLaunchClosure(const uint8_t* ma
 	}
 
 	char closurePath[PATH_MAX];
-	dyld3::closure::ClosureBuilder::LaunchErrorInfo* errorInfo = (dyld3::closure::ClosureBuilder::LaunchErrorInfo*)&gProcessInfo->errorKind;
+	bool canSaveClosureToDisk = !bootToken.empty() && dyld3::closure::LaunchClosure::buildClosureCachePath(mainFileInfo.path, envp, true, closurePath);
+	dyld3::LaunchErrorInfo* errorInfo = (dyld3::LaunchErrorInfo*)&gProcessInfo->errorKind;
+	const dyld3::GradedArchs& archs = dyld3::GradedArchs::forCurrentOS(sKeysDisabled, sOnlyPlatformArm64e);
 	dyld3::closure::FileSystemPhysical fileSystem;
-	const dyld3::GradedArchs& archs = dyld3::GradedArchs::forCurrentOS(mainExecutableMH);
 	dyld3::closure::ClosureBuilder::AtPath atPathHanding = (gLinkContext.allowAtPaths ? dyld3::closure::ClosureBuilder::AtPath::all : dyld3::closure::ClosureBuilder::AtPath::none);
-	dyld3::closure::ClosureBuilder builder(dyld3::closure::kFirstLaunchClosureImageNum, fileSystem, sSharedCacheLoadInfo.loadAddress, true,
-										   archs, pathOverrides, atPathHanding, gLinkContext.allowEnvVarsPath, errorInfo);
+	dyld3::closure::ClosureBuilder builder(dyld3::closure::kFirstLaunchClosureImageNum, fileSystem, sRootsChecker, sSharedCacheLoadInfo.loadAddress, true,
+										   archs, pathOverrides, atPathHanding, gLinkContext.allowEnvVarsPath, errorInfo, (dyld3::Platform)gProcessInfo->platform);
 	if (sForceInvalidSharedCacheClosureFormat)
 		builder.setDyldCacheInvalidFormatVersion();
+	if (sClosureKind == ClosureKind::minimal)
+		builder.makeMinimalClosures();
+	else if ( canSaveClosureToDisk )
+		builder.setCanSkipEncodingRebases(); // <rdar://problem/56172089> large iOS apps with massive number of rebases can overflow 16MB closure file limit
 	if ( !gLinkContext.allowInterposing )
 		builder.disableInterposing();
+
 	const dyld3::closure::LaunchClosure* result = builder.makeLaunchClosure(mainFileInfo, gLinkContext.allowInsertFailures);
 	if ( builder.diagnostics().hasError() ) {
 		const char* errMsg = builder.diagnostics().errorMessage();
 		// let apps with this error fallback to dyld2 mode
 		if ( needsDyld2ErrorMessage(errMsg) ) {
-			if ( dyld3::closure::LaunchClosure::buildClosureCachePath(mainFileInfo.path, closurePath, getTempDir(envp), true) ) {
+			if ( canSaveClosureToDisk ) {
 				// create empty file as a tombstone to not keep trying
-				int fd = ::open(closurePath, O_WRONLY|O_CREAT, S_IRUSR|S_IWUSR);
+				int fd = dyld3::open(closurePath, O_WRONLY|O_CREAT, S_IRUSR|S_IWUSR);
 				if ( fd != -1 ) {
 					::fchmod(fd, S_IRUSR);
 					::close(fd);
@@ -6097,8 +6211,24 @@ static const dyld3::closure::LaunchClosure* buildLaunchClosure(const uint8_t* ma
 			dyld::log("dyld: somehow just built closure is invalid\n");
 		return nullptr;
 	}
-	// try to atomically save closure to disk to speed up next launch
-	if ( dyld3::closure::LaunchClosure::buildClosureCachePath(mainFileInfo.path, closurePath, getTempDir(envp), true) ) {
+
+	// write closure file but only if we have boot-token
+	if ( canSaveClosureToDisk ) {
+		if ( const dyld3::closure::LaunchClosure* existingClosure = mapClosureFile(closurePath) ) {
+			if ( (existingClosure->size() == result->size()) && (memcmp(existingClosure, result, result->size()) == 0) ) {
+				// closure file already exists and has same content, so re-use file by altering boot-token
+				::chmod(closurePath, S_IRUSR|S_IWUSR); // file has to be writable to alter attributes
+				// handle both attribute size change and missing attribute
+				if ( ::setxattr(closurePath, DYLD_CLOSURE_XATTR_NAME, bootToken.begin(), bootToken.count(), 0, XATTR_REPLACE) != 0 )
+					::setxattr(closurePath, DYLD_CLOSURE_XATTR_NAME, bootToken.begin(), bootToken.count(), 0, 0);
+				::chmod(closurePath, S_IRUSR);
+				result->deallocate();
+				if ( gLinkContext.verboseWarnings )
+					dyld::log("dyld: reusing previous boot %s closure %p (size=%lu) for %s\n", existingClosure->topImage()->variantString(), existingClosure, existingClosure->size(), sExecPath);
+				return existingClosure;
+			}
+		}
+		// make new file
 		char closurePathTemp[PATH_MAX];
 		strlcpy(closurePathTemp, closurePath, PATH_MAX);
 		int mypid = getpid();
@@ -6111,20 +6241,22 @@ static const dyld3::closure::LaunchClosure* buildLaunchClosure(const uint8_t* ma
 		putHexByte(mypid, s);
 		*s = '\0';
 		strlcat(closurePathTemp, pidBuf, PATH_MAX);
-#if __MAC_OS_X_VERSION_MIN_REQUIRED
-		int fd = ::open(closurePathTemp, O_WRONLY|O_CREAT, S_IRUSR|S_IWUSR);
+#if TARGET_OS_OSX
+		int fd = dyld3::open(closurePathTemp, O_WRONLY|O_CREAT, S_IRUSR|S_IWUSR);
 #else
 		int fd = ::open_dprotected_np(closurePathTemp, O_WRONLY|O_CREAT, PROTECTION_CLASS_D, 0, S_IRUSR|S_IWUSR);
 #endif
 		if ( fd != -1 ) {
 			::ftruncate(fd, result->size());
 			::write(fd, result, result->size());
+			::fsetxattr(fd, DYLD_CLOSURE_XATTR_NAME, bootToken.begin(), bootToken.count(), 0, 0);
 			::fchmod(fd, S_IRUSR);
 			::close(fd);
 			::rename(closurePathTemp, closurePath);
 			// free built closure and mmap file() to reduce dirty memory
 			result->deallocate();
 			result = mapClosureFile(closurePath);
+			sLaunchModeUsed |= DYLD_LAUNCH_MODE_CLOSURE_SAVED_TO_FILE;
 		}
 		else if ( gLinkContext.verboseWarnings ) {
 			dyld::log("could not save closure (errno=%d) to: %s\n", errno, closurePathTemp);
@@ -6132,19 +6264,35 @@ static const dyld3::closure::LaunchClosure* buildLaunchClosure(const uint8_t* ma
 	}
 
 	if ( gLinkContext.verboseWarnings )
-		dyld::log("dyld: just built closure %p (size=%lu) for %s\n", result, result->size(), sExecPath);
+		dyld::log("dyld: just built %s closure %p (size=%lu) for %s\n", result->topImage()->variantString(), result, result->size(), sExecPath);
 
 	return result;
 }
 
 static const dyld3::closure::LaunchClosure* findCachedLaunchClosure(const uint8_t* mainExecutableCDHash,
 																    const dyld3::closure::LoadedFileInfo& mainFileInfo,
-																	const char* envp[])
+																	const char* envp[],
+																	const dyld3::Array<uint8_t>& bootToken)
 {
+	// get path to where closure file will be store for this program
 	char closurePath[PATH_MAX];
-	// build base path of $TMPDIR/dyld/<prog-name>-
-	if ( !dyld3::closure::LaunchClosure::buildClosureCachePath(mainFileInfo.path, closurePath, getTempDir(envp), false) )
+	if ( !dyld3::closure::LaunchClosure::buildClosureCachePath(mainFileInfo.path, envp, false, closurePath) ) {
+		// if cannot construct path to use/store closure file, then use minimal closures
+		if ( sClosureKind == ClosureKind::unset )
+			sClosureKind = ClosureKind::minimal;
 		return nullptr;
+	}
+
+	// if file exists, but extended attribute is wrong, ignore file (might be re-used later)
+	if ( bootToken.empty() )
+		return nullptr;
+	uint8_t filesBootToken[bootToken.count()];
+	ssize_t attrSize = ::getxattr(closurePath, DYLD_CLOSURE_XATTR_NAME, filesBootToken, bootToken.count(), 0, 0);
+	if ( attrSize != bootToken.count() )
+		return nullptr;
+	if ( memcmp(bootToken.begin(), filesBootToken, bootToken.count()) != 0 )
+		return nullptr;
+
 	const dyld3::closure::LaunchClosure* closure = mapClosureFile(closurePath);
 	if ( closure == nullptr )
 		return nullptr;
@@ -6155,7 +6303,7 @@ static const dyld3::closure::LaunchClosure* findCachedLaunchClosure(const uint8_
 	}
 
 	if ( gLinkContext.verboseWarnings )
-		dyld::log("dyld: used cached closure %p (size=%lu) for %s\n", closure, closure->size(), sExecPath);
+		dyld::log("dyld: used cached %s closure %p (size=%lu) for %s\n", closure->topImage()->variantString(), closure, closure->size(), sExecPath);
 
 	return closure;
 }
@@ -6164,7 +6312,7 @@ static const dyld3::closure::LaunchClosure* findCachedLaunchClosure(const uint8_
 
 	
 static ClosureMode getPlatformDefaultClosureMode() {
-#if __MAC_OS_X_VERSION_MIN_REQUIRED
+#if TARGET_OS_OSX
 #if __i386__
 	// rdar://problem/32701418: Don't use dyld3 for i386 for now.
 	return ClosureMode::Off;
@@ -6179,7 +6327,7 @@ static ClosureMode getPlatformDefaultClosureMode() {
 		return ClosureMode::On;
 	else
 		return ClosureMode::Off;
-#endif // __MAC_OS_X_VERSION_MIN_REQUIRED
+#endif // TARGET_OS_OSX
 }
 
 //
@@ -6200,11 +6348,29 @@ _main(const macho_header* mainExecutableMH, uintptr_t mainExecutableSlide,
 	//Check and see if there are any kernel flags
 	dyld3::BootArgs::setFlags(hexToUInt64(_simple_getenv(apple, "dyld_flags"), nullptr));
 
+#if __has_feature(ptrauth_calls)
+	// Check and see if kernel disabled JOP pointer signing (which lets us load plain arm64 binaries)
+	if ( const char* disableStr = _simple_getenv(apple, "ptrauth_disabled") ) {
+		if ( strcmp(disableStr, "1") == 0 )
+			sKeysDisabled = true;
+	}
+	else {
+		// needed until kernel passes ptrauth_disabled for arm64 main executables
+		if ( (mainExecutableMH->cpusubtype == CPU_SUBTYPE_ARM64_V8) || (mainExecutableMH->cpusubtype == CPU_SUBTYPE_ARM64_ALL) )
+			sKeysDisabled = true;
+	}
+#endif
+
     // Grab the cdHash of the main executable from the environment
 	uint8_t mainExecutableCDHashBuffer[20];
 	const uint8_t* mainExecutableCDHash = nullptr;
-	if ( hexToBytes(_simple_getenv(apple, "executable_cdhash"), 40, mainExecutableCDHashBuffer) )
-		mainExecutableCDHash = mainExecutableCDHashBuffer;
+	if ( const char* mainExeCdHashStr = _simple_getenv(apple, "executable_cdhash") ) {
+		unsigned bufferLenUsed;
+		if ( hexStringToBytes(mainExeCdHashStr, mainExecutableCDHashBuffer, sizeof(mainExecutableCDHashBuffer), bufferLenUsed) )
+			mainExecutableCDHash = mainExecutableCDHashBuffer;
+	}
+
+	getHostInfo(mainExecutableMH, mainExecutableSlide);
 
 #if !TARGET_OS_SIMULATOR
 	// Trace dyld's load
@@ -6220,7 +6386,8 @@ _main(const macho_header* mainExecutableMH, uintptr_t mainExecutableSlide,
 
 	// Set the platform ID in the all image infos so debuggers can tell the process type
 	// FIXME: This can all be removed once we make the kernel handle it in rdar://43369446
-	if (gProcessInfo->version >= 16) {
+	// The host may not have the platform field in its struct, but there's space for it in the padding, so always set it
+	{
 		__block bool platformFound = false;
 		((dyld3::MachOFile*)mainExecutableMH)->forEachSupportedPlatform(^(dyld3::Platform platform, uint32_t minOS, uint32_t sdk) {
 			if (platformFound) {
@@ -6232,7 +6399,7 @@ _main(const macho_header* mainExecutableMH, uintptr_t mainExecutableSlide,
 		if (gProcessInfo->platform == (uint32_t)dyld3::Platform::unknown) {
 			// There were no platforms found in the binary. This may occur on macOS for alternate toolchains and old binaries.
 			// It should never occur on any of our embedded platforms.
-#if __MAC_OS_X_VERSION_MIN_REQUIRED
+#if TARGET_OS_OSX
 			gProcessInfo->platform = (uint32_t)dyld3::Platform::macOS;
 #else
 			halt("MH_EXECUTE binaries must specify a minimum supported OS version");
@@ -6240,16 +6407,21 @@ _main(const macho_header* mainExecutableMH, uintptr_t mainExecutableSlide,
 		}
 	}
 
-#if __MAC_OS_X_VERSION_MIN_REQUIRED
+#if TARGET_OS_OSX
 	// Check to see if we need to override the platform
 	const char* forcedPlatform = _simple_getenv(envp, "DYLD_FORCE_PLATFORM");
 	if (forcedPlatform) {
-		if (strncmp(forcedPlatform, "6", 1) != 0) {
-			halt("DYLD_FORCE_PLATFORM is only supported for platform 6");
+		dyld_platform_t forcedPlatformType = 0;
+		if (strncmp(forcedPlatform, "6", 1) == 0) {
+			forcedPlatformType = PLATFORM_MACCATALYST;
+		} else if (strncmp(forcedPlatform, "2", 1) == 0) {
+			forcedPlatformType = PLATFORM_IOS;
+		} else  {
+			halt("DYLD_FORCE_PLATFORM is only supported for platform 2 or 6.");
 		}
 		const dyld3::MachOFile* mf = (dyld3::MachOFile*)sMainExecutableMachHeader;
 		if (mf->allowsAlternatePlatform()) {
-			gProcessInfo->platform = PLATFORM_IOSMAC;
+			gProcessInfo->platform = forcedPlatformType;
 		}
 	}
 
@@ -6260,7 +6432,7 @@ _main(const macho_header* mainExecutableMH, uintptr_t mainExecutableSlide,
 		char simDyldPath[PATH_MAX]; 
 		strlcpy(simDyldPath, rootPath, PATH_MAX);
 		strlcat(simDyldPath, "/usr/lib/dyld_sim", PATH_MAX);
-		int fd = my_open(simDyldPath, O_RDONLY, 0);
+		int fd = dyld3::open(simDyldPath, O_RDONLY, 0);
 		if ( fd != -1 ) {
 			const char* errMessage = useSimulatorDyld(fd, mainExecutableMH, simDyldPath, argc, argv, envp, apple, startGlue, &result);
 			if ( errMessage != NULL )
@@ -6286,7 +6458,7 @@ _main(const macho_header* mainExecutableMH, uintptr_t mainExecutableSlide,
 	// <rdar://problem/13868260> Remove interim apple[0] transition code from dyld
 	if (!sExecPath) sExecPath = apple[0];
 
-#if __IPHONE_OS_VERSION_MIN_REQUIRED && !TARGET_OS_SIMULATOR
+#if TARGET_OS_IPHONE && !TARGET_OS_SIMULATOR
 	// <rdar://54095622> kernel is not passing a real path for main executable
 	if ( strncmp(sExecPath, "/var/containers/Bundle/Application/", 35) == 0 ) {
 		if ( char* newPath = (char*)malloc(strlen(sExecPath)+10) ) {
@@ -6317,6 +6489,17 @@ _main(const macho_header* mainExecutableMH, uintptr_t mainExecutableSlide,
 	else
 		sExecShortName = sExecPath;
 
+#if TARGET_OS_OSX && __has_feature(ptrauth_calls)
+	// on Apple Silicon macOS, only Apple signed ("platform binary") arm64e can be loaded
+	sOnlyPlatformArm64e = true;
+
+	// internal builds, or if boot-arg is set, then non-platform-binary arm64e slices can be run
+	if ( const char* abiMode = _simple_getenv(apple, "arm64e_abi") ) {
+		if ( strcmp(abiMode, "all") == 0 )
+			sOnlyPlatformArm64e = false;
+	}
+#endif
+
     configureProcessRestrictions(mainExecutableMH, envp);
 
 	// Check if we should force dyld3.  Note we have to do this outside of the regular env parsing due to AMFI
@@ -6325,20 +6508,13 @@ _main(const macho_header* mainExecutableMH, uintptr_t mainExecutableSlide,
 			if ( strcmp(useClosures, "0") == 0 ) {
 				sClosureMode = ClosureMode::Off;
 			} else if ( strcmp(useClosures, "1") == 0 ) {
-#if __MAC_OS_X_VERSION_MIN_REQUIRED
-
-#if __i386__
-				// don't support dyld3 for 32-bit macOS
-#else
-				// Also don't support dyld3 for iOSMac right now
-				if ( gProcessInfo->platform != PLATFORM_IOSMAC ) {
-					sClosureMode = ClosureMode::On;
-				}
-#endif // __i386__
-
-#else
+	#if !__i386__ // don't support dyld3 for 32-bit macOS
 				sClosureMode = ClosureMode::On;
-#endif // __MAC_OS_X_VERSION_MIN_REQUIRED
+				sClosureKind = ClosureKind::full;
+	#endif
+			} else if ( strcmp(useClosures, "2") == 0 ) {
+				sClosureMode = ClosureMode::On;
+				sClosureKind = ClosureKind::minimal;
 			} else {
 				dyld::warn("unknown option to DYLD_USE_CLOSURES.  Valid options are: 0 and 1\n");
 			}
@@ -6346,7 +6522,7 @@ _main(const macho_header* mainExecutableMH, uintptr_t mainExecutableSlide,
 		}
 	}
 
-#if __MAC_OS_X_VERSION_MIN_REQUIRED
+#if TARGET_OS_OSX
     if ( !gLinkContext.allowEnvVarsPrint && !gLinkContext.allowEnvVarsPath && !gLinkContext.allowEnvVarsSharedCache ) {
 		pruneEnvironmentVariables(envp, &apple);
 		// set again because envp and apple may have changed or moved
@@ -6358,18 +6534,25 @@ _main(const macho_header* mainExecutableMH, uintptr_t mainExecutableSlide,
 		checkEnvironmentVariables(envp);
 		defaultUninitializedFallbackPaths(envp);
 	}
-#if __MAC_OS_X_VERSION_MIN_REQUIRED
-	if ( gProcessInfo->platform == PLATFORM_IOSMAC ) {
-		gLinkContext.rootPaths = parseColonList("/System/iOSSupport", NULL);
-		gLinkContext.iOSonMac = true;
-		if ( sEnv.DYLD_FALLBACK_LIBRARY_PATH == sLibraryFallbackPaths )
-			sEnv.DYLD_FALLBACK_LIBRARY_PATH = sRestrictedLibraryFallbackPaths;
-		if ( sEnv.DYLD_FALLBACK_FRAMEWORK_PATH == sFrameworkFallbackPaths )
-			sEnv.DYLD_FALLBACK_FRAMEWORK_PATH = sRestrictedFrameworkFallbackPaths;
-	}
-	else if ( ((dyld3::MachOFile*)mainExecutableMH)->supportsPlatform(dyld3::Platform::driverKit) ) {
-		gLinkContext.driverKit = true;
-		gLinkContext.sharedRegionMode = ImageLoader::kDontUseSharedRegion;
+#if TARGET_OS_OSX
+	switch (gProcessInfo->platform) {
+#if (TARGET_OS_OSX && TARGET_CPU_ARM64)
+		case PLATFORM_IOS:
+			sClosureMode = ClosureMode::On; // <rdar://problem/56792308> Run iOS apps on macOS in dyld3 mode
+			[[clang::fallthrough]];
+#endif
+		case PLATFORM_MACCATALYST:
+			gLinkContext.rootPaths = parseColonList("/System/iOSSupport", NULL);
+			gLinkContext.iOSonMac = true;
+			if ( sEnv.DYLD_FALLBACK_LIBRARY_PATH == sLibraryFallbackPaths )
+				sEnv.DYLD_FALLBACK_LIBRARY_PATH = sRestrictedLibraryFallbackPaths;
+			if ( sEnv.DYLD_FALLBACK_FRAMEWORK_PATH == sFrameworkFallbackPaths )
+				sEnv.DYLD_FALLBACK_FRAMEWORK_PATH = sRestrictedFrameworkFallbackPaths;
+			break;
+		case PLATFORM_DRIVERKIT:
+			gLinkContext.driverKit = true;
+			gLinkContext.sharedRegionMode = ImageLoader::kDontUseSharedRegion;
+			break;
 	}
 #endif
 	if ( sEnv.DYLD_PRINT_OPTS )
@@ -6382,18 +6565,11 @@ _main(const macho_header* mainExecutableMH, uintptr_t mainExecutableSlide,
 #if !TARGET_OS_SIMULATOR
 	if ( _simple_getenv(envp, "DYLD_JUST_BUILD_CLOSURE") != nullptr ) {
 #if TARGET_OS_IPHONE
-		const char* tempDir = getTempDir(envp);
-		if ( (tempDir != nullptr) && (geteuid() != 0) ) {
-			// Use realpath to prevent something like TMPRIR=/tmp/../usr/bin
-			char realPath[PATH_MAX];
-			if ( realpath(tempDir, realPath) != NULL )
-				tempDir = realPath;
-			if (strncmp(tempDir, "/private/var/mobile/Containers/", strlen("/private/var/mobile/Containers/")) == 0) {
-				sJustBuildClosure = true;
-			}
-		}
+		char tempClosurePath[PATH_MAX];
+		if ( dyld3::closure::LaunchClosure::buildClosureCachePath(sExecPath, envp, false, tempClosurePath) )
+			sJustBuildClosure = true;
 #endif
-		// If we didn't like the format of TMPDIR, just exit.  We don't want to launch the app as that would bring up the UI
+		// If the env vars for the data contain look wrong, don't want to launch the app as that would bring up the UI
 		if (!sJustBuildClosure) {
 			_exit(EXIT_SUCCESS);
 		}
@@ -6402,18 +6578,98 @@ _main(const macho_header* mainExecutableMH, uintptr_t mainExecutableSlide,
 
 	if ( sJustBuildClosure )
 		sClosureMode = ClosureMode::On;
-	getHostInfo(mainExecutableMH, mainExecutableSlide);
 
 	// load shared cache
 	checkSharedRegionDisable((dyld3::MachOLoaded*)mainExecutableMH, mainExecutableSlide);
 	if ( gLinkContext.sharedRegionMode != ImageLoader::kDontUseSharedRegion ) {
 #if TARGET_OS_SIMULATOR
 		if ( sSharedCacheOverrideDir)
-			mapSharedCache();
+			mapSharedCache(mainExecutableSlide);
 #else
-		mapSharedCache();
+		mapSharedCache(mainExecutableSlide);
 #endif
 	}
+
+#if !TARGET_OS_SIMULATOR
+	if ( getpid() == 1 ) {
+		// Get the value as set by the boot-args
+		uint64_t commPageValue = 0;
+		size_t commPageValueSize = sizeof(commPageValue);
+		if ( sysctlbyname("kern.dyld_flags", &commPageValue, &commPageValueSize, nullptr, 0) != 0 ) {
+			// Try again with the old name
+			// TODO: Remove this when we are always on new enough kernels
+			sysctlbyname("kern.dyld_system_flags", &commPageValue, &commPageValueSize, nullptr, 0);
+		}
+
+		commPageValue &= CommPageBootArgMask;
+		// logToConsole("dyld: got comm page flags 0x%llx\n", commPageValue);
+
+		// If we are PID 1 (launchd) and on macOS, then we should check if the simulator support dylibs
+		// are roots or not.
+		// If they are not roots at launchd time, and the file system is read-only, then we know for sure
+		// they will not be roots later
+#if DYLD_SIMULATOR_ROOTS_SUPPORT
+		bool fileSystemIsWritable = true;
+
+		// logToConsole("dyld: in launchd\n");
+		struct statfs statBuffer;
+		int statResult = statfs("/", &statBuffer);
+		if ( statResult == 0 ) {
+			if ( !strcmp(statBuffer.f_fstypename, "apfs") ) {
+				if ( (statBuffer.f_flags & (MNT_RDONLY | MNT_SNAPSHOT)) == (MNT_RDONLY | MNT_SNAPSHOT) ) {
+					// logToConsole("dyld: got statfs flags 0x%llx\n", statBuffer.f_flags);
+					fileSystemIsWritable = false;
+				}
+			}
+		} else {
+			int error = errno;
+			logToConsole("dyld: could not stat '/', errno = %d\n", error);
+		}
+
+		// If the file system is read-only, then we can check now whether any of the simulator support
+		// dylibs are roots
+		bool libsystemKernelIsRoot 		= false;
+		bool libsystemPlatformIsRoot 	= false;
+		bool libsystemPThreadIsRoot 	= false;
+		if ( !fileSystemIsWritable && (sSharedCacheLoadInfo.loadAddress != nullptr)) {
+			dyld3::closure::FileSystemPhysical fileSystem;
+			libsystemKernelIsRoot 	= !dyld3::RootsChecker::uuidMatchesSharedCache("/usr/lib/system/libsystem_kernel.dylib",
+																				   &fileSystem, sSharedCacheLoadInfo.loadAddress);
+			libsystemPlatformIsRoot = !dyld3::RootsChecker::uuidMatchesSharedCache("/usr/lib/system/libsystem_platform.dylib",
+																				   &fileSystem, sSharedCacheLoadInfo.loadAddress);
+			libsystemPThreadIsRoot 	= !dyld3::RootsChecker::uuidMatchesSharedCache("/usr/lib/system/libsystem_pthread.dylib",
+																				   &fileSystem, sSharedCacheLoadInfo.loadAddress);
+		}
+		commPageValue |= (fileSystemIsWritable ? CommPageFlags::fileSystemCanBeModified : CommPageFlags::None);
+		commPageValue |= (libsystemKernelIsRoot ? CommPageFlags::libsystemKernelIsRoot : CommPageFlags::None);
+		commPageValue |= (libsystemPlatformIsRoot ? CommPageFlags::libsystemPlatformIsRoot : CommPageFlags::None);
+		commPageValue |= (libsystemPThreadIsRoot ? CommPageFlags::libsystemPThreadIsRoot : CommPageFlags::None);
+#endif // DYLD_SIMULATOR_ROOTS_SUPPORT
+
+		logToConsole("dyld: setting comm page to 0x%llx\n", commPageValue);
+		if ( sysctlbyname("kern.dyld_flags", nullptr, 0, &commPageValue, sizeof(commPageValue)) != 0 ) {
+			// Try again with the old name
+			// TODO: Remove this when we are always on new enough kernels
+			sysctlbyname("kern.dyld_system_flags", nullptr, 0, &commPageValue, sizeof(commPageValue));
+		}
+	}
+
+#if DYLD_SIMULATOR_ROOTS_SUPPORT
+	// Set the roots checker to the state from the comm page
+	{
+		uint64_t dyldFlags = *((uint64_t*)_COMM_PAGE_DYLD_SYSTEM_FLAGS);
+		bool fileSystemCanBeModified = dyldFlags & CommPageFlags::fileSystemCanBeModified;
+		bool libsystemKernelIsRoot = dyldFlags & CommPageFlags::libsystemKernelIsRoot;
+		bool libsystemPlatformIsRoot = dyldFlags & CommPageFlags::libsystemPlatformIsRoot;
+		bool libsystemPThreadIsRoot = dyldFlags & CommPageFlags::libsystemPThreadIsRoot;
+		sRootsChecker.setFileSystemCanBeModified(fileSystemCanBeModified);
+		sRootsChecker.setLibsystemKernelIsRoot(libsystemKernelIsRoot);
+		sRootsChecker.setLibsystemPlatformIsRoot(libsystemPlatformIsRoot);
+		sRootsChecker.setLibsystemPThreadIsRoot(libsystemPThreadIsRoot);
+	}
+#endif // DYLD_SIMULATOR_ROOTS_SUPPORT
+
+#endif // !TARGET_OS_SIMULATOR
 
 	// If we haven't got a closure mode yet, then check the environment and cache type
 	if ( sClosureMode == ClosureMode::Unset ) {
@@ -6434,8 +6690,9 @@ _main(const macho_header* mainExecutableMH, uintptr_t mainExecutableSlide,
 #if !TARGET_OS_SIMULATOR
 	if ( sClosureMode == ClosureMode::Off ) {
 		if ( gLinkContext.verboseWarnings )
-			dyld::log("dyld: not using closure because of DYLD_USE_CLOSURES or -force_dyld2=1 override\n");
+			dyld::log("dyld: not using closures\n");
 	} else {
+		sLaunchModeUsed = DYLD_LAUNCH_MODE_USING_CLOSURE;
 		const dyld3::closure::LaunchClosure* mainClosure = nullptr;
 		dyld3::closure::LoadedFileInfo mainFileInfo;
 		mainFileInfo.fileContent = mainExecutableMH;
@@ -6444,7 +6701,7 @@ _main(const macho_header* mainExecutableMH, uintptr_t mainExecutableSlide,
 		mainFileInfo.sliceOffset = 0;
 		mainFileInfo.sliceLen = -1;
 		struct stat mainExeStatBuf;
-		if ( ::stat(sExecPath, &mainExeStatBuf) == 0 ) {
+		if ( dyld3::stat(sExecPath, &mainExeStatBuf) == 0 ) {
 			mainFileInfo.inode = mainExeStatBuf.st_ino;
 			mainFileInfo.mtime = mainExeStatBuf.st_mtime;
 		}
@@ -6453,6 +6710,8 @@ _main(const macho_header* mainExecutableMH, uintptr_t mainExecutableSlide,
 			mainClosure = sSharedCacheLoadInfo.loadAddress->findClosure(sExecPath);
 			if ( gLinkContext.verboseWarnings && (mainClosure != nullptr) )
 				dyld::log("dyld: found closure %p (size=%lu) in dyld shared cache\n", mainClosure, mainClosure->size());
+			if ( mainClosure != nullptr )
+				sLaunchModeUsed |= DYLD_LAUNCH_MODE_CLOSURE_FROM_OS;
 		}
 
 		// We only want to try build a closure at runtime if its an iOS third party binary, or a macOS binary from the shared cache
@@ -6463,17 +6722,32 @@ _main(const macho_header* mainExecutableMH, uintptr_t mainExecutableSlide,
 			allowClosureRebuilds = true;
 		}
 
-		if ( (mainClosure != nullptr) && !closureValid(mainClosure, mainFileInfo, mainExecutableCDHash, true, envp) )
+		if ( (mainClosure != nullptr) && !closureValid(mainClosure, mainFileInfo, mainExecutableCDHash, true, envp) ) {
 			mainClosure = nullptr;
+			sLaunchModeUsed &= ~DYLD_LAUNCH_MODE_CLOSURE_FROM_OS;
+		}
+
+		// <rdar://60333505> bootToken is a concat of boot-hash kernel passes down for app and dyld's uuid
+		uint8_t bootTokenBufer[128];
+		unsigned bootTokenBufferLen = 0;
+		if ( const char* bootHashStr = _simple_getenv(apple, "executable_boothash") ) {
+			if ( hexStringToBytes(bootHashStr, bootTokenBufer, sizeof(bootTokenBufer), bootTokenBufferLen) ) {
+				if ( ((dyld3::MachOFile*)&__dso_handle)->getUuid(&bootTokenBufer[bootTokenBufferLen]) )
+					bootTokenBufferLen += sizeof(uuid_t);
+			}
+		}
+		dyld3::Array<uint8_t> bootToken(bootTokenBufer, bootTokenBufferLen, bootTokenBufferLen);
 
 		// If we didn't find a valid cache closure then try build a new one
 		if ( (mainClosure == nullptr) && allowClosureRebuilds ) {
 			// if forcing closures, and no closure in cache, or it is invalid, check for cached closure
 			if ( !sForceInvalidSharedCacheClosureFormat )
-				mainClosure = findCachedLaunchClosure(mainExecutableCDHash, mainFileInfo, envp);
+				mainClosure = findCachedLaunchClosure(mainExecutableCDHash, mainFileInfo, envp, bootToken);
 			if ( mainClosure == nullptr ) {
 				// if  no cached closure found, build new one
-				mainClosure = buildLaunchClosure(mainExecutableCDHash, mainFileInfo, envp);
+				mainClosure = buildLaunchClosure(mainExecutableCDHash, mainFileInfo, envp, bootToken);
+				if ( mainClosure != nullptr )
+					sLaunchModeUsed |= DYLD_LAUNCH_MODE_BUILT_CLOSURE_AT_LAUNCH;
 			}
 		}
 
@@ -6484,22 +6758,29 @@ _main(const macho_header* mainExecutableMH, uintptr_t mainExecutableSlide,
 		// try using launch closure
 		if ( mainClosure != nullptr ) {
 			CRSetCrashLogMessage("dyld3: launch started");
+			if ( mainClosure->topImage()->fixupsNotEncoded() )
+				sLaunchModeUsed |= DYLD_LAUNCH_MODE_MINIMAL_CLOSURE;
+			Diagnostics diag;
+			bool closureOutOfDate;
+			bool recoverable;
 			bool launched = launchWithClosure(mainClosure, sSharedCacheLoadInfo.loadAddress, (dyld3::MachOLoaded*)mainExecutableMH,
-											  mainExecutableSlide, argc, argv, envp, apple, &result, startGlue);
-			if ( !launched && allowClosureRebuilds ) {
+											  mainExecutableSlide, argc, argv, envp, apple, diag, &result, startGlue, &closureOutOfDate, &recoverable);
+			if ( !launched && closureOutOfDate && allowClosureRebuilds ) {
 				// closure is out of date, build new one
-				mainClosure = buildLaunchClosure(mainExecutableCDHash, mainFileInfo, envp);
+				mainClosure = buildLaunchClosure(mainExecutableCDHash, mainFileInfo, envp, bootToken);
 				if ( mainClosure != nullptr ) {
+					diag.clearError();
+					sLaunchModeUsed |= DYLD_LAUNCH_MODE_BUILT_CLOSURE_AT_LAUNCH;
+					if ( mainClosure->topImage()->fixupsNotEncoded() )
+						sLaunchModeUsed |= DYLD_LAUNCH_MODE_MINIMAL_CLOSURE;
+					else
+						sLaunchModeUsed &= ~DYLD_LAUNCH_MODE_MINIMAL_CLOSURE;
 					launched = launchWithClosure(mainClosure, sSharedCacheLoadInfo.loadAddress, (dyld3::MachOLoaded*)mainExecutableMH,
-												 mainExecutableSlide, argc, argv, envp, apple, &result, startGlue);
+												 mainExecutableSlide, argc, argv, envp, apple, diag, &result, startGlue, &closureOutOfDate, &recoverable);
 				}
 			}
 			if ( launched ) {
 				gLinkContext.startedInitializingMainExecutable = true;
-#if __has_feature(ptrauth_calls)
-				// start() calls the result pointer as a function pointer so we need to sign it.
-				result = (uintptr_t)__builtin_ptrauth_sign_unauthenticated((void*)result, 0, 0);
-#endif
 				if (sSkipMain)
 					result = (uintptr_t)&fake_main;
 				return result;
@@ -6508,12 +6789,14 @@ _main(const macho_header* mainExecutableMH, uintptr_t mainExecutableSlide,
 				if ( gLinkContext.verboseWarnings ) {
 					dyld::log("dyld: unable to use closure %p\n", mainClosure);
 				}
+				if ( !recoverable )
+					halt(diag.errorMessage());
 			}
 		}
 	}
 #endif // TARGET_OS_SIMULATOR
 	// could not use closure info, launch old way
-
+	sLaunchModeUsed = 0;
 
 
 	// install gdb notifier
@@ -6542,13 +6825,13 @@ _main(const macho_header* mainExecutableMH, uintptr_t mainExecutableSlide,
 #if SUPPORT_ACCELERATE_TABLES
 #if __arm64e__
 		// Disable accelerator tables when we have threaded rebase/bind, which is arm64e executables only for now.
-		if (sMainExecutableMachHeader->cpusubtype == CPU_SUBTYPE_ARM64E)
+		if ((sMainExecutableMachHeader->cpusubtype & ~CPU_SUBTYPE_MASK) == CPU_SUBTYPE_ARM64E)
 			sDisableAcceleratorTables = true;
 #endif
 		bool mainExcutableAlreadyRebased = false;
 		if ( (sSharedCacheLoadInfo.loadAddress != nullptr) && !dylibsCanOverrideCache() && !sDisableAcceleratorTables && (sSharedCacheLoadInfo.loadAddress->header.accelerateInfoAddr != 0) ) {
 			struct stat statBuf;
-			if ( ::stat(IPHONE_DYLD_SHARED_CACHE_DIR "no-dyld2-accelerator-tables", &statBuf) != 0 )
+			if ( dyld3::stat(IPHONE_DYLD_SHARED_CACHE_DIR "no-dyld2-accelerator-tables", &statBuf) != 0 )
 				sAllCacheImagesProxy = ImageLoaderMegaDylib::makeImageLoaderMegaDylib(&sSharedCacheLoadInfo.loadAddress->header, sSharedCacheLoadInfo.slide, mainExecutableMH, gLinkContext);
 		}
 
@@ -6556,7 +6839,7 @@ reloadAllImages:
 #endif
 
 
-	#if __MAC_OS_X_VERSION_MIN_REQUIRED
+#if TARGET_OS_OSX
 		gLinkContext.strictMachORequired = false;
         // <rdar://problem/22805519> be less strict about old macOS mach-o binaries
         ((dyld3::MachOFile*)mainExecutableMH)->forEachSupportedPlatform(^(dyld3::Platform platform, uint32_t minOS, uint32_t sdk) {
@@ -6613,6 +6896,54 @@ reloadAllImages:
 	#else
 		sAllImages.reserve(INITIAL_IMAGE_COUNT);
 	#endif
+
+#if defined(__x86_64__) && !TARGET_OS_SIMULATOR
+		if (dyld::isTranslated()) {
+			struct dyld_all_runtime_info {
+				uint32_t image_count;
+				dyld_image_info* images;
+				uint32_t uuid_count;
+				dyld_uuid_info* uuids;
+				uint32_t aot_image_count;
+				dyld_aot_image_info* aots;
+				dyld_aot_shared_cache_info aot_cache_info;
+			};
+
+			dyld_all_runtime_info* runtime_info;
+			int ret = syscall(0x7000004, &runtime_info);
+			if (ret == 0) {
+				for (int i = 0; i < runtime_info->uuid_count; i++) {
+					dyld_image_info image_info = runtime_info->images[i];
+					dyld_uuid_info uuid_info = runtime_info->uuids[i];
+
+					// add the arm64 cambria runtime to uuid info
+					addNonSharedCacheImageUUID(uuid_info);
+
+					struct stat sb;
+					if (stat(image_info.imageFilePath, &sb) == 0) {
+						fsid_t fsid = {{0, 0}};
+						fsobj_id_t fsobj = {0};
+						ino_t inode = sb.st_ino;
+						fsobj.fid_objno = (uint32_t)inode;
+						fsobj.fid_generation = (uint32_t)(inode>>32);
+						fsid.val[0] = sb.st_dev;
+
+						dyld3::kdebug_trace_dyld_image(DBG_DYLD_UUID_MAP_A, image_info.imageFilePath, &(uuid_info.imageUUID), fsobj, fsid, image_info.imageLoadAddress);
+					}
+				}
+
+				// add aot images to dyld_all_image_info
+				addAotImagesToAllAotImages(runtime_info->aot_image_count, runtime_info->aots);
+
+				// add the arm64 cambria runtime to dyld_all_image_info
+				addImagesToAllImages(runtime_info->image_count, runtime_info->images);
+
+				// set the aot shared cache info in dyld_all_image_info
+				dyld::gProcessInfo->aotSharedCacheBaseAddress = runtime_info->aot_cache_info.cacheBaseAddress;
+				memcpy(dyld::gProcessInfo->aotSharedCacheUUID, runtime_info->aot_cache_info.cacheUUID, sizeof(uuid_t));
+			}
+		}
+#endif
 
 		// Now that shared cache is loaded, setup an versioned dylib overrides
 	#if SUPPORT_VERSIONED_PATHS
@@ -6741,7 +7072,7 @@ reloadAllImages:
 		if ( sInsertedDylibCount > 0 ) {
 			for(unsigned int i=0; i < sInsertedDylibCount; ++i) {
 				ImageLoader* image = sAllImages[i+1];
-				image->recursiveBind(gLinkContext, sEnv.DYLD_BIND_AT_LAUNCH, true);
+				image->recursiveBind(gLinkContext, sEnv.DYLD_BIND_AT_LAUNCH, true, nullptr);
 			}
 		}
 		
@@ -6768,9 +7099,9 @@ reloadAllImages:
 		}
 		ARIADNEDBG_CODE(220, 1);
 
-#if __MAC_OS_X_VERSION_MIN_REQUIRED
+#if TARGET_OS_OSX
 		if ( gLinkContext.driverKit ) {
-			result = (uintptr_t)sEntryOveride;
+			result = (uintptr_t)sEntryOverride;
 			if ( result == 0 )
 				halt("no entry point registered");
 			*startGlue = (uintptr_t)gLibSystemHelpers->startGlueToCallExit;
@@ -6793,10 +7124,6 @@ reloadAllImages:
 				*startGlue = 0;
 			}
 		}
-#if __has_feature(ptrauth_calls)
-		// start() calls the result pointer as a function pointer so we need to sign it.
-		result = (uintptr_t)__builtin_ptrauth_sign_unauthenticated((void*)result, 0, 0);
-#endif
 	}
 	catch(const char* message) {
 		syncAllImages();
@@ -6823,7 +7150,7 @@ reloadAllImages:
 		result = (uintptr_t)&fake_main;
 		*startGlue = (uintptr_t)gLibSystemHelpers->startGlueToCallExit;
 	}
-	
+
 	return result;
 }
 

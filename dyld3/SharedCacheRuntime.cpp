@@ -26,6 +26,7 @@
 #include <stdint.h>
 #include <string.h>
 #include <unistd.h>
+#include <errno.h>
 #include <fcntl.h>
 #include <sys/param.h>
 #include <sys/types.h>
@@ -53,12 +54,18 @@
 // should be in mach/shared_region.h
 extern "C" int __shared_region_check_np(uint64_t* startaddress);
 extern "C" int __shared_region_map_and_slide_np(int fd, uint32_t count, const shared_file_mapping_np mappings[], long slide, const dyld_cache_slide_info2* slideInfo, size_t slideInfoSize);
+extern "C" int __shared_region_map_and_slide_2_np(uint32_t files_count, const shared_file_np files[], uint32_t mappings_count, const shared_file_mapping_slide_np mappings[]);
 
+#ifndef VM_PROT_NOAUTH
+#define VM_PROT_NOAUTH  0x40  /* must not interfere with normal prot assignments */
+#endif
 
 namespace dyld {
-    extern int  my_stat(const char* path, struct stat* buf);
-    extern int  my_open(const char* path, int flag, int other);
     extern void log(const char*, ...);
+    extern void logToConsole(const char* format, ...);
+#if defined(__x86_64__) && !TARGET_OS_SIMULATOR
+    bool isTranslated();
+#endif
 }
 
 
@@ -67,13 +74,13 @@ namespace dyld3 {
 
 struct CacheInfo
 {
-    int                     fd;
-    shared_file_mapping_np  mappings[3];
-    uint64_t                slideInfoAddressUnslid;
-    size_t                  slideInfoSize;
-    uint64_t                sharedRegionStart;
-    uint64_t                sharedRegionSize;
-    uint64_t                maxSlide;
+    shared_file_mapping_slide_np            mappings[DyldSharedCache::MaxMappings];
+    uint32_t                                mappingsCount;
+    // All mappings come from the same file
+    int                                     fd               = 0;
+    uint64_t                                sharedRegionStart;
+    uint64_t                                sharedRegionSize;
+    uint64_t                                maxSlide;
 };
 
 
@@ -169,57 +176,123 @@ static void rebaseChainV4(uint8_t* pageContent, uint16_t startOffset, uintptr_t 
 }
 #endif
 
-static void getCachePath(const SharedCacheOptions& options, size_t pathBufferSize, char pathBuffer[])
-{
+#if TARGET_OS_OSX
+bool getMacOSCachePath(char pathBuffer[], size_t pathBufferSize,
+                       const char* cacheDir, bool useHaswell) {
+    // Clear old attempts at finding a cache, if any
+    pathBuffer[0] = '\0';
+
     // set cache dir
-    if ( options.cacheDirOverride != nullptr ) {
-        strlcpy(pathBuffer, options.cacheDirOverride, pathBufferSize);
-    }
-    else {
-#if __IPHONE_OS_VERSION_MIN_REQUIRED
-        strlcpy(pathBuffer, IPHONE_DYLD_SHARED_CACHE_DIR, sizeof(IPHONE_DYLD_SHARED_CACHE_DIR));
-#else
-        strlcpy(pathBuffer, MACOSX_DYLD_SHARED_CACHE_DIR, sizeof(MACOSX_DYLD_SHARED_CACHE_DIR));
-#endif
-    }
+    strlcpy(pathBuffer, cacheDir, pathBufferSize);
 
     // append file component of cache file
     if ( pathBuffer[strlen(pathBuffer)-1] != '/' )
         strlcat(pathBuffer, "/", pathBufferSize);
-#if __x86_64__ && !__IPHONE_OS_VERSION_MIN_REQUIRED
-    if ( options.useHaswell ) {
+
+#if __x86_64__
+    if ( useHaswell ) {
         size_t len = strlen(pathBuffer);
         struct stat haswellStatBuf;
         strlcat(pathBuffer, DYLD_SHARED_CACHE_BASE_NAME ARCH_NAME_H, pathBufferSize);
-        if ( dyld::my_stat(pathBuffer, &haswellStatBuf) == 0 )
-            return;
+        if ( dyld3::stat(pathBuffer, &haswellStatBuf) == 0 )
+            return true;
         // no haswell cache file, use regular x86_64 cache
         pathBuffer[len] = '\0';
     }
 #endif
 
+    struct stat statBuf;
+    strlcat(pathBuffer, DYLD_SHARED_CACHE_BASE_NAME ARCH_NAME, pathBufferSize);
+    if ( dyld3::stat(pathBuffer, &statBuf) == 0 )
+        return true;
+
+    return false;
+}
+#endif // TARGET_OS_OSX
+
+static void getCachePath(const SharedCacheOptions& options, size_t pathBufferSize, char pathBuffer[])
+{
+#if TARGET_OS_OSX
+
+    if ( options.cacheDirOverride != nullptr ) {
+        getMacOSCachePath(pathBuffer, pathBufferSize, options.cacheDirOverride, options.useHaswell);
+    } else {
+        getMacOSCachePath(pathBuffer, pathBufferSize, MACOSX_MRM_DYLD_SHARED_CACHE_DIR, options.useHaswell);
+    }
+
+#else // TARGET_OS_OSX
+
+    // Non-macOS path
+    if ( options.cacheDirOverride != nullptr ) {
+        strlcpy(pathBuffer, options.cacheDirOverride, pathBufferSize);
+    } else {
+        strlcpy(pathBuffer, IPHONE_DYLD_SHARED_CACHE_DIR, sizeof(IPHONE_DYLD_SHARED_CACHE_DIR));
+    }
+
+    // append file component of cache file
+    if ( pathBuffer[strlen(pathBuffer)-1] != '/' )
+        strlcat(pathBuffer, "/", pathBufferSize);
+
     strlcat(pathBuffer, DYLD_SHARED_CACHE_BASE_NAME ARCH_NAME, pathBufferSize);
 
-#if __IPHONE_OS_VERSION_MIN_REQUIRED && !TARGET_OS_SIMULATOR
+#if TARGET_OS_IPHONE && !TARGET_OS_SIMULATOR
     // use .development cache if it exists
-    struct stat enableStatBuf;
+    if ( BootArgs::forceCustomerCache() ) {
+        // The boot-arg always wins.  Use the customer cache if we are told to
+        return;
+    }
+    if ( !dyld3::internalInstall() ) {
+        // We can't use the development cache on customer installs
+        return;
+    }
+    if ( BootArgs::forceDevelopmentCache() ) {
+        // The boot-arg always wins.  Use the development cache if we are told to
+        strlcat(pathBuffer, DYLD_SHARED_CACHE_DEVELOPMENT_EXT, pathBufferSize);
+        return;
+    }
+
+    // If only one or the other caches exists, then use the one we have
     struct stat devCacheStatBuf;
     struct stat optCacheStatBuf;
-    bool developmentDevice = dyld3::internalInstall();
-    bool enableFileExists = (dyld::my_stat(IPHONE_DYLD_SHARED_CACHE_DIR "enable-dylibs-to-override-cache", &enableStatBuf) == 0);
-    bool devCacheExists = (dyld::my_stat(IPHONE_DYLD_SHARED_CACHE_DIR DYLD_SHARED_CACHE_BASE_NAME ARCH_NAME DYLD_SHARED_CACHE_DEVELOPMENT_EXT, &devCacheStatBuf) == 0);
-    bool optCacheExists = (dyld::my_stat(IPHONE_DYLD_SHARED_CACHE_DIR DYLD_SHARED_CACHE_BASE_NAME ARCH_NAME, &optCacheStatBuf) == 0);
-    if ( !BootArgs::forceCustomerCache() && developmentDevice && ((enableFileExists && (enableStatBuf.st_size < ENABLE_DYLIBS_TO_OVERRIDE_CACHE_SIZE) && devCacheExists) || !optCacheExists) )
+    bool devCacheExists = (dyld3::stat(IPHONE_DYLD_SHARED_CACHE_DIR DYLD_SHARED_CACHE_BASE_NAME ARCH_NAME DYLD_SHARED_CACHE_DEVELOPMENT_EXT, &devCacheStatBuf) == 0);
+    bool optCacheExists = (dyld3::stat(IPHONE_DYLD_SHARED_CACHE_DIR DYLD_SHARED_CACHE_BASE_NAME ARCH_NAME, &optCacheStatBuf) == 0);
+    if ( !devCacheExists ) {
+        // If the dev cache doesn't exist, then use the customer cache
+        return;
+    }
+    if ( !optCacheExists ) {
+        // If the customer cache doesn't exist, then use the development cache
         strlcat(pathBuffer, DYLD_SHARED_CACHE_DEVELOPMENT_EXT, pathBufferSize);
+        return;
+    }
+
+    // Finally, check for the sentinels
+    struct stat enableStatBuf;
+    //struct stat sentinelStatBuf;
+    bool enableFileExists = (dyld3::stat(IPHONE_DYLD_SHARED_CACHE_DIR "enable-dylibs-to-override-cache", &enableStatBuf) == 0);
+    // FIXME: rdar://problem/59813537 Re-enable once automation is updated to use boot-arg
+    bool sentinelFileExists = false;
+    //bool sentinelFileExists = (dyld3::stat(MACOSX_MRM_DYLD_SHARED_CACHE_DIR "enable_development_mode", &sentinelStatBuf) == 0);
+    if ( enableFileExists && (enableStatBuf.st_size < ENABLE_DYLIBS_TO_OVERRIDE_CACHE_SIZE) ) {
+        // if the old enable file exists, use the development cache
+        strlcat(pathBuffer, DYLD_SHARED_CACHE_DEVELOPMENT_EXT, pathBufferSize);
+        return;
+    }
+    if ( sentinelFileExists ) {
+        // If the new sentinel exists, then use the development cache
+        strlcat(pathBuffer, DYLD_SHARED_CACHE_DEVELOPMENT_EXT, pathBufferSize);
+        return;
+    }
 #endif
 
+#endif //!TARGET_OS_OSX
 }
 
 
 int openSharedCacheFile(const SharedCacheOptions& options, SharedCacheLoadInfo* results)
 {
     getCachePath(options, sizeof(results->path), results->path);
-    return dyld::my_open(results->path, O_RDONLY, 0);
+    return dyld3::open(results->path, O_RDONLY, 0);
 }
 
 static bool validMagic(const SharedCacheOptions& options, const DyldSharedCache* cache)
@@ -258,15 +331,29 @@ static bool validPlatform(const SharedCacheOptions& options, const DyldSharedCac
 }
 
 #if !TARGET_OS_SIMULATOR
-static void verboseSharedCacheMappings(const shared_file_mapping_np mappings[3])
+static void verboseSharedCacheMappings(const shared_file_mapping_slide_np mappings[DyldSharedCache::MaxMappings],
+                                       uint32_t mappingsCount)
 {
-    for (int i=0; i < 3; ++i) {
-        dyld::log("        0x%08llX->0x%08llX init=%x, max=%x %s%s%s\n",
-            mappings[i].sfm_address, mappings[i].sfm_address+mappings[i].sfm_size-1,
-            mappings[i].sfm_init_prot, mappings[i].sfm_init_prot,
-            ((mappings[i].sfm_init_prot & VM_PROT_READ) ? "read " : ""),
-            ((mappings[i].sfm_init_prot & VM_PROT_WRITE) ? "write " : ""),
-            ((mappings[i].sfm_init_prot & VM_PROT_EXECUTE) ? "execute " : ""));
+    for (int i=0; i < mappingsCount; ++i) {
+        const char* mappingName = "";
+        if ( mappings[i].sms_init_prot & VM_PROT_WRITE ) {
+            if ( mappings[i].sms_init_prot & VM_PROT_NOAUTH ) {
+                // __DATA*
+                mappingName = "data";
+            } else {
+                // __AUTH*
+                mappingName = "auth";
+            }
+        }
+        uint32_t init_prot = mappings[i].sms_init_prot & (VM_PROT_READ | VM_PROT_WRITE | VM_PROT_EXECUTE);
+        uint32_t max_prot = mappings[i].sms_max_prot & (VM_PROT_READ | VM_PROT_WRITE | VM_PROT_EXECUTE);
+        dyld::log("        0x%08llX->0x%08llX init=%x, max=%x %s%s%s%s\n",
+            mappings[i].sms_address, mappings[i].sms_address+mappings[i].sms_size-1,
+            init_prot, max_prot,
+            ((mappings[i].sms_init_prot & VM_PROT_READ) ? "read " : ""),
+            ((mappings[i].sms_init_prot & VM_PROT_WRITE) ? "write " : ""),
+            ((mappings[i].sms_init_prot & VM_PROT_EXECUTE) ? "execute " : ""),
+            mappingName);
     }
 }
 #endif
@@ -282,7 +369,7 @@ static bool preflightCacheFile(const SharedCacheOptions& options, SharedCacheLoa
     }
 
     struct stat cacheStatBuf;
-    if ( dyld::my_stat(results->path, &cacheStatBuf) != 0 ) {
+    if ( dyld3::stat(results->path, &cacheStatBuf) != 0 ) {
         results->errorMessage = "shared cache file stat() failed";
         ::close(fd);
         return false;
@@ -307,39 +394,41 @@ static bool preflightCacheFile(const SharedCacheOptions& options, SharedCacheLoa
         ::close(fd);
         return false;
     }
-    if ( (cache->header.mappingCount != 3) || (cache->header.mappingOffset > 0x148) ) {
+    if ( (cache->header.mappingCount < 3) || (cache->header.mappingCount > DyldSharedCache::MaxMappings) || (cache->header.mappingOffset > 0x168) ) {
         results->errorMessage = "shared cache file mappings are invalid";
         ::close(fd);
         return false;
     }
     const dyld_cache_mapping_info* const fileMappings = (dyld_cache_mapping_info*)&firstPage[cache->header.mappingOffset];
-    if (  (fileMappings[0].fileOffset != 0)
-      || ((fileMappings[0].address + fileMappings[0].size) > fileMappings[1].address)
-      || ((fileMappings[1].address + fileMappings[1].size) > fileMappings[2].address)
-      || ((fileMappings[0].fileOffset + fileMappings[0].size) != fileMappings[1].fileOffset)
-      || ((fileMappings[1].fileOffset + fileMappings[1].size) != fileMappings[2].fileOffset)
+    const dyld_cache_mapping_info* textMapping = &fileMappings[0];
+    const dyld_cache_mapping_info* firstDataMapping = &fileMappings[1];
+    const dyld_cache_mapping_info* linkeditMapping = &fileMappings[cache->header.mappingCount - 1];
+    if (  (textMapping->fileOffset != 0)
+      || ((fileMappings[0].address + fileMappings[0].size) > firstDataMapping->address)
+      || ((fileMappings[0].fileOffset + fileMappings[0].size) != firstDataMapping->fileOffset)
       || ((cache->header.codeSignatureOffset + cache->header.codeSignatureSize) != cacheFileLength)
-      || (fileMappings[0].maxProt != (VM_PROT_READ|VM_PROT_EXECUTE))
-      || (fileMappings[1].maxProt != (VM_PROT_READ|VM_PROT_WRITE))
-      || (fileMappings[2].maxProt != VM_PROT_READ) ) {
-        results->errorMessage = "shared cache file mappings are invalid";
+      || (textMapping->maxProt != (VM_PROT_READ|VM_PROT_EXECUTE))
+      || (linkeditMapping->maxProt != VM_PROT_READ) ) {
+        results->errorMessage = "shared cache text/linkedit mappings are invalid";
         ::close(fd);
         return false;
     }
 
-    if ( cache->header.mappingOffset >= 0xF8 ) {
-        if ( (fileMappings[0].address != cache->header.sharedRegionStart) || ((fileMappings[2].address + fileMappings[2].size) > (cache->header.sharedRegionStart+cache->header.sharedRegionSize)) ) {
-            results->errorMessage = "shared cache file mapping addressses invalid";
+    // Check the __DATA mappings
+    for (unsigned i = 1; i != (cache->header.mappingCount - 1); ++i) {
+        if ( ((fileMappings[i].address + fileMappings[i].size) > fileMappings[i + 1].address)
+          || ((fileMappings[i].fileOffset + fileMappings[i].size) != fileMappings[i + 1].fileOffset)
+          || (fileMappings[i].maxProt != (VM_PROT_READ|VM_PROT_WRITE)) ) {
+            results->errorMessage = "shared cache data mappings are invalid";
             ::close(fd);
             return false;
         }
     }
-    else {
-        if ( (fileMappings[0].address != SHARED_REGION_BASE) || ((fileMappings[2].address + fileMappings[2].size) > (SHARED_REGION_BASE+SHARED_REGION_SIZE)) ) {
-            results->errorMessage = "shared cache file mapping addressses invalid";
-            ::close(fd);
-            return false;
-        }
+
+    if ( (textMapping->address != cache->header.sharedRegionStart) || ((linkeditMapping->address + linkeditMapping->size) > (cache->header.sharedRegionStart+cache->header.sharedRegionSize)) ) {
+        results->errorMessage = "shared cache file mapping addressses invalid";
+        ::close(fd);
+        return false;
     }
 
     // register code signature of cache file
@@ -375,28 +464,52 @@ static bool preflightCacheFile(const SharedCacheOptions& options, SharedCacheLoa
     ::munmap(mappedData, sizeof(firstPage));
 
     // fill out results
-    info->fd = fd;
-    for (int i=0; i < 3; ++i) {
-        info->mappings[i].sfm_address       = fileMappings[i].address;
-        info->mappings[i].sfm_size          = fileMappings[i].size;
-        info->mappings[i].sfm_file_offset   = fileMappings[i].fileOffset;
-        info->mappings[i].sfm_max_prot      = fileMappings[i].maxProt;
-        info->mappings[i].sfm_init_prot     = fileMappings[i].initProt;
+    info->mappingsCount = cache->header.mappingCount;
+    // We have to emit the mapping for the __LINKEDIT before the slid mappings
+    // This is so that the kernel has already mapped __LINKEDIT in to its address space
+    // for when it copies the slid info for each __DATA mapping
+    for (int i=0; i < cache->header.mappingCount; ++i) {
+        uint64_t    slideInfoFileOffset = 0;
+        uint64_t    slideInfoFileSize   = 0;
+        vm_prot_t   authProt            = 0;
+        if ( cache->header.mappingOffset <= __offsetof(dyld_cache_header, mappingWithSlideOffset) ) {
+            // Old cache without the new slid mappings
+            if ( i == 1 ) {
+                // Add slide info to the __DATA mapping
+                slideInfoFileOffset = cache->header.slideInfoOffsetUnused;
+                slideInfoFileSize   = cache->header.slideInfoSizeUnused;
+                // Don't set auth prot to anything interseting on the old mapppings
+                authProt = 0;
+            }
+        } else {
+            // New cache where each mapping has a corresponding slid mapping
+            const dyld_cache_mapping_and_slide_info* slidableMappings = (const dyld_cache_mapping_and_slide_info*)&firstPage[cache->header.mappingWithSlideOffset];
+            slideInfoFileOffset = slidableMappings[i].slideInfoFileOffset;
+            slideInfoFileSize   = slidableMappings[i].slideInfoFileSize;
+            if ( (slidableMappings[i].flags & DYLD_CACHE_MAPPING_AUTH_DATA) == 0 )
+                authProt = VM_PROT_NOAUTH;
+        }
+
+        // Add a file for each mapping
+        info->fd                        = fd;
+        info->mappings[i].sms_address               = fileMappings[i].address;
+        info->mappings[i].sms_size                  = fileMappings[i].size;
+        info->mappings[i].sms_file_offset           = fileMappings[i].fileOffset;
+        info->mappings[i].sms_slide_size            = 0;
+        info->mappings[i].sms_slide_start           = 0;
+        info->mappings[i].sms_max_prot              = fileMappings[i].maxProt;
+        info->mappings[i].sms_init_prot             = fileMappings[i].initProt;
+        if ( slideInfoFileSize != 0 ) {
+            uint64_t offsetInLinkEditRegion = (slideInfoFileOffset - linkeditMapping->fileOffset);
+            info->mappings[i].sms_slide_start   = (user_addr_t)(linkeditMapping->address + offsetInLinkEditRegion);
+            info->mappings[i].sms_slide_size    = (user_addr_t)slideInfoFileSize;
+            info->mappings[i].sms_init_prot    |= (VM_PROT_SLIDE | authProt);
+            info->mappings[i].sms_max_prot     |= (VM_PROT_SLIDE | authProt);
+        }
     }
-    info->mappings[1].sfm_max_prot  |= VM_PROT_SLIDE;
-    info->mappings[1].sfm_init_prot |= VM_PROT_SLIDE;
-    info->slideInfoAddressUnslid  = fileMappings[2].address + cache->header.slideInfoOffset - fileMappings[2].fileOffset;
-    info->slideInfoSize           = (long)cache->header.slideInfoSize;
-    if ( cache->header.mappingOffset >= 0xf8 ) {
-        info->sharedRegionStart = cache->header.sharedRegionStart;
-        info->sharedRegionSize  = cache->header.sharedRegionSize;
-        info->maxSlide          = cache->header.maxSlide;
-    }
-    else {
-        info->sharedRegionStart = SHARED_REGION_BASE;
-        info->sharedRegionSize  = SHARED_REGION_SIZE;
-        info->maxSlide          = SHARED_REGION_SIZE - (fileMappings[2].address + fileMappings[2].size - fileMappings[0].address);
-    }
+    info->sharedRegionStart = cache->header.sharedRegionStart;
+    info->sharedRegionSize  = cache->header.sharedRegionSize;
+    info->maxSlide          = cache->header.maxSlide;
     return true;
 }
 
@@ -404,14 +517,10 @@ static bool preflightCacheFile(const SharedCacheOptions& options, SharedCacheLoa
 #if !TARGET_OS_SIMULATOR
 
 // update all __DATA pages with slide info
-static bool rebaseDataPages(bool isVerbose, CacheInfo& info, SharedCacheLoadInfo* results)
+static bool rebaseDataPages(bool isVerbose, const dyld_cache_slide_info* slideInfo, const uint8_t *dataPagesStart,
+                            uint64_t sharedRegionStart, SharedCacheLoadInfo* results)
 {
-    uint64_t dataPagesStart = info.mappings[1].sfm_address;
-    const dyld_cache_slide_info* slideInfo = nullptr;
-    if ( info.slideInfoSize != 0 ) {
-        slideInfo = (dyld_cache_slide_info*)(info.slideInfoAddressUnslid + results->slide);
-    }
-    const dyld_cache_slide_info* slideInfoHeader = (dyld_cache_slide_info*)slideInfo;
+    const dyld_cache_slide_info* slideInfoHeader = slideInfo;
     if ( slideInfoHeader != nullptr ) {
         if ( slideInfoHeader->version == 2 ) {
             const dyld_cache_slide_info2* slideHeader = (dyld_cache_slide_info2*)slideInfo;
@@ -450,6 +559,7 @@ static bool rebaseDataPages(bool isVerbose, CacheInfo& info, SharedCacheLoadInfo
              for (int i=0; i < slideHeader->page_starts_count; ++i) {
                  uint8_t* page = (uint8_t*)(dataPagesStart + (pageSize*i));
                  uint64_t delta = slideHeader->page_starts[i];
+                 //dyld::log("page[%d]: page_starts[i]=0x%04X\n", i, delta);
                  if ( delta == DYLD_CACHE_SLIDE_V3_PAGE_ATTR_NO_REBASE )
                      continue;
                  delta = delta/sizeof(uint64_t); // initial offset is byte based
@@ -459,7 +569,7 @@ static bool rebaseDataPages(bool isVerbose, CacheInfo& info, SharedCacheLoadInfo
                      delta = loc->plain.offsetToNextPointer;
                      if ( loc->auth.authenticated ) {
 #if __has_feature(ptrauth_calls)
-                        uint64_t target = info.sharedRegionStart + loc->auth.offsetFromSharedCacheBase + results->slide;
+                        uint64_t target = sharedRegionStart + loc->auth.offsetFromSharedCacheBase + results->slide;
                         MachOLoaded::ChainedFixupPointerOnDisk ptr;
                         ptr.raw64 = *((uint64_t*)loc);
                         loc->raw = ptr.arm64e.signPointer(loc, target);
@@ -534,12 +644,26 @@ static bool reuseExistingCache(const SharedCacheOptions& options, SharedCacheLoa
             if ( options.verbose ) {
                 const shared_file_mapping_np* const mappings = (shared_file_mapping_np*)(cacheBaseAddress + existingCache->header.mappingOffset);
                 dyld::log("re-using existing shared cache (%s):\n", results->path);
-                shared_file_mapping_np slidMappings[3];
-                for (int i=0; i < 3; ++i) {
-                    slidMappings[i] = mappings[i];
-                    slidMappings[i].sfm_address += results->slide;
+                shared_file_mapping_slide_np slidMappings[DyldSharedCache::MaxMappings];
+                for (int i=0; i < DyldSharedCache::MaxMappings; ++i) {
+                    slidMappings[i].sms_address = mappings[i].sfm_address;
+                    slidMappings[i].sms_size = mappings[i].sfm_size;
+                    slidMappings[i].sms_file_offset = mappings[i].sfm_file_offset;
+                    slidMappings[i].sms_max_prot = mappings[i].sfm_max_prot;
+                    slidMappings[i].sms_init_prot = mappings[i].sfm_init_prot;
+
+                    slidMappings[i].sms_address += results->slide;
+                    if ( existingCache->header.mappingOffset > __offsetof(dyld_cache_header, mappingWithSlideOffset) ) {
+                        // New caches have slide info on each new mapping
+                        const dyld_cache_mapping_and_slide_info* const slidableMappings = (dyld_cache_mapping_and_slide_info*)(cacheBaseAddress + existingCache->header.mappingWithSlideOffset);
+                        assert(existingCache->header.mappingWithSlideCount <= DyldSharedCache::MaxMappings);
+                        if ( !(slidableMappings[i].flags & DYLD_CACHE_MAPPING_AUTH_DATA) ) {
+                            slidMappings[i].sms_max_prot  |= VM_PROT_NOAUTH;
+                            slidMappings[i].sms_init_prot |= VM_PROT_NOAUTH;
+                        }
+                    }
                 }
-                verboseSharedCacheMappings(slidMappings);
+                verboseSharedCacheMappings(slidMappings, existingCache->header.mappingCount);
             }
         }
         else {
@@ -550,24 +674,28 @@ static bool reuseExistingCache(const SharedCacheOptions& options, SharedCacheLoa
     return false;
 }
 
-static long pickCacheASLR(CacheInfo& info)
+static long pickCacheASLRSlide(CacheInfo& info)
 {
     // choose new random slide
-#if __IPHONE_OS_VERSION_MIN_REQUIRED
+#if TARGET_OS_IPHONE || (TARGET_OS_OSX && TARGET_CPU_ARM64)
     // <rdar://problem/20848977> change shared cache slide for 32-bit arm to always be 16k aligned
-    long slide = ((arc4random() % info.maxSlide) & (-16384));
-#else
-    long slide = ((arc4random() % info.maxSlide) & (-4096));
-#endif
-
-    // <rdar://problem/32031197> respect -disable_aslr boot-arg
-    if ( BootArgs::contains("-disable_aslr") )
+    long slide;
+    if (info.maxSlide == 0)
         slide = 0;
-
-    // update mappings
-    for (uint32_t i=0; i < 3; ++i) {
-        info.mappings[i].sfm_address += slide;
+    else
+        slide = ((arc4random() % info.maxSlide) & (-16384));
+#else
+    long slide;
+    if (info.maxSlide == 0)
+        slide = 0;
+    else
+        slide = ((arc4random() % info.maxSlide) & (-4096));
+#if defined(__x86_64__) && !TARGET_OS_SIMULATOR
+    if (dyld::isTranslated()) {
+        slide &= (-16384);
     }
+#endif
+#endif
     
     return slide;
 }
@@ -578,16 +706,56 @@ static bool mapCacheSystemWide(const SharedCacheOptions& options, SharedCacheLoa
     if ( !preflightCacheFile(options, results, &info) )
         return false;
 
-    const dyld_cache_slide_info2* slideInfo = nullptr;
-    if ( info.slideInfoSize != 0 ) {
-        results->slide = pickCacheASLR(info);
-        slideInfo = (dyld_cache_slide_info2*)(info.slideInfoAddressUnslid + results->slide);
+    int result = 0;
+    if ( info.mappingsCount != 3 ) {
+        uint32_t maxSlide = options.disableASLR ? 0 : (uint32_t)info.maxSlide;
+
+        shared_file_np file;
+        file.sf_fd = info.fd;
+        file.sf_mappings_count = info.mappingsCount;
+        // For the new syscall, this is actually the max slide.  The kernel now owns the actual slide
+        file.sf_slide = maxSlide;
+        result = __shared_region_map_and_slide_2_np(1, &file, info.mappingsCount, info.mappings);
+    } else {
+        // With the old syscall, dyld has to choose the slide
+        results->slide = options.disableASLR ? 0 : pickCacheASLRSlide(info);
+
+        // update mappings based on the slide we choose
+        for (uint32_t i=0; i < info.mappingsCount; ++i) {
+            info.mappings[i].sms_address += results->slide;
+            if ( info.mappings[i].sms_slide_size != 0 )
+                info.mappings[i].sms_slide_start += (uint32_t)results->slide;
+        }
+
+        // If we get here then we don't have the new kernel function, so use the old one
+        const dyld_cache_slide_info2*   slideInfo       = nullptr;
+        size_t                          slideInfoSize   = 0;
+        shared_file_mapping_np mappings[3];
+        for (unsigned i = 0; i != 3; ++i) {
+            mappings[i].sfm_address         = info.mappings[i].sms_address;
+            mappings[i].sfm_size            = info.mappings[i].sms_size;
+            mappings[i].sfm_file_offset     = info.mappings[i].sms_file_offset;
+            mappings[i].sfm_max_prot        = info.mappings[i].sms_max_prot;
+            mappings[i].sfm_init_prot       = info.mappings[i].sms_init_prot;
+            if ( info.mappings[i].sms_slide_size != 0 ) {
+                slideInfo       = (dyld_cache_slide_info2*)info.mappings[i].sms_slide_start;
+                slideInfoSize   = (size_t)info.mappings[i].sms_slide_size;
+            }
+        }
+        result = __shared_region_map_and_slide_np(info.fd, 3, mappings, results->slide, slideInfo, slideInfoSize);
     }
 
-    int result = __shared_region_map_and_slide_np(info.fd, 3, info.mappings, results->slide, slideInfo, info.slideInfoSize);
     ::close(info.fd);
     if ( result == 0 ) {
-        results->loadAddress = (const DyldSharedCache*)(info.mappings[0].sfm_address);
+        results->loadAddress = (const DyldSharedCache*)(info.mappings[0].sms_address);
+        if ( info.mappingsCount != 3 ) {
+            // We don't know our own slide any more as the kernel owns it, so ask for it again now
+            if ( reuseExistingCache(options, results) )
+                return true;
+            // Uh oh, we mapped the kernel, but we didn't find the slide
+            dyld::logToConsole("dyld: error finding shared cache slide for system wide mapping\n");
+            return false;
+        }
     }
     else {
         // could be another process beat us to it
@@ -601,7 +769,7 @@ static bool mapCacheSystemWide(const SharedCacheOptions& options, SharedCacheLoa
 
     if ( options.verbose ) {
         dyld::log("mapped dyld cache file system wide: %s\n", results->path);
-        verboseSharedCacheMappings(info.mappings);
+        verboseSharedCacheMappings(info.mappings, info.mappingsCount);
     }
     return true;
 }
@@ -616,12 +784,18 @@ static bool mapCachePrivate(const SharedCacheOptions& options, SharedCacheLoadIn
 
     // compute ALSR slide
     results->slide = 0;
-#if !TARGET_OS_SIMULATOR // simulator caches do not support sliding
-    if ( info.slideInfoSize != 0 ) {
-        results->slide = pickCacheASLR(info);
-    }
+#if !TARGET_OS_SIMULATOR
+    results->slide = options.disableASLR ? 0 : pickCacheASLRSlide(info);
 #endif
-    results->loadAddress = (const DyldSharedCache*)(info.mappings[0].sfm_address);
+
+    // update mappings
+    for (uint32_t i=0; i < info.mappingsCount; ++i) {
+        info.mappings[i].sms_address += (uint32_t)results->slide;
+        if ( info.mappings[i].sms_slide_size != 0 )
+            info.mappings[i].sms_slide_start += (uint32_t)results->slide;
+    }
+
+    results->loadAddress = (const DyldSharedCache*)(info.mappings[0].sms_address);
 
     // deallocate any existing system wide shared cache
     deallocateExistingSharedCache();
@@ -634,18 +808,18 @@ static bool mapCachePrivate(const SharedCacheOptions& options, SharedCacheLoadIn
 #endif
 
     // map cache just for this process with mmap()
-    for (int i=0; i < 3; ++i) {
-        void* mmapAddress = (void*)(uintptr_t)(info.mappings[i].sfm_address);
-        size_t size = (size_t)(info.mappings[i].sfm_size);
+    for (int i=0; i < info.mappingsCount; ++i) {
+        void* mmapAddress = (void*)(uintptr_t)(info.mappings[i].sms_address);
+        size_t size = (size_t)(info.mappings[i].sms_size);
         //dyld::log("dyld: mapping address %p with size 0x%08lX\n", mmapAddress, size);
         int protection = 0;
-        if ( info.mappings[i].sfm_init_prot & VM_PROT_EXECUTE )
+        if ( info.mappings[i].sms_init_prot & VM_PROT_EXECUTE )
             protection   |= PROT_EXEC;
-        if ( info.mappings[i].sfm_init_prot & VM_PROT_READ )
+        if ( info.mappings[i].sms_init_prot & VM_PROT_READ )
             protection   |= PROT_READ;
-        if ( info.mappings[i].sfm_init_prot & VM_PROT_WRITE )
+        if ( info.mappings[i].sms_init_prot & VM_PROT_WRITE )
             protection   |= PROT_WRITE;
-        off_t offset = info.mappings[i].sfm_file_offset;
+        off_t offset = info.mappings[i].sms_file_offset;
         if ( ::mmap(mmapAddress, size, protection, MAP_FIXED | MAP_PRIVATE, info.fd, offset) != mmapAddress ) {
             // failed to map some chunk of this shared cache file
             // clear shared region
@@ -662,11 +836,18 @@ static bool mapCachePrivate(const SharedCacheOptions& options, SharedCacheLoadIn
 #if TARGET_OS_SIMULATOR // simulator caches do not support sliding
     return true;
 #else
-    bool success = rebaseDataPages(options.verbose, info, results);
+    __block bool success = true;
+    for (int i=0; i < info.mappingsCount; ++i) {
+        if ( info.mappings[i].sms_slide_size == 0 )
+            continue;
+        const dyld_cache_slide_info* slideInfoHeader = (const dyld_cache_slide_info*)info.mappings[i].sms_slide_start;
+        const uint8_t* mappingPagesStart = (const uint8_t*)info.mappings[i].sms_address;
+        success &= rebaseDataPages(options.verbose, slideInfoHeader, mappingPagesStart, info.sharedRegionStart, results);
+    }
 
     if ( options.verbose ) {
         dyld::log("mapped dyld cache file private to process (%s):\n", results->path);
-        verboseSharedCacheMappings(info.mappings);
+        verboseSharedCacheMappings(info.mappings, info.mappingsCount);
     }
     return success;
 #endif
@@ -710,7 +891,7 @@ bool findInSharedCacheImage(const SharedCacheLoadInfo& loadInfo, const char* dyl
 
     if ( loadInfo.loadAddress->header.formatVersion != dyld3::closure::kFormatVersion ) {
         // support for older cache with a different Image* format
-#if __IPHONE_OS_VERSION_MIN_REQUIRED
+#if TARGET_OS_IPHONE
         uint64_t hash = 0;
         for (const char* s=dylibPathToFind; *s != '\0'; ++s)
                 hash += hash*4 + *s;
@@ -718,7 +899,7 @@ bool findInSharedCacheImage(const SharedCacheLoadInfo& loadInfo, const char* dyl
         const dyld_cache_image_info* const start = (dyld_cache_image_info*)((uint8_t*)loadInfo.loadAddress + loadInfo.loadAddress->header.imagesOffset);
         const dyld_cache_image_info* const end = &start[loadInfo.loadAddress->header.imagesCount];
         for (const dyld_cache_image_info* p = start; p != end; ++p) {
-#if __IPHONE_OS_VERSION_MIN_REQUIRED
+#if TARGET_OS_IPHONE
             // on iOS, inode is used to hold hash of path
             if ( (p->modTime == 0) && (p->inode != hash) )
                 continue;
@@ -741,34 +922,7 @@ bool findInSharedCacheImage(const SharedCacheLoadInfo& loadInfo, const char* dyl
     if ( loadInfo.loadAddress->hasImagePath(dylibPathToFind, imageIndex) ) {
         results->image = images->imageForNum(imageIndex+1);
     }
- #if __MAC_OS_X_VERSION_MIN_REQUIRED
-    else {
-        // <rdar://problem/32740215> handle symlink to cached dylib
-        if ( loadInfo.loadAddress->header.dylibsExpectedOnDisk ) {
-            struct stat statBuf;
-            if ( dyld::my_stat(dylibPathToFind, &statBuf) == 0 ) {
-                // on macOS we store the inode and mtime of each dylib in the cache in the dyld_cache_image_info array
-                const dyld_cache_image_info* const start = (dyld_cache_image_info*)((uint8_t*)loadInfo.loadAddress + loadInfo.loadAddress->header.imagesOffset);
-                const dyld_cache_image_info* const end = &start[loadInfo.loadAddress->header.imagesCount];
-                for (const dyld_cache_image_info* p = start; p != end; ++p) {
-                    if ( (p->inode == statBuf.st_ino) && (p->modTime == statBuf.st_mtime) ) {
-                        imageIndex = (uint32_t)(p - start);
-                        results->image = images->imageForNum(imageIndex+1);
-                        break;
-                    }
-                }
-            }
-        }
-        else {
-            char resolvedPath[PATH_MAX];
-            if ( realpath(dylibPathToFind, resolvedPath) != nullptr ) {
-                if ( loadInfo.loadAddress->hasImagePath(resolvedPath, imageIndex) ) {
-                    results->image = images->imageForNum(imageIndex+1);
-                }
-            }
-        }
-    }
-#endif
+
     if ( results->image == nullptr )
         return false;
 
@@ -793,7 +947,7 @@ void deallocateExistingSharedCache()
 #if TARGET_OS_SIMULATOR
     // dyld deallocated macOS shared cache before jumping into dyld_sim
 #else
-    // <rdar://problem/5077374> remove the shared region sub-map
+    // <rdar://problem/50773474> remove the shared region sub-map
     uint64_t existingCacheAddress = 0;
     if ( __shared_region_check_np(&existingCacheAddress) == 0 ) {
         ::mmap((void*)((long)SHARED_REGION_BASE), SHARED_REGION_SIZE, PROT_NONE, MAP_FIXED | MAP_PRIVATE| MAP_ANON, 0, 0);

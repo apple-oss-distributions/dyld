@@ -55,8 +55,8 @@ static void inspectProcess(task_t task, bool launchedSuspended, bool expectCF, b
         if (remotePlatform != 0)  {
             FAIL("_dyld_process_info_get_platform() should be 0 for launchSuspended processes");
         }
-    } else if (forceIOSMac && (remotePlatform != PLATFORM_IOSMAC)) {
-        FAIL("_dyld_process_info_get_platform(%u) should be PLATFORM_IOSMAC", remotePlatform);
+    } else if (forceIOSMac && (remotePlatform != PLATFORM_MACCATALYST)) {
+        FAIL("_dyld_process_info_get_platform(%u) should be PLATFORM_MACCATALYST", remotePlatform);
     } else if (!forceIOSMac && (remotePlatform != localPlatform)) {
         FAIL("_dyld_process_info_get_platform(%u) should be the same dyld_get_active_platform(%u)",
              remotePlatform, localPlatform);

@@ -48,6 +48,27 @@ private:
     bool suspended;
     bool async;
 };
+
+#define STDERR_WRITER ^(int fd) {           \
+    char buffer[16384];                     \
+    ssize_t size = 0;                       \
+    do {                                    \
+        size = read(fd, &buffer[0], 16384); \
+        buffer[size] = 0;                   \
+        fprintf(stderr, "%s", &buffer[0]);  \
+    } while (size > 0);                     \
+}
+
+#define STDOUT_WRITER ^(int fd) {           \
+    char buffer[16384];                     \
+    ssize_t size = 0;                       \
+    do {                                    \
+        size = read(fd, &buffer[0], 16384); \
+        buffer[size] = 0;                   \
+        fprintf(stdout, "%s", &buffer[0]);  \
+    } while (size > 0);                     \
+}
+
 #endif /* __cplusplus */
 
 #define PASS(...)           _PASS(__FILE__,__LINE__,__VA_ARGS__)

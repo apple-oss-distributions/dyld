@@ -10,6 +10,16 @@ Example, main.c may contain:
     // RUN:  ./example.exe
     int main() { return 0; }
 
+It is possible to restrict build and run lines to specific platforms using the BUILD(): syntax, for example
+
+    // BUILD(macos):    $CC main.c  -o $BUILD_DIR/example.exe
+    // BUILD(ios):      $CC main.c -DIOS=1 -o $BUILD_DIR/example.exe
+    // RUN(ios,macos):  ./example.exe
+    int main() { return 0; }
+
+will build example.exe with distinct options for macOS and iOS, and will invoke example.exe on both macOS and iOS (but not tvOS,
+watchOS, or bridgeOS). Valid platforms are "macos", ios", tvos", "watchos", "bridgeos".
+
 When build lines are executed, the current directory is set to the test case's .dtest dir.
 Build lines may contain the follow variables:
     $BUILD_DIR    - expands to the directory in $DSTROOT where this test case binaries are installed
@@ -39,12 +49,6 @@ PASS() and FAIL() will take care of appropriately formatting the messages for th
 run in. LOG() will capture messages in a per image queue. By default these logs are emitted if a test fails, and they are
 ignored if a test succeeds. While debugging tests logs can be emitted even during success by setting the LOG_ON_SUCCESS
 environment variable. This allows us to leave logging statements in production dyld_tests.Fdtra
-
-To support tests that are platform specific, add the BUILD_ONLY: line which specifies the platform.
-Valid platforms are: MacOSX, iOS, watchOS, and tvOS.  When a specific platform is specified, a
-new min OS version can also be specified via the BUILD_MIN_OS option.  For instance:
-    // BUILD_ONLY: MacOSX
-    // BUILD_MIN_OS: 10.5
 
 Note, to run the tests as root, you need to first set "defaults write com.apple.dt.Xcode EnableRootTesting YES",
 and then check the "Debug process as root" box in the Test scheme on the ContainerizedTestRunner scheme.

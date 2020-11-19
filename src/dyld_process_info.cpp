@@ -104,11 +104,11 @@ RemoteBuffer::map(task_t task, mach_vm_address_t remote_address, vm_size_t size,
     if (!shared) {
         void* buffer = malloc(size);
         if (buffer == nullptr) {
-            (void)vm_deallocate(mach_task_self(), localAddress, size);
-            return std::make_pair(MACH_VM_MIN_ADDRESS, kr);
+            (void)vm_deallocate(mach_task_self(), (vm_address_t)localAddress, size);
+            return std::make_pair(MACH_VM_MIN_ADDRESS, KERN_NO_SPACE);
         }
         memcpy(buffer, (void *)localAddress, size);
-        (void)vm_deallocate(mach_task_self(), localAddress, size);
+        (void)vm_deallocate(mach_task_self(), (vm_address_t)localAddress, size);
         return std::make_pair((vm_address_t)buffer, KERN_SUCCESS);
     }
     // A shared buffer was requested, if the permissions are not correct deallocate the region and return failure
@@ -195,13 +195,15 @@ struct __attribute__((visibility("hidden"))) dyld_process_info_base {
     template<typename T>
     static dyld_process_info_ptr makeSuspended(task_t task, const T& allImageInfo, kern_return_t* kr);
 
-    std::atomic<uint32_t>&      retainCount() const { return _retainCount; }
-    dyld_process_cache_info*    cacheInfo() const { return (dyld_process_cache_info*)(((char*)this) + _cacheInfoOffset); }
-    dyld_process_state_info*    stateInfo() const { return (dyld_process_state_info*)(((char*)this) + _stateInfoOffset); }
-    dyld_platform_t             platform() const { return _platform; }
+    std::atomic<uint32_t>&       retainCount() const { return _retainCount; }
+    dyld_process_cache_info*     cacheInfo() const { return (dyld_process_cache_info*)(((char*)this) + _cacheInfoOffset); }
+    dyld_process_aot_cache_info* aotCacheInfo() const { return (dyld_process_aot_cache_info*)(((char*)this) + _aotCacheInfoOffset); }
+    dyld_process_state_info*     stateInfo() const { return (dyld_process_state_info*)(((char*)this) + _stateInfoOffset); }
+    dyld_platform_t              platform() const { return _platform; }
 
-    void                        forEachImage(void (^callback)(uint64_t machHeaderAddress, const uuid_t uuid, const char* path)) const;
-    void                        forEachSegment(uint64_t machHeaderAddress, void (^callback)(uint64_t segmentAddress, uint64_t segmentSize, const char* segmentName)) const;
+    void                         forEachImage(void (^callback)(uint64_t machHeaderAddress, const uuid_t uuid, const char* path)) const;
+    void                         forEachAotImage(bool (^callback)(uint64_t x86Address, uint64_t aotAddress, uint64_t aotSize, uint8_t* aotImageKey, size_t aotImageKeySize)) const;
+    void                         forEachSegment(uint64_t machHeaderAddress, void (^callback)(uint64_t segmentAddress, uint64_t segmentSize, const char* segmentName)) const;
 
     bool reserveSpace(size_t space) {
         if (_freeSpace < space) { return false; }
@@ -238,11 +240,13 @@ private:
         uint64_t                size;
     };
 
-                                dyld_process_info_base(dyld_platform_t platform, unsigned imageCount, size_t totalSize);
+                                dyld_process_info_base(dyld_platform_t platform, unsigned imageCount, unsigned aotImageCount, size_t totalSize);
     void*                       operator new (size_t, void* buf) { return buf; }
 
     static bool                 inCache(uint64_t addr) { return (addr > SHARED_REGION_BASE) && (addr < SHARED_REGION_BASE+SHARED_REGION_SIZE); }
     bool                        addImage(task_t task, bool sameCacheAsThisProcess, uint64_t imageAddress, uint64_t imagePath, const char* imagePathLocal);
+
+    bool                        addAotImage(dyld_aot_image_info_64 aotImageInfo);
 
     kern_return_t               addDyldImage(task_t task, uint64_t dyldAddress, uint64_t dyldPathAddress, const char* localPath);
 
@@ -259,13 +263,17 @@ private:
 
     mutable std::atomic<uint32_t>            _retainCount;
     const uint32_t              _cacheInfoOffset;
+    const uint32_t              _aotCacheInfoOffset;
     const uint32_t              _stateInfoOffset;
     const uint32_t              _imageInfosOffset;
+    const uint32_t              _aotImageInfosOffset;
     const uint32_t              _segmentInfosOffset;
     size_t                      _freeSpace;
     dyld_platform_t             _platform;
     ImageInfo* const            _firstImage;
     ImageInfo*                  _curImage;
+    dyld_aot_image_info_64* const            _firstAotImage;
+    dyld_aot_image_info_64*                  _curAotImage;
     SegmentInfo* const          _firstSegment;
     SegmentInfo*                _curSegment;
     uint32_t                    _curSegmentIndex;
@@ -278,14 +286,18 @@ private:
     // char                     stringPool[]
 };
 
-dyld_process_info_base::dyld_process_info_base(dyld_platform_t platform, unsigned imageCount, size_t totalSize)
+dyld_process_info_base::dyld_process_info_base(dyld_platform_t platform, unsigned imageCount, unsigned aotImageCount, size_t totalSize)
  :  _retainCount(1), _cacheInfoOffset(sizeof(dyld_process_info_base)),
-    _stateInfoOffset(sizeof(dyld_process_info_base) + sizeof(dyld_process_cache_info)),
-    _imageInfosOffset(sizeof(dyld_process_info_base) + sizeof(dyld_process_cache_info) + sizeof(dyld_process_state_info)),
-    _segmentInfosOffset(sizeof(dyld_process_info_base) + sizeof(dyld_process_cache_info) + sizeof(dyld_process_state_info) + imageCount*sizeof(ImageInfo)),
+    _aotCacheInfoOffset(sizeof(dyld_process_info_base) + sizeof(dyld_process_cache_info)),
+    _stateInfoOffset(sizeof(dyld_process_info_base) + sizeof(dyld_process_cache_info) + sizeof(dyld_process_aot_cache_info)),
+    _imageInfosOffset(sizeof(dyld_process_info_base) + sizeof(dyld_process_cache_info) + sizeof(dyld_process_aot_cache_info) + sizeof(dyld_process_state_info)),
+    _aotImageInfosOffset(sizeof(dyld_process_info_base) + sizeof(dyld_process_cache_info) + sizeof(dyld_process_aot_cache_info) + sizeof(dyld_process_state_info) + imageCount*sizeof(ImageInfo)),
+    _segmentInfosOffset(sizeof(dyld_process_info_base) + sizeof(dyld_process_cache_info) + sizeof(dyld_process_aot_cache_info) + sizeof(dyld_process_state_info) + imageCount*sizeof(ImageInfo) + aotImageCount*sizeof(dyld_aot_image_info_64)),
     _freeSpace(totalSize), _platform(platform),
     _firstImage((ImageInfo*)(((uint8_t*)this) + _imageInfosOffset)),
     _curImage((ImageInfo*)(((uint8_t*)this) + _imageInfosOffset)),
+    _firstAotImage((dyld_aot_image_info_64*)(((uint8_t*)this) + _aotImageInfosOffset)),
+    _curAotImage((dyld_aot_image_info_64*)(((uint8_t*)this) + _aotImageInfosOffset)),
     _firstSegment((SegmentInfo*)(((uint8_t*)this) + _segmentInfosOffset)),
     _curSegment((SegmentInfo*)(((uint8_t*)this) + _segmentInfosOffset)),
     _curSegmentIndex(0),
@@ -377,9 +389,11 @@ dyld_process_info_ptr dyld_process_info_base::make(task_t task, const T1& allIma
             // allocate result object
             size_t allocationSize = sizeof(dyld_process_info_base)
                                         + sizeof(dyld_process_cache_info)
+                                        + sizeof(dyld_process_aot_cache_info)
                                         + sizeof(dyld_process_state_info)
                                         + sizeof(ImageInfo)*(imageCountWithDyld)
-                                        + sizeof(SegmentInfo)*imageCountWithDyld*5
+                                        + sizeof(dyld_aot_image_info_64)*(allImageInfo.aotInfoCount) // add the size necessary for aot info to this buffer
+                                        + sizeof(SegmentInfo)*imageCountWithDyld*10
                                         + countOfPathsNeedingCopying*PATH_MAX;
             void* storage = malloc(allocationSize);
             if (storage == nullptr) {
@@ -387,8 +401,9 @@ dyld_process_info_ptr dyld_process_info_base::make(task_t task, const T1& allIma
                 result = nullptr;
                 return;
             }
-            auto info = dyld_process_info_ptr(new (storage) dyld_process_info_base(allImageInfo.platform, imageCountWithDyld, allocationSize), deleter);
-            (void)info->reserveSpace(sizeof(dyld_process_info_base)+sizeof(dyld_process_cache_info)+sizeof(dyld_process_state_info));
+            auto info = dyld_process_info_ptr(new (storage) dyld_process_info_base(allImageInfo.platform, imageCountWithDyld, allImageInfo.aotInfoCount, allocationSize), deleter);
+            (void)info->reserveSpace(sizeof(dyld_process_info_base)+sizeof(dyld_process_cache_info)+sizeof(dyld_process_state_info)+sizeof(dyld_process_aot_cache_info));
+            (void)info->reserveSpace(sizeof(ImageInfo)*imageCountWithDyld);
 
             // fill in base info
             dyld_process_cache_info* cacheInfo = info->cacheInfo();
@@ -402,6 +417,11 @@ dyld_process_info_ptr dyld_process_info_base::make(task_t task, const T1& allIma
                     cacheInfo->noCache = false;
                 }
             }
+
+            // fill in aot shared cache info
+            dyld_process_aot_cache_info* aotCacheInfo = info->aotCacheInfo();
+            memcpy(aotCacheInfo->cacheUUID, &allImageInfo.aotSharedCacheUUID[0], 16);
+            aotCacheInfo->cacheBaseAddress = allImageInfo.aotSharedCacheBaseAddress;
 
             dyld_process_state_info* stateInfo = info->stateInfo();
             stateInfo->timestamp           = currentTimestamp;
@@ -441,6 +461,24 @@ dyld_process_info_ptr dyld_process_info_base::make(task_t task, const T1& allIma
 
             result = std::move(info);
         });
+
+        mach_vm_address_t aotImageArray = allImageInfo.aotInfoArray;
+        // shortcircuit this code path if aotImageArray == 0 (32 vs 64 bit struct difference)
+        // and if result == nullptr, since we need to append aot image infos to the process info struct
+        if (aotImageArray != 0 && result != nullptr) {
+            uint32_t aotImageCount = allImageInfo.aotInfoCount;
+            size_t aotImageArraySize = aotImageCount * sizeof(dyld_aot_image_info_64);
+
+            withRemoteBuffer(task, aotImageArray, aotImageArraySize, false, false, kr, ^(void *buffer, size_t size) {
+                dyld_aot_image_info_64* imageArray = (dyld_aot_image_info_64*)buffer;
+                for (uint32_t i = 0; i < aotImageCount; i++) {
+                    if (!result->addAotImage(imageArray[i])) {
+                        result = nullptr;
+                        return;
+                    }
+                }
+            });
+        }
 
         if (result) break;
     }
@@ -513,26 +551,36 @@ dyld_process_info_ptr dyld_process_info_base::makeSuspended(task_t task, const T
     //fprintf(stderr, "dyld: addr=0x%llX, path=%s\n", dyldAddress, dyldPathBuffer);
     //fprintf(stderr, "app:  addr=0x%llX, path=%s\n", mainExecutableAddress, mainExecutablePathBuffer);
 
+    // explicitly set aot image count to 0 in the suspended case
+    unsigned aotImageCount = 0;
+
     // allocate result object
     size_t allocationSize =   sizeof(dyld_process_info_base)
                             + sizeof(dyld_process_cache_info)
+                            + sizeof(dyld_process_aot_cache_info)
                             + sizeof(dyld_process_state_info)
                             + sizeof(ImageInfo)*(imageCount)
-                            + sizeof(SegmentInfo)*imageCount*5
+                            + sizeof(dyld_aot_image_info_64)*aotImageCount // this should always be 0, but including it here to be explicit
+                            + sizeof(SegmentInfo)*imageCount*10
                             + imageCount*PATH_MAX;
     void* storage = malloc(allocationSize);
     if (storage == nullptr) {
         *kr = KERN_NO_SPACE;
         return  nullptr;
     }
-    auto obj = dyld_process_info_ptr(new (storage) dyld_process_info_base((dyld_platform_t)platformID, imageCount, allocationSize), deleter);
-    (void)obj->reserveSpace(sizeof(dyld_process_info_base)+sizeof(dyld_process_cache_info)+sizeof(dyld_process_state_info));
+    auto obj = dyld_process_info_ptr(new (storage) dyld_process_info_base((dyld_platform_t)platformID, imageCount, aotImageCount, allocationSize), deleter);
+    (void)obj->reserveSpace(sizeof(dyld_process_info_base)+sizeof(dyld_process_cache_info)+sizeof(dyld_process_aot_cache_info)+sizeof(dyld_process_state_info));
     // fill in base info
     dyld_process_cache_info* cacheInfo = obj->cacheInfo();
     bzero(cacheInfo->cacheUUID, 16);
     cacheInfo->cacheBaseAddress    = 0;
     cacheInfo->noCache             = true;
     cacheInfo->privateCache        = false;
+
+    // zero out aot cache info
+    dyld_process_aot_cache_info* aotCacheInfo = obj->aotCacheInfo();
+    bzero(aotCacheInfo->cacheUUID, 16);
+    aotCacheInfo->cacheBaseAddress = 0;
 
     dyld_process_state_info* stateInfo = obj->stateInfo();
     stateInfo->timestamp           = 0;
@@ -594,7 +642,6 @@ const char* dyld_process_info_base::copyPath(task_t task, uint64_t stringAddress
 
 bool dyld_process_info_base::addImage(task_t task, bool sameCacheAsThisProcess, uint64_t imageAddress, uint64_t imagePath, const char* imagePathLocal)
 {
-    if (!reserveSpace(sizeof(ImageInfo))) { return false; }
     _curImage->loadAddress = imageAddress;
     _curImage->segmentStartIndex = _curSegmentIndex;
     if ( imagePathLocal != NULL ) {
@@ -618,6 +665,18 @@ bool dyld_process_info_base::addImage(task_t task, bool sameCacheAsThisProcess, 
     return true;
 }
 
+bool dyld_process_info_base::addAotImage(dyld_aot_image_info_64 aotImageInfo) {
+    if (!reserveSpace(sizeof(dyld_aot_image_info_64))) {
+        return false;
+    }
+    _curAotImage->x86LoadAddress = aotImageInfo.x86LoadAddress;
+    _curAotImage->aotLoadAddress = aotImageInfo.aotLoadAddress;
+    _curAotImage->aotImageSize = aotImageInfo.aotImageSize;
+    memcpy(_curAotImage->aotImageKey, aotImageInfo.aotImageKey, sizeof(aotImageInfo.aotImageKey));
+
+    _curAotImage++;
+    return true;
+}
 
 kern_return_t dyld_process_info_base::addInfoFromRemoteLoadCommands(task_t task, uint64_t remoteMH) {
     __block kern_return_t kr = KERN_SUCCESS;
@@ -649,11 +708,6 @@ kern_return_t dyld_process_info_base::addInfoFromRemoteLoadCommands(task_t task,
 
 kern_return_t dyld_process_info_base::addDyldImage(task_t task, uint64_t dyldAddress, uint64_t dyldPathAddress, const char* localPath)
 {
-    if (!reserveSpace(sizeof(ImageInfo))) {
-        // If we don't have ebnough spacee the data will be truncated, but well formed. Return success so
-        // symbolicators can try and use it
-        return KERN_SUCCESS;
-    }
     __block kern_return_t kr = KERN_SUCCESS;
     _curImage->loadAddress = dyldAddress;
     _curImage->segmentStartIndex = _curSegmentIndex;
@@ -722,7 +776,13 @@ void dyld_process_info_base::addInfoFromLoadCommands(const mach_header* mh, uint
 const char* dyld_process_info_base::copySegmentName(const char* name)
 {
     // don't copy names of standard segments into string pool
-    static const char* stdSegNames[] = {"__TEXT", "__DATA", "__LINKEDIT", "__DATA_DIRTY", "__DATA_CONST", "__OBJC", NULL };
+    static const char* stdSegNames[] = {
+        "__TEXT", "__DATA", "__LINKEDIT",
+        "__DATA_DIRTY", "__DATA_CONST",
+        "__OBJC", "__OBJC_CONST",
+        "__AUTH", "__AUTH_CONST",
+        NULL
+    };
     for (const char** s=stdSegNames; *s != NULL; ++s) {
         if ( strcmp(name, *s) == 0 )
         return *s;
@@ -737,6 +797,18 @@ void dyld_process_info_base::forEachImage(void (^callback)(uint64_t machHeaderAd
         callback(p->loadAddress, p->uuid, p->path);
     }
 }
+
+
+#if TARGET_OS_OSX
+void dyld_process_info_base::forEachAotImage(bool (^callback)(uint64_t x86Address, uint64_t aotAddress, uint64_t aotSize, uint8_t* aotImageKey, size_t aotImageKeySize)) const
+{
+    for (const dyld_aot_image_info_64* p = _firstAotImage; p < _curAotImage; ++p) {
+        if (!callback(p->x86LoadAddress, p->aotLoadAddress, p->aotImageSize, (uint8_t*)p->aotImageKey, sizeof(p->aotImageKey))) {
+            break;
+        }
+    }
+}
+#endif
 
 void dyld_process_info_base::forEachSegment(uint64_t machHeaderAddress, void (^callback)(uint64_t segmentAddress, uint64_t segmentSize, const char* segmentName)) const
 {
@@ -809,6 +881,11 @@ void _dyld_process_info_get_cache(dyld_process_info info, dyld_process_cache_inf
     *cacheInfo = *info->cacheInfo();
 }
 
+void _dyld_process_info_get_aot_cache(dyld_process_info info, dyld_process_aot_cache_info* aotCacheInfo)
+{
+    *aotCacheInfo = *info->aotCacheInfo();
+}
+
 void _dyld_process_info_retain(dyld_process_info object)
 {
     const_cast<dyld_process_info_base*>(object)->retain();
@@ -828,6 +905,12 @@ void _dyld_process_info_for_each_image(dyld_process_info info, void (^callback)(
     info->forEachImage(callback);
 }
 
+#if TARGET_OS_OSX
+void _dyld_process_info_for_each_aot_image(dyld_process_info info, bool (^callback)(uint64_t x86Address, uint64_t aotAddress, uint64_t aotSize, uint8_t* aotImageKey, size_t aotImageKeySize))
+{
+    info->forEachAotImage(callback);
+}
+#endif
 
 void _dyld_process_info_for_each_segment(dyld_process_info info, uint64_t machHeaderAddress, void (^callback)(uint64_t segmentAddress, uint64_t segmentSize, const char* segmentName))
 {

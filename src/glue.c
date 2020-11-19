@@ -400,29 +400,6 @@ void* memset(void* b, int c, size_t len)
 }
 
 
-// <rdar://problem/10111032> wrap calls to stat() with check for EAGAIN
-int _ZN4dyld7my_statEPKcP4stat(const char* path, struct stat* buf)
-{
-	int result;
-	do {
-		result = stat(path, buf);
-    } while ((result == -1) && ((errno == EAGAIN) || (errno == EINTR)));
-
-	return result;
-}
-
-// <rdar://problem/13805025> dyld should retry open() if it gets an EGAIN
-int _ZN4dyld7my_openEPKcii(const char* path, int flag, int other)
-{
-	int result;
-	do {
-		result = open(path, flag, other);
-	} while ((result == -1) && ((errno == EAGAIN) || (errno == EINTR)));
-
-	return result;
-}
-
-
 //
 // The dyld in the iOS simulator cannot do syscalls, so it calls back to
 // host dyld.
@@ -430,9 +407,15 @@ int _ZN4dyld7my_openEPKcii(const char* path, int flag, int other)
 
 #if TARGET_OS_SIMULATOR
 
-int myopen(const char* path, int oflag, int extra) __asm("_open");
-int myopen(const char* path, int oflag, int extra) {
-	return gSyscallHelpers->open(path, oflag, extra);
+int open(const char* path, int oflag, ...) {
+	int retval;
+
+	va_list args;
+	va_start(args, oflag);
+	retval = gSyscallHelpers->open(path, oflag, va_arg(args, int));
+	va_end(args);
+
+	return retval;
 }
 
 int close(int fd) {
@@ -463,14 +446,26 @@ int stat(const char* path, struct stat* buf) {
 	return gSyscallHelpers->stat(path, buf);
 }
 
-int myfcntl(int fd, int cmd, void* result) __asm("_fcntl");
-int myfcntl(int fd, int cmd, void* result) {
-	return gSyscallHelpers->fcntl(fd, cmd, result);
+int fcntl(int fd, int cmd, ...) {
+        int retval;
+
+        va_list args;
+        va_start(args, cmd);
+        retval = gSyscallHelpers->fcntl(fd, cmd, va_arg(args, void *));
+        va_end(args);
+
+	return retval;
 }
 
-int myioctl(int fd, unsigned long request, void* result) __asm("_ioctl");
-int myioctl(int fd, unsigned long request, void* result) {
-	return gSyscallHelpers->ioctl(fd, request, result);
+int ioctl(int fd, unsigned long request, ...) {
+        int retval;
+
+        va_list args;
+        va_start(args, request);
+        retval = gSyscallHelpers->ioctl(fd, request, va_arg(args, void *));
+        va_end(args);
+
+	return retval;
 }
 
 int issetugid() {
@@ -1163,3 +1158,6 @@ void uuid_unparse_upper(const uuid_t uu, uuid_string_t out)
              uu[8], uu[9],
              uu[10], uu[11], uu[12], uu[13], uu[14], uu[15]);
 }
+
+
+

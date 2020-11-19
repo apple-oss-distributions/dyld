@@ -1,4 +1,4 @@
-.TH DYLD 1 "June 1, 2017" "Apple Inc."
+.TH DYLD 1 "June 1, 2020" "Apple Inc."
 .SH NAME
 dyld \- the dynamic linker
 .SH SYNOPSIS
@@ -51,8 +51,6 @@ DYLD_PRINT_DOFS
 DYLD_PRINT_RPATHS
 .br
 DYLD_SHARED_CACHE_DIR
-.br
-DYLD_SHARED_CACHE_DONT_VALIDATE
 .SH DESCRIPTION
 The dynamic linker checks the following environment variables during the launch
 of each process.
@@ -229,13 +227,7 @@ that expansion was successful or not.
 .TP
 .B DYLD_SHARED_CACHE_DIR
 This is a directory containing dyld shared cache files.  This variable can be used in
-conjunction with DYLD_SHARED_REGION=private and DYLD_SHARED_CACHE_DONT_VALIDATE
-to run a process with an alternate shared cache.
-.TP
-.B DYLD_SHARED_CACHE_DONT_VALIDATE
-Causes dyld to not check that the inode and mod-time of files in the shared cache match
-the requested dylib on disk. Thus a program can be made to run with the dylib in the
-shared cache even though the real dylib has been updated on disk.
+conjunction with DYLD_SHARED_REGION=private to run a process with an alternate shared cache.
 .TP
 .SH DYNAMIC LIBRARY LOADING
 Unlike many other operating systems, Darwin does not locate dependent dynamic libraries

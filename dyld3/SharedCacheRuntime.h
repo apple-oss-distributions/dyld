@@ -38,6 +38,7 @@ struct SharedCacheOptions {
     bool            forcePrivate;
     bool            useHaswell;
     bool            verbose;
+    bool            disableASLR;
 };
 
 struct SharedCacheLoadInfo {

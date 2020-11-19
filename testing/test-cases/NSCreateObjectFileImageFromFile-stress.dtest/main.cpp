@@ -1,7 +1,7 @@
-// BUILD_ONLY: MacOSX
+// BUILD(macos):  $CXX main.cpp  -o $BUILD_DIR/NSCreateObjectFileImageFromFile-stress.exe -Wno-deprecated-declarations
+// BUILD(macos):  $CC  foo.c     -o $BUILD_DIR/foo.bundle -bundle
 
-// BUILD:  $CXX main.cpp  -o $BUILD_DIR/NSCreateObjectFileImageFromFile-stress.exe -Wno-deprecated-declarations
-// BUILD:  $CC  foo.c     -o $BUILD_DIR/foo.bundle -bundle
+// BUILD(ios,tvos,watchos,bridgeos):
 
 // RUN:  ./NSCreateObjectFileImageFromFile-stress.exe $RUN_DIR/foo.bundle
 

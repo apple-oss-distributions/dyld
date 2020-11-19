@@ -1,7 +1,7 @@
-// BUILD_ONLY: MacOSX
+// BUILD(macos):  $CC foo.c -dynamiclib -o $BUILD_DIR/libfoo.dylib -install_name $RUN_DIR/libfoo.dylib
+// BUILD(macos):  $CC main.c $BUILD_DIR/libfoo.dylib -o $BUILD_DIR/flat-namespace.exe -flat_namespace
 
-// BUILD:  $CC foo.c -dynamiclib -o $BUILD_DIR/libfoo.dylib -install_name $RUN_DIR/libfoo.dylib
-// BUILD:  $CC main.c $BUILD_DIR/libfoo.dylib -o $BUILD_DIR/flat-namespace.exe -flat_namespace
+// BUILD(ios,tvos,watchos,bridgeos):
 
 // RUN:    ./flat-namespace.exe
 

@@ -7,4 +7,5 @@ dyld.xcodeproj/xcuserdata/
 dyld.xcodeproj/xcshareddata/
 .DS_Store
 .pyc
-
+*.apc
+*.kc

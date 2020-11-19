@@ -60,7 +60,7 @@ struct __DATA__dyld {
 static volatile struct __DATA__dyld  myDyldSection __attribute__ ((section ("__DATA,__dyld"))) 
 	= { 0, 0, NULL, &NXArgc, &NXArgv, &environ, &__progname };
 
-#if __arm__ && __MAC_OS_X_VERSION_MIN_REQUIRED
+#if __arm__ && TARGET_OS_OSX
 // <rdar://problem/8755380>
 // For historical reasons, gcc and llvm-gcc added -ldylib1.o to the link line of armv6 
 // dylibs when targeting MacOSX (but not iOS).  clang cleans up that mistake, but doing

@@ -140,6 +140,9 @@ namespace dyld {
 		DYLD_SYSCALL_VTABLE_ENTRY(mach_msg_destroy);
 		DYLD_SYSCALL_VTABLE_ENTRY(mach_port_construct);
 		DYLD_SYSCALL_VTABLE_ENTRY(mach_port_destruct);
+		// Add in version 13
+		DYLD_SYSCALL_VTABLE_ENTRY(fstat);
+		DYLD_SYSCALL_VTABLE_ENTRY(vm_copy);
 	};
 	extern const struct SyscallHelpers* gSyscallHelpers;
 

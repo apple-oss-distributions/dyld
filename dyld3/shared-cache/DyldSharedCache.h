@@ -40,6 +40,7 @@
 #include "Diagnostics.h"
 #include "MachOAnalyzer.h"
 #include "Closure.h"
+#include "JSON.h"
 
 namespace objc_opt {
 struct objc_opt_t;
@@ -57,15 +58,22 @@ public:
         Agile      = 2
     };
 
+    enum class LocalSymbolsMode {
+        keep,
+        unmap,
+        strip
+    };
+
     struct CreateOptions
     {
         std::string                                 outputFilePath;
         std::string                                 outputMapFilePath;
         const dyld3::GradedArchs*                   archs;
         dyld3::Platform                             platform;
-        bool                                        excludeLocalSymbols;
+        LocalSymbolsMode                            localSymbolMode;
         bool                                        optimizeStubs;
-        bool                                        optimizeObjC;
+        bool                                        optimizeDyldDlopens;
+        bool                                        optimizeDyldLaunches;
         CodeSigningDigestMode                       codeSigningDigestMode;
         bool                                        dylibsRemovedDuringMastering;
         bool                                        inodesAreSameAsRuntime;
@@ -76,6 +84,7 @@ public:
         bool                                        evictLeafDylibsOnOverflow;
         std::unordered_map<std::string, unsigned>   dylibOrdering;
         std::unordered_map<std::string, unsigned>   dirtyDataSegmentOrdering;
+        dyld3::json::Node                           objcOptimizations;
         std::string                                 loggingPrefix;
     };
 
@@ -118,7 +127,7 @@ public:
     // outset the set.  It will call back the loader function to try to find any mising dylibs.
     static bool verifySelfContained(std::vector<MappedMachO>& dylibsToCache,
                                     std::unordered_set<std::string>& badZippered,
-                                    MappedMachO (^loader)(const std::string& runtimePath), std::vector<std::pair<DyldSharedCache::MappedMachO, std::set<std::string>>>& excluded);
+                                    MappedMachO (^loader)(const std::string& runtimePath, Diagnostics& diag), std::vector<std::pair<DyldSharedCache::MappedMachO, std::set<std::string>>>& excluded);
 
 
     //
@@ -154,7 +163,7 @@ public:
     //
     std::string         mapFile() const;
 
-#endif // TARGET_OS_OSX
+#endif // BUILDING_CACHE_BUILDER
 
 
     //
@@ -182,12 +191,30 @@ public:
 
 
     //
+    // Is this path (which we know is in the shared cache), overridable
+    //
+    bool                isOverridablePath(const char* dylibPath) const;
+
+
+    //
     // Path is to a dylib in the cache and this is an optimized cache so that path cannot be overridden
     //
     bool                hasNonOverridablePath(const char* dylibPath) const;
 
 
-   //
+    //
+    // Check if shared cache contains local symbols info
+    //
+    const bool          hasLocalSymbolsInfo() const;
+
+
+    //
+    // Get code signature mapped address
+    //
+    uint64_t             getCodeSignAddress() const;
+
+
+    //
     // Searches cache for dylib with specified mach_header
     //
     bool                findMachHeaderImageIndex(const mach_header* mh, uint32_t& imageIndex) const;
@@ -199,13 +226,29 @@ public:
 
 
     //
-    // Iterates over each dylib in the cache
+    // Get image entry from index
     //
     const mach_header*  getIndexedImageEntry(uint32_t index, uint64_t& mTime, uint64_t& node) const;
 
 
+    // iterates over all dylibs and aliases
+    void forEachDylibPath(void (^handler)(const char* dylibPath, uint32_t index)) const;
+
+
     //
-    // Iterates over each dylib in the cache
+    // Get image path from index
+    //
+    const char*         getIndexedImagePath(uint32_t index) const;
+
+#if BUILDING_LIBDYLD
+    //
+    // Get the canonical (dylib) path for a given path, which may be a symlink to something in the cache
+    //
+    const char*         getCanonicalPath(const char* path) const;
+#endif
+
+    //
+    // Iterates over each text segment in the cache
     //
     void                forEachImageTextSegment(void (^handler)(uint64_t loadAddressUnslid, uint64_t textSegmentSize, const uuid_t dylibUUID, const char* installName, bool& stop)) const;
 
@@ -213,14 +256,48 @@ public:
     //
     // Iterates over each of the three regions in the cache
     //
-    void                forEachRegion(void (^handler)(const void* content, uint64_t vmAddr, uint64_t size, uint32_t permissions)) const;
+    void                forEachRegion(void (^handler)(const void* content, uint64_t vmAddr, uint64_t size, uint32_t permissions,
+                                                      uint64_t flags)) const;
 
+
+    //
+    // Get local symbols nlist entries
+    //
+    const void*         getLocalNlistEntries() const;
+
+
+    //
+    // Get local symbols nlist count
+    //
+    const uint32_t      getLocalNlistCount() const;
+
+
+    //
+    // Get local symbols strings
+    //
+    const char*  getLocalStrings() const;
+
+
+    //
+    // Get local symbols strings size
+    //
+    const uint32_t       getLocalStringsSize() const;
+
+
+     //
+     // Iterates over each local symbol entry in the cache
+     //
+     void                forEachLocalSymbolEntry(void (^handler)(uint32_t dylibOffset, uint32_t nlistStartIndex, uint32_t nlistCount, bool& stop)) const;
 
     //
     // Returns if an address range is in this cache, and if so if in a read-only area
     //
     bool                inCache(const void* addr, size_t length, bool& readOnly) const;
 
+    //
+    // Returns true if a path is an alternate path (symlink)
+    //
+    bool isAlias(const char* path) const;
 
     //
     // returns address the cache would load at if unslid
@@ -278,12 +355,17 @@ public:
     //
     // Returns the pointer to the slide info for this cache
     //
-    const dyld_cache_slide_info* slideInfo() const;
+    const dyld_cache_slide_info* legacyCacheSlideInfo() const;
+
+    //
+    // Returns a pointer to the __DATA region mapping in the cache
+    //
+    const dyld_cache_mapping_info* legacyCacheDataRegionMapping() const;
 
     //
     // Returns a pointer to the start of the __DATA region in the cache
     //
-    const uint8_t* dataRegionStart() const;
+    const uint8_t* legacyCacheDataRegionBuffer() const;
 
     //
     // Returns a pointer to the shared cache optimized Objective-C data structures
@@ -294,6 +376,15 @@ public:
     // Returns a pointer to the shared cache optimized Objective-C pointer structures
     //
     const void* objcOptPtrs() const;
+
+    // Returns true if the cache has any slide info, either old style on a single data region
+    // or on each individual data mapping
+    bool                hasSlideInfo() const;
+
+    void                forEachSlideInfo(void (^handler)(uint64_t mappingStartAddress, uint64_t mappingSize,
+                                                         const uint8_t* mappingPagesStart,
+                                                         uint64_t slideInfoOffset, uint64_t slideInfoSize,
+                                                         const dyld_cache_slide_info* slideInfoHeader)) const;
 
 
     //
@@ -336,7 +427,25 @@ public:
     std::string generateJSONDependents() const;
 #endif
 
+    // Note these enum entries are only valid for 64-bit archs.
+    enum class ConstantClasses {
+        cfStringAtomSize = 32
+    };
+
+    // Returns the start and size of the range in the shared cache of the ObjC constants, such as
+    // all of the CFString's which have been moved in to a contiguous range
+    std::pair<const void*, uint64_t> getObjCConstantRange() const;
+
+#if !(BUILDING_LIBDYLD || BUILDING_DYLD)
+    dyld3::MachOAnalyzer::VMAddrConverter makeVMAddrConverter(bool contentRebased) const;
+#endif
+
     dyld_cache_header header;
+
+    // The most mappings we could generate.
+    // For now its __TEXT, __DATA_CONST, __DATA_DIRTY, __DATA, __LINKEDIT,
+    // and optionally also __AUTH, __AUTH_CONST, __AUTH_DIRTY
+    static const uint32_t MaxMappings = 8;
 
 private:
     // Returns a variable of type "const T" which corresponds to the header field with the given unslid address

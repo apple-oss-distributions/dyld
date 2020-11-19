@@ -1852,7 +1852,7 @@ void ImageLoaderMachOClassic::initializeLazyStubs(const LinkContext& context)
 #endif // __i386__
 
 
-void ImageLoaderMachOClassic::doBind(const LinkContext& context, bool forceLazysBound)
+void ImageLoaderMachOClassic::doBind(const LinkContext& context, bool forceLazysBound, const ImageLoader* reExportParent)
 {
 	CRSetCrashLogMessage2(this->getPath());
 #if __i386__

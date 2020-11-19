@@ -1,6 +1,6 @@
-// BUILD_ONLY: MacOSX
+// BUILD(macos):  $CXX main.cpp          -o $BUILD_DIR/rebuild-dyld-cache.exe
 
-// BUILD:  $CXX main.cpp          -o $BUILD_DIR/rebuild-dyld-cache.exe
+// BUILD(ios,tvos,watchos,bridgeos):
 
 // FIXME: This test will not make sense when remove update_dyld_shared_cache, and the functionality will be subsummed by root testing
 // ./rebuild-dyld-cache.exe

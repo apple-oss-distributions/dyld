@@ -57,7 +57,7 @@ static const char* leafName(const char* argv0)
         return argv0;
 }
 
-static void entry_setVars(const mach_header* mainMH, int argc, const char* argv[], const char* envp[], const char* apple[])
+static void entry_setVars(const mach_header* mainMH, int argc, const char* argv[], const char* envp[], const char* apple[], bool keysOff, bool platformBinariesOnly)
 {
     NXArgc       = argc;
     NXArgv       = argv;
@@ -70,7 +70,7 @@ static void entry_setVars(const mach_header* mainMH, int argc, const char* argv[
     sVars.NXArgvPtr     = &NXArgv;
     sVars.environPtr    = (const char***)&environ;
     sVars.__prognamePtr = &__progname;
-    gAllImages.setProgramVars(&sVars);
+    gAllImages.setProgramVars(&sVars, keysOff, platformBinariesOnly);
 
     gUseDyld3 = true;
 
@@ -150,8 +150,20 @@ static void entry_setHasCacheOverrides(bool someCacheImageOverriden)
 
 static void entry_setProgramVars(ProgramVars* progVars)
 {
-    gAllImages.setProgramVars((AllImages::ProgramVars*)progVars);
+    // this entry only called when running crt1.o based old macOS programs
+    gAllImages.setProgramVars((AllImages::ProgramVars*)progVars, false, false);
 }
+
+static void entry_setLaunchMode(uint32_t flags)
+{
+    gAllImages.setLaunchMode(flags);
+}
+
+static MainFunc entry_getDriverkitMain(void)
+{
+    return gAllImages.getDriverkitMain();
+}
+
 
 static_assert((closure::kFormatVersion & LibDyldEntryVector::kBinaryFormatVersionMask) == closure::kFormatVersion, "binary format version overflow");
 
@@ -171,6 +183,8 @@ const LibDyldEntryVector entryVectorForDyld = {
     &entry_setNotifyMonitoringDyld,
     &entry_setHasCacheOverrides,
     &entry_setProgramVars,
+    &entry_setLaunchMode,
+    &entry_getDriverkitMain,
 };
 
 VIS_HIDDEN void _dyld_atfork_prepare()

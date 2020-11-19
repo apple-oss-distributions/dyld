@@ -42,7 +42,7 @@
 #include "MachOAnalyzer.h"
 #include "Diagnostics.h"
 #include "DyldSharedCache.h"
-#include "SharedCacheBuilder.h"
+#include "CacheBuilder.h"
 
 static const bool verbose = false;
 
@@ -52,11 +52,13 @@ static const bool verbose = false;
 template <typename P>
 class StubOptimizer {
 public:
-                            StubOptimizer(const DyldSharedCache* cache, macho_header<P>* mh, Diagnostics& diags);
+                            StubOptimizer(int64_t cacheSlide, uint64_t cacheUnslidAddr,
+                                          const std::string& archName, macho_header<P>* mh,
+                                          const char* dylibID, Diagnostics& diags);
     void                    buildStubMap(const std::unordered_set<std::string>& neverStubEliminate);
     void                    optimizeStubs();
     void                    optimizeCallSites(std::unordered_map<uint64_t, uint64_t>& targetAddrToOptStubAddr);
-    const char*             installName() { return _installName; }
+    const char*             dylibID() { return _dylibID; }
     const uint8_t*          exportsTrie() {
         if ( _dyldInfo != nullptr )
             return &_linkeditBias[_dyldInfo->export_off()];
@@ -79,7 +81,7 @@ public:
     uint32_t                _branchToReUsedOptimizedStubCount = 0;
 
 private:
-    Diagnostics             _diagnostics;
+    Diagnostics&            _diagnostics;
 
     typedef std::function<bool(uint8_t callSiteKind, uint64_t callSiteAddr, uint64_t stubAddr, uint32_t& instruction)> CallSiteHandler;
     typedef typename P::uint_t pint_t;
@@ -107,6 +109,7 @@ private:
     int32_t                 getDisplacementFromThumbBranch(uint32_t instruction, uint32_t instrAddr);
     uint32_t                setDisplacementInThumbBranch(uint32_t instruction,  uint32_t instrAddr,
                                                          int32_t displacement, bool targetIsThumb);
+    uint32_t                cpuSubtype() { return ((dyld3::MachOFile*)_mh)->maskedCpuSubtype(); }
 
 
     struct AddressAndName { pint_t targetVMAddr; const char* targetName; };
@@ -123,7 +126,7 @@ private:
     uint32_t                                _linkeditSize        = 0;
     uint64_t                                _linkeditAddr        = 0;
     const uint8_t*                          _linkeditBias        = nullptr;
-    const char*                             _installName         = nullptr;
+    const char*                             _dylibID             = nullptr;
     const macho_symtab_command<P>*          _symTabCmd           = nullptr;
     const macho_dysymtab_command<P>*        _dynSymTabCmd        = nullptr;
     const macho_dyld_info_command<P>*       _dyldInfo            = nullptr;
@@ -143,11 +146,14 @@ private:
 
 
 template <typename P>
-StubOptimizer<P>::StubOptimizer(const DyldSharedCache* cache, macho_header<P>* mh, Diagnostics& diags)
-: _mh(mh), _diagnostics(diags)
+StubOptimizer<P>::StubOptimizer(int64_t cacheSlide, uint64_t cacheUnslidAddr,
+                                const std::string& archName,
+                                macho_header<P>* mh, const char* dylibID,
+                                Diagnostics& diags)
+    : _mh(mh), _dylibID(dylibID),
+      _cacheSlide(cacheSlide), _cacheUnslideAddr(cacheUnslidAddr),
+      _diagnostics(diags)
 {
-    _cacheSlide = (long)cache - cache->unslidLoadAddress();
-    _cacheUnslideAddr = cache->unslidLoadAddress();
     const macho_load_command<P>* const cmds = (macho_load_command<P>*)((uint8_t*)mh + sizeof(macho_header<P>));
     const uint32_t cmd_count = mh->ncmds();
     macho_segment_command<P>* segCmd;
@@ -155,9 +161,6 @@ StubOptimizer<P>::StubOptimizer(const DyldSharedCache* cache, macho_header<P>* m
     const macho_load_command<P>* cmd = cmds;
     for (uint32_t i = 0; i < cmd_count; ++i) {
         switch (cmd->cmd()) {
-            case LC_ID_DYLIB:
-                _installName = ((macho_dylib_command<P>*)cmd)->name();
-                break;
             case LC_SYMTAB:
                 _symTabCmd = (macho_symtab_command<P>*)cmd;
                 break;
@@ -215,17 +218,17 @@ uint32_t StubOptimizer<P>::lazyPointerAddrFromArmStub(const uint8_t* stubInstruc
     int32_t  stubData   = E::get32(*(uint32_t*)(stubInstructions+12));
     if ( stubInstr1 != 0xe59fc004 ) {
         _diagnostics.warning("first instruction of stub (0x%08X) is not 'ldr ip, pc + 12' for stub at addr 0x%0llX in %s",
-                stubInstr1, (uint64_t)stubVMAddr, _installName);
+                stubInstr1, (uint64_t)stubVMAddr, _dylibID);
         return 0;
     }
     if ( stubInstr2 != 0xe08fc00c ) {
         _diagnostics.warning("second instruction of stub (0x%08X) is not 'add ip, pc, ip' for stub at addr 0x%0llX in %s",
-                stubInstr1, (uint64_t)stubVMAddr, _installName);
+                stubInstr1, (uint64_t)stubVMAddr, _dylibID);
         return 0;
     }
     if ( stubInstr3 != 0xe59cf000 ) {
         _diagnostics.warning("third instruction of stub (0x%08X) is not 'ldr pc, [ip]' for stub at addr 0x%0llX in %s",
-                stubInstr1, (uint64_t)stubVMAddr, _installName);
+                stubInstr1, (uint64_t)stubVMAddr, _dylibID);
         return 0;
     }
     return stubVMAddr + 12 + stubData;
@@ -238,7 +241,7 @@ uint64_t StubOptimizer<P>::lazyPointerAddrFromArm64Stub(const uint8_t* stubInstr
     uint32_t stubInstr1 = E::get32(*(uint32_t*)stubInstructions);
     if ( (stubInstr1 & 0x9F00001F) != 0x90000010 ) {
         _diagnostics.warning("first instruction of stub (0x%08X) is not ADRP for stub at addr 0x%0llX in %s",
-                stubInstr1, (uint64_t)stubVMAddr, _installName);
+                stubInstr1, (uint64_t)stubVMAddr, _dylibID);
         return 0;
     }
     int32_t adrpValue = ((stubInstr1 & 0x00FFFFE0) >> 3) | ((stubInstr1 & 0x60000000) >> 29);
@@ -247,7 +250,7 @@ uint64_t StubOptimizer<P>::lazyPointerAddrFromArm64Stub(const uint8_t* stubInstr
     uint32_t stubInstr2 = E::get32(*(uint32_t*)(stubInstructions + 4));
     if ( (stubInstr2 & 0xFFC003FF) != 0xF9400210 ) {
         _diagnostics.warning("second instruction of stub (0x%08X) is not LDR for stub at addr 0x%0llX in %s",
-                stubInstr2, (uint64_t)stubVMAddr, _installName);
+                stubInstr2, (uint64_t)stubVMAddr, _dylibID);
         return 0;
     }
     uint32_t ldrValue = ((stubInstr2 >> 10) & 0x00000FFF);
@@ -261,7 +264,7 @@ uint64_t StubOptimizer<P>::lazyPointerAddrFromArm64_32Stub(const uint8_t* stubIn
     uint32_t stubInstr1 = E::get32(*(uint32_t*)stubInstructions);
     if ( (stubInstr1 & 0x9F00001F) != 0x90000010 ) {
         _diagnostics.warning("first instruction of stub (0x%08X) is not ADRP for stub at addr 0x%0llX in %s",
-                stubInstr1, (uint64_t)stubVMAddr, _installName);
+                stubInstr1, (uint64_t)stubVMAddr, _dylibID);
         return 0;
     }
     int32_t adrpValue = ((stubInstr1 & 0x00FFFFE0) >> 3) | ((stubInstr1 & 0x60000000) >> 29);
@@ -270,7 +273,7 @@ uint64_t StubOptimizer<P>::lazyPointerAddrFromArm64_32Stub(const uint8_t* stubIn
     uint32_t stubInstr2 = E::get32(*(uint32_t*)(stubInstructions + 4));
     if ( (stubInstr2 & 0xFFC003FF) != 0xB9400210 ) {
         _diagnostics.warning("second instruction of stub (0x%08X) is not LDR for stub at addr 0x%0llX in %s",
-                stubInstr2, (uint64_t)stubVMAddr, _installName);
+                stubInstr2, (uint64_t)stubVMAddr, _dylibID);
         return 0;
     }
     uint32_t ldrValue = ((stubInstr2 >> 10) & 0x00000FFF);
@@ -288,7 +291,7 @@ uint64_t StubOptimizer<P>::lazyPointerAddrFromArm64eStub(const uint8_t* stubInst
     // ADRP  X17, dyld_mageLoaderCache@page
     if ( (stubInstr1 & 0x9F00001F) != 0x90000011 ) {
         _diagnostics.warning("first instruction of stub (0x%08X) is not ADRP for stub at addr 0x%0llX in %s",
-                stubInstr1, (uint64_t)stubVMAddr, _installName);
+                stubInstr1, (uint64_t)stubVMAddr, _dylibID);
         return 0;
     }
     int32_t adrpValue = ((stubInstr1 & 0x00FFFFE0) >> 3) | ((stubInstr1 & 0x60000000) >> 29);
@@ -299,7 +302,7 @@ uint64_t StubOptimizer<P>::lazyPointerAddrFromArm64eStub(const uint8_t* stubInst
     uint32_t stubInstr2 = E::get32(*(uint32_t*)(stubInstructions + 4));
     if ( (stubInstr2 & 0xFFC003FF) != 0x91000231 ) {
         _diagnostics.warning("second instruction of stub (0x%08X) is not ADD for stub at addr 0x%0llX in %s",
-                             stubInstr2, (uint64_t)stubVMAddr, _installName);
+                             stubInstr2, (uint64_t)stubVMAddr, _dylibID);
         return 0;
     }
     uint32_t addValue = ((stubInstr2 & 0x003FFC00) >> 10);
@@ -308,7 +311,7 @@ uint64_t StubOptimizer<P>::lazyPointerAddrFromArm64eStub(const uint8_t* stubInst
     uint32_t stubInstr3 = E::get32(*(uint32_t*)(stubInstructions + 8));
     if ( stubInstr3 != 0xF9400230 ) {
         _diagnostics.warning("second instruction of stub (0x%08X) is not LDR for stub at addr 0x%0llX in %s",
-                stubInstr2, (uint64_t)stubVMAddr, _installName);
+                stubInstr2, (uint64_t)stubVMAddr, _dylibID);
         return 0;
     }
     return (stubVMAddr & (-4096)) + adrpValue*4096 + addValue;
@@ -350,19 +353,19 @@ void StubOptimizer<P>::buildStubMap(const std::unordered_set<std::string>& never
                             default:
                                 if ( symbolIndex >= _symTabCmd->nsyms() ) {
                                     _diagnostics.warning("symbol index out of range (%d of %d) for stub at addr 0x%0llX in %s",
-                                        symbolIndex, _symTabCmd->nsyms(), (uint64_t)stubVMAddr, _installName);
+                                        symbolIndex, _symTabCmd->nsyms(), (uint64_t)stubVMAddr, _dylibID);
                                     continue;
                                 }
                                 const macho_nlist<P>* sym = &symbolTable[symbolIndex];
                                 uint32_t stringOffset = sym->n_strx();
                                 if ( stringOffset > _symTabCmd->strsize() ) {
                                     _diagnostics.warning("symbol string offset out of range (%u of %u) for stub at addr 0x%0llX in %s",
-                                        stringOffset, sym->n_strx(), (uint64_t)stubVMAddr, _installName);
+                                        stringOffset, sym->n_strx(), (uint64_t)stubVMAddr, _dylibID);
                                     continue;
                                 }
                                 const char* symName = &symbolStrings[stringOffset];
                                 if ( neverStubEliminate.count(symName) ) {
-                                    //fprintf(stderr, "stubVMAddr=0x%llX, not bypassing stub to %s in %s because target is interposable\n", (uint64_t)stubVMAddr, symName, _installName);
+                                    //fprintf(stderr, "stubVMAddr=0x%llX, not bypassing stub to %s in %s because target is interposable\n", (uint64_t)stubVMAddr, symName, _dylibID);
                                     _stubsLeftInterposable++;
                                     continue;
                                 }
@@ -370,19 +373,19 @@ void StubOptimizer<P>::buildStubMap(const std::unordered_set<std::string>& never
                                 pint_t targetLPAddr = 0;
                                 switch ( _mh->cputype() ) {
                                     case CPU_TYPE_ARM64:
-                                    case CPU_TYPE_ARM64_32:
 #if SUPPORT_ARCH_arm64e
-                                        if (_mh->cpusubtype() == CPU_SUBTYPE_ARM64E)
+                                        if (cpuSubtype() == CPU_SUBTYPE_ARM64E)
                                             targetLPAddr = (pint_t)lazyPointerAddrFromArm64eStub(stubInstrs, stubVMAddr);
-                                        else
-#endif
-#if SUPPORT_ARCH_arm64_32
-                                        if (_mh->cputype() == CPU_TYPE_ARM64_32)
-                                            targetLPAddr = (pint_t)lazyPointerAddrFromArm64_32Stub(stubInstrs, stubVMAddr);
                                         else
 #endif
                                             targetLPAddr = (pint_t)lazyPointerAddrFromArm64Stub(stubInstrs, stubVMAddr);
                                         break;
+#if SUPPORT_ARCH_arm64_32
+                                    case CPU_TYPE_ARM64_32:
+                                        if (cpuSubtype() == CPU_TYPE_ARM64_32)
+                                            targetLPAddr = (pint_t)lazyPointerAddrFromArm64_32Stub(stubInstrs, stubVMAddr);
+                                        break;
+#endif
                                     case CPU_TYPE_ARM:
                                         targetLPAddr = (pint_t)lazyPointerAddrFromArmStub(stubInstrs, (uint32_t)stubVMAddr);
                                         break;
@@ -412,23 +415,26 @@ void StubOptimizer<P>::buildStubMap(const std::unordered_set<std::string>& never
                                 lpVMAddr = (pint_t)sect->addr() + j * sizeof(pint_t);
                                 if ( symbolIndex >= _symTabCmd->nsyms() ) {
                                     _diagnostics.warning("symbol index out of range (%d of %d) for lazy pointer at addr 0x%0llX in %s",
-                                            symbolIndex, _symTabCmd->nsyms(), (uint64_t)lpVMAddr, _installName);
+                                            symbolIndex, _symTabCmd->nsyms(), (uint64_t)lpVMAddr, _dylibID);
                                     continue;
                                 }
                                 const macho_nlist<P>* sym = &symbolTable[symbolIndex];
                                 uint32_t stringOffset = sym->n_strx();
                                 if ( stringOffset > _symTabCmd->strsize() ) {
                                     _diagnostics.warning("symbol string offset out of range (%u of %u) for lazy pointer at addr 0x%0llX in %s",
-                                            stringOffset, sym->n_strx(), (uint64_t)lpVMAddr, _installName);
+                                            stringOffset, sym->n_strx(), (uint64_t)lpVMAddr, _dylibID);
                                     continue;
                                 }
                                 const char* symName = &symbolStrings[stringOffset];
                                 if ( (lpValue > textSegStartAddr) && (lpValue< textSegEndAddr) ) {
-                                    //fprintf(stderr, "skipping lazy pointer at 0x%0lX to %s in %s because target is within dylib\n", (long)lpVMAddr, symName, _installName);
+                                    //fprintf(stderr, "skipping lazy pointer at 0x%0lX to %s in %s because target is within dylib\n", (long)lpVMAddr, symName, _dylibID);
                                 }
                                 else if ( (sizeof(pint_t) == 8) && ((lpValue % 4) != 0) ) {
-                                    _diagnostics.warning("lazy pointer at 0x%0llX does not point to 4-byte aligned address(0x%0llX) in %s",
-                                                (uint64_t)lpVMAddr, (uint64_t)lpValue, _installName);
+                                    // Only warn on lazy pointers which correspond to call targets
+                                    if ( sectionType == S_LAZY_SYMBOL_POINTERS ) {
+                                        _diagnostics.warning("lazy pointer at 0x%0llX does not point to 4-byte aligned address(0x%0llX) for symbol '%s' in %s",
+                                                             (uint64_t)lpVMAddr, (uint64_t)lpValue, symName, _dylibID);
+                                    }
                                 }
                                 else {
                                    _lpAddrToTargetAddr[lpVMAddr] = lpValue;
@@ -453,7 +459,7 @@ void StubOptimizer<P>::forEachCallSiteToAStub(CallSiteHandler handler)
     const uint8_t* infoStart = &_linkeditBias[_splitSegInfoCmd->dataoff()];
     const uint8_t* infoEnd = &infoStart[_splitSegInfoCmd->datasize()];
     if ( *infoStart++ != DYLD_CACHE_ADJ_V2_FORMAT ) {
-        _diagnostics.error("malformed split seg info in %s", _installName);
+        _diagnostics.error("malformed split seg info in %s", _dylibID);
         return;
     }
 
@@ -477,7 +483,7 @@ void StubOptimizer<P>::forEachCallSiteToAStub(CallSiteHandler handler)
             for (uint64_t k=0; k < fromOffsetCount; ++k) {
                 uint64_t kind = read_uleb128(p, infoEnd);
                 if ( kind > 13 ) {
-                    _diagnostics.error("bad kind (%llu) value in %s\n", kind, _installName);
+                    _diagnostics.error("bad kind (%llu) value in %s\n", kind, _dylibID);
                 }
                 uint64_t fromSectDeltaCount = read_uleb128(p, infoEnd);
                 uint64_t fromSectionOffset = 0;
@@ -531,7 +537,7 @@ template <typename P>
 uint32_t StubOptimizer<P>::setDisplacementInThumbBranch(uint32_t instruction,  uint32_t instrAddr,
                                                         int32_t displacement, bool targetIsThumb) {
     if ( (displacement > 16777214) || (displacement < (-16777216)) ) {
-        _diagnostics.error("thumb branch out of range at 0x%0X in %s", instrAddr, _installName);
+        _diagnostics.error("thumb branch out of range at 0x%0X in %s", instrAddr, _dylibID);
         return 0;
     }
     bool is_bl = ((instruction & 0xD000F800) == 0xD000F000);
@@ -551,12 +557,12 @@ uint32_t StubOptimizer<P>::setDisplacementInThumbBranch(uint32_t instruction,  u
     }
     else if (is_b) {
         if ( !targetIsThumb ) {
-            _diagnostics.error("no pc-rel thumb branch instruction that switches to arm mode at 0x%0X in %s", instrAddr, _installName);
+            _diagnostics.error("no pc-rel thumb branch instruction that switches to arm mode at 0x%0X in %s", instrAddr, _dylibID);
             return 0;
         }
     }
     else {
-        _diagnostics.error("not b/bl/blx at 0x%0X in %s", instrAddr, _installName);
+        _diagnostics.error("not b/bl/blx at 0x%0X in %s", instrAddr, _dylibID);
         return 0;
     }
     uint32_t s = (uint32_t)(displacement >> 24) & 0x1;
@@ -582,13 +588,13 @@ void StubOptimizer<P>::optimizeArmCallSites(std::unordered_map<uint64_t, uint64_
             bool is_blx = ((instruction & 0xD000F800) == 0xC000F000);
             bool is_b = ((instruction & 0xD000F800) == 0x9000F000);
             if ( !is_bl && !is_blx && !is_b ){
-                _diagnostics.warning("non-branch instruction at 0x%0llX in %s", callSiteAddr, _installName);
+                _diagnostics.warning("non-branch instruction at 0x%0llX in %s", callSiteAddr, _dylibID);
                 return false;
             }
             int32_t brDelta = getDisplacementFromThumbBranch(instruction, (uint32_t)callSiteAddr);
             pint_t targetAddr = (pint_t)callSiteAddr + 4 + brDelta;
             if ( targetAddr != stubAddr ) {
-                _diagnostics.warning("stub target mismatch at callsite 0x%0llX in %s", callSiteAddr, _installName);
+                _diagnostics.warning("stub target mismatch at callsite 0x%0llX in %s", callSiteAddr, _dylibID);
                 return false;
             }
             // ignore branch if not to a known stub
@@ -850,7 +856,7 @@ void StubOptimizer<P>::optimizeCallSites(std::unordered_map<uint64_t, uint64_t>&
         case CPU_TYPE_ARM64:
             optimizeArm64CallSites(targetAddrToOptStubAddr);
 #if SUPPORT_ARCH_arm64e
-            if (_mh->cpusubtype() == CPU_SUBTYPE_ARM64E)
+            if (cpuSubtype() == CPU_SUBTYPE_ARM64E)
                 optimizeArm64eStubs();
             else
 #endif
@@ -871,38 +877,47 @@ void StubOptimizer<P>::optimizeCallSites(std::unordered_map<uint64_t, uint64_t>&
         _diagnostics.verbose("dylib has %6u BLs to %4u stubs. Changed %5u, %5u, %5u BLs to use direct branch, optimized stub, neighbor's optimized stub. "
                              "%5u stubs left interposable, %4u stubs optimized. path=%s\n",
                             _branchToStubCount, _stubCount, _branchOptimizedToDirectCount, _branchToOptimizedStubCount, _branchToReUsedOptimizedStubCount,
-                            _stubsLeftInterposable, _stubOptimizedCount, _installName);
+                            _stubsLeftInterposable, _stubOptimizedCount, _dylibID);
     }
 
 }
 
 template <typename P>
-void bypassStubs(DyldSharedCache* cache, const std::string& archName, std::unordered_map<uint64_t, uint64_t>& targetAddrToOptStubAddr,
-                 const char* const neverStubEliminateDylibs[], const char* const neverStubEliminateSymbols[],
+void bypassStubs(std::vector<std::pair<const mach_header*, const char*>> images,
+                 const std::string& archName,
+                 int64_t cacheSlide, uint64_t cacheUnslidAddr,
+                 const DyldSharedCache* dyldCache,
+                 const char* const neverStubEliminateSymbols[],
                  Diagnostics& diags)
 {
+    std::unordered_map<uint64_t, uint64_t> targetAddrToOptStubAddr;
     diags.verbose("Stub elimination optimization:\n");
 
     // construct a StubOptimizer for each image
     __block std::vector<StubOptimizer<P>*> optimizers;
-    cache->forEachImage(^(const mach_header* mh, const char* installName) {
-        optimizers.push_back(new StubOptimizer<P>(cache, (macho_header<P>*)mh, diags));
-    });
+    for (std::pair<const mach_header*, const char*> image : images) {
+        optimizers.push_back(new StubOptimizer<P>(cacheSlide, cacheUnslidAddr, archName,
+                                                  (macho_header<P>*)image.first, image.second,
+                                                  diags));
+    }
 
     // build set of functions to never stub-eliminate because tools may need to override them
     std::unordered_set<std::string> neverStubEliminate;
     for (const char* const* p=neverStubEliminateSymbols; *p != nullptr; ++p) {
         neverStubEliminate.insert(*p);
     }
-    for (const char* const* d=neverStubEliminateDylibs; *d != nullptr; ++d) {
+
+#if !BUILDING_APP_CACHE_UTIL
+    // Customer shared caches support overriding libdispatch
+    if ( dyldCache != nullptr ) {
         for (StubOptimizer<P>* op : optimizers) {
-            if ( strcmp(op->installName(), *d) == 0 ) {
+            if ( dyldCache->isOverridablePath(op->dylibID()) ) {
                 // add all exports
                 const uint8_t* exportsStart = op->exportsTrie();
                 const uint8_t* exportsEnd = exportsStart + op->exportsTrieSize();
                 std::vector<ExportInfoTrie::Entry> exports;
                 if ( !ExportInfoTrie::parseTrie(exportsStart, exportsEnd, exports) ) {
-                    diags.error("malformed exports trie in %s", *d);
+                    diags.error("malformed exports trie in %s", op->dylibID());
                     return;
                 }
                 for(const ExportInfoTrie::Entry& entry : exports) {
@@ -911,6 +926,7 @@ void bypassStubs(DyldSharedCache* cache, const std::string& archName, std::unord
             }
         }
     }
+#endif
 
     // build maps of stubs-to-lp and lp-to-target
     for (StubOptimizer<P>* op : optimizers)
@@ -934,20 +950,32 @@ void bypassStubs(DyldSharedCache* cache, const std::string& archName, std::unord
         delete op;
 }
 
-void SharedCacheBuilder::optimizeAwayStubs()
+void CacheBuilder::optimizeAwayStubs(const std::vector<std::pair<const mach_header*, const char*>>& images,
+                                     int64_t cacheSlide, uint64_t cacheUnslidAddr,
+                                     const DyldSharedCache* dyldCache,
+                                     const char* const neverStubEliminateSymbols[])
 {
     std::unordered_map<uint64_t, uint64_t> targetAddrToOptStubAddr;
-
-    DyldSharedCache* dyldCache = (DyldSharedCache*)_readExecuteRegion.buffer;
-    std::string archName = dyldCache->archName();
+    std::string archName = _options.archs->name();
 #if SUPPORT_ARCH_arm64_32
-    if ( startsWith(archName, "arm64_32") )
-        bypassStubs<Pointer32<LittleEndian> >(dyldCache, archName, targetAddrToOptStubAddr, _s_neverStubEliminateDylibs, _s_neverStubEliminateSymbols, _diagnostics);
-    else
+    if ( startsWith(archName, "arm64_32") ) {
+        bypassStubs<Pointer32<LittleEndian> >(images, archName, cacheSlide, cacheUnslidAddr,
+                                              dyldCache, neverStubEliminateSymbols,
+                                              _diagnostics);
+        return;
+    }
 #endif
-    if ( startsWith(archName, "arm64") )
-        bypassStubs<Pointer64<LittleEndian> >(dyldCache, archName, targetAddrToOptStubAddr, _s_neverStubEliminateDylibs, _s_neverStubEliminateSymbols, _diagnostics);
-    else if ( archName == "armv7k" )
-        bypassStubs<Pointer32<LittleEndian>>(dyldCache, archName, targetAddrToOptStubAddr, _s_neverStubEliminateDylibs, _s_neverStubEliminateSymbols, _diagnostics);
+    if ( startsWith(archName, "arm64") ) {
+        bypassStubs<Pointer64<LittleEndian> >(images, archName, cacheSlide, cacheUnslidAddr,
+                                              dyldCache, neverStubEliminateSymbols,
+                                              _diagnostics);
+        return;
+    }
+    if ( archName == "armv7k" ) {
+        bypassStubs<Pointer32<LittleEndian> >(images, archName, cacheSlide, cacheUnslidAddr,
+                                              dyldCache, neverStubEliminateSymbols,
+                                              _diagnostics);
+        return;
+    }
     // no stub optimization done for other arches
 }

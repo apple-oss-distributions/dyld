@@ -84,6 +84,19 @@ struct dyld_uuid_info {
 	uuid_t						imageUUID;			/* UUID of image */
 };
 
+#define DYLD_AOT_IMAGE_KEY_SIZE 32
+struct dyld_aot_image_info {
+    const struct mach_header*   x86LoadAddress;
+    const struct mach_header*   aotLoadAddress;
+    const uint64_t              aotImageSize;
+    const uint8_t               aotImageKey[DYLD_AOT_IMAGE_KEY_SIZE]; // uniquely identifying SHA-256 key for this aot
+};
+
+struct dyld_aot_shared_cache_info {
+    const uintptr_t cacheBaseAddress;
+    uuid_t          cacheUUID;
+};
+
 typedef void (*dyld_image_notifier)(enum dyld_image_mode mode, uint32_t infoCount, const struct dyld_image_info info[]);
 
 /* for use in dyld_all_image_infos.errorKind field */
@@ -154,7 +167,14 @@ struct dyld_all_image_infos {
 	/* the following field is only in version 16 (macOS 10.13, iOS 11.0) and later */
     uintptr_t                       compact_dyld_image_info_addr;
     size_t                          compact_dyld_image_info_size;
-    uint32_t                        platform; // FIXME: really a dyld_platform_t, but those aren't exposed here. 
+    uint32_t                        platform; // FIXME: really a dyld_platform_t, but those aren't exposed here.
+
+    /* the following field is only in version 17 (macOS 10.16) and later */
+    uint32_t                          aotInfoCount;
+    const struct dyld_aot_image_info* aotInfoArray;
+    uint64_t                          aotInfoArrayChangeTimestamp;
+    uintptr_t                         aotSharedCacheBaseAddress;
+    uint8_t                           aotSharedCacheUUID[16];
 };
 
 /*

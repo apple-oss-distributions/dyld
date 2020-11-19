@@ -28,6 +28,7 @@
 #include "CacheBuilder.h"
 #include "DyldSharedCache.h"
 #include "ClosureFileSystem.h"
+#include "IMPCachesBuilder.hpp"
 
 class SharedCacheBuilder : public CacheBuilder {
 public:
@@ -47,7 +48,8 @@ public:
     void                                        writeFile(const std::string& path);
     void                                        writeBuffer(uint8_t*& buffer, uint64_t& size);
     void                                        writeMapFile(const std::string& path);
-    std::string                                 getMapFileBuffer(const std::string& cacheDisposition) const;
+    std::string                                 getMapFileBuffer() const;
+    std::string                                 getMapFileJSONBuffer(const std::string& cacheDisposition) const;
     void                                        deleteBuffer();
     const std::set<std::string>                 warnings();
     const std::set<const dyld3::MachOAnalyzer*> evictions();
@@ -57,6 +59,9 @@ public:
     const std::string                           uuid() const;
 
     void                                        forEachCacheDylib(void (^callback)(const std::string& path));
+    void                                        forEachCacheSymlink(void (^callback)(const std::string& path));
+
+    void                                        forEachDylibInfo(void (^callback)(const DylibInfo& dylib, Diagnostics& dylibDiag)) override final;
 
 private:
 
@@ -80,7 +85,6 @@ private:
     {
         uint64_t    sharedMemoryStart;
         uint64_t    sharedMemorySize;
-        uint64_t    textAndDataMaxSize;
         uint64_t    sharedRegionPadding;
         uint64_t    pointerDeltaMask;
         const char* archName;
@@ -93,13 +97,22 @@ private:
     };
 
     static const ArchLayout  _s_archLayout[];
-    static const char* const _s_neverStubEliminateDylibs[];
     static const char* const _s_neverStubEliminateSymbols[];
 
     void        makeSortedDylibs(const std::vector<LoadedMachO>& dylibs, const std::unordered_map<std::string, unsigned> sortOrder);
-    void        processSelectorStrings(const std::vector<LoadedMachO>& executables);
-    void        parseCoalescableSegments();
+    void        processSelectorStrings(const std::vector<LoadedMachO>& executables, IMPCaches::HoleMap& selectorsHoleMap);
+    void        parseCoalescableSegments(IMPCaches::SelectorMap& selectorMap, IMPCaches::HoleMap& selectorsHoleMap);
     void        assignSegmentAddresses();
+    void        assignMultipleDataSegmentAddresses(uint64_t& addr, uint32_t totalProtocolDefCount);
+
+    uint64_t    dataRegionsTotalSize() const;
+    uint64_t    dataRegionsSizeInUse() const;
+
+    // Return the earliest data region by address
+    const Region* firstDataRegion() const;
+
+    // Return the lateset data region by address
+    const Region* lastDataRegion() const;
 
     uint64_t    cacheOverflowAmount();
     size_t      evictLeafDylibs(uint64_t reductionTarget, std::vector<const LoadedMachO*>& overflowDylibs);
@@ -118,23 +131,22 @@ private:
     bool        writeCache(void (^cacheSizeCallback)(uint64_t size), bool (^copyCallback)(const uint8_t* src, uint64_t size, uint64_t dstOffset));
 
     // implemented in OptimizerObjC.cpp
-    void        optimizeObjC();
+    void        optimizeObjC(bool impCachesSuccess, const std::vector<const IMPCaches::Selector*> & inlinedSelectors);
     uint32_t    computeReadOnlyObjC(uint32_t selRefCount, uint32_t classDefCount, uint32_t protocolDefCount);
     uint32_t    computeReadWriteObjC(uint32_t imageCount, uint32_t protocolDefCount);
 
-    // implemented in OptimizerBranches.cpp
-    void        optimizeAwayStubs();
+    void        emitContantObjects();
 
     typedef std::unordered_map<std::string, const dyld3::MachOAnalyzer*> InstallNameToMA;
 
     typedef uint64_t                                                CacheOffset;
 
+    std::vector<DylibInfo>                      _sortedDylibs;
+    std::vector<Region>                         _dataRegions; // 1 or more __DATA regions.
     UnmappedRegion                              _codeSignatureRegion;
     std::set<const dyld3::MachOAnalyzer*>       _evictions;
     const ArchLayout*                           _archLayout                             = nullptr;
     uint32_t                                    _aliasCount                             = 0;
-    uint64_t                                    _slideInfoFileOffset                    = 0;
-    uint64_t                                    _slideInfoBufferSizeAllocated           = 0;
     uint8_t*                                    _objcReadOnlyBuffer                     = nullptr;
     uint64_t                                    _objcReadOnlyBufferSizeUsed             = 0;
     uint64_t                                    _objcReadOnlyBufferSizeAllocated        = 0;
@@ -152,6 +164,7 @@ private:
     std::set<std::pair<const dyld3::MachOLoaded*, CacheOffset>>                 _dylibWeakExports;
     std::unordered_map<CacheOffset, std::vector<dyld_cache_patchable_location>> _exportsToUses;
     std::unordered_map<CacheOffset, std::string>                                _exportsToName;
+    IMPCaches::IMPCachesBuilder* _impCachesBuilder;
 };
 
 

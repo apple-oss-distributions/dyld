@@ -162,9 +162,9 @@ protected:
 #endif
 
 	virtual void						recursiveLoadLibraries(const LinkContext& context, bool preflightOnly, const RPathChain& loaderRPaths, const char* loadPath);
-	virtual unsigned 					recursiveUpdateDepth(unsigned int maxDepth);
+	virtual unsigned 					updateDepth(unsigned int maxDepth);
 	virtual void						recursiveRebase(const LinkContext& context) {  }
-	virtual void						recursiveBind(const LinkContext& context, bool forceLazysBound, bool neverUnload);
+	virtual void						recursiveBind(const LinkContext& context, bool forceLazysBound, bool neverUnload, const ImageLoader* parent);
 	virtual void						recursiveApplyInterposing(const LinkContext& context);
 	virtual void						recursiveMakeDataReadOnly(const LinkContext& context) {}
 	virtual void						recursiveGetDOFSections(const LinkContext& context, std::vector<DOFInfo>& dofs) { }
@@ -174,7 +174,7 @@ protected:
 	virtual void						doGetDependentLibraries(DependentLibraryInfo libs[]) { unreachable(); }
 	virtual LibraryInfo					doGetLibraryInfo(const LibraryInfo& requestorInfo) { return requestorInfo; }
 	virtual void						doRebase(const LinkContext& context) { unreachable(); }
-	virtual void						doBind(const LinkContext& context, bool forceLazysBound) { unreachable(); }
+	virtual void						doBind(const LinkContext& context, bool forceLazysBound, const ImageLoader* reExportParent) { unreachable(); }
 	virtual void						doBindJustLazies(const LinkContext& context) { unreachable(); }
 	virtual void						doGetDOFSections(const LinkContext& context, std::vector<DOFInfo>& dofs) { unreachable(); }
 	virtual void						doInterpose(const LinkContext& context) { unreachable(); }

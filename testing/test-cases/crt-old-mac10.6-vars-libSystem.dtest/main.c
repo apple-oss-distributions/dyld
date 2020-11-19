@@ -1,7 +1,6 @@
-// BUILD_ONLY:      MacOSX
-// BUILD_MIN_OS:    10.6
+// BUILD(macos|x86_64):  $CC main.c    -mmacosx-version-min=10.6 -o $BUILD_DIR/crt-vars10.6-libSystem.exe
 
-// BUILD:  $CC main.c            -o $BUILD_DIR/crt-vars10.6-libSystem.exe
+// BUILD(ios,tvos,watchos,bridgeos):
 
 // RUN:  ./crt-vars10.6-libSystem.exe
 

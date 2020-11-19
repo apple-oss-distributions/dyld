@@ -198,7 +198,7 @@ protected:
 	virtual	void		getRPaths(const LinkContext& context, std::vector<const char*>&) const;
 	virtual	bool		getUUID(uuid_t) const;
 	virtual void		doRebase(const LinkContext& context);
-	virtual void		doBind(const LinkContext& context, bool forceLazysBound) = 0;
+	virtual void		doBind(const LinkContext& context, bool forceLazysBound, const ImageLoader* reExportParent) = 0;
 	virtual void		doBindJustLazies(const LinkContext& context) = 0;
 	virtual bool		doInitialization(const LinkContext& context);
 	virtual void		doGetDOFSections(const LinkContext& context, std::vector<ImageLoader::DOFInfo>& dofs);
@@ -230,7 +230,7 @@ protected:
 			bool		segIsReadOnlyImport(unsigned int) const;
 #endif
 			bool		segIsReadOnlyData(unsigned int) const;
-			intptr_t	assignSegmentAddresses(const LinkContext& context);
+			intptr_t	assignSegmentAddresses(const LinkContext& context, size_t extraAllocationSize);
 			uintptr_t	reserveAnAddressRange(size_t length, const ImageLoader::LinkContext& context);
 			bool		reserveAddressRange(uintptr_t start, size_t length);
 			void		mapSegments(int fd, uint64_t offsetInFat, uint64_t lenInFat, uint64_t fileLen, const LinkContext& context);

@@ -135,7 +135,7 @@ ImageLoaderMachOCompressed* ImageLoaderMachOCompressed::instantiateFromFile(cons
 		const char* installName = image->getInstallPath();
 		if ( (installName != NULL) && (strcmp(installName, path) == 0) && (path[0] == '/') )
 			image->setPathUnowned(installName);
-#if __MAC_OS_X_VERSION_MIN_REQUIRED
+#if TARGET_OS_OSX
 		// <rdar://problem/6563887> app crashes when libSystem cannot be found
 		else if ( (installName != NULL) && (strcmp(path, "/usr/lib/libgcc_s.1.dylib") == 0) && (strcmp(installName, "/usr/lib/libSystem.B.dylib") == 0) )
 			image->setPathUnowned("/usr/lib/libSystem.B.dylib");
@@ -317,7 +317,7 @@ bool ImageLoaderMachOCompressed::libReExported(unsigned int libIndex) const
 bool ImageLoaderMachOCompressed::libIsUpward(unsigned int libIndex) const
 {
 	const uintptr_t* images = ((uintptr_t*)(((uint8_t*)this) + sizeof(ImageLoaderMachOCompressed) + fSegmentsCount*sizeof(uint32_t)));
-	// re-export flag is second bit
+	// upward flag is second bit
 	return ((images[libIndex] & 2) != 0);
 }	
 
@@ -765,7 +765,7 @@ uintptr_t ImageLoaderMachOCompressed::resolveTwolevel(const LinkContext& context
 	extern const mach_header __dso_handle;
 	uint32_t dyldMinOS = ImageLoaderMachO::minOSVersion(&__dso_handle);
 	if ( imageMinOS > dyldMinOS ) {
-#if __MAC_OS_X_VERSION_MIN_REQUIRED
+#if TARGET_OS_OSX
 		const char* msg = dyld::mkstringf(" (which was built for Mac OS X %d.%d)", imageMinOS >> 16, (imageMinOS >> 8) & 0xFF);
 #else
 		const char* msg = dyld::mkstringf(" (which was built for iOS %d.%d)", imageMinOS >> 16, (imageMinOS >> 8) & 0xFF);
@@ -799,7 +799,7 @@ uintptr_t ImageLoaderMachOCompressed::resolve(const LinkContext& context, const 
 		symbolAddress = this->resolveFlat(context, symbolName, weak_import, runResolver, targetImage);
 	}
 	else if ( libraryOrdinal == BIND_SPECIAL_DYLIB_WEAK_LOOKUP ) {
-		symbolAddress = this->resolveWeak(context, symbolName, false, runResolver, targetImage);
+		symbolAddress = this->resolveWeak(context, symbolName, weak_import, runResolver, targetImage);
 	}
 	else {
 		if ( libraryOrdinal == BIND_SPECIAL_DYLIB_MAIN_EXECUTABLE ) {
@@ -825,8 +825,14 @@ uintptr_t ImageLoaderMachOCompressed::resolve(const LinkContext& context, const 
 				symbolAddress = 0;
 			}
 			else {
-				dyld::throwf("can't resolve symbol %s in %s because dependent dylib #%ld could not be loaded",
-					symbolName, this->getPath(), libraryOrdinal);
+				// Try get the path from the load commands
+				if ( const char* depPath = libPath((unsigned int)libraryOrdinal-1) ) {
+					dyld::throwf("can't resolve symbol %s in %s because dependent dylib %s could not be loaded",
+								 symbolName, this->getPath(), depPath);
+				} else {
+					dyld::throwf("can't resolve symbol %s in %s because dependent dylib #%ld could not be loaded",
+								 symbolName, this->getPath(), libraryOrdinal);
+				}
 			}
 		}
 		else {
@@ -876,7 +882,7 @@ void ImageLoaderMachOCompressed::throwBadBindingAddress(uintptr_t address, uintp
 }
 
 
-void ImageLoaderMachOCompressed::doBind(const LinkContext& context, bool forceLazysBound)
+void ImageLoaderMachOCompressed::doBind(const LinkContext& context, bool forceLazysBound, const ImageLoader* reExportParent)
 {
 	CRSetCrashLogMessage2(this->getPath());
 
@@ -957,11 +963,28 @@ void ImageLoaderMachOCompressed::doBind(const LinkContext& context, bool forceLa
 		// need to patch all other places in cache that point to the overridden dylib, to point to this dylib instead
 		const dyld3::closure::Image* overriddenImage = context.dyldCache->cachedDylibsImageArray()->imageForNum(dyldCacheOverrideImageNum);
 		uint32_t imageIndex = dyldCacheOverrideImageNum - (uint32_t)context.dyldCache->cachedDylibsImageArray()->startImageNum();
+		//dyld::log("doBind() found override of %s\n", this->getPath());
 		context.dyldCache->forEachPatchableExport(imageIndex, ^(uint32_t cacheOffsetOfImpl, const char* exportName) {
 			uintptr_t newImpl = 0;
-			const ImageLoader* foundIn;
-			this->findExportedSymbolAddress(context, exportName, NULL, 0, false, &foundIn, &newImpl);
-			patchCacheUsesOf(context, overriddenImage, cacheOffsetOfImpl, exportName, newImpl);
+			const ImageLoader* foundIn = nullptr;
+			if ( this->findExportedSymbolAddress(context, exportName, NULL, 0, false, &foundIn, &newImpl) ) {
+				//dyld::log("   patchCacheUsesOf(%s) found in %s\n", exportName, foundIn->getPath());
+				patchCacheUsesOf(context, overriddenImage, cacheOffsetOfImpl, exportName, newImpl);
+			}
+			else {
+				// <rdar://problem/59196856> allow patched impls to move between re-export sibling dylibs
+				if ( reExportParent != nullptr ) {
+					reExportParent->forEachReExportDependent(^(const ImageLoader* reExportedDep, bool& stop) {
+						uintptr_t siblingImpl = 0;
+						const ImageLoader* foundInSibling = nullptr;
+						if ( reExportedDep->findExportedSymbolAddress(context, exportName, NULL, 0, false, &foundInSibling, &siblingImpl) ) {
+							stop = true;
+							//dyld::log("   patchCacheUsesOf(%s) found in sibling %s\n", exportName, foundInSibling->getPath());
+							patchCacheUsesOf(context, overriddenImage, cacheOffsetOfImpl, exportName, siblingImpl);
+						}
+					});
+				}
+			}
 		});
 	}
 
@@ -1040,11 +1063,12 @@ void ImageLoaderMachOCompressed::registerInterposing(const LinkContext& context)
 						return;
 					uint64_t rebaseTargetRuntimeOffset;
 					uint32_t bindOrdinal;
+					int64_t  ptrAddend;
        				if ( fixupLoc->isRebase(pointerFormat, 0, rebaseTargetRuntimeOffset) ) {
 						//dyld::log("interpose rebase at fixup at %p to 0x%0llX\n", fixupLoc, rebaseTargetRuntimeOffset);
 						lastRebaseTarget = (uintptr_t)(fMachOData+rebaseTargetRuntimeOffset);
        				}
-     				else if ( fixupLoc->isBind(pointerFormat, bindOrdinal) ) {
+     				else if ( fixupLoc->isBind(pointerFormat, bindOrdinal, ptrAddend) ) {
 						//dyld::log("interpose bind fixup at %p to bind ordinal %d\n", fixupLoc, bindOrdinal);
 						__block uint32_t targetBindIndex = 0;
 						ma->forEachChainedFixupTarget(diag, ^(int libraryOrdinal, const char* symbolName, uint64_t addend, bool weakImport, bool& stop) {
@@ -1132,8 +1156,8 @@ void ImageLoaderMachOCompressed::registerInterposing(const LinkContext& context)
 						}
 						ImageLoader::fgInterposingTuples.push_back(tuple);
 					}
-				}, ^(const char* symbolName){ },
-				   ^() { });
+				}, ^(const char* symbolName){
+				});
 			}
 		}
 	});
@@ -1167,6 +1191,13 @@ void ImageLoaderMachOCompressed::makeDataReadOnly() const
 			if ( segIsReadOnlyData(i) ) {
 				uintptr_t start = segActualLoadAddress(i);
 				uintptr_t size = segSize(i);
+	#if defined(__x86_64__) && !TARGET_OS_SIMULATOR
+				if ( dyld::isTranslated() ) {
+					// <rdar://problem/48325338> can't mprotect non-16KB segments
+					if ( ((size & 0x3FFF) != 0) || ((start & 0x3FFF) != 0) )
+						continue;
+				}
+	#endif
 				::mprotect((void*)start, size, PROT_READ);
 				//dyld::log("make read-only 0x%09lX -> 0x%09lX\n", (long)start, (long)(start+size));
 			}
@@ -2060,7 +2091,7 @@ void ImageLoaderMachOCompressed::updateOptimizedLazyPointers(const LinkContext& 
 
 void ImageLoaderMachOCompressed::registerEncryption(const encryption_info_command* encryptCmd, const LinkContext& context)
 {
-#if __arm__ || __arm64__
+#if (__arm__ || __arm64__) && !TARGET_OS_SIMULATOR
 	if ( encryptCmd == NULL )
 		return;
 	// fMachOData not set up yet, need to manually find mach_header

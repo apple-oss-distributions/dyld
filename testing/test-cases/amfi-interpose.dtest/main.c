@@ -18,18 +18,17 @@
 
 #include <libamfi.h>
 
+#include "test_support.h"
+
 int main()
 {
-    printf("[BEGIN] amfi-interpose\n");
-
     // interposed malloc() doubles alloction size and prefills allocation with '#'
     char* p1 = malloc(10);
     bool interposed = (strncmp(p1, "####################", 20) == 0);
 
     const char* amfiBits = getenv("DYLD_AMFI_FAKE");
     if ( amfiBits == NULL ) {
-        printf("[FAIL] amfi-interpose: DYLD_AMFI_FAKE not setn\n");
-        return 0;
+        FAIL("amfi-interpose: DYLD_AMFI_FAKE not set");
     }
 #ifdef AMFI_RETURNS_INTERPOSING_FLAG
     bool allowInterposing = (strcmp(amfiBits, "0x7F") == 0);
@@ -38,11 +37,9 @@ int main()
 #endif
 
     if ( interposed == allowInterposing )
-        printf("[PASS] amfi-interpose\n");
+        PASS("Success");
     else if ( interposed )
-        printf("[FAIL] amfi-interpose: malloc interposed, but amfi said to block it\n");
+        FAIL("amfi-interpose: malloc interposed, but amfi said to block it");
     else
-        printf("[FAIL] amfi-interpose: malloc not interposed, but amfi said to allow it\n");
-
-	return 0;
+        FAIL("amfi-interpose: malloc not interposed, but amfi said to allow it");
 }

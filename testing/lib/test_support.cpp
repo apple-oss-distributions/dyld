@@ -140,6 +140,7 @@ private:
     };
     void runLeaks();
     void dumpLogs();
+    void getLogsString(char** buffer);
     static uint8_t hexCharToUInt(const char hexByte, uint8_t* value);
     static uint64_t hexToUInt64(const char* startHexByte, const char** endHexByte);
     
@@ -154,9 +155,9 @@ private:
 };
 
 // Okay, this is tricky. We need something with roughly he semantics of a weak def, but without using weak defs as their presence
-// m ay impact certain tests. Instead we do the following:
+// may impact certain tests. Instead we do the following:
 //
-// 1. Embed a stuct containing a lock and a pointer to our global state object in eahc binary
+// 1. Embed a stuct containing a lock and a pointer to our global state object in each binary
 // 2. Once per binary we walk the entire image list looking for the first entry that also has state data
 // 3. If it has state we lock its initializaion lock, and if it is not initialized we initialize it
 // 4. We then copy the initalized pointer into our own state, and unlock the initializer lock
@@ -455,6 +456,29 @@ uint64_t TestState::hexToUInt64(const char* startHexByte, const char** endHexByt
     return retval;
 }
 
+void TestState::getLogsString(char** buffer)
+{
+    char *logBuf = NULL;
+    if ( logs.count() ) {
+        size_t idx = 0;
+        size_t bufSize = 0;
+        for (const auto& log : logs) {
+            size_t logSize = strlen(log);
+            bufSize += logSize + 2;  // \t and \n
+            logBuf = (char*)realloc(logBuf, bufSize);
+            strncpy(logBuf+idx, "\t", 1);
+            idx++;
+            strncpy(logBuf+idx, log, logSize);
+            idx += logSize;
+            strncpy(logBuf+idx, "\n", 1);
+            idx++;
+        }
+        logBuf = (char*)realloc(logBuf, bufSize + 1);
+        logBuf[bufSize] = '\0';
+        *buffer = logBuf;
+    }
+}
+
 TestState::TestState() : testName(__progname), logImmediate(false), logOnSuccess(false),  checkForLeaks(false), output(Console) {
     forEachEnvVar(environ, [this](const char* env, const char* val) {
         if (strcmp(env, "TEST_LOG_IMMEDIATE") == 0) {
@@ -492,46 +516,40 @@ TestState::TestState() : testName(__progname), logImmediate(false), logOnSuccess
     }
 }
 
-static std::atomic<TestState*>& getExecutableImageState() {
-    uint32_t imageCnt = _dyld_image_count();
-    for (uint32_t i = 0; i < imageCnt; ++i) {
-        #if __LP64__
-            const struct mach_header_64* mh = (const struct mach_header_64*)_dyld_get_image_header(i);
-        #else
-            const struct mach_header* mh = _dyld_get_image_header(i);
-        #endif
-        if (mh->filetype != MH_EXECUTE) {
-            continue;
-        }
-        size_t size = 0;
-        auto state = (std::atomic<TestState*>*)getsectiondata(mh, "__DATA", "__dyld_test", &size);
-        if (!state) {
-            fprintf(stderr, "Could not find test state in main executable TestState\n");
-            exit(0);
-        }
-        return *state;
-    }
-    fprintf(stderr, "Could not find test state in main executable\n");
-    exit(0);
-}
-
 GrowableArray<std::pair<mach_port_t, _dyld_test_crash_handler_t>>& TestState::getCrashHandlers() {
     return crashHandlers;
 }
 
 TestState* TestState::getState() {
     if (!sState) {
-        auto& state = getExecutableImageState();
-        if (state == nullptr) {
-            void *temp = malloc(sizeof(TestState));
-            auto newState = new (temp) TestState();
-            TestState* expected = nullptr;
-            if(!state.compare_exchange_strong(expected, newState)) {
-                newState->~TestState();
-                free(temp);
+        uint32_t imageCnt = _dyld_image_count();
+        for (uint32_t i = 0; i < imageCnt; ++i) {
+            #if __LP64__
+                const struct mach_header_64* mh = (const struct mach_header_64*)_dyld_get_image_header(i);
+            #else
+                const struct mach_header* mh = _dyld_get_image_header(i);
+            #endif
+            if (mh->filetype != MH_EXECUTE) {
+                continue;
             }
+            size_t size = 0;
+            auto state = (std::atomic<TestState*>*)getsectiondata(mh, "__DATA", "__dyld_test", &size);
+//            fprintf(stderr, "__dyld_test -> 0x%llx\n", state);
+            if (!state) {
+                fprintf(stderr, "Could not find test state in main executable TestState\n");
+                exit(0);
+            }
+            if (*state == nullptr) {
+                void *temp = malloc(sizeof(TestState));
+                auto newState = new (temp) TestState();
+                TestState* expected = nullptr;
+                if(!state->compare_exchange_strong(expected, newState)) {
+                    newState->~TestState();
+                    free(temp);
+                }
+            }
+            sState.store(*state);
         }
-        sState.store(state);
     }
     assert(sState != nullptr);
     return sState;
@@ -623,12 +641,21 @@ void TestState::_PASSV(const char* file, unsigned line, const char* format, va_l
                 printf("<plist version=\"1.0\">");
                 printf("<dict>");
                 printf("<key>PASS</key><true />");
+                if (logOnSuccess) {
+                    char *logBuffer = NULL;
+                    getLogsString(&logBuffer);
+                    if ( logBuffer != NULL ) {
+                        printf("<key>LOGS</key><string>%s</string>", logBuffer);
+                        free(logBuffer);
+                    }
+                }
                 printf("</dict>");
                 printf("</plist>");
             }
+            exit(0);
         });
-        exit(0);
     }
+    __builtin_unreachable();
 }
 
 void _PASS(const char* file, unsigned line, const char* format, ...)  {
@@ -664,7 +691,6 @@ void TestState::_FAILV(const char* file, unsigned line, const char* format, va_l
                 }
             }
         } else if (output == XCTest) {
-            char *buffer;
             printf("<?xml version=\"1.0\" encoding=\"UTF-8\"?>");
             printf("<!DOCTYPE plist PUBLIC \"-//Apple//DTD PLIST 1.0//EN\" \"http://www.apple.com/DTDs/PropertyList-1.0.dtd\">");
             printf("<plist version=\"1.0\">");
@@ -672,14 +698,22 @@ void TestState::_FAILV(const char* file, unsigned line, const char* format, va_l
             printf("<key>PASS</key><false />");
             printf("<key>FILE</key><string>%s</string>", file);
             printf("<key>LINE</key><integer>%u</integer>", line);
+            char *buffer;
             vasprintf(&buffer, format, args);
             printf("<key>INFO</key><string>%s</string>", buffer);
             free(buffer);
+            char *logBuffer = NULL;
+            getLogsString(&logBuffer);
+            if ( logBuffer != NULL ) {
+                printf("<key>LOGS</key><string>%s</string>", logBuffer);
+                free(logBuffer);
+            }
             printf("</dict>");
             printf("</plist>");
         }
+        exit(0);
     });
-    exit(0);
+    __builtin_unreachable();
 }
 
 void _FAIL(const char* file, unsigned line, const char* format, ...)  {

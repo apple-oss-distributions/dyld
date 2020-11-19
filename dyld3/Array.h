@@ -26,6 +26,7 @@
 
 #include <algorithm>
 #include <stdint.h>
+#include <assert.h>
 #include <stddef.h>
 #include <mach/mach.h>
 
@@ -159,13 +160,13 @@ inline void OverflowSafeArray<T,MAXCOUNT>::growTo(uintptr_t n)
 #if BUILDING_LIBDYLD
         //FIXME We should figure out a way to do this in dyld
         char crashString[256];
-        snprintf(crashString, 256, "OverflowSafeArray failed to allocate %lu bytes, vm_allocate returned: %d\n",
-                _overflowBufferSize, kr);
+        snprintf(crashString, 256, "OverflowSafeArray failed to allocate %llu bytes, vm_allocate returned: %d\n",
+                (uint64_t)_overflowBufferSize, kr);
         CRSetCrashLogMessage(crashString);
 #endif
         assert(0);
     }
-    ::memcpy((void*)_overflowBuffer, this->_elements, this->_usedCount*sizeof(T));
+    ::memcpy((void*)_overflowBuffer, (void*)this->_elements, this->_usedCount*sizeof(T));
     this->_elements = (T*)_overflowBuffer;
     this->_allocCount = _overflowBufferSize / sizeof(T);
 

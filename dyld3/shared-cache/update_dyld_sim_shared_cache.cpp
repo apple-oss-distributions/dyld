@@ -56,6 +56,7 @@
 #include <unordered_set>
 #include <iostream>
 #include <fstream>
+#include <sstream>
 
 #include "FileUtils.h"
 #include "StringUtils.h"
@@ -100,7 +101,7 @@ static const char* sMacOSBinaries[] = {
 static bool verbose = false;
 
 
-static bool addIfMachO(const dyld3::closure::FileSystem& fileSystem, const std::string& runtimePath, const struct stat& statBuf, std::vector<MappedMachOsByCategory>& files, dyld3::Platform platform)
+static bool addIfMachO(const dyld3::closure::FileSystem& fileSystem, const std::string& runtimePath, const struct stat& statBuf, std::vector<MappedMachOsByCategory>& files, dyld3::Platform platform, Diagnostics& diag)
 {
     // don't precompute closure info for any debug or profile dylibs
     if ( endsWith(runtimePath, "_profile.dylib") || endsWith(runtimePath, "_debug.dylib") || endsWith(runtimePath, "_asan.dylib") || endsWith(runtimePath, "_profile") || endsWith(runtimePath, "_debug") )
@@ -110,13 +111,12 @@ static bool addIfMachO(const dyld3::closure::FileSystem& fileSystem, const std::
 
     bool result = false;
     for (MappedMachOsByCategory& file : files) {
-        Diagnostics diag;
         char realerPath[MAXPATHLEN];
         dyld3::closure::LoadedFileInfo loadedFileInfo = dyld3::MachOAnalyzer::load(diag, fileSystem, runtimePath.c_str(), file.archs, platform, realerPath);
         const dyld3::MachOAnalyzer* ma = (const dyld3::MachOAnalyzer*)loadedFileInfo.fileContent;
 
         if ( ma != nullptr ) {
-            bool            sipProtected    = false; // isProtectedBySIP(fd);
+            bool            sipProtected    = false;
             bool            issetuid        = false;
             const uint64_t  sliceLen        = loadedFileInfo.sliceLen;
             if ( ma->isDynamicExecutable() ) {
@@ -126,7 +126,9 @@ static bool addIfMachO(const dyld3::closure::FileSystem& fileSystem, const std::
                 result = true;
         #endif
             }
-            else if ( ma->canBePlacedInDyldCache(runtimePath.c_str(), ^(const char* msg) {}) ) {
+            else if ( ma->canBePlacedInDyldCache(runtimePath.c_str(), ^(const char* msg) {
+                diag.error("Dylib located at '%s' cannot be placed in cache because: '%s'", loadedFileInfo.path, msg);
+            }) ) {
                 file.dylibsForCache.emplace_back(runtimePath, ma, sliceLen, issetuid, sipProtected, loadedFileInfo.sliceOffset, statBuf.st_mtime, statBuf.st_ino);
                 result = true;
            }
@@ -167,7 +169,8 @@ static void findAllFiles(const dyld3::closure::FileSystem& fileSystem, const std
                         return;
                 }
                 // if the file is mach-o, add to list
-                if ( addIfMachO(fileSystem, path, statBuf, files, platform) ) {
+                Diagnostics diag;
+                if ( addIfMachO(fileSystem, path, statBuf, files, platform, diag) ) {
                     if ( multiplePrefixes )
                         alreadyUsed.insert(path);
                 }
@@ -182,7 +185,10 @@ static void addMacOSHostLibs(std::vector<MappedMachOsByCategory>& allFileSets, d
     for (const char* path : sMacOSHostLibs) {
         struct stat statBuf;
         if ( stat(path, &statBuf) == 0 ) {
-            addIfMachO(fileSystem, path, statBuf, allFileSets, dyld3::Platform::macOS);
+            Diagnostics diag;
+            addIfMachO(fileSystem, path, statBuf, allFileSets, dyld3::Platform::macOS, diag);
+            if ( diag.hasError() )
+                fprintf(stderr, "update_dyld_sim_shared_cache: warning: skipping %s because %s\n", path, diag.errorMessage().c_str());
         }
     }
 }
@@ -194,7 +200,10 @@ static void addMacOSBinaries(const dyld3::closure::FileSystem& fileSystem, const
             std::string fullPath = prefix + path;
             struct stat statBuf;
             if ( stat(fullPath.c_str(), &statBuf) == 0 ) {
-                addIfMachO(fileSystem, path, statBuf, files, dyld3::Platform::macOS);
+                Diagnostics diag;
+                addIfMachO(fileSystem, path, statBuf, files, dyld3::Platform::macOS, diag);
+                if ( diag.hasError() )
+                    fprintf(stderr, "update_dyld_sim_shared_cache: warning: skipping %s because %s\n", fullPath.c_str(), diag.errorMessage().c_str());
             }
         }
     }
@@ -305,6 +314,14 @@ static void pruneOtherDylibs(const std::string& volumePrefix, MappedMachOsByCate
 }
 
 
+static std::string getOrderFileContent(const std::string& orderFile)
+{
+    std::ifstream fstream(orderFile);
+    std::stringstream stringBuf;
+    stringBuf << fstream.rdbuf();
+    return stringBuf.str();
+}
+
 static bool existingCacheUpToDate(const std::string& existingCache, const std::vector<DyldSharedCache::MappedMachO>& currentDylibs)
 {
     // if no existing cache, it is not up-to-date
@@ -363,6 +380,26 @@ static bool existingCacheUpToDate(const std::string& existingCache, const std::v
     return !foundMismatch;
 }
 
+static void addFileSets(const std::unordered_set<std::string>& allowedArchs, std::unordered_set<std::string>& requestedArchs, std::vector<MappedMachOsByCategory>& fileSets)
+{
+    if ( requestedArchs.empty() ) {
+#if __arm64__
+        requestedArchs.insert("arm64");
+#elif __x86_64__
+        requestedArchs.insert("x86_64");
+        requestedArchs.insert("i386");
+#else
+    #error unknown platform
+#endif
+    }
+
+    for (auto& requested : requestedArchs) {
+        if ( allowedArchs.find(requested) != allowedArchs.end() ) {
+            const dyld3::GradedArchs& archs = dyld3::GradedArchs::forName(requested.c_str(), false);
+            fileSets.push_back({archs});
+        }
+    }
+}
 
 inline uint32_t absolutetime_to_milliseconds(uint64_t abstime)
 {
@@ -388,6 +425,7 @@ int main(int argc, const char* argv[], const char* envp[])
     std::string                     dirtyDataOrderFile;
     dyld3::Platform                 platform = dyld3::Platform::iOS_simulator;
     std::unordered_set<std::string> skipDylibs;
+    std::unordered_set<std::string> requestedArchs;
     
     // parse command line options
     for (int i = 1; i < argc; ++i) {
@@ -426,6 +464,10 @@ int main(int argc, const char* argv[], const char* envp[])
             TERMINATE_IF_LAST_ARG("-dirty_data_order_file missing path argument\n");
             dirtyDataOrderFile = argv[++i];
         }
+        else if (strcmp(arg, "-arch") == 0) {
+            TERMINATE_IF_LAST_ARG("-arch missing arch argument\n");
+            requestedArchs.insert(argv[++i]);
+        }
         else if (strcmp(arg, "-force") == 0) {
             force = true;
         }
@@ -440,11 +482,11 @@ int main(int argc, const char* argv[], const char* envp[])
         }
     }
     
-    if ( rootPath.empty()) {
+    if ( rootPath.empty() ) {
         fprintf(stderr, "-root should be specified\n");
         return 1;
     }
-    if (cacheDir.empty()) {
+    if ( cacheDir.empty() ) {
         fprintf(stderr, "-cache_dir should be specified\n");
         return 1;
     }
@@ -452,6 +494,12 @@ int main(int argc, const char* argv[], const char* envp[])
     char resolvedPath[PATH_MAX];
     if ( realpath(rootPath.c_str(), resolvedPath) != NULL ) {
         rootPath = resolvedPath;
+    }
+    
+    // canonicalize cacheDir.
+    // Later, path is checked against real path name before writing cache file to avoid TOCTU race condition.
+    if ( realpath(cacheDir.c_str(), resolvedPath) != NULL ) {
+        cacheDir = resolvedPath;
     }
 
     // Find the boot volume so that we can ensure all overlays are on the same volume
@@ -476,23 +524,45 @@ int main(int argc, const char* argv[], const char* envp[])
         return 1;
     }
 
+    std::string dylibOrderFileContent;
+    if ( !dylibOrderFile.empty() ) {
+        dylibOrderFileContent = getOrderFileContent(dylibOrderFile);
+    }
+
+    std::string dirtyDataOrderFileContent;
+    if ( !dirtyDataOrderFile.empty() ) {
+        dirtyDataOrderFileContent = getOrderFileContent(dirtyDataOrderFile);
+    }
     uint64_t t1 = mach_absolute_time();
 
     __block std::vector<MappedMachOsByCategory> allFileSets;
+    std::unordered_set<std::string> allowedArchs;
     switch ( platform ) {
         case dyld3::Platform::iOS_simulator:
-            allFileSets.push_back({dyld3::GradedArchs::x86_64});
+            allowedArchs.insert("x86_64");
+            allowedArchs.insert("arm64");
             break;
         case dyld3::Platform::watchOS_simulator:
-            allFileSets.push_back({dyld3::GradedArchs::i386});
+            allowedArchs.insert("i386");
+            allowedArchs.insert("x86_64");
+            allowedArchs.insert("arm64");
+
             break;
         case dyld3::Platform::tvOS_simulator:
-            allFileSets.push_back({dyld3::GradedArchs::x86_64});
+            allowedArchs.insert("x86_64");
+            allowedArchs.insert("arm64");
             break;
         default:
             assert(0 && "invalid platform");
             break;
     }
+
+    addFileSets(allowedArchs, requestedArchs, allFileSets);
+    if ( allFileSets.empty() ) {
+        fprintf(stderr, "update_dyld_sim_shared_cache: error: no valid architecture specified\n");
+        return 1;
+    }
+
     findAllFiles(fileSystem, pathPrefixes, allFileSets, platform);
     addMacOSHostLibs(allFileSets, platform);
     addMacOSBinaries(fileSystem, pathPrefixes, allFileSets);
@@ -526,7 +596,7 @@ int main(int argc, const char* argv[], const char* envp[])
         MappedMachOsByCategory& fileSet = allFileSets[index];
         const std::string outFile = cacheDir + "/dyld_sim_shared_cache_" + fileSet.archs.name();
         
-        DyldSharedCache::MappedMachO (^loader)(const std::string&) = ^DyldSharedCache::MappedMachO(const std::string& runtimePath) {
+        DyldSharedCache::MappedMachO (^loader)(const std::string&, Diagnostics&) = ^DyldSharedCache::MappedMachO(const std::string& runtimePath, Diagnostics& diag) {
             if ( skipDylibs.count(runtimePath) )
                 return DyldSharedCache::MappedMachO();
 
@@ -554,7 +624,7 @@ int main(int argc, const char* argv[], const char* envp[])
                     
                     std::vector<MappedMachOsByCategory> mappedFiles;
                     mappedFiles.push_back({fileSet.archs});
-                    if ( addIfMachO(fileSystem, runtimePath, statBuf, mappedFiles, platform) ) {
+                    if ( addIfMachO(fileSystem, runtimePath, statBuf, mappedFiles, platform, diag) ) {
                         if ( !mappedFiles.back().dylibsForCache.empty() ) {
                             if ( verbose )
                                 fprintf(stderr, "verifySelfContained, add %s\n", mappedFiles.back().dylibsForCache.back().runtimePath.c_str());
@@ -581,7 +651,7 @@ int main(int argc, const char* argv[], const char* envp[])
                 }
             }
             reasons += "\")";
-            fprintf(stderr, "update_dyld_shared_cache: warning: %s rejected from cached dylibs: %s (%s)\n", fileSet.archs.name(), exclude.first.runtimePath.c_str(), reasons.c_str());
+            fprintf(stderr, "update_dyld_sim_shared_cache: warning: %s rejected from cached dylibs: %s (%s)\n", fileSet.archs.name(), exclude.first.runtimePath.c_str(), reasons.c_str());
             fileSet.otherDylibsAndBundles.push_back(exclude.first);
         }
         
@@ -598,9 +668,10 @@ int main(int argc, const char* argv[], const char* envp[])
         options.outputMapFilePath            = cacheDir + "/dyld_sim_shared_cache_" + fileSet.archs.name() + ".map";
         options.archs                        = &fileSet.archs;
         options.platform                     = platform;
-        options.excludeLocalSymbols          = false;
+        options.localSymbolMode              = DyldSharedCache::LocalSymbolsMode::keep;
         options.optimizeStubs                = false;
-        options.optimizeObjC                 = true;
+        options.optimizeDyldDlopens          = false;   // don't add dyld3 closures to simulator cache
+        options.optimizeDyldLaunches         = false;   // don't add dyld3 closures to simulator cache
         options.codeSigningDigestMode        = DyldSharedCache::SHA256only;
         options.dylibsRemovedDuringMastering = dylibsRemoved;
         options.inodesAreSameAsRuntime       = true;
@@ -609,8 +680,8 @@ int main(int argc, const char* argv[], const char* envp[])
         options.isLocallyBuiltCache          = true;
         options.verbose                      = verbose;
         options.evictLeafDylibsOnOverflow    = true;
-        options.dylibOrdering                = parseOrderFile(dylibOrderFile);
-        options.dirtyDataSegmentOrdering     = parseOrderFile(dirtyDataOrderFile);
+        options.dylibOrdering                = parseOrderFile(dylibOrderFileContent);
+        options.dirtyDataSegmentOrdering     = parseOrderFile(dirtyDataOrderFileContent);
         DyldSharedCache::CreateResults results = DyldSharedCache::create(options, fileSystem, fileSet.dylibsForCache, fileSet.otherDylibsAndBundles, fileSet.mainExecutables);
         
         // print any warnings

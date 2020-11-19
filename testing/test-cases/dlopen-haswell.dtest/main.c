@@ -1,7 +1,7 @@
-// BUILD_ONLY: MacOSX
+// BUILD(macos):  $CC a.c -dynamiclib -arch x86_64h -o $BUILD_DIR/libHaswellCheck.dylib -install_name $RUN_DIR/libHaswellCheck.dylib
+// BUILD(macos):  $CC main.c -o $BUILD_DIR/dlopen-haswell.exe -DRUN_DIR="$RUN_DIR"
 
-// BUILD:  $CC a.c -dynamiclib -arch x86_64h -o $BUILD_DIR/libHaswellCheck.dylib -install_name $RUN_DIR/libHaswellCheck.dylib
-// BUILD:  $CC main.c -o $BUILD_DIR/dlopen-haswell.exe -DRUN_DIR="$RUN_DIR"
+// BUILD(ios,tvos,watchos,bridgeos):
 
 // RUN:  ./dlopen-haswell.exe
 

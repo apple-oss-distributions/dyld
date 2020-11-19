@@ -1,12 +1,11 @@
-// BUILD_ONLY: MacOSX
+// BUILD(macos):  $CC foo.c -dynamiclib -o $BUILD_DIR/lc/libfoo.dylib -install_name /blah/libfoo.dylib
+// BUILD(macos):  $CC main.c $BUILD_DIR/lc/libfoo.dylib -o $BUILD_DIR/restrict-search-lc-find.exe    -Wl,-dyld_env,DYLD_LIBRARY_PATH=@loader_path/lc -DMODE=lc-find -DSHOULD_BE_FOUND=1
+// BUILD(macos):  $CC main.c $BUILD_DIR/lc/libfoo.dylib -o $BUILD_DIR/restrict-search-lc-no-find.exe -Wl,-dyld_env,DYLD_LIBRARY_PATH=@loader_path/lc -DMODE=lc-no-find -sectcreate __RESTRICT __restrict /dev/null
+// BUILD(macos):  $CC foo.c -dynamiclib -o $BUILD_DIR/rpath/libfoo.dylib -install_name @rpath/libfoo.dylib
+// BUILD(macos):  $CC main.c $BUILD_DIR/rpath/libfoo.dylib -o $BUILD_DIR/restrict-search-rpath-find.exe    -Wl,-rpath,@loader_path/rpath/ -DMODE=rpath-find -DSHOULD_BE_FOUND=1
+// BUILD(macos):  $CC main.c $BUILD_DIR/rpath/libfoo.dylib -o $BUILD_DIR/restrict-search-rpath-no-find.exe -Wl,-rpath,@loader_path/rpath/ -DMODE=rpath-no-find -sectcreate __RESTRICT __restrict /dev/null
 
-// BUILD:  $CC foo.c -dynamiclib -o $BUILD_DIR/lc/libfoo.dylib -install_name /blah/libfoo.dylib
-// BUILD:  $CC main.c $BUILD_DIR/lc/libfoo.dylib -o $BUILD_DIR/restrict-search-lc-find.exe    -Wl,-dyld_env,DYLD_LIBRARY_PATH=@loader_path/lc -DMODE=lc-find -DSHOULD_BE_FOUND=1
-// BUILD:  $CC main.c $BUILD_DIR/lc/libfoo.dylib -o $BUILD_DIR/restrict-search-lc-no-find.exe -Wl,-dyld_env,DYLD_LIBRARY_PATH=@loader_path/lc -DMODE=lc-no-find -sectcreate __RESTRICT __restrict /dev/null
-// BUILD:  $CC foo.c -dynamiclib -o $BUILD_DIR/rpath/libfoo.dylib -install_name @rpath/libfoo.dylib
-// BUILD:  $CC main.c $BUILD_DIR/rpath/libfoo.dylib -o $BUILD_DIR/restrict-search-rpath-find.exe    -Wl,-rpath,@loader_path/rpath/ -DMODE=rpath-find -DSHOULD_BE_FOUND=1
-// BUILD:  $CC main.c $BUILD_DIR/rpath/libfoo.dylib -o $BUILD_DIR/restrict-search-rpath-no-find.exe -Wl,-rpath,@loader_path/rpath/ -DMODE=rpath-no-find -sectcreate __RESTRICT __restrict /dev/null
-
+// BUILD(ios,tvos,watchos,bridgeos):
 
 // RUN:  ./restrict-search-lc-find.exe
 // RUN:  ./restrict-search-lc-no-find.exe

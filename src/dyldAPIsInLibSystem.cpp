@@ -28,6 +28,7 @@
 #include <sys/mman.h>
 #include <execinfo.h>
 
+#include <TargetConditionals.h>
 #include <System/sys/csr.h>
 #include <crt_externs.h>
 #include <Availability.h>
@@ -39,6 +40,7 @@
 #include <sys/stat.h>
 #include <fcntl.h>
 #include <System/sys/codesign.h>
+#include <libc_private.h>
 
 #include <mach-o/dyld_images.h>
 #include <mach-o/dyld.h>
@@ -81,11 +83,55 @@ extern "C" void setLookupFunc(void*);
 
 extern bool gUseDyld3;
 
+
+// <rdar://problem/61161069> libdyld.dylib should use abort_with_payload() for asserts
+VIS_HIDDEN
+void abort_report_np(const char* format, ...)
+{
+    va_list list;
+    const char *str;
+    _SIMPLE_STRING s = _simple_salloc();
+    if ( s != NULL ) {
+        va_start(list, format);
+        _simple_vsprintf(s, format, list);
+        va_end(list);
+        str = _simple_string(s);
+    }
+    else {
+        // _simple_salloc failed, but at least format may have useful info by itself
+        str = format;
+    }
+    if ( gUseDyld3 ) {
+        dyld3::halt(str);
+    }
+    else {
+        void (*p)(const char* msg) __attribute__((__noreturn__));
+        _dyld_func_lookup("__dyld_halt", (void**)&p);
+        p(str);
+    }
+    // halt() doesn't return, so we can't call _simple_sfree
+}
+
+// libc uses assert()
+#pragma clang diagnostic push
+#pragma clang diagnostic ignored "-Winvalid-noreturn"
+VIS_HIDDEN
+void __assert_rtn(const char* func, const char* file, int line, const char* failedexpr)
+{
+    if (func == NULL) {
+        abort_report_np("Assertion failed: (%s), file %s, line %d.\n", failedexpr, file, line);
+    } else {
+        abort_report_np("Assertion failed: (%s), function %s, file %s, line %d.\n", failedexpr, func, file, line);
+    }
+}
+#pragma clang diagnostic pop
+
+
 // deprecated APIs are still availble on Mac OS X, but not on iPhone OS
-#if __IPHONE_OS_VERSION_MIN_REQUIRED || TARGET_OS_DRIVERKIT
-	#define DEPRECATED_APIS_SUPPORTED 0
-#else
+#if TARGET_OS_OSX
 	#define DEPRECATED_APIS_SUPPORTED 1
+#else
+	#define DEPRECATED_APIS_SUPPORTED 0
 #endif
 
 /*
@@ -626,15 +672,10 @@ bool _dyld_get_image_uuid(const struct mach_header* mh, uuid_t uuid)
 }
 
 dyld_platform_t dyld_get_active_platform(void) {
-    if (gUseDyld3) { return dyld3::dyld_get_active_platform(); }
-    if (_dyld_get_all_image_infos()->version >= 16) { return (dyld_platform_t)_dyld_get_all_image_infos()->platform; }
+    if (gUseDyld3)
+        return dyld3::dyld_get_active_platform();
 
-    __block dyld_platform_t result;
-    // FIXME: Remove this once we only care about version 16 or greater all image infos
-    dyld3::dyld_get_image_versions((mach_header*)_NSGetMachExecuteHeader(), ^(dyld_platform_t platform, uint32_t sdk_version, uint32_t min_version) {
-        result = platform;
-    });
-    return result;
+    return (dyld_platform_t)_dyld_get_all_image_infos()->platform;
 }
 
 dyld_platform_t dyld_get_base_platform(dyld_platform_t platform) {
@@ -654,11 +695,11 @@ bool dyld_minos_at_least(const struct mach_header* mh, dyld_build_version_t vers
 }
 
 bool dyld_program_sdk_at_least(dyld_build_version_t version) {
-    return dyld3::dyld_sdk_at_least((mach_header*)_NSGetMachExecuteHeader(),version);
+    return dyld3::dyld_program_sdk_at_least(version);
 }
 
 bool dyld_program_minos_at_least(dyld_build_version_t version) {
-    return dyld3::dyld_minos_at_least((mach_header*)_NSGetMachExecuteHeader(), version);
+    return dyld3::dyld_program_minos_at_least(version);
 }
 
 // Function that walks through the load commands and calls the internal block for every version found
@@ -1006,6 +1047,9 @@ const char* symbol_name,
 void** address,
 NSModule* module)
 {
+	if ( gUseDyld3 )
+		return dyld3::_dyld_lookup_and_bind(symbol_name, address, module);
+
 	DYLD_LOCK_THIS_BLOCK;
     static void (*p)(const char*, void** , NSModule*) = NULL;
 
@@ -1264,6 +1308,19 @@ intptr_t _dyld_get_image_slide(const struct mach_header* mh)
 	return dyld3::_dyld_get_image_slide(mh);
 }
 
+const struct mach_header *
+_dyld_get_prog_image_header()
+{
+    if ( gUseDyld3 )
+        return dyld3::_dyld_get_prog_image_header();
+
+    DYLD_LOCK_THIS_BLOCK;
+    static const struct mach_header * (*p)(void) = NULL;
+
+    if(p == NULL)
+        _dyld_func_lookup("__dyld_get_prog_image_header", (void**)&p);
+    return p();
+}
 
 #if DEPRECATED_APIS_SUPPORTED
 bool
@@ -1317,7 +1374,7 @@ bool _dyld_all_twolevel_modules_prebound(void)
 #endif // DEPRECATED_APIS_SUPPORTED
 
 
-#include <dlfcn.h>
+#include <dlfcn_private.h>
 #include <stddef.h>
 #include <pthread.h>
 #include <stdlib.h>
@@ -1516,13 +1573,12 @@ int dlclose(void* handle)
 	return result;
 }
 
-void* dlopen(const char* path, int mode)
+static void* dlopen_internal(const char* path, int mode, void* callerAddress)
 {
     dyld3::ScopedTimer timer(DBG_DYLD_TIMING_DLOPEN, path, mode, 0);
     void* result = nullptr;
-
     if ( gUseDyld3 ) {
-        result = dyld3::dlopen_internal(path, mode, __builtin_return_address(0));
+        result = dyld3::dlopen_internal(path, mode, callerAddress);
         timer.setData4(result);
         return result;
     }
@@ -1534,7 +1590,7 @@ void* dlopen(const char* path, int mode)
 
     if(p == NULL)
         _dyld_func_lookup("__dyld_dlopen_internal", (void**)&p);
-    result = p(path, mode, __builtin_return_address(0));
+    result = p(path, mode, callerAddress);
     // use asm block to prevent tail call optimization
     // this is needed because dlopen uses __builtin_return_address() and depends on this glue being in the frame chain
     // <rdar://problem/5313172 dlopen() looks too far up stack, can cause crash>
@@ -1543,6 +1599,31 @@ void* dlopen(const char* path, int mode)
 
 	return result;
 }
+
+void* dlopen(const char* path, int mode)
+{
+    void* result = dlopen_internal(path, mode, __builtin_return_address(0));
+    if ( result )
+        return result;
+
+
+    return nullptr;
+}
+
+void* dlopen_from(const char* path, int mode, void* addressInCaller)
+{
+#if __has_feature(ptrauth_calls)
+    addressInCaller = __builtin_ptrauth_strip(addressInCaller, ptrauth_key_asia);
+#endif
+    return dlopen_internal(path, mode, addressInCaller);
+}
+
+#if !__i386__
+void* dlopen_audited(const char* path, int mode)
+{
+	return dlopen(path, mode);
+}
+#endif // !__i386__
 
 bool dlopen_preflight(const char* path)
 {
@@ -1725,6 +1806,32 @@ bool _dyld_shared_cache_is_locally_built()
     return false;
 }
 
+const char* _dyld_shared_cache_real_path(const char* path)
+{
+    const dyld_all_image_infos* allInfo = _dyld_get_all_image_infos();
+    if ( allInfo != nullptr  ) {
+        const DyldSharedCache* cache = (const DyldSharedCache*)(allInfo->sharedCacheBaseAddress);
+        if ( cache != nullptr )
+            return cache->getCanonicalPath(path);
+    }
+    return nullptr;
+}
+
+bool _dyld_shared_cache_contains_path(const char* path)
+{
+    return _dyld_shared_cache_real_path(path) != nullptr;
+}
+
+
+uint32_t _dyld_launch_mode()
+{
+    if ( gUseDyld3 )
+        return dyld3::_dyld_launch_mode();
+
+    // in dyld2 mode all flag bits are zero
+    return 0;
+}
+
 void _dyld_images_for_addresses(unsigned count, const void* addresses[], struct dyld_image_uuid_offset infos[])
 {
     if ( gUseDyld3 )
@@ -1764,9 +1871,9 @@ void _dyld_register_for_bulk_image_loads(void (*func)(unsigned imageCount, const
     return p(func);
 }
 
-bool dyld_need_closure(const char* execPath, const char* tempDir)
+bool dyld_need_closure(const char* execPath, const char* dataContainerRootDir)
 {
-    return dyld3::dyld_need_closure(execPath, tempDir);
+    return dyld3::dyld_need_closure(execPath, dataContainerRootDir);
 }
 
 bool dyld_process_is_restricted()
@@ -1807,6 +1914,13 @@ bool dyld_has_inserted_or_interposing_libraries()
 	    _dyld_func_lookup("__dyld_has_inserted_or_interposing_libraries", (void**)&p);
 	return p();
 }
+
+bool _dyld_has_fix_for_radar(const char *rdar) {
+    // There is no point in shimming this to dyld3, actual functionality can exist purely in libSystem for
+    // both dyld2 and dyld3.
+    return false;
+}
+
 
 void dyld_dynamic_interpose(const struct mach_header* mh, const struct dyld_interpose_tuple array[], size_t count)
 {
@@ -1854,13 +1968,13 @@ void _dyld_fork_child()
 static void* mapStartOfCache(const char* path, size_t length)
 {
 	struct stat statbuf;
-	if ( ::stat(path, &statbuf) == -1 )
+	if ( dyld3::stat(path, &statbuf) == -1 )
 		return NULL;
 
 	if ( (size_t)statbuf.st_size < length )
 		return NULL;
 
-	int cache_fd = ::open(path, O_RDONLY);
+	int cache_fd = dyld3::open(path, O_RDONLY, 0);
 	if ( cache_fd < 0 )
 		return NULL;
 
@@ -1893,7 +2007,7 @@ static const dyld_cache_header* findCacheInDirAndMap(const uuid_t cacheUuid, con
 			if ( strlcat(cachePath, entp->d_name, PATH_MAX) >= PATH_MAX )
 				continue;
 			if ( const dyld_cache_header* cacheHeader = (dyld_cache_header*)mapStartOfCache(cachePath, 0x00100000) ) {
-				if ( ::memcmp(cacheHeader->uuid, cacheUuid, 16) != 0 ) {
+				if ( (::memcmp(cacheHeader, "dyld_", 5) != 0) || (::memcmp(cacheHeader->uuid, cacheUuid, 16) != 0) ) {
 					// wrong uuid, unmap and keep looking
 					::munmap((void*)cacheHeader, 0x00100000);
 				}
@@ -1926,12 +2040,11 @@ int dyld_shared_cache_find_iterate_text(const uuid_t cacheUuid, const char* extr
 	}
 	else {
 		// look first is default location for cache files
-	#if	__IPHONE_OS_VERSION_MIN_REQUIRED
-		const char* defaultSearchDir = IPHONE_DYLD_SHARED_CACHE_DIR;
-	#else
-		const char* defaultSearchDir = MACOSX_DYLD_SHARED_CACHE_DIR;
-	#endif
-		cacheHeader = findCacheInDirAndMap(cacheUuid, defaultSearchDir);
+    #if TARGET_OS_IPHONE
+		cacheHeader = findCacheInDirAndMap(cacheUuid, IPHONE_DYLD_SHARED_CACHE_DIR);
+    #else
+		cacheHeader = findCacheInDirAndMap(cacheUuid, MACOSX_MRM_DYLD_SHARED_CACHE_DIR);
+    #endif
 		// if not there, look in extra search locations
 		if ( cacheHeader == NULL ) {
 			for (const char** p = extraSearchDirs; *p != NULL; ++p) {
@@ -1945,7 +2058,7 @@ int dyld_shared_cache_find_iterate_text(const uuid_t cacheUuid, const char* extr
 	if ( cacheHeader == NULL )
 		return -1;
 	
-	if ( cacheHeader->mappingOffset < sizeof(dyld_cache_header) ) {
+	if ( cacheHeader->mappingOffset <= __offsetof(dyld_cache_header, imagesTextOffset) ) {
 		// old cache without imagesText array
 		if ( needToUnmap )
 			::munmap((void*)cacheHeader, 0x00100000);
@@ -2049,9 +2162,74 @@ void _dyld_for_each_objc_protocol(const char* protocolName,
 
 void _dyld_register_driverkit_main(void (*mainFunc)(void))
 {
+    if ( gUseDyld3 )
+        return dyld3::_dyld_register_driverkit_main(mainFunc);
+
     static bool (*p)(void (*mainFunc)(void)) = NULL;
 
     if(p == NULL)
         _dyld_func_lookup("__dyld_register_driverkit_main", (void**)&p);
    p(mainFunc);
+}
+
+// This is populated in the shared cache builder, so that the ranges are protected by __DATA_CONST
+// If we have a root, we can find this range in the shared cache libdyld at runtime
+typedef std::pair<const uint8_t*, const uint8_t*> ObjCConstantRange;
+
+#if TARGET_OS_OSX
+__attribute__((section(("__DATA, __objc_ranges"))))
+#else
+__attribute__((section(("__DATA_CONST, __objc_ranges"))))
+#endif
+__attribute__((used))
+static ObjCConstantRange gSharedCacheObjCConstantRanges[dyld_objc_string_kind + 1];
+
+static std::pair<const void*, uint64_t> getDyldCacheConstantRanges() {
+    const dyld_all_image_infos* allInfo = _dyld_get_all_image_infos();
+    if ( allInfo != nullptr  ) {
+        const DyldSharedCache* cache = (const DyldSharedCache*)(allInfo->sharedCacheBaseAddress);
+        if ( cache != nullptr ) {
+            return cache->getObjCConstantRange();
+        }
+    }
+    return { nullptr, 0 };
+}
+
+bool _dyld_is_objc_constant(DyldObjCConstantKind kind, const void* addr) {
+    assert(kind <= dyld_objc_string_kind);
+    // The common case should be that the value is in range, as this is a security
+    // check, so first test against the values in the struct.  If we have a root then
+    // we'll take the slow path later
+    if ( (addr >= gSharedCacheObjCConstantRanges[kind].first) && (addr < gSharedCacheObjCConstantRanges[kind].second) ) {
+        // Make sure that we are pointing at the start of a constant object, not in to the middle of it
+        uint64_t offset = (uint64_t)addr - (uint64_t)gSharedCacheObjCConstantRanges[kind].first;
+        return (offset % (uint64_t)DyldSharedCache::ConstantClasses::cfStringAtomSize) == 0;
+    }
+
+    // If we are in the shared cache, then the above check was sufficient, so this really isn't a valid constant address
+    extern void* __dso_handle;
+    const dyld3::MachOAnalyzer* ma = (const dyld3::MachOAnalyzer*)&__dso_handle;
+    if ( ma->inDyldCache() )
+        return false;
+
+    // We now know we are a root, so use the pointers in the shared cache libdyld version of gSharedCacheObjCConstantRanges
+    static std::pair<const void*, uint64_t> sharedCacheRanges = { nullptr, ~0ULL };
+
+    // FIXME: Should we fold this in as an inititalizer above?
+    // That would mean we need to link against somewhere to get ___cxa_guard_acquire/___cxa_guard_release
+    if ( sharedCacheRanges.second == ~0ULL )
+        sharedCacheRanges = getDyldCacheConstantRanges();
+
+    // We have the range of the section in libdyld in the shared cache, now get an array of ranges from it
+    uint64_t numRanges = sharedCacheRanges.second / sizeof(ObjCConstantRange);
+    if ( kind >= numRanges )
+        return false;
+
+    const ObjCConstantRange* rangeArrayBase = (const ObjCConstantRange*)sharedCacheRanges.first;
+    if ( (addr >= rangeArrayBase[kind].first) && (addr < rangeArrayBase[kind].second) ) {
+        // Make sure that we are pointing at the start of a constant object, not in to the middle of it
+        uint64_t offset = (uint64_t)addr - (uint64_t)rangeArrayBase[kind].first;
+        return (offset % (uint64_t)DyldSharedCache::ConstantClasses::cfStringAtomSize) == 0;
+    }
+    return false;
 }

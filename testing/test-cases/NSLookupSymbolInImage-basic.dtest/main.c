@@ -1,6 +1,6 @@
-// BUILD_ONLY: MacOSX
+// BUILD(macos):  $CC main.c            -o $BUILD_DIR/NSLookupSymbolInImage-basic.exe -Wno-deprecated-declarations
 
-// BUILD:  $CC main.c            -o $BUILD_DIR/NSLookupSymbolInImage-basic.exe -Wno-deprecated-declarations
+// BUILD(ios,tvos,watchos,bridgeos):
 
 // RUN:  ./NSLookupSymbolInImage-basic.exe
 

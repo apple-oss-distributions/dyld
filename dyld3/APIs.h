@@ -82,6 +82,8 @@ intptr_t _dyld_get_image_vmaddr_slide(uint32_t imageIndex) TEMP_HIDDEN;
 
 const char* _dyld_get_image_name(uint32_t imageIndex) TEMP_HIDDEN;
 
+const struct mach_header * _dyld_get_prog_image_header() TEMP_HIDDEN;
+
 int32_t NSVersionOfLinkTimeLibrary(const char* libraryName) TEMP_HIDDEN;
 
 int32_t NSVersionOfRunTimeLibrary(const char* libraryName) TEMP_HIDDEN;
@@ -157,7 +159,9 @@ bool _dyld_shared_cache_optimized() TEMP_HIDDEN;
 
 bool _dyld_shared_cache_is_locally_built() TEMP_HIDDEN;
     
-bool dyld_need_closure(const char* execPath, const char* tempDir) TEMP_HIDDEN;
+uint32_t _dyld_launch_mode() TEMP_HIDDEN;
+
+bool dyld_need_closure(const char* execPath, const char* dataContainerRootDir) TEMP_HIDDEN;
 
 void _dyld_images_for_addresses(unsigned count, const void* addresses[], struct dyld_image_uuid_offset infos[]) TEMP_HIDDEN;
 
@@ -193,8 +197,10 @@ void _dyld_for_each_objc_class(const char* className,
 void _dyld_for_each_objc_protocol(const char* protocolName,
                                   void (^callback)(void* protocolPtr, bool isLoaded, bool* stop)) TEMP_HIDDEN;
 
+void _dyld_register_driverkit_main(void (*mainFunc)())TEMP_HIDDEN;
+
 // only in macOS and deprecated 
-#if __MAC_OS_X_VERSION_MIN_REQUIRED
+#if TARGET_OS_OSX
 NSObjectFileImageReturnCode NSCreateObjectFileImageFromFile(const char* pathName, NSObjectFileImage *objectFileImage) TEMP_HIDDEN;
 NSObjectFileImageReturnCode NSCreateObjectFileImageFromMemory(const void *address, size_t size, NSObjectFileImage *objectFileImage) TEMP_HIDDEN;
 bool NSDestroyObjectFileImage(NSObjectFileImage objectFileImage) TEMP_HIDDEN;

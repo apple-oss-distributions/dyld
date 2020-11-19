@@ -39,7 +39,7 @@ struct LoadedFileInfo {
     uint64_t     fileContentLen             = 0;
     uint64_t     sliceOffset                = 0;
     uint64_t     sliceLen            : 63,
-                 isSipProtected      : 1;
+                 isOSBinary          : 1;
     uint64_t     inode                      = 0;
     uint64_t     mtime                      = 0;
     void (*unload)(const LoadedFileInfo&)   = nullptr;

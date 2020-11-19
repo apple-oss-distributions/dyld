@@ -5,7 +5,7 @@
 // BUILD:  $CC defSymbol.c -dynamiclib -install_name $RUN_DIR/libMissingSymbols.dylib -o $BUILD_DIR/libMissingSymbols.dylib
 // BUILD:  $CC defSymbol.c -dynamiclib -install_name $RUN_DIR/libMissingSymbols.dylib -o $BUILD_DIR/libHasSymbols.dylib -DHAS_SYMBOL
 // BUILD:  $CC useSymbol.c $BUILD_DIR/libHasSymbols.dylib -o $BUILD_DIR/prog_missing_symbol.exe
-// BUILD:  $CXX main.cpp -o $BUILD_DIR/dyld_abort_tests.exe
+// BUILD:  $CXX main.cpp -o $BUILD_DIR/dyld_abort_tests.exe -DRUN_DIR="$RUN_DIR"
 
 // NO_CRASH_LOG: prog_missing_dylib.exe
 // NO_CRASH_LOG: prog_missing_symbol.exe
@@ -32,19 +32,28 @@
 
 
 void runTest(const char* prog, uint64_t dyldReason, const char* expectedDylibPath, const char* expectedSymbol) {
+    dispatch_block_t oneShotSemaphoreBlock = dispatch_block_create(DISPATCH_BLOCK_INHERIT_QOS_CLASS, ^{});
+    LOG("Running test for %s / %s / %s", prog, expectedDylibPath, expectedSymbol);
     _process process;
     process.set_executable_path(prog);
     process.set_crash_handler(^(task_t task) {
         LOG("Crash for task=%u", task);
-        vm_address_t corpse_data;
-        uint32_t corpse_size;
-        if (task_map_corpse_info(mach_task_self(), task, &corpse_data, &corpse_size) != KERN_SUCCESS) {
-            FAIL("Could not read corpse data");
+        mach_vm_address_t corpse_data;
+        mach_vm_size_t corpse_size;
+        kern_return_t kr = task_map_corpse_info_64(mach_task_self(), task, &corpse_data, &corpse_size);
+        if (kr != KERN_SUCCESS) {
+            FAIL("Could not read corpse data kr=(%d)", kr);
         }
+
         kcdata_iter_t autopsyData = kcdata_iter((void*)corpse_data, corpse_size);
         if (!kcdata_iter_valid(autopsyData)) {
             FAIL("Corpse Data Invalid");
         }
+
+        kcdata_iter_t pidIter = kcdata_iter_find_type(autopsyData, TASK_CRASHINFO_PID);
+        pid_t pid = *(pid_t *) (kcdata_iter_payload(pidIter));
+        LOG("Crash for pid=%u", pid);
+
         kcdata_iter_t exitReasonData = kcdata_iter_find_type(autopsyData, EXIT_REASON_SNAPSHOT);
         if (!kcdata_iter_valid(exitReasonData)) {
             FAIL("Could not find exit data");
@@ -58,6 +67,7 @@ void runTest(const char* prog, uint64_t dyldReason, const char* expectedDylibPat
             FAIL("eri_code (%llu) != dyldReason (%lld)", ers->ers_code, dyldReason);
         }
         kcdata_iter_t iter = kcdata_iter((void*)corpse_data, corpse_size);
+        bool foundOSReason = false;
 
         KCDATA_ITER_FOREACH(iter) {
             if (kcdata_iter_type(iter) == KCDATA_TYPE_NESTED_KCDATA) {
@@ -65,6 +75,7 @@ void runTest(const char* prog, uint64_t dyldReason, const char* expectedDylibPat
                 if ( kcdata_iter_type(nestedIter) != KCDATA_BUFFER_BEGIN_OS_REASON ){
                     return;
                 }
+                foundOSReason = true;
                 kcdata_iter_t payloadIter = kcdata_iter_find_type(nestedIter, EXIT_REASON_USER_PAYLOAD);
                 if ( !kcdata_iter_valid(payloadIter) ) {
                     FAIL("invalid kcdata payload iterator from payload data");
@@ -100,19 +111,28 @@ void runTest(const char* prog, uint64_t dyldReason, const char* expectedDylibPat
                         FAIL("symbol (%s) not provided by dyld", expectedSymbol);
                     }
                 }
-                PASS("Success");
             }
         }
-        FAIL("Did not find EXIT_REASON_USER_PAYLOAD");
+        if (!foundOSReason) {
+            FAIL("Did not find KCDATA_BUFFER_BEGIN_OS_REASON");
+        }
+        oneShotSemaphoreBlock();
     });
-    process.launch();
+
+    pid_t pid = process.launch();
+    LOG("Launch pid: %u", pid);
+    // We need to wait for the task to crash in before we call PASS(). Ideally we would return the block and wait
+    // in main(), that way we could run multiple processes simultaneously, but when we do that there are strange crashes
+    // and deadlocks, I suspect it has something to do with block capture of parameters sometimes being references.
+    // but it is not entirely clear what the intended semantics are.
+    dispatch_block_wait(oneShotSemaphoreBlock, DISPATCH_TIME_FOREVER);
 }
 
 
 int main(int argc, const char* argv[], const char* envp[], const char* apple[]) {
     // test launch program with missing library
-    runTest("./prog_missing_dylib.exe", DYLD_EXIT_REASON_DYLIB_MISSING, "/cant/find/me.dylib", NULL);
-//    runTest("./prog_missing_symbol.exe", DYLD_EXIT_REASON_SYMBOL_MISSING, "libMissingSymbols.dylib", "_slipperySymbol");
+    runTest(RUN_DIR "/prog_missing_dylib.exe", DYLD_EXIT_REASON_DYLIB_MISSING, "/cant/find/me.dylib", NULL);
+    runTest(RUN_DIR "/prog_missing_symbol.exe", DYLD_EXIT_REASON_SYMBOL_MISSING, "libMissingSymbols.dylib", "_slipperySymbol");
     PASS("Success");
 }
 

@@ -84,6 +84,9 @@ ImageLoader::ImageLoader(const char* path, unsigned int libCount)
 	fPathOwnedByImage(false), fIsReferencedDownward(false), 
 	fWeakSymbolsBound(false)
 {
+#if __x86_64__
+	fAotPath = NULL;
+#endif
 	if ( fPath != NULL )
 		fPathHash = hash(fPath);
 	if ( libCount > 512 )
@@ -103,6 +106,10 @@ ImageLoader::~ImageLoader()
 		delete [] fRealPath;
 	if ( fPathOwnedByImage && (fPath != NULL) ) 
 		delete [] fPath;
+#if __x86_64__
+	if ( fAotPath != NULL )
+		delete [] fAotPath;
+#endif
 }
 
 void ImageLoader::setFileInfo(dev_t device, ino_t inode, time_t modDate)
@@ -473,7 +480,7 @@ void ImageLoader::addDynamicInterposingTuples(const struct dyld_interpose_tuple 
 // <rdar://problem/29099600> dyld should tell the kernel when it is doing root fix-ups
 void ImageLoader::vmAccountingSetSuspended(const LinkContext& context, bool suspend)
 {
-#if __arm__ || __arm64__
+#if TARGET_OS_IPHONE && !TARGET_OS_SIMULATOR
 	static bool sVmAccountingSuspended = false;
 	if ( suspend == sVmAccountingSuspended )
 		return;
@@ -508,7 +515,7 @@ void ImageLoader::link(const LinkContext& context, bool forceLazysBound, bool pr
 
 	uint64_t t1 = mach_absolute_time();
 	context.clearAllDepths();
-	this->recursiveUpdateDepth(context.imageCount());
+	this->updateDepth(context.imageCount());
 
 	__block uint64_t t2, t3, t4, t5;
 	{
@@ -662,7 +669,19 @@ void ImageLoader::markedUsedRecursive(const std::vector<DynamicReference>& dynam
 	
 }
 
-unsigned int ImageLoader::recursiveUpdateDepth(unsigned int maxDepth)
+unsigned int ImageLoader::updateDepth(unsigned int maxDepth)
+{
+	STACK_ALLOC_ARRAY(ImageLoader*, danglingUpwards, maxDepth);
+	unsigned int depth = this->recursiveUpdateDepth(maxDepth, danglingUpwards);
+	for (auto& danglingUpward : danglingUpwards) {
+		if ( danglingUpward->fDepth != 0)
+			continue;
+		danglingUpward->recursiveUpdateDepth(maxDepth, danglingUpwards);
+	}
+	return depth;
+}
+
+unsigned int ImageLoader::recursiveUpdateDepth(unsigned int maxDepth, dyld3::Array<ImageLoader*>& danglingUpwards)
 {
 	// the purpose of this phase is to make the images sortable such that 
 	// in a sort list of images, every image that an image depends on
@@ -675,17 +694,29 @@ unsigned int ImageLoader::recursiveUpdateDepth(unsigned int maxDepth)
 		unsigned int minDependentDepth = maxDepth;
 		for(unsigned int i=0; i < libraryCount(); ++i) {
 			ImageLoader* dependentImage = libImage(i);
-			if ( (dependentImage != NULL) && !libIsUpward(i) ) {
-				unsigned int d = dependentImage->recursiveUpdateDepth(maxDepth);
-				if ( d < minDependentDepth )
-					minDependentDepth = d;
+			if ( dependentImage != NULL ) {
+				if ( libIsUpward(i) ) {
+					if ( dependentImage->fDepth == 0) {
+						if ( !danglingUpwards.contains(dependentImage) )
+							danglingUpwards.push_back(dependentImage);
+					}
+				} else {
+					unsigned int d = dependentImage->recursiveUpdateDepth(maxDepth, danglingUpwards);
+					if ( d < minDependentDepth )
+						minDependentDepth = d;
+				}
+			}
+			// <rdar://problem/60878811> make sure need to re-bind propagates up
+			if ( dependentImage != NULL ) {
+				if ( fAllLibraryChecksumsAndLoadAddressesMatch && !dependentImage->fAllLibraryChecksumsAndLoadAddressesMatch ) {
+					fAllLibraryChecksumsAndLoadAddressesMatch = false;
+				}
 			}
 		}
-	
 		// make me less deep then all my dependents
 		fDepth = minDependentDepth - 1;
+
 	}
-	
 	return fDepth;
 }
 
@@ -797,22 +828,21 @@ void ImageLoader::recursiveLoadLibraries(const LinkContext& context, bool prefli
 		// tell each to load its dependents
 		for(unsigned int i=0; i < libraryCount(); ++i) {
 			ImageLoader* dependentImage = libImage(i);
-			if ( dependentImage != NULL ) {	
+			if ( dependentImage != NULL ) {
 				dependentImage->recursiveLoadLibraries(context, preflightOnly, thisRPaths, libraryInfos[i].name);
 			}
 		}
-		
 		// do deep prebind check
 		if ( fAllLibraryChecksumsAndLoadAddressesMatch ) {
 			for(unsigned int i=0; i < libraryCount(); ++i){
 				ImageLoader* dependentImage = libImage(i);
-				if ( dependentImage != NULL ) {	
+				if ( dependentImage != NULL ) {
 					if ( !dependentImage->allDependentLibrariesAsWhenPreBound() )
 						fAllLibraryChecksumsAndLoadAddressesMatch = false;
 				}
 			}
 		}
-		
+
 		// free rpaths (getRPaths() malloc'ed each string)
 		for(std::vector<const char*>::iterator it=rpathsFromThisImage.begin(); it != rpathsFromThisImage.end(); ++it) {
 			const char* str = *it;
@@ -910,11 +940,11 @@ void ImageLoader::recursiveMakeDataReadOnly(const LinkContext& context)
 
 void ImageLoader::recursiveBindWithAccounting(const LinkContext& context, bool forceLazysBound, bool neverUnload)
 {
-	this->recursiveBind(context, forceLazysBound, neverUnload);
+	this->recursiveBind(context, forceLazysBound, neverUnload, nullptr);
 	vmAccountingSetSuspended(context, false);
 }
 
-void ImageLoader::recursiveBind(const LinkContext& context, bool forceLazysBound, bool neverUnload)
+void ImageLoader::recursiveBind(const LinkContext& context, bool forceLazysBound, bool neverUnload, const ImageLoader* parent)
 {
 	// Normally just non-lazy pointers are bound immediately.
 	// The exceptions are:
@@ -928,11 +958,15 @@ void ImageLoader::recursiveBind(const LinkContext& context, bool forceLazysBound
 			// bind lower level libraries first
 			for(unsigned int i=0; i < libraryCount(); ++i) {
 				ImageLoader* dependentImage = libImage(i);
-				if ( dependentImage != NULL )
-					dependentImage->recursiveBind(context, forceLazysBound, neverUnload);
+				if ( dependentImage != NULL )  {
+					const ImageLoader* reExportParent = nullptr;
+					if ( libReExported(i) )
+						reExportParent = this;
+					dependentImage->recursiveBind(context, forceLazysBound, neverUnload, reExportParent);
+				}
 			}
 			// bind this image
-			this->doBind(context, forceLazysBound);	
+			this->doBind(context, forceLazysBound, parent);
 			// mark if lazys are also bound
 			if ( forceLazysBound || this->usablePrebinding(context) )
 				fAllLazyPointersBound = true;
@@ -1010,7 +1044,7 @@ void ImageLoader::weakBind(const LinkContext& context)
 			new (&context.weakDefMap) dyld3::Map<const char*, std::pair<const ImageLoader*, uintptr_t>, ImageLoader::HashCString, ImageLoader::EqualCString>();
 			context.weakDefMapInitialized = true;
 		}
-#if __MAC_OS_X_VERSION_MIN_REQUIRED
+#if TARGET_OS_OSX
 	  // only do alternate algorithm for dlopen(). Use traditional algorithm for launch
 	  if ( !context.linkingMainExecutable ) {
 		  // Don't take the memory hit of weak defs on the launch path until we hit a dlopen with more weak symbols to bind
@@ -1030,8 +1064,8 @@ void ImageLoader::weakBind(const LinkContext& context)
 
 				  Diagnostics diag;
 				  const dyld3::MachOAnalyzer* ma = (const dyld3::MachOAnalyzer*)image->machHeader();
-				  ma->forEachWeakDef(diag, ^(const char *symbolName, uintptr_t imageOffset, bool isFromExportTrie) {
-					  uintptr_t targetAddr = (uintptr_t)ma + imageOffset;
+				  ma->forEachWeakDef(diag, ^(const char *symbolName, uint64_t imageOffset, bool isFromExportTrie) {
+					  uintptr_t targetAddr = (uintptr_t)ma + (uintptr_t)imageOffset;
 					  if ( isFromExportTrie ) {
 						  // Avoid duplicating the string if we already have the symbol name
 						  if ( context.weakDefMap.find(symbolName) != context.weakDefMap.end() )
@@ -1053,8 +1087,8 @@ void ImageLoader::weakBind(const LinkContext& context)
 				  continue;
 			  Diagnostics diag;
 			  const dyld3::MachOAnalyzer* ma = (const dyld3::MachOAnalyzer*)image->machHeader();
-			  ma->forEachWeakDef(diag, ^(const char *symbolName, uintptr_t imageOffset, bool isFromExportTrie) {
-				  uintptr_t targetAddr = (uintptr_t)ma + imageOffset;
+			  ma->forEachWeakDef(diag, ^(const char *symbolName, uint64_t imageOffset, bool isFromExportTrie) {
+				  uintptr_t targetAddr = (uintptr_t)ma + (uintptr_t)imageOffset;
 				  if ( isFromExportTrie ) {
 					  // Avoid duplicating the string if we already have the symbol name
 					  if ( context.weakDefMap.find(symbolName) != context.weakDefMap.end() )
@@ -1133,7 +1167,7 @@ void ImageLoader::weakBind(const LinkContext& context)
 		}
 	  }
 	  else
-#endif // __MAC_OS_X_VERSION_MIN_REQUIRED
+#endif // TARGET_OS_OSX
 	  {
 		// make symbol iterators for each
 		ImageLoader::CoalIterator iterators[count];
@@ -1297,7 +1331,7 @@ void ImageLoader::weakBindOld(const LinkContext& context)
 
 	// don't need to do any coalescing if only one image has overrides, or all have already been done
 	if ( (countOfImagesWithWeakDefinitionsNotInSharedCache > 0) && (countNotYetWeakBound > 0) ) {
-#if __MAC_OS_X_VERSION_MIN_REQUIRED
+#if TARGET_OS_OSX
 	  // only do alternate algorithm for dlopen(). Use traditional algorithm for launch
 	  if ( !context.linkingMainExecutable ) {
 		// for all images that need weak binding
@@ -1358,7 +1392,7 @@ void ImageLoader::weakBindOld(const LinkContext& context)
 		}
 	  }
 	  else
-#endif // __MAC_OS_X_VERSION_MIN_REQUIRED
+#endif // TARGET_OS_OSX
 	  {
 		// make symbol iterators for each
 		ImageLoader::CoalIterator iterators[count];
@@ -1881,9 +1915,23 @@ intptr_t ImageLoader::read_sleb128(const uint8_t*& p, const uint8_t* end)
 		bit += 7;
 	} while (byte & 0x80);
 	// sign extend negative numbers
-	if ( (byte & 0x40) != 0 )
+	if ( ((byte & 0x40) != 0) && (bit < 64) )
 		result |= (~0ULL) << bit;
 	return (intptr_t)result;
+}
+
+void ImageLoader::forEachReExportDependent( void (^callback)(const ImageLoader*, bool& stop)) const
+{
+	bool stop = false;
+	for (unsigned int i=0; i < libraryCount(); ++i) {
+		if ( libReExported(i) ) {
+			if ( ImageLoader* dependentImage = libImage(i) ) {
+				callback(dependentImage, stop);
+			}
+		}
+		if (stop)
+			break;
+	}
 }
 
 

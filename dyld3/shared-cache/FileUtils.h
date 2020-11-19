@@ -36,6 +36,7 @@
 #include <dispatch/dispatch.h>
 
 #include "DyldSharedCache.h"
+#include "JSON.h"
 
 class Diagnostics;
 
@@ -72,10 +73,6 @@ bool safeSave(const void* buffer, size_t bufferLen, const std::string& path);
 
 
 const void* mapFileReadOnly(const char* path, size_t& mappedSize);
-
-bool isProtectedBySIP(const std::string& path);
-bool isProtectedBySIPExceptDyld(const std::string& path);
-bool isProtectedBySIP(int fd);
 
 bool fileExists(const std::string& path);
 
