@@ -33,12 +33,6 @@
 #include <map>
 #include <sys/stat.h>
 
-#if __has_include(<Cambria/SharedCache.h>)
-#include <Cambria/SharedCache.h>
-asm(".linker_option \"-lcambria_sharedcache\"");
-asm(".linker_option \"-lcodedirectory_static\"");
-#endif
-
 static const uint64_t kMinBuildVersion = 1; //The minimum version BuildOptions struct we can support
 static const uint64_t kMaxBuildVersion = 2; //The maximum version BuildOptions struct we can support
 
@@ -258,11 +252,6 @@ struct MRMSharedCacheBuilder {
     // We keep this in a vector to own the data.
     std::vector<CacheResult*>    cacheResults;
     std::vector<CacheResult>     cacheResultStorage;
-
-#if __has_include(<Cambria/SharedCache.h>)
-    // Storage for translated shared caches
-    std::vector<TranslationResult> translationResults;
-#endif
 
     // The files to remove.  These are in every copy of the caches we built
     std::vector<const char*> filesToRemove;
@@ -708,93 +697,6 @@ bool runSharedCacheBuilder(struct MRMSharedCacheBuilder* builder) {
             cacheBuilder->deleteBuffer();
             buildInstance.builder.reset();
         }
-
-#if __has_include(<Cambria/SharedCache.h>)
-        // Only build the cambria caches if we have x86_64(h) and at least one other arch
-        bool gotX86Cache    = false;
-        bool gotOtherCache  = false;
-        for (uint64_t i = 0; i != builder->options->numArchs; ++i) {
-            const char* arch = builder->options->archs[i];
-            if ( !strcmp(arch, "x86_64") || !strcmp(arch, "x86_64h") ) {
-                gotX86Cache = true;
-                continue;
-            }
-            gotOtherCache = true;
-        }
-
-        if ( (builder->options->platform == Platform::macOS) && gotX86Cache && gotOtherCache ) {
-            // Now create an Aot shared cache for any applicable caches
-            for (const auto& buildInstance : builder->builders) {
-                // Only convert the x86_64 cache
-                if ( buildInstance.options->archs != &dyld3::GradedArchs::x86_64)
-                    continue;
-
-                // Skip failed caches
-                if (!buildInstance.errors.empty())
-                    continue;
-
-                const uint8_t* aotCacheData;
-                size_t aotCacheSize;
-                std::string cdHashStr;
-
-                // Translate this shared cache file.
-                cambria::TranslationOptions options;
-
-#if !defined(RC_HIDE_J274) || !RC_HIDE_J274
-                // <rdar://problem/63767839> Don't generate a Tonga shared cache translation in the seed trains
-                cambria::translate_shared_cache(options, buildInstance.cacheData, buildInstance.cacheSize,
-                                                &aotCacheData, &aotCacheSize, &cdHashStr);
-
-                builder->translationResults.push_back({
-                    .data = aotCacheData,
-                    .size = aotCacheSize,
-                    .cdHash = cdHashStr,
-                    .path = std::string(cambria::kAotSharedCachePath),
-                    .bufferWasMalloced = false
-                });
-#endif
-
-                // Now translate again for aruba based systems
-                options.is_aruba_shared_cache = true;
-                cambria::translate_shared_cache(options, buildInstance.cacheData, buildInstance.cacheSize,
-                                                &aotCacheData, &aotCacheSize, &cdHashStr);
-
-                bool bufferWasMalloced = false;
-#if !defined(RC_HIDE_J274) || !RC_HIDE_J274
-                // For GM we don't need to ship the Aruba AOT any more.  It will be converted on the fly
-                // for the DTK.  We'll just put a 0-byte placeholder instead and record the cdHash
-                vm_deallocate(mach_task_self(), (vm_address_t)aotCacheData, aotCacheSize);
-                aotCacheData = (uint8_t*)calloc(1, 1);
-                aotCacheSize = 0;
-                bufferWasMalloced = true;
-#endif
-
-                builder->translationResults.push_back({
-                    .data = aotCacheData,
-                    .size = aotCacheSize,
-                    .cdHash = cdHashStr,
-                    .path = std::string(cambria::kAotSharedCachePathAruba),
-                    .bufferWasMalloced = bufferWasMalloced
-                });
-           }
-
-            // Convert translation results into File results
-            for (auto& translationResult : builder->translationResults) {
-                FileResult cacheFileResult;
-                cacheFileResult.version          = 1;
-                cacheFileResult.behavior         = AddFile;
-                cacheFileResult.path             = translationResult.path.c_str();
-                cacheFileResult.data             = translationResult.data;
-                cacheFileResult.size             = translationResult.size;
-                cacheFileResult.hashArch         = "x86_64";
-                cacheFileResult.hashType         = "sha256";
-                cacheFileResult.hash             = translationResult.cdHash.c_str();
-
-                builder->fileResultBuffers.push_back({ builder->fileResultStorage.size(), translationResult.bufferWasMalloced });
-                builder->fileResultStorage.emplace_back(cacheFileResult);
-            }
-        }
-#endif
 
         // Now that we have run all of the builds, collect the results
         // First push file results for each of the shared caches we built

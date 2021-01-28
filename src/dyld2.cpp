@@ -4897,7 +4897,9 @@ static bool isFairPlayEncrypted(const macho_header* mh)
 
 #if SUPPORT_VERSIONED_PATHS
 
-static bool readFirstPage(const char* dylibPath, uint8_t firstPage[4096]) 
+#define FIRST_PAGE_BUFFER_SIZE	16384
+
+static bool readFirstPage(const char* dylibPath, uint8_t firstPage[FIRST_PAGE_BUFFER_SIZE])
 {
 	firstPage[0] = 0;
 	// open file (automagically closed when this function exits)
@@ -4906,7 +4908,7 @@ static bool readFirstPage(const char* dylibPath, uint8_t firstPage[4096])
 	if ( file.getFileDescriptor() == -1 ) 
 		return false;
 	
-	if ( pread(file.getFileDescriptor(), firstPage, 4096, 0) != 4096 )
+	if ( pread(file.getFileDescriptor(), firstPage, FIRST_PAGE_BUFFER_SIZE, 0) != FIRST_PAGE_BUFFER_SIZE )
 		return false;
 
 	// if fat wrapper, find usable sub-file
@@ -4915,7 +4917,7 @@ static bool readFirstPage(const char* dylibPath, uint8_t firstPage[4096])
 		uint64_t fileOffset;
 		uint64_t fileLength;
 		if ( fatFindBest(fileStartAsFat, &fileOffset, &fileLength) ) {
-			if ( pread(file.getFileDescriptor(), firstPage, 4096, fileOffset) != 4096 )
+			if ( pread(file.getFileDescriptor(), firstPage, FIRST_PAGE_BUFFER_SIZE, fileOffset) != FIRST_PAGE_BUFFER_SIZE )
 				return false;
 		}
 		else {
@@ -4932,7 +4934,7 @@ static bool readFirstPage(const char* dylibPath, uint8_t firstPage[4096])
 //
 static bool getDylibVersionAndInstallname(const char* dylibPath, uint32_t* version, char* installName)
 {
-	uint8_t firstPage[4096];
+	uint8_t firstPage[FIRST_PAGE_BUFFER_SIZE];
 	const macho_header* mh = (macho_header*)firstPage;
 	if ( !readFirstPage(dylibPath, firstPage) ) {
 		// If file cannot be read, check to see if path is in shared cache
@@ -4953,7 +4955,7 @@ static bool getDylibVersionAndInstallname(const char* dylibPath, uint32_t* versi
 	// scan load commands for LC_ID_DYLIB
 	const uint32_t cmd_count = mh->ncmds;
 	const struct load_command* const cmds = (struct load_command*)(((char*)mh)+sizeof(macho_header));
-	const struct load_command* const cmdsReadEnd = (struct load_command*)(((char*)mh)+4096);
+	const struct load_command* const cmdsReadEnd = (struct load_command*)(((char*)mh)+FIRST_PAGE_BUFFER_SIZE);
 	const struct load_command* cmd = cmds;
 	for (uint32_t i = 0; i < cmd_count; ++i) {
 		switch (cmd->cmd) {
