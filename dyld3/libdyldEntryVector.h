@@ -27,6 +27,7 @@
 #define __DYLD_ENTRY_VECTOR_H__
 
 #include <mach-o/loader.h>
+#include <sys/types.h>
 #include <Availability.h>
 
 #include "Loading.h"
@@ -47,12 +48,14 @@ struct LibDyldEntryVector
 
     uint32_t    vectorVersion;              // should be kCurrentVectorVersion
     uint32_t    binaryFormatVersion;        // should be dyld3::closure::kFormatVersion
-    void        (*setVars)(const mach_header* mainMH, int argc, const char* argv[], const char* envp[], const char* apple[], bool keysOff, bool platformBinariesOnly);
+    void        (*setVars)(const mach_header* mainMH, int argc, const char* argv[], const char* envp[], const char* apple[],
+                           bool keysOff, bool platformBinariesOnly, bool enableSharedCacheDataConst);
     void        (*setHaltFunction)(void (*func)(const char* message) __attribute__((noreturn)) );
     void        (*setOldAllImageInfo)(dyld_all_image_infos*);
     void        (*setInitialImageList)(const closure::LaunchClosure* closure,
-                                        const DyldSharedCache* dyldCacheLoadAddress, const char* dyldCachePath,
-                                        const Array<LoadedImage>& initialImages, LoadedImage& libSystem);
+                                       const DyldSharedCache* dyldCacheLoadAddress, const char* dyldCachePath,
+                                       const Array<LoadedImage>& initialImages, LoadedImage& libSystem,
+                                       mach_port_t mach_task_self);
     void        (*runInitialzersBottomUp)(const mach_header* topImageLoadAddress);
     void        (*startFunc)();
     // added in version 3

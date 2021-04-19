@@ -3638,6 +3638,26 @@ void MachOAnalyzer::forEachExportedSymbol(Diagnostics& diag, ExportsCallback cal
    }
 }
 
+bool MachOAnalyzer::markNeverUnload(Diagnostics &diag) const {
+    bool neverUnload = false;
+    
+    if ( hasThreadLocalVariables() ) {
+        neverUnload = true;
+    } else if ( hasObjC() && isDylib() ) {
+        neverUnload = true;
+    } else {
+        // record if image has DOF sections
+        __block bool hasDOFs = false;
+        forEachDOFSection(diag, ^(uint32_t offset) {
+            hasDOFs = true;
+        });
+        if ( hasDOFs )
+            neverUnload = true;
+    }
+    return neverUnload;
+}
+
+
 bool MachOAnalyzer::canBePlacedInDyldCache(const char* path, void (^failureReason)(const char*)) const
 {
     if (!MachOFile::canBePlacedInDyldCache(path, failureReason))
@@ -3721,15 +3741,17 @@ bool MachOAnalyzer::canBePlacedInDyldCache(const char* path, void (^failureReaso
         return false;
     }
 
-    if ( !(isArch("x86_64") || isArch("x86_64h")) )
-        return true;
-
-    if ( hasChainedFixups() )
-        return true;
-
     // evict swift dylibs with split seg v1 info
     if ( this->isSwiftLibrary() && this->isSplitSegV1() )
         return false;
+
+    if ( hasChainedFixups() ) {
+        // Chained fixups assumes split seg v2.  This is true for now as chained fixups is arm64e only
+        return this->isSplitSegV2();
+    }
+
+    if ( !(isArch("x86_64") || isArch("x86_64h")) )
+        return true;
 
     __block bool rebasesOk = true;
     uint64_t startVMAddr = preferredLoadAddress();
@@ -4102,6 +4124,23 @@ struct OldThreadsStartSection
     uint32_t        chain_starts[1];
 };
 
+// ld64 can't sometimes determine the size of __thread_starts accurately,
+// because these sections have to be given a size before everything is laid out,
+// and you don't know the actual size of the chains until everything is
+// laid out. In order to account for this, the linker puts trailing 0xFFFFFFFF at
+// the end of the section, that must be ignored when walking the chains. This
+// patch adjust the section size accordingly.
+static uint32_t adjustStartsCount(uint32_t startsCount, const uint32_t* starts) {
+    for ( int i = startsCount; i > 0; --i )
+    {
+        if ( starts[i - 1] == 0xFFFFFFFF )
+            startsCount--;
+        else
+            break;
+    }
+    return startsCount;
+}
+
 bool MachOAnalyzer::hasFirmwareChainStarts(uint16_t* pointerFormat, uint32_t* startsCount, const uint32_t** starts) const
 {
     if ( !this->isPreload() && !this->isStaticExecutable() )
@@ -4116,7 +4155,7 @@ bool MachOAnalyzer::hasFirmwareChainStarts(uint16_t* pointerFormat, uint32_t* st
     }
     if (const OldThreadsStartSection* sect = (OldThreadsStartSection*)this->findSectionContent("__TEXT", "__thread_starts", sectionSize) ) {
         *pointerFormat = sect->stride8 ? DYLD_CHAINED_PTR_ARM64E : DYLD_CHAINED_PTR_ARM64E_FIRMWARE;
-        *startsCount   = (uint32_t)(sectionSize/4) - 1;
+        *startsCount   = adjustStartsCount((uint32_t)(sectionSize/4) - 1, sect->chain_starts);
         *starts        = sect->chain_starts;
         return true;
     }

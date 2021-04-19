@@ -28,6 +28,10 @@
 #include <TargetConditionals.h>
 #include <uuid/uuid.h>
 
+#if (BUILDING_LIBDYLD || BUILDING_DYLD)
+#include <sys/types.h>
+#endif
+
 #if !(BUILDING_LIBDYLD || BUILDING_DYLD)
 #include <set>
 #include <string>
@@ -256,8 +260,8 @@ public:
     //
     // Iterates over each of the three regions in the cache
     //
-    void                forEachRegion(void (^handler)(const void* content, uint64_t vmAddr, uint64_t size, uint32_t permissions,
-                                                      uint64_t flags)) const;
+    void                forEachRegion(void (^handler)(const void* content, uint64_t vmAddr, uint64_t size,
+                                                      uint32_t initProt, uint32_t maxProt, uint64_t flags)) const;
 
 
     //
@@ -412,6 +416,45 @@ public:
         dummy.arm64e.authRebase.key  = patchLocation.key;
         return dummy.arm64e.keyName();
     }
+
+#if (BUILDING_LIBDYLD || BUILDING_DYLD)
+
+    typedef void (*DataConstLogFunc)(const char*, ...) __attribute__((format(printf, 1, 2)));
+    void changeDataConstPermissions(mach_port_t machTask, uint32_t permissions, DataConstLogFunc logFunc) const;
+
+    struct DataConstLazyScopedWriter {
+        DataConstLazyScopedWriter(const DyldSharedCache* cache, mach_port_t machTask, DataConstLogFunc logFunc);
+        ~DataConstLazyScopedWriter();
+
+        // Delete all other kinds of constructors to make sure we don't accidentally copy these around
+        DataConstLazyScopedWriter() = delete;
+        DataConstLazyScopedWriter(const DataConstLazyScopedWriter&) = delete;
+        DataConstLazyScopedWriter(DataConstLazyScopedWriter&&) = delete;
+        DataConstLazyScopedWriter& operator=(const DataConstLazyScopedWriter&) = delete;
+        DataConstLazyScopedWriter& operator=(DataConstLazyScopedWriter&&) = delete;
+
+        void makeWriteable();
+
+        const DyldSharedCache*  cache           = nullptr;
+        mach_port_t             machTask        = MACH_PORT_NULL;
+        DataConstLogFunc        logFunc         = nullptr;
+        bool                    wasMadeWritable = false;
+    };
+
+    struct DataConstScopedWriter {
+        DataConstScopedWriter(const DyldSharedCache* cache, mach_port_t machTask, DataConstLogFunc logFunc);
+        ~DataConstScopedWriter() = default;
+
+        // Delete all other kinds of constructors to make sure we don't accidentally copy these around
+        DataConstScopedWriter() = delete;
+        DataConstScopedWriter(const DataConstScopedWriter&) = delete;
+        DataConstScopedWriter(DataConstScopedWriter&&) = delete;
+        DataConstScopedWriter& operator=(const DataConstScopedWriter&) = delete;
+        DataConstScopedWriter& operator=(DataConstScopedWriter&&) = delete;
+
+        DataConstLazyScopedWriter writer;
+    };
+#endif
 
 #if !(BUILDING_LIBDYLD || BUILDING_DYLD)
     // MRM map file generator

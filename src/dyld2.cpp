@@ -33,7 +33,8 @@
 #include <libproc.h>
 #include <sys/param.h>
 #include <mach/mach_time.h> // mach_absolute_time()
-#include <mach/mach_init.h> 
+#include <mach/mach_init.h>
+#include <mach/mach_traps.h>
 #include <sys/types.h>
 #include <sys/stat.h> 
 #include <sys/syscall.h>
@@ -48,7 +49,6 @@
 #include <mach-o/ldsyms.h> 
 #include <libkern/OSByteOrder.h> 
 #include <libkern/OSAtomic.h>
-#include <mach/mach.h>
 #include <sys/sysctl.h>
 #include <sys/mman.h>
 #include <sys/dtrace.h>
@@ -65,7 +65,7 @@
 #include <sys/fsgetpath.h>
 #include <System/sys/content_protection.h>
 
-#define SUPPORT_LOGGING_TO_CONSOLE !(__i386__ || __x86_64__ || TARGET_OS_SIMULATOR)
+#define SUPPORT_LOGGING_TO_CONSOLE !TARGET_OS_SIMULATOR
 #if SUPPORT_LOGGING_TO_CONSOLE
 #include <paths.h> // for logging to console
 #endif
@@ -196,6 +196,8 @@ extern "C" {
 // magic linker symbol for start of dyld binary
 extern "C" const macho_header __dso_handle;
 
+extern bool gEnableSharedCacheDataConst;
+
 
 //
 // The file contains the core of dyld used to get a process to main().  
@@ -281,7 +283,8 @@ static uintptr_t					sMainExecutableSlide = 0;
 static cpu_type_t					sHostCPU;
 static cpu_subtype_t				sHostCPUsubtype;
 #endif
-static ImageLoaderMachO*			sMainExecutable = NULL;
+typedef ImageLoaderMachO* __ptrauth_dyld_address_auth MainExecutablePointerType;
+static MainExecutablePointerType	sMainExecutable = NULL;
 static size_t						sInsertedDylibCount = 0;
 static std::vector<ImageLoader*>	sAllImages;
 static std::vector<ImageLoader*>	sImageRoots;
@@ -866,98 +869,188 @@ static void notifySingleFromCache(dyld_image_states state, const mach_header* mh
 #endif
 
 #if !TARGET_OS_SIMULATOR
-static void sendMessage(unsigned portSlot, mach_msg_id_t msgId, mach_msg_size_t sendSize, mach_msg_header_t* buffer, mach_msg_size_t bufferSize) {
-	// Allocate a port to listen on in this monitoring task
-	mach_port_t sendPort = dyld::gProcessInfo->notifyPorts[portSlot];
-	if (sendPort == MACH_PORT_NULL) {
-		return;
-	}
-	mach_port_t replyPort = MACH_PORT_NULL;
-	mach_port_options_t options = { .flags = MPO_CONTEXT_AS_GUARD | MPO_STRICT,
-		.mpl = { 1 }};
-	kern_return_t kr = mach_port_construct(mach_task_self(), &options, (mach_port_context_t)&replyPort, &replyPort);
-	if (kr != KERN_SUCCESS) {
-		return;
-	}
-	// Assemble a message
-	mach_msg_header_t* h = buffer;
-	h->msgh_bits         = MACH_MSGH_BITS(MACH_MSG_TYPE_COPY_SEND,MACH_MSG_TYPE_MAKE_SEND_ONCE);
-	h->msgh_id           = msgId;
-	h->msgh_local_port   = replyPort;
-	h->msgh_remote_port  = sendPort;
-	h->msgh_reserved     = 0;
-	h->msgh_size         = sendSize;
-	kr = mach_msg(h, MACH_SEND_MSG | MACH_RCV_MSG, h->msgh_size, bufferSize, replyPort, 0, MACH_PORT_NULL);
-	mach_msg_destroy(h);
-	if ( kr == MACH_SEND_INVALID_DEST ) {
-		if (OSAtomicCompareAndSwap32(sendPort, 0, (volatile int32_t*)&dyld::gProcessInfo->notifyPorts[portSlot])) {
-			mach_port_deallocate(mach_task_self(), sendPort);
+#define DYLD_PROCESS_INFO_NOTIFY_MAGIC 0x49414E46
+
+struct RemoteNotificationResponder {
+	RemoteNotificationResponder(const RemoteNotificationResponder&) = delete;
+	RemoteNotificationResponder(RemoteNotificationResponder&&) = delete;
+	RemoteNotificationResponder() {
+		if (dyld::gProcessInfo->notifyPorts[0] != DYLD_PROCESS_INFO_NOTIFY_MAGIC) {
+			// No notifier found, early out
+			_namesCnt = 0;
+			return;
+		}
+		kern_return_t kr = task_dyld_process_info_notify_get(_names, &_namesCnt);
+		while (kr == KERN_NO_SPACE) {
+			// In the future the SPI may return the size we need, but for now we just double the count. Since we don't want to depend on the
+			// return value in _nameCnt we set it to have a minimm of 16, double the inline storage value
+			_namesCnt = std::max<uint32_t>(16, 2*_namesCnt);
+			_namesSize = _namesCnt*sizeof(mach_port_t);
+			kr = vm_allocate(mach_task_self(), (vm_address_t*)&_names, _namesSize, VM_FLAGS_ANYWHERE);
+			if (kr != KERN_SUCCESS) {
+				// We could not allocate memory, time to error out
+				break;
+			}
+			kr = task_dyld_process_info_notify_get(_names, &_namesCnt);
+			if (kr != KERN_SUCCESS) {
+				// We failed, so deallocate the memory. If the failures was KERN_NO_SPACE we will loop back and try again
+				(void)vm_deallocate(mach_task_self(), (vm_address_t)_names, _namesSize);
+				_namesSize = 0;
+			}
+		}
+		if (kr != KERN_SUCCESS) {
+			// We failed, set _namesCnt to 0 so nothing else will happen
+			_namesCnt = 0;
 		}
 	}
-	mach_port_destruct(mach_task_self(), replyPort, 0, (mach_port_context_t)&replyPort);
+	~RemoteNotificationResponder() {
+		if (_namesCnt) {
+			for (auto i = 0; i < _namesCnt; ++i) {
+				(void)mach_port_deallocate(mach_task_self(), _names[i]);
+			}
+			if (_namesSize != 0) {
+				// We are not using inline memory, we need to free it
+				(void)vm_deallocate(mach_task_self(), (vm_address_t)_names, _namesSize);
+			}
+		}
+	}
+	void sendMessage(mach_msg_id_t msgId, mach_msg_size_t sendSize, mach_msg_header_t* buffer) {
+		if (_namesCnt == 0) { return; }
+		// Allocate a port to listen on in this monitoring task
+		mach_port_t replyPort = MACH_PORT_NULL;
+		mach_port_options_t options = { .flags = MPO_CONTEXT_AS_GUARD | MPO_STRICT, .mpl = { 1 }};
+		kern_return_t kr = mach_port_construct(mach_task_self(), &options, (mach_port_context_t)&replyPort, &replyPort);
+		if (kr != KERN_SUCCESS) {
+			return;
+		}
+		for (auto i = 0; i < _namesCnt; ++i) {
+			if (_names[i] == MACH_PORT_NULL) { continue; }
+			// Assemble a message
+			uint8_t replyBuffer[sizeof(mach_msg_header_t) + MAX_TRAILER_SIZE];
+			mach_msg_header_t* 	msg = buffer;
+			msg->msgh_bits         = MACH_MSGH_BITS(MACH_MSG_TYPE_COPY_SEND,MACH_MSG_TYPE_MAKE_SEND_ONCE);
+			msg->msgh_id           = msgId;
+			msg->msgh_local_port   = replyPort;
+			msg->msgh_remote_port  = _names[i];
+			msg->msgh_reserved     = 0;
+			msg->msgh_size         = sendSize;
+			kr = mach_msg_overwrite(msg, MACH_SEND_MSG | MACH_RCV_MSG, msg->msgh_size, sizeof(replyBuffer), replyPort, 0, MACH_PORT_NULL,
+									 (mach_msg_header_t*)&replyBuffer[0], 0);
+			if (kr != KERN_SUCCESS) {
+				// Send failed, we may have been psuedo recieved. destroy the message
+				(void)mach_msg_destroy(msg);
+				// Mark the port as null. It does not matter why we failed... if it is s single message we will not retry, if it
+				// is a fragmented message then subsequent messages will not decode correctly
+				_names[i] = MACH_PORT_NULL;
+			}
+		}
+		(void)mach_port_destruct(mach_task_self(), replyPort, 0, (mach_port_context_t)&replyPort);
+	}
+
+	bool const active() const {
+		for (auto i = 0; i < _namesCnt; ++i) {
+			if (_names[i] != MACH_PORT_NULL) {
+				return true;
+			}
+		}
+		return false;
+	}
+private:
+	mach_port_t             _namesArray[8] = {0};
+	mach_port_name_array_t  _names = (mach_port_name_array_t)&_namesArray[0];
+	mach_msg_type_number_t  _namesCnt = 8;
+	vm_size_t               _namesSize = 0;
+};
+
+//FIXME: Remove this once we drop support for iOS 11 simulators
+// This is an enormous hack to keep remote introspection of older simulators working
+//   It works by interposing mach_msg, and redirecting message sent to a special port name. Messages to that portname will trigger a full set
+//   of sends to all kernel registered notifiers. In this mode mach_msg_sim_interposed() must return KERN_SUCCESS or the older dyld_sim may
+//   try to cleanup the notifer array.
+kern_return_t mach_msg_sim_interposed(	mach_msg_header_t* msg, mach_msg_option_t option, mach_msg_size_t send_size, mach_msg_size_t rcv_size,
+									  mach_port_name_t rcv_name, mach_msg_timeout_t timeout, mach_port_name_t notify) {
+	if (msg->msgh_remote_port != DYLD_PROCESS_INFO_NOTIFY_MAGIC) {
+		// Not the magic port, so just pass through to the real mach_msg()
+		return mach_msg(msg, option, send_size, rcv_size, rcv_name, timeout, notify);
+	}
+
+	// The magic port. We know dyld_sim is trying to message observers, so lets call into our messaging code directly.
+	// This is kind of weird since we effectively built a buffer in dyld_sim, then pass it to mach_msg, which we interpose, unpack, and then
+	// pass to send_message which then sends the buffer back out vis mach_message_overwrite(), but it should work at least as well as the old
+	// way.
+	RemoteNotificationResponder responder;
+	responder.sendMessage(msg->msgh_id, send_size, msg);
+
+	// We always return KERN_SUCCESS, otherwise old dyld_sims might clear the port
+	return KERN_SUCCESS;
+}
+
+static void notifyMonitoringDyld(RemoteNotificationResponder& responder, bool unloading, unsigned imageCount,
+								 const struct mach_header* loadAddresses[], const char* imagePaths[])
+{
+	// Make sure there is at least enough room to hold a the largest single file entry that can exist.
+	static_assert((MAXPATHLEN + sizeof(dyld_process_info_image_entry) + 1 + MAX_TRAILER_SIZE) <= DYLD_PROCESS_INFO_NOTIFY_MAX_BUFFER_SIZE);
+
+	unsigned entriesSize = imageCount*sizeof(dyld_process_info_image_entry);
+	unsigned pathsSize = 0;
+	for (unsigned j=0; j < imageCount; ++j) {
+		pathsSize += (strlen(imagePaths[j]) + 1);
+	}
+
+	unsigned totalSize = (sizeof(struct dyld_process_info_notify_header) + entriesSize + pathsSize + 127) & -128;   // align
+	// The reciever has a fixed buffer of DYLD_PROCESS_INFO_NOTIFY_MAX_BUFFER_SIZE, whcih needs to hold both the message and a trailer.
+	// If the total size exceeds that we need to fragment the message.
+	if ( (totalSize + MAX_TRAILER_SIZE) > DYLD_PROCESS_INFO_NOTIFY_MAX_BUFFER_SIZE ) {
+		// Putting all image paths into one message would make buffer too big.
+		// Instead split into two messages.  Recurse as needed until paths fit in buffer.
+		unsigned imageHalfCount = imageCount/2;
+		notifyMonitoringDyld(responder, unloading, imageHalfCount, loadAddresses, imagePaths);
+		notifyMonitoringDyld(responder, unloading, imageCount - imageHalfCount, &loadAddresses[imageHalfCount], &imagePaths[imageHalfCount]);
+		return;
+	}
+	uint8_t	buffer[totalSize + MAX_TRAILER_SIZE];
+	dyld_process_info_notify_header* header = (dyld_process_info_notify_header*)buffer;
+	header->version			= 1;
+	header->imageCount		= imageCount;
+	header->imagesOffset	= sizeof(dyld_process_info_notify_header);
+	header->stringsOffset	= sizeof(dyld_process_info_notify_header) + entriesSize;
+	header->timestamp		= dyld::gProcessInfo->infoArrayChangeTimestamp;
+	dyld_process_info_image_entry* entries = (dyld_process_info_image_entry*)&buffer[header->imagesOffset];
+	char* const pathPoolStart = (char*)&buffer[header->stringsOffset];
+	char* pathPool = pathPoolStart;
+	for (unsigned j=0; j < imageCount; ++j) {
+		strcpy(pathPool, imagePaths[j]);
+		uint32_t len = (uint32_t)strlen(pathPool);
+		bzero(entries->uuid, 16);
+		dyld3::MachOFile* mf = (dyld3::MachOFile*)loadAddresses[j];
+		mf->getUuid(entries->uuid);
+		entries->loadAddress = (uint64_t)loadAddresses[j];
+		entries->pathStringOffset = (uint32_t)(pathPool - pathPoolStart);
+		entries->pathLength  = len;
+		pathPool += (len +1);
+		++entries;
+	}
+	if (unloading) {
+		responder.sendMessage(DYLD_PROCESS_INFO_NOTIFY_UNLOAD_ID, totalSize, (mach_msg_header_t*)buffer);
+	} else {
+		responder.sendMessage(DYLD_PROCESS_INFO_NOTIFY_LOAD_ID, totalSize, (mach_msg_header_t*)buffer);
+	}
 }
 
 static void notifyMonitoringDyld(bool unloading, unsigned imageCount, const struct mach_header* loadAddresses[],
 								 const char* imagePaths[])
 {
 	dyld3::ScopedTimer(DBG_DYLD_REMOTE_IMAGE_NOTIFIER, 0, 0, 0);
-	for (int slot=0; slot < DYLD_MAX_PROCESS_INFO_NOTIFY_COUNT; ++slot) {
-		if ( dyld::gProcessInfo->notifyPorts[slot] == 0) continue;
-		unsigned entriesSize = imageCount*sizeof(dyld_process_info_image_entry);
-		unsigned pathsSize = 0;
-		for (unsigned j=0; j < imageCount; ++j) {
-			pathsSize += (strlen(imagePaths[j]) + 1);
-		}
-
-		unsigned totalSize = (sizeof(struct dyld_process_info_notify_header) + entriesSize + pathsSize + 127) & -128;   // align
-		// The reciever has a fixed buffer of DYLD_PROCESS_INFO_NOTIFY_MAX_BUFFER_SIZE, whcih needs to hold both the message and a trailer.
-		// If the total size exceeds that we need to fragment the message.
-		if ( (totalSize + MAX_TRAILER_SIZE) > DYLD_PROCESS_INFO_NOTIFY_MAX_BUFFER_SIZE ) {
-			// Putting all image paths into one message would make buffer too big.
-			// Instead split into two messages.  Recurse as needed until paths fit in buffer.
-			unsigned imageHalfCount = imageCount/2;
-			notifyMonitoringDyld(unloading, imageHalfCount, loadAddresses, imagePaths);
-			notifyMonitoringDyld(unloading, imageCount - imageHalfCount, &loadAddresses[imageHalfCount], &imagePaths[imageHalfCount]);
-			return;
-		}
-		uint8_t	buffer[totalSize + MAX_TRAILER_SIZE];
-		dyld_process_info_notify_header* header = (dyld_process_info_notify_header*)buffer;
-		header->version			= 1;
-		header->imageCount		= imageCount;
-		header->imagesOffset	= sizeof(dyld_process_info_notify_header);
-		header->stringsOffset	= sizeof(dyld_process_info_notify_header) + entriesSize;
-		header->timestamp		= dyld::gProcessInfo->infoArrayChangeTimestamp;
-		dyld_process_info_image_entry* entries = (dyld_process_info_image_entry*)&buffer[header->imagesOffset];
-		char* const pathPoolStart = (char*)&buffer[header->stringsOffset];
-		char* pathPool = pathPoolStart;
-		for (unsigned j=0; j < imageCount; ++j) {
-			strcpy(pathPool, imagePaths[j]);
-			uint32_t len = (uint32_t)strlen(pathPool);
-			bzero(entries->uuid, 16);
-			dyld3::MachOFile* mf = (dyld3::MachOFile*)loadAddresses[j];
-			mf->getUuid(entries->uuid);
-			entries->loadAddress = (uint64_t)loadAddresses[j];
-			entries->pathStringOffset = (uint32_t)(pathPool - pathPoolStart);
-			entries->pathLength  = len;
-			pathPool += (len +1);
-			++entries;
-		}
-		if (unloading) {
-			sendMessage(slot, DYLD_PROCESS_INFO_NOTIFY_UNLOAD_ID, totalSize, (mach_msg_header_t*)buffer, totalSize);
-		} else {
-			sendMessage(slot, DYLD_PROCESS_INFO_NOTIFY_LOAD_ID, totalSize, (mach_msg_header_t*)buffer, totalSize);
-		}
-	}
+	RemoteNotificationResponder responder;
+	if (!responder.active()) { return; }
+	notifyMonitoringDyld(responder, unloading, imageCount, loadAddresses, imagePaths);
 }
 
-static void notifyMonitoringDyldMain()
-{
+static void notifyMonitoringDyldMain() {
 	dyld3::ScopedTimer(DBG_DYLD_REMOTE_IMAGE_NOTIFIER, 0, 0, 0);
-	for (int slot=0; slot < DYLD_MAX_PROCESS_INFO_NOTIFY_COUNT; ++slot) {
-		if ( dyld::gProcessInfo->notifyPorts[slot] == 0) continue;
-		uint8_t buffer[sizeof(mach_msg_header_t) + MAX_TRAILER_SIZE];
-		sendMessage(slot, DYLD_PROCESS_INFO_NOTIFY_MAIN_ID, sizeof(mach_msg_header_t), (mach_msg_header_t*)buffer, sizeof(mach_msg_header_t) + MAX_TRAILER_SIZE);
-	}
+	RemoteNotificationResponder responder;
+	uint8_t buffer[sizeof(mach_msg_header_t) + MAX_TRAILER_SIZE];
+	responder.sendMessage(DYLD_PROCESS_INFO_NOTIFY_MAIN_ID, sizeof(mach_msg_header_t), (mach_msg_header_t*)buffer);
 }
 #else
 extern void notifyMonitoringDyldMain() VIS_HIDDEN;
@@ -1609,7 +1702,15 @@ void runImageStaticTerminators(ImageLoader* image)
 
 static void terminationRecorder(ImageLoader* image)
 {
-	sImageFilesNeedingTermination.push_back(image);
+	bool add = true;
+#if __arm64e__
+	// <rdar://problem/71820555> Don't run static terminator for arm64e
+	const mach_header* mh = image->machHeader();
+	if ( (mh->cputype == CPU_TYPE_ARM64) && ((mh->cpusubtype & ~CPU_SUBTYPE_MASK) == CPU_SUBTYPE_ARM64E) )
+		add = false;
+#endif
+	if ( add )
+		sImageFilesNeedingTermination.push_back(image);
 }
 
 const char* getExecutablePath()
@@ -2143,6 +2244,9 @@ void processDyldEnvironmentVariable(const char* key, const char* value, const ch
 		sSharedCacheOverrideDir = value;
 	}
 	else if ( strcmp(key, "DYLD_USE_CLOSURES") == 0 ) {
+		// Handled elsewhere
+	}
+	else if ( strcmp(key, "DYLD_SHARED_REGION_DATA_CONST") == 0 ) {
 		// Handled elsewhere
 	}
 	else if ( strcmp(key, "DYLD_FORCE_INVALID_CACHE_CLOSURES") == 0 ) {
@@ -4374,7 +4478,8 @@ uintptr_t bindLazySymbol(const mach_header* mh, uintptr_t* lazyPointer)
 	#endif
 		if ( target == NULL )
 			throwf("image not found for lazy pointer at %p", lazyPointer);
-		result = target->doBindLazySymbol(lazyPointer, gLinkContext);
+		DyldSharedCache::DataConstLazyScopedWriter patcher(gLinkContext.dyldCache, mach_task_self(), gLinkContext.verboseMapping ? &dyld::log : nullptr);
+		result = target->doBindLazySymbol(lazyPointer, gLinkContext, patcher);
 	}
 	catch (const char* message) {
 		dyld::log("dyld: lazy symbol binding failed: %s\n", message);
@@ -4897,7 +5002,9 @@ static bool isFairPlayEncrypted(const macho_header* mh)
 
 #if SUPPORT_VERSIONED_PATHS
 
-static bool readFirstPage(const char* dylibPath, uint8_t firstPage[4096]) 
+#define FIRST_PAGE_BUFFER_SIZE	16384
+
+static bool readFirstPage(const char* dylibPath, uint8_t firstPage[FIRST_PAGE_BUFFER_SIZE])
 {
 	firstPage[0] = 0;
 	// open file (automagically closed when this function exits)
@@ -4906,7 +5013,7 @@ static bool readFirstPage(const char* dylibPath, uint8_t firstPage[4096])
 	if ( file.getFileDescriptor() == -1 ) 
 		return false;
 	
-	if ( pread(file.getFileDescriptor(), firstPage, 4096, 0) != 4096 )
+	if ( pread(file.getFileDescriptor(), firstPage, FIRST_PAGE_BUFFER_SIZE, 0) != FIRST_PAGE_BUFFER_SIZE )
 		return false;
 
 	// if fat wrapper, find usable sub-file
@@ -4915,7 +5022,7 @@ static bool readFirstPage(const char* dylibPath, uint8_t firstPage[4096])
 		uint64_t fileOffset;
 		uint64_t fileLength;
 		if ( fatFindBest(fileStartAsFat, &fileOffset, &fileLength) ) {
-			if ( pread(file.getFileDescriptor(), firstPage, 4096, fileOffset) != 4096 )
+			if ( pread(file.getFileDescriptor(), firstPage, FIRST_PAGE_BUFFER_SIZE, fileOffset) != FIRST_PAGE_BUFFER_SIZE )
 				return false;
 		}
 		else {
@@ -4932,7 +5039,7 @@ static bool readFirstPage(const char* dylibPath, uint8_t firstPage[4096])
 //
 static bool getDylibVersionAndInstallname(const char* dylibPath, uint32_t* version, char* installName)
 {
-	uint8_t firstPage[4096];
+	uint8_t firstPage[FIRST_PAGE_BUFFER_SIZE];
 	const macho_header* mh = (macho_header*)firstPage;
 	if ( !readFirstPage(dylibPath, firstPage) ) {
 		// If file cannot be read, check to see if path is in shared cache
@@ -4953,7 +5060,7 @@ static bool getDylibVersionAndInstallname(const char* dylibPath, uint32_t* versi
 	// scan load commands for LC_ID_DYLIB
 	const uint32_t cmd_count = mh->ncmds;
 	const struct load_command* const cmds = (struct load_command*)(((char*)mh)+sizeof(macho_header));
-	const struct load_command* const cmdsReadEnd = (struct load_command*)(((char*)mh)+4096);
+	const struct load_command* const cmdsReadEnd = (struct load_command*)(((char*)mh)+FIRST_PAGE_BUFFER_SIZE);
 	const struct load_command* cmd = cmds;
 	for (uint32_t i = 0; i < cmd_count; ++i) {
 		switch (cmd->cmd) {
@@ -5347,7 +5454,7 @@ void notifyKernelAboutImage(const struct macho_header* mh, const char* fileInfo)
 #if TARGET_OS_OSX
 static void* getProcessInfo() { return dyld::gProcessInfo; }
 static const SyscallHelpers sSysCalls = {
-		13,
+		14,
 		// added in version 1
 		&open,
 		&close, 
@@ -5392,7 +5499,7 @@ static const SyscallHelpers sSysCalls = {
 		&getpid,
 		&mach_port_insert_right,
 		&mach_port_allocate,
-		&mach_msg,
+		&mach_msg_sim_interposed,
 		// Added in version 6
 		&abort_with_payload,
 		// Added in version 7
@@ -5418,9 +5525,11 @@ static const SyscallHelpers sSysCalls = {
 		&mach_msg_destroy,
 		&mach_port_construct,
 		&mach_port_destruct,
-		// Add in version 13
+		// Added in version 13
 		&fstat,
-		&vm_copy
+		&vm_copy,
+		// Added in version 14
+		&task_dyld_process_info_notify_get
 };
 
 __attribute__((noinline))
@@ -6024,8 +6133,14 @@ static bool launchWithClosure(const dyld3::closure::LaunchClosure* mainClosure,
 	mainClosure->libDyldEntry(dyldEntry);
 	const dyld3::LibDyldEntryVector* libDyldEntry = (dyld3::LibDyldEntryVector*)loader.resolveTarget(dyldEntry);
 
+	// Set the logging function first so that libdyld can log from inside all other entry vector functions
+#if !TARGET_OS_SIMULATOR
+	if ( libDyldEntry->vectorVersion > 3 )
+		libDyldEntry->setLogFunction(&dyld::vlog);
+#endif
+
 	// send info on all images to libdyld.dylb
-	libDyldEntry->setVars(mainExecutableMH, argc, argv, envp, apple, sKeysDisabled, sOnlyPlatformArm64e);
+	libDyldEntry->setVars(mainExecutableMH, argc, argv, envp, apple, sKeysDisabled, sOnlyPlatformArm64e, gEnableSharedCacheDataConst);
 #if TARGET_OS_OSX
 	uint32_t progVarsOffset;
 	if ( mainClosure->hasProgramVars(progVarsOffset) ) {
@@ -6054,17 +6169,14 @@ static bool launchWithClosure(const dyld3::closure::LaunchClosure* mainClosure,
 
 	if ( libDyldEntry->vectorVersion > 2 )
 		libDyldEntry->setChildForkFunction(&_dyld_fork_child);
-#if !TARGET_OS_SIMULATOR
-	if ( libDyldEntry->vectorVersion > 3 )
-		libDyldEntry->setLogFunction(&dyld::vlog);
-#endif
 	if ( libDyldEntry->vectorVersion >= 9 )
 		libDyldEntry->setLaunchMode(sLaunchModeUsed);
 
 
 	libDyldEntry->setOldAllImageInfo(gProcessInfo);
 	dyld3::LoadedImage* libSys = loader.findImage(mainClosure->libSystemImageNum());
-	libDyldEntry->setInitialImageList(mainClosure, dyldCache, sSharedCacheLoadInfo.path, allImages, *libSys);
+	libDyldEntry->setInitialImageList(mainClosure, dyldCache, sSharedCacheLoadInfo.path, allImages, *libSys,
+									  mach_task_self());
 	// run initializers
 	CRSetCrashLogMessage("dyld3: launch, running initializers");
 	libDyldEntry->runInitialzersBottomUp((mach_header*)mainExecutableMH);
@@ -6522,6 +6634,35 @@ _main(const macho_header* mainExecutableMH, uintptr_t mainExecutableSlide,
 		}
 	}
 
+	// Check if we should force the shared cache __DATA_CONST to read-only or read-write
+	if ( dyld3::BootArgs::forceReadWriteDataConst() ) {
+		gEnableSharedCacheDataConst = false;
+	} else if ( dyld3::BootArgs::forceReadOnlyDataConst() ) {
+		gEnableSharedCacheDataConst = true;
+	} else {
+		// __DATA_CONST is enabled by default for arm64(e) for now
+#if __arm64__ && __LP64__
+		gEnableSharedCacheDataConst = true;
+#else
+		gEnableSharedCacheDataConst = false;
+#endif
+	}
+	bool sharedCacheDataConstIsEnabled = gEnableSharedCacheDataConst;
+
+	if ( dyld3::internalInstall() ) {
+		if (const char* dataConst = _simple_getenv(envp, "DYLD_SHARED_REGION_DATA_CONST")) {
+			if ( strcmp(dataConst, "RW") == 0 ) {
+				gEnableSharedCacheDataConst = false;
+			} else if ( strcmp(dataConst, "RO") == 0 ) {
+				gEnableSharedCacheDataConst = true;
+			} else {
+				dyld::warn("unknown option to DYLD_SHARED_REGION_DATA_CONST.  Valid options are: RW and RO\n");
+			}
+
+		}
+	}
+
+
 #if TARGET_OS_OSX
     if ( !gLinkContext.allowEnvVarsPrint && !gLinkContext.allowEnvVarsPath && !gLinkContext.allowEnvVarsSharedCache ) {
 		pruneEnvironmentVariables(envp, &apple);
@@ -6588,6 +6729,13 @@ _main(const macho_header* mainExecutableMH, uintptr_t mainExecutableSlide,
 #else
 		mapSharedCache(mainExecutableSlide);
 #endif
+
+		// If this process wants a different __DATA_CONST state from the shared region, then override that now
+		if ( (sSharedCacheLoadInfo.loadAddress != nullptr) && (gEnableSharedCacheDataConst != sharedCacheDataConstIsEnabled) ) {
+			uint32_t permissions = gEnableSharedCacheDataConst ? VM_PROT_READ : (VM_PROT_READ | VM_PROT_WRITE);
+			sSharedCacheLoadInfo.loadAddress->changeDataConstPermissions(mach_task_self(), permissions,
+																		 (gLinkContext.verboseMapping ? &dyld::log : nullptr));
+		}
 	}
 
 #if !TARGET_OS_SIMULATOR

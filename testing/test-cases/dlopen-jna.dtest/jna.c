@@ -19,8 +19,8 @@ void jna() {
     }
 
     // jna should see libCarbon.dylib as it's name is correct
-    void* handle2 = dlopen("libCarbon.dylib", RTLD_LAZY);
-    if ( handle2 == NULL ) {
+    void* handle3 = dlopen("libCarbon.dylib", RTLD_LAZY);
+    if ( handle3 == NULL ) {
         FAIL("dlopen-jna, libjna not be able to dlopen(): %s", dlerror());
     }
 }

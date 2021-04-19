@@ -68,6 +68,14 @@ bool BootArgs::enableCompactImageInfo() {
     return (_flags & kEnableCompactImageInfoMask);
 }
 
+bool BootArgs::forceReadOnlyDataConst() {
+    return (_flags & kForceReadOnlyDataConstMask);
+}
+
+bool BootArgs::forceReadWriteDataConst() {
+    return (_flags & kForceReadWriteDataConstMask);
+}
+
 void BootArgs::setFlags(uint64_t flags) {
 #if TARGET_IPHONE_SIMULATOR
     return;

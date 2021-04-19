@@ -396,7 +396,7 @@ uintptr_t ImageLoader::interposedAddress(const LinkContext& context, uintptr_t a
 		//dyld::log("    interposedAddress: replacee=0x%08llX, replacement=0x%08llX, neverImage=%p, onlyImage=%p, inImage=%p\n", 
 		//				(uint64_t)it->replacee, (uint64_t)it->replacement,  it->neverImage, it->onlyImage, inImage);
 		// replace all references to 'replacee' with 'replacement'
-		if ( (address == it->replacee) && (inImage != it->neverImage) && ((it->onlyImage == NULL) || (inImage == it->onlyImage)) ) {
+		if ( (address == it->replacee) && (it->neverImage != inImage) && ((it->onlyImage == NULL) || (it->onlyImage == inImage)) ) {
 			if ( context.verboseInterposing ) {
 				dyld::log("dyld interposing: replace 0x%lX with 0x%lX\n", it->replacee, it->replacement);
 			}
@@ -413,6 +413,10 @@ void ImageLoader::applyInterposingToDyldCache(const LinkContext& context) {
 		return;
 	if (fgInterposingTuples.empty())
 		return;
+
+	// make the cache writable for this block
+	DyldSharedCache::DataConstScopedWriter patcher(context.dyldCache, mach_task_self(), (context.verboseMapping ? &dyld::log : nullptr));
+
 	// For each of the interposed addresses, see if any of them are in the shared cache.  If so, find
 	// that image and apply its patch table to all uses.
 	uintptr_t cacheStart = (uintptr_t)context.dyldCache;
@@ -635,7 +639,8 @@ void ImageLoader::bindAllLazyPointers(const LinkContext& context, bool recursive
 			}
 		}
 		// bind lazies in this image
-		this->doBindJustLazies(context);
+		DyldSharedCache::DataConstLazyScopedWriter patcher(context.dyldCache, mach_task_self(), context.verboseMapping ? &dyld::log : nullptr);
+		this->doBindJustLazies(context, patcher);
 	}
 }
 
@@ -1044,6 +1049,11 @@ void ImageLoader::weakBind(const LinkContext& context)
 			new (&context.weakDefMap) dyld3::Map<const char*, std::pair<const ImageLoader*, uintptr_t>, ImageLoader::HashCString, ImageLoader::EqualCString>();
 			context.weakDefMapInitialized = true;
 		}
+
+		// We might have to patch the shared cache __DATA_CONST.  In that case, we'll create just a single
+		// patcher when needed.
+		DyldSharedCache::DataConstLazyScopedWriter patcher(context.dyldCache, mach_task_self(), context.verboseMapping ? &dyld::log : nullptr);
+
 #if TARGET_OS_OSX
 	  // only do alternate algorithm for dlopen(). Use traditional algorithm for launch
 	  if ( !context.linkingMainExecutable ) {
@@ -1143,6 +1153,8 @@ void ImageLoader::weakBind(const LinkContext& context)
 					}
 				}
 				if ( (targetAddr != 0) && (coalIterator.image != targetImage) ) {
+					if ( coalIterator.image->inSharedCache() )
+						patcher.makeWriteable();
 					coalIterator.image->updateUsesCoalIterator(coalIterator, targetAddr, (ImageLoader*)targetImage, 0, context);
 					if (weakDefIt == context.weakDefMap.end()) {
 						if (targetImage->neverUnload()) {
@@ -1247,8 +1259,11 @@ void ImageLoader::weakBind(const LinkContext& context)
 											nameToCoalesce, iterators[i].image->getIndexedShortName((unsigned)iterators[i].imageIndex),
 											targetAddr, targetImage->getIndexedShortName(targetImageIndex));
 							}
-							if ( ! iterators[i].image->weakSymbolsBound(imageIndexes[i]) )
+							if ( ! iterators[i].image->weakSymbolsBound(imageIndexes[i]) ) {
+								if ( iterators[i].image->inSharedCache() )
+									patcher.makeWriteable();
 								iterators[i].image->updateUsesCoalIterator(iterators[i], targetAddr, targetImage, targetImageIndex, context);
+							}
 							iterators[i].symbolMatches = false; 
 						}
 					}
@@ -1274,7 +1289,7 @@ void ImageLoader::weakBind(const LinkContext& context)
 				// but if main executable has non-weak override of operator new or delete it needs is handled here
 				for (const char* weakSymbolName : sTreatAsWeak) {
 					const ImageLoader* dummy;
-					imagesNeedingCoalescing[i]->resolveWeak(context, weakSymbolName, true, false, &dummy);
+					imagesNeedingCoalescing[i]->resolveWeak(context, weakSymbolName, true, false, &dummy, patcher);
 				}
 			}
 #if __arm64e__
@@ -1287,7 +1302,7 @@ void ImageLoader::weakBind(const LinkContext& context)
 				while ( !coaler.done ) {
 					const ImageLoader* dummy;
 					// a side effect of resolveWeak() is to patch cache
-					imagesNeedingCoalescing[i]->resolveWeak(context, coaler.symbolName, true, false, &dummy);
+					imagesNeedingCoalescing[i]->resolveWeak(context, coaler.symbolName, true, false, &dummy, patcher);
 					imagesNeedingCoalescing[i]->incrementCoalIterator(coaler);
 				}
 			}
@@ -1331,6 +1346,10 @@ void ImageLoader::weakBindOld(const LinkContext& context)
 
 	// don't need to do any coalescing if only one image has overrides, or all have already been done
 	if ( (countOfImagesWithWeakDefinitionsNotInSharedCache > 0) && (countNotYetWeakBound > 0) ) {
+		// We might have to patch the shared cache __DATA_CONST.  In that case, we'll create just a single
+		// patcher when needed.
+		DyldSharedCache::DataConstLazyScopedWriter patcher(context.dyldCache, mach_task_self(), context.verboseMapping ? &dyld::log : nullptr);
+
 #if TARGET_OS_OSX
 	  // only do alternate algorithm for dlopen(). Use traditional algorithm for launch
 	  if ( !context.linkingMainExecutable ) {
@@ -1383,6 +1402,8 @@ void ImageLoader::weakBindOld(const LinkContext& context)
 					}
 				}
 				if ( (targetAddr != 0) && (coalIterator.image != targetImage) ) {
+					if ( coalIterator.image->inSharedCache() )
+						patcher.makeWriteable();
 					coalIterator.image->updateUsesCoalIterator(coalIterator, targetAddr, (ImageLoader*)targetImage, 0, context);
 					if ( context.verboseWeakBind )
 						dyld::log("dyld:     adjusting uses of %s in %s to use definition from %s\n", nameToCoalesce, coalIterator.image->getPath(), targetImage->getPath());
@@ -1472,8 +1493,11 @@ void ImageLoader::weakBindOld(const LinkContext& context)
 											nameToCoalesce, iterators[i].image->getIndexedShortName((unsigned)iterators[i].imageIndex),
 											targetAddr, targetImage->getIndexedShortName(targetImageIndex));
 							}
-							if ( ! iterators[i].image->weakSymbolsBound(imageIndexes[i]) )
+							if ( ! iterators[i].image->weakSymbolsBound(imageIndexes[i]) ) {
+								if ( iterators[i].image->inSharedCache() )
+									patcher.makeWriteable();
 								iterators[i].image->updateUsesCoalIterator(iterators[i], targetAddr, targetImage, targetImageIndex, context);
+							}
 							iterators[i].symbolMatches = false;
 						}
 					}
@@ -1491,20 +1515,21 @@ void ImageLoader::weakBindOld(const LinkContext& context)
 				// but if main executable has non-weak override of operator new or delete it needs is handled here
 				for (const char* weakSymbolName : sTreatAsWeak) {
 					const ImageLoader* dummy;
-					imagesNeedingCoalescing[i]->resolveWeak(context, weakSymbolName, true, false, &dummy);
+					imagesNeedingCoalescing[i]->resolveWeak(context, weakSymbolName, true, false, &dummy, patcher);
 				}
 			}
 #if __arm64e__
 			else {
 				// support traditional arm64 app on an arm64e device
 				// look for weak def symbols in this image which may override the cache
+				patcher.makeWriteable();
 				ImageLoader::CoalIterator coaler;
 				imagesNeedingCoalescing[i]->initializeCoalIterator(coaler, i, 0);
 				imagesNeedingCoalescing[i]->incrementCoalIterator(coaler);
 				while ( !coaler.done ) {
 					const ImageLoader* dummy;
 					// a side effect of resolveWeak() is to patch cache
-					imagesNeedingCoalescing[i]->resolveWeak(context, coaler.symbolName, true, false, &dummy);
+					imagesNeedingCoalescing[i]->resolveWeak(context, coaler.symbolName, true, false, &dummy, patcher);
 					imagesNeedingCoalescing[i]->incrementCoalIterator(coaler);
 				}
 			}

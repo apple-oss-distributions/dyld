@@ -246,7 +246,7 @@ bool ClosureBuilder::findImage(const char* loadPath, const LoadedImageChain& for
                 if ( foundInCache && !fileFound ) {
                     ImageNum dyldCacheImageNum = dyldCacheImageIndex + 1;
                     for (BuilderLoadedImage& li: _loadedImages) {
-                        if ( li.overrideImageNum == dyldCacheImageNum ) {
+                        if ( (li.overrideImageNum == dyldCacheImageNum) || (li.imageNum == dyldCacheImageNum) ) {
                             foundImage = &li;
                             result = true;
                             stop = true;
@@ -262,12 +262,14 @@ bool ClosureBuilder::findImage(const char* loadPath, const LoadedImageChain& for
                     if ( _fileSystem.getRealPath(possiblePath, realPath) ) {
                         foundInCache = _dyldCache->hasImagePath(realPath, dyldCacheImageIndex);
                         if ( foundInCache ) {
-                            filePath = realPath;
+                            ImageNum dyldCacheImageNum = dyldCacheImageIndex + 1;
+                            const Image* image = _dyldImageArray->imageForNum(dyldCacheImageNum);
+                            filePath = image->path();
 #if BUILDING_LIBDYLD
                             // handle case where OS dylib was updated after this process launched
                             if ( foundInCache ) {
                                 for (BuilderLoadedImage& li: _loadedImages) {
-                                    if ( strcmp(li.path(), realPath) == 0 ) {
+                                    if ( strcmp(li.path(), filePath) == 0 ) {
                                         foundImage = &li;
                                         result = true;
                                         stop = true;
@@ -452,19 +454,7 @@ bool ClosureBuilder::findImage(const char* loadPath, const LoadedImageChain& for
 
             if ( !markNeverUnload ) {
                 // If the parent didn't force us to be never unload, other conditions still may
-                if ( mh->hasThreadLocalVariables() ) {
-                    markNeverUnload = true;
-                } else if ( mh->hasObjC() && mh->isDylib() ) {
-                    markNeverUnload = true;
-                } else {
-                    // record if image has DOF sections
-                    __block bool hasDOFs = false;
-                    mh->forEachDOFSection(_diag, ^(uint32_t offset) {
-                        hasDOFs = true;
-                    });
-                    if ( hasDOFs )
-                        markNeverUnload = true;
-                }
+                markNeverUnload = mh->markNeverUnload(_diag);
             }
 
             // Set the path again just in case it was strdup'ed.
@@ -3723,13 +3713,15 @@ const ImageArray* ClosureBuilder::makeOtherDylibsImageArray(const Array<LoadedFi
     // build _loadedImages[] with every dylib in cache, followed by others
     _nextIndex = 0;
     for (const LoadedFileInfo& aDylibInfo : otherDylibs)  {
+        auto *mh = (const MachOAnalyzer*)aDylibInfo.fileContent;
+        
         BuilderLoadedImage entry;
         entry.loadedFileInfo                = aDylibInfo;
         entry.imageNum                      = _startImageNum + _nextIndex++;
         entry.unmapWhenDone                 = false;
         entry.contentRebased                = false;
         entry.hasInits                      = false;
-        entry.markNeverUnload               = false;
+        entry.markNeverUnload               = mh->markNeverUnload(_diag);
         entry.rtldLocal                     = false;
         entry.isBadImage                    = false;
         entry.mustBuildClosure              = false;

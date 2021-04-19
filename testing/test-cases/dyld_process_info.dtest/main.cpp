@@ -14,6 +14,7 @@
 #include <spawn.h>
 #include <errno.h>
 #include <sys/uio.h>
+#include <sys/proc.h>
 #include <sys/wait.h>
 #include <sys/types.h>
 #include <mach/mach.h>
@@ -29,11 +30,13 @@ static void inspectProcess(task_t task, bool launchedSuspended, bool expectCF, b
 {
     kern_return_t result;
     dyld_process_info info = _dyld_process_info_create(task, 0, &result);
+    LOG("_dyld_process_info_create(): return(%u), info(0x%llx)", result, (uint64_t)info);
+
     if (result != KERN_SUCCESS) {
-        FAIL("dyld_process_info() should succeed");
+        FAIL("_dyld_process_info_create() should succeed");
     }
     if (info == NULL) {
-        FAIL("dyld_process_info(task, 0) alwats return a value");
+        FAIL("_dyld_process_info_create(task, 0) alwats return a value");
     }
 
     dyld_process_state_info stateInfo;
@@ -82,6 +85,8 @@ static void inspectProcess(task_t task, bool launchedSuspended, bool expectCF, b
      _dyld_process_info_release(info);
 }
 
+
+
 #if __x86_64__
 cpu_type_t otherArch[] = { CPU_TYPE_I386 };
 #elif __i386__
@@ -101,7 +106,6 @@ static void launchTest(bool launchOtherArch, bool launchSuspended, bool forceIOS
     _process process;
     process.set_executable_path(RUN_DIR "/linksWithCF.exe");
     process.set_launch_suspended(launchSuspended);
-    process.set_launch_async(true);
     if (forceIOSMac) {
         LOG("Launching native");
         const char* env[] = { "TEST_OUTPUT=None", "DYLD_FORCE_PLATFORM=6", NULL};
@@ -115,10 +119,11 @@ static void launchTest(bool launchOtherArch, bool launchSuspended, bool forceIOS
     LOG("launchTest pid: %d", pid);
 
     task_t task;
-    if (task_for_pid(mach_task_self(), pid, &task) != KERN_SUCCESS) {
-        FAIL("task_for_pid() failed");
+    kern_return_t kr = task_read_for_pid(mach_task_self(), pid, &task);
+    LOG("task_read_for_pid(mach_task_self(): return(%u), task(%u)", kr, task);
+    if (kr != KERN_SUCCESS) {
+        FAIL("task_read_for_pid() failed");
     }
-    LOG("launchTest task: %u", task);
 
     // wait until process is up and has suspended itself
     if (!launchSuspended) {
@@ -142,7 +147,6 @@ static void launchTest(bool launchOtherArch, bool launchSuspended, bool forceIOS
 
 int main(int argc, const char* argv[], const char* envp[], const char* apple[]) {
     signal(SIGUSR1, SIG_IGN);
-    TIMEOUT(120);
     launchTest(false, false, false);
     launchTest(false, true, false);
 #if __MAC_OS_X_VERSION_MIN_REQUIRED
@@ -160,3 +164,4 @@ int main(int argc, const char* argv[], const char* envp[], const char* apple[]) 
     });
     dispatch_main();
 }
+

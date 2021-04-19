@@ -1503,6 +1503,20 @@ bool MachOFile::canBePlacedInKernelCollection(const char* path, void (^failureRe
         return false;
     }
 
+    // Only x86_64 is allowed to have RWX segments
+    if ( !isArch("x86_64") && !isArch("x86_64h") ) {
+        __block bool foundBadSegment = false;
+        forEachSegment(^(const SegmentInfo &info, bool &stop) {
+            if ( (info.protections & (VM_PROT_WRITE | VM_PROT_EXECUTE)) == (VM_PROT_WRITE | VM_PROT_EXECUTE) ) {
+                failureReason("Segments are not allowed to be both writable and executable");
+                foundBadSegment = true;
+                stop = true;
+            }
+        });
+        if ( foundBadSegment )
+            return false;
+    }
+
     return true;
 }
 #endif

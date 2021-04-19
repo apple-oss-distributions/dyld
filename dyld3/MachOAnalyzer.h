@@ -170,6 +170,8 @@ struct VIS_HIDDEN MachOAnalyzer : public MachOLoaded
     static bool         sliceIsOSBinary(int fd, uint64_t sliceOffset, uint64_t sliceSize);
 
     const MachOAnalyzer*    remapIfZeroFill(Diagnostics& diag, const closure::FileSystem& fileSystem, closure::LoadedFileInfo& info) const;
+    
+    bool                markNeverUnload(Diagnostics &diag) const;
 
     struct ObjCInfo {
         uint32_t    selRefCount;

@@ -59,6 +59,10 @@
 #include <sstream>
 #endif
 
+#if (BUILDING_LIBDYLD || BUILDING_DYLD)
+VIS_HIDDEN bool gEnableSharedCacheDataConst = false;
+#endif
+
 
 #if BUILDING_CACHE_BUILDER
 DyldSharedCache::CreateResults DyldSharedCache::create(const CreateOptions&               options,
@@ -231,8 +235,8 @@ uint64_t DyldSharedCache::getCodeSignAddress() const
     return mappings[header.mappingCount-1].address + mappings[header.mappingCount-1].size;
 }
 
-void DyldSharedCache::forEachRegion(void (^handler)(const void* content, uint64_t vmAddr, uint64_t size, uint32_t permissions,
-                                                    uint64_t flags)) const
+void DyldSharedCache::forEachRegion(void (^handler)(const void* content, uint64_t vmAddr, uint64_t size,
+                                                    uint32_t initProt, uint32_t maxProt, uint64_t flags)) const
 {
     // <rdar://problem/49875993> sanity check cache header
     if ( strncmp(header.magic, "dyld_v1", 7) != 0 )
@@ -245,13 +249,13 @@ void DyldSharedCache::forEachRegion(void (^handler)(const void* content, uint64_
         const dyld_cache_mapping_info* mappings = (dyld_cache_mapping_info*)((char*)this + header.mappingOffset);
         const dyld_cache_mapping_info* mappingsEnd = &mappings[header.mappingCount];
         for (const dyld_cache_mapping_info* m=mappings; m < mappingsEnd; ++m) {
-            handler((char*)this + m->fileOffset, m->address, m->size, m->initProt, 0);
+            handler((char*)this + m->fileOffset, m->address, m->size, m->initProt, m->maxProt, 0);
         }
     } else {
         const dyld_cache_mapping_and_slide_info* mappings = (const dyld_cache_mapping_and_slide_info*)((char*)this + header.mappingWithSlideOffset);
         const dyld_cache_mapping_and_slide_info* mappingsEnd = &mappings[header.mappingCount];
         for (const dyld_cache_mapping_and_slide_info* m=mappings; m < mappingsEnd; ++m) {
-            handler((char*)this + m->fileOffset, m->address, m->size, m->initProt, m->flags);
+            handler((char*)this + m->fileOffset, m->address, m->size, m->initProt, m->maxProt, m->flags);
         }
     }
 }
@@ -460,16 +464,16 @@ std::string DyldSharedCache::mapFile() const
     __block std::vector<uint64_t>   regionFileOffsets;
 
     result.reserve(256*1024);
-    forEachRegion(^(const void* content, uint64_t vmAddr, uint64_t size, uint32_t permissions,
-                    uint64_t flags) {
+    forEachRegion(^(const void* content, uint64_t vmAddr, uint64_t size,
+                    uint32_t initProt, uint32_t maxProt, uint64_t flags) {
         regionStartAddresses.push_back(vmAddr);
         regionSizes.push_back(size);
         regionFileOffsets.push_back((uint8_t*)content - (uint8_t*)this);
         char lineBuffer[256];
         const char* prot = "RW";
-        if ( permissions == (VM_PROT_EXECUTE|VM_PROT_READ) )
+        if ( maxProt == (VM_PROT_EXECUTE|VM_PROT_READ) )
             prot = "EX";
-        else if ( permissions == VM_PROT_READ )
+        else if ( maxProt == VM_PROT_READ )
             prot = "RO";
         if ( size > 1024*1024 )
             sprintf(lineBuffer, "mapping  %s %4lluMB 0x%0llX -> 0x%0llX\n", prot, size/(1024*1024), vmAddr, vmAddr+size);
@@ -512,8 +516,8 @@ uint64_t DyldSharedCache::mappedSize() const
 {
     __block uint64_t startAddr = 0;
     __block uint64_t endAddr = 0;
-    forEachRegion(^(const void* content, uint64_t vmAddr, uint64_t size, uint32_t permissions,
-                    uint64_t flags) {
+    forEachRegion(^(const void* content, uint64_t vmAddr, uint64_t size,
+                    uint32_t initProt, uint32_t maxProt, uint64_t flags) {
         if ( startAddr == 0 )
             startAddr = vmAddr;
         uint64_t end = vmAddr+size;
@@ -792,6 +796,59 @@ void DyldSharedCache::forEachPatchableUseOfExport(uint32_t imageIndex, uint32_t 
         }
     }
 }
+
+#if (BUILDING_LIBDYLD || BUILDING_DYLD)
+void DyldSharedCache::changeDataConstPermissions(mach_port_t machTask, uint32_t permissions,
+                                                 DataConstLogFunc logFunc) const {
+
+    const dyld_cache_mapping_info* mappings = (dyld_cache_mapping_info*)((char*)this + header.mappingOffset);
+    uintptr_t slide = (uintptr_t)this - (uintptr_t)(mappings[0].address);
+
+    if ( (permissions & VM_PROT_WRITE) != 0 )
+        permissions |= VM_PROT_COPY;
+
+    forEachRegion(^(const void *, uint64_t vmAddr, uint64_t size,
+                    uint32_t initProt, uint32_t maxProt, uint64_t flags) {
+        void* content = (void*)(vmAddr + slide);
+        if ( ( flags & DYLD_CACHE_MAPPING_CONST_DATA) == 0 )
+            return;
+        if ( logFunc != nullptr ) {
+            logFunc("dyld: marking shared cache range 0x%x permissions: 0x%09lX -> 0x%09lX\n",
+                    permissions, (long)content, (long)content + size);
+        }
+        kern_return_t result = vm_protect(machTask, (vm_address_t)content, (vm_size_t)size, false, permissions);
+        if ( result != KERN_SUCCESS ) {
+            if ( logFunc != nullptr )
+                logFunc("dyld: failed to mprotect shared cache due to: %d\n", result);
+        }
+    });
+}
+
+DyldSharedCache::DataConstLazyScopedWriter::DataConstLazyScopedWriter(const DyldSharedCache* cache, mach_port_t machTask, DataConstLogFunc logFunc)
+    : cache(cache), machTask(machTask), logFunc(logFunc) {
+}
+
+DyldSharedCache::DataConstLazyScopedWriter::~DataConstLazyScopedWriter() {
+    if ( wasMadeWritable )
+        cache->changeDataConstPermissions(machTask, VM_PROT_READ, logFunc);
+}
+
+void DyldSharedCache::DataConstLazyScopedWriter::makeWriteable() {
+    if ( wasMadeWritable )
+        return;
+    if ( !gEnableSharedCacheDataConst )
+        return;
+    if ( cache == nullptr )
+        return;
+    wasMadeWritable = true;
+    cache->changeDataConstPermissions(machTask, VM_PROT_READ | VM_PROT_WRITE, logFunc);
+}
+
+DyldSharedCache::DataConstScopedWriter::DataConstScopedWriter(const DyldSharedCache* cache, mach_port_t machTask, DataConstLogFunc logFunc)
+    : writer(cache, machTask, logFunc) {
+    writer.makeWriteable();
+}
+#endif
 
 #if !(BUILDING_LIBDYLD || BUILDING_DYLD)
 // MRM map file generator

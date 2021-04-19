@@ -19,8 +19,8 @@ void foo() {
     }
 
     // foo can't see libCarbon.dylib as it's name isn't correct
-    void* handle2 = dlopen("libCarbon.dylib", RTLD_LAZY);
-    if ( handle2 != NULL ) {
+    void* handle3 = dlopen("libCarbon.dylib", RTLD_LAZY);
+    if ( handle3 != NULL ) {
         FAIL("dlopen-jna, libfoo should not be able to dlopen()");
     }
 }

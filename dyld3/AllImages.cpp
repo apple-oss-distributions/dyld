@@ -62,8 +62,7 @@ extern "C" void __cxa_finalize_ranges(const __cxa_range_t ranges[], unsigned int
 extern "C" int  __cxa_atexit(void (*func)(void *), void* arg, void* dso);
 
 
-
-VIS_HIDDEN bool gUseDyld3 = false;
+VIS_HIDDEN void* __ptrauth_dyld_address_auth gUseDyld3 = nullptr;
 
 
 namespace dyld3 {
@@ -1213,13 +1212,15 @@ void Reaper::finalizeDeadImages()
 
 void Reaper::runTerminators(const LoadedImage& li)
 {
+    // <rdar://problem/71820555> Don't run static terminator for arm64e
+    const MachOAnalyzer* ma = (MachOAnalyzer*)li.loadedAddress();
+    if ( ma->isArch("arm64e") )
+        return;
+
     if ( li.image()->hasTerminators() ) {
         typedef void (*Terminator)();
         li.image()->forEachTerminator(li.loadedAddress(), ^(const void* terminator) {
             Terminator termFunc = (Terminator)terminator;
-#if __has_feature(ptrauth_calls)
-            termFunc = (Terminator)__builtin_ptrauth_sign_unauthenticated((void*)termFunc, 0, 0);
-#endif
             termFunc();
             log_initializers("dyld: called static terminator %p in %s\n", termFunc, li.image()->path());
         });
@@ -1481,13 +1482,20 @@ void AllImages::setObjCNotifiers(_dyld_objc_notify_mapped map, _dyld_objc_notify
     }
 }
 
-void AllImages::applyInterposingToDyldCache(const closure::Closure* closure)
+void AllImages::applyInterposingToDyldCache(const closure::Closure* closure, mach_port_t mach_task_self)
 {
     dyld3::ScopedTimer timer(DBG_DYLD_TIMING_APPLY_INTERPOSING, 0, 0, 0);
     const uintptr_t                 cacheStart              = (uintptr_t)_dyldCacheAddress;
     __block closure::ImageNum       lastCachedDylibImageNum = 0;
     __block const closure::Image*   lastCachedDylibImage    = nullptr;
     __block bool                    suspendedAccounting     = false;
+
+    if ( closure->findAttributePayload(closure::TypedBytes::Type::cacheOverrides) == nullptr )
+        return;
+
+    // make the cache writable for this block
+    DyldSharedCache::DataConstScopedWriter patcher(_dyldCacheAddress, mach_task_self, (DyldSharedCache::DataConstLogFunc)&log_segments);
+
     closure->forEachPatchEntry(^(const closure::Closure::PatchEntry& entry) {
         if ( entry.overriddenDylibInCache != lastCachedDylibImageNum ) {
             lastCachedDylibImage    = closure::ImageArray::findImage(imagesArrays(), entry.overriddenDylibInCache);
@@ -1877,7 +1885,7 @@ const MachOLoaded* AllImages::loadImage(Diagnostics& diag, const char* path,
 
     // if closure adds images that override dyld cache, patch cache
     if ( newClosure != nullptr )
-        applyInterposingToDyldCache(newClosure);
+        applyInterposingToDyldCache(newClosure, mach_task_self());
 
     runImageCallbacks(newImages);
 

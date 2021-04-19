@@ -611,16 +611,18 @@ int main (int argc, const char* argv[]) {
         if ( dyldCache->hasSlideInfo() ) {
             uint32_t pageSize            = 0x4000; // fix me for intel
             uint32_t possibleSlideValues = (uint32_t)(header->maxSlide/pageSize);
-            uint32_t entropyBits         = 32 - __builtin_clz(possibleSlideValues - 1);
+            uint32_t entropyBits = 0;
+            if ( possibleSlideValues > 1 )
+                entropyBits = __builtin_clz(possibleSlideValues - 1);
             printf("ASLR entropy: %u-bits\n", entropyBits);
         }
         printf("mappings:\n");
-        dyldCache->forEachRegion(^(const void *content, uint64_t vmAddr, uint64_t size, uint32_t permissions,
-                                   uint64_t flags) {
+        dyldCache->forEachRegion(^(const void *content, uint64_t vmAddr, uint64_t size,
+                                   uint32_t initProt, uint32_t maxProt, uint64_t flags) {
             std::string mappingName = "";
-            if ( permissions & VM_PROT_EXECUTE ) {
+            if ( maxProt & VM_PROT_EXECUTE ) {
                 mappingName = "__TEXT";
-            } else if ( permissions & VM_PROT_WRITE ) {
+            } else if ( maxProt & VM_PROT_WRITE ) {
                 // Start off with __DATA or __AUTH
                 if ( flags & DYLD_CACHE_MAPPING_AUTH_DATA )
                     mappingName = "__AUTH";
@@ -632,7 +634,7 @@ int main (int argc, const char* argv[]) {
                 else if ( flags & DYLD_CACHE_MAPPING_CONST_DATA )
                     mappingName += "_CONST";
             }
-            else if ( permissions & VM_PROT_READ ) {
+            else if ( maxProt & VM_PROT_READ ) {
                 mappingName = "__LINKEDIT";
             } else {
                 mappingName = "*unknown*";

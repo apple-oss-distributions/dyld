@@ -60,6 +60,8 @@ extern "C" int __shared_region_map_and_slide_2_np(uint32_t files_count, const sh
 #define VM_PROT_NOAUTH  0x40  /* must not interfere with normal prot assignments */
 #endif
 
+extern bool gEnableSharedCacheDataConst;
+
 namespace dyld {
     extern void log(const char*, ...);
     extern void logToConsole(const char* format, ...);
@@ -336,8 +338,8 @@ static void verboseSharedCacheMappings(const shared_file_mapping_slide_np mappin
 {
     for (int i=0; i < mappingsCount; ++i) {
         const char* mappingName = "";
-        if ( mappings[i].sms_init_prot & VM_PROT_WRITE ) {
-            if ( mappings[i].sms_init_prot & VM_PROT_NOAUTH ) {
+        if ( mappings[i].sms_max_prot & VM_PROT_WRITE ) {
+            if ( mappings[i].sms_max_prot & VM_PROT_NOAUTH ) {
                 // __DATA*
                 mappingName = "data";
             } else {
@@ -354,6 +356,33 @@ static void verboseSharedCacheMappings(const shared_file_mapping_slide_np mappin
             ((mappings[i].sms_init_prot & VM_PROT_WRITE) ? "write " : ""),
             ((mappings[i].sms_init_prot & VM_PROT_EXECUTE) ? "execute " : ""),
             mappingName);
+    }
+}
+
+
+static void verboseSharedCacheMappingsToConsole(const shared_file_mapping_slide_np mappings[DyldSharedCache::MaxMappings],
+                                                uint32_t mappingsCount)
+{
+    for (int i=0; i < mappingsCount; ++i) {
+        const char* mappingName = "";
+        if ( mappings[i].sms_max_prot & VM_PROT_WRITE ) {
+            if ( mappings[i].sms_max_prot & VM_PROT_NOAUTH ) {
+                // __DATA*
+                mappingName = "data";
+            } else {
+                // __AUTH*
+                mappingName = "auth";
+            }
+        }
+        uint32_t init_prot = mappings[i].sms_init_prot & (VM_PROT_READ | VM_PROT_WRITE | VM_PROT_EXECUTE);
+        uint32_t max_prot = mappings[i].sms_max_prot & (VM_PROT_READ | VM_PROT_WRITE | VM_PROT_EXECUTE);
+        dyld::logToConsole("dyld: mapping 0x%08llX->0x%08llX init=%x, max=%x %s%s%s%s\n",
+                           mappings[i].sms_address, mappings[i].sms_address+mappings[i].sms_size-1,
+                           init_prot, max_prot,
+                           ((mappings[i].sms_init_prot & VM_PROT_READ) ? "read " : ""),
+                           ((mappings[i].sms_init_prot & VM_PROT_WRITE) ? "write " : ""),
+                           ((mappings[i].sms_init_prot & VM_PROT_EXECUTE) ? "execute " : ""),
+                           mappingName);
     }
 }
 #endif
@@ -472,6 +501,7 @@ static bool preflightCacheFile(const SharedCacheOptions& options, SharedCacheLoa
         uint64_t    slideInfoFileOffset = 0;
         uint64_t    slideInfoFileSize   = 0;
         vm_prot_t   authProt            = 0;
+        vm_prot_t   initProt            = fileMappings[i].initProt;
         if ( cache->header.mappingOffset <= __offsetof(dyld_cache_header, mappingWithSlideOffset) ) {
             // Old cache without the new slid mappings
             if ( i == 1 ) {
@@ -488,6 +518,12 @@ static bool preflightCacheFile(const SharedCacheOptions& options, SharedCacheLoa
             slideInfoFileSize   = slidableMappings[i].slideInfoFileSize;
             if ( (slidableMappings[i].flags & DYLD_CACHE_MAPPING_AUTH_DATA) == 0 )
                 authProt = VM_PROT_NOAUTH;
+            if ( (slidableMappings[i].flags & DYLD_CACHE_MAPPING_CONST_DATA) != 0 ) {
+                // The cache was built with __DATA_CONST being read-only.  We can override that
+                // with a boot-arg
+                if ( !gEnableSharedCacheDataConst )
+                    initProt |= VM_PROT_WRITE;
+            }
         }
 
         // Add a file for each mapping
@@ -498,7 +534,7 @@ static bool preflightCacheFile(const SharedCacheOptions& options, SharedCacheLoa
         info->mappings[i].sms_slide_size            = 0;
         info->mappings[i].sms_slide_start           = 0;
         info->mappings[i].sms_max_prot              = fileMappings[i].maxProt;
-        info->mappings[i].sms_init_prot             = fileMappings[i].initProt;
+        info->mappings[i].sms_init_prot             = initProt;
         if ( slideInfoFileSize != 0 ) {
             uint64_t offsetInLinkEditRegion = (slideInfoFileOffset - linkeditMapping->fileOffset);
             info->mappings[i].sms_slide_start   = (user_addr_t)(linkeditMapping->address + offsetInLinkEditRegion);
@@ -642,16 +678,15 @@ static bool reuseExistingCache(const SharedCacheOptions& options, SharedCacheLoa
             // we don't know the path this cache was previously loaded from, assume default
             getCachePath(options, sizeof(results->path), results->path);
             if ( options.verbose ) {
-                const shared_file_mapping_np* const mappings = (shared_file_mapping_np*)(cacheBaseAddress + existingCache->header.mappingOffset);
+                const dyld_cache_mapping_and_slide_info* const mappings = (const dyld_cache_mapping_and_slide_info*)(cacheBaseAddress + existingCache->header.mappingWithSlideOffset);
                 dyld::log("re-using existing shared cache (%s):\n", results->path);
                 shared_file_mapping_slide_np slidMappings[DyldSharedCache::MaxMappings];
                 for (int i=0; i < DyldSharedCache::MaxMappings; ++i) {
-                    slidMappings[i].sms_address = mappings[i].sfm_address;
-                    slidMappings[i].sms_size = mappings[i].sfm_size;
-                    slidMappings[i].sms_file_offset = mappings[i].sfm_file_offset;
-                    slidMappings[i].sms_max_prot = mappings[i].sfm_max_prot;
-                    slidMappings[i].sms_init_prot = mappings[i].sfm_init_prot;
-
+                    slidMappings[i].sms_address = mappings[i].address;
+                    slidMappings[i].sms_size = mappings[i].size;
+                    slidMappings[i].sms_file_offset = mappings[i].fileOffset;
+                    slidMappings[i].sms_max_prot = mappings[i].maxProt;
+                    slidMappings[i].sms_init_prot = mappings[i].initProt;
                     slidMappings[i].sms_address += results->slide;
                     if ( existingCache->header.mappingOffset > __offsetof(dyld_cache_header, mappingWithSlideOffset) ) {
                         // New caches have slide info on each new mapping
@@ -661,6 +696,12 @@ static bool reuseExistingCache(const SharedCacheOptions& options, SharedCacheLoa
                             slidMappings[i].sms_max_prot  |= VM_PROT_NOAUTH;
                             slidMappings[i].sms_init_prot |= VM_PROT_NOAUTH;
                         }
+                        if ( (slidableMappings[i].flags & DYLD_CACHE_MAPPING_CONST_DATA) != 0 ) {
+                            // The cache was built with __DATA_CONST being read-only.  We can override that
+                            // with a boot-arg
+                            if ( !gEnableSharedCacheDataConst )
+                                slidMappings[i].sms_init_prot |= VM_PROT_WRITE;
+                        }
                     }
                 }
                 verboseSharedCacheMappings(slidMappings, existingCache->header.mappingCount);
@@ -669,6 +710,7 @@ static bool reuseExistingCache(const SharedCacheOptions& options, SharedCacheLoa
         else {
             results->errorMessage = "existing shared cache in memory is not compatible";
         }
+
         return true;
     }
     return false;
@@ -750,10 +792,22 @@ static bool mapCacheSystemWide(const SharedCacheOptions& options, SharedCacheLoa
         results->loadAddress = (const DyldSharedCache*)(info.mappings[0].sms_address);
         if ( info.mappingsCount != 3 ) {
             // We don't know our own slide any more as the kernel owns it, so ask for it again now
-            if ( reuseExistingCache(options, results) )
+            if ( reuseExistingCache(options, results) ) {
+
+                // update mappings based on the slide the kernel chose
+                for (uint32_t i=0; i < info.mappingsCount; ++i) {
+                    info.mappings[i].sms_address += results->slide;
+                    if ( info.mappings[i].sms_slide_size != 0 )
+                        info.mappings[i].sms_slide_start += (uint32_t)results->slide;
+                }
+
+                if ( options.verbose )
+                    verboseSharedCacheMappingsToConsole(info.mappings, info.mappingsCount);
                 return true;
+            }
             // Uh oh, we mapped the kernel, but we didn't find the slide
-            dyld::logToConsole("dyld: error finding shared cache slide for system wide mapping\n");
+            if ( options.verbose )
+                dyld::logToConsole("dyld: error finding shared cache slide for system wide mapping\n");
             return false;
         }
     }
@@ -836,6 +890,10 @@ static bool mapCachePrivate(const SharedCacheOptions& options, SharedCacheLoadIn
 #if TARGET_OS_SIMULATOR // simulator caches do not support sliding
     return true;
 #else
+
+    // Change __DATA_CONST to read-write for this block
+    DyldSharedCache::DataConstScopedWriter patcher(results->loadAddress, mach_task_self(), options.verbose ? &dyld::log : nullptr);
+
     __block bool success = true;
     for (int i=0; i < info.mappingsCount; ++i) {
         if ( info.mappings[i].sms_slide_size == 0 )

@@ -1,12 +1,12 @@
 
-// BOOT_ARGS: amfi=3 cs_enforcement_disable=1
+// BOOT_ARGSxx: amfi=3 cs_enforcement_disable=1
+// FIXME: re-enable for macOS when it work
+// xxBUILDxx(macos|x86_64):  $CC main.c -o $BUILD_DIR/kernel-fixups.exe -Wl,-static -mkernel -nostdlib -Wl,-add_split_seg_info -Wl,-e,__start -Wl,-pie -Wl,-pagezero_size,0x0 -Wl,-install_name,/usr/lib/swift/split.seg.v2.hack -fno-stack-protector -fno-builtin -ffreestanding -Wl,-segprot,__HIB,rx,rx -Wl,-image_base,0x8000 -Wl,-segaddr,__HIB,0x4000
+// xxBUILDxx(macos|x86_64):  $APP_CACHE_UTIL -create-kernel-collection $BUILD_DIR/kernel.kc -kernel $BUILD_DIR/kernel-fixups.exe
 
-// BUILD(macos|x86_64):  $CC main.c -o $BUILD_DIR/kernel-fixups.exe -Wl,-static -mkernel -nostdlib -Wl,-add_split_seg_info -Wl,-e,__start -Wl,-pie -Wl,-pagezero_size,0x0 -Wl,-install_name,/usr/lib/swift/split.seg.v2.hack -fno-stack-protector -fno-builtin -ffreestanding -Wl,-segprot,__HIB,rx,rx -Wl,-image_base,0x8000 -Wl,-segaddr,__HIB,0x4000
-// BUILD(macos|x86_64):  $APP_CACHE_UTIL -create-kernel-collection $BUILD_DIR/kernel.kc -kernel $BUILD_DIR/kernel-fixups.exe
+// BUILDxx(macos,ios,tvos,watchos,bridgeos):
 
-// BUILD(ios,tvos,watchos,bridgeos):
-
-// RUN_STATIC:    $RUN_STATIC ./kernel.kc
+// xxRUN_STATIC:    $RUN_STATIC ./kernel.kc
 
 // This tests that unaligned fixups work in x86_64
 

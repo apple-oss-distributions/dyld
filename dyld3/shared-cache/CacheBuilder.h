@@ -78,7 +78,8 @@ public:
         uint64_t    sizeInUse                       = 0;
         uint64_t    unslidLoadAddress               = 0;
         uint64_t    cacheFileOffset                 = 0;
-        uint8_t     permissions                     = 0;
+        uint8_t     initProt                        = 0;
+        uint8_t     maxProt                         = 0;
         std::string name;
         uint64_t    index                  = ~0ULL; // The index of this region in the final binary
 

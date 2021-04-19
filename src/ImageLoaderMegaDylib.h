@@ -83,7 +83,8 @@ public:
 	virtual bool						isExecutable() const { unreachable();  }
 	virtual bool						isPositionIndependentExecutable() const { unreachable();  }
 	virtual bool						forceFlat() const { unreachable();  }
-	virtual uintptr_t					doBindLazySymbol(uintptr_t* lazyPointer, const LinkContext& context) { unreachable(); }
+	virtual uintptr_t					doBindLazySymbol(uintptr_t* lazyPointer, const LinkContext& context,
+														 DyldSharedCache::DataConstLazyScopedWriter& patcher) { unreachable(); }
 	virtual uintptr_t					doBindFastLazySymbol(uint32_t lazyBindingInfoOffset, const LinkContext& context,
 															void (*lock)(), void (*unlock)()) { unreachable(); }
 	virtual void						doTermination(const LinkContext& context) { unreachable(); }
@@ -175,7 +176,7 @@ protected:
 	virtual LibraryInfo					doGetLibraryInfo(const LibraryInfo& requestorInfo) { return requestorInfo; }
 	virtual void						doRebase(const LinkContext& context) { unreachable(); }
 	virtual void						doBind(const LinkContext& context, bool forceLazysBound, const ImageLoader* reExportParent) { unreachable(); }
-	virtual void						doBindJustLazies(const LinkContext& context) { unreachable(); }
+	virtual void						doBindJustLazies(const LinkContext& context, DyldSharedCache::DataConstLazyScopedWriter& patcher) { unreachable(); }
 	virtual void						doGetDOFSections(const LinkContext& context, std::vector<DOFInfo>& dofs) { unreachable(); }
 	virtual void						doInterpose(const LinkContext& context) { unreachable(); }
 	virtual bool						doInitialization(const LinkContext& context) { unreachable(); }

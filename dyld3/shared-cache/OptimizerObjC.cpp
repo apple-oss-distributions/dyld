@@ -908,7 +908,7 @@ template <typename P>
 void addObjcSegments(Diagnostics& diag, DyldSharedCache* cache, const mach_header* libobjcMH,
                      uint8_t* objcReadOnlyBuffer, uint64_t objcReadOnlyBufferSizeAllocated,
                      uint8_t* objcReadWriteBuffer, uint64_t objcReadWriteBufferSizeAllocated,
-                     uint32_t objcRwFileOffset)
+                     uint64_t objcRwFileOffset)
 {
     // validate there is enough free space to add the load commands
     const dyld3::MachOAnalyzer* libobjcMA = ((dyld3::MachOAnalyzer*)libobjcMH);
@@ -1021,7 +1021,7 @@ void doOptimizeObjC(DyldSharedCache* cache, bool forProduction, CacheBuilder::AS
                     const std::map<void*, std::string>& missingWeakImports, Diagnostics& diag,
                     uint8_t* objcReadOnlyBuffer, uint64_t objcReadOnlyBufferSizeUsed, uint64_t objcReadOnlyBufferSizeAllocated,
                     uint8_t* objcReadWriteBuffer, uint64_t objcReadWriteBufferSizeAllocated,
-                    uint32_t objcRwFileOffset,
+                    uint64_t objcRwFileOffset,
                     std::vector<CacheBuilder::DylibInfo> & allDylibs,
                     const std::vector<const IMPCaches::Selector*> & inlinedSelectors,
                     bool impCachesSuccess,
@@ -1622,10 +1622,6 @@ size_t IMPCaches::sizeForImpCacheWithCount(int count) {
 
 void SharedCacheBuilder::optimizeObjC(bool impCachesSuccess, const std::vector<const IMPCaches::Selector*> & inlinedSelectors)
 {
-    // FIXME: Can we move the objc RW content to the __DATA_CONST region?
-    // For now, it is always at the end of the last region
-    const Region* readWriteRegion = lastDataRegion();
-    uint32_t objcRwFileOffset = (uint32_t)((_objcReadWriteBuffer - readWriteRegion->buffer) + readWriteRegion->cacheFileOffset);
     if ( _archLayout->is64 )
         doOptimizeObjC<Pointer64<LittleEndian>>((DyldSharedCache*)_readExecuteRegion.buffer,
             _options.optimizeStubs,
@@ -1636,7 +1632,7 @@ void SharedCacheBuilder::optimizeObjC(bool impCachesSuccess, const std::vector<c
             _objcReadOnlyBufferSizeUsed,
             _objcReadOnlyBufferSizeAllocated,
             _objcReadWriteBuffer, _objcReadWriteBufferSizeAllocated,
-            objcRwFileOffset, _sortedDylibs, inlinedSelectors, impCachesSuccess, _timeRecorder);
+            _objcReadWriteFileOffset, _sortedDylibs, inlinedSelectors, impCachesSuccess, _timeRecorder);
     else
         doOptimizeObjC<Pointer32<LittleEndian>>((DyldSharedCache*)_readExecuteRegion.buffer,
             _options.optimizeStubs,
@@ -1647,7 +1643,7 @@ void SharedCacheBuilder::optimizeObjC(bool impCachesSuccess, const std::vector<c
             _objcReadOnlyBufferSizeUsed,
             _objcReadOnlyBufferSizeAllocated,
             _objcReadWriteBuffer, _objcReadWriteBufferSizeAllocated,
-            objcRwFileOffset, _sortedDylibs, inlinedSelectors, impCachesSuccess, _timeRecorder);
+            _objcReadWriteFileOffset, _sortedDylibs, inlinedSelectors, impCachesSuccess, _timeRecorder);
 }
 
 static uint32_t hashTableSize(uint32_t maxElements, uint32_t perElementData)

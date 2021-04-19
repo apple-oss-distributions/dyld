@@ -38,7 +38,8 @@ extern "C" char start;
 
 VIS_HIDDEN const char** appleParams;
 
-extern bool gUseDyld3;
+extern void* __ptrauth_dyld_address_auth gUseDyld3;
+extern bool gEnableSharedCacheDataConst;
 
 namespace dyld3 {
 
@@ -57,7 +58,8 @@ static const char* leafName(const char* argv0)
         return argv0;
 }
 
-static void entry_setVars(const mach_header* mainMH, int argc, const char* argv[], const char* envp[], const char* apple[], bool keysOff, bool platformBinariesOnly)
+static void entry_setVars(const mach_header* mainMH, int argc, const char* argv[], const char* envp[], const char* apple[],
+                          bool keysOff, bool platformBinariesOnly, bool enableSharedCacheDataConst)
 {
     NXArgc       = argc;
     NXArgv       = argv;
@@ -72,9 +74,11 @@ static void entry_setVars(const mach_header* mainMH, int argc, const char* argv[
     sVars.__prognamePtr = &__progname;
     gAllImages.setProgramVars(&sVars, keysOff, platformBinariesOnly);
 
-    gUseDyld3 = true;
+    gUseDyld3 = (void*)1;
 
     setLoggingFromEnvs(envp);
+
+    gEnableSharedCacheDataConst = enableSharedCacheDataConst;
 }
 
 static void entry_setHaltFunction(void (*func)(const char* message) __attribute__((noreturn)) )
@@ -107,11 +111,12 @@ static void entry_setNotifyMonitoringDyld(void (*notifyMonitoringDyld)(bool unlo
 }
 
 static void entry_setInitialImageList(const closure::LaunchClosure* closure,
-                                const DyldSharedCache* dyldCacheLoadAddress, const char* dyldCachePath,
-                                const Array<LoadedImage>& initialImages, LoadedImage& libSystem)
+                                      const DyldSharedCache* dyldCacheLoadAddress, const char* dyldCachePath,
+                                      const Array<LoadedImage>& initialImages, LoadedImage& libSystem,
+                                      mach_port_t mach_task_self)
 {
     gAllImages.init(closure, dyldCacheLoadAddress, dyldCachePath, initialImages);
-    gAllImages.applyInterposingToDyldCache(closure);
+    gAllImages.applyInterposingToDyldCache(closure, mach_task_self);
 
     // run initializer for libSytem.B.dylib
     // this calls back into _dyld_initializer which calls gAllIimages.addImages()

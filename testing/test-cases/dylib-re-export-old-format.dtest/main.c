@@ -1,6 +1,6 @@
-// BUILD(macos|x86_64):           $CC bar.c -mmacosx-version-min=10.5 -dynamiclib -install_name $RUN_DIR/libbar.dylib -o $BUILD_DIR/libbar.dylib
-// BUILD(macos|x86_64):           $CC foo.c -mmacosx-version-min=10.5 -dynamiclib $BUILD_DIR/libbar.dylib -sub_library libbar -install_name $RUN_DIR/libfoo.dylib -o $BUILD_DIR/libfoo.dylib
-// BUILD(macos|x86_64):           $CC main.c -mmacosx-version-min=10.5 -o $BUILD_DIR/dylib-re-export.exe $BUILD_DIR/libfoo.dylib
+// BUILD(macos|x86_64):   $CC bar.c -mmacosx-version-min=10.5 -dynamiclib -install_name $RUN_DIR/libbar.dylib -o $BUILD_DIR/libbar.dylib
+// BUILD(macos|x86_64):   $CC foo.c -mmacosx-version-min=10.5 -dynamiclib $BUILD_DIR/libbar.dylib -sub_library libbar -install_name $RUN_DIR/libfoo.dylib -o $BUILD_DIR/libfoo.dylib
+// BUILD(macos|x86_64):   $CC main.c -mmacosx-version-min=10.5 -o $BUILD_DIR/dylib-re-export.exe $BUILD_DIR/libfoo.dylib -L$BUILD_DIR
 
 // BUILD(ios,tvos,watchos,bridgeos):
 

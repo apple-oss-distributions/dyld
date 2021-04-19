@@ -367,7 +367,7 @@ void ImageLoaderMachO::sniffLoadCommands(const macho_header* mh, const char* pat
 	if ( !inCache && (startOfFileSegCmd == NULL) )
 		throw "malformed mach-o image: missing __TEXT segment that maps start of file";
 	// <rdar://problem/13145644> verify every segment does not overlap another segment
-	if ( context.strictMachORequired ) {
+	if ( context.strictMachORequired && !inCache ) {
 		uintptr_t lastFileStart = 0;
 		uintptr_t linkeditFileStart = 0;
 		const struct load_command* cmd1 = startCmds;

@@ -30,7 +30,6 @@ struct _process {
     void set_exit_handler(_dyld_test_exit_handler_t EH);
     void set_crash_handler(_dyld_test_crash_handler_t CH);
     void set_launch_suspended(bool S);
-    void set_launch_async(bool S);
     void set_launch_arch(cpu_type_t A);
     pid_t launch();
     void *operator new(size_t size);

@@ -773,6 +773,7 @@
 		C116F1A523F5BB39002D386B /* update_dyld_shared_cache-build.sh */ = {isa = PBXFileReference; lastKnownFileType = text.script.sh; path = "update_dyld_shared_cache-build.sh"; sourceTree = "<group>"; };
 		C11ECA8E233C307C0011726F /* SharedCacheBuilder.cpp */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.cpp.cpp; name = SharedCacheBuilder.cpp; path = "dyld3/shared-cache/SharedCacheBuilder.cpp"; sourceTree = "<group>"; };
 		C11ECA8F233C307C0011726F /* SharedCacheBuilder.h */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.c.h; name = SharedCacheBuilder.h; path = "dyld3/shared-cache/SharedCacheBuilder.h"; sourceTree = "<group>"; };
+		C141DF8825673EF00077621A /* PointerAuth.h */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.c.h; name = PointerAuth.h; path = dyld3/PointerAuth.h; sourceTree = "<group>"; };
 		C14965DB22BDCE7C00568D15 /* dyld_app_cache_util.cpp */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.cpp.cpp; name = dyld_app_cache_util.cpp; path = dyld3/dyld_app_cache_util.cpp; sourceTree = "<group>"; };
 		C14965E022BDCF6800568D15 /* dyld_app_cache_util */ = {isa = PBXFileReference; explicitFileType = "compiled.mach-o.executable"; includeInIndex = 0; path = dyld_app_cache_util; sourceTree = BUILT_PRODUCTS_DIR; };
 		C14C3560230531820059E04C /* run-static */ = {isa = PBXFileReference; explicitFileType = "compiled.mach-o.executable"; includeInIndex = 0; path = "run-static"; sourceTree = BUILT_PRODUCTS_DIR; };
@@ -1264,6 +1265,7 @@
 				C18F095221925E7600034B68 /* Map.h */,
 				F9F76FAE1E08CFF200828678 /* PathOverrides.cpp */,
 				F9F76FAF1E08CFF200828678 /* PathOverrides.h */,
+				C141DF8825673EF00077621A /* PointerAuth.h */,
 				C116F19A23F4B11B002D386B /* RootsChecker.cpp */,
 				C116F19B23F4B11B002D386B /* RootsChecker.h */,
 				F977DDC91E53BEA700609230 /* SharedCacheRuntime.cpp */,
@@ -2720,7 +2722,7 @@
 				GCC_WARN_UNUSED_FUNCTION = YES;
 				GCC_WARN_UNUSED_VARIABLE = YES;
 				INSTALL_PATH = "$(INSTALL_LOCATION)/usr/local/bin";
-				MACOSX_DEPLOYMENT_TARGET = 10.11;
+				MACOSX_DEPLOYMENT_TARGET = 10.14;
 				MTL_ENABLE_DEBUG_INFO = YES;
 				ONLY_ACTIVE_ARCH = YES;
 				OTHER_CFLAGS = (
@@ -2774,7 +2776,7 @@
 				GCC_WARN_UNUSED_FUNCTION = YES;
 				GCC_WARN_UNUSED_VARIABLE = YES;
 				INSTALL_PATH = "$(INSTALL_LOCATION)/usr/local/bin";
-				MACOSX_DEPLOYMENT_TARGET = 10.11;
+				MACOSX_DEPLOYMENT_TARGET = 10.14;
 				MTL_ENABLE_DEBUG_INFO = NO;
 				OTHER_CFLAGS = (
 					"-DBOM_SUPPORT=1",

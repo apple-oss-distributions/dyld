@@ -784,6 +784,19 @@ void* NSAddressOfSymbol(NSSymbol symbol)
 	ImageLoader* image = dyld::findImageContainingSymbol(symbol);
 	if ( image != NULL ) 
 		result = (void*)image->getExportedSymbolAddress(NSSymbolToSymbol(symbol), dyld::gLinkContext);
+
+#if __has_feature(ptrauth_calls)
+	// Sign the pointer if it points to a function
+	if ( result ) {
+		const ImageLoader* symbolImage = image;
+		if (!symbolImage->containsAddress(result)) {
+			symbolImage = dyld::findImageContainingAddress(result);
+		}
+		const macho_section *sect = symbolImage ? symbolImage->findSection(result) : NULL;
+		if ( sect && ((sect->flags & S_ATTR_PURE_INSTRUCTIONS) || (sect->flags & S_ATTR_SOME_INSTRUCTIONS)) )
+			result = __builtin_ptrauth_sign_unauthenticated(result, ptrauth_key_asia, 0);
+	}
+#endif
 	return result;
 }
 
@@ -2133,6 +2146,9 @@ void dyld_dynamic_interpose(const struct mach_header* mh, const struct dyld_inte
 	ImageLoader* image = dyld::findImageByMachHeader(mh);
 	if ( image == NULL )
 		return;
+
+	// make the cache writable for this block
+	DyldSharedCache::DataConstScopedWriter patcher(dyld::gLinkContext.dyldCache, mach_task_self(), (dyld::gLinkContext.verboseMapping ? &dyld::log : nullptr));
 	
 	// make pass at bound references in this image and update them
 	dyld::gLinkContext.dynamicInterposeArray = array;

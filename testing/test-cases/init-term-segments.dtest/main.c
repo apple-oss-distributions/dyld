@@ -34,9 +34,15 @@ int main(int argc, const char* argv[], const char* envp[], const char* apple[]) 
         FAIL("didn't dlclose");
     }
 
+#if __arm64e__
+    if (ranTerm) {
+        FAIL("unexpectedly ran term");
+    }
+#else
     if (!ranTerm) {
         FAIL("didn't run term");
     }
+#endif
 
     PASS("Success");
 }

@@ -143,6 +143,8 @@ namespace dyld {
 		// Add in version 13
 		DYLD_SYSCALL_VTABLE_ENTRY(fstat);
 		DYLD_SYSCALL_VTABLE_ENTRY(vm_copy);
+        // Add in version 14
+        DYLD_SYSCALL_VTABLE_ENTRY(task_dyld_process_info_notify_get);
 	};
 	extern const struct SyscallHelpers* gSyscallHelpers;
 

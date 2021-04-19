@@ -1439,11 +1439,15 @@ void SharedCacheBuilder::writeCacheHeader()
         if ( i == 0 ) {
             assert(_dataRegions[i].cacheFileOffset == _readExecuteRegion.sizeInUse);
         }
+
+        assert(_dataRegions[i].initProt != 0);
+        assert(_dataRegions[i].maxProt != 0);
+
         mappings[i + 1].address    = _dataRegions[i].unslidLoadAddress;
         mappings[i + 1].fileOffset = _dataRegions[i].cacheFileOffset;
         mappings[i + 1].size       = _dataRegions[i].sizeInUse;
-        mappings[i + 1].maxProt    = VM_PROT_READ | VM_PROT_WRITE;
-        mappings[i + 1].initProt   = VM_PROT_READ | VM_PROT_WRITE;
+        mappings[i + 1].maxProt    = _dataRegions[i].maxProt;
+        mappings[i + 1].initProt   = _dataRegions[i].initProt;
     }
     assert(_readOnlyRegion.cacheFileOffset == (_dataRegions.back().cacheFileOffset + _dataRegions.back().sizeInUse));
     mappings[mappingCount - 1].address    = _readOnlyRegion.unslidLoadAddress;
@@ -1473,11 +1477,14 @@ void SharedCacheBuilder::writeCacheHeader()
             flags |= DYLD_CACHE_MAPPING_CONST_DATA;
         }
 
+        assert(_dataRegions[i].initProt != 0);
+        assert(_dataRegions[i].maxProt != 0);
+
         slidableMappings[i + 1].address             = _dataRegions[i].unslidLoadAddress;
         slidableMappings[i + 1].fileOffset          = _dataRegions[i].cacheFileOffset;
         slidableMappings[i + 1].size                = _dataRegions[i].sizeInUse;
-        slidableMappings[i + 1].maxProt             = VM_PROT_READ | VM_PROT_WRITE;
-        slidableMappings[i + 1].initProt            = VM_PROT_READ | VM_PROT_WRITE;
+        slidableMappings[i + 1].maxProt             = _dataRegions[i].maxProt;
+        slidableMappings[i + 1].initProt            = _dataRegions[i].initProt;
         slidableMappings[i + 1].slideInfoFileOffset = _dataRegions[i].slideInfoFileOffset;
         slidableMappings[i + 1].slideInfoFileSize   = _dataRegions[i].slideInfoFileSize;
         slidableMappings[i + 1].flags               = flags;
@@ -1650,7 +1657,7 @@ void SharedCacheBuilder::assignMultipleDataSegmentAddresses(uint64_t& addr, uint
     uint64_t nextRegionFileOffset = _readExecuteRegion.sizeInUse;
 
     const size_t dylibCount = _sortedDylibs.size();
-    uint32_t dirtyDataSortIndexes[dylibCount];
+    BLOCK_ACCCESSIBLE_ARRAY(uint32_t, dirtyDataSortIndexes, dylibCount);
     for (size_t i=0; i < dylibCount; ++i)
         dirtyDataSortIndexes[i] = (uint32_t)i;
     std::sort(&dirtyDataSortIndexes[0], &dirtyDataSortIndexes[dylibCount], [&](const uint32_t& a, const uint32_t& b) {
@@ -1671,22 +1678,21 @@ void SharedCacheBuilder::assignMultipleDataSegmentAddresses(uint64_t& addr, uint
              return _sortedDylibs[a].input->mappedFile.runtimePath < _sortedDylibs[b].input->mappedFile.runtimePath;
     });
 
-    // Work out if we'll have __AUTH regions, as the objc RW has to go at the end of __AUTH if it exists, or
-    // the end of __DATA if we have no __AUTH
-    __block bool foundAuthenticatedFixups = false;
+    bool supportsAuthFixups = false;
 
     // This tracks which segments contain authenticated data, even if their name isn't __AUTH*
-    std::map<const DylibInfo*, std::set<uint32_t>> authenticatedSegments;
-
+    std::set<uint32_t> authenticatedSegments[dylibCount];
     if ( strcmp(_archLayout->archName, "arm64e") == 0 ) {
+        supportsAuthFixups = true;
+
         for (DylibInfo& dylib : _sortedDylibs) {
-            __block std::set<uint32_t>& authSegmentIndices = authenticatedSegments[&dylib];
+            uint64_t dylibIndex = &dylib - _sortedDylibs.data();
+            __block std::set<uint32_t>& authSegmentIndices = authenticatedSegments[dylibIndex];
 
             // Put all __DATA_DIRTY segments in the __AUTH region first, then we don't need to walk their chains
             dylib.input->mappedFile.mh->forEachSegment(^(const dyld3::MachOFile::SegmentInfo& segInfo, bool& stop) {
                 if ( strcmp(segInfo.segName, "__DATA_DIRTY") == 0 ) {
                     authSegmentIndices.insert(segInfo.segIndex);
-                    foundAuthenticatedFixups = true;
                     stop = true;
                 }
             });
@@ -1704,7 +1710,6 @@ void SharedCacheBuilder::assignMultipleDataSegmentAddresses(uint64_t& addr, uint
                         assert( (chainedFixupsFormat == DYLD_CHAINED_PTR_ARM64E) || (chainedFixupsFormat == DYLD_CHAINED_PTR_ARM64E_USERLAND) || (chainedFixupsFormat == DYLD_CHAINED_PTR_ARM64E_USERLAND24) );
 
                         if ( fixupLoc->arm64e.authRebase.auth ) {
-                            foundAuthenticatedFixups = true;
                             authSegmentIndices.insert(segIndex);
                             stopChain = true;
                             return;
@@ -1715,29 +1720,195 @@ void SharedCacheBuilder::assignMultipleDataSegmentAddresses(uint64_t& addr, uint
         }
     }
 
-    // __DATA
-    {
-        Region region;
-        region.buffer               = (uint8_t*)_fullAllocatedBuffer + addr - _archLayout->sharedMemoryStart;
-        region.bufferSize           = 0;
-        region.sizeInUse            = 0;
-        region.unslidLoadAddress    = addr;
-        region.cacheFileOffset      = nextRegionFileOffset;
-        region.name                 = "__DATA";
+    // Categorize each segment in each binary
+    enum class SegmentType : uint8_t {
+        skip,       // used for non-data segments we should ignore here
+        data,
+        dataDirty,
+        dataConst,
+        auth,
+        authDirty,
+        authConst,
+    };
 
-        // layout all __DATA_CONST/__OBJC_CONST segments
-        __block int dataConstSegmentCount = 0;
-        for (DylibInfo& dylib : _sortedDylibs) {
-            __block uint64_t textSegVmAddr = 0;
-            __block std::set<uint32_t>& authSegmentIndices = authenticatedSegments[&dylib];
-           dylib.input->mappedFile.mh->forEachSegment(^(const dyld3::MachOFile::SegmentInfo& segInfo, bool& stop) {
-               if ( _options.platform == dyld3::Platform::watchOS_simulator && !_is64)
-                   return;
-                if ( strcmp(segInfo.segName, "__TEXT") == 0 )
-                    textSegVmAddr = segInfo.vmAddr;
-                if ( segInfo.protections != (VM_PROT_READ | VM_PROT_WRITE) )
-                    return;
-                if ( (strcmp(segInfo.segName, "__DATA_CONST") != 0) && (strcmp(segInfo.segName, "__OBJC_CONST") != 0) )
+    BLOCK_ACCCESSIBLE_ARRAY(uint64_t, textSegVmAddrs, dylibCount);
+    BLOCK_ACCCESSIBLE_ARRAY(std::vector<SegmentType>, segmentTypes, dylibCount);
+
+    // Just in case __AUTH is used in a non-arm64e binary, we can force it to use data enums
+    SegmentType authSegment      = supportsAuthFixups ? SegmentType::auth      : SegmentType::data;
+    SegmentType authConstSegment = supportsAuthFixups ? SegmentType::authConst : SegmentType::dataConst;
+
+    for (const DylibInfo& dylib : _sortedDylibs) {
+        uint64_t dylibIndex = &dylib - _sortedDylibs.data();
+        __block std::set<uint32_t>& authSegmentIndices = authenticatedSegments[dylibIndex];
+        __block std::vector<SegmentType>& dylibSegmentTypes = segmentTypes[dylibIndex];
+        uint64_t &textSegVmAddr = textSegVmAddrs[dylibIndex];
+        dylib.input->mappedFile.mh->forEachSegment(^(const dyld3::MachOFile::SegmentInfo& segInfo, bool& stop) {
+            if ( strcmp(segInfo.segName, "__TEXT") == 0 ) {
+                textSegVmAddr = segInfo.vmAddr;
+            }
+
+            // Skip non-DATA segments
+            if ( segInfo.protections != (VM_PROT_READ | VM_PROT_WRITE) ) {
+                dylibSegmentTypes.push_back(SegmentType::skip);
+                return;
+            }
+
+            // If we don't have split seg v2, then all remaining segments must look like __DATA so that they
+            // stay contiguous
+            if (!dylib.input->mappedFile.mh->isSplitSegV2()) {
+                dylibSegmentTypes.push_back(SegmentType::data);
+                return;
+            }
+
+            __block bool supportsDataConst = true;
+            if ( dylib.input->mappedFile.mh->isSwiftLibrary() ) {
+                uint64_t objcConstSize = 0;
+                bool containsObjCSection = dylib.input->mappedFile.mh->findSectionContent(segInfo.segName, "__objc_const", objcConstSize);
+
+                // <rdar://problem/66284631> Don't put __objc_const read-only memory as Swift has method lists we can't see
+                if ( containsObjCSection )
+                    supportsDataConst = false;
+            } else if ( !strcmp(dylib.input->mappedFile.mh->installName(), "/System/Library/Frameworks/Foundation.framework/Foundation") ||
+                        !strcmp(dylib.input->mappedFile.mh->installName(), "/System/Library/Frameworks/Foundation.framework/Versions/C/Foundation") ) {
+                // <rdar://problem/69813664> _NSTheOneTruePredicate is incompatible with __DATA_CONST
+                supportsDataConst = false;
+            } else if ( !strcmp(dylib.input->mappedFile.mh->installName(), "/usr/lib/system/libdispatch.dylib") ) {
+               // rdar://72361509 (Speechrecognitiond crashing on AzulE18E123)
+               supportsDataConst = false;
+            } else if ( !strcmp(dylib.input->mappedFile.mh->installName(), "/System/Library/Frameworks/CoreFoundation.framework/CoreFoundation") ||
+                        !strcmp(dylib.input->mappedFile.mh->installName(), "/System/Library/Frameworks/CoreFoundation.framework/Versions/A/CoreFoundation") ) {
+                // rdar://74112547 CF writes to kCFNull constant object
+                supportsDataConst = false;
+            }
+
+            // Don't use data const for dylibs containing resolver functions.  This will be fixed in ld64 by moving their pointer atoms to __DATA
+            if ( supportsDataConst && endsWith(segInfo.segName, "_CONST") ) {
+                dylib.input->mappedFile.mh->forEachExportedSymbol(_diagnostics,
+                                                                  ^(const char *symbolName, uint64_t imageOffset, uint64_t flags, uint64_t other, const char *importName, bool &stop) {
+                    if ( (flags & EXPORT_SYMBOL_FLAGS_STUB_AND_RESOLVER ) != 0 ) {
+                        _diagnostics.verbose("%s: preventing use of __DATA_CONST due to resolvers\n", dylib.dylibID.c_str());
+                        supportsDataConst = false;
+                        stop = true;
+                    }
+                });
+            }
+
+            // If we are still allowed to use __DATA_CONST, then make sure that we are not using pointer based method lists.  These may not be written in libobjc due
+            // to uniquing or sorting (as those are done in the builder), but clients can still call setIMP to mutate them.
+            if ( supportsDataConst && endsWith(segInfo.segName, "_CONST") ) {
+                uint64_t segStartVMAddr = segInfo.vmAddr;
+                uint64_t segEndVMAddr = segInfo.vmAddr + segInfo.vmSize;
+
+                auto vmAddrConverter = dylib.input->mappedFile.mh->makeVMAddrConverter(false);
+                const uint32_t pointerSize = dylib.input->mappedFile.mh->pointerSize();
+
+                __block bool foundPointerBasedMethodList = false;
+                auto visitMethodList = ^(uint64_t methodListVMAddr) {
+                    if ( foundPointerBasedMethodList )
+                        return;
+                    if ( methodListVMAddr == 0 )
+                        return;
+                    // Ignore method lists in other segments
+                    if ( (methodListVMAddr < segStartVMAddr) || (methodListVMAddr >= segEndVMAddr) )
+                        return;
+                    auto visitMethod = ^(uint64_t methodVMAddr, const dyld3::MachOAnalyzer::ObjCMethod& method) { };
+                    bool isRelativeMethodList = false;
+                    dylib.input->mappedFile.mh->forEachObjCMethod(methodListVMAddr, vmAddrConverter, visitMethod, &isRelativeMethodList);
+                    if ( !isRelativeMethodList )
+                        foundPointerBasedMethodList = true;
+                };
+
+                auto visitClass = ^(Diagnostics& diag, uint64_t classVMAddr,
+                                    uint64_t classSuperclassVMAddr, uint64_t classDataVMAddr,
+                                    const dyld3::MachOAnalyzer::ObjCClassInfo& objcClass, bool isMetaClass) {
+                    visitMethodList(objcClass.baseMethodsVMAddr(pointerSize));
+                };
+
+                auto visitCategory = ^(Diagnostics& diag, uint64_t categoryVMAddr,
+                                       const dyld3::MachOAnalyzer::ObjCCategory& objcCategory) {
+                    visitMethodList(objcCategory.instanceMethodsVMAddr);
+                    visitMethodList(objcCategory.classMethodsVMAddr);
+                };
+
+                // Walk the class list
+                Diagnostics classDiag;
+                dylib.input->mappedFile.mh->forEachObjCClass(classDiag, vmAddrConverter, visitClass);
+
+                // Walk the category list
+                Diagnostics categoryDiag;
+                dylib.input->mappedFile.mh->forEachObjCCategory(categoryDiag, vmAddrConverter, visitCategory);
+
+                // Note we don't walk protocols as they don't have an IMP to set
+
+                if ( foundPointerBasedMethodList ) {
+                    _diagnostics.verbose("%s: preventing use of read-only %s due to pointer based method list\n", dylib.dylibID.c_str(), segInfo.segName);
+                    supportsDataConst = false;
+                }
+            }
+
+            // __AUTH_CONST
+            if ( strcmp(segInfo.segName, "__AUTH_CONST") == 0 ) {
+                dylibSegmentTypes.push_back(supportsDataConst ? authConstSegment : authSegment);
+                return;
+            }
+
+            // __DATA_CONST
+            if ( (strcmp(segInfo.segName, "__DATA_CONST") == 0) || (strcmp(segInfo.segName, "__OBJC_CONST") == 0) ) {
+                if ( authSegmentIndices.count(segInfo.segIndex) ) {
+                    // _diagnostics.verbose("%s: treating authenticated %s as __AUTH_CONST\n", dylib.dylibID.c_str(), segInfo.segName);
+                    dylibSegmentTypes.push_back(supportsDataConst ? SegmentType::authConst : SegmentType::auth);
+                } else {
+                    dylibSegmentTypes.push_back(supportsDataConst ? SegmentType::dataConst : SegmentType::data);
+                }
+                return;
+            }
+
+            // __DATA_DIRTY
+            if ( strcmp(segInfo.segName, "__DATA_DIRTY") == 0 ) {
+                if ( authSegmentIndices.count(segInfo.segIndex) ) {
+                    dylibSegmentTypes.push_back(SegmentType::authDirty);
+                } else {
+                    dylibSegmentTypes.push_back(SegmentType::dataDirty);
+                }
+                return;
+            }
+
+            // __AUTH
+            if ( strcmp(segInfo.segName, "__AUTH") == 0 ) {
+                dylibSegmentTypes.push_back(authSegment);
+                return;
+            }
+
+            // DATA
+            if ( authSegmentIndices.count(segInfo.segIndex) ) {
+                // _diagnostics.verbose("%s: treating authenticated %s as __AUTH\n", dylib.dylibID.c_str(), segInfo.segName);
+                dylibSegmentTypes.push_back(SegmentType::auth);
+            } else {
+                dylibSegmentTypes.push_back(SegmentType::data);
+            }
+        });
+    }
+
+    auto processDylibSegments = ^(SegmentType onlyType, Region& region) {
+        for (size_t unsortedDylibIndex = 0; unsortedDylibIndex != dylibCount; ++unsortedDylibIndex) {
+            size_t dylibIndex = unsortedDylibIndex;
+            if ( (onlyType == SegmentType::dataDirty) || (onlyType == SegmentType::authDirty) )
+                dylibIndex = dirtyDataSortIndexes[dylibIndex];
+
+            DylibInfo& dylib = _sortedDylibs[dylibIndex];
+            const std::vector<SegmentType>& dylibSegmentTypes = segmentTypes[dylibIndex];
+            const uint64_t textSegVmAddr = textSegVmAddrs[dylibIndex];
+
+            bool forcePageAlignedData = false;
+            if ( (_options.platform == dyld3::Platform::macOS) && (onlyType == SegmentType::data) ) {
+                forcePageAlignedData = dylib.input->mappedFile.mh->hasUnalignedPointerFixups();
+                //if ( forcePageAlignedData )
+                //    warning("unaligned pointer in %s\n", dylib.input->mappedFile.runtimePath.c_str());
+            }
+
+            dylib.input->mappedFile.mh->forEachSegment(^(const dyld3::MachOFile::SegmentInfo& segInfo, bool& stop) {
+                if ( dylibSegmentTypes[segInfo.segIndex] != onlyType )
                     return;
 
                 // We may have coalesced the sections at the end of this segment.  In that case, shrink the segment to remove them.
@@ -1755,18 +1926,15 @@ void SharedCacheBuilder::assignMultipleDataSegmentAddresses(uint64_t& addr, uint
                 if (!foundCoalescedSection)
                     sizeOfSections = segInfo.sizeOfSections;
 
-                if ( authSegmentIndices.count(segInfo.segIndex) ) {
-                    // Only move this segment to __AUTH if it had content we didn't coalesce away
-                    if ( !foundCoalescedSection || (sizeOfSections != 0) ) {
-                        // Don't put authenticated __DATA_CONST/__OBJC_CONST in the non-AUTH __DATA mapping
-                        _diagnostics.verbose("%s: treating authenticated %s as __AUTH_CONST\n", dylib.dylibID.c_str(), segInfo.segName);
-                        return;
-                    }
+                if ( !forcePageAlignedData ) {
+                    // Pack __DATA segments
+                    addr = align(addr, segInfo.p2align);
+                }
+                else {
+                    // Keep __DATA segments 4K or more aligned
+                    addr = align(addr, std::max((int)segInfo.p2align, (int)12));
                 }
 
-                ++dataConstSegmentCount;
-                // Pack __DATA_CONST segments
-                addr = align(addr, segInfo.p2align);
                 size_t copySize = std::min((size_t)segInfo.fileSize, (size_t)sizeOfSections);
                 uint64_t offsetInRegion = addr - region.unslidLoadAddress;
                 SegmentMappingInfo loc;
@@ -1784,11 +1952,67 @@ void SharedCacheBuilder::assignMultipleDataSegmentAddresses(uint64_t& addr, uint
             });
         }
 
-        // align __DATA_CONST region end
+        // align region end
         addr = align(addr, _archLayout->sharedRegionAlignP2);
+    };
+
+    struct DataRegion {
+        const char*                 regionName;
+        SegmentType                 dataSegment;
+        std::optional<SegmentType>  dirtySegment;
+        // Note this is temporary as once all platforms/archs support __DATA_CONST, we can move to a DataRegion just for CONST
+        std::optional<SegmentType>  dataConstSegment;
+        bool                        addCFStrings;
+        bool                        addObjCRW;
+    };
+    std::vector<DataRegion> dataRegions;
+
+    // We only support __DATA_CONST on arm64(e) for now.
+    bool supportDataConst = false;
+    //supportDataConst |= strcmp(_archLayout->archName, "arm64") == 0;
+    supportDataConst |= strcmp(_archLayout->archName, "arm64e") == 0;
+    if ( supportDataConst ) {
+        bool addObjCRWToData = !supportsAuthFixups;
+        DataRegion dataWriteRegion  = { "__DATA",       SegmentType::data,      SegmentType::dataDirty, {}, false,  addObjCRWToData  };
+        DataRegion dataConstRegion  = { "__DATA_CONST", SegmentType::dataConst, {},                     {}, true,   false            };
+        DataRegion authWriteRegion  = { "__AUTH",       SegmentType::auth,      SegmentType::authDirty, {}, false,  !addObjCRWToData };
+        DataRegion authConstRegion  = { "__AUTH_CONST", SegmentType::authConst, {},                     {}, false,  false            };
+        dataRegions.push_back(dataWriteRegion);
+        dataRegions.push_back(dataConstRegion);
+        if ( supportsAuthFixups ) {
+            dataRegions.push_back(authWriteRegion);
+            dataRegions.push_back(authConstRegion);
+        }
+    } else {
+        DataRegion dataWriteRegion  = { "__DATA",       SegmentType::data,      SegmentType::dataDirty, SegmentType::dataConst, false,  true  };
+        dataRegions.push_back(dataWriteRegion);
+    }
+
+    for (DataRegion& dataRegion : dataRegions)
+    {
+        Region region;
+        region.buffer               = (uint8_t*)_fullAllocatedBuffer + addr - _archLayout->sharedMemoryStart;
+        region.bufferSize           = 0;
+        region.sizeInUse            = 0;
+        region.unslidLoadAddress    = addr;
+        region.cacheFileOffset      = nextRegionFileOffset;
+        region.name                 = dataRegion.regionName;
+        region.initProt             = endsWith(dataRegion.regionName, "_CONST") ? VM_PROT_READ : (VM_PROT_READ | VM_PROT_WRITE);
+        region.maxProt              = VM_PROT_READ | VM_PROT_WRITE;
+
+        // layout all __DATA_DIRTY segments, sorted (FIXME)
+        if (dataRegion.dirtySegment.has_value())
+            processDylibSegments(*dataRegion.dirtySegment, region);
+
+        // layout all __DATA segments (and other r/w non-dirty, non-const, non-auth) segments
+        processDylibSegments(dataRegion.dataSegment, region);
+
+        // When __DATA_CONST is not its own DataRegion, we fold it in to the __DATA DataRegion
+        if (dataRegion.dataConstSegment.has_value())
+            processDylibSegments(*dataRegion.dataConstSegment, region);
 
         // Make space for the cfstrings
-        if ( _coalescedText.cfStrings.bufferSize != 0 ) {
+        if ( (dataRegion.addCFStrings) && (_coalescedText.cfStrings.bufferSize != 0) ) {
             // Keep __DATA segments 4K or more aligned
             addr = align(addr, 12);
             uint64_t offsetInRegion = addr - region.unslidLoadAddress;
@@ -1800,321 +2024,36 @@ void SharedCacheBuilder::assignMultipleDataSegmentAddresses(uint64_t& addr, uint
             addr += cacheSection.bufferSize;
         }
 
-        // layout all __DATA_DIRTY segments, sorted (FIXME)
-        for (size_t i=0; i < dylibCount; ++i) {
-            DylibInfo& dylib  = _sortedDylibs[dirtyDataSortIndexes[i]];
-            __block uint64_t textSegVmAddr = 0;
-            __block std::set<uint32_t>& authSegmentIndices = authenticatedSegments[&dylib];
-            dylib.input->mappedFile.mh->forEachSegment(^(const dyld3::MachOFile::SegmentInfo& segInfo, bool& stop) {
-                if ( _options.platform == dyld3::Platform::watchOS_simulator && !_is64)
-                    return;
-                if ( strcmp(segInfo.segName, "__TEXT") == 0 )
-                    textSegVmAddr = segInfo.vmAddr;
-                if ( segInfo.protections != (VM_PROT_READ | VM_PROT_WRITE) )
-                    return;
-                if ( strcmp(segInfo.segName, "__DATA_DIRTY") != 0 )
-                    return;
-                if ( authSegmentIndices.count(segInfo.segIndex) ) {
-                    // Don't put authenticated __DATA_DIRTY in the non-AUTH __DATA mapping
-                    // This is going to be true for all arm64e __DATA_DIRTY as we move it all, regardless of auth fixups.
-                    // Given that, don't issue a diagnostic as its really not helpful
-                    return;
-                }
-                // Pack __DATA_DIRTY segments
-                addr = align(addr, segInfo.p2align);
-                size_t copySize = std::min((size_t)segInfo.fileSize, (size_t)segInfo.sizeOfSections);
-                uint64_t offsetInRegion = addr - region.unslidLoadAddress;
-                SegmentMappingInfo loc;
-                loc.srcSegment             = (uint8_t*)dylib.input->mappedFile.mh + segInfo.vmAddr - textSegVmAddr;
-                loc.segName                = segInfo.segName;
-                loc.dstSegment             = region.buffer + offsetInRegion;
-                loc.dstCacheUnslidAddress  = addr;
-                loc.dstCacheFileOffset     = (uint32_t)(region.cacheFileOffset + offsetInRegion);
-                loc.dstCacheSegmentSize    = (uint32_t)segInfo.sizeOfSections;
-                loc.dstCacheFileSize       = (uint32_t)copySize;
-                loc.copySegmentSize        = (uint32_t)copySize;
-                loc.srcSegmentIndex        = segInfo.segIndex;
-                dylib.cacheLocation.push_back(loc);
-                addr += loc.dstCacheSegmentSize;
-            });
-        }
-
-        // align __DATA_DIRTY region end
-        addr = align(addr, _archLayout->sharedRegionAlignP2);
-
-        // layout all __DATA segments (and other r/w non-dirty, non-const, non-auth) segments
-        for (DylibInfo& dylib : _sortedDylibs) {
-            __block uint64_t textSegVmAddr = 0;
-            __block std::set<uint32_t>& authSegmentIndices = authenticatedSegments[&dylib];
-           dylib.input->mappedFile.mh->forEachSegment(^(const dyld3::MachOFile::SegmentInfo& segInfo, bool& stop) {
-                if ( strcmp(segInfo.segName, "__TEXT") == 0 )
-                    textSegVmAddr = segInfo.vmAddr;
-                if ( segInfo.protections != (VM_PROT_READ | VM_PROT_WRITE) )
-                    return;
-                if ( _options.platform != dyld3::Platform::watchOS_simulator || _is64) {
-                    if ( strcmp(segInfo.segName, "__DATA_CONST") == 0 )
-                        return;
-                    if ( strcmp(segInfo.segName, "__DATA_DIRTY") == 0 )
-                        return;
-                    if ( strcmp(segInfo.segName, "__OBJC_CONST") == 0 )
-                        return;
-                }
-                // Skip __AUTH* segments as they'll be handled elsewhere
-                if ( strncmp(segInfo.segName, "__AUTH", 6) == 0 )
-                    return;
-               if ( authSegmentIndices.count(segInfo.segIndex) ) {
-                   // Don't put authenticated __DATA in the non-AUTH __DATA mapping
-                   _diagnostics.verbose("%s: treating authenticated __DATA as __AUTH\n", dylib.dylibID.c_str());
-                   return;
-               }
-                bool forcePageAlignedData = false;
-                if (_options.platform == dyld3::Platform::macOS) {
-                    forcePageAlignedData = dylib.input->mappedFile.mh->hasUnalignedPointerFixups();
-                    //if ( forcePageAlignedData )
-                    //    warning("unaligned pointer in %s\n", dylib.input->mappedFile.runtimePath.c_str());
-                }
-                if ( (dataConstSegmentCount > 10) && !forcePageAlignedData ) {
-                    // Pack __DATA segments only if we also have __DATA_CONST segments
-                    addr = align(addr, segInfo.p2align);
-                }
-                else {
-                    // Keep __DATA segments 4K or more aligned
-                    addr = align(addr, std::max((int)segInfo.p2align, (int)12));
-                }
-                size_t copySize = std::min((size_t)segInfo.fileSize, (size_t)segInfo.sizeOfSections);
-                uint64_t offsetInRegion = addr - region.unslidLoadAddress;
-                SegmentMappingInfo loc;
-                loc.srcSegment             = (uint8_t*)dylib.input->mappedFile.mh + segInfo.vmAddr - textSegVmAddr;
-                loc.segName                = segInfo.segName;
-                loc.dstSegment             = region.buffer + offsetInRegion;
-                loc.dstCacheUnslidAddress  = addr;
-                loc.dstCacheFileOffset     = (uint32_t)(region.cacheFileOffset + offsetInRegion);
-                loc.dstCacheSegmentSize    = (uint32_t)segInfo.sizeOfSections;
-                loc.dstCacheFileSize       = (uint32_t)copySize;
-                loc.copySegmentSize        = (uint32_t)copySize;
-                loc.srcSegmentIndex        = segInfo.segIndex;
-                dylib.cacheLocation.push_back(loc);
-                addr += loc.dstCacheSegmentSize;
-            });
-        }
-
-        if ( !foundAuthenticatedFixups ) {
+        if ( dataRegion.addObjCRW ) {
             // reserve space for objc r/w optimization tables
             _objcReadWriteBufferSizeAllocated = align(computeReadWriteObjC((uint32_t)_sortedDylibs.size(), totalProtocolDefCount), 14);
             addr = align(addr, 4); // objc r/w section contains pointer and must be at least pointer align
             _objcReadWriteBuffer = region.buffer + (addr - region.unslidLoadAddress);
+            _objcReadWriteFileOffset = (uint32_t)((_objcReadWriteBuffer - region.buffer) + region.cacheFileOffset);
             addr += _objcReadWriteBufferSizeAllocated;
+
+
+            // align region end
+            addr = align(addr, _archLayout->sharedRegionAlignP2);
         }
 
         // align DATA region end
-        addr = align(addr, _archLayout->sharedRegionAlignP2);
         uint64_t endDataAddress = addr;
         region.bufferSize   = endDataAddress - region.unslidLoadAddress;
         region.sizeInUse    = region.bufferSize;
 
         _dataRegions.push_back(region);
         nextRegionFileOffset = region.cacheFileOffset + region.sizeInUse;
+
+        // Only arm64 and arm64e shared caches have enough space to pad between __DATA and __DATA_CONST
+        // All other caches are overflowing.
+        if ( !strcmp(_archLayout->archName, "arm64") || !strcmp(_archLayout->archName, "arm64e") )
+            addr = align((addr + _archLayout->sharedRegionPadding), _archLayout->sharedRegionAlignP2);
     }
 
-    // __AUTH
-    if ( foundAuthenticatedFixups ) {
-
-        // align __AUTH region
-        addr = align((addr + _archLayout->sharedRegionPadding), _archLayout->sharedRegionAlignP2);
-
-        Region region;
-        region.buffer               = (uint8_t*)_fullAllocatedBuffer + addr - _archLayout->sharedMemoryStart;
-        region.bufferSize           = 0;
-        region.sizeInUse            = 0;
-        region.unslidLoadAddress    = addr;
-        region.cacheFileOffset      = nextRegionFileOffset;
-        region.name                 = "__AUTH";
-
-        // layout all __AUTH_CONST segments
-        __block int authConstSegmentCount = 0;
-        for (DylibInfo& dylib : _sortedDylibs) {
-            __block uint64_t textSegVmAddr = 0;
-            __block std::set<uint32_t>& authSegmentIndices = authenticatedSegments[&dylib];
-            dylib.input->mappedFile.mh->forEachSegment(^(const dyld3::MachOFile::SegmentInfo& segInfo, bool& stop) {
-                if ( _options.platform == dyld3::Platform::watchOS_simulator && !_is64)
-                    return;
-                if ( strcmp(segInfo.segName, "__TEXT") == 0 )
-                    textSegVmAddr = segInfo.vmAddr;
-                if ( segInfo.protections != (VM_PROT_READ | VM_PROT_WRITE) )
-                    return;
-
-                // We may have coalesced the sections at the end of this segment.  In that case, shrink the segment to remove them.
-                __block size_t sizeOfSections = 0;
-                __block bool foundCoalescedSection = false;
-                dylib.input->mappedFile.mh->forEachSection(^(const dyld3::MachOAnalyzer::SectionInfo &sectInfo, bool malformedSectionRange, bool &stopSection) {
-                    if (strcmp(sectInfo.segInfo.segName, segInfo.segName) != 0)
-                        return;
-                    if ( dylib.textCoalescer.sectionWasCoalesced(segInfo.segName, sectInfo.sectName)) {
-                        foundCoalescedSection = true;
-                    } else {
-                        sizeOfSections = sectInfo.sectAddr + sectInfo.sectSize - segInfo.vmAddr;
-                    }
-                });
-                if (!foundCoalescedSection)
-                    sizeOfSections = segInfo.sizeOfSections;
-
-                if ( strcmp(segInfo.segName, "__AUTH_CONST") == 0 ) {
-                    // We'll handle __AUTH_CONST here
-                } else if ( (strcmp(segInfo.segName, "__DATA_CONST") == 0) || (strcmp(segInfo.segName, "__OBJC_CONST") == 0) ) {
-                    // And we'll also handle __DATA_CONST/__OBJC_CONST which may contain authenticated pointers
-                    if ( authSegmentIndices.count(segInfo.segIndex) == 0 ) {
-                        // This __DATA_CONST doesn't contain authenticated pointers so was handled earlier
-                        return;
-                    } else {
-                        // We only moved this segment to __AUTH if it had content we didn't coalesce away
-                        if ( foundCoalescedSection && (sizeOfSections == 0) ) {
-                            // This __DATA_CONST doesn't contain authenticated pointers so was handled earlier
-                            return;
-                        }
-                    }
-                } else {
-                   // Not __AUTH_CONST or __DATA_CONST/__OBJC_CONST so skip this
-                   return;
-                }
-                ++authConstSegmentCount;
-                // Pack __AUTH_CONST segments
-                addr = align(addr, segInfo.p2align);
-                size_t copySize = std::min((size_t)segInfo.fileSize, (size_t)sizeOfSections);
-                uint64_t offsetInRegion = addr - region.unslidLoadAddress;
-                SegmentMappingInfo loc;
-                loc.srcSegment             = (uint8_t*)dylib.input->mappedFile.mh + segInfo.vmAddr - textSegVmAddr;
-                loc.segName                = segInfo.segName;
-                loc.dstSegment             = region.buffer + offsetInRegion;
-                loc.dstCacheUnslidAddress  = addr;
-                loc.dstCacheFileOffset     = (uint32_t)(region.cacheFileOffset + offsetInRegion);
-                loc.dstCacheSegmentSize    = (uint32_t)sizeOfSections;
-                loc.dstCacheFileSize       = (uint32_t)copySize;
-                loc.copySegmentSize        = (uint32_t)copySize;
-                loc.srcSegmentIndex        = segInfo.segIndex;
-                dylib.cacheLocation.push_back(loc);
-                addr += loc.dstCacheSegmentSize;
-            });
-        }
-
-        // align __AUTH_CONST region end
-        addr = align(addr, _archLayout->sharedRegionAlignP2);
-
-        // __AUTH_DIRTY.  Note this is really __DATA_DIRTY as we don't generate an __AUTH_DIRTY in ld64
-        for (size_t i=0; i < dylibCount; ++i) {
-            DylibInfo& dylib  = _sortedDylibs[dirtyDataSortIndexes[i]];
-            __block uint64_t textSegVmAddr = 0;
-            dylib.input->mappedFile.mh->forEachSegment(^(const dyld3::MachOFile::SegmentInfo& segInfo, bool& stop) {
-                if ( _options.platform == dyld3::Platform::watchOS_simulator && !_is64)
-                    return;
-                if ( strcmp(segInfo.segName, "__TEXT") == 0 )
-                    textSegVmAddr = segInfo.vmAddr;
-                if ( segInfo.protections != (VM_PROT_READ | VM_PROT_WRITE) )
-                    return;
-                if ( strcmp(segInfo.segName, "__DATA_DIRTY") != 0 )
-                    return;
-                // Pack __AUTH_DIRTY segments
-                addr = align(addr, segInfo.p2align);
-                size_t copySize = std::min((size_t)segInfo.fileSize, (size_t)segInfo.sizeOfSections);
-                uint64_t offsetInRegion = addr - region.unslidLoadAddress;
-                SegmentMappingInfo loc;
-                loc.srcSegment             = (uint8_t*)dylib.input->mappedFile.mh + segInfo.vmAddr - textSegVmAddr;
-                loc.segName                = segInfo.segName;
-                loc.dstSegment             = region.buffer + offsetInRegion;
-                loc.dstCacheUnslidAddress  = addr;
-                loc.dstCacheFileOffset     = (uint32_t)(region.cacheFileOffset + offsetInRegion);
-                loc.dstCacheSegmentSize    = (uint32_t)segInfo.sizeOfSections;
-                loc.dstCacheFileSize       = (uint32_t)copySize;
-                loc.copySegmentSize        = (uint32_t)copySize;
-                loc.srcSegmentIndex        = segInfo.segIndex;
-                dylib.cacheLocation.push_back(loc);
-                addr += loc.dstCacheSegmentSize;
-            });
-        }
-
-        // align __AUTH_DIRTY region end
-        addr = align(addr, _archLayout->sharedRegionAlignP2);
-
-        // layout all __AUTH segments (and other r/w non-dirty, non-const, non-auth) segments
-        for (DylibInfo& dylib : _sortedDylibs) {
-            __block uint64_t textSegVmAddr = 0;
-            __block std::set<uint32_t>& authSegmentIndices = authenticatedSegments[&dylib];
-           dylib.input->mappedFile.mh->forEachSegment(^(const dyld3::MachOFile::SegmentInfo& segInfo, bool& stop) {
-                if ( strcmp(segInfo.segName, "__TEXT") == 0 )
-                    textSegVmAddr = segInfo.vmAddr;
-                if ( segInfo.protections != (VM_PROT_READ | VM_PROT_WRITE) )
-                    return;
-                if ( _options.platform != dyld3::Platform::watchOS_simulator || _is64) {
-                    if ( strcmp(segInfo.segName, "__AUTH_CONST") == 0 )
-                        return;
-                }
-               if ( strncmp(segInfo.segName, "__AUTH", 6) == 0 ) {
-                   // We'll handle __AUTH* here
-               } else {
-                   // And we'll also handle __DATA* which contains authenticated pointers
-                   if ( authSegmentIndices.count(segInfo.segIndex) == 0 ) {
-                       // This __DATA doesn't contain authenticated pointers so was handled earlier
-                       return;
-                   }
-                   if ( _options.platform != dyld3::Platform::watchOS_simulator || _is64) {
-                       if ( strcmp(segInfo.segName, "__DATA_CONST") == 0 )
-                           return;
-                       if ( strcmp(segInfo.segName, "__DATA_DIRTY") == 0 )
-                           return;
-                       if ( strcmp(segInfo.segName, "__OBJC_CONST") == 0 )
-                           return;
-                   }
-               }
-                bool forcePageAlignedData = false;
-                if (_options.platform == dyld3::Platform::macOS) {
-                    forcePageAlignedData = dylib.input->mappedFile.mh->hasUnalignedPointerFixups();
-                    //if ( forcePageAlignedData )
-                    //    warning("unaligned pointer in %s\n", dylib.input->mappedFile.runtimePath.c_str());
-                }
-                if ( (authConstSegmentCount > 10) && !forcePageAlignedData ) {
-                    // Pack __AUTH segments only if we also have __AUTH_CONST segments
-                    addr = align(addr, segInfo.p2align);
-                }
-                else {
-                    // Keep __AUTH segments 4K or more aligned
-                    addr = align(addr, std::max((int)segInfo.p2align, (int)12));
-                }
-                size_t copySize = std::min((size_t)segInfo.fileSize, (size_t)segInfo.sizeOfSections);
-                uint64_t offsetInRegion = addr - region.unslidLoadAddress;
-                SegmentMappingInfo loc;
-                loc.srcSegment             = (uint8_t*)dylib.input->mappedFile.mh + segInfo.vmAddr - textSegVmAddr;
-                loc.segName                = segInfo.segName;
-                loc.dstSegment             = region.buffer + offsetInRegion;
-                loc.dstCacheUnslidAddress  = addr;
-                loc.dstCacheFileOffset     = (uint32_t)(region.cacheFileOffset + offsetInRegion);
-                loc.dstCacheSegmentSize    = (uint32_t)segInfo.sizeOfSections;
-                loc.dstCacheFileSize       = (uint32_t)copySize;
-                loc.copySegmentSize        = (uint32_t)copySize;
-                loc.srcSegmentIndex        = segInfo.segIndex;
-                dylib.cacheLocation.push_back(loc);
-                addr += loc.dstCacheSegmentSize;
-            });
-        }
-
-        // reserve space for objc r/w optimization tables
-        _objcReadWriteBufferSizeAllocated = align(computeReadWriteObjC((uint32_t)_sortedDylibs.size(), totalProtocolDefCount), 14);
-        addr = align(addr, 4); // objc r/w section contains pointer and must be at least pointer align
-        _objcReadWriteBuffer = region.buffer + (addr - region.unslidLoadAddress);
-        addr += _objcReadWriteBufferSizeAllocated;
-
-        // align DATA region end
-        addr = align(addr, _archLayout->sharedRegionAlignP2);
-        uint64_t endDataAddress = addr;
-        region.bufferSize   = endDataAddress - region.unslidLoadAddress;
-        region.sizeInUse    = region.bufferSize;
-
-        _dataRegions.push_back(region);
-        nextRegionFileOffset = region.cacheFileOffset + region.sizeInUse;
-    }
-
-#if 0
     // Sanity check that we didn't put the same segment in 2 different ranges
     for (DylibInfo& dylib : _sortedDylibs) {
-        __block std::unordered_set<uint64_t> seenSegmentIndices;
+        std::unordered_set<uint64_t> seenSegmentIndices;
         for (SegmentMappingInfo& segmentInfo : dylib.cacheLocation) {
             if ( seenSegmentIndices.count(segmentInfo.srcSegmentIndex) != 0 ) {
                 _diagnostics.error("%s segment %s was duplicated in layout",
@@ -2124,7 +2063,6 @@ void SharedCacheBuilder::assignMultipleDataSegmentAddresses(uint64_t& addr, uint
             seenSegmentIndices.insert(segmentInfo.srcSegmentIndex);
         }
     }
-#endif
 }
 
 void SharedCacheBuilder::assignSegmentAddresses()
@@ -3903,10 +3841,10 @@ void SharedCacheBuilder::addPageStartsV4(uint8_t* pageContent, const bool bitmap
         pint_t lastValue = (pint_t)P::getP(*lastLoc);
         pint_t newValue = ((lastValue - valueAdd) & valueMask);
         P::setP(*lastLoc, newValue);
-    }
-    if ( startValue & DYLD_CACHE_SLIDE4_PAGE_USE_EXTRA ) {
-        // add end bit to extras
-        pageExtras.back() |= DYLD_CACHE_SLIDE4_PAGE_EXTRA_END;
+        if ( startValue & DYLD_CACHE_SLIDE4_PAGE_USE_EXTRA ) {
+            // add end bit to extras
+            pageExtras.back() |= DYLD_CACHE_SLIDE4_PAGE_EXTRA_END;
+        }
     }
     pageStarts.push_back(startValue);
 }

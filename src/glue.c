@@ -35,6 +35,7 @@
 #include <stdio.h>
 #include <mach/mach.h>
 #include <mach/mach_time.h>
+#include <mach/mach_traps.h>
 #include <sys/stat.h>
 #include <sys/mman.h>
 #include <sys/stat.h>
@@ -891,6 +892,21 @@ kern_return_t mach_port_destruct(ipc_space_t task, mach_port_name_t name, mach_p
     return KERN_NOT_SUPPORTED;
 }
 
+kern_return_t task_dyld_process_info_notify_get( mach_port_name_array_t names_addr, mach_msg_type_number_t *names_count_addr) {
+    if ( gSyscallHelpers->version >= 14 ) {
+        return gSyscallHelpers->task_dyld_process_info_notify_get(names_addr, names_count_addr);
+    }
+    struct dyld_all_image_infos* imageInfo = (struct dyld_all_image_infos*)(gSyscallHelpers->getProcessInfo());
+    for (int slot=0; slot < DYLD_MAX_PROCESS_INFO_NOTIFY_COUNT; ++slot) {
+        if ( imageInfo->notifyPorts[slot] != 0 ) {
+            // Bump the refs
+            (void)mach_port_mod_refs(mach_task_self(), imageInfo->notifyPorts[slot], MACH_PORT_RIGHT_SEND, 1);
+        }
+    }
+
+    return KERN_NOT_SUPPORTED;
+}
+
 void abort_with_payload(uint32_t reason_namespace, uint64_t reason_code, void* payload, uint32_t payload_size, const char* reason_string, uint64_t reason_flags)
 {
 	if ( gSyscallHelpers->version >= 6 )
@@ -1073,12 +1089,6 @@ void _ZN4dyld20notifyMonitoringDyldEbjPPK11mach_headerPPKc(bool unloading, unsig
         gSyscallHelpers->notifyMonitoringDyld(unloading, imageCount, loadAddresses, imagePaths);
         return;
     }
-#if SUPPORT_HOST_10_11
-    findHostFunctions();
-    for (int slot=0; slot < DYLD_MAX_PROCESS_INFO_NOTIFY_COUNT; ++slot) {
-        notifyMonitoringDyld(unloading, slot, imageCount, loadAddresses, imagePaths);
-    }
-#endif
 }
 
 int* __error(void) {
@@ -1105,6 +1115,8 @@ vm_size_t vm_page_size = 0x1000;
 #if ! TARGET_OS_SIMULATOR
 	#include <mach-o/dyld_process_info.h>
 
+    // <rdar://problem/69456906> dyld should mark _dyld_debugger_notification `noinline`
+    __attribute__ ((noinline))
 	void _dyld_debugger_notification(enum dyld_notify_mode mode, unsigned long count, uint64_t machHeaders[])
 	{
 		// Do nothing.  This exists for the debugger to set a break point on to see what images have been loaded or unloaded.

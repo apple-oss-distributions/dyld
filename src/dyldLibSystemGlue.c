@@ -48,7 +48,7 @@ const char*  __progname = NULL;
 //
 struct __DATA__dyld { 
 	long			lazy; 
-	int				(*lookup)(const char*, void**);
+	void *lookup;
 	// ProgramVars
 	const void*		mh;
 	int*			NXArgcPtr;
@@ -71,7 +71,10 @@ __attribute__((weak))
 __attribute__((visibility("hidden")))
 int _dyld_func_lookup(const char* dyld_func_name, void **address)
 {
-	return (*myDyldSection.lookup)(dyld_func_name, address);
+	// Cast lookup function here to resign from dyld's 0-discriminator to a real
+	// function pointer if needed.
+	int (*lookupFn)(const char*, void**) = myDyldSection.lookup;
+	return lookupFn(dyld_func_name, address);
 }
 
 #if TARGET_OS_IOS && !TARGET_OS_SIMULATOR

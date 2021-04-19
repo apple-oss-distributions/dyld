@@ -51,8 +51,8 @@
 #endif
 
 #include "DyldSharedCache.h"
-
 #include "Map.h"
+#include "PointerAuth.h"
 
 #if __arm__
  #include <mach/vm_page_size.h>
@@ -531,7 +531,8 @@ public:
 	virtual bool						forceFlat() const = 0;
 	
 										// called at runtime when a lazily bound function is first called
-	virtual uintptr_t					doBindLazySymbol(uintptr_t* lazyPointer, const LinkContext& context) = 0;
+	virtual uintptr_t					doBindLazySymbol(uintptr_t* lazyPointer, const LinkContext& context,
+													     DyldSharedCache::DataConstLazyScopedWriter& patcher) = 0;
 	
 										// called at runtime when a fast lazily bound function is first called
 	virtual uintptr_t					doBindFastLazySymbol(uint32_t lazyBindingInfoOffset, const LinkContext& context,
@@ -655,7 +656,8 @@ public:
 	virtual void						recursiveMakeDataReadOnly(const LinkContext& context);
 
 	virtual uintptr_t					resolveWeak(const LinkContext& context, const char* symbolName, bool weak_import, bool runResolver,
-													const ImageLoader** foundIn) { return 0; } 
+													const ImageLoader** foundIn,
+													DyldSharedCache::DataConstLazyScopedWriter& patcher) { return 0; } 
 
 										// triggered by DYLD_PRINT_STATISTICS to write info on work done and how fast
 	static void							printStatistics(unsigned int imageCount, const InitializerTimingList& timingInfo);
@@ -699,10 +701,10 @@ public:
 			bool						objCMappedNotified() const { return fObjCMappedNotified; }
 
 	struct InterposeTuple { 
-		uintptr_t		replacement; 
-		ImageLoader*	neverImage;			// don't apply replacement to this image
-		ImageLoader*	onlyImage;			// only apply replacement to this image
-		uintptr_t		replacee; 
+		uintptr_t										replacement;
+		dyld3::AuthenticatedValue<const ImageLoader*>	neverImage;		// don't apply replacement to this image
+		dyld3::AuthenticatedValue<const ImageLoader*>	onlyImage;		// only apply replacement to this image
+		uintptr_t										replacee;
 	};
 
 	static uintptr_t read_uleb128(const uint8_t*& p, const uint8_t* end);
@@ -776,7 +778,7 @@ protected:
 	virtual void				doBind(const LinkContext& context, bool forceLazysBound, const ImageLoader* reExportParent) = 0;
 	
 								// called later via API to force all lazy pointer to be bound
-	virtual void				doBindJustLazies(const LinkContext& context) = 0;
+	virtual void				doBindJustLazies(const LinkContext& context, DyldSharedCache::DataConstLazyScopedWriter& patcher) = 0;
 	
 								// if image has any dtrace DOF sections, append them to list to be registered
 	virtual void				doGetDOFSections(const LinkContext& context, std::vector<DOFInfo>& dofs) = 0;

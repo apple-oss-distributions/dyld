@@ -801,6 +801,11 @@ void Loader::applyFixupsToImage(Diagnostics& diag, LoadedImage& info)
     if ( overrideOfCache )
         vmAccountingSetSuspended(true, _logFixups);
     if ( image->fixupsNotEncoded() ) {
+        // make the cache writable for this block
+        // We do this lazily, only if we find a symbol which needs to be overridden
+        DyldSharedCache::DataConstLazyScopedWriter patcher((const DyldSharedCache*)_dyldCacheAddress, mach_task_self(), (DyldSharedCache::DataConstLogFunc)_logSegments);
+        auto* patcherPtr = &patcher;
+
         WrappedMachO wmo((MachOAnalyzer*)info.loadedAddress(), this, (void*)info.image());
         wmo.forEachFixup(diag,
         ^(uint64_t fixupLocRuntimeOffset, PointerMetaData pmd, const FixupTarget& target, bool& stop) {
@@ -838,6 +843,7 @@ void Loader::applyFixupsToImage(Diagnostics& diag, LoadedImage& info)
             // Full dlopen closures don't patch weak defs.  Bail out early if we are libdyld to match this behaviour
             return;
 #endif
+            patcherPtr->makeWriteable();
             ((const DyldSharedCache*)_dyldCacheAddress)->forEachPatchableUseOfExport(cachedDylibIndex, exportCacheOffset, ^(dyld_cache_patchable_location patchLoc) {
                 uintptr_t* loc     = (uintptr_t*)(((uint8_t*)_dyldCacheAddress)+patchLoc.cacheOffset);
                 uintptr_t  newImpl = (uintptr_t)(target.foundInImage._mh) + target.offsetInImage + DyldSharedCache::getAddend(patchLoc);

@@ -30,10 +30,13 @@
 #include <os/lock_private.h>
 #include <mach-o/dyld_priv.h>
 
+#include <sys/types.h>
+
 #include "Closure.h"
 #include "Loading.h"
 #include "MachOLoaded.h"
 #include "DyldSharedCache.h"
+#include "PointerAuth.h"
 
 
 #if TARGET_OS_OSX
@@ -71,7 +74,7 @@ public:
     void                        removeImages(const Array<LoadedImage>& unloadImages);
     void                        runImageNotifiers(const Array<LoadedImage>& newImages);
     void                        runImageCallbacks(const Array<LoadedImage>& newImages);
-    void                        applyInterposingToDyldCache(const closure::Closure* closure);
+    void                        applyInterposingToDyldCache(const closure::Closure* closure, mach_port_t mach_task_self);
     void                        runStartupInitialzers();
     void                        runInitialzersBottomUp(const closure::Image* topImage);
     void                        runLibSystemInitializer(LoadedImage& libSystem);
@@ -213,17 +216,13 @@ private:
     uintptr_t                   resolveTarget(closure::Image::ResolvedSymbolTarget target) const;
     void                        addImmutableRange(uintptr_t start, uintptr_t end);
 
-    void                        constructMachPorts(int slot);
-    void                        teardownMachPorts(int slot);
-    void                        forEachPortSlot(void (^callback)(int slot));
-    void                        sendMachMessage(int slot, mach_msg_id_t msg_id, mach_msg_header_t* msg_buffer, mach_msg_size_t msg_size);
-    void                        notifyMonitoringDyld(bool unloading, const Array<LoadedImage>& images);
-
     static void                 runAllStaticTerminatorsHelper(void*);
 
     typedef closure::ImageArray  ImageArray;
 
-    const closure::LaunchClosure*           _mainClosure         = nullptr;
+    typedef const closure::LaunchClosure* __ptrauth_dyld_address_auth MainClosurePtrType;
+
+    MainClosurePtrType                      _mainClosure         = nullptr;
     const DyldSharedCache*                  _dyldCacheAddress    = nullptr;
     const char*                             _dyldCachePath       = nullptr;
     uint64_t                                _dyldCacheSlide      = 0;

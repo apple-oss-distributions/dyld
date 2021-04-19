@@ -38,6 +38,10 @@
 
 #include <algorithm>
 
+#if __has_feature(ptrauth_calls)
+  #include <ptrauth.h>
+#endif
+
 #include "dlfcn.h"
 
 #include "AllImages.h"
@@ -451,8 +455,35 @@ void* NSAddressOfSymbol(NSSymbol symbol)
 {
     log_apis("NSAddressOfSymbol(%p)\n", symbol);
 
+	if ( symbol == nullptr )
+		return nullptr;
+
     // in dyld 1.0, NSSymbol was a pointer to the nlist entry in the symbol table
-    return (void*)symbol;
+    void *result = (void*)symbol;
+
+#if __has_feature(ptrauth_calls)
+    __block const MachOLoaded *module = nullptr;
+    gAllImages.infoForImageMappedAt(symbol, ^(const LoadedImage& foundImage, uint8_t permissions) {
+        module = foundImage.loadedAddress();
+    });
+
+    int64_t slide = module->getSlide();
+    __block bool resultPointsToInstructions = false;
+    module->forEachSection(^(const MachOAnalyzer::SectionInfo& sectInfo, bool malformedSectionRange, bool& stop) {
+        uint64_t sectStartAddr = sectInfo.sectAddr + slide;
+        uint64_t sectEndAddr = sectStartAddr + sectInfo.sectSize;
+        if ( ((uint64_t)result >= sectStartAddr) && ((uint64_t)result < sectEndAddr) ) {
+            resultPointsToInstructions = (sectInfo.sectFlags & S_ATTR_PURE_INSTRUCTIONS) || (sectInfo.sectFlags & S_ATTR_SOME_INSTRUCTIONS);
+            stop = true;
+        }
+    });
+
+    if (resultPointsToInstructions) {
+        result = __builtin_ptrauth_sign_unauthenticated(result, ptrauth_key_asia, 0);
+    }
+#endif
+
+    return result;
 }
 
 NSModule NSModuleForSymbol(NSSymbol symbol)

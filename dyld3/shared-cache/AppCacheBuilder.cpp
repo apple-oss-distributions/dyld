@@ -386,7 +386,8 @@ void AppCacheBuilder::assignSegmentRegionsAndOffsets()
         // kclist needs this segment, even if its empty, so leave it in there
         readOnlyTextRegion.bufferSize   = align(offsetInRegion, 14);
         readOnlyTextRegion.sizeInUse    = readOnlyTextRegion.bufferSize;
-        readOnlyTextRegion.permissions  = VM_PROT_READ;
+        readOnlyTextRegion.initProt     = VM_PROT_READ;
+        readOnlyTextRegion.maxProt      = VM_PROT_READ;
         readOnlyTextRegion.name         = "__PRELINK_TEXT";
     }
 
@@ -434,7 +435,8 @@ void AppCacheBuilder::assignSegmentRegionsAndOffsets()
         // align r/x region end
         readExecuteRegion.bufferSize  = align(offsetInRegion, 14);
         readExecuteRegion.sizeInUse   = readExecuteRegion.bufferSize;
-        readExecuteRegion.permissions = VM_PROT_READ | VM_PROT_EXECUTE;
+        readExecuteRegion.initProt    = VM_PROT_READ | VM_PROT_EXECUTE;
+        readExecuteRegion.maxProt     = VM_PROT_READ | VM_PROT_EXECUTE;
         readExecuteRegion.name        = "__TEXT_EXEC";
     }
 
@@ -442,7 +444,8 @@ void AppCacheBuilder::assignSegmentRegionsAndOffsets()
         // 6-bytes per jmpq
         branchStubsRegion.bufferSize    = align(branchTargetsFromKexts * 6, 14);
         branchStubsRegion.sizeInUse     = branchStubsRegion.bufferSize;
-        branchStubsRegion.permissions   = VM_PROT_READ | VM_PROT_EXECUTE;
+        branchStubsRegion.initProt      = VM_PROT_READ | VM_PROT_EXECUTE;
+        branchStubsRegion.maxProt       = VM_PROT_READ | VM_PROT_EXECUTE;
         branchStubsRegion.name          = "__BRANCH_STUBS";
     }
 
@@ -488,7 +491,8 @@ void AppCacheBuilder::assignSegmentRegionsAndOffsets()
         // align r/o region end
         dataConstRegion.bufferSize  = align(offsetInRegion, 14);
         dataConstRegion.sizeInUse   = dataConstRegion.bufferSize;
-        dataConstRegion.permissions = VM_PROT_READ;
+        dataConstRegion.initProt    = VM_PROT_READ;
+        dataConstRegion.maxProt     = VM_PROT_READ;
         dataConstRegion.name        = "__DATA_CONST";
     }
 
@@ -497,7 +501,8 @@ void AppCacheBuilder::assignSegmentRegionsAndOffsets()
         // 8-bytes per GOT
         branchGOTsRegion.bufferSize     = align(branchTargetsFromKexts * 8, 14);
         branchGOTsRegion.sizeInUse      = branchGOTsRegion.bufferSize;
-        branchGOTsRegion.permissions    = VM_PROT_READ | VM_PROT_WRITE;
+        branchGOTsRegion.initProt       = VM_PROT_READ | VM_PROT_WRITE;
+        branchGOTsRegion.maxProt        = VM_PROT_READ | VM_PROT_WRITE;
         branchGOTsRegion.name           = "__BRANCH_GOTS";
     }
 
@@ -545,7 +550,8 @@ void AppCacheBuilder::assignSegmentRegionsAndOffsets()
         // align r/w region end
         readWriteRegion.bufferSize  = align(offsetInRegion, 14);
         readWriteRegion.sizeInUse   = readWriteRegion.bufferSize;
-        readWriteRegion.permissions = VM_PROT_READ | VM_PROT_WRITE;
+        readWriteRegion.initProt    = VM_PROT_READ | VM_PROT_WRITE;
+        readWriteRegion.maxProt     = VM_PROT_READ | VM_PROT_WRITE;
         readWriteRegion.name        = "__DATA";
     }
 
@@ -586,7 +592,8 @@ void AppCacheBuilder::assignSegmentRegionsAndOffsets()
 
         hibernateRegion.bufferSize   = align(offsetInRegion, 14);
         hibernateRegion.sizeInUse    = hibernateRegion.bufferSize;
-        hibernateRegion.permissions  = VM_PROT_READ | VM_PROT_WRITE | VM_PROT_EXECUTE;
+        hibernateRegion.initProt     = VM_PROT_READ | VM_PROT_WRITE | VM_PROT_EXECUTE;
+        hibernateRegion.maxProt      = VM_PROT_READ | VM_PROT_WRITE | VM_PROT_EXECUTE;
         hibernateRegion.name         = "__HIB";
     }
 
@@ -605,7 +612,8 @@ void AppCacheBuilder::assignSegmentRegionsAndOffsets()
                     return;
 
                 nonSplitSegRegions.emplace_back();
-                nonSplitSegRegions.back().permissions = segInfo.protections;
+                nonSplitSegRegions.back().initProt    = segInfo.protections;
+                nonSplitSegRegions.back().maxProt     = segInfo.protections;
                 nonSplitSegRegions.back().name        = "__REGION" + std::to_string(nonSplitSegRegions.size() - 1);
 
                 // Note we don't align the region offset as we have no split seg
@@ -646,7 +654,8 @@ void AppCacheBuilder::assignSegmentRegionsAndOffsets()
             // align region end
             customRegion.bufferSize  = align(offsetInRegion, 14);
             customRegion.sizeInUse   = customRegion.bufferSize;
-            customRegion.permissions = VM_PROT_READ;
+            customRegion.initProt    = VM_PROT_READ;
+            customRegion.maxProt     = VM_PROT_READ;
             customRegion.name        = segment.segmentName;
         }
     }
@@ -828,7 +837,8 @@ void AppCacheBuilder::assignSegmentRegionsAndOffsets()
             // align region end
             prelinkInfoRegion.bufferSize  = align(xmlDataLength, 14);
             prelinkInfoRegion.sizeInUse   = prelinkInfoRegion.bufferSize;
-            prelinkInfoRegion.permissions = VM_PROT_READ | VM_PROT_WRITE;
+            prelinkInfoRegion.initProt    = VM_PROT_READ | VM_PROT_WRITE;
+            prelinkInfoRegion.maxProt     = VM_PROT_READ | VM_PROT_WRITE;
             prelinkInfoRegion.name        = "__PRELINK_INFO";
         }
     }
@@ -900,7 +910,8 @@ void AppCacheBuilder::assignSegmentRegionsAndOffsets()
     // align r/o region end
     _readOnlyRegion.bufferSize  = align(offsetInRegion, 14);
     _readOnlyRegion.sizeInUse   = _readOnlyRegion.bufferSize;
-    _readOnlyRegion.permissions = VM_PROT_READ;
+    _readOnlyRegion.initProt    = VM_PROT_READ;
+    _readOnlyRegion.maxProt     = VM_PROT_READ;
     _readOnlyRegion.name        = "__LINKEDIT";
 
     // Add space in __LINKEDIT for chained fixups and classic relocs
@@ -968,7 +979,8 @@ void AppCacheBuilder::assignSegmentRegionsAndOffsets()
             uint64_t numBytes = align(numBytesForChainedFixups, 3) + align(numBytesForClassicRelocs, 3);
             fixupsSubRegion.bufferSize  = align(numBytes, 14);
             fixupsSubRegion.sizeInUse   = fixupsSubRegion.bufferSize;
-            fixupsSubRegion.permissions = VM_PROT_READ;
+            fixupsSubRegion.initProt    = VM_PROT_READ;
+            fixupsSubRegion.maxProt     = VM_PROT_READ;
             fixupsSubRegion.name        = "__FIXUPS";
         }
     }
@@ -4451,7 +4463,8 @@ void AppCacheBuilder::allocateBuffer()
         cacheHeaderRegion.bufferSize            = cacheHeaderRegionSize;
         cacheHeaderRegion.sizeInUse             = cacheHeaderRegion.bufferSize;
         cacheHeaderRegion.cacheFileOffset       = 0;
-        cacheHeaderRegion.permissions           = VM_PROT_READ;
+        cacheHeaderRegion.initProt              = VM_PROT_READ;
+        cacheHeaderRegion.maxProt               = VM_PROT_READ;
         cacheHeaderRegion.name                  = "__TEXT";
 
 #if 0
@@ -4485,7 +4498,8 @@ void AppCacheBuilder::allocateBuffer()
         }
 
         for (auto& regionAndOffset : regions) {
-            assert(regionAndOffset.first->permissions != 0);
+            assert(regionAndOffset.first->initProt != 0);
+            assert(regionAndOffset.first->maxProt != 0);
             segment_command_64* loadCommand = (segment_command_64*)(cacheHeaderRegion.buffer + regionAndOffset.second);
             header.segments.push_back({ loadCommand, regionAndOffset.first });
         }
@@ -4649,7 +4663,8 @@ void AppCacheBuilder::generateCacheHeader() {
             region->index = segmentIndex;
             ++segmentIndex;
 
-            assert(region->permissions != 0);
+            assert(region->initProt != 0);
+            assert(region->maxProt != 0);
 
             const char* name = region->name.c_str();
 
@@ -4660,8 +4675,8 @@ void AppCacheBuilder::generateCacheHeader() {
             cmd->set_vmsize(region->sizeInUse);
             cmd->set_fileoff(region->cacheFileOffset);
             cmd->set_filesize(region->sizeInUse);
-            cmd->set_maxprot(region->permissions);
-            cmd->set_initprot(region->permissions);
+            cmd->set_maxprot(region->maxProt);
+            cmd->set_initprot(region->initProt);
             cmd->set_nsects(0);
             cmd->set_flags(0);
 

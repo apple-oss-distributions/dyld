@@ -152,6 +152,7 @@ private:
     uint64_t                                    _objcReadOnlyBufferSizeAllocated        = 0;
     uint8_t*                                    _objcReadWriteBuffer                    = nullptr;
     uint64_t                                    _objcReadWriteBufferSizeAllocated       = 0;
+    uint64_t                                    _objcReadWriteFileOffset                = 0;
     uint64_t                                    _selectorStringsFromExecutables         = 0;
     InstallNameToMA                             _installNameToCacheDylib;
     std::unordered_map<std::string, uint32_t>   _dataDirtySegsOrder;

@@ -217,9 +217,8 @@ def processBuildLines(ninja, buildLines, testName, platform, osFlag, forceArchs,
                 target = ninja.findTarget(args[1])
                 target.addVariable("entitlements", "--entitlements $SRCROOT/testing/get_task_allow_entitlement.plist")
         elif args[0] == "$TASK_FOR_PID_ENABLE":
-            if platform != "macos":
-                target = ninja.findTarget(args[1])
-                target.addVariable("entitlements", "--entitlements $SRCROOT/testing/task_for_pid_entitlement.plist")
+            target = ninja.findTarget(args[1])
+            target.addVariable("entitlements", "--entitlements $SRCROOT/testing/task_read_for_pid_entitlement.plist")
         elif args[0] in ["$CC", "$CXX"]:
             tool = args[0][1:].lower()
             sources = []
@@ -453,7 +452,7 @@ def parseDirective(line, directive, platform, archs):
         if platforms and platform not in platforms: return -1, archs, foundPlatform
         effectiveArchs = list(set(archs) & set(restrictedArchs))
         if effectiveArchs: return idx + len(directive) + len(match.group()), effectiveArchs, foundPlatform
-        return len(line), archs, foundPlatform
+        return line.find(':')+1, archs, foundPlatform
     return -1, archs, False
 
 if __name__ == "__main__":

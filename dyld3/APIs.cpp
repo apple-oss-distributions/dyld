@@ -1439,8 +1439,8 @@ int dyld_shared_cache_find_iterate_text(const uuid_t cacheUuid, const char* extr
 
     // get base address of cache
     __block uint64_t cacheUnslidBaseAddress = 0;
-    sharedCache->forEachRegion(^(const void *content, uint64_t vmAddr, uint64_t size, uint32_t permissions,
-                                 uint64_t flags) {
+    sharedCache->forEachRegion(^(const void *content, uint64_t vmAddr, uint64_t size,
+                                 uint32_t initProt, uint32_t maxProt, uint64_t flags) {
         if ( cacheUnslidBaseAddress == 0 )
             cacheUnslidBaseAddress = vmAddr;
     });

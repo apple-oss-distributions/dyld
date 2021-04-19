@@ -277,17 +277,12 @@ public:
             }
         });
         // compute number of symbols in new symbol table
-        const macho_nlist<P>* const mergedSymTabStart = (macho_nlist<P>*)(((uint8_t*)mapped_cache) + symtab->symoff);
-        const macho_nlist<P>* const mergedSymTabend = &mergedSymTabStart[symtab->nsyms];
+        const macho_nlist<P>*       mergedSymTabStart = (macho_nlist<P>*)(((uint8_t*)mapped_cache) + symtab->symoff);
+        const macho_nlist<P>* const mergedSymTabend   = &mergedSymTabStart[symtab->nsyms];
         uint32_t newSymCount = symtab->nsyms;
         if ( localNlistCount != 0 ) {
-            newSymCount = localNlistCount;
-            for (const macho_nlist<P>* s = mergedSymTabStart; s != mergedSymTabend; ++s) {
-                // skip any locals in cache
-                if ( (s->n_type() & (N_TYPE|N_EXT)) == N_SECT )
-                    continue;
-                ++newSymCount;
-            }
+            // if we are recombining with unmapped locals, recompute new total size
+            newSymCount = localNlistCount + dynamicSymTab->nextdefsym + dynamicSymTab->nundefsym;
         }
 
         // add room for N_INDR symbols for re-exported symbols
@@ -305,10 +300,31 @@ public:
         // first pool entry is always empty string
         newSymNames.push_back('\0');
 
+        // local symbols are first in dylibs, if this cache has unmapped locals, insert them all first
+        uint32_t undefSymbolShift = 0;
+        if ( localNlistCount != 0 ) {
+            const char* localStrings = cache->getLocalStrings();
+            undefSymbolShift = localNlistCount - dynamicSymTab->nlocalsym;
+            // update load command to reflect new count of locals
+            dynamicSymTab->ilocalsym = (uint32_t)newSymTab.size();
+            dynamicSymTab->nlocalsym = localNlistCount;
+            // copy local symbols
+            for (uint32_t i=0; i < localNlistCount; ++i) {
+                const char* localName = &localStrings[localNlists[i].n_strx()];
+                if ( localName > localStrings + cache->getLocalStringsSize() )
+                    localName = "<corrupt local symbol name>";
+                macho_nlist<P> t = localNlists[i];
+                t.set_n_strx((uint32_t)newSymNames.size());
+                newSymNames.insert(newSymNames.end(),
+                                   localName,
+                                   localName + (strlen(localName) + 1));
+                newSymTab.push_back(t);
+            }
+            // now start copying symbol table from start of externs instead of start of locals
+            mergedSymTabStart = &mergedSymTabStart[dynamicSymTab->iextdefsym];
+        }
+        // copy full symbol table from cache (skipping locals if they where elsewhere)
         for (const macho_nlist<P>* s = mergedSymTabStart; s != mergedSymTabend; ++s) {
-            // if we have better local symbol info, skip any locals here
-            if ( (localNlists != NULL) && ((s->n_type() & (N_TYPE|N_EXT)) == N_SECT) )
-                continue;
             macho_nlist<P> t = *s;
             t.set_n_strx((uint32_t)newSymNames.size());
             const char* symName = &mergedStringPoolStart[s->n_strx()];
@@ -339,24 +355,6 @@ public:
                                importName + (strlen(importName) + 1));
             newSymTab.push_back(t);
         }
-        if ( localNlistCount != 0 ) {
-            const char* localStrings = cache->getLocalStrings();
-            // update load command to reflect new count of locals
-            dynamicSymTab->ilocalsym = (uint32_t)newSymTab.size();
-            dynamicSymTab->nlocalsym = localNlistCount;
-            // copy local symbols
-            for (uint32_t i=0; i < localNlistCount; ++i) {
-                const char* localName = &localStrings[localNlists[i].n_strx()];
-                if ( localName > localStrings + cache->getLocalStringsSize() )
-                    localName = "<corrupt local symbol name>";
-                macho_nlist<P> t = localNlists[i];
-                t.set_n_strx((uint32_t)newSymNames.size());
-                newSymNames.insert(newSymNames.end(),
-                                   localName,
-                                   localName + (strlen(localName) + 1));
-                newSymTab.push_back(t);
-            }
-        }
 
         if ( newSymCount != newSymTab.size() ) {
             fprintf(stderr, "symbol count miscalculation\n");
@@ -382,12 +380,17 @@ public:
 
         const uint64_t newIndSymTabOffset = new_linkedit_data.size();
 
-        // Copy indirect symbol table
+        // Copy (and adjust) indirect symbol table
         const uint32_t* mergedIndSymTab = (uint32_t*)((char*)mapped_cache + dynamicSymTab->indirectsymoff);
         new_linkedit_data.insert(new_linkedit_data.end(),
                                  (char*)mergedIndSymTab,
                                  (char*)(mergedIndSymTab + dynamicSymTab->nindirectsyms));
-
+        if ( undefSymbolShift != 0 ) {
+            uint32_t* newIndSymTab = (uint32_t*)&new_linkedit_data[newIndSymTabOffset];
+            for (int i=0; i < dynamicSymTab->nindirectsyms; ++i) {
+                newIndSymTab[i] += undefSymbolShift;
+            }
+        }
         const uint64_t newStringPoolOffset = new_linkedit_data.size();
 
         // pointer align string pool size

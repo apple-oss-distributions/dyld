@@ -138,6 +138,7 @@ private:
         Console,
         XCTest
     };
+    void emitBegin();
     void runLeaks();
     void dumpLogs();
     void getLogsString(char** buffer);
@@ -225,7 +226,7 @@ catch_mach_exception_raise_state_identity(mach_port_t exception_port,
 }
 
 _process::_process() :  executablePath(nullptr), args(nullptr), env(nullptr), stdoutHandler(nullptr), stderrHandler(nullptr),
-                        crashHandler(nullptr), exitHandler(nullptr), pid(0), arch(currentArch), suspended(false), async(false) {}
+                        crashHandler(nullptr), exitHandler(nullptr), pid(0), arch(currentArch), suspended(false) {}
 _process::~_process() {
     if (stdoutHandler) { Block_release(stdoutHandler);}
     if (stderrHandler) { Block_release(stderrHandler);}
@@ -241,12 +242,10 @@ void _process::set_stderr_handler(_dyld_test_reader_t SEH) { stderrHandler = Blo
 void _process::set_exit_handler(_dyld_test_exit_handler_t EH) { exitHandler = Block_copy(EH); }
 void _process::set_crash_handler(_dyld_test_crash_handler_t CH) { crashHandler = Block_copy(CH); }
 void _process::set_launch_suspended(bool S) { suspended = S; }
-void _process::set_launch_async(bool S) { async = S; }
 void _process::set_launch_arch(cpu_type_t A) { arch = A; }
 
 pid_t _process::launch() {
     dispatch_queue_t queue = dispatch_queue_create("com.apple.dyld.test.launch", NULL);
-    dispatch_block_t oneShotSemaphoreBlock = dispatch_block_create(DISPATCH_BLOCK_INHERIT_QOS_CLASS, ^{});
     posix_spawn_file_actions_t fileActions = NULL;
     posix_spawnattr_t attr = NULL;
     dispatch_source_t stdoutSource = NULL;
@@ -360,7 +359,6 @@ pid_t _process::launch() {
         if (stderrSource) {
             dispatch_source_cancel(stderrSource);
         }
-        oneShotSemaphoreBlock();
         dispatch_source_cancel(exitSource);
     });
     dispatch_resume(exitSource);
@@ -378,10 +376,6 @@ pid_t _process::launch() {
     if (!suspended) {
         kill(pid, SIGCONT);
     }
-    if (!async) {
-        dispatch_block_wait(oneShotSemaphoreBlock, DISPATCH_TIME_FOREVER);
-    }
-    Block_release(oneShotSemaphoreBlock);
     dispatch_release(queue);
     return pid;
 }
@@ -498,6 +492,9 @@ TestState::TestState() : testName(__progname), logImmediate(false), logOnSuccess
             }
         }
     });
+}
+
+void TestState::emitBegin() {
     if (output == BATS) {
         printf("[BEGIN]");
         if (checkForLeaks) {
@@ -546,6 +543,8 @@ TestState* TestState::getState() {
                 if(!state->compare_exchange_strong(expected, newState)) {
                     newState->~TestState();
                     free(temp);
+                } else {
+                    newState->emitBegin();
                 }
             }
             sState.store(*state);

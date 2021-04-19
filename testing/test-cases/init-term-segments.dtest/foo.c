@@ -32,6 +32,7 @@ bool foo(bool* ptr) {
 	return true;
 }
 
+#if !__arm64e__
 #if SUPPORT_CUSTOM_SEGMENTS
 __attribute__((section(("__MORETEXT,__text"))))
 #endif
@@ -41,3 +42,4 @@ void myterm()
 	if ( gRanTerm != NULL )
 		*gRanTerm = true;
 }
+#endif
