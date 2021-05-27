@@ -1650,7 +1650,8 @@ void removeImage(ImageLoader* image)
 		const dyld3::MachOAnalyzer* ma = (const dyld3::MachOAnalyzer*)image->machHeader();
 		ma->forEachWeakDef(diag, ^(const char *symbolName, uint64_t imageOffset, bool isFromExportTrie) {
 			auto it = gLinkContext.weakDefMap.find(symbolName);
-			assert(it != gLinkContext.weakDefMap.end());
+			if ( it == gLinkContext.weakDefMap.end() )
+				return;
 			it->second = { nullptr, 0 };
 			if ( !isFromExportTrie ) {
 				// The string was already duplicated if we are an export trie
