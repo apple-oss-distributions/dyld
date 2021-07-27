@@ -5022,7 +5022,7 @@ static bool readFirstPage(const char* dylibPath, uint8_t firstPage[FIRST_PAGE_BU
 	if ( fileStartAsFat->magic == OSSwapBigToHostInt32(FAT_MAGIC) ) {
 		uint64_t fileOffset;
 		uint64_t fileLength;
-		if ( fatFindBest(fileStartAsFat, &fileOffset, &fileLength) ) {
+		if ( fatFindBest(fileStartAsFat, &fileOffset, &fileLength, file.getFileDescriptor()) ) {
 			if ( pread(file.getFileDescriptor(), firstPage, FIRST_PAGE_BUFFER_SIZE, fileOffset) != FIRST_PAGE_BUFFER_SIZE )
 				return false;
 		}
@@ -5830,6 +5830,29 @@ static bool envVarsMatch(const dyld3::closure::LaunchClosure* mainClosure, const
 	return true;
 }
 
+
+void getCDHashString(const uint8_t cdHash[20], char* cdHashBuffer) {
+	for (int i=0; i < 20; ++i) {
+		uint8_t byte = cdHash[i];
+		uint8_t nibbleL = byte & 0x0F;
+		uint8_t nibbleH = byte >> 4;
+		if ( nibbleH < 10 ) {
+			*cdHashBuffer = '0' + nibbleH;
+			++cdHashBuffer;
+		} else {
+			*cdHashBuffer = 'a' + (nibbleH-10);
+			++cdHashBuffer;
+		}
+		if ( nibbleL < 10 ) {
+			*cdHashBuffer = '0' + nibbleL;
+			++cdHashBuffer;
+		} else {
+			*cdHashBuffer = 'a' + (nibbleL-10);
+			++cdHashBuffer;
+		}
+	}
+}
+
 static bool closureValid(const dyld3::closure::LaunchClosure* mainClosure, const dyld3::closure::LoadedFileInfo& mainFileInfo,
 						 const uint8_t* mainExecutableCDHash, bool closureInCache, const char* envp[])
 {
@@ -5924,27 +5947,6 @@ static bool closureValid(const dyld3::closure::LaunchClosure* mainClosure, const
 
 	// If we found cd hashes, but they were all invalid, then print them out
 	if ( foundCDHash && !foundValidCDHash ) {
-		auto getCDHashString = [](const uint8_t cdHash[20], char* cdHashBuffer) {
-			for (int i=0; i < 20; ++i) {
-				uint8_t byte = cdHash[i];
-				uint8_t nibbleL = byte & 0x0F;
-				uint8_t nibbleH = byte >> 4;
-				if ( nibbleH < 10 ) {
-					*cdHashBuffer = '0' + nibbleH;
-					++cdHashBuffer;
-				} else {
-					*cdHashBuffer = 'a' + (nibbleH-10);
-					++cdHashBuffer;
-				}
-				if ( nibbleL < 10 ) {
-					*cdHashBuffer = '0' + nibbleL;
-					++cdHashBuffer;
-				} else {
-					*cdHashBuffer = 'a' + (nibbleL-10);
-					++cdHashBuffer;
-				}
-			}
-		};
 		if ( gLinkContext.verboseWarnings ) {
 			mainImage->forEachCDHash(^(const uint8_t *expectedHash, bool &stop) {
 				char mainExecutableCDHashBuffer[128] = { '\0' };
@@ -6257,7 +6259,8 @@ static bool needsDyld2ErrorMessage(const char* msg)
 }
 
 // Note: buildLaunchClosure calls halt() if there is an error building the closure
-static const dyld3::closure::LaunchClosure* buildLaunchClosure(const uint8_t* mainExecutableCDHash,
+static const dyld3::closure::LaunchClosure* buildLaunchClosure(bool canUseClosureFromDisk,
+															   const uint8_t* mainExecutableCDHash,
 															   const dyld3::closure::LoadedFileInfo& mainFileInfo,
 															   const char* envp[],
 															   const dyld3::Array<uint8_t>& bootToken)
@@ -6274,7 +6277,7 @@ static const dyld3::closure::LaunchClosure* buildLaunchClosure(const uint8_t* ma
 	}
 
 	char closurePath[PATH_MAX];
-	bool canSaveClosureToDisk = !bootToken.empty() && dyld3::closure::LaunchClosure::buildClosureCachePath(mainFileInfo.path, envp, true, closurePath);
+	bool canSaveClosureToDisk = canUseClosureFromDisk && !bootToken.empty() && dyld3::closure::LaunchClosure::buildClosureCachePath(mainFileInfo.path, envp, true, closurePath);
 	dyld3::LaunchErrorInfo* errorInfo = (dyld3::LaunchErrorInfo*)&gProcessInfo->errorKind;
 	const dyld3::GradedArchs& archs = dyld3::GradedArchs::forCurrentOS(sKeysDisabled, sOnlyPlatformArm64e);
 	dyld3::closure::FileSystemPhysical fileSystem;
@@ -6360,16 +6363,57 @@ static const dyld3::closure::LaunchClosure* buildLaunchClosure(const uint8_t* ma
 		int fd = ::open_dprotected_np(closurePathTemp, O_WRONLY|O_CREAT, PROTECTION_CLASS_D, 0, S_IRUSR|S_IWUSR);
 #endif
 		if ( fd != -1 ) {
-			::ftruncate(fd, result->size());
-			::write(fd, result, result->size());
-			::fsetxattr(fd, DYLD_CLOSURE_XATTR_NAME, bootToken.begin(), bootToken.count(), 0, 0);
-			::fchmod(fd, S_IRUSR);
-			::close(fd);
-			::rename(closurePathTemp, closurePath);
-			// free built closure and mmap file() to reduce dirty memory
-			result->deallocate();
-			result = mapClosureFile(closurePath);
-			sLaunchModeUsed |= DYLD_LAUNCH_MODE_CLOSURE_SAVED_TO_FILE;
+			auto saveClosure = [&]() -> bool {
+				if ( ::ftruncate(fd, result->size()) == -1 ) {
+					if ( gLinkContext.verboseWarnings )
+						dyld::log("could not ftruncate closure (errno=%d) at: %s\n", errno, closurePathTemp);
+					return false;
+				}
+
+				ssize_t writeResult = ::write(fd, result, result->size());
+				if ( writeResult == -1 ) {
+					if ( gLinkContext.verboseWarnings )
+						dyld::log("could not write closure (errno=%d) at: %s\n", errno, closurePathTemp);
+					return false;
+				} else if ( writeResult != result->size() ) {
+					if ( gLinkContext.verboseWarnings )
+						dyld::log("could not write whole closure at: %s\n", closurePathTemp);
+					return false;
+				}
+
+				if ( ::fsetxattr(fd, DYLD_CLOSURE_XATTR_NAME, bootToken.begin(), bootToken.count(), 0, 0) == -1 ) {
+					if ( gLinkContext.verboseWarnings )
+						dyld::log("could not fsetxattr closure (errno=%d) at: %s\n", errno, closurePathTemp);
+					return false;
+				}
+
+				if ( ::fchmod(fd, S_IRUSR) == -1 ) {
+					if ( gLinkContext.verboseWarnings )
+						dyld::log("could not fchmod closure (errno=%d) at: %s\n", errno, closurePathTemp);
+					return false;
+				}
+
+				if ( ::close(fd) == -1 ) {
+					if ( gLinkContext.verboseWarnings )
+						dyld::log("could not close closure (errno=%d) at: %s\n", errno, closurePathTemp);
+					return false;
+				}
+
+				if ( ::rename(closurePathTemp, closurePath) == -1 ) {
+					if ( gLinkContext.verboseWarnings )
+						dyld::log("could not rename closure (errno=%d) from: %s to: %s\n", errno, closurePathTemp, closurePath);
+					return false;
+				}
+
+				return true;
+			};
+
+			if ( saveClosure() ) {
+				// free built closure and mmap file() to reduce dirty memory
+				result->deallocate();
+				result = mapClosureFile(closurePath);
+				sLaunchModeUsed |= DYLD_LAUNCH_MODE_CLOSURE_SAVED_TO_FILE;
+			}
 		}
 		else if ( gLinkContext.verboseWarnings ) {
 			dyld::log("could not save closure (errno=%d) to: %s\n", errno, closurePathTemp);
@@ -6865,16 +6909,73 @@ _main(const macho_header* mainExecutableMH, uintptr_t mainExecutableSlide,
 
 		// We only want to try build a closure at runtime if its an iOS third party binary, or a macOS binary from the shared cache
 		bool allowClosureRebuilds = false;
-		if ( sClosureMode == ClosureMode::On ) {
+		if ( sJustBuildClosure ) {
+			// If sJustBuildClosure is set, always allow rebuilding
+			// In this case dyld will exit before using the closure
 			allowClosureRebuilds = true;
+		} else if ( sClosureMode == ClosureMode::On ) {
+			// Only rebuild shared cache closures on internal
+			if ( mainClosure != nullptr ) {
+				if ( dyld3::internalInstall() ) {
+					if ( gLinkContext.verboseWarnings )
+						dyld::log("dyld: allowing closure build as this is an internal OS\n");
+					allowClosureRebuilds = true;
+				} else {
+					if ( gLinkContext.verboseWarnings )
+						dyld::log("dyld: denying closure build as this is a customer OS\n");
+				}
+			} else {
+				// Always allow rebuilding on-disk closures
+				allowClosureRebuilds = true;
+			}
 		} else if ( (sClosureMode == ClosureMode::PreBuiltOnly) && (mainClosure != nullptr) ) {
-			allowClosureRebuilds = true;
+			// Only allow closure rebuilds on macOS if internal.  Customers should never have out-of-date closures as roots
+			// aren't used there.
+			if ( dyld3::internalInstall() ) {
+				if ( gLinkContext.verboseWarnings )
+					dyld::log("dyld: allowing closure build as this is an internal OS\n");
+				allowClosureRebuilds = true;
+			} else {
+				if ( gLinkContext.verboseWarnings )
+					dyld::log("dyld: denying closure build as this is a customer OS\n");
+			}
 		}
 
 		if ( (mainClosure != nullptr) && !closureValid(mainClosure, mainFileInfo, mainExecutableCDHash, true, envp) ) {
 			mainClosure = nullptr;
 			sLaunchModeUsed &= ~DYLD_LAUNCH_MODE_CLOSURE_FROM_OS;
 		}
+
+		// On customer devices, don't allow a binary with a shared cache prebuilt closure to find one on disk
+		bool canUseClosureFromDisk = true;
+		if ( (sSharedCacheLoadInfo.loadAddress != nullptr) && (mainExecutableCDHash != nullptr) ) {
+			char mainExecutableCDHashStringBuffer[128] = { '\0' };
+			strcat(mainExecutableCDHashStringBuffer, "/cdhash/");
+			getCDHashString(mainExecutableCDHash, mainExecutableCDHashStringBuffer + strlen("/cdhash/"));
+
+			const dyld3::closure::LaunchClosure* mainClosureByCDHash = sSharedCacheLoadInfo.loadAddress->findClosure(mainExecutableCDHashStringBuffer);
+
+		    if ( mainClosureByCDHash != nullptr ) {
+		 	   if ( dyld3::internalInstall() ) {
+		 		   if ( gLinkContext.verboseWarnings )
+		 			   dyld::log("dyld: allowing closure from disk on internal OS\n");
+		 	   } else {
+				   if ( mainClosure == nullptr ) {
+					   if ( gLinkContext.verboseWarnings )
+						   dyld::log("dyld: rejecting closure from disk on customer OS as shared cache closure was not used\n");
+				   }
+
+		 		   canUseClosureFromDisk = false;
+		 	   }
+			} else {
+				 // If we found a cache closure already, then we should have also found a cdHash for it
+				 if ( mainClosure != nullptr ) {
+					 if ( gLinkContext.verboseWarnings )
+						 dyld::log("dyld: somehow cache closure was found, but cdHash is not in cache lookup table\n");
+					 mainClosure = nullptr;
+				 }
+			}
+	    }
 
 		// <rdar://60333505> bootToken is a concat of boot-hash kernel passes down for app and dyld's uuid
 		uint8_t bootTokenBufer[128];
@@ -6890,11 +6991,11 @@ _main(const macho_header* mainExecutableMH, uintptr_t mainExecutableSlide,
 		// If we didn't find a valid cache closure then try build a new one
 		if ( (mainClosure == nullptr) && allowClosureRebuilds ) {
 			// if forcing closures, and no closure in cache, or it is invalid, check for cached closure
-			if ( !sForceInvalidSharedCacheClosureFormat )
+			if ( !sForceInvalidSharedCacheClosureFormat && canUseClosureFromDisk )
 				mainClosure = findCachedLaunchClosure(mainExecutableCDHash, mainFileInfo, envp, bootToken);
 			if ( mainClosure == nullptr ) {
 				// if  no cached closure found, build new one
-				mainClosure = buildLaunchClosure(mainExecutableCDHash, mainFileInfo, envp, bootToken);
+				mainClosure = buildLaunchClosure(canUseClosureFromDisk, mainExecutableCDHash, mainFileInfo, envp, bootToken);
 				if ( mainClosure != nullptr )
 					sLaunchModeUsed |= DYLD_LAUNCH_MODE_BUILT_CLOSURE_AT_LAUNCH;
 			}
@@ -6916,7 +7017,7 @@ _main(const macho_header* mainExecutableMH, uintptr_t mainExecutableSlide,
 											  mainExecutableSlide, argc, argv, envp, apple, diag, &result, startGlue, &closureOutOfDate, &recoverable);
 			if ( !launched && closureOutOfDate && allowClosureRebuilds ) {
 				// closure is out of date, build new one
-				mainClosure = buildLaunchClosure(mainExecutableCDHash, mainFileInfo, envp, bootToken);
+				mainClosure = buildLaunchClosure(canUseClosureFromDisk, mainExecutableCDHash, mainFileInfo, envp, bootToken);
 				if ( mainClosure != nullptr ) {
 					diag.clearError();
 					sLaunchModeUsed |= DYLD_LAUNCH_MODE_BUILT_CLOSURE_AT_LAUNCH;

@@ -2786,11 +2786,32 @@ void SharedCacheBuilder::addClosures(const std::vector<LoadedMachO>& osExecutabl
     DyldSharedCache* cache = (DyldSharedCache*)_readExecuteRegion.buffer;
     cache->header.progClosuresAddr = _readOnlyRegion.unslidLoadAddress + _readOnlyRegion.sizeInUse;
     uint8_t* closuresBase = _readOnlyRegion.buffer + _readOnlyRegion.sizeInUse;
-    std::vector<DylibIndexTrie::Entry> closureEntrys;
+    __block std::vector<DylibIndexTrie::Entry> closureEntrys;
     uint32_t currentClosureOffset = 0;
     for (const auto& entry : closures) {
         const dyld3::closure::LaunchClosure* closure = entry.second;
         closureEntrys.push_back(DylibIndexTrie::Entry(entry.first, DylibIndex(currentClosureOffset)));
+
+        // Add cdHashes to the trie so that we can look up by cdHash at runtime
+        closure->topImage()->forEachCDHash(^(const uint8_t *cdHash, bool &stop) {
+            std::string cdHashStr = "/cdhash/";
+            cdHashStr.reserve(24);
+            for (int i=0; i < 20; ++i) {
+                uint8_t byte = cdHash[i];
+                uint8_t nibbleL = byte & 0x0F;
+                uint8_t nibbleH = byte >> 4;
+                if ( nibbleH < 10 )
+                    cdHashStr += '0' + nibbleH;
+                else
+                    cdHashStr += 'a' + (nibbleH-10);
+                if ( nibbleL < 10 )
+                    cdHashStr += '0' + nibbleL;
+                else
+                    cdHashStr += 'a' + (nibbleL-10);
+            }
+            closureEntrys.push_back(DylibIndexTrie::Entry(cdHashStr, DylibIndex(currentClosureOffset)));
+        });
+
         size_t size = closure->size();
         assert((size % 4) == 0);
         memcpy(closuresBase+currentClosureOffset, closure, size);
