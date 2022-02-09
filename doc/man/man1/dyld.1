@@ -14,25 +14,17 @@ DYLD_FALLBACK_LIBRARY_PATH
 .br
 DYLD_VERSIONED_LIBRARY_PATH
 .br
-DYLD_PRINT_TO_FILE
-.br
-DYLD_SHARED_REGION
+DYLD_IMAGE_SUFFIX
 .br
 DYLD_INSERT_LIBRARIES
 .br
-DYLD_FORCE_FLAT_NAMESPACE
-.br
-DYLD_IMAGE_SUFFIX
-.br
-DYLD_PRINT_OPTS
-.br
-DYLD_PRINT_ENV
+DYLD_PRINT_TO_FILE
 .br
 DYLD_PRINT_LIBRARIES
 .br
-DYLD_BIND_AT_LAUNCH
+DYLD_PRINT_LOADERS
 .br
-DYLD_DISABLE_DOFS
+DYLD_PRINT_SEARCHING
 .br
 DYLD_PRINT_APIS
 .br
@@ -40,19 +32,15 @@ DYLD_PRINT_BINDINGS
 .br
 DYLD_PRINT_INITIALIZERS
 .br
-DYLD_PRINT_REBASINGS
-.br
 DYLD_PRINT_SEGMENTS
 .br
-DYLD_PRINT_STATISTICS
+DYLD_PRINT_ENV
 .br
-DYLD_PRINT_DOFS
-.br
-DYLD_PRINT_RPATHS
+DYLD_SHARED_REGION
 .br
 DYLD_SHARED_CACHE_DIR
 .SH DESCRIPTION
-The dynamic linker checks the following environment variables during the launch
+The dynamic linker (dyld) checks the following environment variables during the launch
 of each process.
 .br
 .br
@@ -98,7 +86,7 @@ Whichever has the larger current_version value will be used in the process whene
 a framework with that install name is required.  This is similar to DYLD_FRAMEWORK_PATH
 except instead of always overriding, it only overrides if the supplied framework is newer.
 Note: dyld does not check the framework's Info.plist to find its version.  Dyld only
-checks the -currrent_version number supplied when the framework was created.
+checks the -current_version number supplied when the framework was created.
 .TP
 .B DYLD_LIBRARY_PATH
 This is a colon separated list of directories that contain libraries. The
@@ -133,37 +121,6 @@ Whichever has the larger current_version value will be used in the process whene
 a dylib with that install name is required.  This is similar to DYLD_LIBRARY_PATH
 except instead of always overriding, it only overrides is the supplied library is newer.
 .TP
-.B DYLD_PRINT_TO_FILE
-This is a path to a (writable) file. Normally, the dynamic linker writes all
-logging output (triggered by DYLD_PRINT_* settings) to file descriptor 2 
-(which is usually stderr).  But this setting causes the dynamic linker to
-write logging output to the specified file.  
-.TP
-.B DYLD_SHARED_REGION 
-This can be "use" (the default), "avoid", or "private".  Setting it to 
-"avoid" tells dyld to not use the shared cache.  All OS dylibs are loaded 
-dynamically just like every other dylib.  Setting it to "private" tells
-dyld to remove the shared region from the process address space and mmap()
-back in a private copy of the dyld shared cache in the shared region address
-range. This is only useful if the shared cache on disk has been updated 
-and is different than the shared cache in use.
-.TP
-.B DYLD_INSERT_LIBRARIES
-This is a colon separated list of dynamic libraries to load before the ones
-specified in the program.  This lets you test new modules of existing dynamic
-shared libraries that are used in flat-namespace images by loading a temporary
-dynamic shared library with just the new modules.  Note that this has no
-effect on images built a two-level namespace images using a dynamic shared
-library unless
-.SM DYLD_FORCE_FLAT_NAMESPACE
-is also used.
-.TP
-.B DYLD_FORCE_FLAT_NAMESPACE
-Force all images in the program to be linked as flat-namespace images and ignore
-any two-level namespace bindings.  This may cause programs to fail to execute
-with a multiply defined symbol error if two-level namespace images are used to
-allow the images to have multiply defined symbols.
-.TP
 .B DYLD_IMAGE_SUFFIX
 This is set to a string of a suffix to try to be used for all shared libraries
 used by the program.  For libraries ending in ".dylib" the suffix is applied
@@ -171,59 +128,62 @@ just before the ".dylib".  For all other libraries the suffix is appended to the
 library name.  This is useful for using conventional "_profile" and "_debug"
 libraries and frameworks.
 .TP
-.B DYLD_PRINT_OPTS
-When this is set, the dynamic linker writes to file descriptor 2 (normally
-standard error) the command line options.
+.B DYLD_INSERT_LIBRARIES
+This is a colon separated list of additional dynamic libraries to load before the
+ones specified in the program. If instead, your goal is to substitute a library
+that would normally be loaded, use
+.SM DYLD_LIBRARY_PATH
+or
+.SM DYLD_FRAMEWORK_PATH
+instead.
+.TP
+.B DYLD_PRINT_TO_FILE
+This is a path to a (writable) file. Normally, the dynamic linker writes all
+logging output (triggered by DYLD_PRINT_* settings) to file descriptor 2
+(which is usually stderr).  But this setting causes the dynamic linker to
+write logging output to the specified file.
 .TP
 .B DYLD_PRINT_ENV
-When this is set, the dynamic linker writes to file descriptor 2 (normally
-standard error) the environment variables.
+If set, causes dyld to print a line of key=valule for each enviroment variable in the process.
 .TP
 .B DYLD_PRINT_LIBRARIES
-When this is set, the dynamic linker writes to file descriptor 2 (normally
-standard error) the filenames of the libraries the program is using.
+If set, causes dyld to print a line for each mach-o image loaded into a process.
 This is useful to make sure that the use of
 .SM DYLD_LIBRARY_PATH
 is getting what you want.
 .TP
-.B DYLD_BIND_AT_LAUNCH
-When this is set, the dynamic linker binds all undefined symbols
-the program needs at launch time. This includes function symbols that are normally 
-lazily bound at the time of their first call.
+.B DYLD_PRINT_LOADERS
+If set, causes dyld to print a line whether each image is tracked by a JustInTimeLoader
+or a PrebuiltLoader.  Additionally, it prints if a PrebuiltLoaderSet was used to
+launch the process or if a PrebuiltLoader was written to make the next launch
+faster.
 .TP
-.B DYLD_PRINT_STATISTICS
-Right before the process's main() is called, dyld prints out information about how
-dyld spent its time.  Useful for analyzing launch performance.
-.TP
-.B DYLD_PRINT_STATISTICS_DETAILS
-Right before the process's main() is called, dyld prints out detailed information about how
-dyld spent its time.  Useful for analyzing launch performance.
-.TP
-.B DYLD_DISABLE_DOFS
-Causes dyld to not register dtrace static probes with the kernel.
+.B DYLD_PRINT_SEARCHING
+If set, causes dyld to print a line about each file system path checked when searching
+for an image to load.
 .TP
 .B DYLD_PRINT_INITIALIZERS
-Causes dyld to print out a line when running each initializer in every image.  Initializers
+If set, causes dyld to print out a line when running each initializer in every image.  Initializers
 run by dyld include constructors for C++ statically allocated objects, functions marked with
 __attribute__((constructor)), and -init functions.
 .TP
 .B DYLD_PRINT_APIS
-Causes dyld to print a line whenever a dyld API is called (e.g. NSAddImage()).
+If set, causes dyld to print a line whenever a dyld API is called (e.g. dlopen()).
 .TP
 .B DYLD_PRINT_SEGMENTS
-Causes dyld to print out a line containing the name and address range of each mach-o segment
+If set, causes dyld to print out a line containing the name and address range of each mach-o segment
 that dyld maps.  In addition it prints information about if the image was from the dyld 
 shared cache.
 .TP
 .B DYLD_PRINT_BINDINGS 
-Causes dyld to print a line each time a symbolic name is bound.  
+If set, causes dyld to print a line each time a symbolic name is bound.
 .TP
-.B DYLD_PRINT_DOFS 
-Causes dyld to print out information about dtrace static probes registered with the kernel. 
-.TP
-.B DYLD_PRINT_RPATHS
-Cause dyld  to print a line each time it expands an @rpath variable and whether
-that expansion was successful or not.
+.B DYLD_SHARED_REGION
+This can be "use" (the default) or "private".  Setting it to "private" tells
+dyld to remove the shared region from the process address space and mmap()
+back in a private copy of the dyld shared cache in the shared region address
+range. This is only useful if the shared cache on disk has been updated
+and is different than the shared cache in use.
 .TP
 .B DYLD_SHARED_CACHE_DIR
 This is a directory containing dyld shared cache files.  This variable can be used in

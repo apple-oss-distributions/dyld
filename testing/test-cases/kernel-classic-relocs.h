@@ -112,7 +112,7 @@ int slideClassic(const struct mach_header* mh, FixupsLogFunc logFunc) {
     }
 
     // Now we have the dynamic symbol table, walk it to apply all the rebases
-    uint32_t offsetInLinkedit   = dynSymbolTable->locreloff - linkeditFileOffset;
+    uint32_t offsetInLinkedit   = dynSymbolTable->locreloff - (uint32_t)linkeditFileOffset;
     uintptr_t linkeditStartAddr = linkeditVMAddr + slide;
     if (LogFixupsClassic) {
         logFunc("[LOG] kernel-classic-relocs: offsetInLinkedit 0x%x\n", offsetInLinkedit);
@@ -124,8 +124,8 @@ int slideClassic(const struct mach_header* mh, FixupsLogFunc logFunc) {
     const struct relocation_info* const    relocsEnd   = &relocsStart[dynSymbolTable->nlocrel];
     for (const struct relocation_info* reloc = relocsStart; reloc < relocsEnd; ++reloc) {
         if ( reloc->r_length == 2 ) {
-            uint32_t* fixupLoc = (uint32_t*)(relocsStartAddress + reloc->r_address + slide);
-            uint32_t slidValue = *fixupLoc + slide;
+            uint32_t* fixupLoc = (uint32_t*)(relocsStartAddress + (uintptr_t)reloc->r_address + slide);
+            uint32_t slidValue = *fixupLoc + (uint32_t)slide;
             if (LogFixupsClassic) {
                 logFunc("[LOG] kernel-classic-relocs: fixupLoc %p = 0x%x + 0x%x + 0x%x\n", fixupLoc, relocsStartAddress, reloc->r_address, slide);
                 logFunc("[LOG] kernel-classic-relocs: slidValue *%p = 0x%x\n", fixupLoc, slidValue);
@@ -134,7 +134,7 @@ int slideClassic(const struct mach_header* mh, FixupsLogFunc logFunc) {
             continue;
         }
         if ( reloc->r_length == 3 ) {
-            uint64_t* fixupLoc = (uint64_t*)(relocsStartAddress + reloc->r_address + slide);
+            uint64_t* fixupLoc = (uint64_t*)(relocsStartAddress + (uintptr_t)reloc->r_address + slide);
             uint64_t slidValue = *fixupLoc + slide;
             if (LogFixupsClassic) {
                 logFunc("[LOG] kernel-classic-relocs: fixupLoc %p = 0x%x + 0x%x + 0x%x\n", fixupLoc, relocsStartAddress, reloc->r_address, slide);

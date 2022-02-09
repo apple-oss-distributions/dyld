@@ -31,6 +31,11 @@ extern "C" {
 #endif
 
 /*
+ * For use in NSCreateObjectFileImageFromMemory()
+ */
+#define RTLD_UNLOADABLE 0x80000000
+
+/*
  * Internal interface for dlopen; intended to help audit internal use of
  * dlopen.
  */

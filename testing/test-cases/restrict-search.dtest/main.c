@@ -32,20 +32,20 @@ extern int foo() __attribute__((weak_import));
 #define STRINGIFY(x) STRINGIFY2(x)
 
 
-int main(int argc, const char* argv[], const char* envp[], const char* apple[]) {
+int main(int argc, const char* argv[], const char* envp[], const char* apple[])
+{
 #if SHOULD_BE_FOUND
-    if ( &foo == NULL )
-        FAIL("Incorrectly found %s", STRINGIFY(MODE));
+    if ( &foo != NULL )
+        PASS("Found %s", STRINGIFY(MODE));
     else
-        PASS("Incorrectly did not find %s", STRINGIFY(MODE));
+        FAIL("Incorrectly did not find %s", STRINGIFY(MODE));
 #else
     // dylib won't be found at runtime, so &foo should be NULL
     if ( &foo == NULL )
-        PASS("Found %s", STRINGIFY(MODE));
+        PASS("Correctly could not load %s", STRINGIFY(MODE));
     else
-        FAIL("Could not find %s", STRINGIFY(MODE));
+        FAIL("Incorrectly found %s", STRINGIFY(MODE));
 #endif
-
 	return 0;
 }
 

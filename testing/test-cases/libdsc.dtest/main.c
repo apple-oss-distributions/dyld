@@ -8,9 +8,9 @@
 #include <string.h> 
 #include <mach-o/dyld_priv.h>
 #include <dlfcn.h>
+#include <mach-o/dsc_iterator.h>
 
 #include "test_support.h"
-#include "shared-cache/dsc_iterator.h"
 
 // This program links libdsc.a and verifies that dyld_shared_cache_iterate() works
 

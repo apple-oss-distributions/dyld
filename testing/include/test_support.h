@@ -42,10 +42,8 @@ private:
     _dyld_test_reader_t stderrHandler;
     _dyld_test_crash_handler_t crashHandler;
     _dyld_test_exit_handler_t exitHandler;
-    pid_t pid;
     cpu_type_t arch;
     bool suspended;
-    bool async;
 };
 
 #define STDERR_WRITER ^(int fd) {           \

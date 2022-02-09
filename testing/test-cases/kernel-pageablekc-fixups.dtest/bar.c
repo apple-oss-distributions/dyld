@@ -13,7 +13,7 @@ extern int kernelExportDirect();
 // Test direct pointer fixups to the kernel.  On x86_64 these would be emitted as just
 // a branch relocation so we needed to synthesize a stub
 __attribute__((constructor))
-int testDirectToKernel(const TestRunnerFunctions* funcs) {
+int testDirectToKernel(const TestRunnerFunctions* hostFuncs) {
     LOG("testDirectToKernel(): start");
     // The kernel returned 42
     int v = kernelExportDirect();

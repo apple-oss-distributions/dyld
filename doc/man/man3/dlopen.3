@@ -140,10 +140,7 @@ $DYLD_FRAMEWORK_PATH (with framework partial path from
 .Fa path
 ), then the supplied 
 .Fa path 
-(using current working directory for relative paths), then 
-$DYLD_FALLBACK_FRAMEWORK_PATH (with framework partial path from 
-.Fa path
-).
+(using current working directory for relative paths).
 .Pp
 When 
 .Fa path 
@@ -154,10 +151,7 @@ $DYLD_LIBRARY_PATH (with leaf name from
 .Fa path 
 ), then the supplied 
 .Fa path 
-(using current working directory for relative paths), then 
-$DYLD_FALLBACK_LIBRARY_PATH (with leaf name from  
-.Fa path 
-).
+(using current working directory for relative paths).
 .Pp
 Note: If DYLD_FALLBACK_LIBRARY_PATH is not set, dlopen operates as if 
 DYLD_FALLBACK_LIBRARY_PATH was set to $HOME/lib:/usr/local/lib:/usr/lib.

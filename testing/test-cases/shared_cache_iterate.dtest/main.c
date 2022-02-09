@@ -39,6 +39,16 @@ static void forEachCacheInDir(const char* dirPath, void (^handler)(const uuid_t 
                 break;
             if ( entp->d_type != DT_REG )
                 continue;
+            const char* leaf = entp->d_name;
+            const char* lastDot = strrchr(leaf, '.');
+            if ( lastDot != NULL ) {
+                // skip files that end in ".[0-9]" as they are sub-caches
+                if ( (lastDot[1] >= '0') && (lastDot[1] <= '9') )
+                    continue;
+                // skip files that end in ".symbols" as they are sub-caches
+                if ( strcmp(lastDot, ".symbols") == 0 )
+                    continue;
+            }
             if ( strlcpy(cachePath, dirPath, PATH_MAX) >= PATH_MAX )
                 continue;
             if ( strlcat(cachePath, "/", PATH_MAX) >= PATH_MAX )

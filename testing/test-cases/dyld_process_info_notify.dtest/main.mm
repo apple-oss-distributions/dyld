@@ -20,6 +20,7 @@
 #include <mach/machine.h>
 #include <mach-o/dyld_images.h>
 #include <mach-o/dyld_process_info.h>
+#include <mach-o/dyld_introspection.h>
 #include <dispatch/dispatch.h>
 #include <Availability.h>
 
@@ -88,7 +89,9 @@ void launchTest(bool launchSuspended, bool disconnectEarly)
     task_t task;
     __block bool sawMainExecutable = false;
     __block bool sawlibSystem = false;
+    __block bool gotMainNoticeOld = false;
     __block bool gotMainNotice = false;
+    __block bool gotCacheNotice = false;
     __block bool gotMainNoticeBeforeAllInitialDylibs = false;
     __block bool gotFooNoticeBeforeMain = false;
     __block int libFooLoadCount = 0;
@@ -132,12 +135,15 @@ void launchTest(bool launchSuspended, bool disconnectEarly)
     do {
         handle = _dyld_process_info_notify( task, queue,
                                             ^(bool unload, uint64_t timestamp, uint64_t machHeader, const uuid_t uuid, const char* path) {
-                                                LOG("Handler called");
+                                                LOG("Handler called %s", path);
                                                 if ( strstr(path, "/target.exe") != NULL )
                                                     sawMainExecutable = true;
                                                 if ( strstr(path, "/libSystem") != NULL )
                                                     sawlibSystem = true;
                                                 if ( strstr(path, "/libfoo.dylib") != NULL ) {
+                                                    if ( !gotMainNoticeOld ) {
+                                                        gotFooNoticeBeforeMain = true;
+                                                    }
                                                     if ( !gotMainNotice ) {
                                                         gotFooNoticeBeforeMain = true;
                                                     }
@@ -167,13 +173,41 @@ void launchTest(bool launchSuspended, bool disconnectEarly)
     }
 
     // if suspended attach main notifier and unsuspend
+    dyld_process_t dyldProcess = nullptr;
+    uint32_t cacheHandle = 0;
+    uint32_t mainHandle = 0;
+
     if (launchSuspended) {
         // If the process starts suspended register for main(),
         // otherwise skip since this test is a race between
         // process setup and notification registration
+        dyldProcess = dyld_process_create_for_task(task, &kr);
+        if (kr != KERN_SUCCESS) {
+            FAIL("kr must equal KERN_SUCCESS");
+        }
+        if (dyldProcess == nullptr) {
+            FAIL("dyldProcess must not be NULL");
+        }
+        cacheHandle = dyld_process_register_for_event_notification(dyldProcess, &kr, DYLD_REMOTE_EVENT_SHARED_CACHE_MAPPED, queue, ^{
+            gotCacheNotice = true;
+        });
+        if (kr != KERN_SUCCESS) {
+            FAIL("kr must equal KERN_SUCCESS");
+        }
+        mainHandle = dyld_process_register_for_event_notification(dyldProcess, &kr, DYLD_REMOTE_EVENT_MAIN, queue, ^{
+            gotMainNotice = true;
+            if (!gotCacheNotice) {
+                FAIL("Got main notice before cache notice");
+            }
+        });
+        if (kr != KERN_SUCCESS) {
+            FAIL("kr must equal KERN_SUCCESS");
+        }
+        
+        // Old SPI
         _dyld_process_info_notify_main(handle, ^{
                                                 LOG("target entering main()");
-                                                gotMainNotice = true;
+                                                gotMainNoticeOld = true;
                                                 if ( !sawMainExecutable || !sawlibSystem )
                                                     gotMainNoticeBeforeAllInitialDylibs = true;
                                                 });
@@ -193,8 +227,14 @@ void launchTest(bool launchSuspended, bool disconnectEarly)
         if ( !sawMainExecutable ) {
             FAIL("Did not get load notification of main executable");
         }
+        if ( !gotMainNoticeOld ) {
+            FAIL("Did not get old style notification of main()");
+        }
         if ( !gotMainNotice ) {
             FAIL("Did not get notification of main()");
+        }
+        if ( !gotCacheNotice ) {
+            FAIL("Did not get notification of cache mapping");
         }
         if ( gotMainNoticeBeforeAllInitialDylibs ) {
             FAIL("Notification of main() arrived before all initial dylibs");
@@ -235,6 +275,17 @@ void launchTest(bool launchSuspended, bool disconnectEarly)
     dispatch_source_cancel(usr2SignalSource);
     if (!disconnectEarly) {
         _dyld_process_info_notify_release(handle);
+    }
+    if (dyldProcess) {
+        if (cacheHandle == 0) {
+            FAIL("cacheHandle should be non-zero");
+        }
+        if (mainHandle == 0) {
+            FAIL("mainHandle should be non-zero");
+        }
+        dyld_process_unregister_for_notification(dyldProcess, mainHandle);
+        dyld_process_unregister_for_notification(dyldProcess, cacheHandle);
+        dyld_process_dispose(dyldProcess);
     }
 }
 

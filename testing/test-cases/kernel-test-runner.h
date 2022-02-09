@@ -46,18 +46,7 @@ typedef struct TestRunnerFunctions {
     PtrAuth __typeof(&_TIMEOUT)         testTimeout;
 } TestRunnerFunctions;
 
-static const TestRunnerFunctions* funcs = 0;
-
-#define PASS(...)           funcs->testPass(__FILE__,__LINE__,__VA_ARGS__)
-#define FAIL(...)           funcs->testFail(__FILE__,__LINE__,__VA_ARGS__)
-#define LOG(...)            funcs->testLog(__FILE__,__LINE__,__VA_ARGS__)
-#define TIMEOUT(seconds)    funcs->testTimeout(__FILE__,__LINE__,seconds)
-
-#if __x86_64__
-__attribute__((section(("__HIB, __text"))))
-#else
-__attribute__((section(("__TEXT_EXEC, __text"))))
-#endif
-static inline void setFuncs(const TestRunnerFunctions* v) {
-    funcs = v;
-}
+#define PASS(...)           hostFuncs->testPass(__FILE__,__LINE__,__VA_ARGS__)
+#define FAIL(...)           hostFuncs->testFail(__FILE__,__LINE__,__VA_ARGS__)
+#define LOG(...)            hostFuncs->testLog(__FILE__,__LINE__,__VA_ARGS__)
+#define TIMEOUT(seconds)    hostFuncs->testTimeout(__FILE__,__LINE__,seconds)

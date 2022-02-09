@@ -30,13 +30,11 @@ static void inspectProcess(task_t task, bool launchedSuspended, bool expectCF, b
 {
     kern_return_t result;
     dyld_process_info info = _dyld_process_info_create(task, 0, &result);
-    LOG("_dyld_process_info_create(): return(%u), info(0x%llx)", result, (uint64_t)info);
-
     if (result != KERN_SUCCESS) {
-        FAIL("_dyld_process_info_create() should succeed");
+        FAIL("dyld_process_info() should succeed, get return code %d", result);
     }
     if (info == NULL) {
-        FAIL("_dyld_process_info_create(task, 0) alwats return a value");
+        FAIL("dyld_process_info(task, 0) alwats return a value");
     }
 
     dyld_process_state_info stateInfo;
@@ -85,8 +83,6 @@ static void inspectProcess(task_t task, bool launchedSuspended, bool expectCF, b
      _dyld_process_info_release(info);
 }
 
-
-
 #if __x86_64__
 cpu_type_t otherArch[] = { CPU_TYPE_I386 };
 #elif __i386__
@@ -119,11 +115,10 @@ static void launchTest(bool launchOtherArch, bool launchSuspended, bool forceIOS
     LOG("launchTest pid: %d", pid);
 
     task_t task;
-    kern_return_t kr = task_read_for_pid(mach_task_self(), pid, &task);
-    LOG("task_read_for_pid(mach_task_self(): return(%u), task(%u)", kr, task);
-    if (kr != KERN_SUCCESS) {
+    if (task_read_for_pid(mach_task_self(), pid, &task) != KERN_SUCCESS) {
         FAIL("task_read_for_pid() failed");
     }
+    LOG("launchTest task: %u", task);
 
     // wait until process is up and has suspended itself
     if (!launchSuspended) {
@@ -164,4 +159,3 @@ int main(int argc, const char* argv[], const char* envp[], const char* apple[]) 
     });
     dispatch_main();
 }
-

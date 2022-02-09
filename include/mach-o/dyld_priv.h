@@ -480,11 +480,13 @@ extern const char* _dyld_shared_cache_real_path(const char* path);
 // Exists in macOS 10.16 and later
 // Exists in iOS 14.0 and later
 //
-#define DYLD_LAUNCH_MODE_USING_CLOSURE               0x00000001     // if 0, then running in classic dyld2 mode
-#define DYLD_LAUNCH_MODE_BUILT_CLOSURE_AT_LAUNCH     0x00000002     // launch was slow, to build closure
-#define DYLD_LAUNCH_MODE_CLOSURE_SAVED_TO_FILE       0x00000004     // next launch will be faster
-#define DYLD_LAUNCH_MODE_CLOSURE_FROM_OS             0x00000008     // closure built into dyld cache
-#define DYLD_LAUNCH_MODE_MINIMAL_CLOSURE             0x00000010     // closure does not contain fix ups
+#define DYLD_LAUNCH_MODE_USING_CLOSURE               0x00000001     // dyld4: 0 => main is JITLoader, 1=> main is PrebuiltLoader
+#define DYLD_LAUNCH_MODE_BUILT_CLOSURE_AT_LAUNCH     0x00000002     // dyld4: currently unused
+#define DYLD_LAUNCH_MODE_CLOSURE_SAVED_TO_FILE       0x00000004     // dyld4: built and wrote PrebuiltLoaderSet to disk
+#define DYLD_LAUNCH_MODE_CLOSURE_FROM_OS             0x00000008     // dyld4: PrebuiltLoaderSet used was built into dyld cache
+#define DYLD_LAUNCH_MODE_MINIMAL_CLOSURE             0x00000010     // dyld4: unused
+#define DYLD_LAUNCH_MODE_HAS_INTERPOSING             0x00000020     // dyld4: process has interposed symbols
+#define DYLD_LAUNCH_MODE_OPTIMIZED_DYLD_CACHE        0x00000040     // dyld4: dyld shared cache is optimized (stubs eliminated)
 extern uint32_t _dyld_launch_mode(void);
 
 
@@ -569,6 +571,75 @@ extern void _dyld_for_each_objc_class(const char* className,
 // Exists in iOS 13.0 and later
 extern void _dyld_for_each_objc_protocol(const char* protocolName,
                                          void (^callback)(void* protocolPtr, bool isLoaded, bool* stop));
+
+// Called only by lldb to visit every objc Class in the shared cache hash table
+//
+// Exists in Mac OS X 12.0 and later
+// Exists in iOS 15.0 and later
+extern void _dyld_visit_objc_classes(void (^callback)(const void* classPtr));
+
+// Called only by libobjc to get the number of classes in the shared cache hash table
+//
+// Exists in Mac OS X 12.0 and later
+// Exists in iOS 15.0 and later
+extern uint32_t _dyld_objc_class_count(void);
+
+// Called only by libobjc to check if relative method lists are the new large caches format
+//
+// Exists in Mac OS X 12.0 and later
+// Exists in iOS 15.0 and later
+extern bool _dyld_objc_uses_large_shared_cache(void);
+
+
+enum _dyld_protocol_conformance_result_kind {
+  _dyld_protocol_conformance_result_kind_found_descriptor,
+  _dyld_protocol_conformance_result_kind_found_witness_table,
+  _dyld_protocol_conformance_result_kind_not_found,
+  _dyld_protocol_conformance_result_kind_definitive_failure
+  // Unknown values will be considered to be a non-definitive failure, so we can
+  // add more response kinds later if needed without a synchronized submission.
+};
+
+struct _dyld_protocol_conformance_result {
+    // Note this is really a _dyld_protocol_conformance_result_kind in disguise
+    uintptr_t kind;
+
+    // Contains a ProtocolConformanceDescriptor iff `kind` is _dyld_protocol_conformance_result_kind_found_descriptor
+    // Contains a WitnessTable iff `kind` is _dyld_protocol_conformance_result_kind_found_witness_table
+    const void *value;
+};
+
+// Called only by Swift to see if dyld has pre-optimized protocol conformances for the given
+// protocolDescriptor/metadataType and typeDescriptor.
+//
+// Exists in Mac OS X 12.0 and later
+// Exists in iOS 15.0 and later
+struct _dyld_protocol_conformance_result
+_dyld_find_protocol_conformance(const void *protocolDescriptor,
+                                const void *metadataType,
+                                const void *typeDescriptor);
+
+// Called only by Swift to see if dyld has pre-optimized protocol conformances for the given
+// foreign type descriptor name and protocol
+//
+// Exists in Mac OS X 12.0 and later
+// Exists in iOS 15.0 and later
+struct _dyld_protocol_conformance_result
+_dyld_find_foreign_type_protocol_conformance(const void *protocol,
+                                             const char *foreignTypeIdentityStart,
+                                             size_t foreignTypeIdentityLength);
+
+// Called only by Swift to check what version of the optimizations are available.
+//
+// Exists in Mac OS X 12.0 and later
+// Exists in iOS 15.0 and later
+// Exists in watchOS 8.0 and later
+// Exists in tvOS 15.0 and later.
+
+extern uint32_t _dyld_swift_optimizations_version(void) __API_AVAILABLE(macos(12.0), ios(15.0), watchos(8.0), tvos(15.0));
+
+// Swift uses this define to guard for the above symbol being available at build time
+#define DYLD_FIND_PROTOCOL_CONFORMANCE_DEFINED 1
 
 
 // called by exit() before it calls cxa_finalize() so that thread_local

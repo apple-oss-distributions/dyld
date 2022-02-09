@@ -226,7 +226,7 @@ catch_mach_exception_raise_state_identity(mach_port_t exception_port,
 }
 
 _process::_process() :  executablePath(nullptr), args(nullptr), env(nullptr), stdoutHandler(nullptr), stderrHandler(nullptr),
-                        crashHandler(nullptr), exitHandler(nullptr), pid(0), arch(currentArch), suspended(false) {}
+                        crashHandler(nullptr), exitHandler(nullptr), arch(currentArch), suspended(false) {}
 _process::~_process() {
     if (stdoutHandler) { Block_release(stdoutHandler);}
     if (stderrHandler) { Block_release(stderrHandler);}
@@ -246,6 +246,7 @@ void _process::set_launch_arch(cpu_type_t A) { arch = A; }
 
 pid_t _process::launch() {
     dispatch_queue_t queue = dispatch_queue_create("com.apple.dyld.test.launch", NULL);
+    dispatch_block_t oneShotSemaphoreBlock = dispatch_block_create(DISPATCH_BLOCK_INHERIT_QOS_CLASS, ^{});
     posix_spawn_file_actions_t fileActions = NULL;
     posix_spawnattr_t attr = NULL;
     dispatch_source_t stdoutSource = NULL;
@@ -359,6 +360,7 @@ pid_t _process::launch() {
         if (stderrSource) {
             dispatch_source_cancel(stderrSource);
         }
+        oneShotSemaphoreBlock();
         dispatch_source_cancel(exitSource);
     });
     dispatch_resume(exitSource);
@@ -376,6 +378,7 @@ pid_t _process::launch() {
     if (!suspended) {
         kill(pid, SIGCONT);
     }
+    Block_release(oneShotSemaphoreBlock);
     dispatch_release(queue);
     return pid;
 }
@@ -500,7 +503,7 @@ void TestState::emitBegin() {
         if (checkForLeaks) {
             printf(" MallocStackLogging=1 MallocDebugReport=none");
         }
-        forEachEnvVar(environ, [this](const char* env, const char* val) {
+        forEachEnvVar(environ, [](const char* env, const char* val) {
             if ((strncmp(env, "DYLD_", 5) == 0) || (strncmp(env, "TEST_", 5) == 0)) {
                 printf(" %s=%s", env, val);
             }
@@ -548,18 +551,18 @@ TestState* TestState::getState() {
                 }
             }
             sState.store(*state);
+            break; // don't print [BEGIN] if a second main executeable is dlopen()ed
         }
     }
     assert(sState != nullptr);
     return sState;
 }
-
 __attribute__((noreturn))
 void TestState::runLeaks(void) {
     auto testState = TestState::getState();
-    pid_t pid = getpid();
+    pid_t currentPid = getpid();
     char pidString[32];
-    sprintf(&pidString[0], "%d", pid);
+    sprintf(&pidString[0], "%d", currentPid);
     if (getuid() != 0) {
         printf("Insufficient priviledges, skipping Leak check: %s\n", testState->testName);
         exit(0);
@@ -613,7 +616,7 @@ void TestState::_PASSV(const char* file, unsigned line, const char* format, va_l
     if (checkForLeaks) {
         runLeaks();
     } else {
-        _IOlock.withLock([this,&format,&args,&file,&line](){
+        _IOlock.withLock([this,&format,&args](){
             if (output == Console) {
                 printf("[\033[0;32mPASS\033[0m] %s: ", testName);
                 vprintf(format, args);

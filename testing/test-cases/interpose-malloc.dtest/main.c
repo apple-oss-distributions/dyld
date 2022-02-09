@@ -2,8 +2,10 @@
 // BUILD:  $CC main.c $BUILD_DIR/libfoo.dylib -o $BUILD_DIR/interpose-malloc.exe
 // BUILD:  $DYLD_ENV_VARS_ENABLE $BUILD_DIR/interpose-malloc.exe
 // BUILD:  $CC interposer.c -dynamiclib -o $BUILD_DIR/libmyalloc.dylib -install_name libmyalloc.dylib
+// BUILD:  $CC interposer.c -dynamiclib -o $BUILD_DIR/libmyallocsyspath.dylib -install_name /usr/lib/libmyallocsyspath.dylib
 
-// RUN:    DYLD_INSERT_LIBRARIES=libmyalloc.dylib   ./interpose-malloc.exe
+// RUN:    DYLD_INSERT_LIBRARIES=libmyalloc.dylib        ./interpose-malloc.exe
+// RUN:    DYLD_INSERT_LIBRARIES=libmyallocsyspath.dylib ./interpose-malloc.exe
 
 
 

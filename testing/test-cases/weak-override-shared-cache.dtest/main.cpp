@@ -1,5 +1,5 @@
 
-// BUILD:  $CC main.cpp -lc++ -o $BUILD_DIR/weak-override-shared-cache.exe
+// BUILD:  $CC main.cpp -lc++ -o $BUILD_DIR/weak-override-shared-cache.exe -Wl,-no_fixup_chains
 
 // RUN:  ./weak-override-shared-cache.exe
 

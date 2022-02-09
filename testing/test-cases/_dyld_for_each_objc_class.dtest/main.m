@@ -24,7 +24,8 @@
 @end
 
 // Only the main executable has DyldMainClass
-@interface DyldMainClass : NSObject
+__attribute__((objc_root_class))
+@interface DyldMainClass
 @end
 
 @implementation DyldMainClass

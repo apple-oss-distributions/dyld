@@ -1,8 +1,6 @@
-// BUILD(macos):  $CC foo.c -dynamiclib -install_name $RUN_DIR/libfoo.dylib  -o $BUILD_DIR/libfoo.dylib
-// BUILD(macos):  $CC jna.c -dynamiclib -install_name $RUN_DIR/jna.dylib  -o $BUILD_DIR/jna.dylib
-// BUILD(macos):  $CC main.c -o $BUILD_DIR/dlopen-jna.exe $BUILD_DIR/libfoo.dylib $BUILD_DIR/jna.dylib
-
-// BUILD(ios,tvos,watchos,bridgeos):
+// BUILD:  $CC foo.c -dynamiclib -install_name $RUN_DIR/libfoo.dylib  -o $BUILD_DIR/libfoo.dylib
+// BUILD:  $CC jna.c -dynamiclib -install_name $RUN_DIR/jna.dylib  -o $BUILD_DIR/jna.dylib
+// BUILD:  $CC main.c -o $BUILD_DIR/dlopen-jna.exe $BUILD_DIR/libfoo.dylib $BUILD_DIR/jna.dylib
 
 // RUN:  ./dlopen-jna.exe
 

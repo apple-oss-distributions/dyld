@@ -244,7 +244,7 @@ int slide(const struct mach_header* mh, const void* basePointers[4], FixupsLogFu
     }
 
     // Now we have the chained fixups, walk it to apply all the rebases
-    uint32_t offsetInLinkedit   = chainedFixups->dataoff - linkeditFileOffset;
+    uint32_t offsetInLinkedit   = (uint32_t)(chainedFixups->dataoff - linkeditFileOffset);
     uintptr_t linkeditStartAddr = linkeditVMAddr + slide;
     if (LogFixups) {
         logFunc("[LOG] kernel-fixups: offsetInLinkedit 0x%x\n", offsetInLinkedit);

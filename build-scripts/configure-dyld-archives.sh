@@ -1,5 +1,5 @@
 # link with all .a files in /usr/local/lib/dyld
-ls -1 ${SDKROOT}/usr/local/lib/dyld/*.a | grep -v libcompiler_rt > ${DERIVED_SOURCES_DIR}/archives.txt
+ls -1 ${SDKROOT}/usr/local/lib/dyld/*.a | grep -v libcompiler_rt | grep -v libunwind | grep -v libc++abi > ${DERIVED_SOURCES_DIR}/archives.txt
 
 # link with crash report archive if it exists
 if [ -f ${SDKROOT}/usr/local/lib/libCrashReporterClient.a ]

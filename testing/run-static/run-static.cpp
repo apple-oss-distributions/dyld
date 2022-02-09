@@ -20,7 +20,7 @@
 
 const bool isLoggingEnabled = false;
 
-int entryFunc(const TestRunnerFunctions* funcs);
+int entryFunc(const TestRunnerFunctions* hostFuncs);
 typedef __typeof(&entryFunc) EntryFuncTy;
 
 TestRunnerFunctions testFuncs = {
@@ -42,7 +42,7 @@ struct LoadedMachO {
     const void*                 basePointer     = nullptr;
 };
 
-LoadedMachO loadPath(const char* binaryPath) {
+static LoadedMachO loadPath(const char* binaryPath) {
     __block Diagnostics diag;
     dyld3::closure::FileSystemPhysical fileSystem;
     dyld3::closure::LoadedFileInfo info;
@@ -121,10 +121,10 @@ LoadedMachO loadPath(const char* binaryPath) {
 
     __block uint64_t baseAddress = ~0ULL;
     __block uint64_t textSegVMAddr = ~0ULL;
-    mf->forEachSegment(^(const dyld3::MachOAnalyzer::SegmentInfo& info, bool& stop) {
-        baseAddress = std::min(baseAddress, info.vmAddr);
-        if ( strcmp(info.segName, "__TEXT") == 0 ) {
-            textSegVMAddr = info.vmAddr;
+    mf->forEachSegment(^(const dyld3::MachOAnalyzer::SegmentInfo& segInfo, bool& stop) {
+        baseAddress = std::min(baseAddress, segInfo.vmAddr);
+        if ( strcmp(segInfo.segName, "__TEXT") == 0 ) {
+            textSegVMAddr = segInfo.vmAddr;
         }
     });
 
@@ -132,24 +132,24 @@ LoadedMachO loadPath(const char* binaryPath) {
     if ( isLoggingEnabled ) {
         fprintf(stderr, "Mapping binary built at 0x%llx to 0x%llx\n", baseAddress, loadAddress);
     }
-    mf->forEachSegment(^(const dyld3::MachOFile::SegmentInfo &info, bool &stop) {
-        uint64_t requestedLoadAddress = info.vmAddr - baseAddress + loadAddress;
+    mf->forEachSegment(^(const dyld3::MachOFile::SegmentInfo& segInfo, bool& stop) {
+        uint64_t requestedLoadAddress = segInfo.vmAddr - baseAddress + loadAddress;
         if ( isLoggingEnabled )
-            fprintf(stderr, "Mapping %p: %s with perms %d\n", (void*)requestedLoadAddress, info.segName, info.protections);
-        if ( info.vmSize == 0 )
+            fprintf(stderr, "Mapping %p: %s with perms %d\n", (void*)requestedLoadAddress, segInfo.segName, segInfo.protections);
+        if ( segInfo.vmSize == 0 )
             return;
-        size_t readBytes = pread(fd, (void*)requestedLoadAddress, (uintptr_t)info.fileSize, sliceOffset + info.fileOffset);
-        if ( readBytes != info.fileSize ) {
+        size_t readBytes = pread(fd, (void*)requestedLoadAddress, (uintptr_t)segInfo.fileSize, sliceOffset + segInfo.fileOffset);
+        if ( readBytes != segInfo.fileSize ) {
             fprintf(stderr, "Didn't read enough bytes\n");
             exit(1);
         }
         // __DATA_CONST is read-only when we actually run live, but this test runner fixes up __DATA_CONST after this vm_protect
         // For now just don't make __DATA_CONST read only
-        uint32_t protections = info.protections;
-        if ( !strcmp(info.segName, "__DATA_CONST") )
+        uint32_t protections = segInfo.protections;
+        if ( !strcmp(segInfo.segName, "__DATA_CONST") )
             protections = VM_PROT_READ | VM_PROT_WRITE;
         const bool setCurrentPermissions = false;
-        kern_return_t r = vm_protect(mach_task_self(), (vm_address_t)requestedLoadAddress, (uintptr_t)info.vmSize, setCurrentPermissions, protections);
+        kern_return_t r = vm_protect(mach_task_self(), (vm_address_t)requestedLoadAddress, (uintptr_t)segInfo.vmSize, setCurrentPermissions, protections);
         if ( r != KERN_SUCCESS ) {
             diag.error("vm_protect didn't work because %d", r);
             stop = true;
@@ -188,7 +188,7 @@ int main(int argc, const char * argv[]) {
     unsupported = true;
 #endif
     if ( unsupported ) {
-        funcs = &testFuncs;
+        auto* hostFuncs = &testFuncs;
         PASS("Success");
     }
 

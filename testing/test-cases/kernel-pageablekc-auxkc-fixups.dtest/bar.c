@@ -13,7 +13,7 @@ extern int pageableExportDirect();
 // Test direct pointer fixups to the pageable KC.  On x86_64 these would be emitted as just
 // a branch relocation so we needed to synthesize a stub
 __attribute__((constructor))
-int testDirectToPageable(const TestRunnerFunctions* funcs) {
+int testDirectToPageable(const TestRunnerFunctions* hostFuncs) {
     LOG("testDirectToPageable(): start");
     // The pageable returned 42
     int v = pageableExportDirect();

@@ -88,8 +88,8 @@ struct dyld_uuid_info {
 struct dyld_aot_image_info {
     const struct mach_header*   x86LoadAddress;
     const struct mach_header*   aotLoadAddress;
-    const uint64_t              aotImageSize;
-    const uint8_t               aotImageKey[DYLD_AOT_IMAGE_KEY_SIZE]; // uniquely identifying SHA-256 key for this aot
+    uint64_t                    aotImageSize;
+    uint8_t                     aotImageKey[DYLD_AOT_IMAGE_KEY_SIZE]; // uniquely identifying SHA-256 key for this aot
 };
 
 struct dyld_aot_shared_cache_info {
@@ -160,10 +160,13 @@ struct dyld_all_image_infos {
 	const char*						dyldPath;
 	mach_port_t						notifyPorts[DYLD_MAX_PROCESS_INFO_NOTIFY_COUNT];
 #if __LP64__
-	uintptr_t						reserved[13-(DYLD_MAX_PROCESS_INFO_NOTIFY_COUNT/2)];
+	uintptr_t						reserved[11-(DYLD_MAX_PROCESS_INFO_NOTIFY_COUNT/2)];
 #else
-	uintptr_t						reserved[13-DYLD_MAX_PROCESS_INFO_NOTIFY_COUNT];
+	uintptr_t						reserved[9-DYLD_MAX_PROCESS_INFO_NOTIFY_COUNT];
 #endif
+    // The following fields were added in version 18 (previously they were reserved padding fields)
+    uint64_t                        sharedCacheFSID;
+    uint64_t                        sharedCacheFSObjID;
 	/* the following field is only in version 16 (macOS 10.13, iOS 11.0) and later */
     uintptr_t                       compact_dyld_image_info_addr;
     size_t                          compact_dyld_image_info_size;

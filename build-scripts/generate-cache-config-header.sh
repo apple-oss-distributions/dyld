@@ -7,7 +7,13 @@ if [ -z "${ARM_SDK}" ]; then
     ARM_SDK=`xcrun -sdk macosx.internal --show-sdk-path`
 fi
 
-SHARED_REGION_FILE="${ARM_SDK}/usr/include/mach/shared_region.h"
+# mach/shared_region.h is private in some SDKs and public in others.
+# Do a grossly simplified version of what the compiler does to find it.
+SHARED_REGION_FILE="${ARM_SDK}/usr/local/include/mach/shared_region.h"
+if [ ! -e "${SHARED_REGION_FILE}" ]
+then
+    SHARED_REGION_FILE="${ARM_SDK}/usr/include/mach/shared_region.h"
+fi
 
 
 if [ -r "${SHARED_REGION_FILE}" ]; then
@@ -40,14 +46,5 @@ if [ -r "${SHARED_REGION_FILE}" ]; then
 else
     /bin/echo "ERROR: File needed to configure update_dyld_shared_cache does not exist '${SHARED_REGION_FILE}'"
     exit 1
-fi
-
-if [ -r "${ARM_SDK}/AppleInternal/DirtyDataFiles/dirty-data-segments-order.txt" ]; then
-    mkdir -p "${DSTROOT}/${INSTALL_LOCATION}/usr/local/bin"
-    cp "${ARM_SDK}/AppleInternal/DirtyDataFiles/dirty-data-segments-order.txt"  "${DSTROOT}/${INSTALL_LOCATION}/usr/local/bin"
-fi
-if [ -r "${ARM_SDK}/AppleInternal/OrderFiles/dylib-order.txt" ]; then
-    mkdir -p "${DSTROOT}/${INSTALL_LOCATION}/usr/local/bin"
-    cp "${ARM_SDK}/AppleInternal/OrderFiles/dylib-order.txt"  "${DSTROOT}/${INSTALL_LOCATION}/usr/local/bin"
 fi
 

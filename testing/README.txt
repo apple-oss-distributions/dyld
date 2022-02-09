@@ -22,16 +22,23 @@ watchOS, or bridgeOS). Valid platforms are "macos", ios", tvos", "watchos", "bri
 
 When build lines are executed, the current directory is set to the test case's .dtest dir.
 Build lines may contain the follow variables:
-    $BUILD_DIR    - expands to the directory in $DSTROOT where this test case binaries are installed
-    $RUN_DIR      - expands to the directory in /AppleInternal/ where this test case binaries will be run
-    $TEMP_DIR     - expands to a temporary directory that will be delete after this test case is built
-    $CC           - expands to the C compiler command line for the current platform.  It includes
-                    the min-os-version option, then SDK option, and the architectures.
-    $CXX          - expands to the C++ compiler plus standard options
-    $DEPENDS_ON   - adds a build time dependency to the next argument on the commandline
-    $SKIP_INSTALL - prevents the built binary from being installed
-    $SYM_LINK     - creates a symlink
-    $CP           - copies a file
+    $BUILD_DIR      - expands to the directory in $DSTROOT where this test case binaries are installed
+    $RUN_DIR        - expands to the directory in /AppleInternal/ where this test case binaries will be run
+    $TEMP_DIR       - expands to a temporary directory that will be delete after this test case is built
+    $CC             - expands to the C compiler command line for the current platform.  It includes
+                      the min-os-version option, then SDK option, and the architectures.
+    $CXX            - expands to the C++ compiler plus standard options
+    $DEPENDS_ON_ARG - adds a build time dependency to the next argument on the commandline
+    $DEPENDS_ON     - adds a build time dependency to the next argument on the commandline, which will not be passed to the tool being called
+    $SKIP_INSTALL   - prevents the built binary from being installed
+    $SYM_LINK       - creates a symlink
+    $CP             - copies a file
+
+Once each $CC line is expanded, the build system will consider every full path to a binary and -l variants to dylibs built in the default test
+dir will be considered a dependency, and automatically generate a ninja file that expresses that dependency graph. For other dependencies (such
+as generated .h files, or inputs to $CP and $SYMLINK) the $DEPENDS_ON_ARG can be added before any file path to argument to mark it as a
+dependency. If a path that is not on a commandline argument is necessaery (such as search paths for subframeworks dylibs) $DEPENDS_ON can be
+used, and the following string will not be passed to the command.
 
 When run lines are executed, the current directory is set to what $RUN_DIR was during build.
 Run lines may contain the follow variables:

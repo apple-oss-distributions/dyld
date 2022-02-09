@@ -84,7 +84,7 @@ __attribute__((section(("__HIB, __text"))))
 __attribute__((section(("__TEXT_EXEC, __text"))))
 #endif
 static int runAllModInitFunctions(const struct mach_header* mh, ModInitLogFunc logFunc,
-                                  const TestRunnerFunctions* funcs)  {
+                                  const TestRunnerFunctions* hostFuncs)  {
 	uintptr_t slide = 0;
 	if ( getSlide(mh, logFunc, &slide) != 0 ) {
 		return 1;
@@ -141,7 +141,7 @@ static int runAllModInitFunctions(const struct mach_header* mh, ModInitLogFunc l
 						if ( LogModInits ) {
 							logFunc("[LOG] kernel-mod-inits: running mod init %p\n", (const void*)func);
 						}
-						int initResult = func(funcs);
+						int initResult = func(hostFuncs);
 						if ( initResult != 0 ) {
 							logFunc("[LOG] kernel-mod-inits: mod init %p, result = %d\n", (const void*)func, initResult);
 							return 1;
@@ -162,7 +162,7 @@ __attribute__((section(("__HIB, __text"))))
 __attribute__((section(("__TEXT_EXEC, __text"))))
 #endif
 static int runAllModInitFunctionsForAppCache(const struct mach_header* appCacheMH, ModInitLogFunc logFunc,
-                                             const TestRunnerFunctions* funcs) {
+                                             const TestRunnerFunctions* hostFuncs) {
 	uintptr_t slide = 0;
 	if ( getSlide(appCacheMH, logFunc, &slide) != 0 ) {
 		return 1;
@@ -208,7 +208,7 @@ static int runAllModInitFunctionsForAppCache(const struct mach_header* appCacheM
             if ( LogModInits ) {
                 logFunc("[LOG] mod-init: Running mod inits for %p: %s\n", mh, name);
             }
-            int result = runAllModInitFunctions(mh, logFunc, funcs);
+            int result = runAllModInitFunctions(mh, logFunc, hostFuncs);
         	if (result != 0) {
         		return 1;
         	}
@@ -225,7 +225,8 @@ __attribute__((section(("__HIB, __text"))))
 __attribute__((section(("__TEXT_EXEC, __text"))))
 #endif
 static int slideKextsInsideKernelCollection(const struct mach_header* appCacheMH, const void* basePointers[4],
-                                            FixupsLogFunc logFunc, const TestRunnerFunctions* funcs) {
+                                            FixupsLogFunc logFunc, const TestRunnerFunctions* hostFuncs)
+{
     uintptr_t slideAmount = 0;
     if ( getSlide(appCacheMH, logFunc, &slideAmount) != 0 ) {
         return 1;

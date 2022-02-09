@@ -12,9 +12,20 @@ OBJROOT_RUN_STATIC="${TARGET_TEMP_DIR}/Objects_Run_Static"
 SYMROOT=${BUILD_DIR}/${CONFIGURATION}${EFFECTIVE_PLATFORM_NAME}/dyld_tests
 OBJROOT=${PROJECT_TEMP_DIR}/${CONFIGURATION}${EFFECTIVE_PLATFORM_NAME}
 SDKROOT=${SDKROOT:-$(xcrun -sdk macosx.internal --show-sdk-path)}
-DEPLOYMENT_TARGET_CLANG_FLAG_NAME=${DEPLOYMENT_TARGET_CLANG_FLAG_NAME:-"mmacosx-version-min"}
+
+case "$PLATFORM_NAME" in
+    "bridgeos")
+        DK_SDK="driverkit.macosx.internal";;
+    *)
+        DK_SDK="driverkit.${PLATFORM_NAME}.internal";;
+esac
+DK_SDKROOT=$(xcrun -sdk ${DK_SDK} --show-sdk-path)
+DK_SYSTEM_HEADER_SEARCH_PATHS="${DK_SDKROOT}/System/DriverKit/Runtime/usr/include/"
+
+
 DERIVED_FILES_DIR=${DERIVED_FILES_DIR}
 LDFLAGS="-L$BUILT_PRODUCTS_DIR"
+DK_LDFLAGS="-L$BUILT_PRODUCTS_DIR-driverkit"
 #LLBUILD=$(xcrun --sdk $SDKROOT --find llbuild 2> /dev/null)
 NINJA=${LLBUILD:-`xcrun  --sdk $SDKROOT --find ninja  2> /dev/null`}
 BUILD_TARGET=${ONLY_BUILD_TEST:-all}
@@ -23,9 +34,13 @@ if [ ! -z "$LLBUILD" ]; then
   NINJA="$LLBUILD ninja build"
 fi
 
-OSVERSION="10.14"
-if [ ! -z "$DEPLOYMENT_TARGET_CLANG_ENV_NAME" ]; then
-    OSVERSION=${!DEPLOYMENT_TARGET_CLANG_ENV_NAME}
+if [ -z "$DEPLOYMENT_TARGET_CLANG_ENV_NAME" ]; then
+    echo "Error $$DEPLOYMENT_TARGET_CLANG_ENV_NAME must be set"
+fi
+OSVERSION=${!DEPLOYMENT_TARGET_CLANG_ENV_NAME}
+
+if [ -z "$PLATFORM_NAME" ]; then
+    echo "Error $$PLATFORM_NAME must be set"
 fi
 
 if [ -z "$SRCROOT" ]; then
@@ -52,9 +67,11 @@ fi
 TMPFILE=$(mktemp ${DERIVED_FILES_DIR}/config.ninja.XXXXXX)
 
 echo "OBJROOT = $OBJROOT" >> $TMPFILE
-echo "OSFLAG = $DEPLOYMENT_TARGET_CLANG_FLAG_NAME" >> $TMPFILE
+echo "OSPLATFORM = $PLATFORM_NAME" >> $TMPFILE
 echo "OSVERSION = $OSVERSION" >> $TMPFILE
 echo "SDKROOT = $SDKROOT" >> $TMPFILE
+echo "DK_SDKROOT = $DK_SDKROOT" >> $TMPFILE
+echo "DK_SYSTEM_HEADER_SEARCH_PATHS = $DK_SYSTEM_HEADER_SEARCH_PATHS" >> $TMPFILE
 echo "SRCROOT = $SRCROOT" >> $TMPFILE
 echo "SYMROOT = $SYMROOT" >> $TMPFILE
 echo "BUILT_PRODUCTS_DIR = $BUILT_PRODUCTS_DIR" >> $TMPFILE
@@ -67,13 +84,19 @@ echo "SYSTEM_HEADER_SEARCH_PATHS = $SYSTEM_HEADER_SEARCH_PATHS" >> $TMPFILE
 echo "ARCHS = $ARCHS" >> $TMPFILE
 echo "DERIVED_FILES_DIR = $DERIVED_FILES_DIR" >> $TMPFILE
 echo "LDFLAGS = $LDFLAGS" >> $TMPFILE
+echo "DK_LDFLAGS = $DK_LDFLAGS" >> $TMPFILE
 
 /usr/bin/rsync -vc $TMPFILE ${DERIVED_FILES_DIR}/config.ninja
 /bin/rm -f $TMPFILE
 
 xcodebuild install -target run-static SDKROOT="${SDKROOT}" MACOSX_DEPLOYMENT_TARGET=${MACOSX_DEPLOYMENT_TARGET} OBJROOT="${OBJROOT_RUN_STATIC}" SRCROOT="${SRCROOT}" DSTROOT="${DSTROOT}" SYMROOT="${SYMROOT}" RC_ProjectSourceVersion="${RC_ProjectSourceVersion}" DISABLE_SDK_METADATA_PARSING=YES
 
-xcodebuild install -target dyld_app_cache_util -sdk macosx.internal -configuration ${CONFIGURATION} MACOSX_DEPLOYMENT_TARGET=${MACOSX_DEPLOYMENT_TARGET} OBJROOT="${OBJROOT_DYLD_APP_CACHE_UTIL}" SRCROOT="${SRCROOT}" DSTROOT="${BUILT_PRODUCTS_DIR}" SYMROOT="${SYMROOT}" RC_ProjectSourceVersion="${RC_ProjectSourceVersion}" INSTALL_PATH="/host_tools" RC_ARCHS="${NATIVE_ARCH_ACTUAL}" DISABLE_SDK_METADATA_PARSING=YES
+if [ "${PLATFORM_NAME}" == "watchos" ]
+then
+    echo "watchOS does not need native dyld_app_cache_util"
+else
+    xcodebuild install -target dyld_app_cache_util -sdk macosx.internal -configuration ${CONFIGURATION} MACOSX_DEPLOYMENT_TARGET=${MACOSX_DEPLOYMENT_TARGET} OBJROOT="${OBJROOT_DYLD_APP_CACHE_UTIL}" SRCROOT="${SRCROOT}" DSTROOT="${BUILT_PRODUCTS_DIR}" SYMROOT="${SYMROOT}" RC_ProjectSourceVersion="${RC_ProjectSourceVersion}" INSTALL_PATH="/host_tools" RC_ARCHS="${NATIVE_ARCH_ACTUAL}" DISABLE_SDK_METADATA_PARSING=YES
+fi
 
 ${SRCROOT}/testing/build_ninja.py ${DERIVED_FILES_DIR}/config.ninja || exit_if_error $? "Generating build.ninja failed"
-${NINJA} -C ${DERIVED_FILES_DIR} ${BUILD_TARGET} || exit_if_error $? "Ninja build failed"
+${NINJA} -k 0 -C ${DERIVED_FILES_DIR} ${BUILD_TARGET} || exit_if_error $? "Ninja build failed"

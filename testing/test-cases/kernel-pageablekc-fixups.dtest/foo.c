@@ -9,7 +9,7 @@ int foo() {
 }
 
 __attribute__((constructor))
-int test(const TestRunnerFunctions* funcs) {
+int test(const TestRunnerFunctions* hostFuncs) {
     LOG("test(): start");
     // kernel, bar, and foo each added 1, 2, 4, so we need to return 7 to know this worked
 	int v = foo();
@@ -26,7 +26,7 @@ int fooDirect() {
 
 // Test direct pointer fixups, ie, not via a GOT
 __attribute__((constructor))
-int testDirect(const TestRunnerFunctions* funcs) {
+int testDirect(const TestRunnerFunctions* hostFuncs) {
     LOG("testDirect(): start");
     // kernel, bar, and foo each added 1, 2, 4, so we need to return 7 to know this worked
     int v = fooDirect();
