@@ -267,9 +267,9 @@ void* ProcessConfig::Process::roalloc(size_t size) const
     // warning: fragile code here.  The goal is to have a small buffer that
     // goes onto the end of the __DATA_CONST segment.  That segment is r/w
     // while ProcessConfig is being constructed, then made r/o.
-    static uint8_t roBuffer[0x8000] __attribute__((section("__DATA_CONST,__bss")));
+    static uint8_t roBuffer[0x10000] __attribute__((section("__DATA_CONST,__bss")));
     static uint8_t* next = roBuffer;
-    assert( next < &roBuffer[0x8000]);
+    assert( next < &roBuffer[0x10000]);
     void* result = next;
     next += size;
     return result;

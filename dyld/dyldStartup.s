@@ -85,7 +85,7 @@ __dyld_start:
 #elif __x86_64__
     movq    %rsp,%rdi       # save pointer to KernelArgs
     pushq   $0              # push a zero for debugger end of frames marker
-    movq    %rsp,%rbp       # first frame
+    movq    $0,%rbp         # first frame
     andq    $-16,%rsp       # force SSE alignment
     subq    $8,%rsp         # align stack for jump instead of call
     jmp     start

@@ -575,7 +575,6 @@ bool MachOFile::loadableIntoProcess(Platform processPlatform, const char* path) 
         return true;
 #endif
 
-
     bool iOSonMac = (processPlatform == Platform::iOSMac);
 #if (TARGET_OS_OSX && TARGET_CPU_ARM64)
     // allow iOS binaries in iOSApp
