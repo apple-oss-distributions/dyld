@@ -69,11 +69,12 @@ struct VIS_HIDDEN Mapper {
             std::swap(_pointer, P._pointer);
             std::swap(_mmapped, P._mmapped);
         }
-        void operator=(Pointer&& P) {
+        Pointer& operator=(Pointer&& P) {
             std::swap(_mapper, P._mapper);
             std::swap(_size, P._size);
             std::swap(_pointer, P._pointer);
             std::swap(_mmapped, P._mmapped);
+            return *this;
         };
         ~Pointer() {
             if (_pointer && _mmapped) {
