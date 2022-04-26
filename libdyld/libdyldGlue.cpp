@@ -112,29 +112,12 @@ using dyld4::gDyld;
 
 static const dyld4::LibSystemHelpers sHelpers;
 
-static void beforeForkPrepareDlopen()
-{
-    gDyld.apis->_dyld_before_fork_dlopen();
-}
-
-static void afterForkParentDlopen()
-{
-    gDyld.apis->_dyld_after_fork_dlopen_parent();
-}
-
-static void afterForkChildDlopen()
-{
-    gDyld.apis->_dyld_after_fork_dlopen_child();
-}
-
 // This is called during libSystem.dylib initialization.
 // It calls back into dyld and lets it know it can start using libSystem.dylib
 // functions which are wrapped in the LibSystemHelpers class.
 void _dyld_initializer()
 {
     gDyld.apis->_libdyld_initialize(&sHelpers);
-
-    pthread_atfork(&beforeForkPrepareDlopen, &afterForkParentDlopen, &afterForkChildDlopen);
 }
 
 
@@ -801,6 +784,24 @@ struct _dyld_protocol_conformance_result _dyld_find_foreign_type_protocol_confor
 uint32_t _dyld_swift_optimizations_version()
 {
     return gDyld.apis->_dyld_swift_optimizations_version();
+}
+
+//
+// MARK: --- APIs added iOS 15.x, macOS 12.x ---
+//
+void _dyld_dlopen_atfork_prepare()
+{
+    gDyld.apis->_dyld_before_fork_dlopen();
+}
+
+void _dyld_dlopen_atfork_parent()
+{
+    gDyld.apis->_dyld_after_fork_dlopen_parent();
+}
+
+void _dyld_dlopen_atfork_child()
+{
+    gDyld.apis->_dyld_after_fork_dlopen_child();
 }
 
 //

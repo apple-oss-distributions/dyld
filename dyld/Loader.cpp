@@ -369,7 +369,11 @@ void Loader::forEachPath(Diagnostics& diag, RuntimeState& state, const char* loa
                                  }
                                  if ( stop )
                                     return;
-
+                                // don't use fallbacks for dlopen() of non-framework paths with slashes
+                                if ( (type == ProcessConfig::PathOverrides::Type::standardFallback) || (type == ProcessConfig::PathOverrides::Type::customFallback) ) {
+                                    if ( !options.staticLinkage && (strchr(loadPath, '/') != nullptr) && (state.config.pathOverrides.getFrameworkPartialPath(loadPath) == nullptr) )
+                                        return;
+                                }
                                 // expand @ paths
                                 Loader::forEachResolvedAtPathVar(state, possibleVariantPath, options, type, stop, handler);
                           });

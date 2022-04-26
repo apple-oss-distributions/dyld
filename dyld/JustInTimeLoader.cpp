@@ -451,7 +451,8 @@ void JustInTimeLoader::applyFixups(Diagnostics& diag, RuntimeState& state, DyldC
         const MachOAnalyzer* ma = this->analyzer();
         if ( !ma->inDyldCache() ) {
             ma->forEachSupportedPlatform(^(dyld3::Platform platform, uint32_t minOS, uint32_t sdk) {
-                if ( (platform == dyld3::Platform::macOS) && (minOS <= 0x000A0600) ) {
+                // rdar://84760053 (SEED: Web: Crash in libobjc.A.dylib's load_images when loading certain bundles in Monterey)
+                if ( (platform == dyld3::Platform::macOS) && (minOS <= 0x000A0900) ) {
                     struct DATAdyld { void* dyldLazyBinder; dyld3::DyldLookFunc dyldFuncLookup; };
                     uint64_t  sectSize;
                     if ( DATAdyld* dyldSect = (DATAdyld*)ma->findSectionContent("__DATA", "__dyld", sectSize) ) {

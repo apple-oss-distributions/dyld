@@ -127,7 +127,7 @@
     });
 #endif
 }
-/*
+
 - (void)testLocalIntrospection {
     kern_return_t kr = KERN_SUCCESS;
     dyld_process_t process = dyld_process_create_for_task(mach_task_self(), &kr);
@@ -143,7 +143,7 @@
     dyld_process_snapshot_dispose(snapshot);
     dyld_process_dispose(process);
 }
-*/
+
 - (void)testLocalIntrospectionNullKernReturns {
     dyld_process_t process = dyld_process_create_for_task(mach_task_self(), nullptr);
     dyld_process_snapshot_t snapshot = dyld_process_snapshot_create_for_process(process, nullptr);

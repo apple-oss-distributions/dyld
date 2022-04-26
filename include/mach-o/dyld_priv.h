@@ -45,6 +45,10 @@ extern void _dyld_atfork_prepare(void);
 extern void _dyld_atfork_parent(void);
 extern void _dyld_fork_child(void);
 
+extern void _dyld_dlopen_atfork_prepare(void);
+extern void _dyld_dlopen_atfork_parent(void);
+extern void _dyld_dlopen_atfork_child(void);
+
 
 
 typedef void (*_dyld_objc_notify_mapped)(unsigned count, const char* const paths[], const struct mach_header* const mh[]);

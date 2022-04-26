@@ -11,4 +11,10 @@ module MachO_Private.dyld [system] [extern_c] {
     header "dyld-interposing.h"
     export *
   }
+
+  explicit module introspection {
+    header "dyld_introspection.h"
+    export *
+  }
+
 }

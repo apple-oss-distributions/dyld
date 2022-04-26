@@ -260,6 +260,7 @@ public:
         bool                            hasInsertedDylibs() const { return (_insertedDylibCount != 0); }
         uint32_t                        insertedDylibCount() const { return _insertedDylibCount; }
         const char*                     simRootPath() const { return _simRootPath; }
+        const char*                     getFrameworkPartialPath(const char* path) const;
 
         static const char*              getLibraryLeafName(const char* path);
         static const char*              typeName(Type);
@@ -273,7 +274,6 @@ public:
 
         void                            setString(const Process& process, const char*& var, const char* value);
         static void                     forEachInColonList(const char* list1, const char* list2, void (^callback)(const char* path, bool& stop));
-        const char*                     getFrameworkPartialPath(const char* path) const;
         void                            handleListEnvVar(const char* key, const char** list, void (^handler)(const char* envVar)) const;
         void                            handleEnvVar(const char* key, const char* value, void (^handler)(const char* envVar)) const;
         void                            forEachDylibFallback(dyld3::Platform platform, bool disableCustom, void (^handler)(const char* fallbackDir, Type type, bool& stop)) const;

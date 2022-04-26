@@ -626,7 +626,21 @@ ProcessConfigTester::ProcessConfigTester(MockO& main, const std::vector<const ch
 }
 #endif
 
+- (void)testInsertLibraries
+{
+    // Arrange: mock up start up config with DYLD_INSERT_LIBRARIES
+    MockO main(MH_EXECUTE, "arm64");
+    std::string insertString = "DYLD_INSERT_LIBRARIES=/bar/libfoo.dylib";
+    for (int i = 1; i < 1000; i++)
+        insertString += ":/foo/libbar" +  std::to_string(i) + ".dylib";
+    ProcessConfigTester tester(main, { insertString.c_str() });
 
+    // Act: run dyld's ProcessConfig constructor
+    ProcessConfig testConfig(tester.kernArgs(), tester.osDelegate(), tester.allocator());
+
+    // Assert: insertedDylibCount() returns the same number of inserted libs
+    XCTAssertTrue(testConfig.pathOverrides.insertedDylibCount() == 1000);
+}
 
 
 - (void)testDefaultFallbackFrameworkPathsMac

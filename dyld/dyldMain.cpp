@@ -467,7 +467,7 @@ __attribute__((noinline)) static MainFunc prepare(APIs& state, const MachOAnalyz
     addNonSharedCacheImageUUID(state.longTermAllocator, dyldInfo);
 
     // load any inserted dylibs
-    STACK_ALLOC_ARRAY(Loader*, topLevelLoaders, 16);
+    STACK_ALLOC_OVERFLOW_SAFE_ARRAY(Loader*, topLevelLoaders, 16);
     topLevelLoaders.push_back(mainLoader);
     Loader::LoadChain   loadChainMain { nullptr, mainLoader };
     Loader::LoadOptions options;

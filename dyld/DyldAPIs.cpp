@@ -1215,6 +1215,13 @@ void* APIs::dlopen_from(const char* path, int mode, void* addressInCaller)
             return RTLD_DEFAULT;
     }
 
+    // If we are still forking, then return as it would be unsafe to even try
+    // take the locks at this point
+    if ( this->_locks.stillForking ) {
+        setErrorString("dlopen(%s, 0x%04X): cannot dlopen until fork() handlers have completed", path, mode);
+        return nullptr;
+    }
+
     // don't take the lock until after the check for path==NULL
     // don't take the lock in RTLD_NOLOAD mode, since that will never change the set of loaded images
     bool skipApiLock = (mode & RTLD_NOLOAD);
@@ -1287,6 +1294,7 @@ void* APIs::dlopen_from(const char* path, int mode, void* addressInCaller)
         // load all dependents
         Loader::LoadChain   loadChain { options.rpathStack, topLoader };
         Loader::LoadOptions depOptions;
+        depOptions.staticLinkage   = true;
         depOptions.rtldLocal       = false; // RTLD_LOCAL only effects top level dylib
         depOptions.rtldNoDelete    = (mode & RTLD_NODELETE);
         depOptions.canBeDylib      = true;
@@ -1416,6 +1424,13 @@ void* APIs::dlopen_from(const char* path, int mode, void* addressInCaller)
 
 int APIs::dlclose(void* handle)
 {
+    // If we are still forking, then return as it would be unsafe to even try
+    // take the locks at this point
+    if ( this->_locks.stillForking ) {
+        setErrorString("dlclose(%p): cannot dlclose until fork() handlers have completed", handle);
+        return -1;
+    }
+
     RecursiveAutoLock apiLock(*this);
     if ( config.log.apis )
         log("dlclose(%p)\n", handle);

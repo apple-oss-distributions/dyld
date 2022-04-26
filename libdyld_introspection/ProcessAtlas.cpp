@@ -138,6 +138,9 @@ SharedPtr<Mapper> Mapper::mapperForSharedCache(const char* cachePath, const DRL:
     if ( fd == -1 ) {
         return nullptr;
     }
+    //TODO: Replace this with a set
+    Vector<int> fds(libDylAllocator());
+    fds.push_back(fd);
     const void* localBaseAddress = _dyld_get_shared_cache_range(&length);
     if (localBaseAddress) {
         auto localCacheHeader = ((dyld_cache_header*)localBaseAddress);
@@ -182,7 +185,7 @@ SharedPtr<Mapper> Mapper::mapperForSharedCache(const char* cachePath, const DRL:
                 .fd         = -1
             });
         } else {
-            printMapping(&onDiskCacheMappings[i], 0, slide);
+            printMapping(&onDiskCacheMappings[i], i+1, slide);
             mappings.emplace_back((Mapper::Mapping){
                 .address    = onDiskCacheMappings[i].address + slide,
                 .size       = onDiskCacheMappings[i].size,
@@ -197,6 +200,7 @@ SharedPtr<Mapper> Mapper::mapperForSharedCache(const char* cachePath, const DRL:
             char subCachePath[PATH_MAX];
             snprintf(&subCachePath[0], PATH_MAX, "%s.%u", cachePath, i+1);
             fd = open(subCachePath, O_RDONLY);
+            fds.push_back(fd);
             if ( fd == -1 ) {
                 break;
             }
@@ -213,22 +217,14 @@ SharedPtr<Mapper> Mapper::mapperForSharedCache(const char* cachePath, const DRL:
             auto onDiskSubcacheUUID = DRL::UUID(subCache->uuid);
             auto subcacheUUID = DRL::UUID(subCaches[i].uuid);
             if (subcacheUUID != onDiskSubcacheUUID) {
-                //TODO: Replace this with a set
-                Vector<int> fds(libDylAllocator());
-                for (auto& deadMapping : mappings) {
-                    if (deadMapping.fd == -1) { continue; }
-                    if (std::find(fds.begin(), fds.end(), deadMapping.fd) == fds.end()) {
-                        fds.push_back(deadMapping.fd);
-                    }
-                }
-                for (auto& deadFd : fds) {
+                for (auto deadFd : fds) {
                     close(deadFd);
                 }
                 return nullptr;
             }
 
             for (auto j = 0; j < subCache->mappingWithSlideCount; ++j) {
-                if (useLocalCache && ((onDiskCacheMappings[j].maxProt & VM_PROT_WRITE) != VM_PROT_WRITE)) {
+                if (useLocalCache && ((subCacheMappings[j].maxProt & VM_PROT_WRITE) != VM_PROT_WRITE)) {
                     // This region is immutable, use in memory version
                     printMapping(&subCacheMappings[j], 255, slide);;
                     mappings.emplace_back((Mapper::Mapping){
@@ -248,6 +244,15 @@ SharedPtr<Mapper> Mapper::mapperForSharedCache(const char* cachePath, const DRL:
                 }
             }
         }
+    }
+    for (auto activeMapping : mappings) {
+        if (activeMapping.fd == -1) { continue; }
+        auto i = std::find(fds.begin(), fds.end(), activeMapping.fd);
+        if (i == fds.end()) { continue; }
+        fds.erase(i);
+    }
+    for (auto deadFd : fds) {
+        close(deadFd);
     }
     munmap(mapping,(size_t)headerSize);
     return SharedPtr<Mapper>(new (libDylAllocator()) Mapper(mappings));
@@ -404,19 +409,6 @@ const MachOLoaded* Image::ml() {
     // in process / vs out of process / vs shared cache.
     return &*_ml;
 }
-
-//const MachOLoaded*              ml();
-//DRL::UUID                       _uuid;
-//Mapper::Pointer<MachOLoaded>    _ml;
-//const uint64_t                  _slide              = 0;
-//const void*                     _address            = nullptr;
-//SharedPtr<Mapper>               _mapper;
-//const SharedCache*              _sharedCache        = nullptr;
-//const char*                     _installname        = nullptr;
-//const char*                     _filename           = nullptr;
-//bool                            _uuidLoaded         = false;
-//bool                            _installnameLoaded  = false;
-//bool                            _filenameLoaded     = false;
 
 const DRL::UUID& Image::uuid() {
     if (!_uuidLoaded) {

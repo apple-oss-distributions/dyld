@@ -71,13 +71,14 @@ struct VIS_HIDDEN UniquePtr {
         metadata->slot1 = AllocationMetadata::kUniquePtr;
     }
     UniquePtr(const UniquePtr&) = delete;
-    void operator=(const UniquePtr&) = delete;
+    UniquePtr& operator=(const UniquePtr&) = delete;
 
     UniquePtr(UniquePtr&& O) {
         std::swap(_data, O._data);
     }
-    void operator=(UniquePtr&& O) {
+    UniquePtr& operator=(UniquePtr&& O) {
         std::swap(_data, O._data);
+        return *this;
     };
     ~UniquePtr() {
         if (!_data) { return; }
@@ -133,15 +134,17 @@ struct VIS_HIDDEN SharedPtr {
     SharedPtr(const SharedPtr& O) : _data(O._data) {
         incrementRefCount();
     };
-    void operator=(const SharedPtr& O) {
+    SharedPtr& operator=(const SharedPtr& O) {
         _data = O._data;
         incrementRefCount();
+        return *this;
     }
     SharedPtr(SharedPtr&& O) {
         std::swap(_data, O._data);
     }
-    void operator=(SharedPtr&& O) {
+    SharedPtr& operator=(SharedPtr&& O) {
         std::swap(_data, O._data);
+        return *this;
     };
     ~SharedPtr() {
         decrementRefCount();

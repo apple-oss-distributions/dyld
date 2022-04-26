@@ -224,6 +224,14 @@ public:
                                                                                                  size_t foreignTypeIdentityLength) const;
     virtual     uint32_t                            _dyld_swift_optimizations_version() const;
     virtual     void                                runAllInitializersForMain();
+
+    //
+    // Added iOS 15.x, macOS 12.x
+    //
+    // Note these 3 methods were technically internally defined in iOS 15/macOS 12, but are now exported from
+    // libdyld.dylib as of iOS 15.x/macOS 12.x.
+    // Note the names of these virtual methods doesn't match the API names.  We can't change them due
+    // to pointer signing
     virtual     void                                _dyld_before_fork_dlopen();
     virtual     void                                _dyld_after_fork_dlopen_parent();
     virtual     void                                _dyld_after_fork_dlopen_child();

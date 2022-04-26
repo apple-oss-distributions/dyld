@@ -97,7 +97,7 @@ public:
         typedef void          (^Missing)(const char* pathNotFound);
 
         bool        launching           = false;
-        bool        staticLinkage       = false;
+        bool        staticLinkage       = false;    // did this path come from an LC_LOAD_DYLIB (as opposed to top level dlopen)
         bool        canBeMissing        = false;
         bool        rtldLocal           = false;
         bool        rtldNoDelete        = false;

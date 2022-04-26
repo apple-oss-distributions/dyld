@@ -39,6 +39,9 @@ int main(int argc, const char* argv[], const char* envp[], const char* apple[]) 
             FAIL("Could not dlopen CoreFoundation because: %s", dlerror());
 
         PASS("Success");
+    } else {
+        // Also dlopen on the child side.  This will crash if locks are bad
+        dlopen("/System/Library/Frameworks/CoreFoundation.framework/CoreFoundation", RTLD_LAZY);
     }
 
     return 0;
