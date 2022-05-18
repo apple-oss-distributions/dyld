@@ -1932,6 +1932,13 @@ void Loader::applyCachePatchesToOverride(RuntimeState& state, const Loader* dyli
             uintptr_t  targetRuntimeAddress = patch->overrideOffsetOfImpl ? (uintptr_t)(this->loadAddress(state)) + ((intptr_t)patch->overrideOffsetOfImpl) : 0;
             uintptr_t* loc                  = (uintptr_t*)((uint8_t*)dylibToPatchMA + userVMOffset);
             uintptr_t  newValue             = targetRuntimeAddress + (uintptr_t)addend;
+
+            // if overridden dylib is also interposed, use interposing
+            for ( const InterposeTupleAll& tuple : state.interposingTuplesAll ) {
+                if ( tuple.replacee == newValue ) {
+                    newValue = tuple.replacement;
+                }
+            }
 #if __has_feature(ptrauth_calls)
             if ( pmd.authenticated ) {
                 newValue = dyld3::MachOLoaded::ChainedFixupPointerOnDisk::Arm64e::signPointer(newValue, loc, pmd.usesAddrDiversity, pmd.diversity, pmd.key);

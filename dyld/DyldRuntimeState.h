@@ -78,7 +78,6 @@ struct RuntimeLocks
     os_unfair_recursive_lock        notifiersLock         = OS_UNFAIR_RECURSIVE_LOCK_INIT;
     os_unfair_recursive_lock        tlvInfosLock          = OS_UNFAIR_RECURSIVE_LOCK_INIT;
     os_unfair_recursive_lock        apiLock               = OS_UNFAIR_RECURSIVE_LOCK_INIT;
-    bool                            stillForking          = false;
   #if !TARGET_OS_SIMULATOR
     os_lock_unfair_s                logSerializer         = OS_LOCK_UNFAIR_INIT;
   #endif

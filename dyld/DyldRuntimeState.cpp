@@ -2314,7 +2314,6 @@ void RuntimeState::takeDlopenLockBeforeFork()
     // before then doing the reset
     if ( this->libSystemHelpers != nullptr ) {
         this->libSystemHelpers->os_unfair_recursive_lock_lock_with_options(&_locks.apiLock, OS_UNFAIR_LOCK_NONE);
-        _locks.stillForking = true;
     }
 #endif
 }
@@ -2325,7 +2324,6 @@ void RuntimeState::releaseDlopenLockInForkParent()
     // This is on the parent side after fork().  We just to an unlock to undo the lock we did before form
     if ( this->libSystemHelpers != nullptr ) {
         this->libSystemHelpers->os_unfair_recursive_lock_unlock(&_locks.apiLock);
-        _locks.stillForking = false;
         // FIXME: logSerializer
     }
 #endif
@@ -2337,7 +2335,6 @@ void RuntimeState::resetDlopenLockInForkChild()
     // This is the child side after fork().  The locks are all taken, and will be reset to their initial state
     if ( (this->libSystemHelpers != nullptr) && (this->libSystemHelpers->version() >= 2) ) {
         this->libSystemHelpers->os_unfair_recursive_lock_unlock_forked_child(&_locks.apiLock);
-        _locks.stillForking = false;
         // FIXME: logSerializer
     }
 #endif
