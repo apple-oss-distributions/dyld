@@ -495,6 +495,11 @@ ProcessConfig::Security::Security(Process& process, SyscallDelegate& syscall)
     this->allowClassicFallbackPaths = (amfiFlags & AMFI_DYLD_OUTPUT_ALLOW_FALLBACK_PATHS);
     this->allowInsertFailures       = (amfiFlags & AMFI_DYLD_OUTPUT_ALLOW_FAILED_LIBRARY_INSERTION);
     this->allowInterposing          = (amfiFlags & AMFI_DYLD_OUTPUT_ALLOW_LIBRARY_INTERPOSING);
+#if TARGET_OS_OSX
+    this->allowEmbeddedVars = (amfiFlags & (1<<7)); // FIXME: use AMFI_DYLD_OUTPUT_ALLOW_EMBEDDED_VARS when available);
+ #else
+    this->allowEmbeddedVars = this->allowEnvVarsPath;
+ #endif
 #if TARGET_OS_SIMULATOR
     this->allowInsertFailures       = true; // FIXME: amfi is returning the wrong value for simulators <rdar://74025454>
 #endif
@@ -850,14 +855,15 @@ ProcessConfig::PathOverrides::PathOverrides(const Process& process, const Securi
         }
     }
 
-    // process LC_DYLD_ENVIRONMENT variables
-    process.mainExecutable->forDyldEnv(^(const char* keyEqualValue, bool& stop) {
-        this->addEnvVar(process, security, keyEqualValue, true, nullptr);
-    });
+    // process LC_DYLD_ENVIRONMENT variables if allowed
+    if ( security.allowEmbeddedVars ) {
+        process.mainExecutable->forDyldEnv(^(const char* keyEqualValue, bool& stop) {
+            this->addEnvVar(process, security, keyEqualValue, true, nullptr);
+        });
+    }
 
-    // process DYLD_VERSIONED_* env vars if allowed
-    if ( security.allowEnvVarsPath )
-        this->processVersionedPaths(process, syscall, cache, process.platform, *process.archs);
+    // process DYLD_VERSIONED_* env vars
+    this->processVersionedPaths(process, syscall, cache, process.platform, *process.archs);
 }
 
 
@@ -1664,7 +1670,42 @@ void halt(const char* message)
         payloadSize += strlcpy(&payloadBuffer[payloadSize], gProcessInfo->errorSymbol, sizeof(payloadBuffer) - payloadSize) + 1;
     }
     char truncMessage[EXIT_REASON_USER_DESC_MAX_LEN];
-    strlcpy(truncMessage, message, EXIT_REASON_USER_DESC_MAX_LEN);
+    truncMessage[EXIT_REASON_USER_DESC_MAX_LEN-1] = '\0';
+
+    bool walkingPath = false;
+    size_t pathStart = 0;
+    size_t dstIndex = 0;
+    for (size_t i = 0; i < EXIT_REASON_USER_DESC_MAX_LEN; i++) {
+        bool separator = false;
+        if (message[i] == '\'' ) {
+            separator = true;
+            if ( walkingPath ) {
+                // reached end of path
+                walkingPath = false;
+                size_t pathEnd = i-1;
+                size_t sz = pathEnd - pathStart;
+                const char* path = message + pathStart;
+                if ( memcmp(path, &payloadBuffer[payload->targetDylibPathOffset], sz) == 0
+                    || memcmp(path, &payloadBuffer[payload->clientPathOffset], sz) == 0 ) {
+                    for (size_t j = pathStart; j <= pathEnd; j++) {
+                        truncMessage[dstIndex] = message[j];
+                        dstIndex++;
+                    }
+                }
+            } else {
+                // found new path
+                walkingPath = true;
+                pathStart = i+1;
+            }
+        }
+
+        if ( !walkingPath || separator ) {
+            truncMessage[dstIndex] = message[i];
+            dstIndex++;
+        }
+    }
+    truncMessage[EXIT_REASON_USER_DESC_MAX_LEN-1] = '\0';
+
     const bool verbose = false;
     if ( verbose ) {
         console("dyld_abort_payload.version               = 0x%08X\n", payload->version);

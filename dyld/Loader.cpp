@@ -459,10 +459,12 @@ const Loader* Loader::getLoader(Diagnostics& diag, RuntimeState& state, const ch
                             // <rdar://problem/47682983> don't allow file system relative paths in hardened programs
                             // (type == ProcessConfig::PathOverrides::Type::implictRpathExpansion)
                             if ( !state.config.security.allowEnvVarsPath && isFileRelativePath(possiblePath) ) {
+                                char dupPath[PATH_MAX];
+                                Diagnostics::quotePath(possiblePath, dupPath);
                                 if ( diag.noError() )
-                                    diag.error("tried: '%s' (relative path not allowed in hardened program)", possiblePath);
+                                    diag.error("tried: '%s' (relative path not allowed in hardened program)", dupPath);
                                 else
-                                    diag.appendError(", '%s' (relative path not allowed in hardened program)", possiblePath);
+                                    diag.appendError(", '%s' (relative path not allowed in hardened program)", dupPath);
                                 return;
                             }
 
@@ -565,17 +567,19 @@ const Loader* Loader::getLoader(Diagnostics& diag, RuntimeState& state, const ch
                                 if ( options.pathNotFoundHandler )
                                     options.pathNotFoundHandler(possiblePath);
                                 // set diag to be contain all errors from all paths tried
+                                char dupPath[PATH_MAX];
+                                Diagnostics::quotePath(possiblePath, dupPath);
                                 if ( diag.noError() ) {
                                     if ( notAFile )
-                                        diag.error("tried: '%s' (not a file)", possiblePath);
+                                        diag.error("tried: '%s' (not a file)", dupPath);
                                     else
-                                        diag.error("tried: '%s' (no such file)", possiblePath);
+                                        diag.error("tried: '%s' (no such file)", dupPath);
                                 }
                                 else {
                                     if ( notAFile )
-                                        diag.appendError(", '%s' (not a file)", possiblePath);
+                                        diag.appendError(", '%s' (not a file)", dupPath);
                                     else
-                                        diag.appendError(", '%s' (no such file)", possiblePath);
+                                        diag.appendError(", '%s' (no such file)", dupPath);
                                 }
                                 return;
                             }
@@ -613,11 +617,13 @@ const Loader* Loader::getLoader(Diagnostics& diag, RuntimeState& state, const ch
                                 diag.clearError(); // found dylib, so clear any errors from previous paths tried
                             }
                             else {
+                                char dupPath[PATH_MAX];
+                                Diagnostics::quotePath(possiblePath, dupPath);
                                 // set diag to be contain all errors from all paths tried
                                 if ( diag.noError() )
-                                    diag.error("tried: '%s' (%s)", possiblePath, possiblePathDiag.errorMessageCStr());
+                                    diag.error("tried: '%s' (%s)", dupPath, possiblePathDiag.errorMessageCStr());
                                 else
-                                    diag.appendError(", '%s' (%s)", possiblePath, possiblePathDiag.errorMessageCStr());
+                                    diag.appendError(", '%s' (%s)", dupPath, possiblePathDiag.errorMessageCStr());
                             }
                         });
 
@@ -874,12 +880,14 @@ uint64_t Loader::validateFile(Diagnostics& diag, const RuntimeState& state, int 
     struct stat statBuf;
     if ( state.config.syscall.fstat(fd, &statBuf) != 0 ) {
         int statErr = errno;
+        char dupPath[PATH_MAX];
+        Diagnostics::quotePath(path, dupPath);
         if ( (statErr == EPERM) && state.config.syscall.sandboxBlockedStat(path) )
-            diag.error("file system sandbox blocked stat(\"%s\")", path);
+            diag.error("file system sandbox blocked stat('%s')", dupPath);
         else if ( statErr == ENOENT )
             diag.error("no such file");
         else
-            diag.error("stat(\"%s\") failed with errno=%d", path, statErr);
+            diag.error("stat('%s') failed with errno=%d", dupPath, statErr);
         return -1;
     }
 
@@ -888,18 +896,20 @@ uint64_t Loader::validateFile(Diagnostics& diag, const RuntimeState& state, int 
 #endif
 
     // if inode/mtime was recorded, check that
+    char dupPath[PATH_MAX];
+    Diagnostics::quotePath(path, dupPath);
     if ( fileValidation.checkInodeMtime ) {
         if ( statBuf.st_ino != fileValidation.inode ) {
-            diag.error("file inode changed from 0x%llX to 0x%llX since PrebuiltLoader was built for '%s'", fileValidation.inode, statBuf.st_ino, path);
+            diag.error("file inode changed from 0x%llX to 0x%llX since PrebuiltLoader was built for '%s'", fileValidation.inode, statBuf.st_ino, dupPath);
             return -1;
         }
         if ( (uint64_t)statBuf.st_mtime != fileValidation.mtime ) {
-            diag.error("file mtime changed from 0x%llX to 0x%lX since PrebuiltLoader was built for '%s'", fileValidation.mtime, statBuf.st_mtime, path);
+            diag.error("file mtime changed from 0x%llX to 0x%lX since PrebuiltLoader was built for '%s'", fileValidation.mtime, statBuf.st_mtime, dupPath);
             return -1;
         }
         // sanity check slice offset
         if ( (uint64_t)statBuf.st_size < fileValidation.sliceOffset ) {
-            diag.error("file too small for slice offset '%s'", path);
+            diag.error("file too small for slice offset '%s'", dupPath);
             return -1;
         }
         return fileValidation.sliceOffset;
@@ -909,7 +919,7 @@ uint64_t Loader::validateFile(Diagnostics& diag, const RuntimeState& state, int 
         // otherwise compare cdHash
         void* mappedFile = state.config.syscall.mmap(nullptr, (size_t)statBuf.st_size, PROT_READ, MAP_PRIVATE, fd, 0);
         if ( mappedFile == MAP_FAILED ) {
-            diag.error("could not mmap() '%s'", path);
+            diag.error("could not mmap() '%s'", dupPath);
             return -1;
         }
         uint64_t sliceOffset = -1;
@@ -926,7 +936,7 @@ uint64_t Loader::validateFile(Diagnostics& diag, const RuntimeState& state, int 
             if ( cdHashMatches )
                 sliceOffset = (uint8_t*)mf - (uint8_t*)mappedFile;
             else
-                diag.error("file cdHash not as expected '%s'", path);
+                diag.error("file cdHash not as expected '%s'", dupPath);
         }
         state.config.syscall.munmap(mappedFile, (size_t)fileValidation.sliceOffset);
         return sliceOffset;
@@ -943,16 +953,18 @@ const MachOAnalyzer* Loader::mapSegments(Diagnostics& diag, RuntimeState& state,
     dyld3::ScopedTimer timer(DBG_DYLD_TIMING_MAP_IMAGE, path, 0, 0);
 #endif
 
+    char dupPath[PATH_MAX];
+    Diagnostics::quotePath(path, dupPath);
     // open file
     int fd = state.config.syscall.open(path, O_RDONLY, 0);
     if ( fd == -1 ) {
         int openErr = errno;
         if ( (openErr == EPERM) && state.config.syscall.sandboxBlockedOpen(path) )
-            diag.error("file system sandbox blocked open(\"%s\", O_RDONLY)", path);
+            diag.error("file system sandbox blocked open('%s', O_RDONLY)", dupPath);
         else if ( openErr == ENOENT )
             diag.error("no such file");
         else
-            diag.error("open(\"%s\", O_RDONLY) failed with errno=%d", path, openErr);
+            diag.error("open('%s', O_RDONLY) failed with errno=%d", dupPath, openErr);
         return nullptr;
     }
 
@@ -980,11 +992,11 @@ const MachOAnalyzer* Loader::mapSegments(Diagnostics& diag, RuntimeState& state,
             int errnoCopy = errno;
             if ( (errnoCopy == EPERM) || (errnoCopy == EBADEXEC) ) {
                 diag.error("code signature invalid (errno=%d) sliceOffset=0x%08llX, codeBlobOffset=0x%08X, codeBlobSize=0x%08X for '%s'",
-                           errnoCopy, sliceOffset, codeSignature.fileOffset, codeSignature.size, path);
+                           errnoCopy, sliceOffset, codeSignature.fileOffset, codeSignature.size, dupPath);
             }
             else {
                 diag.error("fcntl(fd, F_ADDFILESIGS_RETURN) failed with errno=%d, sliceOffset=0x%08llX, codeBlobOffset=0x%08X, codeBlobSize=0x%08X for '%s'",
-                           errnoCopy, sliceOffset, codeSignature.fileOffset, codeSignature.size, path);
+                           errnoCopy, sliceOffset, codeSignature.fileOffset, codeSignature.size, dupPath);
             }
             state.config.syscall.close(fd);
             return nullptr;
@@ -1086,13 +1098,13 @@ const MachOAnalyzer* Loader::mapSegments(Diagnostics& diag, RuntimeState& state,
         if ( segAddress == MAP_FAILED ) {
             if ( mmapErr == EPERM ) {
                 if ( state.config.syscall.sandboxBlockedMmap(path) )
-                    diag.error("file system sandbox blocked mmap() of '%s'", path);
+                    diag.error("file system sandbox blocked mmap() of '%s'", dupPath);
                 else
                     diag.error("code signing blocked mmap() of '%s'", path);
             }
             else {
-                diag.error("mmap(addr=0x%0llX, size=0x%08X) failed with errno=%d for %s", loadAddress + region.vmOffset,
-                           region.fileSize, mmapErr, path);
+                diag.error("mmap(addr=0x%0llX, size=0x%08X) failed with errno=%d for '%s'", loadAddress + region.vmOffset,
+                           region.fileSize, mmapErr, dupPath);
             }
             mmapFailure = true;
             break;
@@ -1443,7 +1455,7 @@ Loader::ResolvedSymbol Loader::resolveSymbol(Diagnostics& diag, RuntimeState& st
             }
             else {
                 // missing symbol, but not weak-import or lazy-bound, so error
-                diag.error("symbol not found in flat namespace '%s'", symbolName);
+                diag.error("symbol not found in flat namespace (%s)", symbolName);
             }
         }
         return result;
@@ -1621,13 +1633,13 @@ Loader::ResolvedSymbol Loader::resolveSymbol(Diagnostics& diag, RuntimeState& st
                 result.targetRuntimeOffset = 0;
             }
             else {
-                diag.error("weak-def symbol not found '%s'", symbolName);
+                diag.error("weak-def symbol not found (%s)", symbolName);
             }
         }
         return result;
     }
     else {
-        diag.error("unknown library ordinal %d in %s when binding '%s'", libOrdinal, path(), symbolName);
+        diag.error("unknown library ordinal %d in '%s' when binding (%s)", libOrdinal, path(), symbolName);
         return result;
     }
     if ( result.targetLoader != nullptr ) {
@@ -1662,7 +1674,9 @@ Loader::ResolvedSymbol Loader::resolveSymbol(Diagnostics& diag, RuntimeState& st
 #endif
         // FIXME: check for too-new binary
 
-        diag.error("Symbol not found: %s\n  Referenced from: %s\n  Expected in: %s", symbolName, this->path(), expectedInDylib);
+        char dupPath[PATH_MAX];
+        Diagnostics::quotePath(this->path(), dupPath);
+        diag.error("Symbol not found: (%s)\n  Referenced from: '%s'\n  Expected in: '%s'", symbolName, dupPath, expectedInDylib);
     }
     return result;
 }
@@ -1730,7 +1744,9 @@ bool Loader::hasExportedSymbol(Diagnostics& diag, RuntimeState& state, const cha
                     nameChanged = true;
                 }
                 if ( (ordinal == 0) || (ordinal > this->dependentCount()) ) {
-                    diag.error("re-export ordinal %lld in %s out of range for %s", ordinal, this->path(), symbolName);
+                    char dupPath[PATH_MAX];
+                    Diagnostics::quotePath(this->path(), dupPath);
+                    diag.error("re-export ordinal %lld in '%s' out of range for (%s)", ordinal, dupPath, symbolName);
                     return false;
                 }
                 uint32_t      depIndex = (uint32_t)(ordinal - 1);

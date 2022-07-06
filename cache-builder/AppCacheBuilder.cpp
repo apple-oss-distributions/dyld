@@ -1458,7 +1458,7 @@ void VTablePatcher::findBaseKernelVTables(Diagnostics& diags, const dyld3::MachO
                 if ( symbolLocation.found() ) {
                     classVTableVMAddr = symbolLocation.vmAddr;
                 } else {
-                    diags.error("Class vtables '%s' or '%s' is not exported from '%s'",
+                    diags.error("Class vtables (%s) or (%s) is not exported from '%s'",
                                        classVTableName.c_str(), namespacedVTableName.c_str(), dylibID);
                     stop = true;
                     return;
@@ -1508,7 +1508,7 @@ void VTablePatcher::findBaseKernelVTables(Diagnostics& diags, const dyld3::MachO
             auto& metaclassDefinitions = collections[superclassFixupLevel].metaclassDefinitions;
             auto metaclassIt = metaclassDefinitions.find(superMetaclassSymbolAddress);
             if ( metaclassIt == metaclassDefinitions.end() ) {
-                diags.error("Cannot find symbol for metaclass pointed to by '%s' in '%s'",
+                diags.error("Cannot find symbol for metaclass pointed to by (%s) in '%s'",
                             symbolName, dylibID);
                 stop = true;
                 return;
@@ -1542,7 +1542,7 @@ void VTablePatcher::findBaseKernelVTables(Diagnostics& diags, const dyld3::MachO
                     for (const std::string& dependencyID : dependencies) {
                         auto depIt = dylibsToSymbols.find(dependencyID);
                         if (depIt == dylibsToSymbols.end()) {
-                            diags.error("Failed to bind '%s' in '%s' as could not find a kext with '%s' bundle-id",
+                            diags.error("Failed to bind (%s) in '%s' as could not find a kext with '%s' bundle-id",
                                         symbolName, dylibID, dependencyID.c_str());
                             stop = true;
                             return;
@@ -1562,7 +1562,7 @@ void VTablePatcher::findBaseKernelVTables(Diagnostics& diags, const dyld3::MachO
                 if ( superclassVTableLoc == nullptr ) {
                     auto depIt = dylibsToSymbols.find(dylibID);
                     if (depIt == dylibsToSymbols.end()) {
-                        diags.error("Failed to bind '%s' in '%s' as could not find a binary with '%s' bundle-id",
+                        diags.error("Failed to bind (%s) in '%s' as could not find a binary with '%s' bundle-id",
                                     symbolName, dylibID, dylibID);
                         stop = true;
                         return;
@@ -1583,7 +1583,7 @@ void VTablePatcher::findBaseKernelVTables(Diagnostics& diags, const dyld3::MachO
 
             if ( superclassVTableLoc == nullptr ) {
                 superclassVTableName = std::string(vtablePrefix) + std::string(superClassName);
-                diags.error("Superclass vtable '%s' is not exported from '%s' or its dependencies",
+                diags.error("Superclass vtable (%s) is not exported from '%s' or its dependencies",
                             superclassVTableName.c_str(), dylibID);
                 stop = true;
                 return;
@@ -1678,7 +1678,7 @@ void VTablePatcher::findPageableKernelVTables(Diagnostics& diags, const dyld3::M
                 if ( symbolLocation.found() ) {
                     classVTableVMAddr = symbolLocation.vmAddr;
                 } else {
-                    diags.error("Class vtables '%s' or '%s' is not exported from '%s'",
+                    diags.error("Class vtables (%s0 or '%s' is not exported from '%s'",
                                 classVTableName.c_str(), namespacedVTableName.c_str(), dylibID);
                     stop = true;
                     return;
@@ -1723,7 +1723,7 @@ void VTablePatcher::findPageableKernelVTables(Diagnostics& diags, const dyld3::M
             auto& metaclassDefinitions = collections[superclassFixupLevel].metaclassDefinitions;
             auto metaclassIt = metaclassDefinitions.find(superMetaclassSymbolAddress);
             if ( metaclassIt == metaclassDefinitions.end() ) {
-                diags.error("Cannot find symbol for metaclass pointed to by '%s' in '%s'",
+                diags.error("Cannot find symbol for metaclass pointed to by (%s) in '%s'",
                             symbolName, dylibID);
                 stop = true;
                 return;
@@ -1757,7 +1757,7 @@ void VTablePatcher::findPageableKernelVTables(Diagnostics& diags, const dyld3::M
                     for (const std::string& dependencyID : dependencies) {
                         auto depIt = dylibsToSymbols.find(dependencyID);
                         if (depIt == dylibsToSymbols.end()) {
-                            diags.error("Failed to bind '%s' in '%s' as could not find a kext with '%s' bundle-id",
+                            diags.error("Failed to bind (%s) in '%s' as could not find a kext with '%s' bundle-id",
                                         symbolName, dylibID, dependencyID.c_str());
                             stop = true;
                             return;
@@ -1777,7 +1777,7 @@ void VTablePatcher::findPageableKernelVTables(Diagnostics& diags, const dyld3::M
                 if ( superclassVTableLoc == nullptr ) {
                     auto depIt = dylibsToSymbols.find(dylibID);
                     if (depIt == dylibsToSymbols.end()) {
-                        diags.error("Failed to bind '%s' in '%s' as could not find a binary with '%s' bundle-id",
+                        diags.error("Failed to bind (%s) in '%s' as could not find a binary with '%s' bundle-id",
                                     symbolName, dylibID, dylibID);
                         stop = true;
                         return;
@@ -1798,7 +1798,7 @@ void VTablePatcher::findPageableKernelVTables(Diagnostics& diags, const dyld3::M
 
             if ( superclassVTableLoc == nullptr ) {
                 superclassVTableName = std::string(vtablePrefix) + std::string(superClassName);
-                diags.error("Superclass vtable '%s' is not exported from '%s' or its dependencies",
+                diags.error("Superclass vtable (%s) is not exported from '%s' or its dependencies",
                             superclassVTableName.c_str(), dylibID);
                 stop = true;
                 return;
@@ -1913,7 +1913,7 @@ void VTablePatcher::findVTables(uint8_t currentLevel, const dyld3::MachOAnalyzer
                 if ( symbolLocation.found() ) {
                     classVTableVMAddr = symbolLocation.vmAddr;
                 } else {
-                    dylibDiags.error("Class vtables '%s' or '%s' is not an exported symbol",
+                    dylibDiags.error("Class vtables (%s) or (%s) is not an exported symbol",
                                      classVTableName.c_str(), namespacedVTableName.c_str());
                     return;
                 }
@@ -1967,11 +1967,11 @@ void VTablePatcher::findVTables(uint8_t currentLevel, const dyld3::MachOAnalyzer
             if ( metaclassIt == metaclassDefinitions.end() ) {
                 auto bindIt = missingBindLocations.find(fixupLoc);
                 if ( bindIt != missingBindLocations.end() ) {
-                    dylibDiags.error("Cannot find symbol for metaclass pointed to by '%s'.  "
-                                     "Expected symbol '%s' to be defined in another kext",
+                    dylibDiags.error("Cannot find symbol for metaclass pointed to by (%s).  "
+                                     "Expected symbol (%s) to be defined in another kext",
                                      symbolName, bindIt->second.symbolName.c_str());
                 } else {
-                    dylibDiags.error("Cannot find symbol for metaclass pointed to by '%s'",
+                    dylibDiags.error("Cannot find symbol for metaclass pointed to by (%s)",
                                      symbolName);
                 }
                 return;
@@ -2003,7 +2003,7 @@ void VTablePatcher::findVTables(uint8_t currentLevel, const dyld3::MachOAnalyzer
                     for (const std::string& dependencyID : dependencies) {
                         auto depIt = dylibsToSymbols.find(dependencyID);
                         if (depIt == dylibsToSymbols.end()) {
-                            dylibDiags.error("Failed to bind '%s' as could not find a kext with '%s' bundle-id",
+                            dylibDiags.error("Failed to bind (%s) as could not find a kext with '%s' bundle-id",
                                              symbolName, dependencyID.c_str());
                             return;
                         }
@@ -2036,7 +2036,7 @@ void VTablePatcher::findVTables(uint8_t currentLevel, const dyld3::MachOAnalyzer
 
             if ( superclassVTableLoc == nullptr ) {
                 superclassVTableName = std::string(vtablePrefix) + std::string(superClassName);
-                dylibDiags.error("Superclass vtable '%s' is not exported from kext or its dependencies",
+                dylibDiags.error("Superclass vtable (%s) is not exported from kext or its dependencies",
                                  superclassVTableName.c_str());
                 return;
             }
@@ -2223,7 +2223,7 @@ void VTablePatcher::patchVTables(Diagnostics& diags,
                     continue;
                 auto superIt = vtables.find(vtableEntry.second.superVTable);
                 assert(superIt != vtables.end());
-                diags.error("Found unpatched vtable: '%s' with unpatched superclass '%s'\n",
+                diags.error("Found unpatched vtable: (%s) with unpatched superclass (%s)\n",
                             vtableEntry.second.name.c_str(), superIt->second.name.c_str());
             }
             break;
@@ -2486,7 +2486,7 @@ void DylibFixups::processFixups(const std::map<std::string, DylibSymbols>& dylib
             for (const std::string& dependencyID : dependencies) {
                 auto depIt = dylibsToSymbols.find(dependencyID);
                 if (depIt == dylibsToSymbols.end()) {
-                    dylibDiag.error("Failed to bind '%s' as could not find a kext with '%s' bundle-id",
+                    dylibDiag.error("Failed to bind (%s) as could not find a kext with '%s' bundle-id",
                                        symbolName, dependencyID.c_str());
                     stop = true;
                     return;
@@ -2507,7 +2507,7 @@ void DylibFixups::processFixups(const std::map<std::string, DylibSymbols>& dylib
             if ( libOrdinal == BIND_SPECIAL_DYLIB_WEAK_LOOKUP ) {
                 auto dylibIt = dylibsToSymbols.find(dylibID);
                 if (dylibIt == dylibsToSymbols.end()) {
-                    dylibDiag.error("Failed to bind weak '%s' as could not find a define in self",
+                    dylibDiag.error("Failed to bind weak (%s) as could not find a define in self",
                                     symbolName);
                     stop = true;
                     return;
@@ -2534,7 +2534,7 @@ void DylibFixups::processFixups(const std::map<std::string, DylibSymbols>& dylib
                     bindTargets.push_back({ bindSymbol, exportIt->second, kernelSymbols.dylibLevel, true, isMissingSymbol });
                     return;
                 }
-                dylibDiag.error("Weak bind symbol '%s' not found in kernel", missingWeakImportSymbolName);
+                dylibDiag.error("Weak bind symbol (%s) not found in kernel", missingWeakImportSymbolName);
                 return;
             }
 
@@ -2738,7 +2738,7 @@ void DylibFixups::processFixups(const std::map<std::string, DylibSymbols>& dylib
             for (const std::string& dependencyID : dependencies) {
                 auto depIt = dylibsToSymbols.find(dependencyID);
                 if (depIt == dylibsToSymbols.end()) {
-                    dylibDiag.error("Failed to bind '%s' as could not find a kext with '%s' bundle-id",
+                    dylibDiag.error("Failed to bind (%s) as could not find a kext with '%s' bundle-id",
                                     symbolName, dependencyID.c_str());
                     stop = true;
                     return;
@@ -2758,7 +2758,7 @@ void DylibFixups::processFixups(const std::map<std::string, DylibSymbols>& dylib
         if ( !foundSymbol && (libOrdinal == BIND_SPECIAL_DYLIB_WEAK_LOOKUP) ) {
             auto dylibIt = dylibsToSymbols.find(dylibID);
             if (dylibIt == dylibsToSymbols.end()) {
-                dylibDiag.error("Failed to bind weak '%s' as could not find a define in self",
+                dylibDiag.error("Failed to bind weak (%s) as could not find a define in self",
                                 symbolName);
                 stop = true;
                 return;
@@ -2818,7 +2818,7 @@ void DylibFixups::processFixups(const std::map<std::string, DylibSymbols>& dylib
                 fixupLocs[fixupLoc] = kernelSymbols.dylibLevel;
                 return;
             }
-            dylibDiag.error("Weak bind symbol '%s' not found in kernel", missingWeakImportSymbolName);
+            dylibDiag.error("Weak bind symbol (%s) not found in kernel", missingWeakImportSymbolName);
             return;
         }
 
@@ -3214,7 +3214,7 @@ void AppCacheBuilder::processFixups()
                         if (globalIt != kernelSymbols.globals.end()) {
                             symbolSetGlobals[symbolName] = globalIt->second;
                         } else {
-                            _diagnostics.error("Alias '%s' not found in kernel", aliasTargetName);
+                            _diagnostics.error("Alias (%s0 not found in kernel", aliasTargetName);
                             return;
                         }
 
@@ -3608,7 +3608,7 @@ void AppCacheBuilder::processFixups()
                     std::string sectionName = sectInfo.sectName;
                     uint64_t sectionOffset = (missingBindLoc - start);
 
-                    dylibDiag.error("Failed to bind '%s' in '%s' (at offset 0x%llx in %s, %s) as "
+                    dylibDiag.error("Failed to bind (%s) in '%s' (at offset 0x%llx in %s, %s) as "
                                     "could not find a kext which exports this symbol",
                                     missingBind.symbolName.c_str(), missingBind.binaryID.data(),
                                     sectionOffset, segmentName.c_str(), sectionName.c_str());
@@ -3621,7 +3621,7 @@ void AppCacheBuilder::processFixups()
         });
 
         if ( !reportedError ) {
-            _diagnostics.error("Failed to bind '%s' in '%s' as could not find a kext which exports this symbol",
+            _diagnostics.error("Failed to bind (%s) in '%s' as could not find a kext which exports this symbol",
                                missingBind.symbolName.c_str(), missingBind.binaryID.data());
         }
     }
@@ -4971,7 +4971,7 @@ bool AppCacheBuilder::addCustomSection(const std::string& segmentName,
         // Make sure we don't have a section with this name already
         if ( section.sectionName.empty() ) {
             // We can't add a segment only section if other sections exist
-            _diagnostics.error("Cannot add empty section name with segment '%s' as other sections exist on that segment",
+            _diagnostics.error("Cannot add empty section name with segment (%s0 as other sections exist on that segment",
                                segmentName.c_str());
             return false;
         }
@@ -4979,13 +4979,13 @@ bool AppCacheBuilder::addCustomSection(const std::string& segmentName,
         for (const CustomSegment::CustomSection& existingSection : segment.sections) {
             if ( existingSection.sectionName.empty() ) {
                 // We can't add a section with a name if an existing section exists with no name
-                _diagnostics.error("Cannot add section named '%s' with segment '%s' as segment has existing nameless section",
+                _diagnostics.error("Cannot add section named (%s) with segment (%s) as segment has existing nameless section",
                                    segmentName.c_str(), section.sectionName.c_str());
                 return false;
             }
             if ( existingSection.sectionName == section.sectionName ) {
                 // We can't add a section with the same name as an existing one
-                _diagnostics.error("Cannot add section named '%s' with segment '%s' as section already exists",
+                _diagnostics.error("Cannot add section named (%s) with segment (%s) as section already exists",
                                    segmentName.c_str(), section.sectionName.c_str());
                 return false;
             }
@@ -5399,7 +5399,7 @@ void AppCacheBuilder::writeFile(const std::string& path)
     strlcpy(pathTemplateSpace, pathTemplate.c_str(), templateLen);
     int fd = mkstemp(pathTemplateSpace);
     if ( fd == -1 ) {
-        _diagnostics.error("could not open file %s", pathTemplateSpace);
+        _diagnostics.error("could not open file '%s'", pathTemplateSpace);
         return;
     }
     uint64_t cacheFileSize = 0;

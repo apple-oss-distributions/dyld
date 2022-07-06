@@ -568,7 +568,7 @@ SharedCacheBuilder::SharedCacheBuilder(const DyldSharedCache::CreateOptions& opt
     }
 
     if (!_archLayout) {
-        _diagnostics.error("Tool was built without support for: '%s'", targetArch.c_str());
+        _diagnostics.error("Tool was built without support for: (%s)", targetArch.c_str());
     }
 }
 
@@ -3353,7 +3353,7 @@ void SharedCacheBuilder::buildDylibJITLoaders(dyld4::RuntimeState& state, const 
     for (const Loader* ldr : state.loaded) {
         ((Loader*)ldr)->loadDependents(loadDiag, state, options);
         if ( loadDiag.hasError() ) {
-            _diagnostics.error("%s, loading dependents of %s", loadDiag.errorMessageCStr(), ldr->path());
+            _diagnostics.error("%s, loading dependents of '%s'", loadDiag.errorMessageCStr(), ldr->path());
             return;
         }
     }
@@ -3610,7 +3610,7 @@ void SharedCacheBuilder::bindDylibs(const MachOAnalyzer* aMainExe, const std::ve
 
         });
         if ( fixupDiag.hasError() ) {
-            _diagnostics.error("%s, applying fixups to %s", fixupDiag.errorMessageCStr(), ldr->path());
+            _diagnostics.error("%s, applying fixups to '%s'", fixupDiag.errorMessageCStr(), ldr->path());
             return;
         }
         ++dylibIndex;
@@ -4176,7 +4176,7 @@ void SharedCacheBuilder::emitContantObjects() {
         }
     });
     if ( targetSymbolOffsetInCache == 0 ) {
-        _diagnostics.error("Could not find export of '%s' in '%s'", _coalescedText.cfStrings.isaClassName,
+        _diagnostics.error("Could not find export of (%s) in '%s'", _coalescedText.cfStrings.isaClassName,
                            _coalescedText.cfStrings.isaInstallName);
         return;
     }
@@ -4385,13 +4385,13 @@ void SharedCacheBuilder::writeSubCacheFile(const SubCache& subCache, const std::
             }
         }
         else {
-            _diagnostics.error("could not write file %s", pathTemplateSpace);
+            _diagnostics.error("could not write file '%s'", pathTemplateSpace);
         }
         ::close(fd);
         ::unlink(pathTemplateSpace);
     }
     else {
-        _diagnostics.error("could not open file %s", pathTemplateSpace);
+        _diagnostics.error("could not open file '%s'", pathTemplateSpace);
     }
 }
 

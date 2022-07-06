@@ -164,10 +164,16 @@ void JustInTimeLoader::loadDependents(Diagnostics& diag, RuntimeState& state, co
             depOptions.canBeMissing = isWeak;
             depLoader               = options.finder ? options.finder(depDiag, state.config.process.platform, loadPath, depOptions) : getLoader(depDiag, state, loadPath, depOptions);
             if ( depDiag.hasError() ) {
-                if ( depDiag.errorMessageContains("dylib not found") )
-                    diag.error("Library not loaded: %s\n  Referenced from: %s\n  Reason: image not found", loadPath, this->path());
-                else
-                    diag.error("Library not loaded: %s\n  Referenced from: %s\n  Reason: %s", loadPath, this->path(), depDiag.errorMessageCStr());
+                char dupPath[PATH_MAX];
+                Diagnostics::quotePath(this->path(), dupPath);
+                char dupLoadPath[PATH_MAX];
+                Diagnostics::quotePath(loadPath, dupLoadPath);
+                if ( depDiag.errorMessageContains("dylib not found") ) {
+                    diag.error("Library not loaded: '%s'\n  Referenced from: '%s'\n  Reason: image not found", dupLoadPath, dupPath);
+                }
+                else {
+                    diag.error("Library not loaded: '%s'\n  Referenced from: '%s'\n  Reason: %s", dupLoadPath, dupPath, depDiag.errorMessageCStr());
+                }
 #if BUILDING_DYLD
                 if ( options.launching )
                     state.setLaunchMissingDylib(loadPath, this->path());
@@ -757,29 +763,31 @@ Loader* JustInTimeLoader::makeJustInTimeLoaderDisk(Diagnostics& diag, RuntimeSta
     state.config.syscall.withReadOnlyMappedFile(diag, loadPath, checkIfOSBinary, ^(const void* mapping, size_t mappedSize, bool isOSBinary, const FileID& fileID, const char* canonicalPath) {
         if ( const MachOFile* mf = MachOFile::compatibleSlice(diag, mapping, mappedSize, loadPath, state.config.process.platform, isOSBinary, *state.config.process.archs) ) {
             // verify the filetype is loadable in this context
+            char dupPath[PATH_MAX];
+            Diagnostics::quotePath(loadPath, dupPath);
             if ( mf->isDylib() ) {
                 if ( !options.canBeDylib ) {
-                    diag.error("cannot load dylib '%s'", loadPath);
+                    diag.error("cannot load dylib '%s'", dupPath);
                     return;
                 }
             }
             else if ( mf->isBundle() ) {
                 if ( !options.canBeBundle ) {
-                    diag.error("cannot link against bundle '%s'", loadPath);
+                    diag.error("cannot link against bundle '%s'", dupPath);
                     return;
                 }
             }
             else if ( mf->isMainExecutable() ) {
                 if ( !options.canBeExecutable ) {
                     if ( options.staticLinkage )
-                        diag.error("cannot link against a main executable '%s'", loadPath);
+                        diag.error("cannot link against a main executable '%s'", dupPath);
                     else
-                        diag.error("cannot dlopen a main executable '%s'", loadPath);
+                        diag.error("cannot dlopen a main executable '%s'", dupPath);
                     return;
                 }
             }
             else {
-                diag.error("unloadable mach-o file type %d '%s'", mf->filetype, loadPath);
+                diag.error("unloadable mach-o file type %d '%s'", mf->filetype, dupPath);
                 return;
             }
             const MachOAnalyzer* ma          = (MachOAnalyzer*)mf;

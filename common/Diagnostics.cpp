@@ -79,11 +79,19 @@ void Diagnostics::error(const char* format, ...)
 {
     va_list    list;
     va_start(list, format);
+#if __x86_64__
     error(format, list);
+#else
+    errorVA(format, list);
+#endif
     va_end(list);
 }
 
+#if __x86_64__
 void Diagnostics::error(const char* format, va_list list)
+#else
+void Diagnostics::errorVA(const char* format, va_list list)
+#endif
 {
     if ( _buffer == nullptr )
         _buffer = _simple_salloc();
@@ -107,7 +115,11 @@ void Diagnostics::error(const char* format, va_list list)
         _simple_sresize(_buffer);
     va_list list;
     va_start(list, format);
+#if __x86_64__
     error(format, list);
+#else
+    errorVA(format, list);
+#endif
     va_end(list);
  }
 
@@ -139,6 +151,23 @@ bool Diagnostics::errorMessageContains(const char* subString) const
     if ( _buffer == nullptr )
         return false;
     return (strstr(_simple_string(_buffer), subString) != nullptr);
+}
+
+void Diagnostics::quotePath(const char* path, char newPath[PATH_MAX])
+{
+    if ( !path ) {
+        newPath[0] = '\0';
+        return;
+    }
+    size_t len = strlen(path);
+    if ( len >= PATH_MAX )
+        len = PATH_MAX-1;
+    for (size_t i = 0; i < len; i++) {
+        newPath[i] = path[i];
+        if ( newPath[i] == '\'' )
+            newPath[i] = ' ';
+    }
+    newPath[len] = '\0';
 }
 
 

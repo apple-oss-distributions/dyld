@@ -77,12 +77,17 @@ struct KernelCollectionBuilder {
     void error(const char* format, ...) {
         va_list list;
         va_start(list, format);
-        Diagnostics diag;
-        diag.error(format, list);
+        char* buffer = nullptr;
+        vasprintf(&buffer, format, list);
         va_end(list);
 
-        errorStorage.push_back(diag.errorMessage());
+        if ( buffer == nullptr )
+            return;
+
+        errorStorage.push_back(buffer);
         errors.push_back(errorStorage.back().data());
+
+        free(buffer);
     }
 
     void retain(CFTypeRef v) {

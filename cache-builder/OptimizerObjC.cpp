@@ -173,7 +173,7 @@ public:
 
     pint_t getVMAddress(pint_t index) const {
         if ( index >= _count ) {
-            _cache->diagnostics().error("index out of range in section %s", _section->sectname());
+            _cache->diagnostics().error("index out of range in section (%s)", _section->sectname());
             return 0;
         }
         return (pint_t)P::getP(_base[index]);
@@ -189,7 +189,7 @@ public:
 
     void setVMAddress(pint_t index, pint_t value) {
         if ( index >= _count ) {
-            _cache->diagnostics().error("index out of range in section %s", _section->sectname());
+            _cache->diagnostics().error("index out of range in section (%s)", _section->sectname());
             return;
         }
         P::setP(_base[index], value);
@@ -234,7 +234,7 @@ public:
 
     T& get(uint64_t index) const { 
         if (index >= _count) {
-            _cache->diagnostics().error("index out of range in section %s", _section->sectname());
+            _cache->diagnostics().error("index out of range in section (%s)", _section->sectname());
         }
         return _base[index];
     }
@@ -684,7 +684,7 @@ public:
         const char* className = cls->getName(cache);
 
         if (cls->getVTable(cache) != 0) {
-            diag.error("Class '%s' has non-zero vtable\n", className);
+            diag.error("Class (%s) has non-zero vtable\n", className);
             return;
         }
 

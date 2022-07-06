@@ -34,6 +34,7 @@
 #include <vector>
 #include <dispatch/dispatch.h>
 #endif
+#include <sys/syslimits.h>
 
 #include "Defines.h"
 
@@ -45,7 +46,9 @@ public:
                     ~Diagnostics();
 
     void            error(const char* format, ...)  __attribute__((format(printf, 2, 3)));
+#if __x86_64__
     void            error(const char* format, va_list list);
+#endif
     void            appendError(const char* format, ...)  __attribute__((format(printf, 2, 3)));
 #if BUILDING_CACHE_BUILDER
                     Diagnostics(const std::string& prefix, bool verbose=false);
@@ -61,6 +64,8 @@ public:
     void            assertNoError() const;
     bool            errorMessageContains(const char* subString) const;
 
+    static void    quotePath(const char* path, char newPath[PATH_MAX]);
+
 #if !BUILDING_CACHE_BUILDER
     const char*                     errorMessage() const;
     const char*                     errorMessageCStr() const { return errorMessage(); }
@@ -73,6 +78,10 @@ public:
 #endif
 
 private:
+
+#if !__x86_64__
+    void            errorVA(const char* format, va_list list);
+#endif
 
     void*                    _buffer = nullptr;
 #if BUILDING_CACHE_BUILDER

@@ -1716,12 +1716,14 @@ const PrebuiltLoaderSet* PrebuiltLoaderSet::makeLaunchSet(Diagnostics& diag, Run
     uint16_t indexAsPrebuilt = 0;
     for ( const Loader* l : state.loaded ) {
         if ( JustInTimeLoader* jl = (JustInTimeLoader*)(l->isJustInTimeLoader()) ) {
+            char dupPath[PATH_MAX];
+            Diagnostics::quotePath(jl->path(), dupPath);
             if ( jl->dylibInDyldCache ) {
-                diag.error("cannot make PrebuiltLoader for dylib that is in dyld cache (%s)", jl->path());
+                diag.error("cannot make PrebuiltLoader for dylib that is in dyld cache '%s'", dupPath);
                 return nullptr;
             }
            if ( jl->isOverrideOfCachedDylib() ) {
-                diag.error("cannot make PrebuiltLoader for dylib that overrides dylib in dyld cache (%s)", jl->path());
+                diag.error("cannot make PrebuiltLoader for dylib that overrides dylib in dyld cache '%s'", dupPath);
                 return nullptr;
             }
             jitLoaders.push_back(jl);
@@ -1857,7 +1859,9 @@ const PrebuiltLoaderSet* PrebuiltLoaderSet::makeDyldCachePrebuiltLoaders(Diagnos
     uint16_t indexAsPrebuilt = 0;
     for ( const Loader* ldr : jitLoaders ) {
         if ( ldr->isPrebuilt ) {
-            diag.error("unexpected prebuilt loader in cached dylibs (%s)", ldr->path());
+            char dupPath[PATH_MAX];
+            Diagnostics::quotePath(ldr->path(), dupPath);
+            diag.error("unexpected prebuilt loader in cached dylibs '%s'", dupPath);
             return nullptr;
         }
         JustInTimeLoader* jldr = (JustInTimeLoader*)ldr;

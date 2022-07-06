@@ -767,7 +767,9 @@ static void optimizeObjCClasses(RuntimeState& state,
             if ( (objcClass.flags(image.pointerSize) & RO_ROOT) == 0 ) {
                 uint64_t classNameVMAddr = objcClass.nameVMAddr(image.pointerSize);
                 const char* className = (const char*)(classNameVMAddr + slide);
-                image.diag.error("Missing weak superclass of class %s in %s", className, image.jitLoader->path());
+                char dupPath[PATH_MAX];
+                Diagnostics::quotePath(image.jitLoader->path(), dupPath);
+                image.diag.error("Missing weak superclass of class %s in '%s'", className, dupPath);
                 return;
             }
         }

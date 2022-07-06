@@ -992,7 +992,7 @@ createKernelCollectionForArch(const CreateKernelCollectionOptions& options, cons
             exit(1);
         case baseKC: {
             if (!fileSystem.fileExists(options.kernelPath)) {
-                fprintf(stderr, "Kernel path does not exist: %s\n", options.kernelPath);
+                fprintf(stderr, "Kernel path does not exist: '%s'\n", options.kernelPath);
                 return {};
             }
             LoadedFileInfo info;
@@ -1011,7 +1011,7 @@ createKernelCollectionForArch(const CreateKernelCollectionOptions& options, cons
                 uint64_t errorCount = 0;
                 const char* const* errors = getErrors(kcb, &errorCount);
                 for (uint64_t i = 0; i != errorCount; ++i)
-                    diag.error("Could not load kernel file because: '%s'", errors[i]);
+                    diag.error("Could not load kernel file because: (%s)", errors[i]);
                 return {};
             }
             CFRelease(dataRef);
@@ -1393,7 +1393,7 @@ createKernelCollectionForArch(const CreateKernelCollectionOptions& options, cons
                 } else if ( stripModeString == "all" ) {
                     stripMode = binaryStripAll;
                 } else {
-                    diag.error("Unknown strip mode: '%s'", stripModeString.c_str());
+                    diag.error("Unknown strip mode: (%s)", stripModeString.c_str());
                     return {};
                 }
             }
@@ -1406,7 +1406,7 @@ createKernelCollectionForArch(const CreateKernelCollectionOptions& options, cons
                 uint64_t errorCount = 0;
                 const char* const* errors = getErrors(kcb, &errorCount);
                 for (uint64_t i = 0; i != errorCount; ++i)
-                    diag.error("Could not load kext file because: '%s'", errors[i]);
+                    diag.error("Could not load kext file because: (%s)", errors[i]);
                 return {};
             }
 
@@ -1509,7 +1509,7 @@ createKernelCollectionForArch(const CreateKernelCollectionOptions& options, cons
 
             const void* buffer = mmap(NULL, (size_t)stat_buf.st_size, PROT_READ, MAP_PRIVATE, fd, 0);
             if (buffer == MAP_FAILED) {
-                diag.error("mmap() for file at %s failed, errno=%d\n", sectData.payloadFilePath, errno);
+                diag.error("mmap() for file at '%s' failed, errno=%d\n", sectData.payloadFilePath, errno);
                 ::close(fd);
                 return {};
             }
@@ -1522,7 +1522,7 @@ createKernelCollectionForArch(const CreateKernelCollectionOptions& options, cons
             uint64_t errorCount = 0;
             const char* const* errors = getErrors(kcb, &errorCount);
             for (uint64_t i = 0; i != errorCount; ++i)
-                diag.error("Could not load section data file because: '%s'", errors[i]);
+                diag.error("Could not load section data file because: (%s)", errors[i]);
             return {};
         }
     }
@@ -1573,7 +1573,7 @@ createKernelCollectionForArch(const CreateKernelCollectionOptions& options, cons
             uint64_t errorCount = 0;
             const char* const* errors = getErrors(kcb, &errorCount);
             for (uint64_t i = 0; i != errorCount; ++i)
-                diag.error("Could not prelink data file because: '%s'", errors[i]);
+                diag.error("Could not prelink data file because: (%s)", errors[i]);
             return {};
         }
     }
@@ -1584,7 +1584,7 @@ createKernelCollectionForArch(const CreateKernelCollectionOptions& options, cons
     if ( errors != nullptr ) {
         if ( !options.printJSONErrors ) {
             for (uint64_t i = 0; i != errorCount; ++i) {
-                fprintf(stderr, "Could not build kernel collection because '%s'\n", errors[i]);
+                fprintf(stderr, "Could not build kernel collection because (%s)\n", errors[i]);
             }
         }
         CFDictionaryRef errorDictRef = getKextErrors(kcb);

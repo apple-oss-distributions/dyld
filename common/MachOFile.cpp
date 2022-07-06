@@ -1898,7 +1898,7 @@ const MachOFile* MachOFile::compatibleSlice(Diagnostics& diag, const void* fileC
         }
         else {
             char strBuf[256];
-            diag.error("fat file, but missing compatible architecture (have '%s', need '%s')", ff->archNames(strBuf), archs.name());
+            diag.error("fat file, but missing compatible architecture (have (%s), need (%s))", ff->archNames(strBuf), archs.name());
             return nullptr;
         }
     }
@@ -1912,7 +1912,7 @@ const MachOFile* MachOFile::compatibleSlice(Diagnostics& diag, const void* fileC
     }
 
     if ( archs.grade(mf->cputype, mf->cpusubtype, isOSBinary) == 0 ) {
-        diag.error("mach-o file, but is an incompatible architecture (have '%s', need '%s')", mf->archName(), archs.name());
+        diag.error("mach-o file, but is an incompatible architecture (have (%s), need (%s))", mf->archName(), archs.name());
         return nullptr;
     }
 
@@ -1921,7 +1921,7 @@ const MachOFile* MachOFile::compatibleSlice(Diagnostics& diag, const void* fileC
         mf->forEachSupportedPlatform(^(Platform aPlat, uint32_t minOS, uint32_t sdk) {
             havePlatform = aPlat;
         });
-        diag.error("mach-o file (%s), but incompatible platform (have '%s', need '%s')", path, MachOFile::platformName(havePlatform), MachOFile::platformName(platform));
+        diag.error("mach-o file (%s), but incompatible platform (have (%s), need (%s))", path, MachOFile::platformName(havePlatform), MachOFile::platformName(platform));
         return nullptr;
     }
 

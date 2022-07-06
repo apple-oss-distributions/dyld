@@ -183,6 +183,7 @@ public:
         bool                        allowClassicFallbackPaths;
         bool                        allowInsertFailures;
         bool                        allowInterposing;
+        bool                        allowEmbeddedVars;
         bool                        skipMain;
 
      private:

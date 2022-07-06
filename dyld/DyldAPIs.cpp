@@ -1481,14 +1481,16 @@ bool APIs::dlopen_preflight(const char* path)
             }
         });
         if ( !result && possiblePathDiag.hasError() ) {
+            char dupPath[PATH_MAX];
+            Diagnostics::quotePath(possiblePath, dupPath);
             if ( diag.noError() )
-                diag.error("tried: '%s' (%s)", possiblePath, possiblePathDiag.errorMessageCStr());
+                diag.error("tried: '%s' (%s)", dupPath, possiblePathDiag.errorMessageCStr());
             else
-                diag.appendError(", '%s' (%s)", possiblePath, possiblePathDiag.errorMessageCStr());
+                diag.appendError(", '%s' (%s)", dupPath, possiblePathDiag.errorMessageCStr());
         }
     });
     if ( !result && diag.hasError() )
-        setErrorString("dlopen_preflight(%s) => false, %s", path, diag.errorMessageCStr());
+        setErrorString("dlopen_preflight(%s) => false, '%s'", path, diag.errorMessageCStr());
 
     if ( config.log.apis )
         log("      dlopen_preflight(%s) => %d\n", Loader::leafName(path), result);

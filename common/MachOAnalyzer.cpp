@@ -54,7 +54,9 @@ bool MachOAnalyzer::isValidMainExecutable(Diagnostics& diag, const char* path, u
         return false;
 
     if ( !this->isDynamicExecutable() ) {
-        diag.error("could not use '%s' because it is not an executable, filetype=0x%08X", path, this->filetype);
+        char dupPath[PATH_MAX];
+        Diagnostics::quotePath(path, dupPath);
+        diag.error("could not use '%s' because it is not an executable, filetype=0x%08X", dupPath, this->filetype);
         return false;
     }
 
@@ -86,7 +88,9 @@ bool MachOAnalyzer::loadFromBuffer(Diagnostics& diag, const closure::FileSystem&
         return false;
     }
     else if ( fatButMissingSlice ) {
-        diag.error("missing compatible arch in %s", path);
+        char dupPath[PATH_MAX];
+        Diagnostics::quotePath(path, dupPath);
+        diag.error("missing compatible arch in '%s'", dupPath);
         fileSystem.unloadFile(info);
         return false;
     }
@@ -220,14 +224,17 @@ uint64_t MachOAnalyzer::mappedSize() const
 
 bool MachOAnalyzer::validMachOForArchAndPlatform(Diagnostics& diag, size_t sliceLength, const char* path, const GradedArchs& archs, Platform reqPlatform, bool isOSBinary) const
 {
+    char dupPath[PATH_MAX];
+    Diagnostics::quotePath(path, dupPath);
+
     // must start with mach-o magic value
     if ( (this->magic != MH_MAGIC) && (this->magic != MH_MAGIC_64) ) {
-        diag.error("could not use '%s' because it is not a mach-o file: 0x%08X 0x%08X", path, this->magic, this->cputype);
+        diag.error("could not use '%s' because it is not a mach-o file: 0x%08X 0x%08X", dupPath, this->magic, this->cputype);
         return false;
     }
 
     if ( !archs.grade(this->cputype, this->cpusubtype, isOSBinary) ) {
-        diag.error("could not use '%s' because it is not a compatible arch", path);
+        diag.error("could not use '%s' because it is not a compatible arch", dupPath);
         return false;
     }
 
@@ -245,7 +252,7 @@ bool MachOAnalyzer::validMachOForArchAndPlatform(Diagnostics& diag, size_t slice
             break;
 #endif
         default:
-            diag.error("could not use '%s' because it is not a dylib, bundle, or executable, filetype=0x%08X", path, this->filetype);
+            diag.error("could not use '%s' because it is not a dylib, bundle, or executable, filetype=0x%08X", dupPath, this->filetype);
            return false;
     }
 
@@ -258,7 +265,7 @@ bool MachOAnalyzer::validMachOForArchAndPlatform(Diagnostics& diag, size_t slice
     if ( (this->filetype == MH_EXECUTE) && !isDynamicExecutable() ) {
 #if !BUILDING_DYLDINFO && !BUILDING_APP_CACHE_UTIL
         // dyldinfo should be able to inspect static executables such as the kernel
-        diag.error("could not use '%s' because it is a static executable", path);
+        diag.error("could not use '%s' because it is a static executable", dupPath);
         return false;
 #endif
     }
@@ -276,11 +283,11 @@ bool MachOAnalyzer::validMachOForArchAndPlatform(Diagnostics& diag, size_t slice
             }
         });
         if (!foundPlatform) {
-            diag.error("could not use '%s' because we expected it to have a platform", path);
+            diag.error("could not use '%s' because we expected it to have a platform", dupPath);
             return false;
         }
         if (foundBadPlatform) {
-            diag.error("could not use '%s' because is has the wrong platform", path);
+            diag.error("could not use '%s' because is has the wrong platform", dupPath);
             return false;
         }
     } else if ( reqPlatform == Platform::unknown ) {
@@ -292,14 +299,14 @@ bool MachOAnalyzer::validMachOForArchAndPlatform(Diagnostics& diag, size_t slice
                 foundPlatform = true;
             });
             if (foundPlatform) {
-                diag.error("could not use '%s' because we expected it to have no platform", path);
+                diag.error("could not use '%s' because we expected it to have no platform", dupPath);
                 return false;
             }
         }
     } else
 #endif
     if ( !this->loadableIntoProcess(reqPlatform, path) ) {
-        diag.error("could not use '%s' because it was not built for platform %s", path, MachOFile::platformName(reqPlatform));
+        diag.error("could not use '%s' because it was not built for platform %s", dupPath, MachOFile::platformName(reqPlatform));
         return false;
     }
 
@@ -361,9 +368,12 @@ bool MachOAnalyzer::validLinkedit(Diagnostics& diag, const char* path) const
 
 bool MachOAnalyzer::validLoadCommands(Diagnostics& diag, const char* path, size_t fileLen) const
 {
+    char dupPath[PATH_MAX];
+    Diagnostics::quotePath(path, dupPath);
+
     // check load command don't exceed file length
     if ( this->sizeofcmds + machHeaderSize() > fileLen ) {
-        diag.error("in '%s' load commands exceed length of file", path);
+        diag.error("in '%s' load commands exceed length of file", dupPath);
         return false;
     }
 
@@ -372,9 +382,9 @@ bool MachOAnalyzer::validLoadCommands(Diagnostics& diag, const char* path, size_
     forEachLoadCommand(walkDiag, ^(const load_command* cmd, bool& stop) {});
     if ( walkDiag.hasError() ) {
 #if BUILDING_CACHE_BUILDER
-        diag.error("in '%s' %s", path, walkDiag.errorMessage().c_str());
+        diag.error("in '%s' %s", dupPath, walkDiag.errorMessage().c_str());
 #else
-        diag.error("in '%s' %s", path, walkDiag.errorMessage());
+        diag.error("in '%s' %s", dupPath, walkDiag.errorMessage());
 #endif
         return false;
     }
@@ -383,18 +393,20 @@ bool MachOAnalyzer::validLoadCommands(Diagnostics& diag, const char* path, size_
     __block bool foundTEXT    = false;
     forEachSegment(^(const SegmentInfo& info, bool& stop) {
         if ( strcmp(info.segName, "__TEXT") == 0 ) {
+            char dupPathBlock[PATH_MAX];
+            Diagnostics::quotePath(path, dupPathBlock);
             foundTEXT = true;
             if ( this->sizeofcmds + machHeaderSize() > info.fileSize ) {
-                diag.error("in '%s' load commands exceed length of __TEXT segment", path);
+                diag.error("in '%s' load commands exceed length of __TEXT segment", dupPathBlock);
             }
             if ( info.fileOffset != 0 ) {
-                diag.error("in '%s' __TEXT segment not start of mach-o", path);
+                diag.error("in '%s' __TEXT segment not start of mach-o", dupPathBlock);
             }
             stop = true;
         }
     });
     if ( !diag.noError() && !foundTEXT ) {
-        diag.error("in '%s' __TEXT segment not found", path);
+        diag.error("in '%s' __TEXT segment not found", dupPath);
         return false;
     }
 
@@ -707,6 +719,8 @@ bool MachOAnalyzer::validEmbeddedPaths(Diagnostics& diag, Platform platform, con
     __block int         dependentsCount = 0;
     __block const char* installName = nullptr;
     forEachLoadCommand(diag, ^(const load_command* cmd, bool& stop) {
+        char dupPathBlock[PATH_MAX];
+        Diagnostics::quotePath(path, dupPathBlock);
         const dylib_command* dylibCmd;
         const rpath_command* rpathCmd;
         switch ( cmd->cmd ) {
@@ -717,7 +731,7 @@ bool MachOAnalyzer::validEmbeddedPaths(Diagnostics& diag, Platform platform, con
             case LC_LOAD_UPWARD_DYLIB:
                 dylibCmd = (dylib_command*)cmd;
                 if ( dylibCmd->dylib.name.offset > cmd->cmdsize ) {
-                    diag.error("in '%s' load command #%d name offset (%u) outside its size (%u)", path, index, dylibCmd->dylib.name.offset, cmd->cmdsize);
+                    diag.error("in '%s' load command #%d name offset (%u) outside its size (%u)", dupPathBlock, index, dylibCmd->dylib.name.offset, cmd->cmdsize);
                     stop = true;
                     allGood = false;
                 }
@@ -732,7 +746,7 @@ bool MachOAnalyzer::validEmbeddedPaths(Diagnostics& diag, Platform platform, con
                         }
                     }
                     if ( !foundEnd ) {
-                        diag.error("in '%s' load command #%d string extends beyond end of load command", path, index);
+                        diag.error("in '%s' load command #%d string extends beyond end of load command", dupPathBlock, index);
                         stop = true;
                         allGood = false;
                     }
@@ -745,7 +759,7 @@ bool MachOAnalyzer::validEmbeddedPaths(Diagnostics& diag, Platform platform, con
             case LC_RPATH:
                 rpathCmd = (rpath_command*)cmd;
                 if ( rpathCmd->path.offset > cmd->cmdsize ) {
-                    diag.error("in '%s' load command #%d path offset (%u) outside its size (%u)", path, index, rpathCmd->path.offset, cmd->cmdsize);
+                    diag.error("in '%s' load command #%d path offset (%u) outside its size (%u)", dupPathBlock, index, rpathCmd->path.offset, cmd->cmdsize);
                     stop = true;
                     allGood = false;
                 }
@@ -760,7 +774,7 @@ bool MachOAnalyzer::validEmbeddedPaths(Diagnostics& diag, Platform platform, con
                         }
                     }
                     if ( !foundEnd ) {
-                        diag.error("in '%s' load command #%d string extends beyond end of load command", path, index);
+                        diag.error("in '%s' load command #%d string extends beyond end of load command", dupPathBlock, index);
                         stop = true;
                         allGood = false;
                     }
@@ -772,9 +786,11 @@ bool MachOAnalyzer::validEmbeddedPaths(Diagnostics& diag, Platform platform, con
     if ( !allGood )
         return false;
 
+    char dupPath[PATH_MAX];
+    Diagnostics::quotePath(path, dupPath);
     if ( this->filetype == MH_DYLIB ) {
         if ( installName == nullptr ) {
-            diag.error("in '%s' MH_DYLIB is missing LC_ID_DYLIB", path);
+            diag.error("in '%s' MH_DYLIB is missing LC_ID_DYLIB", dupPath);
             return false;
         }
 
@@ -796,7 +812,7 @@ bool MachOAnalyzer::validEmbeddedPaths(Diagnostics& diag, Platform platform, con
     }
     else {
         if ( installName != nullptr ) {
-            diag.error("in '%s' LC_ID_DYLIB found in non-MH_DYLIB", path);
+            diag.error("in '%s' LC_ID_DYLIB found in non-MH_DYLIB", dupPath);
             return false;
         }
     }
@@ -808,7 +824,7 @@ bool MachOAnalyzer::validEmbeddedPaths(Diagnostics& diag, Platform platform, con
         bool isNotLibSystem = (installName == nullptr) || (strncmp(installName, libSystemDir, strlen(libSystemDir)) != 0);
 
         if ( this->isDyldManaged() && isNotLibSystem ) {
-            diag.error("in '%s' missing LC_LOAD_DYLIB (must link with at least libSystem.dylib)", path);
+            diag.error("in '%s' missing LC_LOAD_DYLIB (must link with at least libSystem.dylib)", dupPath);
             return false;
         }
     }
@@ -821,32 +837,34 @@ bool MachOAnalyzer::validSegments(Diagnostics& diag, const char* path, size_t fi
     // check segment load command size
     __block bool badSegmentLoadCommand = false;
     forEachLoadCommand(diag, ^(const load_command* cmd, bool& stop) {
+        char dupPathBlock[PATH_MAX];
+        Diagnostics::quotePath(path, dupPathBlock);
         if ( cmd->cmd == LC_SEGMENT_64 ) {
             const segment_command_64* seg = (segment_command_64*)cmd;
             int32_t sectionsSpace = cmd->cmdsize - sizeof(segment_command_64);
             if ( sectionsSpace < 0 ) {
-               diag.error("in '%s' load command size too small for LC_SEGMENT_64", path);
+               diag.error("in '%s' load command size too small for LC_SEGMENT_64", dupPathBlock);
                badSegmentLoadCommand = true;
                stop = true;
             }
             else if ( (sectionsSpace % sizeof(section_64)) != 0 ) {
-               diag.error("in '%s' segment load command size 0x%X will not fit whole number of sections", path, cmd->cmdsize);
+               diag.error("in '%s' segment load command size 0x%X will not fit whole number of sections", dupPathBlock, cmd->cmdsize);
                badSegmentLoadCommand = true;
                stop = true;
             }
             else if ( sectionsSpace != (seg->nsects * sizeof(section_64)) ) {
-               diag.error("in '%s' load command size 0x%X does not match nsects %d", path, cmd->cmdsize, seg->nsects);
+               diag.error("in '%s' load command size 0x%X does not match nsects %d", dupPathBlock, cmd->cmdsize, seg->nsects);
                badSegmentLoadCommand = true;
                stop = true;
             }
             else if ( greaterThanAddOrOverflow(seg->fileoff, seg->filesize, fileLen) ) {
-                diag.error("in '%s' segment load command content extends beyond end of file", path);
+                diag.error("in '%s' segment load command content extends beyond end of file", dupPathBlock);
                 badSegmentLoadCommand = true;
                 stop = true;
             }
             else if ( (seg->filesize > seg->vmsize) && ((seg->vmsize != 0) || ((seg->flags & SG_NORELOC) == 0)) ) {
                 // <rdar://problem/19986776> dyld should support non-allocatable __LLVM segment
-                diag.error("in '%s' segment '%s' filesize exceeds vmsize", path, seg->segname);
+                diag.error("in '%s' segment '%s' filesize exceeds vmsize", dupPathBlock, seg->segname);
                 badSegmentLoadCommand = true;
                 stop = true;
             }
@@ -855,23 +873,23 @@ bool MachOAnalyzer::validSegments(Diagnostics& diag, const char* path, size_t fi
             const segment_command* seg = (segment_command*)cmd;
             int32_t sectionsSpace = cmd->cmdsize - sizeof(segment_command);
             if ( sectionsSpace < 0 ) {
-               diag.error("in '%s' load command size too small for LC_SEGMENT", path);
+               diag.error("in '%s' load command size too small for LC_SEGMENT", dupPathBlock);
                badSegmentLoadCommand = true;
                stop = true;
             }
             else if ( (sectionsSpace % sizeof(section)) != 0 ) {
-               diag.error("in '%s' segment load command size 0x%X will not fit whole number of sections", path, cmd->cmdsize);
+               diag.error("in '%s' segment load command size 0x%X will not fit whole number of sections", dupPathBlock, cmd->cmdsize);
                badSegmentLoadCommand = true;
                stop = true;
             }
             else if ( sectionsSpace != (seg->nsects * sizeof(section)) ) {
-               diag.error("in '%s' load command size 0x%X does not match nsects %d", path, cmd->cmdsize, seg->nsects);
+               diag.error("in '%s' load command size 0x%X does not match nsects %d", dupPathBlock, cmd->cmdsize, seg->nsects);
                badSegmentLoadCommand = true;
                stop = true;
             }
             else if ( (seg->filesize > seg->vmsize) && ((seg->vmsize != 0) || ((seg->flags & SG_NORELOC) == 0)) ) {
                 // <rdar://problem/19986776> dyld should support non-allocatable __LLVM segment
-                diag.error("in '%s' segment  '%s' filesize exceeds vmsize", path, seg->segname);
+                diag.error("in '%s' segment  '%s' filesize exceeds vmsize", dupPathBlock, seg->segname);
                 badSegmentLoadCommand = true;
                 stop = true;
             }
@@ -886,9 +904,11 @@ bool MachOAnalyzer::validSegments(Diagnostics& diag, const char* path, size_t fi
     __block bool hasTEXT        = false;
     __block bool hasLINKEDIT    = false;
     forEachSegment(^(const SegmentInfo& info, bool& stop) {
+        char dupPathBlock[PATH_MAX];
+        Diagnostics::quotePath(path, dupPathBlock);
         if ( strcmp(info.segName, "__TEXT") == 0 ) {
             if ( (info.protections != (VM_PROT_READ|VM_PROT_EXECUTE)) && enforceFormat(Malformed::textPermissions) ) {
-                diag.error("in '%s' __TEXT segment permissions is not 'r-x'", path);
+                diag.error("in '%s' __TEXT segment permissions is not 'r-x'", dupPathBlock);
                 badPermissions = true;
                 stop = true;
             }
@@ -896,32 +916,32 @@ bool MachOAnalyzer::validSegments(Diagnostics& diag, const char* path, size_t fi
         }
         else if ( strcmp(info.segName, "__LINKEDIT") == 0 ) {
             if ( (info.protections != VM_PROT_READ) && enforceFormat(Malformed::linkeditPermissions) ) {
-                diag.error("in '%s' __LINKEDIT segment permissions is not 'r--'", path);
+                diag.error("in '%s' __LINKEDIT segment permissions is not 'r--'", dupPathBlock);
                 badPermissions = true;
                 stop = true;
             }
             hasLINKEDIT = true;
         }
         else if ( (info.protections & 0xFFFFFFF8) != 0 ) {
-            diag.error("in '%s' %s segment permissions has invalid bits set", path, info.segName);
+            diag.error("in '%s' %s segment permissions has invalid bits set", dupPathBlock, info.segName);
             badPermissions = true;
             stop = true;
         }
         if ( greaterThanAddOrOverflow(info.fileOffset, info.fileSize, fileLen) ) {
-            diag.error("in '%s' %s segment content extends beyond end of file", path, info.segName);
+            diag.error("in '%s' %s segment content extends beyond end of file", dupPathBlock, info.segName);
             badSize = true;
             stop = true;
         }
         if ( is64() ) {
             if ( info.vmAddr+info.vmSize < info.vmAddr ) {
-                diag.error("in '%s' %s segment vm range wraps", path, info.segName);
+                diag.error("in '%s' %s segment vm range wraps", dupPathBlock, info.segName);
                 badSize = true;
                 stop = true;
             }
        }
        else {
             if ( (uint32_t)(info.vmAddr+info.vmSize) < (uint32_t)(info.vmAddr) ) {
-                diag.error("in '%s' %s segment vm range wraps", path, info.segName);
+                diag.error("in '%s' %s segment vm range wraps", dupPathBlock, info.segName);
                 badSize = true;
                 stop = true;
             }
@@ -929,12 +949,14 @@ bool MachOAnalyzer::validSegments(Diagnostics& diag, const char* path, size_t fi
     });
     if ( badPermissions || badSize )
         return false;
+    char dupPath[PATH_MAX];
+    Diagnostics::quotePath(path, dupPath);
     if ( !hasTEXT ) {
-        diag.error("in '%s' missing __TEXT segment", path);
+        diag.error("in '%s' missing __TEXT segment", dupPath);
         return false;
     }
     if ( !hasLINKEDIT ) {
-       diag.error("in '%s' missing __LINKEDIT segment", path);
+       diag.error("in '%s' missing __LINKEDIT segment", dupPath);
        return false;
     }
 
@@ -944,12 +966,14 @@ bool MachOAnalyzer::validSegments(Diagnostics& diag, const char* path, size_t fi
         uint64_t seg1vmEnd   = info1.vmAddr + info1.vmSize;
         uint64_t seg1FileEnd = info1.fileOffset + info1.fileSize;
         forEachSegment(^(const SegmentInfo& info2, bool& stop2) {
+            char dupPathBlock[PATH_MAX];
+            Diagnostics::quotePath(path, dupPathBlock);
             if ( info1.segIndex == info2.segIndex )
                 return;
             uint64_t seg2vmEnd   = info2.vmAddr + info2.vmSize;
             uint64_t seg2FileEnd = info2.fileOffset + info2.fileSize;
             if ( ((info2.vmAddr <= info1.vmAddr) && (seg2vmEnd > info1.vmAddr) && (seg1vmEnd > info1.vmAddr )) || ((info2.vmAddr >= info1.vmAddr ) && (info2.vmAddr < seg1vmEnd) && (seg2vmEnd > info2.vmAddr)) ) {
-                diag.error("in '%s' segment %s vm range overlaps segment %s", path, info1.segName, info2.segName);
+                diag.error("in '%s' segment %s vm range overlaps segment %s", dupPathBlock, info1.segName, info2.segName);
                 badSegments = true;
                 stop1 = true;
                 stop2 = true;
@@ -959,7 +983,7 @@ bool MachOAnalyzer::validSegments(Diagnostics& diag, const char* path, size_t fi
                      // HACK: Split shared caches might put the __TEXT in a SubCache, then the __DATA in a later SubCache.
                      // The file offsets are in to each SubCache file, which means that they might overlap
                      // For now we have no choice but to disable this error
-                     diag.error("in '%s' segment %s file content overlaps segment %s", path, info1.segName, info2.segName);
+                     diag.error("in '%s' segment %s file content overlaps segment %s", dupPathBlock, info1.segName, info2.segName);
                      badSegments = true;
                      stop1 = true;
                      stop2 = true;
@@ -972,7 +996,7 @@ bool MachOAnalyzer::validSegments(Diagnostics& diag, const char* path, size_t fi
                         if ( (strcmp(info1.segName, "__DWARF") != 0 && strcmp(info2.segName, "__DWARF") != 0) ) {
                             // dyld cache __DATA_* segments are moved around
                             // The static kernel also has segments with vmAddr's before __TEXT
-                            diag.error("in '%s' segment load commands out of order with respect to layout for %s and %s", path, info1.segName, info2.segName);
+                            diag.error("in '%s' segment load commands out of order with respect to layout for %s and %s", dupPathBlock, info1.segName, info2.segName);
                             badSegments = true;
                             stop1 = true;
                             stop2 = true;
@@ -988,17 +1012,19 @@ bool MachOAnalyzer::validSegments(Diagnostics& diag, const char* path, size_t fi
     // check sections are within segment
     __block bool badSections = false;
     forEachLoadCommand(diag, ^(const load_command* cmd, bool& stop) {
+        char dupPathBlock[PATH_MAX];
+        Diagnostics::quotePath(path, dupPathBlock);
         if ( cmd->cmd == LC_SEGMENT_64 ) {
             const segment_command_64* seg = (segment_command_64*)cmd;
             const section_64* const sectionsStart = (section_64*)((char*)seg + sizeof(struct segment_command_64));
             const section_64* const sectionsEnd   = &sectionsStart[seg->nsects];
             for (const section_64* sect=sectionsStart; (sect < sectionsEnd); ++sect) {
                 if ( (int64_t)(sect->size) < 0 ) {
-                    diag.error("in '%s' section '%s' size too large 0x%llX", path, sect->sectname, sect->size);
+                    diag.error("in '%s' section '%s' size too large 0x%llX", dupPathBlock, sect->sectname, sect->size);
                     badSections = true;
                 }
                 else if ( sect->addr < seg->vmaddr ) {
-                    diag.error("in '%s' section '%s' start address 0x%llX is before containing segment's address 0x%0llX", path, sect->sectname, sect->addr, seg->vmaddr);
+                    diag.error("in '%s' section '%s' start address 0x%llX is before containing segment's address 0x%0llX", dupPathBlock, sect->sectname, sect->addr, seg->vmaddr);
                     badSections = true;
                 }
                 else if ( sect->addr+sect->size > seg->vmaddr+seg->vmsize ) {
@@ -1008,7 +1034,7 @@ bool MachOAnalyzer::validSegments(Diagnostics& diag, const char* path, size_t fi
                         ignoreError = true;
 #endif
                     if ( !ignoreError ) {
-                        diag.error("in '%s' section '%s' end address 0x%llX is beyond containing segment's end address 0x%0llX", path, sect->sectname, sect->addr+sect->size, seg->vmaddr+seg->vmsize);
+                        diag.error("in '%s' section '%s' end address 0x%llX is beyond containing segment's end address 0x%0llX", dupPathBlock, sect->sectname, sect->addr+sect->size, seg->vmaddr+seg->vmsize);
                         badSections = true;
                     }
                 }
@@ -1020,15 +1046,15 @@ bool MachOAnalyzer::validSegments(Diagnostics& diag, const char* path, size_t fi
             const section* const sectionsEnd   = &sectionsStart[seg->nsects];
             for (const section* sect=sectionsStart; !stop && (sect < sectionsEnd); ++sect) {
                if ( (int64_t)(sect->size) < 0 ) {
-                    diag.error("in '%s' section %s size too large 0x%X", path, sect->sectname, sect->size);
+                    diag.error("in '%s' section %s size too large 0x%X", dupPathBlock, sect->sectname, sect->size);
                     badSections = true;
                 }
                 else if ( sect->addr < seg->vmaddr ) {
-                    diag.error("in '%s' section %s start address 0x%X is before containing segment's address 0x%0X", path,  sect->sectname, sect->addr, seg->vmaddr);
+                    diag.error("in '%s' section %s start address 0x%X is before containing segment's address 0x%0X", dupPathBlock,  sect->sectname, sect->addr, seg->vmaddr);
                     badSections = true;
                 }
                 else if ( sect->addr+sect->size > seg->vmaddr+seg->vmsize ) {
-                    diag.error("in '%s' section %s end address 0x%X is beyond containing segment's end address 0x%0X", path, sect->sectname, sect->addr+sect->size, seg->vmaddr+seg->vmsize);
+                    diag.error("in '%s' section %s end address 0x%X is beyond containing segment's end address 0x%0X", dupPathBlock, sect->sectname, sect->addr+sect->size, seg->vmaddr+seg->vmsize);
                     badSections = true;
                 }
             }
@@ -1238,14 +1264,16 @@ bool MachOAnalyzer::validLinkeditLayout(Diagnostics& diag, const char* path) con
             *bp++ = {"code signature",          ptrSize, leInfo.codeSig->dataoff, leInfo.codeSig->datasize};
     }
 
+    char dupPath[PATH_MAX];
+    Diagnostics::quotePath(path, dupPath);
     // check for bad combinations
     if ( (leInfo.dyldInfo != nullptr) && (leInfo.dyldInfo->cmd == LC_DYLD_INFO_ONLY) && (leInfo.dynSymTab != nullptr) ) {
         if ( (leInfo.dynSymTab->nlocrel != 0) && enforceFormat(Malformed::dyldInfoAndlocalRelocs) ) {
-            diag.error("in '%s' malformed mach-o contains LC_DYLD_INFO_ONLY and local relocations", path);
+            diag.error("in '%s' malformed mach-o contains LC_DYLD_INFO_ONLY and local relocations", dupPath);
             return false;
         }
         if ( leInfo.dynSymTab->nextrel != 0 ) {
-            diag.error("in '%s' malformed mach-o contains LC_DYLD_INFO_ONLY and external relocations", path);
+            diag.error("in '%s' malformed mach-o contains LC_DYLD_INFO_ONLY and external relocations", dupPath);
             return false;
         }
     }
@@ -1255,7 +1283,7 @@ bool MachOAnalyzer::validLinkeditLayout(Diagnostics& diag, const char* path) con
     checkMissingDyldInfo = !isFileSet() && !isStaticExecutable() && !isKextBundle();
 #endif
     if ( (leInfo.dyldInfo == nullptr) && (leInfo.dynSymTab == nullptr) && checkMissingDyldInfo ) {
-        diag.error("in '%s' malformed mach-o misssing LC_DYLD_INFO and LC_DYSYMTAB", path);
+        diag.error("in '%s' malformed mach-o misssing LC_DYLD_INFO and LC_DYSYMTAB", dupPath);
         return false;
     }
 
@@ -1281,18 +1309,18 @@ bool MachOAnalyzer::validLinkeditLayout(Diagnostics& diag, const char* path) con
     for (unsigned long i=0; i < blobCount; ++i) {
         const LinkEditContentChunk& blob = blobs[i];
         if ( blob.fileOffsetStart < prevEnd ) {
-            diag.error("in '%s' LINKEDIT overlap of %s and %s", path, prevName, blob.name);
+            diag.error("in '%s' LINKEDIT overlap of %s and %s", dupPath, prevName, blob.name);
             return false;
         }
         if (greaterThanAddOrOverflow(blob.fileOffsetStart, blob.size, linkeditFileEnd)) {
-            diag.error("in '%s' LINKEDIT content '%s' extends beyond end of segment", path, blob.name);
+            diag.error("in '%s' LINKEDIT content '%s' extends beyond end of segment", dupPath, blob.name);
             return false;
         }
         if ( (blob.fileOffsetStart & (blob.alignment-1)) != 0 ) {
             // <rdar://problem/51115705> relax code sig alignment for pre iOS13
             Malformed kind = (strcmp(blob.name, "code signature") == 0) ? Malformed::codeSigAlignment : Malformed::linkeditAlignment;
             if ( enforceFormat(kind) )
-                diag.error("in '%s' mis-aligned LINKEDIT content '%s'", path, blob.name);
+                diag.error("in '%s' mis-aligned LINKEDIT content '%s'", dupPath, blob.name);
         }
         prevEnd  = blob.fileOffsetStart + blob.size;
         prevName = blob.name;
@@ -1301,39 +1329,39 @@ bool MachOAnalyzer::validLinkeditLayout(Diagnostics& diag, const char* path) con
     // Check for invalid symbol table sizes
     if ( leInfo.symTab != nullptr ) {
         if ( leInfo.symTab->nsyms > 0x10000000 ) {
-            diag.error("in '%s' malformed mach-o image: symbol table too large", path);
+            diag.error("in '%s' malformed mach-o image: symbol table too large", dupPath);
             return false;
         }
         if ( leInfo.dynSymTab != nullptr ) {
             // validate indirect symbol table
             if ( leInfo.dynSymTab->nindirectsyms != 0 ) {
                 if ( leInfo.dynSymTab->nindirectsyms > 0x10000000 ) {
-                    diag.error("in '%s' malformed mach-o image: indirect symbol table too large", path);
+                    diag.error("in '%s' malformed mach-o image: indirect symbol table too large", dupPath);
                     return false;
                 }
             }
             if ( (leInfo.dynSymTab->nlocalsym > leInfo.symTab->nsyms) || (leInfo.dynSymTab->ilocalsym > leInfo.symTab->nsyms) ) {
-                diag.error("in '%s' malformed mach-o image: indirect symbol table local symbol count exceeds total symbols", path);
+                diag.error("in '%s' malformed mach-o image: indirect symbol table local symbol count exceeds total symbols", dupPath);
                 return false;
             }
             if ( leInfo.dynSymTab->ilocalsym + leInfo.dynSymTab->nlocalsym < leInfo.dynSymTab->ilocalsym  ) {
-                diag.error("in '%s' malformed mach-o image: indirect symbol table local symbol count wraps", path);
+                diag.error("in '%s' malformed mach-o image: indirect symbol table local symbol count wraps", dupPath);
                 return false;
             }
             if ( (leInfo.dynSymTab->nextdefsym > leInfo.symTab->nsyms) || (leInfo.dynSymTab->iextdefsym > leInfo.symTab->nsyms) ) {
-                diag.error("in '%s' malformed mach-o image: indirect symbol table extern symbol count exceeds total symbols", path);
+                diag.error("in '%s' malformed mach-o image: indirect symbol table extern symbol count exceeds total symbols", dupPath);
                 return false;
             }
             if ( leInfo.dynSymTab->iextdefsym + leInfo.dynSymTab->nextdefsym < leInfo.dynSymTab->iextdefsym  ) {
-                diag.error("in '%s' malformed mach-o image: indirect symbol table extern symbol count wraps", path);
+                diag.error("in '%s' malformed mach-o image: indirect symbol table extern symbol count wraps", dupPath);
                 return false;
             }
             if ( (leInfo.dynSymTab->nundefsym > leInfo.symTab->nsyms) || (leInfo.dynSymTab->iundefsym > leInfo.symTab->nsyms) ) {
-                diag.error("in '%s' malformed mach-o image: indirect symbol table undefined symbol count exceeds total symbols", path);
+                diag.error("in '%s' malformed mach-o image: indirect symbol table undefined symbol count exceeds total symbols", dupPath);
                 return false;
             }
             if ( leInfo.dynSymTab->iundefsym + leInfo.dynSymTab->nundefsym < leInfo.dynSymTab->iundefsym  ) {
-                diag.error("in '%s' malformed mach-o image: indirect symbol table undefined symbol count wraps", path);
+                diag.error("in '%s' malformed mach-o image: indirect symbol table undefined symbol count wraps", dupPath);
                 return false;
             }
         }
@@ -1347,47 +1375,49 @@ bool MachOAnalyzer::validLinkeditLayout(Diagnostics& diag, const char* path) con
 bool MachOAnalyzer::invalidRebaseState(Diagnostics& diag, const char* opcodeName, const char* path, const LinkEditInfo& leInfo, const SegmentInfo segments[],
                                       bool segIndexSet, uint32_t ptrSize, uint8_t segmentIndex, uint64_t segmentOffset, Rebase kind) const
 {
+    char dupPath[PATH_MAX];
+    Diagnostics::quotePath(path, dupPath);
     if ( !segIndexSet ) {
-        diag.error("in '%s' %s missing preceding REBASE_OPCODE_SET_SEGMENT_AND_OFFSET_ULEB", path, opcodeName);
+        diag.error("in '%s' %s missing preceding REBASE_OPCODE_SET_SEGMENT_AND_OFFSET_ULEB", dupPath, opcodeName);
         return true;
     }
     if ( segmentIndex >= leInfo.layout.linkeditSegIndex )  {
-        diag.error("in '%s' %s segment index %d too large", path, opcodeName, segmentIndex);
+        diag.error("in '%s' %s segment index %d too large", dupPath, opcodeName, segmentIndex);
         return true;
     }
     if ( segmentOffset > (segments[segmentIndex].vmSize-ptrSize) ) {
-        diag.error("in '%s' %s current segment offset 0x%08llX beyond segment size (0x%08llX)", path, opcodeName, segmentOffset, segments[segmentIndex].vmSize);
+        diag.error("in '%s' %s current segment offset 0x%08llX beyond segment size (0x%08llX)", dupPath, opcodeName, segmentOffset, segments[segmentIndex].vmSize);
         return true;
     }
     switch ( kind )  {
         case Rebase::pointer32:
         case Rebase::pointer64:
             if ( !segments[segmentIndex].writable() && enforceFormat(Malformed::writableData) ) {
-                diag.error("in '%s' %s pointer rebase is in non-writable segment", path, opcodeName);
+                diag.error("in '%s' %s pointer rebase is in non-writable segment", dupPath, opcodeName);
                 return true;
             }
             if ( segments[segmentIndex].executable() && enforceFormat(Malformed::executableData) ) {
-                diag.error("in '%s' %s pointer rebase is in executable segment", path, opcodeName);
+                diag.error("in '%s' %s pointer rebase is in executable segment", dupPath, opcodeName);
                 return true;
             }
             break;
         case Rebase::textAbsolute32:
         case Rebase::textPCrel32:
             if ( !segments[segmentIndex].textRelocs ) {
-                diag.error("in '%s' %s text rebase is in segment that does not support text relocations", path, opcodeName);
+                diag.error("in '%s' %s text rebase is in segment that does not support text relocations", dupPath, opcodeName);
                 return true;
             }
             if ( segments[segmentIndex].writable() ) {
-                diag.error("in '%s' %s text rebase is in writable segment", path, opcodeName);
+                diag.error("in '%s' %s text rebase is in writable segment", dupPath, opcodeName);
                 return true;
             }
             if ( !segments[segmentIndex].executable() ) {
-                diag.error("in '%s' %s pointer rebase is in non-executable segment", path, opcodeName);
+                diag.error("in '%s' %s pointer rebase is in non-executable segment", dupPath, opcodeName);
                 return true;
             }
             break;
         case Rebase::unknown:
-            diag.error("in '%s' %s unknown rebase type", path, opcodeName);
+            diag.error("in '%s' %s unknown rebase type", dupPath, opcodeName);
             return true;
     }
     return false;
@@ -1918,42 +1948,44 @@ bool MachOAnalyzer::invalidBindState(Diagnostics& diag, const char* opcodeName, 
                                     bool segIndexSet,  bool libraryOrdinalSet, uint32_t dylibCount, int libOrdinal, uint32_t ptrSize,
                                     uint8_t segmentIndex, uint64_t segmentOffset, uint8_t type, const char* symbolName) const
 {
+    char dupPath[PATH_MAX];
+    Diagnostics::quotePath(path, dupPath);
     if ( !segIndexSet ) {
-        diag.error("in '%s' %s missing preceding BIND_OPCODE_SET_SEGMENT_AND_OFFSET_ULEB", path, opcodeName);
+        diag.error("in '%s' %s missing preceding BIND_OPCODE_SET_SEGMENT_AND_OFFSET_ULEB", dupPath, opcodeName);
         return true;
     }
     if ( segmentIndex >= leInfo.layout.linkeditSegIndex )  {
-        diag.error("in '%s' %s segment index %d too large", path, opcodeName, segmentIndex);
+        diag.error("in '%s' %s segment index %d too large", dupPath, opcodeName, segmentIndex);
         return true;
     }
     if ( segmentOffset > (segments[segmentIndex].vmSize-ptrSize) ) {
-        diag.error("in '%s' %s current segment offset 0x%08llX beyond segment size (0x%08llX)", path, opcodeName, segmentOffset, segments[segmentIndex].vmSize);
+        diag.error("in '%s' %s current segment offset 0x%08llX beyond segment size (0x%08llX)", dupPath, opcodeName, segmentOffset, segments[segmentIndex].vmSize);
         return true;
     }
     if ( symbolName == NULL ) {
-        diag.error("in '%s' %s missing preceding BIND_OPCODE_SET_SYMBOL_TRAILING_FLAGS_IMM", path, opcodeName);
+        diag.error("in '%s' %s missing preceding BIND_OPCODE_SET_SYMBOL_TRAILING_FLAGS_IMM", dupPath, opcodeName);
         return true;
     }
     if ( !libraryOrdinalSet ) {
-        diag.error("in '%s' %s missing preceding BIND_OPCODE_SET_DYLIB_ORDINAL", path, opcodeName);
+        diag.error("in '%s' %s missing preceding BIND_OPCODE_SET_DYLIB_ORDINAL", dupPath, opcodeName);
         return true;
     }
     if ( libOrdinal > (int)dylibCount ) {
-        diag.error("in '%s' %s has library ordinal too large (%d) max (%d)", path, opcodeName, libOrdinal, dylibCount);
+        diag.error("in '%s' %s has library ordinal too large (%d) max (%d)", dupPath, opcodeName, libOrdinal, dylibCount);
         return true;
     }
     if ( libOrdinal < BIND_SPECIAL_DYLIB_WEAK_LOOKUP ) {
-        diag.error("in '%s' %s has unknown library special ordinal (%d)", path, opcodeName, libOrdinal);
+        diag.error("in '%s' %s has unknown library special ordinal (%d)", dupPath, opcodeName, libOrdinal);
         return true;
     }
     switch ( type )  {
         case BIND_TYPE_POINTER:
             if ( !segments[segmentIndex].writable() ) {
-                diag.error("in '%s' %s pointer bind is in non-writable segment", path, opcodeName);
+                diag.error("in '%s' %s pointer bind is in non-writable segment", dupPath, opcodeName);
                 return true;
             }
             if ( segments[segmentIndex].executable() && enforceFormat(Malformed::executableData) ) {
-                diag.error("in '%s' %s pointer bind is in executable segment", path, opcodeName);
+                diag.error("in '%s' %s pointer bind is in executable segment", dupPath, opcodeName);
                 return true;
             }
             break;
@@ -1966,21 +1998,21 @@ bool MachOAnalyzer::invalidBindState(Diagnostics& diag, const char* opcodeName, 
                 forceAllowTextRelocs = true;
 #endif
             if ( !forceAllowTextRelocs && !segments[segmentIndex].textRelocs ) {
-                diag.error("in '%s' %s text bind is in segment that does not support text relocations", path, opcodeName);
+                diag.error("in '%s' %s text bind is in segment that does not support text relocations", dupPath, opcodeName);
                 return true;
             }
             if ( segments[segmentIndex].writable() ) {
-                diag.error("in '%s' %s text bind is in writable segment", path, opcodeName);
+                diag.error("in '%s' %s text bind is in writable segment", dupPath, opcodeName);
                 return true;
             }
             if ( !segments[segmentIndex].executable() ) {
-                diag.error("in '%s' %s pointer bind is in non-executable segment", path, opcodeName);
+                diag.error("in '%s' %s pointer bind is in non-executable segment", dupPath, opcodeName);
                 return true;
             }
             break;
         }
         default:
-            diag.error("in '%s' %s unknown bind type %d", path, opcodeName, type);
+            diag.error("in '%s' %s unknown bind type %d", dupPath, opcodeName, type);
             return true;
     }
     return false;
@@ -2622,43 +2654,47 @@ bool MachOAnalyzer::validChainedFixupsInfoOldArm64e(Diagnostics& diag, const cha
             maxTargetCount = totalTargets;
         },
         ^(const LinkEditInfo& leInfo, const SegmentInfo segments[], bool libraryOrdinalSet, uint32_t dylibCount, int libOrdinal, uint8_t type, const char* symbolName, uint64_t addend, bool weakImport, bool& stop) {
+            char dupPathBlock[PATH_MAX];
+            Diagnostics::quotePath(path, dupPathBlock);
            if ( symbolName == NULL ) {
-                diag.error("in '%s' missing BIND_OPCODE_SET_SYMBOL_TRAILING_FLAGS_IMM", path);
+                diag.error("in '%s' missing BIND_OPCODE_SET_SYMBOL_TRAILING_FLAGS_IMM", dupPathBlock);
             }
             else if ( !libraryOrdinalSet ) {
-                diag.error("in '%s' missing BIND_OPCODE_SET_DYLIB_ORDINAL", path);
+                diag.error("in '%s' missing BIND_OPCODE_SET_DYLIB_ORDINAL",  dupPathBlock);
             }
             else if ( libOrdinal > (int)dylibCount ) {
-                diag.error("in '%s' has library ordinal too large (%d) max (%d)", path, libOrdinal, dylibCount);
+                diag.error("in '%s' has library ordinal too large (%d) max (%d)", dupPathBlock, libOrdinal, dylibCount);
             }
             else if ( libOrdinal < BIND_SPECIAL_DYLIB_WEAK_LOOKUP ) {
-                diag.error("in '%s' has unknown library special ordinal (%d)", path, libOrdinal);
+                diag.error("in '%s' has unknown library special ordinal (%d)", dupPathBlock, libOrdinal);
             }
             else if ( type != BIND_TYPE_POINTER ) {
-                diag.error("in '%s' unknown bind type %d", path, type);
+                diag.error("in '%s' unknown bind type %d", dupPathBlock, type);
             }
             else if ( currentTargetCount > maxTargetCount ) {
-                diag.error("in '%s' chained target counts exceeds BIND_SUBOPCODE_THREADED_SET_BIND_ORDINAL_TABLE_SIZE_ULEB", path);
+                diag.error("in '%s' chained target counts exceeds BIND_SUBOPCODE_THREADED_SET_BIND_ORDINAL_TABLE_SIZE_ULEB", dupPathBlock);
             }
             ++currentTargetCount;
             if ( diag.hasError() )
                 stop = true;
         },
         ^(const LinkEditInfo& leInfo, const SegmentInfo segments[], uint8_t segmentIndex, bool segIndexSet, uint64_t segmentOffset, uint16_t format, bool& stop) {
+           char dupPathBlock[PATH_MAX];
+           Diagnostics::quotePath(path, dupPathBlock);
            if ( !segIndexSet ) {
-                diag.error("in '%s' missing BIND_OPCODE_SET_SEGMENT_AND_OFFSET_ULEB", path);
+                diag.error("in '%s' missing BIND_OPCODE_SET_SEGMENT_AND_OFFSET_ULEB", dupPathBlock);
             }
             else if ( segmentIndex >= leInfo.layout.linkeditSegIndex )  {
-                diag.error("in '%s' segment index %d too large", path, segmentIndex);
+                diag.error("in '%s' segment index %d too large", dupPathBlock, segmentIndex);
             }
             else if ( segmentOffset > (segments[segmentIndex].vmSize-8) ) {
-                diag.error("in '%s' current segment offset 0x%08llX beyond segment size (0x%08llX)", path, segmentOffset, segments[segmentIndex].vmSize);
+                diag.error("in '%s' current segment offset 0x%08llX beyond segment size (0x%08llX)", dupPathBlock, segmentOffset, segments[segmentIndex].vmSize);
             }
             else if ( !segments[segmentIndex].writable() ) {
-                diag.error("in '%s' pointer bind is in non-writable segment", path);
+                diag.error("in '%s' pointer bind is in non-writable segment", dupPathBlock);
             }
             else if ( segments[segmentIndex].executable() ) {
-                diag.error("in '%s' pointer bind is in executable segment", path);
+                diag.error("in '%s' pointer bind is in executable segment", dupPathBlock);
             }
             if ( diag.hasError() )
                 stop = true;

@@ -180,7 +180,7 @@ Adjustor<P>::Adjustor(uint64_t cacheBaseAddress, dyld3::MachOAnalyzer* mh, const
         }
 #endif
         if ( !canHaveMissingSplitSeg )
-            _diagnostics.error("missing LC_SEGMENT_SPLIT_INFO in %s", _dylibID);
+            _diagnostics.error("missing LC_SEGMENT_SPLIT_INFO in '%s'", _dylibID);
     }
 
     // Set the chained pointer format on old arm64e binaries using threaded rebase, and
@@ -243,7 +243,7 @@ uint64_t Adjustor<P>::slideForOrigAddress(uint64_t addr)
     if ( _maskPointers && (addr & 0xF000000000000000) ) {
         return slideForOrigAddress(addr & 0x0FFFFFFFFFFFFFFF);
     }
-    _diagnostics.error("slide not known for dylib address 0x%llX in %s", addr, _dylibID);
+    _diagnostics.error("slide not known for dylib address 0x%llX in '%s'", addr, _dylibID);
     return 0;
 }
 
@@ -283,7 +283,7 @@ void Adjustor<P>::rebuildLinkEditAndLoadCommands(const CacheBuilder::DylibTextCo
 
     size_t linkeditBufferSize = align(_segCmds[_linkeditSegIndex]->vmsize(), 12);
     if ( linkeditBufferSize < newLinkEditSize ) {
-        _diagnostics.error("LINKEDIT overflow in %s", _dylibID);
+        _diagnostics.error("LINKEDIT overflow in '%s'", _dylibID);
         return;
     }
 
@@ -574,7 +574,7 @@ void Adjustor<P>::slidePointer(int segIndex, uint64_t segOffset, uint8_t type, C
         case REBASE_TYPE_TEXT_PCREL32:
             // general text relocs not support
         default:
-            _diagnostics.error("unknown rebase type 0x%02X in %s", type, _dylibID);
+            _diagnostics.error("unknown rebase type 0x%02X in '%s'", type, _dylibID);
     }
 }
 
@@ -829,7 +829,7 @@ void Adjustor<P>::adjustReference(uint32_t kind, uint8_t* mappedAddr, uint64_t f
             delta = (int32_t)value32;
             delta += adjust;
             if ( (delta > 0x80000000) || (-delta > 0x80000000) ) {
-                _diagnostics.error("DYLD_CACHE_ADJ_V2_DELTA_32 can't be adjust by 0x%016llX in %s", adjust, _dylibID);
+                _diagnostics.error("DYLD_CACHE_ADJ_V2_DELTA_32 can't be adjust by 0x%016llX in '%s'", adjust, _dylibID);
                 return;
             }
             P::E::set32(*mappedAddr32, (int32_t)delta);
@@ -858,7 +858,7 @@ void Adjustor<P>::adjustReference(uint32_t kind, uint8_t* mappedAddr, uint64_t f
             else if ( _mh->usesClassicRelocationsInKernelCollection() ) {
                 // Classic relocs are not guaranteed to be aligned, so always store them in the side table
                 if ( (uint32_t)toNewAddress != (uint32_t)(E::get32(*mappedAddr32) + targetSlide) ) {
-                    _diagnostics.error("bad DYLD_CACHE_ADJ_V2_POINTER_32 value not as expected at address 0x%llX in %s", fromNewAddress, _dylibID);
+                    _diagnostics.error("bad DYLD_CACHE_ADJ_V2_POINTER_32 value not as expected at address 0x%llX in '%s'", fromNewAddress, _dylibID);
                     return;
                 }
                 aslrTracker.setRebaseTarget32(mappedAddr32, (uint32_t)toNewAddress);
@@ -867,7 +867,7 @@ void Adjustor<P>::adjustReference(uint32_t kind, uint8_t* mappedAddr, uint64_t f
             }
             else {
                 if ( toNewAddress != (uint64_t)(E::get32(*mappedAddr32) + targetSlide) ) {
-                    _diagnostics.error("bad DYLD_CACHE_ADJ_V2_POINTER_32 value not as expected at address 0x%llX in %s", fromNewAddress, _dylibID);
+                    _diagnostics.error("bad DYLD_CACHE_ADJ_V2_POINTER_32 value not as expected at address 0x%llX in '%s'", fromNewAddress, _dylibID);
                     return;
                 }
                 E::set32(*mappedAddr32, (uint32_t)toNewAddress);
@@ -900,13 +900,13 @@ void Adjustor<P>::adjustReference(uint32_t kind, uint8_t* mappedAddr, uint64_t f
                         }
                         break;
                     default:
-                        _diagnostics.error("unknown 64-bit chained fixup format %d in %s", _chainedFixupsFormat, _dylibID);
+                        _diagnostics.error("unknown 64-bit chained fixup format %d in '%s'", _chainedFixupsFormat, _dylibID);
                         break;
                 }
             }
             else if ( _mh->usesClassicRelocationsInKernelCollection() ) {
                 if ( toNewAddress != (E::get64(*mappedAddr64) + targetSlide) ) {
-                    _diagnostics.error("bad DYLD_CACHE_ADJ_V2_POINTER_64 value not as expected at address 0x%llX in %s", fromNewAddress, _dylibID);
+                    _diagnostics.error("bad DYLD_CACHE_ADJ_V2_POINTER_64 value not as expected at address 0x%llX in '%s'", fromNewAddress, _dylibID);
                     return;
                 }
                 aslrTracker.setRebaseTarget64(mappedAddr64, toNewAddress);
@@ -918,7 +918,7 @@ void Adjustor<P>::adjustReference(uint32_t kind, uint8_t* mappedAddr, uint64_t f
             }
             else {
                 if ( toNewAddress != (E::get64(*mappedAddr64) + targetSlide) ) {
-                    _diagnostics.error("bad DYLD_CACHE_ADJ_V2_POINTER_64 value not as expected at address 0x%llX in %s", fromNewAddress, _dylibID);
+                    _diagnostics.error("bad DYLD_CACHE_ADJ_V2_POINTER_64 value not as expected at address 0x%llX in '%s'", fromNewAddress, _dylibID);
                     return;
                 }
                 E::set64(*mappedAddr64, toNewAddress);
@@ -950,7 +950,7 @@ void Adjustor<P>::adjustReference(uint32_t kind, uint8_t* mappedAddr, uint64_t f
             value32 = P::E::get32(*mappedAddr32);
             value64 = toNewAddress - imageStartAddress;
             if ( value64 > imageEndAddress ) {
-                _diagnostics.error("DYLD_CACHE_ADJ_V2_IMAGE_OFF_32 can't be adjust to 0x%016llX in %s", toNewAddress, _dylibID);
+                _diagnostics.error("DYLD_CACHE_ADJ_V2_IMAGE_OFF_32 can't be adjust to 0x%016llX in '%s'", toNewAddress, _dylibID);
                 return;
             }
             P::E::set32(*mappedAddr32, (uint32_t)value64);
@@ -964,7 +964,7 @@ void Adjustor<P>::adjustReference(uint32_t kind, uint8_t* mappedAddr, uint64_t f
                 int64_t pageDistance = ((toNewAddress & ~0xFFF) - (fromNewAddress & ~0xFFF));
                 int64_t newPage21 = pageDistance >> 12;
                 if ( (newPage21 > 2097151) || (newPage21 < -2097151) ) {
-                    _diagnostics.error("DYLD_CACHE_ADJ_V2_ARM64_ADRP can't be adjusted that far in %s", _dylibID);
+                    _diagnostics.error("DYLD_CACHE_ADJ_V2_ARM64_ADRP can't be adjusted that far in '%s'", _dylibID);
                     return;
                 }
                 instruction = (instruction & 0x9F00001F) | ((newPage21 << 29) & 0x60000000) | ((newPage21 << 3) & 0x00FFFFE0);
@@ -991,11 +991,11 @@ void Adjustor<P>::adjustReference(uint32_t kind, uint8_t* mappedAddr, uint64_t f
                     case 0x00000000:
                         if ( (instruction & 0x04800000) == 0x04800000 ) {
                             if ( newPageOffset & 0xF ) {
-                                _diagnostics.error("can't adjust off12 scale=16 instruction to %d bytes at mapped address=%p in %s", newPageOffset, mappedAddr, _dylibID);
+                                _diagnostics.error("can't adjust off12 scale=16 instruction to %d bytes at mapped address=%p in '%s'", newPageOffset, mappedAddr, _dylibID);
                                 return;
                             }
                             if ( encodedAddend*16 >= 4096 ) {
-                                _diagnostics.error("off12 scale=16 instruction points outside its page at mapped address=%p in %s", mappedAddr, _dylibID);
+                                _diagnostics.error("off12 scale=16 instruction points outside its page at mapped address=%p in '%s'", mappedAddr, _dylibID);
                             }
                             newAddend = (newPageOffset/16);
                         }
@@ -1006,33 +1006,33 @@ void Adjustor<P>::adjustReference(uint32_t kind, uint8_t* mappedAddr, uint64_t f
                         break;
                     case 0x40000000:
                         if ( newPageOffset & 1 ) {
-                            _diagnostics.error("can't adjust off12 scale=2 instruction to %d bytes at mapped address=%p in %s", newPageOffset, mappedAddr, _dylibID);
+                            _diagnostics.error("can't adjust off12 scale=2 instruction to %d bytes at mapped address=%p in '%s'", newPageOffset, mappedAddr, _dylibID);
                             return;
                         }
                         if ( encodedAddend*2 >= 4096 ) {
-                            _diagnostics.error("off12 scale=2 instruction points outside its page at mapped address=%p in %s", mappedAddr, _dylibID);
+                            _diagnostics.error("off12 scale=2 instruction points outside its page at mapped address=%p in '%s'", mappedAddr, _dylibID);
                             return;
                         }
                         newAddend = (newPageOffset/2);
                         break;
                     case 0x80000000:
                         if ( newPageOffset & 3 ) {
-                            _diagnostics.error("can't adjust off12 scale=4 instruction to %d bytes at mapped address=%p in %s", newPageOffset, mappedAddr, _dylibID);
+                            _diagnostics.error("can't adjust off12 scale=4 instruction to %d bytes at mapped address=%p in '%s'", newPageOffset, mappedAddr, _dylibID);
                             return;
                         }
                         if ( encodedAddend*4 >= 4096 ) {
-                            _diagnostics.error("off12 scale=4 instruction points outside its page at mapped address=%p in %s", mappedAddr, _dylibID);
+                            _diagnostics.error("off12 scale=4 instruction points outside its page at mapped address=%p in '%s'", mappedAddr, _dylibID);
                             return;
                         }
                         newAddend = (newPageOffset/4);
                         break;
                     case 0xC0000000:
                         if ( newPageOffset & 7 ) {
-                            _diagnostics.error("can't adjust off12 scale=8 instruction to %d bytes at mapped address=%p in %s", newPageOffset, mappedAddr, _dylibID);
+                            _diagnostics.error("can't adjust off12 scale=8 instruction to %d bytes at mapped address=%p in '%s'", newPageOffset, mappedAddr, _dylibID);
                             return;
                         }
                         if ( encodedAddend*8 >= 4096 ) {
-                            _diagnostics.error("off12 scale=8 instruction points outside its page at mapped address=%p in %s", mappedAddr, _dylibID);
+                            _diagnostics.error("off12 scale=8 instruction points outside its page at mapped address=%p in '%s'", mappedAddr, _dylibID);
                             return;
                         }
                         newAddend = (newPageOffset/8);
@@ -1044,7 +1044,7 @@ void Adjustor<P>::adjustReference(uint32_t kind, uint8_t* mappedAddr, uint64_t f
             else if ( (instruction & 0xFFC00000) == 0x91000000 ) {
                 // ADD imm12
                 if ( instruction & 0x00C00000 ) {
-                    _diagnostics.error("ADD off12 uses shift at mapped address=%p in %s", mappedAddr, _dylibID);
+                    _diagnostics.error("ADD off12 uses shift at mapped address=%p in '%s'", mappedAddr, _dylibID);
                     return;
                 }
                 uint32_t newAddend = newPageOffset;
@@ -1053,7 +1053,7 @@ void Adjustor<P>::adjustReference(uint32_t kind, uint8_t* mappedAddr, uint64_t f
             }
             else if ( instruction != 0xD503201F ) {
                 // ignore imm12 instructions optimized into a NOP, but warn about others
-                _diagnostics.error("unknown off12 instruction 0x%08X at 0x%0llX in %s", instruction, fromNewAddress, _dylibID);
+                _diagnostics.error("unknown off12 instruction 0x%08X at 0x%0llX in '%s'", instruction, fromNewAddress, _dylibID);
                 return;
             }
             break;
@@ -1082,7 +1082,7 @@ void Adjustor<P>::adjustReference(uint32_t kind, uint8_t* mappedAddr, uint64_t f
                         instruction1 = setThumbWord(instruction1, full >> 16);
                     }
                     else {
-                        _diagnostics.error("two DYLD_CACHE_ADJ_V2_THUMB_MOVW_MOVT in a row but not paried in %s", _dylibID);
+                        _diagnostics.error("two DYLD_CACHE_ADJ_V2_THUMB_MOVW_MOVT in a row but not paried in '%s'", _dylibID);
                         return;
                     }
                     P::E::set32(*lastMappedAddr32, instruction1);
@@ -1090,7 +1090,7 @@ void Adjustor<P>::adjustReference(uint32_t kind, uint8_t* mappedAddr, uint64_t f
                     kind = 0;
                 }
                 else {
-                    _diagnostics.error("two DYLD_CACHE_ADJ_V2_THUMB_MOVW_MOVT in a row but target different addresses in %s", _dylibID);
+                    _diagnostics.error("two DYLD_CACHE_ADJ_V2_THUMB_MOVW_MOVT in a row but target different addresses in '%s'", _dylibID);
                     return;
                 }
             }
@@ -1120,7 +1120,7 @@ void Adjustor<P>::adjustReference(uint32_t kind, uint8_t* mappedAddr, uint64_t f
                         instruction1 = setArmWord(instruction1, full >> 16);
                     }
                     else {
-                        _diagnostics.error("two DYLD_CACHE_ADJ_V2_ARM_MOVW_MOVT in a row but not paired in %s", _dylibID);
+                        _diagnostics.error("two DYLD_CACHE_ADJ_V2_ARM_MOVW_MOVT in a row but not paired in '%s'", _dylibID);
                         return;
                     }
                     P::E::set32(*lastMappedAddr32, instruction1);
@@ -1128,7 +1128,7 @@ void Adjustor<P>::adjustReference(uint32_t kind, uint8_t* mappedAddr, uint64_t f
                     kind = 0;
                 }
                 else {
-                    _diagnostics.error("two DYLD_CACHE_ADJ_V2_ARM_MOVW_MOVT in a row but target different addresses in %s", _dylibID);
+                    _diagnostics.error("two DYLD_CACHE_ADJ_V2_ARM_MOVW_MOVT in a row but target different addresses in '%s'", _dylibID);
                     return;
                 }
             }
@@ -1147,7 +1147,7 @@ void Adjustor<P>::adjustReference(uint32_t kind, uint8_t* mappedAddr, uint64_t f
                 P::E::set32(*mappedAddr32, instruction);
                 break;
             } else {
-                _diagnostics.error("br26 instruction exceeds maximum range at mapped address=%p in %s", mappedAddr, _dylibID);
+                _diagnostics.error("br26 instruction exceeds maximum range at mapped address=%p in '%s'", mappedAddr, _dylibID);
                 return;
             }
         }
@@ -1294,7 +1294,7 @@ void Adjustor<P>::adjustReferencesUsingInfoV2(CacheBuilder::ASLR_Tracker& aslrTr
             for (uint64_t k=0; k < fromOffsetCount; ++k) {
                 uint64_t kind = read_uleb128(p, infoEnd);
                 if ( kind > 13 ) {
-                    _diagnostics.error("unknown split seg info v2 kind value (%llu) in %s", kind, _dylibID);
+                    _diagnostics.error("unknown split seg info v2 kind value (%llu) in '%s'", kind, _dylibID);
                     return;
                 }
                 uint64_t fromSectDeltaCount = read_uleb128(p, infoEnd);
@@ -1571,7 +1571,7 @@ void Adjustor<P>::adjustDataPointers(CacheBuilder::ASLR_Tracker& aslrTracker)
                 }
                 break;
             default:
-                _diagnostics.error("unknown rebase opcode 0x%02X in %s", opcode, _dylibID);
+                _diagnostics.error("unknown rebase opcode 0x%02X in '%s'", opcode, _dylibID);
                 done = true;
                 break;
         }
@@ -1751,7 +1751,7 @@ void Adjustor<P>::adjustExportsTrie(std::vector<uint8_t>& newTrieBytes)
     const uint8_t* end = &start[exportSize];
     std::vector<ExportInfoTrie::Entry> originalExports;
     if ( !ExportInfoTrie::parseTrie(start, end, originalExports) ) {
-        _diagnostics.error("malformed exports trie in %s", _dylibID);
+        _diagnostics.error("malformed exports trie in '%s'", _dylibID);
         return;
     }
 

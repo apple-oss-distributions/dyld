@@ -686,7 +686,9 @@ bool SyscallDelegate::saveFileWithAttribute(Diagnostics& diag, const char* path,
     int fd = ::open_dprotected_np(tempPath, O_WRONLY | O_CREAT, PROTECTION_CLASS_D, 0, S_IRUSR | S_IWUSR);
 #endif
     if ( fd == -1 ) {
-        diag.error("open/open_dprotected_np(%s) failed, errno=%d", tempPath, errno);
+        char duptempPath[PATH_MAX];
+        Diagnostics::quotePath(tempPath, duptempPath);
+        diag.error("open/open_dprotected_np('%s') failed, errno=%d", duptempPath, errno);
         return false;
     }
     int result = ::ftruncate(fd, size);
@@ -716,7 +718,11 @@ bool SyscallDelegate::saveFileWithAttribute(Diagnostics& diag, const char* path,
     }
     result = ::rename(tempPath, path);
     if ( result == -1 ) {
-        diag.error("rename(%s, %s) failed, errno=%d", tempPath, path, errno);
+        char duptempPath[PATH_MAX];
+        Diagnostics::quotePath(tempPath, duptempPath);
+        char dupPath[PATH_MAX];
+        Diagnostics::quotePath(path, dupPath);
+        diag.error("rename('%s', '%s') failed, errno=%d", duptempPath, dupPath, errno);
         return false;
     }
     return true;

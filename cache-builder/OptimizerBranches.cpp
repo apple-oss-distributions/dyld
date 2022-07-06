@@ -224,7 +224,7 @@ uint32_t StubOptimizer<P>::lazyPointerAddrFromArmStub(const uint8_t* stubInstruc
         return 0;
     }
     if ( stubInstr3 != 0xe59cf000 ) {
-        _diagnostics.warning("third instruction of stub (0x%08X) is not 'ldr pc, [ip]' for stub at addr 0x%0llX in %s",
+        _diagnostics.warning("third instruction of stub (0x%08X) is not 'ldr pc, [ip]' for stub at addr 0x%0llX in '%s'",
                 stubInstr1, (uint64_t)stubVMAddr, _dylibID);
         return 0;
     }
@@ -456,7 +456,7 @@ void StubOptimizer<P>::forEachCallSiteToAStub(CallSiteHandler handler)
     const uint8_t* infoStart = &_linkeditBias[_splitSegInfoCmd->dataoff()];
     const uint8_t* infoEnd = &infoStart[_splitSegInfoCmd->datasize()];
     if ( *infoStart++ != DYLD_CACHE_ADJ_V2_FORMAT ) {
-        _diagnostics.error("malformed split seg info in %s", _dylibID);
+        _diagnostics.error("malformed split seg info in '%s'", _dylibID);
         return;
     }
 
@@ -480,7 +480,7 @@ void StubOptimizer<P>::forEachCallSiteToAStub(CallSiteHandler handler)
             for (uint64_t k=0; k < fromOffsetCount; ++k) {
                 uint64_t kind = read_uleb128(p, infoEnd);
                 if ( kind > 13 ) {
-                    _diagnostics.error("bad kind (%llu) value in %s\n", kind, _dylibID);
+                    _diagnostics.error("bad kind (%llu) value in '%s'\n", kind, _dylibID);
                 }
                 uint64_t fromSectDeltaCount = read_uleb128(p, infoEnd);
                 uint64_t fromSectionOffset = 0;
@@ -534,7 +534,7 @@ template <typename P>
 uint32_t StubOptimizer<P>::setDisplacementInThumbBranch(uint32_t instruction,  uint32_t instrAddr,
                                                         int32_t displacement, bool targetIsThumb) {
     if ( (displacement > 16777214) || (displacement < (-16777216)) ) {
-        _diagnostics.error("thumb branch out of range at 0x%0X in %s", instrAddr, _dylibID);
+        _diagnostics.error("thumb branch out of range at 0x%0X in '%s'", instrAddr, _dylibID);
         return 0;
     }
     bool is_bl = ((instruction & 0xD000F800) == 0xD000F000);
@@ -554,12 +554,12 @@ uint32_t StubOptimizer<P>::setDisplacementInThumbBranch(uint32_t instruction,  u
     }
     else if (is_b) {
         if ( !targetIsThumb ) {
-            _diagnostics.error("no pc-rel thumb branch instruction that switches to arm mode at 0x%0X in %s", instrAddr, _dylibID);
+            _diagnostics.error("no pc-rel thumb branch instruction that switches to arm mode at 0x%0X in '%s'", instrAddr, _dylibID);
             return 0;
         }
     }
     else {
-        _diagnostics.error("not b/bl/blx at 0x%0X in %s", instrAddr, _dylibID);
+        _diagnostics.error("not b/bl/blx at 0x%0X in '%s'", instrAddr, _dylibID);
         return 0;
     }
     uint32_t s = (uint32_t)(displacement >> 24) & 0x1;
@@ -914,7 +914,7 @@ void bypassStubs(std::vector<std::pair<const mach_header*, const char*>> images,
                 const uint8_t* exportsEnd = exportsStart + op->exportsTrieSize();
                 std::vector<ExportInfoTrie::Entry> exports;
                 if ( !ExportInfoTrie::parseTrie(exportsStart, exportsEnd, exports) ) {
-                    diags.error("malformed exports trie in %s", op->dylibID());
+                    diags.error("malformed exports trie in '%s'", op->dylibID());
                     return;
                 }
                 for(const ExportInfoTrie::Entry& entry : exports) {
