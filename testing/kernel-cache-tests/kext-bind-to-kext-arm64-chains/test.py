@@ -1,7 +1,8 @@
-#!/usr/bin/python2.7
+#!/usr/bin/python3
 
 import os
 import KernelCollection
+from FixupHelpers import *
 
 # This tests that kexts can bind to each other using DYLD_CHAINED_PTR_64_OFFSET
 
@@ -13,27 +14,32 @@ def check(kernel_cache):
     assert len(kernel_cache.dictionary()["dylibs"]) == 3
     # main.kernel
     assert kernel_cache.dictionary()["dylibs"][0]["name"] == "com.apple.kernel"
-    assert len(kernel_cache.dictionary()["dylibs"][0]["segments"]) == 4
     # bar.kext
     assert kernel_cache.dictionary()["dylibs"][1]["name"] == "com.apple.bar"
-    assert kernel_cache.dictionary()["dylibs"][1]["segments"][2]["name"] == "__DATA_CONST"
-    assert kernel_cache.dictionary()["dylibs"][1]["segments"][2]["vmAddr"] == "0xFFFFFFF00701C000"
     # foo.kext
     assert kernel_cache.dictionary()["dylibs"][2]["name"] == "com.apple.foo"
 
+    # Note down the base addresses and GOT section for later
+    cacheBaseAddress = findCacheBaseVMAddr(kernel_cache)
+    barGOTVMAddr = findSectionVMAddr(kernel_cache, 1, "__DATA_CONST", "__got")
+
     # Symbols
     kernel_cache.analyze("/kext-bind-to-kext-arm64-chains/main.kc", ["-symbols", "-arch", "arm64"])
+    # main.kernel
+    assert kernel_cache.dictionary()["dylibs"][0]["name"] == "com.apple.kernel"
+    main_func_vmAddr = findGlobalSymbolVMAddr(kernel_cache, 0, "_func")
+    main_funcPtr_vmAddr = findGlobalSymbolVMAddr(kernel_cache, 0, "_funcPtr")
+    # foo.kext
     assert kernel_cache.dictionary()["dylibs"][2]["name"] == "com.apple.foo"
-    assert kernel_cache.dictionary()["dylibs"][2]["global-symbols"][0]["name"] == "_foo"
-    assert kernel_cache.dictionary()["dylibs"][2]["global-symbols"][0]["vmAddr"] == "0xFFFFFFF007018020"
+    foo_foo_vmAddr = findGlobalSymbolVMAddr(kernel_cache, 2, "_foo")
 
     # Check the fixups
     kernel_cache.analyze("/kext-bind-to-kext-arm64-chains/main.kc", ["-fixups", "-arch", "arm64"])
-    assert len(kernel_cache.dictionary()["fixups"]) == 2
+    assert len(kernel_cache.dictionary()["fixups"]) >= 2
     # bar.kext: extern int foo();
-    assert kernel_cache.dictionary()["fixups"]["0x20000"] == "kc(0) + 0xFFFFFFF007014000"
+    assert kernel_cache.dictionary()["fixups"][fixupOffset(barGOTVMAddr, cacheBaseAddress)] == "kc(0) + " + foo_foo_vmAddr
     # main.kernel: __typeof(&func) funcPtr = &func;
-    assert kernel_cache.dictionary()["fixups"]["0x18000"] == "kc(0) + 0xFFFFFFF007018020"
+    assert kernel_cache.dictionary()["fixups"][fixupOffset(main_funcPtr_vmAddr, cacheBaseAddress)] == "kc(0) + " + main_func_vmAddr
     assert len(kernel_cache.dictionary()["dylibs"]) == 3
     assert kernel_cache.dictionary()["dylibs"][0]["name"] == "com.apple.kernel"
     assert kernel_cache.dictionary()["dylibs"][0]["fixups"] == "none"

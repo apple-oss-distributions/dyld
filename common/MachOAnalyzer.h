@@ -48,10 +48,9 @@ struct VIS_HIDDEN MachOAnalyzer : public MachOLoaded
     using MachOLoaded::FoundSymbol;
     using MachOLoaded::findExportedSymbol;
     using MachOLoaded::forEachGlobalSymbol;
+    using MachOLoaded::forEachImportedSymbol;
     using MachOLoaded::forEachLocalSymbol;
-    using MachOFile::canBePlacedInDyldCache;
     using MachOFile::forEachLoadCommand;
-    using MachOFile::removeLoadCommand;
 
     enum class Rebase {
         unknown,
@@ -82,37 +81,30 @@ struct VIS_HIDDEN MachOAnalyzer : public MachOLoaded
 #if !(BUILDING_LIBDYLD || BUILDING_DYLD)
         enum class SharedCacheFormat : uint8_t {
             none            = 0,
-            v2_x86_64_tbi   = 1,
-            v3              = 2,
-            v4              = 3,
+            v1             = 1,
+            v2_x86_64_tbi   = 2,
+            v3              = 3,
+            v4              = 4,
         };
         SharedCacheFormat sharedCacheChainedPointerFormat   = SharedCacheFormat::none;
 #endif
 
         uint64_t convertToVMAddr(uint64_t v) const;
+        uint64_t convertToVMAddr(uint64_t v, const Array<uint64_t>& bindTargets) const;
     };
 
     VMAddrConverter     makeVMAddrConverter(bool contentRebased) const;
-
-    uint64_t            mappedSize() const;
-    bool                hasObjC() const;
+    bool                hasSwiftOrObjC(bool* hasSwift = nullptr) const;
+    bool                hasSwift() const;
     bool                hasPlusLoadMethod(Diagnostics& diag) const;
     bool                usesObjCGarbageCollection() const;
-    bool                isSwiftLibrary() const;
-    void                forEachRPath(void (^callback)(const char* rPath, bool& stop)) const;
     bool                hasProgramVars(uint32_t& progVarsOffset, bool& runsInitializers, DyldLookFunc*& dyldLookupFuncAddr) const;
     void                forEachCDHash(void (^handler)(const uint8_t cdHash[20])) const;
-    bool                hasCodeSignature(uint32_t& fileOffset, uint32_t& size) const;
     bool                usesLibraryValidation() const;
-    bool                getEntry(uint64_t& offset, bool& usesCRT) const;
     bool                isSlideable() const;
-    bool                hasInitializer(Diagnostics& diag) const;
-    void                forEachInitializerPointerSection(Diagnostics& diag, void (^callback)(uint32_t sectionOffset, uint32_t sectionSize, const uint8_t* content, bool& stop)) const;
     void                forEachInitializer(Diagnostics& diag, const VMAddrConverter& vmAddrConverter, void (^callback)(uint32_t offset), const void* dyldCache=nullptr) const;
     bool                hasTerminators(Diagnostics& diag, const VMAddrConverter& vmAddrConverter) const;
     void                forEachTerminator(Diagnostics& diag, const VMAddrConverter& vmAddrConverter, void (^callback)(uint32_t offset)) const;
-    void                forEachDOFSection(Diagnostics& diag, void (^callback)(uint32_t offset)) const;
-    uint32_t            segmentCount() const;
     void                forEachExportedSymbol(Diagnostics& diag, ExportsCallback callback) const;
     void                forEachWeakDef(Diagnostics& diag, void (^callback)(bool strongDef, uint32_t dataSegIndex, uint64_t dataSegOffset,
                                                     uint64_t addend, const char* symbolName, bool& stop)) const;
@@ -149,14 +141,10 @@ struct VIS_HIDDEN MachOAnalyzer : public MachOLoaded
                                                                        uint32_t pointerSize, uint8_t segmentIndex, uint64_t segmentOffset,
                                                                        uint8_t type, const char* symbolName, bool weakImport, bool lazyBind, uint64_t addend, bool& stop),
                                                        void (^strongHandler)(const char* symbolName)) const;
-    bool                canBePlacedInDyldCache(const char* path, void (^failureReason)(const char*)) const;
     bool                canHavePrecomputedDlopenClosure(const char* path, void (^failureReason)(const char*)) const;
 #if BUILDING_APP_CACHE_UTIL
     bool                canBePlacedInKernelCollection(const char* path, void (^failureReason)(const char*)) const;
 #endif
-    bool                usesClassicRelocationsInKernelCollection() const;
-    uint32_t            loadCommandsFreeSpace() const;
-    uint32_t            getFixupsLoadCommandFileOffset() const;
 
 #if DEBUG
     void                validateDyldCacheDylib(Diagnostics& diag, const char* path) const;
@@ -164,10 +152,11 @@ struct VIS_HIDDEN MachOAnalyzer : public MachOLoaded
     void                withChainStarts(Diagnostics& diag, uint64_t startsStructOffsetHint, void (^callback)(const dyld_chained_starts_in_image*)) const;
     uint64_t            chainStartsOffset() const;
     uint16_t            chainedPointerFormat() const;
-    static uint16_t     chainedPointerFormat(const dyld_chained_fixups_header* chainHeader);
     bool                hasUnalignedPointerFixups() const;
     const dyld_chained_fixups_header* chainedFixupsHeader() const;
     bool                hasFirmwareChainStarts(uint16_t* pointerFormat, uint32_t* startsCount, const uint32_t** starts) const;
+    bool                hasRebaseRuns(const void** runs, size_t* runsSize) const;
+    void                forEachRebaseRunAddress(const void* runs, size_t runsSize, void (^handler)(uint32_t address)) const;
     bool                isOSBinary(int fd, uint64_t sliceOffset, uint64_t sliceSize) const;  // checks if binary is codesigned to be part of the OS
     static bool         sliceIsOSBinary(int fd, uint64_t sliceOffset, uint64_t sliceSize);
 
@@ -315,11 +304,6 @@ struct VIS_HIDDEN MachOAnalyzer : public MachOLoaded
         //uint64_t classPropertiesVMAddr;
     };
 
-    // Looks for the given section in the segments in order: __DATA, __DATA_CONST, __DATA_DIRTY.
-    // Returns true if it finds a section, and sets the out parameters to the first section it found.
-    // Returns false if the given section doesn't exist in any of the given segments.
-    bool findObjCDataSection(const char* sectionName, uint64_t& sectionRuntimeOffset, uint64_t& sectionSize) const;
-
     enum class PrintableStringResult {
         CanPrint,
         FairPlayEncrypted,
@@ -330,10 +314,12 @@ struct VIS_HIDDEN MachOAnalyzer : public MachOLoaded
     const char* getPrintableString(uint64_t stringVMAddr, PrintableStringResult& result) const;
 
     void parseObjCClass(const VMAddrConverter& vmAddrConverter,
-                        uint64_t classVMAddr,
+                        uint64_t classVMAddr, const Array<uint64_t>& bindTargets,
                         void (^handler)(uint64_t classSuperclassVMAddr,
                                         uint64_t classDataVMAddr,
                                         const ObjCClassInfo& objcClass)) const;
+
+    bool isSwiftClass(const void* classPtr) const;
 
     typedef void (^ClassCallback)(uint64_t classVMAddr,
                                   uint64_t classSuperclassVMAddr, uint64_t classDataVMAddr,
@@ -386,54 +372,32 @@ struct VIS_HIDDEN MachOAnalyzer : public MachOLoaded
     void forEachObjCDuplicateClassToIgnore(void (^handler)(const char* className)) const;
 #endif
 
-    bool hasObjCMessageReferences() const;
-
     const ObjCImageInfo* objcImageInfo() const;
-
-    // Swift
-
-    struct SwiftProtocolConformance
-    {
-        uint64_t protocolRuntimeOffset                      = 0;
-
-        // The type conforms to one of a descriptor, a class by name, or an objc class
-        uint64_t typeConformanceRuntimeOffset               = 0;
-        uint64_t typeConformanceObjCClassNameRuntimeOffset  = 0;
-        uint64_t typeConformanceObjCClassRuntimeOffset      = 0;
-
-        // A type descriptor conformance can also point to a 'foreign' name to identity it by name not just pointer
-        uint64_t foreignMetadataNameRuntimeOffset           = 0;
-        bool     foreignMetadataNameHasImportInfo           = false;
-    };
-
-    // Walks all protocol conformances in the binary
-    void forEachSwiftProtocolConformance(uint64_t protocolConformanceListRuntimeOffset,
-                                         uint64_t numProtocolConformances,
-                                         const VMAddrConverter& vmAddrConverter,
-                                         bool canAnalyzeIndirectPointers,
-                                         void (^handler)(uint64_t protocolConformanceRuntimeOffset,
-                                                         const SwiftProtocolConformance& protocolConformance,
-                                                         bool& stopProtocolConformance)) const;
-
-    // Walks all protocol conformances in the binary
-    void forEachSwiftProtocolConformance(Diagnostics& diag, const VMAddrConverter& vmAddrConverter,
-                                         bool canAnalyzeIndirectPointers,
-                                         void (^handler)(uint64_t protocolConformanceRuntimeOffset,
-                                                         const SwiftProtocolConformance& protocolConformance,
-                                                         bool& stopProtocolConformance)) const;
 
     void forEachWeakDef(Diagnostics& diag, void (^handler)(const char* symbolName, uint64_t imageOffset, bool isFromExportTrie)) const;
 
-    bool inCodeSection(uint32_t runtimeOffset) const;
+    struct TLV_Thunk;
+    typedef void* (*TLV_Resolver)(TLV_Thunk*);
 
     // the compiler statically allocated one of these thunks for each thread_local variable
     // the compiler codegens access to a thread_local by calling the thunk to get the address of the variable for the current thread
     struct TLV_Thunk
     {
-        void*   (*thunk)(TLV_Thunk*);
+        TLV_Resolver thunk;
         size_t	  key;
         size_t	  offset;
     };
+
+    // To be used in the shared cache builder to hardcode a
+    // given pointer size.
+    template <typename P> struct FixedSizeTLVThunk
+    {
+        P thunk;
+        P key;
+        P offset;
+    };
+
+    static_assert(sizeof(FixedSizeTLVThunk<intptr_t>) == sizeof(TLV_Thunk));
 
     // all TLV in a linkage unit are lazily allocated per thread
     // this struct describes what the initial content of that allocation should be 
@@ -443,8 +407,7 @@ struct VIS_HIDDEN MachOAnalyzer : public MachOLoaded
         uint64_t    size;
     };
 
-    TLV_InitialContent  forEachThreadLocalVariable(Diagnostics& diag, void (^handler)(TLV_Thunk& slot)) const;
-
+    TLV_InitialContent  forEachThreadLocalVariable(Diagnostics& diag, void (^handler)(TLV_Resolver* tlvThunkAddr, uintptr_t* keyAddr)) const;
 
     struct BindTargetInfo {
         unsigned    targetIndex;
@@ -463,12 +426,23 @@ struct VIS_HIDDEN MachOAnalyzer : public MachOLoaded
     bool                forEachRebaseLocation_Opcodes(Diagnostics& diag, void (^handler)(uint64_t runtimeOffset, bool& stop)) const;
     bool                forEachRebaseLocation_Relocations(Diagnostics& diag, void (^handler)(uint64_t runtimeOffset, bool& stop)) const;
 
-    static void forEachTreatAsWeakDef(void (^handler)(const char* symbolName));
+    // Get the layout information for this MachOAnalyzer.  Requires that the file is in VM layout, not file layout.
+    bool                    getLinkeditLayout(Diagnostics& diag, uint64_t linkeditFileOffset,
+                                              const uint8_t* linkeditStartAddr, mach_o::LinkeditLayout& layout) const;
+    void                    withVMLayout(Diagnostics &diag, void (^callback)(const mach_o::Layout& layout)) const;
+    void                    getAllSegmentsInfos(Diagnostics& diag, SegmentInfo segments[]) const;
 
-    enum class Malformed { linkeditOrder, linkeditAlignment, linkeditPermissions, dyldInfoAndlocalRelocs, segmentOrder,
-                            textPermissions, executableData, writableData, codeSigAlignment, sectionsAddrRangeWithinSegment,
-                            noLinkedDylibs, loaderPathsAreReal, mainExecInDyldCache, noUUID };
-    bool                    enforceFormat(Malformed) const;
+    typedef void (^BindDetailedHandler)(const char* opcodeName, const LinkEditInfo& leInfo, const SegmentInfo segments[],
+                                bool segIndexSet,  bool libraryOrdinalSet, uint32_t dylibCount, int libOrdinal,
+                                uint32_t pointerSize, uint8_t segmentIndex, uint64_t segmentOffset,
+                                uint8_t type, const char* symbolName, bool weakImport, bool lazyBind,
+                                uint64_t addend, bool targetOrAddendChanged, bool& stop);
+    typedef void (^RebaseDetailHandler)(const char* opcodeName, const LinkEditInfo& leInfo, const SegmentInfo segments[],
+                                        bool segIndexSet, uint32_t pointerSize, uint8_t segmentIndex, uint64_t segmentOffset, Rebase kind, bool& stop);
+    bool                forEachBind_OpcodesLazy(Diagnostics& diag, const LinkEditInfo& leInfo, const SegmentInfo segments[], BindDetailedHandler) const;
+    bool                forEachBind_OpcodesWeak(Diagnostics& diag, const LinkEditInfo& leInfo, const SegmentInfo segments[], BindDetailedHandler,  void (^strongHandler)(const char* symbolName)) const;
+    bool                forEachBind_OpcodesRegular(Diagnostics& diag, const LinkEditInfo& leInfo, const SegmentInfo segments[], BindDetailedHandler) const;
+    bool                forEachRebase_Opcodes(Diagnostics& diag, const LinkEditInfo& leInfo, const SegmentInfo segments[], RebaseDetailHandler) const;
 
 private:
     void                forEachBindUnified_Opcodes(Diagnostics& diag, bool allowLazyBinds,
@@ -481,21 +455,8 @@ private:
     void                forEachBindTarget_ChainedFixups(Diagnostics& diag, void (^handler)(const BindTargetInfo& info, bool& stop)) const;
     void                forEachBindTarget_Relocations(Diagnostics& diag, void (^handler)(const BindTargetInfo& info, bool& stop)) const;
 
-    typedef void (^BindDetailedHandler)(const char* opcodeName, const LinkEditInfo& leInfo, const SegmentInfo segments[],
-                                bool segIndexSet,  bool libraryOrdinalSet, uint32_t dylibCount, int libOrdinal,
-                                uint32_t pointerSize, uint8_t segmentIndex, uint64_t segmentOffset,
-                                uint8_t type, const char* symbolName, bool weakImport, bool lazyBind,
-                                uint64_t addend, bool targetOrAddendChanged, bool& stop);
-    typedef void (^RebaseDetailHandler)(const char* opcodeName, const LinkEditInfo& leInfo, const SegmentInfo segments[],
-                                        bool segIndexSet, uint32_t pointerSize, uint8_t segmentIndex, uint64_t segmentOffset, Rebase kind, bool& stop);
-
-    bool                forEachBind_OpcodesLazy(Diagnostics& diag, const LinkEditInfo& leInfo, const SegmentInfo segments[], BindDetailedHandler) const;
-    bool                forEachBind_OpcodesWeak(Diagnostics& diag, const LinkEditInfo& leInfo, const SegmentInfo segments[], BindDetailedHandler,  void (^strongHandler)(const char* symbolName)) const;
-    bool                forEachBind_OpcodesRegular(Diagnostics& diag, const LinkEditInfo& leInfo, const SegmentInfo segments[], BindDetailedHandler) const;
     bool                forEachBind_Relocations(Diagnostics& diag, const LinkEditInfo& leInfo, const SegmentInfo segments[],
                                                 bool supportPrivateExternsWorkaround, BindDetailedHandler) const;
-
-    bool                forEachRebase_Opcodes(Diagnostics& diag, const LinkEditInfo& leInfo, const SegmentInfo segments[], RebaseDetailHandler) const;
     bool                forEachRebase_Relocations(Diagnostics& diag, const LinkEditInfo& leInfo, const SegmentInfo segments[], RebaseDetailHandler) const;
 
     struct SegmentStuff
@@ -511,7 +472,6 @@ private:
     const uint8_t*          getContentForVMAddr(const LayoutInfo& info, uint64_t vmAddr) const;
     bool                    validLoadCommands(Diagnostics& diag, const char* path, size_t fileLen) const;
     bool                    validEmbeddedPaths(Diagnostics& diag, Platform platform, const char* path) const;
-    bool                    validSegments(Diagnostics& diag, const char* path, size_t fileLen) const;
     bool                    validLinkedit(Diagnostics& diag, const char* path) const;
     bool                    validLinkeditLayout(Diagnostics& diag, const char* path) const;
     bool                    validRebaseInfo(Diagnostics& diag, const char* path) const;
@@ -532,7 +492,6 @@ private:
                                             void (^callback)(uint32_t dataSegIndex, uint64_t dataSegOffset, uint8_t type, int libOrdinal,
                                                              uint64_t addend, const char* symbolName, bool weakImport, bool lazy, bool& stop)) const;
 
-    void                    getAllSegmentsInfos(Diagnostics& diag, SegmentInfo segments[]) const;
     bool                    segmentHasTextRelocs(uint32_t segIndex) const;
     uint64_t                localRelocBaseAddress(const SegmentInfo segmentsInfos[], uint32_t segCount) const;
     uint64_t                externalRelocBaseAddress(const SegmentInfo segmentsInfos[], uint32_t segCount) const;
@@ -543,7 +502,8 @@ private:
     bool                    contentIsRegularStub(const uint8_t* helperContent) const;
     void                    recurseTrie(Diagnostics& diag, const uint8_t* const start, const uint8_t* p, const uint8_t* const end,
                                         OverflowSafeArray<char>& cummulativeString, int curStrOffset, bool& stop, MachOAnalyzer::ExportsCallback callback) const;
-    void                    analyzeSegmentsLayout(uint64_t& vmSpace, bool& hasZeroFill) const;
+
+    template<typename P> void forEachThreadLocalVariableInSection(Diagnostics& diag, const MachOAnalyzer::SectionInfo& sectInfo, void (^handler)(TLV_Resolver* tlvThunkAddr, uintptr_t* keyAddr)) const;
 
 };
 

@@ -101,6 +101,26 @@ struct BuildOptions_v2
     bool                                        optimizeForSize;
 };
 
+// This is available when getVersion() returns 1.3 or higher
+struct BuildOptions_v3
+{
+    uint64_t                                    version;                        // Future proofing, set to 2
+    const char *                                updateName;                     // BuildTrain+UpdateNumber
+    const char *                                deviceName;
+    enum Disposition                            disposition;                    // Internal, Customer, etc.
+    enum Platform                               platform;                       // Enum: unknown, macOS, iOS, ...
+    const char **                               archs;
+    uint64_t                                    numArchs;
+    bool                                        verboseDiagnostics;
+    bool                                        isLocallyBuiltCache;
+    // Added in v2
+    bool                                        optimizeForSize;
+    // Added in v3
+    bool                                        filesRemovedFromDisk;
+    bool                                        timePasses;
+    bool                                        printStats;
+};
+
 enum FileBehavior
 {
     AddFile                                     = 0,        // New file: uid, gid, mode, data, cdhash fields must be set
@@ -108,6 +128,11 @@ enum FileBehavior
 };
 
 struct FileResult
+{
+    uint64_t                                    version;
+};
+
+struct FileResult_v1
 {
     uint64_t                                    version;            // Future proofing, set to 1
     const char*                                 path;
@@ -120,6 +145,20 @@ struct FileResult
     const char*                                 hash;
 };
 
+struct FileResult_v2
+{
+    uint64_t                                    version;            // Future proofing, set to 2
+    const char*                                 path;
+    enum FileBehavior                           behavior;
+    const uint8_t*                              data;               // May be null.  Owned by the cache builder.  Destroyed by destroySharedCacheBuilder
+    uint64_t                                    size;
+    // CDHash, must be set for new or modified files
+    const char*                                 hashArch;
+    const char*                                 hashType;
+    const char*                                 hash;
+    int                                         fd;
+    const char*                                 tempFilePath;
+};
 
 struct CacheResult
 {
@@ -145,6 +184,11 @@ struct MRMSharedCacheBuilder* createSharedCacheBuilder(const struct BuildOptions
 // Add a file.  Returns true on success.
 __API_AVAILABLE(macos(10.12))
 bool addFile(struct MRMSharedCacheBuilder* builder, const char* path, uint8_t* data, uint64_t size, enum FileFlags fileFlags);
+
+// Add an on-disk file (ie, a file which won't be removed by MRM).  Returns true on success.
+__API_AVAILABLE(macos(10.12))
+bool addOnDiskFile(struct MRMSharedCacheBuilder* builder, const char* path, uint8_t* data, uint64_t size, enum FileFlags fileFlags,
+                   uint64_t inode, uint64_t modTime);
 
 __API_AVAILABLE(macos(10.12))
 bool addSymlink(struct MRMSharedCacheBuilder* builder, const char* fromPath, const char* toPath);

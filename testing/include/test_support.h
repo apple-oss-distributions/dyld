@@ -30,7 +30,9 @@ struct _process {
     void set_exit_handler(_dyld_test_exit_handler_t EH);
     void set_crash_handler(_dyld_test_crash_handler_t CH);
     void set_launch_suspended(bool S);
+    void set_alt_page_size(bool PS);
     void set_launch_arch(cpu_type_t A);
+    pid_t get_pid() const;
     pid_t launch();
     void *operator new(size_t size);
     void operator delete(void *ptr);
@@ -44,6 +46,8 @@ private:
     _dyld_test_exit_handler_t exitHandler;
     cpu_type_t arch;
     bool suspended;
+    bool altPageSize;
+    pid_t pid;
 };
 
 #define STDERR_WRITER ^(int fd) {           \
@@ -68,11 +72,19 @@ private:
 
 #endif /* __cplusplus */
 
+#ifdef USE_PRINTF_MACROS
+#include <stdio.h>
+extern const char* __progname;
+#define PASS(...)           printf("[PASS] %s: ", __progname); printf(__VA_ARGS__); printf("\n"); exit(0);
+#define FAIL(...)           printf("[FAIL] %s: ", __progname); printf(__VA_ARGS__); printf("\n"); exit(0);
+#define LOG(...)            printf("[LOG] %s: ", __progname); printf(__VA_ARGS__); printf("\n");
+#define BEGIN()             printf("[BEGIN] %s\n", __progname);
+#else
 #define PASS(...)           _PASS(__FILE__,__LINE__,__VA_ARGS__)
 #define FAIL(...)           _FAIL(__FILE__,__LINE__,__VA_ARGS__)
 #define LOG(...)            _LOG(__FILE__,__LINE__,__VA_ARGS__)
 #define TIMEOUT(seconds)    _TIMEOUT(__FILE__,__LINE__,seconds)
-
+#endif
 // MARK: Private implementation details
 
 #if __cplusplus

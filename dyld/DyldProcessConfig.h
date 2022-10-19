@@ -33,26 +33,37 @@
 
 #include "Defines.h"
 #include "Array.h"
-#include "MachOAnalyzer.h"
 #include "DyldSharedCache.h"
 #include "SharedCacheRuntime.h"
 #include "DyldDelegates.h"
+#include "Allocator.h"
 
+#if BUILDING_CACHE_BUILDER
+#include "MachOFile.h"
+#else
+#include "MachOAnalyzer.h"
+#endif
 
+#if BUILDING_CACHE_BUILDER || BUILDING_CACHE_BUILDER_UNIT_TESTS
+#include "Vector.h"
+#endif
 
+namespace dyld4 {
+
+using lsl::Allocator;
+using dyld3::MachOFile;
 using dyld3::MachOLoaded;
 using dyld3::MachOAnalyzer;
 using dyld3::GradedArchs;
-//using dyld3::Platform;
+
 typedef dyld4::SyscallDelegate::DyldCommPage   DyldCommPage;
 
-namespace dyld4 {
-    class APIs;
+class APIs;
 
 #if BUILDING_DYLD
-    void halt(const char* message)  __attribute__((noreturn));
+void halt(const char* message)  __attribute__((noreturn));
 #endif
-    void console(const char* format, ...) __attribute__((format(printf, 1, 2)));
+void console(const char* format, ...) __attribute__((format(printf, 1, 2)));
 
 struct ProgramVars
 {
@@ -81,14 +92,20 @@ struct LibdyldDyld4Section {
     void*               allImageInfos;  // set by dyld to point to the dyld_all_image_infos struct
 	dyld4::ProgramVars  defaultVars;    // set by libdyld to have addresses of default crt globals in libdyld.dylib
     dyld3::DyldLookFunc dyldLookupFuncAddr;
+    void* (*tlv_get_addrAddr)(dyld3::MachOAnalyzer::TLV_Thunk*);
 };
+
 extern volatile LibdyldDyld4Section gDyld;
 
 
 // how kernel pass argc,argv,envp on the stack to main executable
 struct KernelArgs
 {
+#if SUPPORT_VM_LAYOUT
     const MachOAnalyzer*  mainExecutable;
+#else
+    const MachOFile*      mainExecutable;
+#endif
     uintptr_t             argc;
 #define MAX_KERNEL_ARGS   128
     const char*           args[MAX_KERNEL_ARGS]; // argv[], then envp[], then apple[]
@@ -98,7 +115,7 @@ struct KernelArgs
     const char**          findApple() const;
 
 #if !BUILDING_DYLD
-                          KernelArgs(const MachOAnalyzer* mh, const std::vector<const char*>& argv, const std::vector<const char*>& envp, const std::vector<const char*>& apple);
+                          KernelArgs(const MachOFile* mh, const std::vector<const char*>& argv, const std::vector<const char*>& envp, const std::vector<const char*>& apple);
 #endif
 };
 
@@ -113,11 +130,14 @@ class VIS_HIDDEN ProcessConfig
 {
 public:
                             // used in unit tests to config and test ProcessConfig objects
-                            ProcessConfig(const KernelArgs* kernArgs, SyscallDelegate&);
+                            ProcessConfig(const KernelArgs* kernArgs, SyscallDelegate&, Allocator&);
 
 #if !BUILDING_DYLD
-    void                    reset(const MachOAnalyzer* mainExe, const char* mainPath, const DyldSharedCache* cache);
+    void                    reset(const MachOFile* mainExe, const char* mainPath, const DyldSharedCache* cache);
 #endif
+
+    void                    scanForRoots() const;
+    static void*            scanForRoots(void* context);
 
     //
     // Contains config info derived from Kernel arguments
@@ -125,11 +145,16 @@ public:
     class Process
     {
     public:
-                                    Process(const KernelArgs* kernArgs, SyscallDelegate&);
-
+                                    Process(const KernelArgs* kernArgs, SyscallDelegate&, Allocator&);
+#if SUPPORT_VM_LAYOUT
         const MachOAnalyzer*        mainExecutable;
+#else
+        mach_o::MachOFileRef        mainExecutable = { nullptr };
+#endif
         const char*                 mainExecutablePath;
         const char*                 mainUnrealPath;             // raw path used to launch
+        uint64_t                    mainExecutableFSID;
+        uint64_t                    mainExecutableObjID;
         uint32_t                    mainExecutableSDKVersion;
         uint32_t                    mainExecutableSDKVersionSet;
         uint32_t                    mainExecutableMinOSVersion;
@@ -137,6 +162,12 @@ public:
         dyld3::Platform             basePlatform;
         dyld3::Platform             platform;
         const char*                 dyldPath;
+        uint64_t                    dyldFSID;
+        uint64_t                    dyldObjID;
+#if TARGET_OS_SIMULATOR
+        uint64_t                    dyldSimFSID;
+        uint64_t                    dyldSimObjID;
+#endif
         int                         argc;
         const char* const*          argv;
         const char* const*          envp;
@@ -148,23 +179,27 @@ public:
         bool                        isTranslated;
         bool                        catalystRuntime; // Mac Catalyst app or iOS-on-mac app
         bool                        enableDataConst; // Temporarily allow disabling __DATA_CONST for bringup
+        bool                        enableCompactInfo; // Temporarily allow disabling Compact Info during bringup
         bool                        proactivelyUseWeakDefMap;
-
+        int                         pageInLinkingMode;
         const char*                 appleParam(const char* key) const;
         const char*                 environ(const char* key) const;
-        const char*                 strdup(const char*) const; // allocates into read-only region
-        void*                       roalloc(size_t) const;     // allocates into read-only region
+
     private:
         friend class ProcessConfig;
 
-        uint32_t                    findVersionSetEquivalent(dyld3::Platform versionPlatform, uint32_t version) const;
-        const char*                 pathFromFileHexStrings(SyscallDelegate& sys, const char* encodedFileInfo);
-        const char*                 getDyldPath(SyscallDelegate& sys);
-        const char*                 getMainPath(SyscallDelegate& syscall);
-        const char*                 getMainUnrealPath(SyscallDelegate& syscall);
-        dyld3::Platform             getMainPlatform();
-        const GradedArchs*          getMainArchs(SyscallDelegate& osDelegate);
-        bool                        usesCatalyst();
+        uint32_t                        findVersionSetEquivalent(dyld3::Platform versionPlatform, uint32_t version) const;
+        std::pair<uint64_t, uint64_t>   fileIDFromFileHexStrings(const char* encodedFileInfo);
+        const char*                     pathFromFileHexStrings(SyscallDelegate& sys, Allocator& allocator, const char* encodedFileInfo);
+        std::pair<uint64_t, uint64_t>   getDyldFileID();
+        const char*                     getDyldPath(SyscallDelegate& sys, Allocator& allocator);
+        std::pair<uint64_t, uint64_t>   getDyldSimFileID(SyscallDelegate& syscall);
+        const char*                     getMainPath(SyscallDelegate& syscall, Allocator& allocator);
+        std::pair<uint64_t, uint64_t>   getMainFileID();
+        const char*                     getMainUnrealPath(SyscallDelegate& syscall, Allocator& allocator);
+        dyld3::Platform                 getMainPlatform();
+        const GradedArchs*              getMainArchs(SyscallDelegate& osDelegate);
+        bool                            usesCatalyst();
     };
 
     //
@@ -222,19 +257,59 @@ public:
     class DyldCache
     {
     public:
-                                    DyldCache(Process&, const Security&, const Logging&, SyscallDelegate&);
+                                    DyldCache(Process&, const Security&, const Logging&, SyscallDelegate&, Allocator&);
 
         const DyldSharedCache*          addr;
+#if SUPPORT_VM_LAYOUT
         uintptr_t                       slide;
+#endif
+        uint64_t                        unslidLoadAddress;
         const char*                     path;
-        const objc_opt::objc_opt_t*     objCCacheInfo;
+        const objc::HeaderInfoRO*       objcHeaderInfoRO;
+        const objc::HeaderInfoRW*       objcHeaderInfoRW;
+        const objc::SelectorHashTable*  objcSelectorHashTable;
+        const objc::ClassHashTable*     objcClassHashTable;
+        const objc::ProtocolHashTable*  objcProtocolHashTable;
+        std::string_view                cryptexOSPath;
         const SwiftOptimizationHeader*  swiftCacheInfo;
+        uint64_t                        objcHeaderInfoROUnslidVMAddr;
+        uint64_t                        objcProtocolClassCacheOffset;
+        PatchTable                      patchTable;
         dyld3::Platform                 platform;
         uint32_t                        osVersion;
         uint32_t                        dylibCount;
+        bool                            development;
+        bool                            dylibsExpectedOnDisk;
+
+#if BUILDING_CACHE_BUILDER || BUILDING_CACHE_BUILDER_UNIT_TESTS
+        // In the cache builder, the dylibs might not be mapped in their runtime layout,
+        // so use the layout the builder gives us
+        struct CacheDylib
+        {
+            const MachOFile*        mf        = nullptr;
+            uint64_t                mTime     = 0;
+            uint64_t                inode     = 0;
+            const mach_o::Layout*   layout    = nullptr;
+        };
+        // FIXME: Use std::span once we have it
+        const lsl::Vector<CacheDylib>* cacheBuilderDylibs = nullptr;
+#endif
 
         bool                        indexOfPath(const char* dylibPath, uint32_t& dylibIndex) const;
+        bool                        findMachHeaderImageIndex(const mach_header* mh, uint32_t& imageIndex) const;
         void                        makeDataConstWritable(const Logging&, const SyscallDelegate&, bool writable) const;
+
+        // Moved from DyldSharedCache as they are only used from Loader's anyway, and this allows
+        // us to not link DyldSharedCache in to the cache builder, where it would be unsafe to use due
+        // to file layout vs VM layout vs builder layout
+        static bool                 isAlwaysOverridablePath(const char* dylibPath);
+        bool                        isOverridablePath(const char* dylibPath) const;
+        const char*                 getCanonicalPath(const char *path) const;
+        const char*                 getIndexedImagePath(uint32_t index) const;
+        const dyld3::MachOFile*     getIndexedImageEntry(uint32_t index,
+                                                         uint64_t& mTime, uint64_t& inode) const;
+
+        void                        adjustDevelopmentMode() const;
 
     private:
         friend class ProcessConfig;
@@ -249,18 +324,20 @@ public:
     class PathOverrides
     {
     public:
-                                        PathOverrides(const Process&, const Security&, const Logging&, const DyldCache&, SyscallDelegate&);
+                                        PathOverrides(const Process&, const Security&, const Logging&, const DyldCache&, SyscallDelegate&, Allocator&);
 
-        enum Type { pathDirOverride, versionedOverride, suffixOverride, catalystPrefix, simulatorPrefix, rawPath,
-              rpathExpansion, loaderPathExpansion, executablePathExpansion, implictRpathExpansion, customFallback, standardFallback };
+        enum Type { pathDirOverride, versionedOverride, suffixOverride, catalystPrefix, simulatorPrefix, cryptexPrefix,
+                    rawPathOnDisk, rawPath, rpathExpansion, loaderPathExpansion, executablePathExpansion, implictRpathExpansion,
+                    customFallback, standardFallback };
 
-        void                            forEachPathVariant(const char* requestedPath, dyld3::Platform platform, bool disableCustomFallbacks, bool& stop,
+        void                            forEachPathVariant(const char* requestedPath, dyld3::Platform platform, bool requestorNeedsFallbacks, bool skipFallbacks, bool& stop,
                                                            void (^handler)(const char* possiblePath, Type type, bool& stop)) const;
         void                            forEachInsertedDylib(void (^handler)(const char* dylibPath, bool &stop)) const;
         bool                            dontUsePrebuiltForApp() const;
         bool                            hasInsertedDylibs() const { return (_insertedDylibCount != 0); }
         uint32_t                        insertedDylibCount() const { return _insertedDylibCount; }
         const char*                     simRootPath() const { return _simRootPath; }
+        const char*                     cryptexRootPath() const { return _cryptexRootPath; }
         const char*                     getFrameworkPartialPath(const char* path) const;
 
         static const char*              getLibraryLeafName(const char* path);
@@ -268,21 +345,21 @@ public:
 
     private:
         void                            setEnvVars(const char* envp[], const char* mainExePath);
-        void                            addEnvVar(const Process& process, const Security& security, const char* keyEqualsValue, bool isLC_DYLD_ENV, char* crashMsg);
-        void                            processVersionedPaths(const Process& proc, SyscallDelegate&, const DyldCache&, dyld3::Platform, const GradedArchs&);
+        void                            addEnvVar(const Process& process, const Security& security, Allocator&, const char* keyEqualsValue, bool isLC_DYLD_ENV, char* crashMsg);
+        void                            processVersionedPaths(const Process& proc, SyscallDelegate&, const DyldCache&, dyld3::Platform, const GradedArchs&, Allocator& allocator);
         void                            forEachEnvVar(void (^handler)(const char* envVar)) const;
         void                            forEachExecutableEnvVar(void (^handler)(const char* envVar)) const;
 
-        void                            setString(const Process& process, const char*& var, const char* value);
-        static void                     forEachInColonList(const char* list1, const char* list2, void (^callback)(const char* path, bool& stop));
+        void                            setString(Allocator&, const char*& var, const char* value);
+        static void                     forEachInColonList(const char* list1, const char* list2, bool& stop, void (^callback)(const char* path, bool& stop));
         void                            handleListEnvVar(const char* key, const char** list, void (^handler)(const char* envVar)) const;
         void                            handleEnvVar(const char* key, const char* value, void (^handler)(const char* envVar)) const;
-        void                            forEachDylibFallback(dyld3::Platform platform, bool disableCustom, void (^handler)(const char* fallbackDir, Type type, bool& stop)) const;
-        void                            forEachFrameworkFallback(dyld3::Platform platform, bool disableCustom, void (^handler)(const char* fallbackDir, Type type, bool& stop)) const;
+        void                            forEachDylibFallback(dyld3::Platform platform, bool requestorNeedsFallbacks, bool& stop, void (^handler)(const char* fallbackDir, Type type, bool& stop)) const;
+        void                            forEachFrameworkFallback(dyld3::Platform platform, bool requestorNeedsFallbacks, bool& stop, void (^handler)(const char* fallbackDir, Type type, bool& stop)) const;
         void                            forEachImageSuffix(const char* path, Type type, bool& stop, void (^handler)(const char* possiblePath, Type type, bool& stop)) const;
         void                            addSuffix(const char* path, const char* suffix, char* result) const;
-        void                            checkVersionedPath(const Process&, const char* path, SyscallDelegate& delegate, const DyldCache&, dyld3::Platform platform, const GradedArchs& archs);
-        void                            addPathOverride(const Process&, const char* installName, const char* overridePath);
+        void                            checkVersionedPath(SyscallDelegate& delegate, const DyldCache&, Allocator&, const char* path, dyld3::Platform, const GradedArchs&);
+        void                            addPathOverride(Allocator& allocator, const char* installName, const char* overridePath);
 
         enum class FallbackPathMode { classic, restricted, none };
         struct DylibOverride { DylibOverride* next; const char* installName; const char* overridePath; };
@@ -302,6 +379,7 @@ public:
         const char*                     _insertedDylibs              = nullptr;
         const char*                     _imageSuffix                 = nullptr;
         const char*                     _simRootPath                 = nullptr;  // simulator only
+        const char*                     _cryptexRootPath             = nullptr;  // cryptex only
         DylibOverride*                  _versionedOverrides          = nullptr;  // linked list of VERSIONED overrides
         FallbackPathMode                _fallbackPathMode            = FallbackPathMode::classic;
         uint32_t                        _insertedDylibCount          = 0;
@@ -310,7 +388,7 @@ public:
 
     // wrappers for macOS that causes special three libsystem dylibs to not exist if they match what is in dyld cache
     bool simulatorFileMatchesDyldCache(const char* path) const;
-    bool fileExists(const char* path, FileID* fileID=nullptr, bool* notAFile=nullptr) const;
+    bool fileExists(const char* path, FileID* fileID=nullptr, int* errNum=nullptr) const;
 
     // if there is a dyld cache and the supplied path is in the dyld cache at that path or a symlink, return canonical path
     const char* canonicalDylibPathInCache(const char* dylibPath) const;

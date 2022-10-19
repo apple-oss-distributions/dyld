@@ -24,6 +24,7 @@
 #ifndef AppCacheBuilder_h
 #define AppCacheBuilder_h
 
+#include "ASLRTracker.h"
 #include "CacheBuilder.h"
 #include "MachOFileAbstraction.hpp"
 #include "MachOAppCache.h"
@@ -31,6 +32,9 @@
 #include <list>
 
 #include <CoreFoundation/CFDictionary.h>
+
+struct DylibSymbols;
+struct VTableBindSymbol;
 
 class AppCacheBuilder final : public CacheBuilder {
 public:
@@ -108,12 +112,27 @@ private:
         CFDictionaryRef                 infoPlist       = nullptr;
         Diagnostics*                    errors          = nullptr;
         std::string                     bundlePath;
+
+        DylibSectionCoalescer  _coalescer;
     };
 
     static_assert(std::is_move_constructible<AppCacheDylibInfo>::value);
 
+    struct AlignedRegion
+    {
+        AlignedRegion(Region* region, uint32_t alignmentBefore, uint32_t alignmentAfter)
+            : region(region), alignmentBefore(alignmentBefore), alignmentAfter(alignmentAfter)
+        {
+        }
+
+        Region* region;
+        uint32_t alignmentBefore;
+        uint32_t alignmentAfter;
+    };
+
     void                    forEachDylibInfo(void (^callback)(const DylibInfo& dylib, Diagnostics& dylibDiag,
-                                                              ASLR_Tracker& dylibASLRTracker)) override final;
+                                                              cache_builder::ASLR_Tracker& dylibASLRTracker,
+                                                              const CacheBuilder::DylibSectionCoalescer* sectionCoalescer)) override final;
 
     void                    forEachCacheDylib(void (^callback)(const dyld3::MachOAnalyzer* ma,
                                                                const std::string& dylibID,
@@ -126,6 +145,13 @@ private:
     const dyld3::MachOAnalyzer*         getKernelStaticExecutableFromCache() const;
 
     void                                makeSortedDylibs(const std::vector<InputDylib>& dylibs);
+    bool                                removeStubs();
+    void                                parseStubs();
+    void                                getRegionOrder(bool dataRegionFirstInVMOrder,
+                                                       bool hibernateRegionFirstInVMOrder,
+                                                       std::vector<AlignedRegion>& fileOrder,
+                                                       std::vector<AlignedRegion>& vmOrder,
+                                                       std::map<const Region*, uint32_t>& sectionsToAddToRegions);
     void                                allocateBuffer();
     void                                assignSegmentRegionsAndOffsets();
     void                                copyRawSegments();
@@ -134,6 +160,11 @@ private:
     void                                generatePrelinkInfo();
     uint32_t                            getCurrentFixupLevel() const;
     void                                processFixups();
+    void                                rewriteRemovedStubs();
+    void                                patchVTables(const dyld3::MachOAnalyzer* kernelMA,
+                                                     const std::string& kernelID,
+                                                     std::map<std::string, DylibSymbols>& dylibsToSymbols,
+                                                     std::map<const uint8_t*, const VTableBindSymbol>& missingBindLocations);
     void                                writeFixups();
     void                                fipsSign();
     void                                generateUUID();
@@ -150,7 +181,7 @@ private:
     CFDictionaryRef                     extraPrelinkInfo         = nullptr;
 
     // Note this is mutable as the only parallel writes to it are done atomically to the bitmap
-    mutable ASLR_Tracker                _aslrTracker;
+    mutable cache_builder::ASLR_Tracker _aslrTracker;
     uint64_t                            _nonLinkEditReadOnlySize    = 0;
     Region                              _readOnlyRegion;
 
@@ -160,6 +191,7 @@ private:
     Region                              cacheHeaderRegion;
     Region                              readExecuteRegion;
     Region                              branchStubsRegion;
+    Region                              textBootExecRegion;
     Region                              dataConstRegion;
     Region                              branchGOTsRegion;
     Region                              readWriteRegion;
@@ -172,10 +204,9 @@ private:
     Region                              fixupsSubRegion;        // This will be in the __LINKEDIT when we write the file
 
     // This is the base address from the statically linked kernel, or 0 for other caches
+    // In x86_64, we hack the base address to the address of __HIB as that starts below
+    // the __TEXT address in xnu
     uint64_t                            cacheBaseAddress = 0;
-    // For x86_64 only, we want to keep the address of the hibernate segment from xnu
-    // We'll ensure this is mapped lower than the cache base address
-    uint64_t                            hibernateAddress = 0;
 
     uint16_t                            chainedPointerFormat = 0;
 

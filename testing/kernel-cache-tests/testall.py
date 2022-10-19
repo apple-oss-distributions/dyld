@@ -1,10 +1,11 @@
-#!/usr/bin/python2.7
+#!/usr/bin/python3
 
 import string
 import os
 import json
 import sys
-import imp
+import importlib
+import importlib.machinery
 import os.path
 import traceback
 
@@ -25,23 +26,23 @@ if __name__ == "__main__":
     for f in all_tests:
         test_case = test_dir + "/" + f + "/test.py"
         if os.path.isfile(test_case):
-            py_mod = imp.load_source(f, test_case)
+            py_mod = importlib.machinery.SourceFileLoader(f, test_case).load_module()
             check_func = getattr(py_mod, "check", 0)
             if check_func == 0:
-                print "FAIL: " + f + ", missing check() function";
+                print("FAIL: " + f + ", missing check() function")
             else:
                 try:
                     kernelCollection = KernelCollection.KernelCollection(test_to_run != "")
                     check_func(kernelCollection)
-                    print "PASS: " + f
-                except AssertionError, e:
+                    print("PASS: " + f)
+                except AssertionError:
                     _, _, tb = sys.exc_info()
                     tb_info = traceback.extract_tb(tb)
                     filename, line, func, text = tb_info[-1]
-                    print "FAIL: " + f + ", " + text
-                except KeyError, e:
+                    print("FAIL: " + f + ", " + text)
+                except KeyError:
                     _, _, tb = sys.exc_info()
                     tb_info = traceback.extract_tb(tb)
                     filename, line, func, text = tb_info[-1]
-                    print "FAIL: " + f + ", " + text
+                    print("FAIL: " + f + ", " + text)
 

@@ -32,6 +32,7 @@
 #include <variant>
 
 #include <CoreFoundation/CFBundle.h>
+#include <CoreFoundation/CFNumber.h>
 #include <CoreFoundation/CFPropertyList.h>
 #include <CoreFoundation/CFStream.h>
 
@@ -66,6 +67,7 @@ static void exit_usage(const char* missingOption = nullptr) {
     fprintf(stderr, "  -kmod            print the kmod_info of an existing app cache\n");
     fprintf(stderr, "  -uuid            print the UUID of an existing app cache\n");
     fprintf(stderr, "  -fips            print the FIPS section of an existing app cache\n");
+    fprintf(stderr, "  -function-starts print the function starts of an app cache\n");
     fprintf(stderr, "\n");
 
     fprintf(stderr, "Usage: dyld_app_cache_util -validate file-path -arch arch -platform platform\n");
@@ -112,8 +114,10 @@ struct DumpOptions {
     bool printFixups            = false;
     bool printSymbols           = false;
     bool printUUID              = false;
+    bool printPrelinkInfo       = false;
     bool printKModInfo          = false;
     bool printFIPS              = false;
+    bool printFunctionStarts    = false;
 };
 
 struct ValidateOptions {
@@ -214,12 +218,20 @@ static bool parseArgs(int argc, const char* argv[], OptionsVariants& options) {
             exitOrGetState<DumpOptions>(options, arg).printUUID = true;
             continue;
         }
+        if (strcmp(arg, "-prelink-info") == 0) {
+            exitOrGetState<DumpOptions>(options, arg).printPrelinkInfo = true;
+            continue;
+        }
         if (strcmp(arg, "-kmod") == 0) {
             exitOrGetState<DumpOptions>(options, arg).printKModInfo = true;
             continue;
         }
         if (strcmp(arg, "-fips") == 0) {
             exitOrGetState<DumpOptions>(options, arg).printFIPS = true;
+            continue;
+        }
+        if (strcmp(arg, "-function-starts") == 0) {
+            exitOrGetState<DumpOptions>(options, arg).printFunctionStarts = true;
             continue;
         }
 
@@ -271,7 +283,7 @@ static bool parseArgs(int argc, const char* argv[], OptionsVariants& options) {
             exitOrGetState<CreateKernelCollectionOptions>(options, arg).volumeRoot = argv[++i];
             continue;
         }
-        if (strcmp(arg, "-bundle-id") == 0) {
+        if ( (strcmp(arg, "-bundle-id") == 0) || (strcmp(arg, "-b") == 0) ) {
             exitOrGetState<CreateKernelCollectionOptions>(options, arg).bundleIDs.push_back(argv[++i]);
             continue;
         }
@@ -357,12 +369,9 @@ static int dumpAppCache(const DumpOptions& options) {
 
     const GradedArchs& archs = GradedArchs::forName(gOpts.archs[0]);
     Platform platform = Platform::unknown;
-    bool isKernelCollection = false;
 
     // HACK: Pass a real option for building a kernel app cache
-    if (!strcmp(gOpts.platform, "kernel")) {
-        isKernelCollection = true;
-    } else {
+    if (strcmp(gOpts.platform, "kernel") != 0) {
         platform = stringToPlatform(gOpts.platform);
         if (platform == Platform::unknown) {
             fprintf(stderr, "Could not create app cache because: unknown platform '%s'\n", gOpts.platform);
@@ -577,7 +586,7 @@ static int dumpAppCache(const DumpOptions& options) {
                         case DYLD_CHAINED_PTR_X86_64_KERNEL_CACHE: {
                             uint64_t targetVMOffset = fixupLoc->kernel64.target;
                             uint64_t targetVMAddr = targetVMOffset + cacheBaseAddress;
-                            std::string level = "kc(" + decimal(fixupLoc->kernel64.cacheLevel) + ")";
+                            std::string level = "kc(" + unpaddedDecimal(fixupLoc->kernel64.cacheLevel) + ")";
                             std::string fixup = level + " + " + hex(targetVMAddr);
                             if (fixupLoc->kernel64.isAuth) {
                                 fixup += " auth(";
@@ -585,7 +594,7 @@ static int dumpAppCache(const DumpOptions& options) {
                                 fixup += " ";
                                 fixup += fixupLoc->kernel64.addrDiv ? "addr" : "!addr";
                                 fixup += " ";
-                                fixup += decimal(fixupLoc->kernel64.diversity);
+                                fixup += unpaddedDecimal(fixupLoc->kernel64.diversity);
                                 fixup += ")";
                             }
                             fixupsNode.map[hex(vmOffset)] = makeNode(fixup);
@@ -757,6 +766,56 @@ static int dumpAppCache(const DumpOptions& options) {
         printJSON(topNode, 0, std::cout);
     }
 
+    if (options.printPrelinkInfo) {
+        __block Node topNode;
+
+        const uint8_t* prelinkInfoBuffer = nullptr;
+        uint64_t prelinkInfoBufferSize = 0;
+        prelinkInfoBuffer = (const uint8_t*)appCacheMA->findSectionContent("__PRELINK_INFO", "__info", prelinkInfoBufferSize);
+        if ( prelinkInfoBuffer != nullptr ) {
+            CFReadStreamRef readStreamRef = CFReadStreamCreateWithBytesNoCopy(kCFAllocatorDefault, prelinkInfoBuffer, prelinkInfoBufferSize, kCFAllocatorNull);
+            if ( !CFReadStreamOpen(readStreamRef) ) {
+                fprintf(stderr, "Could not open plist stream\n");
+                exit(1);
+            }
+            CFErrorRef errorRef = nullptr;
+            CFPropertyListRef plistRef = CFPropertyListCreateWithStream(kCFAllocatorDefault, readStreamRef, prelinkInfoBufferSize, kCFPropertyListImmutable, nullptr, &errorRef);
+            if ( errorRef != nullptr ) {
+                CFStringRef stringRef = CFErrorCopyFailureReason(errorRef);
+                fprintf(stderr, "Could not read plist because: %s\n", CFStringGetCStringPtr(stringRef, kCFStringEncodingASCII));
+                CFRelease(stringRef);
+                exit(1);
+            }
+            assert(CFGetTypeID(plistRef) == CFDictionaryGetTypeID());
+            CFArrayRef kextPrelinkInfosRef = (CFArrayRef)CFDictionaryGetValue((CFDictionaryRef)plistRef, CFSTR("_PrelinkInfoDictionary"));
+            if ( kextPrelinkInfosRef != nullptr ) {
+                assert(CFGetTypeID(kextPrelinkInfosRef) == CFArrayGetTypeID());
+
+                CFIndex count = CFArrayGetCount(kextPrelinkInfosRef);
+                for ( CFIndex index = 0; index != count; ++index ) {
+                    CFDictionaryRef kextInfoRef = (CFDictionaryRef)CFArrayGetValueAtIndex(kextPrelinkInfosRef, index);
+                    assert(CFGetTypeID(kextInfoRef) == CFDictionaryGetTypeID());
+
+                    CFStringRef bundleIDRef = (CFStringRef)CFDictionaryGetValue((CFDictionaryRef)kextInfoRef, CFSTR("CFBundleIdentifier"));
+                    CFNumberRef executableSizeRef = (CFNumberRef)CFDictionaryGetValue((CFDictionaryRef)kextInfoRef, CFSTR("_PrelinkExecutableSize"));
+
+                    const char* bundleName = CFStringGetCStringPtr(bundleIDRef, kCFStringEncodingASCII);
+                    uint64_t execSize = 0;
+                    CFNumberGetValue(executableSizeRef, CFNumberGetType(executableSizeRef), &execSize);
+
+                    Node kextNode;
+                    kextNode.map["bundle-id"] = dyld3::json::makeNode(bundleName);
+                    kextNode.map["executable-size"] = dyld3::json::hex(execSize);
+                    topNode.array.push_back(std::move(kextNode));
+                }
+            }
+            CFRelease(plistRef);
+            CFRelease(readStreamRef);
+        }
+
+        printJSON(topNode, 0, std::cout);
+    }
+
     if (options.printKModInfo) {
         __block Node topNode;
 
@@ -789,7 +848,7 @@ static int dumpAppCache(const DumpOptions& options) {
             if ( found ) {
                 dyld3::MachOAppCache::KModInfo64_v1* kmodInfo = (dyld3::MachOAppCache::KModInfo64_v1*)((uint8_t*)ma + kmodInfoVMOffset);
                 Node kmodInfoNode;
-                kmodInfoNode.map["info-version"] = makeNode(decimal(kmodInfo->info_version));
+                kmodInfoNode.map["info-version"] = makeNode(unpaddedDecimal(kmodInfo->info_version));
                 kmodInfoNode.map["name"] = makeNode((const char*)&kmodInfo->name[0]);
                 kmodInfoNode.map["version"] = makeNode((const char*)&kmodInfo->version[0]);
                 kmodInfoNode.map["address"] = makeNode(hex(kmodInfo->address));
@@ -840,6 +899,37 @@ static int dumpAppCache(const DumpOptions& options) {
 
             topNode.map["fips"] = makeNode(hashString);
         });
+
+        printJSON(topNode, 0, std::cout);
+    }
+
+    if (options.printFunctionStarts) {
+        __block Node topNode;
+
+        auto getStartsNode = [](const dyld3::MachOAnalyzer* ma) {
+            __block Node functionStartsNode;
+
+            uint64_t loadAddress = ma->preferredLoadAddress();
+            ma->forEachFunctionStart(^(uint64_t runtimeOffset) {
+                Node functionStart = makeNode(hex(loadAddress + runtimeOffset));
+                functionStartsNode.array.push_back(functionStart);
+            });
+
+            return functionStartsNode;
+        };
+
+        topNode.map["function-starts"] = getStartsNode(appCacheMA);
+
+        __block Node dylibsNode;
+        appCacheMA->forEachDylib(diag, ^(const MachOAnalyzer *ma, const char *name, bool &stop) {
+            Node dylibNode;
+            dylibNode.map["name"] = makeNode(name);
+            dylibNode.map["function-starts"] = getStartsNode(ma);
+
+            dylibsNode.array.push_back(dylibNode);
+        });
+
+        topNode.map["dylibs"] = dylibsNode;
 
         printJSON(topNode, 0, std::cout);
     }
@@ -967,12 +1057,14 @@ createKernelCollectionForArch(const CreateKernelCollectionOptions& options, cons
         }
         LoadedFileInfo info;
         char realerPath[MAXPATHLEN];
-        bool loadedFile = fileSystem.loadFile(kernelCollectionPath, info, realerPath, ^(const char *format, ...) {
+        void (^fileErrorLog)(const char *format, ...) __printflike(1, 2)
+        = ^(const char *format, ...) __printflike(1, 2) {
             va_list list;
             va_start(list, format);
             diag.error(format, list);
             va_end(list);
-        });
+        };
+        bool loadedFile = fileSystem.loadFile(kernelCollectionPath, info, realerPath, fileErrorLog);
         if ( !loadedFile )
             return false;
         CFStringRef pathStringRef = CFStringCreateWithCString(kCFAllocatorDefault, kernelCollectionPath, kCFStringEncodingASCII);
@@ -992,17 +1084,19 @@ createKernelCollectionForArch(const CreateKernelCollectionOptions& options, cons
             exit(1);
         case baseKC: {
             if (!fileSystem.fileExists(options.kernelPath)) {
-                fprintf(stderr, "Kernel path does not exist: '%s'\n", options.kernelPath);
+                fprintf(stderr, "Kernel path does not exist: %s\n", options.kernelPath);
                 return {};
             }
             LoadedFileInfo info;
             char realerPath[MAXPATHLEN];
-            bool loadedFile = fileSystem.loadFile(options.kernelPath, info, realerPath, ^(const char *format, ...) {
+            void (^fileErrorLog)(const char *format, ...) __printflike(1, 2)
+            = ^(const char *format, ...) __printflike(1, 2) {
                 va_list list;
                 va_start(list, format);
                 diag.error(format, list);
                 va_end(list);
-            });
+            };
+            bool loadedFile = fileSystem.loadFile(options.kernelPath, info, realerPath, fileErrorLog);
             if ( !loadedFile )
                 return {};
             CFStringRef pathStringRef = CFStringCreateWithCString(kCFAllocatorDefault, options.kernelPath, kCFStringEncodingASCII);
@@ -1011,7 +1105,7 @@ createKernelCollectionForArch(const CreateKernelCollectionOptions& options, cons
                 uint64_t errorCount = 0;
                 const char* const* errors = getErrors(kcb, &errorCount);
                 for (uint64_t i = 0; i != errorCount; ++i)
-                    diag.error("Could not load kernel file because: (%s)", errors[i]);
+                    diag.error("Could not load kernel file because: '%s'", errors[i]);
                 return {};
             }
             CFRelease(dataRef);
@@ -1353,13 +1447,14 @@ createKernelCollectionForArch(const CreateKernelCollectionOptions& options, cons
             bool isCodeless = bundleData.executablePath.empty();
             if ( !isCodeless ) {
                 char realerPath[MAXPATHLEN];
-                bool loadedFile = fileSystem.loadFile(bundleData.executablePath.c_str(), info, realerPath,
-                                                      ^(const char *format, ...) {
+                void (^fileErrorLog)(const char *format, ...) __printflike(1, 2)
+                = ^(const char *format, ...) __printflike(1, 2) {
                     va_list list;
                     va_start(list, format);
                     diag.error(format, list);
                     va_end(list);
-                });
+                };
+                bool loadedFile = fileSystem.loadFile(bundleData.executablePath.c_str(), info, realerPath, fileErrorLog);
                 if ( !loadedFile )
                     return {};
             }
@@ -1393,7 +1488,7 @@ createKernelCollectionForArch(const CreateKernelCollectionOptions& options, cons
                 } else if ( stripModeString == "all" ) {
                     stripMode = binaryStripAll;
                 } else {
-                    diag.error("Unknown strip mode: (%s)", stripModeString.c_str());
+                    diag.error("Unknown strip mode: '%s'", stripModeString.c_str());
                     return {};
                 }
             }
@@ -1406,7 +1501,7 @@ createKernelCollectionForArch(const CreateKernelCollectionOptions& options, cons
                 uint64_t errorCount = 0;
                 const char* const* errors = getErrors(kcb, &errorCount);
                 for (uint64_t i = 0; i != errorCount; ++i)
-                    diag.error("Could not load kext file because: (%s)", errors[i]);
+                    diag.error("Could not load kext file because: '%s'", errors[i]);
                 return {};
             }
 
@@ -1509,7 +1604,7 @@ createKernelCollectionForArch(const CreateKernelCollectionOptions& options, cons
 
             const void* buffer = mmap(NULL, (size_t)stat_buf.st_size, PROT_READ, MAP_PRIVATE, fd, 0);
             if (buffer == MAP_FAILED) {
-                diag.error("mmap() for file at '%s' failed, errno=%d\n", sectData.payloadFilePath, errno);
+                diag.error("mmap() for file at %s failed, errno=%d\n", sectData.payloadFilePath, errno);
                 ::close(fd);
                 return {};
             }
@@ -1522,7 +1617,7 @@ createKernelCollectionForArch(const CreateKernelCollectionOptions& options, cons
             uint64_t errorCount = 0;
             const char* const* errors = getErrors(kcb, &errorCount);
             for (uint64_t i = 0; i != errorCount; ++i)
-                diag.error("Could not load section data file because: (%s)", errors[i]);
+                diag.error("Could not load section data file because: '%s'", errors[i]);
             return {};
         }
     }
@@ -1573,7 +1668,7 @@ createKernelCollectionForArch(const CreateKernelCollectionOptions& options, cons
             uint64_t errorCount = 0;
             const char* const* errors = getErrors(kcb, &errorCount);
             for (uint64_t i = 0; i != errorCount; ++i)
-                diag.error("Could not prelink data file because: (%s)", errors[i]);
+                diag.error("Could not prelink data file because: '%s'", errors[i]);
             return {};
         }
     }
@@ -1584,7 +1679,7 @@ createKernelCollectionForArch(const CreateKernelCollectionOptions& options, cons
     if ( errors != nullptr ) {
         if ( !options.printJSONErrors ) {
             for (uint64_t i = 0; i != errorCount; ++i) {
-                fprintf(stderr, "Could not build kernel collection because (%s)\n", errors[i]);
+                fprintf(stderr, "Could not build kernel collection because '%s'\n", errors[i]);
             }
         }
         CFDictionaryRef errorDictRef = getKextErrors(kcb);

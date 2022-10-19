@@ -1,11 +1,13 @@
-#!/usr/bin/python2.7
+#!/usr/bin/python3
 
 import os
 import KernelCollection
+from FixupHelpers import *
 
 # OSMetaClass in the kernel has a vtable which has to be patched in to Foo::MetaClass
 
 def check(kernel_cache):
+    enableLogging = False
     kernel_cache.buildKernelCollection("x86_64", "/auxkc-vtable-metaclass-patching/main.kc", "/auxkc-vtable-metaclass-patching/main.kernel", None, [], [])
     kernel_cache.analyze("/auxkc-vtable-metaclass-patching/main.kc", ["-layout", "-arch", "x86_64"])
 
@@ -16,31 +18,38 @@ def check(kernel_cache):
     kernel_cache.analyze("/auxkc-vtable-metaclass-patching/main.kc", ["-symbols", "-arch", "x86_64"])
     
     # From OSMetaClass, we want to know where the vtable is, and the foo() and fooUsed0() slots in that vtable
-    assert kernel_cache.dictionary()["dylibs"][0]["global-symbols"][11]["name"] == "__ZN15OSMetaClassBase11placeholderEv"
-    assert kernel_cache.dictionary()["dylibs"][0]["global-symbols"][11]["vmAddr"] == "0x14BE0"
-    assert kernel_cache.dictionary()["dylibs"][0]["global-symbols"][12]["name"] == "__ZN15OSMetaClassBase18metaclassBaseUsed4Ev"
-    assert kernel_cache.dictionary()["dylibs"][0]["global-symbols"][12]["vmAddr"] == "0x14BF0"
-    assert kernel_cache.dictionary()["dylibs"][0]["global-symbols"][13]["name"] == "__ZN15OSMetaClassBase18metaclassBaseUsed5Ev"
-    assert kernel_cache.dictionary()["dylibs"][0]["global-symbols"][13]["vmAddr"] == "0x14C10"
-    assert kernel_cache.dictionary()["dylibs"][0]["global-symbols"][14]["name"] == "__ZN15OSMetaClassBase18metaclassBaseUsed6Ev"
-    assert kernel_cache.dictionary()["dylibs"][0]["global-symbols"][14]["vmAddr"] == "0x14C30"
-    assert kernel_cache.dictionary()["dylibs"][0]["global-symbols"][15]["name"] == "__ZN15OSMetaClassBase18metaclassBaseUsed7Ev"
-    assert kernel_cache.dictionary()["dylibs"][0]["global-symbols"][15]["vmAddr"] == "0x14C50"
+    basePlaceholderVMAddr = findGlobalSymbolVMAddr(kernel_cache, 0, "__ZN15OSMetaClassBase11placeholderEv")
+    baseUsed4VMAddr = findGlobalSymbolVMAddr(kernel_cache, 0, "__ZN15OSMetaClassBase18metaclassBaseUsed4Ev")
+    baseUsed5VMAddr = findGlobalSymbolVMAddr(kernel_cache, 0, "__ZN15OSMetaClassBase18metaclassBaseUsed5Ev")
+    baseUsed6VMAddr = findGlobalSymbolVMAddr(kernel_cache, 0, "__ZN15OSMetaClassBase18metaclassBaseUsed6Ev")
+    baseUsed7VMAddr = findGlobalSymbolVMAddr(kernel_cache, 0, "__ZN15OSMetaClassBase18metaclassBaseUsed7Ev")
+    if enableLogging:
+        print("basePlaceholderVMAddr: " + basePlaceholderVMAddr)
+        print("baseUsed4VMAddr: " + baseUsed4VMAddr)
+        print("baseUsed5VMAddr: " + baseUsed5VMAddr)
+        print("baseUsed6VMAddr: " + baseUsed6VMAddr)
+        print("baseUsed7VMAddr: " + baseUsed7VMAddr)
 
 
     # Check the fixups
     kernel_cache.analyze("/auxkc-vtable-metaclass-patching/main.kc", ["-fixups", "-arch", "x86_64"])
     
     # In vtable for OSMetaClass, we match the entry for OSMetaClass::placeholder() by looking for its value on the RHS of the fixup
-    assert kernel_cache.dictionary()["fixups"]["0x14168"] == "kc(0) + 0x14BE0 : pointer64"
+    basePlaceholderFixupAddr = findFixupVMAddr(kernel_cache, "kc(0) + " + basePlaceholderVMAddr + " : pointer64")
+    if enableLogging:
+        print("basePlaceholderFixupAddr: " + basePlaceholderFixupAddr)
     # Then the following fixup should be to OSMetaClass::metaclassBaseUsed4()
-    assert kernel_cache.dictionary()["fixups"]["0x14170"] == "kc(0) + 0x14BF0 : pointer64"
+    nextFixupAddr = offsetVMAddr(basePlaceholderFixupAddr, 8)
+    assert kernel_cache.dictionary()["fixups"][nextFixupAddr] == "kc(0) + " + baseUsed4VMAddr + " : pointer64"
     # Then OSMetaClass::metaclassBaseUsed5()
-    assert kernel_cache.dictionary()["fixups"]["0x14178"] == "kc(0) + 0x14C10 : pointer64"
+    nextFixupAddr = offsetVMAddr(nextFixupAddr, 8)
+    assert kernel_cache.dictionary()["fixups"][nextFixupAddr] == "kc(0) + " + baseUsed5VMAddr + " : pointer64"
     # Then OSMetaClass::metaclassBaseUsed6()
-    assert kernel_cache.dictionary()["fixups"]["0x14180"] == "kc(0) + 0x14C30 : pointer64"
+    nextFixupAddr = offsetVMAddr(nextFixupAddr, 8)
+    assert kernel_cache.dictionary()["fixups"][nextFixupAddr] == "kc(0) + " + baseUsed6VMAddr + " : pointer64"
     # Then OSMetaClass::metaclassBaseUsed7()
-    assert kernel_cache.dictionary()["fixups"]["0x14188"] == "kc(0) + 0x14C50 : pointer64"
+    nextFixupAddr = offsetVMAddr(nextFixupAddr, 8)
+    assert kernel_cache.dictionary()["fixups"][nextFixupAddr] == "kc(0) + " + baseUsed7VMAddr + " : pointer64"
 
 
     # -----------------------------------------------------------
@@ -56,23 +65,46 @@ def check(kernel_cache):
     
     # From foo.kext, find the vtable and its override of placeholder()
     # Foo::placeholder()
-    assert kernel_cache.dictionary()["dylibs"][0]["local-symbols"][4]["name"] == "__ZN3Foo11placeholderEv"
-    assert kernel_cache.dictionary()["dylibs"][0]["local-symbols"][4]["vmAddr"] == "0xCF90"
+    fooPlaceholderVMAddr = findLocalSymbolVMAddr(kernel_cache, 0, "__ZN3Foo11placeholderEv")
+    if enableLogging:
+        print("fooPlaceholderVMAddr: " + fooPlaceholderVMAddr)
 
 
     # Check the fixups
     kernel_cache.analyze("/auxkc-vtable-metaclass-patching/aux.kc", ["-fixups", "-arch", "x86_64"])
 
     # Now in foo.kext, match the entry for its Foo::placeholder() symbol
-    assert kernel_cache.dictionary()["dylibs"][0]["fixups"]["0x50"] == "kc(3) + 0xCF90"
+    fooPlaceholderFixupAddr = findAuxFixupVMAddr(kernel_cache, 0, "kc(3) + " + fooPlaceholderVMAddr)
+    if enableLogging:
+        print("fooPlaceholderFixupAddr: " + fooPlaceholderFixupAddr)
+
     # And if the patching was correct, then following entry should be to OSMetaClass::metaclassBaseUsed4()
-    assert kernel_cache.dictionary()["dylibs"][0]["fixups"]["0x58"] == "kc(0) + 0x10BF0"
+    nextFixupAddr = offsetVMAddr(fooPlaceholderFixupAddr, 8)
+    offsetInBaseUsed4 = offsetVMAddr(baseUsed4VMAddr, -16384)
+    if enableLogging:
+        print("offsetInBaseUsed4: " + offsetInBaseUsed4)
+    assert kernel_cache.dictionary()["dylibs"][0]["fixups"][nextFixupAddr] == "kc(0) + " + offsetInBaseUsed4
+
     # Then OSMetaClass::metaclassBaseUsed5()
-    assert kernel_cache.dictionary()["dylibs"][0]["fixups"]["0x60"] == "kc(0) + 0x10C10"
+    nextFixupAddr = offsetVMAddr(nextFixupAddr, 8)
+    offsetInBaseUsed5 = offsetVMAddr(baseUsed5VMAddr, -16384)
+    if enableLogging:
+        print("offsetInBaseUsed5: " + offsetInBaseUsed5)
+    assert kernel_cache.dictionary()["dylibs"][0]["fixups"][nextFixupAddr] == "kc(0) + " + offsetInBaseUsed5
+
     # Then OSMetaClass::metaclassBaseUsed6()
-    assert kernel_cache.dictionary()["dylibs"][0]["fixups"]["0x68"] == "kc(0) + 0x10C30"
+    nextFixupAddr = offsetVMAddr(nextFixupAddr, 8)
+    offsetInBaseUsed6 = offsetVMAddr(baseUsed6VMAddr, -16384)
+    if enableLogging:
+        print("offsetInBaseUsed6: " + offsetInBaseUsed6)
+    assert kernel_cache.dictionary()["dylibs"][0]["fixups"][nextFixupAddr] == "kc(0) + " + offsetInBaseUsed6
+
     # Then OSMetaClass::metaclassBaseUsed7()
-    assert kernel_cache.dictionary()["dylibs"][0]["fixups"]["0x70"] == "kc(0) + 0x10C50"
+    nextFixupAddr = offsetVMAddr(nextFixupAddr, 8)
+    offsetInBaseUsed7 = offsetVMAddr(baseUsed7VMAddr, -16384)
+    if enableLogging:
+        print("offsetInBaseUsed7: " + offsetInBaseUsed7)
+    assert kernel_cache.dictionary()["dylibs"][0]["fixups"][nextFixupAddr] == "kc(0) + " + offsetInBaseUsed7
 
 
 # [~]> xcrun -sdk macosx.internal cc -arch x86_64 -Wl,-static -mkernel -nostdlib -Wl,-e,__start -Wl,-pie main.cpp -Wl,-pagezero_size,0x0 -o main.kernel -Wl,-image_base,0x10000 -Wl,-segaddr,__HIB,0x4000 -Wl,-add_split_seg_info -Wl,-install_name,/usr/lib/swift/split.seg.v2.hack -iwithsysroot /System/Library/Frameworks/Kernel.framework/Headers -Wl,-sectcreate,__LINKINFO,__symbolsets,SymbolSets.plist -Wl,-segprot,__LINKINFO,r--,r-- -DMETACLASS_BASE_USED=1

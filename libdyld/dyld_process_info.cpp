@@ -101,12 +101,13 @@ RemoteBuffer::map(task_t task, mach_vm_address_t remote_address, vm_size_t size)
     // we are copying some memory in the middle of a mach-o that is on a USB drive that is disconnected after we perform
     // the mapping). Once we copy them into a local buffer the memory will be handled by the default pager instead of
     // potentially being backed by the mmap pager, and thus will be guaranteed not to mutate out from under us.
-    void* buffer = malloc(size);
+    void* buffer = malloc(size + 1);
     if (buffer == nullptr) {
         (void)vm_deallocate(mach_task_self(), (vm_address_t)localAddress, size);
         return std::make_pair(MACH_VM_MIN_ADDRESS, KERN_NO_SPACE);
     }
     memcpy(buffer, (void *)localAddress, size);
+    ((char*)buffer)[size] = 0; // Add a null terminator so strlcpy does not read base the end of the buffer.
     (void)vm_deallocate(mach_task_self(), (vm_address_t)localAddress, size);
     return std::make_pair((vm_address_t)buffer, KERN_SUCCESS);
 }
@@ -124,7 +125,8 @@ std::tuple<mach_vm_address_t,vm_size_t,kern_return_t> RemoteBuffer::create(task_
     // truncatable buffer we map is less than a single page. To be more general we would need to try repeatedly in a
     // loop.
     if (allow_truncation) {
-        size = PAGE_SIZE - remote_address%PAGE_SIZE;
+        // Manually set to 4096 instead of page size to deal with wierd issues involving 4k page arm64 binaries
+        size = 4096 - remote_address%4096;
         std::tie(localAddress, kr) = map(task, remote_address, size);
         if (kr == KERN_SUCCESS) return std::make_tuple(localAddress, size, kr);
     }
@@ -176,7 +178,7 @@ struct __attribute__((visibility("hidden"))) dyld_process_info_base {
     template<typename T1, typename T2>
     static dyld_process_info_ptr make(task_t task, const T1& allImageInfo, uint64_t timestamp, kern_return_t* kr);
     template<typename T>
-    static dyld_process_info_ptr makeSuspended(task_t task, const T& allImageInfo, kern_return_t* kr);
+    static dyld_process_info_ptr makeSuspended(task_t task, const T& allImageInfo, uint64_t timestamp, kern_return_t* kr);
 
     std::atomic<uint32_t>&       retainCount() const { return _retainCount; }
     dyld_process_cache_info*     cacheInfo() const { return (dyld_process_cache_info*)(((char*)this) + _cacheInfoOffset); }
@@ -227,9 +229,9 @@ private:
     void*                       operator new (size_t, void* buf) { return buf; }
 
     static bool                 inCache(uint64_t addr) { return (addr > SHARED_REGION_BASE) && (addr < SHARED_REGION_BASE+SHARED_REGION_SIZE); }
-    bool                        addImage(task_t task, bool sameCacheAsThisProcess, uint64_t imageAddress, uint64_t imagePath, const char* imagePathLocal);
+    kern_return_t               addImage(task_t task, bool sameCacheAsThisProcess, uint64_t imageAddress, uint64_t imagePath, const char* imagePathLocal);
 
-    bool                        addAotImage(dyld_aot_image_info_64 aotImageInfo);
+    kern_return_t               addAotImage(dyld_aot_image_info_64 aotImageInfo);
 
     kern_return_t               addDyldImage(task_t task, uint64_t dyldAddress, uint64_t dyldPathAddress, const char* localPath);
 
@@ -300,8 +302,16 @@ dyld_process_info_ptr dyld_process_info_base::make(task_t task, const T1& allIma
     }
 
     // Check if the process is suspended
-    if (allImageInfo.infoArrayChangeTimestamp == 0) {
-        result = dyld_process_info_base::makeSuspended<T1>(task, allImageInfo, kr);
+    bool shouldMakeSuspended = (allImageInfo.infoArrayChangeTimestamp == 0);
+    if ( !shouldMakeSuspended ) {
+        if ( (allImageInfo.infoArray == 0)
+            && (allImageInfo.sharedCacheBaseAddress != 0)
+            && ((uintptr_t)allImageInfo.dyldImageLoadAddress > allImageInfo.sharedCacheBaseAddress) )
+            shouldMakeSuspended = true;
+    }
+    if (shouldMakeSuspended) {
+        result = dyld_process_info_base::makeSuspended<T1>(task, allImageInfo,
+                                                           allImageInfo.infoArrayChangeTimestamp, kr);
         // If we have a result return it, otherwise rescan
         if (result) {
             // If it returned the process is suspended and there is nothing more to do
@@ -309,7 +319,9 @@ dyld_process_info_ptr dyld_process_info_base::make(task_t task, const T1& allIma
         }
         usleep(1000 * 50); // 50ms
         // Not exactly correct, but conveys that operation may succeed in the future
-        *kr = KERN_RESOURCE_SHORTAGE;
+        if (*kr == KERN_SUCCESS) {
+            *kr = KERN_RESOURCE_SHORTAGE;
+        }
         return  nullptr;
     }
 
@@ -324,7 +336,7 @@ dyld_process_info_ptr dyld_process_info_base::make(task_t task, const T1& allIma
     if (infoArray == 0) {
         usleep(1000 * 50); // 50ms
         // Not exactly correct, but conveys that operation may succeed in the future
-        *kr = KERN_RESOURCE_SHORTAGE;
+        *kr = KERN_UREFS_OVERFLOW;
         return  nullptr;
     };
 
@@ -417,8 +429,8 @@ dyld_process_info_ptr dyld_process_info_base::make(task_t task, const T1& allIma
         }
         // fill in info for each image
         for (uint32_t i=0; i < imageCount; ++i) {
-            if (!info->addImage(task, sameCacheAsThisProcess, imageArray[i].imageLoadAddress, imageArray[i].imageFilePath, NULL)) {
-                *kr = KERN_FAILURE;
+            *kr =  info->addImage(task, sameCacheAsThisProcess, imageArray[i].imageLoadAddress, imageArray[i].imageFilePath, NULL);
+            if (*kr != KERN_SUCCESS) {
                 result = nullptr;
                 return;
             }
@@ -443,8 +455,7 @@ dyld_process_info_ptr dyld_process_info_base::make(task_t task, const T1& allIma
         withRemoteBuffer(task, aotImageArray, aotImageArraySize, false, kr, ^(void *buffer, size_t size) {
             dyld_aot_image_info_64* imageArray = (dyld_aot_image_info_64*)buffer;
             for (uint32_t i = 0; i < aotImageCount; i++) {
-                if (!result->addAotImage(imageArray[i])) {
-                    *kr = KERN_FAILURE;
+                if ((*kr = result->addAotImage(imageArray[i]))) {
                     result = nullptr;
                     return;
                 }
@@ -455,7 +466,8 @@ dyld_process_info_ptr dyld_process_info_base::make(task_t task, const T1& allIma
 }
 
 template<typename T>
-dyld_process_info_ptr dyld_process_info_base::makeSuspended(task_t task, const T& allImageInfo, kern_return_t* kr)
+dyld_process_info_ptr dyld_process_info_base::makeSuspended(task_t task, const T& allImageInfo,
+                                                            uint64_t timestamp, kern_return_t* kr)
 {
     pid_t   pid;
     if ((*kr = pid_for_task(task, &pid))) {
@@ -465,11 +477,14 @@ dyld_process_info_ptr dyld_process_info_base::makeSuspended(task_t task, const T
     mach_task_basic_info ti;
     mach_msg_type_number_t count = MACH_TASK_BASIC_INFO_COUNT;
     if ((*kr = task_info(task, MACH_TASK_BASIC_INFO, (task_info_t)&ti, &count))) {
+        *kr = KERN_NO_SPACE;
         return  nullptr;
     }
 
     // The task is not suspended, exit
     if (ti.suspend_count == 0) {
+        // Just need a code here to disambiguate our failures
+        *kr = KERN_ALREADY_WAITING;
         return  nullptr;
     }
 
@@ -551,12 +566,17 @@ dyld_process_info_ptr dyld_process_info_base::makeSuspended(task_t task, const T
     aotCacheInfo->cacheBaseAddress = 0;
 
     dyld_process_state_info* stateInfo = obj->stateInfo();
-    stateInfo->timestamp           = 0;
+    stateInfo->timestamp           = timestamp;
     stateInfo->imageCount          = imageCount;
     stateInfo->initialImageCount   = imageCount;
     stateInfo->dyldState           = dyld_process_state_not_started;
 
     // fill in info for dyld
+    if ( dyldAddress == 0 ) {
+        // if dyld was not found in vm walk, then we've switched to the dyld in the cache
+        dyldAddress = allImageInfo.dyldImageLoadAddress;
+        strcpy(dyldPathBuffer, "/usr/lib/dyld");
+    }
     if ( dyldAddress != 0 ) {
         if ((*kr = obj->addDyldImage(task, dyldAddress, 0, dyldPath))) {
             return nullptr;
@@ -565,12 +585,13 @@ dyld_process_info_ptr dyld_process_info_base::makeSuspended(task_t task, const T
 
     // fill in info for each image
     if ( mainExecutableAddress != 0 ) {
-        if (!obj->addImage(task, false, mainExecutableAddress, 0, mainExecutablePath)) {
+        if ((*kr = obj->addImage(task, false, mainExecutableAddress, 0, mainExecutablePath))) {
             return nullptr;
         }
     }
 
-    if (allImageInfo.infoArrayChangeTimestamp != 0) {
+    if (allImageInfo.infoArrayChangeTimestamp != timestamp) {
+        *kr = KERN_INVALID_VALUE;
         return  nullptr;
     }
 
@@ -581,6 +602,7 @@ dyld_process_info_ptr dyld_process_info_base::makeSuspended(task_t task, const T
 
     // The task is not suspended, exit
     if (ti.suspend_count == 0) {
+        *kr = KERN_ABORTED;
         return  nullptr;
     }
 
@@ -608,7 +630,7 @@ const char* dyld_process_info_base::copyPath(task_t task, uint64_t stringAddress
     return retval;
 }
 
-bool dyld_process_info_base::addImage(task_t task, bool sameCacheAsThisProcess, uint64_t imageAddress, uint64_t imagePath, const char* imagePathLocal)
+kern_return_t dyld_process_info_base::addImage(task_t task, bool sameCacheAsThisProcess, uint64_t imageAddress, uint64_t imagePath, const char* imagePathLocal)
 {
     _curImage->loadAddress = imageAddress;
     _curImage->segmentStartIndex = _curSegmentIndex;
@@ -624,18 +646,21 @@ bool dyld_process_info_base::addImage(task_t task, bool sameCacheAsThisProcess, 
 
     if ( sameCacheAsThisProcess && inCache(imageAddress) ) {
         addInfoFromLoadCommands((mach_header*)imageAddress, imageAddress, 32*1024);
-    } else if (addInfoFromRemoteLoadCommands(task, imageAddress) != KERN_SUCCESS) {
-        // The image is not here, return early
-        return false;
+    } else {
+        auto kr = addInfoFromRemoteLoadCommands(task, imageAddress);
+        if (kr != KERN_SUCCESS) {
+            // The image is not here, return early
+            return kr;
+        }
     }
     _curImage->segmentsCount = _curSegmentIndex - _curImage->segmentStartIndex;
     _curImage++;
-    return true;
+    return KERN_SUCCESS;
 }
 
-bool dyld_process_info_base::addAotImage(dyld_aot_image_info_64 aotImageInfo) {
+kern_return_t dyld_process_info_base::addAotImage(dyld_aot_image_info_64 aotImageInfo) {
     if (!reserveSpace(sizeof(dyld_aot_image_info_64))) {
-        return false;
+        return KERN_NO_SPACE;
     }
     _curAotImage->x86LoadAddress = aotImageInfo.x86LoadAddress;
     _curAotImage->aotLoadAddress = aotImageInfo.aotLoadAddress;
@@ -643,7 +668,7 @@ bool dyld_process_info_base::addAotImage(dyld_aot_image_info_64 aotImageInfo) {
     memcpy(_curAotImage->aotImageKey, aotImageInfo.aotImageKey, sizeof(aotImageInfo.aotImageKey));
 
     _curAotImage++;
-    return true;
+    return KERN_SUCCESS;
 }
 
 kern_return_t dyld_process_info_base::addInfoFromRemoteLoadCommands(task_t task, uint64_t remoteMH) {
@@ -652,7 +677,7 @@ kern_return_t dyld_process_info_base::addInfoFromRemoteLoadCommands(task_t task,
     __block bool done = false;
 
     //Since the minimum we can reasonably map is a page, map that.
-    withRemoteBuffer(task, remoteMH, PAGE_SIZE, true, &kr, ^(void * buffer, size_t size) {
+    withRemoteBuffer(task, remoteMH, 4096, true, &kr, ^(void * buffer, size_t size) {
         if (size > sizeof(mach_header)) {
             const mach_header* mh = (const mach_header*)buffer;
             headerPagesSize = sizeof(mach_header) + mh->sizeofcmds;
@@ -841,6 +866,12 @@ dyld_process_info _dyld_process_info_create(task_t task, uint64_t timestamp, ker
             }
         });
         if (*kr == KERN_SUCCESS) { break; }
+        // possible that dyld moved, causing imageinfo reads to fail, so get TASK_DYLD_INFO again
+        task_dyld_info_data_t task_dyld_info2;
+        mach_msg_type_number_t count2 = TASK_DYLD_INFO_COUNT;
+        if ( task_info(task, TASK_DYLD_INFO, (task_info_t)&task_dyld_info2, &count2) == KERN_SUCCESS ) {
+            task_dyld_info = task_dyld_info2;
+        }
     }
     return  result;
 }

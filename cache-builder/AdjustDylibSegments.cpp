@@ -36,6 +36,7 @@
 #include <unordered_map>
 #include <unordered_set>
 
+#include "ASLRTracker.h"
 #include "CacheBuilder.h"
 #include "Diagnostics.h"
 #include "DyldSharedCache.h"
@@ -57,34 +58,33 @@ class Adjustor {
 public:
                     Adjustor(uint64_t cacheBaseAddress, dyld3::MachOAnalyzer* mh, const char* dylibID,
                              const std::vector<CacheBuilder::SegmentMappingInfo>& mappingInfo, Diagnostics& diag);
-    void            adjustImageForNewSegmentLocations(CacheBuilder::ASLR_Tracker& aslrTracker,
+    void            adjustImageForNewSegmentLocations(cache_builder::ASLR_Tracker& aslrTracker,
                                                       CacheBuilder::LOH_Tracker* lohTracker,
-                                                      const CacheBuilder::CacheCoalescedText* coalescedText,
-                                                      const CacheBuilder::DylibTextCoalescer& textCoalescer);
+                                                      const CacheBuilder::DylibSectionCoalescer* sectionCoalescer);
  
 private:
-    void            adjustReferencesUsingInfoV2(CacheBuilder::ASLR_Tracker& aslrTracker,
+    void            adjustReferencesUsingInfoV2(cache_builder::ASLR_Tracker& aslrTracker,
                                                 CacheBuilder::LOH_Tracker* lohTracker,
-                                                const CacheBuilder::CacheCoalescedText* coalescedText,
-                                                const CacheBuilder::DylibTextCoalescer& textCoalescer);
+                                                const CacheBuilder::DylibSectionCoalescer* sectionCoalescer);
     void            adjustReference(uint32_t kind, uint8_t* mappedAddr, uint64_t fromNewAddress, uint64_t toNewAddress, int64_t adjust, int64_t targetSlide,
                                     uint64_t imageStartAddress, uint64_t imageEndAddress, bool convertRebaseChains,
-                                    CacheBuilder::ASLR_Tracker& aslrTracker, CacheBuilder::LOH_Tracker* lohTracker,
+                                    cache_builder::ASLR_Tracker& aslrTracker, CacheBuilder::LOH_Tracker* lohTracker,
                                     uint32_t*& lastMappedAddr32, uint32_t& lastKind, uint64_t& lastToNewAddress);
-    void            adjustDataPointers(CacheBuilder::ASLR_Tracker& aslrTracker);
-    void            adjustRebaseChains(CacheBuilder::ASLR_Tracker& aslrTracker);
-    void            slidePointer(int segIndex, uint64_t segOffset, uint8_t type, CacheBuilder::ASLR_Tracker& aslrTracker);
+    void            adjustDataPointers(cache_builder::ASLR_Tracker& aslrTracker);
+    void            adjustRebaseChains(cache_builder::ASLR_Tracker& aslrTracker);
+    void            slidePointer(int segIndex, uint64_t segOffset, uint8_t type, cache_builder::ASLR_Tracker& aslrTracker);
     void            adjustSymbolTable();
-    void            adjustChainedFixups(const CacheBuilder::DylibTextCoalescer& textCoalescer);
+    void            adjustChainedFixups();
     void            adjustExternalRelocations();
     void            adjustExportsTrie(std::vector<uint8_t>& newTrieBytes);
+    void            adjustFunctionStarts(std::vector<uint8_t>& newFunctionStartsBytes);
     void            rebuildLinkEdit();
     void            adjustCode();
     void            adjustInstruction(uint8_t kind, uint8_t* textLoc, uint64_t codeToDataDelta);
-    void            rebuildLinkEditAndLoadCommands(const CacheBuilder::DylibTextCoalescer& textCoalescer);
+    void            rebuildLinkEditAndLoadCommands(const CacheBuilder::DylibSectionCoalescer* sectionCoalescer);
     uint64_t        slideForOrigAddress(uint64_t addr);
-    void            convertGeneric64RebaseToIntermediate(dyld3::MachOLoaded::ChainedFixupPointerOnDisk* chainPtr, CacheBuilder::ASLR_Tracker& aslrTracker, uint64_t targetVMaddr);
-    void            convertArm64eRebaseToIntermediate(dyld3::MachOLoaded::ChainedFixupPointerOnDisk* chainPtr, CacheBuilder::ASLR_Tracker& aslrTracker,
+    void            convertGeneric64RebaseToIntermediate(dyld3::MachOLoaded::ChainedFixupPointerOnDisk* chainPtr, cache_builder::ASLR_Tracker& aslrTracker, uint64_t targetVMaddr);
+    void            convertArm64eRebaseToIntermediate(dyld3::MachOLoaded::ChainedFixupPointerOnDisk* chainPtr, cache_builder::ASLR_Tracker& aslrTracker,
                                                       uint64_t targetSlide, bool convertRebaseChains);
 
 
@@ -146,7 +146,7 @@ Adjustor<P>::Adjustor(uint64_t cacheBaseAddress, dyld3::MachOAnalyzer* mh, const
                 break;
             case LC_DYLD_CHAINED_FIXUPS:
                 _chainedFixupsCmd = (linkedit_data_command*)cmd;
-                _chainedFixupsFormat = dyld3::MachOAnalyzer::chainedPointerFormat((dyld_chained_fixups_header*)&_linkeditBias[_chainedFixupsCmd->dataoff]);
+                _chainedFixupsFormat = dyld3::MachOFile::chainedPointerFormat((dyld_chained_fixups_header*)&_linkeditBias[_chainedFixupsCmd->dataoff]);
                 break;
             case LC_DYLD_EXPORTS_TRIE:
                 _exportTrieCmd = (linkedit_data_command*)cmd;
@@ -180,7 +180,7 @@ Adjustor<P>::Adjustor(uint64_t cacheBaseAddress, dyld3::MachOAnalyzer* mh, const
         }
 #endif
         if ( !canHaveMissingSplitSeg )
-            _diagnostics.error("missing LC_SEGMENT_SPLIT_INFO in '%s'", _dylibID);
+            _diagnostics.error("missing LC_SEGMENT_SPLIT_INFO in %s", _dylibID);
     }
 
     // Set the chained pointer format on old arm64e binaries using threaded rebase, and
@@ -191,20 +191,19 @@ Adjustor<P>::Adjustor(uint64_t cacheBaseAddress, dyld3::MachOAnalyzer* mh, const
 }
 
 template <typename P>
-void Adjustor<P>::adjustImageForNewSegmentLocations(CacheBuilder::ASLR_Tracker& aslrTracker,
+void Adjustor<P>::adjustImageForNewSegmentLocations(cache_builder::ASLR_Tracker& aslrTracker,
                                                     CacheBuilder::LOH_Tracker* lohTracker,
-                                                    const CacheBuilder::CacheCoalescedText* coalescedText,
-                                                    const CacheBuilder::DylibTextCoalescer& textCoalescer)
+                                                    const CacheBuilder::DylibSectionCoalescer* sectionCoalescer)
 {
     if ( _diagnostics.hasError() )
         return;
     if ( _splitSegInfoV2 ) {
-        adjustReferencesUsingInfoV2(aslrTracker, lohTracker, coalescedText, textCoalescer);
-        adjustChainedFixups(textCoalescer);
+        adjustReferencesUsingInfoV2(aslrTracker, lohTracker, sectionCoalescer);
+        adjustChainedFixups();
     }
     else if ( _chainedFixupsCmd != nullptr ) {
         // need to adjust the chain fixup segment_offset fields in LINKEDIT before chains can be walked
-        adjustChainedFixups(textCoalescer);
+        adjustChainedFixups();
         adjustRebaseChains(aslrTracker);
         adjustCode();
     }
@@ -221,7 +220,7 @@ void Adjustor<P>::adjustImageForNewSegmentLocations(CacheBuilder::ASLR_Tracker& 
     adjustExternalRelocations();
     if ( _diagnostics.hasError() )
         return;
-    rebuildLinkEditAndLoadCommands(textCoalescer);
+    rebuildLinkEditAndLoadCommands(sectionCoalescer);
 
 #if DEBUG
     Diagnostics  diag;
@@ -243,16 +242,19 @@ uint64_t Adjustor<P>::slideForOrigAddress(uint64_t addr)
     if ( _maskPointers && (addr & 0xF000000000000000) ) {
         return slideForOrigAddress(addr & 0x0FFFFFFFFFFFFFFF);
     }
-    _diagnostics.error("slide not known for dylib address 0x%llX in '%s'", addr, _dylibID);
+    _diagnostics.error("slide not known for dylib address 0x%llX in %s", addr, _dylibID);
     return 0;
 }
 
 template <typename P>
-void Adjustor<P>::rebuildLinkEditAndLoadCommands(const CacheBuilder::DylibTextCoalescer& textCoalescer)
+void Adjustor<P>::rebuildLinkEditAndLoadCommands(const CacheBuilder::DylibSectionCoalescer* sectionCoalescer)
 {
     // Exports trie is only data structure in LINKEDIT that might grow
     std::vector<uint8_t> newTrieBytes;
     adjustExportsTrie(newTrieBytes);
+
+    std::vector<uint8_t> newFunctionStartsBytes;
+    adjustFunctionStarts(newFunctionStartsBytes);
 
     // Remove: code signature, rebase info, code-sign-dirs, split seg info
     uint32_t chainedFixupsOffset = 0;
@@ -268,7 +270,7 @@ void Adjustor<P>::rebuildLinkEditAndLoadCommands(const CacheBuilder::DylibTextCo
     uint32_t splitSegInfoOffset  = exportOffset + exportSize;
     uint32_t splitSegInfosSize   = (_splitSegInfoCmd ? _splitSegInfoCmd->datasize : 0);
     uint32_t funcStartsOffset    = splitSegInfoOffset + splitSegInfosSize;
-    uint32_t funcStartsSize      = (_functionStartsCmd ? _functionStartsCmd->datasize : 0);
+    uint32_t funcStartsSize      = (uint32_t)newFunctionStartsBytes.size();
     uint32_t dataInCodeOffset    = funcStartsOffset + funcStartsSize;
     uint32_t dataInCodeSize      = (_dataInCodeCmd ? _dataInCodeCmd->datasize : 0);
     uint32_t symbolTableOffset   = dataInCodeOffset + dataInCodeSize;
@@ -281,9 +283,9 @@ void Adjustor<P>::rebuildLinkEditAndLoadCommands(const CacheBuilder::DylibTextCo
     uint32_t symbolStringsSize   = _symTabCmd->strsize;
     uint32_t newLinkEditSize     = symbolStringsOffset + symbolStringsSize;
 
-    size_t linkeditBufferSize = align(_segCmds[_linkeditSegIndex]->vmsize(), 12);
+    size_t linkeditBufferSize = _mappingInfo[_linkeditSegIndex].dstCacheSegmentSize;
     if ( linkeditBufferSize < newLinkEditSize ) {
-        _diagnostics.error("LINKEDIT overflow in '%s'", _dylibID);
+        _diagnostics.error("LINKEDIT overflow in %s", _dylibID);
         return;
     }
 
@@ -301,7 +303,7 @@ void Adjustor<P>::rebuildLinkEditAndLoadCommands(const CacheBuilder::DylibTextCo
     if ( splitSegInfosSize )
         memcpy(&newLinkeditBufer[splitSegInfoOffset], &_linkeditBias[_splitSegInfoCmd->dataoff], splitSegInfosSize);
     if ( funcStartsSize )
-        memcpy(&newLinkeditBufer[funcStartsOffset], &_linkeditBias[_functionStartsCmd->dataoff], funcStartsSize);
+        memcpy(&newLinkeditBufer[funcStartsOffset], &newFunctionStartsBytes[0], funcStartsSize);
     if ( dataInCodeSize )
         memcpy(&newLinkeditBufer[dataInCodeOffset], &_linkeditBias[_dataInCodeCmd->dataoff], dataInCodeSize);
     if ( symbolTableSize )
@@ -404,9 +406,20 @@ void Adjustor<P>::rebuildLinkEditAndLoadCommands(const CacheBuilder::DylibTextCo
                     
                     for (macho_section<P>*  sect=sectionsStart; sect < sectionsEnd; ++sect) {
                         bool coalescedSection = false;
-                        if ( textCoalescer.sectionWasCoalesced(sect->segname(), sect->sectname())) {
+                        if ( (sectionCoalescer != nullptr) && sectionCoalescer->sectionWasRemoved(sect->segname(), sect->sectname())) {
                             coalescedSection = true;
                         }
+
+                        bool optimizedSection = false;
+                        if ( (sectionCoalescer != nullptr) && sectionCoalescer->sectionWasOptimized(sect->segname(), sect->sectname())) {
+                            optimizedSection = true;
+                        }
+
+                        bool obliteratedSection = false;
+                        if ( (sectionCoalescer != nullptr) && sectionCoalescer->sectionWasObliterated(sect->segname(), sect->sectname())) {
+                            obliteratedSection = true;
+                        }
+
 #if BUILDING_APP_CACHE_UTIL
                         if ( strcmp(segCmd->segname(), "__CTF") == 0 ) {
                             // The kernel __CTF segment data is completely removed when we link the baseKC
@@ -415,8 +428,8 @@ void Adjustor<P>::rebuildLinkEditAndLoadCommands(const CacheBuilder::DylibTextCo
                         }
 #endif
 
-                        if ( coalescedSection ) {
-                            // Put coalesced sections at the end of the segment
+                        if ( coalescedSection || obliteratedSection) {
+                            // Put coalesced/obliterated sections at the end of the segment
                             sect->set_addr(segCmd->vmaddr() + segCmd->filesize());
                             sect->set_offset(0);
                             sect->set_size(0);
@@ -424,6 +437,17 @@ void Adjustor<P>::rebuildLinkEditAndLoadCommands(const CacheBuilder::DylibTextCo
                             sect->set_addr(sect->addr() + _segSlides[segIndex]);
                             if ( sect->offset() != 0 )
                                 sect->set_offset(sect->offset() + segFileOffsetDelta);
+
+                            // If the section was optimized but not removed, then its GOTs.  In that
+                            // case, remove the flag which tells anyone to analyze this segment
+                            if ( optimizedSection ) {
+                                if ( (sect->flags() & SECTION_TYPE) == S_NON_LAZY_SYMBOL_POINTERS ) {
+                                    uint32_t flags = sect->flags();
+                                    flags = flags & ~SECTION_TYPE;
+                                    flags = flags | S_REGULAR;
+                                    sect->set_flags(flags);
+                                }
+                            }
                         }
                     }
                 }
@@ -432,6 +456,18 @@ void Adjustor<P>::rebuildLinkEditAndLoadCommands(const CacheBuilder::DylibTextCo
             case LC_SEGMENT_SPLIT_INFO:
                 splitSegInfoCmd = (linkedit_data_command*)cmd;
                 splitSegInfoCmd->dataoff = linkeditStartOffset + splitSegInfoOffset;
+                break;
+            case LC_UNIXTHREAD:
+                {
+                // adjust entry point of /usr/lib/dyld copied into the dyld cache
+                uint32_t* regs32 = (uint32_t*)(((char*)cmd) + 16);
+                uint64_t* regs64 = (uint64_t*)(((char*)cmd) + 16);
+                uint32_t index = _mh->entryAddrRegisterIndexForThreadCmd();
+                if ( _mh->use64BitEntryRegs() )
+                    regs64[index] += _mappingInfo[0].dstCacheUnslidAddress;
+                else
+                    regs32[index] += _mappingInfo[0].dstCacheUnslidAddress;
+                }
                 break;
             default:
                 break;
@@ -481,7 +517,7 @@ void Adjustor<P>::adjustSymbolTable()
 
 
 template <typename P>
-void Adjustor<P>::adjustChainedFixups(const CacheBuilder::DylibTextCoalescer& textCoalescer)
+void Adjustor<P>::adjustChainedFixups()
 {
     if ( _chainedFixupsCmd == nullptr )
         return;
@@ -498,11 +534,6 @@ void Adjustor<P>::adjustChainedFixups(const CacheBuilder::DylibTextCoalescer& te
                 continue;
             dyld_chained_starts_in_segment* segInfo = (dyld_chained_starts_in_segment*)((uint8_t*)starts + starts->seg_info_offset[segIndex]);
             segInfo->segment_offset = (uint64_t)_mappingInfo[segIndex].dstSegment - (uint64_t)_mh;
-
-            // If the whole segment was coalesced the remove its chain starts
-            if ( textCoalescer.segmentWasCoalesced(_segCmds[segIndex]->segname()) ) {
-                segInfo->page_count = 0;
-            }
         }
     });
 }
@@ -553,7 +584,7 @@ void Adjustor<P>::adjustExternalRelocations()
 }
 
 template <typename P>
-void Adjustor<P>::slidePointer(int segIndex, uint64_t segOffset, uint8_t type, CacheBuilder::ASLR_Tracker& aslrTracker)
+void Adjustor<P>::slidePointer(int segIndex, uint64_t segOffset, uint8_t type, cache_builder::ASLR_Tracker& aslrTracker)
 {
     pint_t*   mappedAddrP  = (pint_t*)((uint8_t*)_mappingInfo[segIndex].dstSegment + segOffset);
     uint32_t* mappedAddr32 = (uint32_t*)mappedAddrP;
@@ -574,7 +605,7 @@ void Adjustor<P>::slidePointer(int segIndex, uint64_t segOffset, uint8_t type, C
         case REBASE_TYPE_TEXT_PCREL32:
             // general text relocs not support
         default:
-            _diagnostics.error("unknown rebase type 0x%02X in '%s'", type, _dylibID);
+            _diagnostics.error("unknown rebase type 0x%02X in %s", type, _dylibID);
     }
 }
 
@@ -631,7 +662,7 @@ static uint32_t setArmWord(uint32_t instruction, uint16_t word) {
 
 
 template <typename P>
-void Adjustor<P>::convertArm64eRebaseToIntermediate(dyld3::MachOLoaded::ChainedFixupPointerOnDisk* chainPtr, CacheBuilder::ASLR_Tracker& aslrTracker,
+void Adjustor<P>::convertArm64eRebaseToIntermediate(dyld3::MachOLoaded::ChainedFixupPointerOnDisk* chainPtr, cache_builder::ASLR_Tracker& aslrTracker,
                                                     uint64_t targetSlide, bool convertRebaseChains)
 {
     assert(chainPtr->arm64e.authRebase.bind == 0);
@@ -772,7 +803,7 @@ void Adjustor<P>::convertArm64eRebaseToIntermediate(dyld3::MachOLoaded::ChainedF
 
 
 template <typename P>
-void Adjustor<P>::convertGeneric64RebaseToIntermediate(dyld3::MachOLoaded::ChainedFixupPointerOnDisk* chainPtr, CacheBuilder::ASLR_Tracker& aslrTracker, uint64_t targVMaddr)
+void Adjustor<P>::convertGeneric64RebaseToIntermediate(dyld3::MachOLoaded::ChainedFixupPointerOnDisk* chainPtr, cache_builder::ASLR_Tracker& aslrTracker, uint64_t targVMaddr)
 {
     assert( (_chainedFixupsFormat == DYLD_CHAINED_PTR_64) || (_chainedFixupsFormat == DYLD_CHAINED_PTR_64_OFFSET) );
     dyld3::MachOLoaded::ChainedFixupPointerOnDisk tmp;
@@ -811,7 +842,7 @@ template <typename P>
 void Adjustor<P>::adjustReference(uint32_t kind, uint8_t* mappedAddr, uint64_t fromNewAddress, uint64_t toNewAddress,
                                   int64_t adjust, int64_t targetSlide, uint64_t imageStartAddress, uint64_t imageEndAddress,
                                   bool convertRebaseChains,
-                                  CacheBuilder::ASLR_Tracker& aslrTracker, CacheBuilder::LOH_Tracker* lohTracker,
+                                  cache_builder::ASLR_Tracker& aslrTracker, CacheBuilder::LOH_Tracker* lohTracker,
                                   uint32_t*& lastMappedAddr32, uint32_t& lastKind, uint64_t& lastToNewAddress)
 {
     uint64_t value64;
@@ -829,7 +860,7 @@ void Adjustor<P>::adjustReference(uint32_t kind, uint8_t* mappedAddr, uint64_t f
             delta = (int32_t)value32;
             delta += adjust;
             if ( (delta > 0x80000000) || (-delta > 0x80000000) ) {
-                _diagnostics.error("DYLD_CACHE_ADJ_V2_DELTA_32 can't be adjust by 0x%016llX in '%s'", adjust, _dylibID);
+                _diagnostics.error("DYLD_CACHE_ADJ_V2_DELTA_32 can't be adjust by 0x%016llX in %s", adjust, _dylibID);
                 return;
             }
             P::E::set32(*mappedAddr32, (int32_t)delta);
@@ -858,7 +889,7 @@ void Adjustor<P>::adjustReference(uint32_t kind, uint8_t* mappedAddr, uint64_t f
             else if ( _mh->usesClassicRelocationsInKernelCollection() ) {
                 // Classic relocs are not guaranteed to be aligned, so always store them in the side table
                 if ( (uint32_t)toNewAddress != (uint32_t)(E::get32(*mappedAddr32) + targetSlide) ) {
-                    _diagnostics.error("bad DYLD_CACHE_ADJ_V2_POINTER_32 value not as expected at address 0x%llX in '%s'", fromNewAddress, _dylibID);
+                    _diagnostics.error("bad DYLD_CACHE_ADJ_V2_POINTER_32 value not as expected at address 0x%llX in %s", fromNewAddress, _dylibID);
                     return;
                 }
                 aslrTracker.setRebaseTarget32(mappedAddr32, (uint32_t)toNewAddress);
@@ -867,7 +898,7 @@ void Adjustor<P>::adjustReference(uint32_t kind, uint8_t* mappedAddr, uint64_t f
             }
             else {
                 if ( toNewAddress != (uint64_t)(E::get32(*mappedAddr32) + targetSlide) ) {
-                    _diagnostics.error("bad DYLD_CACHE_ADJ_V2_POINTER_32 value not as expected at address 0x%llX in '%s'", fromNewAddress, _dylibID);
+                    _diagnostics.error("bad DYLD_CACHE_ADJ_V2_POINTER_32 value not as expected at address 0x%llX in %s", fromNewAddress, _dylibID);
                     return;
                 }
                 E::set32(*mappedAddr32, (uint32_t)toNewAddress);
@@ -900,13 +931,13 @@ void Adjustor<P>::adjustReference(uint32_t kind, uint8_t* mappedAddr, uint64_t f
                         }
                         break;
                     default:
-                        _diagnostics.error("unknown 64-bit chained fixup format %d in '%s'", _chainedFixupsFormat, _dylibID);
+                        _diagnostics.error("unknown 64-bit chained fixup format %d in %s", _chainedFixupsFormat, _dylibID);
                         break;
                 }
             }
             else if ( _mh->usesClassicRelocationsInKernelCollection() ) {
                 if ( toNewAddress != (E::get64(*mappedAddr64) + targetSlide) ) {
-                    _diagnostics.error("bad DYLD_CACHE_ADJ_V2_POINTER_64 value not as expected at address 0x%llX in '%s'", fromNewAddress, _dylibID);
+                    _diagnostics.error("bad DYLD_CACHE_ADJ_V2_POINTER_64 value not as expected at address 0x%llX in %s", fromNewAddress, _dylibID);
                     return;
                 }
                 aslrTracker.setRebaseTarget64(mappedAddr64, toNewAddress);
@@ -918,7 +949,7 @@ void Adjustor<P>::adjustReference(uint32_t kind, uint8_t* mappedAddr, uint64_t f
             }
             else {
                 if ( toNewAddress != (E::get64(*mappedAddr64) + targetSlide) ) {
-                    _diagnostics.error("bad DYLD_CACHE_ADJ_V2_POINTER_64 value not as expected at address 0x%llX in '%s'", fromNewAddress, _dylibID);
+                    _diagnostics.error("bad DYLD_CACHE_ADJ_V2_POINTER_64 value not as expected at address 0x%llX in %s", fromNewAddress, _dylibID);
                     return;
                 }
                 E::set64(*mappedAddr64, toNewAddress);
@@ -950,7 +981,7 @@ void Adjustor<P>::adjustReference(uint32_t kind, uint8_t* mappedAddr, uint64_t f
             value32 = P::E::get32(*mappedAddr32);
             value64 = toNewAddress - imageStartAddress;
             if ( value64 > imageEndAddress ) {
-                _diagnostics.error("DYLD_CACHE_ADJ_V2_IMAGE_OFF_32 can't be adjust to 0x%016llX in '%s'", toNewAddress, _dylibID);
+                _diagnostics.error("DYLD_CACHE_ADJ_V2_IMAGE_OFF_32 can't be adjust to 0x%016llX in %s", toNewAddress, _dylibID);
                 return;
             }
             P::E::set32(*mappedAddr32, (uint32_t)value64);
@@ -964,7 +995,7 @@ void Adjustor<P>::adjustReference(uint32_t kind, uint8_t* mappedAddr, uint64_t f
                 int64_t pageDistance = ((toNewAddress & ~0xFFF) - (fromNewAddress & ~0xFFF));
                 int64_t newPage21 = pageDistance >> 12;
                 if ( (newPage21 > 2097151) || (newPage21 < -2097151) ) {
-                    _diagnostics.error("DYLD_CACHE_ADJ_V2_ARM64_ADRP can't be adjusted that far in '%s'", _dylibID);
+                    _diagnostics.error("DYLD_CACHE_ADJ_V2_ARM64_ADRP can't be adjusted that far in %s", _dylibID);
                     return;
                 }
                 instruction = (instruction & 0x9F00001F) | ((newPage21 << 29) & 0x60000000) | ((newPage21 << 3) & 0x00FFFFE0);
@@ -991,11 +1022,11 @@ void Adjustor<P>::adjustReference(uint32_t kind, uint8_t* mappedAddr, uint64_t f
                     case 0x00000000:
                         if ( (instruction & 0x04800000) == 0x04800000 ) {
                             if ( newPageOffset & 0xF ) {
-                                _diagnostics.error("can't adjust off12 scale=16 instruction to %d bytes at mapped address=%p in '%s'", newPageOffset, mappedAddr, _dylibID);
+                                _diagnostics.error("can't adjust off12 scale=16 instruction to %d bytes at mapped address=%p in %s", newPageOffset, mappedAddr, _dylibID);
                                 return;
                             }
                             if ( encodedAddend*16 >= 4096 ) {
-                                _diagnostics.error("off12 scale=16 instruction points outside its page at mapped address=%p in '%s'", mappedAddr, _dylibID);
+                                _diagnostics.error("off12 scale=16 instruction points outside its page at mapped address=%p in %s", mappedAddr, _dylibID);
                             }
                             newAddend = (newPageOffset/16);
                         }
@@ -1006,33 +1037,33 @@ void Adjustor<P>::adjustReference(uint32_t kind, uint8_t* mappedAddr, uint64_t f
                         break;
                     case 0x40000000:
                         if ( newPageOffset & 1 ) {
-                            _diagnostics.error("can't adjust off12 scale=2 instruction to %d bytes at mapped address=%p in '%s'", newPageOffset, mappedAddr, _dylibID);
+                            _diagnostics.error("can't adjust off12 scale=2 instruction to %d bytes at mapped address=%p in %s", newPageOffset, mappedAddr, _dylibID);
                             return;
                         }
                         if ( encodedAddend*2 >= 4096 ) {
-                            _diagnostics.error("off12 scale=2 instruction points outside its page at mapped address=%p in '%s'", mappedAddr, _dylibID);
+                            _diagnostics.error("off12 scale=2 instruction points outside its page at mapped address=%p in %s", mappedAddr, _dylibID);
                             return;
                         }
                         newAddend = (newPageOffset/2);
                         break;
                     case 0x80000000:
                         if ( newPageOffset & 3 ) {
-                            _diagnostics.error("can't adjust off12 scale=4 instruction to %d bytes at mapped address=%p in '%s'", newPageOffset, mappedAddr, _dylibID);
+                            _diagnostics.error("can't adjust off12 scale=4 instruction to %d bytes at mapped address=%p in %s", newPageOffset, mappedAddr, _dylibID);
                             return;
                         }
                         if ( encodedAddend*4 >= 4096 ) {
-                            _diagnostics.error("off12 scale=4 instruction points outside its page at mapped address=%p in '%s'", mappedAddr, _dylibID);
+                            _diagnostics.error("off12 scale=4 instruction points outside its page at mapped address=%p in %s", mappedAddr, _dylibID);
                             return;
                         }
                         newAddend = (newPageOffset/4);
                         break;
                     case 0xC0000000:
                         if ( newPageOffset & 7 ) {
-                            _diagnostics.error("can't adjust off12 scale=8 instruction to %d bytes at mapped address=%p in '%s'", newPageOffset, mappedAddr, _dylibID);
+                            _diagnostics.error("can't adjust off12 scale=8 instruction to %d bytes at mapped address=%p in %s", newPageOffset, mappedAddr, _dylibID);
                             return;
                         }
                         if ( encodedAddend*8 >= 4096 ) {
-                            _diagnostics.error("off12 scale=8 instruction points outside its page at mapped address=%p in '%s'", mappedAddr, _dylibID);
+                            _diagnostics.error("off12 scale=8 instruction points outside its page at mapped address=%p in %s", mappedAddr, _dylibID);
                             return;
                         }
                         newAddend = (newPageOffset/8);
@@ -1044,7 +1075,7 @@ void Adjustor<P>::adjustReference(uint32_t kind, uint8_t* mappedAddr, uint64_t f
             else if ( (instruction & 0xFFC00000) == 0x91000000 ) {
                 // ADD imm12
                 if ( instruction & 0x00C00000 ) {
-                    _diagnostics.error("ADD off12 uses shift at mapped address=%p in '%s'", mappedAddr, _dylibID);
+                    _diagnostics.error("ADD off12 uses shift at mapped address=%p in %s", mappedAddr, _dylibID);
                     return;
                 }
                 uint32_t newAddend = newPageOffset;
@@ -1053,7 +1084,7 @@ void Adjustor<P>::adjustReference(uint32_t kind, uint8_t* mappedAddr, uint64_t f
             }
             else if ( instruction != 0xD503201F ) {
                 // ignore imm12 instructions optimized into a NOP, but warn about others
-                _diagnostics.error("unknown off12 instruction 0x%08X at 0x%0llX in '%s'", instruction, fromNewAddress, _dylibID);
+                _diagnostics.error("unknown off12 instruction 0x%08X at 0x%0llX in %s", instruction, fromNewAddress, _dylibID);
                 return;
             }
             break;
@@ -1082,7 +1113,7 @@ void Adjustor<P>::adjustReference(uint32_t kind, uint8_t* mappedAddr, uint64_t f
                         instruction1 = setThumbWord(instruction1, full >> 16);
                     }
                     else {
-                        _diagnostics.error("two DYLD_CACHE_ADJ_V2_THUMB_MOVW_MOVT in a row but not paried in '%s'", _dylibID);
+                        _diagnostics.error("two DYLD_CACHE_ADJ_V2_THUMB_MOVW_MOVT in a row but not paried in %s", _dylibID);
                         return;
                     }
                     P::E::set32(*lastMappedAddr32, instruction1);
@@ -1090,7 +1121,7 @@ void Adjustor<P>::adjustReference(uint32_t kind, uint8_t* mappedAddr, uint64_t f
                     kind = 0;
                 }
                 else {
-                    _diagnostics.error("two DYLD_CACHE_ADJ_V2_THUMB_MOVW_MOVT in a row but target different addresses in '%s'", _dylibID);
+                    _diagnostics.error("two DYLD_CACHE_ADJ_V2_THUMB_MOVW_MOVT in a row but target different addresses in %s", _dylibID);
                     return;
                 }
             }
@@ -1120,7 +1151,7 @@ void Adjustor<P>::adjustReference(uint32_t kind, uint8_t* mappedAddr, uint64_t f
                         instruction1 = setArmWord(instruction1, full >> 16);
                     }
                     else {
-                        _diagnostics.error("two DYLD_CACHE_ADJ_V2_ARM_MOVW_MOVT in a row but not paired in '%s'", _dylibID);
+                        _diagnostics.error("two DYLD_CACHE_ADJ_V2_ARM_MOVW_MOVT in a row but not paired in %s", _dylibID);
                         return;
                     }
                     P::E::set32(*lastMappedAddr32, instruction1);
@@ -1128,7 +1159,7 @@ void Adjustor<P>::adjustReference(uint32_t kind, uint8_t* mappedAddr, uint64_t f
                     kind = 0;
                 }
                 else {
-                    _diagnostics.error("two DYLD_CACHE_ADJ_V2_ARM_MOVW_MOVT in a row but target different addresses in '%s'", _dylibID);
+                    _diagnostics.error("two DYLD_CACHE_ADJ_V2_ARM_MOVW_MOVT in a row but target different addresses in %s", _dylibID);
                     return;
                 }
             }
@@ -1147,7 +1178,7 @@ void Adjustor<P>::adjustReference(uint32_t kind, uint8_t* mappedAddr, uint64_t f
                 P::E::set32(*mappedAddr32, instruction);
                 break;
             } else {
-                _diagnostics.error("br26 instruction exceeds maximum range at mapped address=%p in '%s'", mappedAddr, _dylibID);
+                _diagnostics.error("br26 instruction exceeds maximum range at mapped address=%p in %s", mappedAddr, _dylibID);
                 return;
             }
         }
@@ -1165,10 +1196,9 @@ void Adjustor<P>::adjustReference(uint32_t kind, uint8_t* mappedAddr, uint64_t f
 }
 
 template <typename P>
-void Adjustor<P>::adjustReferencesUsingInfoV2(CacheBuilder::ASLR_Tracker& aslrTracker,
+void Adjustor<P>::adjustReferencesUsingInfoV2(cache_builder::ASLR_Tracker& aslrTracker,
                                               CacheBuilder::LOH_Tracker* lohTracker,
-                                              const CacheBuilder::CacheCoalescedText* coalescedText,
-                                              const CacheBuilder::DylibTextCoalescer& textCoalescer)
+                                              const CacheBuilder::DylibSectionCoalescer* sectionCoalescer)
 {
     static const bool logDefault = false;
     bool log = logDefault;
@@ -1180,36 +1210,29 @@ void Adjustor<P>::adjustReferencesUsingInfoV2(CacheBuilder::ASLR_Tracker& aslrTr
         return;
     }
     // build section arrays of slide and mapped address for each section
-    std::vector<uint64_t> sectionSlides;
-    std::vector<uint64_t> sectionNewAddress;
-    std::vector<uint8_t*> sectionMappedAddress;
+    std::vector<uint64_t>           sectionSlides;
+    std::vector<uint64_t>           sectionNewAddress;
+    std::vector<uint8_t*>           sectionMappedAddress;
+    std::vector<std::string_view>   sectionNames;
 
     // Also track coalesced sections, if we have any
-    typedef CacheBuilder::DylibTextCoalescer::DylibSectionOffsetToCacheSectionOffset DylibSectionOffsetToCacheSectionOffset;
+    typedef CacheBuilder::DylibSectionCoalescer::OptimizedSection OptimizedSection;
     std::vector<uint64_t>                                       coalescedSectionOriginalVMAddrs;
-    std::vector<uint64_t>                                       coalescedSectionNewVMAddrs;
-    std::vector<uint8_t*>                                       coalescedSectionBufferAddrs;
-    std::vector<const DylibSectionOffsetToCacheSectionOffset*>  coalescedSectionOffsetMaps;
-    std::vector<uint64_t>                                       coalescedSectionObjcTags;
+    std::vector<const OptimizedSection*>                        coalescedSectionData;
 
     sectionSlides.reserve(16);
     sectionNewAddress.reserve(16);
     sectionMappedAddress.reserve(16);
     coalescedSectionOriginalVMAddrs.reserve(16);
-    coalescedSectionNewVMAddrs.reserve(16);
-    coalescedSectionBufferAddrs.reserve(16);
-    coalescedSectionOffsetMaps.reserve(16);
-    coalescedSectionObjcTags.reserve(16);
+    coalescedSectionData.reserve(16);
 
     // section index 0 refers to mach_header
     sectionMappedAddress.push_back((uint8_t*)_mappingInfo[0].dstSegment);
     sectionSlides.push_back(_segSlides[0]);
     sectionNewAddress.push_back(_mappingInfo[0].dstCacheUnslidAddress);
+    sectionNames.push_back("mach_header");
     coalescedSectionOriginalVMAddrs.push_back(0);
-    coalescedSectionNewVMAddrs.push_back(0);
-    coalescedSectionBufferAddrs.push_back(nullptr);
-    coalescedSectionOffsetMaps.push_back(nullptr);
-    coalescedSectionObjcTags.push_back(0);
+    coalescedSectionData.push_back(nullptr);
 
     uint64_t imageStartAddress  = sectionNewAddress.front();
     uint64_t imageEndAddress    = 0;
@@ -1223,45 +1246,32 @@ void Adjustor<P>::adjustReferencesUsingInfoV2(CacheBuilder::ASLR_Tracker& aslrTr
         macho_section<P>* const sectionsEnd = &sectionsStart[segCmd->nsects()];
 
         for(macho_section<P>* sect = sectionsStart; sect < sectionsEnd; ++sect) {
-            if ( textCoalescer.sectionWasCoalesced(sect->segname(), sect->sectname())) {
-                // If we coalesced the segment then the sections aren't really there to be fixed up
-                const DylibSectionOffsetToCacheSectionOffset& offsetMap = textCoalescer.getSectionCoalescer(sect->segname(),
-                                                                                                            sect->sectname());
-                uint64_t coalescedSectionNewVMAddr = coalescedText->getSectionVMAddr(sect->segname(), sect->sectname());
-                uint8_t* coalescedSectionNewBufferAddr = coalescedText->getSectionBufferAddr(sect->segname(), sect->sectname());
-                uint64_t coalescedSectionObjcTag = coalescedText->getSectionObjcTag(sect->segname(), sect->sectname());
-                sectionMappedAddress.push_back(nullptr);
-                sectionSlides.push_back(0);
-                sectionNewAddress.push_back(0);
-                coalescedSectionOriginalVMAddrs.push_back(sect->addr());
-                coalescedSectionNewVMAddrs.push_back(coalescedSectionNewVMAddr);
-                coalescedSectionBufferAddrs.push_back(coalescedSectionNewBufferAddr);
-                coalescedSectionOffsetMaps.push_back(&offsetMap);
-                coalescedSectionObjcTags.push_back(coalescedSectionObjcTag);
-                ++sectionIndex;
-                if (log) {
-                    fprintf(stderr, " %s/%s, sectIndex=%d, mapped at=%p\n",
-                            sect->segname(), sect->sectname(), sectionIndex, sectionMappedAddress.back());
-                }
-            } else {
-                sectionMappedAddress.push_back((uint8_t*)_mappingInfo[segmentIndex].dstSegment + sect->addr() - segCmd->vmaddr());
-                sectionSlides.push_back(_segSlides[segmentIndex]);
-                sectionNewAddress.push_back(_mappingInfo[segmentIndex].dstCacheUnslidAddress + sect->addr() - segCmd->vmaddr());
-                coalescedSectionOriginalVMAddrs.push_back(0);
-                coalescedSectionNewVMAddrs.push_back(0);
-                coalescedSectionBufferAddrs.push_back(nullptr);
-                coalescedSectionOffsetMaps.push_back(nullptr);
-                coalescedSectionObjcTags.push_back(0);
-                ++sectionIndex;
-                if (log) {
-                    fprintf(stderr, " %s/%s, sectIndex=%d, mapped at=%p\n",
-                            sect->segname(), sect->sectname(), sectionIndex, sectionMappedAddress.back());
-                }
-                if (!strcmp(sect->segname(), "__DATA") && !strcmp(sect->sectname(), "__objc_selrefs"))
-                    objcSelRefsSectionIndex = sectionIndex;
 
-                imageEndAddress = sectionNewAddress.back();
+            // Common fields
+            sectionMappedAddress.push_back((uint8_t*)_mappingInfo[segmentIndex].dstSegment + sect->addr() - segCmd->vmaddr());
+            sectionSlides.push_back(_segSlides[segmentIndex]);
+            sectionNewAddress.push_back(_mappingInfo[segmentIndex].dstCacheUnslidAddress + sect->addr() - segCmd->vmaddr());
+            sectionNames.push_back(std::string_view(sect->sectname(), strnlen(sect->sectname(), 16)));
+            coalescedSectionOriginalVMAddrs.push_back(sect->addr());
+
+            if ( (sectionCoalescer != nullptr) && sectionCoalescer->sectionWasOptimized(sect->segname(), sect->sectname())) {
+                // Optimized/removed sections need to track the section itself
+                const OptimizedSection* optimizedSection = sectionCoalescer->getSection(sect->segname(), sect->sectname());
+                coalescedSectionData.push_back(optimizedSection);
+            } else {
+                coalescedSectionData.push_back(nullptr);
             }
+
+            if ( (sectionCoalescer == nullptr) || !sectionCoalescer->sectionWasRemoved(sect->segname(), sect->sectname()) )
+                imageEndAddress = sectionNewAddress.back();
+
+            ++sectionIndex;
+            if (log) {
+                fprintf(stderr, " %s/%s, sectIndex=%d, mapped at=%p\n",
+                        sect->segname(), sect->sectname(), sectionIndex, sectionMappedAddress.back());
+            }
+            if (!strncmp(sect->segname(), "__DATA", 6) && !strcmp(sect->sectname(), "__objc_selrefs"))
+                objcSelRefsSectionIndex = sectionIndex;
         }
     }
 
@@ -1294,7 +1304,7 @@ void Adjustor<P>::adjustReferencesUsingInfoV2(CacheBuilder::ASLR_Tracker& aslrTr
             for (uint64_t k=0; k < fromOffsetCount; ++k) {
                 uint64_t kind = read_uleb128(p, infoEnd);
                 if ( kind > 13 ) {
-                    _diagnostics.error("unknown split seg info v2 kind value (%llu) in '%s'", kind, _dylibID);
+                    _diagnostics.error("unknown split seg info v2 kind value (%llu) in %s", kind, _dylibID);
                     return;
                 }
                 uint64_t fromSectDeltaCount = read_uleb128(p, infoEnd);
@@ -1304,21 +1314,30 @@ void Adjustor<P>::adjustReferencesUsingInfoV2(CacheBuilder::ASLR_Tracker& aslrTr
                     fromSectionOffset += delta;
                     if (log) printf("   kind=%lld, from offset=0x%0llX, to offset=0x%0llX, adjust=0x%llX, targetSlide=0x%llX\n", kind, fromSectionOffset, toSectionOffset, delta, toSectionSlide);
 
-                    // It's possible for all either of from/to sectiobs to be coalesced/optimized.
+                    // If either of to/from were obliterated, ie, not just coalesced, then skip this reference.  There's nothing to do here, and we'll handle it later
+                    if ( (coalescedSectionData[fromSectionIndex] != nullptr) && coalescedSectionData[fromSectionIndex]->sectionIsObliterated )
+                        continue;
+                    if ( (coalescedSectionData[toSectionIndex] != nullptr) && coalescedSectionData[toSectionIndex]->sectionIsObliterated )
+                        continue;
+
+                    // It's possible for all either of from/to sections to be coalesced/optimized.
                     // Handle each of those combinations.
                     uint8_t* fromMappedAddr = nullptr;
                     uint64_t fromNewAddress = 0;
                     uint64_t fromAtomSlide  = 0;
                     bool convertRebaseChains = false;
-                    if ( coalescedSectionOffsetMaps[fromSectionIndex] != nullptr ) {
-                        // From was optimized/coalesced
+                    if ( (coalescedSectionData[fromSectionIndex] != nullptr) && coalescedSectionData[fromSectionIndex]->sectionWillBeRemoved ) {
+                        // From was coalesced and removed
+                        // Note we don't do coalesced GOTs here as those are not removed.  Those will be handled with the regular logic as
+                        // their section still exists
+
                         // This is only supported on pointer kind fixups, ie, pointers in RW segments
                         assert( (kind == DYLD_CACHE_ADJ_V2_POINTER_64) || (kind == DYLD_CACHE_ADJ_V2_THREADED_POINTER_64) );
                         // Find where the atom moved to with its new section
                         // CFString's and similar may have fixups in the middle of the atom, but the map only
                         // tracks the start offset for the atom.  We use lower_bound to find the atom containing
                         // the offset we are looking for
-                        const DylibSectionOffsetToCacheSectionOffset* offsetMap = coalescedSectionOffsetMaps[fromSectionIndex];
+                        const auto* offsetMap = &coalescedSectionData[fromSectionIndex]->offsetMap;
                         auto offsetIt = offsetMap->lower_bound((uint32_t)fromSectionOffset);
                         if ( offsetIt->first != fromSectionOffset ) {
                             // This points to the middle of the atom, so check the previous atom
@@ -1331,9 +1350,9 @@ void Adjustor<P>::adjustReferencesUsingInfoV2(CacheBuilder::ASLR_Tracker& aslrTr
                         uint64_t offsetInAtom = fromSectionOffset - offsetIt->first;
                         assert(offsetInAtom < (uint64_t)DyldSharedCache::ConstantClasses::cfStringAtomSize);
 
-                        uint8_t* baseMappedAddr = coalescedSectionBufferAddrs[fromSectionIndex];
+                        uint8_t* baseMappedAddr = coalescedSectionData[fromSectionIndex]->subCacheSection->bufferAddr;
                         fromMappedAddr = baseMappedAddr + offsetIt->second + offsetInAtom;
-                        uint64_t baseVMAddr = coalescedSectionNewVMAddrs[fromSectionIndex];
+                        uint64_t baseVMAddr = coalescedSectionData[fromSectionIndex]->subCacheSection->bufferVMAddr;
                         fromNewAddress = baseVMAddr + offsetIt->second + offsetInAtom;
 
                         // The 'from' section is gone, but we still need the 'from' slide.  Instead of a section slide,
@@ -1350,21 +1369,32 @@ void Adjustor<P>::adjustReferencesUsingInfoV2(CacheBuilder::ASLR_Tracker& aslrTr
 
                     uint64_t toNewAddress   = 0;
                     uint64_t toAtomSlide    = 0;
-                    if ( coalescedSectionOffsetMaps[toSectionIndex] != nullptr ) {
+                    if ( coalescedSectionData[toSectionIndex] != nullptr ) {
                         // To was optimized/coalesced
-                        const DylibSectionOffsetToCacheSectionOffset* offsetMap = coalescedSectionOffsetMaps[toSectionIndex];
+                        const auto* offsetMap = &coalescedSectionData[toSectionIndex]->offsetMap;
                         auto offsetIt = offsetMap->find((uint32_t)toSectionOffset);
-                        assert(offsetIt != offsetMap->end());
-                        uint64_t baseVMAddr = coalescedSectionNewVMAddrs[toSectionIndex];
-                        toNewAddress = baseVMAddr + offsetIt->second;
+                        if ( coalescedSectionData[toSectionIndex]->sectionWillBeRemoved ) {
+                            // If the section was removed then we have to find an entry for every atom in there
+                            assert(offsetIt != offsetMap->end());
+                        } else {
+                            // Not all GOTs are optimized, but we should find the element somewhere
+                            assert((offsetIt != offsetMap->end()) || coalescedSectionData[toSectionIndex]->unoptimizedOffsets.count((uint32_t)toSectionOffset));
+                        }
 
-                        // Add in the high bits which are the tagged pointer TBI bits
-                        toNewAddress |= coalescedSectionObjcTags[toSectionIndex];
+                        if ( offsetIt == offsetMap->end() ) {
+                            // To was not fully optimized/coalesced
+                            // FIXME: Unify this with the else branch below where we didn't have a coalesced section
+                            toNewAddress = toSectionNewAddress + toSectionOffset;
+                            toAtomSlide = toSectionSlide;
+                        } else {
+                            uint64_t baseVMAddr = coalescedSectionData[toSectionIndex]->subCacheSection->bufferVMAddr;
+                            toNewAddress = baseVMAddr + offsetIt->second;
 
-                        // The 'to' section is gone, but we still need the 'to' slide.  Instead of a section slide,
-                        // compute the slide for this individual atom
-                        uint64_t toAtomOriginalVMAddr = coalescedSectionOriginalVMAddrs[toSectionIndex] + toSectionOffset;
-                        toAtomSlide = toNewAddress - toAtomOriginalVMAddr;
+                            // The 'to' section is gone, but we still need the 'to' slide.  Instead of a section slide,
+                            // compute the slide for this individual atom
+                            uint64_t toAtomOriginalVMAddr = coalescedSectionOriginalVMAddrs[toSectionIndex] + toSectionOffset;
+                            toAtomSlide = toNewAddress - toAtomOriginalVMAddr;
+                        }
                     } else {
                         // To was not optimized/coalesced
                         toNewAddress = toSectionNewAddress + toSectionOffset;
@@ -1390,7 +1420,7 @@ void Adjustor<P>::adjustReferencesUsingInfoV2(CacheBuilder::ASLR_Tracker& aslrTr
 }
 
 template <typename P>
-void Adjustor<P>::adjustRebaseChains(CacheBuilder::ASLR_Tracker& aslrTracker)
+void Adjustor<P>::adjustRebaseChains(cache_builder::ASLR_Tracker& aslrTracker)
 {
     const dyld_chained_fixups_header* chainHeader = (dyld_chained_fixups_header*)(&_linkeditBias[_chainedFixupsCmd->dataoff]);
     const dyld_chained_starts_in_image* startsInfo = (dyld_chained_starts_in_image*)((uint8_t*)chainHeader + chainHeader->starts_offset);
@@ -1466,7 +1496,7 @@ static bool segIndexAndOffsetForAddress(uint64_t addr, const std::vector<uint64_
 }
 
 template <typename P>
-void Adjustor<P>::adjustDataPointers(CacheBuilder::ASLR_Tracker& aslrTracker)
+void Adjustor<P>::adjustDataPointers(cache_builder::ASLR_Tracker& aslrTracker)
 {
     if ( (_dynSymTabCmd != nullptr) && (_dynSymTabCmd->locreloff != 0) ) {
         // kexts may have old style relocations instead of dyldinfo rebases
@@ -1571,7 +1601,7 @@ void Adjustor<P>::adjustDataPointers(CacheBuilder::ASLR_Tracker& aslrTracker)
                 }
                 break;
             default:
-                _diagnostics.error("unknown rebase opcode 0x%02X in '%s'", opcode, _dylibID);
+                _diagnostics.error("unknown rebase opcode 0x%02X in %s", opcode, _dylibID);
                 done = true;
                 break;
         }
@@ -1751,7 +1781,7 @@ void Adjustor<P>::adjustExportsTrie(std::vector<uint8_t>& newTrieBytes)
     const uint8_t* end = &start[exportSize];
     std::vector<ExportInfoTrie::Entry> originalExports;
     if ( !ExportInfoTrie::parseTrie(start, end, originalExports) ) {
-        _diagnostics.error("malformed exports trie in '%s'", _dylibID);
+        _diagnostics.error("malformed exports trie in %s", _dylibID);
         return;
     }
 
@@ -1782,13 +1812,55 @@ void Adjustor<P>::adjustExportsTrie(std::vector<uint8_t>& newTrieBytes)
 }
 
 
+template <typename P>
+void Adjustor<P>::adjustFunctionStarts(std::vector<uint8_t>& newFunctionStartsBytes)
+{
+    // if no function starts info, nothing to adjust
+    uint32_t functionStartsOffset   = 0;
+    uint32_t functionStartsSize     = 0;
+    if ( _functionStartsCmd != nullptr ) {
+        functionStartsOffset = _functionStartsCmd->dataoff;
+        functionStartsSize = _functionStartsCmd->datasize;
+    }
+
+    if ( functionStartsSize == 0 )
+        return;
+
+    const uint8_t* starts = &_linkeditBias[functionStartsOffset];
+    const uint8_t* startsEnd = &starts[functionStartsSize];
+
+    std::vector<uint64_t> newAddresses;
+    uint64_t oldVMAddr = _segOrigStartAddresses[0];
+    while ( true ) {
+        uint64_t value = read_uleb128(starts, startsEnd);
+        if ( value == 0 )
+            break;
+        oldVMAddr += value;
+
+        uint64_t newVMAddr = oldVMAddr + slideForOrigAddress(oldVMAddr);
+        newAddresses.push_back(newVMAddr);
+    }
+
+    uint64_t lastVMAddr = _segOrigStartAddresses[0] + _segSlides[0];
+    for ( uint64_t vmAddr : newAddresses ) {
+        TrieUtils::append_uleb128(vmAddr - lastVMAddr, newFunctionStartsBytes);
+        lastVMAddr = vmAddr;
+    }
+    TrieUtils::append_uleb128(0, newFunctionStartsBytes);
+
+    // align
+    while ( (newFunctionStartsBytes.size() % sizeof(pint_t)) != 0 )
+        newFunctionStartsBytes.push_back(0);
+}
+
+
 } // anonymous namespace
 
 void CacheBuilder::adjustDylibSegments(const DylibInfo& dylib, Diagnostics& diag,
                                        uint64_t cacheBaseAddress,
-                                       CacheBuilder::ASLR_Tracker& aslrTracker,
+                                       cache_builder::ASLR_Tracker& aslrTracker,
                                        CacheBuilder::LOH_Tracker* lohTracker,
-                                       const CacheBuilder::CacheCoalescedText* coalescedText) const
+                                       const CacheBuilder::DylibSectionCoalescer* sectionCoalescer) const
 {
     
     dyld3::MachOAnalyzer* mh = (dyld3::MachOAnalyzer*)dylib.cacheLocation[0].dstSegment;
@@ -1797,14 +1869,14 @@ void CacheBuilder::adjustDylibSegments(const DylibInfo& dylib, Diagnostics& diag
                                                      mh,
                                                      dylib.dylibID.c_str(),
                                                      dylib.cacheLocation, diag);
-        adjustor64.adjustImageForNewSegmentLocations(aslrTracker, lohTracker, coalescedText, dylib.textCoalescer);
+        adjustor64.adjustImageForNewSegmentLocations(aslrTracker, lohTracker, sectionCoalescer);
     }
     else {
         Adjustor<Pointer32<LittleEndian>> adjustor32(cacheBaseAddress,
                                                      mh,
                                                      dylib.dylibID.c_str(),
                                                      dylib.cacheLocation, diag);
-        adjustor32.adjustImageForNewSegmentLocations(aslrTracker, lohTracker, coalescedText, dylib.textCoalescer);
+        adjustor32.adjustImageForNewSegmentLocations(aslrTracker, lohTracker, sectionCoalescer);
     }
 }
 

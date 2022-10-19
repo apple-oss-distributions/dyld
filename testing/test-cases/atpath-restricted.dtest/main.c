@@ -18,12 +18,12 @@ extern void foo();
 
 int main(int argc, const char* argv[], const char* envp[], const char* apple[])
 {
-#if __x86_64__ && !RESTRICTED
-    // Unrestricted x86_64 processes should be able to find foo via a relative rpath
+#if !RESTRICTED
+    // Unrestricted macOS processes should be able to find foo via a relative rpath
     if ( &foo == NULL )
         FAIL("Expected &foo to be non-null");
 #else
-  // The @rpath link to foo should fail when we are restricted (or not x86_64), so we expect it to be null
+  // The @rpath link to foo should fail when we are restricted, so we expect it to be null
   if ( &foo != NULL )
       FAIL("Expected &foo to be null");
 #endif

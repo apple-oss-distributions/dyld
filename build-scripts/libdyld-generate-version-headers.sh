@@ -2,6 +2,9 @@
 
 if [ "${DRIVERKIT}" = 1 ]; then
     RUNTIME_PREFIX="/System/DriverKit/Runtime"
+elif [ -n "${SYSTEM_PREFIX}" ]; then
+    # do nothing
+    exit 0
 else
     RUNTIME_PREFIX=""
 fi

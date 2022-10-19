@@ -35,7 +35,6 @@
 // RUN: DYLD_VERSIONED_LIBRARY_PATH=$RUN_DIR/alt-1.0.0:$RUN_DIR/alt-2000.0.0 ./env-DYLD_VERSIONED_LIBRARY_PATH-missing-dylibs-dlopen.exe "2000.0.0"
 // RUN: DYLD_VERSIONED_LIBRARY_PATH=$RUN_DIR/alt-2000.0.0:$RUN_DIR/alt-1.0.0 ./env-DYLD_VERSIONED_LIBRARY_PATH-missing-dylibs-dlopen.exe "2000.0.0"
 
-#include <stdio.h>  // fprintf(), NULL
 #include <stdlib.h> // exit(), EXIT_SUCCESS
 #include <string.h>
 #include <stdlib.h> // for atoi()

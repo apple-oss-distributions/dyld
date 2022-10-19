@@ -30,21 +30,38 @@
 #include <mach-o/dyld_priv.h>
 #include <os/lock_private.h>
 
+#include "Defines.h"
 #include "MachOLoaded.h"
 #include "MachOAnalyzer.h"
 #include "Array.h"
 #include "DyldProcessConfig.h"
 #include "LibSystemHelpers.h"
 #include "Allocator.h"
+#include "FileManager.h"
 #include "Loader.h"
+#include "MurmurHash.h"
+#include "OptimizerSwift.h"
 #include "Vector.h"
 #include "Map.h"
-
-using dyld3::MachOLoaded;
-using dyld3::MachOAnalyzer;
+#include "UUID.h"
+#include "OrderedMap.h"
 
 
 namespace dyld4 {
+
+using lsl::UUID;
+using lsl::UniquePtr;
+using lsl::OrderedMap;
+using lsl::Vector;
+using lsl::Allocator;
+using lsl::EphemeralAllocator;
+using dyld3::MachOLoaded;
+using dyld3::MachOAnalyzer;
+
+namespace Atlas {
+struct ProcessSnapshot;
+};
+using Atlas::ProcessSnapshot;
 
 class Loader;
 class Reaper;
@@ -64,6 +81,16 @@ struct InterposeTupleSpecific
     const Loader*    onlyImage;            // don't apply replacement to this image (allows interposer to call thru to old impl)
     uintptr_t        replacement;
     uintptr_t        replacee;
+};
+
+// Instead of patching all uses of a class, we can rewrite the class in the cache to point to the root.  This is the list
+// of classes to pass to libobjc
+struct ObjCClassReplacement
+{
+    const mach_header*  cacheMH;
+    uintptr_t           cacheImpl;
+    const mach_header*  rootMH;
+    uintptr_t           rootImpl;
 };
 
 typedef void                (*NotifyFunc)(const mach_header* mh, intptr_t slide);
@@ -94,8 +121,110 @@ struct WeakDefMapValue {
                     isWeakDef           : 1;
 };
 
-
 typedef dyld3::CStringMapTo<WeakDefMapValue> WeakDefMap;
+
+#if SUPPORT_VM_LAYOUT
+struct EqualTypeConformanceLookupKey {
+    static bool equal(const SwiftTypeProtocolConformanceDiskLocationKey& key, uint64_t typeDescriptor, uint64_t protocol, RuntimeState* state) {
+        assert(state != nullptr);
+        return (key.typeDescriptor.value(*state) == typeDescriptor) && (key.protocol.value(*state) == protocol);
+    }
+};
+
+struct EqualMetadataConformanceLookupKey {
+    static bool equal(const SwiftMetadataProtocolConformanceDiskLocationKey& key, uint64_t metadataDescriptor, uint64_t protocol, RuntimeState* state) {
+        assert(state != nullptr);
+        return (key.metadataDescriptor.value(*state) == metadataDescriptor) && (key.protocol.value(*state) == protocol);
+    }
+};
+
+struct EqualForeignConformanceLookupKey {
+    static bool equal(const SwiftForeignTypeProtocolConformanceDiskLocationKey& key, const char* foreignDescriptor, size_t foreignLength, uint64_t protocol, RuntimeState* state) {
+        assert(state != nullptr);
+        char* keyStr = (char*)key.foreignDescriptor.value(*state);
+        return (strncmp(keyStr, foreignDescriptor, (size_t)key.foreignDescriptorNameLength) == 0) && (key.foreignDescriptorNameLength == foreignLength) && (key.protocol.value(*state) == protocol);
+    }
+};
+#endif
+
+const uint64_t twelveBitsMask = 0xFFF;
+
+struct EqualTypeConformanceKey {
+    static bool equal(const SwiftTypeProtocolConformanceDiskLocationKey& a, const SwiftTypeProtocolConformanceDiskLocationKey& b, void* state) {
+        return ((a.typeDescriptor.offset() & twelveBitsMask) == (b.typeDescriptor.offset() & twelveBitsMask)) && ((a.protocol.offset()&twelveBitsMask) == (b.protocol.offset()&twelveBitsMask));
+    }
+};
+
+struct HashTypeConformanceKey {
+    static uint64_t hash(const SwiftTypeProtocolConformanceDiskLocationKey& v, void* state) {
+        uint64_t keyA = v.typeDescriptor.offset() & twelveBitsMask;
+        uint64_t keyB = v.protocol.offset() & twelveBitsMask;
+        return murmurHash(&keyA, sizeof(uint64_t), 0) ^ murmurHash(&keyB, sizeof(uint64_t), 0);
+    }
+};
+
+struct EqualMetadataConformanceKey {
+    static bool equal(const SwiftMetadataProtocolConformanceDiskLocationKey& a, const SwiftMetadataProtocolConformanceDiskLocationKey& b, void* state) {
+        return ((a.metadataDescriptor.offset()&twelveBitsMask) == (b.metadataDescriptor.offset()&twelveBitsMask)) && ((a.protocol.offset()&twelveBitsMask) == (b.protocol.offset()&twelveBitsMask));
+    }
+};
+
+struct HashMetadataConformanceKey {
+    static uint64_t hash(const SwiftMetadataProtocolConformanceDiskLocationKey& v, void* state) {
+        uint64_t keyA = v.metadataDescriptor.offset() & twelveBitsMask;
+        uint64_t keyB = v.protocol.offset() & twelveBitsMask;
+        return murmurHash(&keyA, sizeof(uint64_t), 0) ^ murmurHash(&keyB, sizeof(uint64_t), 0);
+    }
+};
+
+struct EqualForeignConformanceKey {
+    static bool equal(const SwiftForeignTypeProtocolConformanceDiskLocationKey& a, const SwiftForeignTypeProtocolConformanceDiskLocationKey& b, void* state) {
+        char* strA = nullptr;
+        char* strB = nullptr;
+
+        // State is only non-null here in dyld when calling from the APIs
+#if SUPPORT_VM_LAYOUT
+        if ( state != nullptr ) {
+            RuntimeState* rState = (RuntimeState*)state;
+            strA = (char*)a.foreignDescriptor.value(*rState);
+            strB = (char*)b.foreignDescriptor.value(*rState);
+        } else {
+            strA = (char*)a.originalPointer;
+            strB = (char*)b.originalPointer;
+        }
+#else
+        strA = (char*)a.originalPointer;
+        strB = (char*)b.originalPointer;
+#endif
+
+        return (strncmp(strA, strB, (size_t)a.foreignDescriptorNameLength) == 0) && (a.foreignDescriptorNameLength == b.foreignDescriptorNameLength) && ((a.protocol.offset()&twelveBitsMask) == (b.protocol.offset()&twelveBitsMask));
+    }
+};
+
+struct HashForeignConformanceKey {
+    static uint64_t hash(const SwiftForeignTypeProtocolConformanceDiskLocationKey& v, void* state) {
+        char* str = nullptr;
+
+        // State is only non-null here in dyld when calling from the APIs
+#if SUPPORT_VM_LAYOUT
+        if ( state != nullptr ) {
+            RuntimeState* rState = (RuntimeState*)state;
+            str = (char*)v.foreignDescriptor.value(*rState);
+        } else {
+            str = (char*)v.originalPointer;
+        }
+#else
+        str = (char*)v.originalPointer;
+#endif
+
+        uint64_t keyPart = v.protocol.offset() & twelveBitsMask;
+        return murmurHash(str, (int)v.foreignDescriptorNameLength, 0) ^ murmurHash(&keyPart, sizeof(uint64_t), 0);
+    }
+};
+
+typedef dyld3::MultiMap<SwiftTypeProtocolConformanceDiskLocationKey, SwiftTypeProtocolConformanceDiskLocation, HashTypeConformanceKey, EqualTypeConformanceKey> TypeProtocolMap;
+typedef dyld3::MultiMap<SwiftMetadataProtocolConformanceDiskLocationKey, SwiftMetadataProtocolConformanceDiskLocation, HashMetadataConformanceKey, EqualMetadataConformanceKey> MetadataProtocolMap;
+typedef dyld3::MultiMap<SwiftForeignTypeProtocolConformanceDiskLocationKey, SwiftForeignTypeProtocolConformanceDiskLocation, HashForeignConformanceKey, EqualForeignConformanceKey> ForeignProtocolMap;
 
 
 //
@@ -105,12 +234,16 @@ class [[clang::ptrauth_vtable_pointer(process_independent, address_discriminatio
 {
 public:
     const ProcessConfig&            config;
-    Allocator&                      longTermAllocator;
+    Allocator&                      persistentAllocator;
+    EphemeralAllocator              ephemeralAllocator;
     const Loader*                   mainExecutableLoader = nullptr;
     Vector<ConstAuthLoader>         loaded;
     const Loader*                   libSystemLoader      = nullptr;
     const Loader*                   libdyldLoader        = nullptr;
-    const void*                     libdyldMissingSymbol = 0;
+#if BUILDING_DYLD || BUILDING_UNIT_TESTS
+    const void*                     libdyldMissingSymbol = nullptr;
+#endif
+    uint64_t                        libdyldMissingSymbolRuntimeOffset = 0;
 #if BUILDING_DYLD
     RuntimeLocks&                   _locks;
 #endif
@@ -118,24 +251,35 @@ public:
     const LibSystemHelpers*         libSystemHelpers     = nullptr;
     Vector<InterposeTupleAll>       interposingTuplesAll;
     Vector<InterposeTupleSpecific>  interposingTuplesSpecific;
+    Vector<InterposeTupleAll>       patchedObjCClasses;
+    Vector<ObjCClassReplacement>    objcReplacementClasses;
+    Vector<InterposeTupleAll>       patchedSingletons;
+    size_t                          numSingletonObjectsPatched = 0;
     uint64_t                        weakDefResolveSymbolCount = 0;
     WeakDefMap*                     weakDefMap                = nullptr;
+    TypeProtocolMap*                typeProtocolMap     = nullptr;
+    MetadataProtocolMap*            metadataProtocolMap = nullptr;
+    ForeignProtocolMap*             foreignProtocolMap  = nullptr;
+    FileManager                     fileManager;
 
 #if BUILDING_DYLD
-                                RuntimeState(const ProcessConfig& c, RuntimeLocks& locks, Allocator& alloc)
+                                RuntimeState(const ProcessConfig& c, Allocator& alloc, RuntimeLocks& locks)
 #else
-                                RuntimeState(const ProcessConfig& c, Allocator& alloc = *Allocator::bootstrap())
+                                RuntimeState(const ProcessConfig& c, Allocator& alloc = Allocator::defaultAllocator())
 #endif
-                                    : config(c), longTermAllocator(alloc), loaded(&alloc),
+    : config(c), persistentAllocator(alloc), loaded(alloc),
 #if BUILDING_DYLD
                                     _locks(locks),
 #endif
-                                    interposingTuplesAll(&alloc), interposingTuplesSpecific(&alloc),
-                                    _notifyAddImage(&alloc), _notifyRemoveImage(&alloc),
-                                    _notifyLoadImage(&alloc), _notifyBulkLoadImage(&alloc),
-                                    _tlvInfos(&alloc), _loadersNeedingDOFUnregistration(&alloc),
-                                    _missingFlatLazySymbols(&alloc), _dynamicReferences(&alloc),
-                                    _dlopenRefCounts(&alloc), _dynamicNeverUnloads(&alloc) {}
+                                    interposingTuplesAll(alloc), interposingTuplesSpecific(alloc),
+                                    patchedObjCClasses(alloc), objcReplacementClasses(alloc),
+                                    patchedSingletons(alloc),
+                                    fileManager(persistentAllocator, &config.syscall),
+                                    _notifyAddImage(alloc), _notifyRemoveImage(alloc),
+                                    _notifyLoadImage(alloc), _notifyBulkLoadImage(alloc),
+                                    _tlvInfos(alloc), _loadersNeedingDOFUnregistration(alloc),
+                                    _missingFlatLazySymbols(alloc), _dynamicReferences(alloc),
+                                    _dlopenRefCounts(alloc), _dynamicNeverUnloads(alloc) {}
 
     void                        setMainLoader(const Loader*);
     void                        add(const Loader*);
@@ -147,34 +291,63 @@ public:
 
     uint8_t*                    appState(uint16_t index);
     uint8_t*                    cachedDylibState(uint16_t index);
+#if BUILDING_CACHE_BUILDER || BUILDING_CACHE_BUILDER_UNIT_TESTS
+    const MachOFile*            appMF(uint16_t index);
+    void                        setAppMF(uint16_t index, const MachOFile* mf);
+    const MachOFile*            cachedDylibMF(uint16_t index);
+    const mach_o::Layout*       cachedDylibLayout(uint16_t index);
+#else
     const MachOLoaded*          appLoadAddress(uint16_t index);
     void                        setAppLoadAddress(uint16_t index, const MachOLoaded* ml);
     const MachOLoaded*          cachedDylibLoadAddress(uint16_t index);
+#endif
 
     void                        log(const char* format, ...) const __attribute__((format(printf, 2, 3))) ;
-    void                        vlog(const char* format, va_list list);
+    void                        vlog(const char* format, va_list list) __attribute__((format(printf, 2, 0)));
 
-    void                        setObjCNotifiers(_dyld_objc_notify_mapped, _dyld_objc_notify_init, _dyld_objc_notify_unmapped);
+    void                        setObjCNotifiers(_dyld_objc_notify_mapped, _dyld_objc_notify_init, _dyld_objc_notify_unmapped,
+                                                 _dyld_objc_notify_patch_class, _dyld_objc_notify_mapped2);
     void                        addNotifyAddFunc(const Loader* callbackLoader, NotifyFunc);
     void                        addNotifyRemoveFunc(const Loader* callbackLoader, NotifyFunc);
     void                        addNotifyLoadImage(const Loader* callbackLoader, LoadNotifyFunc);
     void                        addNotifyBulkLoadImage(const Loader* callbackLoader, BulkLoadNotifier);
 
+#if BUILDING_DYLD || BUILDING_UNIT_TESTS
     void                        notifyObjCInit(const Loader* ldr);
     void                        buildInterposingTables();
+#endif
 
     void                        withNotifiersReadLock(void (^work)());
-    void                        withNotifiersWriteLock(void (^work)());
+
+    template<typename F>
+    ALWAYS_INLINE void          withNotifiersWriteLock(F work)
+    {
+    #if BUILDING_DYLD
+        if ( this->libSystemHelpers != nullptr ) {
+            this->libSystemHelpers->os_unfair_recursive_lock_lock_with_options(&_locks.notifiersLock, OS_UNFAIR_LOCK_NONE);
+              this->incWritable();
+                 work();
+              this->decWritable();
+            this->libSystemHelpers->os_unfair_recursive_lock_unlock(&_locks.notifiersLock);
+        }
+        else
+    #endif
+        {
+            work();
+        }
+    }
 
     void                        addPermanentRanges(const Array<const Loader*>& neverUnloadLoaders);
     bool                        inPermanentRange(uintptr_t start, uintptr_t end, uint8_t* perms, const Loader** loader);
 
-    void                        notifyLoad(const dyld3::Array<const Loader*>& newLoaders);
-    void                        notifyUnload(const dyld3::Array<const Loader*>& removeLoaders);
+    void                        notifyLoad(const std::span<const Loader*>& newLoaders);
+    void                        notifyUnload(const std::span<const Loader*>& removeLoaders);
+    void                        doSingletonPatching();
+    void                        notifyObjCPatching();
     void                        notifyDebuggerLoad(const Loader* oneLoader);
-    void                        notifyDebuggerLoad(const dyld3::Array<const Loader*>& newLoaders);
-    void                        notifyDebuggerUnload(const dyld3::Array<const Loader*>& removingLoaders);
-    void                        notifyDtrace(const dyld3::Array<const Loader*>& newLoaders);
+    void                        notifyDebuggerLoad(const std::span<const Loader*>& newLoaders);
+    void                        notifyDebuggerUnload(const std::span<const Loader*>& removingLoaders);
+    void                        notifyDtrace(const std::span<const Loader*>& newLoaders);
 
     void                        incDlRefCount(const Loader* ldr);  // used by dlopen
     void                        decDlRefCount(const Loader* ldr);  // used by dlclose
@@ -183,8 +356,8 @@ public:
     void                        setLaunchMissingSymbol(const char* missingSymbolName, const char* dylibThatShouldHaveSymbol, const char* clientUsingSymbol);
 
     void                        addMissingFlatLazySymbol(const Loader* ldr, const char* symbolName, uintptr_t* bindLoc);
-    void                        rebindMissingFlatLazySymbols(const dyld3::Array<const Loader*>& newLoaders);
-    void                        removeMissingFlatLazySymbols(const dyld3::Array<const Loader*>& removingLoaders);
+    void                        rebindMissingFlatLazySymbols(const std::span<const Loader*>& newLoaders);
+    void                        removeMissingFlatLazySymbols(const std::span<const Loader*>& removingLoaders);
     bool                        hasMissingFlatLazySymbols() const;
 
     void                        addDynamicReference(const Loader* from, const Loader* to);
@@ -207,30 +380,90 @@ public:
     void                        exitTLV();
 
     void                        withLoadersReadLock(void (^work)());
-    void                        withLoadersWriteLock(void (^work)());
 
-    void                        incWritable();
-    void                        decWritable();
+    template<typename F>
+    ALWAYS_INLINE void          withLoadersWriteLock(F work)
+    {
+        #if BUILDING_DYLD
+        if ( this->libSystemHelpers != nullptr ) {
+            this->libSystemHelpers->os_unfair_recursive_lock_lock_with_options(&_locks.loadersLock, OS_UNFAIR_LOCK_NONE);
+            this->incWritable();
+            work();
+            this->decWritable();
+            this->libSystemHelpers->os_unfair_recursive_lock_unlock(&_locks.loadersLock);
+        }
+        else
+        #endif
+        {
+            work();
+        }
+    }
 
+    ALWAYS_INLINE void          incWritable()
+    {
+        #if BUILDING_DYLD
+        // FIXME: move inc/decWritable() into Allocator to replace writeProtect()
+        pthread_mutex_lock(&_locks.writableLock);
+        _locks.writeableCount += 1;
+        if ( _locks.writeableCount == 1 ) {
+            {
+                persistentAllocator.writeProtect(false);
+            }
+        }
+        pthread_mutex_unlock(&_locks.writableLock);
+        #endif
+    }
+
+    ALWAYS_INLINE void          decWritable()
+    {
+        #if BUILDING_DYLD
+        pthread_mutex_lock(&_locks.writableLock);
+        _locks.writeableCount -= 1;
+        if ( _locks.writeableCount == 0 ) {
+            // We are done all write operations, so we can tear down the ephemeral allocator and write protect the persistent one
+#if !TARGET_OS_SIMULATOR
+            freeProcessSnapshot();
+#endif
+            ephemeralAllocator.reset();
+            {
+                persistentAllocator.writeProtect(true);
+            }
+        }
+        pthread_mutex_unlock(&_locks.writableLock);
+        #endif
+    }
+
+#if BUILDING_DYLD
     void                        initializeClosureMode();
+#endif
     const PrebuiltLoaderSet*    processPrebuiltLoaderSet() const { return _processPrebuiltLoaderSet; }
     const PrebuiltLoaderSet*    cachedDylibsPrebuiltLoaderSet() const { return _cachedDylibsPrebuiltLoaderSet; }
     uint8_t*                    prebuiltStateArray(bool app) const { return (app ? _processDylibStateArray : _cachedDylibsStateArray); }
+    void                        setInitialImageCount(uint32_t count) { _initialImageCount = count; }
+    uint32_t                    initialImageCount() const { return _initialImageCount; }
 
     const PrebuiltLoader*       findPrebuiltLoader(const char* loadPath) const;
     bool                        saveAppClosureFile() const { return _saveAppClosureFile; }
     bool                        failIfCouldBuildAppClosureFile() const { return _failIfCouldBuildAppClosureFile; }
     bool                        saveAppPrebuiltLoaderSet(const PrebuiltLoaderSet* pblset) const;
     bool                        inPrebuiltLoader(const void* p, size_t len) const;
+    const UUID&                 uuidForFileSystem(uint64_t fsid);
+    uint64_t                    fsidForUUID(const UUID& uuid);
 #if !BUILDING_DYLD
     void                        resetCachedDylibs(const PrebuiltLoaderSet* dylibs, uint8_t* stateArray);
     void                        setProcessPrebuiltLoaderSet(const PrebuiltLoaderSet* appPBLS);
-    void                        resetCachedDylibsArrays();
+    void                        resetCachedDylibsArrays(const PrebuiltLoaderSet* cachedDylibsPBLS);
 #endif
 
     // this need to be virtual to be callable from libdyld.dylb
     virtual void                _finalizeListTLV(void* l);
     virtual void*               _instantiateTLVs(pthread_key_t key);
+
+#if !TARGET_OS_SIMULATOR
+    ProcessSnapshot*            getCurrentProcessSnapshot();
+    void                        commitProcessSnapshot();
+    void                        freeProcessSnapshot();
+#endif
 
 protected:
 
@@ -339,10 +572,12 @@ private:
 
     enum { kMaxBootTokenSize = 128 };
 
+#if BUILDING_DYLD || BUILDING_UNIT_TESTS
     void                        appendInterposingTuples(const Loader* ldr, const uint8_t* dylibTuples, uint32_t tupleCount);
+#endif
     void                        garbageCollectImages();
     void                        garbageCollectInner();
-    void                        removeLoaders(const dyld3::Array<const Loader*>& loadersToRemove);
+    void                        removeLoaders(const std::span<const Loader*>& loadersToRemove);
     void                        withTLVLock(void (^work)());
     void                        setUpLogging();
     void                        buildAppPrebuiltLoaderSetPath(bool createDirs);
@@ -351,13 +586,18 @@ private:
     void                        loadAppPrebuiltLoaderSet();
     bool                        allowOsProgramsToSaveUpdatedClosures() const;
     bool                        allowNonOsProgramsToSaveUpdatedClosures() const;
+#if BUILDING_DYLD || BUILDING_CLOSURE_UTIL
     void                        allocateProcessArrays(uintptr_t count);
+#endif
     void                        checkHiddenCacheAddr(const Loader* t, const void* targetAddr, const char* symbolName, dyld3::OverflowSafeArray<HiddenCacheAddr>& hiddenCacheAddrs) const;
+    void                        setDyldPatchedObjCClasses() const;
+    void                        reloadFSInfos();
 
-    
     _dyld_objc_notify_mapped        _notifyObjCMapped       = nullptr;
     _dyld_objc_notify_init          _notifyObjCInit         = nullptr;
     _dyld_objc_notify_unmapped      _notifyObjCUnmapped     = nullptr;
+    _dyld_objc_notify_patch_class   _notifyObjCPatchClass   = nullptr;
+    _dyld_objc_notify_mapped2       _notifyObjCMapped2       = nullptr;
     Vector<NotifyFunc>              _notifyAddImage;
     Vector<NotifyFunc>              _notifyRemoveImage;
     Vector<LoadNotifyFunc>          _notifyLoadImage;
@@ -371,9 +611,14 @@ private:
     const char*                     _processPrebuiltLoaderSetPath   = nullptr;
     const PrebuiltLoaderSet*        _processPrebuiltLoaderSet       = nullptr;
     uint8_t*                        _processDylibStateArray         = nullptr;
+#if SUPPORT_VM_LAYOUT
     const MachOLoaded**             _processLoadedAddressArray      = nullptr;
+#else
+    const MachOFile**               _processLoadedMachOArray        = nullptr;
+#endif
     bool                            _saveAppClosureFile;
     bool                            _failIfCouldBuildAppClosureFile;
+    uint32_t                        _initialImageCount        = 256;
     PermanentRanges*                _permanentRanges          = nullptr;
     MainFunc                        _driverKitMain            = nullptr;
     Vector<DlopenCount>             _dlopenRefCounts;
@@ -389,6 +634,8 @@ private:
 #if TARGET_OS_IPHONE && !TARGET_OS_SIMULATOR
     bool                            _vmAccountingSuspended    = false;
 #endif // TARGET_OS_IPHONE && !TARGET_OS_SIMULATOR
+    UniquePtr<OrderedMap<uint64_t,UUID>>    _fsUUIDMap;
+    ProcessSnapshot*                        _processSnapshot    = nullptr;
 };
 
 
@@ -435,13 +682,15 @@ protected:
 
 void notifyMonitoringDyld(bool unloading, unsigned imageCount, const mach_header* loadAddresses[], const char* imagePaths[]);
 void notifyMonitoringDyldMain();
-void notifyMonitoringDyldSharedCacheMap();
+void notifyMonitoringDyldBeforeInitializers();
+#if BUILDING_DYLD && !TARGET_OS_SIMULATOR
+void notifyMonitoringDyldSimSupport(bool unloading, unsigned imageCount, const mach_header* loadAddresses[], const char* imagePaths[]);
+#endif
 void coresymbolication_load_notifier(void* connection, uint64_t timestamp, const char* path, const mach_header* mh);
 void coresymbolication_unload_notifier(void* connection, uint64_t timestamp, const char* path, const mach_header* mh);
 kern_return_t mach_msg_sim_interposed(mach_msg_header_t* msg, mach_msg_option_t option, mach_msg_size_t send_size, mach_msg_size_t rcv_size,
                                       mach_port_name_t rcv_name, mach_msg_timeout_t timeout, mach_port_name_t notify);
 
-#if !BUILDING_CACHE_BUILDER && !BUILDING_SHARED_CACHE_UTIL
 //
 // The implementation of all dyld load/unload API's must hold a global lock
 // so that the next load/unload does start until the current is complete.
@@ -462,13 +711,12 @@ public:
     RecursiveAutoLock(RuntimeState& state, bool skip=false);
     ~RecursiveAutoLock();
 private:
-    const LibSystemHelpers*     _libSystemHelpers;
+    const LibSystemHelpers*     _libSystemHelpers = nullptr;
 #if BUILDING_DYLD
     os_unfair_recursive_lock&   _lock;
     bool                        _skip;
 #endif
 };
-#endif // !BUILDING_CACHE_BUILDER
 
 
 } // namespace

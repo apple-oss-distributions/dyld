@@ -1317,8 +1317,8 @@ public:
         return mVisitor.strings();
     }
 
-    void visitCoalescedStrings(const CacheBuilder::CacheCoalescedText& coalescedText) {
-        mVisitor.visitCoalescedStrings(coalescedText);
+    void visitCoalescedStrings(const CacheBuilder::CoalescedStringsSection& coalescedMethodNames) {
+        mVisitor.visitCoalescedStrings(coalescedMethodNames);
     }
 
     void setSelectorBaseAddress(uint64_t selectorBaseAddress) {

@@ -1,4 +1,4 @@
-#!/usr/bin/python2.7
+#!/usr/bin/python3
 
 import os
 import KernelCollection
@@ -24,12 +24,12 @@ def check(kernel_cache):
     kernel_cache.analyze("/kext-bind-to-kext-symbol-set/main.kc", ["-symbols", "-arch", "arm64"])
     assert kernel_cache.dictionary()["dylibs"][2]["name"] == "com.apple.foo"
     assert kernel_cache.dictionary()["dylibs"][2]["global-symbols"][0]["name"] == "_foo"
-    assert kernel_cache.dictionary()["dylibs"][2]["global-symbols"][0]["vmAddr"] == "0x14020"
+    assert kernel_cache.dictionary()["dylibs"][2]["global-symbols"][0]["vmAddr"] == "0x14040"
 
     # Check the fixups
     kernel_cache.analyze("/kext-bind-to-kext-symbol-set/main.kc", ["-fixups", "-arch", "arm64"])
-    assert len(kernel_cache.dictionary()["fixups"]) == 1
-    assert kernel_cache.dictionary()["fixups"]["0x1C000"] == "kc(0) + 0x14020"
+    assert len(kernel_cache.dictionary()["fixups"]) == 5
+    assert kernel_cache.dictionary()["fixups"]["0x1C000"] == "kc(0) + 0x14040"
     assert len(kernel_cache.dictionary()["dylibs"]) == 3
     assert kernel_cache.dictionary()["dylibs"][0]["name"] == "com.apple.kernel"
     assert kernel_cache.dictionary()["dylibs"][0]["fixups"] == "none"

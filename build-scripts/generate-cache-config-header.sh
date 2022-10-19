@@ -17,6 +17,14 @@ fi
 
 
 if [ -r "${SHARED_REGION_FILE}" ]; then
+    /bin/echo -n "#define X86_64_SHARED_REGION_START "  >> ${DERIVED_FILE_DIR}/dyld_cache_config.h
+    awk '/define SHARED_REGION_BASE_X86_64[ \t]/ { print $3;}' "${SHARED_REGION_FILE}" >> ${DERIVED_FILE_DIR}/dyld_cache_config.h
+    /bin/echo ""  >> ${DERIVED_FILE_DIR}/dyld_cache_config.h
+
+    /bin/echo -n "#define X86_64_SHARED_REGION_SIZE "  >> ${DERIVED_FILE_DIR}/dyld_cache_config.h
+    awk '/define SHARED_REGION_SIZE_X86_64[ \t]/ { print $3;}' "${SHARED_REGION_FILE}" >> ${DERIVED_FILE_DIR}/dyld_cache_config.h
+    /bin/echo ""  >> ${DERIVED_FILE_DIR}/dyld_cache_config.h
+
     /bin/echo -n "#define ARM_SHARED_REGION_START "  >> ${DERIVED_FILE_DIR}/dyld_cache_config.h
     awk '/define SHARED_REGION_BASE_ARM[ \t]/ { print $3;}' "${SHARED_REGION_FILE}" >> ${DERIVED_FILE_DIR}/dyld_cache_config.h
     /bin/echo ""  >> ${DERIVED_FILE_DIR}/dyld_cache_config.h

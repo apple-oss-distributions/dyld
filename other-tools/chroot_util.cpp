@@ -47,7 +47,7 @@
 #include "StringUtils.h"
 #include "MachOFile.h"
 
-std::set<std::string> scanForDependencies(const std::string& path) {
+static std::set<std::string> scanForDependencies(const std::string& path) {
     __block std::set<std::string> result;
     struct stat stat_buf;
     int fd = open(path.c_str(), O_RDONLY, 0);
@@ -88,14 +88,7 @@ std::set<std::string> scanForDependencies(const std::string& path) {
     return result;
 }
 
-std::string withoutPrefixPath(const std::string& path, const std::string& prefix ) {
-    std::string result = path;
-    size_t pos = result.find(prefix);
-    result.erase(pos, prefix.length());
-    return result;
-}
-
-void add_symlinks_to_dylib(const std::string path) {
+static void add_symlinks_to_dylib(const std::string path) {
     static std::set<std::string> alreadyMatched;
     size_t pos = path.rfind(".framework/Versions/");
     auto prefixPath = path.substr(0, pos);
@@ -127,13 +120,13 @@ void add_symlinks_to_dylib(const std::string path) {
     }
 }
 
-void add_symlink(const std::string& target, const std::string& path) {
+static void add_symlink(const std::string& target, const std::string& path) {
     if (!std::filesystem::exists(path)) {
         std::filesystem::create_symlink(target, path);
     }
 }
 
-void buildChroot(const std::string& chroot, const std::string& fallback, const std::vector<std::string>& binaries) {
+static void buildChroot(const std::string& chroot, const std::string& fallback, const std::vector<std::string>& binaries) {
     auto chrootPath = std::filesystem::path(chroot);
     auto fallbackPath = std::filesystem::path(fallback);
 

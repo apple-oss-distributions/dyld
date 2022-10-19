@@ -1,7 +1,8 @@
-#!/usr/bin/python2.7
+#!/usr/bin/python3
 
 import os
 import KernelCollection
+from FixupHelpers import *
 
 # Check that weak binds can be missing, so long as we check for the magic symbol
 
@@ -11,19 +12,25 @@ def check(kernel_cache):
 
     assert len(kernel_cache.dictionary()["dylibs"]) == 1
     assert kernel_cache.dictionary()["dylibs"][0]["name"] == "com.apple.kernel"
-    assert kernel_cache.dictionary()["dylibs"][0]["global-symbols"][2]["name"] == "_gOSKextUnresolved"
-    assert kernel_cache.dictionary()["dylibs"][0]["global-symbols"][2]["vmAddr"] == "0x10000"
+    kextUnresolvedVMAddr = findGlobalSymbolVMAddr(kernel_cache, 0, "_gOSKextUnresolved")
 
     # Now build an aux cache using the baseline kernel collection
     kernel_cache.buildAuxKernelCollection("arm64", "/auxkc-missing-weak-bind/aux.kc", "/auxkc-missing-weak-bind/main.kc", "", "/auxkc-missing-weak-bind/extensions", ["com.apple.foo", "com.apple.bar"], [])
-    kernel_cache.analyze("/auxkc-missing-weak-bind/aux.kc", ["-fixups", "-arch", "arm64"])
+
+    kernel_cache.analyze("/auxkc-missing-weak-bind/aux.kc", ["-layout", "-arch", "arm64"])
+    assert len(kernel_cache.dictionary()["dylibs"]) == 2
+    assert kernel_cache.dictionary()["dylibs"][0]["name"] == "com.apple.bar"
+    assert kernel_cache.dictionary()["dylibs"][1]["name"] == "com.apple.foo"
+    barGOTVMAddr = findSectionVMAddr(kernel_cache, 0, "__DATA_CONST", "__got")
+    fooGOTVMAddr = findSectionVMAddr(kernel_cache, 1, "__DATA_CONST", "__got")
 
     # Check the fixups
-    assert len(kernel_cache.dictionary()["fixups"]) == 4
-    assert kernel_cache.dictionary()["fixups"]["0x14000"] == "kc(0) + 0x10000"
-    assert kernel_cache.dictionary()["fixups"]["0x14008"] == "kc(0) + 0x10000"
-    assert kernel_cache.dictionary()["fixups"]["0x14010"] == "kc(0) + 0x10000"
-    assert kernel_cache.dictionary()["fixups"]["0x14018"] == "kc(0) + 0x10000"
+    kernel_cache.analyze("/auxkc-missing-weak-bind/aux.kc", ["-fixups", "-arch", "arm64"])
+    assert len(kernel_cache.dictionary()["fixups"]) >= 8
+    assert kernel_cache.dictionary()["fixups"][offsetVMAddr(barGOTVMAddr, 0)] == "kc(0) + " + kextUnresolvedVMAddr
+    assert kernel_cache.dictionary()["fixups"][offsetVMAddr(barGOTVMAddr, 8)] == "kc(0) + " + kextUnresolvedVMAddr
+    assert kernel_cache.dictionary()["fixups"][offsetVMAddr(fooGOTVMAddr, 0)] == "kc(0) + " + kextUnresolvedVMAddr
+    assert kernel_cache.dictionary()["fixups"][offsetVMAddr(fooGOTVMAddr, 8)] == "kc(0) + " + kextUnresolvedVMAddr
     assert len(kernel_cache.dictionary()["dylibs"]) == 2
     assert kernel_cache.dictionary()["dylibs"][0]["name"] == "com.apple.bar"
     assert kernel_cache.dictionary()["dylibs"][0]["fixups"] == "none"

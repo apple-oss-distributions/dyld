@@ -38,22 +38,11 @@
 #include "DyldSharedCache.h"
 #include "JSON.h"
 
-class Diagnostics;
-
-#if BUILDING_CACHE_BUILDER
-struct FileCache {
-    FileCache(void);
-    std::pair<uint8_t*, struct stat> cacheLoad(Diagnostics& diags, const std::string path);
-
-private:
-    std::pair<uint8_t*, struct stat> fill(Diagnostics& diags, const std::string& path);
-
-    std::unordered_map<std::string, std::pair<uint8_t*, struct stat>> entries;
-    dispatch_queue_t cache_queue;
+namespace cache_builder {
+    struct FileAlias;
 };
 
-extern FileCache fileCache;
-#endif
+class Diagnostics;
 
 //
 // recursively walk all files in a directory tree
@@ -86,25 +75,6 @@ std::string realPath(const std::string& path);
 std::string realFilePath(const std::string& path);
 
 std::string toolDir();
-
-#if BUILDING_CACHE_BUILDER
-class SymlinkResolver {
-public:
-    SymlinkResolver() { }
-
-    void addFile(Diagnostics& diags, std::string path);
-
-    void addSymlink(Diagnostics& diags, std::string fromPath, std::string toPath);
-
-    std::string realPath(Diagnostics& diags, const std::string& path) const;
-
-    std::vector<DyldSharedCache::FileAlias> getResolvedSymlinks(Diagnostics& diags);
-
-private:
-    std::set<std::string> filePaths;
-    std::map<std::string, std::string> symlinks;
-};
-#endif  // BUILDING_CACHE_BUILDER
 
 
 #endif // FileUtils_h

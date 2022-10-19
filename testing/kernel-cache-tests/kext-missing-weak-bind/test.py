@@ -1,15 +1,15 @@
-#!/usr/bin/python2.7
+#!/usr/bin/python3
 
 import os
 import KernelCollection
+from FixupHelpers import *
 
 # Check that weak binds can be missing, so long as we check for the magic symbol
 
 def check(kernel_cache):
     kernel_cache.buildKernelCollection("arm64", "/kext-missing-weak-bind/main.kc", "/kext-missing-weak-bind/main.kernel", "/kext-missing-weak-bind/extensions", ["com.apple.foo", "com.apple.bar"], [])
     kernel_cache.analyze("/kext-missing-weak-bind/main.kc", ["-layout", "-arch", "arm64"])
-    assert kernel_cache.dictionary()["cache-segments"][3]["name"] == "__DATA_CONST"
-    assert kernel_cache.dictionary()["cache-segments"][3]["vmAddr"] == "0x18000"
+    dataConstVMAddr = findCacheSegmentVMAddr(kernel_cache, "__DATA_CONST")
 
     assert len(kernel_cache.dictionary()["dylibs"]) == 3
     assert kernel_cache.dictionary()["dylibs"][0]["name"] == "com.apple.kernel"
@@ -20,16 +20,15 @@ def check(kernel_cache):
     kernel_cache.analyze("/kext-missing-weak-bind/main.kc", ["-symbols", "-arch", "arm64"])
     # kernel
     assert kernel_cache.dictionary()["dylibs"][0]["name"] == "com.apple.kernel"
-    assert kernel_cache.dictionary()["dylibs"][0]["global-symbols"][2]["name"] == "_gOSKextUnresolved"
-    assert kernel_cache.dictionary()["dylibs"][0]["global-symbols"][2]["vmAddr"] == "0x20000"
+    kextUnresolvedVMAddr = findGlobalSymbolVMAddr(kernel_cache, 0, "_gOSKextUnresolved")
 
     # Check the fixups
     kernel_cache.analyze("/kext-missing-weak-bind/main.kc", ["-fixups", "-arch", "arm64"])
-    assert len(kernel_cache.dictionary()["fixups"]) == 4
-    assert kernel_cache.dictionary()["fixups"]["0x18000"] == "kc(0) + 0x20000"
-    assert kernel_cache.dictionary()["fixups"]["0x18008"] == "kc(0) + 0x20000"
-    assert kernel_cache.dictionary()["fixups"]["0x18010"] == "kc(0) + 0x20000"
-    assert kernel_cache.dictionary()["fixups"]["0x18018"] == "kc(0) + 0x20000"
+    assert len(kernel_cache.dictionary()["fixups"]) == 8
+    assert kernel_cache.dictionary()["fixups"][offsetVMAddr(dataConstVMAddr, 0)] == "kc(0) + " + kextUnresolvedVMAddr
+    assert kernel_cache.dictionary()["fixups"][offsetVMAddr(dataConstVMAddr, 8)] == "kc(0) + " + kextUnresolvedVMAddr
+    assert kernel_cache.dictionary()["fixups"][offsetVMAddr(dataConstVMAddr, 0)] == "kc(0) + " + kextUnresolvedVMAddr
+    assert kernel_cache.dictionary()["fixups"][offsetVMAddr(dataConstVMAddr, 8)] == "kc(0) + " + kextUnresolvedVMAddr
     assert len(kernel_cache.dictionary()["dylibs"]) == 3
     assert kernel_cache.dictionary()["dylibs"][0]["name"] == "com.apple.kernel"
     assert kernel_cache.dictionary()["dylibs"][0]["fixups"] == "none"

@@ -26,6 +26,10 @@ then
         xcodebuild ${ACTION} -target libKernelCollectionBuilder OBJROOT="${OBJROOT_KBO}" LD_DYLIB_INSTALL_NAME="/usr/lib/libKernelCollectionBuilder.dylib" INSTALL_PATH="/usr/lib"                     SYMROOT="${SYMROOT}/os"  SDKROOT="${SDKROOT}" MACOSX_DEPLOYMENT_TARGET=${MACOSX_DEPLOYMENT_TARGET} SRCROOT="${SRCROOT}" DSTROOT="${DSTROOT}" RC_ProjectSourceVersion="${RC_ProjectSourceVersion}"
     fi
 
+    # Build dyld_info for the toolchain
+    OBJROOT_INFO_TOOLCHAIN="${TARGET_TEMP_DIR}/Objects_dyld_info_macToolchain"
+    xcodebuild ${ACTION} -target dyld_info OBJROOT="${OBJROOT_INFO_TOOLCHAIN}" INSTALL_PATH="${DT_TOOLCHAIN_DIR}/usr/local/bin/" MAN_INSTALL_PATH="${DT_TOOLCHAIN_DIR}/usr/local/share/man/man1/" SYMROOT="${SYMROOT}"     SDKROOT="${SDKROOT}" MACOSX_DEPLOYMENT_TARGET=${MACOSX_DEPLOYMENT_TARGET} SRCROOT="${SRCROOT}" DSTROOT="${DSTROOT}" RC_ProjectSourceVersion="${RC_ProjectSourceVersion}"
+
     # move build results to host locations
     if [ "${ACTION}" == "install" ]
     then
@@ -67,6 +71,10 @@ else
 
     OBJROOT_KBT="${TARGET_TEMP_DIR}/Objects_kcb"
     xcodebuild ${ACTION} -target libKernelCollectionBuilder OBJROOT="${OBJROOT_KBT}" LD_DYLIB_INSTALL_NAME="@rpath/libKernelCollectionBuilder.dylib"   INSTALL_PATH="${CANON_TOOLCHAIN_DIR}/usr/lib/" SYMROOT="${SYMROOT}"     SDKROOT="${SDKROOT}" MACOSX_DEPLOYMENT_TARGET=${MACOSX_DEPLOYMENT_TARGET} SRCROOT="${SRCROOT}" DSTROOT="${DSTROOT}" RC_ProjectSourceVersion="${RC_ProjectSourceVersion}"
+
+    # Build dyld_info for the toolchain
+    OBJROOT_INFO_TOOLCHAIN="${TARGET_TEMP_DIR}/Objects_dyld_info"
+    xcodebuild ${ACTION} -target dyld_info OBJROOT="${OBJROOT_INFO_TOOLCHAIN}" INSTALL_PATH="${CANON_TOOLCHAIN_DIR}/usr/local/bin/" MAN_INSTALL_PATH="${CANON_TOOLCHAIN_DIR}/usr/local/share/man/man1/" SYMROOT="${SYMROOT}"     SDKROOT="${SDKROOT}" MACOSX_DEPLOYMENT_TARGET=${MACOSX_DEPLOYMENT_TARGET} SRCROOT="${SRCROOT}" DSTROOT="${DSTROOT}" RC_ProjectSourceVersion="${RC_ProjectSourceVersion}"
 
     # no simulator for bridgeOS
     if [ "${RC_BRIDGE}" != "YES" ]

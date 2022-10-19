@@ -1,6 +1,6 @@
 
 // BUILD:  $CC bar.cpp -Wno-missing-exception-spec -lc++ -dynamiclib -o $BUILD_DIR/libbar.dylib -install_name $RUN_DIR/libbar.dylib -Wl,-no_fixup_chains
-// BUILD:  $CC foo.cpp -Wno-missing-exception-spec -lc++ -dynamiclib -o $BUILD_DIR/libfoo.dylib -install_name $RUN_DIR/libfoo.dylib -Wl,-no_fixup_chains $BUILD_DIR/libbar.dylib
+// BUILD:  $CC foo.cpp -Wno-missing-exception-spec -lc++ -ltest_support -dynamiclib -o $BUILD_DIR/libfoo.dylib -install_name $RUN_DIR/libfoo.dylib -Wl,-no_fixup_chains $BUILD_DIR/libbar.dylib
 // BUILD:  $CC main.cpp -Wno-missing-exception-spec -lc++ -o $BUILD_DIR/weak-override-shared-cache-dlopen.exe -Wl,-no_fixup_chains -DRUN_DIR="$RUN_DIR"
 
 // RUN:  ./weak-override-shared-cache-dlopen.exe

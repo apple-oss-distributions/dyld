@@ -117,9 +117,11 @@ void AppCacheBuilder::forEachCacheDylib(void (^callback)(const dyld3::MachOAnaly
     }
 }
 
-void AppCacheBuilder::forEachDylibInfo(void (^callback)(const DylibInfo& dylib, Diagnostics& dylibDiag, ASLR_Tracker& dylibASLRTracker)) {
+void AppCacheBuilder::forEachDylibInfo(void (^callback)(const DylibInfo& dylib, Diagnostics& dylibDiag,
+                                                        cache_builder::ASLR_Tracker& dylibASLRTracker,
+                                                        const CacheBuilder::DylibSectionCoalescer* sectionCoalescer)) {
     for (const AppCacheDylibInfo& dylibInfo : sortedDylibs)
-        callback(dylibInfo, *dylibInfo.errors, _aslrTracker);
+        callback(dylibInfo, *dylibInfo.errors, _aslrTracker, &dylibInfo._coalescer);
 }
 
 const CacheBuilder::DylibInfo* AppCacheBuilder::getKernelStaticExecutableInputFile() const {
@@ -164,6 +166,10 @@ void AppCacheBuilder::forEachRegion(void (^callback)(const Region& region)) cons
     // branchStubsRegion
     if ( branchStubsRegion.bufferSize != 0 )
         callback(branchStubsRegion);
+
+    // textBootExecRegion
+    if ( textBootExecRegion.sizeInUse != 0 )
+        callback(textBootExecRegion);
 
     // dataConstRegion
     if ( dataConstRegion.sizeInUse != 0 )
@@ -281,6 +287,55 @@ uint64_t AppCacheBuilder::numBranchRelocationTargets() {
     return totalTargets;
 }
 
+bool AppCacheBuilder::removeStubs()
+{
+    // Only eliminate stubs in the base kernel collection.  We could eliminate stubs
+    // in the auxKC too, for those calls resolved within the auxKC, but its not worth it right now
+    if ( appCacheOptions.cacheKind != Options::AppCacheKind::kernel )
+        return false;
+
+    if ( _options.archs != &dyld3::GradedArchs::arm64e )
+        return false;
+
+    return true;
+}
+
+void AppCacheBuilder::parseStubs()
+{
+    if ( !removeStubs() )
+        return;
+
+    for (AppCacheDylibInfo& dylib : sortedDylibs) {
+
+        const dyld3::MachOAnalyzer* ma = dylib.input->mappedFile.mh;
+
+        // We can only remove sections if we know we have split seg v2 to point to it
+        uint32_t splitSegSize = 0;
+        const void* splitSegStart = ma->getSplitSeg(splitSegSize);
+        if (!splitSegStart)
+            continue;
+
+        if ((*(const uint8_t*)splitSegStart) != DYLD_CACHE_ADJ_V2_FORMAT)
+            continue;
+
+        // Find __TEXT_EXEC __auth_stubs, and remove it if we have it
+        __block bool lastSectionWasAuthStubs = false;
+        ma->forEachSection(^(const dyld3::MachOAnalyzer::SectionInfo& sectInfo, bool malformedSectionRange, bool& stop) {
+            if ( strcmp(sectInfo.segInfo.segName, "__TEXT_EXEC") != 0 )
+                return;
+            lastSectionWasAuthStubs = false;
+            if ( strcmp(sectInfo.sectName, "__auth_stubs") == 0 ) {
+                // The auth stubs are only valid if the sections is 16-byte stubs
+                if ( ((sectInfo.sectFlags & SECTION_TYPE) == S_SYMBOL_STUBS) && (sectInfo.reserved2 == 16) )
+                    lastSectionWasAuthStubs = true;
+            }
+        });
+
+        if ( lastSectionWasAuthStubs )
+            dylib._coalescer.auth_stubs.sectionIsObliterated = true;
+    }
+}
+
 void AppCacheBuilder::assignSegmentRegionsAndOffsets()
 {
     // Segments can be re-ordered in memory relative to the order of the LC_SEGMENT load comamnds
@@ -393,7 +448,7 @@ void AppCacheBuilder::assignSegmentRegionsAndOffsets()
     {
         // __TEXT segments with r/x permissions
         __block uint64_t offsetInRegion = 0;
-        for (DylibInfo& dylib : sortedDylibs) {
+        for (AppCacheDylibInfo& dylib : sortedDylibs) {
             bool canBePacked = dylib.input->mappedFile.mh->hasSplitSeg();
             if (!canBePacked)
                 continue;
@@ -404,16 +459,34 @@ void AppCacheBuilder::assignSegmentRegionsAndOffsets()
                     textSegVmAddr = segInfo.vmAddr;
                 if ( strcmp(segInfo.segName, "__HIB") == 0 )
                     return;
+                if ( (strcmp(segInfo.segName, "__TEXT_BOOT_EXEC") == 0) && dylib.input->mappedFile.mh->isStaticExecutable() )
+                    return;
                 if ( segInfo.protections != (VM_PROT_READ | VM_PROT_EXECUTE) )
                    return;
+
+                // We may have coalesced the sections at the end of this segment.  In that case, shrink the segment to remove them.
+                __block size_t sizeOfSections = 0;
+                __block bool foundRemovedSection = false;
+                dylib.input->mappedFile.mh->forEachSection(^(const dyld3::MachOAnalyzer::SectionInfo &sectInfo, bool malformedSectionRange, bool &stopSection) {
+                    if (strcmp(sectInfo.segInfo.segName, segInfo.segName) != 0)
+                        return;
+                    if ( dylib._coalescer.sectionWasObliterated(segInfo.segName, sectInfo.sectName)) {
+                        foundRemovedSection = true;
+                    } else {
+                        sizeOfSections = sectInfo.sectAddr + sectInfo.sectSize - segInfo.vmAddr;
+                    }
+                });
+                if ( !foundRemovedSection )
+                    sizeOfSections = segInfo.sizeOfSections;
+
                 // kxld packs __TEXT_EXEC so we will do
                 // Note we align to at least 16-bytes as LDR's can scale up to 16 from their address
                 // and aligning them less than 16 would break that
                 uint32_t minAlignmentP2 = getMinAlignment(dylib.input->mappedFile.mh);
                 offsetInRegion = align(offsetInRegion, std::max(segInfo.p2align, 4U));
                 offsetInRegion = align(offsetInRegion, minAlignmentP2);
-                size_t copySize = std::min((size_t)segInfo.fileSize, (size_t)segInfo.sizeOfSections);
-                uint64_t dstCacheSegmentSize = align(segInfo.sizeOfSections, minAlignmentP2);
+                size_t copySize = std::min((size_t)segInfo.fileSize, (size_t)sizeOfSections);
+                uint64_t dstCacheSegmentSize = align(sizeOfSections, minAlignmentP2);
                 SegmentMappingInfo loc;
                 loc.srcSegment             = (uint8_t*)dylib.input->mappedFile.mh + segInfo.vmAddr - textSegVmAddr;
                 loc.segName                = segInfo.segName;
@@ -445,6 +518,74 @@ void AppCacheBuilder::assignSegmentRegionsAndOffsets()
         branchStubsRegion.initProt      = VM_PROT_READ | VM_PROT_EXECUTE;
         branchStubsRegion.maxProt       = VM_PROT_READ | VM_PROT_EXECUTE;
         branchStubsRegion.name          = "__BRANCH_STUBS";
+    }
+
+    // __TEXT_BOOT_EXEC segments in xnu with r/x permissions
+    {
+        __block uint64_t offsetInRegion = 0;
+        for (AppCacheDylibInfo& dylib : sortedDylibs) {
+            bool canBePacked = dylib.input->mappedFile.mh->hasSplitSeg();
+            if (!canBePacked)
+                continue;
+
+            // Only do this for xnu
+            if ( !dylib.input->mappedFile.mh->isStaticExecutable() )
+                continue;
+
+            __block uint64_t textSegVmAddr = 0;
+            dylib.input->mappedFile.mh->forEachSegment(^(const dyld3::MachOFile::SegmentInfo& segInfo, bool& stop) {
+                if ( strcmp(segInfo.segName, "__TEXT") == 0 )
+                    textSegVmAddr = segInfo.vmAddr;
+                if ( strcmp(segInfo.segName, "__TEXT_BOOT_EXEC") != 0 )
+                    return;
+                if ( segInfo.protections != (VM_PROT_READ | VM_PROT_EXECUTE) )
+                    return;
+
+                // We may have coalesced the sections at the end of this segment.  In that case, shrink the segment to remove them.
+                __block size_t sizeOfSections = 0;
+                __block bool foundRemovedSection = false;
+                dylib.input->mappedFile.mh->forEachSection(^(const dyld3::MachOAnalyzer::SectionInfo &sectInfo, bool malformedSectionRange, bool &stopSection) {
+                    if (strcmp(sectInfo.segInfo.segName, segInfo.segName) != 0)
+                        return;
+                    if ( dylib._coalescer.sectionWasObliterated(segInfo.segName, sectInfo.sectName)) {
+                        foundRemovedSection = true;
+                    } else {
+                        sizeOfSections = sectInfo.sectAddr + sectInfo.sectSize - segInfo.vmAddr;
+                    }
+                });
+                if ( !foundRemovedSection )
+                    sizeOfSections = segInfo.sizeOfSections;
+
+                // kxld packs __TEXT_EXEC so we will do
+                // Note we align to at least 16-bytes as LDR's can scale up to 16 from their address
+                // and aligning them less than 16 would break that
+                uint32_t minAlignmentP2 = getMinAlignment(dylib.input->mappedFile.mh);
+                offsetInRegion = align(offsetInRegion, std::max(segInfo.p2align, 4U));
+                offsetInRegion = align(offsetInRegion, minAlignmentP2);
+                size_t copySize = std::min((size_t)segInfo.fileSize, (size_t)sizeOfSections);
+                uint64_t dstCacheSegmentSize = align(sizeOfSections, minAlignmentP2);
+                SegmentMappingInfo loc;
+                loc.srcSegment             = (uint8_t*)dylib.input->mappedFile.mh + segInfo.vmAddr - textSegVmAddr;
+                loc.segName                = segInfo.segName;
+                loc.dstSegment             = nullptr;
+                loc.dstCacheUnslidAddress  = offsetInRegion; // This will be updated later once we've assigned addresses
+                loc.dstCacheFileOffset     = (uint32_t)offsetInRegion;
+                loc.dstCacheSegmentSize    = (uint32_t)dstCacheSegmentSize;
+                loc.dstCacheFileSize       = (uint32_t)copySize;
+                loc.copySegmentSize        = (uint32_t)copySize;
+                loc.srcSegmentIndex        = segInfo.segIndex;
+                loc.parentRegion           = &textBootExecRegion;
+                dylib.cacheLocation[segInfo.segIndex] = loc;
+                offsetInRegion += loc.dstCacheSegmentSize;
+            });
+        }
+
+        // align r/x region end
+        textBootExecRegion.bufferSize  = align(offsetInRegion, 14);
+        textBootExecRegion.sizeInUse   = textBootExecRegion.bufferSize;
+        textBootExecRegion.initProt    = VM_PROT_READ | VM_PROT_EXECUTE;
+        textBootExecRegion.maxProt     = VM_PROT_READ | VM_PROT_EXECUTE;
+        textBootExecRegion.name        = "__TEXT_BOOT_EXEC";
     }
 
     // __DATA_CONST segments
@@ -561,6 +702,7 @@ void AppCacheBuilder::assignSegmentRegionsAndOffsets()
                 continue;
 
             __block uint64_t textSegVmAddr = 0;
+            __block uint64_t hibernateAddress = 0;
             dylib.input->mappedFile.mh->forEachSegment(^(const dyld3::MachOFile::SegmentInfo& segInfo, bool& stop) {
                 if ( strcmp(segInfo.segName, "__TEXT") == 0 )
                     textSegVmAddr = segInfo.vmAddr;
@@ -583,6 +725,21 @@ void AppCacheBuilder::assignSegmentRegionsAndOffsets()
 
                 hibernateAddress = segInfo.vmAddr;
             });
+
+            if ( offsetInRegion != 0 ) {
+                // Pad out the VM offset so that the cache header starts where the base address
+                // really should be
+                uint64_t paddedSize = cacheBaseAddress - hibernateAddress;
+                if ( offsetInRegion > paddedSize ) {
+                    _diagnostics.error("Could not lay out __HIB segment");
+                    return;
+                }
+                offsetInRegion = paddedSize;
+
+                // Set the base address to the hibernate address so that we actually put the
+                // hibernate segment there
+                cacheBaseAddress = hibernateAddress;
+            }
 
             // Only xnu has __HIB, so no need to continue once we've found it.
             break;
@@ -716,16 +873,16 @@ void AppCacheBuilder::assignSegmentRegionsAndOffsets()
             }
 
             // _PrelinkExecutableSize
-            // This seems to be the file size of __TEXT
-            __block uint64_t textSegFileSize = 0;
+            // Use the size of the TEXT sections in the cache.  This is required as we pack segments
+            __block uint64_t textSegSize = 0;
             if ( info.ma != nullptr ) {
                 info.ma->forEachSegment(^(const dyld3::MachOFile::SegmentInfo& segInfo, bool& stop) {
                     if ( strcmp(segInfo.segName, "__TEXT") == 0 )
-                        textSegFileSize = segInfo.fileSize;
+                        textSegSize = segInfo.sizeOfSections == 0 ? segInfo.fileSize : segInfo.sizeOfSections;
                 });
             }
-            if (textSegFileSize != 0) {
-                CFNumberRef fileSizeRef = CFNumberCreate(kCFAllocatorDefault, kCFNumberLongLongType, &textSegFileSize);
+            if (textSegSize != 0) {
+                CFNumberRef fileSizeRef = CFNumberCreate(kCFAllocatorDefault, kCFNumberLongLongType, &textSegSize);
                 CFDictionarySetValue(dictCopyRef, CFSTR("_PrelinkExecutableSize"), fileSizeRef);
                 CFRelease(fileSizeRef);
             }
@@ -888,15 +1045,23 @@ void AppCacheBuilder::assignSegmentRegionsAndOffsets()
                 return;
             // Keep segments 4K or more aligned
             offsetInRegion = align(offsetInRegion, std::max((int)segInfo.p2align, (int)12));
-            size_t copySize = std::min((size_t)segInfo.fileSize, (size_t)segInfo.sizeOfSections);
+            size_t copySize = segInfo.fileSize;
+
+            // HACK: When we adjust LINKEDIT, we may grow function starts.  This is because the kernel and kexts
+            // have __TEXT_EXEC __text (or other __text) which is going to be moved away from __TEXT.
+            // That is, the first function start is effectively going to be an offset from __TEXT to __TEXT_EXEC
+            // and that may grow.
+            // Everything is ULEB encoded. We've only seen a need for 8-bytes more, but use 16-bytes to be safe
+            const uint32_t extraLinkeditSpace = 16;
+
             SegmentMappingInfo loc;
             loc.srcSegment             = (uint8_t*)dylib.input->mappedFile.mh + segInfo.vmAddr - textSegVmAddr;
             loc.segName                = segInfo.segName;
             loc.dstSegment             = nullptr;
             loc.dstCacheUnslidAddress  = offsetInRegion; // This will be updated later once we've assigned addresses
             loc.dstCacheFileOffset     = (uint32_t)offsetInRegion;
-            loc.dstCacheSegmentSize    = (uint32_t)align(segInfo.sizeOfSections, 12);
-            loc.dstCacheFileSize       = (uint32_t)copySize;
+            loc.dstCacheSegmentSize    = (uint32_t)align(copySize + extraLinkeditSpace, 12);
+            loc.dstCacheFileSize       = (uint32_t)copySize + extraLinkeditSpace;
             loc.copySegmentSize        = (uint32_t)copySize;
             loc.srcSegmentIndex        = segInfo.segIndex;
             loc.parentRegion           = &_readOnlyRegion;
@@ -1107,16 +1272,17 @@ public:
                                    std::map<std::string, DylibSymbols>& dylibsToSymbols);
     void findVTables(uint8_t currentLevel, const dyld3::MachOAnalyzer* kernelMA,
                      std::map<std::string, DylibSymbols>& dylibsToSymbols,
-                     const AppCacheBuilder::ASLR_Tracker& aslrTracker,
+                     const cache_builder::ASLR_Tracker& aslrTracker,
                      const std::map<const uint8_t*, const VTableBindSymbol>& missingBindLocations);
     void calculateSymbols();
     void patchVTables(Diagnostics& diags,
                       std::map<const uint8_t*, const VTableBindSymbol>& missingBindLocations,
-                      AppCacheBuilder::ASLR_Tracker& aslrTracker,
+                      cache_builder::ASLR_Tracker& aslrTracker,
                       uint8_t currentLevel);
 
 private:
 
+    __attribute__((format(printf, 2, 3)))
     void logFunc(const char* format, ...) {
         if ( logPatching ) {
             va_list list;
@@ -1126,6 +1292,7 @@ private:
         }
     };
 
+    __attribute__((format(printf, 2, 3)))
     void logFuncVerbose(const char* format, ...) {
         if ( logPatchingVerbose ) {
             va_list list;
@@ -1458,7 +1625,7 @@ void VTablePatcher::findBaseKernelVTables(Diagnostics& diags, const dyld3::MachO
                 if ( symbolLocation.found() ) {
                     classVTableVMAddr = symbolLocation.vmAddr;
                 } else {
-                    diags.error("Class vtables (%s) or (%s) is not exported from '%s'",
+                    diags.error("Class vtables '%s' or '%s' is not exported from '%s'",
                                        classVTableName.c_str(), namespacedVTableName.c_str(), dylibID);
                     stop = true;
                     return;
@@ -1508,7 +1675,7 @@ void VTablePatcher::findBaseKernelVTables(Diagnostics& diags, const dyld3::MachO
             auto& metaclassDefinitions = collections[superclassFixupLevel].metaclassDefinitions;
             auto metaclassIt = metaclassDefinitions.find(superMetaclassSymbolAddress);
             if ( metaclassIt == metaclassDefinitions.end() ) {
-                diags.error("Cannot find symbol for metaclass pointed to by (%s) in '%s'",
+                diags.error("Cannot find symbol for metaclass pointed to by '%s' in '%s'",
                             symbolName, dylibID);
                 stop = true;
                 return;
@@ -1542,7 +1709,7 @@ void VTablePatcher::findBaseKernelVTables(Diagnostics& diags, const dyld3::MachO
                     for (const std::string& dependencyID : dependencies) {
                         auto depIt = dylibsToSymbols.find(dependencyID);
                         if (depIt == dylibsToSymbols.end()) {
-                            diags.error("Failed to bind (%s) in '%s' as could not find a kext with '%s' bundle-id",
+                            diags.error("Failed to bind '%s' in '%s' as could not find a kext with '%s' bundle-id",
                                         symbolName, dylibID, dependencyID.c_str());
                             stop = true;
                             return;
@@ -1562,7 +1729,7 @@ void VTablePatcher::findBaseKernelVTables(Diagnostics& diags, const dyld3::MachO
                 if ( superclassVTableLoc == nullptr ) {
                     auto depIt = dylibsToSymbols.find(dylibID);
                     if (depIt == dylibsToSymbols.end()) {
-                        diags.error("Failed to bind (%s) in '%s' as could not find a binary with '%s' bundle-id",
+                        diags.error("Failed to bind '%s' in '%s' as could not find a binary with '%s' bundle-id",
                                     symbolName, dylibID, dylibID);
                         stop = true;
                         return;
@@ -1583,7 +1750,7 @@ void VTablePatcher::findBaseKernelVTables(Diagnostics& diags, const dyld3::MachO
 
             if ( superclassVTableLoc == nullptr ) {
                 superclassVTableName = std::string(vtablePrefix) + std::string(superClassName);
-                diags.error("Superclass vtable (%s) is not exported from '%s' or its dependencies",
+                diags.error("Superclass vtable '%s' is not exported from '%s' or its dependencies",
                             superclassVTableName.c_str(), dylibID);
                 stop = true;
                 return;
@@ -1678,7 +1845,7 @@ void VTablePatcher::findPageableKernelVTables(Diagnostics& diags, const dyld3::M
                 if ( symbolLocation.found() ) {
                     classVTableVMAddr = symbolLocation.vmAddr;
                 } else {
-                    diags.error("Class vtables (%s0 or '%s' is not exported from '%s'",
+                    diags.error("Class vtables '%s' or '%s' is not exported from '%s'",
                                 classVTableName.c_str(), namespacedVTableName.c_str(), dylibID);
                     stop = true;
                     return;
@@ -1723,7 +1890,7 @@ void VTablePatcher::findPageableKernelVTables(Diagnostics& diags, const dyld3::M
             auto& metaclassDefinitions = collections[superclassFixupLevel].metaclassDefinitions;
             auto metaclassIt = metaclassDefinitions.find(superMetaclassSymbolAddress);
             if ( metaclassIt == metaclassDefinitions.end() ) {
-                diags.error("Cannot find symbol for metaclass pointed to by (%s) in '%s'",
+                diags.error("Cannot find symbol for metaclass pointed to by '%s' in '%s'",
                             symbolName, dylibID);
                 stop = true;
                 return;
@@ -1757,7 +1924,7 @@ void VTablePatcher::findPageableKernelVTables(Diagnostics& diags, const dyld3::M
                     for (const std::string& dependencyID : dependencies) {
                         auto depIt = dylibsToSymbols.find(dependencyID);
                         if (depIt == dylibsToSymbols.end()) {
-                            diags.error("Failed to bind (%s) in '%s' as could not find a kext with '%s' bundle-id",
+                            diags.error("Failed to bind '%s' in '%s' as could not find a kext with '%s' bundle-id",
                                         symbolName, dylibID, dependencyID.c_str());
                             stop = true;
                             return;
@@ -1777,7 +1944,7 @@ void VTablePatcher::findPageableKernelVTables(Diagnostics& diags, const dyld3::M
                 if ( superclassVTableLoc == nullptr ) {
                     auto depIt = dylibsToSymbols.find(dylibID);
                     if (depIt == dylibsToSymbols.end()) {
-                        diags.error("Failed to bind (%s) in '%s' as could not find a binary with '%s' bundle-id",
+                        diags.error("Failed to bind '%s' in '%s' as could not find a binary with '%s' bundle-id",
                                     symbolName, dylibID, dylibID);
                         stop = true;
                         return;
@@ -1798,7 +1965,7 @@ void VTablePatcher::findPageableKernelVTables(Diagnostics& diags, const dyld3::M
 
             if ( superclassVTableLoc == nullptr ) {
                 superclassVTableName = std::string(vtablePrefix) + std::string(superClassName);
-                diags.error("Superclass vtable (%s) is not exported from '%s' or its dependencies",
+                diags.error("Superclass vtable '%s' is not exported from '%s' or its dependencies",
                             superclassVTableName.c_str(), dylibID);
                 stop = true;
                 return;
@@ -1844,7 +2011,7 @@ void VTablePatcher::findPageableKernelVTables(Diagnostics& diags, const dyld3::M
 
 void VTablePatcher::findVTables(uint8_t currentLevel, const dyld3::MachOAnalyzer* kernelMA,
                                 std::map<std::string, DylibSymbols>& dylibsToSymbols,
-                                const AppCacheBuilder::ASLR_Tracker& aslrTracker,
+                                const cache_builder::ASLR_Tracker& aslrTracker,
                                 const std::map<const uint8_t*, const VTableBindSymbol>& missingBindLocations)
 {
     const bool is64 = pointerSize == 8;
@@ -1913,7 +2080,7 @@ void VTablePatcher::findVTables(uint8_t currentLevel, const dyld3::MachOAnalyzer
                 if ( symbolLocation.found() ) {
                     classVTableVMAddr = symbolLocation.vmAddr;
                 } else {
-                    dylibDiags.error("Class vtables (%s) or (%s) is not an exported symbol",
+                    dylibDiags.error("Class vtables '%s' or '%s' is not an exported symbol",
                                      classVTableName.c_str(), namespacedVTableName.c_str());
                     return;
                 }
@@ -1967,11 +2134,11 @@ void VTablePatcher::findVTables(uint8_t currentLevel, const dyld3::MachOAnalyzer
             if ( metaclassIt == metaclassDefinitions.end() ) {
                 auto bindIt = missingBindLocations.find(fixupLoc);
                 if ( bindIt != missingBindLocations.end() ) {
-                    dylibDiags.error("Cannot find symbol for metaclass pointed to by (%s).  "
-                                     "Expected symbol (%s) to be defined in another kext",
+                    dylibDiags.error("Cannot find symbol for metaclass pointed to by '%s'.  "
+                                     "Expected symbol '%s' to be defined in another kext",
                                      symbolName, bindIt->second.symbolName.c_str());
                 } else {
-                    dylibDiags.error("Cannot find symbol for metaclass pointed to by (%s)",
+                    dylibDiags.error("Cannot find symbol for metaclass pointed to by '%s'",
                                      symbolName);
                 }
                 return;
@@ -2003,7 +2170,7 @@ void VTablePatcher::findVTables(uint8_t currentLevel, const dyld3::MachOAnalyzer
                     for (const std::string& dependencyID : dependencies) {
                         auto depIt = dylibsToSymbols.find(dependencyID);
                         if (depIt == dylibsToSymbols.end()) {
-                            dylibDiags.error("Failed to bind (%s) as could not find a kext with '%s' bundle-id",
+                            dylibDiags.error("Failed to bind '%s' as could not find a kext with '%s' bundle-id",
                                              symbolName, dependencyID.c_str());
                             return;
                         }
@@ -2036,7 +2203,7 @@ void VTablePatcher::findVTables(uint8_t currentLevel, const dyld3::MachOAnalyzer
 
             if ( superclassVTableLoc == nullptr ) {
                 superclassVTableName = std::string(vtablePrefix) + std::string(superClassName);
-                dylibDiags.error("Superclass vtable (%s) is not exported from kext or its dependencies",
+                dylibDiags.error("Superclass vtable '%s' is not exported from kext or its dependencies",
                                  superclassVTableName.c_str());
                 return;
             }
@@ -2114,7 +2281,7 @@ void VTablePatcher::calculateSymbols() {
 
 void VTablePatcher::patchVTables(Diagnostics& diags,
                                  std::map<const uint8_t*, const VTableBindSymbol>& missingBindLocations,
-                                 AppCacheBuilder::ASLR_Tracker& aslrTracker,
+                                 cache_builder::ASLR_Tracker& aslrTracker,
                                  uint8_t currentLevel)
 {
     const bool is64 = pointerSize == 8;
@@ -2186,7 +2353,7 @@ void VTablePatcher::patchVTables(Diagnostics& diags,
             }
         }
 
-        logFunc("Found %d vtable items: '%s'\n", vtable.entries.size(), vtable.name.c_str());
+        logFunc("Found %lu vtable items: '%s'\n", vtable.entries.size(), vtable.name.c_str());
     };
 
     // Map from MachO to diagnostics to emit for that file
@@ -2223,7 +2390,7 @@ void VTablePatcher::patchVTables(Diagnostics& diags,
                     continue;
                 auto superIt = vtables.find(vtableEntry.second.superVTable);
                 assert(superIt != vtables.end());
-                diags.error("Found unpatched vtable: (%s) with unpatched superclass (%s)\n",
+                diags.error("Found unpatched vtable: '%s' with unpatched superclass '%s'\n",
                             vtableEntry.second.name.c_str(), superIt->second.name.c_str());
             }
             break;
@@ -2389,7 +2556,7 @@ struct DylibSymbolLocation {
 struct DylibFixups {
     void processFixups(const std::map<std::string, DylibSymbols>& dylibsToSymbols,
                        const std::unordered_map<std::string_view, std::vector<DylibSymbolLocation>>& symbolMap,
-                       const std::string& kernelID, const CacheBuilder::ASLR_Tracker& aslrTracker);
+                       const std::string& kernelID, const cache_builder::ASLR_Tracker& aslrTracker);
 
     // Inputs
     const dyld3::MachOAnalyzer*     ma              = nullptr;
@@ -2417,7 +2584,7 @@ struct DylibFixups {
 
 void DylibFixups::processFixups(const std::map<std::string, DylibSymbols>& dylibsToSymbols,
                                 const std::unordered_map<std::string_view, std::vector<DylibSymbolLocation>>& symbolMap,
-                                const std::string& kernelID, const CacheBuilder::ASLR_Tracker& aslrTracker) {
+                                const std::string& kernelID, const cache_builder::ASLR_Tracker& aslrTracker) {
     auto& resolvedBindLocations = dylibSymbols.resolvedBindLocations;
     const std::string& dylibID = dylibSymbols.dylibName;
 
@@ -2486,7 +2653,7 @@ void DylibFixups::processFixups(const std::map<std::string, DylibSymbols>& dylib
             for (const std::string& dependencyID : dependencies) {
                 auto depIt = dylibsToSymbols.find(dependencyID);
                 if (depIt == dylibsToSymbols.end()) {
-                    dylibDiag.error("Failed to bind (%s) as could not find a kext with '%s' bundle-id",
+                    dylibDiag.error("Failed to bind '%s' as could not find a kext with '%s' bundle-id",
                                        symbolName, dependencyID.c_str());
                     stop = true;
                     return;
@@ -2507,7 +2674,7 @@ void DylibFixups::processFixups(const std::map<std::string, DylibSymbols>& dylib
             if ( libOrdinal == BIND_SPECIAL_DYLIB_WEAK_LOOKUP ) {
                 auto dylibIt = dylibsToSymbols.find(dylibID);
                 if (dylibIt == dylibsToSymbols.end()) {
-                    dylibDiag.error("Failed to bind weak (%s) as could not find a define in self",
+                    dylibDiag.error("Failed to bind weak '%s' as could not find a define in self",
                                     symbolName);
                     stop = true;
                     return;
@@ -2534,7 +2701,7 @@ void DylibFixups::processFixups(const std::map<std::string, DylibSymbols>& dylib
                     bindTargets.push_back({ bindSymbol, exportIt->second, kernelSymbols.dylibLevel, true, isMissingSymbol });
                     return;
                 }
-                dylibDiag.error("Weak bind symbol (%s) not found in kernel", missingWeakImportSymbolName);
+                dylibDiag.error("Weak bind symbol '%s' not found in kernel", missingWeakImportSymbolName);
                 return;
             }
 
@@ -2738,7 +2905,7 @@ void DylibFixups::processFixups(const std::map<std::string, DylibSymbols>& dylib
             for (const std::string& dependencyID : dependencies) {
                 auto depIt = dylibsToSymbols.find(dependencyID);
                 if (depIt == dylibsToSymbols.end()) {
-                    dylibDiag.error("Failed to bind (%s) as could not find a kext with '%s' bundle-id",
+                    dylibDiag.error("Failed to bind '%s' as could not find a kext with '%s' bundle-id",
                                     symbolName, dependencyID.c_str());
                     stop = true;
                     return;
@@ -2758,7 +2925,7 @@ void DylibFixups::processFixups(const std::map<std::string, DylibSymbols>& dylib
         if ( !foundSymbol && (libOrdinal == BIND_SPECIAL_DYLIB_WEAK_LOOKUP) ) {
             auto dylibIt = dylibsToSymbols.find(dylibID);
             if (dylibIt == dylibsToSymbols.end()) {
-                dylibDiag.error("Failed to bind weak (%s) as could not find a define in self",
+                dylibDiag.error("Failed to bind weak '%s' as could not find a define in self",
                                 symbolName);
                 stop = true;
                 return;
@@ -2818,7 +2985,7 @@ void DylibFixups::processFixups(const std::map<std::string, DylibSymbols>& dylib
                 fixupLocs[fixupLoc] = kernelSymbols.dylibLevel;
                 return;
             }
-            dylibDiag.error("Weak bind symbol (%s) not found in kernel", missingWeakImportSymbolName);
+            dylibDiag.error("Weak bind symbol '%s' not found in kernel", missingWeakImportSymbolName);
             return;
         }
 
@@ -2958,13 +3125,152 @@ static std::unique_ptr<std::unordered_set<std::string>> getKPI(Diagnostics& diag
     return std::make_unique<std::unordered_set<std::string>>(std::move(symbols));
 }
 
+void AppCacheBuilder::patchVTables(const dyld3::MachOAnalyzer* kernelMA,
+                                   const std::string& kernelID,
+                                   std::map<std::string, DylibSymbols>& dylibsToSymbols,
+                                   std::map<const uint8_t*, const VTableBindSymbol>& missingBindLocations)
+{
+    // We only patch vtables on macOS.  Luckily the platform is in the kernel binary
+    if ( !kernelMA->builtForPlatform(dyld3::Platform::macOS) )
+        return;
+
+    auto vtablePatcherOwner = std::make_unique<VTablePatcher>(numFixupLevels);
+    VTablePatcher& vtablePatcher = *vtablePatcherOwner.get();
+
+    uint8_t currentLevel = getCurrentFixupLevel();
+
+    // Add all the collections to the vtable patcher
+    if ( existingKernelCollection != nullptr ) {
+        // The baseKC for x86_64 has __HIB mapped first , so we need to get either the __DATA or __TEXT depending on what is earliest
+        // The kernel base address is still __TEXT, even if __DATA or __HIB is mapped prior to that.
+        // The loader may have loaded something before __TEXT, but the existingKernelCollection pointer still corresponds to __TEXT
+        __block uint64_t baseAddress = ~0ULL;
+        existingKernelCollection->forEachSegment(^(const dyld3::MachOAnalyzer::SegmentInfo& info, bool& stop) {
+            baseAddress = std::min(baseAddress, info.vmAddr);
+        });
+
+        // The existing collection is a pointer to the mach_header for the baseKC, but __HIB and other segments may be before that
+        // Offset those here
+        uint64_t basePointerOffset = existingKernelCollection->preferredLoadAddress() - baseAddress;
+        const uint8_t* basePointer = (uint8_t*)existingKernelCollection - basePointerOffset;
+
+        vtablePatcher.addKernelCollection(existingKernelCollection, Options::AppCacheKind::kernel,
+                                          basePointer, baseAddress);
+    }
+
+    if ( pageableKernelCollection != nullptr ) {
+        // The baseKC for x86_64 has __HIB mapped first , so we need to get either the __DATA or __TEXT depending on what is earliest
+        // The kernel base address is still __TEXT, even if __DATA or __HIB is mapped prior to that.
+        // The loader may have loaded something before __TEXT, but the existingKernelCollection pointer still corresponds to __TEXT
+        __block uint64_t baseAddress = ~0ULL;
+        pageableKernelCollection->forEachSegment(^(const dyld3::MachOAnalyzer::SegmentInfo& info, bool& stop) {
+            baseAddress = std::min(baseAddress, info.vmAddr);
+        });
+
+        // The existing collection is a pointer to the mach_header for the baseKC, but __HIB and other segments may be before that
+        // Offset those here
+        uint64_t basePointerOffset = pageableKernelCollection->preferredLoadAddress() - baseAddress;
+        const uint8_t* basePointer = (uint8_t*)pageableKernelCollection - basePointerOffset;
+
+        vtablePatcher.addKernelCollection(pageableKernelCollection, Options::AppCacheKind::pageableKC,
+                                          basePointer, baseAddress);
+    }
+
+    // Also add our KC
+    vtablePatcher.addKernelCollection((const dyld3::MachOAppCache*)cacheHeader.header, appCacheOptions.cacheKind,
+                                      (const uint8_t*)_fullAllocatedBuffer, cacheBaseAddress);
+
+    // Add all the dylibs to the patcher
+    {
+        if ( existingKernelCollection != nullptr ) {
+            uint8_t fixupLevel = getFixupLevel(Options::AppCacheKind::kernel);
+
+            __block std::map<std::string, std::vector<std::string>> kextDependencies;
+            kextDependencies[kernelID] = {};
+            existingKernelCollection->forEachPrelinkInfoLibrary(_diagnostics,
+                                                                ^(const char *bundleName, const char* relativePath,
+                                                                  const std::vector<const char *> &deps) {
+                std::vector<std::string>& dependencies = kextDependencies[bundleName];
+                dependencies.insert(dependencies.end(), deps.begin(), deps.end());
+            });
+
+            existingKernelCollection->forEachDylib(_diagnostics, ^(const dyld3::MachOAnalyzer *ma, const char *dylibID, bool &stop) {
+                auto depsIt = kextDependencies.find(dylibID);
+                assert(depsIt != kextDependencies.end());
+                vtablePatcher.addDylib(_diagnostics, ma, dylibID, depsIt->second, fixupLevel);
+            });
+        }
+
+        if ( pageableKernelCollection != nullptr ) {
+            uint8_t fixupLevel = getFixupLevel(Options::AppCacheKind::pageableKC);
+
+            __block std::map<std::string, std::vector<std::string>> kextDependencies;
+            pageableKernelCollection->forEachPrelinkInfoLibrary(_diagnostics,
+                                                                ^(const char *bundleName, const char* relativePath,
+                                                                  const std::vector<const char *> &deps) {
+                std::vector<std::string>& dependencies = kextDependencies[bundleName];
+                dependencies.insert(dependencies.end(), deps.begin(), deps.end());
+            });
+
+            pageableKernelCollection->forEachDylib(_diagnostics, ^(const dyld3::MachOAnalyzer *ma, const char *dylibID, bool &stop) {
+                auto depsIt = kextDependencies.find(dylibID);
+                assert(depsIt != kextDependencies.end());
+                vtablePatcher.addDylib(_diagnostics, ma, dylibID, depsIt->second, fixupLevel);
+            });
+        }
+
+        forEachCacheDylib(^(const dyld3::MachOAnalyzer *ma, const std::string &dylibID, DylibStripMode stripMode,
+                            const std::vector<std::string> &dependencies, Diagnostics& dylibDiag, bool &stop) {
+            vtablePatcher.addDylib(dylibDiag, ma, dylibID, dependencies, currentLevel);
+        });
+    }
+
+    vtablePatcher.findMetaclassDefinitions(dylibsToSymbols, kernelID, kernelMA, appCacheOptions.cacheKind);
+    vtablePatcher.findExistingFixups(_diagnostics, existingKernelCollection, pageableKernelCollection);
+    if ( _diagnostics.hasError() )
+        return;
+
+    // Add vtables from the base KC if we have one
+    if ( existingKernelCollection != nullptr ) {
+        vtablePatcher.findBaseKernelVTables(_diagnostics, existingKernelCollection, dylibsToSymbols);
+        if ( _diagnostics.hasError() )
+            return;
+    }
+
+    // Add vtables from the pageable KC if we have one
+    if ( pageableKernelCollection != nullptr ) {
+        vtablePatcher.findPageableKernelVTables(_diagnostics, pageableKernelCollection, dylibsToSymbols);
+        if ( _diagnostics.hasError() )
+            return;
+    }
+
+    // Add vables from our level
+    vtablePatcher.findVTables(currentLevel, kernelMA, dylibsToSymbols, _aslrTracker, missingBindLocations);
+
+    // Don't run the patcher if we have a failure finding the vtables
+    if ( vtablePatcher.hasError() ) {
+        _diagnostics.error("One or more binaries has an error which prevented linking.  See other errors.");
+        return;
+    }
+
+    // Now patch all of the vtables.
+    vtablePatcher.patchVTables(_diagnostics, missingBindLocations, _aslrTracker, currentLevel);
+    if ( _diagnostics.hasError() )
+        return;
+
+    if ( vtablePatcher.hasError() ) {
+        _diagnostics.error("One or more binaries has an error which prevented linking.  See other errors.");
+        return;
+    }
+
+    // FIXME: We could move vtablePatcherOwner to a worker thread to be destroyed
+    vtablePatcherOwner.reset();
+}
+
 void AppCacheBuilder::processFixups()
 {
     auto dylibsToSymbolsOwner = std::make_unique<std::map<std::string, DylibSymbols>>();
     std::map<std::string, DylibSymbols>& dylibsToSymbols = *dylibsToSymbolsOwner.get();
-
-    auto vtablePatcherOwner = std::make_unique<VTablePatcher>(numFixupLevels);
-    VTablePatcher& vtablePatcher = *vtablePatcherOwner.get();
 
     const uint32_t kernelLevel = 0;
     uint8_t currentLevel = getCurrentFixupLevel();
@@ -3214,7 +3520,7 @@ void AppCacheBuilder::processFixups()
                         if (globalIt != kernelSymbols.globals.end()) {
                             symbolSetGlobals[symbolName] = globalIt->second;
                         } else {
-                            _diagnostics.error("Alias (%s0 not found in kernel", aliasTargetName);
+                            _diagnostics.error("Alias '%s' not found in kernel", aliasTargetName);
                             return;
                         }
 
@@ -3458,133 +3764,9 @@ void AppCacheBuilder::processFixups()
     }
 
     // Now that we've processes all rebases/binds, patch all the vtables
-
-    // Add all the collections to the vtable patcher
-    if ( existingKernelCollection != nullptr ) {
-        // The baseKC for x86_64 has __HIB mapped first , so we need to get either the __DATA or __TEXT depending on what is earliest
-        // The kernel base address is still __TEXT, even if __DATA or __HIB is mapped prior to that.
-        // The loader may have loaded something before __TEXT, but the existingKernelCollection pointer still corresponds to __TEXT
-        __block uint64_t baseAddress = ~0ULL;
-        existingKernelCollection->forEachSegment(^(const dyld3::MachOAnalyzer::SegmentInfo& info, bool& stop) {
-            baseAddress = std::min(baseAddress, info.vmAddr);
-        });
-
-        // The existing collection is a pointer to the mach_header for the baseKC, but __HIB and other segments may be before that
-        // Offset those here
-        uint64_t basePointerOffset = existingKernelCollection->preferredLoadAddress() - baseAddress;
-        const uint8_t* basePointer = (uint8_t*)existingKernelCollection - basePointerOffset;
-
-        vtablePatcher.addKernelCollection(existingKernelCollection, Options::AppCacheKind::kernel,
-                                          basePointer, baseAddress);
-    }
-
-    if ( pageableKernelCollection != nullptr ) {
-        // The baseKC for x86_64 has __HIB mapped first , so we need to get either the __DATA or __TEXT depending on what is earliest
-        // The kernel base address is still __TEXT, even if __DATA or __HIB is mapped prior to that.
-        // The loader may have loaded something before __TEXT, but the existingKernelCollection pointer still corresponds to __TEXT
-        __block uint64_t baseAddress = ~0ULL;
-        pageableKernelCollection->forEachSegment(^(const dyld3::MachOAnalyzer::SegmentInfo& info, bool& stop) {
-            baseAddress = std::min(baseAddress, info.vmAddr);
-        });
-
-        // The existing collection is a pointer to the mach_header for the baseKC, but __HIB and other segments may be before that
-        // Offset those here
-        uint64_t basePointerOffset = pageableKernelCollection->preferredLoadAddress() - baseAddress;
-        const uint8_t* basePointer = (uint8_t*)pageableKernelCollection - basePointerOffset;
-
-        vtablePatcher.addKernelCollection(pageableKernelCollection, Options::AppCacheKind::pageableKC,
-                                          basePointer, baseAddress);
-    }
-
-    // Also add our KC
-    vtablePatcher.addKernelCollection((const dyld3::MachOAppCache*)cacheHeader.header, appCacheOptions.cacheKind,
-                                      (const uint8_t*)_fullAllocatedBuffer, cacheBaseAddress);
-
-    // Add all the dylibs to the patcher
-    {
-        if ( existingKernelCollection != nullptr ) {
-            uint8_t fixupLevel = getFixupLevel(Options::AppCacheKind::kernel);
-
-            __block std::map<std::string, std::vector<std::string>> kextDependencies;
-            kextDependencies[kernelID] = {};
-            existingKernelCollection->forEachPrelinkInfoLibrary(_diagnostics,
-                                                                ^(const char *bundleName, const char* relativePath,
-                                                                  const std::vector<const char *> &deps) {
-                std::vector<std::string>& dependencies = kextDependencies[bundleName];
-                dependencies.insert(dependencies.end(), deps.begin(), deps.end());
-            });
-
-            existingKernelCollection->forEachDylib(_diagnostics, ^(const dyld3::MachOAnalyzer *ma, const char *dylibID, bool &stop) {
-                auto depsIt = kextDependencies.find(dylibID);
-                assert(depsIt != kextDependencies.end());
-                vtablePatcher.addDylib(_diagnostics, ma, dylibID, depsIt->second, fixupLevel);
-            });
-        }
-
-        if ( pageableKernelCollection != nullptr ) {
-            uint8_t fixupLevel = getFixupLevel(Options::AppCacheKind::pageableKC);
-
-            __block std::map<std::string, std::vector<std::string>> kextDependencies;
-            pageableKernelCollection->forEachPrelinkInfoLibrary(_diagnostics,
-                                                                ^(const char *bundleName, const char* relativePath,
-                                                                  const std::vector<const char *> &deps) {
-                std::vector<std::string>& dependencies = kextDependencies[bundleName];
-                dependencies.insert(dependencies.end(), deps.begin(), deps.end());
-            });
-
-            pageableKernelCollection->forEachDylib(_diagnostics, ^(const dyld3::MachOAnalyzer *ma, const char *dylibID, bool &stop) {
-                auto depsIt = kextDependencies.find(dylibID);
-                assert(depsIt != kextDependencies.end());
-                vtablePatcher.addDylib(_diagnostics, ma, dylibID, depsIt->second, fixupLevel);
-            });
-        }
-
-        forEachCacheDylib(^(const dyld3::MachOAnalyzer *ma, const std::string &dylibID, DylibStripMode stripMode,
-                            const std::vector<std::string> &dependencies, Diagnostics& dylibDiag, bool &stop) {
-            vtablePatcher.addDylib(dylibDiag, ma, dylibID, dependencies, currentLevel);
-        });
-    }
-
-    vtablePatcher.findMetaclassDefinitions(dylibsToSymbols, kernelID, kernelMA, appCacheOptions.cacheKind);
-    vtablePatcher.findExistingFixups(_diagnostics, existingKernelCollection, pageableKernelCollection);
+    this->patchVTables(kernelMA, kernelID, dylibsToSymbols, missingBindLocations);
     if ( _diagnostics.hasError() )
         return;
-
-    // Add vtables from the base KC if we have one
-    if ( existingKernelCollection != nullptr ) {
-        vtablePatcher.findBaseKernelVTables(_diagnostics, existingKernelCollection, dylibsToSymbols);
-        if ( _diagnostics.hasError() )
-            return;
-    }
-
-    // Add vtables from the pageable KC if we have one
-    if ( pageableKernelCollection != nullptr ) {
-        vtablePatcher.findPageableKernelVTables(_diagnostics, pageableKernelCollection, dylibsToSymbols);
-        if ( _diagnostics.hasError() )
-            return;
-    }
-
-    // Add vables from our level
-    vtablePatcher.findVTables(currentLevel, kernelMA, dylibsToSymbols, _aslrTracker, missingBindLocations);
-
-    // Don't run the patcher if we have a failure finding the vtables
-    if ( vtablePatcher.hasError() ) {
-        _diagnostics.error("One or more binaries has an error which prevented linking.  See other errors.");
-        return;
-    }
-
-    // Now patch all of the vtables.
-    vtablePatcher.patchVTables(_diagnostics, missingBindLocations, _aslrTracker, currentLevel);
-    if ( _diagnostics.hasError() )
-        return;
-
-    if ( vtablePatcher.hasError() ) {
-        _diagnostics.error("One or more binaries has an error which prevented linking.  See other errors.");
-        return;
-    }
-
-    // FIXME: We could move vtablePatcherOwner to a worker thread to be destroyed
-    vtablePatcherOwner.reset();
 
     // Also error out if we have an error on any of the dylib diagnostic objects
 
@@ -3608,7 +3790,7 @@ void AppCacheBuilder::processFixups()
                     std::string sectionName = sectInfo.sectName;
                     uint64_t sectionOffset = (missingBindLoc - start);
 
-                    dylibDiag.error("Failed to bind (%s) in '%s' (at offset 0x%llx in %s, %s) as "
+                    dylibDiag.error("Failed to bind '%s' in '%s' (at offset 0x%llx in %s, %s) as "
                                     "could not find a kext which exports this symbol",
                                     missingBind.symbolName.c_str(), missingBind.binaryID.data(),
                                     sectionOffset, segmentName.c_str(), sectionName.c_str());
@@ -3621,7 +3803,7 @@ void AppCacheBuilder::processFixups()
         });
 
         if ( !reportedError ) {
-            _diagnostics.error("Failed to bind (%s) in '%s' as could not find a kext which exports this symbol",
+            _diagnostics.error("Failed to bind '%s' in '%s' as could not find a kext which exports this symbol",
                                missingBind.symbolName.c_str(), missingBind.binaryID.data());
         }
     }
@@ -3799,11 +3981,9 @@ void AppCacheBuilder::writeFixups()
         // We have a dyld_chained_starts_in_image plus an offset for each segment
         dyld_chained_starts_in_image* startsInImage = (dyld_chained_starts_in_image*)byteBuffer.makeSpace(sizeof(dyld_chained_starts_in_image) + (segmentCount * sizeof(uint32_t)));
 
-        const uint8_t* endOfStarts = nullptr;
         for (SegmentFixups& segmentFixups : startsInSegments) {
             uint64_t startsInSegmentByteSize = sizeof(dyld_chained_starts_in_segment) + (segmentFixups.numPagesToFixup * sizeof(uint16_t));
             dyld_chained_starts_in_segment* startsInSegment = (dyld_chained_starts_in_segment*)byteBuffer.makeSpace(startsInSegmentByteSize);
-            endOfStarts = (const uint8_t*)startsInSegment + startsInSegmentByteSize;
 
             segmentFixups.starts            = startsInSegment;
             segmentFixups.startsByteSize    = startsInSegmentByteSize;
@@ -4088,6 +4268,145 @@ void AppCacheBuilder::writeFixups()
 #endif
 }
 
+void AppCacheBuilder::getRegionOrder(bool dataRegionFirstInVMOrder,
+                                     bool hibernateRegionFirstInVMOrder,
+                                     std::vector<AlignedRegion>& fileOrder,
+                                     std::vector<AlignedRegion>& vmOrder,
+                                     std::map<const Region*, uint32_t>& sectionsToAddToRegions)
+{
+    if ( hibernateRegionFirstInVMOrder ) {
+        vmOrder.emplace_back(&hibernateRegion, 14, 14);
+        // Add a section too
+        sectionsToAddToRegions[&hibernateRegion] = 1;
+    } else if ( dataRegionFirstInVMOrder ) {
+        if ( prelinkInfoDict != nullptr ) {
+            vmOrder.emplace_back(&prelinkInfoRegion, 14, 14);
+        }
+        if ( readWriteRegion.sizeInUse != 0 ) {
+            vmOrder.emplace_back(&readWriteRegion, 14, 14);
+        }
+    }
+
+    // Cache header (__TEXT)
+    vmOrder.emplace_back(&cacheHeaderRegion, 14, 14);
+    fileOrder.emplace_back(&cacheHeaderRegion, 14, 14);
+
+    // Split seg __TEXT (ie, __PRELINK_TEXT)
+    {
+        vmOrder.emplace_back(&readOnlyTextRegion, 14, 14);
+        fileOrder.emplace_back(&readOnlyTextRegion, 14, 14);
+        // Add a section too
+        sectionsToAddToRegions[&readOnlyTextRegion] = 1;
+    }
+
+    // __DATA_CONST
+    if ( dataConstRegion.sizeInUse != 0 ) {
+        vmOrder.emplace_back(&dataConstRegion, 14, 14);
+        fileOrder.emplace_back(&dataConstRegion, 14, 14);
+    }
+
+    // Split seg __TEXT_EXEC
+    if ( readExecuteRegion.sizeInUse != 0 ) {
+        vmOrder.emplace_back(&readExecuteRegion, 14, 14);
+        fileOrder.emplace_back(&readExecuteRegion, 14, 14);
+    }
+
+    // __BRANCH_STUBS
+    if ( branchStubsRegion.bufferSize != 0 ) {
+        vmOrder.emplace_back(&branchStubsRegion, 14, 14);
+        fileOrder.emplace_back(&branchStubsRegion, 14, 14);
+    }
+
+    // __TEXT_BOOT_EXEC
+    if ( textBootExecRegion.sizeInUse != 0 ) {
+        vmOrder.emplace_back(&textBootExecRegion, 14, 14);
+        fileOrder.emplace_back(&textBootExecRegion, 14, 14);
+    }
+
+    // __BRANCH_GOTS
+    if ( branchGOTsRegion.bufferSize != 0 ) {
+        vmOrder.emplace_back(&branchGOTsRegion, 14, 14);
+        fileOrder.emplace_back(&branchGOTsRegion, 14, 14);
+    }
+
+    // -sectcreate
+    // Align to 16k before we lay out all contiguous regions
+    if ( !customSegments.empty() ) {
+        uint32_t alignFileBefore = 14;
+        for (CustomSegment& customSegment : customSegments) {
+            Region& region = *customSegment.parentRegion;
+            vmOrder.emplace_back(&region, 0, 0);
+            fileOrder.emplace_back(&region, alignFileBefore, 0);
+            alignFileBefore = 0;
+
+            // Maybe add sections too
+            uint32_t sectionsToAdd = 0;
+            if ( customSegment.sections.size() > 1 ) {
+                // More than one section, so they all need names
+                sectionsToAdd = (uint32_t)customSegment.sections.size();
+            } else if ( !customSegment.sections.front().sectionName.empty() ) {
+                // Only one section, but it has a name
+                sectionsToAdd = 1;
+            }
+            sectionsToAddToRegions[&region] = sectionsToAdd;
+        }
+
+        // Align the last region after
+        vmOrder.back().alignmentAfter = 14;
+        fileOrder.back().alignmentAfter = 14;
+    }
+
+    // __PRELINK_INFO
+    if ( prelinkInfoDict != nullptr )
+    {
+        fileOrder.emplace_back(&prelinkInfoRegion, 14, 14);
+        if ( !dataRegionFirstInVMOrder )
+            vmOrder.emplace_back(&prelinkInfoRegion, 14, 14);
+        // Add a section too
+        sectionsToAddToRegions[&prelinkInfoRegion] = 1;
+    }
+
+    // Split seg __DATA
+    if ( readWriteRegion.sizeInUse != 0 ) {
+        fileOrder.emplace_back(&readWriteRegion, 14, 14);
+        if ( !dataRegionFirstInVMOrder ) {
+            vmOrder.emplace_back(&readWriteRegion, 14, 14);
+        }
+    }
+
+    // Split seg __HIB
+    // Align to 16k
+    if ( hibernateRegion.sizeInUse != 0 ) {
+        fileOrder.emplace_back(&hibernateRegion, 14, 14);
+        // VM offset was already handled earlier
+    }
+
+    // Non split seg regions
+    // Align to 16k before we lay out all contiguous regions
+    if ( !nonSplitSegRegions.empty() ) {
+        uint32_t alignFileBefore = 14;
+        for (Region& region : nonSplitSegRegions) {
+            vmOrder.emplace_back(&region, 0, 0);
+            fileOrder.emplace_back(&region, alignFileBefore, 0);
+            alignFileBefore = 0;
+        }
+
+        // Align the last region after
+        vmOrder.back().alignmentAfter = 14;
+        fileOrder.back().alignmentAfter = 14;
+    }
+
+    // __LINKEDIT
+    vmOrder.emplace_back(&_readOnlyRegion, 14, 14);
+    fileOrder.emplace_back(&_readOnlyRegion, 14, 14);
+
+    // __LINKEDIT fixups sub region
+    if ( fixupsSubRegion.sizeInUse != 0 ) {
+        vmOrder.emplace_back(&fixupsSubRegion, 14, 14);
+        fileOrder.emplace_back(&fixupsSubRegion, 14, 14);
+    }
+}
+
 void AppCacheBuilder::allocateBuffer()
 {
     // Whether to order the regions __TEXT, __DATA, __LINKEDIT or __DATA, __TEXT, __LINKEDIT in VM address order
@@ -4098,7 +4417,7 @@ void AppCacheBuilder::allocateBuffer()
             assert(0 && "Cache kind should have been set");
             break;
         case Options::AppCacheKind::kernel:
-            if ( hibernateAddress != 0 )
+            if ( hibernateRegion.sizeInUse != 0 )
                 hibernateRegionFirstInVMOrder = true;
             break;
         case Options::AppCacheKind::pageableKC:
@@ -4112,228 +4431,11 @@ void AppCacheBuilder::allocateBuffer()
             break;
     }
 
-    // Count how many bytes we need from all our regions
-    __block uint64_t numRegionFileBytes = 0;
-    __block uint64_t numRegionVMBytes = 0;
-
-    std::vector<std::pair<Region*, uint64_t>> regions;
-    std::vector<std::pair<Region*, uint64_t>> regionsVMOrder;
+    std::vector<AlignedRegion> fileOrder;
+    std::vector<AlignedRegion> vmOrder;
     std::map<const Region*, uint32_t> sectionsToAddToRegions;
-
-    if ( hibernateRegionFirstInVMOrder ) {
-        regionsVMOrder.push_back({ &hibernateRegion, numRegionVMBytes });
-        // Pad out the VM offset so that the cache header starts where the base address
-        // really should be
-        uint64_t paddedSize = cacheBaseAddress - hibernateAddress;
-        if ( hibernateRegion.bufferSize > paddedSize ) {
-            _diagnostics.error("Could not lay out __HIB segment");
-            return;
-        }
-        numRegionVMBytes = paddedSize;
-        // Set the base address to the hibernate address so that we actually put the
-        // hibernate segment there
-        cacheBaseAddress = hibernateAddress;
-
-        // Add a section too
-        sectionsToAddToRegions[&hibernateRegion] = 1;
-    } else if ( dataRegionFirstInVMOrder ) {
-        if ( prelinkInfoDict != nullptr ) {
-            numRegionVMBytes = align(numRegionVMBytes, 14);
-            regionsVMOrder.push_back({ &prelinkInfoRegion, numRegionVMBytes });
-            numRegionVMBytes += prelinkInfoRegion.bufferSize;
-        }
-        if ( readWriteRegion.sizeInUse != 0 ) {
-            numRegionVMBytes = align(numRegionVMBytes, 14);
-            regionsVMOrder.push_back({ &readWriteRegion, numRegionVMBytes });
-            numRegionVMBytes += readWriteRegion.bufferSize;
-        }
-    }
-
-    // Cache header
-    numRegionVMBytes = align(numRegionVMBytes, 14);
-    regions.push_back({ &cacheHeaderRegion, 0 });
-    regionsVMOrder.push_back({ &cacheHeaderRegion, numRegionVMBytes });
-
-    // Split seg __TEXT
-    {
-        // File offset
-        readOnlyTextRegion.cacheFileOffset = numRegionFileBytes;
-        numRegionFileBytes += readOnlyTextRegion.bufferSize;
-        regions.push_back({ &readOnlyTextRegion, 0 });
-        // VM offset
-        numRegionVMBytes = align(numRegionVMBytes, 14);
-        regionsVMOrder.push_back({ &readOnlyTextRegion, numRegionVMBytes });
-        numRegionVMBytes += readOnlyTextRegion.bufferSize;
-
-        // Add a section too
-        sectionsToAddToRegions[&readOnlyTextRegion] = 1;
-    }
-
-    // Split seg __TEXT_EXEC
-    if ( readExecuteRegion.sizeInUse != 0 ) {
-        // File offset
-        readExecuteRegion.cacheFileOffset = numRegionFileBytes;
-        numRegionFileBytes += readExecuteRegion.bufferSize;
-        regions.push_back({ &readExecuteRegion, 0 });
-        // VM offset
-        numRegionVMBytes = align(numRegionVMBytes, 14);
-        regionsVMOrder.push_back({ &readExecuteRegion, numRegionVMBytes });
-        numRegionVMBytes += readExecuteRegion.bufferSize;
-    }
-
-    // __BRANCH_STUBS
-    if ( branchStubsRegion.bufferSize != 0 ) {
-        // File offset
-        branchStubsRegion.cacheFileOffset = numRegionFileBytes;
-        numRegionFileBytes += branchStubsRegion.bufferSize;
-        regions.push_back({ &branchStubsRegion, 0 });
-        // VM offset
-        numRegionVMBytes = align(numRegionVMBytes, 14);
-        regionsVMOrder.push_back({ &branchStubsRegion, numRegionVMBytes });
-        numRegionVMBytes += branchStubsRegion.bufferSize;
-    }
-
-    // __DATA_CONST
-    if ( dataConstRegion.sizeInUse != 0 ) {
-        // File offset
-        dataConstRegion.cacheFileOffset = numRegionFileBytes;
-        numRegionFileBytes += dataConstRegion.bufferSize;
-        regions.push_back({ &dataConstRegion, 0 });
-        // VM offset
-        numRegionVMBytes = align(numRegionVMBytes, 14);
-        regionsVMOrder.push_back({ &dataConstRegion, numRegionVMBytes });
-        numRegionVMBytes += dataConstRegion.bufferSize;
-    }
-
-    // __BRANCH_GOTS
-    if ( branchGOTsRegion.bufferSize != 0 ) {
-        // File offset
-        branchGOTsRegion.cacheFileOffset = numRegionFileBytes;
-        numRegionFileBytes += branchGOTsRegion.bufferSize;
-        regions.push_back({ &branchGOTsRegion, 0 });
-        // VM offset
-        numRegionVMBytes = align(numRegionVMBytes, 14);
-        regionsVMOrder.push_back({ &branchGOTsRegion, numRegionVMBytes });
-        numRegionVMBytes += branchGOTsRegion.bufferSize;
-    }
-
-    // -sectcreate
-    // Align to 16k before we lay out all contiguous regions
-    numRegionFileBytes = align(numRegionFileBytes, 14);
-    for (CustomSegment& customSegment : customSegments) {
-        Region& region = *customSegment.parentRegion;
-
-        region.cacheFileOffset = numRegionFileBytes;
-        numRegionFileBytes += region.bufferSize;
-        regions.push_back({ &region, 0 });
-        // VM offset
-        // Note we can't align the vm offset in here
-        assert( (numRegionVMBytes % 4096) == 0);
-        regionsVMOrder.push_back({ &region, numRegionVMBytes });
-        numRegionVMBytes += region.bufferSize;
-
-        // Maybe add sections too
-        uint32_t sectionsToAdd = 0;
-        if ( customSegment.sections.size() > 1 ) {
-            // More than one section, so they all need names
-            sectionsToAdd = (uint32_t)customSegment.sections.size();
-        } else if ( !customSegment.sections.front().sectionName.empty() ) {
-            // Only one section, but it has a name
-            sectionsToAdd = 1;
-        }
-        sectionsToAddToRegions[&region] = sectionsToAdd;
-    }
-    numRegionVMBytes = align(numRegionVMBytes, 14);
-
-    // __PRELINK_INFO
-    // Align to 16k
-    numRegionFileBytes = align(numRegionFileBytes, 14);
-    if ( prelinkInfoDict != nullptr )
-    {
-        // File offset
-        prelinkInfoRegion.cacheFileOffset = numRegionFileBytes;
-        numRegionFileBytes += prelinkInfoRegion.bufferSize;
-        regions.push_back({ &prelinkInfoRegion, 0 });
-
-        if ( !dataRegionFirstInVMOrder ) {
-            // VM offset
-            numRegionVMBytes = align(numRegionVMBytes, 14);
-            regionsVMOrder.push_back({ &prelinkInfoRegion, numRegionVMBytes });
-            numRegionVMBytes += prelinkInfoRegion.bufferSize;
-        }
-
-        // Add a section too
-        sectionsToAddToRegions[&prelinkInfoRegion] = 1;
-    }
-
-    // Split seg __DATA
-    // Align to 16k
-    numRegionFileBytes = align(numRegionFileBytes, 14);
-    if ( readWriteRegion.sizeInUse != 0 ) {
-        // File offset
-        readWriteRegion.cacheFileOffset = numRegionFileBytes;
-        numRegionFileBytes += readWriteRegion.bufferSize;
-        regions.push_back({ &readWriteRegion, 0 });
-
-        if ( !dataRegionFirstInVMOrder ) {
-            // VM offset
-            numRegionVMBytes = align(numRegionVMBytes, 14);
-            regionsVMOrder.push_back({ &readWriteRegion, numRegionVMBytes });
-            numRegionVMBytes += readWriteRegion.bufferSize;
-        }
-    }
-
-    // Split seg __HIB
-    // Align to 16k
-    numRegionFileBytes = align(numRegionFileBytes, 14);
-    if ( hibernateRegion.sizeInUse != 0 ) {
-        // File offset
-        hibernateRegion.cacheFileOffset = numRegionFileBytes;
-        numRegionFileBytes += hibernateRegion.bufferSize;
-        regions.push_back({ &hibernateRegion, 0 });
-
-        // VM offset was already handled earlier
-    }
-
-    // Non split seg regions
-    // Align to 16k before we lay out all contiguous regions
-    numRegionFileBytes = align(numRegionFileBytes, 14);
-    for (Region& region : nonSplitSegRegions) {
-        region.cacheFileOffset = numRegionFileBytes;
-        numRegionFileBytes += region.bufferSize;
-        regions.push_back({ &region, 0 });
-        // VM offset
-        // Note we can't align the vm offset in here
-        assert( (numRegionVMBytes % 4096) == 0);
-        regionsVMOrder.push_back({ &region, numRegionVMBytes });
-        numRegionVMBytes += region.bufferSize;
-    }
-    numRegionVMBytes = align(numRegionVMBytes, 14);
-
-    // __LINKEDIT
-    // Align to 16k
-    // File offset
-    numRegionFileBytes = align(numRegionFileBytes, 14);
-    _readOnlyRegion.cacheFileOffset = numRegionFileBytes;
-    numRegionFileBytes += _readOnlyRegion.bufferSize;
-    regions.push_back({ &_readOnlyRegion, 0 });
-    // VM offset
-    numRegionVMBytes = align(numRegionVMBytes, 14);
-    regionsVMOrder.push_back({ &_readOnlyRegion, numRegionVMBytes });
-    numRegionVMBytes += _readOnlyRegion.bufferSize;
-
-    // __LINKEDIT fixups sub region
-    // Align to 16k
-    numRegionFileBytes = align(numRegionFileBytes, 14);
-    if ( fixupsSubRegion.sizeInUse != 0 ) {
-        fixupsSubRegion.cacheFileOffset = numRegionFileBytes;
-        numRegionFileBytes += fixupsSubRegion.bufferSize;
-        //regions.push_back({ &fixupsSubRegion, 0 });
-
-        // VM offset
-        regionsVMOrder.push_back({ &fixupsSubRegion, numRegionVMBytes });
-        numRegionVMBytes += fixupsSubRegion.bufferSize;
-    }
+    getRegionOrder(dataRegionFirstInVMOrder, hibernateRegionFirstInVMOrder,
+                   fileOrder, vmOrder, sectionsToAddToRegions);
 
     const thread_command* unixThread = nullptr;
     if (const DylibInfo* dylib = getKernelStaticExecutableInputFile()) {
@@ -4392,13 +4494,19 @@ void AppCacheBuilder::allocateBuffer()
         }
 
         // Add an LC_SEGMENT_64 for each region
-        for (auto& regionAndOffset : regions) {
+        std::unordered_map<const Region*, uint64_t> regionLoadCommandOffsets;
+        for ( const AlignedRegion& region : fileOrder ) {
+            // The fixups sub region doesn't get a load command, as its a range inside LINKEDIT
+            if ( region.region == &fixupsSubRegion )
+                continue;
+
+            regionLoadCommandOffsets[region.region] = cacheHeaderSize + cacheLoadCommandsSize;
+
             ++cacheNumLoadCommands;
-            regionAndOffset.second = cacheHeaderSize + cacheLoadCommandsSize;
             cacheLoadCommandsSize += sizeof(segment_command_64);
 
             // Add space for any sections too
-            auto sectionIt = sectionsToAddToRegions.find(regionAndOffset.first);
+            auto sectionIt = sectionsToAddToRegions.find(region.region);
             if ( sectionIt != sectionsToAddToRegions.end() ) {
                 uint32_t numSections = sectionIt->second;
                 cacheLoadCommandsSize += sizeof(section_64) * numSections;
@@ -4419,6 +4527,51 @@ void AppCacheBuilder::allocateBuffer()
 
         // Align the app cache header before the rest of the bytes
         cacheHeaderRegionSize = align(cacheHeaderRegionSize, 14);
+
+        // Cache header
+        cacheHeaderRegion.bufferSize            = cacheHeaderRegionSize;
+        cacheHeaderRegion.sizeInUse             = cacheHeaderRegion.bufferSize;
+        cacheHeaderRegion.cacheFileOffset       = 0;
+        cacheHeaderRegion.initProt              = VM_PROT_READ;
+        cacheHeaderRegion.maxProt               = VM_PROT_READ;
+        cacheHeaderRegion.name                  = "__TEXT";
+
+        // Walk all the regions and compute the total file and VM bytes
+        uint64_t numRegionVMBytes = 0;
+        {
+            uint64_t vmAddr = cacheBaseAddress;
+            for ( AlignedRegion& alignedRegion : vmOrder ) {
+                if ( alignedRegion.alignmentBefore != 0 )
+                    vmAddr = align(vmAddr, alignedRegion.alignmentBefore);
+
+                Region* region = alignedRegion.region;
+                region->unslidLoadAddress = vmAddr;
+                vmAddr += region->bufferSize;
+
+                if ( alignedRegion.alignmentAfter != 0 )
+                    vmAddr = align(vmAddr, alignedRegion.alignmentAfter);
+            }
+
+            numRegionVMBytes = vmAddr - cacheBaseAddress;
+        }
+
+        uint64_t numRegionFileBytes = 0;
+        {
+            uint64_t fileOffset = 0;
+            for ( AlignedRegion& alignedRegion : fileOrder ) {
+                if ( alignedRegion.alignmentBefore != 0 )
+                    fileOffset = align(fileOffset, alignedRegion.alignmentBefore);
+
+                Region* region = alignedRegion.region;
+                region->cacheFileOffset = fileOffset;
+                fileOffset += region->bufferSize;
+
+                if ( alignedRegion.alignmentAfter != 0 )
+                    fileOffset = align(fileOffset, alignedRegion.alignmentAfter);
+            }
+
+            numRegionFileBytes = fileOffset;
+        }
 
         assert(numRegionFileBytes <= numRegionVMBytes);
 
@@ -4441,33 +4594,10 @@ void AppCacheBuilder::allocateBuffer()
 
         // Assign region vm and buffer addresses now that we know the size of
         // the cache header
-        {
-            // All vm offsets prior to the cache header are already correct
-            // All those after the cache header need to be shifted by the cache
-            // header size
-            bool seenCacheHeader = false;
-            for (const auto& regionAndVMOffset : regionsVMOrder) {
-                Region* region = regionAndVMOffset.first;
-                uint64_t vmOffset = regionAndVMOffset.second;
-                region->unslidLoadAddress = cacheBaseAddress + vmOffset;
-                if ( seenCacheHeader ) {
-                    // Shift by the cache header size
-                    region->unslidLoadAddress += cacheHeaderRegionSize;
-                } else {
-                    // The offset is correct but add in the base address
-                    seenCacheHeader = (region == &cacheHeaderRegion);
-                }
-                region->buffer = (uint8_t*)_fullAllocatedBuffer + (region->unslidLoadAddress - cacheBaseAddress);
-            }
+        for ( AlignedRegion& alignedRegion : vmOrder ) {
+            Region* region = alignedRegion.region;
+            region->buffer = (uint8_t*)_fullAllocatedBuffer + (region->unslidLoadAddress - cacheBaseAddress);
         }
-
-        // Cache header
-        cacheHeaderRegion.bufferSize            = cacheHeaderRegionSize;
-        cacheHeaderRegion.sizeInUse             = cacheHeaderRegion.bufferSize;
-        cacheHeaderRegion.cacheFileOffset       = 0;
-        cacheHeaderRegion.initProt              = VM_PROT_READ;
-        cacheHeaderRegion.maxProt               = VM_PROT_READ;
-        cacheHeaderRegion.name                  = "__TEXT";
 
 #if 0
         for (const auto& regionAndVMOffset : regionsVMOrder) {
@@ -4499,57 +4629,23 @@ void AppCacheBuilder::allocateBuffer()
             header.chainedFixups = (linkedit_data_command*)(cacheHeaderRegion.buffer + chainedFixupsOffset);
         }
 
-        for (auto& regionAndOffset : regions) {
-            assert(regionAndOffset.first->initProt != 0);
-            assert(regionAndOffset.first->maxProt != 0);
-            segment_command_64* loadCommand = (segment_command_64*)(cacheHeaderRegion.buffer + regionAndOffset.second);
-            header.segments.push_back({ loadCommand, regionAndOffset.first });
+        for ( AlignedRegion& alignedRegion : fileOrder ) {
+            Region* region = alignedRegion.region;
+            // The fixups sub region doesn't get a load command, as its a range inside LINKEDIT
+            if ( region == &fixupsSubRegion )
+                continue;
+
+            assert(region->initProt != 0);
+            assert(region->maxProt != 0);
+
+            uint64_t loadCommandOffset = regionLoadCommandOffsets.at(region);
+            segment_command_64* loadCommand = (segment_command_64*)(cacheHeaderRegion.buffer + loadCommandOffset);
+            header.segments.push_back({ loadCommand, region });
         }
         for (const auto& dylibAndOffset : dylibs) {
             fileset_entry_command* loadCommand = (fileset_entry_command*)(cacheHeaderRegion.buffer + dylibAndOffset.second);
             header.dylibs.push_back({ loadCommand, dylibAndOffset.first });
         }
-
-        // Move the offsets of all the other regions
-        // Split seg __TEXT
-        readOnlyTextRegion.cacheFileOffset += cacheHeaderRegion.sizeInUse;
-
-        // Split seg __TEXT_EXEC
-        readExecuteRegion.cacheFileOffset += cacheHeaderRegion.sizeInUse;
-
-        // __BRANCH_STUBS
-        branchStubsRegion.cacheFileOffset += cacheHeaderRegion.sizeInUse;
-
-        // Split seg __DATA_CONST
-        dataConstRegion.cacheFileOffset += cacheHeaderRegion.sizeInUse;
-
-        // __BRANCH_GOTS
-        branchGOTsRegion.cacheFileOffset += cacheHeaderRegion.sizeInUse;
-
-        // Split seg __DATA
-        readWriteRegion.cacheFileOffset += cacheHeaderRegion.sizeInUse;
-
-        // Split seg __HIB
-        hibernateRegion.cacheFileOffset += cacheHeaderRegion.sizeInUse;
-
-        // -sectcreate
-        for (Region& region : customDataRegions) {
-            region.cacheFileOffset += cacheHeaderRegion.sizeInUse;
-        }
-
-        // Non split seg regions
-        for (Region& region : nonSplitSegRegions) {
-            region.cacheFileOffset += cacheHeaderRegion.sizeInUse;
-        }
-
-        // __PRELINK_INFO
-        prelinkInfoRegion.cacheFileOffset += cacheHeaderRegion.sizeInUse;
-
-        // __LINKEDIT
-        _readOnlyRegion.cacheFileOffset += cacheHeaderRegion.sizeInUse;
-
-        // __LINKEDIT fixups sub region
-        fixupsSubRegion.cacheFileOffset += cacheHeaderRegion.sizeInUse;
     } else {
         assert(false);
     }
@@ -4971,7 +5067,7 @@ bool AppCacheBuilder::addCustomSection(const std::string& segmentName,
         // Make sure we don't have a section with this name already
         if ( section.sectionName.empty() ) {
             // We can't add a segment only section if other sections exist
-            _diagnostics.error("Cannot add empty section name with segment (%s0 as other sections exist on that segment",
+            _diagnostics.error("Cannot add empty section name with segment '%s' as other sections exist on that segment",
                                segmentName.c_str());
             return false;
         }
@@ -4979,13 +5075,13 @@ bool AppCacheBuilder::addCustomSection(const std::string& segmentName,
         for (const CustomSegment::CustomSection& existingSection : segment.sections) {
             if ( existingSection.sectionName.empty() ) {
                 // We can't add a section with a name if an existing section exists with no name
-                _diagnostics.error("Cannot add section named (%s) with segment (%s) as segment has existing nameless section",
+                _diagnostics.error("Cannot add section named '%s' with segment '%s' as segment has existing nameless section",
                                    segmentName.c_str(), section.sectionName.c_str());
                 return false;
             }
             if ( existingSection.sectionName == section.sectionName ) {
                 // We can't add a section with the same name as an existing one
-                _diagnostics.error("Cannot add section named (%s) with segment (%s) as section already exists",
+                _diagnostics.error("Cannot add section named '%s' with segment '%s' as section already exists",
                                    segmentName.c_str(), section.sectionName.c_str());
                 return false;
             }
@@ -5045,6 +5141,9 @@ void AppCacheBuilder::buildAppCache(const std::vector<InputDylib>& dylibs)
         }
         return;
     }
+
+    // Find stubs to remove, if any
+    parseStubs();
 
     // assign addresses for each segment of each dylib in new cache
     assignSegmentRegionsAndOffsets();
@@ -5129,7 +5228,7 @@ void AppCacheBuilder::buildAppCache(const std::vector<InputDylib>& dylibs)
             _aslrTracker.setDataRegion(firstDataRegion->buffer, size);
         }
     }
-    adjustAllImagesForNewSegmentLocations(cacheBaseAddress, nullptr, nullptr);
+    adjustAllImagesForNewSegmentLocations(cacheBaseAddress, nullptr);
     if ( _diagnostics.hasError() )
         return;
 
@@ -5148,12 +5247,17 @@ void AppCacheBuilder::buildAppCache(const std::vector<InputDylib>& dylibs)
 
     // optimize away stubs
     uint64_t t6 = mach_absolute_time();
-    {
-        __block std::vector<std::pair<const mach_header*, const char*>> images;
+
+    if ( removeStubs() ) {
+        // Stubs were removed, but we need to rewrite calls which would have gone through those stubs
+        rewriteRemovedStubs();
+    } else {
+        // Stubs weren't removed, so do the existing stub optimizer
+        __block std::vector<StubOptimizerInfo> images;
         forEachCacheDylib(^(const dyld3::MachOAnalyzer *ma, const std::string &dylibID,
                             DylibStripMode stripMode, const std::vector<std::string>& dependencies,
                             Diagnostics& dylibDiag, bool& stop) {
-            images.push_back({ ma, dylibID.c_str() });
+            images.push_back({ ma, dylibID.c_str(), nullptr, nullptr });
         });
         // FIXME: Should we keep the same never stub eliminate symbols?  Eg, for gmalloc.
         const char* const neverStubEliminateSymbols[] = {
@@ -5162,8 +5266,8 @@ void AppCacheBuilder::buildAppCache(const std::vector<InputDylib>& dylibs)
 
         uint64_t cacheUnslidAddr = cacheBaseAddress;
         int64_t cacheSlide = (long)_fullAllocatedBuffer - cacheUnslidAddr;
-        optimizeAwayStubs(images, cacheSlide, cacheUnslidAddr,
-                          nullptr, neverStubEliminateSymbols);
+        std::unordered_map<uint64_t, std::pair<uint64_t, uint8_t*>> stubsToIslandAddr;
+        optimizeAwayStubs(images, cacheSlide, nullptr, stubsToIslandAddr, neverStubEliminateSymbols);
     }
 
     // FIPS seal corecrypto, This must be done after stub elimination (so that __TEXT,__text is not changed after sealing)
@@ -5283,6 +5387,213 @@ void AppCacheBuilder::buildAppCache(const std::vector<InputDylib>& dylibs)
     }
 }
 
+static void getSectionLayout(const dyld3::MachOAnalyzer* ma,
+                             std::vector<uint64_t>& sectionAddresses,
+                             std::vector<uint8_t*>& sectionBuffers,
+                             uint32_t& authStubSectionIndex)
+{
+    // section index 0 refers to mach_header
+    sectionAddresses.push_back(ma->preferredLoadAddress());
+    sectionBuffers.push_back(nullptr);
+
+    intptr_t slide = ma->getSlide();
+    ma->forEachSection(^(const dyld3::MachOAnalyzer::SectionInfo& sectInfo, bool malformedSectionRange, bool& stop) {
+        if ( !strcmp(sectInfo.segInfo.segName, "__TEXT_EXEC") && !strcmp(sectInfo.sectName, "__auth_stubs") )
+            authStubSectionIndex = (uint32_t)sectionAddresses.size();
+        sectionAddresses.push_back(sectInfo.sectAddr);
+        sectionBuffers.push_back((uint8_t*)sectInfo.sectAddr + slide);
+    });
+}
+
+// Auth stubs will load a value then jump to it.  This returns the list of locations they jump to
+static void getAuthStubTargets(Diagnostics& diag, const dyld3::MachOAnalyzer* ma,
+                               std::string_view dylibID,
+                               const std::vector<uint64_t>& sectionAddresses,
+                               const std::vector<uint8_t*>& sectionBuffers,
+                               uint32_t stubSectionIndex,
+                               std::map<uint64_t, uint64_t>& stubToTargetMap)
+{
+    uint32_t splitSegSize = 0;
+    const uint8_t* infoStart = (const uint8_t*)ma->getSplitSeg(splitSegSize);
+    const uint8_t* infoEnd = infoStart + splitSegSize;
+    if ( *infoStart++ != DYLD_CACHE_ADJ_V2_FORMAT ) {
+        diag.error("malformed split seg info in %s", dylibID.data());
+        return;
+    }
+
+    // Whole         :== <count> FromToSection+
+    // FromToSection :== <from-sect-index> <to-sect-index> <count> ToOffset+
+    // ToOffset      :== <to-sect-offset-delta> <count> FromOffset+
+    // FromOffset    :== <kind> <count> <from-sect-offset-delta>
+    const uint8_t* p = infoStart;
+    uint64_t sectionCount = read_uleb128(p, infoEnd);
+    for (uint64_t i=0; i < sectionCount; ++i) {
+        uint64_t fromSectionIndex = read_uleb128(p, infoEnd);
+        uint64_t toSectionIndex = read_uleb128(p, infoEnd);
+        uint64_t toOffsetCount = read_uleb128(p, infoEnd);
+        uint64_t toSectionOffset = 0;
+        for (uint64_t j=0; j < toOffsetCount; ++j) {
+            uint64_t toSectionDelta = read_uleb128(p, infoEnd);
+            uint64_t fromOffsetCount = read_uleb128(p, infoEnd);
+            toSectionOffset += toSectionDelta;
+            for (uint64_t k=0; k < fromOffsetCount; ++k) {
+                uint64_t kind = read_uleb128(p, infoEnd);
+                if ( kind > 13 ) {
+                    diag.error("bad kind (%llu) value in %s\n", kind, dylibID.data());
+                }
+                uint64_t fromSectDeltaCount = dyld3::MachOFile::read_uleb128(diag, p, infoEnd);
+                if ( diag.hasError() )
+                    return;
+                uint64_t fromSectionOffset = 0;
+                for (uint64_t l=0; l < fromSectDeltaCount; ++l) {
+                    uint64_t delta = dyld3::MachOFile::read_uleb128(diag, p, infoEnd);
+                    if ( diag.hasError() )
+                        return;
+                    fromSectionOffset += delta;
+                    if ( fromSectionIndex == stubSectionIndex ) {
+                        // The stub is 16-bytes in size, and contains the stub fixup here.
+                        // We need to work out the stub for the fixup
+                        uint64_t stubOffset = fromSectionOffset & ~0xF;
+                        uint64_t stubAddr = sectionAddresses[fromSectionIndex] + stubOffset;
+
+                        uint64_t* gotPtr = (uint64_t*)(sectionBuffers[toSectionIndex] + toSectionOffset);
+                        uint64_t gotTargetAddr = *gotPtr;
+                        printf("");
+
+                        stubToTargetMap[stubAddr] = gotTargetAddr;
+                    }
+                }
+            }
+        }
+    }
+}
+
+static void rewriteBranchesToStubs(Diagnostics& diag, const dyld3::MachOAnalyzer* ma,
+                                   std::string_view dylibID,
+                                   const std::vector<uint64_t>& sectionAddresses,
+                                   const std::vector<uint8_t*>& sectionBuffers,
+                                   uint32_t stubSectionIndex,
+                                   const std::map<uint64_t, uint64_t>& stubToTargetMap)
+{
+    static const int64_t b128MegLimit = 0x07FFFFFF;
+
+    uint32_t splitSegSize = 0;
+    const uint8_t* infoStart = (const uint8_t*)ma->getSplitSeg(splitSegSize);
+    const uint8_t* infoEnd = infoStart + splitSegSize;
+    if ( *infoStart++ != DYLD_CACHE_ADJ_V2_FORMAT ) {
+        diag.error("malformed split seg info in %s", dylibID.data());
+        return;
+    }
+
+    // Whole         :== <count> FromToSection+
+    // FromToSection :== <from-sect-index> <to-sect-index> <count> ToOffset+
+    // ToOffset      :== <to-sect-offset-delta> <count> FromOffset+
+    // FromOffset    :== <kind> <count> <from-sect-offset-delta>
+    const uint8_t* p = infoStart;
+    uint64_t sectionCount = read_uleb128(p, infoEnd);
+    for (uint64_t i=0; i < sectionCount; ++i) {
+        uint64_t fromSectionIndex = read_uleb128(p, infoEnd);
+        uint64_t toSectionIndex = read_uleb128(p, infoEnd);
+        uint64_t toOffsetCount = read_uleb128(p, infoEnd);
+        uint64_t toSectionOffset = 0;
+        for (uint64_t j=0; j < toOffsetCount; ++j) {
+            uint64_t toSectionDelta = read_uleb128(p, infoEnd);
+            uint64_t fromOffsetCount = read_uleb128(p, infoEnd);
+            toSectionOffset += toSectionDelta;
+            for (uint64_t k=0; k < fromOffsetCount; ++k) {
+                uint64_t kind = read_uleb128(p, infoEnd);
+                if ( kind > 13 ) {
+                    diag.error("bad kind (%llu) value in %s\n", kind, dylibID.data());
+                }
+                uint64_t fromSectDeltaCount = dyld3::MachOFile::read_uleb128(diag, p, infoEnd);
+                if ( diag.hasError() )
+                    return;
+                uint64_t fromSectionOffset = 0;
+                for (uint64_t l=0; l < fromSectDeltaCount; ++l) {
+                    uint64_t delta = dyld3::MachOFile::read_uleb128(diag, p, infoEnd);
+                    if ( diag.hasError() )
+                        return;
+                    fromSectionOffset += delta;
+                    if ( toSectionIndex == stubSectionIndex ) {
+                        // The stub is 16-bytes in size, and contains the stub fixup here.
+                        // We need to work out the stub for the fixup
+                        uint32_t* instrPtr = (uint32_t*)(sectionBuffers[fromSectionIndex] + fromSectionOffset);
+                        uint64_t instrAddr = sectionAddresses[fromSectionIndex] + fromSectionOffset;
+                        uint64_t stubAddr = sectionAddresses[toSectionIndex] + toSectionOffset;
+
+                        auto it = stubToTargetMap.find(stubAddr);
+                        if ( it == stubToTargetMap.end() ) {
+                            diag.error("couldn't find stub at 0x%llx, for branch 0x%llx in %s\n", stubAddr, instrAddr, dylibID.data());
+                        }
+
+                        uint64_t finalTargetAddr = it->second;
+
+                        if ( kind != DYLD_CACHE_ADJ_V2_ARM64_BR26 ) {
+                            diag.error("bad kind (%llu) value in %s\n", kind, dylibID.data());
+                            return;
+                        }
+                        // skip all but BL or B
+                        uint32_t& instruction = *instrPtr;
+                        if ( (instruction & 0x7C000000) != 0x14000000 ) {
+                            diag.error("bad instruction (0x%x) value in %s\n", instruction, dylibID.data());
+                            return;
+                        }
+
+                        int64_t deltaToFinalTarget = finalTargetAddr - instrAddr;
+                        // if final target within range, change to branch there directly
+                        if ( (deltaToFinalTarget > -b128MegLimit) && (deltaToFinalTarget < b128MegLimit) ) {
+                            instruction = (instruction & 0xFC000000) | ((deltaToFinalTarget >> 2) & 0x03FFFFFF);
+                        } else {
+                            diag.error("branch (%llx -> %llx) out of reach (%llx) in %s\n", fromSectionOffset, toSectionOffset,
+                                       deltaToFinalTarget, dylibID.data());
+                        }
+                    }
+                }
+            }
+        }
+    }
+}
+
+void AppCacheBuilder::rewriteRemovedStubs()
+{
+    if ( _diagnostics.hasError() )
+        return;
+
+    for (AppCacheDylibInfo& dylib : sortedDylibs) {
+        if ( !dylib._coalescer.auth_stubs.sectionIsObliterated )
+            continue;
+
+        const dyld3::MachOAnalyzer* ma = nullptr;
+        for (const SegmentMappingInfo& loc : dylib.cacheLocation) {
+            if ( !strcmp(loc.segName, "__TEXT") ) {
+                // Assume __TEXT contains the mach header
+                ma = (const dyld3::MachOAnalyzer*)loc.dstSegment;
+                break;
+            }
+        }
+
+        // We need to find what the auth stubs pointed to, then rewrite all
+        // users of the auth stubs to jump to those locations instead
+        std::vector<uint64_t> sectionAddresses;
+        std::vector<uint8_t*> sectionBuffers;
+        uint32_t authStubSectionIndex = ~0U;
+        getSectionLayout(ma, sectionAddresses, sectionBuffers, authStubSectionIndex);
+
+        std::map<uint64_t, uint64_t> stubToTargetMap;
+        getAuthStubTargets(_diagnostics, dylib.input->mappedFile.mh, dylib.dylibID,
+                           sectionAddresses, sectionBuffers, authStubSectionIndex,
+                           stubToTargetMap);
+        if ( _diagnostics.hasError() )
+            return;
+
+        rewriteBranchesToStubs(_diagnostics, dylib.input->mappedFile.mh, dylib.dylibID,
+                               sectionAddresses, sectionBuffers, authStubSectionIndex,
+                               stubToTargetMap);
+        if ( _diagnostics.hasError() )
+            return;
+    }
+}
+
 void AppCacheBuilder::fipsSign()
 {
     if ( appCacheOptions.cacheKind != Options::AppCacheKind::kernel )
@@ -5399,7 +5710,7 @@ void AppCacheBuilder::writeFile(const std::string& path)
     strlcpy(pathTemplateSpace, pathTemplate.c_str(), templateLen);
     int fd = mkstemp(pathTemplateSpace);
     if ( fd == -1 ) {
-        _diagnostics.error("could not open file '%s'", pathTemplateSpace);
+        _diagnostics.error("could not open file %s", pathTemplateSpace);
         return;
     }
     uint64_t cacheFileSize = 0;

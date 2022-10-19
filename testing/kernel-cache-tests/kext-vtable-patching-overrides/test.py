@@ -1,4 +1,4 @@
-#!/usr/bin/python2.7
+#!/usr/bin/python3
 
 import os
 import KernelCollection
@@ -29,46 +29,46 @@ def check(kernel_cache):
     # From foo, we want to know where the vtable is, and the foo() and fooUsed0() slots in that vtable
     # Foo::fooOverride()
     assert kernel_cache.dictionary()["dylibs"][2]["global-symbols"][3]["name"] == "__ZN3Foo11fooOverrideEv"
-    assert kernel_cache.dictionary()["dylibs"][2]["global-symbols"][3]["vmAddr"] == "0x26BA0"
+    assert kernel_cache.dictionary()["dylibs"][2]["global-symbols"][3]["vmAddr"] == "0x26B90"
     # Foo::foo()
     assert kernel_cache.dictionary()["dylibs"][2]["global-symbols"][7]["name"] == "__ZN3Foo3fooEv"
-    assert kernel_cache.dictionary()["dylibs"][2]["global-symbols"][7]["vmAddr"] == "0x26B80"
+    assert kernel_cache.dictionary()["dylibs"][2]["global-symbols"][7]["vmAddr"] == "0x26B70"
     # Foo::fooUsed0()
     assert kernel_cache.dictionary()["dylibs"][2]["global-symbols"][8]["name"] == "__ZN3Foo8fooUsed0Ev"
-    assert kernel_cache.dictionary()["dylibs"][2]["global-symbols"][8]["vmAddr"] == "0x26BC0"
+    assert kernel_cache.dictionary()["dylibs"][2]["global-symbols"][8]["vmAddr"] == "0x26BB0"
 
     # From foo
     # FooSub::fooOverride()
-    assert kernel_cache.dictionary()["dylibs"][2]["global-symbols"][21]["name"] == "__ZN6FooSub11fooOverrideEv"
-    assert kernel_cache.dictionary()["dylibs"][2]["global-symbols"][21]["vmAddr"] == "0x26EA0"
+    assert kernel_cache.dictionary()["dylibs"][2]["global-symbols"][23]["name"] == "__ZN6FooSub11fooOverrideEv"
+    assert kernel_cache.dictionary()["dylibs"][2]["global-symbols"][23]["vmAddr"] == "0x26EC0"
     # Foo::foo()
-    assert kernel_cache.dictionary()["dylibs"][2]["global-symbols"][22]["name"] == "__ZN6FooSub3fooEv"
-    assert kernel_cache.dictionary()["dylibs"][2]["global-symbols"][22]["vmAddr"] == "0x26E80"
+    assert kernel_cache.dictionary()["dylibs"][2]["global-symbols"][24]["name"] == "__ZN6FooSub3fooEv"
+    assert kernel_cache.dictionary()["dylibs"][2]["global-symbols"][24]["vmAddr"] == "0x26EA0"
 
 
     # Check the fixups
     kernel_cache.analyze("/kext-vtable-patching-overrides/main.kc", ["-fixups", "-arch", "x86_64"])
     
     # In vtable for Foo, we match the entry for Foo::foo() by looking for its value on the RHS of the fixup
-    assert kernel_cache.dictionary()["fixups"]["0x23150"] == "kc(0) + 0x26B80"
+    assert kernel_cache.dictionary()["fixups"]["0x23150"] == "kc(0) + 0x26B70"
     # Then the following fixup should be to Foo::fooOverride()
-    assert kernel_cache.dictionary()["fixups"]["0x23158"] == "kc(0) + 0x26BA0"
+    assert kernel_cache.dictionary()["fixups"]["0x23158"] == "kc(0) + 0x26B90"
     # Then the following fixup should be to Foo::fooUsed0()
-    assert kernel_cache.dictionary()["fixups"]["0x23160"] == "kc(0) + 0x26BC0"
+    assert kernel_cache.dictionary()["fixups"]["0x23160"] == "kc(0) + 0x26BB0"
     
     # In vtable for FooSub, we match the entry for FooSub::foo() by looking for its value on the RHS of the fixup
-    assert kernel_cache.dictionary()["fixups"]["0x233A8"] == "kc(0) + 0x26E80"
+    assert kernel_cache.dictionary()["fixups"]["0x233A8"] == "kc(0) + 0x26EA0"
     # Then the following fixup should be to FooSub::fooOverride()
-    assert kernel_cache.dictionary()["fixups"]["0x233B0"] == "kc(0) + 0x26EA0"
+    assert kernel_cache.dictionary()["fixups"]["0x233B0"] == "kc(0) + 0x26EC0"
     # Then the following fixup should be to Foo::fooUsed0()
-    assert kernel_cache.dictionary()["fixups"]["0x233B8"] == "kc(0) + 0x26BC0"
+    assert kernel_cache.dictionary()["fixups"]["0x233B8"] == "kc(0) + 0x26BB0"
 
     # Now in bar, again match the entry for its Bar::foo() symbol
     assert kernel_cache.dictionary()["fixups"]["0x21150"] == "kc(0) + 0x24F10"
     # Then the following fixup should be to FooSub::fooOverride()
-    assert kernel_cache.dictionary()["fixups"]["0x21158"] == "kc(0) + 0x26EA0"
+    assert kernel_cache.dictionary()["fixups"]["0x21158"] == "kc(0) + 0x26EC0"
     # And if the patching was correct, then following entry should be to Foo::fooUsed0()
-    assert kernel_cache.dictionary()["fixups"]["0x21160"] == "kc(0) + 0x26BC0"
+    assert kernel_cache.dictionary()["fixups"]["0x21160"] == "kc(0) + 0x26BB0"
 
 
 # [~]> xcrun -sdk macosx.internal cc -arch x86_64 -Wl,-static -mkernel -nostdlib -Wl,-e,__start -Wl,-pie main.cpp -Wl,-pagezero_size,0x0 -o main.kernel -Wl,-image_base,0x10000 -Wl,-segaddr,__HIB,0x4000 -Wl,-add_split_seg_info -Wl,-install_name,/usr/lib/swift/split.seg.v2.hack -iwithsysroot /System/Library/Frameworks/Kernel.framework/Headers -Wl,-sectcreate,__LINKINFO,__symbolsets,SymbolSets.plist -Wl,-segprot,__LINKINFO,r--,r--

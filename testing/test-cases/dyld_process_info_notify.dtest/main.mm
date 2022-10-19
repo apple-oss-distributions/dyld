@@ -91,7 +91,7 @@ void launchTest(bool launchSuspended, bool disconnectEarly)
     __block bool sawlibSystem = false;
     __block bool gotMainNoticeOld = false;
     __block bool gotMainNotice = false;
-    __block bool gotCacheNotice = false;
+    __block bool gotInitializersNotice = false;
     __block bool gotMainNoticeBeforeAllInitialDylibs = false;
     __block bool gotFooNoticeBeforeMain = false;
     __block int libFooLoadCount = 0;
@@ -188,22 +188,27 @@ void launchTest(bool launchSuspended, bool disconnectEarly)
         if (dyldProcess == nullptr) {
             FAIL("dyldProcess must not be NULL");
         }
-        cacheHandle = dyld_process_register_for_event_notification(dyldProcess, &kr, DYLD_REMOTE_EVENT_SHARED_CACHE_MAPPED, queue, ^{
-            gotCacheNotice = true;
+        cacheHandle = dyld_process_register_for_event_notification(dyldProcess, &kr, DYLD_REMOTE_EVENT_BEFORE_INITIALIZERS, queue, ^{
+            gotInitializersNotice = true;
         });
         if (kr != KERN_SUCCESS) {
             FAIL("kr must equal KERN_SUCCESS");
         }
+        if (cacheHandle == 0) {
+            FAIL("cacheHandle should be non-zero");
+        }
         mainHandle = dyld_process_register_for_event_notification(dyldProcess, &kr, DYLD_REMOTE_EVENT_MAIN, queue, ^{
             gotMainNotice = true;
-            if (!gotCacheNotice) {
-                FAIL("Got main notice before cache notice");
+            if (!gotInitializersNotice) {
+                FAIL("Got main notice before initializers notice");
             }
         });
         if (kr != KERN_SUCCESS) {
             FAIL("kr must equal KERN_SUCCESS");
         }
-        
+        if (mainHandle == 0) {
+            FAIL("mainHandle should be non-zero");
+        }
         // Old SPI
         _dyld_process_info_notify_main(handle, ^{
                                                 LOG("target entering main()");
@@ -233,8 +238,8 @@ void launchTest(bool launchSuspended, bool disconnectEarly)
         if ( !gotMainNotice ) {
             FAIL("Did not get notification of main()");
         }
-        if ( !gotCacheNotice ) {
-            FAIL("Did not get notification of cache mapping");
+        if ( !gotInitializersNotice ) {
+            FAIL("Did not get notification before initializers");
         }
         if ( gotMainNoticeBeforeAllInitialDylibs ) {
             FAIL("Notification of main() arrived before all initial dylibs");
@@ -273,16 +278,8 @@ void launchTest(bool launchSuspended, bool disconnectEarly)
     // Tear down
     dispatch_source_cancel(usr1SignalSource);
     dispatch_source_cancel(usr2SignalSource);
-    if (!disconnectEarly) {
-        _dyld_process_info_notify_release(handle);
-    }
-    if (dyldProcess) {
-        if (cacheHandle == 0) {
-            FAIL("cacheHandle should be non-zero");
-        }
-        if (mainHandle == 0) {
-            FAIL("mainHandle should be non-zero");
-        }
+    _dyld_process_info_notify_release(handle);
+    if (launchSuspended) {
         dyld_process_unregister_for_notification(dyldProcess, mainHandle);
         dyld_process_unregister_for_notification(dyldProcess, cacheHandle);
         dyld_process_dispose(dyldProcess);

@@ -32,8 +32,8 @@
 #include <sys/mount.h>
 #include <uuid/uuid.h>
 #include <mach-o/loader.h>
-#include <System/sys/kdebug.h>
 #include <System/sys/reason.h>
+#include <sys/kdebug_private.h>
 
 #include "Defines.h"
 
@@ -110,6 +110,7 @@ private:
 
 class VIS_HIDDEN ScopedTimer {
 public:
+    [[nodiscard]]
     ScopedTimer(uint32_t code, kt_arg data1, kt_arg data2, kt_arg data3)
         : code(code), data1(data1), data2(data2), data3(data3), data4(0), data5(0), data6(0) {
 //#if BUILDING_LIBDYLD || BUILDING_DYLD
@@ -147,7 +148,8 @@ void kdebug_trace_dyld_image(const uint32_t code, const char* path, const uuid_t
                              const fsobj_id_t fsobjid, const fsid_t fsid, const mach_header* load_addr);
 
 VIS_HIDDEN
-void kdebug_trace_dyld_cache(const char* path, dyld_all_image_infos* infos);
+void kdebug_trace_dyld_cache(uint64_t fsobjid, uint64_t fsid, uint64_t sharedCacheBaseAddress,
+                             const uint8_t sharedCacheUUID[16]);
 
 VIS_HIDDEN
 bool kdebug_trace_dyld_enabled(uint32_t code);

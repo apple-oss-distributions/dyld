@@ -1,10 +1,9 @@
-#!/usr/bin/python2.7
+#!/usr/bin/python3
 
 import string
 import os
 import json
 import sys
-import commands
 import subprocess
 
 
@@ -44,17 +43,19 @@ class KernelCollection:
 
             self.dict = {}
             if self.print_json:
-                print "Run with: " + runline
+                print("Run with: " + runline)
             process = subprocess.Popen(args, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
             self.json_text, self.error_message = process.communicate()
+            self.json_text = self.json_text.decode()
+            self.error_message = self.error_message.decode()
             if self.print_json:
-                print self.json_text
-                print self.error_message
+                print(self.json_text)
+                print(self.error_message)
             if process.returncode:
                 if not self.print_json:
-                    print self.error_message
-                print "Non-zero return code"
-                print "Run with: " + runline
+                    print(self.error_message)
+                print("Non-zero return code")
+                print("Run with: " + runline)
                 sys.exit(0)
             #print self.json_text
             #print self.error_message
@@ -62,7 +63,7 @@ class KernelCollection:
                 self.dict = json.loads(self.json_text)
                 self.error_message = ""
         except subprocess.CalledProcessError as e:
-            #print "can't make closure for " + kernel_cache_path
+            #print("can't make closure for " + kernel_cache_path)
             self.error_message = e.output
             self.dict = {}
         except:
@@ -89,17 +90,19 @@ class KernelCollection:
                 args.append(opt)
             self.dict = {}
             if self.print_json:
-                print "Run with: " + ' '.join(args)
+                print("Run with: " + ' '.join(args))
             process = subprocess.Popen(args, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
             self.json_text, self.error_message = process.communicate()
+            self.json_text = self.json_text.decode()
+            self.error_message = self.error_message.decode()
             if self.print_json:
-                print self.json_text
-                print self.error_message
+                print(self.json_text)
+                print(self.error_message)
             if process.returncode:
                 if not self.print_json:
-                    print self.error_message
-                print "Non-zero return code"
-                print "Run with: " + ' '.join(args)
+                    print(self.error_message)
+                print("Non-zero return code")
+                print("Run with: " + ' '.join(args))
                 sys.exit(0)
             #print self.json_text
             #print self.error_message
@@ -107,7 +110,7 @@ class KernelCollection:
                 self.dict = json.loads(self.json_text)
                 self.error_message = ""
         except subprocess.CalledProcessError as e:
-            #print "can't make closure for " + kernel_cache_path
+            #print("can't make closure for " + kernel_cache_path)
             self.error_message = e.output
             self.dict = {}
         except:
@@ -137,17 +140,19 @@ class KernelCollection:
                 args.append(opt)
             self.dict = {}
             if self.print_json:
-                print "Run with: " + ' '.join(args)
+                print("Run with: " + ' '.join(args))
             process = subprocess.Popen(args, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
             self.json_text, self.error_message = process.communicate()
+            self.json_text = self.json_text.decode()
+            self.error_message = self.error_message.decode()
             if self.print_json:
-                print self.json_text
-                print self.error_message
+                print(self.json_text)
+                print(self.error_message)
             if process.returncode:
                 if not self.print_json:
-                    print self.error_message
-                print "Non-zero return code"
-                print "Run with: " + ' '.join(args)
+                    print(self.error_message)
+                print("Non-zero return code")
+                print("Run with: " + ' '.join(args))
                 sys.exit(0)
             #print self.json_text
             #print self.error_message
@@ -155,7 +160,7 @@ class KernelCollection:
                 self.dict = json.loads(self.json_text)
                 self.error_message = ""
         except subprocess.CalledProcessError as e:
-            #print "can't make closure for " + kernel_cache_path
+            #print("can't make closure for " + kernel_cache_path)
             self.error_message = e.output
             self.dict = {}
         except:
@@ -173,17 +178,19 @@ class KernelCollection:
                 args.append(opt)
             self.dict = {}
             if self.print_json:
-                print "Run with: " + ' '.join(args)
+                print("Run with: " + ' '.join(args))
             process = subprocess.Popen(args, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
             self.json_text, self.error_message = process.communicate()
+            self.json_text = self.json_text.decode()
+            self.error_message = self.error_message.decode()
             if self.print_json:
-                print self.json_text
-                print self.error_message
+                print(self.json_text)
+                print(self.error_message)
             if process.returncode:
                 if not self.print_json:
-                    print self.error_message
-                print "Non-zero return code"
-                print "Run with: " + ' '.join(args)
+                    print(self.error_message)
+                print("Non-zero return code")
+                print("Run with: " + ' '.join(args))
                 sys.exit(0)
             #print self.json_text
             #print self.error_message
@@ -191,7 +198,7 @@ class KernelCollection:
                 self.dict = json.loads(self.json_text)
                 self.error_message = ""
         except subprocess.CalledProcessError as e:
-            #print "can't make closure for " + app_cache_path
+            #print("can't make closure for " + app_cache_path)
             self.error_message = e.output
             self.dict = {}
         except:

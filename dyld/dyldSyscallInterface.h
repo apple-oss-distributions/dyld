@@ -29,13 +29,16 @@
 #include <sys/cdefs.h>
 
 #include <dirent.h>
-#if __has_include(<libamfi.h>)
-#include <libamfi.h>
+
+#if __has_include(<libamfi.h>) && !TARGET_OS_SIMULATOR && BUILDING_DYLD
+    #include <libamfi.h>
 #else
 __BEGIN_DECLS
 extern int amfi_check_dyld_policy_self(uint64_t input_flags, uint64_t* output_flags);
+extern kern_return_t task_dyld_process_info_notify_get(mach_port_name_array_t names_addr, natural_t *names_count_addr);
 __END_DECLS
 #endif
+
 #include <libkern/OSAtomic.h>
 #include <libproc.h>
 #include <mach/mach.h>
@@ -150,6 +153,10 @@ namespace dyld {
 		DYLD_SYSCALL_VTABLE_ENTRY(fsgetpath);
 		// Add in version 16
 		DYLD_SYSCALL_VTABLE_ENTRY(getattrlistbulk);
+        // Add in version 17
+        DYLD_SYSCALL_VTABLE_ENTRY(getattrlist);
+        DYLD_SYSCALL_VTABLE_ENTRY(getfsstat);
+        void            (*notifyMonitoringDyldBeforeInitializers)(void);
 	};
 
 #if __cplusplus

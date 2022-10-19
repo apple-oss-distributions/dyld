@@ -1,4 +1,4 @@
-// BUILD:  $DKCC dext.c -o $BUILD_DIR/dext.exe -Wl,-client_name,DriverKit -lSystem
+// BUILD:  $DKCC dext.c -o $BUILD_DIR/dext.exe -Wl,-client_name,DriverKit -nostdlib -lSystem
 // BUILD:  $CC main.c -o $BUILD_DIR/driverkit-basic.exe -DRUN_DIR="$RUN_DIR"
 // BUILD:  $DEXT_SPAWN_ENABLE $BUILD_DIR/driverkit-basic.exe 
 

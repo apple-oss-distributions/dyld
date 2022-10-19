@@ -44,15 +44,13 @@ typedef uint32_t dyld_platform_t;
 #define DYLD_MACOS_12_SPI SPI_AVAILABLE(macos(12.0)) API_UNAVAILABLE(ios,watchos,tvos,bridgeos)
 
 #define DYLD_MACOS_12_ALIGNED_SPI SPI_AVAILABLE(macos(12.0), ios(15.0), tvos(15.0), watchos(8.0), bridgeos(6.0))
+#define DYLD_MACOS_13_ALIGNED_SPI SPI_AVAILABLE(macos(13.0), ios(16.0), tvos(16.0), watchos(9.0), bridgeos(7.0))
 
 #if BUILDING_CACHE_BUILDER || ENABLE_DYLD_STATIC_ROSETTA_RUNTIME_SUPPORT
 #define DYLD_MACOS_12_ALIGNED_AND_STATIC_SPI
 #else
 #define DYLD_MACOS_12_ALIGNED_AND_STATIC_SPI DYLD_MACOS_12_ALIGNED_SPI
 #endif
-
-// FIXME: Several of these SPIs will not be available until more infrastructure work lands, but are included here for review
-#define DYLD_UNAVAILABLE_FOR_NOW __attribute__((unavailable))
 
 typedef struct dyld_process_s*              dyld_process_t;
 typedef struct dyld_process_snapshot_s*     dyld_process_snapshot_t;
@@ -101,6 +99,18 @@ extern void dyld_process_dispose(dyld_process_t process);
 DYLD_MACOS_12_ALIGNED_AND_STATIC_SPI
 extern dyld_process_snapshot_t dyld_process_snapshot_create_for_process(dyld_process_t process, kern_return_t *kr);
 
+
+/*
+ * dyld_process_snapshot_create_from_data
+ *   Creates a snapshot from a serialized blob that can be introspected.
+ *   buffer: The serialized process info. Currenrtly the only way to obtain this by inspecting a processes memory dor it directly
+ *   size: The size of the buffer passed in
+ *   reserved1: Must be NULL. In the future this will be used for passing an additional "system" info buffer read from the shared cache
+ *   reserved2: Must be 0
+ */
+DYLD_MACOS_13_ALIGNED_SPI
+extern dyld_process_snapshot_t dyld_process_snapshot_create_from_data(void* buffer, size_t size, void* reserved1, size_t reserved2);
+
 /*
  * dyld_process_snapshot_dispose
  *    Disposes of the snapshot and frees any resources held by it
@@ -116,14 +126,15 @@ extern void dyld_process_snapshot_dispose(dyld_process_snapshot_t snapshot);
  *   If kr is non-null then it will be set to KERN_SUCCESS if the call succeeds, and return any error codes if it failed
  *   Returns 0 on failure, on success a non-zero will be returned to be used as a handle to dyld_process_unregister_for_notification
  */
-DYLD_UNAVAILABLE_FOR_NOW
+DYLD_MACOS_13_ALIGNED_SPI
 extern uint32_t dyld_process_register_for_image_notifications(dyld_process_t, kern_return_t *kr,
                                                               dispatch_queue_t queue, void (^block)(dyld_image_t image, bool load));
 
-
 #define DYLD_REMOTE_EVENT_MAIN (1) // This event is called immediately before main will be executed
 // rdar://48435712 (ER: Way to suspend a process just after the shared cache gets mapped in)
-#define DYLD_REMOTE_EVENT_SHARED_CACHE_MAPPED (2) // This event is called immediately after the shared cache has been mapped
+#define DYLD_REMOTE_EVENT_SHARED_CACHE_MAPPED (2)
+#pragma clang deprecated(DYLD_REMOTE_EVENT_SHARED_CACHE_MAPPED, "DYLD_REMOTE_EVENT_SHARED_CACHE_MAPPED is deprecated, use DYLD_REMOTE_EVENT_BEFORE_INITIALIZERS")
+#define DYLD_REMOTE_EVENT_BEFORE_INITIALIZERS (2)  // This event is called before running initializers
 
 /*
  * dyld_process_register_for_event_notification
@@ -149,7 +160,7 @@ extern void dyld_process_unregister_for_notification(dyld_process_t, uint32_t ha
  *   Iterates over all the images currently loaded in a dyld_process_t. Does not include images that are mapped as part of the shared cache
  *   but that have not actually been loaded into the process.
  */
-DYLD_UNAVAILABLE_FOR_NOW
+DYLD_MACOS_13_ALIGNED_SPI
 extern void dyld_process_snapshot_for_each_image(dyld_process_snapshot_t snapshot, void (^block)(dyld_image_t image));
 
 #pragma mark Functions to get shared caches
@@ -160,21 +171,6 @@ extern void dyld_process_snapshot_for_each_image(dyld_process_snapshot_t snapsho
  */
 DYLD_MACOS_12_ALIGNED_SPI
 extern dyld_shared_cache_t dyld_process_snapshot_get_shared_cache(dyld_process_snapshot_t snapshot);
-
-// Returns a dyld_shared_cache_t for a provided a dyld_process_t
-// FIXME: This SPI was a mistake, we will be removing it before macOS 12 ships, please move to dyld_process_snapshot_get_shared_cache
-SPI_DEPRECATED_WITH_REPLACEMENT("dyld_process_snapshot_get_shared_cache",
-                                macos(12.0, 12.0), ios(15.0,15.0), tvos(15.0,15.0), watchos(8.0,8.0), bridgeos(6.0,6.0))
-extern dyld_shared_cache_t dyld_shared_cache_create(dyld_process_t process);
-
-/*
- * dyld_shared_cache_dispose
- *    Disposes of the dyld_shared_cache_t and frees any resources held by it
- *    NOTE: This should only be used with dyld_shared_cache_create(), which is deprecated. This will also be removed
- */
-SPI_DEPRECATED("Only needed for use with deprecated dyld_shared_cache_create() SPI",
-               macos(12.0, 12.0), ios(15.0,15.0), tvos(15.0,15.0), watchos(8.0,8.0), bridgeos(6.0,6.0))
-extern void dyld_shared_cache_dispose(dyld_shared_cache_t cache);
 
 #endif /* BUILDING_CACHE_BUILDER */
 
@@ -292,16 +288,13 @@ extern bool dyld_image_copy_uuid(dyld_image_t cache, uuid_t* uuid);
  */
 DYLD_MACOS_12_ALIGNED_SPI
 extern const char* dyld_image_get_installname(dyld_image_t image);
-
-#if 0
 /*
- * dyld_image_get_installname
- *   Returns the path of the file backing an image of an image. This may return NULL underlying buffer being unavailable, such as if the file
- *   has bgeen deleted
+ * dyld_image_get_file_path
+ *   Returns the path of the file backing an image of an image. This may return NULL underlying buffer being unavailable, such as
+ *   if the file has been deleted. Returns null if there is not a mach-o file backing the image
  */
-DYLD_UNAVAILABLE_FOR_NOW
+DYLD_MACOS_13_ALIGNED_SPI
 extern const char* dyld_image_get_file_path(dyld_image_t image);
-#endif
 
 /*
  * dyld_image_for_each_segment

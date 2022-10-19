@@ -26,12 +26,16 @@
 
 #include <mach-o/dyld_images.h>
 
+#include <span>
+
 #include "Defines.h"
 #include "Allocator.h"
-
+//#include "CompactInfo.h"
+#include "DyldRuntimeState.h"
 
 namespace dyld4 {
-    void addImagesToAllImages(Allocator&, uint32_t infoCount, const dyld_image_info info[]);
+    using lsl::Allocator;
+    void addImagesToAllImages(RuntimeState& state, uint32_t infoCount, const dyld_image_info info[],  uint32_t initialImageCount);
     void removeImageFromAllImages(const mach_header* loadAddress);
     void addNonSharedCacheImageUUID(Allocator&, const dyld_uuid_info& info);
 #if TARGET_OS_SIMULATOR
@@ -40,8 +44,11 @@ namespace dyld4 {
 
 #if SUPPORT_ROSETTA
     void addAotImagesToAllAotImages(Allocator&, uint32_t aotInfoCount, const dyld_aot_image_info aotInfo[]);
+    void removeAotImageFromAllAotImages(const mach_header* loadAddress);
 #endif
 }
+
+extern "C" void lldb_image_notifier(enum dyld_image_mode mode, uint32_t infoCount, const dyld_image_info info[]);
 
 extern dyld_all_image_infos*        gProcessInfo;
 

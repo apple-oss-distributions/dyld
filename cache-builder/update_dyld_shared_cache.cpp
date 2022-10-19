@@ -22,26 +22,8 @@
  * @APPLE_LICENSE_HEADER_END@
  */
 
-#include <sys/types.h>
-#include <sys/stat.h>
-#include <sys/mman.h>
-#include <limits.h>
-#include <stdarg.h>
-#include <stdio.h>
-#include <stdlib.h>
-#include <math.h>
-#include <fcntl.h>
-#include <dlfcn.h>
-#include <signal.h>
-#include <errno.h>
-#include <assert.h>
-#include <sys/uio.h>
-#include <unistd.h>
-
-
 int main(int argc, const char* argv[], const char* envp[])
 {
-    fprintf(stderr, "This tool is deprecated.\n");
     return 0;
 }
 

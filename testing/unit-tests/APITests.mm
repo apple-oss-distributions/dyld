@@ -30,7 +30,7 @@
 #include <vector>
 #include <string>
 
-#include <XCTest/XCTest.h>
+#include "DyldTestCase.h"
 
 #include "DyldRuntimeState.h"
 #include "DyldProcessConfig.h"
@@ -42,57 +42,10 @@ using dyld4::KernelArgs;
 using dyld4::ProcessConfig;
 using dyld4::APIs;
 using dyld4::SyscallDelegate;
+using lsl::Allocator;
 using dyld3::Platform;
 
-//
-// This tests methods in the APIs class.  Thus, by calling tester.apis.dlopen()
-// it is calling the dlopen linked into the unit test, and not the OS dlopen().
-//
-class TestState
-{
-public:
-                         TestState(SyscallDelegate& sys, MockO& main, const std::vector<const char*>& envp={},
-                                   const std::vector<const char*>& apple={"executable_path=/foo/test.exe"});
-                         TestState(SyscallDelegate& sys, const std::vector<const char*>& envp, const std::vector<const char*>& apple);
-                         TestState(MockO& main, const std::vector<const char*>& envp={},
-                                   const std::vector<const char*>& apple={"executable_path=/foo/test.exe"});
-                         TestState(const std::vector<const char*>& envp={});
-    SyscallDelegate&     osDelegate()   { return _osDelegate; }
-
-private:
-    MockO                _defaultMain;
-    SyscallDelegate      _osDelegate;
-    KernelArgs           _kernArgs;
-    ProcessConfig        _config;
-public:
-    APIs&                apis;
-};
-
-TestState::TestState(SyscallDelegate& sys, MockO& main, const std::vector<const char*>& envp, const std::vector<const char*>& apple)
-    : _defaultMain(MH_EXECUTE, "arm64"), _osDelegate(sys), _kernArgs(main.header(), {"test.exe"}, envp, apple),
-      _config(&_kernArgs, _osDelegate), apis(APIs::bootstrap(_config))
-{
-}
-
-TestState::TestState(SyscallDelegate& sys, const std::vector<const char*>& envp, const std::vector<const char*>& apple)
-    : _defaultMain(MH_EXECUTE, "arm64"), _kernArgs(_defaultMain.header(), {"test.exe"}, envp, apple),
-      _config(&_kernArgs, _osDelegate), apis(APIs::bootstrap(_config))
-{
-}
-
-TestState::TestState(MockO& main, const std::vector<const char*>& envp, const std::vector<const char*>& apple)
-    :  _defaultMain(MH_EXECUTE, "arm64"), _kernArgs(main.header(), {"test.exe"}, envp, apple),
-      _config(&_kernArgs, _osDelegate), apis(APIs::bootstrap(_config))
-{
-}
-
-TestState::TestState(const std::vector<const char*>& envp)
-    :  _defaultMain(MH_EXECUTE, "arm64"), _kernArgs(_defaultMain.header(), {"test.exe"}, envp, {"executable_path=/foo/test.exe"}),
-      _config(&_kernArgs, _osDelegate), apis(APIs::bootstrap(_config))
-{
-}
-
-@interface APITests : XCTestCase
+@interface APITests : DyldTestCase
 @end
 
 @implementation APITests

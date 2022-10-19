@@ -1,4 +1,19 @@
 
+
+#include "../kmod.h"
+
+__attribute__((visibility(("hidden"))))
+int startKext() {
+	return 0;
+}
+
+__attribute__((visibility(("hidden"))))
+int endKext() {
+	return 0;
+}
+
+KMOD_EXPLICIT_DECL(com.apple.foo1, "1.0.0", (void*)startKext, (void*)endKext)
+
 #include "foo1.h"
 
 using namespace X;
@@ -12,6 +27,8 @@ OSMetaClassDefineReservedUsed( Foo1, 1 )
 
 OSMetaClassDefineReservedUnused( Foo1, 2 )
 OSMetaClassDefineReservedUnused( Foo1, 3 )
+
+int hack __asm("___cxa_pure_virtual");
 
 int Foo1::foo() {
 	return 0;

@@ -77,17 +77,12 @@ struct KernelCollectionBuilder {
     void error(const char* format, ...) {
         va_list list;
         va_start(list, format);
-        char* buffer = nullptr;
-        vasprintf(&buffer, format, list);
+        Diagnostics diag;
+        diag.error(format, list);
         va_end(list);
 
-        if ( buffer == nullptr )
-            return;
-
-        errorStorage.push_back(buffer);
+        errorStorage.push_back(diag.errorMessage());
         errors.push_back(errorStorage.back().data());
-
-        free(buffer);
     }
 
     void retain(CFTypeRef v) {
@@ -532,7 +527,7 @@ bool runKernelCollectionBuilder(struct KernelCollectionBuilder* builder) {
     builderOptions.archs = &dyld3::GradedArchs::forName(builder->arch);
     builderOptions.platform = dyld3::Platform::unknown;
     builderOptions.localSymbolMode = DyldSharedCache::LocalSymbolsMode::keep;
-    builderOptions.optimizeStubs = true;
+    builderOptions.cacheConfiguration = kDyldSharedCacheTypeProduction;
     builderOptions.optimizeDyldDlopens = false;
     builderOptions.optimizeDyldLaunches = false;
     builderOptions.codeSigningDigestMode = DyldSharedCache::CodeSigningDigestMode::SHA256only;

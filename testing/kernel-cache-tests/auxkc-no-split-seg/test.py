@@ -1,4 +1,4 @@
-#!/usr/bin/python2.7
+#!/usr/bin/python3
 
 import os
 import KernelCollection
@@ -83,12 +83,12 @@ def check(kernel_cache):
     assert len(kernel_cache.dictionary()["dylibs"]) == 2
     # bar.kext
     assert kernel_cache.dictionary()["dylibs"][0]["name"] == "com.apple.bar"
-    assert len(kernel_cache.dictionary()["dylibs"][0]["fixups"]) == 1
-    assert kernel_cache.dictionary()["dylibs"][0]["fixups"]["0x5008"] == "kc(3) + 0x9000"
+    assert len(kernel_cache.dictionary()["dylibs"][0]["fixups"]) == 3
+    assert kernel_cache.dictionary()["dylibs"][0]["fixups"]["0x50C8"] == "kc(3) + 0x90C4"
     # foo.kext
     assert kernel_cache.dictionary()["dylibs"][1]["name"] == "com.apple.foo"
-    assert len(kernel_cache.dictionary()["dylibs"][1]["fixups"]) == 1
-    assert kernel_cache.dictionary()["dylibs"][1]["fixups"]["0x5008"] == "kc(3) + 0xB000"
+    assert len(kernel_cache.dictionary()["dylibs"][1]["fixups"]) == 3
+    assert kernel_cache.dictionary()["dylibs"][1]["fixups"]["0x50C8"] == "kc(3) + 0xB0C4"
 
 
 # [~]> xcrun -sdk macosx.internal cc -arch x86_64 -Wl,-static -mkernel -nostdlib -Wl,-add_split_seg_info -Wl,-rename_section,__TEXT,__text,__TEXT_EXEC,__text -Wl,-e,__start -Wl,-pagezero_size,0x0 -Wl,-pie main.c -o main.kernel -Wl,-install_name,/usr/lib/swift/split.seg.v2.hack -Wl,-segprot,__HIB,r-x,r-x -Wl,-image_base,0x8000 -Wl,-segaddr,__HIB,0x4000

@@ -1,80 +1,55 @@
-#!/usr/bin/python2.7
+#!/usr/bin/python3
 
 import os
 import KernelCollection
+from FixupHelpers import *
 
 
 def check(kernel_cache):
+    enableLogging = False
     kernel_cache.buildKernelCollection("arm64e", "/fixups-arm64e/main.kc", "/fixups-arm64e/main.kernel", "/fixups-arm64e/extensions", ["com.apple.foo", "com.apple.bar"], [])
     kernel_cache.analyze("/fixups-arm64e/main.kc", ["-layout", "-arch", "arm64e"])
 
-    assert len(kernel_cache.dictionary()["cache-segments"]) == 6
-    assert kernel_cache.dictionary()["cache-segments"][0]["name"] == "__TEXT"
-    assert kernel_cache.dictionary()["cache-segments"][0]["vmAddr"] == "0xFFFFFFF007004000"
-    assert kernel_cache.dictionary()["cache-segments"][1]["name"] == "__PRELINK_TEXT"
-    assert kernel_cache.dictionary()["cache-segments"][1]["vmAddr"] == "0xFFFFFFF007008000"
-    assert kernel_cache.dictionary()["cache-segments"][2]["name"] == "__TEXT_EXEC"
-    assert kernel_cache.dictionary()["cache-segments"][2]["vmAddr"] == "0xFFFFFFF007010000"
-    assert kernel_cache.dictionary()["cache-segments"][3]["name"] == "__PRELINK_INFO"
-    assert kernel_cache.dictionary()["cache-segments"][3]["vmAddr"] == "0xFFFFFFF00701C000"
-    assert kernel_cache.dictionary()["cache-segments"][4]["name"] == "__DATA"
-    assert kernel_cache.dictionary()["cache-segments"][4]["vmAddr"] == "0xFFFFFFF007020000"
-    assert kernel_cache.dictionary()["cache-segments"][5]["name"] == "__LINKEDIT"
-    assert kernel_cache.dictionary()["cache-segments"][5]["vmAddr"] == "0xFFFFFFF007030000"
+    # Get the base address of the cache, so that we can compute fixups as offsets from that
+    cacheBaseVMAddr = findCacheBaseVMAddr(kernel_cache)
 
-    assert len(kernel_cache.dictionary()["dylibs"]) == 3
-    # main.kernel
-    assert kernel_cache.dictionary()["dylibs"][0]["name"] == "com.apple.kernel"
-    assert len(kernel_cache.dictionary()["dylibs"][0]["segments"]) == 4
-    assert kernel_cache.dictionary()["dylibs"][0]["segments"][0]["name"] == "__TEXT"
-    assert kernel_cache.dictionary()["dylibs"][0]["segments"][0]["vmAddr"] == "0xFFFFFFF007010000"
-    assert kernel_cache.dictionary()["dylibs"][0]["segments"][1]["name"] == "__DATA"
-    assert kernel_cache.dictionary()["dylibs"][0]["segments"][1]["vmAddr"] == "0xFFFFFFF007020000"
-    assert kernel_cache.dictionary()["dylibs"][0]["segments"][2]["name"] == "__TEXT_EXEC"
-    assert kernel_cache.dictionary()["dylibs"][0]["segments"][2]["vmAddr"] == "0xFFFFFFF007014000"
-    assert kernel_cache.dictionary()["dylibs"][0]["segments"][3]["name"] == "__LINKEDIT"
-    assert kernel_cache.dictionary()["dylibs"][0]["segments"][3]["vmAddr"] == "0xFFFFFFF007030000"
-    # bar.kext
-    assert kernel_cache.dictionary()["dylibs"][1]["name"] == "com.apple.bar"
-    assert len(kernel_cache.dictionary()["dylibs"][1]["segments"]) == 4
-    assert kernel_cache.dictionary()["dylibs"][1]["segments"][0]["name"] == "__TEXT"
-    assert kernel_cache.dictionary()["dylibs"][1]["segments"][0]["vmAddr"] == "0xFFFFFFF007008000"
-    assert kernel_cache.dictionary()["dylibs"][1]["segments"][1]["name"] == "__TEXT_EXEC"
-    assert kernel_cache.dictionary()["dylibs"][1]["segments"][1]["vmAddr"] == "0xFFFFFFF007018000"
-    assert kernel_cache.dictionary()["dylibs"][1]["segments"][2]["name"] == "__DATA"
-    assert kernel_cache.dictionary()["dylibs"][1]["segments"][2]["vmAddr"] == "0xFFFFFFF00702C000"
-    assert kernel_cache.dictionary()["dylibs"][1]["segments"][3]["name"] == "__LINKEDIT"
-    assert kernel_cache.dictionary()["dylibs"][1]["segments"][3]["vmAddr"] == "0xFFFFFFF007030000"
-    # foo.kext
-    assert kernel_cache.dictionary()["dylibs"][2]["name"] == "com.apple.foo"
-    assert len(kernel_cache.dictionary()["dylibs"][2]["segments"]) == 4
-    assert kernel_cache.dictionary()["dylibs"][2]["segments"][0]["name"] == "__TEXT"
-    assert kernel_cache.dictionary()["dylibs"][2]["segments"][0]["vmAddr"] == "0xFFFFFFF00700C000"
-    assert kernel_cache.dictionary()["dylibs"][2]["segments"][1]["name"] == "__TEXT_EXEC"
-    assert kernel_cache.dictionary()["dylibs"][2]["segments"][1]["vmAddr"] == "0xFFFFFFF007018040"
-    assert kernel_cache.dictionary()["dylibs"][2]["segments"][2]["name"] == "__DATA"
-    assert kernel_cache.dictionary()["dylibs"][2]["segments"][2]["vmAddr"] == "0xFFFFFFF00702C010"
-    assert kernel_cache.dictionary()["dylibs"][2]["segments"][3]["name"] == "__LINKEDIT"
-    assert kernel_cache.dictionary()["dylibs"][2]["segments"][3]["vmAddr"] == "0xFFFFFFF007030000"
+    kernel_cache.analyze("/fixups-arm64e/main.kc", ["-symbols", "-arch", "arm64e"])
+    # Get the addresses of &func, &g, &bar for use later
+    funcVMAddr = findLocalSymbolVMAddr(kernel_cache, 0, "__ZL4funcv")
+    gVMAddr = findGlobalSymbolVMAddr(kernel_cache, 0, "_g")
+    barVMAddr = findGlobalSymbolVMAddr(kernel_cache, 1, "_bar")
+    g2VMAddr = findGlobalSymbolVMAddr(kernel_cache, 2, "_g")
+
+    # Get the addresses, and offsets, to all the values we are fixing up
+    sVMAddr = findGlobalSymbolVMAddr(kernel_cache, 0, "_s")
+    sOffset = fixupOffset(sVMAddr, cacheBaseVMAddr)
+    psVMAddr = findGlobalSymbolVMAddr(kernel_cache, 0, "_ps")
+    psOffset = fixupOffset(psVMAddr, cacheBaseVMAddr)
+    barPtrVMAddr = findGlobalSymbolVMAddr(kernel_cache, 1, "_barPtr")
+    barPtrOffset = fixupOffset(barPtrVMAddr, cacheBaseVMAddr)
+    gPtrVMAddr = findGlobalSymbolVMAddr(kernel_cache, 2, "_gPtr")
+    gPtrOffset = fixupOffset(gPtrVMAddr, cacheBaseVMAddr)
+
+    # print("barPtrOffset: " + barPtrOffset)
 
     # Check the fixups
     kernel_cache.analyze("/fixups-arm64e/main.kc", ["-fixups", "-arch", "arm64e"])
-    assert len(kernel_cache.dictionary()["fixups"]) == 11
+    assert len(kernel_cache.dictionary()["fixups"]) >= 11
     # main.kernel: S s = { &func, &func, &g, &func, &g };
-    assert kernel_cache.dictionary()["fixups"]["0x1C000"] == "kc(0) + 0xFFFFFFF007014000 auth(IA !addr 0)"
-    assert kernel_cache.dictionary()["fixups"]["0x1C008"] == "kc(0) + 0xFFFFFFF007014000 auth(IA !addr 0)"
-    assert kernel_cache.dictionary()["fixups"]["0x1C010"] == "kc(0) + 0xFFFFFFF00702802C"
-    assert kernel_cache.dictionary()["fixups"]["0x20000"] == "kc(0) + 0xFFFFFFF007014000 auth(IA !addr 0)"
-    assert kernel_cache.dictionary()["fixups"]["0x20008"] == "kc(0) + 0xFFFFFFF00702802C"
+    assert kernel_cache.dictionary()["fixups"][offsetVMAddr(sOffset, 0)] == "kc(0) + " + funcVMAddr + " auth(IA !addr 0)"
+    assert kernel_cache.dictionary()["fixups"][offsetVMAddr(sOffset, 8)] == "kc(0) + " + funcVMAddr + " auth(IA !addr 0)"
+    assert kernel_cache.dictionary()["fixups"][offsetVMAddr(sOffset, 16)] == "kc(0) + " + gVMAddr
+    assert kernel_cache.dictionary()["fixups"][offsetVMAddr(sOffset, 16384)] == "kc(0) + " + funcVMAddr + " auth(IA !addr 0)"
+    assert kernel_cache.dictionary()["fixups"][offsetVMAddr(sOffset, 16384 + 8)] == "kc(0) + " + gVMAddr
     # main.kernel: PackedS ps = { 0, &func, &func, 0, &g, 0, &g };
-    assert kernel_cache.dictionary()["fixups"]["0x24004"] == "kc(0) + 0xFFFFFFF007014000 auth(IA !addr 0)"
-    assert kernel_cache.dictionary()["fixups"]["0x2400C"] == "kc(0) + 0xFFFFFFF007014000 auth(IA !addr 0)"
-    assert kernel_cache.dictionary()["fixups"]["0x24018"] == "kc(0) + 0xFFFFFFF00702802C"
-    assert kernel_cache.dictionary()["fixups"]["0x24024"] == "kc(0) + 0xFFFFFFF00702802C"
+    assert kernel_cache.dictionary()["fixups"][offsetVMAddr(psOffset, 4)] == "kc(0) + " + funcVMAddr + " auth(IA !addr 0)"
+    assert kernel_cache.dictionary()["fixups"][offsetVMAddr(psOffset, 12)] == "kc(0) + " + funcVMAddr + " auth(IA !addr 0)"
+    assert kernel_cache.dictionary()["fixups"][offsetVMAddr(psOffset, 24)] == "kc(0) + " + gVMAddr
+    assert kernel_cache.dictionary()["fixups"][offsetVMAddr(psOffset, 36)] == "kc(0) + " + gVMAddr
     # bar.kext: __typeof(&bar) barPtr = &bar;
-    assert kernel_cache.dictionary()["fixups"]["0x28000"] == "kc(0) + 0xFFFFFFF007018000 auth(IA !addr 0)"
+    assert kernel_cache.dictionary()["fixups"][offsetVMAddr(barPtrOffset, 0)] == "kc(0) + " + barVMAddr + " auth(IA !addr 42271)"
     # foo.kext: int* gPtr = &g;
-    assert kernel_cache.dictionary()["fixups"]["0x28010"] == "kc(0) + 0xFFFFFFF00702C018"
+    assert kernel_cache.dictionary()["fixups"][offsetVMAddr(gPtrOffset, 0)] == "kc(0) + " + g2VMAddr
     assert len(kernel_cache.dictionary()["dylibs"]) == 3
     assert kernel_cache.dictionary()["dylibs"][0]["name"] == "com.apple.kernel"
     assert kernel_cache.dictionary()["dylibs"][0]["fixups"] == "none"

@@ -18,6 +18,7 @@
 #include <sys/wait.h>
 #include <sys/types.h>
 #include <mach/mach.h>
+#include <sys/sysctl.h>
 #include <mach/machine.h>
 #include <mach-o/dyld_priv.h>
 #include <mach-o/dyld_process_info.h>
@@ -94,14 +95,23 @@ cpu_type_t otherArch[] = { CPU_TYPE_ARM64 };
 #endif
 
 
-static void launchTest(bool launchOtherArch, bool launchSuspended, bool forceIOSMac)
+static void launchTest(bool launchOtherArch, bool launchSuspended, bool forceIOSMac, bool altPageSize)
 {
+    if (altPageSize) {
+        int supported = 0;
+        size_t supported_size = sizeof(size_t);
+        int r = sysctlbyname("debug.vm_mixed_pagesize_supported", &supported, &supported_size, NULL, 0);
+        if (r != 0 || !supported) { return; }
+    }
     LOG("launchTest %s", launchSuspended ? "suspended" : "unsuspended");
     const char * program = RUN_DIR "/linksWithCF.exe";
 
     _process process;
     process.set_executable_path(RUN_DIR "/linksWithCF.exe");
     process.set_launch_suspended(launchSuspended);
+    if (altPageSize) {
+        process.set_alt_page_size(true);
+    }
     if (forceIOSMac) {
         LOG("Launching native");
         const char* env[] = { "TEST_OUTPUT=None", "DYLD_FORCE_PLATFORM=6", NULL};
@@ -142,14 +152,13 @@ static void launchTest(bool launchOtherArch, bool launchSuspended, bool forceIOS
 
 int main(int argc, const char* argv[], const char* envp[], const char* apple[]) {
     signal(SIGUSR1, SIG_IGN);
-    launchTest(false, false, false);
-    launchTest(false, true, false);
+    launchTest(false, false, false, false);
+    launchTest(false, true, false, false);
 #if __MAC_OS_X_VERSION_MIN_REQUIRED
-    // FIXME: Reenable these ones i386 is turned back on for simulators
-    //launchTest(true, false, false);
-    //launchTest(true, true, false);
-    launchTest(false, false, true);
-    launchTest(false, true, true);
+    launchTest(false, false, true, false);
+    launchTest(false, true, true, false);
+    launchTest(false, false, false, true);
+    launchTest(false, true, false, true);
     //FIXME: This functionality is broken, but it is an edge case no one should ever hit
     //launchTest(true, true, true);
 #endif

@@ -173,7 +173,7 @@ public:
 
     pint_t getVMAddress(pint_t index) const {
         if ( index >= _count ) {
-            _cache->diagnostics().error("index out of range in section (%s)", _section->sectname());
+            _cache->diagnostics().error("index out of range in section %s", _section->sectname());
             return 0;
         }
         return (pint_t)P::getP(_base[index]);
@@ -189,7 +189,7 @@ public:
 
     void setVMAddress(pint_t index, pint_t value) {
         if ( index >= _count ) {
-            _cache->diagnostics().error("index out of range in section (%s)", _section->sectname());
+            _cache->diagnostics().error("index out of range in section %s", _section->sectname());
             return;
         }
         P::setP(_base[index], value);
@@ -234,7 +234,7 @@ public:
 
     T& get(uint64_t index) const { 
         if (index >= _count) {
-            _cache->diagnostics().error("index out of range in section (%s)", _section->sectname());
+            _cache->diagnostics().error("index out of range in section %s", _section->sectname());
         }
         return _base[index];
     }
@@ -273,10 +273,9 @@ public:
         return (pint_t)element->second;
     }
 
-    void visitCoalescedStrings(const CacheBuilder::CacheCoalescedText& coalescedText) {
-        const CacheBuilder::CacheCoalescedText::StringSection& methodNames = coalescedText.getSectionData("__objc_methname");
-        for (const auto& stringAndOffset : methodNames.stringsToOffsets) {
-            uint64_t vmAddr = methodNames.bufferVMAddr + stringAndOffset.second;
+    void visitCoalescedStrings(const CacheBuilder::CoalescedStringsSection& coalescedMethodNames) {
+        for (const auto& stringAndOffset : coalescedMethodNames.stringsToOffsets) {
+            uint64_t vmAddr = coalescedMethodNames.bufferVMAddr + stringAndOffset.second;
             _selectorStrings[stringAndOffset.first.data()] = vmAddr;
         }
     }
@@ -308,10 +307,9 @@ public:
 
     ClassListBuilder(const std::unordered_map<const macho_header<P>*, uint16_t>& dylibIndices) : _dylibIndices(dylibIndices) { }
 
-    void visitCoalescedStrings(const CacheBuilder::CacheCoalescedText& coalescedText) {
-        const CacheBuilder::CacheCoalescedText::StringSection& classNames = coalescedText.getSectionData("__objc_classname");
-        for (const auto& stringAndOffset : classNames.stringsToOffsets) {
-            uint64_t vmAddr = classNames.bufferVMAddr + stringAndOffset.second;
+    void visitCoalescedStrings(const CacheBuilder::CoalescedStringsSection& coalescedClassNames) {
+        for (const auto& stringAndOffset : coalescedClassNames.stringsToOffsets) {
+            uint64_t vmAddr = coalescedClassNames.bufferVMAddr + stringAndOffset.second;
             _uniquedClassNames[stringAndOffset.first.data()] = vmAddr;
         }
     }
@@ -466,7 +464,7 @@ struct objc_opt_imp_caches_pointerlist_tt {
     T inlinedSelectorsVMAddrEnd;
 };
 
-template <typename P>
+template <typename P, typename H>
 class IMPCachesEmitter
 {
     typedef typename P::uint_t pint_t;
@@ -489,30 +487,11 @@ private:
     std::map<std::string_view, const macho_header<P>*> _dylibs;
     const std::vector<const IMPCaches::Selector*> inlinedSelectors;
 
-    struct ImpCacheHeader {
-        int32_t  fallback_class_offset;
-        uint32_t cache_shift :  5;
-        uint32_t cache_mask  : 11;
-        uint32_t occupied    : 14;
-        uint32_t has_inlines :  1;
-        uint32_t bit_one     :  1;
-    };
-
-    struct ImpCacheEntry_v1 {
-        uint32_t selOffset;
-        uint32_t impOffset;
-    };
-
-    struct ImpCacheEntry_v2 {
-        int64_t impOffset : 38;
-        uint64_t selOffset : 26;
-    };
-
 public:
 
     static size_t sizeForImpCacheWithCount(int entries) {
         static_assert(sizeof(ImpCacheEntry_v1) == sizeof(ImpCacheEntry_v2));
-        return sizeof(ImpCacheHeader) + entries * sizeof(ImpCacheEntry_v1);
+        return sizeof(H) + entries * sizeof(ImpCacheEntry_v1);
     }
 
     struct ImpCacheContents {
@@ -650,6 +629,7 @@ public:
             cachesFormatVersion(cachesVersion), objcASLRTracker(objcASLRTracker) {
             for (const SharedCacheBuilder::DylibInfo& d : dylibInfos) {
                 _dylibInfos[d.dylibID] = &d;
+                _dylibInfos[d.input->mappedFile.mh->installName()] = &d;
             }
             for (const macho_header<P>* d : dylibs) {
                 const dyld3::MachOAnalyzer* ma = (const dyld3::MachOAnalyzer*) d;
@@ -684,7 +664,7 @@ public:
         const char* className = cls->getName(cache);
 
         if (cls->getVTable(cache) != 0) {
-            diag.error("Class (%s) has non-zero vtable\n", className);
+            diag.error("Class '%s' has non-zero vtable\n", className);
             return;
         }
 
@@ -717,20 +697,12 @@ public:
             printf("Writing cache for %sclass %s (%#08llx)\n", cls->isMetaClass(cache) ? "meta" : "", className, clsVMAddr);
         }
 
-        struct ImpCacheHeader {
-            int32_t  fallback_class_offset;
-            uint32_t cache_shift :  5;
-            uint32_t cache_mask  : 11;
-            uint32_t occupied    : 14;
-            uint32_t has_inlines :  1;
-            uint32_t bit_one     :  1;
-        };
         pint_t* vtableAddr = cls->getVTableAddress();
 
         // the alignment of ImpCaches to 16 bytes is only needed for arm64_32.
-        ImpCacheHeader* cachePtr = (ImpCacheHeader*)align_buffer(readOnlyBuffer, sizeof(pint_t) == 4 ? 4 : 3);
+        H* cachePtr = (H*)align_buffer(readOnlyBuffer, sizeof(pint_t) == 4 ? 4 : 3);
 
-        assert(readOnlyBufferSize > sizeof(ImpCacheHeader));
+        assert(readOnlyBufferSize > sizeof(H));
 
         uint64_t occupied = impCache.occupied();
         int64_t fallback_class_offset = *(cls->getSuperClassAddress()) - clsVMAddr;
@@ -756,25 +728,27 @@ public:
             fallback_class_offset = superclassVMAddr - clsVMAddr;
         }
 
-        assert((int32_t)fallback_class_offset == fallback_class_offset);
         assert((uint32_t)occupied == occupied);
-
-        *cachePtr = (ImpCacheHeader){
-            .fallback_class_offset = (int32_t)fallback_class_offset,
-            .cache_shift = (uint32_t)(data->shift + 7),
-            .cache_mask = (uint32_t)data->mask(),
-            .occupied = (uint32_t)occupied,
-            .has_inlines = impCache.hasInlines,
-            .bit_one = 1, // obj-c plays HORRENDOUS games here
-        };
+        if ( cachesFormatVersion < 3 ) {
+            assert((int32_t)fallback_class_offset == fallback_class_offset);
+            cachePtr->fallback_class_offset = (int32_t)fallback_class_offset;
+        } else {
+            assert(sizeof(cachePtr->fallback_class_offset) == sizeof(fallback_class_offset));
+            cachePtr->fallback_class_offset = fallback_class_offset;
+        }
+        cachePtr->cache_shift = (uint32_t)(data->shift + 7);
+        cachePtr->cache_mask = (uint32_t)data->mask();
+        cachePtr->occupied = (uint32_t)occupied;
+        cachePtr->has_inlines = impCache.hasInlines;
+        cachePtr->bit_one = 1; // obj-c plays HORRENDOUS games here
 
         // is this right?
         int64_t vmaddr = cache->vmAddrForContent(readOnlyBuffer);
         assert((pint_t)vmaddr == (uint64_t)vmaddr);
         *vtableAddr =  (pint_t)cache->vmAddrForContent(readOnlyBuffer);
         d->_aslrTracker->add(vtableAddr);
-        readOnlyBuffer += sizeof(ImpCacheHeader);
-        readOnlyBufferSize -= sizeof(ImpCacheHeader);
+        readOnlyBuffer += sizeof(H);
+        readOnlyBufferSize -= sizeof(H);
 
         impCache.write(cache, selectorStringVMAddr, clsVMAddr, readOnlyBuffer, readOnlyBufferSize, cachesFormatVersion, diag);
     }
@@ -823,10 +797,9 @@ public:
         : _protocolCount(0), _protocolReferenceCount(0), _diagnostics(diag), _dylibIndices(dylibIndices) {
     }
 
-    void visitCoalescedStrings(const CacheBuilder::CacheCoalescedText& coalescedText) {
-        const CacheBuilder::CacheCoalescedText::StringSection& classNames = coalescedText.getSectionData("__objc_classname");
-        for (const auto& stringAndOffset : classNames.stringsToOffsets) {
-            uint64_t vmAddr = classNames.bufferVMAddr + stringAndOffset.second;
+    void visitCoalescedStrings(const CacheBuilder::CoalescedStringsSection& coalescedClassNames) {
+        for (const auto& stringAndOffset : coalescedClassNames.stringsToOffsets) {
+            uint64_t vmAddr = coalescedClassNames.bufferVMAddr + stringAndOffset.second;
             _uniquedProtocolNames[stringAndOffset.first.data()] = vmAddr;
         }
     }
@@ -1059,7 +1032,7 @@ void addObjcSegments(Diagnostics& diag, DyldSharedCache* cache, const mach_heade
 #endif
 }
 
-template <typename P> static inline void emitIMPCaches(ContentAccessor& cacheAccessor,
+template <typename P, typename H> static inline void emitIMPCaches(ContentAccessor& cacheAccessor,
                                          std::vector<SharedCacheBuilder::DylibInfo> & allDylibs,
                                          std::vector<const macho_header<P>*> & sizeSortedDylibs,
                                          std::optional<uint64_t> relativeMethodListBaseAddress,
@@ -1085,8 +1058,8 @@ template <typename P> static inline void emitIMPCaches(ContentAccessor& cacheAcc
     timeRecorder.recordTime("compute IMP map");
     diag.verbose("[IMP caches] emitting IMP caches\n");
 
-    IMPCachesEmitter<P> impCachesEmitter(diag, classRecorder, selectorStringVMAddr, optROData, optRORemaining, optRWData, optRWRemaining, allDylibs, sizeSortedDylibs, objcASLRTracker, impCachesVersion);
-    ClassWalker<P, IMPCachesEmitter<P>> impEmitterClassWalker(impCachesEmitter, ClassWalkerMode::ClassAndMetaclasses);
+    IMPCachesEmitter<P, H> impCachesEmitter(diag, classRecorder, selectorStringVMAddr, optROData, optRORemaining, optRWData, optRWRemaining, allDylibs, sizeSortedDylibs, objcASLRTracker, impCachesVersion);
+    ClassWalker<P, IMPCachesEmitter<P, H>> impEmitterClassWalker(impCachesEmitter, ClassWalkerMode::ClassAndMetaclasses);
     for (const macho_header<P>* mh : sizeSortedDylibs) {
         impEmitterClassWalker.walk(&cacheAccessor, mh);
         if (diag.hasError())
@@ -1099,22 +1072,24 @@ template <typename P> static inline void emitIMPCaches(ContentAccessor& cacheAcc
 }
 
 template <typename P>
-void doOptimizeObjC(DyldSharedCache* cache, bool forProduction,
-                    CacheBuilder::LOH_Tracker& lohTracker, const CacheBuilder::CacheCoalescedText& coalescedText,
+void doOptimizeObjC(DyldSharedCache* cache, uint64_t cacheType,
+                    CacheBuilder::LOH_Tracker& lohTracker,
+                    const CacheBuilder::CoalescedStringsSection& coalescedMethodNames,
+                    const CacheBuilder::CoalescedStringsSection& coalescedClassNames,
                     const std::map<void*, std::string>& missingWeakImports, Diagnostics& diag,
                     uint8_t* objcReadOnlyBuffer, uint64_t objcReadOnlyBufferSizeUsed, uint64_t objcReadOnlyBufferSizeAllocated,
                     uint8_t* objcReadWriteBuffer, uint64_t objcReadWriteBufferSizeAllocated,
                     uint64_t objcRwFileOffset,
                     std::vector<SharedCacheBuilder::DylibInfo> & allDylibs,
                     const std::vector<const IMPCaches::Selector*> & inlinedSelectors,
-                    bool impCachesSuccess,
+                    bool impCachesSuccess, int impCachesVersion,
                     TimeRecorder& timeRecorder)
 {
     typedef typename P::E           E;
     typedef typename P::uint_t      pint_t;
 
     diag.verbose("Optimizing objc metadata:\n");
-    diag.verbose("  cache type is %s\n", forProduction ? "production" : "development");
+    diag.verbose("  cache type is %s\n", DyldSharedCache::getCacheTypeName(cacheType));
 
     ContentAccessor cacheAccessor(cache, diag);
 
@@ -1151,10 +1126,9 @@ void doOptimizeObjC(DyldSharedCache* cache, bool forProduction,
             // state which we can access at runtime.  We do have the PBLS state today in dyld4, but its not used with
             // JIT loaders.
             const dyld3::MachOAnalyzer* ma = (const dyld3::MachOAnalyzer*)mh;
-            auto vmAddrConverter = ma->makeVMAddrConverter(false);
             Diagnostics diags;
             __block bool hasSwiftProtocols = false;
-            ma->forEachSwiftProtocolConformance(diags, vmAddrConverter, true,
+            ma->forEachSwiftProtocolConformance(diags,
                                                 ^(uint64_t protocolConformanceRuntimeOffset,
                                                   const dyld3::MachOAnalyzer::SwiftProtocolConformance& protocolConformance,
                                                   bool& stopProtocolConformance) {
@@ -1356,7 +1330,7 @@ void doOptimizeObjC(DyldSharedCache* cache, bool forProduction,
     // Eventually we'll update them to offsets directly to the selector string, from the given base address
 
     SelectorOptimizer<P, ObjCSelectorUniquer<P> > selOptimizer(uniq);
-    selOptimizer.visitCoalescedStrings(coalescedText);
+    selOptimizer.visitCoalescedStrings(coalescedMethodNames);
     uint64_t relativeMethodListBaseAddress = 0;
     constexpr std::string_view magicSelector = "\xf0\x9f\xa4\xaf";
     if ( auto it = selOptimizer.strings().find(magicSelector.data()); it != selOptimizer.strings().end() ) {
@@ -1400,7 +1374,9 @@ void doOptimizeObjC(DyldSharedCache* cache, bool forProduction,
                                                                        missingWeakImports,
                                                                        sizeSortedDylibs);
 
-    if (forProduction) {
+    bool universalCustomer = (cacheType == kDyldSharedCacheTypeUniversal) && (cache->header.cacheSubType == kDyldSharedCacheTypeProduction);
+
+    if ( cacheType == kDyldSharedCacheTypeProduction || universalCustomer ) {
         // Shared cache does not currently support unbound weak references.
         // Here we assert that there are none. If support is added later then
         // this assertion needs to be removed and this path needs to be tested.
@@ -1419,7 +1395,7 @@ void doOptimizeObjC(DyldSharedCache* cache, bool forProduction,
     //
     // This is SAFE: the binaries themselves are unmodified.
     ClassListBuilder<P> classes(dylibIndices);
-    classes.visitCoalescedStrings(coalescedText);
+    classes.visitCoalescedStrings(coalescedClassNames);
     ClassWalker<P, ClassListBuilder<P>> classWalker(classes);
     for (const macho_header<P>* mh : sizeSortedDylibs) {
         classWalker.walk(&cacheAccessor, mh);
@@ -1459,7 +1435,7 @@ void doOptimizeObjC(DyldSharedCache* cache, bool forProduction,
     // This must be done AFTER updating method lists.
 
     ProtocolOptimizer<P> protocolOptimizer(diag, dylibIndices);
-    protocolOptimizer.visitCoalescedStrings(coalescedText);
+    protocolOptimizer.visitCoalescedStrings(coalescedClassNames);
     for (const macho_header<P>* mh : sizeSortedDylibs) {
         protocolOptimizer.addProtocols(&cacheAccessor, mh);
     }
@@ -1537,9 +1513,8 @@ void doOptimizeObjC(DyldSharedCache* cache, bool forProduction,
     //
     // Objc has a magic section of imp cache base pointers.  We need these to
     // offset everything else from
-    const CacheBuilder::CacheCoalescedText::StringSection& methodNames = coalescedText.getSectionData("__objc_methname");
-    uint64_t selectorStringVMAddr = methodNames.bufferVMAddr;
-    uint64_t selectorStringVMSize = methodNames.bufferSize;
+    uint64_t selectorStringVMAddr = coalescedMethodNames.bufferVMAddr;
+    uint64_t selectorStringVMSize = coalescedMethodNames.bufferSize;
     uint64_t impCachesVMSize = 0; // We'll calculate this later
 
     uint64_t optRODataRemainingBeforeImpCaches = optRORemaining;
@@ -1549,8 +1524,6 @@ void doOptimizeObjC(DyldSharedCache* cache, bool forProduction,
     uint8_t* inlinedSelectorsStart = optRWData;
     uint8_t* inlinedSelectorsEnd = optRWData;
     
-    int impCachesVersion = 1;
-
     uint64_t pointersVMAddr = 0;
     if (optImpCachesPointerSection) {
         if (optImpCachesPointerSection->size() < sizeof(objc_opt::objc_opt_pointerlist_tt<pint_t>)) {
@@ -1562,7 +1535,6 @@ void doOptimizeObjC(DyldSharedCache* cache, bool forProduction,
         bool found = ((dyld3::MachOAnalyzer*)libobjcMH)->findExportedSymbol(diag, "_objc_opt_preopt_caches_version", false, foundInfo, nullptr);
 
         if (found) {
-            impCachesVersion = *(int*)((uint8_t*)libobjcMH + foundInfo.value);
             found = ((dyld3::MachOAnalyzer*)libobjcMH)->findExportedSymbol(diag, "_objc_opt_offsets", false, foundInfo, nullptr);
             if (!found) {
                 diag.error("libobjc's imp cache pointer list not found (metadata not optimized)");
@@ -1570,15 +1542,20 @@ void doOptimizeObjC(DyldSharedCache* cache, bool forProduction,
             }
             pointersVMAddr = ((dyld3::MachOAnalyzer*)libobjcMH)->preferredLoadAddress() + foundInfo.value;
         } else {
-            impCachesVersion = 1;
             pointersVMAddr = optImpCachesPointerSection->addr();
         }
     }
 
     if (impCachesSuccess) {
-        emitIMPCaches<P>(cacheAccessor, allDylibs, sizeSortedDylibs, relativeMethodListBaseAddress,
-                         selectorStringVMAddr, optROData, optRORemaining, optRWData, optRWRemaining,
-                         *objcASLRTracker, inlinedSelectors, inlinedSelectorsStart, inlinedSelectorsEnd, impCachesVersion, diag, timeRecorder);
+        if ( impCachesVersion < 3 ) {
+            emitIMPCaches<P, ImpCacheHeader_v1>(cacheAccessor, allDylibs, sizeSortedDylibs, relativeMethodListBaseAddress,
+                             selectorStringVMAddr, optROData, optRORemaining, optRWData, optRWRemaining,
+                             *objcASLRTracker, inlinedSelectors, inlinedSelectorsStart, inlinedSelectorsEnd, impCachesVersion, diag, timeRecorder);
+        } else {
+            emitIMPCaches<P, ImpCacheHeader_v2>(cacheAccessor, allDylibs, sizeSortedDylibs, relativeMethodListBaseAddress,
+                             selectorStringVMAddr, optROData, optRORemaining, optRWData, optRWRemaining,
+                             *objcASLRTracker, inlinedSelectors, inlinedSelectorsStart, inlinedSelectorsEnd, impCachesVersion, diag, timeRecorder);
+        }
     }
 
     uint8_t* alignedROData = alignPointer(optROData);
@@ -1607,7 +1584,7 @@ void doOptimizeObjC(DyldSharedCache* cache, bool forProduction,
 
     // Collect flags.
     uint32_t headerFlags = 0;
-    if (forProduction) {
+    if ( cacheType == kDyldSharedCacheTypeProduction || universalCustomer ) {
         headerFlags |= objc_opt::IsProduction;
     }
     if (noMissingWeakSuperclasses) {
@@ -1772,12 +1749,16 @@ void doOptimizeObjC(DyldSharedCache* cache, bool forProduction,
 
 } // anon namespace
 
-size_t IMPCaches::sizeForImpCacheWithCount(int count) {
+size_t IMPCaches::sizeForImpCacheWithCount(int count, int impCachesVersion) {
     // The architecture should not be relevant here as it's all offsets and fixed int sizes.
     // It was just the most logical place to host this function in.
 
-    size_t size64 = IMPCachesEmitter<Pointer64<LittleEndian>>::sizeForImpCacheWithCount(count);
-    size_t size32 = IMPCachesEmitter<Pointer32<LittleEndian>>::sizeForImpCacheWithCount(count);
+    size_t size64 = IMPCachesEmitter<Pointer64<LittleEndian>, ImpCacheHeader_v2>::sizeForImpCacheWithCount(count);
+    size_t size32 = IMPCachesEmitter<Pointer32<LittleEndian>, ImpCacheHeader_v2>::sizeForImpCacheWithCount(count);
+    if (impCachesVersion < 3) {
+        size64 = IMPCachesEmitter<Pointer64<LittleEndian>, ImpCacheHeader_v1>::sizeForImpCacheWithCount(count);
+        size32 = IMPCachesEmitter<Pointer32<LittleEndian>, ImpCacheHeader_v1>::sizeForImpCacheWithCount(count);
+    }
     assert(size64 == size32);
 
     return size64;
@@ -1790,26 +1771,32 @@ void SharedCacheBuilder::optimizeObjC(bool impCachesSuccess, const std::vector<c
     // Mike suggests all relative method lists are offsets from the magic selector
     if ( _archLayout->is64 )
         doOptimizeObjC<Pointer64<LittleEndian>>(cache,
-            _options.optimizeStubs,
+            _options.cacheConfiguration,
             _lohTracker,
-            _coalescedText,
+            _objcCoalescedMethodNames,
+            _objcCoalescedClassNames,
             _missingWeakImports, _diagnostics,
             _objcReadOnlyBuffer,
             _objcReadOnlyBufferSizeUsed,
             _objcReadOnlyBufferSizeAllocated,
             _objcReadWriteBuffer, _objcReadWriteBufferSizeAllocated,
-            _objcReadWriteFileOffset, _sortedDylibs, inlinedSelectors, impCachesSuccess, _timeRecorder);
+            _objcReadWriteFileOffset, _sortedDylibs, inlinedSelectors,
+            impCachesSuccess, _impCachesBuilder->impCachesVersion,
+            _timeRecorder);
     else
         doOptimizeObjC<Pointer32<LittleEndian>>(cache,
-            _options.optimizeStubs,
+            _options.cacheConfiguration,
             _lohTracker,
-            _coalescedText,
+            _objcCoalescedMethodNames,
+            _objcCoalescedClassNames,
             _missingWeakImports, _diagnostics,
             _objcReadOnlyBuffer,
             _objcReadOnlyBufferSizeUsed,
             _objcReadOnlyBufferSizeAllocated,
             _objcReadWriteBuffer, _objcReadWriteBufferSizeAllocated,
-            _objcReadWriteFileOffset, _sortedDylibs, inlinedSelectors, impCachesSuccess, _timeRecorder);
+            _objcReadWriteFileOffset, _sortedDylibs, inlinedSelectors,
+            impCachesSuccess, _impCachesBuilder->impCachesVersion,
+            _timeRecorder);
 }
 
 static uint32_t hashTableSize(uint32_t maxElements, uint32_t perElementData)

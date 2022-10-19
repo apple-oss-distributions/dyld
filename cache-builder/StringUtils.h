@@ -25,6 +25,7 @@
 #ifndef StringUtils_h
 #define StringUtils_h
 
+#include <algorithm>
 #include <string>
 
 inline bool startsWith(const std::string& str, const std::string& prefix)
@@ -43,6 +44,12 @@ inline bool startsWith(const char* str, const char* prefix)
 }
 
 inline bool endsWith(const std::string& str, const std::string& suffix)
+{
+    std::size_t index = str.find(suffix, str.size() - suffix.size());
+    return (index != std::string::npos);
+}
+
+inline bool endsWith(const std::string_view& str, const std::string_view& suffix)
 {
     std::size_t index = str.find(suffix, str.size() - suffix.size());
     return (index != std::string::npos);

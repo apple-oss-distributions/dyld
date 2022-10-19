@@ -1,6 +1,6 @@
 
 
-// BUILD:  $CC foo.c -DRUN_DIR="$RUN_DIR" -dynamiclib -o $BUILD_DIR/libfoo.dylib -install_name $RUN_DIR/libfoo.dylib
+// BUILD:  $CC foo.c -DRUN_DIR="$RUN_DIR" -dynamiclib -ltest_support -o $BUILD_DIR/libfoo.dylib -install_name $RUN_DIR/libfoo.dylib
 // BUILD:  $CC main.c -DRUN_DIR="$RUN_DIR" -o $BUILD_DIR/dlclose-in-init.exe
 
 // RUN:  ./dlclose-in-init.exe

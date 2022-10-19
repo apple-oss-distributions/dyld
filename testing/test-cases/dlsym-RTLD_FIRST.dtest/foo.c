@@ -1,3 +1,3 @@
 
 // alternate implemenation
-void free(void*) { }
+void free(void* ptr) { }

@@ -28,13 +28,12 @@
 #include <stdint.h>
 #include <stdarg.h>
 
-#if BUILDING_CACHE_BUILDER
+#if BUILDING_CACHE_BUILDER || BUILDING_UNIT_TESTS || BUILDING_CACHE_BUILDER_UNIT_TESTS
 #include <set>
 #include <string>
 #include <vector>
 #include <dispatch/dispatch.h>
 #endif
-#include <sys/syslimits.h>
 
 #include "Defines.h"
 
@@ -46,11 +45,9 @@ public:
                     ~Diagnostics();
 
     void            error(const char* format, ...)  __attribute__((format(printf, 2, 3)));
-#if __x86_64__
-    void            error(const char* format, va_list list);
-#endif
+    void            error(const char* format, va_list list) __attribute__((format(printf, 2, 0)));
     void            appendError(const char* format, ...)  __attribute__((format(printf, 2, 3)));
-#if BUILDING_CACHE_BUILDER
+#if BUILDING_CACHE_BUILDER || BUILDING_UNIT_TESTS || BUILDING_CACHE_BUILDER_UNIT_TESTS
                     Diagnostics(const std::string& prefix, bool verbose=false);
 
     void            warning(const char* format, ...)  __attribute__((format(printf, 2, 3)));
@@ -64,34 +61,28 @@ public:
     void            assertNoError() const;
     bool            errorMessageContains(const char* subString) const;
 
-    static void    quotePath(const char* path, char newPath[PATH_MAX]);
-
-#if !BUILDING_CACHE_BUILDER
-    const char*                     errorMessage() const;
-    const char*                     errorMessageCStr() const { return errorMessage(); }
-#else
+#if BUILDING_CACHE_BUILDER || BUILDING_UNIT_TESTS || BUILDING_CACHE_BUILDER_UNIT_TESTS
     const std::string               prefix() const;
     std::string                     errorMessage() const;
     const char*                     errorMessageCStr() const;
     const std::set<std::string>     warnings() const;
     void                            clearWarnings();
+#else
+    const char*                     errorMessage() const;
+    const char*                     errorMessageCStr() const { return errorMessage(); }
 #endif
 
 private:
 
-#if !__x86_64__
-    void            errorVA(const char* format, va_list list);
-#endif
-
     void*                    _buffer = nullptr;
-#if BUILDING_CACHE_BUILDER
+#if BUILDING_CACHE_BUILDER || BUILDING_UNIT_TESTS || BUILDING_CACHE_BUILDER_UNIT_TESTS
     std::string              _prefix;
     std::set<std::string>    _warnings;
     bool                     _verbose = false;
 #endif
 };
 
-#if BUILDING_CACHE_BUILDER
+#if BUILDING_CACHE_BUILDER || BUILDING_UNIT_TESTS || BUILDING_CACHE_BUILDER_UNIT_TESTS
 
 class VIS_HIDDEN TimeRecorder
 {
@@ -105,7 +96,7 @@ public:
     void pushTimedSection();
 
     // Records the time taken since the last pushTimedSection() / recordTime() at the current level
-    void recordTime(const char* format, ...);
+    void recordTime(const char* format, ...)  __attribute__((format(printf, 2, 3)));
 
     // Stop the current timed section and pop back one level.
     void popTimedSection();

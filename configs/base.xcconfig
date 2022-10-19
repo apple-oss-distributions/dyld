@@ -4,8 +4,8 @@
 
 // language versions
 CLANG_CXX_LIBRARY = libc++
-GCC_C_LANGUAGE_STANDARD = c11
-CLANG_CXX_LANGUAGE_STANDARD = c++17
+GCC_C_LANGUAGE_STANDARD = c2x
+CLANG_CXX_LANGUAGE_STANDARD = c++20
 
 // clang warnings
 CLANG_WARN_EMPTY_BODY = YES
@@ -18,7 +18,7 @@ GCC_WARN_FOUR_CHARACTER_CONSTANTS = NO
 GCC_WARN_ABOUT_MISSING_PROTOTYPES = YES
 GCC_WARN_UNINITIALIZED_AUTOS = YES
 ENABLE_ATP_WERROR_9999099099000000 = -Werror // Hack to enable -Werror in ATP
-WARNING_CFLAGS = $(ENABLE_ATP_WERROR_$(RC_ProjectCanonicalSourceVersion)) -Wmost -Wimplicit-fallthrough -Wno-unknown-pragmas
+WARNING_CFLAGS = $(ENABLE_ATP_WERROR_$(RC_ProjectCanonicalSourceVersion)) -Wmost -Wimplicit-fallthrough -Wno-unknown-pragmas -Wno-assume -Wformat-nonliteral -Wno-vla-extension -Wundef-prefix=SUPPORT_
 
 // clang optimization level
 GCC_OPTIMIZATION_LEVEL_Release = s

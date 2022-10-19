@@ -28,51 +28,71 @@
 #include "dyld_cache_format.h"
 #include "ProcessAtlas.h"
 #include "MachOLoaded.h"
+#include "DyldProcessConfig.h"
+#include "DyldAPIs.h"
+#include "FileManager.h"
+
+using dyld4::gDyld;
 
 #define NO_ULEB
 #include "FileAbstraction.hpp"
 #include "MachOFileAbstraction.hpp"
 
-using namespace dyld3;
-using namespace dyld4;
+using lsl::Allocator;
+using lsl::UniquePtr;
+using dyld4::FileManager;
+using dyld4::EphemeralAllocator;
+using dyld4::Atlas::SharedCache;
+using dyld4::Atlas::Image;
+using dyld4::Atlas::ProcessSnapshot;
+#if BUILDING_LIBDYLD
+using dyld4::Atlas::Process;
+#endif
+
+
+static
+FileManager& defaultFileManager() {
+#if BUILDING_DYLD
+    return gDyld.apis->fileManager;
+#else
+    static FileManager* sFileManager = nullptr;
+    static dispatch_once_t onceToken;
+    dispatch_once(&onceToken, ^{
+        sFileManager = Allocator::defaultAllocator().makeUnique<FileManager>(Allocator::defaultAllocator(), nullptr).release();
+    });
+    return *sFileManager;
+#endif /* BUILDING_DYLD */
+}
 
 // This file is essentially glue to bind the public API/SPI to the internal object representations.
 // No significant implementation code should be present in this file
 
+#if BUILDING_LIBDYLD
+
 #pragma mark -
 #pragma mark Process
 
-#if BUILDING_LIBDYLD || BUILDING_LIBDYLD_INTROSPECTION || BUILDING_UNIT_TESTS
-
 dyld_process_t dyld_process_create_for_task(task_t task, kern_return_t *kr) {
-    return (dyld_process_t)dyld4::Atlas::Process::createForTask(task, kr).release();
+    return (dyld_process_t)Allocator::defaultAllocator().makeUnique<Process>(Allocator::defaultAllocator(), defaultFileManager(), task, kr).release();
 }
 
 dyld_process_t dyld_process_create_for_current_task() {
     return dyld_process_create_for_task(mach_task_self(), nullptr);
 }
 
-dyld_shared_cache_t dyld_shared_cache_create(dyld_process_t process) {
-    kern_return_t kr = KERN_SUCCESS;
-    auto snapshot = ((dyld4::Atlas::Process*)process)->createSnapshot(&kr);
-    return (dyld_shared_cache_t)snapshot->sharedCache().release();
-}
-
-void dyld_shared_cache_dispose(dyld_shared_cache_t cache) {
-    UniquePtr<Atlas::SharedCache>((Atlas::SharedCache*)cache);
-}
-
 void dyld_process_dispose(dyld_process_t process) {
-    UniquePtr<Atlas::Process> temp((Atlas::Process*)process);
+    UniquePtr<Process> temp((Process*)process);
 }
 
-#if 0
-uint32_t dyld_process_register_for_image_notifications(dyld_process_t, kern_return_t *kr,
+uint32_t dyld_process_register_for_image_notifications(dyld_process_t process, kern_return_t *kr,
                                                        dispatch_queue_t queue, void (^block)(dyld_image_t image, bool load)) {
-    //TODO: Implementation
-    return 0;
+    kern_return_t krSink = KERN_SUCCESS;
+    if (kr == nullptr) {
+        kr = &krSink;
+    }
+    return ((dyld4::Atlas::Process*)process)->registerAtlasChangedEventHandler(kr, queue, (void (^)(dyld4::Atlas::Image*, bool))block);
 }
-#endif
+
 
 uint32_t dyld_process_register_for_event_notification(dyld_process_t process, kern_return_t *kr, uint32_t event,
                                                       dispatch_queue_t queue, void (^block)()) {
@@ -91,26 +111,46 @@ void dyld_process_unregister_for_notification(dyld_process_t process, uint32_t h
 #pragma mark Process Snaphsot
 
 dyld_process_snapshot_t dyld_process_snapshot_create_for_process(dyld_process_t process, kern_return_t *kr) {
-    return (dyld_process_snapshot_t)((dyld4::Atlas::Process*)process)->createSnapshot(kr).release();
+    return (dyld_process_snapshot_t)((Process*)process)->getSnapshot(kr).release();
 }
+
+dyld_process_snapshot_t dyld_process_snapshot_create_from_data(void* buffer, size_t size, void* reserved1, size_t reserved2) {
+    // Make sure no one uses the reserved parameters
+    assert(reserved1 == nullptr);
+    assert(reserved2 == 0);
+    EphemeralAllocator ephemeralAllocator;
+    auto bytes = std::span((std::byte*)buffer, size);
+    return (dyld_process_snapshot_t)Allocator::defaultAllocator()
+                                .makeUnique<ProcessSnapshot>(ephemeralAllocator, defaultFileManager(), false, bytes).release();
+}
+
 
 void dyld_process_snapshot_dispose(dyld_process_snapshot_t snapshot) {
-    UniquePtr<Atlas::ProcessSnapshot> temp((Atlas::ProcessSnapshot*)snapshot);
+    ProcessSnapshot* processSnapshot = (ProcessSnapshot*)snapshot;
+    if ( !processSnapshot->valid() )
+        return;
+    UniquePtr<ProcessSnapshot> temp(processSnapshot);
 }
 
-#if 0
 void dyld_process_snapshot_for_each_image(dyld_process_snapshot_t snapshot, void (^block)(dyld_image_t image)) {
-    ((dyld::Atlas::ProcessSnapshot*)snapshot)->forEachImage(^(dyld::Atlas::Image* image) {
+    ProcessSnapshot* processSnapshot = (ProcessSnapshot*)snapshot;
+    if ( !processSnapshot->valid() )
+        return;
+    processSnapshot->forEachImage(^(Image* image) {
         block((dyld_image_t)image);
     });
 }
-#endif
 
 dyld_shared_cache_t dyld_process_snapshot_get_shared_cache(dyld_process_snapshot_t snapshot) {
-    return (dyld_shared_cache_t)(((Atlas::ProcessSnapshot*)snapshot)->sharedCache().get());
+    ProcessSnapshot* processSnapshot = (ProcessSnapshot*)snapshot;
+    if ( !processSnapshot->valid() )
+        return nullptr;
+    return processSnapshot->sharedCache().withUnsafe([](auto cachePtr) {
+        return (dyld_shared_cache_t)cachePtr;
+    });
 }
 
-#endif /* BUILDING_LIBDYLD || BUILDING_LIBDYLD_INTROSPECTION */
+#endif /* BUILDING_LIBDYLD */
 
 #pragma mark -
 #pragma mark SharedCache
@@ -125,7 +165,7 @@ void dyld_shared_cache_unpin_mapping(dyld_shared_cache_t cache) {
 
 uint64_t dyld_shared_cache_get_base_address(dyld_shared_cache_t cache_atlas) {
     auto cache = (dyld4::Atlas::SharedCache*)cache_atlas;
-    return cache->baseAddress();
+    return cache->rebasedAddress();
 }
 
 uint64_t dyld_shared_cache_get_mapped_size(dyld_shared_cache_t cache_atlas) {
@@ -155,22 +195,27 @@ void dyld_shared_cache_for_each_image(dyld_shared_cache_t cache, void (^block)(d
 }
 
 void dyld_for_each_installed_shared_cache_with_system_path(const char* root_path, void (^block)(dyld_shared_cache_t atlas)) {
-    //FIXME: We should pass through root_path instead of "/", but this is a workaround for rdar://76615959
-    dyld4::Atlas::SharedCache::forEachInstalledCacheWithSystemPath("/", ^(dyld4::Atlas::SharedCache* cache){
+    EphemeralAllocator ephemeralAllocator;
+    dyld4::Atlas::SharedCache::forEachInstalledCacheWithSystemPath(ephemeralAllocator, defaultFileManager(), root_path, ^(dyld4::Atlas::SharedCache* cache){
         block((dyld_shared_cache_t)cache);
     });
 }
 
 void dyld_for_each_installed_shared_cache(void (^block)(dyld_shared_cache_t cache)) {
-    dyld4::Atlas::SharedCache::forEachInstalledCacheWithSystemPath("/", ^(dyld4::Atlas::SharedCache* cache){
+    EphemeralAllocator ephemeralAllocator;
+    dyld4::Atlas::SharedCache::forEachInstalledCacheWithSystemPath(ephemeralAllocator, defaultFileManager(), "/", ^(dyld4::Atlas::SharedCache* cache){
         block((dyld_shared_cache_t)cache);
     });
 }
 
-extern bool dyld_shared_cache_for_file(const char* filePath, void (^block)(dyld_shared_cache_t cache)) {
-    auto cache = dyld4::Atlas::SharedCache::createForFilePath(filePath);
+bool dyld_shared_cache_for_file(const char* filePath, void (^block)(dyld_shared_cache_t cache)) {
+    EphemeralAllocator ephemeralAllocator;
+    auto cacheFile = defaultFileManager().fileRecordForPath(filePath);
+    auto cache = SharedCache::createForFileRecord(ephemeralAllocator, std::move(cacheFile));
     if (cache) {
-        block((dyld_shared_cache_t)cache.get());
+        cache.withUnsafe([&](auto cachePtr) {
+            block((dyld_shared_cache_t)cachePtr);
+        });
         return true;
     }
     return false;
@@ -178,20 +223,22 @@ extern bool dyld_shared_cache_for_file(const char* filePath, void (^block)(dyld_
 
 bool dyld_image_content_for_segment(dyld_image_t image, const char* segmentName,
                                     void (^contentReader)(const void* content, uint64_t vmAddr, uint64_t vmSize)) {
-    return ((dyld4::Atlas::Image*)image)->contentForSegment(segmentName, contentReader);
+    return ((Image*)image)->contentForSegment(segmentName, contentReader);
 }
 
 bool dyld_image_content_for_section(dyld_image_t image, const char* segmentName, const char* sectionName,
                                     void (^contentReader)(const void* content, uint64_t vmAddr, uint64_t vmSize)) {
-    return ((dyld4::Atlas::Image*)image)->contentForSection(segmentName, sectionName, contentReader);
+    return ((Image*)image)->contentForSection(segmentName, sectionName, contentReader);
 }
 
 bool dyld_image_copy_uuid(dyld_image_t image, uuid_t* uuid) {
-    DRL::UUID imageUUID = ((dyld4::Atlas::Image*)image)->uuid();
+    using lsl::UUID;
+
+    UUID imageUUID = ((dyld4::Atlas::Image*)image)->uuid();
     if (imageUUID.empty()) {
         return false;
     }
-    std::copy(imageUUID.begin(), imageUUID.end(), (uint8_t*)&uuid[0]);
+    std::copy((uint8_t*)imageUUID.begin(), (uint8_t*)imageUUID.end(), (uint8_t*)&uuid[0]);
     return true;
 }
 
@@ -208,9 +255,9 @@ const char* dyld_image_get_installname(dyld_image_t image) {
     return ((dyld4::Atlas::Image*)image)->installname();
 }
 
-#if 0
+#if !BUILDING_CACHE_BUILDER
 const char* dyld_image_get_file_path(dyld_image_t image) {
-    return ((dyld4::Atlas::Image*)image)->filename();
+    return ((Image*)image)->filename();
 }
 #endif
 
@@ -261,9 +308,9 @@ bool dyld_image_local_nlist_content_4Symbolication(dyld_image_t image,
                                                    void (^contentReader)(const void* nListStart, uint64_t nListCount,
                                                                          const char* stringTable))
 {
-    dyld4::Atlas::Image* atlasImage = (dyld4::Atlas::Image*)image;
-    const dyld4::Atlas::SharedCache* sharedCache = atlasImage->sharedCache();
-    if ( sharedCache == nullptr )
+    Image* atlasImage = (dyld4::Atlas::Image*)image;
+    const SharedCache* sharedCache = atlasImage->sharedCache();
+    if ( !sharedCache )
         return false;
 
     if ( auto localsFileData = sharedCache->localSymbols() ) {
@@ -291,3 +338,4 @@ bool dyld_image_local_nlist_content_4Symbolication(dyld_image_t image,
     }
     return true;
 }
+

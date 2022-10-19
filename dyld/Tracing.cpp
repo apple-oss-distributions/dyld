@@ -26,6 +26,7 @@
 #include <kern/kcdata.h>
 #include <mach-o/dyld_priv.h>
 #include <mach-o/dyld_images.h>
+#include <sys/fsgetpath.h>
 
 #include "Tracing.h"
 #include "DyldRuntimeState.h"
@@ -36,6 +37,8 @@ extern "C" int
 os_fault_with_payload(uint32_t reason_namespace, uint64_t reason_code,
                       void *payload, uint32_t payload_size, const char *reason_string,
                       uint64_t reason_flags) __attribute__((cold));
+
+extern const dyld3::MachOAnalyzer __dso_handle;
 
 namespace dyld3 {
 
@@ -79,11 +82,30 @@ void kdebug_trace_dyld_image(const uint32_t code,
     kdebug_trace_dyld_region(code, load_addr->cputype, load_addr->cpusubtype, imagePath, uuid_bytes, fsobjid, fsid, (const void*)load_addr);
 }
 
-void kdebug_trace_dyld_cache(const char* path, dyld_all_image_infos* infos)
+void kdebug_trace_dyld_cache(uint64_t rawFSObjID, uint64_t rawFSID, uint64_t sharedCacheBaseAddress,
+                             const uint8_t sharedCacheUUID[16])
 {
-    const fsid_t*     fsid    = (fsid_t*)&infos->sharedCacheFSID;
-    const fsobj_id_t* fsobjid = (fsobj_id_t*)&infos->sharedCacheFSObjID;
-    kdebug_trace_dyld_region(DBG_DYLD_UUID_SHARED_CACHE_A, 0, 0, path, (const uuid_t*)&infos->sharedCacheUUID[0], *fsobjid, *fsid, (const void*)infos->sharedCacheBaseAddress);
+#if BUILDING_DYLD
+    if ( !dyld3::kdebug_trace_dyld_enabled(KDBG_CODE(DBG_DYLD, DBG_DYLD_UUID, DBG_DYLD_UUID_SHARED_CACHE_A)) )
+        return;
+
+    // Don't send the event if dyld is in the cache.  In this case, we already sent the event when we transitioned to dyld in the cache
+    if ( __dso_handle.inDyldCache() )
+        return;
+
+    fsid_t*     fsid    = (fsid_t*)&rawFSID;
+    fsobj_id_t* fsobjid = (fsobj_id_t*)&rawFSObjID;
+
+    char pathBuffer[PATH_MAX] = { 0 };
+    // TODO: Add the shared cache path to the dynamic config region so that we don't need this call
+    if ( fsgetpath(pathBuffer, PATH_MAX, fsid, rawFSObjID) == -1 ) {
+        // Failed, likely due to the sandbox.  Zero the buffer for now.
+        pathBuffer[0] = 0;
+    }
+
+    kdebug_trace_dyld_region(DBG_DYLD_UUID_SHARED_CACHE_A, 0, 0, pathBuffer, (const uuid_t*)&sharedCacheUUID[0],
+                             *fsobjid, *fsid, (const void*)sharedCacheBaseAddress);
+#endif // BUILDING_DYLD
 }
 
 // FIXME

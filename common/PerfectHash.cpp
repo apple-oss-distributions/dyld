@@ -42,8 +42,10 @@ Source is http://burtleburtle.net/bob/c/perfect.c
 
 #include "PerfectHash.h"
 
-#if BUILDING_CACHE_BUILDER || BUILDING_UNIT_TESTS
+#if BUILDING_CACHE_BUILDER || BUILDING_UNIT_TESTS || BUILDING_CACHE_BUILDER_UNIT_TESTS
 #include <dispatch/dispatch.h>
+#include <string>
+#include <vector>
 #endif
 
 namespace objc {
@@ -371,7 +373,7 @@ static void initnorm(dyld3::OverflowSafeArray<key>& keys, ub4 alen, ub4 blen, ub
 // gencode  *final;                          /* output, code for the final hash */
 {
   ub4 loga = log2u(alen);                            /* log based 2 of blen */
-#if BUILDING_CACHE_BUILDER || BUILDING_UNIT_TESTS
+#if BUILDING_CACHE_BUILDER || BUILDING_UNIT_TESTS || BUILDING_CACHE_BUILDER_UNIT_TESTS
   dispatch_apply(keys.count(), DISPATCH_APPLY_AUTO, ^(size_t index) {
     ub4 i = (ub4)index;
     key *mykey = &keys[i];
@@ -782,20 +784,20 @@ void objc::PerfectHash::make_perfect(dyld3::OverflowSafeArray<key>& keys, Perfec
     }
 }
 
-#if BUILDING_CACHE_BUILDER || BUILDING_UNIT_TESTS
+#if BUILDING_CACHE_BUILDER || BUILDING_UNIT_TESTS || BUILDING_CACHE_BUILDER_UNIT_TESTS
 
-void PerfectHash::make_perfect(const string_map& strings, objc::PerfectHash& phash)
+void PerfectHash::make_perfect(const std::vector<ObjCString>& strings, objc::PerfectHash& phash)
 {
     dyld3::OverflowSafeArray<key> keys;
 
     /* read in the list of keywords */
     keys.reserve(strings.size());
-    size_t i;
-    string_map::const_iterator s;
-    for (i = 0, s = strings.begin(); s != strings.end(); ++s, ++i) {
+
+    for ( const ObjCString& stringAndOffset: strings ) {
+        const std::string_view& str = stringAndOffset.first;
         key mykey;
-        mykey.name1_k = (ub1 *)s->first;
-        mykey.len1_k  = (ub4)strlen(s->first);
+        mykey.name1_k = (ub1 *)str.data();
+        mykey.len1_k  = (ub4)str.size();
         mykey.name2_k = (ub1 *)nullptr;
         mykey.len2_k  = (ub4)0;
         keys.push_back(mykey);
@@ -814,7 +816,7 @@ void PerfectHash::make_perfect(const dyld3::OverflowSafeArray<const char*>& stri
     keys.reserve(strings.count());
     for (const char* s : strings) {
         key mykey;
-#if BUILDING_CACHE_BUILDER || BUILDING_UNIT_TESTS
+#if BUILDING_CACHE_BUILDER || BUILDING_UNIT_TESTS || BUILDING_CACHE_BUILDER_UNIT_TESTS
         mykey.name1_k = (ub1 *)s;
         mykey.len1_k  = (ub4)strlen(s);
         mykey.name2_k = (ub1 *)nullptr;

@@ -28,7 +28,12 @@
 #include "Map.h"
 #include "DyldSharedCache.h"
 #include "PrebuiltLoader.h"
+#include "Types.h"
 #include <optional>
+
+#if BUILDING_CACHE_BUILDER || BUILDING_CLOSURE_UTIL
+#include <unordered_set>
+#endif
 
 struct SelectorFixup;
 
@@ -198,7 +203,9 @@ public:
     // Get a string if it has an entry in the table
     const char* getString(const char* selName, RuntimeState&) const;
 
-    void write(const objc::PerfectHash& phash, const Array<std::pair<const char*, PrebuiltLoader::BindTarget>>& strings);
+    typedef dyld3::CStringMapTo<PrebuiltLoader::BindTarget>::NodeT StringToTargetMapNodeT;
+
+    void write(const objc::PerfectHash& phash, const Array<StringToTargetMapNodeT>& strings);
 };
 
 class VIS_HIDDEN ObjCSelectorOpt : public ObjCStringTable {
@@ -264,7 +271,7 @@ public:
 
     bool hasDuplicates() const { return duplicateCount() != 0; }
 
-    void write(const objc::PerfectHash& phash, const Array<std::pair<const char*, PrebuiltLoader::BindTarget>>& strings,
+    void write(const objc::PerfectHash& phash, const Array<StringToTargetMapNodeT>& strings,
                const dyld3::CStringMultiMapTo<PrebuiltLoader::BindTarget>& classes,
                uint32_t numClassesWithDuplicates, uint32_t totalDuplicates);
 };
@@ -272,52 +279,80 @@ public:
 //
 // PrebuiltObjC computes read-only optimized data structures to store in the PrebuiltLoaderSet
 //
-struct PrebuiltObjC {
-
+struct PrebuiltObjC
+{
     typedef dyld3::CStringMapTo<Loader::BindTarget>                               SelectorMapTy;
-    typedef std::pair<const dyld3::MachOAnalyzer*, const Loader*>                 SharedCacheLoadedImage;
+    typedef std::pair<VMAddress, const Loader*>                                   SharedCacheLoadedImage;
     typedef dyld3::Map<uint16_t, SharedCacheLoadedImage, HashUInt16, EqualUInt16> SharedCacheImagesMapTy;
     typedef dyld3::CStringMapTo<Loader::BindTarget>                               DuplicateClassesMapTy;
+    typedef dyld3::CStringMultiMapTo<PrebuiltLoader::BindTarget>                  ClassMapTy;
+    typedef dyld3::CStringMultiMapTo<PrebuiltLoader::BindTarget>                  ProtocolMapTy;
 
     struct ObjCOptimizerImage {
 
         ObjCOptimizerImage(const JustInTimeLoader* jitLoader, uint64_t loadAddress, uint32_t pointerSize);
 
-        ~ObjCOptimizerImage() {
-        }
+        ~ObjCOptimizerImage() = default;
+        ObjCOptimizerImage(ObjCOptimizerImage&&) = default;
+        ObjCOptimizerImage& operator=(ObjCOptimizerImage&&) = default;
+
+        ObjCOptimizerImage(const ObjCOptimizerImage&) = delete;
+        ObjCOptimizerImage& operator=(const ObjCOptimizerImage&) = delete;
 
         void visitReferenceToObjCSelector(const objc::SelectorHashTable* objcSelOpt,
                                           const SelectorMapTy& appSelectorMap,
-                                          uint64_t selectorStringVMAddr, uint64_t selectorReferenceVMAddr,
+                                          VMOffset selectorStringVMAddr, VMOffset selectorReferenceVMAddr,
                                           const char* selectorString);
 
-        void visitClass(const void* dyldCacheBase,
+        void visitClass(const VMAddress dyldCacheBaseAddress,
                         const objc::ClassHashTable* objcClassOpt,
                         const SharedCacheImagesMapTy& sharedCacheImagesMap,
                         const DuplicateClassesMapTy& duplicateSharedCacheClasses,
-                        uint64_t classVMAddr, uint64_t classNameVMAddr, const char* className);
+                        InputDylibVMAddress classVMAddr, InputDylibVMAddress classNameVMAddr, const char* className);
 
         void visitProtocol(const objc::ProtocolHashTable* objcProtocolOpt,
                            const SharedCacheImagesMapTy& sharedCacheImagesMap,
-                           uint64_t protocolVMAddr, uint64_t protocolNameVMAddr, const char* protocolName);
+                           InputDylibVMAddress protocolVMAddr, InputDylibVMAddress protocolNameVMAddr, const char* protocolName);
 
 #if BUILDING_CACHE_BUILDER || BUILDING_CLOSURE_UTIL
         void calculateMissingWeakImports(RuntimeState& state);
 #endif
 
         // Returns true if the given vm address is a pointer to null
-        bool isNull(uint64_t vmAddr, const dyld3::MachOAnalyzer* ma, intptr_t slide) const;
+        bool isNull(InputDylibVMAddress vmAddr, const void* address) const;
 
         // On object here is either a class or protocol, which both look the same to our optimisation
         struct ObjCObject {
             const char* name;
-            uint64_t    nameRuntimeOffset;
-            uint64_t    valueRuntimeOffset;
+            VMOffset    nameRuntimeOffset;
+            VMOffset    valueRuntimeOffset;
+        };
+
+        struct VMOffsetHash
+        {
+            static size_t hash(const VMOffset& value) {
+                return std::hash<uint64_t>{}(value.rawValue());
+            }
+            size_t operator()(const VMOffset& value) const
+            {
+                return hash(value);
+            }
+        };
+
+        struct VMOffsetEqual
+        {
+            static bool equal(const VMOffset& a, const VMOffset& b) {
+                return a.rawValue() == b.rawValue();
+            }
+            bool operator()(const VMOffset& a, const VMOffset& b) const
+            {
+                return equal(a, b);
+            }
         };
 
         const JustInTimeLoader*         jitLoader               = nullptr;
         uint32_t                        pointerSize             = 0;
-        uint64_t                        loadAddress;
+        InputDylibVMAddress             loadAddress;
         Diagnostics                     diag;
 
         // Class and protocol optimisation data structures
@@ -325,10 +360,26 @@ struct PrebuiltObjC {
         dyld3::OverflowSafeArray<ObjCObject>                                    protocolLocations;
         dyld3::OverflowSafeArray<bool>                                          protocolISAFixups;
         DuplicateClassesMapTy                                                   duplicateSharedCacheClassMap;
-        dyld3::Map<uint64_t, uint32_t, HashUInt64, EqualUInt64>                 protocolIndexMap;
+        dyld3::Map<VMOffset, uint32_t, VMOffsetHash, VMOffsetEqual>             protocolIndexMap;
 
 #if BUILDING_CACHE_BUILDER || BUILDING_CLOSURE_UTIL
-        dyld3::Map<uint64_t, bool, HashUInt64, EqualUInt64>                     missingWeakImportOffsets;
+        struct VMAddressHash
+        {
+            size_t operator()(const InputDylibVMAddress& value) const
+            {
+                return std::hash<uint64_t> {}(value.rawValue());
+            }
+        };
+
+        struct VMAddressEqual
+        {
+            bool operator()(const InputDylibVMAddress& a, const InputDylibVMAddress& b) const
+            {
+                return a.rawValue() == b.rawValue();
+            }
+        };
+
+        std::unordered_set<InputDylibVMAddress, VMAddressHash, VMAddressEqual>  missingWeakImports;
 #endif
 
         // Selector optimsation data structures
@@ -339,7 +390,7 @@ struct PrebuiltObjC {
     };
 
     PrebuiltObjC() = default;
-    ~PrebuiltObjC();
+    ~PrebuiltObjC() = default;
 
     void make(Diagnostics& diag, RuntimeState& state);
 
@@ -357,16 +408,19 @@ struct PrebuiltObjC {
     uint32_t serializeFixups(const Loader& jitLoader, BumpAllocator& allocator) const;
 
     static void forEachSelectorReferenceToUnique(RuntimeState& state,
-                                                 const dyld3::MachOAnalyzer* ma,
+                                                 const Loader* ldr,
                                                  uint64_t loadAddress,
                                                  const ObjCBinaryInfo& binaryInfo,
-                                                 const dyld3::MachOAnalyzer::VMAddrConverter& vmAddrConverter,
-                                                 void (^callback)(uint64_t selectorReferenceRuntimeOffset, uint64_t selectorStringRuntimeOffset));
+                                                 void (^callback)(uint64_t selectorReferenceRuntimeOffset,
+                                                                  uint64_t selectorStringRuntimeOffset,
+                                                                  const char* selectorString));
 
     // Intermediate data which doesn't get saved to the PrebuiltLoader(Set)
     dyld3::OverflowSafeArray<ObjCOptimizerImage>                            objcImages;
     dyld3::OverflowSafeArray<const char*>                                   closureSelectorStrings;
     SelectorMapTy                                                           closureSelectorMap;
+    ClassMapTy                                                              classMap                        = { nullptr };
+    ProtocolMapTy                                                           protocolMap                     = { nullptr };
     DuplicateClassesMapTy                                                   duplicateSharedCacheClassMap;
     ObjCStringTable*                                                        selectorStringTable             = nullptr;
     bool                                                                    builtObjC                       = false;
@@ -375,7 +429,7 @@ struct PrebuiltObjC {
     dyld3::OverflowSafeArray<uint8_t>               selectorsHashTable;
     dyld3::OverflowSafeArray<uint8_t>               classesHashTable;
     dyld3::OverflowSafeArray<uint8_t>               protocolsHashTable;
-    uint64_t                                        objcProtocolClassCacheOffset = 0;
+    VMOffset                                        objcProtocolClassCacheOffset;
 
     // Per-image info, which is saved to the PrebuiltLoader's
     struct ObjCImageFixups {

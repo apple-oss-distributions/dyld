@@ -49,20 +49,23 @@
 #include <iostream>
 #include <optional>
 
-//#include "ClosureBuilder.h"
 #include "DyldSharedCache.h"
 #include "JSONWriter.h"
 #include "Trie.hpp"
 #include "dsc_extractor.h"
 #include "dyld_introspection.h"
+#include "OptimizerObjC.h"
 #include "OptimizerSwift.h"
 
 #include "PrebuiltLoader.h"
 #include "DyldProcessConfig.h"
 #include "DyldRuntimeState.h"
+#include "Utils.h"
 
 #include "objc-shared-cache.h"
 #include "OptimizerObjC.h"
+
+#include "ObjCVisitor.h"
 
 using namespace dyld4;
 
@@ -72,30 +75,6 @@ using namespace dyld4;
 #define DSC_BUNDLE_REL_PATH "../lib/dsc_extractor.bundle"
 #endif
 
-// In newer shared caches, relative method list selectors are offsets from the magic selector in libobjc
-static uint64_t getSharedCacheRelativeSelectorBaseVMAddress(const DyldSharedCache* dyldCache, bool rebased)
-{
-    __block uint64_t sharedCacheRelativeSelectorBaseVMAddress = 0;
-    if ( dyldCache->header.mappingOffset >= __offsetof(dyld_cache_header, symbolFileUUID) ) {
-        constexpr std::string_view magicSelector = "\xf0\x9f\xa4\xaf";
-        dyld3::MachOAnalyzer::VMAddrConverter vmAddrConverter = dyldCache->makeVMAddrConverter(rebased);
-        dyldCache->forEachImage(^(const mach_header *mh, const char *installName) {
-            if ( !strcmp(installName, "/usr/lib/libobjc.A.dylib") ) {
-                const dyld3::MachOAnalyzer* ma = (const dyld3::MachOAnalyzer*)mh;
-                uintptr_t slide = ma->getSlide();
-                Diagnostics diag;
-                ma->forEachObjCSelectorReference(diag, vmAddrConverter,
-                                                 ^(uint64_t selRefVMAddr, uint64_t selRefTargetVMAddr, bool &stop) {
-                    const char* selString = (const char*)selRefTargetVMAddr + slide;
-                    if ( selString == magicSelector ) {
-                        sharedCacheRelativeSelectorBaseVMAddress = selRefTargetVMAddr;
-                    }
-                });
-            }
-        });
-    }
-    return sharedCacheRelativeSelectorBaseVMAddress;
-}
 
 enum Mode {
     modeNone,
@@ -104,24 +83,36 @@ enum Mode {
     modeDependencies,
     modeSlideInfo,
     modeVerboseSlideInfo,
+    modeFixupsInDylib,
     modeTextInfo,
     modeLinkEdit,
     modeLocalSymbols,
     modeJSONMap,
+    modeVerboseJSONMap,
     modeJSONDependents,
     modeSectionSizes,
     modeStrings,
     modeInfo,
+    modeStats,
     modeSize,
     modeObjCInfo,
     modeObjCProtocols,
     modeObjCImpCaches,
     modeObjCClasses,
+    modeObjCClassLayout,
+    modeObjCClassHashTable,
     modeObjCSelectors,
     modeSwiftProtocolConformances,
     modeExtract,
     modePatchTable,
-    modeListDylibsWithSection
+    modeListDylibsWithSection,
+    modeDuplicates,
+    modeDuplicatesSummary,
+    modeMachHeaders,
+    modeLoadCommands,
+    modeCacheHeader,
+    modeDylibSymbols,
+    modeFunctionStarts,
 };
 
 struct Options {
@@ -131,6 +122,7 @@ struct Options {
     const char*     segmentName;
     const char*     sectionName;
     const char*     rootPath            = nullptr;
+    const char*     fixupsInDylib;
     bool            printUUIDs;
     bool            printVMAddrs;
     bool            printDylibVersions;
@@ -158,20 +150,30 @@ struct SegmentInfo
     const char* segName;
 };
 
+static void sortSegmentInfo(std::vector<SegmentInfo>& segInfos)
+{
+    std::sort(segInfos.begin(), segInfos.end(), [](const SegmentInfo& l, const SegmentInfo& r) -> bool {
+        return l.vmAddr < r.vmAddr;
+    });
+}
+
+static void buildSegmentInfo(const dyld3::MachOAnalyzer* ma, std::vector<SegmentInfo>& segInfos)
+{
+    const char* installName = ma->installName();
+    ma->forEachSegment(^(const dyld3::MachOAnalyzer::SegmentInfo& info, bool& stop) {
+        // Note, we subtract 1 from the vmSize so that lower_bound doesn't include the end of the segment
+        // as being a match for a given address.
+        segInfos.push_back({info.vmAddr, info.vmSize - 1, installName, info.segName});
+    });
+}
+
 static void buildSegmentInfo(const DyldSharedCache* dyldCache, std::vector<SegmentInfo>& segInfos)
 {
     dyldCache->forEachImage(^(const mach_header* mh, const char* installName) {
         dyld3::MachOAnalyzer* ma = (dyld3::MachOAnalyzer*)mh;
-        ma->forEachSegment(^(const dyld3::MachOAnalyzer::SegmentInfo& info, bool& stop) {
-            // Note, we subtract 1 from the vmSize so that lower_bound doesn't include the end of the segment
-            // as being a match for a given address.
-            segInfos.push_back({info.vmAddr, info.vmSize - 1, installName, info.segName});
-        });
+        buildSegmentInfo(ma, segInfos);
     });
-
-    std::sort(segInfos.begin(), segInfos.end(), [](const SegmentInfo& l, const SegmentInfo& r) -> bool {
-        return l.vmAddr < r.vmAddr;
-    });
+    sortSegmentInfo(segInfos);
 }
 
 static void printSlideInfoForDataRegion(const DyldSharedCache* dyldCache, uint64_t dataStartAddress, uint64_t dataSize,
@@ -189,6 +191,20 @@ static void printSlideInfoForDataRegion(const DyldSharedCache* dyldCache, uint64
             for(int j=0; j < slideInfoHeader->entries_size; ++j)
                 printf("%02X", entry->bits[j]);
             printf("\n");
+            if ( verboseSlideInfo ) {
+                uint8_t* pageContent = (uint8_t*)(long)(dataPagesStart + (4096 * i));
+                for(int j=0; j < slideInfoHeader->entries_size; ++j) {
+                    uint8_t bitmask = entry->bits[j];
+                    for (unsigned k = 0; k != 8; ++k) {
+                        if ( bitmask & (1 << k) ) {
+                            uint32_t pageOffset = ((j * 8) + k) * 4;
+                            uint8_t* loc = pageContent + pageOffset;
+                            uint32_t rawValue = *((uint32_t*)loc);
+                            printf("         [% 5d + 0x%04llX]: 0x%016llX\n", i, (uint64_t)(pageOffset), (uint64_t)rawValue);
+                        }
+                    }
+                }
+            }
         }
     }
     else if ( slideInfoHeader->version == 2 ) {
@@ -369,8 +385,192 @@ static void printSlideInfoForDataRegion(const DyldSharedCache* dyldCache, uint64
     }
 }
 
+static void forEachSlidValue(const DyldSharedCache* dyldCache, uint64_t dataStartAddress, uint64_t dataSize,
+                             const uint8_t* dataPagesStart,
+                             const dyld_cache_slide_info* slideInfoHeader,
+                             void (^callback)(uint64_t fixupVMAddr, uint64_t targetVMAddr,
+                                              PointerMetaData PMD))
+{
+    if ( slideInfoHeader->version == 1 ) {
+        const dyld_cache_slide_info_entry* entries = (dyld_cache_slide_info_entry*)((char*)slideInfoHeader + slideInfoHeader->entries_offset);
+        const uint16_t* tocs = (uint16_t*)((char*)slideInfoHeader + slideInfoHeader->toc_offset);
+        for(int i=0; i < slideInfoHeader->toc_count; ++i) {
+            const dyld_cache_slide_info_entry* entry = &entries[tocs[i]];
+            uint8_t* pageContent = (uint8_t*)(long)(dataPagesStart + (4096 * i));
+            for(int j=0; j < slideInfoHeader->entries_size; ++j) {
+                uint8_t bitmask = entry->bits[j];
+                for (unsigned k = 0; k != 8; ++k) {
+                    if ( bitmask & (1 << k) ) {
+                        uint32_t pageOffset = ((j * 8) + k) * 4;
+                        uint8_t* loc = pageContent + pageOffset;
+                        uint32_t rawValue = *((uint32_t*)loc);
 
-static void findImageAndSegment(const DyldSharedCache* dyldCache, const std::vector<SegmentInfo>& segInfos, uint64_t cacheOffset, SegmentInfo* found)
+                        uint64_t offsetInDataRegion = loc - dataPagesStart;
+                        uint64_t fixupVMAddr = dataStartAddress + offsetInDataRegion;
+                        uint64_t targetVMAddr = rawValue;
+                        callback(fixupVMAddr, targetVMAddr, PointerMetaData());
+                    }
+                }
+            }
+        }
+    }
+    else if ( slideInfoHeader->version == 2 ) {
+        const dyld_cache_slide_info2* slideInfo = (dyld_cache_slide_info2*)(slideInfoHeader);
+        const uint16_t* starts = (uint16_t* )((char*)slideInfo + slideInfo->page_starts_offset);
+        const uint16_t* extras = (uint16_t* )((char*)slideInfo + slideInfo->page_extras_offset);
+        for (int i=0; i < slideInfo->page_starts_count; ++i) {
+            const uint16_t start = starts[i];
+            auto rebaseChain = [&](uint8_t* pageContent, uint16_t startOffset)
+            {
+                uintptr_t slideAmount = 0;
+                const uintptr_t   deltaMask    = (uintptr_t)(slideInfo->delta_mask);
+                const uintptr_t   valueMask    = ~deltaMask;
+                const uintptr_t   valueAdd     = (uintptr_t)(slideInfo->value_add);
+                const unsigned    deltaShift   = __builtin_ctzll(deltaMask) - 2;
+
+                uint32_t pageOffset = startOffset;
+                uint32_t delta = 1;
+                while ( delta != 0 ) {
+                    uint8_t* loc = pageContent + pageOffset;
+                    uintptr_t rawValue = *((uintptr_t*)loc);
+                    delta = (uint32_t)((rawValue & deltaMask) >> deltaShift);
+                    uintptr_t value = (rawValue & valueMask);
+                    if ( value != 0 ) {
+                        value += valueAdd;
+                        value += slideAmount;
+                    }
+                    pageOffset += delta;
+
+                    uint64_t offsetInDataRegion = loc - dataPagesStart;
+                    uint64_t fixupVMAddr = dataStartAddress + offsetInDataRegion;
+                    uint64_t targetVMAddr = value;
+                    callback(fixupVMAddr, targetVMAddr, PointerMetaData());
+                }
+            };
+            if ( start == DYLD_CACHE_SLIDE_PAGE_ATTR_NO_REBASE ) {
+                // Nothing to do here
+            }
+            else if ( start & DYLD_CACHE_SLIDE_PAGE_ATTR_EXTRA ) {
+                int j=(start & 0x3FFF);
+                bool done = false;
+                do {
+                    uint16_t aStart = extras[j];
+                    uint8_t* page = (uint8_t*)(long)(dataPagesStart + (slideInfo->page_size*i));
+                    uint16_t pageStartOffset = (aStart & 0x3FFF)*4;
+                    rebaseChain(page, pageStartOffset);
+                    done = (extras[j] & DYLD_CACHE_SLIDE_PAGE_ATTR_END);
+                    ++j;
+                } while ( !done );
+            }
+            else {
+                uint8_t* page = (uint8_t*)(long)(dataPagesStart + (slideInfo->page_size*i));
+                uint16_t pageStartOffset = start*4;
+                rebaseChain(page, pageStartOffset);
+            }
+        }
+    }
+    else if ( slideInfoHeader->version == 3 ) {
+        const dyld_cache_slide_info3* slideInfo = (dyld_cache_slide_info3*)(slideInfoHeader);
+        const uintptr_t authValueAdd = (uintptr_t)(slideInfo->auth_value_add);
+        for (int i=0; i < slideInfo->page_starts_count; ++i) {
+            uint16_t delta = slideInfo->page_starts[i];
+            if ( delta == DYLD_CACHE_SLIDE_V3_PAGE_ATTR_NO_REBASE ) {
+                // Nothing to do here
+                continue;
+            }
+
+            delta = delta/sizeof(uint64_t); // initial offset is byte based
+            const uint8_t* pageStart = dataPagesStart + (i * slideInfo->page_size);
+            const dyld_cache_slide_pointer3* loc = (dyld_cache_slide_pointer3*)pageStart;
+            do {
+                loc += delta;
+                delta = loc->plain.offsetToNextPointer;
+                dyld3::MachOLoaded::ChainedFixupPointerOnDisk ptr;
+                ptr.raw64 = *((uint64_t*)loc);
+                if ( loc->auth.authenticated ) {
+                    uint64_t targetVMAddr = authValueAdd + loc->auth.offsetFromSharedCacheBase;
+
+                    PointerMetaData pmd(&ptr, DYLD_CHAINED_PTR_ARM64E);
+                    uint64_t offsetInDataRegion = (const uint8_t*)loc - dataPagesStart;
+                    uint64_t fixupVMAddr = dataStartAddress + offsetInDataRegion;
+                    callback(fixupVMAddr, targetVMAddr, pmd);
+                }
+                else {
+                    uint64_t targetVMAddr = ptr.arm64e.unpackTarget();
+
+                    uint64_t offsetInDataRegion = (const uint8_t*)loc - dataPagesStart;
+                    uint64_t fixupVMAddr = dataStartAddress + offsetInDataRegion;
+                    callback(fixupVMAddr, targetVMAddr, PointerMetaData());
+                }
+            } while (delta != 0);
+        }
+    }
+    else if ( slideInfoHeader->version == 4 ) {
+        const dyld_cache_slide_info4* slideInfo = (dyld_cache_slide_info4*)(slideInfoHeader);
+        const uint16_t* starts = (uint16_t* )((char*)slideInfo + slideInfo->page_starts_offset);
+        const uint16_t* extras = (uint16_t* )((char*)slideInfo + slideInfo->page_extras_offset);
+        for (int i=0; i < slideInfo->page_starts_count; ++i) {
+            const uint16_t start = starts[i];
+            auto rebaseChainV4 = [&](uint8_t* pageContent, uint16_t startOffset)
+            {
+                uintptr_t slideAmount = 0;
+                const uintptr_t   deltaMask    = (uintptr_t)(slideInfo->delta_mask);
+                const uintptr_t   valueMask    = ~deltaMask;
+                const uintptr_t   valueAdd     = (uintptr_t)(slideInfo->value_add);
+                const unsigned    deltaShift   = __builtin_ctzll(deltaMask) - 2;
+
+                uint32_t pageOffset = startOffset;
+                uint32_t delta = 1;
+                while ( delta != 0 ) {
+                    uint8_t* loc = pageContent + pageOffset;
+                    uint32_t rawValue = *((uint32_t*)loc);
+                    delta = (uint32_t)((rawValue & deltaMask) >> deltaShift);
+                    uintptr_t value = (rawValue & valueMask);
+                    if ( (value & 0xFFFF8000) == 0 ) {
+                        // small positive non-pointer, use as-is
+                    }
+                    else if ( (value & 0x3FFF8000) == 0x3FFF8000 ) {
+                        // small negative non-pointer
+                        value |= 0xC0000000;
+                    }
+                    else  {
+                        value += valueAdd;
+                        value += slideAmount;
+
+                        uint64_t offsetInDataRegion = (const uint8_t*)loc - dataPagesStart;
+                        uint64_t fixupVMAddr = dataStartAddress + offsetInDataRegion;
+                        uint64_t targetVMAddr = value;
+                        callback(fixupVMAddr, targetVMAddr, PointerMetaData());
+                    }
+                    pageOffset += delta;
+                }
+            };
+            if ( start == DYLD_CACHE_SLIDE4_PAGE_NO_REBASE ) {
+                // Nothing to do here
+            }
+            else if ( start & DYLD_CACHE_SLIDE4_PAGE_USE_EXTRA ) {
+                int j=(start & DYLD_CACHE_SLIDE4_PAGE_INDEX);
+                bool done = false;
+                do {
+                    uint16_t aStart = extras[j];
+                    uint8_t* page = (uint8_t*)(long)(dataPagesStart + (slideInfo->page_size*i));
+                    uint16_t pageStartOffset = (aStart & DYLD_CACHE_SLIDE4_PAGE_INDEX)*4;
+                    rebaseChainV4(page, pageStartOffset);
+                    done = (extras[j] & DYLD_CACHE_SLIDE4_PAGE_EXTRA_END);
+                    ++j;
+                } while ( !done );
+            }
+            else {
+                uint8_t* page = (uint8_t*)(long)(dataPagesStart + (slideInfo->page_size*i));
+                uint16_t pageStartOffset = start*4;
+                rebaseChainV4(page, pageStartOffset);
+            }
+        }
+    }
+}
+
+
+static bool findImageAndSegment(const DyldSharedCache* dyldCache, const std::vector<SegmentInfo>& segInfos, uint64_t cacheOffset, SegmentInfo* found)
 {
     const uint64_t locVmAddr = dyldCache->unslidLoadAddress() + cacheOffset;
     const SegmentInfo target = { locVmAddr, 0, NULL, NULL };
@@ -378,7 +578,57 @@ static void findImageAndSegment(const DyldSharedCache* dyldCache, const std::vec
                                                                         [](const SegmentInfo& l, const SegmentInfo& r) -> bool {
                                                                             return l.vmAddr+l.vmSize < r.vmAddr+r.vmSize;
                                                                     });
+
+    if ( lowIt == segInfos.end() )
+        return false;
+
+    if ( locVmAddr < lowIt->vmAddr )
+        return false;
+    if ( locVmAddr >= (lowIt->vmAddr  + lowIt->vmSize) )
+        return false;
+
     *found = *lowIt;
+    return true;
+}
+
+static void dumpObjCClassLayout(const DyldSharedCache* dyldCache)
+{
+    dyldCache->forEachImage(^(const mach_header *mh, const char *installName) {
+        const dyld3::MachOAnalyzer* ma = (dyld3::MachOAnalyzer*)mh;
+        Diagnostics diag;
+
+        __block objc_visitor::Visitor visitor(dyldCache, ma);
+        visitor.forEachClassAndMetaClass(^(const objc_visitor::Class& objcClass, bool& stopClass) {
+            const char* className = objcClass.getName(visitor);
+            bool isMetaClass = objcClass.isMetaClass;
+            uint32_t instanceStart = objcClass.getInstanceStart(visitor);
+            objc_visitor::IVarList ivars = objcClass.getIVars(visitor);
+
+            printf("%s (%s): start 0x%x\n", className, isMetaClass ? "metaclass" : "class", instanceStart);
+            std::optional<metadata_visitor::ResolvedValue> superClassValue = objcClass.getSuperclass(visitor);
+            if ( superClassValue.has_value() ) {
+                bool unusedIsPatchable = false;
+                objc_visitor::Class superClass(superClassValue.value(), isMetaClass, unusedIsPatchable);
+                const char* superClassName = superClass.getName(visitor);
+                uint32_t superStart = superClass.getInstanceStart(visitor);
+                uint32_t superSize = superClass.getInstanceSize(visitor);
+                printf("  super %s (%s): start 0x%x, size 0x%x\n", superClassName,
+                       isMetaClass ? "metaclass" : "class", superStart, superSize);
+            }
+
+            uint32_t numIVars = ivars.numIVars();
+            for ( uint32_t i = 0; i != numIVars; ++i ) {
+                objc_visitor::IVar ivar = ivars.getIVar(visitor, i);
+                std::optional<uint32_t> ivarStart = ivar.getOffset(visitor);
+                const char* name = ivar.getName(visitor);
+                printf("  ivar %s: 0x%x (start + 0x%d), alignment %d\n",
+                       name,
+                       ivarStart.has_value() ? ivarStart.value() : -1,
+                       ivarStart.has_value() ? (ivarStart.value() - instanceStart) : -1,
+                       ivar.getAlignment(visitor));
+            }
+        });
+    });
 }
 
 
@@ -423,6 +673,10 @@ int main (int argc, const char* argv[]) {
                 checkMode(options.mode);
                 options.mode = modeInfo;
             }
+            else if (strcmp(opt, "-stats") == 0) {
+                checkMode(options.mode);
+                options.mode = modeStats;
+            }
             else if (strcmp(opt, "-slide_info") == 0) {
                 checkMode(options.mode);
                 options.mode = modeSlideInfo;
@@ -430,6 +684,16 @@ int main (int argc, const char* argv[]) {
             else if (strcmp(opt, "-verbose_slide_info") == 0) {
                 checkMode(options.mode);
                 options.mode = modeVerboseSlideInfo;
+            }
+            else if (strcmp(opt, "-fixups_in_dylib") == 0) {
+                checkMode(options.mode);
+                options.mode = modeFixupsInDylib;
+                options.fixupsInDylib = argv[++i];
+                if ( i >= argc ) {
+                    fprintf(stderr, "Error: option -fixups_in_dylib requires a path argument\n");
+                    usage();
+                    exit(1);
+                }
             }
             else if (strcmp(opt, "-text_info") == 0) {
                 checkMode(options.mode);
@@ -455,6 +719,12 @@ int main (int argc, const char* argv[]) {
                 options.mode = modeStrings;
                 printExports = true;
             }
+            else if (strcmp(opt, "-duplicate_exports") == 0) {
+                options.mode = modeDuplicates;
+            }
+            else if (strcmp(opt, "-duplicate_exports_summary") == 0) {
+                options.mode = modeDuplicatesSummary;
+            }
             else if (strcmp(opt, "-map") == 0) {
                 checkMode(options.mode);
                 options.mode = modeMap;
@@ -462,6 +732,10 @@ int main (int argc, const char* argv[]) {
             else if (strcmp(opt, "-json-map") == 0) {
                 checkMode(options.mode);
                 options.mode = modeJSONMap;
+            }
+            else if (strcmp(opt, "-verbose-json-map") == 0) {
+                checkMode(options.mode);
+                options.mode = modeVerboseJSONMap;
             }
             else if (strcmp(opt, "-json-dependents") == 0) {
                 checkMode(options.mode);
@@ -486,6 +760,14 @@ int main (int argc, const char* argv[]) {
             else if (strcmp(opt, "-objc-classes") == 0) {
                 checkMode(options.mode);
                 options.mode = modeObjCClasses;
+            }
+            else if (strcmp(opt, "-objc-class-layout") == 0) {
+                checkMode(options.mode);
+                options.mode = modeObjCClassLayout;
+            }
+            else if (strcmp(opt, "-objc-class-hash-table") == 0) {
+                checkMode(options.mode);
+                options.mode = modeObjCClassHashTable;
             }
             else if (strcmp(opt, "-objc-selectors") == 0) {
                 checkMode(options.mode);
@@ -532,6 +814,25 @@ int main (int argc, const char* argv[]) {
                     usage();
                     exit(1);
                 }
+            }
+            else if (strcmp(opt, "-mach_headers") == 0) {
+                checkMode(options.mode);
+                options.mode = modeMachHeaders;
+            }
+            else if (strcmp(opt, "-load_commands") == 0) {
+                checkMode(options.mode);
+                options.mode = modeLoadCommands;
+            }
+            else if (strcmp(opt, "-cache_header") == 0) {
+                checkMode(options.mode);
+                options.mode = modeCacheHeader;
+            }
+            else if (strcmp(opt, "-dylib_symbols") == 0) {
+                checkMode(options.mode);
+                options.mode = modeDylibSymbols;
+            }
+            else if (strcmp(opt, "-function_starts") == 0) {
+                options.mode = modeFunctionStarts;
             }
             else {
                 fprintf(stderr, "Error: unrecognized option %s\n", opt);
@@ -588,6 +889,10 @@ int main (int argc, const char* argv[]) {
             fprintf(stderr, "Cannot use -objc-classes with a live cache.  Please run with a path to an on-disk cache file\n");
             return 1;
         }
+        if ( options.mode == modeObjCClassLayout ) {
+            fprintf(stderr, "Cannot use -objc-class-layout with a live cache.  Please run with a path to an on-disk cache file\n");
+            return 1;
+        }
 
 
         // The in-use cache might be the first cache file of many.  In that case, also add the sub caches
@@ -597,16 +902,94 @@ int main (int argc, const char* argv[]) {
     }
 
     if ( options.mode == modeSlideInfo || options.mode == modeVerboseSlideInfo ) {
-        if ( !dyldCache->hasSlideInfo() ) {
-            fprintf(stderr, "Error: dyld shared cache does not contain slide info\n");
-            exit(1);
+        if ( dyldCache->numSubCaches() == 0 ) {
+            if ( !dyldCache->hasSlideInfo() ) {
+                fprintf(stderr, "Error: dyld shared cache does not contain slide info\n");
+                exit(1);
+            }
         }
 
         const bool verboseSlideInfo = (options.mode == modeVerboseSlideInfo);
-        dyldCache->forEachSlideInfo(^(uint64_t mappingStartAddress, uint64_t mappingSize, const uint8_t *mappingPagesStart,
-                                      uint64_t slideInfoOffset, uint64_t slideInfoSize, const dyld_cache_slide_info *slideInfoHeader) {
-            printSlideInfoForDataRegion(dyldCache, mappingStartAddress, mappingSize, mappingPagesStart,
-                                        slideInfoHeader, verboseSlideInfo);
+        dyldCache->forEachCache(^(const DyldSharedCache *cache, bool& stopCache) {
+            cache->forEachSlideInfo(^(uint64_t mappingStartAddress, uint64_t mappingSize, const uint8_t *mappingPagesStart,
+                                          uint64_t slideInfoOffset, uint64_t slideInfoSize, const dyld_cache_slide_info *slideInfoHeader) {
+                printSlideInfoForDataRegion(cache, mappingStartAddress, mappingSize, mappingPagesStart,
+                                            slideInfoHeader, verboseSlideInfo);
+            });
+        });
+        return 0;
+    }
+    else if ( options.mode == modeFixupsInDylib ) {
+        if ( dyldCache->numSubCaches() == 0 ) {
+            if ( !dyldCache->hasSlideInfo() ) {
+                fprintf(stderr, "Error: dyld shared cache does not contain slide info\n");
+                exit(1);
+            }
+        }
+
+        uint32_t imageIndex = ~0U;
+        if ( !dyldCache->hasImagePath(options.fixupsInDylib, imageIndex) ) {
+            fprintf(stderr, "Error: dyld shared cache does not contain image: %s\n",
+                    options.fixupsInDylib);
+            exit(1);
+        }
+
+        const auto* ma = (const dyld3::MachOAnalyzer*)dyldCache->getIndexedImageEntry(imageIndex);
+
+        __block std::vector<SegmentInfo> dylibSegInfo;
+        buildSegmentInfo(ma, dylibSegInfo);
+        sortSegmentInfo(dylibSegInfo);
+
+        __block std::vector<SegmentInfo> cacheSegInfo;
+        buildSegmentInfo(dyldCache, cacheSegInfo);
+
+        uint64_t cacheBaseAddress = dyldCache->unslidLoadAddress();
+        auto handler = ^(uint64_t fixupVMAddr, uint64_t targetVMAddr,
+                         PointerMetaData pmd)
+        {
+            SegmentInfo fixupAt;
+            if ( !findImageAndSegment(dyldCache, dylibSegInfo, fixupVMAddr - cacheBaseAddress, &fixupAt) ) {
+                // Fixup is not in the given dylib
+                return;
+            }
+
+            // Remove high8 if we have it
+            uint64_t high8 = targetVMAddr >> 56;
+            targetVMAddr = targetVMAddr & 0x00FFFFFFFFFFFFFF;
+
+            SegmentInfo targetAt;
+            if ( !findImageAndSegment(dyldCache, cacheSegInfo, targetVMAddr - cacheBaseAddress, &targetAt) ) {
+                return;
+            }
+
+            if ( pmd.authenticated ) {
+                static const char* keyNames[] = {
+                    "IA", "IB", "DA", "DB"
+                };
+                printf("%s(0x%04llX) -> %s(0x%04llX):%s; (PAC: div=%d, addr=%s, key=%s)\n",
+                       fixupAt.segName, fixupVMAddr - fixupAt.vmAddr,
+                       targetAt.segName, targetVMAddr - targetAt.vmAddr, targetAt.installName,
+                       pmd.diversity, pmd.usesAddrDiversity ? "true" : "false", keyNames[pmd.key]);
+            } else {
+                if ( high8 != 0 ) {
+                    printf("%s(0x%04llX) -> %s(0x%04llX):%s; (high8: 0x%02llX)\n",
+                           fixupAt.segName, fixupVMAddr - fixupAt.vmAddr,
+                           targetAt.segName, targetVMAddr - targetAt.vmAddr, targetAt.installName,
+                           high8);
+                } else {
+                    printf("%s(0x%04llX) -> %s(0x%04llX):%s\n",
+                           fixupAt.segName, fixupVMAddr - fixupAt.vmAddr,
+                           targetAt.segName, targetVMAddr - targetAt.vmAddr, targetAt.installName);
+                }
+            }
+        };
+
+        dyldCache->forEachCache(^(const DyldSharedCache *cache, bool& stopCache) {
+            cache->forEachSlideInfo(^(uint64_t mappingStartAddress, uint64_t mappingSize, const uint8_t *mappingPagesStart,
+                                          uint64_t slideInfoOffset, uint64_t slideInfoSize, const dyld_cache_slide_info *slideInfoHeader) {
+                forEachSlidValue(cache, mappingStartAddress, mappingSize, mappingPagesStart,
+                                 slideInfoHeader, handler);
+            });
         });
         return 0;
     }
@@ -619,7 +1002,11 @@ int main (int argc, const char* argv[]) {
         dyld3::Platform platform = dyldCache->platform();
         printf("platform: %s\n", dyld3::MachOFile::platformName(platform));
         printf("built by: %s\n", header->locallyBuiltCache ? "local machine" : "B&I");
-        printf("cache type: %s\n", header->cacheType ? "production" : "development");
+        printf("cache type: %s\n", DyldSharedCache::getCacheTypeName(header->cacheType));
+        if ( header->dylibsExpectedOnDisk )
+            printf("dylibs expected on disk: true\n");
+        if ( header->cacheType == kDyldSharedCacheTypeUniversal )
+            printf("cache sub-type: %s\n", DyldSharedCache::getCacheTypeName(header->cacheSubType));
         if ( header->mappingOffset >= __offsetof(dyld_cache_header, imagesCount) ) {
             printf("image count: %u\n", header->imagesCount);
         } else {
@@ -636,22 +1023,25 @@ int main (int argc, const char* argv[]) {
                 entropyBits = __builtin_clz(possibleSlideValues - 1);
             printf("ASLR entropy: %u-bits (%lldMB)\n", entropyBits, header->maxSlide >> 20);
         }
-
         printf("mappings:\n");
         dyldCache->forEachRange(^(const char *mappingName, uint64_t unslidVMAddr, uint64_t vmSize,
                                   uint32_t cacheFileIndex, uint64_t fileOffset, uint32_t initProt, uint32_t maxProt, bool& stopRange) {
             printf("%16s %4lluMB,  file offset: #%u/0x%08llX -> 0x%08llX,  address: 0x%08llX -> 0x%08llX\n",
                    mappingName, vmSize / (1024*1024), cacheFileIndex, fileOffset, fileOffset + vmSize, unslidVMAddr, unslidVMAddr + vmSize);
+            if (header->mappingOffset >=  __offsetof(dyld_cache_header, dynamicDataOffset)) {
+                if ( (unslidVMAddr + vmSize) == (header->sharedRegionStart + header->dynamicDataOffset) ) {
+                    printf("  dynamic config %4lluKB,                                             address: 0x%08llX -> 0x%08llX\n",
+                           header->dynamicDataMaxSize/1024, header->sharedRegionStart + header->dynamicDataOffset,
+                           header->sharedRegionStart + header->dynamicDataOffset + header->dynamicDataMaxSize);
+                }
+            }
         }, ^(const DyldSharedCache* subCache, uint32_t cacheFileIndex) {
             const dyld_cache_header* subCacheHeader = &subCache->header;
 
-            if ( subCacheHeader->codeSignatureOffset != 0 ) {
-                uint64_t size = subCacheHeader->codeSignatureSize;
-                uint64_t csAddr = subCache->getCodeSignAddress();
-                if ( size != 0 )
-                    printf("%16s %4lluMB,  file offset: #%u/0x%08llX -> 0x%08llX,  address: 0x%08llX -> 0x%08llX\n",
-                           "code sign", size/(1024*1024), cacheFileIndex,
-                           subCacheHeader->codeSignatureOffset, subCacheHeader->codeSignatureOffset + size, csAddr, csAddr + size);
+            if ( subCacheHeader->codeSignatureSize != 0) {
+                    printf("%16s %4lluMB,  file offset: #%u/0x%08llX -> 0x%08llX\n",
+                           "code sign", subCacheHeader->codeSignatureSize/(1024*1024), cacheFileIndex,
+                           subCacheHeader->codeSignatureOffset, subCacheHeader->codeSignatureOffset + subCacheHeader->codeSignatureSize);
             }
 
             if ( subCacheHeader->mappingOffset > __offsetof(dyld_cache_header, rosettaReadOnlySize) ) {
@@ -678,6 +1068,28 @@ int main (int argc, const char* argv[]) {
                        subCacheHeader->localSymbolsSize/(1024*1024), cacheFileIndex,
                        subCacheHeader->localSymbolsOffset, subCacheHeader->localSymbolsOffset + subCacheHeader->localSymbolsSize);
         });
+    }
+    else if ( options.mode == modeStats ) {
+        __block std::map<std::string_view, uint64_t> mappingSizes;
+        __block uint64_t totalFileSize = 0;
+        __block uint64_t minVMAddr = UINT64_MAX;
+        __block uint64_t maxVMAddr = 0;
+
+        dyldCache->forEachRange(^(const char *mappingName, uint64_t unslidVMAddr, uint64_t vmSize,
+                                  uint32_t cacheFileIndex, uint64_t fileOffset, uint32_t initProt, uint32_t maxProt, bool& stopRange) {
+            mappingSizes[mappingName] += vmSize;
+            totalFileSize += vmSize;
+            minVMAddr = std::min(minVMAddr, unslidVMAddr);
+            maxVMAddr = std::max(maxVMAddr, unslidVMAddr + vmSize);
+        }, nullptr);
+
+        uint64_t totalVMSize = maxVMAddr - minVMAddr;
+
+        printf("-stats:\n");
+        printf("  total file size: %lldMB\n", totalFileSize >> 20);
+        printf("  total VM size: %lldMB\n", totalVMSize >> 20);
+        for ( const auto& mappingNameAndSize : mappingSizes )
+            printf("  total VM size (%s): %lldMB\n", mappingNameAndSize.first.data(), mappingNameAndSize.second >> 20);
     }
     else if ( options.mode == modeTextInfo ) {
         const dyld_cache_header* header = &dyldCache->header;
@@ -775,8 +1187,11 @@ int main (int argc, const char* argv[]) {
         printf("local symbols by dylib (count=%d):\n", entriesCount);
 #endif
     }
-    else if ( options.mode == modeJSONMap ) {
-        std::string buffer = dyldCache->generateJSONMap("unknown");
+    else if ( (options.mode == modeJSONMap) || (options.mode == modeVerboseJSONMap) ) {
+        bool verbose = (options.mode == modeVerboseJSONMap);
+        uuid_t uuid;
+        dyldCache->getUUID(uuid);
+        std::string buffer = dyldCache->generateJSONMap("unknown", uuid, verbose);
         printf("%s\n", buffer.c_str());
     }
     else if ( options.mode == modeJSONDependents ) {
@@ -790,7 +1205,7 @@ int main (int argc, const char* argv[]) {
             if ( !cacheRebased )
                 dyldCache->applyCacheRebases();
 
-            uint64_t sharedCacheRelativeSelectorBaseVMAddress = getSharedCacheRelativeSelectorBaseVMAddress(dyldCache, cacheRebased);
+            uint64_t sharedCacheRelativeSelectorBaseVMAddress = dyldCache->sharedCacheRelativeSelectorBaseVMAddress();
 
             dyldCache->forEachImage(^(const mach_header *mh, const char *installName) {
                 __block std::unordered_set<std::string_view> seenStrings;
@@ -915,57 +1330,129 @@ int main (int argc, const char* argv[]) {
         }
     }
     else if ( options.mode == modeObjCInfo ) {
-        const objc_opt::objc_opt_t* objcOpt = dyldCache->objcOpt();
-        if ( objcOpt == nullptr ) {
+        if ( !dyldCache->hasOptimizedObjC() ) {
             fprintf(stderr, "Error: could not get optimized objc\n");
             return 1;
         }
 
-        printf("version:                            %u\n", objcOpt->version);
-        printf("flags:                              0x%08x\n", objcOpt->flags);
-        if ( const objc::SelectorHashTable* selectors = dyldCache->objcOpt()->selectorOpt() ) {
+        printf("version:                            %u\n", dyldCache->objcOptVersion());
+        printf("flags:                              0x%08x\n", dyldCache->objcOptFlags());
+        if ( const objc::SelectorHashTable* selectors = dyldCache->objcSelectorHashTable() ) {
             printf("num selectors:                      %u\n", selectors->occupancy());
         }
-        if ( const objc::ClassHashTable* classes = dyldCache->objcOpt()->classOpt() ) {
+        if ( const objc::ClassHashTable* classes = dyldCache->objcClassHashTable() ) {
             printf("num classes:                        %u\n", classes->occupancy());
         }
-        if ( const objc::ProtocolHashTable* protocols = dyldCache->objcOpt()->protocolOpt() ) {
+        if ( const objc::ProtocolHashTable* protocols = dyldCache->objcProtocolHashTable() ) {
             printf("num protocols:                      %u\n", protocols->occupancy());
         }
-        if ( const void* relativeMethodListSelectorBase = dyldCache->objcOpt()->relativeMethodListsBaseAddress() ) {
+        if ( const void* relativeMethodListSelectorBase = dyldCache->objcRelativeMethodListsBaseAddress() ) {
             printf("method list selector base address:  0x%llx\n", dyldCache->unslidLoadAddress() + ((uint64_t)relativeMethodListSelectorBase - (uint64_t)dyldCache));
             printf("method list selector base value:    \"%s\"\n", (const char*)relativeMethodListSelectorBase);
         }
     }
     else if ( options.mode == modeObjCProtocols ) {
-        if ( dyldCache->objcOpt() == nullptr ) {
+        if ( !dyldCache->hasOptimizedObjC() ) {
             fprintf(stderr, "Error: could not get optimized objc\n");
             return 1;
         }
-        const objc::ProtocolHashTable* protocols = dyldCache->objcOpt()->protocolOpt();
+        const objc::ProtocolHashTable* protocols = dyldCache->objcProtocolHashTable();
         if ( protocols == nullptr ) {
             fprintf(stderr, "Error: could not get optimized objc protocols\n");
             return 1;
         }
 
-        protocols->forEachProtocol(^(uint32_t bucketIndex, const char* protocolName, const dyld3::Array<uint64_t>& implCacheOffsets) {
+        __block std::map<uint64_t, const char*> dylibVMAddrMap;
+        dyldCache->forEachImage(^(const mach_header *mh, const char *installName) {
+            const dyld3::MachOAnalyzer* ma = (const dyld3::MachOAnalyzer*)mh;
+            dylibVMAddrMap[ma->preferredLoadAddress()] = installName;
+        });
 
-            if ( implCacheOffsets.empty() ) {
+        __block std::map<uint16_t, const char*> dylibMap;
+
+        const objc::HeaderInfoRO* headerInfoRO = dyldCache->objcHeaderInfoRO();
+        const bool is64 = (strstr(dyldCache->archName(), "64") != nullptr) && (strstr(dyldCache->archName(), "64_32") == nullptr);
+        if ( is64 ) {
+            const auto* headerInfo64 = (objc::objc_headeropt_ro_t<uint64_t>*)headerInfoRO;
+            uint64_t headerInfoVMAddr = dyldCache->unslidLoadAddress();
+            headerInfoVMAddr += (uint64_t)headerInfo64 - (uint64_t)dyldCache;
+            for ( std::pair<uint64_t, const char*> vmAddrAndName : dylibVMAddrMap ) {
+                const objc::objc_header_info_ro_t<uint64_t>* element = headerInfo64->get(headerInfoVMAddr, vmAddrAndName.first);
+                if ( element != nullptr ) {
+                    dylibMap[headerInfo64->index(element)] = vmAddrAndName.second;
+                }
+            }
+        } else {
+            const auto* headerInfo32 = (objc::objc_headeropt_ro_t<uint32_t>*)headerInfoRO;
+            uint64_t headerInfoVMAddr = dyldCache->unslidLoadAddress();
+            headerInfoVMAddr += (uint64_t)headerInfo32 - (uint64_t)dyldCache;
+            for ( std::pair<uint64_t, const char*> vmAddrAndName : dylibVMAddrMap ) {
+                const objc::objc_header_info_ro_t<uint32_t>* element = headerInfo32->get(headerInfoVMAddr, vmAddrAndName.first);
+                if ( element != nullptr ) {
+                    dylibMap[headerInfo32->index(element)] = vmAddrAndName.second;
+                }
+            }
+        }
+
+        typedef objc::ProtocolHashTable::ObjectAndDylibIndex ObjectAndDylibIndex;
+        protocols->forEachProtocol(^(uint32_t bucketIndex, const char* protocolName,
+                                     const dyld3::Array<ObjectAndDylibIndex>& implCacheInfos) {
+
+            if ( implCacheInfos.empty() ) {
                 // Empty bucket
-                fprintf(stderr, "[% 5d]\n", bucketIndex);
+                printf("[% 5d]\n", bucketIndex);
                 return;
             }
 
-            if ( implCacheOffsets.count() == 1 ) {
+            if ( implCacheInfos.count() == 1 ) {
                 // No duplicates
-                fprintf(stderr, "[% 5d] -> (% 8lld) = %s\n", bucketIndex, implCacheOffsets[0], protocolName);
+                printf("[% 5d] -> (% 8lld, %4d) = %s (in %s)\n",
+                       bucketIndex, implCacheInfos[0].first, implCacheInfos[0].second, protocolName,
+                       dylibMap.at(implCacheInfos[0].second));
                 return;
             }
 
             // class appears in more than one header
-            fprintf(stderr, "[% 5d] -> %lu duplicates = %s\n", bucketIndex, implCacheOffsets.count(), protocolName);
-            for (uint64_t cacheOffset : implCacheOffsets) {
-                fprintf(stderr, "  - [% 5d] -> (% 8lld) = %s\n", bucketIndex, cacheOffset, protocolName);
+            fprintf(stderr, "[% 5d] -> %lu duplicates = %s\n", bucketIndex, implCacheInfos.count(), protocolName);
+            for (const ObjectAndDylibIndex& objectInfo : implCacheInfos) {
+                printf("  - [% 5d] -> (% 8lld, %4d) = %s in (%s)\n",
+                       bucketIndex, objectInfo.first, objectInfo.second, protocolName,
+                       dylibMap.at(objectInfo.second));
+            }
+        });
+    }
+    else if ( options.mode == modeObjCClassHashTable ) {
+        if ( !dyldCache->hasOptimizedObjC() ) {
+            fprintf(stderr, "Error: could not get optimized objc\n");
+            return 1;
+        }
+        const objc::ClassHashTable* classes = dyldCache->objcClassHashTable();
+        if ( classes == nullptr ) {
+            fprintf(stderr, "Error: could not get optimized objc classes\n");
+            return 1;
+        }
+
+        typedef objc::ClassHashTable::ObjectAndDylibIndex ObjectAndDylibIndex;
+        classes->forEachClass(^(uint32_t bucketIndex, const char* className,
+                                const dyld3::Array<ObjectAndDylibIndex>& implCacheInfos) {
+            if ( implCacheInfos.empty() ) {
+                // Empty bucket
+                printf("[% 5d]\n", bucketIndex);
+                return;
+            }
+
+            if ( implCacheInfos.count() == 1 ) {
+                // No duplicates
+                printf("[% 5d] -> (% 8lld, %4d) = %s\n",
+                       bucketIndex, implCacheInfos[0].first, implCacheInfos[0].second, className);
+                return;
+            }
+
+            // class appears in more than one header
+            printf("[% 5d] -> %lu duplicates = %s\n", bucketIndex, implCacheInfos.count(), className);
+            for (const ObjectAndDylibIndex& objectInfo : implCacheInfos) {
+                printf("  - [% 5d] -> (% 8lld, %4d) = %s\n",
+                       bucketIndex, objectInfo.first, objectInfo.second, className);
             }
         });
     }
@@ -992,7 +1479,7 @@ int main (int argc, const char* argv[]) {
         // We don't actually slide the cache.  It still contains unslid VMAddr's
         const bool rebased = false;
 
-        uint64_t sharedCacheRelativeSelectorBaseVMAddress = getSharedCacheRelativeSelectorBaseVMAddress(dyldCache, rebased);
+        uint64_t sharedCacheRelativeSelectorBaseVMAddress = dyldCache->sharedCacheRelativeSelectorBaseVMAddress();
 
         using dyld3::json::Node;
         using dyld3::json::NodeValueType;
@@ -1469,13 +1956,13 @@ int main (int argc, const char* argv[]) {
         }
 
         KernelArgs            kernArgs(mainMA, {"test.exe"}, {}, {});
+        Allocator&            alloc = Allocator::defaultAllocator();
         SyscallDelegate       osDelegate;
         osDelegate._dyldCache   = dyldCache;
         osDelegate._rootPath    = options.rootPath;
-
-        __block ProcessConfig config(&kernArgs, osDelegate);
-        RuntimeState stateObject(config);
-        RuntimeState& state = stateObject;
+        __block ProcessConfig   config(&kernArgs, osDelegate, alloc);
+        RuntimeState            stateObject(config, alloc);
+        RuntimeState&           state = stateObject;
 
         config.dyldCache.addr->forEachLaunchLoaderSet(^(const char* executableRuntimePath, const PrebuiltLoaderSet* pbls) {
 
@@ -1539,12 +2026,15 @@ int main (int argc, const char* argv[]) {
 
         dyld3::json::streamArrayEnd(needsComma);
     }
+    else if ( options.mode == modeObjCClassLayout ) {
+        dumpObjCClassLayout(dyldCache);
+    }
     else if ( options.mode == modeObjCSelectors ) {
-        if ( dyldCache->objcOpt() == nullptr ) {
+        if ( !dyldCache->hasOptimizedObjC() ) {
             fprintf(stderr, "Error: could not get optimized objc\n");
             return 1;
         }
-        const objc::SelectorHashTable* selectors = dyldCache->objcOpt()->selectorOpt();
+        const objc::SelectorHashTable* selectors = dyldCache->objcSelectorHashTable();
         if ( selectors == nullptr ) {
             fprintf(stderr, "Error: could not get optimized objc selectors\n");
             return 1;
@@ -1862,11 +2352,16 @@ int main (int argc, const char* argv[]) {
         // Get the base pointers from the magic section in objc
         __block uint64_t objcCacheOffsetsSize = 0;
         __block const void* objcCacheOffsets = nullptr;
+        __block int impCachesVersion = 1;
         __block Diagnostics diag;
         dyldCache->forEachImage(^(const mach_header* mh, const char* installName) {
             if ( !strcmp(installName, "/usr/lib/libobjc.A.dylib") ) {
                 const dyld3::MachOAnalyzer* ma = (const dyld3::MachOAnalyzer*)mh;
                 objcCacheOffsets = ma->findSectionContent("__DATA_CONST", "__objc_scoffs", objcCacheOffsetsSize);
+                dyld3::MachOAnalyzer::FoundSymbol foundInfo;
+                if (ma->findExportedSymbol(diag, "_objc_opt_preopt_caches_version", false, foundInfo, nullptr)) {
+                    impCachesVersion = *(int*)((uint8_t*)ma + foundInfo.value);
+                }
             }
         });
 
@@ -1882,8 +2377,11 @@ int main (int argc, const char* argv[]) {
 
         dyld3::MachOAnalyzer::VMAddrConverter vmAddrConverter = dyldCache->makeVMAddrConverter(contentRebased);
 
-        uint64_t selectorStringVMAddrStart  = vmAddrConverter.convertToVMAddr(((uint64_t*)objcCacheOffsets)[0]);
-        uint64_t selectorStringVMAddrEnd    = vmAddrConverter.convertToVMAddr(((uint64_t*)objcCacheOffsets)[1]);
+        uint8_t selectorStringIndex = 0;
+        if (impCachesVersion > 1)
+            selectorStringIndex = 1;
+        uint64_t selectorStringVMAddrStart  = vmAddrConverter.convertToVMAddr(((uint64_t*)objcCacheOffsets)[selectorStringIndex]);
+        uint64_t selectorStringVMAddrEnd    = vmAddrConverter.convertToVMAddr(((uint64_t*)objcCacheOffsets)[selectorStringIndex+1]);
 
         uint64_t sharedCacheRelativeSelectorBaseVMAddress = dyldCache->sharedCacheRelativeSelectorBaseVMAddress();
 
@@ -1956,37 +2454,50 @@ int main (int argc, const char* argv[]) {
                     return;
                 }
 
-                struct Bucket {
-                    uint32_t selOffset;
-                    uint32_t impOffset;
-                };
-                struct ImpCache {
-                    int32_t  fallback_class_offset;
-                    uint32_t cache_shift :  5;
-                    uint32_t cache_mask  : 11;
-                    uint32_t occupied    : 14;
-                    uint32_t has_inlines :  1;
-                    uint32_t bit_one     :  1;
-                    struct Bucket buckets[];
-                };
-
-                const ImpCache* impCache = (const ImpCache*)(objcClass.methodCacheVMAddr + slide);
-                printf("%s (%s): %d buckets\n", className, type, impCache->cache_mask + 1);
-
-                if ((classVMAddr + impCache->fallback_class_offset) != objcClass.superclassVMAddr) {
-                    printf("Flattening fallback: %s\n", classVMAddrToNameMap[classVMAddr + impCache->fallback_class_offset]);
+                const uint8_t* impCacheBuffer = (const uint8_t*)(objcClass.methodCacheVMAddr + slide);
+                uint32_t cacheMask = 0;
+                uint32_t sizeOfHeader = 0;
+                if (impCachesVersion < 3) {
+                    const ImpCacheHeader_v1* impCache = (const ImpCacheHeader_v1*)impCacheBuffer;
+                    printf("%s (%s): %d buckets\n", className, type, impCache->cache_mask + 1);
+                    if ((classVMAddr + impCache->fallback_class_offset) != objcClass.superclassVMAddr)
+                        printf("Flattening fallback: %s\n", classVMAddrToNameMap[classVMAddr + impCache->fallback_class_offset]);
+                    cacheMask = impCache->cache_mask;
+                    sizeOfHeader = sizeof(ImpCacheHeader_v1);
+                } else {
+                    const ImpCacheHeader_v2* impCache = (const ImpCacheHeader_v2*)impCacheBuffer;
+                    printf("%s (%s): %d buckets\n", className, type, impCache->cache_mask + 1);
+                    if ((classVMAddr + impCache->fallback_class_offset) != objcClass.superclassVMAddr)
+                        printf("Flattening fallback: %s\n", classVMAddrToNameMap[classVMAddr + impCache->fallback_class_offset]);
+                    cacheMask = impCache->cache_mask;
+                    sizeOfHeader = sizeof(ImpCacheHeader_v2);
                 }
+
+                const uint8_t* buckets = impCacheBuffer + sizeOfHeader;
                 // Buckets are a 32-bit offset from the impcache itself
-                for (uint32_t i = 0; i <= impCache->cache_mask ; ++i) {
-                    const Bucket& b = impCache->buckets[i];
-                    uint64_t sel = (uint64_t)b.selOffset + selectorStringVMAddrStart;
-                    uint64_t imp = classVMAddr - (uint64_t)b.impOffset;
-                    if (b.selOffset == 0xFFFFFFFF) {
+                for (uint32_t i = 0; i <= cacheMask ; ++i) {
+                    uint64_t sel = 0;
+                    uint64_t imp = 0;
+                    bool empty = false;
+                    if (impCachesVersion == 1) {
+                        const ImpCacheEntry_v1* bucket = (ImpCacheEntry_v1*)buckets + i;
+                        sel = selectorStringVMAddrStart + bucket->selOffset;
+                        imp = classVMAddr - bucket->impOffset;
+                        if (bucket->selOffset == 0xFFFFFFF && bucket->impOffset == 0)
+                            empty = true;
+                    } else {
+                        const ImpCacheEntry_v2* bucket = (ImpCacheEntry_v2*)buckets + i;
+                        sel = selectorStringVMAddrStart + bucket->selOffset;
+                        imp = classVMAddr - (bucket->impOffset << 2);
+                        if (bucket->selOffset == 0x3FFFFFF && bucket->impOffset == 0)
+                            empty = true;
+                    }
+
+                    if ( empty ) {
                         // Empty bucket
                         printf("  - 0x%016llx: %s\n", 0ULL, "");
                     } else {
                         assert(sel < selectorStringVMAddrEnd);
-
                         auto it = methodToClassMap.find(imp);
                         if (it == methodToClassMap.end()) {
                             fprintf(stderr, "Could not find IMP %llx (for %s)\n", imp, (const char*)(sel + slide));
@@ -2001,9 +2512,15 @@ int main (int argc, const char* argv[]) {
     } else {
         switch ( options.mode ) {
             case modeList: {
+                if ( options.printInodes && !dyldCache->header.dylibsExpectedOnDisk ) {
+                    fprintf(stderr, "Error: '-inode' option only valid on simulator shared caches\n");
+                    return 1;
+                }
                 // list all dylibs, including their aliases (symlinks to them) with option vmaddr
                 __block std::vector<std::unordered_set<std::string>> indexToPaths;
                 __block std::vector<uint64_t> indexToAddr;
+                __block std::unordered_map<uint64_t, uint64_t> indexToINode;
+                __block std::unordered_map<uint64_t, uint64_t> indexToModTime;
                 __block std::vector<std::string> indexToUUID;
                 dyldCache->forEachImageTextSegment(^(uint64_t loadAddressUnslid, uint64_t textSegmentSize, const unsigned char* dylibUUID, const char* installName, bool& stop) {
                     std::unordered_set<std::string> empty;
@@ -2019,6 +2536,12 @@ int main (int argc, const char* argv[]) {
                 });
                 dyldCache->forEachDylibPath(^(const char* dylibPath, uint32_t index) {
                     indexToPaths[index].insert(dylibPath);
+
+                    uint64_t mTime = ~0ULL;
+                    uint64_t inode = ~0ULL;
+                    dyldCache->getIndexedImageEntry(index, mTime, inode);
+                    indexToINode[index] = inode;
+                    indexToModTime[index] = mTime;
                 });
                 int index = 0;
                 for (const std::unordered_set<std::string>& paths : indexToPaths) {
@@ -2027,6 +2550,8 @@ int main (int argc, const char* argv[]) {
                             printf("0x%08llX ", indexToAddr[index]);
                         if ( options.printUUIDs )
                              printf("<%s> ", indexToUUID[index].c_str());
+                        if ( options.printInodes )
+                            printf("0x%08llX 0x%08llX ", indexToINode[index], indexToModTime[index]);
                        printf("%s\n", path.c_str());
                     }
                     ++index;
@@ -2156,28 +2681,28 @@ int main (int argc, const char* argv[]) {
                             //printf("export_off=0x%X\n", leInfo.dyldInfo->export_off());
                             uint32_t exportPageOffsetStart = leInfo.dyldInfo->export_off & (-4096);
                             uint32_t exportPageOffsetEnd = (leInfo.dyldInfo->export_off + leInfo.dyldInfo->export_size) & (-4096);
-                            sprintf(message, "exports from %s", shortName);
+                            snprintf(message, sizeof(message), "exports from %s", shortName);
                             add_linkedit(exportPageOffsetStart, exportPageOffsetEnd, message);
                         }
                         // add binding info
                         if ( leInfo.dyldInfo->bind_size != 0 ) {
                             uint32_t bindPageOffsetStart = leInfo.dyldInfo->bind_off & (-4096);
                             uint32_t bindPageOffsetEnd = (leInfo.dyldInfo->bind_off + leInfo.dyldInfo->bind_size) & (-4096);
-                            sprintf(message, "bindings from %s", shortName);
+                            snprintf(message, sizeof(message), "bindings from %s", shortName);
                             add_linkedit(bindPageOffsetStart, bindPageOffsetEnd, message);
                         }
                         // add lazy binding info
                         if ( leInfo.dyldInfo->lazy_bind_size != 0 ) {
                             uint32_t lazybindPageOffsetStart = leInfo.dyldInfo->lazy_bind_off & (-4096);
                             uint32_t lazybindPageOffsetEnd = (leInfo.dyldInfo->lazy_bind_off + leInfo.dyldInfo->lazy_bind_size) & (-4096);
-                            sprintf(message, "lazy bindings from %s", shortName);
+                            snprintf(message, sizeof(message), "lazy bindings from %s", shortName);
                             add_linkedit(lazybindPageOffsetStart, lazybindPageOffsetEnd, message);
                         }
                         // add weak binding info
                         if ( leInfo.dyldInfo->weak_bind_size != 0 ) {
                             uint32_t weakbindPageOffsetStart = leInfo.dyldInfo->weak_bind_off & (-4096);
                             uint32_t weakbindPageOffsetEnd = (leInfo.dyldInfo->weak_bind_off + leInfo.dyldInfo->weak_bind_size) & (-4096);
-                            sprintf(message, "weak bindings from %s", shortName);
+                            snprintf(message, sizeof(message), "weak bindings from %s", shortName);
                             add_linkedit(weakbindPageOffsetStart, weakbindPageOffsetEnd, message);
                         }
                     } else {
@@ -2186,7 +2711,7 @@ int main (int argc, const char* argv[]) {
                             //printf("export_off=0x%X\n", leInfo.exportsTrie->export_off());
                             uint32_t exportPageOffsetStart = leInfo.exportsTrie->dataoff & (-4096);
                             uint32_t exportPageOffsetEnd = (leInfo.exportsTrie->dataoff + leInfo.exportsTrie->datasize) & (-4096);
-                            sprintf(message, "exports from %s", shortName);
+                            snprintf(message, sizeof(message), "exports from %s", shortName);
                             add_linkedit(exportPageOffsetStart, exportPageOffsetEnd, message);
                         }
                         // Chained fixups are stripped from cache binaries, so no need to check for them here
@@ -2222,6 +2747,8 @@ int main (int argc, const char* argv[]) {
                 break;
             }
             case modePatchTable: {
+                printf("Patch table size: %lld bytes\n", dyldCache->header.patchInfoSize);
+
                 std::vector<SegmentInfo> segInfos;
                 buildSegmentInfo(dyldCache, segInfos);
                 __block uint32_t imageIndex = 0;
@@ -2229,9 +2756,11 @@ int main (int argc, const char* argv[]) {
                     printf("%s:\n", installName);
                     uint64_t cacheBaseAddress = dyldCache->unslidLoadAddress();
                     uint64_t dylibBaseAddress = ((dyld3::MachOAnalyzer*)mh)->preferredLoadAddress();
-                    dyldCache->forEachPatchableExport(imageIndex, ^(uint32_t dylibVMOffsetOfImpl, const char* exportName) {
+                    dyldCache->forEachPatchableExport(imageIndex, ^(uint32_t dylibVMOffsetOfImpl, const char* exportName,
+                                                                    PatchKind patchKind) {
                         uint64_t cacheOffsetOfImpl = (dylibBaseAddress + dylibVMOffsetOfImpl) - cacheBaseAddress;
-                        printf("    export: 0x%08llX  %s\n", cacheOffsetOfImpl, exportName);
+                        printf("    export: 0x%08llX%s  %s\n", cacheOffsetOfImpl,
+                               PatchTable::patchKindName(patchKind), exportName);
                         dyldCache->forEachPatchableUseOfExport(imageIndex, dylibVMOffsetOfImpl,
                                                                ^(uint32_t userImageIndex, uint32_t userVMOffset,
                                                                  dyld3::MachOLoaded::PointerMetaData pmd, uint64_t addend) {
@@ -2249,25 +2778,491 @@ int main (int argc, const char* argv[]) {
 
                             // Verify that findImage and the callback image match
                             std::string_view userInstallName = imageMA->installName();
-                            assert(userInstallName == usageAt.installName);
 
-                            if ( addend == 0 )
-                                printf("        used by: %s+0x%04llX in %s\n", usageAt.segName, patchLocVmAddr-usageAt.vmAddr, usageAt.installName);
-                            else
-                                printf("        used by: %s+0x%04llX (addend=%lld) in %s\n", usageAt.segName, patchLocVmAddr-usageAt.vmAddr, addend, usageAt.installName);
+                            // FIXME: We can't get this from MachoLoaded without having a fixup location to call
+                            static const char* keyNames[] = {
+                                "IA", "IB", "DA", "DB"
+                            };
+
+                            uint64_t sectionOffset = patchLocVmAddr-usageAt.vmAddr;
+
+                            if ( addend == 0 ) {
+                                if ( pmd.authenticated ) {
+                                    printf("        used by: %s(0x%04llX) (PAC: div=%d, addr=%s, key=%s) in %s\n",
+                                           usageAt.segName, sectionOffset,
+                                           pmd.diversity, pmd.usesAddrDiversity ? "true" : "false", keyNames[pmd.key],
+                                           userInstallName.data());
+                                } else {
+                                    printf("        used by: %s(0x%04llX) in %s\n", usageAt.segName, sectionOffset, userInstallName.data());
+                                }
+                            } else {
+                                if ( pmd.authenticated ) {
+                                    printf("        used by: %s(0x%04llX) (addend=%lld) (PAC: div=%d, addr=%s, key=%s) in %s\n",
+                                           usageAt.segName, sectionOffset, addend,
+                                           pmd.diversity, pmd.usesAddrDiversity ? "true" : "false", keyNames[pmd.key],
+                                           userInstallName.data());
+                                } else {
+                                    printf("        used by: %s(0x%04llX) (addend=%lld) in %s\n", usageAt.segName, sectionOffset, addend, userInstallName.data());
+                                }
+                            }
+                        });
+
+                        // Print GOT uses
+                        dyldCache->forEachPatchableGOTUseOfExport(imageIndex, dylibVMOffsetOfImpl,
+                                                                  ^(uint64_t cacheVMOffset,
+                                                                    dyld3::MachOLoaded::PointerMetaData pmd, uint64_t addend) {
+
+                            // FIXME: We can't get this from MachoLoaded without having a fixup location to call
+                            static const char* keyNames[] = {
+                                "IA", "IB", "DA", "DB"
+                            };
+
+                            if ( addend == 0 ) {
+                                if ( pmd.authenticated ) {
+                                    printf("        used by: GOT (PAC: div=%d, addr=%s, key=%s)\n",
+                                           pmd.diversity, pmd.usesAddrDiversity ? "true" : "false", keyNames[pmd.key]);
+                                } else {
+                                    printf("        used by: GOT\n");
+                                }
+                            } else {
+                                if ( pmd.authenticated ) {
+                                    printf("        used by: GOT (addend=%lld) (PAC: div=%d, addr=%s, key=%s)\n",
+                                           addend, pmd.diversity, pmd.usesAddrDiversity ? "true" : "false", keyNames[pmd.key]);
+                                } else {
+                                    printf("        used by: GOT (addend=%lld)\n", addend);
+                                }
+                            }
                         });
                     });
                     ++imageIndex;
                 });
                 break;
             }
+            case modeMachHeaders: {
+                auto printRow = [](const char* magic, const char* arch, const char* filetype,
+                                   const char* ncmds, const char* sizeofcmds , const char* flags,
+                                   const char* installname) {
+                    printf("%12s %8s %8s %8s %12s %12s %8s\n",
+                           magic, arch, filetype, ncmds, sizeofcmds , flags, installname);
+                };
+
+                printRow("magic", "arch", "filetype", "ncmds", "sizeofcmds", "flags", "installname");
+                dyldCache->forEachDylib(^(const dyld3::MachOAnalyzer *ma, const char *installName, uint32_t imageIndex, uint64_t inode, uint64_t mtime, bool &stop) {
+                    const char* magic = nullptr;
+                    if ( ma->magic == MH_MAGIC )
+                        magic = "MH_MAGIC";
+                    else if ( ma->magic == MH_MAGIC_64 )
+                        magic = "MH_MAGIC_64";
+                    else if ( ma->magic == MH_CIGAM )
+                        magic = "MH_CIGAM";
+                    else if ( ma->magic == MH_CIGAM_64 )
+                        magic = "MH_CIGAM_64";
+
+                    const char* arch = ma->archName();
+                    const char* filetype = ma->isDylib() ? "DYLIB" : "UNKNOWN";
+                    std::string ncmds = dyld3::json::decimal(ma->ncmds);
+                    std::string sizeofcmds = dyld3::json::decimal(ma->sizeofcmds);
+                    std::string flags = dyld3::json::hex(ma->flags);
+
+                    printRow(magic, arch, filetype, ncmds.c_str(), sizeofcmds.c_str(), flags.c_str(), installName);
+                });
+
+                break;
+            }
+            case modeLoadCommands: {
+                dyldCache->forEachDylib(^(const dyld3::MachOAnalyzer *ma, const char *installName, uint32_t imageIndex, uint64_t inode, uint64_t mtime, bool &stop) {
+                    printf("%s:\n", installName);
+
+                    Diagnostics diag;
+                    ma->forEachLoadCommand(diag, ^(const load_command *cmd, bool &stopLC) {
+                        const char* loadCommandName = "unknown";
+                        switch (cmd->cmd) {
+                            case LC_SEGMENT:
+                                loadCommandName = "LC_SEGMENT";
+                                break;
+                            case LC_SYMTAB:
+                                loadCommandName = "LC_SYMTAB";
+                                break;
+                            case LC_SYMSEG:
+                                loadCommandName = "LC_SYMSEG";
+                                break;
+                            case LC_THREAD:
+                                loadCommandName = "LC_THREAD";
+                                break;
+                            case LC_UNIXTHREAD:
+                                loadCommandName = "LC_UNIXTHREAD";
+                                break;
+                            case LC_LOADFVMLIB:
+                                loadCommandName = "LC_LOADFVMLIB";
+                                break;
+                            case LC_IDFVMLIB:
+                                loadCommandName = "LC_IDFVMLIB";
+                                break;
+                            case LC_IDENT:
+                                loadCommandName = "LC_IDENT";
+                                break;
+                            case LC_FVMFILE:
+                                loadCommandName = "LC_FVMFILE";
+                                break;
+                            case LC_PREPAGE:
+                                loadCommandName = "LC_PREPAGE";
+                                break;
+                            case LC_DYSYMTAB:
+                                loadCommandName = "LC_DYSYMTAB";
+                                break;
+                            case LC_LOAD_DYLIB:
+                                loadCommandName = "LC_LOAD_DYLIB";
+                                break;
+                            case LC_ID_DYLIB:
+                                loadCommandName = "LC_ID_DYLIB";
+                                break;
+                            case LC_LOAD_DYLINKER:
+                                loadCommandName = "LC_LOAD_DYLINKER";
+                                break;
+                            case LC_ID_DYLINKER:
+                                loadCommandName = "LC_ID_DYLINKER";
+                                break;
+                            case LC_PREBOUND_DYLIB:
+                                loadCommandName = "LC_PREBOUND_DYLIB";
+                                break;
+                            case LC_ROUTINES:
+                                loadCommandName = "LC_ROUTINES";
+                                break;
+                            case LC_SUB_FRAMEWORK:
+                                loadCommandName = "LC_SUB_FRAMEWORK";
+                                break;
+                            case LC_SUB_UMBRELLA:
+                                loadCommandName = "LC_SUB_UMBRELLA";
+                                break;
+                            case LC_SUB_CLIENT:
+                                loadCommandName = "LC_SUB_CLIENT";
+                                break;
+                            case LC_SUB_LIBRARY:
+                                loadCommandName = "LC_SUB_LIBRARY";
+                                break;
+                            case LC_TWOLEVEL_HINTS:
+                                loadCommandName = "LC_TWOLEVEL_HINTS";
+                                break;
+                            case LC_PREBIND_CKSUM:
+                                loadCommandName = "LC_PREBIND_CKSUM";
+                                break;
+                            case LC_LOAD_WEAK_DYLIB:
+                                loadCommandName = "LC_LOAD_WEAK_DYLIB";
+                                break;
+                            case LC_SEGMENT_64:
+                                loadCommandName = "LC_SEGMENT_64";
+                                break;
+                            case LC_ROUTINES_64:
+                                loadCommandName = "LC_ROUTINES_64";
+                                break;
+                            case LC_UUID:
+                                loadCommandName = "LC_UUID";
+                                break;
+                            case LC_RPATH:
+                                loadCommandName = "LC_RPATH";
+                                break;
+                            case LC_CODE_SIGNATURE:
+                                loadCommandName = "LC_CODE_SIGNATURE";
+                                break;
+                            case LC_SEGMENT_SPLIT_INFO:
+                                loadCommandName = "LC_SEGMENT_SPLIT_INFO";
+                                break;
+                            case LC_REEXPORT_DYLIB:
+                                loadCommandName = "LC_REEXPORT_DYLIB";
+                                break;
+                            case LC_LAZY_LOAD_DYLIB:
+                                loadCommandName = "LC_LAZY_LOAD_DYLIB";
+                                break;
+                            case LC_ENCRYPTION_INFO:
+                                loadCommandName = "LC_ENCRYPTION_INFO";
+                                break;
+                            case LC_DYLD_INFO:
+                                loadCommandName = "LC_DYLD_INFO";
+                                break;
+                            case LC_DYLD_INFO_ONLY:
+                                loadCommandName = "LC_DYLD_INFO_ONLY";
+                                break;
+                            case LC_LOAD_UPWARD_DYLIB:
+                                loadCommandName = "LC_LOAD_UPWARD_DYLIB";
+                                break;
+                            case LC_VERSION_MIN_MACOSX:
+                                loadCommandName = "LC_VERSION_MIN_MACOSX";
+                                break;
+                            case LC_VERSION_MIN_IPHONEOS:
+                                loadCommandName = "LC_VERSION_MIN_IPHONEOS";
+                                break;
+                            case LC_FUNCTION_STARTS:
+                                loadCommandName = "LC_FUNCTION_STARTS";
+                                break;
+                            case LC_DYLD_ENVIRONMENT:
+                                loadCommandName = "LC_DYLD_ENVIRONMENT";
+                                break;
+                            case LC_MAIN:
+                                loadCommandName = "LC_MAIN";
+                                break;
+                            case LC_DATA_IN_CODE:
+                                loadCommandName = "LC_DATA_IN_CODE";
+                                break;
+                            case LC_SOURCE_VERSION:
+                                loadCommandName = "LC_SOURCE_VERSION";
+                                break;
+                            case LC_DYLIB_CODE_SIGN_DRS:
+                                loadCommandName = "LC_DYLIB_CODE_SIGN_DRS";
+                                break;
+                            case LC_ENCRYPTION_INFO_64:
+                                loadCommandName = "LC_ENCRYPTION_INFO_64";
+                                break;
+                            case LC_LINKER_OPTION:
+                                loadCommandName = "LC_LINKER_OPTION";
+                                break;
+                            case LC_LINKER_OPTIMIZATION_HINT:
+                                loadCommandName = "LC_LINKER_OPTIMIZATION_HINT";
+                                break;
+                            case LC_VERSION_MIN_TVOS:
+                                loadCommandName = "LC_VERSION_MIN_TVOS";
+                                break;
+                            case LC_VERSION_MIN_WATCHOS:
+                                loadCommandName = "LC_VERSION_MIN_WATCHOS";
+                                break;
+                            case LC_NOTE:
+                                loadCommandName = "LC_NOTE";
+                                break;
+                            case LC_BUILD_VERSION:
+                                loadCommandName = "LC_BUILD_VERSION";
+                                break;
+                            case LC_DYLD_EXPORTS_TRIE:
+                                loadCommandName = "LC_DYLD_EXPORTS_TRIE";
+                                break;
+                            case LC_DYLD_CHAINED_FIXUPS:
+                                loadCommandName = "LC_DYLD_CHAINED_FIXUPS";
+                                break;
+                            case LC_FILESET_ENTRY:
+                                loadCommandName = "LC_FILESET_ENTRY";
+                                break;
+                            default:
+                                break;
+                        }
+
+                        printf("  %s\n", loadCommandName);
+                    });
+
+                    diag.assertNoError();
+                });
+
+                break;
+            }
+            case modeCacheHeader: {
+                __block uint32_t cacheIndex = 0;
+                dyldCache->forEachCache(^(const DyldSharedCache *cache, bool &stopCache) {
+                    printf("Cache #%d\n", cacheIndex);
+
+                    uuid_string_t uuidString;
+                    uuid_unparse_upper(dyldCache->header.uuid, uuidString);
+
+                    uuid_string_t symbolFileUUIDString;
+                    uuid_unparse_upper(dyldCache->header.symbolFileUUID, symbolFileUUIDString);
+
+                    printf("  - magic: %s\n", dyldCache->header.magic);
+                    printf("  - mappingOffset: 0x%llx\n", (uint64_t)dyldCache->header.mappingOffset);
+                    printf("  - mappingCount: 0x%llx\n", (uint64_t)dyldCache->header.mappingCount);
+                    printf("  - imagesOffsetOld: 0x%llx\n", (uint64_t)dyldCache->header.imagesOffsetOld);
+                    printf("  - imagesCountOld: 0x%llx\n", (uint64_t)dyldCache->header.imagesCountOld);
+                    printf("  - dyldBaseAddress: 0x%llx\n", (uint64_t)dyldCache->header.dyldBaseAddress);
+                    printf("  - codeSignatureOffset: 0x%llx\n", (uint64_t)dyldCache->header.codeSignatureOffset);
+                    printf("  - codeSignatureSize: 0x%llx\n", (uint64_t)dyldCache->header.codeSignatureSize);
+                    printf("  - slideInfoOffsetUnused: 0x%llx\n", (uint64_t)dyldCache->header.slideInfoOffsetUnused);
+                    printf("  - slideInfoSizeUnused: 0x%llx\n", (uint64_t)dyldCache->header.slideInfoSizeUnused);
+                    printf("  - localSymbolsOffset: 0x%llx\n", (uint64_t)dyldCache->header.localSymbolsOffset);
+                    printf("  - localSymbolsSize: 0x%llx\n", (uint64_t)dyldCache->header.localSymbolsSize);
+                    printf("  - uuid: %s\n", uuidString);
+                    printf("  - cacheType: 0x%llx\n", (uint64_t)dyldCache->header.cacheType);
+                    printf("  - branchPoolsOffset: 0x%llx\n", (uint64_t)dyldCache->header.branchPoolsOffset);
+                    printf("  - branchPoolsCount: 0x%llx\n", (uint64_t)dyldCache->header.branchPoolsCount);
+                    printf("  - dyldInCacheMH: 0x%llx\n", (uint64_t)dyldCache->header.dyldInCacheMH);
+                    printf("  - dyldInCacheEntry: 0x%llx\n", (uint64_t)dyldCache->header.dyldInCacheEntry);
+                    printf("  - imagesTextOffset: 0x%llx\n", (uint64_t)dyldCache->header.imagesTextOffset);
+                    printf("  - imagesTextCount: 0x%llx\n", (uint64_t)dyldCache->header.imagesTextCount);
+                    printf("  - patchInfoAddr: 0x%llx\n", (uint64_t)dyldCache->header.patchInfoAddr);
+                    printf("  - patchInfoSize: 0x%llx\n", (uint64_t)dyldCache->header.patchInfoSize);
+                    printf("  - otherImageGroupAddrUnused: 0x%llx\n", (uint64_t)dyldCache->header.otherImageGroupAddrUnused);
+                    printf("  - otherImageGroupSizeUnused: 0x%llx\n", (uint64_t)dyldCache->header.otherImageGroupSizeUnused);
+                    printf("  - progClosuresAddr: 0x%llx\n", (uint64_t)dyldCache->header.progClosuresAddr);
+                    printf("  - progClosuresSize: 0x%llx\n", (uint64_t)dyldCache->header.progClosuresSize);
+                    printf("  - progClosuresTrieAddr: 0x%llx\n", (uint64_t)dyldCache->header.progClosuresTrieAddr);
+                    printf("  - progClosuresTrieSize: 0x%llx\n", (uint64_t)dyldCache->header.progClosuresTrieSize);
+                    printf("  - platform: 0x%llx\n", (uint64_t)dyldCache->header.platform);
+                    printf("  - formatVersion: 0x%llx\n", (uint64_t)dyldCache->header.formatVersion);
+                    printf("  - dylibsExpectedOnDisk: 0x%llx\n", (uint64_t)dyldCache->header.dylibsExpectedOnDisk);
+                    printf("  - simulator: 0x%llx\n", (uint64_t)dyldCache->header.simulator);
+                    printf("  - locallyBuiltCache: 0x%llx\n", (uint64_t)dyldCache->header.locallyBuiltCache);
+                    printf("  - builtFromChainedFixups: 0x%llx\n", (uint64_t)dyldCache->header.builtFromChainedFixups);
+                    printf("  - padding: 0x%llx\n", (uint64_t)dyldCache->header.padding);
+                    printf("  - sharedRegionStart: 0x%llx\n", (uint64_t)dyldCache->header.sharedRegionStart);
+                    printf("  - sharedRegionSize: 0x%llx\n", (uint64_t)dyldCache->header.sharedRegionSize);
+                    printf("  - maxSlide: 0x%llx\n", (uint64_t)dyldCache->header.maxSlide);
+                    printf("  - dylibsImageArrayAddr: 0x%llx\n", (uint64_t)dyldCache->header.dylibsImageArrayAddr);
+                    printf("  - dylibsImageArraySize: 0x%llx\n", (uint64_t)dyldCache->header.dylibsImageArraySize);
+                    printf("  - dylibsTrieAddr: 0x%llx\n", (uint64_t)dyldCache->header.dylibsTrieAddr);
+                    printf("  - dylibsTrieSize: 0x%llx\n", (uint64_t)dyldCache->header.dylibsTrieSize);
+                    printf("  - otherImageArrayAddr: 0x%llx\n", (uint64_t)dyldCache->header.otherImageArrayAddr);
+                    printf("  - otherImageArraySize: 0x%llx\n", (uint64_t)dyldCache->header.otherImageArraySize);
+                    printf("  - otherTrieAddr: 0x%llx\n", (uint64_t)dyldCache->header.otherTrieAddr);
+                    printf("  - otherTrieSize: 0x%llx\n", (uint64_t)dyldCache->header.otherTrieSize);
+                    printf("  - mappingWithSlideOffset: 0x%llx\n", (uint64_t)dyldCache->header.mappingWithSlideOffset);
+                    printf("  - mappingWithSlideCount: 0x%llx\n", (uint64_t)dyldCache->header.mappingWithSlideCount);
+                    printf("  - dylibsPBLStateArrayAddrUnused: 0x%llx\n", (uint64_t)dyldCache->header.dylibsPBLStateArrayAddrUnused);
+                    printf("  - dylibsPBLSetAddr: 0x%llx\n", (uint64_t)dyldCache->header.dylibsPBLSetAddr);
+                    printf("  - programsPBLSetPoolAddr: 0x%llx\n", (uint64_t)dyldCache->header.programsPBLSetPoolAddr);
+                    printf("  - programsPBLSetPoolSize: 0x%llx\n", (uint64_t)dyldCache->header.programsPBLSetPoolSize);
+                    printf("  - programTrieAddr: 0x%llx\n", (uint64_t)dyldCache->header.programTrieAddr);
+                    printf("  - programTrieSize: 0x%llx\n", (uint64_t)dyldCache->header.programTrieSize);
+                    printf("  - osVersion: 0x%llx\n", (uint64_t)dyldCache->header.osVersion);
+                    printf("  - altPlatform: 0x%llx\n", (uint64_t)dyldCache->header.altPlatform);
+                    printf("  - altOsVersion: 0x%llx\n", (uint64_t)dyldCache->header.altOsVersion);
+                    printf("  - swiftOptsOffset: 0x%llx\n", (uint64_t)dyldCache->header.swiftOptsOffset);
+                    printf("  - swiftOptsSize: 0x%llx\n", (uint64_t)dyldCache->header.swiftOptsSize);
+                    printf("  - subCacheArrayOffset: 0x%llx\n", (uint64_t)dyldCache->header.subCacheArrayOffset);
+                    printf("  - subCacheArrayCount: 0x%llx\n", (uint64_t)dyldCache->header.subCacheArrayCount);
+                    printf("  - symbolFileUUID: %s\n", symbolFileUUIDString);
+                    printf("  - rosettaReadOnlyAddr: 0x%llx\n", (uint64_t)dyldCache->header.rosettaReadOnlyAddr);
+                    printf("  - rosettaReadOnlySize: 0x%llx\n", (uint64_t)dyldCache->header.rosettaReadOnlySize);
+                    printf("  - rosettaReadWriteAddr: 0x%llx\n", (uint64_t)dyldCache->header.rosettaReadWriteAddr);
+                    printf("  - rosettaReadWriteSize: 0x%llx\n", (uint64_t)dyldCache->header.rosettaReadWriteSize);
+                    printf("  - imagesOffset: 0x%llx\n", (uint64_t)dyldCache->header.imagesOffset);
+                    printf("  - imagesCount: 0x%llx\n", (uint64_t)dyldCache->header.imagesCount);
+                    printf("  - cacheSubType: 0x%llx\n", (uint64_t)dyldCache->header.cacheSubType);
+                    printf("  - objcOptsOffset: 0x%llx\n", (uint64_t)dyldCache->header.objcOptsOffset);
+                    printf("  - objcOptsSize: 0x%llx\n", (uint64_t)dyldCache->header.objcOptsSize);
+
+                    ++cacheIndex;
+                });
+                break;
+            }
+            case modeDylibSymbols:
+            {
+                dyldCache->forEachImage(^(const mach_header* mh, const char* installName) {
+                    const dyld3::MachOAnalyzer* ma = (dyld3::MachOAnalyzer*)mh;
+                    Diagnostics diag;
+
+                    printf("%s globals:\n", installName);
+                    ma->forEachGlobalSymbol(diag, ^(const char *symbolName, uint64_t n_value, uint8_t n_type, uint8_t n_sect, uint16_t n_desc, bool &stop) {
+                        printf("  0x%08llX: %s\n", n_value, symbolName);
+                    });
+                    printf("%s locals:\n", installName);
+                    ma->forEachLocalSymbol(diag, ^(const char *symbolName, uint64_t n_value, uint8_t n_type, uint8_t n_sect, uint16_t n_desc, bool &stop) {
+                        printf("  0x%08llX: %s\n", n_value, symbolName);
+                    });
+                    printf("%s undefs:\n", installName);
+                    ma->forEachImportedSymbol(diag, ^(const char *symbolName, uint64_t n_value, uint8_t n_type, uint8_t n_sect, uint16_t n_desc, bool &stop) {
+                        printf("  undef: %s\n", symbolName);
+                    });
+                });
+                break;
+            }
+            case modeFunctionStarts: {
+                dyldCache->forEachImage(^(const mach_header* mh, const char* installName) {
+                    printf("%s:\n", installName);
+
+                    const dyld3::MachOAnalyzer* ma = (dyld3::MachOAnalyzer*)mh;
+                    uint64_t loadAddress = ma->preferredLoadAddress();
+                    Diagnostics diag;
+                    ma->forEachFunctionStart(^(uint64_t runtimeOffset) {
+                        uint64_t targetVMAddr = loadAddress + runtimeOffset;
+                        printf("        0x%08llX\n", targetVMAddr);
+                    });
+                });
+                break;
+            }
+            case modeDuplicates:
+            case modeDuplicatesSummary:
+            {
+                __block std::map<std::string, std::vector<const char*>> symbolsToInstallNames;
+                __block std::set<std::string>                           weakDefSymbols;
+                dyldCache->forEachImage(^(const mach_header* mh, const char* installName) {
+                    const dyld3::MachOAnalyzer* ma = (dyld3::MachOAnalyzer*)mh;
+                    uint32_t exportTrieRuntimeOffset;
+                    uint32_t exportTrieSize;
+                    if ( ma->hasExportTrie(exportTrieRuntimeOffset, exportTrieSize) ) {
+                        const uint8_t* start = (uint8_t*)mh + exportTrieRuntimeOffset;
+                        const uint8_t* end = start + exportTrieSize;
+                        std::vector<ExportInfoTrie::Entry> exports;
+                        if ( ExportInfoTrie::parseTrie(start, end, exports) ) {
+                            for (const ExportInfoTrie::Entry& entry: exports) {
+                                if ( (entry.info.flags & EXPORT_SYMBOL_FLAGS_REEXPORT) == 0 ) {
+                                    symbolsToInstallNames[entry.name].push_back(installName);
+                                    if ( entry.info.flags & EXPORT_SYMBOL_FLAGS_WEAK_DEFINITION ) {
+                                        weakDefSymbols.insert(entry.name);
+                                    }
+                                }
+                            }
+                        }
+                    }
+                });
+                // filter out unzippered twins
+                std::set<std::string> okTwinSymbols;
+                for (const auto& pos : symbolsToInstallNames) {
+                    const std::vector<const char*>& paths = pos.second;
+                    if ( paths.size() == 2 ) {
+                        // ignore unzippered twins
+                        const char* one = paths[0];
+                        const char* two = paths[1];
+                        if ( (strncmp(one, "/System/iOSSupport/", 19) == 0) || (strncmp(two, "/System/iOSSupport/", 19) == 0) ) {
+                            if ( const char* tailOne = Utils::strrstr(one, ".framework/") ) {
+                                if ( const char* tailTwo = Utils::strrstr(two, ".framework/") ) {
+                                    if ( strcmp(tailOne, tailTwo) == 0 )
+                                        okTwinSymbols.insert(pos.first);
+                                }
+                            }
+                        }
+                    }
+                }
+                std::erase_if(symbolsToInstallNames, [&](auto const& pos) { return okTwinSymbols.count(pos.first); });
+
+                if ( options.mode == modeDuplicatesSummary ) {
+                    __block std::map<std::string, int> dylibDuplicatesCount;
+                    for (const auto& pos : symbolsToInstallNames) {
+                        const std::vector<const char*>& paths = pos.second;
+                        if ( paths.size() <= 1 )
+                            continue;
+                        for (const char* path : paths) {
+                            dylibDuplicatesCount[path] += 1;
+                        }
+                    }
+                    struct DupCount { const char* path; int count; };
+                    std::vector<DupCount> summary;
+                    for (const auto& pos : dylibDuplicatesCount) {
+                        summary.push_back({pos.first.c_str(), pos.second});
+                    }
+                    std::sort(summary.begin(), summary.end(), [](const DupCount& l, const DupCount& r) -> bool {
+                        return (l.count > r.count);
+                    });
+                    for ( const DupCount& entry : summary)
+                         printf("% 5d  %s\n", entry.count, entry.path);
+                }
+                else {
+                    for (const auto& pos : symbolsToInstallNames) {
+                        const std::vector<const char*>& paths = pos.second;
+                        if ( paths.size() > 1 ) {
+                            bool isWeakDef = (weakDefSymbols.count(pos.first) != 0);
+                            printf("%s%s\n", pos.first.c_str(), (isWeakDef ? " [weak-def]" : ""));
+                            for (const char* path : paths)
+                                printf("   %s\n", path);
+                        }
+                    }
+                }
+            }
+            break;
+
             case modeNone:
             case modeInfo:
+            case modeStats:
             case modeSlideInfo:
             case modeVerboseSlideInfo:
+            case modeFixupsInDylib:
             case modeTextInfo:
             case modeLocalSymbols:
             case modeJSONMap:
+            case modeVerboseJSONMap:
             case modeJSONDependents:
             case modeSectionSizes:
             case modeStrings:
@@ -2275,6 +3270,8 @@ int main (int argc, const char* argv[]) {
             case modeObjCProtocols:
             case modeObjCImpCaches:
             case modeObjCClasses:
+            case modeObjCClassLayout:
+            case modeObjCClassHashTable:
             case modeObjCSelectors:
             case modeSwiftProtocolConformances:
             case modeExtract:

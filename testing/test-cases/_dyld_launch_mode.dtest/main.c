@@ -3,7 +3,6 @@
 
 // RUN:  ./dyld_launch_mode.exe
 
-#include <stdio.h>
 #include <stdlib.h>
 #include <string.h> 
 #include <mach-o/dyld_priv.h>
@@ -15,7 +14,7 @@ int main(int argc, const char* argv[], const char* envp[], const char* apple[])
 {
     uint32_t expectedFlags;
     uint32_t launchFlags = _dyld_launch_mode();
-    printf("launchFlags=0x%08x\n", launchFlags);
+    LOG("launchFlags=0x%08x", launchFlags);
 
     // dyld4 will not build closures where there are roots of cached dylibs
     // in BATS there is always a root of libdyld.dylib

@@ -1,4 +1,4 @@
-#!/usr/bin/python2.7
+#!/usr/bin/python3
 
 import os
 import KernelCollection
@@ -61,13 +61,13 @@ def check(kernel_cache):
     assert kernel_cache.dictionary()["dylibs"][2]["segments"][1]["name"] == "__TEXT_EXEC"
     assert kernel_cache.dictionary()["dylibs"][2]["segments"][1]["vmAddr"] == "0xFFFFFFF007018040"
     assert kernel_cache.dictionary()["dylibs"][2]["segments"][2]["name"] == "__DATA"
-    assert kernel_cache.dictionary()["dylibs"][2]["segments"][2]["vmAddr"] == "0xFFFFFFF00702C010"
+    assert kernel_cache.dictionary()["dylibs"][2]["segments"][2]["vmAddr"] == "0xFFFFFFF00702C0D8"
     assert kernel_cache.dictionary()["dylibs"][2]["segments"][3]["name"] == "__LINKEDIT"
     assert kernel_cache.dictionary()["dylibs"][2]["segments"][3]["vmAddr"] == "0xFFFFFFF007030000"
 
     # Check the fixups
     kernel_cache.analyze("/ctf-arm64e/main.kc", ["-fixups", "-arch", "arm64e"])
-    assert len(kernel_cache.dictionary()["fixups"]) == 11
+    assert len(kernel_cache.dictionary()["fixups"]) == 15
     # main.kernel: S s = { &func, &func, &g, &func, &g };
     assert kernel_cache.dictionary()["fixups"]["0x1C000"] == "kc(0) + 0xFFFFFFF007014000 auth(IA !addr 0)"
     assert kernel_cache.dictionary()["fixups"]["0x1C008"] == "kc(0) + 0xFFFFFFF007014000 auth(IA !addr 0)"
@@ -80,9 +80,9 @@ def check(kernel_cache):
     assert kernel_cache.dictionary()["fixups"]["0x24018"] == "kc(0) + 0xFFFFFFF00702802C"
     assert kernel_cache.dictionary()["fixups"]["0x24024"] == "kc(0) + 0xFFFFFFF00702802C"
     # bar.kext: __typeof(&bar) barPtr = &bar;
-    assert kernel_cache.dictionary()["fixups"]["0x28000"] == "kc(0) + 0xFFFFFFF007018000 auth(IA !addr 0)"
+    assert kernel_cache.dictionary()["fixups"]["0x280C8"] == "kc(0) + 0xFFFFFFF007018010 auth(IA !addr 42271)"
     # foo.kext: int* gPtr = &g;
-    assert kernel_cache.dictionary()["fixups"]["0x28010"] == "kc(0) + 0xFFFFFFF00702C018"
+    assert kernel_cache.dictionary()["fixups"]["0x281A0"] == "kc(0) + 0xFFFFFFF00702C1A8"
     assert len(kernel_cache.dictionary()["dylibs"]) == 3
     assert kernel_cache.dictionary()["dylibs"][0]["name"] == "com.apple.kernel"
     assert kernel_cache.dictionary()["dylibs"][0]["fixups"] == "none"

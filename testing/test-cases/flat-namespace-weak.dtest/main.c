@@ -1,6 +1,8 @@
-// BUILD:  $CC bar.c -dynamiclib -o $BUILD_DIR/libbar.dylib -install_name $RUN_DIR/libbar.dylib
-// BUILD:  $CC foo.c -dynamiclib -o $BUILD_DIR/libfoo.dylib -install_name $RUN_DIR/libfoo.dylib -undefined dynamic_lookup
-// BUILD:  $CC main.c -o $BUILD_DIR/flat-namespace-weak.exe -DRUN_DIR="$RUN_DIR"
+// BUILD(macos):  $CC bar.c -dynamiclib -o $BUILD_DIR/libbar.dylib -install_name $RUN_DIR/libbar.dylib
+// BUILD(macos):  $CC foo.c -dynamiclib -o $BUILD_DIR/libfoo.dylib -install_name $RUN_DIR/libfoo.dylib -undefined dynamic_lookup -Wl,-no_fixup_chains
+// BUILD(macos):  $CC main.c -o $BUILD_DIR/flat-namespace-weak.exe -DRUN_DIR="$RUN_DIR"
+
+// BUILD(ios,tvos,watchos,bridgeos):
 
 // RUN:    ./flat-namespace-weak.exe
 

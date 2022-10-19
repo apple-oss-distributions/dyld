@@ -54,9 +54,7 @@ bool MachOAnalyzer::isValidMainExecutable(Diagnostics& diag, const char* path, u
         return false;
 
     if ( !this->isDynamicExecutable() ) {
-        char dupPath[PATH_MAX];
-        Diagnostics::quotePath(path, dupPath);
-        diag.error("could not use '%s' because it is not an executable, filetype=0x%08X", dupPath, this->filetype);
+        diag.error("could not use '%s' because it is not an executable, filetype=0x%08X", path, this->filetype);
         return false;
     }
 
@@ -88,9 +86,7 @@ bool MachOAnalyzer::loadFromBuffer(Diagnostics& diag, const closure::FileSystem&
         return false;
     }
     else if ( fatButMissingSlice ) {
-        char dupPath[PATH_MAX];
-        Diagnostics::quotePath(path, dupPath);
-        diag.error("missing compatible arch in '%s'", dupPath);
+        diag.error("missing compatible arch in %s", path);
         fileSystem.unloadFile(info);
         return false;
     }
@@ -104,7 +100,8 @@ bool MachOAnalyzer::loadFromBuffer(Diagnostics& diag, const closure::FileSystem&
     }
 
     // if has zero-fill expansion, re-map
-    mh = mh->remapIfZeroFill(diag, fileSystem, info);
+    if ( !mh->isPreload() )
+        mh = mh->remapIfZeroFill(diag, fileSystem, info);
 
     // on error, remove mappings and return nullptr
     if ( diag.hasError() ) {
@@ -113,7 +110,8 @@ bool MachOAnalyzer::loadFromBuffer(Diagnostics& diag, const closure::FileSystem&
     }
 
     // now that LINKEDIT is at expected offset, finish validation
-    mh->validLinkedit(diag, path);
+    if ( !mh->isPreload() )
+        mh->validLinkedit(diag, path);
 
     // on error, remove mappings and return nullptr
     if ( diag.hasError() ) {
@@ -134,12 +132,14 @@ closure::LoadedFileInfo MachOAnalyzer::load(Diagnostics& diag, const closure::Fi
         return closure::LoadedFileInfo();
 
     closure::LoadedFileInfo info;
-    if (!fileSystem.loadFile(path, info, realerPath, ^(const char *format, ...) {
-        va_list list;
-        va_start(list, format);
-        diag.error(format, list);
-        va_end(list);
-    })) {
+    void (^fileErrorLog)(const char *format, ...) __printflike(1, 2)
+        = ^(const char *format, ...) __printflike(1, 2) {
+            va_list list;
+            va_start(list, format);
+            diag.error(format, list);
+            va_end(list);
+        };
+    if ( !fileSystem.loadFile(path, info, realerPath, fileErrorLog) ) {
         return closure::LoadedFileInfo();
     }
 
@@ -214,27 +214,16 @@ void MachOAnalyzer::validateDyldCacheDylib(Diagnostics& diag, const char* path) 
 }
 #endif
 
-uint64_t MachOAnalyzer::mappedSize() const
-{
-    uint64_t vmSpace;
-    bool     hasZeroFill;
-    analyzeSegmentsLayout(vmSpace, hasZeroFill);
-    return vmSpace;
-}
-
 bool MachOAnalyzer::validMachOForArchAndPlatform(Diagnostics& diag, size_t sliceLength, const char* path, const GradedArchs& archs, Platform reqPlatform, bool isOSBinary) const
 {
-    char dupPath[PATH_MAX];
-    Diagnostics::quotePath(path, dupPath);
-
     // must start with mach-o magic value
     if ( (this->magic != MH_MAGIC) && (this->magic != MH_MAGIC_64) ) {
-        diag.error("could not use '%s' because it is not a mach-o file: 0x%08X 0x%08X", dupPath, this->magic, this->cputype);
+        diag.error("could not use '%s' because it is not a mach-o file: 0x%08X 0x%08X", path, this->magic, this->cputype);
         return false;
     }
 
     if ( !archs.grade(this->cputype, this->cpusubtype, isOSBinary) ) {
-        diag.error("could not use '%s' because it is not a compatible arch", dupPath);
+        diag.error("could not use '%s' because it is not a compatible arch", path);
         return false;
     }
 
@@ -249,10 +238,11 @@ bool MachOAnalyzer::validMachOForArchAndPlatform(Diagnostics& diag, size_t slice
         // Allow offline tools to analyze binaries dyld doesn't load
         case MH_KEXT_BUNDLE:
         case MH_FILESET:
+        case MH_PRELOAD:
             break;
 #endif
         default:
-            diag.error("could not use '%s' because it is not a dylib, bundle, or executable, filetype=0x%08X", dupPath, this->filetype);
+            diag.error("could not use '%s' because it is not a dylib, bundle, or executable, filetype=0x%08X", path, this->filetype);
            return false;
     }
 
@@ -265,7 +255,7 @@ bool MachOAnalyzer::validMachOForArchAndPlatform(Diagnostics& diag, size_t slice
     if ( (this->filetype == MH_EXECUTE) && !isDynamicExecutable() ) {
 #if !BUILDING_DYLDINFO && !BUILDING_APP_CACHE_UTIL
         // dyldinfo should be able to inspect static executables such as the kernel
-        diag.error("could not use '%s' because it is a static executable", dupPath);
+        diag.error("could not use '%s' because it is a static executable", path);
         return false;
 #endif
     }
@@ -283,11 +273,11 @@ bool MachOAnalyzer::validMachOForArchAndPlatform(Diagnostics& diag, size_t slice
             }
         });
         if (!foundPlatform) {
-            diag.error("could not use '%s' because we expected it to have a platform", dupPath);
+            diag.error("could not use '%s' because we expected it to have a platform", path);
             return false;
         }
         if (foundBadPlatform) {
-            diag.error("could not use '%s' because is has the wrong platform", dupPath);
+            diag.error("could not use '%s' because is has the wrong platform", path);
             return false;
         }
     } else if ( reqPlatform == Platform::unknown ) {
@@ -299,14 +289,14 @@ bool MachOAnalyzer::validMachOForArchAndPlatform(Diagnostics& diag, size_t slice
                 foundPlatform = true;
             });
             if (foundPlatform) {
-                diag.error("could not use '%s' because we expected it to have no platform", dupPath);
+                diag.error("could not use '%s' because we expected it to have no platform", path);
                 return false;
             }
         }
     } else
 #endif
     if ( !this->loadableIntoProcess(reqPlatform, path) ) {
-        diag.error("could not use '%s' because it was not built for platform %s", dupPath, MachOFile::platformName(reqPlatform));
+        diag.error("could not use '%s' because it was not built for platform %s", path, MachOFile::platformName(reqPlatform));
         return false;
     }
 
@@ -368,12 +358,9 @@ bool MachOAnalyzer::validLinkedit(Diagnostics& diag, const char* path) const
 
 bool MachOAnalyzer::validLoadCommands(Diagnostics& diag, const char* path, size_t fileLen) const
 {
-    char dupPath[PATH_MAX];
-    Diagnostics::quotePath(path, dupPath);
-
     // check load command don't exceed file length
     if ( this->sizeofcmds + machHeaderSize() > fileLen ) {
-        diag.error("in '%s' load commands exceed length of file", dupPath);
+        diag.error("in '%s' load commands exceed length of file", path);
         return false;
     }
 
@@ -381,10 +368,10 @@ bool MachOAnalyzer::validLoadCommands(Diagnostics& diag, const char* path, size_
     Diagnostics walkDiag;
     forEachLoadCommand(walkDiag, ^(const load_command* cmd, bool& stop) {});
     if ( walkDiag.hasError() ) {
-#if BUILDING_CACHE_BUILDER
-        diag.error("in '%s' %s", dupPath, walkDiag.errorMessage().c_str());
+#if BUILDING_CACHE_BUILDER || BUILDING_UNIT_TESTS || BUILDING_CACHE_BUILDER_UNIT_TESTS
+        diag.error("in '%s' %s", path, walkDiag.errorMessage().c_str());
 #else
-        diag.error("in '%s' %s", dupPath, walkDiag.errorMessage());
+        diag.error("in '%s' %s", path, walkDiag.errorMessage());
 #endif
         return false;
     }
@@ -393,20 +380,18 @@ bool MachOAnalyzer::validLoadCommands(Diagnostics& diag, const char* path, size_
     __block bool foundTEXT    = false;
     forEachSegment(^(const SegmentInfo& info, bool& stop) {
         if ( strcmp(info.segName, "__TEXT") == 0 ) {
-            char dupPathBlock[PATH_MAX];
-            Diagnostics::quotePath(path, dupPathBlock);
             foundTEXT = true;
             if ( this->sizeofcmds + machHeaderSize() > info.fileSize ) {
-                diag.error("in '%s' load commands exceed length of __TEXT segment", dupPathBlock);
+                diag.error("in '%s' load commands exceed length of __TEXT segment", path);
             }
-            if ( info.fileOffset != 0 ) {
-                diag.error("in '%s' __TEXT segment not start of mach-o", dupPathBlock);
+            if ( (info.fileOffset != 0) && !this->isPreload() ) {
+                diag.error("in '%s' __TEXT segment not start of mach-o", path);
             }
             stop = true;
         }
     });
     if ( !diag.noError() && !foundTEXT ) {
-        diag.error("in '%s' __TEXT segment not found", dupPath);
+        diag.error("in '%s' __TEXT segment not found", path);
         return false;
     }
 
@@ -498,220 +483,6 @@ const MachOAnalyzer* MachOAnalyzer::remapIfZeroFill(Diagnostics& diag, const clo
     return this;
 }
 
-void MachOAnalyzer::analyzeSegmentsLayout(uint64_t& vmSpace, bool& hasZeroFill) const
-{
-    __block bool     writeExpansion = false;
-    __block uint64_t lowestVmAddr   = 0xFFFFFFFFFFFFFFFFULL;
-    __block uint64_t highestVmAddr  = 0;
-    __block uint64_t sumVmSizes     = 0;
-    forEachSegment(^(const SegmentInfo& segmentInfo, bool& stop) {
-        if ( strcmp(segmentInfo.segName, "__PAGEZERO") == 0 )
-            return;
-        if ( segmentInfo.writable() && (segmentInfo.fileSize !=  segmentInfo.vmSize) )
-            writeExpansion = true; // zerofill at end of __DATA
-        if ( segmentInfo.vmSize == 0 ) {
-            // Always zero fill if we have zero-sized segments
-            writeExpansion = true;
-        }
-        if ( segmentInfo.vmAddr < lowestVmAddr )
-            lowestVmAddr = segmentInfo.vmAddr;
-        if ( segmentInfo.vmAddr+segmentInfo.vmSize > highestVmAddr )
-            highestVmAddr = segmentInfo.vmAddr+segmentInfo.vmSize;
-        sumVmSizes += segmentInfo.vmSize;
-    });
-    uint64_t totalVmSpace = (highestVmAddr - lowestVmAddr);
-    // LINKEDIT vmSize is not required to be a multiple of page size.  Round up if that is the case
-    const uint64_t pageSize = uses16KPages() ? 0x4000 : 0x1000;
-    totalVmSpace = (totalVmSpace + (pageSize - 1)) & ~(pageSize - 1);
-    bool hasHole = (totalVmSpace != sumVmSizes); // segments not contiguous
-
-    // The aux KC may have __DATA first, in which case we always want to vm_copy to the right place
-    bool hasOutOfOrderSegments = false;
-#if BUILDING_APP_CACHE_UTIL
-    uint64_t textSegVMAddr = preferredLoadAddress();
-    hasOutOfOrderSegments = textSegVMAddr != lowestVmAddr;
-#endif
-
-    vmSpace     = totalVmSpace;
-    hasZeroFill = writeExpansion || hasHole || hasOutOfOrderSegments;
-}
-
-bool MachOAnalyzer::enforceFormat(Malformed kind) const
-{
-    // TODO: Add a mapping from generic releases to platform versions
-#if BUILDING_DYLDINFO || BUILDING_APP_CACHE_UTIL || BUILDING_RUN_STATIC
-    // HACK: If we are the kernel, we have a different format to enforce
-    if ( isFileSet() ) {
-        bool result = false;
-        switch (kind) {
-        case Malformed::linkeditOrder:
-        case Malformed::linkeditAlignment:
-        case Malformed::dyldInfoAndlocalRelocs:
-            result = true;
-            break;
-        case Malformed::segmentOrder:
-        // The aux KC has __DATA first
-            result = false;
-            break;
-        case Malformed::linkeditPermissions:
-        case Malformed::executableData:
-        case Malformed::writableData:
-        case Malformed::codeSigAlignment:
-        case Malformed::sectionsAddrRangeWithinSegment:
-        case Malformed::loaderPathsAreReal:
-        case Malformed::mainExecInDyldCache:
-            result = true;
-            break;
-        case Malformed::noLinkedDylibs:
-        case Malformed::textPermissions:
-            // The kernel has its own __TEXT_EXEC for executable memory
-            result = false;
-            break;
-        case Malformed::noUUID:
-            result = true;
-            break;
-        }
-        return result;
-    }
-
-    if ( isStaticExecutable() ) {
-        bool result = false;
-        switch (kind) {
-        case Malformed::linkeditOrder:
-        case Malformed::linkeditAlignment:
-        case Malformed::dyldInfoAndlocalRelocs:
-            result = true;
-            break;
-        case Malformed::segmentOrder:
-            result = false;
-            break;
-        case Malformed::linkeditPermissions:
-        case Malformed::executableData:
-        case Malformed::codeSigAlignment:
-        case Malformed::textPermissions:
-        case Malformed::sectionsAddrRangeWithinSegment:
-        case Malformed::loaderPathsAreReal:
-        case Malformed::mainExecInDyldCache:
-            result = true;
-            break;
-        case Malformed::noLinkedDylibs:
-        case Malformed::writableData:
-        case Malformed::noUUID:
-            // The kernel has __DATA_CONST marked as r/o
-            result = false;
-            break;
-        }
-        return result;
-    }
-
-#endif
-
-    __block bool result = false;
-    forEachSupportedPlatform(^(Platform platform, uint32_t minOS, uint32_t sdk) {
-        switch (platform) {
-        case Platform::macOS:
-            switch (kind) {
-            case Malformed::linkeditOrder:
-            case Malformed::linkeditAlignment:
-            case Malformed::dyldInfoAndlocalRelocs:
-                // enforce these checks on new binaries only
-                if (sdk >= 0x000A0E00) // macOS 10.14
-                    result = true;
-                break;
-            case Malformed::segmentOrder:
-            case Malformed::linkeditPermissions:
-            case Malformed::textPermissions:
-            case Malformed::executableData:
-            case Malformed::writableData:
-            case Malformed::codeSigAlignment:
-                // enforce these checks on new binaries only
-                if (sdk >= 0x000A0F00) // macOS 10.15
-                    result = true;
-                break;
-            case Malformed::sectionsAddrRangeWithinSegment:
-                // enforce these checks on new binaries only
-                if (sdk >= 0x000A1000) // macOS 10.16
-                    result = true;
-                break;
-            case Malformed::noLinkedDylibs:
-            case Malformed::loaderPathsAreReal:
-            case Malformed::mainExecInDyldCache:
-            case Malformed::noUUID:
-                // enforce these checks on new binaries only
-                if (sdk >= 0x000C0000) // macOS 12.0
-                    result = true;
-                break;
-            }
-            break;
-        case Platform::iOS:
-        case Platform::tvOS:
-        case Platform::iOSMac:
-            switch (kind) {
-            case Malformed::linkeditOrder:
-            case Malformed::dyldInfoAndlocalRelocs:
-            case Malformed::textPermissions:
-            case Malformed::executableData:
-            case Malformed::writableData:
-                result = true;
-                break;
-            case Malformed::linkeditAlignment:
-            case Malformed::segmentOrder:
-            case Malformed::linkeditPermissions:
-            case Malformed::codeSigAlignment:
-                // enforce these checks on new binaries only
-                if (sdk >= 0x000D0000) // iOS 13
-                    result = true;
-                break;
-            case Malformed::sectionsAddrRangeWithinSegment:
-                // enforce these checks on new binaries only
-                if (sdk >= 0x000E0000) // iOS 14
-                    result = true;
-                break;
-            case Malformed::noLinkedDylibs:
-            case Malformed::loaderPathsAreReal:
-            case Malformed::mainExecInDyldCache:
-            case Malformed::noUUID:
-                // enforce these checks on new binaries only
-                if (sdk >= 0x000F0000) // iOS 15
-                    result = true;
-            }
-            break;
-        case Platform::watchOS:
-            switch (kind) {
-            case Malformed::linkeditOrder:
-            case Malformed::dyldInfoAndlocalRelocs:
-            case Malformed::textPermissions:
-            case Malformed::executableData:
-            case Malformed::writableData:
-                result = true;
-                break;
-            case Malformed::linkeditAlignment:
-            case Malformed::segmentOrder:
-            case Malformed::linkeditPermissions:
-            case Malformed::codeSigAlignment:
-            case Malformed::sectionsAddrRangeWithinSegment:
-            case Malformed::noLinkedDylibs:
-            case Malformed::loaderPathsAreReal:
-            case Malformed::mainExecInDyldCache:
-            case Malformed::noUUID:
-                // enforce these checks on new binaries only
-                if (sdk >= 0x00080000) // watchOS 8
-                    result = true;
-                break;
-            }
-            break;
-        case Platform::driverKit:
-            result = true;
-            break;
-        default:
-            result = true;
-            break;
-        }
-    });
-    // if binary is so old, there is no platform info, don't enforce malformed errors
-    return result;
-}
-
 bool MachOAnalyzer::validEmbeddedPaths(Diagnostics& diag, Platform platform, const char* path) const
 {
     __block int         index = 1;
@@ -719,8 +490,6 @@ bool MachOAnalyzer::validEmbeddedPaths(Diagnostics& diag, Platform platform, con
     __block int         dependentsCount = 0;
     __block const char* installName = nullptr;
     forEachLoadCommand(diag, ^(const load_command* cmd, bool& stop) {
-        char dupPathBlock[PATH_MAX];
-        Diagnostics::quotePath(path, dupPathBlock);
         const dylib_command* dylibCmd;
         const rpath_command* rpathCmd;
         switch ( cmd->cmd ) {
@@ -731,7 +500,7 @@ bool MachOAnalyzer::validEmbeddedPaths(Diagnostics& diag, Platform platform, con
             case LC_LOAD_UPWARD_DYLIB:
                 dylibCmd = (dylib_command*)cmd;
                 if ( dylibCmd->dylib.name.offset > cmd->cmdsize ) {
-                    diag.error("in '%s' load command #%d name offset (%u) outside its size (%u)", dupPathBlock, index, dylibCmd->dylib.name.offset, cmd->cmdsize);
+                    diag.error("in '%s' load command #%d name offset (%u) outside its size (%u)", path, index, dylibCmd->dylib.name.offset, cmd->cmdsize);
                     stop = true;
                     allGood = false;
                 }
@@ -746,7 +515,7 @@ bool MachOAnalyzer::validEmbeddedPaths(Diagnostics& diag, Platform platform, con
                         }
                     }
                     if ( !foundEnd ) {
-                        diag.error("in '%s' load command #%d string extends beyond end of load command", dupPathBlock, index);
+                        diag.error("in '%s' load command #%d string extends beyond end of load command", path, index);
                         stop = true;
                         allGood = false;
                     }
@@ -759,7 +528,7 @@ bool MachOAnalyzer::validEmbeddedPaths(Diagnostics& diag, Platform platform, con
             case LC_RPATH:
                 rpathCmd = (rpath_command*)cmd;
                 if ( rpathCmd->path.offset > cmd->cmdsize ) {
-                    diag.error("in '%s' load command #%d path offset (%u) outside its size (%u)", dupPathBlock, index, rpathCmd->path.offset, cmd->cmdsize);
+                    diag.error("in '%s' load command #%d path offset (%u) outside its size (%u)", path, index, rpathCmd->path.offset, cmd->cmdsize);
                     stop = true;
                     allGood = false;
                 }
@@ -774,7 +543,7 @@ bool MachOAnalyzer::validEmbeddedPaths(Diagnostics& diag, Platform platform, con
                         }
                     }
                     if ( !foundEnd ) {
-                        diag.error("in '%s' load command #%d string extends beyond end of load command", dupPathBlock, index);
+                        diag.error("in '%s' load command #%d string extends beyond end of load command", path, index);
                         stop = true;
                         allGood = false;
                     }
@@ -786,11 +555,9 @@ bool MachOAnalyzer::validEmbeddedPaths(Diagnostics& diag, Platform platform, con
     if ( !allGood )
         return false;
 
-    char dupPath[PATH_MAX];
-    Diagnostics::quotePath(path, dupPath);
     if ( this->filetype == MH_DYLIB ) {
         if ( installName == nullptr ) {
-            diag.error("in '%s' MH_DYLIB is missing LC_ID_DYLIB", dupPath);
+            diag.error("in '%s' MH_DYLIB is missing LC_ID_DYLIB", path);
             return false;
         }
 
@@ -812,7 +579,7 @@ bool MachOAnalyzer::validEmbeddedPaths(Diagnostics& diag, Platform platform, con
     }
     else {
         if ( installName != nullptr ) {
-            diag.error("in '%s' LC_ID_DYLIB found in non-MH_DYLIB", dupPath);
+            diag.error("in '%s' LC_ID_DYLIB found in non-MH_DYLIB", path);
             return false;
         }
     }
@@ -824,7 +591,7 @@ bool MachOAnalyzer::validEmbeddedPaths(Diagnostics& diag, Platform platform, con
         bool isNotLibSystem = (installName == nullptr) || (strncmp(installName, libSystemDir, strlen(libSystemDir)) != 0);
 
         if ( this->isDyldManaged() && isNotLibSystem ) {
-            diag.error("in '%s' missing LC_LOAD_DYLIB (must link with at least libSystem.dylib)", dupPath);
+            diag.error("in '%s' missing LC_LOAD_DYLIB (must link with at least libSystem.dylib)", path);
             return false;
         }
     }
@@ -832,322 +599,65 @@ bool MachOAnalyzer::validEmbeddedPaths(Diagnostics& diag, Platform platform, con
     return true;
 }
 
-bool MachOAnalyzer::validSegments(Diagnostics& diag, const char* path, size_t fileLen) const
-{
-    // check segment load command size
-    __block bool badSegmentLoadCommand = false;
-    forEachLoadCommand(diag, ^(const load_command* cmd, bool& stop) {
-        char dupPathBlock[PATH_MAX];
-        Diagnostics::quotePath(path, dupPathBlock);
-        if ( cmd->cmd == LC_SEGMENT_64 ) {
-            const segment_command_64* seg = (segment_command_64*)cmd;
-            int32_t sectionsSpace = cmd->cmdsize - sizeof(segment_command_64);
-            if ( sectionsSpace < 0 ) {
-               diag.error("in '%s' load command size too small for LC_SEGMENT_64", dupPathBlock);
-               badSegmentLoadCommand = true;
-               stop = true;
-            }
-            else if ( (sectionsSpace % sizeof(section_64)) != 0 ) {
-               diag.error("in '%s' segment load command size 0x%X will not fit whole number of sections", dupPathBlock, cmd->cmdsize);
-               badSegmentLoadCommand = true;
-               stop = true;
-            }
-            else if ( sectionsSpace != (seg->nsects * sizeof(section_64)) ) {
-               diag.error("in '%s' load command size 0x%X does not match nsects %d", dupPathBlock, cmd->cmdsize, seg->nsects);
-               badSegmentLoadCommand = true;
-               stop = true;
-            }
-            else if ( greaterThanAddOrOverflow(seg->fileoff, seg->filesize, fileLen) ) {
-                diag.error("in '%s' segment load command content extends beyond end of file", dupPathBlock);
-                badSegmentLoadCommand = true;
-                stop = true;
-            }
-            else if ( (seg->filesize > seg->vmsize) && ((seg->vmsize != 0) || ((seg->flags & SG_NORELOC) == 0)) ) {
-                // <rdar://problem/19986776> dyld should support non-allocatable __LLVM segment
-                diag.error("in '%s' segment '%s' filesize exceeds vmsize", dupPathBlock, seg->segname);
-                badSegmentLoadCommand = true;
-                stop = true;
-            }
-        }
-        else if ( cmd->cmd == LC_SEGMENT ) {
-            const segment_command* seg = (segment_command*)cmd;
-            int32_t sectionsSpace = cmd->cmdsize - sizeof(segment_command);
-            if ( sectionsSpace < 0 ) {
-               diag.error("in '%s' load command size too small for LC_SEGMENT", dupPathBlock);
-               badSegmentLoadCommand = true;
-               stop = true;
-            }
-            else if ( (sectionsSpace % sizeof(section)) != 0 ) {
-               diag.error("in '%s' segment load command size 0x%X will not fit whole number of sections", dupPathBlock, cmd->cmdsize);
-               badSegmentLoadCommand = true;
-               stop = true;
-            }
-            else if ( sectionsSpace != (seg->nsects * sizeof(section)) ) {
-               diag.error("in '%s' load command size 0x%X does not match nsects %d", dupPathBlock, cmd->cmdsize, seg->nsects);
-               badSegmentLoadCommand = true;
-               stop = true;
-            }
-            else if ( (seg->filesize > seg->vmsize) && ((seg->vmsize != 0) || ((seg->flags & SG_NORELOC) == 0)) ) {
-                // <rdar://problem/19986776> dyld should support non-allocatable __LLVM segment
-                diag.error("in '%s' segment  '%s' filesize exceeds vmsize", dupPathBlock, seg->segname);
-                badSegmentLoadCommand = true;
-                stop = true;
-            }
-        }
-    });
-     if ( badSegmentLoadCommand )
-         return false;
-
-    // check mapping permissions of segments
-    __block bool badPermissions = false;
-    __block bool badSize        = false;
-    __block bool hasTEXT        = false;
-    __block bool hasLINKEDIT    = false;
-    forEachSegment(^(const SegmentInfo& info, bool& stop) {
-        char dupPathBlock[PATH_MAX];
-        Diagnostics::quotePath(path, dupPathBlock);
-        if ( strcmp(info.segName, "__TEXT") == 0 ) {
-            if ( (info.protections != (VM_PROT_READ|VM_PROT_EXECUTE)) && enforceFormat(Malformed::textPermissions) ) {
-                diag.error("in '%s' __TEXT segment permissions is not 'r-x'", dupPathBlock);
-                badPermissions = true;
-                stop = true;
-            }
-            hasTEXT = true;
-        }
-        else if ( strcmp(info.segName, "__LINKEDIT") == 0 ) {
-            if ( (info.protections != VM_PROT_READ) && enforceFormat(Malformed::linkeditPermissions) ) {
-                diag.error("in '%s' __LINKEDIT segment permissions is not 'r--'", dupPathBlock);
-                badPermissions = true;
-                stop = true;
-            }
-            hasLINKEDIT = true;
-        }
-        else if ( (info.protections & 0xFFFFFFF8) != 0 ) {
-            diag.error("in '%s' %s segment permissions has invalid bits set", dupPathBlock, info.segName);
-            badPermissions = true;
-            stop = true;
-        }
-        if ( greaterThanAddOrOverflow(info.fileOffset, info.fileSize, fileLen) ) {
-            diag.error("in '%s' %s segment content extends beyond end of file", dupPathBlock, info.segName);
-            badSize = true;
-            stop = true;
-        }
-        if ( is64() ) {
-            if ( info.vmAddr+info.vmSize < info.vmAddr ) {
-                diag.error("in '%s' %s segment vm range wraps", dupPathBlock, info.segName);
-                badSize = true;
-                stop = true;
-            }
-       }
-       else {
-            if ( (uint32_t)(info.vmAddr+info.vmSize) < (uint32_t)(info.vmAddr) ) {
-                diag.error("in '%s' %s segment vm range wraps", dupPathBlock, info.segName);
-                badSize = true;
-                stop = true;
-            }
-       }
-    });
-    if ( badPermissions || badSize )
-        return false;
-    char dupPath[PATH_MAX];
-    Diagnostics::quotePath(path, dupPath);
-    if ( !hasTEXT ) {
-        diag.error("in '%s' missing __TEXT segment", dupPath);
-        return false;
-    }
-    if ( !hasLINKEDIT ) {
-       diag.error("in '%s' missing __LINKEDIT segment", dupPath);
-       return false;
-    }
-
-    // check for overlapping segments
-    __block bool badSegments = false;
-    forEachSegment(^(const SegmentInfo& info1, bool& stop1) {
-        uint64_t seg1vmEnd   = info1.vmAddr + info1.vmSize;
-        uint64_t seg1FileEnd = info1.fileOffset + info1.fileSize;
-        forEachSegment(^(const SegmentInfo& info2, bool& stop2) {
-            char dupPathBlock[PATH_MAX];
-            Diagnostics::quotePath(path, dupPathBlock);
-            if ( info1.segIndex == info2.segIndex )
-                return;
-            uint64_t seg2vmEnd   = info2.vmAddr + info2.vmSize;
-            uint64_t seg2FileEnd = info2.fileOffset + info2.fileSize;
-            if ( ((info2.vmAddr <= info1.vmAddr) && (seg2vmEnd > info1.vmAddr) && (seg1vmEnd > info1.vmAddr )) || ((info2.vmAddr >= info1.vmAddr ) && (info2.vmAddr < seg1vmEnd) && (seg2vmEnd > info2.vmAddr)) ) {
-                diag.error("in '%s' segment %s vm range overlaps segment %s", dupPathBlock, info1.segName, info2.segName);
-                badSegments = true;
-                stop1 = true;
-                stop2 = true;
-            }
-             if ( ((info2.fileOffset  <= info1.fileOffset) && (seg2FileEnd > info1.fileOffset) && (seg1FileEnd > info1.fileOffset)) || ((info2.fileOffset  >= info1.fileOffset) && (info2.fileOffset  < seg1FileEnd) && (seg2FileEnd > info2.fileOffset )) ) {
-                 if ( !inDyldCache() ) {
-                     // HACK: Split shared caches might put the __TEXT in a SubCache, then the __DATA in a later SubCache.
-                     // The file offsets are in to each SubCache file, which means that they might overlap
-                     // For now we have no choice but to disable this error
-                     diag.error("in '%s' segment %s file content overlaps segment %s", dupPathBlock, info1.segName, info2.segName);
-                     badSegments = true;
-                     stop1 = true;
-                     stop2 = true;
-                 }
-            }
-            if ( (info1.segIndex < info2.segIndex) && !stop1 ) {
-                if ( (info1.vmAddr > info2.vmAddr) || ((info1.fileOffset > info2.fileOffset ) && (info1.fileOffset != 0) && (info2.fileOffset  != 0)) ){
-                    if ( !inDyldCache() && enforceFormat(Malformed::segmentOrder) && !isStaticExecutable() ) {
-                        //<rdar://80084852> whitelist go libraries __DWARF segments
-                        if ( (strcmp(info1.segName, "__DWARF") != 0 && strcmp(info2.segName, "__DWARF") != 0) ) {
-                            // dyld cache __DATA_* segments are moved around
-                            // The static kernel also has segments with vmAddr's before __TEXT
-                            diag.error("in '%s' segment load commands out of order with respect to layout for %s and %s", dupPathBlock, info1.segName, info2.segName);
-                            badSegments = true;
-                            stop1 = true;
-                            stop2 = true;
-                        }
-                    }
-                }
-            }
-        });
-    });
-    if ( badSegments )
-        return false;
-
-    // check sections are within segment
-    __block bool badSections = false;
-    forEachLoadCommand(diag, ^(const load_command* cmd, bool& stop) {
-        char dupPathBlock[PATH_MAX];
-        Diagnostics::quotePath(path, dupPathBlock);
-        if ( cmd->cmd == LC_SEGMENT_64 ) {
-            const segment_command_64* seg = (segment_command_64*)cmd;
-            const section_64* const sectionsStart = (section_64*)((char*)seg + sizeof(struct segment_command_64));
-            const section_64* const sectionsEnd   = &sectionsStart[seg->nsects];
-            for (const section_64* sect=sectionsStart; (sect < sectionsEnd); ++sect) {
-                if ( (int64_t)(sect->size) < 0 ) {
-                    diag.error("in '%s' section '%s' size too large 0x%llX", dupPathBlock, sect->sectname, sect->size);
-                    badSections = true;
-                }
-                else if ( sect->addr < seg->vmaddr ) {
-                    diag.error("in '%s' section '%s' start address 0x%llX is before containing segment's address 0x%0llX", dupPathBlock, sect->sectname, sect->addr, seg->vmaddr);
-                    badSections = true;
-                }
-                else if ( sect->addr+sect->size > seg->vmaddr+seg->vmsize ) {
-                    bool ignoreError = !enforceFormat(Malformed::sectionsAddrRangeWithinSegment);
-#if BUILDING_APP_CACHE_UTIL
-                    if ( (seg->vmsize == 0) && !strcmp(seg->segname, "__CTF") )
-                        ignoreError = true;
-#endif
-                    if ( !ignoreError ) {
-                        diag.error("in '%s' section '%s' end address 0x%llX is beyond containing segment's end address 0x%0llX", dupPathBlock, sect->sectname, sect->addr+sect->size, seg->vmaddr+seg->vmsize);
-                        badSections = true;
-                    }
-                }
-            }
-        }
-        else if ( cmd->cmd == LC_SEGMENT ) {
-            const segment_command* seg = (segment_command*)cmd;
-            const section* const sectionsStart = (section*)((char*)seg + sizeof(struct segment_command));
-            const section* const sectionsEnd   = &sectionsStart[seg->nsects];
-            for (const section* sect=sectionsStart; !stop && (sect < sectionsEnd); ++sect) {
-               if ( (int64_t)(sect->size) < 0 ) {
-                    diag.error("in '%s' section %s size too large 0x%X", dupPathBlock, sect->sectname, sect->size);
-                    badSections = true;
-                }
-                else if ( sect->addr < seg->vmaddr ) {
-                    diag.error("in '%s' section %s start address 0x%X is before containing segment's address 0x%0X", dupPathBlock,  sect->sectname, sect->addr, seg->vmaddr);
-                    badSections = true;
-                }
-                else if ( sect->addr+sect->size > seg->vmaddr+seg->vmsize ) {
-                    diag.error("in '%s' section %s end address 0x%X is beyond containing segment's end address 0x%0X", dupPathBlock, sect->sectname, sect->addr+sect->size, seg->vmaddr+seg->vmsize);
-                    badSections = true;
-                }
-            }
-        }
-    });
-
-    return !badSections;
-}
-
 
 bool MachOAnalyzer::validMain(Diagnostics& diag, const char* path) const
 {
-    // FIXME: Also check that dylibs with inDyldCache() set are actaully in the cache
     if ( this->inDyldCache() && MachOAnalyzer::enforceFormat(Malformed::mainExecInDyldCache) ) {
         diag.error("MH_EXECUTE is in dyld shared cache");
         return false;
     }
-    const char* executableTextSegmentName = "__TEXT";
-#if BUILDING_APP_CACHE_UTIL
-    // The kernel has __start in __TEXT_EXEC, or for x86_64 it's __HIB
-    if ( isStaticExecutable() ) {
-        if ( isArch("x86_64") || isArch("x86_64h") )
-            executableTextSegmentName = "__HIB";
-        else
-            executableTextSegmentName = "__TEXT_EXEC";
-    }
-#endif
-
-    __block uint64_t textSegStartAddr = 0;
-    __block uint64_t textSegStartSize = 0;
-    forEachSegment(^(const SegmentInfo& info, bool& stop) {
-        if ( strcmp(info.segName, executableTextSegmentName) == 0 ) {
-            textSegStartAddr = info.vmAddr;
-            textSegStartSize = info.vmSize;
-            stop = true;
-       }
-    });
 
     __block int mainCount   = 0;
     __block int threadCount = 0;
     forEachLoadCommand(diag, ^(const load_command* cmd, bool& stop) {
-        entry_point_command* mainCmd;
-        uint64_t startAddress;
         switch (cmd->cmd) {
-            case LC_MAIN:
+            case LC_MAIN: {
                 ++mainCount;
-                mainCmd = (entry_point_command*)cmd;
-                if ( mainCmd->entryoff >= textSegStartSize ) {
-                    startAddress = preferredLoadAddress() + mainCmd->entryoff;
-                    __block bool foundSegment = false;
-                    forEachSegment(^(const SegmentInfo& info, bool& stopSegment) {
-                        // Skip segments which don't contain this address
-                        if ( (startAddress < info.vmAddr) || (startAddress >= info.vmAddr+info.vmSize) )
-                            return;
-                        foundSegment = true;
-                        if ( (info.protections & VM_PROT_EXECUTE) == 0 )
-                            diag.error("LC_MAIN points to non-executable segment");
-                        stopSegment = true;
-                    });
-                    if (!foundSegment)
-                        diag.error("LC_MAIN entryoff is out of range");
-                    stop = true;
-                }
+                entry_point_command* mainCmd = (entry_point_command*)cmd;
+                uint64_t startAddress = preferredLoadAddress() + mainCmd->entryoff;
+
+                __block bool foundSegment = false;
+                forEachSegment(^(const SegmentInfo& info, bool& stopSegment) {
+                    // Skip segments which don't contain this address
+                    if ( (startAddress < info.vmAddr) || (startAddress >= info.vmAddr+info.vmSize) )
+                        return;
+                    foundSegment = true;
+                    if ( (info.protections & VM_PROT_EXECUTE) == 0 )
+                        diag.error("LC_MAIN points to non-executable segment");
+                    stopSegment = true;
+                });
+                if (!foundSegment)
+                    diag.error("LC_MAIN entryoff is out of range");
+
+                stop = true;
                 break;
-            case LC_UNIXTHREAD:
+            }
+            case LC_UNIXTHREAD: {
                 ++threadCount;
-                startAddress = entryAddrFromThreadCmd((thread_command*)cmd);
+                uint64_t startAddress = entryAddrFromThreadCmd((thread_command*)cmd);
                 if ( startAddress == 0 ) {
                     diag.error("LC_UNIXTHREAD not valid for arch %s", archName());
                     stop = true;
-                }
-#if BUILDING_DYLDINFO
-                else if ( isStaticExecutable() ) {
+                } else {
                     __block bool foundSegment = false;
                     forEachSegment(^(const SegmentInfo& info, bool& stopSegment) {
                         // Skip segments which don't contain this address
                         if ( (startAddress < info.vmAddr) || (startAddress >= info.vmAddr+info.vmSize) )
                             return;
                         foundSegment = true;
-                        if ( (info.protections & VM_PROT_EXECUTE) == 0 )
-                            diag.error("LC_UNIXTHREAD points to non-executable segment");
+                        if ( (info.protections & VM_PROT_EXECUTE) == 0 ) {
+                            // Suppress this error for the x86_64 kernel
+                            if ( !this->isStaticExecutable() )
+                                diag.error("LC_UNIXTHREAD points to non-executable segment");
+                        }
                         stopSegment = true;
                     });
                     if (!foundSegment)
                         diag.error("LC_UNIXTHREAD entry is out of range");
                     stop = true;
                 }
-#endif
-                else if ( (startAddress < textSegStartAddr) || (startAddress >= textSegStartAddr+textSegStartSize) ) {
-                    diag.error("LC_UNIXTHREAD entry not in %s segment", executableTextSegmentName);
-                    stop = true;
-                }
                 break;
+            }
         }
     });
     if ( diag.hasError() )
@@ -1203,171 +713,11 @@ namespace {
 
 bool MachOAnalyzer::validLinkeditLayout(Diagnostics& diag, const char* path) const
 {
-    LinkEditInfo leInfo;
-    getLinkEditPointers(diag, leInfo);
-    if ( diag.hasError() )
-        return false;
-    const uint32_t ptrSize = pointerSize();
-
-    // build vector of all blobs in LINKEDIT
-    LinkEditContentChunk blobs[32];
-    LinkEditContentChunk* bp = blobs;
-    if ( leInfo.dyldInfo != nullptr ) {
-        if ( leInfo.dyldInfo->rebase_size != 0 )
-            *bp++ = {"rebase opcodes",          ptrSize, leInfo.dyldInfo->rebase_off, leInfo.dyldInfo->rebase_size};
-        if ( leInfo.dyldInfo->bind_size != 0 )
-            *bp++ = {"bind opcodes",            ptrSize, leInfo.dyldInfo->bind_off, leInfo.dyldInfo->bind_size};
-        if ( leInfo.dyldInfo->weak_bind_size != 0 )
-            *bp++ = {"weak bind opcodes",       ptrSize, leInfo.dyldInfo->weak_bind_off, leInfo.dyldInfo->weak_bind_size};
-        if ( leInfo.dyldInfo->lazy_bind_size != 0 )
-            *bp++ = {"lazy bind opcodes",       ptrSize, leInfo.dyldInfo->lazy_bind_off, leInfo.dyldInfo->lazy_bind_size};
-        if ( leInfo.dyldInfo->export_size!= 0 )
-            *bp++ = {"exports trie",            ptrSize, leInfo.dyldInfo->export_off, leInfo.dyldInfo->export_size};
-    }
-    if ( leInfo.exportsTrie != nullptr ) {
-        if ( leInfo.exportsTrie->datasize != 0 )
-            *bp++ = {"exports trie",            ptrSize, leInfo.exportsTrie->dataoff, leInfo.exportsTrie->datasize};
-    }
-    if ( leInfo.chainedFixups != nullptr ) {
-        if ( leInfo.chainedFixups->datasize != 0 )
-            *bp++ = {"chained fixups",          ptrSize, leInfo.chainedFixups->dataoff, leInfo.chainedFixups->datasize};
-    }
-    
-    if ( leInfo.dynSymTab != nullptr ) {
-        if ( leInfo.dynSymTab->nlocrel != 0 )
-            *bp++ = {"local relocations",       ptrSize, leInfo.dynSymTab->locreloff, static_cast<uint32_t>(leInfo.dynSymTab->nlocrel*sizeof(relocation_info))};
-        if ( leInfo.dynSymTab->nextrel != 0 )
-            *bp++ = {"external relocations",    ptrSize, leInfo.dynSymTab->extreloff, static_cast<uint32_t>(leInfo.dynSymTab->nextrel*sizeof(relocation_info))};
-        if ( leInfo.dynSymTab->nindirectsyms != 0 )
-            *bp++ = {"indirect symbol table",   4,       leInfo.dynSymTab->indirectsymoff, leInfo.dynSymTab->nindirectsyms*4};
-    }
-    if ( leInfo.splitSegInfo != nullptr ) {
-        if ( leInfo.splitSegInfo->datasize != 0 )
-            *bp++ = {"shared cache info",       ptrSize, leInfo.splitSegInfo->dataoff, leInfo.splitSegInfo->datasize};
-    }
-    if ( leInfo.functionStarts != nullptr ) {
-        if ( leInfo.functionStarts->datasize != 0 )
-            *bp++ = {"function starts",         ptrSize, leInfo.functionStarts->dataoff, leInfo.functionStarts->datasize};
-    }
-    if ( leInfo.dataInCode != nullptr ) {
-        if ( leInfo.dataInCode->datasize != 0 )
-            *bp++ = {"data in code",            ptrSize, leInfo.dataInCode->dataoff, leInfo.dataInCode->datasize};
-    }
-    if ( leInfo.symTab != nullptr ) {
-        if ( leInfo.symTab->nsyms != 0 )
-            *bp++ = {"symbol table",            ptrSize, leInfo.symTab->symoff, static_cast<uint32_t>(leInfo.symTab->nsyms*(ptrSize == 8 ? sizeof(nlist_64) : sizeof(struct nlist)))};
-        if ( leInfo.symTab->strsize != 0 )
-            *bp++ = {"symbol table strings",    1,       leInfo.symTab->stroff, leInfo.symTab->strsize};
-    }
-    if ( leInfo.codeSig != nullptr ) {
-        if ( leInfo.codeSig->datasize != 0 )
-            *bp++ = {"code signature",          ptrSize, leInfo.codeSig->dataoff, leInfo.codeSig->datasize};
-    }
-
-    char dupPath[PATH_MAX];
-    Diagnostics::quotePath(path, dupPath);
-    // check for bad combinations
-    if ( (leInfo.dyldInfo != nullptr) && (leInfo.dyldInfo->cmd == LC_DYLD_INFO_ONLY) && (leInfo.dynSymTab != nullptr) ) {
-        if ( (leInfo.dynSymTab->nlocrel != 0) && enforceFormat(Malformed::dyldInfoAndlocalRelocs) ) {
-            diag.error("in '%s' malformed mach-o contains LC_DYLD_INFO_ONLY and local relocations", dupPath);
-            return false;
-        }
-        if ( leInfo.dynSymTab->nextrel != 0 ) {
-            diag.error("in '%s' malformed mach-o contains LC_DYLD_INFO_ONLY and external relocations", dupPath);
-            return false;
-        }
-    }
-
-    bool checkMissingDyldInfo = true;
-#if BUILDING_DYLDINFO || BUILDING_APP_CACHE_UTIL
-    checkMissingDyldInfo = !isFileSet() && !isStaticExecutable() && !isKextBundle();
-#endif
-    if ( (leInfo.dyldInfo == nullptr) && (leInfo.dynSymTab == nullptr) && checkMissingDyldInfo ) {
-        diag.error("in '%s' malformed mach-o misssing LC_DYLD_INFO and LC_DYSYMTAB", dupPath);
-        return false;
-    }
-
-    // FIXME: Remove this hack
-#if BUILDING_APP_CACHE_UTIL
-    if ( isFileSet() )
-        return true;
-#endif
-
-    const unsigned long blobCount = bp - blobs;
-    if ( blobCount == 0 ) {
-        diag.error("in '%s' malformed mach-o missing LINKEDIT", path);
-        return false;
-    }
-
-    uint32_t linkeditFileEnd = leInfo.layout.linkeditFileOffset + leInfo.layout.linkeditFileSize;
-
-
-    // sort blobs by file-offset and error on overlaps
-    LinkEditContentChunk::sort(blobs, blobCount);
-    uint32_t     prevEnd = leInfo.layout.linkeditFileOffset;
-    const char*  prevName = "start of LINKEDIT";
-    for (unsigned long i=0; i < blobCount; ++i) {
-        const LinkEditContentChunk& blob = blobs[i];
-        if ( blob.fileOffsetStart < prevEnd ) {
-            diag.error("in '%s' LINKEDIT overlap of %s and %s", dupPath, prevName, blob.name);
-            return false;
-        }
-        if (greaterThanAddOrOverflow(blob.fileOffsetStart, blob.size, linkeditFileEnd)) {
-            diag.error("in '%s' LINKEDIT content '%s' extends beyond end of segment", dupPath, blob.name);
-            return false;
-        }
-        if ( (blob.fileOffsetStart & (blob.alignment-1)) != 0 ) {
-            // <rdar://problem/51115705> relax code sig alignment for pre iOS13
-            Malformed kind = (strcmp(blob.name, "code signature") == 0) ? Malformed::codeSigAlignment : Malformed::linkeditAlignment;
-            if ( enforceFormat(kind) )
-                diag.error("in '%s' mis-aligned LINKEDIT content '%s'", dupPath, blob.name);
-        }
-        prevEnd  = blob.fileOffsetStart + blob.size;
-        prevName = blob.name;
-    }
-
-    // Check for invalid symbol table sizes
-    if ( leInfo.symTab != nullptr ) {
-        if ( leInfo.symTab->nsyms > 0x10000000 ) {
-            diag.error("in '%s' malformed mach-o image: symbol table too large", dupPath);
-            return false;
-        }
-        if ( leInfo.dynSymTab != nullptr ) {
-            // validate indirect symbol table
-            if ( leInfo.dynSymTab->nindirectsyms != 0 ) {
-                if ( leInfo.dynSymTab->nindirectsyms > 0x10000000 ) {
-                    diag.error("in '%s' malformed mach-o image: indirect symbol table too large", dupPath);
-                    return false;
-                }
-            }
-            if ( (leInfo.dynSymTab->nlocalsym > leInfo.symTab->nsyms) || (leInfo.dynSymTab->ilocalsym > leInfo.symTab->nsyms) ) {
-                diag.error("in '%s' malformed mach-o image: indirect symbol table local symbol count exceeds total symbols", dupPath);
-                return false;
-            }
-            if ( leInfo.dynSymTab->ilocalsym + leInfo.dynSymTab->nlocalsym < leInfo.dynSymTab->ilocalsym  ) {
-                diag.error("in '%s' malformed mach-o image: indirect symbol table local symbol count wraps", dupPath);
-                return false;
-            }
-            if ( (leInfo.dynSymTab->nextdefsym > leInfo.symTab->nsyms) || (leInfo.dynSymTab->iextdefsym > leInfo.symTab->nsyms) ) {
-                diag.error("in '%s' malformed mach-o image: indirect symbol table extern symbol count exceeds total symbols", dupPath);
-                return false;
-            }
-            if ( leInfo.dynSymTab->iextdefsym + leInfo.dynSymTab->nextdefsym < leInfo.dynSymTab->iextdefsym  ) {
-                diag.error("in '%s' malformed mach-o image: indirect symbol table extern symbol count wraps", dupPath);
-                return false;
-            }
-            if ( (leInfo.dynSymTab->nundefsym > leInfo.symTab->nsyms) || (leInfo.dynSymTab->iundefsym > leInfo.symTab->nsyms) ) {
-                diag.error("in '%s' malformed mach-o image: indirect symbol table undefined symbol count exceeds total symbols", dupPath);
-                return false;
-            }
-            if ( leInfo.dynSymTab->iundefsym + leInfo.dynSymTab->nundefsym < leInfo.dynSymTab->iundefsym  ) {
-                diag.error("in '%s' malformed mach-o image: indirect symbol table undefined symbol count wraps", dupPath);
-                return false;
-            }
-        }
-    }
-
-    return true;
+    __block bool result = false;
+    this->withVMLayout(diag, ^(const mach_o::Layout &layout) {
+        result = layout.isValidLinkeditLayout(diag, path);
+    });
+    return result;
 }
 
 
@@ -1375,49 +725,47 @@ bool MachOAnalyzer::validLinkeditLayout(Diagnostics& diag, const char* path) con
 bool MachOAnalyzer::invalidRebaseState(Diagnostics& diag, const char* opcodeName, const char* path, const LinkEditInfo& leInfo, const SegmentInfo segments[],
                                       bool segIndexSet, uint32_t ptrSize, uint8_t segmentIndex, uint64_t segmentOffset, Rebase kind) const
 {
-    char dupPath[PATH_MAX];
-    Diagnostics::quotePath(path, dupPath);
     if ( !segIndexSet ) {
-        diag.error("in '%s' %s missing preceding REBASE_OPCODE_SET_SEGMENT_AND_OFFSET_ULEB", dupPath, opcodeName);
+        diag.error("in '%s' %s missing preceding REBASE_OPCODE_SET_SEGMENT_AND_OFFSET_ULEB", path, opcodeName);
         return true;
     }
     if ( segmentIndex >= leInfo.layout.linkeditSegIndex )  {
-        diag.error("in '%s' %s segment index %d too large", dupPath, opcodeName, segmentIndex);
+        diag.error("in '%s' %s segment index %d too large", path, opcodeName, segmentIndex);
         return true;
     }
     if ( segmentOffset > (segments[segmentIndex].vmSize-ptrSize) ) {
-        diag.error("in '%s' %s current segment offset 0x%08llX beyond segment size (0x%08llX)", dupPath, opcodeName, segmentOffset, segments[segmentIndex].vmSize);
+        diag.error("in '%s' %s current segment offset 0x%08llX beyond segment size (0x%08llX)", path, opcodeName, segmentOffset, segments[segmentIndex].vmSize);
         return true;
     }
     switch ( kind )  {
         case Rebase::pointer32:
         case Rebase::pointer64:
             if ( !segments[segmentIndex].writable() && enforceFormat(Malformed::writableData) ) {
-                diag.error("in '%s' %s pointer rebase is in non-writable segment", dupPath, opcodeName);
+                diag.error("in '%s' %s pointer rebase is in non-writable segment", path, opcodeName);
                 return true;
             }
             if ( segments[segmentIndex].executable() && enforceFormat(Malformed::executableData) ) {
-                diag.error("in '%s' %s pointer rebase is in executable segment", dupPath, opcodeName);
+                diag.error("in '%s' %s pointer rebase is in executable segment", path, opcodeName);
                 return true;
             }
             break;
         case Rebase::textAbsolute32:
         case Rebase::textPCrel32:
             if ( !segments[segmentIndex].textRelocs ) {
-                diag.error("in '%s' %s text rebase is in segment that does not support text relocations", dupPath, opcodeName);
+                diag.error("in '%s' %s text rebase is in segment that does not support text relocations", path, opcodeName);
                 return true;
             }
             if ( segments[segmentIndex].writable() ) {
-                diag.error("in '%s' %s text rebase is in writable segment", dupPath, opcodeName);
+                diag.error("in '%s' %s text rebase is in writable segment", path, opcodeName);
                 return true;
             }
             if ( !segments[segmentIndex].executable() ) {
-                diag.error("in '%s' %s pointer rebase is in non-executable segment", dupPath, opcodeName);
+                diag.error("in '%s' %s pointer rebase is in non-executable segment", path, opcodeName);
                 return true;
             }
             break;
         case Rebase::unknown:
-            diag.error("in '%s' %s unknown rebase type", dupPath, opcodeName);
+            diag.error("in '%s' %s unknown rebase type", path, opcodeName);
             return true;
     }
     return false;
@@ -1948,44 +1296,42 @@ bool MachOAnalyzer::invalidBindState(Diagnostics& diag, const char* opcodeName, 
                                     bool segIndexSet,  bool libraryOrdinalSet, uint32_t dylibCount, int libOrdinal, uint32_t ptrSize,
                                     uint8_t segmentIndex, uint64_t segmentOffset, uint8_t type, const char* symbolName) const
 {
-    char dupPath[PATH_MAX];
-    Diagnostics::quotePath(path, dupPath);
     if ( !segIndexSet ) {
-        diag.error("in '%s' %s missing preceding BIND_OPCODE_SET_SEGMENT_AND_OFFSET_ULEB", dupPath, opcodeName);
+        diag.error("in '%s' %s missing preceding BIND_OPCODE_SET_SEGMENT_AND_OFFSET_ULEB", path, opcodeName);
         return true;
     }
     if ( segmentIndex >= leInfo.layout.linkeditSegIndex )  {
-        diag.error("in '%s' %s segment index %d too large", dupPath, opcodeName, segmentIndex);
+        diag.error("in '%s' %s segment index %d too large", path, opcodeName, segmentIndex);
         return true;
     }
     if ( segmentOffset > (segments[segmentIndex].vmSize-ptrSize) ) {
-        diag.error("in '%s' %s current segment offset 0x%08llX beyond segment size (0x%08llX)", dupPath, opcodeName, segmentOffset, segments[segmentIndex].vmSize);
+        diag.error("in '%s' %s current segment offset 0x%08llX beyond segment size (0x%08llX)", path, opcodeName, segmentOffset, segments[segmentIndex].vmSize);
         return true;
     }
     if ( symbolName == NULL ) {
-        diag.error("in '%s' %s missing preceding BIND_OPCODE_SET_SYMBOL_TRAILING_FLAGS_IMM", dupPath, opcodeName);
+        diag.error("in '%s' %s missing preceding BIND_OPCODE_SET_SYMBOL_TRAILING_FLAGS_IMM", path, opcodeName);
         return true;
     }
     if ( !libraryOrdinalSet ) {
-        diag.error("in '%s' %s missing preceding BIND_OPCODE_SET_DYLIB_ORDINAL", dupPath, opcodeName);
+        diag.error("in '%s' %s missing preceding BIND_OPCODE_SET_DYLIB_ORDINAL", path, opcodeName);
         return true;
     }
     if ( libOrdinal > (int)dylibCount ) {
-        diag.error("in '%s' %s has library ordinal too large (%d) max (%d)", dupPath, opcodeName, libOrdinal, dylibCount);
+        diag.error("in '%s' %s has library ordinal too large (%d) max (%d)", path, opcodeName, libOrdinal, dylibCount);
         return true;
     }
     if ( libOrdinal < BIND_SPECIAL_DYLIB_WEAK_LOOKUP ) {
-        diag.error("in '%s' %s has unknown library special ordinal (%d)", dupPath, opcodeName, libOrdinal);
+        diag.error("in '%s' %s has unknown library special ordinal (%d)", path, opcodeName, libOrdinal);
         return true;
     }
     switch ( type )  {
         case BIND_TYPE_POINTER:
             if ( !segments[segmentIndex].writable() ) {
-                diag.error("in '%s' %s pointer bind is in non-writable segment", dupPath, opcodeName);
+                diag.error("in '%s' %s pointer bind is in non-writable segment", path, opcodeName);
                 return true;
             }
             if ( segments[segmentIndex].executable() && enforceFormat(Malformed::executableData) ) {
-                diag.error("in '%s' %s pointer bind is in executable segment", dupPath, opcodeName);
+                diag.error("in '%s' %s pointer bind is in executable segment", path, opcodeName);
                 return true;
             }
             break;
@@ -1998,21 +1344,21 @@ bool MachOAnalyzer::invalidBindState(Diagnostics& diag, const char* opcodeName, 
                 forceAllowTextRelocs = true;
 #endif
             if ( !forceAllowTextRelocs && !segments[segmentIndex].textRelocs ) {
-                diag.error("in '%s' %s text bind is in segment that does not support text relocations", dupPath, opcodeName);
+                diag.error("in '%s' %s text bind is in segment that does not support text relocations", path, opcodeName);
                 return true;
             }
             if ( segments[segmentIndex].writable() ) {
-                diag.error("in '%s' %s text bind is in writable segment", dupPath, opcodeName);
+                diag.error("in '%s' %s text bind is in writable segment", path, opcodeName);
                 return true;
             }
             if ( !segments[segmentIndex].executable() ) {
-                diag.error("in '%s' %s pointer bind is in non-executable segment", dupPath, opcodeName);
+                diag.error("in '%s' %s pointer bind is in non-executable segment", path, opcodeName);
                 return true;
             }
             break;
         }
         default:
-            diag.error("in '%s' %s unknown bind type %d", dupPath, opcodeName, type);
+            diag.error("in '%s' %s unknown bind type %d", path, opcodeName, type);
             return true;
     }
     return false;
@@ -2654,47 +2000,43 @@ bool MachOAnalyzer::validChainedFixupsInfoOldArm64e(Diagnostics& diag, const cha
             maxTargetCount = totalTargets;
         },
         ^(const LinkEditInfo& leInfo, const SegmentInfo segments[], bool libraryOrdinalSet, uint32_t dylibCount, int libOrdinal, uint8_t type, const char* symbolName, uint64_t addend, bool weakImport, bool& stop) {
-            char dupPathBlock[PATH_MAX];
-            Diagnostics::quotePath(path, dupPathBlock);
            if ( symbolName == NULL ) {
-                diag.error("in '%s' missing BIND_OPCODE_SET_SYMBOL_TRAILING_FLAGS_IMM", dupPathBlock);
+                diag.error("in '%s' missing BIND_OPCODE_SET_SYMBOL_TRAILING_FLAGS_IMM", path);
             }
             else if ( !libraryOrdinalSet ) {
-                diag.error("in '%s' missing BIND_OPCODE_SET_DYLIB_ORDINAL",  dupPathBlock);
+                diag.error("in '%s' missing BIND_OPCODE_SET_DYLIB_ORDINAL", path);
             }
             else if ( libOrdinal > (int)dylibCount ) {
-                diag.error("in '%s' has library ordinal too large (%d) max (%d)", dupPathBlock, libOrdinal, dylibCount);
+                diag.error("in '%s' has library ordinal too large (%d) max (%d)", path, libOrdinal, dylibCount);
             }
             else if ( libOrdinal < BIND_SPECIAL_DYLIB_WEAK_LOOKUP ) {
-                diag.error("in '%s' has unknown library special ordinal (%d)", dupPathBlock, libOrdinal);
+                diag.error("in '%s' has unknown library special ordinal (%d)", path, libOrdinal);
             }
             else if ( type != BIND_TYPE_POINTER ) {
-                diag.error("in '%s' unknown bind type %d", dupPathBlock, type);
+                diag.error("in '%s' unknown bind type %d", path, type);
             }
             else if ( currentTargetCount > maxTargetCount ) {
-                diag.error("in '%s' chained target counts exceeds BIND_SUBOPCODE_THREADED_SET_BIND_ORDINAL_TABLE_SIZE_ULEB", dupPathBlock);
+                diag.error("in '%s' chained target counts exceeds BIND_SUBOPCODE_THREADED_SET_BIND_ORDINAL_TABLE_SIZE_ULEB", path);
             }
             ++currentTargetCount;
             if ( diag.hasError() )
                 stop = true;
         },
         ^(const LinkEditInfo& leInfo, const SegmentInfo segments[], uint8_t segmentIndex, bool segIndexSet, uint64_t segmentOffset, uint16_t format, bool& stop) {
-           char dupPathBlock[PATH_MAX];
-           Diagnostics::quotePath(path, dupPathBlock);
            if ( !segIndexSet ) {
-                diag.error("in '%s' missing BIND_OPCODE_SET_SEGMENT_AND_OFFSET_ULEB", dupPathBlock);
+                diag.error("in '%s' missing BIND_OPCODE_SET_SEGMENT_AND_OFFSET_ULEB", path);
             }
             else if ( segmentIndex >= leInfo.layout.linkeditSegIndex )  {
-                diag.error("in '%s' segment index %d too large", dupPathBlock, segmentIndex);
+                diag.error("in '%s' segment index %d too large", path, segmentIndex);
             }
             else if ( segmentOffset > (segments[segmentIndex].vmSize-8) ) {
-                diag.error("in '%s' current segment offset 0x%08llX beyond segment size (0x%08llX)", dupPathBlock, segmentOffset, segments[segmentIndex].vmSize);
+                diag.error("in '%s' current segment offset 0x%08llX beyond segment size (0x%08llX)", path, segmentOffset, segments[segmentIndex].vmSize);
             }
             else if ( !segments[segmentIndex].writable() ) {
-                diag.error("in '%s' pointer bind is in non-writable segment", dupPathBlock);
+                diag.error("in '%s' pointer bind is in non-writable segment", path);
             }
             else if ( segments[segmentIndex].executable() ) {
-                diag.error("in '%s' pointer bind is in executable segment", dupPathBlock);
+                diag.error("in '%s' pointer bind is in executable segment", path);
             }
             if ( diag.hasError() )
                 stop = true;
@@ -2828,7 +2170,6 @@ void MachOAnalyzer::forEachChainedFixupTarget(Diagnostics& diag, void (^callback
     if ( diag.hasError() )
         return;
 
-    bool stop    = false;
     if ( leInfo.dyldInfo != nullptr ) {
         parseOrgArm64eChainedFixups(diag, nullptr, ^(const LinkEditInfo& leInfo2, const SegmentInfo segments[], bool libraryOrdinalSet, uint32_t dylibCount,
                                                     int libOrdinal, uint8_t type, const char* symbolName, uint64_t fixAddend, bool weakImport, bool& stopChain) {
@@ -2837,114 +2178,8 @@ void MachOAnalyzer::forEachChainedFixupTarget(Diagnostics& diag, void (^callback
     }
     else if ( leInfo.chainedFixups != nullptr ) {
         const dyld_chained_fixups_header*  header = (dyld_chained_fixups_header*)getLinkEditContent(leInfo.layout, leInfo.chainedFixups->dataoff);
-        if ( (header->imports_offset > leInfo.chainedFixups->datasize) || (header->symbols_offset > leInfo.chainedFixups->datasize) ) {
-            diag.error("malformed import table");
-            return;
-        }
-        const dyld_chained_import*          imports;
-        const dyld_chained_import_addend*   importsA32;
-        const dyld_chained_import_addend64* importsA64;
-        const char*                         symbolsPool     = (char*)header + header->symbols_offset;
-        uint32_t                            maxSymbolOffset = leInfo.chainedFixups->datasize - header->symbols_offset;
-        int                                 libOrdinal;
-        switch (header->imports_format) {
-            case DYLD_CHAINED_IMPORT:
-                imports = (dyld_chained_import*)((uint8_t*)header + header->imports_offset);
-                for (uint32_t i=0; i < header->imports_count && !stop; ++i) {
-                    const char* symbolName = &symbolsPool[imports[i].name_offset];
-                    if ( imports[i].name_offset > maxSymbolOffset ) {
-                        diag.error("malformed import table, string overflow");
-                        return;
-                    }
-                    uint8_t libVal = imports[i].lib_ordinal;
-                    if ( libVal > 0xF0 )
-                        libOrdinal = (int8_t)libVal;
-                    else
-                        libOrdinal = libVal;
-                    callback(libOrdinal, symbolName, 0, imports[i].weak_import, stop);
-                }
-                break;
-            case DYLD_CHAINED_IMPORT_ADDEND:
-                importsA32 = (dyld_chained_import_addend*)((uint8_t*)header + header->imports_offset);
-                for (uint32_t i=0; i < header->imports_count && !stop; ++i) {
-                    const char* symbolName = &symbolsPool[importsA32[i].name_offset];
-                    if ( importsA32[i].name_offset > maxSymbolOffset ) {
-                        diag.error("malformed import table, string overflow");
-                        return;
-                    }
-                    uint8_t libVal = importsA32[i].lib_ordinal;
-                    if ( libVal > 0xF0 )
-                        libOrdinal = (int8_t)libVal;
-                    else
-                        libOrdinal = libVal;
-                    callback(libOrdinal, symbolName, importsA32[i].addend, importsA32[i].weak_import, stop);
-                }
-                break;
-            case DYLD_CHAINED_IMPORT_ADDEND64:
-                importsA64 = (dyld_chained_import_addend64*)((uint8_t*)header + header->imports_offset);
-                for (uint32_t i=0; i < header->imports_count && !stop; ++i) {
-                    const char* symbolName = &symbolsPool[importsA64[i].name_offset];
-                    if ( importsA64[i].name_offset > maxSymbolOffset ) {
-                        diag.error("malformed import table, string overflow");
-                        return;
-                    }
-                    uint16_t libVal = importsA64[i].lib_ordinal;
-                    if ( libVal > 0xFFF0 )
-                        libOrdinal = (int16_t)libVal;
-                    else
-                        libOrdinal = libVal;
-                    callback(libOrdinal, symbolName, importsA64[i].addend, importsA64[i].weak_import, stop);
-                }
-                break;
-           default:
-                diag.error("unknown imports format");
-                return;
-        }
+        MachOFile::forEachChainedFixupTarget(diag, header, leInfo.chainedFixups, callback);
     }
-}
-
-uint32_t MachOAnalyzer::segmentCount() const
-{
-    __block uint32_t count   = 0;
-    forEachSegment(^(const SegmentInfo& info, bool& stop) {
-        ++count;
-    });
-    return count;
-}
-
-bool MachOAnalyzer::hasCodeSignature(uint32_t& fileOffset, uint32_t& size) const
-{
-    fileOffset = 0;
-    size = 0;
-
-    Diagnostics diag;
-    forEachLoadCommand(diag, ^(const load_command* cmd, bool& stop) {
-        if ( cmd->cmd == LC_CODE_SIGNATURE ) {
-            const linkedit_data_command* sigCmd = (linkedit_data_command*)cmd;
-            fileOffset = sigCmd->dataoff;
-            size       = sigCmd->datasize;
-            stop = true;
-        }
-    });
-    diag.assertNoError();   // any malformations in the file should have been caught by earlier validate() call
-
-    // early exist if no LC_CODE_SIGNATURE
-    if ( fileOffset == 0 )
-        return false;
-
-    // <rdar://problem/13622786> ignore code signatures in macOS binaries built with pre-10.9 tools
-    if ( (this->cputype == CPU_TYPE_X86_64) || (this->cputype == CPU_TYPE_I386) ) {
-        __block bool foundPlatform = false;
-        __block bool badSignature  = false;
-        forEachSupportedPlatform(^(Platform platform, uint32_t minOS, uint32_t sdk) {
-            foundPlatform = true;
-            if ( (platform == Platform::macOS) && (sdk < 0x000A0900) )
-                badSignature = true;
-        });
-        return foundPlatform && !badSignature;
-    }
-
-    return true;
 }
 
 bool MachOAnalyzer::hasProgramVars(uint32_t& progVarsOffset, bool& crtRunsInitializers, DyldLookFunc*& dyldLookupFuncAddr) const
@@ -2990,7 +2225,7 @@ bool MachOAnalyzer::hasProgramVars(uint32_t& progVarsOffset, bool& crtRunsInitia
 }
 
 // Convert from a (possibly) live pointer to a vmAddr
-uint64_t MachOAnalyzer::VMAddrConverter::convertToVMAddr(uint64_t value) const {
+uint64_t MachOAnalyzer::VMAddrConverter::convertToVMAddr(uint64_t value, const Array<uint64_t>& bindTargets) const {
     if ( contentRebased ) {
         if ( value == 0 )
             return 0;
@@ -3014,6 +2249,14 @@ uint64_t MachOAnalyzer::VMAddrConverter::convertToVMAddr(uint64_t value) const {
         if ( chainedValue->isRebase(chainedPointerFormat, preferredLoadAddress, targetRuntimeOffset) ) {
             value = preferredLoadAddress + targetRuntimeOffset;
         }
+
+#if !BUILDING_DYLD
+        // Patchable objc classes use binds to self.  Support them in offline tools
+        uint32_t    bindOrdinal = 0;
+        int64_t     addend      = 0;
+        if ( !bindTargets.empty() && chainedValue->isBind(chainedPointerFormat, bindOrdinal, addend))
+            value = bindTargets[bindOrdinal] + addend;
+#endif
         return value;
     }
 
@@ -3023,6 +2266,10 @@ uint64_t MachOAnalyzer::VMAddrConverter::convertToVMAddr(uint64_t value) const {
         switch ( sharedCacheChainedPointerFormat ) {
             case VMAddrConverter::SharedCacheFormat::none:
                 assert(false);
+            case VMAddrConverter::SharedCacheFormat::v1: {
+                // Nothing to do here.  We don't have chained fixup bits to remove, or a value_add to apply
+                break;
+            }
             case VMAddrConverter::SharedCacheFormat::v2_x86_64_tbi: {
                 const uint64_t   deltaMask    = 0x00FFFF0000000000;
                 const uint64_t   valueMask    = ~deltaMask;
@@ -3061,6 +2308,11 @@ uint64_t MachOAnalyzer::VMAddrConverter::convertToVMAddr(uint64_t value) const {
     return value;
 }
 
+uint64_t MachOAnalyzer::VMAddrConverter::convertToVMAddr(uint64_t v) const
+{
+    return this->convertToVMAddr(v, {});
+}
+
 MachOAnalyzer::VMAddrConverter MachOAnalyzer::makeVMAddrConverter(bool contentRebased) const {
     MachOAnalyzer::VMAddrConverter vmAddrConverter;
     vmAddrConverter.preferredLoadAddress   = preferredLoadAddress();
@@ -3070,67 +2322,6 @@ MachOAnalyzer::VMAddrConverter MachOAnalyzer::makeVMAddrConverter(bool contentRe
     return vmAddrConverter;
 }
 
-bool MachOAnalyzer::hasInitializer(Diagnostics& diag) const
-{
-    __block bool result = false;
-
-    // if dylib linked with -init linker option, that initializer is first
-    forEachLoadCommand(diag, ^(const load_command* cmd, bool& stop) {
-        if ( (cmd->cmd == LC_ROUTINES) || (cmd->cmd == LC_ROUTINES_64) ) {
-            result = true;
-            stop = true;
-        }
-    });
-
-    if ( result )
-        return true;
-
-    // next any function pointers in mod-init section
-    forEachInitializerPointerSection(diag, ^(uint32_t sectionOffset, uint32_t sectionSize, const uint8_t* content, bool& stop) {
-        result = true;
-        stop = true;
-    });
-
-    if ( result )
-        return true;
-
-    forEachSection(^(const SectionInfo& info, bool malformedSectionRange, bool& stop) {
-        if ( (info.sectFlags & SECTION_TYPE) != S_INIT_FUNC_OFFSETS )
-            return;
-        result = true;
-        stop = true;
-    });
-
-    return result;
-}
-
-void MachOAnalyzer::forEachInitializerPointerSection(Diagnostics& diag, void (^callback)(uint32_t sectionOffset, uint32_t sectionSize, const uint8_t* content, bool& stop)) const
-{
-    const unsigned ptrSize     = pointerSize();
-    const uint64_t baseAddress = preferredLoadAddress();
-    const uint64_t slide       = (uint64_t)this - baseAddress;
-    forEachSection(^(const SectionInfo& info, bool malformedSectionRange, bool& sectStop) {
-        if ( (info.sectFlags & SECTION_TYPE) == S_MOD_INIT_FUNC_POINTERS ) {
-            if ( (info.sectSize % ptrSize) != 0 ) {
-                diag.error("initializer section %s/%s has bad size", info.segInfo.segName, info.sectName);
-                sectStop = true;
-                return;
-            }
-            if ( malformedSectionRange ) {
-                diag.error("initializer section %s/%s extends beyond its segment", info.segInfo.segName, info.sectName);
-                sectStop = true;
-                return;
-            }
-            const uint8_t* content = (uint8_t*)(info.sectAddr + slide);
-            if ( ((long)content % ptrSize) != 0 ) {
-                diag.error("initializer section %s/%s is not pointer aligned", info.segInfo.segName, info.sectName);
-                sectStop = true;
-                return;
-            }
-            callback((uint32_t)(info.sectAddr - baseAddress), (uint32_t)info.sectSize, content, sectStop);
-        }
-    });
-}
 
 struct VIS_HIDDEN SegmentRanges
 {
@@ -3194,7 +2385,8 @@ void MachOAnalyzer::forEachInitializer(Diagnostics& diag, const VMAddrConverter&
 
     // next any function pointers in mod-init section
     const unsigned ptrSize          = pointerSize();
-    forEachInitializerPointerSection(diag, ^(uint32_t sectionOffset, uint32_t sectionSize, const uint8_t* content, bool& stop) {
+    forEachInitializerPointerSection(diag, ^(uint32_t sectionOffset, uint32_t sectionSize, bool& stop) {
+        const uint8_t* content = (uint8_t*)this + sectionOffset;
         if ( ptrSize == 8 ) {
             const uint64_t* initsStart = (uint64_t*)content;
             const uint64_t* initsEnd   = (uint64_t*)((uint8_t*)content + sectionSize);
@@ -3342,35 +2534,43 @@ void MachOAnalyzer::forEachTerminator(Diagnostics& diag, const VMAddrConverter& 
     });
 }
 
-
-
-void MachOAnalyzer::forEachRPath(void (^callback)(const char* rPath, bool& stop)) const
+bool MachOAnalyzer::hasSwiftOrObjC(bool* hasSwift) const
 {
-    Diagnostics diag;
-    forEachLoadCommand(diag, ^(const load_command* cmd, bool& stop) {
-         if ( cmd->cmd == LC_RPATH ) {
-            const char* rpath = (char*)cmd + ((struct rpath_command*)cmd)->path.offset;
-            callback(rpath, stop);
-        }
-    });
-    diag.assertNoError();   // any malformations in the file should have been caught by earlier validate() call
-}
+    struct objc_image_info {
+        int32_t version;
+        uint32_t flags;
+    };
 
+    if ( hasSwift != nullptr )
+        *hasSwift = false;
 
-bool MachOAnalyzer::hasObjC() const
-{
+    uintptr_t slide = getSlide();
     __block bool result = false;
-    forEachSection(^(const SectionInfo& info, bool malformedSectionRange, bool& stop) {
-        if ( (strcmp(info.sectName, "__objc_imageinfo") == 0) && (strncmp(info.segInfo.segName, "__DATA", 6) == 0) ) {
+    forEachSection(^(const SectionInfo& sectInfo, bool malformedSectionRange, bool& stop) {
+        if ( (strcmp(sectInfo.sectName, "__objc_imageinfo") == 0) && (strncmp(sectInfo.segInfo.segName, "__DATA", 6) == 0) ) {
+            if ( hasSwift != nullptr ) {
+                objc_image_info* info =  (objc_image_info*)((uintptr_t)sectInfo.sectAddr + slide);
+                uint32_t swiftVersion = ((info->flags >> 8) & 0xFF);
+                if ( swiftVersion )
+                     *hasSwift = true;
+            }
+
             result = true;
             stop = true;
         }
-        if ( (this->cputype == CPU_TYPE_I386) && (strcmp(info.sectName, "__image_info") == 0) && (strcmp(info.segInfo.segName, "__OBJC") == 0) ) {
+        if ( (this->cputype == CPU_TYPE_I386) && (strcmp(sectInfo.sectName, "__image_info") == 0) && (strcmp(sectInfo.segInfo.segName, "__OBJC") == 0) ) {
             result = true;
             stop = true;
         }
     });
     return result;
+}
+
+bool MachOAnalyzer::hasSwift() const {
+    bool hasSwift = false;
+    this->hasSwiftOrObjC(&hasSwift);
+
+    return hasSwift;
 }
 
 bool MachOAnalyzer::usesObjCGarbageCollection() const
@@ -3394,7 +2594,7 @@ bool MachOAnalyzer::hasPlusLoadMethod(Diagnostics& diag) const
     __block bool result = false;
     if ( (this->cputype == CPU_TYPE_I386) && this->builtForPlatform(Platform::macOS) ) {
         // old objc runtime has no special section for +load methods, scan for string
-        int64_t slide = getSlide();
+        uintptr_t slide = getSlide();
         forEachSection(^(const SectionInfo& info, bool malformedSectionRange, bool& stop) {
             if ( ( (info.sectFlags & SECTION_TYPE) == S_CSTRING_LITERALS ) ) {
                 if ( malformedSectionRange ) {
@@ -3402,7 +2602,7 @@ bool MachOAnalyzer::hasPlusLoadMethod(Diagnostics& diag) const
                     stop = true;
                     return;
                 }
-                const uint8_t* content = (uint8_t*)(info.sectAddr + slide);
+                const uint8_t* content = (uint8_t*)((uintptr_t)info.sectAddr + slide);
                 const char* s   = (char*)content;
                 const char* end = s + info.sectSize;
                 while ( s < end ) {
@@ -3417,40 +2617,10 @@ bool MachOAnalyzer::hasPlusLoadMethod(Diagnostics& diag) const
                 }
             }
         });
+        return result;
     }
-    else {
-        // in new objc runtime compiler puts classes/categories with +load method in specical section
-        forEachSection(^(const SectionInfo& info, bool malformedSectionRange, bool& stop) {
-            if ( strncmp(info.segInfo.segName, "__DATA", 6) != 0 )
-                return;
-            if ( (strcmp(info.sectName, "__objc_nlclslist") == 0) || (strcmp(info.sectName, "__objc_nlcatlist") == 0)) {
-                result = true;
-                stop = true;
-            }
-        });
-    }
-    return result;
-}
 
-bool MachOAnalyzer::isSwiftLibrary() const
-{
-    struct objc_image_info {
-        int32_t version;
-        uint32_t flags;
-    };
-    
-    int64_t slide = getSlide();
-    __block bool result = false;
-    forEachSection(^(const SectionInfo& sectInfo, bool malformedSectionRange, bool& stop) {
-        if ( (strncmp(sectInfo.sectName, "__objc_imageinfo", 16) == 0) && (strncmp(sectInfo.segInfo.segName, "__DATA", 6) == 0) ) {
-            objc_image_info* info =  (objc_image_info*)((uint8_t*)sectInfo.sectAddr + slide);
-            uint32_t swiftVersion = ((info->flags >> 8) & 0xFF);
-            if ( swiftVersion )
-                result = true;
-            stop = true;
-        }
-    });
-    return result;
+    return MachOFile::hasPlusLoadMethod(diag);
 }
 
 const void* MachOAnalyzer::getRebaseOpcodes(uint32_t& size) const
@@ -3551,38 +2721,6 @@ bool MachOAnalyzer::hasLazyPointers(uint32_t& runtimeOffset, uint32_t& size) con
         }
     });
     return (size != 0);
-}
-
-
-bool MachOAnalyzer::getEntry(uint64_t& offset, bool& usesCRT) const
-{
-    Diagnostics diag;
-    offset = 0;
-    forEachLoadCommand(diag, ^(const load_command* cmd, bool& stop) {
-        if ( cmd->cmd == LC_MAIN ) {
-            entry_point_command* mainCmd = (entry_point_command*)cmd;
-            usesCRT = false;
-            offset = mainCmd->entryoff;
-            stop = true;
-        }
-        else if ( cmd->cmd == LC_UNIXTHREAD ) {
-            stop = true;
-            usesCRT = true;
-            uint64_t startAddress = entryAddrFromThreadCmd((thread_command*)cmd);
-            offset = startAddress - preferredLoadAddress();
-        }
-    });
-    return (offset != 0);
-}
-
-
-void MachOAnalyzer::forEachDOFSection(Diagnostics& diag, void (^callback)(uint32_t offset)) const
-{
-    forEachSection(^(const dyld3::MachOAnalyzer::SectionInfo& info, bool malformedSectionRange, bool &stop) {
-        if ( ( (info.sectFlags & SECTION_TYPE) == S_DTRACE_DOF ) && !malformedSectionRange ) {
-            callback((uint32_t)(info.sectAddr - info.segInfo.vmAddr));
-        }
-    });
 }
 
 void MachOAnalyzer::forEachCDHash(void (^handler)(const uint8_t cdHash[20])) const
@@ -3793,10 +2931,16 @@ void MachOAnalyzer::forEachExportedSymbol(Diagnostics& diag, ExportsCallback cal
 
 bool MachOAnalyzer::neverUnload() const
 {
-    if ( this->isDylib() && this->hasObjC() ) {
-        return true;
+    bool hasSwift = false;
+    if ( this->hasSwiftOrObjC(&hasSwift) ) {
+        // Policy: images with ObjC or Swift are never unloaded
+        // except MH_BUNDLE *without* Swift can be unloaded
+        if ( hasSwift || !this->isBundle() ) {
+            return true;
+        }
     }
-    else if ( this->hasThreadLocalVariables() ) {
+
+    if ( this->hasThreadLocalVariables() ) {
         return true;
     }
     else {
@@ -3810,127 +2954,6 @@ bool MachOAnalyzer::neverUnload() const
             return true;
     }
     return false;
-}
-
-bool MachOAnalyzer::canBePlacedInDyldCache(const char* path, void (^failureReason)(const char*)) const
-{
-    if (!MachOFile::canBePlacedInDyldCache(path, failureReason))
-        return false;
-
-    // arm64e requires split seg v2 as the split seg code can't handle chained fixups for split seg v1
-    if ( isArch("arm64e") ) {
-        uint32_t splitSegSize = 0;
-        const uint8_t* infoStart = (const uint8_t*)getSplitSeg(splitSegSize);
-        if ( *infoStart != DYLD_CACHE_ADJ_V2_FORMAT ) {
-            failureReason("chained fixups requires split seg v2");
-            return false;
-        }
-    }
-
-    // <rdar://problem/57769033> dyld_cache_patchable_location only supports addend in range 0..31
-    const bool is64bit = is64();
-    __block Diagnostics diag;
-    __block bool addendTooLarge = false;
-    if ( this->hasChainedFixups() ) {
-        // with chained fixups, addends can be in the import table or embedded in a bind pointer
-        forEachChainedFixupTarget(diag, ^(int libOrdinal, const char* symbolName, uint64_t addend, bool weakImport, bool& stop) {
-            if ( is64bit )
-                addend &= 0x00FFFFFFFFFFFFFF; // ignore TBI
-            if ( addend > 31 ) {
-                addendTooLarge = true;
-                stop = true;
-            }
-        });
-        // check each pointer for embedded addend
-        withChainStarts(diag, 0, ^(const dyld_chained_starts_in_image* starts) {
-            forEachFixupInAllChains(diag, starts, false, ^(ChainedFixupPointerOnDisk* fixupLoc, const dyld_chained_starts_in_segment* segInfo, bool& stop) {
-                switch (segInfo->pointer_format) {
-                    case DYLD_CHAINED_PTR_ARM64E:
-                    case DYLD_CHAINED_PTR_ARM64E_USERLAND:
-                    case DYLD_CHAINED_PTR_ARM64E_USERLAND24:
-                        if ( fixupLoc->arm64e.bind.bind && !fixupLoc->arm64e.authBind.auth ) {
-                            if ( fixupLoc->arm64e.bind.addend > 31 ) {
-                                addendTooLarge = true;
-                                stop = true;
-                            }
-                        }
-                        break;
-                    case DYLD_CHAINED_PTR_64:
-                    case DYLD_CHAINED_PTR_64_OFFSET:
-                        if ( fixupLoc->generic64.rebase.bind ) {
-                            if ( fixupLoc->generic64.bind.addend > 31 ) {
-                                addendTooLarge = true;
-                                stop = true;
-                            }
-                        }
-                        break;
-                    case DYLD_CHAINED_PTR_32:
-                        if ( fixupLoc->generic32.bind.bind ) {
-                            if ( fixupLoc->generic32.bind.addend > 31 ) {
-                                addendTooLarge = true;
-                                stop = true;
-                            }
-                        }
-                        break;
-                }
-            });
-        });
-    }
-    else {
-        // scan bind opcodes for large addend
-        forEachBind(diag, ^(const char* opcodeName, const LinkEditInfo& leInfo, const SegmentInfo* segments, bool segIndexSet, bool libraryOrdinalSet, uint32_t dylibCount, int libOrdinal,
-                            uint32_t ptrSize, uint8_t segmentIndex, uint64_t segmentOffset, uint8_t type, const char* symbolName, bool weakImport, bool lazyBind, uint64_t addend, bool& stop) {
-            if ( is64bit )
-                addend &= 0x00FFFFFFFFFFFFFF; // ignore TBI
-            if ( addend > 31 ) {
-                addendTooLarge = true;
-                stop = true;
-            }
-        },
-        ^(const char* symbolName) {
-        });
-    }
-    if ( addendTooLarge ) {
-        failureReason("bind addend too large");
-        return false;
-    }
-
-    // evict swift dylibs with split seg v1 info
-    if ( this->isSwiftLibrary() && this->isSplitSegV1() )
-        return false;
-
-    if ( hasChainedFixups() ) {
-        // Chained fixups assumes split seg v2.  This is true for now as chained fixups is arm64e only
-        return true; // this->isSplitSegV2();
-    }
-
-    if ( !(isArch("x86_64") || isArch("x86_64h")) )
-        return true;
-
-    __block bool rebasesOk = true;
-    uint64_t startVMAddr = preferredLoadAddress();
-    uint64_t endVMAddr = startVMAddr + mappedSize();
-    forEachRebase(diag, false, ^(uint64_t runtimeOffset, bool &stop) {
-        // We allow TBI for x86_64 dylibs, but then require that the remainder of the offset
-        // is a 32-bit offset from the mach-header.
-        uint64_t value = *(uint64_t*)((uint8_t*)this + runtimeOffset);
-        value &= 0x00FFFFFFFFFFFFFFULL;
-        if ( (value < startVMAddr) || (value >= endVMAddr) ) {
-            failureReason("rebase value out of range of dylib");
-            rebasesOk = false;
-            stop = true;
-            return;
-        }
-
-        // Also error if the rebase location is anything other than 4/8 byte aligned
-        if ( (runtimeOffset & 0x3) != 0 ) {
-            failureReason("rebase value is not 4-byte aligned");
-            rebasesOk = false;
-            stop = true;
-            return;
-        }
-    });
-    return rebasesOk;
 }
 
 #if BUILDING_APP_CACHE_UTIL
@@ -4003,6 +3026,31 @@ bool MachOAnalyzer::canBePlacedInKernelCollection(const char* path, void (^failu
     if ( isKextBundle() && (preferredLoadAddress() != 0) ) {
         failureReason("Has load address");
         return false;
+    }
+
+    // All kexts with an executable must have a kmod_info
+    if ( isKextBundle() ) {
+        __block bool found = false;
+        __block Diagnostics diag;
+
+        // Check for a global first
+        FoundSymbol foundInfo;
+        found = findExportedSymbol(diag, "_kmod_info", true, foundInfo, nullptr);
+        if ( !found ) {
+            // And fall back to a local if we need to
+            forEachLocalSymbol(diag, ^(const char* aSymbolName, uint64_t n_value, uint8_t n_type,
+                                       uint8_t n_sect, uint16_t n_desc, bool& stop) {
+                if ( strcmp(aSymbolName, "_kmod_info") == 0 ) {
+                    found = true;
+                    stop = true;
+                }
+            });
+        }
+
+        if ( !found ) {
+            failureReason("kexts must have a _kmod_info symbol");
+            return false;
+        }
     }
 
     if (hasChainedFixups()) {
@@ -4141,15 +3189,6 @@ bool MachOAnalyzer::canBePlacedInKernelCollection(const char* path, void (^failu
 
 #endif
 
-bool MachOAnalyzer::usesClassicRelocationsInKernelCollection() const {
-    // The xnu x86_64 static executable needs to do the i386->x86_64 transition
-    // so will be emitted with classic relocations
-    if ( isArch("x86_64") || isArch("x86_64h") ) {
-        return isStaticExecutable() || isFileSet();
-    }
-    return false;
-}
-
 uint64_t MachOAnalyzer::chainStartsOffset() const
 {
     const dyld_chained_fixups_header* header = chainedFixupsHeader();
@@ -4170,27 +3209,12 @@ const dyld_chained_fixups_header* MachOAnalyzer::chainedFixupsHeader() const
     return (dyld_chained_fixups_header*)getLinkEditContent(leInfo.layout, leInfo.chainedFixups->dataoff);
 }
 
-uint16_t MachOAnalyzer::chainedPointerFormat(const dyld_chained_fixups_header* header)
-{
-    const dyld_chained_starts_in_image* startsInfo = (dyld_chained_starts_in_image*)((uint8_t*)header + header->starts_offset);
-    for (uint32_t i=0; i < startsInfo->seg_count; ++i) {
-        uint32_t segInfoOffset = startsInfo->seg_info_offset[i];
-        // 0 offset means this segment has no fixups
-        if ( segInfoOffset == 0 )
-            continue;
-        const dyld_chained_starts_in_segment* segInfo = (dyld_chained_starts_in_segment*)((uint8_t*)startsInfo + segInfoOffset);
-        if ( segInfo->page_count != 0 )
-            return segInfo->pointer_format;
-    }
-    return 0;  // no chains (perhaps no __DATA segment)
-}
-
 uint16_t MachOAnalyzer::chainedPointerFormat() const
 {
     const dyld_chained_fixups_header* header = chainedFixupsHeader();
     if ( header != nullptr ) {
         // get pointer format from chain info struct in LINKEDIT
-        return chainedPointerFormat(header);
+        return MachOFile::chainedPointerFormat(header);
     }
     assert(this->cputype == CPU_TYPE_ARM64 && (this->maskedCpuSubtype() == CPU_SUBTYPE_ARM64E) && "chainedPointerFormat() called on non-chained binary");
     return DYLD_CHAINED_PTR_ARM64E;
@@ -4227,7 +3251,7 @@ void MachOAnalyzer::withChainStarts(Diagnostics& diag, uint64_t startsStructOffs
     else if ( (leInfo.dyldInfo != nullptr) && (this->cputype == CPU_TYPE_ARM64) && (this->maskedCpuSubtype() == CPU_SUBTYPE_ARM64E) ) {
         // old arm64e binary, create a dyld_chained_starts_in_image for caller
         uint64_t baseAddress = preferredLoadAddress();
-        uint64_t imagePageCount = this->mappedSize()/0x4000;
+        uint64_t imagePageCount = this->mappedSize()/0x1000;
         size_t bufferSize = leInfo.dyldInfo->bind_size + (size_t)imagePageCount*sizeof(uint16_t) + 512;
         BLOCK_ACCCESSIBLE_ARRAY(uint8_t, buffer, bufferSize);
         uint8_t* bufferEnd = &buffer[bufferSize];
@@ -4322,6 +3346,64 @@ bool MachOAnalyzer::hasFirmwareChainStarts(uint16_t* pointerFormat, uint32_t* st
     return false;
 }
 
+bool MachOAnalyzer::hasRebaseRuns(const void** runs, size_t* runsSize) const
+{
+    if ( !this->isPreload() )
+        return false;
+
+    uint64_t sectionSize;
+    if (const void* sect = this->findSectionContent("__TEXT", "__rebase_info", sectionSize) ) {
+        *runs     = sect;
+        *runsSize = (size_t)sectionSize;
+        return true;
+    }
+    return false;
+}
+
+struct RebaseRuns
+{
+	uint32_t  startAddress;
+	uint8_t   runs[];   // value of even indexes is how many pointers in a row are rebases, value of odd indexes times 4 is memory to skip over
+						// two zero values in a row signals the end of the run
+};
+
+void MachOAnalyzer::forEachRebaseRunAddress(const void* runs, size_t runsSize, void (^handler)(uint32_t address)) const
+{
+    const RebaseRuns* rr  = (RebaseRuns*)runs;
+    const RebaseRuns* end = (RebaseRuns*)((uint8_t*)runs + runsSize);
+    while ( rr < end ) {
+        uint32_t address = rr->startAddress;
+        int index = 0;
+        bool done = false;
+        while ( !done ) {
+            uint8_t count = rr->runs[index];
+            if ( count == 0 ) {
+                // two 0x00 in a row mean the run is complete
+                if ( rr->runs[index+1] == 0 ) {
+                    ++index;
+                    done = true;
+                }
+            }
+            else {
+                if ( index & 1 ) {
+                    // odd runs index => how much to jump forward
+                    address += ((count-1) * 4);
+                }
+                else {
+                    // even runs index => how many pointers in a row that need rebasing
+                    for (int i=0; i < count; ++i) {
+                        handler(address);
+                        address += 4;
+                    }
+                }
+            }
+            ++index;
+        }
+        // 4-byte align for next run
+        index = (index+3) & (-4);
+        rr  = (RebaseRuns*)(&rr->runs[index]);
+    }
+}
 
 MachOAnalyzer::ObjCInfo MachOAnalyzer::getObjCInfo() const
 {
@@ -4468,7 +3550,7 @@ const char* MachOAnalyzer::getPrintableString(uint64_t stringVMAddr, MachOAnalyz
 #if BUILDING_SHARED_CACHE_UTIL || BUILDING_DYLDINFO
     // The shared cache coalesces strings in to their own section.
     // Assume its a valid pointer
-    if (result == PrintableStringResult::UnknownSection) {
+    if (result == PrintableStringResult::UnknownSection && this->inDyldCache()) {
         result = PrintableStringResult::CanPrint;
         return (const char*)(stringVMAddr + getSlide());
     }
@@ -4480,22 +3562,58 @@ const char* MachOAnalyzer::getPrintableString(uint64_t stringVMAddr, MachOAnalyz
 }
 
 void MachOAnalyzer::forEachObjCClass(uint64_t classListRuntimeOffset, uint64_t classListCount,
-                                     const VMAddrConverter& vmAddrConverter, ClassCallback& callback) const {
+                                     const VMAddrConverter& vmAddrConverter,
+                                     ClassCallback& callback) const {
+#if !BUILDING_DYLD
+    // ObjC patching needs the bind targets for interposable references to the classes
+    // build targets table
+    STACK_ALLOC_OVERFLOW_SAFE_ARRAY(uint64_t, bindTargets, 32);
+    if ( this->hasChainedFixups() ) {
+        intptr_t slide = this->getSlide();
+        Diagnostics diag;
+        this->forEachBindTarget(diag, false, ^(const BindTargetInfo& info, bool& stop) {
+            if ( diag.hasError() ) {
+                stop = true;
+                return;
+            }
+
+            if ( info.libOrdinal == BIND_SPECIAL_DYLIB_SELF ) {
+                void* result = nullptr;
+                bool  resultPointsToInstructions = false;
+                if ( this->hasExportedSymbol(info.symbolName, nullptr, &result, &resultPointsToInstructions) ) {
+                    uint64_t resultVMAddr = (uint64_t)result - (uint64_t)slide;
+                    bindTargets.push_back(resultVMAddr);
+                } else {
+                    bindTargets.push_back(0);
+                }
+            } else {
+                bindTargets.push_back(0);
+            }
+        }, ^(const MachOAnalyzer::BindTargetInfo& info, bool& stop) {
+        });
+    }
+#else
+    // dyld always analyzes objc after fixups, so we don't need the bind targets
+    Array<uint64_t> bindTargets;
+#endif
+
     const uint64_t ptrSize = pointerSize();
     const uint8_t* arrayBase = (uint8_t*)this + classListRuntimeOffset;
     if ( ptrSize == 8 ) {
         typedef uint64_t PtrTy;
         __block bool stop = false;
         for ( uint64_t i = 0; i != classListCount; ++i ) {
-            uint64_t classVMAddr = vmAddrConverter.convertToVMAddr(*(PtrTy*)(arrayBase + (i * sizeof(PtrTy))));
-            parseObjCClass(vmAddrConverter, classVMAddr, ^(uint64_t classSuperclassVMAddr, uint64_t classDataVMAddr, const ObjCClassInfo& objcClass) {
+            uint64_t classVMAddr = vmAddrConverter.convertToVMAddr(*(PtrTy*)(arrayBase + (i * sizeof(PtrTy))), bindTargets);
+            parseObjCClass(vmAddrConverter, classVMAddr, bindTargets,
+                           ^(uint64_t classSuperclassVMAddr, uint64_t classDataVMAddr, const ObjCClassInfo& objcClass) {
                 callback(classVMAddr, classSuperclassVMAddr, classDataVMAddr, objcClass, false, stop);
                 if ( stop )
                     return;
 
                 // Then parse and call for the metaclass
                 uint64_t isaVMAddr = objcClass.isaVMAddr;
-                parseObjCClass(vmAddrConverter, isaVMAddr, ^(uint64_t metaclassSuperclassVMAddr, uint64_t metaclassDataVMAddr, const ObjCClassInfo& objcMetaclass) {
+                parseObjCClass(vmAddrConverter, isaVMAddr, bindTargets,
+                               ^(uint64_t metaclassSuperclassVMAddr, uint64_t metaclassDataVMAddr, const ObjCClassInfo& objcMetaclass) {
                     callback(isaVMAddr, metaclassSuperclassVMAddr, metaclassDataVMAddr, objcMetaclass, true, stop);
                 });
             });
@@ -4506,15 +3624,17 @@ void MachOAnalyzer::forEachObjCClass(uint64_t classListRuntimeOffset, uint64_t c
         typedef uint32_t PtrTy;
         __block bool stop = false;
         for ( uint64_t i = 0; i != classListCount; ++i ) {
-            uint64_t classVMAddr = vmAddrConverter.convertToVMAddr(*(PtrTy*)(arrayBase + (i * sizeof(PtrTy))));
-            parseObjCClass(vmAddrConverter, classVMAddr, ^(uint64_t classSuperclassVMAddr, uint64_t classDataVMAddr, const ObjCClassInfo& objcClass) {
+            uint64_t classVMAddr = vmAddrConverter.convertToVMAddr(*(PtrTy*)(arrayBase + (i * sizeof(PtrTy))), bindTargets);
+            parseObjCClass(vmAddrConverter, classVMAddr, bindTargets,
+                           ^(uint64_t classSuperclassVMAddr, uint64_t classDataVMAddr, const ObjCClassInfo& objcClass) {
                 callback(classVMAddr, classSuperclassVMAddr, classDataVMAddr, objcClass, false, stop);
                 if ( stop )
                     return;
 
                 // Then parse and call for the metaclass
                 uint64_t isaVMAddr = objcClass.isaVMAddr;
-                parseObjCClass(vmAddrConverter, isaVMAddr, ^(uint64_t metaclassSuperclassVMAddr, uint64_t metaclassDataVMAddr, const ObjCClassInfo& objcMetaclass) {
+                parseObjCClass(vmAddrConverter, isaVMAddr, bindTargets,
+                               ^(uint64_t metaclassSuperclassVMAddr, uint64_t metaclassDataVMAddr, const ObjCClassInfo& objcMetaclass) {
                     callback(isaVMAddr, metaclassSuperclassVMAddr, metaclassDataVMAddr, objcMetaclass, true, stop);
                 });
             });
@@ -4542,7 +3662,7 @@ void MachOAnalyzer::forEachObjCClass(Diagnostics& diag, const VMAddrConverter& v
 }
 
 void MachOAnalyzer::parseObjCClass(const VMAddrConverter& vmAddrConverter,
-                                   uint64_t classVMAddr,
+                                   uint64_t classVMAddr, const Array<uint64_t>& bindTargets,
                                    void (^handler)(uint64_t classSuperclassVMAddr,
                                                    uint64_t classDataVMAddr,
                                                    const ObjCClassInfo& objcClass)) const {
@@ -4574,7 +3694,7 @@ void MachOAnalyzer::parseObjCClass(const VMAddrConverter& vmAddrConverter,
         // First call the handler on the class
         const objc_class_t*           classPtr      = (const objc_class_t*)(classVMAddr + slide);
         const swift_class_metadata_t* swiftClassPtr = (const swift_class_metadata_t*)classPtr;
-        objcClass.isaVMAddr         = vmAddrConverter.convertToVMAddr(classPtr->isaVMAddr);
+        objcClass.isaVMAddr         = vmAddrConverter.convertToVMAddr(classPtr->isaVMAddr, bindTargets);
         objcClass.superclassVMAddr  = vmAddrConverter.convertToVMAddr(classPtr->superclassVMAddr);
         objcClass.methodCacheVMAddr  = classPtr->methodCacheProperties == 0 ? 0 : vmAddrConverter.convertToVMAddr(classPtr->methodCacheProperties);
         objcClass.dataVMAddr        = vmAddrConverter.convertToVMAddr(classPtr->dataVMAddrAndFastFlags) & FAST_DATA_MASK;
@@ -4604,7 +3724,7 @@ void MachOAnalyzer::parseObjCClass(const VMAddrConverter& vmAddrConverter,
         // First call the handler on the class
         const objc_class_t*           classPtr      = (const objc_class_t*)(classVMAddr + slide);
         const swift_class_metadata_t* swiftClassPtr = (const swift_class_metadata_t*)classPtr;
-        objcClass.isaVMAddr         = vmAddrConverter.convertToVMAddr(classPtr->isaVMAddr);
+        objcClass.isaVMAddr         = vmAddrConverter.convertToVMAddr(classPtr->isaVMAddr, bindTargets);
         objcClass.superclassVMAddr  = vmAddrConverter.convertToVMAddr(classPtr->superclassVMAddr);
         objcClass.methodCacheVMAddr  = classPtr->methodCacheProperties == 0 ? 0 : vmAddrConverter.convertToVMAddr(classPtr->methodCacheProperties);
         objcClass.dataVMAddr        = vmAddrConverter.convertToVMAddr(classPtr->dataVMAddrAndFastFlags) & FAST_DATA_MASK;
@@ -4616,6 +3736,48 @@ void MachOAnalyzer::parseObjCClass(const VMAddrConverter& vmAddrConverter,
     }
                                        
     handler(classSuperclassVMAddr, classDataVMAddr, objcClass);
+}
+
+bool MachOAnalyzer::isSwiftClass(const void* classLocation) const
+{
+    const uint64_t ptrSize = pointerSize();
+    if ( ptrSize == 8 ) {
+        struct objc_class_t {
+            uint64_t isaVMAddr;
+            uint64_t superclassVMAddr;
+            uint64_t methodCacheBuckets;
+            uint64_t methodCacheProperties;
+            uint64_t dataVMAddrAndFastFlags;
+        };
+        enum : uint64_t {
+            FAST_DATA_MASK = 0x00007ffffffffff8ULL
+        };
+
+        const objc_class_t* classPtr = (const objc_class_t*)classLocation;
+        bool isSwiftLegacy = classPtr->dataVMAddrAndFastFlags & ObjCClassInfo::FAST_IS_SWIFT_LEGACY;
+        bool isSwiftStable = classPtr->dataVMAddrAndFastFlags & ObjCClassInfo::FAST_IS_SWIFT_STABLE;
+
+        // The Swift class flags are only present if the class is swift
+        return (isSwiftLegacy || isSwiftStable);
+    } else {
+        struct objc_class_t {
+            uint32_t isaVMAddr;
+            uint32_t superclassVMAddr;
+            uint32_t methodCacheBuckets;
+            uint32_t methodCacheProperties;
+            uint32_t dataVMAddrAndFastFlags;
+        };
+        enum : uint32_t {
+            FAST_DATA_MASK = 0xfffffffcUL
+        };
+
+        const objc_class_t* classPtr = (const objc_class_t*)classLocation;
+        bool isSwiftLegacy = classPtr->dataVMAddrAndFastFlags & ObjCClassInfo::FAST_IS_SWIFT_LEGACY;
+        bool isSwiftStable = classPtr->dataVMAddrAndFastFlags & ObjCClassInfo::FAST_IS_SWIFT_STABLE;
+
+        // The Swift class flags are only present if the class is swift
+        return (isSwiftLegacy || isSwiftStable);
+    }
 }
 
 void MachOAnalyzer::forEachObjCCategory(uint64_t categoryListRuntimeOffset, uint64_t categoryListCount,
@@ -5151,26 +4313,6 @@ void MachOAnalyzer::forEachObjCSelectorReference(uint64_t selRefsRuntimeOffset, 
     }
 }
 
-bool MachOAnalyzer::findObjCDataSection(const char *sectionName, uint64_t& sectionRuntimeOffset, uint64_t& sectionSize) const
-{
-    uint64_t baseAddress = preferredLoadAddress();
-
-    __block bool foundSection = false;
-    forEachSection(^(const SectionInfo& sectInfo, bool malformedSectionRange, bool& stop) {
-        if ( (strcmp(sectInfo.segInfo.segName, "__DATA") != 0) &&
-             (strcmp(sectInfo.segInfo.segName, "__DATA_CONST") != 0) &&
-             (strcmp(sectInfo.segInfo.segName, "__DATA_DIRTY") != 0) )
-            return;
-        if ( strcmp(sectInfo.sectName, sectionName) != 0 )
-            return;
-        foundSection         = true;
-        sectionRuntimeOffset = sectInfo.sectAddr - baseAddress;
-        sectionSize          = sectInfo.sectSize;
-        stop                 = true;
-    });
-    return foundSection;
-}
-
 
 void MachOAnalyzer::forEachObjCSelectorReference(Diagnostics& diag, const VMAddrConverter& vmAddrConverter,
                                                  void (^handler)(uint64_t selRefVMAddr, uint64_t selRefTargetVMAddr, bool& stop)) const
@@ -5247,23 +4389,8 @@ void MachOAnalyzer::forEachObjCDuplicateClassToIgnore(void (^handler)(const char
 }
 #endif
 
-
-bool MachOAnalyzer::hasObjCMessageReferences() const {
-
-    __block bool foundSection = false;
-    forEachSection(^(const SectionInfo& sectInfo, bool malformedSectionRange, bool& stop) {
-        if ( strncmp(sectInfo.segInfo.segName, "__DATA", 6) != 0 )
-            return;
-        if ( strcmp(sectInfo.sectName, "__objc_msgrefs") != 0 )
-            return;
-        foundSection = true;
-        stop = true;
-    });
-    return foundSection;
-}
-
 const MachOAnalyzer::ObjCImageInfo* MachOAnalyzer::objcImageInfo() const {
-    int64_t slide = getSlide();
+    uintptr_t slide = getSlide();
 
     __block bool foundInvalidObjCImageInfo = false;
     __block const ObjCImageInfo* imageInfo = nullptr;
@@ -5280,7 +4407,7 @@ const MachOAnalyzer::ObjCImageInfo* MachOAnalyzer::objcImageInfo() const {
             stop = true;
             return;
         }
-        imageInfo = (const ObjCImageInfo*)(sectionInfo.sectAddr + slide);
+        imageInfo = (const ObjCImageInfo*)((uintptr_t)sectionInfo.sectAddr + slide);
         if ( (imageInfo->flags & ObjCImageInfo::dyldPreoptimized) != 0 ) {
             foundInvalidObjCImageInfo = true;
             stop = true;
@@ -5291,298 +4418,6 @@ const MachOAnalyzer::ObjCImageInfo* MachOAnalyzer::objcImageInfo() const {
     if ( foundInvalidObjCImageInfo )
         return nullptr;
     return imageInfo;
-}
-
-// A 32-bit relative pointer to a value.  The offset value is either:
-// - a direct 32-bit offset to the value, if the low bit is 0, or
-// - an offset to a pointer sized slot, if the low bit is 1
-class SwiftRelativePointer
-{
-public:
-    uint64_t getTargetRuntimeOffset(const MachOAnalyzer* ma,
-                                    const MachOAnalyzer::VMAddrConverter& vmAddrConverter,
-                                    uint32_t ptrSize) const {
-        if ( (relativeOffset & 0x1) == 0 ) {
-            // Relative offset directly to the target value
-            uint64_t relativePointerRuntimeOffset = (uint64_t)this - (uint64_t)ma;
-            return relativePointerRuntimeOffset + (int64_t)relativeOffset;
-        } else {
-            // Relative offset to a pointer.  The pointer contains the target value
-            int32_t offset = relativeOffset & ~0x1ULL;
-            uint64_t relativePointerRuntimeOffset = (uint64_t)this - (uint64_t)ma;
-            relativePointerRuntimeOffset += (int64_t)offset;
-            uint64_t pointerValue = 0;
-            if ( ptrSize == 8 ) {
-                pointerValue = *(uint64_t*)((uint8_t*)ma + relativePointerRuntimeOffset);
-            } else {
-                pointerValue = *(uint32_t*)((uint8_t*)ma + relativePointerRuntimeOffset);
-            }
-            // Convert from the encoded pointer to a runtime offset
-            return vmAddrConverter.convertToVMAddr(pointerValue) - vmAddrConverter.preferredLoadAddress;
-        }
-    }
-
-private:
-    int32_t relativeOffset = 0;
-};
-
-class SwiftProtocolConformanceFlags
-{
-public:
-    // Taken from MetadataValues.h
-    enum class TypeMetadataKind : uint32_t {
-        mask    = 0x7 << 3, // 8 type reference kinds
-        shift   = 3,
-    };
-
-    // Taken from MetadataValues.h
-    enum class TypeReferenceKind : uint32_t {
-        // The conformance is for a nominal type referenced directly;
-        // getTypeDescriptor() points to the type context descriptor.
-        directTypeDescriptor = 0x00,
-
-        // The conformance is for a nominal type referenced indirectly;
-        // getTypeDescriptor() points to the type context descriptor.
-        indirectTypeDescriptor = 0x01,
-
-        // The conformance is for an Objective-C class that should be looked up
-        // by class name.
-        directObjCClassName = 0x02,
-
-        // The conformance is for an Objective-C class that has no nominal type
-        // descriptor.
-        // getIndirectObjCClass() points to a variable that contains the pointer to
-        // the class object, which then requires a runtime call to get metadata.
-        //
-        // On platforms without Objective-C interoperability, this case is
-        // unused.
-        indirectObjCClass = 0x03,
-    };
-
-    TypeReferenceKind typeReferenceKind() const {
-        return (TypeReferenceKind)((flags & (uint32_t)TypeMetadataKind::mask) >> (uint32_t)TypeMetadataKind::shift);
-    }
-private:
-    uint32_t flags = 0;
-};
-
-// This represents the type descriptors pointed to by protocol conformances
-class TypeContextDescriptor
-{
-public:
-
-    const SwiftRelativePointer& name() const {
-        return _name;
-    }
-
-    bool isForeignMetadata() const {
-        // The botton 2 bits have the flags
-        return (getKindSpecificFlags() & 0x3) == ForeignMetadataInitialization;
-    }
-
-    bool hasImportInfo() const {
-        // Bit 2 tells us if we have import info, ie, a name containing NULLs
-        return (getKindSpecificFlags() & (1 << 2)) != 0;
-    }
-
-private:
-
-    enum TypeContextDescriptorFlags : uint16_t {
-        ForeignMetadataInitialization = 0x2
-    };
-
-    // The most significant two bytes of the flags word, which can have
-    // kind-specific meaning.
-    uint16_t getKindSpecificFlags() const {
-        return (_flags >> 16u) & 0xFFFFu;
-    }
-
-#pragma clang diagnostic push
-#pragma clang diagnostic ignored "-Wunused-private-field"
-    uint32_t                _flags;
-    int32_t                 _parent;
-    SwiftRelativePointer    _name;
-    int32_t                 _accessFunction;
-    int32_t                 _fields;
-#pragma clang diagnostic pop
-};
-
-// A 32-bit relative pointer to a value
-// The type the pointer depends on the SwiftProtocolConformanceFlags::TypeReferenceKind
-class SwiftTypeRefPointer
-{
-public:
-    // A type descriptor is one of the types described by TypeReferenceKind.
-    // This works out which of the give types we are, and populates the given out parameters to match
-    void getTypeDescriptor(SwiftProtocolConformanceFlags::TypeReferenceKind refKind,
-                           const MachOAnalyzer* ma,
-                           const MachOAnalyzer::VMAddrConverter& vmAddrConverter,
-                           uint32_t ptrSize,
-                           bool canAnalyzeIndirectPointers,
-                           uint64_t& descriptorRuntimeOffset,
-                           uint64_t& objcClassNameRuntimeOffset,
-                           uint64_t& objcClassRuntimeOffset,
-                           uint64_t& foreignMetadataNameRuntimeOffset,
-                           bool& foreignMetadataNameHasImportInfo) const {
-        descriptorRuntimeOffset = 0;
-        objcClassNameRuntimeOffset = 0;
-        objcClassRuntimeOffset = 0;
-        switch ( refKind ) {
-            case SwiftProtocolConformanceFlags::TypeReferenceKind::directTypeDescriptor: {
-                // Relative offset directly to the target value
-                uint64_t relativePointerRuntimeOffset = (uint64_t)this - (uint64_t)ma;
-                descriptorRuntimeOffset = relativePointerRuntimeOffset + (int64_t)relativeOffset;
-                break;
-            }
-            case SwiftProtocolConformanceFlags::TypeReferenceKind::indirectTypeDescriptor: {
-                // Relative offset to a pointer.  The pointer contains the target value
-                uint64_t relativePointerRuntimeOffset = (uint64_t)this - (uint64_t)ma;
-                relativePointerRuntimeOffset += (int64_t)relativeOffset;
-                uint64_t pointerValue = 0;
-                if ( ptrSize == 8 ) {
-                    pointerValue = *(uint64_t*)((uint8_t*)ma + relativePointerRuntimeOffset);
-                } else {
-                    pointerValue = *(uint32_t*)((uint8_t*)ma + relativePointerRuntimeOffset);
-                }
-                // This might be a pointer to a missing weak import.  If that is the case, just skip it
-                if ( pointerValue == 0 )
-                    break;
-                // Convert from the encoded pointer to a runtime offset
-                descriptorRuntimeOffset = vmAddrConverter.convertToVMAddr(pointerValue) - vmAddrConverter.preferredLoadAddress;
-                break;
-            }
-            case SwiftProtocolConformanceFlags::TypeReferenceKind::directObjCClassName: {
-                // Relative offset directly to the class name string
-                uint64_t relativePointerRuntimeOffset = (uint64_t)this - (uint64_t)ma;
-                objcClassNameRuntimeOffset = relativePointerRuntimeOffset + (int64_t)relativeOffset;
-                break;
-            }
-            case SwiftProtocolConformanceFlags::TypeReferenceKind::indirectObjCClass: {
-                // Relative offset to a pointer.  The pointer contains the target class value
-                uint64_t relativePointerRuntimeOffset = (uint64_t)this - (uint64_t)ma;
-                relativePointerRuntimeOffset += (int64_t)relativeOffset;
-                uint64_t pointerValue = 0;
-                if ( ptrSize == 8 ) {
-                    pointerValue = *(uint64_t*)((uint8_t*)ma + relativePointerRuntimeOffset);
-                } else {
-                    pointerValue = *(uint32_t*)((uint8_t*)ma + relativePointerRuntimeOffset);
-                }
-                // This might be a pointer to a missing weak import.  If that is the case, just skip it
-                if ( pointerValue == 0 )
-                    break;
-                // Convert from the encoded pointer to a runtime offset
-                objcClassRuntimeOffset = vmAddrConverter.convertToVMAddr(pointerValue) - vmAddrConverter.preferredLoadAddress;
-                break;
-            }
-        }
-
-        // Type descriptors might be foreign.  This means that the runtime needs to use their name to identify them
-        if ( descriptorRuntimeOffset != 0 ) {
-            // Once we've bound all dylibs in the shared cache, we can visit indirect type descriptors, which are binds.
-            // Prior to that, just add a placeholder value for foriegn metadata to suggest that it might be set.  We don't know
-            // for sure, but need to make pace for it
-            bool canAnalyze = canAnalyzeIndirectPointers;
-            if ( refKind == SwiftProtocolConformanceFlags::TypeReferenceKind::directTypeDescriptor )
-                canAnalyze = true;
-
-            if ( canAnalyze ) {
-                const TypeContextDescriptor* typeDesc = (const TypeContextDescriptor*)((uint8_t*)ma + descriptorRuntimeOffset);
-                if ( typeDesc->isForeignMetadata() ) {
-                    foreignMetadataNameRuntimeOffset = typeDesc->name().getTargetRuntimeOffset(ma, vmAddrConverter, ptrSize);
-                    foreignMetadataNameHasImportInfo = typeDesc->hasImportInfo();
-                    // printf("Name: %s\n", (const char*)ma + foreignMetadatNameRuntimeOffset);
-                }
-            } else {
-                // HACK: Add a placeholder
-                foreignMetadataNameRuntimeOffset = ~0ULL;
-            }
-        }
-    }
-
-private:
-    int32_t relativeOffset = 0;
-};
-
-void MachOAnalyzer::forEachSwiftProtocolConformance(uint64_t protocolConformanceListRuntimeOffset,
-                                                    uint64_t numProtocolConformances,
-                                                    const VMAddrConverter& vmAddrConverter,
-                                                    bool canAnalyzeIndirectPointers,
-                                                    void (^handler)(uint64_t protocolConformanceRuntimeOffset,
-                                                                    const SwiftProtocolConformance& protocolConformance,
-                                                                    bool& stopProtocolConformance)) const
-{
-    // Protocol conformances are a 32-bit offset from the list entry
-    const int32_t* protocolConformanceList = (const int32_t*)((uint8_t*)this + protocolConformanceListRuntimeOffset);
-
-    struct Conformance
-    {
-        const SwiftRelativePointer          protocolRelativePointer;
-        const SwiftTypeRefPointer           typeRef;
-        int32_t                             witnessTable;
-        const SwiftProtocolConformanceFlags flags;
-    };
-
-    const uint32_t ptrSize = MachOFile::pointerSize();
-    for (uint64_t i = 0; i != numProtocolConformances; ++i) {
-        int32_t relativeOffset = protocolConformanceList[i];
-        uint64_t listEntryRuntimeOffset = protocolConformanceListRuntimeOffset + (i * 4);
-        uint64_t protocolConformanceRuntimeOffset = listEntryRuntimeOffset + (int64_t)relativeOffset;
-
-        const Conformance* conformance = (const Conformance*)((uint8_t*)this + protocolConformanceRuntimeOffset);
-
-        SwiftProtocolConformance swiftProtocolConformance;
-        swiftProtocolConformance.protocolRuntimeOffset = conformance->protocolRelativePointer.getTargetRuntimeOffset(this, vmAddrConverter, ptrSize);
-        conformance->typeRef.getTypeDescriptor(conformance->flags.typeReferenceKind(), this, vmAddrConverter, ptrSize,
-                                               canAnalyzeIndirectPointers,
-                                               swiftProtocolConformance.typeConformanceRuntimeOffset,
-                                               swiftProtocolConformance.typeConformanceObjCClassNameRuntimeOffset,
-                                               swiftProtocolConformance.typeConformanceObjCClassRuntimeOffset,
-                                               swiftProtocolConformance.foreignMetadataNameRuntimeOffset,
-                                               swiftProtocolConformance.foreignMetadataNameHasImportInfo);
-
-        bool stopProtocolConformance = false;
-        handler(protocolConformanceRuntimeOffset, swiftProtocolConformance, stopProtocolConformance);
-        if ( stopProtocolConformance )
-            break;
-    }
-}
-
-void MachOAnalyzer::forEachSwiftProtocolConformance(Diagnostics& diag, const VMAddrConverter& vmAddrConverter,
-                                                    bool canAnalyzeIndirectPointers,
-                                                    void (^handler)(uint64_t protocolConformanceRuntimeOffset,
-                                                                    const SwiftProtocolConformance& protocolConformance,
-                                                                    bool& stopProtocolConformance)) const
-{
-    uint64_t protocolListRuntimeOffset;
-    uint64_t protocolListSize;
-    const void* sectionContent = findSectionContent("__TEXT", "__swift5_proto", protocolListSize);
-    if ( sectionContent == nullptr )
-        return;
-    protocolListRuntimeOffset = (uint64_t)sectionContent - (uint64_t)this;
-
-    // Each entry is a 32-bit offset to a protocol conformance
-    const uint32_t entrySize = 4;
-    if ( (protocolListSize % entrySize) != 0 ) {
-        diag.error("Invalid Swift protocol conformance section size");
-        return;
-    }
-
-    forEachSwiftProtocolConformance(protocolListRuntimeOffset, protocolListSize / entrySize, vmAddrConverter, canAnalyzeIndirectPointers, handler);
-}
-
-uint32_t MachOAnalyzer::loadCommandsFreeSpace() const
-{
-    __block uint32_t firstSectionFileOffset = 0;
-    __block uint32_t firstSegmentFileOffset = 0;
-    forEachSection(^(const SectionInfo& sectInfo, bool malformedSectionRange, bool& stop) {
-        firstSectionFileOffset = sectInfo.sectFileOffset;
-        firstSegmentFileOffset = (uint32_t)sectInfo.segInfo.fileOffset;
-        stop = true;
-    });
-
-    uint32_t headerSize = (this->magic == MH_MAGIC_64) ? sizeof(mach_header_64) : sizeof(mach_header);
-    uint32_t existSpaceUsed = this->sizeofcmds + headerSize;
-    return firstSectionFileOffset - firstSegmentFileOffset - existSpaceUsed;
 }
 
 void MachOAnalyzer::forEachWeakDef(Diagnostics& diag,
@@ -5605,59 +4440,19 @@ void MachOAnalyzer::forEachWeakDef(Diagnostics& diag,
     });
 }
 
-uint32_t MachOAnalyzer::getFixupsLoadCommandFileOffset() const
-{
-    Diagnostics diag;
-    LinkEditInfo linkeditInfo;
-    getLinkEditLoadCommands(diag, linkeditInfo);
-    if ( diag.hasError() )
-        return 0;
-    if ( linkeditInfo.dyldInfo )
-        return (uint32_t)( (uint8_t*)linkeditInfo.dyldInfo - (uint8_t*)this );
-    else if ( linkeditInfo.chainedFixups )
-        return (uint32_t)( (uint8_t*)linkeditInfo.chainedFixups - (uint8_t*)this );
-    return 0;
+template<typename P> void MachOAnalyzer::forEachThreadLocalVariableInSection(Diagnostics& diag, const MachOAnalyzer::SectionInfo& sectInfo, void (^handler)(TLV_Resolver* tlvThunkAddr, uintptr_t* keyAddr)) const {
+    uintptr_t  baseAddress = (uintptr_t)this->preferredLoadAddress();
+    intptr_t   slide       = (uintptr_t)this - baseAddress;
+    const uint8_t* content = (uint8_t*)((uintptr_t)sectInfo.sectAddr + slide);
+    unsigned count = (unsigned)(sectInfo.sectSize / sizeof(MachOAnalyzer::FixedSizeTLVThunk<P>));
+    FixedSizeTLVThunk<P>* slotsStart = (FixedSizeTLVThunk<P>*)content;
+    FixedSizeTLVThunk<P>* slotsEnd   =  &slotsStart[count];
+    for (FixedSizeTLVThunk<P>* p=slotsStart; p < slotsEnd; ++p) {
+        handler((TLV_Resolver*)&(p->thunk), (uintptr_t*)&(p->key));
+    }
 }
 
-
-bool MachOAnalyzer::inCodeSection(uint32_t runtimeOffset) const
-{
-    // only needed for arm64e code to know to sign pointers
-    if ( (this->cputype != CPU_TYPE_ARM64) || (this->maskedCpuSubtype() != CPU_SUBTYPE_ARM64E) )
-        return false;
-
-    __block bool result = false;
-    uint64_t baseAddress = this->preferredLoadAddress();
-    this->forEachSection(^(const SectionInfo& sectInfo, bool malformedSectionRange, bool& stop) {
-        if ( ((sectInfo.sectAddr-baseAddress) <= runtimeOffset) && (runtimeOffset < (sectInfo.sectAddr+sectInfo.sectSize-baseAddress)) ) {
-            result = ( (sectInfo.sectFlags & S_ATTR_PURE_INSTRUCTIONS) || (sectInfo.sectFlags & S_ATTR_SOME_INSTRUCTIONS) );
-            stop = true;
-        }
-    });
-    return result;
-}
-
-// These are mangled symbols for all the variants of operator new and delete
-// which a main executable can define (non-weak) and override the
-// weak-def implementation in the OS.
-static const char* const sTreatAsWeak[] = {
-    "__Znwm", "__ZnwmRKSt9nothrow_t",
-    "__Znam", "__ZnamRKSt9nothrow_t",
-    "__ZdlPv", "__ZdlPvRKSt9nothrow_t", "__ZdlPvm",
-    "__ZdaPv", "__ZdaPvRKSt9nothrow_t", "__ZdaPvm",
-    "__ZnwmSt11align_val_t", "__ZnwmSt11align_val_tRKSt9nothrow_t",
-    "__ZnamSt11align_val_t", "__ZnamSt11align_val_tRKSt9nothrow_t",
-    "__ZdlPvSt11align_val_t", "__ZdlPvSt11align_val_tRKSt9nothrow_t", "__ZdlPvmSt11align_val_t",
-    "__ZdaPvSt11align_val_t", "__ZdaPvSt11align_val_tRKSt9nothrow_t", "__ZdaPvmSt11align_val_t"
-};
-
-void MachOAnalyzer::forEachTreatAsWeakDef(void (^handler)(const char* symbolName))
-{
-    for (const char*  sym : sTreatAsWeak)
-        handler(sym);
-}
-
-MachOAnalyzer::TLV_InitialContent MachOAnalyzer::forEachThreadLocalVariable(Diagnostics& diag, void (^handler)(TLV_Thunk& slot)) const
+MachOAnalyzer::TLV_InitialContent MachOAnalyzer::forEachThreadLocalVariable(Diagnostics& diag, void (^handler)(TLV_Resolver *tlvThunkAddr, uintptr_t* keyAddr)) const
 {
     __block TLV_InitialContent result = { 0, 0 };
 
@@ -5666,17 +4461,14 @@ MachOAnalyzer::TLV_InitialContent MachOAnalyzer::forEachThreadLocalVariable(Diag
         return result;
 
     uintptr_t  baseAddress = (uintptr_t)this->preferredLoadAddress();
-    intptr_t   slide       = (uintptr_t)this - baseAddress;
     this->forEachSection(^(const SectionInfo& sectInfo, bool malformedSectionRange, bool& stop) {
         switch (sectInfo.sectFlags & SECTION_TYPE) {
             case S_THREAD_LOCAL_VARIABLES:
                 {
-                    unsigned count = (unsigned)(sectInfo.sectSize / sizeof(TLV_Thunk));
-                    const uint8_t* content = (uint8_t*)(sectInfo.sectAddr + slide);
-                    TLV_Thunk* slotsStart = (TLV_Thunk*)content;
-                    TLV_Thunk* slotsEnd   =  &slotsStart[count];
-                    for (TLV_Thunk* p=slotsStart; p < slotsEnd; ++p) {
-                        handler(*p);
+                    if (is64()) {
+                        forEachThreadLocalVariableInSection<int64_t>(diag, sectInfo, handler);
+                    } else {
+                        forEachThreadLocalVariableInSection<int32_t>(diag, sectInfo, handler);
                     }
                 }
                 break;
@@ -5698,12 +4490,12 @@ MachOAnalyzer::TLV_InitialContent MachOAnalyzer::forEachThreadLocalVariable(Diag
     return result;
 }
 
-
-
 void MachOAnalyzer::forEachBindTarget(Diagnostics& diag, bool allowLazyBinds,
                                       void (^handler)(const BindTargetInfo& info, bool& stop),
                                       void (^overrideHandler)(const BindTargetInfo& info, bool& stop)) const
 {
+    if ( this->isPreload() )
+        return;
     if ( this->hasChainedFixups() )
         this->forEachBindTarget_ChainedFixups(diag, handler);
     else if ( this->hasOpcodeFixups() )
@@ -5912,6 +4704,10 @@ void MachOAnalyzer::forEachBindLocation_Relocations(Diagnostics& diag, void (^ha
 bool MachOAnalyzer::forEachBind_Relocations(Diagnostics& diag, const LinkEditInfo& leInfo, const SegmentInfo segmentsInfo[],
                                             bool supportPrivateExternsWorkaround, BindDetailedHandler handler) const
 {
+    // Firmare binaries won't have a dynSymTab
+    if ( leInfo.dynSymTab == nullptr )
+        return false;
+
     const uint64_t                  relocsStartAddress = externalRelocBaseAddress(segmentsInfo, leInfo.layout.linkeditSegIndex);
     const relocation_info* const    relocsStart = (relocation_info*)getLinkEditContent(leInfo.layout, leInfo.dynSymTab->extreloff);
     const relocation_info* const    relocsEnd   = &relocsStart[leInfo.dynSymTab->nextrel];
@@ -6569,7 +5365,240 @@ bool MachOAnalyzer::forEachRebase_Relocations(Diagnostics& diag, const LinkEditI
     return stop;
 }
 
+bool MachOAnalyzer::getLinkeditLayout(Diagnostics& diag, uint64_t linkeditFileOffset,
+                                      const uint8_t* linkeditStartAddr, mach_o::LinkeditLayout& layout) const
+{
+    // Note, in VM layout all linkedit offsets are adjusted from file offsets.
+    // It is essential no-one calls this on an object in file layout. It must be in VM layout
 
+    auto getLinkEditContent = [&](uint32_t fileOffset)
+    {
+        uint64_t offsetInLinkedit = fileOffset - linkeditFileOffset;
+        return linkeditStartAddr + offsetInLinkedit;
+    };
+
+    // FIXME: Other load commands
+    this->forEachLoadCommand(diag, ^(const load_command *cmd, bool &stop) {
+        switch ( cmd->cmd ) {
+            case LC_SYMTAB: {
+                const symtab_command* symTabCmd = (const symtab_command*)cmd;
+
+                // Record that we found a LC_SYMTAB
+                layout.hasSymTab = true;
+
+                // NList
+                uint64_t nlistEntrySize  = this->is64() ? sizeof(struct nlist_64) : sizeof(struct nlist);
+                layout.symbolTable.fileOffset       = symTabCmd->symoff;
+                layout.symbolTable.buffer           = getLinkEditContent(symTabCmd->symoff);
+                layout.symbolTable.bufferSize       = (uint32_t)(symTabCmd->nsyms * nlistEntrySize);
+                layout.symbolTable.entryCount       = symTabCmd->nsyms;
+                layout.symbolTable.hasLinkedit      = true;
+
+                // Symbol strings
+                layout.symbolStrings.fileOffset     = symTabCmd->stroff;
+                layout.symbolStrings.buffer         = getLinkEditContent(symTabCmd->stroff);
+                layout.symbolStrings.bufferSize     = symTabCmd->strsize;
+                layout.symbolStrings.hasLinkedit    = true;
+                break;
+            }
+            case LC_DYSYMTAB: {
+                const dysymtab_command* dynSymTabCmd = (const dysymtab_command*)cmd;
+
+                // Record that we found a LC_DYSYMTAB
+                layout.hasDynSymTab = true;
+
+                // Local relocs
+                layout.localRelocs.fileOffset          = dynSymTabCmd->locreloff;
+                layout.localRelocs.buffer              = getLinkEditContent(dynSymTabCmd->locreloff);
+                layout.localRelocs.bufferSize          = 0;         // Use entryCount instead
+                layout.localRelocs.entryIndex          = 0;         // Use buffer instead
+                layout.localRelocs.entryCount          = dynSymTabCmd->nlocrel;
+                layout.localRelocs.hasLinkedit         = true;
+
+                // Extern relocs
+                layout.externRelocs.fileOffset          = dynSymTabCmd->extreloff;
+                layout.externRelocs.buffer              = getLinkEditContent(dynSymTabCmd->extreloff);
+                layout.externRelocs.bufferSize          = 0;         // Use entryCount instead
+                layout.externRelocs.entryIndex          = 0;         // Use buffer instead
+                layout.externRelocs.entryCount          = dynSymTabCmd->nextrel;
+                layout.externRelocs.hasLinkedit         = true;
+
+                // Indirect symbol table
+                layout.indirectSymbolTable.fileOffset   = dynSymTabCmd->indirectsymoff;
+                layout.indirectSymbolTable.buffer       = getLinkEditContent(dynSymTabCmd->indirectsymoff);
+                layout.indirectSymbolTable.bufferSize   = 0;         // Use entryCount instead
+                layout.indirectSymbolTable.entryIndex   = 0;         // Use buffer instead
+                layout.indirectSymbolTable.entryCount   = dynSymTabCmd->nindirectsyms;
+                layout.indirectSymbolTable.hasLinkedit  = true;
+
+                // Locals
+                layout.localSymbolTable.fileOffset     = 0;         // unused
+                layout.localSymbolTable.buffer         = nullptr;   // Use entryIndex instead
+                layout.localSymbolTable.bufferSize     = 0;         // Use entryCount instead
+                layout.localSymbolTable.entryIndex     = dynSymTabCmd->ilocalsym;
+                layout.localSymbolTable.entryCount     = dynSymTabCmd->nlocalsym;
+                layout.localSymbolTable.hasLinkedit    = true;
+
+                // Globals
+                layout.globalSymbolTable.fileOffset     = 0;         // unused
+                layout.globalSymbolTable.buffer         = nullptr;   // Use entryIndex instead
+                layout.globalSymbolTable.bufferSize     = 0;         // Use entryCount instead
+                layout.globalSymbolTable.entryIndex     = dynSymTabCmd->iextdefsym;
+                layout.globalSymbolTable.entryCount     = dynSymTabCmd->nextdefsym;
+                layout.globalSymbolTable.hasLinkedit    = true;
+
+                // Imports
+                layout.undefSymbolTable.fileOffset     = 0;         // unused
+                layout.undefSymbolTable.buffer         = nullptr;   // Use entryIndex instead
+                layout.undefSymbolTable.bufferSize     = 0;         // Use entryCount instead
+                layout.undefSymbolTable.entryIndex     = dynSymTabCmd->iundefsym;
+                layout.undefSymbolTable.entryCount     = dynSymTabCmd->nundefsym;
+                layout.undefSymbolTable.hasLinkedit    = true;
+                break;
+            }
+            case LC_DYLD_INFO:
+            case LC_DYLD_INFO_ONLY: {
+                const dyld_info_command* linkeditCmd = (const dyld_info_command*)cmd;
+
+                // Record what kind of DYLD_INFO we found
+                layout.dyldInfoCmd = cmd->cmd;
+
+                // Rebase
+                layout.rebaseOpcodes.fileOffset         = linkeditCmd->rebase_off;
+                layout.rebaseOpcodes.buffer             = getLinkEditContent(linkeditCmd->rebase_off);
+                layout.rebaseOpcodes.bufferSize         = linkeditCmd->rebase_size;
+                layout.rebaseOpcodes.hasLinkedit        = true;
+
+                // Bind
+                layout.regularBindOpcodes.fileOffset    = linkeditCmd->bind_off;
+                layout.regularBindOpcodes.buffer        = getLinkEditContent(linkeditCmd->bind_off);
+                layout.regularBindOpcodes.bufferSize    = linkeditCmd->bind_size;
+                layout.regularBindOpcodes.hasLinkedit   = true;
+
+                // Lazy bind
+                layout.lazyBindOpcodes.fileOffset       = linkeditCmd->lazy_bind_off;
+                layout.lazyBindOpcodes.buffer           = getLinkEditContent(linkeditCmd->lazy_bind_off);
+                layout.lazyBindOpcodes.bufferSize       = linkeditCmd->lazy_bind_size;
+                layout.lazyBindOpcodes.hasLinkedit      = true;
+
+                // Weak bind
+                layout.weakBindOpcodes.fileOffset       = linkeditCmd->weak_bind_off;
+                layout.weakBindOpcodes.buffer           = getLinkEditContent(linkeditCmd->weak_bind_off);
+                layout.weakBindOpcodes.bufferSize       = linkeditCmd->weak_bind_size;
+                layout.weakBindOpcodes.hasLinkedit      = true;
+
+                // Export trie
+                layout.exportsTrie.fileOffset           = linkeditCmd->export_off;
+                layout.exportsTrie.buffer               = getLinkEditContent(linkeditCmd->export_off);
+                layout.exportsTrie.bufferSize           = linkeditCmd->export_size;
+                layout.exportsTrie.hasLinkedit          = true;
+                break;
+            }
+            case LC_DYLD_CHAINED_FIXUPS: {
+                const linkedit_data_command* linkeditCmd = (const linkedit_data_command*)cmd;
+
+                layout.chainedFixups.fileOffset         = linkeditCmd->dataoff;
+                layout.chainedFixups.buffer             = getLinkEditContent(linkeditCmd->dataoff);
+                layout.chainedFixups.bufferSize         = linkeditCmd->datasize;
+                layout.chainedFixups.entryCount         = 0; // Not needed here
+                layout.chainedFixups.hasLinkedit        = true;
+                layout.chainedFixups.cmd                = linkeditCmd;
+                break;
+            }
+            case LC_DYLD_EXPORTS_TRIE: {
+                const linkedit_data_command* linkeditCmd = (const linkedit_data_command*)cmd;
+
+                layout.exportsTrie.fileOffset           = linkeditCmd->dataoff;
+                layout.exportsTrie.buffer               = getLinkEditContent(linkeditCmd->dataoff);
+                layout.exportsTrie.bufferSize           = linkeditCmd->datasize;
+                layout.exportsTrie.entryCount           = 0; // Not needed here
+                layout.exportsTrie.hasLinkedit          = true;
+                break;
+            }
+            case LC_SEGMENT_SPLIT_INFO: {
+                const linkedit_data_command* linkeditCmd = (const linkedit_data_command*)cmd;
+
+                layout.splitSegInfo.fileOffset           = linkeditCmd->dataoff;
+                layout.splitSegInfo.buffer               = getLinkEditContent(linkeditCmd->dataoff);
+                layout.splitSegInfo.bufferSize           = linkeditCmd->datasize;
+                layout.splitSegInfo.entryCount           = 0; // Not needed here
+                layout.splitSegInfo.hasLinkedit          = true;
+                break;
+            }
+            case LC_FUNCTION_STARTS: {
+                const linkedit_data_command* linkeditCmd = (const linkedit_data_command*)cmd;
+
+                layout.functionStarts.fileOffset           = linkeditCmd->dataoff;
+                layout.functionStarts.buffer               = getLinkEditContent(linkeditCmd->dataoff);
+                layout.functionStarts.bufferSize           = linkeditCmd->datasize;
+                layout.functionStarts.entryCount           = 0; // Not needed here
+                layout.functionStarts.hasLinkedit          = true;
+                break;
+            }
+            case LC_DATA_IN_CODE: {
+                const linkedit_data_command* linkeditCmd = (const linkedit_data_command*)cmd;
+
+                layout.dataInCode.fileOffset    = linkeditCmd->dataoff;
+                layout.dataInCode.buffer        = getLinkEditContent(linkeditCmd->dataoff);
+                layout.dataInCode.bufferSize    = linkeditCmd->datasize;
+                layout.dataInCode.entryCount    = 0; // Not needed here
+                layout.dataInCode.hasLinkedit   = true;
+                break;
+            }
+            case LC_CODE_SIGNATURE: {
+                const linkedit_data_command* linkeditCmd = (const linkedit_data_command*)cmd;
+
+                layout.codeSignature.fileOffset    = linkeditCmd->dataoff;
+                layout.codeSignature.buffer        = getLinkEditContent(linkeditCmd->dataoff);
+                layout.codeSignature.bufferSize    = linkeditCmd->datasize;
+                layout.codeSignature.entryCount    = 0; // Not needed here
+                layout.codeSignature.hasLinkedit   = true;
+                break;
+            }
+        }
+    });
+
+    return true;
+}
+
+void MachOAnalyzer::withVMLayout(Diagnostics &diag, void (^callback)(const mach_o::Layout &layout)) const
+{
+    intptr_t slide = this->getSlide();
+    __block uint64_t linkeditFileOffset = 0;
+    __block const uint8_t* linkeditStartAddr = nullptr;
+
+    uint32_t numSegments = this->segmentCount();
+    BLOCK_ACCCESSIBLE_ARRAY(mach_o::SegmentLayout, segmentLayout, numSegments);
+    this->forEachSegment(^(const SegmentInfo &info, bool &stop) {
+        mach_o::SegmentLayout segment;
+        segment.vmAddr      = info.vmAddr;
+        segment.vmSize      = info.vmSize;
+        segment.fileOffset  = info.fileOffset;
+        segment.fileSize    = info.fileSize;
+        segment.buffer      = (uint8_t*)(info.vmAddr + slide);
+        segment.protections = info.protections;
+
+        segment.kind        = mach_o::SegmentLayout::Kind::unknown;
+        if ( !strcmp(info.segName, "__TEXT") ) {
+            segment.kind    = mach_o::SegmentLayout::Kind::text;
+        } else if ( !strcmp(info.segName, "__LINKEDIT") ) {
+            segment.kind    = mach_o::SegmentLayout::Kind::linkedit;
+            linkeditFileOffset = info.fileOffset;
+            linkeditStartAddr = segment.buffer;
+        }
+
+        segmentLayout[info.segIndex] = segment;
+    });
+
+    mach_o::LinkeditLayout linkedit;
+    if ( !this->getLinkeditLayout(diag, linkeditFileOffset, linkeditStartAddr, linkedit) ) {
+        diag.error("Couldn't get dylib layout");
+        return;
+    }
+
+    mach_o::Layout layout(this, { &segmentLayout[0], &segmentLayout[numSegments] }, linkedit);
+    callback(layout);
+}
 
 } // dyld3
 

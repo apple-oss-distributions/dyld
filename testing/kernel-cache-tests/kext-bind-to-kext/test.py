@@ -1,7 +1,8 @@
-#!/usr/bin/python2.7
+#!/usr/bin/python3
 
 import os
 import KernelCollection
+from FixupHelpers import *
 
 # This verifies that a kext can bind to another kext
 # foo.kext exports foo and bar.kext uses it
@@ -15,21 +16,22 @@ def check(kernel_cache):
     assert kernel_cache.dictionary()["dylibs"][0]["name"] == "com.apple.kernel"
     # bar.kext
     assert kernel_cache.dictionary()["dylibs"][1]["name"] == "com.apple.bar"
-    assert len(kernel_cache.dictionary()["dylibs"][1]["segments"]) == 4
-    assert kernel_cache.dictionary()["dylibs"][1]["segments"][2]["name"] == "__DATA"
-    assert kernel_cache.dictionary()["dylibs"][1]["segments"][2]["vmAddr"] == "0x1C000"
     # foo.kext
     assert kernel_cache.dictionary()["dylibs"][2]["name"] == "com.apple.foo"
 
+    # Note down the base addresses and GOT section for later
+    cacheBaseAddress = findCacheBaseVMAddr(kernel_cache)
+    barGOTVMAddr = findSectionVMAddr(kernel_cache, 1, "__DATA", "__got")
+
     kernel_cache.analyze("/kext-bind-to-kext/main.kc", ["-symbols", "-arch", "arm64"])
+    # foo.kext
     assert kernel_cache.dictionary()["dylibs"][2]["name"] == "com.apple.foo"
-    assert kernel_cache.dictionary()["dylibs"][2]["global-symbols"][0]["name"] == "_foo"
-    assert kernel_cache.dictionary()["dylibs"][2]["global-symbols"][0]["vmAddr"] == "0x14020"
+    foo_foo_vmAddr = findGlobalSymbolVMAddr(kernel_cache, 2, "_foo")
 
     # Check the fixups
     kernel_cache.analyze("/kext-bind-to-kext/main.kc", ["-fixups", "-arch", "arm64"])
-    assert len(kernel_cache.dictionary()["fixups"]) == 1
-    assert kernel_cache.dictionary()["fixups"]["0x1C000"] == "kc(0) + 0x14020"
+    assert len(kernel_cache.dictionary()["fixups"]) >= 1
+    assert kernel_cache.dictionary()["fixups"][fixupOffset(barGOTVMAddr, cacheBaseAddress)] == "kc(0) + " + foo_foo_vmAddr
     assert len(kernel_cache.dictionary()["dylibs"]) == 3
     assert kernel_cache.dictionary()["dylibs"][0]["name"] == "com.apple.kernel"
     assert kernel_cache.dictionary()["dylibs"][0]["fixups"] == "none"

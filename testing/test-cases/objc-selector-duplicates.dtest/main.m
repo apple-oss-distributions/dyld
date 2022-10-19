@@ -1,5 +1,5 @@
 
-// BUILD:  $CC main.m -o $BUILD_DIR/objc-selector-duplicate.exe -lobjc -Wl,-no_objc_relative_method_lists -Wno-Wcast-of-sel-type
+// BUILD:  $CC main.m -o $BUILD_DIR/objc-selector-duplicate.exe -lobjc -Wl,-no_objc_relative_method_lists -Wno-cast-of-sel-type
 
 // RUN:  ./objc-selector-duplicate.exe
 
@@ -43,7 +43,7 @@ int main(int argc, const char* argv[], const char* envp[], const char* apple[]) 
     if ( methodCount != 1 )
         FAIL("dyldClassFoo method count is wrong.  Got %d", methodCount);
 
-    const char* methodName = (const char*)method_getName(methods[0]);
+    const char* methodName = (const char*)sel_getName(method_getName(methods[0]));
     if (methodName != mySelRef) {
         FAIL("methodName is wrong pointer: %p(%s) vs %p(%s)", methodName, methodName, mySelRef, mySelRef);
     }

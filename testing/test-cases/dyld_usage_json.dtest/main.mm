@@ -186,7 +186,7 @@ void validateJson(Node json, pid_t pid)
 int main(int argc, const char* argv[], char *env[])
 {
     _process dyldUsage;
-    dyldUsage.set_executable_path("/usr/local/bin/dyld_usage");
+    dyldUsage.set_executable_path("/usr/bin/dyld_usage");
     const char* args[] = { "-j", "dyld_usage_target.exe", NULL };
     dyldUsage.set_args(args);
     __block dispatch_data_t output = NULL;

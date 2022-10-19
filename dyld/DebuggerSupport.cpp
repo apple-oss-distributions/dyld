@@ -37,7 +37,9 @@
 #include "DebuggerSupport.h"
 #include "MachOFile.h"
 
-extern void* __dso_handle;
+using lsl::Vector;
+
+extern struct mach_header __dso_handle;
 
 // lldb sets a break point on this function
 extern "C" 	void _dyld_debugger_notification(enum dyld_notify_mode mode, unsigned long count, uint64_t machHeaders[]);
@@ -66,15 +68,15 @@ void addNonSharedCacheImageUUID(Allocator& allocator, const dyld_uuid_info& info
 	gProcessInfo->uuidArray = sImageUUIDs->begin();
 }
 
-void addImagesToAllImages(Allocator& allocator, uint32_t infoCount, const dyld_image_info info[])
+void addImagesToAllImages(RuntimeState& state, uint32_t infoCount, const dyld_image_info info[], uint32_t initialImageCount)
 {
 	// set infoArray to NULL to denote it is in-use
 	gProcessInfo->infoArray = NULL;
 	
 	// append all new images
     if ( sImageInfos == nullptr ) {
-        sImageInfos = Vector<dyld_image_info>::make(allocator);
-        sImageInfos->reserve(256);
+        sImageInfos = Vector<dyld_image_info>::make(state.persistentAllocator);
+        sImageInfos->reserve(initialImageCount);
     }
 	for (uint32_t i=0; i < infoCount; ++i)
 		sImageInfos->push_back(info[i]);
@@ -132,6 +134,30 @@ void syncProcessInfo(Allocator& allocator)
 }
 #endif
 
+#if SUPPORT_ROSETTA
+void removeAotImageFromAllAotImages(const mach_header* loadAddress)
+{
+    if ( sAotImageInfos == nullptr ) {
+        return;
+    }
+
+    // set aotInfoArray to NULL to denote it is in-use
+    gProcessInfo->aotInfoArray = NULL;
+
+    // remove image from aotInfoArray
+    for (auto it=sAotImageInfos->begin(); it != sAotImageInfos->end(); ++it) {
+        if ( it->aotLoadAddress == loadAddress ) {
+            sAotImageInfos->erase(it);
+            break;
+        }
+    }
+    gProcessInfo->aotInfoCount = (uint32_t)sAotImageInfos->size();
+    gProcessInfo->aotInfoArrayChangeTimestamp  = mach_absolute_time();
+
+    // set aotInfoArray back to base address of vector
+    gProcessInfo->aotInfoArray = sAotImageInfos->begin();
+}
+#endif
 
 void removeImageFromAllImages(const mach_header* loadAddress)
 {
@@ -153,10 +179,10 @@ void removeImageFromAllImages(const mach_header* loadAddress)
 	// set infoArray back to base address of vector
 	gProcessInfo->infoArray = sImageInfos->begin();
 
-	// set uuidArrayCount to NULL to denote it is in-use
+	// set uuidArray to NULL to denote it is in-use
 	gProcessInfo->uuidArray = NULL;
 	
-	// remove image from infoArray
+	// remove image from uuidArray
     for (auto it=sImageUUIDs->begin(); it != sImageUUIDs->end(); ++it) {
 		if ( it->imageLoadAddress == loadAddress ) {
 			sImageUUIDs->erase(it);
@@ -179,11 +205,11 @@ void removeImageFromAllImages(const mach_header* loadAddress)
     struct dyld_all_image_infos* gProcessInfo = nullptr;
 #else
 
-	static void lldb_image_notifier(enum dyld_image_mode mode, uint32_t infoCount, const dyld_image_info info[])
+	void lldb_image_notifier(enum dyld_image_mode mode, uint32_t infoCount, const dyld_image_info info[])
 	{
 #if BUILDING_DYLD
-		dyld3::ScopedTimer(DBG_DYLD_GDB_IMAGE_NOTIFIER, 0, 0, 0);
-		uint64_t machHeaders[infoCount];
+        dyld3::ScopedTimer timer(DBG_DYLD_GDB_IMAGE_NOTIFIER, 0, 0, 0);
+        uint64_t machHeaders[infoCount];
 		for (uint32_t i=0; i < infoCount; ++i) {
 			machHeaders[i] = (uintptr_t)(info[i].imageLoadAddress);
 		}
@@ -194,6 +220,9 @@ void removeImageFromAllImages(const mach_header* loadAddress)
 				break;
 			 case dyld_image_removing:
 				_dyld_debugger_notification(dyld_notify_removing, infoCount, machHeaders);
+				break;
+			 case dyld_image_dyld_moved:
+				_dyld_debugger_notification(dyld_notify_dyld_moved, infoCount, machHeaders);
 				break;
 			default:
 				break;
@@ -217,6 +246,7 @@ void removeImageFromAllImages(const mach_header* loadAddress)
 #else
     #define MAYBE_ATOMIC(x)  x
 #endif
+
 
 struct dyld_all_image_infos  dyld_all_image_infos __attribute__ ((section ("__DATA,__all_image_info")))
                             = {

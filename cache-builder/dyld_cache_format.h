@@ -43,11 +43,11 @@ struct dyld_cache_header
     uint64_t    localSymbolsOffset;     // file offset of where local symbols are stored
     uint64_t    localSymbolsSize;       // size of local symbols information
     uint8_t     uuid[16];               // unique value for each shared cache file
-    uint64_t    cacheType;              // 0 for development, 1 for production
+    uint64_t    cacheType;              // 0 for development, 1 for production, 2 for multi-cache
     uint32_t    branchPoolsOffset;      // file offset to table of uint64_t pool addresses
     uint32_t    branchPoolsCount;       // number of uint64_t entries
-    uint64_t    accelerateInfoAddr;     // (unslid) address of optimization info
-    uint64_t    accelerateInfoSize;     // size of optimization info
+    uint64_t    dyldInCacheMH;          // (unslid) address of mach_header of dyld in cache
+    uint64_t    dyldInCacheEntry;       // (unslid) address of entry point (_dyld_start) of dyld in cache
     uint64_t    imagesTextOffset;       // file offset to first dyld_cache_image_text_info
     uint64_t    imagesTextCount;        // number of dyld_cache_image_text_info entries
     uint64_t    patchInfoAddr;          // (unslid) address of dyld_cache_patch_info
@@ -87,7 +87,7 @@ struct dyld_cache_header
     uint32_t    osVersion;                  // OS Version of dylibs in this cache for the main platform
     uint32_t    altPlatform;                // e.g. iOSMac on macOS
     uint32_t    altOsVersion;               // e.g. 14.0 for iOSMac
-    uint64_t    swiftOptsOffset;        // file offset to Swift optimizations header
+    uint64_t    swiftOptsOffset;        // VM offset from cache_header* to Swift optimizations header
     uint64_t    swiftOptsSize;          // size of Swift optimizations header
     uint32_t    subCacheArrayOffset;    // file offset to first dyld_subcache_entry
     uint32_t    subCacheArrayCount;     // number of subCache entries
@@ -98,6 +98,13 @@ struct dyld_cache_header
     uint64_t    rosettaReadWriteSize;   // maximum size of the Rosetta read-write region
     uint32_t    imagesOffset;           // file offset to first dyld_cache_image_info
     uint32_t    imagesCount;            // number of dyld_cache_image_info entries
+    uint32_t    cacheSubType;           // 0 for development, 1 for production, when cacheType is multi-cache(2)
+    uint64_t    objcOptsOffset;         // VM offset from cache_header* to ObjC optimizations header
+    uint64_t    objcOptsSize;           // size of ObjC optimizations header
+    uint64_t    cacheAtlasOffset;       // VM offset from cache_header* to embedded cache atlas for process introspection
+    uint64_t    cacheAtlasSize;         // size of embedded cache atlas
+    uint64_t    dynamicDataOffset;      // VM offset from cache_header* to the location of dyld_cache_dynamic_data_header
+    uint64_t    dynamicDataMaxSize;     // maximum size of space reserved from dynamic data
 };
 
 // Uncomment this and check the build errors for the current mapping offset to check against when adding new fields.
@@ -117,6 +124,8 @@ enum {
     DYLD_CACHE_MAPPING_AUTH_DATA            = 1 << 0U,
     DYLD_CACHE_MAPPING_DIRTY_DATA           = 1 << 1U,
     DYLD_CACHE_MAPPING_CONST_DATA           = 1 << 2U,
+    DYLD_CACHE_MAPPING_TEXT_STUBS           = 1 << 3U,
+    DYLD_CACHE_DYNAMIC_CONFIG_DATA          = 1 << 4U,
 };
 
 struct dyld_cache_mapping_and_slide_info {
@@ -490,12 +499,27 @@ struct dyld_cache_local_symbols_entry_64
     uint32_t    nlistCount;         // number of local symbols for this dylib
 };
 
-struct dyld_subcache_entry
+struct dyld_subcache_entry_v1
 {
     uint8_t     uuid[16];           // The UUID of the subCache file
     uint64_t    cacheVMOffset;      // The offset of this subcache from the main cache base address
 };
 
+struct dyld_subcache_entry
+{
+    uint8_t     uuid[16];           // The UUID of the subCache file
+    uint64_t    cacheVMOffset;      // The offset of this subcache from the main cache base address
+    char        fileSuffix[32];     // The file name suffix of the subCache file e.g. ".25.data", ".03.development"
+};
+
+// This struct is a small piece of dynamic data that can be included in the shared region, and contains configuration
+// data about the shared cache in use by the process. It is located
+struct dyld_cache_dynamic_data_header
+{
+    char        magic[16];              // e.g. "dyld_data    v0"
+    uint64_t    fsId;                   // The fsid_t of the shared cache being used by a process
+    uint64_t    fsObjId;                // The fs_obj_id_t of the shared cache being used by a process
+};
 
 // This is the  location of the macOS shared cache on macOS 11.0 and later
 #define MACOSX_MRM_DYLD_SHARED_CACHE_DIR   "/System/Library/dyld/"
@@ -514,8 +538,18 @@ struct dyld_subcache_entry
 #endif
 #define DYLD_SHARED_CACHE_DEVELOPMENT_EXT  ".development"
 
+#define DYLD_SHARED_CACHE_DYNAMIC_DATA_MAGIC    "dyld_data    v0"
+
+static const char* cryptexPrefixes[] = {
+    "/System/Volumes/Preboot/Cryptexes/OS/",
+    "/private/preboot/Cryptexes/OS/",
+    "/System/Cryptexes/OS"
+};
+
 static const uint64_t kDyldSharedCacheTypeDevelopment = 0;
 static const uint64_t kDyldSharedCacheTypeProduction = 1;
+static const uint64_t kDyldSharedCacheTypeUniversal = 2;
+
 
 
 

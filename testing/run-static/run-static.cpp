@@ -48,14 +48,16 @@ static LoadedMachO loadPath(const char* binaryPath) {
     dyld3::closure::LoadedFileInfo info;
     char realerPath[MAXPATHLEN];
     __block bool printedError = false;
-    if (!fileSystem.loadFile(binaryPath, info, realerPath, ^(const char* format, ...) {
-        fprintf(stderr, "run-static: ");
-        va_list list;
-        va_start(list, format);
-        vfprintf(stderr, format, list);
-        va_end(list);
-        printedError = true;
-    })) {
+    void (^fileErrorLog)(const char *format, ...) __printflike(1, 2)
+        = ^(const char *format, ...) __printflike(1, 2) {
+            fprintf(stderr, "run-static: ");
+            va_list list;
+            va_start(list, format);
+            vfprintf(stderr, format, list);
+            va_end(list);
+            printedError = true;
+        };
+    if ( !fileSystem.loadFile(binaryPath, info, realerPath, fileErrorLog) ) {
         if (!printedError )
             fprintf(stderr, "run-static: %s: file not found\n", binaryPath);
         exit(1);

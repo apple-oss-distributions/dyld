@@ -24,9 +24,12 @@
 #ifndef _OPTIMIZER_OBJC_H_
 #define _OPTIMIZER_OBJC_H_
 
+#include <mach-o/loader.h>
+
 #include <optional>
 
 #include "Diagnostics.h"
+#include "MachOAnalyzer.h"
 #include "PerfectHash.h"
 
 namespace objc {
@@ -72,7 +75,7 @@ protected:
     uint32_t hash(const char* key, size_t keylen) const
     {
         uint64_t val   = lookup8((uint8_t*)key, keylen, salt);
-        uint32_t index = (uint32_t)(val >> shift) ^ scramble[tab[val & mask]];
+        uint32_t index = (uint32_t)((shift == 64) ? 0 : (val >> shift)) ^ scramble[tab[val & mask]];
         return index;
     }
 
@@ -128,15 +131,18 @@ protected:
         }
     }
 
-#if BUILDING_CACHE_BUILDER || BUILDING_UNIT_TESTS
+#if BUILDING_CACHE_BUILDER || BUILDING_UNIT_TESTS || BUILDING_CACHE_BUILDER_UNIT_TESTS
 
     size_t size()
     {
         return sizeof(StringHashTable) + mask + 1 + (capacity * sizeof(CheckByteType)) + (capacity * sizeof(StringOffset));
     }
 
-    template<typename StringMapType>
-    void write(Diagnostics& diag, uint64_t base, size_t remaining, const StringMapType& strings)
+    // Take an array of strings and turn it in to a perfect hash map of offsets to those strings
+    // Note the strings are going to be emitted relative to stringBaseVMAddr, but class/protocol maps
+    // want to look them up relative to offsetsBaseVMAddr.  So adjust the offsets to account for that
+    void write(Diagnostics& diag, uint64_t stringBaseVMAddr, uint64_t offsetsBaseVMAddr,
+               size_t remaining, const std::vector<ObjCString>& strings)
     {
         if ( sizeof(StringHashTable) > remaining ) {
             diag.error("selector section too small (metadata not optimized)");
@@ -163,7 +169,7 @@ protected:
         salt     = phash.salt;
 
         if ( size() > remaining ) {
-            diag.error("selector section too small (metadata not optimized)");
+            diag.error("class section too small (metadata not optimized)");
             return;
         }
 
@@ -185,18 +191,22 @@ protected:
         }
 
         // Set real string offsets and checkbytes
-        typename StringMapType::const_iterator s;
-        for ( s = strings.begin(); s != strings.end(); ++s ) {
-            int64_t offset = s->second - base;
-            StringOffset encodedOffset = (StringOffset)offset;
-            if ( (int64_t)encodedOffset != offset ) {
+        // We get the strings in the same order they will be in memory.  So we
+        // can iterate over them in the same order to get the offsets
+        for ( const ObjCString& stringAndOffset : strings ) {
+            const std::string_view& str = stringAndOffset.first;
+            const uint32_t stringBufferOffset = stringAndOffset.second;
+            int64_t stringOffset = (stringBaseVMAddr + stringBufferOffset) - offsetsBaseVMAddr;
+
+            StringOffset encodedOffset = (StringOffset)stringOffset;
+            if ( (uint64_t)encodedOffset != stringOffset ) {
                 diag.error("selector offset too big (metadata not optimized)");
                 return;
             }
 
-            uint32_t h      = hash(s->first);
+            uint32_t h      = hash(str.data());
             offsets()[h]    = encodedOffset;
-            checkbytes()[h] = checkbyte(s->first);
+            checkbytes()[h] = checkbyte(str.data());
         }
     }
 
@@ -215,7 +225,7 @@ public:
     using StringHashTable::forEachString;
     using StringHashTable::tryGetIndex;
 
-#if BUILDING_CACHE_BUILDER || BUILDING_UNIT_TESTS
+#if BUILDING_CACHE_BUILDER || BUILDING_UNIT_TESTS || BUILDING_CACHE_BUILDER_UNIT_TESTS
     using StringHashTable::size;
 #endif
 
@@ -230,11 +240,12 @@ public:
         return nullptr;
     }
 
-#if BUILDING_CACHE_BUILDER || BUILDING_UNIT_TESTS
-    template<typename StringMapType>
-    void write(Diagnostics& diag, uint64_t base, size_t remaining, const StringMapType& strings)
+#if BUILDING_CACHE_BUILDER || BUILDING_UNIT_TESTS || BUILDING_CACHE_BUILDER_UNIT_TESTS
+    template<typename StringArray>
+    void write(Diagnostics& diag, uint64_t stringsBaseVMAddr, uint64_t mapBaseAddress,
+               size_t remaining, const StringArray& strings)
     {
-        StringHashTable::write(diag, base, remaining, strings);
+        StringHashTable::write(diag, stringsBaseVMAddr, mapBaseAddress, remaining, strings);
         if ( diag.hasError() )
             return;
 #if BUILDING_CACHE_BUILDER
@@ -413,9 +424,10 @@ protected:
         }
     }
 
+    typedef std::pair<uint64_t, uint16_t> ObjectAndDylibIndex;
     void forEachObject(void (^callback)(uint32_t bucketIndex,
                                         const char* objectName,
-                                        const dyld3::Array<uint64_t>& implCacheOffsets)) const {
+                                        const dyld3::Array<ObjectAndDylibIndex>& implCacheInfos)) const {
         for ( unsigned i = 0; i != capacity; ++i ) {
             StringOffset nameOffset = offsets()[i];
             if ( nameOffset == 0 )
@@ -427,25 +439,32 @@ protected:
             const ObjectData& data = objectOffsets()[i];
             if ( !data.isDuplicate() ) {
                 // This class/protocol has a single implementation
-                uint64_t objectOffset = data.object.objectCacheOffset;
-                const dyld3::Array<uint64_t> implTarget(&objectOffset, 1, 1);
+                ObjectAndDylibIndex objectInfo = {
+                    data.object.objectCacheOffset,
+                    data.object.dylibObjCIndex
+                };
+                const dyld3::Array<ObjectAndDylibIndex> implTarget(&objectInfo, 1, 1);
                 callback(i, objectName, implTarget);
             }
             else {
                 // This class/protocol has mulitple implementations.
                 uint32_t count = data.duplicate.count;
-                uint64_t objectOffsets[count];
+                ObjectAndDylibIndex objectInfos[count];
                 const ObjectData* list  = &duplicateOffsets()[data.duplicate.index];
                 for (uint32_t duplicateIndex = 0; duplicateIndex < count; duplicateIndex++) {
-                    objectOffsets[duplicateIndex] = list[duplicateIndex].object.objectCacheOffset;
+                    ObjectAndDylibIndex objectInfo = {
+                        list[duplicateIndex].object.objectCacheOffset,
+                        list[duplicateIndex].object.dylibObjCIndex
+                    };
+                    objectInfos[duplicateIndex] = objectInfo;
                 }
-                const dyld3::Array<uint64_t> implTargets(&objectOffsets[0], count, count);
+                const dyld3::Array<ObjectAndDylibIndex> implTargets(&objectInfos[0], count, count);
                 callback(i, objectName, implTargets);
             }
         }
     }
 
-#if BUILDING_CACHE_BUILDER || BUILDING_UNIT_TESTS
+#if BUILDING_CACHE_BUILDER || BUILDING_UNIT_TESTS || BUILDING_CACHE_BUILDER_UNIT_TESTS
 
     size_t size()
     {
@@ -462,11 +481,12 @@ protected:
         return StringHashTable::size() + (capacity * sizeof(ObjectData));
     }
 
-    template<typename StringMapType, typename ObjectMapType>
-    void write(Diagnostics& diag, uint64_t mapBaseAddress, uint64_t cacheBaseAddress, size_t remaining,
-               const StringMapType& strings, const ObjectMapType& objects)
+    template<typename ObjectMapType>
+    void write(Diagnostics& diag, uint64_t stringsBaseAddress, uint64_t mapBaseAddress,
+               uint64_t cacheBaseAddress, size_t remaining,
+               const std::vector<ObjCString>& strings, const ObjectMapType& objects)
     {
-        StringHashTable::write(diag, mapBaseAddress, remaining, strings);
+        StringHashTable::write(diag, stringsBaseAddress, mapBaseAddress, remaining, strings);
         if ( diag.hasError() )
             return;
 
@@ -518,7 +538,7 @@ protected:
                 uint32_t dest = duplicateCount();
                 duplicateCount() += count;
                 if ( size() > remaining ) {
-                    diag.error("selector section too small (metadata not optimized)");
+                    diag.error("protocol section too small (metadata not optimized)");
                     return;
                 }
 
@@ -548,7 +568,7 @@ protected:
 class VIS_HIDDEN ClassHashTable : public ObjectHashTable
 {
 public:
-#if BUILDING_CACHE_BUILDER || BUILDING_UNIT_TESTS
+#if BUILDING_CACHE_BUILDER || BUILDING_UNIT_TESTS || BUILDING_CACHE_BUILDER_UNIT_TESTS
     using ObjectHashTable::size;
 #endif
 
@@ -556,9 +576,10 @@ public:
         forEachObject(key, callback);
     }
 
+    using ObjectHashTable::ObjectAndDylibIndex;
     void forEachClass(void (^callback)(uint32_t bucketIndex,
                                        const char* className,
-                                       const dyld3::Array<uint64_t>& implCacheOffsets)) const {
+                                       const dyld3::Array<ObjectAndDylibIndex>& implCacheInfos)) const {
         forEachObject(callback);
     }
 
@@ -566,12 +587,15 @@ public:
         return occupied + duplicateCount();
     }
 
-#if BUILDING_CACHE_BUILDER || BUILDING_UNIT_TESTS
-    template<typename StringMapType, typename ObjectMapType>
-    void write(Diagnostics& diag, uint64_t mapBaseAddress, uint64_t cacheBaseAddress, size_t remaining,
-               const StringMapType& strings, const ObjectMapType& objects)
+#if BUILDING_CACHE_BUILDER || BUILDING_UNIT_TESTS || BUILDING_CACHE_BUILDER_UNIT_TESTS
+    template<typename StringArray, typename ObjectMapType>
+    void write(Diagnostics& diag, uint64_t stringsBaseAddress, uint64_t mapBaseAddress,
+               uint64_t cacheBaseAddress, size_t remaining,
+               const StringArray& strings, const ObjectMapType& objects)
     {
-        ObjectHashTable::write(diag, mapBaseAddress, cacheBaseAddress, remaining, strings, objects);
+        ObjectHashTable::write(diag, stringsBaseAddress, mapBaseAddress,
+                               cacheBaseAddress, remaining,
+                               strings, objects);
         if ( diag.hasError() )
             return;
 
@@ -589,7 +613,7 @@ public:
 class VIS_HIDDEN ProtocolHashTable : public ObjectHashTable
 {
 public:
-#if BUILDING_CACHE_BUILDER || BUILDING_UNIT_TESTS
+#if BUILDING_CACHE_BUILDER || BUILDING_UNIT_TESTS || BUILDING_CACHE_BUILDER_UNIT_TESTS
     using ObjectHashTable::size;
 #endif
 
@@ -597,18 +621,22 @@ public:
         forEachObject(key, callback);
     }
 
+    using ObjectHashTable::ObjectAndDylibIndex;
     void forEachProtocol(void (^callback)(uint32_t bucketIndex,
                                           const char* protocolName,
-                                          const dyld3::Array<uint64_t>& implCacheOffsets)) const {
+                                          const dyld3::Array<ObjectAndDylibIndex>& implCacheInfos)) const {
         forEachObject(callback);
     }
 
-#if BUILDING_CACHE_BUILDER || BUILDING_UNIT_TESTS
-    template<typename StringMapType, typename ObjectMapType>
-    void write(Diagnostics& diag, uint64_t mapBaseAddress, uint64_t cacheBaseAddress, size_t remaining,
-               const StringMapType& strings, const ObjectMapType& objects)
+#if BUILDING_CACHE_BUILDER || BUILDING_UNIT_TESTS || BUILDING_CACHE_BUILDER_UNIT_TESTS
+    template<typename StringArray, typename ObjectMapType>
+    void write(Diagnostics& diag, uint64_t stringsBaseAddress, uint64_t mapBaseAddress,
+               uint64_t cacheBaseAddress, size_t remaining,
+               const StringArray& strings, const ObjectMapType& objects)
     {
-        ObjectHashTable::write(diag, mapBaseAddress, cacheBaseAddress, remaining, strings, objects);
+        ObjectHashTable::write(diag, stringsBaseAddress, mapBaseAddress,
+                               cacheBaseAddress, remaining,
+                               strings, objects);
         if ( diag.hasError() )
             return;
 
@@ -683,19 +711,35 @@ private:
 };
 #endif
 
-#pragma clang diagnostic pop
-
 template <typename PointerType>
-class objc_header_info_ro_t {
+struct objc_header_info_ro_t {
+};
+
+template<>
+class objc_header_info_ro_t<uint32_t> {
 private:
-    PointerType mhdr_offset;     // offset to mach_header or mach_header_64
-    PointerType info_offset;     // offset to objc_image_info *
+    int32_t mhdr_offset;     // offset to mach_header or mach_header_64
+    int32_t info_offset;     // offset to objc_image_info *
 
 public:
-    const mach_header* mhdr() const {
-        return (const mach_header*)(((intptr_t)&mhdr_offset) + mhdr_offset);
+    const uint64_t mhdrVMAddr(uint64_t baseVMAddr) const {
+        return baseVMAddr + mhdr_offset;
     }
 };
+
+template<>
+class objc_header_info_ro_t<uint64_t> {
+private:
+    int64_t mhdr_offset;     // offset to mach_header or mach_header_64
+    int64_t info_offset;     // offset to objc_image_info *
+
+public:
+    const uint64_t mhdrVMAddr(uint64_t baseVMAddr) const {
+        return baseVMAddr + mhdr_offset;
+    }
+};
+
+#pragma clang diagnostic pop // "-Wunused-private-field"
 
 template <typename PointerType>
 struct objc_headeropt_ro_t {
@@ -720,16 +764,23 @@ struct objc_headeropt_ro_t {
         return (uint32_t)(((uintptr_t)hi - (uintptr_t)begin) / entsize);
     }
 
-    objc_header_info_ro_t<PointerType>* get(const mach_header* mhdr)
+    const objc_header_info_ro_t<PointerType>* get(uint64_t headerInfoROVMAddr, uint64_t machoVMAddr) const
     {
         int32_t start = 0;
         int32_t end = count;
         while (start <= end) {
             int32_t i = (start+end)/2;
             objc_header_info_ro_t<PointerType> &hi = get(i);
-            if (mhdr == hi.mhdr()) return &hi;
-            else if (mhdr < hi.mhdr()) end = i-1;
-            else start = i+1;
+            uint64_t elementVMOffset = (uint64_t)&hi - (uint64_t)this;
+            uint64_t elementVMAddr = headerInfoROVMAddr + elementVMOffset;
+            uint64_t elementTargetVMAddr = hi.mhdrVMAddr(elementVMAddr);
+            if ( machoVMAddr == elementTargetVMAddr )
+                return &hi;
+            if ( machoVMAddr < elementTargetVMAddr ) {
+                end = i-1;
+            } else {
+                start = i+1;
+            }
         }
 
         return nullptr;
@@ -754,9 +805,11 @@ struct objc_headeropt_rw_t {
 
 #pragma clang diagnostic push
 #pragma clang diagnostic ignored "-Wunused-function"
-static void *getPreoptimizedHeaderRW(const void* headerInfoRO, const void* headerInfoRW, const dyld3::MachOAnalyzer* ma)
+static void *getPreoptimizedHeaderRW(const void* headerInfoRO, const void* headerInfoRW,
+                                     uint64_t headerInfoROVMAddr, uint64_t machoVMAddr,
+                                     bool is64)
 {
-    if ( ma->is64() ) {
+    if ( is64 ) {
         typedef uint64_t PointerType;
         objc_headeropt_ro_t<PointerType>* hinfoRO = (objc_headeropt_ro_t<PointerType>*)headerInfoRO;
         objc_headeropt_rw_t<PointerType>* hinfoRW = (objc_headeropt_rw_t<PointerType>*)headerInfoRW;
@@ -764,7 +817,7 @@ static void *getPreoptimizedHeaderRW(const void* headerInfoRO, const void* heade
             return nullptr;
         }
 
-        objc_header_info_ro_t<PointerType>* hdr = hinfoRO->get(ma);
+        const objc_header_info_ro_t<PointerType>* hdr = hinfoRO->get(headerInfoROVMAddr, machoVMAddr);
         if ( hdr == nullptr )
             return nullptr;
         int32_t index = hinfoRO->index(hdr);
@@ -778,7 +831,7 @@ static void *getPreoptimizedHeaderRW(const void* headerInfoRO, const void* heade
             return nullptr;
         }
 
-        objc_header_info_ro_t<PointerType>* hdr = hinfoRO->get(ma);
+        const objc_header_info_ro_t<PointerType>* hdr = hinfoRO->get(headerInfoROVMAddr, machoVMAddr);
         if ( hdr == nullptr )
             return nullptr;
         int32_t index = hinfoRO->index(hdr);
@@ -787,16 +840,18 @@ static void *getPreoptimizedHeaderRW(const void* headerInfoRO, const void* heade
     }
 }
 
-static std::optional<uint16_t> getPreoptimizedHeaderRWIndex(const void* headerInfoRO, const void* headerInfoRW, const dyld3::MachOAnalyzer* ma)
+static std::optional<uint16_t> getPreoptimizedHeaderRWIndex(const void* headerInfoRO, const void* headerInfoRW,
+                                                            uint64_t headerInfoROVMAddr, uint64_t machoVMAddr,
+                                                            bool is64)
 {
     assert(headerInfoRO != nullptr);
     assert(headerInfoRW != nullptr);
-    if ( ma->is64() ) {
+    if ( is64 ) {
         typedef uint64_t PointerType;
         objc_headeropt_ro_t<PointerType>* hinfoRO = (objc_headeropt_ro_t<PointerType>*)headerInfoRO;
         objc_headeropt_rw_t<PointerType>* hinfoRW = (objc_headeropt_rw_t<PointerType>*)headerInfoRW;
 
-        objc_header_info_ro_t<PointerType>* hdr = hinfoRO->get(ma);
+        const objc_header_info_ro_t<PointerType>* hdr = hinfoRO->get(headerInfoROVMAddr, machoVMAddr);
         if ( hdr == nullptr )
             return {};
         int32_t index = hinfoRO->index(hdr);
@@ -807,7 +862,7 @@ static std::optional<uint16_t> getPreoptimizedHeaderRWIndex(const void* headerIn
         objc_headeropt_ro_t<PointerType>* hinfoRO = (objc_headeropt_ro_t<PointerType>*)headerInfoRO;
         objc_headeropt_rw_t<PointerType>* hinfoRW = (objc_headeropt_rw_t<PointerType>*)headerInfoRW;
 
-        objc_header_info_ro_t<PointerType>* hdr = hinfoRO->get(ma);
+        const objc_header_info_ro_t<PointerType>* hdr = hinfoRO->get(headerInfoROVMAddr, machoVMAddr);
         if ( hdr == nullptr )
             return {};
         int32_t index = hinfoRO->index(hdr);
@@ -818,5 +873,37 @@ static std::optional<uint16_t> getPreoptimizedHeaderRWIndex(const void* headerIn
 #pragma clang diagnostic pop // "-Wunused-function"
 
 } // namespace objc
+
+struct ImpCacheHeader_v1 {
+    int32_t  fallback_class_offset;
+    uint32_t cache_shift :  5;
+    uint32_t cache_mask  : 11;
+    uint32_t occupied    : 14;
+    uint32_t has_inlines :  1;
+    uint32_t bit_one     :  1;
+};
+
+/// Added with objc_opt_preopt_caches_version = 3
+struct ImpCacheHeader_v2 {
+    int64_t  fallback_class_offset;
+    uint32_t cache_shift :  5;
+    uint32_t cache_mask  : 11;
+    uint32_t occupied    : 14;
+    uint32_t has_inlines :  1;
+    uint32_t padding     :  1;
+    uint32_t unused      :  31;
+    uint32_t bit_one     :  1;
+};
+
+struct ImpCacheEntry_v1 {
+    uint32_t selOffset;
+    uint32_t impOffset;
+};
+
+// Added with objc_opt_preopt_caches_version = 2
+struct ImpCacheEntry_v2 {
+    int64_t impOffset : 38;
+    uint64_t selOffset : 26;
+};
 
 #endif /* _OPTIMIZER_OBJC_H_ */

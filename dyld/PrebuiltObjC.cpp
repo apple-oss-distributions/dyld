@@ -25,20 +25,21 @@
 #include <unistd.h>
 #include <sys/types.h>
 
+#include "Defines.h"
 #include "Loader.h"
 #include "PrebuiltLoader.h"
 #include "JustInTimeLoader.h"
-#include "MachOAnalyzer.h"
+#include "MachOFile.h"
 #include "BumpAllocator.h"
 #include "DyldProcessConfig.h"
 #include "DyldRuntimeState.h"
 #include "OptimizerObjC.h"
+#include "ObjCVisitor.h"
 #include "PerfectHash.h"
 #include "PrebuiltObjC.h"
 #include "objc-shared-cache.h"
 
 
-using dyld3::MachOAnalyzer;
 using dyld3::OverflowSafeArray;
 typedef dyld4::PrebuiltObjC::ObjCOptimizerImage ObjCOptimizerImage;
 
@@ -53,6 +54,7 @@ uint32_t ObjCStringTable::hash(const char* key, size_t keylen) const
     return index;
 }
 
+#if BUILDING_DYLD || BUILDING_UNIT_TESTS
 const char* ObjCStringTable::getString(const char* selName, RuntimeState& state) const
 {
     std::optional<PrebuiltLoader::BindTargetRef> target = getPotentialTarget(selName);
@@ -70,6 +72,7 @@ const char* ObjCStringTable::getString(const char* selName, RuntimeState& state)
         return stringValue;
     return nullptr;
 }
+#endif
 
 size_t ObjCStringTable::size(const objc::PerfectHash& phash)
 {
@@ -84,7 +87,7 @@ size_t ObjCStringTable::size(const objc::PerfectHash& phash)
     return (size_t)align(tableSize, 3);
 }
 
-void ObjCStringTable::write(const objc::PerfectHash& phash, const Array<std::pair<const char*, PrebuiltLoader::BindTarget>>& strings)
+void ObjCStringTable::write(const objc::PerfectHash& phash, const Array<StringToTargetMapNodeT>& strings)
 {
     // Set header
     capacity              = phash.capacity;
@@ -127,6 +130,7 @@ void ObjCStringTable::write(const objc::PerfectHash& phash, const Array<std::pai
 }
 
 ////////////////////////////  ObjCSelectorOpt ////////////////////////////////////////
+#if BUILDING_DYLD || BUILDING_UNIT_TESTS
 const char* ObjCSelectorOpt::getStringAtIndex(uint32_t index, RuntimeState& state) const
 {
     if ( index >= capacity )
@@ -140,6 +144,7 @@ const char* ObjCSelectorOpt::getStringAtIndex(uint32_t index, RuntimeState& stat
     const char* stringValue = (const char*)target.value(state);
     return stringValue;
 }
+#endif
 
 void ObjCSelectorOpt::forEachString(void (^callback)(const PrebuiltLoader::BindTargetRef& target)) const
 {
@@ -156,6 +161,7 @@ void ObjCSelectorOpt::forEachString(void (^callback)(const PrebuiltLoader::BindT
 ////////////////////////////  ObjCClassOpt ////////////////////////////////////////
 
 // Returns true if the class was found and the callback said to stop
+#if BUILDING_DYLD || BUILDING_UNIT_TESTS
 bool ObjCClassOpt::forEachClass(const char* className, RuntimeState& state,
                                 void (^callback)(void* classPtr, bool isLoaded, bool* stop)) const
 {
@@ -208,6 +214,7 @@ bool ObjCClassOpt::forEachClass(const char* className, RuntimeState& state,
     }
     return false;
 }
+#endif
 
 void ObjCClassOpt::forEachClass(RuntimeState& state,
                                 void (^callback)(const PrebuiltLoader::BindTargetRef&        nameTarget,
@@ -236,11 +243,11 @@ void ObjCClassOpt::forEachClass(RuntimeState& state,
             // This class has mulitple implementations.
             // The absolute value of the class target is the index in to the duplicates table
             // The first entry we point to is the count of duplicates for this class
-            uintptr_t                           duplicateStartIndex  = (uintptr_t)classTarget.value(state);
+            uintptr_t                           duplicateStartIndex  = (uintptr_t)classTarget.absValue();
             const PrebuiltLoader::BindTargetRef duplicateCountTarget = duplicates[duplicateStartIndex];
             ++duplicateStartIndex;
             assert(duplicateCountTarget.isAbsolute());
-            uintptr_t duplicateCount = (uintptr_t)duplicateCountTarget.value(state);
+            uintptr_t duplicateCount = (uintptr_t)duplicateCountTarget.absValue();
 
             callback(nameTarget, duplicates.subArray(duplicateStartIndex, duplicateCount));
         }
@@ -258,7 +265,7 @@ size_t ObjCClassOpt::size(const objc::PerfectHash& phash, uint32_t numClassesWit
     return (size_t)align(tableSize, 3);
 }
 
-void ObjCClassOpt::write(const objc::PerfectHash& phash, const Array<std::pair<const char*, PrebuiltLoader::BindTarget>>& strings,
+void ObjCClassOpt::write(const objc::PerfectHash& phash, const Array<StringToTargetMapNodeT>& strings,
                          const dyld3::CStringMultiMapTo<PrebuiltLoader::BindTarget>& classes,
                          uint32_t numClassesWithDuplicates, uint32_t totalDuplicates)
 {
@@ -299,7 +306,7 @@ void ObjCClassOpt::write(const objc::PerfectHash& phash, const Array<std::pair<c
         // The first value we push in to the duplicates array for this class is the count
         // of how many duplicates for this class we have
         duplicateTargets.push_back(PrebuiltLoader::BindTargetRef::makeAbsolute(valuesCount));
-        for ( uint64_t i = 0; i != valuesCount; ++i ) {
+        for ( size_t i = 0; i != valuesCount; ++i ) {
             PrebuiltLoader::BindTarget classTarget = *(values[i]);
             duplicateTargets.push_back(PrebuiltLoader::BindTargetRef(classTarget));
         }
@@ -320,7 +327,7 @@ ObjCOptimizerImage::ObjCOptimizerImage(const JustInTimeLoader* jitLoader, uint64
 #if BUILDING_CACHE_BUILDER || BUILDING_CLOSURE_UTIL
 void ObjCOptimizerImage::calculateMissingWeakImports(RuntimeState& state)
 {
-    const dyld3::MachOAnalyzer* ma = (const dyld3::MachOAnalyzer*)jitLoader->loadAddress(state);
+    const mach_o::MachOFileRef& mf = jitLoader->mf(state);
 
     // build targets table
     STACK_ALLOC_OVERFLOW_SAFE_ARRAY(bool, bindTargetsAreWeakImports, 512);
@@ -349,79 +356,102 @@ void ObjCOptimizerImage::calculateMissingWeakImports(RuntimeState& state)
         return;
 
     if ( foundMissingWeakImport ) {
-        if ( ma->hasChainedFixups() ) {
-            // walk all chains
-            ma->withChainStarts(diag, ma->chainStartsOffset(), ^(const dyld_chained_starts_in_image* startsInfo) {
-                ma->forEachFixupInAllChains(diag, startsInfo, false, ^(MachOLoaded::ChainedFixupPointerOnDisk* fixupLoc, const dyld_chained_starts_in_segment* segInfo, bool& fixupsStop) {
-                    uint64_t fixupOffset = (uint8_t*)fixupLoc - (uint8_t*)ma;
+        jitLoader->withLayout(diag, state, ^(const mach_o::Layout& layout) {
+            mach_o::Fixups fixups(layout);
+
+            if ( mf->hasChainedFixups() ) {
+                // walk all chains
+                auto handler = ^(dyld3::MachOFile::ChainedFixupPointerOnDisk *fixupLocation,
+                                 InputDylibVMAddress fixupVMAddr, uint16_t pointerFormat,
+                                 bool &stopChain) {
                     uint32_t bindOrdinal;
                     int64_t  addend;
-                    if ( fixupLoc->isBind(segInfo->pointer_format, bindOrdinal, addend) ) {
+                    if ( fixupLocation->isBind(pointerFormat, bindOrdinal, addend) ) {
                         if ( bindOrdinal < bindTargetsAreWeakImports.count() ) {
                             if ( bindTargetsAreWeakImports[bindOrdinal] )
-                                missingWeakImportOffsets[fixupOffset] = true;
+                                missingWeakImports.insert(fixupVMAddr);
                         }
                         else {
                             diag.error("out of range bind ordinal %d (max %lu)", bindOrdinal, bindTargetsAreWeakImports.count());
-                            fixupsStop = true;
+                            stopChain = true;
                         }
                     }
+                };
+
+                fixups.withChainStarts(diag, ^(const dyld_chained_starts_in_image* startsInfo) {
+                    fixups.forEachFixupChainSegment(diag, startsInfo, ^(const dyld_chained_starts_in_segment *segInfo,
+                                                                        uint32_t segIndex, bool &stopSegment) {
+                        InputDylibVMAddress segmentVMAddr(layout.segments[segIndex].vmAddr);
+                        auto adaptor = ^(dyld3::MachOFile::ChainedFixupPointerOnDisk *fixupLocation,
+                                         uint64_t fixupSegmentOffset,
+                                         bool &stopChain) {
+                            InputDylibVMAddress fixupVMAddr = segmentVMAddr + VMOffset(fixupSegmentOffset);
+                            handler(fixupLocation, fixupVMAddr, segInfo->pointer_format, stopChain);
+                        };
+                        fixups.forEachFixupInSegmentChains(diag, segInfo, segIndex, true, adaptor);
+                    });
                 });
-            });
-            if ( diag.hasError() )
-                return;
-        }
-        else if ( ma->hasOpcodeFixups() ) {
-            // process all bind opcodes
-            ma->forEachBindLocation_Opcodes(diag, ^(uint64_t runtimeOffset, unsigned targetIndex, bool& fixupsStop) {
-                if ( targetIndex < bindTargetsAreWeakImports.count() ) {
-                    if ( bindTargetsAreWeakImports[targetIndex] )
-                        missingWeakImportOffsets[runtimeOffset] = true;
-                }
-                else {
-                    diag.error("out of range bind ordinal %d (max %lu)", targetIndex, bindTargetsAreWeakImports.count());
-                    fixupsStop = true;
-                }
-            }, ^(uint64_t runtimeOffset, unsigned overrideBindTargetIndex, bool& fixupsStop) {
-                if ( overrideBindTargetIndex < overrideBindTargetsAreWeakImports.count() ) {
-                    if ( overrideBindTargetsAreWeakImports[overrideBindTargetIndex] )
-                        missingWeakImportOffsets[runtimeOffset] = true;
-                }
-                else {
-                    diag.error("out of range bind ordinal %d (max %lu)", overrideBindTargetIndex, overrideBindTargetsAreWeakImports.count());
-                    fixupsStop = true;
-                }
-            });
-            if ( diag.hasError() )
-                return;
-        }
-        else {
-            // process external relocations
-            ma->forEachBindLocation_Relocations(diag, ^(uint64_t runtimeOffset, unsigned targetIndex, bool& fixupsStop) {
-                if ( targetIndex < bindTargetsAreWeakImports.count() ) {
-                    if ( bindTargetsAreWeakImports[targetIndex] )
-                        missingWeakImportOffsets[runtimeOffset] = true;
-                }
-                else {
-                    diag.error("out of range bind ordinal %d (max %lu)", targetIndex, bindTargetsAreWeakImports.count());
-                    fixupsStop = true;
-                }
-            });
-            if ( diag.hasError() )
-                return;
-        }
+                if ( diag.hasError() )
+                    return;
+            } else if ( mf->hasOpcodeFixups() ) {
+                // process all bind opcodes
+                fixups.forEachBindLocation_Opcodes(diag, ^(uint64_t runtimeOffset, uint32_t segmentIndex,
+                                                           unsigned targetIndex, bool& fixupsStop) {
+                    if ( targetIndex < bindTargetsAreWeakImports.count() ) {
+                        if ( bindTargetsAreWeakImports[targetIndex] ) {
+                            InputDylibVMAddress fixupVMAddr(layout.textUnslidVMAddr() + runtimeOffset);
+                            missingWeakImports.insert(fixupVMAddr);
+                        }
+                    }
+                    else {
+                        diag.error("out of range bind ordinal %d (max %lu)", targetIndex, bindTargetsAreWeakImports.count());
+                        fixupsStop = true;
+                    }
+                }, ^(uint64_t runtimeOffset, uint32_t segmentIndex,
+                     unsigned overrideBindTargetIndex, bool& fixupsStop) {
+                    if ( overrideBindTargetIndex < overrideBindTargetsAreWeakImports.count() ) {
+                        if ( overrideBindTargetsAreWeakImports[overrideBindTargetIndex] ) {
+                            InputDylibVMAddress fixupVMAddr(layout.textUnslidVMAddr() + runtimeOffset);
+                            missingWeakImports.insert(fixupVMAddr);
+                        }
+                    }
+                    else {
+                        diag.error("out of range bind ordinal %d (max %lu)", overrideBindTargetIndex, overrideBindTargetsAreWeakImports.count());
+                        fixupsStop = true;
+                    }
+                });
+                if ( diag.hasError() )
+                    return;
+            }
+            else {
+                // process external relocations
+                fixups.forEachBindLocation_Relocations(diag, ^(uint64_t runtimeOffset, unsigned targetIndex, bool& fixupsStop) {
+                    if ( targetIndex < bindTargetsAreWeakImports.count() ) {
+                        if ( bindTargetsAreWeakImports[targetIndex] ) {
+                            InputDylibVMAddress fixupVMAddr(layout.textUnslidVMAddr() + runtimeOffset);
+                            missingWeakImports.insert(fixupVMAddr);
+                        }
+                    }
+                    else {
+                        diag.error("out of range bind ordinal %d (max %lu)", targetIndex, bindTargetsAreWeakImports.count());
+                        fixupsStop = true;
+                    }
+                });
+                if ( diag.hasError() )
+                    return;
+            }
+        });
     }
 }
 #endif // (BUILDING_CACHE_BUILDER || BUILDING_CLOSURE_UTIL)
 
-bool ObjCOptimizerImage::isNull(uint64_t vmAddr, const dyld3::MachOAnalyzer* ma, intptr_t slide) const
+bool ObjCOptimizerImage::isNull(InputDylibVMAddress vmAddr, const void* address) const
 {
 #if BUILDING_CACHE_BUILDER || BUILDING_CLOSURE_UTIL
-    uint64_t runtimeOffset = vmAddr - loadAddress;
-    return (missingWeakImportOffsets.find(runtimeOffset) != missingWeakImportOffsets.end());
+    return (missingWeakImports.find(vmAddr) != missingWeakImports.end());
 #elif BUILDING_DYLD
     // In dyld, we are live, so we can just check if we point to a null value
-    uintptr_t* pointer = (uintptr_t*)(vmAddr + slide);
+    uintptr_t* pointer = (uintptr_t*)address;
     return (*pointer == 0);
 #else
     // FIXME: Have we been slide or not in the non-dyld case?
@@ -432,7 +462,7 @@ bool ObjCOptimizerImage::isNull(uint64_t vmAddr, const dyld3::MachOAnalyzer* ma,
 
 void ObjCOptimizerImage::visitReferenceToObjCSelector(const objc::SelectorHashTable* objcSelOpt,
                                                       const PrebuiltObjC::SelectorMapTy& appSelectorMap,
-                                                      uint64_t selectorReferenceRuntimeOffset, uint64_t selectorStringRuntimeOffset,
+                                                      VMOffset selectorReferenceRuntimeOffset, VMOffset selectorStringRuntimeOffset,
                                                       const char* selectorString)
 {
 
@@ -463,7 +493,7 @@ void ObjCOptimizerImage::visitReferenceToObjCSelector(const objc::SelectorHashTa
         // We added the selector so its pointing in to our own image.
         Loader::BindTarget target;
         target.loader               = jitLoader;
-        target.runtimeOffset        = selectorStringRuntimeOffset;
+        target.runtimeOffset        = selectorStringRuntimeOffset.rawValue();
         itAndInserted.first->second = target;
 
         // We'll add a fixup anyway as we want a sel ref fixup for every entry in the sel refs section
@@ -483,7 +513,7 @@ void ObjCOptimizerImage::visitReferenceToObjCSelector(const objc::SelectorHashTa
 
 // Check if the given class is in an image loaded in the shared cache.
 // If so, add the class to the duplicate map
-static void checkForDuplicateClass(const void* dyldCacheBase,
+static void checkForDuplicateClass(const VMAddress dyldCacheBaseAddress,
                                    const char* className, const objc::ClassHashTable* objcClassOpt,
                                    const PrebuiltObjC::SharedCacheImagesMapTy& sharedCacheImagesMap,
                                    const PrebuiltObjC::DuplicateClassesMapTy& duplicateSharedCacheClasses,
@@ -498,10 +528,10 @@ static void checkForDuplicateClass(const void* dyldCacheBase,
             // We have a duplicate class, so check if we've already got it in our map.
             if ( duplicateSharedCacheClasses.find(className) == duplicateSharedCacheClasses.end() ) {
                 // We haven't seen this one yet, so record it in the map for this image
-                const dyld3::MachOLoaded* sharedCacheMH = cacheIt->second.first;
-                uint64_t           classPointer = (uint64_t)dyldCacheBase + classCacheOffset;
-                uint64_t           classVMOffset = classPointer - (uint64_t)sharedCacheMH;
-                Loader::BindTarget classTarget   = { ldr, classVMOffset };
+                VMAddress cacheDylibUnslidVMAddr = cacheIt->second.first;
+                VMAddress          classVMAddr = dyldCacheBaseAddress + VMOffset(classCacheOffset);
+                VMOffset           classDylibVMOffset = classVMAddr - cacheDylibUnslidVMAddr;
+                Loader::BindTarget classTarget   = { ldr, classDylibVMOffset.rawValue() };
                 image.duplicateSharedCacheClassMap.insert({ className, classTarget });
             }
 
@@ -510,20 +540,21 @@ static void checkForDuplicateClass(const void* dyldCacheBase,
     });
 }
 
-void ObjCOptimizerImage::visitClass(const void* dyldCacheBase,
+void ObjCOptimizerImage::visitClass(const VMAddress dyldCacheBaseAddress,
                                     const objc::ClassHashTable* objcClassOpt,
                                     const SharedCacheImagesMapTy& sharedCacheImagesMap,
                                     const DuplicateClassesMapTy& duplicateSharedCacheClasses,
-                                    uint64_t classVMAddr, uint64_t classNameVMAddr, const char* className)
+                                    InputDylibVMAddress classVMAddr, InputDylibVMAddress classNameVMAddr, const char* className)
 {
 
     // If the class also exists in a shared cache image which is loaded, then objc
     // would have found that one, regardless of load order.
     // In that case, we still add this class to the map, but also track which shared cache class it is a duplicate of
-    checkForDuplicateClass(dyldCacheBase, className, objcClassOpt, sharedCacheImagesMap, duplicateSharedCacheClasses, *this);
+    checkForDuplicateClass(dyldCacheBaseAddress, className, objcClassOpt, sharedCacheImagesMap,
+                           duplicateSharedCacheClasses, *this);
 
-    uint64_t classNameVMOffset   = classNameVMAddr - loadAddress;
-    uint64_t classObjectVMOffset = classVMAddr - loadAddress;
+    VMOffset classNameVMOffset   = classNameVMAddr - loadAddress;
+    VMOffset classObjectVMOffset = classVMAddr - loadAddress;
     classLocations.push_back({ className, classNameVMOffset, classObjectVMOffset });
 }
 
@@ -545,7 +576,8 @@ static bool protocolIsInSharedCache(const char* protocolName,
 
 void ObjCOptimizerImage::visitProtocol(const objc::ProtocolHashTable* objcProtocolOpt,
                                        const SharedCacheImagesMapTy& sharedCacheImagesMap,
-                                       uint64_t protocolVMAddr, uint64_t protocolNameVMAddr, const char* protocolName)
+                                       InputDylibVMAddress protocolVMAddr, InputDylibVMAddress protocolNameVMAddr,
+                                       const char* protocolName)
 {
 
     uint32_t protocolIndex = (uint32_t)protocolISAFixups.count();
@@ -556,8 +588,8 @@ void ObjCOptimizerImage::visitProtocol(const objc::ProtocolHashTable* objcProtoc
     if ( protocolIsInSharedCache(protocolName, objcProtocolOpt, sharedCacheImagesMap) )
         return;
 
-    uint64_t protocolNameVMOffset   = protocolNameVMAddr - loadAddress;
-    uint64_t protocolObjectVMOffset = protocolVMAddr - loadAddress;
+    VMOffset protocolNameVMOffset   = protocolNameVMAddr - loadAddress;
+    VMOffset protocolObjectVMOffset = protocolVMAddr - loadAddress;
     protocolLocations.push_back({ protocolName, protocolNameVMOffset, protocolObjectVMOffset });
 
     // Record which index this protocol uses in protocolISAFixups.  Later we can change its entry if we
@@ -569,6 +601,7 @@ void ObjCOptimizerImage::visitProtocol(const objc::ProtocolHashTable* objcProtoc
 
 // HACK!: dyld3 used to know if each image in a closure has been rebased or not when it was building the closure
 // Now we try to make good guesses based on whether its the shared cache or not, and which binary is executing this code
+#if 0
 static bool hasBeenRebased(const Loader* ldr)
 {
 #if BUILDING_DYLD
@@ -582,6 +615,89 @@ static bool hasBeenRebased(const Loader* ldr)
     return false;
 #endif
 }
+#endif
+
+static objc_visitor::Visitor makeObjCVisitor(Diagnostics& diag, RuntimeState& state,
+                                             const Loader* ldr)
+{
+
+#if POINTERS_ARE_UNSLID
+    const dyld3::MachOAnalyzer* dylibMA = ldr->analyzer(state);
+
+    objc_visitor::Visitor objcVisitor(state.config.dyldCache.addr, dylibMA);
+    return objcVisitor;
+#elif SUPPORT_VM_LAYOUT
+    const dyld3::MachOAnalyzer* dylibMA = ldr->analyzer(state);
+
+    objc_visitor::Visitor objcVisitor(dylibMA);
+    return objcVisitor;
+#else
+    const dyld3::MachOFile* dylibMF = ldr->mf(state);
+    VMAddress dylibBaseAddress(dylibMF->preferredLoadAddress());
+
+    __block std::vector<metadata_visitor::Segment> segments;
+    __block std::vector<uint64_t> bindTargets;
+    ldr->withLayout(diag, state, ^(const mach_o::Layout &layout) {
+        for ( uint32_t segIndex = 0; segIndex != layout.segments.size(); ++segIndex ) {
+            const auto& layoutSegment = layout.segments[segIndex];
+            metadata_visitor::Segment segment {
+                .startVMAddr = VMAddress(layoutSegment.vmAddr),
+                .endVMAddr = VMAddress(layoutSegment.vmAddr + layoutSegment.vmSize),
+                .bufferStart = (uint8_t*)layoutSegment.buffer,
+                .onDiskDylibChainedPointerFormat = 0,
+                .segIndex = segIndex
+            };
+            segments.push_back(std::move(segment));
+        }
+
+        // Add chained fixup info to each segment, if we have it
+        if ( dylibMF->hasChainedFixups() ) {
+            mach_o::Fixups fixups(layout);
+            fixups.withChainStarts(diag, ^(const dyld_chained_starts_in_image* starts) {
+                mach_o::Fixups::forEachFixupChainSegment(diag, starts,
+                                                         ^(const dyld_chained_starts_in_segment *segInfo, uint32_t segIndex, bool &stop) {
+                    segments[segIndex].onDiskDylibChainedPointerFormat = segInfo->pointer_format;
+                });
+            });
+        }
+
+        // ObjC patching needs the bind targets for interposable references to the classes
+        // build targets table
+        if ( dylibMF->hasChainedFixupsLoadCommand() ) {
+            mach_o::Fixups fixups(layout);
+            fixups.forEachBindTarget_ChainedFixups(diag, ^(const mach_o::Fixups::BindTargetInfo &info, bool &stop) {
+                if ( info.libOrdinal != BIND_SPECIAL_DYLIB_SELF ) {
+                    bindTargets.push_back(0);
+                    return;
+                }
+
+                mach_o::Layout::FoundSymbol foundInfo;
+                if ( !layout.findExportedSymbol(diag, info.symbolName, info.weakImport, foundInfo) ) {
+                    bindTargets.push_back(0);
+                    return;
+                }
+
+                // We only support header offsets in this dylib, as we are looking for self binds
+                // which are likely only to classes
+                if ( (foundInfo.kind != mach_o::Layout::FoundSymbol::Kind::headerOffset)
+                    || (foundInfo.foundInDylib.value() != dylibMF) ) {
+                    bindTargets.push_back(0);
+                    return;
+                }
+
+                uint64_t vmAddr = layout.textUnslidVMAddr() + foundInfo.value;
+                bindTargets.push_back(vmAddr);
+            });
+        }
+    });
+
+    std::optional<VMAddress> selectorStringsBaseAddress;
+    objc_visitor::Visitor objcVisitor(dylibBaseAddress, dylibMF,
+                                      std::move(segments), selectorStringsBaseAddress,
+                                      std::move(bindTargets));
+    return objcVisitor;
+#endif
+}
 
 static void optimizeObjCSelectors(RuntimeState& state,
                                   const objc::SelectorHashTable* objcSelOpt,
@@ -589,13 +705,12 @@ static void optimizeObjCSelectors(RuntimeState& state,
                                   ObjCOptimizerImage&                image)
 {
 
-    const dyld3::MachOAnalyzer*                 ma              = (const dyld3::MachOAnalyzer*)image.jitLoader->loadAddress(state);
-    uint32_t                                    pointerSize     = ma->pointerSize();
-    const dyld3::MachOAnalyzer::VMAddrConverter vmAddrConverter = ma->makeVMAddrConverter(hasBeenRebased(image.jitLoader));
+    const mach_o::MachOFileRef mf       = image.jitLoader->mf(state);
+    uint32_t                pointerSize = mf->pointerSize();
 
     // The legacy (objc1) codebase uses a bunch of sections we don't want to reason about.  If we see them just give up.
     __block bool foundBadSection = false;
-    ma->forEachSection(^(const MachOAnalyzer::SectionInfo& sectInfo, bool malformedSectionRange, bool& stop) {
+    mf->forEachSection(^(const MachOAnalyzer::SectionInfo& sectInfo, bool malformedSectionRange, bool& stop) {
         if ( strcmp(sectInfo.segInfo.segName, "__OBJC") != 0 )
             return;
         if ( strcmp(sectInfo.sectName, "__module_info") == 0 ) {
@@ -623,34 +738,45 @@ static void optimizeObjCSelectors(RuntimeState& state,
     // Note this isn't actually supported in libobjc any more.  Its logic for deciding whether to support it is if this is true:
     // #if (defined(__x86_64__) && (TARGET_OS_OSX || TARGET_OS_SIMULATOR))
     // So to keep it simple, lets only do this walk if we are x86_64
-    if ( ma->isArch("x86_64") || ma->isArch("x86_64h") ) {
-        if ( ma->hasObjCMessageReferences() ) {
+    if ( mf->isArch("x86_64") || mf->isArch("x86_64h") ) {
+        if ( mf->hasObjCMessageReferences() ) {
             image.diag.error("Cannot handle message refs");
             return;
         }
     }
 
-    // We only record selector references for __objc_selrefs and pointer based method lists.  If we find a relative method list pointing
-    // outside of __objc_selrefs then we give up for now
+    // FIXME: Don't make a duplicate one of these if we can pass one in instead
+    __block objc_visitor::Visitor objcVisitor = makeObjCVisitor(image.diag, state, image.jitLoader);
+    if ( image.diag.hasError() )
+        return;
+
+    // We only record selector references for __objc_selrefs and pointer based method lists.
+    // If we find a relative method list pointing outside of __objc_selrefs then we give up for now
     uint64_t selRefsStartRuntimeOffset = image.binaryInfo.selRefsRuntimeOffset;
     uint64_t selRefsEndRuntimeOffset   = selRefsStartRuntimeOffset + (pointerSize * image.binaryInfo.selRefsCount);
-    auto     visitMethod               = ^(uint64_t methodVMAddr, const dyld3::MachOAnalyzer::ObjCMethod& method, bool& stop) {
-        uint64_t selectorReferenceRuntimeOffset = method.nameLocationVMAddr - image.loadAddress;
-        if ( (selectorReferenceRuntimeOffset < selRefsStartRuntimeOffset) || (selectorReferenceRuntimeOffset >= selRefsEndRuntimeOffset) ) {
+    auto     visitRelativeMethod = ^(const objc_visitor::Method& method, bool& stop) {
+        VMAddress selectorRefVMAddress = method.getNameSelRefVMAddr(objcVisitor);
+        VMOffset selectorReferenceRuntimeOffset = selectorRefVMAddress - VMAddress(image.loadAddress.rawValue());
+        if ( (selectorReferenceRuntimeOffset.rawValue() < selRefsStartRuntimeOffset)
+            || (selectorReferenceRuntimeOffset.rawValue() >= selRefsEndRuntimeOffset) ) {
             image.diag.error("Cannot handle relative method list pointing outside of __objc_selrefs");
             stop = true;
         }
     };
 
-    auto visitMethodList = ^(uint64_t methodListVMAddr, bool& hasPointerBasedMethodList, bool& hasRelativeMethodList) {
-        if ( methodListVMAddr == 0 )
+    auto visitMethodList = ^(const objc_visitor::MethodList& methodList,
+                             bool& hasPointerBasedMethodList, bool &stop) {
+        if ( methodList.numMethods() == 0 )
             return;
-        uint64_t methodListRuntimeOffset = methodListVMAddr - image.loadAddress;
-        if ( ma->objcMethodListIsRelative(methodListRuntimeOffset) ) {
+
+        if ( methodList.usesRelativeOffsets() ) {
             // Check relative method lists
-            ma->forEachObjCMethod(methodListVMAddr, vmAddrConverter, 0, visitMethod);
-        }
-        else {
+            uint32_t numMethods = methodList.numMethods();
+            for ( uint32_t i = 0; i != numMethods; ++i ) {
+                const objc_visitor::Method& method = methodList.getMethod(objcVisitor, i);
+                visitRelativeMethod(method, stop);
+            }
+        } else {
             // Record if we found a pointer based method list.  This lets us skip walking method lists later if
             // they are all relative method lists
             hasPointerBasedMethodList = true;
@@ -659,80 +785,66 @@ static void optimizeObjCSelectors(RuntimeState& state,
 
     if ( image.binaryInfo.classListCount != 0 ) {
         __block bool hasPointerBasedMethodList = false;
-        __block bool hasRelativeMethodList     = false;
-        auto         visitClass                = ^(uint64_t classVMAddr, uint64_t classSuperclassVMAddr, uint64_t classDataVMAddr,
-                            const dyld3::MachOAnalyzer::ObjCClassInfo& objcClass, bool isMetaClass, bool& stop) {
-            visitMethodList(objcClass.baseMethodsVMAddr(pointerSize), hasPointerBasedMethodList, hasRelativeMethodList);
-            if ( image.diag.hasError() )
-                stop = true;
-        };
-        ma->forEachObjCClass(image.binaryInfo.classListRuntimeOffset, image.binaryInfo.classListCount, vmAddrConverter, visitClass);
-        if ( image.diag.hasError() )
-            return;
-
+        objcVisitor.forEachClassAndMetaClass(^(const objc_visitor::Class &objcClass, bool &stopClass) {
+            objc_visitor::MethodList methodList = objcClass.getBaseMethods(objcVisitor);
+            visitMethodList(methodList, hasPointerBasedMethodList, stopClass);
+        });
         image.binaryInfo.hasClassMethodListsToUnique     = hasPointerBasedMethodList;
         image.binaryInfo.hasClassMethodListsToSetUniqued = hasPointerBasedMethodList;
     }
 
     if ( image.binaryInfo.categoryCount != 0 ) {
         __block bool hasPointerBasedMethodList = false;
-        __block bool hasRelativeMethodList     = false;
-        auto         visitCategory             = ^(uint64_t categoryVMAddr, const dyld3::MachOAnalyzer::ObjCCategory& objcCategory, bool& stop) {
-            visitMethodList(objcCategory.instanceMethodsVMAddr, hasPointerBasedMethodList, hasRelativeMethodList);
-            if ( image.diag.hasError() ) {
-                stop = true;
-                return;
-            }
-            visitMethodList(objcCategory.classMethodsVMAddr, hasPointerBasedMethodList, hasRelativeMethodList);
-            if ( image.diag.hasError() )
-                stop = true;
-        };
-        ma->forEachObjCCategory(image.binaryInfo.categoryListRuntimeOffset, image.binaryInfo.categoryCount, vmAddrConverter, visitCategory);
-        if ( image.diag.hasError() )
-            return;
+        objcVisitor.forEachCategory(^(const objc_visitor::Category& objcCategory, bool &stopCategory) {
+            objc_visitor::MethodList instanceMethodList = objcCategory.getInstanceMethods(objcVisitor);
+            objc_visitor::MethodList classMethodList    = objcCategory.getClassMethods(objcVisitor);
 
-        image.binaryInfo.hasCategoryMethodListsToUnique     = hasPointerBasedMethodList;
-        image.binaryInfo.hasCategoryMethodListsToSetUniqued = hasPointerBasedMethodList;
+            visitMethodList(instanceMethodList, hasPointerBasedMethodList, stopCategory);
+            if ( stopCategory )
+                return;
+
+            visitMethodList(classMethodList, hasPointerBasedMethodList, stopCategory);
+        });
+        image.binaryInfo.hasClassMethodListsToUnique     = hasPointerBasedMethodList;
+        image.binaryInfo.hasClassMethodListsToSetUniqued = hasPointerBasedMethodList;
     }
 
     if ( image.binaryInfo.protocolListCount != 0 ) {
         __block bool hasPointerBasedMethodList = false;
-        __block bool hasRelativeMethodList     = false;
-        auto         visitProtocol             = ^(uint64_t protocolVMAddr, const dyld3::MachOAnalyzer::ObjCProtocol& objCProtocol, bool& stop) {
-            visitMethodList(objCProtocol.instanceMethodsVMAddr, hasPointerBasedMethodList, hasRelativeMethodList);
-            if ( image.diag.hasError() ) {
-                stop = true;
-                return;
-            }
-            visitMethodList(objCProtocol.classMethodsVMAddr, hasPointerBasedMethodList, hasRelativeMethodList);
-            if ( image.diag.hasError() ) {
-                stop = true;
-                return;
-            }
-            visitMethodList(objCProtocol.optionalInstanceMethodsVMAddr, hasPointerBasedMethodList, hasRelativeMethodList);
-            if ( image.diag.hasError() ) {
-                stop = true;
-                return;
-            }
-            visitMethodList(objCProtocol.optionalClassMethodsVMAddr, hasPointerBasedMethodList, hasRelativeMethodList);
-            if ( image.diag.hasError() )
-                stop = true;
-        };
-        ma->forEachObjCProtocol(image.binaryInfo.protocolListRuntimeOffset, image.binaryInfo.protocolListCount, vmAddrConverter, visitProtocol);
-        if ( image.diag.hasError() )
-            return;
+        objcVisitor.forEachProtocol(^(const objc_visitor::Protocol& objcProtocol, bool& stopProtocol) {
+            objc_visitor::MethodList instanceMethodList         = objcProtocol.getInstanceMethods(objcVisitor);
+            objc_visitor::MethodList classMethodList            = objcProtocol.getClassMethods(objcVisitor);
+            objc_visitor::MethodList optionalInstanceMethodList = objcProtocol.getOptionalInstanceMethods(objcVisitor);
+            objc_visitor::MethodList optionalClassMethodList    = objcProtocol.getOptionalClassMethods(objcVisitor);
 
-        image.binaryInfo.hasProtocolMethodListsToUnique     = hasPointerBasedMethodList;
-        image.binaryInfo.hasProtocolMethodListsToSetUniqued = hasPointerBasedMethodList;
+            visitMethodList(instanceMethodList, hasPointerBasedMethodList, stopProtocol);
+            if ( stopProtocol )
+                return;
+
+            visitMethodList(classMethodList, hasPointerBasedMethodList, stopProtocol);
+            if ( stopProtocol )
+                return;
+
+            visitMethodList(optionalInstanceMethodList, hasPointerBasedMethodList, stopProtocol);
+            if ( stopProtocol )
+                return;
+
+            visitMethodList(optionalClassMethodList, hasPointerBasedMethodList, stopProtocol);
+        });
+        image.binaryInfo.hasClassMethodListsToUnique     = hasPointerBasedMethodList;
+        image.binaryInfo.hasClassMethodListsToSetUniqued = hasPointerBasedMethodList;
     }
 
-    PrebuiltObjC::forEachSelectorReferenceToUnique(state, ma, image.loadAddress, image.binaryInfo, vmAddrConverter,
-                                                   ^(uint64_t selectorReferenceRuntimeOffset, uint64_t selectorStringRuntimeOffset) {
-                                                       // Note we don't check if the string is printable.  We already checked earlier that this image doesn't have
-                                                       // Fairplay or protected segments, which would prevent seeing the strings.
-                                                       const char* selectorString = (const char*)ma + selectorStringRuntimeOffset;
-                                                       image.visitReferenceToObjCSelector(objcSelOpt, appSelectorMap, selectorReferenceRuntimeOffset, selectorStringRuntimeOffset, selectorString);
-                                                   });
+    auto visitSelRef = ^(uint64_t selectorReferenceRuntimeOffset, uint64_t selectorStringRuntimeOffset,
+                         const char* selectorString) {
+        // Note we don't check if the string is printable.  We already checked earlier that this image doesn't have
+        // Fairplay or protected segments, which would prevent seeing the strings.
+        image.visitReferenceToObjCSelector(objcSelOpt, appSelectorMap,
+                                           VMOffset(selectorReferenceRuntimeOffset),
+                                           VMOffset(selectorStringRuntimeOffset), selectorString);
+    };
+
+    PrebuiltObjC::forEachSelectorReferenceToUnique(state, image.jitLoader, image.loadAddress.rawValue(), image.binaryInfo, visitSelRef);
 }
 
 static void optimizeObjCClasses(RuntimeState& state,
@@ -744,32 +856,28 @@ static void optimizeObjCClasses(RuntimeState& state,
     if ( image.binaryInfo.classListCount == 0 )
         return;
 
-    const dyld3::MachOAnalyzer*                 ma              = (const dyld3::MachOAnalyzer*)image.jitLoader->loadAddress(state);
-    const intptr_t                              slide           = ma->getSlide();
-    const dyld3::MachOAnalyzer::VMAddrConverter vmAddrConverter = ma->makeVMAddrConverter(hasBeenRebased(image.jitLoader));
-
 #if BUILDING_CACHE_BUILDER || BUILDING_CLOSURE_UTIL
     image.calculateMissingWeakImports(state);
     if ( image.diag.hasError() )
         return;
 #endif
 
-    dyld3::MachOAnalyzer::ClassCallback visitClass = ^(uint64_t classVMAddr,
-                                                       uint64_t classSuperclassVMAddr, uint64_t classDataVMAddr,
-                                                       const MachOAnalyzer::ObjCClassInfo& objcClass, bool isMetaClass,
-                                                       bool& stop) {
-        if ( isMetaClass )
-            return;
+    // FIXME: Don't make a duplicate one of these if we can pass one in instead
+    __block objc_visitor::Visitor objcVisitor = makeObjCVisitor(image.diag, state, image.jitLoader);
+    if ( image.diag.hasError() )
+        return;
 
+    VMAddress dyldCacheBaseAddress(state.config.dyldCache.unslidLoadAddress);
+
+    // Note we skip metaclasses
+    objcVisitor.forEachClass(^(const objc_visitor::Class& objcClass, bool &stopClass) {
         // Make sure the superclass pointer is not nil.  Unless we are a root class as those don't have a superclass
-        if ( image.isNull(classSuperclassVMAddr, ma, slide) ) {
-            const uint32_t RO_ROOT = (1 << 1);
-            if ( (objcClass.flags(image.pointerSize) & RO_ROOT) == 0 ) {
-                uint64_t classNameVMAddr = objcClass.nameVMAddr(image.pointerSize);
-                const char* className = (const char*)(classNameVMAddr + slide);
-                char dupPath[PATH_MAX];
-                Diagnostics::quotePath(image.jitLoader->path(), dupPath);
-                image.diag.error("Missing weak superclass of class %s in '%s'", className, dupPath);
+        if ( !objcClass.isRootClass(objcVisitor) ) {
+            metadata_visitor::ResolvedValue classSuperclassField = objcClass.getSuperclassField(objcVisitor);
+            InputDylibVMAddress superclassFieldVMAddr(classSuperclassField.vmAddress().rawValue());
+            if ( image.isNull(superclassFieldVMAddr, classSuperclassField.value()) ) {
+                const char* className = objcClass.getName(objcVisitor);
+                image.diag.error("Missing weak superclass of class %s in %s", className, image.jitLoader->path());
                 return;
             }
         }
@@ -777,20 +885,20 @@ static void optimizeObjCClasses(RuntimeState& state,
         // Does this class need to be fixed up for stable Swift ABI.
         // Note the order matches the objc runtime in that we always do this fix before checking for dupes,
         // but after excluding classes with missing weak superclasses.
-        if ( objcClass.isUnfixedBackwardDeployingStableSwift() ) {
+        if ( objcClass.isUnfixedBackwardDeployingStableSwift(objcVisitor) ) {
             // Class really is stable Swift, pretending to be pre-stable.
             image.binaryInfo.hasClassStableSwiftFixups = true;
         }
 
-        uint64_t classNameVMAddr = objcClass.nameVMAddr(image.pointerSize);
+        VMAddress classVMAddr = objcClass.getVMAddress();
+        VMAddress classNameVMAddr = objcClass.getNameVMAddr(objcVisitor);
         // Note we don't check if the string is printable.  We already checked earlier that this image doesn't have
         // Fairplay or protected segments, which would prevent seeing the strings.
-        const char* className = (const char*)(classNameVMAddr + slide);
-
-        image.visitClass(state.config.dyldCache.addr, objcClassOpt, sharedCacheImagesMap, duplicateSharedCacheClasses, classVMAddr, classNameVMAddr, className);
-    };
-
-    ma->forEachObjCClass(image.binaryInfo.classListRuntimeOffset, image.binaryInfo.classListCount, vmAddrConverter, visitClass);
+        const char* className = objcClass.getName(objcVisitor);
+        image.visitClass(dyldCacheBaseAddress, objcClassOpt, sharedCacheImagesMap, duplicateSharedCacheClasses,
+                         InputDylibVMAddress(classVMAddr.rawValue()), InputDylibVMAddress(classNameVMAddr.rawValue()),
+                         className);
+    });
 }
 
 static void optimizeObjCProtocols(RuntimeState& state,
@@ -801,41 +909,41 @@ static void optimizeObjCProtocols(RuntimeState& state,
     if ( image.binaryInfo.protocolListCount == 0 )
         return;
 
-    const dyld3::MachOAnalyzer*                 ma              = (const dyld3::MachOAnalyzer*)image.jitLoader->loadAddress(state);
-    const intptr_t                              slide           = ma->getSlide();
-    const dyld3::MachOAnalyzer::VMAddrConverter vmAddrConverter = ma->makeVMAddrConverter(hasBeenRebased(image.jitLoader));
-
     image.protocolISAFixups.reserve(image.binaryInfo.protocolListCount);
 
-    dyld3::MachOAnalyzer::ProtocolCallback visitProtocol = ^(uint64_t                                  protocolVMAddr,
-                                                             const dyld3::MachOAnalyzer::ObjCProtocol& objCProtocol,
-                                                             bool&                                     stop) {
-        if ( objCProtocol.isaVMAddr != 0 ) {
+    // FIXME: Don't make a duplicate one of these if we can pass one in instead
+    __block objc_visitor::Visitor objcVisitor = makeObjCVisitor(image.diag, state, image.jitLoader);
+    if ( image.diag.hasError() )
+        return;
+
+    objcVisitor.forEachProtocol(^(const objc_visitor::Protocol& objcProtocol, bool& stopProtocol) {
+        std::optional<VMAddress> isaVMAddr = objcProtocol.getISAVMAddr(objcVisitor);
+        if ( isaVMAddr.has_value() ) {
             // We can't optimize this protocol if it has an ISA as we want to override it
             image.diag.error("Protocol ISA must be null");
-            stop = true;
+            stopProtocol = true;
             return;
         }
 
-        uint64_t protocolNameVMAddr = objCProtocol.nameVMAddr;
+        VMAddress protocolVMAddr = objcProtocol.getVMAddress();
+        VMAddress protocolNameVMAddr = objcProtocol.getNameVMAddr(objcVisitor);
         // Note we don't check if the string is printable.  We already checked earlier that this image doesn't have
         // Fairplay or protected segments, which would prevent seeing the strings.
-        const char* protocolName = (const char*)(protocolNameVMAddr + slide);
+        const char* protocolName = objcProtocol.getName(objcVisitor);
 
-        image.visitProtocol(objcProtocolOpt, sharedCacheImagesMap, protocolVMAddr, protocolNameVMAddr, protocolName);
-    };
-
-    ma->forEachObjCProtocol(image.binaryInfo.protocolListRuntimeOffset, image.binaryInfo.protocolListCount, vmAddrConverter, visitProtocol);
+        image.visitProtocol(objcProtocolOpt, sharedCacheImagesMap, InputDylibVMAddress(protocolVMAddr.rawValue()),
+                            InputDylibVMAddress(protocolNameVMAddr.rawValue()), protocolName);
+    });
 }
 
 static void
 writeClassOrProtocolHashTable(RuntimeState& state, bool classes,
                               Array<ObjCOptimizerImage>& objcImages,
                               OverflowSafeArray<uint8_t>& hashTable,
-                              const PrebuiltObjC::DuplicateClassesMapTy& duplicateSharedCacheClassMap)
+                              const PrebuiltObjC::DuplicateClassesMapTy& duplicateSharedCacheClassMap,
+                              PrebuiltObjC::ClassMapTy& seenObjectsMap)
 {
 
-    dyld3::CStringMultiMapTo<PrebuiltLoader::BindTarget> seenObjectsMap;
     dyld3::CStringMapTo<PrebuiltLoader::BindTarget>      objectNameMap;
     OverflowSafeArray<const char*>                       objectNames;
 
@@ -852,7 +960,7 @@ writeClassOrProtocolHashTable(RuntimeState& state, bool classes,
             //printf("%s: 0x%08llx = '%s'\n", li.path(), nameVMAddr, className);
 
             // Also track the name
-            PrebuiltLoader::BindTarget nameTarget    = { image.jitLoader, objectLocation.nameRuntimeOffset };
+            PrebuiltLoader::BindTarget nameTarget    = { image.jitLoader, objectLocation.nameRuntimeOffset.rawValue() };
             auto                       itAndInserted = objectNameMap.insert({ objectLocation.name, nameTarget });
             if ( itAndInserted.second ) {
                 // We inserted the class name so we need to add it to the strings for the closure hash table
@@ -877,7 +985,7 @@ writeClassOrProtocolHashTable(RuntimeState& state, bool classes,
                 }
             }
 
-            PrebuiltLoader::BindTarget valueTarget = { image.jitLoader, objectLocation.valueRuntimeOffset };
+            PrebuiltLoader::BindTarget valueTarget = { image.jitLoader, objectLocation.valueRuntimeOffset.rawValue() };
             seenObjectsMap.insert({ objectLocation.name, valueTarget });
         }
     }
@@ -907,13 +1015,6 @@ writeClassOrProtocolHashTable(RuntimeState& state, bool classes,
 
 //////////////////////// PrebuiltObjC /////////////////////////////////
 
-PrebuiltObjC::~PrebuiltObjC()
-{
-    for ( ObjCOptimizerImage& objcImage : objcImages ) {
-        objcImage.~ObjCOptimizerImage();
-    }
-}
-
 void PrebuiltObjC::commitImage(const ObjCOptimizerImage& image)
 {
     // As this image is still valid, then add its intermediate results to the main tables
@@ -935,10 +1036,10 @@ void PrebuiltObjC::commitImage(const ObjCOptimizerImage& image)
 void PrebuiltObjC::generateHashTables(RuntimeState& state)
 {
     // Write out the class table
-    writeClassOrProtocolHashTable(state, true, objcImages, classesHashTable, duplicateSharedCacheClassMap);
+    writeClassOrProtocolHashTable(state, true, objcImages, classesHashTable, duplicateSharedCacheClassMap, classMap);
 
     // Write out the protocol table
-    writeClassOrProtocolHashTable(state, false, objcImages, protocolsHashTable, duplicateSharedCacheClassMap);
+    writeClassOrProtocolHashTable(state, false, objcImages, protocolsHashTable, duplicateSharedCacheClassMap, protocolMap);
 
     // If we have closure selectors, we need to make a hash table for them.
     if ( !closureSelectorStrings.empty() ) {
@@ -1002,139 +1103,210 @@ void PrebuiltObjC::generatePerImageFixups(RuntimeState& state, uint32_t pointerS
 
 // Visits each selector reference once, in order.  Note the order this visits selector references has to
 // match for serializing/deserializing the PrebuiltLoader.
-void PrebuiltObjC::forEachSelectorReferenceToUnique(RuntimeState&                                state,
-                                                    const dyld3::MachOAnalyzer*                  ma,
-                                                    uint64_t                                     loadAddress,
-                                                    const ObjCBinaryInfo&                        binaryInfo,
-                                                    const dyld3::MachOAnalyzer::VMAddrConverter& vmAddrConverter,
-                                                    void (^callback)(uint64_t selectorReferenceRuntimeOffset, uint64_t selectorStringRuntimeOffset))
+void PrebuiltObjC::forEachSelectorReferenceToUnique(RuntimeState&           state,
+                                                    const Loader*           ldr,
+                                                    uint64_t                loadAddress,
+                                                    const ObjCBinaryInfo&   binaryInfo,
+                                                    void (^callback)(uint64_t selectorReferenceRuntimeOffset,
+                                                                     uint64_t selectorStringRuntimeOffset,
+                                                                     const char* selectorString))
 
 {
-    uint32_t pointerSize = ma->pointerSize();
+    // FIXME: Don't make a duplicate one of these if we can pass one in instead
+    Diagnostics diag;
+    __block objc_visitor::Visitor objcVisitor = makeObjCVisitor(diag, state, ldr);
+    assert(!diag.hasError());
+
     if ( binaryInfo.selRefsCount != 0 ) {
-        ma->forEachObjCSelectorReference(binaryInfo.selRefsRuntimeOffset, binaryInfo.selRefsCount, vmAddrConverter,
-                                         ^(uint64_t selRefVMAddr, uint64_t selRefTargetVMAddr, bool& stop) {
-                                             uint64_t selectorReferenceRuntimeOffset = selRefVMAddr - loadAddress;
-                                             uint64_t selectorStringRuntimeOffset    = selRefTargetVMAddr - loadAddress;
-                                             callback(selectorReferenceRuntimeOffset, selectorStringRuntimeOffset);
-                                         });
+        objcVisitor.forEachSelectorReference(^(VMAddress selRefVMAddr, VMAddress selRefTargetVMAddr,
+                                               const char* selectorString) {
+            VMOffset selectorReferenceRuntimeOffset = selRefVMAddr - VMAddress(loadAddress);
+            VMOffset selectorStringRuntimeOffset    = selRefTargetVMAddr - VMAddress(loadAddress);
+            callback(selectorReferenceRuntimeOffset.rawValue(), selectorStringRuntimeOffset.rawValue(),
+                     selectorString);
+        });
     }
 
     // We only make the callback for method list selrefs which are not already covered by the __objc_selrefs section.
     // For pointer based method lists, this is all sel ref pointers.
     // For relative method lists, we should always point to the __objc_selrefs section.  This was checked earlier, so
     // we skip this callback on relative method lists as we know here they must point to the (already uniqied) __objc_selrefs.
-    auto visitMethod = ^(uint64_t methodVMAddr, const dyld3::MachOAnalyzer::ObjCMethod& method, bool& stop) {
-        uint64_t selectorReferenceRuntimeOffset = method.nameLocationVMAddr - loadAddress;
-        uint64_t selectorStringRuntimeOffset    = method.nameVMAddr - loadAddress;
-        callback(selectorReferenceRuntimeOffset, selectorStringRuntimeOffset);
+    auto visitPointerBasedMethod = ^(const objc_visitor::Method& method) {
+        VMAddress nameVMAddr = method.getNameVMAddr(objcVisitor);
+        VMAddress nameLocationVMAddr = method.getNameField(objcVisitor).vmAddress();
+        const char* selectorString = method.getName(objcVisitor);
+
+        VMOffset selectorStringRuntimeOffset    = nameVMAddr - VMAddress(loadAddress);
+        VMOffset selectorReferenceRuntimeOffset = nameLocationVMAddr - VMAddress(loadAddress);
+        callback(selectorReferenceRuntimeOffset.rawValue(), selectorStringRuntimeOffset.rawValue(), selectorString);
     };
 
-    auto visitMethodList = ^(uint64_t methodListVMAddr) {
-        if ( methodListVMAddr == 0 )
+    auto visitMethodList = ^(const objc_visitor::MethodList& methodList) {
+        if ( methodList.numMethods() == 0 )
             return;
-        uint64_t methodListRuntimeOffset = methodListVMAddr - loadAddress;
-        if ( ma->objcMethodListIsRelative(methodListRuntimeOffset) )
+        if ( methodList.usesRelativeOffsets() )
             return;
-        ma->forEachObjCMethod(methodListVMAddr, vmAddrConverter, 0, visitMethod);
+
+        // Check pointer based method lists
+        uint32_t numMethods = methodList.numMethods();
+        for ( uint32_t i = 0; i != numMethods; ++i ) {
+            const objc_visitor::Method& method = methodList.getMethod(objcVisitor, i);
+            visitPointerBasedMethod(method);
+        }
     };
 
     if ( binaryInfo.hasClassMethodListsToUnique && (binaryInfo.classListCount != 0) ) {
-        auto visitClass = ^(uint64_t classVMAddr, uint64_t classSuperclassVMAddr, uint64_t classDataVMAddr,
-                            const dyld3::MachOAnalyzer::ObjCClassInfo& objcClass, bool isMetaClass, bool& stop) {
-            visitMethodList(objcClass.baseMethodsVMAddr(pointerSize));
-        };
-        ma->forEachObjCClass(binaryInfo.classListRuntimeOffset, binaryInfo.classListCount, vmAddrConverter, visitClass);
+        // FIXME: Use binaryInfo.classListRuntimeOffset and binaryInfo.classListCount
+        objcVisitor.forEachClassAndMetaClass(^(const objc_visitor::Class &objcClass, bool &stopClass) {
+            objc_visitor::MethodList methodList = objcClass.getBaseMethods(objcVisitor);
+            visitMethodList(methodList);
+        });
     }
 
     if ( binaryInfo.hasCategoryMethodListsToUnique && (binaryInfo.categoryCount != 0) ) {
-        auto visitCategory = ^(uint64_t categoryVMAddr, const dyld3::MachOAnalyzer::ObjCCategory& objcCategory, bool& stop) {
-            visitMethodList(objcCategory.instanceMethodsVMAddr);
-            visitMethodList(objcCategory.classMethodsVMAddr);
-        };
-        ma->forEachObjCCategory(binaryInfo.categoryListRuntimeOffset, binaryInfo.categoryCount, vmAddrConverter, visitCategory);
+        // FIXME: Use binaryInfo.categoryListRuntimeOffset and binaryInfo.categoryCount
+        objcVisitor.forEachCategory(^(const objc_visitor::Category& objcCategory, bool &stopCategory) {
+            objc_visitor::MethodList instanceMethodList = objcCategory.getInstanceMethods(objcVisitor);
+            objc_visitor::MethodList classMethodList    = objcCategory.getClassMethods(objcVisitor);
+
+            visitMethodList(instanceMethodList);
+            visitMethodList(classMethodList);
+        });
     }
 
     if ( binaryInfo.hasProtocolMethodListsToUnique && (binaryInfo.protocolListCount != 0) ) {
-        auto visitProtocol = ^(uint64_t protocolVMAddr, const dyld3::MachOAnalyzer::ObjCProtocol& objCProtocol, bool& stop) {
-            visitMethodList(objCProtocol.instanceMethodsVMAddr);
-            visitMethodList(objCProtocol.classMethodsVMAddr);
-            visitMethodList(objCProtocol.optionalInstanceMethodsVMAddr);
-            visitMethodList(objCProtocol.optionalClassMethodsVMAddr);
-        };
-        ma->forEachObjCProtocol(binaryInfo.protocolListRuntimeOffset, binaryInfo.protocolListCount, vmAddrConverter, visitProtocol);
+        // FIXME: Use binaryInfo.protocolListRuntimeOffset and binaryInfo.protocolListCount
+        objcVisitor.forEachProtocol(^(const objc_visitor::Protocol& objcProtocol, bool& stopProtocol) {
+            objc_visitor::MethodList instanceMethodList         = objcProtocol.getInstanceMethods(objcVisitor);
+            objc_visitor::MethodList classMethodList            = objcProtocol.getClassMethods(objcVisitor);
+            objc_visitor::MethodList optionalInstanceMethodList = objcProtocol.getOptionalInstanceMethods(objcVisitor);
+            objc_visitor::MethodList optionalClassMethodList    = objcProtocol.getOptionalClassMethods(objcVisitor);
+
+            visitMethodList(instanceMethodList);
+            visitMethodList(classMethodList);
+            visitMethodList(optionalInstanceMethodList);
+            visitMethodList(optionalClassMethodList);
+        });
     }
+}
+
+static std::optional<VMOffset> getImageInfo(Diagnostics& diag, RuntimeState& state,
+                                            const Loader* ldr, const mach_o::MachOFileRef& mf)
+{
+    __block std::optional<VMOffset> objcImageInfoRuntimeOffset;
+    mf->forEachSection(^(const dyld3::MachOAnalyzer::SectionInfo& sectionInfo, bool malformedSectionRange, bool& stop) {
+        if ( strncmp(sectionInfo.segInfo.segName, "__DATA", 6) != 0 )
+            return;
+        if (strcmp(sectionInfo.sectName, "__objc_imageinfo") != 0)
+            return;
+        if ( malformedSectionRange ) {
+            stop = true;
+            return;
+        }
+        if ( sectionInfo.sectSize != 8 ) {
+            stop = true;
+            return;
+        }
+
+        // We can't just access the image info directly from the MachOFile.  Instead we have to
+        // use the layout to find the actual location of the segment, as we might be in the cache builder
+        ldr->withLayout(diag, state, ^(const mach_o::Layout& layout) {
+            const mach_o::SegmentLayout& segment = layout.segments[sectionInfo.segInfo.segIndex];
+            uint64_t offsetInSegment = sectionInfo.sectAddr - segment.vmAddr;
+            const auto* imageInfo = (MachOAnalyzer::ObjCImageInfo*)(segment.buffer + offsetInSegment);
+
+            if ( (imageInfo->flags & MachOAnalyzer::ObjCImageInfo::dyldPreoptimized) != 0 )
+                return;
+
+            objcImageInfoRuntimeOffset = VMOffset(sectionInfo.sectAddr - layout.textUnslidVMAddr());
+        });
+        stop = true;
+    });
+
+    return objcImageInfoRuntimeOffset;
+}
+
+static std::optional<VMOffset> getProtocolClassCacheOffset(RuntimeState& state)
+{
+#if BUILDING_CACHE_BUILDER || BUILDING_CACHE_BUILDER_UNIT_TESTS
+        assert(state.config.dyldCache.objcProtocolClassCacheOffset != 0);
+        return VMOffset(state.config.dyldCache.objcProtocolClassCacheOffset);
+#else
+        // Make sure we have the pointers section with the pointer to the protocol class
+        const void* objcOptPtrs = state.config.dyldCache.addr->objcOptPtrs();
+        if ( objcOptPtrs == nullptr )
+            return { };
+
+        uint32_t pointerSize = state.mainExecutableLoader->loadAddress(state)->pointerSize();
+        uint64_t classProtocolVMAddr = (pointerSize == 8) ? *(uint64_t*)objcOptPtrs : *(uint32_t*)objcOptPtrs;
+
+#if BUILDING_DYLD || BUILDING_UNIT_TESTS
+        // As we are running in dyld/tests, the cache is live
+
+#if __has_feature(ptrauth_calls)
+        // If we are on arm64e, the protocol ISA in the shared cache was signed.  We don't
+        // want the signature bits in the encoded value
+        classProtocolVMAddr = (uint64_t)__builtin_ptrauth_strip((void*)classProtocolVMAddr, ptrauth_key_asda);
+#endif // __has_feature(ptrauth_calls)
+
+        return VMOffset(classProtocolVMAddr - (uint64_t)state.config.dyldCache.addr);
+#elif BUILDING_CLOSURE_UTIL
+        // FIXME: This assumes an on-disk cache
+        classProtocolVMAddr          = state.config.dyldCache.addr->makeVMAddrConverter(false).convertToVMAddr(classProtocolVMAddr);
+        return VMOffset(classProtocolVMAddr - state.config.dyldCache.addr->unslidLoadAddress());
+#else
+        // Running offline so the cache is not live
+        //objcProtocolClassCacheOffset = classProtocolVMAddr - dyldCache->unslidLoadAddress();
+#error Unknown tool
+#endif // BUILDING_DYLD
+
+#endif // BUILDING_CACHE_BUILDER
 }
 
 void PrebuiltObjC::make(Diagnostics& diag, RuntimeState& state)
 {
-    const DyldSharedCache* dyldCache = state.config.dyldCache.addr;
-    if ( dyldCache == nullptr )
+
+    // If we have the read only data, make sure it has a valid selector table inside.
+    const objc::ClassHashTable*    objcClassOpt             = state.config.dyldCache.objcClassHashTable;
+    const objc::SelectorHashTable* objcSelOpt               = state.config.dyldCache.objcSelectorHashTable;
+    const objc::ProtocolHashTable* objcProtocolOpt          = state.config.dyldCache.objcProtocolHashTable;
+    const void*                    headerInfoRO             = state.config.dyldCache.objcHeaderInfoRO;
+    const void*                    headerInfoRW             = state.config.dyldCache.objcHeaderInfoRW;
+    VMAddress                      headerInfoROUnslidVMAddr(state.config.dyldCache.objcHeaderInfoROUnslidVMAddr);
+
+    if ( !objcClassOpt || !objcSelOpt || !objcProtocolOpt )
         return;
+
+    if ( std::optional<VMOffset> offset = getProtocolClassCacheOffset(state); offset.has_value() )
+        objcProtocolClassCacheOffset = offset.value();
 
     STACK_ALLOC_ARRAY(const Loader*, jitLoaders, state.loaded.size());
     for (const Loader* ldr : state.loaded)
         jitLoaders.push_back(ldr);
 
-    // If we have the read only data, make sure it has a valid selector table inside.
-    const objc::ClassHashTable*    objcClassOpt    = nullptr;
-    const objc::SelectorHashTable* objcSelOpt      = nullptr;
-    const objc::ProtocolHashTable* objcProtocolOpt = nullptr;
-    const void*                    headerInfoRO    = nullptr;
-    const void*                    headerInfoRW    = nullptr;
-    if ( const objc_opt::objc_opt_t* optObjCHeader = dyldCache->objcOpt() ) {
-        objcClassOpt    = optObjCHeader->classOpt();
-        objcSelOpt      = optObjCHeader->selectorOpt();
-        objcProtocolOpt = optObjCHeader->protocolOpt();
-        headerInfoRO    = optObjCHeader->headeropt_ro();
-        headerInfoRW    = optObjCHeader->headeropt_rw();
-    }
-
-    if ( !objcClassOpt || !objcSelOpt || !objcProtocolOpt )
-        return;
-
-    // Make sure we have the pointers section with the pointer to the protocol class
-    const void* objcOptPtrs = dyldCache->objcOptPtrs();
-    if ( objcOptPtrs == nullptr )
-        return;
-
-    uint32_t pointerSize = state.mainExecutableLoader->loadAddress(state)->pointerSize();
-
-    {
-        uint64_t classProtocolVMAddr = (pointerSize == 8) ? *(uint64_t*)objcOptPtrs : *(uint32_t*)objcOptPtrs;
-#if BUILDING_DYLD
-        // As we are running in dyld, the cache is live
-    #if __has_feature(ptrauth_calls)
-        // If we are on arm64e, the protocol ISA in the shared cache was signed.  We don't
-        // want the signature bits in the encoded value
-        classProtocolVMAddr = (uint64_t)__builtin_ptrauth_strip((void*)classProtocolVMAddr, ptrauth_key_asda);
-    #endif
-        objcProtocolClassCacheOffset = classProtocolVMAddr - (uint64_t)dyldCache;
-#elif BUILDING_CLOSURE_UTIL
-        // FIXME: This assumes an on-disk cache
-        classProtocolVMAddr          = dyldCache->makeVMAddrConverter(false).convertToVMAddr(classProtocolVMAddr);
-        objcProtocolClassCacheOffset = classProtocolVMAddr - dyldCache->unslidLoadAddress();
-#else
-        // Running offline so the cache is not live
-        objcProtocolClassCacheOffset = classProtocolVMAddr - dyldCache->unslidLoadAddress();
-#endif // BUILDING_DYLD
-    }
-
     // Find all the images with valid objc info
     SharedCacheImagesMapTy sharedCacheImagesMap;
     for ( const Loader* ldr : jitLoaders ) {
-        const dyld3::MachOAnalyzer* ma = (const dyld3::MachOAnalyzer*)ldr->loadAddress(state);
+        const mach_o::MachOFileRef mf = ldr->mf(state);
+        uint32_t pointerSize = mf->pointerSize();
 
-        const MachOAnalyzer::ObjCImageInfo* objcImageInfo = ma->objcImageInfo();
-        if ( objcImageInfo == nullptr )
+        std::optional<VMOffset> objcImageInfoRuntimeOffset = getImageInfo(diag, state, ldr, mf);
+
+        if ( !objcImageInfoRuntimeOffset.has_value() )
             continue;
 
         if ( ldr->dylibInDyldCache ) {
             // Add shared cache images to a map so that we can see them later for looking up classes
-            std::optional<uint16_t> objcIndex = objc::getPreoptimizedHeaderRWIndex(headerInfoRO, headerInfoRW, ma);
+            uint64_t dylibUnslidVMAddr = mf->preferredLoadAddress();
+
+            std::optional<uint16_t> objcIndex;
+            objcIndex = objc::getPreoptimizedHeaderRWIndex(headerInfoRO, headerInfoRW,
+                                                           headerInfoROUnslidVMAddr.rawValue(),
+                                                           dylibUnslidVMAddr,
+                                                           mf->is64());
             if ( !objcIndex.has_value() )
                 return;
-            sharedCacheImagesMap.insert({ *objcIndex, { ma, ldr } });
+            sharedCacheImagesMap.insert({ *objcIndex, { VMAddress(dylibUnslidVMAddr), ldr } });
             continue;
         }
 
@@ -1148,11 +1320,11 @@ void PrebuiltObjC::make(Diagnostics& diag, RuntimeState& state)
         // Find FairPlay encryption range if encrypted
         uint32_t fairPlayFileOffset;
         uint32_t fairPlaySize;
-        if ( ma->isFairPlayEncrypted(fairPlayFileOffset, fairPlaySize) )
+        if ( mf->isFairPlayEncrypted(fairPlayFileOffset, fairPlaySize) )
             return;
 
         __block bool hasProtectedSegment = false;
-        ma->forEachSegment(^(const dyld3::MachOAnalyzer::SegmentInfo& segInfo, bool& stop) {
+        mf->forEachSegment(^(const dyld3::MachOAnalyzer::SegmentInfo& segInfo, bool& stop) {
             if ( segInfo.isProtected ) {
                 hasProtectedSegment = true;
                 stop                = true;
@@ -1163,18 +1335,18 @@ void PrebuiltObjC::make(Diagnostics& diag, RuntimeState& state)
 #endif
 
         // This image is good so record it for use later.
-        objcImages.emplace_back((const JustInTimeLoader*)ldr, ma->preferredLoadAddress(), pointerSize);
+        objcImages.emplace_back((const JustInTimeLoader*)ldr, mf->preferredLoadAddress(), pointerSize);
         ObjCOptimizerImage& image = objcImages.back();
         image.jitLoader           = (const JustInTimeLoader*)ldr;
 
         // Set the offset to the objc image info
-        image.binaryInfo.imageInfoRuntimeOffset = (uint64_t)objcImageInfo - (uint64_t)ma;
+        image.binaryInfo.imageInfoRuntimeOffset = objcImageInfoRuntimeOffset->rawValue();
 
         // Get the range of a section which is required to contain pointers, i.e., be pointer sized.
         auto getPointerBasedSection = ^(const char* name, uint64_t& runtimeOffset, uint32_t& pointerCount) {
             uint64_t offset;
             uint64_t count;
-            if ( ma->findObjCDataSection(name, offset, count) ) {
+            if ( mf->findObjCDataSection(name, offset, count) ) {
                 if ( (count % pointerSize) != 0 ) {
                     image.diag.error("Invalid objc pointer section size");
                     return;
@@ -1216,6 +1388,8 @@ void PrebuiltObjC::make(Diagnostics& diag, RuntimeState& state)
 
     // If we successfully analyzed the classes and selectors, we can now emit their data
     generateHashTables(state);
+
+    uint32_t pointerSize = state.mainExecutableLoader->mf(state)->pointerSize();
     generatePerImageFixups(state, pointerSize);
 
     builtObjC = true;

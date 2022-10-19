@@ -32,7 +32,7 @@
 #include "Array.h"
 #include "Map.h"
 
-#if BUILDING_CACHE_BUILDER || BUILDING_UNIT_TESTS
+#if BUILDING_CACHE_BUILDER || BUILDING_UNIT_TESTS || BUILDING_CACHE_BUILDER_UNIT_TESTS
 #include <unordered_map>
 #endif
 
@@ -40,7 +40,11 @@ namespace objc {
 
 uint64_t lookup8(const uint8_t *k, size_t length, uint64_t level);
 
-#if BUILDING_CACHE_BUILDER || BUILDING_UNIT_TESTS
+#if BUILDING_CACHE_BUILDER || BUILDING_UNIT_TESTS || BUILDING_CACHE_BUILDER_UNIT_TESTS
+
+// An objc string is at a certain offset in to its buffer. Eg, a selector is a given offset
+// in to the selector strings buffer
+typedef std::pair<std::string_view, uint32_t> ObjCString;
 
 struct eqstr {
     bool operator()(const char* s1, const char* s2) const {
@@ -86,7 +90,7 @@ struct VIS_HIDDEN PerfectHash {
     /* representation of a key */
     struct key
     {
-#if BUILDING_CACHE_BUILDER || BUILDING_UNIT_TESTS
+#if BUILDING_CACHE_BUILDER || BUILDING_UNIT_TESTS || BUILDING_CACHE_BUILDER_UNIT_TESTS
         uint8_t        *name1_k;        /* the actual key */
         uint32_t         len1_k;        /* the length of the actual key */
         uint8_t        *name2_k;        /* the actual key */
@@ -107,9 +111,9 @@ struct VIS_HIDDEN PerfectHash {
     // For dyld at runtime to create perfect hash tables in the PrebuiltObjC
     static void make_perfect(const dyld3::OverflowSafeArray<const char*>& strings, objc::PerfectHash& phash);
 
-#if BUILDING_CACHE_BUILDER || BUILDING_UNIT_TESTS
+#if BUILDING_CACHE_BUILDER || BUILDING_UNIT_TESTS || BUILDING_CACHE_BUILDER_UNIT_TESTS
     // For the shared cache builder selector/class/protocol maps
-    static void make_perfect(const string_map& strings, objc::PerfectHash& phash);
+    static void make_perfect(const std::vector<ObjCString>& strings, objc::PerfectHash& phash);
 #endif
 };
 

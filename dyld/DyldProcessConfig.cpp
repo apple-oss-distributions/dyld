@@ -26,6 +26,7 @@
 #include <stdint.h>
 #include <dyld/VersionMap.h>
 #include <mach-o/dyld_priv.h>
+#include <sys/syscall.h>
 #if BUILDING_DYLD
     #include <sys/socket.h>
     #include <sys/syslog.h>
@@ -35,6 +36,8 @@
     #include <System/sys/csr.h>
     #include <System/sys/reason.h>
     #include <kern/kcdata.h>
+    //FIXME: Hack to avoid <sys/commpage.h> being included by <System/machine/cpu_capabilities.h>
+    #include <System/sys/commpage.h>
     #include <System/machine/cpu_capabilities.h>
     #if !TARGET_OS_DRIVERKIT
         #include <vproc_priv.h>
@@ -43,7 +46,11 @@
 extern "C" ssize_t __sendto(int, const void*, size_t, int, const struct sockaddr*, socklen_t);
 #endif
 
-#if TARGET_OS_SIMULATOR
+#include <string_view>
+
+#if !TARGET_OS_SIMULATOR && BUILDING_DYLD
+    #include <libamfi.h>
+#else
 enum
 {
     AMFI_DYLD_INPUT_PROC_IN_SIMULATOR = (1 << 0),
@@ -57,11 +64,10 @@ enum amfi_dyld_policy_output_flag_set
     AMFI_DYLD_OUTPUT_ALLOW_PRINT_VARS               = (1 << 4),
     AMFI_DYLD_OUTPUT_ALLOW_FAILED_LIBRARY_INSERTION = (1 << 5),
     AMFI_DYLD_OUTPUT_ALLOW_LIBRARY_INTERPOSING      = (1 << 6),
+    AMFI_DYLD_OUTPUT_ALLOW_EMBEDDED_VARS            = (1 << 7),
 };
 extern "C" int amfi_check_dyld_policy_self(uint64_t input_flags, uint64_t* output_flags);
     #include "dyldSyscallInterface.h"
-#else
-    #include <libamfi.h>
 #endif
 
 #include "MachOLoaded.h"
@@ -71,18 +77,13 @@ extern "C" int amfi_check_dyld_policy_self(uint64_t input_flags, uint64_t* outpu
 #include "Loader.h"
 #include "DyldProcessConfig.h"
 #include "DebuggerSupport.h"
+#include "Defines.h"
+#include "Utils.h"
 
+#if BUILDING_DYLD && SUPPORT_IGNITION
+    #include <ignition/ignite.h>
+#endif
 
-// based on ANSI-C strstr()
-static const char* strrstr(const char* str, const char* sub)
-{
-    const size_t sublen = strlen(sub);
-    for (const char* p = &str[strlen(str)]; p != str; --p) {
-        if ( ::strncmp(p, sub, sublen) == 0 )
-            return p;
-    }
-    return nullptr;
-}
 
 using dyld3::MachOFile;
 using dyld3::Platform;
@@ -134,13 +135,12 @@ static uint64_t hexToUInt64(const char* startHexByte, const char** endHexByte)
 
 namespace dyld4 {
 
-
 //
 // MARK: --- KernelArgs methods ---
 //
 #if !BUILDING_DYLD
-KernelArgs::KernelArgs(const MachOAnalyzer* mh, const std::vector<const char*>& argv, const std::vector<const char*>& envp, const std::vector<const char*>& apple)
-    : mainExecutable(mh)
+KernelArgs::KernelArgs(const MachOFile* mh, const std::vector<const char*>& argv, const std::vector<const char*>& envp, const std::vector<const char*>& apple)
+    : mainExecutable((const MachOAnalyzer*)mh)
     , argc(argv.size())
 {
     assert( argv.size() + envp.size() + apple.size() < MAX_KERNEL_ARGS);
@@ -186,26 +186,101 @@ const char** KernelArgs::findApple() const
 //
 // MARK: --- ProcessConfig methods ---
 //
-ProcessConfig::ProcessConfig(const KernelArgs* kernArgs, SyscallDelegate& syscallDelegate)
+ProcessConfig::ProcessConfig(const KernelArgs* kernArgs, SyscallDelegate& syscallDelegate, Allocator& allocator)
   : syscall(syscallDelegate),
-    process(kernArgs, syscallDelegate),
+    process(kernArgs, syscallDelegate, allocator),
     security(process, syscallDelegate),
     log(process, security, syscallDelegate),
-    dyldCache(process, security, log, syscallDelegate),
-    pathOverrides(process, security, log, dyldCache, syscallDelegate)
+    dyldCache(process, security, log, syscallDelegate, allocator),
+    pathOverrides(process, security, log, dyldCache, syscallDelegate, allocator)
 {
+#if TARGET_OS_OSX
+    // hack to allow macOS 13 dyld to run chrooted on older kernels
+    if ( (this->dyldCache.addr == nullptr) || (this->dyldCache.addr->header.mappingOffset <= __offsetof(dyld_cache_header, cacheSubType)) )
+        this->process.pageInLinkingMode = 0;
+#endif
 }
 
 #if !BUILDING_DYLD
-void ProcessConfig::reset(const MachOAnalyzer* mainExe, const char* mainPath, const DyldSharedCache* cache)
+void ProcessConfig::reset(const MachOFile* mainExe, const char* mainPath, const DyldSharedCache* cache)
 {
     process.mainExecutablePath    = mainPath;
     process.mainUnrealPath        = mainPath;
+#if BUILDING_CACHE_BUILDER
     process.mainExecutable        = mainExe;
+#else
+    process.mainExecutable        = (const MachOAnalyzer*)mainExe;
+#endif
     dyldCache.addr                = cache;
-    dyldCache.slide               = cache->slide();
+#if SUPPORT_VM_LAYOUT
+    dyldCache.slide               = (cache != nullptr) ? cache->slide() : 0;
+#endif
 }
 #endif
+
+void ProcessConfig::scanForRoots() const
+{
+#if BUILDING_DYLD && TARGET_OS_OSX
+    if ( this->dyldCache.addr == nullptr )
+        return;
+
+    DyldCommPage commPage = this->process.commPage;
+
+    __block bool foundRoot = false;
+    this->dyldCache.addr->forEachImage(^(const mach_header *mh, const char *installName) {
+        if ( foundRoot )
+            return;
+
+        // Skip sim dylibs. They are handled above
+        if ( !strcmp(installName, "/usr/lib/system/libsystem_kernel.dylib") ) {
+            if ( !commPage.libKernelRoot )
+                return;
+        }
+        if ( !strcmp(installName, "/usr/lib/system/libsystem_platform.dylib") ) {
+            if ( !commPage.libPlatformRoot )
+                return;
+        }
+        if ( !strcmp(installName, "/usr/lib/system/libsystem_pthread.dylib") ) {
+            if ( !commPage.libPthreadRoot )
+                return;
+        }
+
+        // Skip dyld.  It knows how to work if its a root
+        if ( !strcmp(installName, "/usr/lib/dyld") )
+            return;
+
+        bool stop = false;
+        this->pathOverrides.forEachPathVariant(installName, Platform::iOSMac, false, true, stop,
+                                               ^(const char* possiblePath, ProcessConfig::PathOverrides::Type type, bool& innerStop) {
+            // look only at variants that might override the original path
+            if ( type > ProcessConfig::PathOverrides::Type::rawPath ) {
+                innerStop = true;
+                return;
+            }
+
+            // dyld4::console("dyld: checking for root at %s\n", possiblePath);
+            if ( this->syscall.fileExists(possiblePath) ) {
+                // dyld4::console("dyld: found root at %s\n", possiblePath);
+                foundRoot = true;
+                innerStop = true;
+                return;
+            }
+        });
+    });
+
+    commPage.foundRoot = foundRoot;
+
+    this->syscall.setDyldCommPageFlags(commPage);
+
+#endif // BUILDING_DYLD && TARGET_OS_OSX
+}
+
+void* ProcessConfig::scanForRoots(void* context)
+{
+    const ProcessConfig* config = (const ProcessConfig*)context;
+    config->scanForRoots();
+    return nullptr;
+}
 
 
 //
@@ -224,31 +299,99 @@ static bool defaultDataConst(DyldCommPage commPage)
     }
 }
 
-
-ProcessConfig::Process::Process(const KernelArgs* kernArgs, SyscallDelegate& syscall)
+static bool defaultCompactInfo(DyldCommPage commPage)
 {
-    this->mainExecutable     = kernArgs->mainExecutable;
-    this->argc               = (int)kernArgs->argc;
-    this->argv               = kernArgs->findArgv();
-    this->envp               = kernArgs->findEnvp();
-    this->apple              = kernArgs->findApple();
-    this->pid                = syscall.getpid();
-    this->platform           = this->getMainPlatform();
-    this->mainUnrealPath     = this->getMainUnrealPath(syscall);
-    this->mainExecutablePath = this->getMainPath(syscall);
-    this->dyldPath           = this->getDyldPath(syscall);
-    this->progname           = PathOverrides::getLibraryLeafName(this->mainUnrealPath);
-    this->catalystRuntime    = this->usesCatalyst();
-    this->commPage           = syscall.dyldCommPageFlags();
-    this->archs              = this->getMainArchs(syscall);
-    this->isTranslated       = syscall.isTranslated();
-    this->enableDataConst    = defaultDataConst(this->commPage);
+    if ( commPage.enableCompactInfo ) {
+        return true;
+    } else if ( commPage.disableCompactInfo ) {
+        return false;
+    } else {
+        return true;
+    }
+}
+
+
+ProcessConfig::Process::Process(const KernelArgs* kernArgs, SyscallDelegate& syscall, Allocator& allocator)
+{
+    this->mainExecutable                                            = kernArgs->mainExecutable;
+    this->argc                                                      = (int)kernArgs->argc;
+    this->argv                                                      = kernArgs->findArgv();
+    this->envp                                                      = kernArgs->findEnvp();
+    this->apple                                                     = kernArgs->findApple();
+    this->pid                                                       = syscall.getpid();
+    this->platform                                                  = this->getMainPlatform();
+    std::tie(this->mainExecutableFSID, this->mainExecutableObjID)   = this->getMainFileID();
+    this->mainUnrealPath                                            = this->getMainUnrealPath(syscall, allocator);
+    this->mainExecutablePath                                        = this->getMainPath(syscall, allocator);
+    std::tie(this->dyldFSID, this->dyldObjID)                       = this->getDyldFileID();
+#if TARGET_OS_SIMULATOR
+    std::tie(this->dyldSimFSID, this->dyldSimObjID)                 = this->getDyldSimFileID(syscall);
+#endif
+    this->dyldPath                                                  = this->getDyldPath(syscall, allocator);
+    this->progname                                                  = PathOverrides::getLibraryLeafName(this->mainUnrealPath);
+    this->catalystRuntime                                           = this->usesCatalyst();
+    this->commPage                                                  = syscall.dyldCommPageFlags();
+    if ( this->pid == 1 ) {
+        // The comm page flags are effectively a namespace.  PID 1 should mask out the bits it owns
+        *((uint64_t*)&this->commPage) &= DyldCommPage::bootArgsMask;
+
+#if TARGET_OS_OSX
+        // Only macOS uses the "foundRoot" variable.  But its only set later in scanForRoots().
+        // Until that runs, assume we have roots, as we don't know for sure that we don't
+        this->commPage.foundRoot = true;
+#endif
+    }
+    this->archs                                                     = this->getMainArchs(syscall);
+    this->isTranslated                                              = syscall.isTranslated();
+    this->enableDataConst                                           = defaultDataConst(this->commPage);
+    this->enableCompactInfo                                         = defaultCompactInfo(this->commPage);
 #if TARGET_OS_OSX
     this->proactivelyUseWeakDefMap = (strncmp(progname, "MATLAB",6) == 0); // rdar://81498849
 #else
     this->proactivelyUseWeakDefMap = false;
 #endif
+    this->pageInLinkingMode  = 2;
+    if ( syscall.internalInstall() ) {
+        if ( const char* mode = environ("DYLD_PAGEIN_LINKING") ) {
+            if (strcmp(mode, "0") == 0 )
+                this->pageInLinkingMode = 0;    // no page-in-linking
+            else if (strcmp(mode, "1") == 0 )
+                this->pageInLinkingMode = 1;    // page-in-linking data structures set up, by applied in-process by dyld
+            else if (strcmp(mode, "2") == 0 )
+                this->pageInLinkingMode = 2;    // page-in-linking done by kernel
+            else if (strcmp(mode, "3") == 0 )
+                this->pageInLinkingMode = 3;    // page-in-linking done by kernel, not disabled
+        }
+    }
+    if ( (this->pageInLinkingMode >= 2) && syscall.sandboxBlockedPageInLinking() ) {
+        //console("sandboxing has disabled page-in linking\n");
+        this->pageInLinkingMode = 0;
+    }
+#if __has_feature(ptrauth_calls)
+    // FIXME: don't use page-in linking for these process that use B keys
+    if ( strcmp(this->mainExecutablePath, "/usr/libexec/adid") == 0 )
+        this->pageInLinkingMode = 0;
+    if ( strcmp(this->mainExecutablePath, "/usr/libexec/fairplaydeviceidentityd") == 0 )
+        this->pageInLinkingMode = 0;
+  #if TARGET_OS_OSX
+    if ( strcmp(this->mainExecutablePath, "/System/Library/PrivateFrameworks/CoreFP.framework/Versions/A/fairplayd") == 0 )
+        this->pageInLinkingMode = 0;
+  #else
+    if ( strncmp(this->mainExecutablePath, "/usr/sbin/fairplayd", 19) == 0 )
+        this->pageInLinkingMode = 0;
+  #endif
 
+#endif
+
+#if TARGET_OS_TV && __arm64__
+    // rdar://88514639 disable page-in-linking for tvOS
+    this->pageInLinkingMode = 0;
+#endif
+#if TARGET_OS_OSX
+    // don't use page-in-linking when running under rosetta
+    if ( this->isTranslated )
+        this->pageInLinkingMode = 0;
+#endif
 }
 
 const char* ProcessConfig::Process::appleParam(const char* key) const
@@ -261,80 +404,94 @@ const char* ProcessConfig::Process::environ(const char* key) const
     return _simple_getenv((const char**)envp, key);
 }
 
-void* ProcessConfig::Process::roalloc(size_t size) const
-{
-#if BUILDING_DYLD
-    // warning: fragile code here.  The goal is to have a small buffer that
-    // goes onto the end of the __DATA_CONST segment.  That segment is r/w
-    // while ProcessConfig is being constructed, then made r/o.
-    static uint8_t roBuffer[0x10000] __attribute__((section("__DATA_CONST,__bss")));
-    static uint8_t* next = roBuffer;
-    assert( next < &roBuffer[0x10000]);
-    void* result = next;
-    next += size;
-    return result;
-#else
-    return ::malloc(size);
-#endif
-}
-
-const char* ProcessConfig::Process::strdup(const char* str) const
-{
-#if BUILDING_DYLD
-    size_t  size   = strlen(str)+1;
-    char*   result = (char*)roalloc(size);
-    ::strcpy(result, str);
-    return result;
-#else
-    return ::strdup(str);
-#endif
-}
-
-const char* ProcessConfig::Process::pathFromFileHexStrings(SyscallDelegate& sys, const char* encodedFileInfo)
+std::pair<uint64_t, uint64_t> ProcessConfig::Process::fileIDFromFileHexStrings(const char* encodedFileInfo)
 {
     // kernel passes fsID and objID encoded as two hex values (e.g. 0x123,0x456)
     const char* endPtr  = nullptr;
     uint64_t    fsID    = hexToUInt64(encodedFileInfo, &endPtr);
-    if ( endPtr != nullptr ) {
-        uint64_t objID = hexToUInt64(endPtr+1, &endPtr);
+    if ( endPtr == nullptr ) { return {0, 0}; }
+    uint64_t objID = hexToUInt64(endPtr+1, &endPtr);
+    if ( endPtr == nullptr ) { return {0, 0}; }
+
+    // something wrong with "executable_file=" or "dyld_file=" encoding
+    return { fsID, objID };
+}
+
+const char* ProcessConfig::Process::pathFromFileHexStrings(SyscallDelegate& sys, Allocator& allocator, const char* encodedFileInfo)
+{
+    auto [fsID, objID] = fileIDFromFileHexStrings(encodedFileInfo);
+    if (fsID && objID) {
         char pathFromIDs[MAXPATHLEN];
         if ( sys.fsgetpath(pathFromIDs, MAXPATHLEN, fsID, objID) != -1 ) {
             // return read-only copy of absolute path
-            return this->strdup(pathFromIDs);
+            return allocator.strdup(pathFromIDs);
         }
     }
-
     // something wrong with "executable_file=" or "dyld_file=" encoding
     return nullptr;
 }
 
-const char* ProcessConfig::Process::getDyldPath(SyscallDelegate& sys)
-{
+std::pair<uint64_t, uint64_t> ProcessConfig::Process::getDyldFileID() {
     // kernel passes fsID and objID of dyld encoded as two hex values (e.g. 0x123,0x456)
     if ( const char* dyldFsIdAndObjId = this->appleParam("dyld_file") ) {
-        if ( const char* path = this->pathFromFileHexStrings(sys, dyldFsIdAndObjId) )
-            return path;
+        return fileIDFromFileHexStrings(dyldFsIdAndObjId);
     }
+    return {0,0};
+}
+
+#if TARGET_OS_SIMULATOR
+std::pair<uint64_t, uint64_t> ProcessConfig::Process::getDyldSimFileID(SyscallDelegate& sys) {
+    const char* rootPath = this->environ("DYLD_ROOT_PATH");
+    char simDyldPath[PATH_MAX];
+    strlcpy(simDyldPath, rootPath, PATH_MAX);
+    strlcat(simDyldPath, "/usr/lib/dyld_sim", PATH_MAX);
+    struct stat stat_buf;
+    if (sys.stat(simDyldPath, &stat_buf) == 0) {
+        return {stat_buf.st_dev, stat_buf.st_ino};
+    }
+    return {0,0};
+}
+#endif
+
+const char* ProcessConfig::Process::getDyldPath(SyscallDelegate& sys, Allocator& allocator)
+{
+    if (dyldFSID && dyldObjID) {
+        char pathFromIDs[MAXPATHLEN];
+        if ( sys.fsgetpath(pathFromIDs, MAXPATHLEN, dyldFSID, dyldObjID) != -1 ) {
+            return allocator.strdup(pathFromIDs);
+        }
+    }
+
     // something wrong with "dyld_file=", fallback to default
     return "/usr/lib/dyld";
 }
 
-const char* ProcessConfig::Process::getMainPath(SyscallDelegate& sys)
-{
-    // kernel passes fsID and objID of main executable encoded as two hex values (e.g. 0x123,0x456)
-    if ( const char* mainPathFsIdAndObjId = this->appleParam("executable_file") ) {
-        if ( const char* path = this->pathFromFileHexStrings(sys, mainPathFsIdAndObjId) )
-            return path;
+std::pair<uint64_t, uint64_t> ProcessConfig::Process::getMainFileID() {
+    // kernel passes fsID and objID of dyld encoded as two hex values (e.g. 0x123,0x456)
+    if ( const char* dyldFsIdAndObjId = this->appleParam("executable_file") ) {
+        return fileIDFromFileHexStrings(dyldFsIdAndObjId);
     }
+    return {0,0};
+}
+
+const char* ProcessConfig::Process::getMainPath(SyscallDelegate& sys, Allocator& allocator)
+{
+    if (mainExecutableFSID && mainExecutableObjID) {
+        char pathFromIDs[MAXPATHLEN];
+        if ( sys.fsgetpath(pathFromIDs, MAXPATHLEN, mainExecutableFSID, mainExecutableObjID) != -1 ) {
+            return allocator.strdup(pathFromIDs);
+        }
+    }
+
     // something wrong with "executable_file=", fallback to (un)realpath
     char resolvedPath[PATH_MAX];
     if ( sys.realpath(this->mainUnrealPath, resolvedPath) ) {
-        return this->strdup(resolvedPath);
+        return allocator.strdup(resolvedPath);
     }
     return this->mainUnrealPath;
 }
 
-const char* ProcessConfig::Process::getMainUnrealPath(SyscallDelegate& sys)
+const char* ProcessConfig::Process::getMainUnrealPath(SyscallDelegate& sys, Allocator& allocator)
 {
     // if above failed, kernel also passes path to main executable in apple param
     const char* mainPath = this->appleParam("executable_path");
@@ -354,7 +511,7 @@ const char* ProcessConfig::Process::getMainUnrealPath(SyscallDelegate& sys)
         if ( sys.getCWD(buff) ) {
             strlcat(buff, "/", MAXPATHLEN);
             strlcat(buff, mainPath, MAXPATHLEN);
-            mainPath = this->strdup(buff);
+            mainPath = allocator.strdup(buff);
         }
     }
 
@@ -456,25 +613,43 @@ Platform ProcessConfig::Process::getMainPlatform()
 
 const GradedArchs* ProcessConfig::Process::getMainArchs(SyscallDelegate& sys)
 {
-    bool keysOff = false;
+    bool keysOff        = false;
+    bool osBinariesOnly = false;
 #if BUILDING_CLOSURE_UTIL
     // In closure util, just assume we want to allow arm64 binaries to get closures built
     // against arm64e shared caches
     if ( strcmp(mainExecutable->archName(), "arm64e") == 0 )
         keysOff = true;
-#else
-    // Check and see if kernel disabled JOP pointer signing (which lets us load plain arm64 binaries)
-    if ( const char* disableStr = this->appleParam("ptrauth_disabled") ) {
+#elif BUILDING_DYLD
+  #if __has_feature(ptrauth_calls)
+    if ( strcmp(mainExecutable->archName(), "arm64") == 0 ) {
+        // keys are always off for arm64 apps
+        keysOff = true;
+    }
+    else if ( const char* disableStr = this->appleParam("ptrauth_disabled") ) {
+        // Check and see if kernel disabled JOP pointer signing for some other reason
         if ( strcmp(disableStr, "1") == 0 )
             keysOff = true;
     }
-    else {
-        // needed until kernel passes ptrauth_disabled for arm64 main executables
-        if ( strcmp(mainExecutable->archName(), "arm64") == 0 )
+  #endif
+  #if TARGET_OS_OSX
+    // on Apple Silicon macOS, only Apple signed ("platform binary") arm64e dylibs can be loaded
+    osBinariesOnly = true;
+
+    // But, on Internal builds, or if boot-arg is set, then non-platform-binary arm64e slices can be run
+    if ( const char* abiMode = this->appleParam("arm64e_abi") ) {
+        if ( strcmp(abiMode, "all") == 0 )
+            osBinariesOnly = false;
+    }
+  #endif
+#else
+    if ( const char* disableStr = this->appleParam("ptrauth_disabled") ) {
+        // Check and see if kernel disabled JOP pointer signing for some other reason
+        if ( strcmp(disableStr, "1") == 0 )
             keysOff = true;
     }
 #endif
-    return &sys.getGradedArchs(mainExecutable->archName(), keysOff);
+    return &sys.getGradedArchs(mainExecutable->archName(), keysOff, osBinariesOnly);
 }
 
 
@@ -487,6 +662,13 @@ ProcessConfig::Security::Security(Process& process, SyscallDelegate& syscall)
     this->internalInstall           = syscall.internalInstall();  // Note: must be set up before calling getAMFI()
     this->skipMain                  = this->internalInstall && process.environ("DYLD_SKIP_MAIN");
 
+    // just on internal installs in launchd, dyld_flags= will alter the CommPage
+    if ( (process.pid == 1) && this->internalInstall  ) {
+        if ( const char* bootFlags = process.appleParam("dyld_flags") ) {
+            *((uint32_t*)&process.commPage) = (uint32_t)hexToUInt64(bootFlags, nullptr);
+        }
+    }
+
     const uint64_t amfiFlags = getAMFI(process, syscall);
     this->allowAtPaths              = (amfiFlags & AMFI_DYLD_OUTPUT_ALLOW_AT_PATH);
     this->allowEnvVarsPrint         = (amfiFlags & AMFI_DYLD_OUTPUT_ALLOW_PRINT_VARS);
@@ -495,11 +677,7 @@ ProcessConfig::Security::Security(Process& process, SyscallDelegate& syscall)
     this->allowClassicFallbackPaths = (amfiFlags & AMFI_DYLD_OUTPUT_ALLOW_FALLBACK_PATHS);
     this->allowInsertFailures       = (amfiFlags & AMFI_DYLD_OUTPUT_ALLOW_FAILED_LIBRARY_INSERTION);
     this->allowInterposing          = (amfiFlags & AMFI_DYLD_OUTPUT_ALLOW_LIBRARY_INTERPOSING);
-#if TARGET_OS_OSX
-    this->allowEmbeddedVars = (amfiFlags & (1<<7)); // FIXME: use AMFI_DYLD_OUTPUT_ALLOW_EMBEDDED_VARS when available);
- #else
-    this->allowEmbeddedVars = this->allowEnvVarsPath;
- #endif
+    this->allowEmbeddedVars         = (amfiFlags & AMFI_DYLD_OUTPUT_ALLOW_EMBEDDED_VARS);
 #if TARGET_OS_SIMULATOR
     this->allowInsertFailures       = true; // FIXME: amfi is returning the wrong value for simulators <rdar://74025454>
 #endif
@@ -527,15 +705,8 @@ uint64_t ProcessConfig::Security::getAMFI(const Process& proc, SyscallDelegate& 
     uint32_t fpSize;
     uint64_t amfiFlags = sys.amfiFlags(proc.mainExecutable->isRestricted(), proc.mainExecutable->isFairPlayEncrypted(fpTextOffset, fpSize));
 
-    bool testMode = proc.commPage.testMode;
-#if !BUILDING_DYLD
-    // during unit tests, commPage not set up yet, so peak ahead
-    if ( const char* bootFlags = proc.appleParam("dyld_flags") ) {
-        testMode = ((hexToUInt64(bootFlags, nullptr) & 0x02) != 0);
-    }
-#endif
-
     // let DYLD_AMFI_FAKE override actual AMFI flags, but only on internalInstalls with boot-arg set
+    bool testMode = proc.commPage.testMode;
     if ( const char* amfiFake = proc.environ("DYLD_AMFI_FAKE") ) {
         //console("env DYLD_AMFI_FAKE set, boot-args dyld_flags=%s\n", this->getAppleParam("dyld_flags"));
         if ( !testMode ) {
@@ -619,26 +790,194 @@ ProcessConfig::Logging::Logging(const Process& process, const Security& security
 // MARK: --- DyldCache methods ---
 //
 
-ProcessConfig::DyldCache::DyldCache(Process& process, const Security& security, const Logging& log, SyscallDelegate& syscall)
+#if BUILDING_DYLD || BUILDING_CACHE_BUILDER || BUILDING_CLOSURE_UTIL
+static const char* getSystemCacheDir(dyld3::Platform platform)
+{
+    if ( platform == dyld3::Platform::driverKit )
+        return DRIVERKIT_DYLD_SHARED_CACHE_DIR;
+
+    // This is gross, but using defines is easier than trying to work out what to do when running
+    // iOS apps on macOS
+#if TARGET_OS_OSX
+    return MACOSX_MRM_DYLD_SHARED_CACHE_DIR;
+#else
+    return IPHONE_DYLD_SHARED_CACHE_DIR;
+#endif
+}
+#endif // BUILDING_DYLD || BUILDING_CACHE_BUILDER
+
+// Shared caches may be found in the system cache dir, or an override
+// via env vars, or a cryptex from libignition.  This works out which one
+struct CacheFinder
+{
+    CacheFinder(const ProcessConfig::Process& process,
+                const ProcessConfig::Logging& log,
+                SyscallDelegate& syscall);
+    ~CacheFinder();
+
+    int cacheDirFD = -1;
+    SyscallDelegate& syscall;
+
+#if BUILDING_DYLD && SUPPORT_IGNITION
+    ignition_payload_t ignitionPayload = IGNITION_PAYLOAD_INIT;
+    bool usesIgnition = false;
+    int ignitionRootFD = -1;
+#endif
+};
+
+CacheFinder::CacheFinder(const ProcessConfig::Process& process,
+                         const ProcessConfig::Logging& log,
+                         SyscallDelegate& syscall)
+    : syscall(syscall)
+{
+#if BUILDING_DYLD
+    if ( const char* overrideDir = process.environ("DYLD_SHARED_CACHE_DIR") ) {
+        this->cacheDirFD = this->syscall.open(overrideDir, O_RDONLY, 0);
+
+        // Early return on invalid shared cache dir.
+        if ( this->cacheDirFD == -1 ) {
+            return;
+        }
+    }
+
+    // Check libignition
+#if SUPPORT_IGNITION
+    if ( !process.commPage.skipIgnition ) {
+#if IGNITION_PARAMETERS_STRUCT_VERSION >= 1
+        ignition_parameters_t params = {
+            IGNITION_PARAMETERS_STRUCT_VERSION,
+            process.argc,
+            (const char**)process.argv,
+            (const char**)process.envp,
+            (const char**)process.apple,
+            -1,
+            (uint32_t)process.platform,
+        };
+#else
+        ignition_parameters_t params = {
+            IGNITION_PARAMETERS_STRUCT_VERSION,
+            process.argc,
+            (const char**)process.argv,
+            (const char**)process.envp,
+            (const char**)process.apple,
+            -1
+        };
+#endif // IGNITION_PARAMETERS_STRUCT_VERSION
+
+        errno_t result = ignite(&params, &ignitionPayload);
+        if ( result == 0 ) {
+            if ( os_fd_valid(ignitionPayload.pl_shared_cache) ) {
+                // Only use ignition shared cache if we don't have one set already.
+                if ( this->cacheDirFD == -1  ) {
+                    this->cacheDirFD = ignitionPayload.pl_shared_cache;
+                    this->usesIgnition = true;
+                } else {
+                    // Manually close ignition cache fd since we won't use it.
+                    this->syscall.close(ignitionPayload.pl_shared_cache);
+                }
+            }
+            if ( os_fd_valid(ignitionPayload.pl_os_graft) ) {
+                this->ignitionRootFD = ignitionPayload.pl_os_graft;
+            }
+        }
+        else {
+            if ( process.pid == 1 ) {
+                dyld4::console("ignite() returned %d\n", result);
+                switch ( result ) {
+                    case ENOEXEC:
+                        dyld4::console("ignition disabled\n");
+                        break;
+                    case EIDRM:
+                        halt("ignition failed");
+                        break;
+                    case ECANCELED:
+                        dyld4::console("ignition partially disabled\n");
+                        break;
+                    case ENODEV:
+                        dyld4::console("no shared cache available\n");
+                        break;
+                    case EBADEXEC:
+                        halt("no shared cache in cryptex");
+                        break;
+                    }
+            }
+            if (result == EBADEXEC ) {
+                // This is fatal.  Should we terminate the process, or just run
+                // without a cache?
+                // For now, lets log it, and return with no cache dir FD
+                // That means we
+                if ( log.segments ) {
+                    dyld4::console("ignite() returned %d\n", result);
+                }
+            }
+        }
+
+        // If we found a cache with ignition, we might prefer to use the system shared cache instead
+        if ( this->usesIgnition ) {
+            bool preferSystemCache = false;
+            if ( process.platform == dyld3::Platform::driverKit )
+                preferSystemCache = process.commPage.useSystemDriverKitCache;
+            else
+                preferSystemCache = process.commPage.useSystemCache;
+
+            if ( preferSystemCache ) {
+                if ( this->cacheDirFD != -1 )
+                    this->syscall.close(this->cacheDirFD);
+                this->cacheDirFD = -1;
+                this->usesIgnition = false;
+            }
+        }
+
+        // If we found a cache with ignition, then use it.  Otherwise fall though
+        // to the system default location
+        if ( this->usesIgnition )
+            return;
+    }
+#endif // SUPPORT_IGNITION
+
+    if ( this->cacheDirFD != -1 )
+        return;
+
+    // Finally use the system path
+    this->cacheDirFD = this->syscall.open(getSystemCacheDir(process.platform), O_RDONLY, 0);
+#endif // BUILDING_DYLD
+}
+
+CacheFinder::~CacheFinder()
+{
+#if BUILDING_DYLD && SUPPORT_IGNITION
+    if ( usesIgnition ) {
+        // Let ignition close the FD
+        auto* ignitionPayloadPtr = &this->ignitionPayload;
+        jettison(&ignitionPayloadPtr);
+        return;
+    }
+#endif // BUILDING_DYLD && SUPPORT_IGNITION
+
+    if ( this->cacheDirFD != -1 ) {
+        this->syscall.close(this->cacheDirFD);
+    }
+}
+
+ProcessConfig::DyldCache::DyldCache(Process& process, const Security& security, const Logging& log, SyscallDelegate& syscall, Allocator& allocator)
 {
     bool forceCustomerCache = process.commPage.forceCustomerCache;
     bool forceDevCache      = process.commPage.forceDevCache;
+
+    // Work out which directories to search for caches
+    CacheFinder cacheFinder(process, log, syscall);
+
 #if BUILDING_DYLD
     // in launchd commpage is not set up yet
     if ( process.pid == 1 ) {
         if ( security.internalInstall ) {
             // default to development cache for internal installs
             forceCustomerCache = false;
-            if ( const char* bootFlags = process.appleParam("dyld_flags") ) {
-                // on internal installs, dyld_flags can force customer cache
-                DyldCommPage cpFlags;
-                *((uint32_t*)&cpFlags) = (uint32_t)hexToUInt64(bootFlags, nullptr);
-                if ( cpFlags.forceCustomerCache )
-                    forceCustomerCache = true;
-                if ( cpFlags.forceDevCache ) {
-                    forceDevCache      = true;
-                    forceCustomerCache = false;
-                }
+            if ( process.commPage.forceCustomerCache )
+                forceCustomerCache = true;
+            if ( process.commPage.forceDevCache ) {
+                forceDevCache      = true;
+                forceCustomerCache = false;
             }
         }
         else {
@@ -647,7 +986,7 @@ ProcessConfig::DyldCache::DyldCache(Process& process, const Security& security, 
             forceDevCache      = false;
         }
     }
-#endif
+#endif // BUILDING_DYLD
 
     // load dyld cache if needed
     const char*               cacheMode = process.environ("DYLD_SHARED_REGION");
@@ -663,11 +1002,17 @@ ProcessConfig::DyldCache::DyldCache(Process& process, const Security& security, 
         }
     }
 #endif
+
     dyld3::SharedCacheOptions opts;
-    opts.cacheDirOverride         = process.environ("DYLD_SHARED_CACHE_DIR");
+    opts.cacheDirFD               = cacheFinder.cacheDirFD;
     opts.forcePrivate             = security.allowEnvVarsSharedCache && (cacheMode != nullptr) && (strcmp(cacheMode, "private") == 0);
     opts.useHaswell               = syscall.onHaswell();
     opts.verbose                  = log.segments;
+#if TARGET_OS_OSX && BUILDING_DYLD
+    // if this is host dyld about to switch to dyld_sim, suppress logging to avoid confusing double logging
+    if ( opts.verbose && MachOFile::isSimulatorPlatform(process.platform) )
+        opts.verbose = false;
+#endif
     opts.disableASLR              = false; // FIXME
     opts.enableReadOnlyDataConst  = process.enableDataConst;
     opts.preferCustomerCache      = forceCustomerCache;
@@ -675,38 +1020,123 @@ ProcessConfig::DyldCache::DyldCache(Process& process, const Security& security, 
     opts.isTranslated             = process.isTranslated;
     opts.platform                 = process.platform;
     this->addr                    = nullptr;
+#if SUPPORT_VM_LAYOUT
     this->slide                   = 0;
+#endif
+    this->unslidLoadAddress       = 0;
+    this->development             = false;
+    this->dylibsExpectedOnDisk    = false;
     this->path                    = nullptr;
-    this->objCCacheInfo           = nullptr;
+    this->objcHeaderInfoRO        = nullptr;
+    this->objcHeaderInfoRW        = nullptr;
+    this->objcSelectorHashTable   = nullptr;
+    this->objcClassHashTable      = nullptr;
+    this->objcProtocolHashTable   = nullptr;
     this->swiftCacheInfo          = nullptr;
+    this->objcHeaderInfoROUnslidVMAddr = 0;
+    this->objcProtocolClassCacheOffset = 0;
     this->platform                = Platform::unknown;
     this->osVersion               = 0;
     this->dylibCount              = 0;
     if ( (cacheMode == nullptr) || (strcmp(cacheMode, "avoid") != 0) ) {
         dyld3::SharedCacheLoadInfo loadInfo;
-        syscall.getDyldCache(opts, loadInfo);
+        bool isSimHost = false;
+#if TARGET_OS_OSX && BUILDING_DYLD
+        isSimHost = MachOFile::isSimulatorPlatform(process.platform);
+#endif
+        if ( !isSimHost ) {
+            syscall.getDyldCache(opts, loadInfo);
+        }
+
         if ( loadInfo.loadAddress != nullptr ) {
             this->addr      = loadInfo.loadAddress;
+            this->development = loadInfo.development;
+            this->dylibsExpectedOnDisk  = this->addr->header.dylibsExpectedOnDisk;
+
+            // All of the following are manually set by the cache builder prior to building loaders
+            // The cache builder won't use the calls here to set any initial values
+#if SUPPORT_VM_LAYOUT
             this->slide     = loadInfo.slide;
-            this->path      = process.strdup(loadInfo.path);
-            this->objCCacheInfo  = this->addr->objcOpt();
-            this->swiftCacheInfo = this->addr->swiftOpt();
-            this->dylibCount     = this->addr->imagesCount();
             this->setPlatformOSVersion(process);
+
+            this->unslidLoadAddress     = this->addr->unslidLoadAddress();
+            this->objcHeaderInfoRO      = this->addr->objcHeaderInfoRO();
+            this->objcHeaderInfoRW      = this->addr->objcHeaderInfoRW();
+            this->objcSelectorHashTable = this->addr->objcSelectorHashTable();
+            this->objcClassHashTable    = this->addr->objcClassHashTable();
+            this->objcProtocolHashTable = this->addr->objcProtocolHashTable();
+            this->swiftCacheInfo        = this->addr->swiftOpt();
+            this->dylibCount            = this->addr->imagesCount();
+
+            this->objcHeaderInfoROUnslidVMAddr = 0;
+            if ( this->objcHeaderInfoRO != nullptr ) {
+                uint64_t offsetInCache = (uint64_t)this->objcHeaderInfoRO - (uint64_t)this->addr;
+                this->objcHeaderInfoROUnslidVMAddr = this->unslidLoadAddress + offsetInCache;
+            }
+
+            // In the cache builder, we'll set this manually before building Loader's.
+            // In dyld at runtime, we'll calculate it lazily in PreBuiltObjC if we need it
+            this->objcProtocolClassCacheOffset = 0;
+
+            this->patchTable = PatchTable(this->addr->patchTable(), this->addr->header.patchInfoAddr);
 
             // The shared cache is mapped with RO __DATA_CONST, but this
             // process might need RW
             if ( !opts.enableReadOnlyDataConst )
                 makeDataConstWritable(log, syscall, true);
+#endif // SUPPORT_VM_LAYOUT
+
+#if TARGET_OS_OSX && BUILDING_DYLD
+            // On macOS, we scan for roots at boot.  This is only done in PID 1, so we can only use
+            // this result on the shared cache mapped at that point, not driverKit/Rosetta
+            if ( !process.commPage.bootVolumeWritable
+                && !process.commPage.foundRoot
+                && !process.isTranslated ) {
+                if ( (process.platform == dyld3::Platform::macOS) || (process.platform == dyld3::Platform::iOSMac) ) {
+                    this->development = false;
+                }
+            }
+#endif // TARGET_OS_OSX
+
+#if BUILDING_CACHE_BUILDER || BUILDING_CLOSURE_UTIL
+            this->path = allocator.strdup(getSystemCacheDir(process.platform));
+#else
+            if (loadInfo.FSID && loadInfo.FSObjID) {
+                char pathFromIDs[MAXPATHLEN];
+                if ( syscall.fsgetpath(pathFromIDs, MAXPATHLEN, loadInfo.FSID, loadInfo.FSObjID) != -1 ) {
+                    this->path = allocator.strdup(pathFromIDs);
+                }
+            } else {
+#if BUILDING_DYLD
+                halt("dyld shared region dynamic config data was not set\n");
+#else
+                abort();
+#endif
+            }
+#endif
         }
         else {
 #if BUILDING_DYLD && !TARGET_OS_SIMULATOR
             // <rdar://74102798> log all shared cache errors except no cache file
             if ( loadInfo.cacheFileFound )
-                console("dyld cache '%s' not loaded: %s\n", loadInfo.path, loadInfo.errorMessage);
+                console("dyld cache '%s' not loaded: %s\n", this->path, loadInfo.errorMessage);
+
+            if ( cacheMode != nullptr ) {
+                if ( strcmp(cacheMode, "private") == 0 && !loadInfo.cacheFileFound)
+                    halt("dyld private shared cache could not be found\n");
+            }
 #endif
         }
     }
+
+#if BUILDING_DYLD && SUPPORT_IGNITION
+    if ( cacheFinder.ignitionRootFD != -1 ) {
+        char buffer[PATH_MAX];
+        if ( syscall.getpath(cacheFinder.ignitionRootFD, buffer) )
+            this->cryptexOSPath = allocator.strdup(buffer);
+    }
+#endif // BUILDING_DYLD && SUPPORT_IGNITION
+
 #if BUILDING_DYLD
     // in launchd we set up the dyld comm-page bits
     if ( process.pid == 1 )
@@ -714,10 +1144,19 @@ ProcessConfig::DyldCache::DyldCache(Process& process, const Security& security, 
         this->setupDyldCommPage(process, security, syscall);
 }
 
+#if SUPPORT_VM_LAYOUT
 bool ProcessConfig::DyldCache::uuidOfFileMatchesDyldCache(const Process& proc, const SyscallDelegate& sys, const char* dylibPath) const
 {
+    // getLoader is going to find the path in the OS cryptex. We need to remove that prefix here, as the cache doesn't contain
+    // cryptex paths
+    std::string_view installName(dylibPath);
+    if ( !this->cryptexOSPath.empty() ) {
+        if ( installName.starts_with(this->cryptexOSPath) ) {
+            installName.remove_prefix(this->cryptexOSPath.size());
+        }
+    }
     // get UUID of dylib in cache
-    if ( const dyld3::MachOFile* cacheMF = this->addr->getImageFromPath(dylibPath) ) {
+    if ( const dyld3::MachOFile* cacheMF = this->addr->getImageFromPath(installName.data()) ) {
         uuid_t cacheUUID;
         if ( !cacheMF->getUuid(cacheUUID) )
             return false;
@@ -775,46 +1214,111 @@ void ProcessConfig::DyldCache::setPlatformOSVersion(const Process& proc)
         }
      }
 }
+#endif // SUPPORT_VM_LAYOUT
+
+#if TARGET_OS_OSX && SUPPORT_VM_LAYOUT
+// FIXME: Move to StringUtils and remove other copies
+static void concatenatePaths(char *path, const char *suffix, size_t pathsize)
+{
+    if ( (path[strlen(path) - 1] == '/') && (suffix[0] == '/') )
+        strlcat(path, &suffix[1], pathsize); // avoid double slash when combining path
+    else
+        strlcat(path, suffix, pathsize);
+}
+#endif
 
 void ProcessConfig::DyldCache::setupDyldCommPage(Process& proc, const Security& sec, SyscallDelegate& sys)
 {
-    DyldCommPage cpFlags;
 #if !TARGET_OS_SIMULATOR
     // in launchd we compute the comm-page flags we want and set them for other processes to read
-    cpFlags.bootVolumeWritable = sys.bootVolumeWritable();
-    if ( const char* bootFlags = proc.appleParam("dyld_flags") ) {
-        // low 32-bits of comm page comes from dyld_flags boot-arg
-        *((uint32_t*)&cpFlags) = (uint32_t)hexToUInt64(bootFlags, nullptr);
-        if ( !sec.internalInstall ) {
-            cpFlags.forceCustomerCache = true;
-            cpFlags.testMode           = false;
-            cpFlags.forceDevCache      = false;
-            cpFlags.bootVolumeWritable = false;
-        }
+    proc.commPage.bootVolumeWritable = sys.bootVolumeWritable();
+    // just in case, force these flags off for customer installs
+    if ( !sec.internalInstall ) {
+        proc.commPage.forceCustomerCache = true;
+        proc.commPage.testMode           = false;
+        proc.commPage.forceDevCache      = false;
+        proc.commPage.bootVolumeWritable = false;
+        proc.commPage.foundRoot          = false;
     }
 #endif
-#if TARGET_OS_OSX
+
+#if TARGET_OS_OSX && SUPPORT_VM_LAYOUT
     // on macOS, three dylibs under libsystem are on disk but may need to be ignored
     if ( this->addr != nullptr ) {
-        cpFlags.libKernelRoot   = !this->uuidOfFileMatchesDyldCache(proc, sys, "/usr/lib/system/libsystem_kernel.dylib");
-        cpFlags.libPlatformRoot = !this->uuidOfFileMatchesDyldCache(proc, sys, "/usr/lib/system/libsystem_platform.dylib");
-        cpFlags.libPthreadRoot  = !this->uuidOfFileMatchesDyldCache(proc, sys, "/usr/lib/system/libsystem_pthread.dylib");
+        auto uuidMatchesDylCache = ^(const char* dylibPath) {
+            if ( !this->uuidOfFileMatchesDyldCache(proc, sys, dylibPath) )
+                return false;
+
+            // Also check the cryptex
+            if ( !this->cryptexOSPath.empty() ) {
+                char pathBuffer[PATH_MAX] = { 0 };
+                strlcpy(pathBuffer, this->cryptexOSPath.data(), sizeof(pathBuffer));
+                concatenatePaths(pathBuffer, dylibPath, sizeof(pathBuffer));
+                if ( !this->uuidOfFileMatchesDyldCache(proc, sys, pathBuffer) )
+                    return false;
+            }
+
+            return true;
+        };
+        proc.commPage.libKernelRoot   = !uuidMatchesDylCache("/usr/lib/system/libsystem_kernel.dylib");
+        proc.commPage.libPlatformRoot = !uuidMatchesDylCache("/usr/lib/system/libsystem_platform.dylib");
+        proc.commPage.libPthreadRoot  = !uuidMatchesDylCache("/usr/lib/system/libsystem_pthread.dylib");
+
+        // If this prints any "true" value, then dyld will need to stat for roots at runtime
+        // That is (false, false, false, false) means no roots, so we take the fast path at run time
+#if BUILDING_DYLD
+        dyld4::console("dyld: simulator status (/ rw: %s; kernel: %s, platform: %s; pthread: %s\n",
+                       proc.commPage.bootVolumeWritable ? "true" : "false",
+                       proc.commPage.libKernelRoot ? "true" : "false",
+                       proc.commPage.libPlatformRoot ? "true" : "false",
+                       proc.commPage.libPthreadRoot ? "true" : "false");
+#endif
     }
 #endif
-    sys.setDyldCommPageFlags(cpFlags);
-    proc.commPage = cpFlags;
+
+    sys.setDyldCommPageFlags(proc.commPage);
 }
 
 bool ProcessConfig::DyldCache::indexOfPath(const char* dylibPath, uint32_t& dylibIndex) const
 {
+#if BUILDING_CACHE_BUILDER || BUILDING_CACHE_BUILDER_UNIT_TESTS
+    // The cache builder doesn't have a real cache, and instead uses the list of dylibs
+    assert(!cacheBuilderDylibs->empty());
+    for ( uint32_t i = 0; i != cacheBuilderDylibs->size(); ++i ) {
+        const CacheDylib& cacheDylib = (*cacheBuilderDylibs)[i];
+        if ( !strcmp(cacheDylib.mf->installName(), dylibPath) ) {
+            dylibIndex = i;
+            return true;
+        }
+    }
+    return false;
+#else
     if ( this->addr == nullptr )
         return false;
 
     return this->addr->hasImagePath(dylibPath, dylibIndex);
+#endif
+}
+
+bool ProcessConfig::DyldCache::findMachHeaderImageIndex(const mach_header* mh, uint32_t& imageIndex) const
+{
+#if BUILDING_CACHE_BUILDER || BUILDING_CACHE_BUILDER_UNIT_TESTS
+    // The cache builder doesn't have a real cache, and instead uses the list of dylibs
+    assert(!cacheBuilderDylibs->empty());
+    for ( uint32_t i = 0; i != cacheBuilderDylibs->size(); ++i ) {
+        const CacheDylib& cacheDylib = (*cacheBuilderDylibs)[i];
+        if ( cacheDylib.mf == mh )
+            return i;
+    }
+    assert("Unknown dylib");
+    return false;
+#else
+    return this->addr->findMachHeaderImageIndex(mh, imageIndex);
+#endif
 }
 
 
-
+#if SUPPORT_VM_LAYOUT
 void ProcessConfig::DyldCache::makeDataConstWritable(const Logging& lg, const SyscallDelegate& sys, bool writable) const
 {
     const uint32_t perms = (writable ? VM_PROT_WRITE | VM_PROT_READ | VM_PROT_COPY : VM_PROT_READ);
@@ -833,11 +1337,71 @@ void ProcessConfig::DyldCache::makeDataConstWritable(const Logging& lg, const Sy
         });
     });
 }
+#endif // SUPPORT_VM_LAYOUT
+
+bool ProcessConfig::DyldCache::isAlwaysOverridablePath(const char* dylibPath)
+{
+    return strcmp(dylibPath, "/usr/lib/system/libdispatch.dylib") == 0;
+}
+
+bool ProcessConfig::DyldCache::isOverridablePath(const char* dylibPath) const
+{
+    if ( this->development )
+        return true;
+
+    return DyldCache::isAlwaysOverridablePath(dylibPath);
+}
+
+const char* ProcessConfig::DyldCache::getCanonicalPath(const char *dylibPath) const
+{
+    uint32_t dyldCacheImageIndex;
+    if ( this->indexOfPath(dylibPath, dyldCacheImageIndex) )
+        return this->getIndexedImagePath(dyldCacheImageIndex);
+    return nullptr;
+}
+
+const char* ProcessConfig::DyldCache::getIndexedImagePath(uint32_t dylibIndex) const
+{
+#if BUILDING_CACHE_BUILDER || BUILDING_CACHE_BUILDER_UNIT_TESTS
+    // The cache builder doesn't have a real cache, and instead uses the list of dylibs
+    assert(!cacheBuilderDylibs->empty());
+    const CacheDylib& cacheDylib = (*cacheBuilderDylibs)[dylibIndex];
+    return cacheDylib.mf->installName();
+#else
+    return this->addr->getIndexedImagePath(dylibIndex);
+#endif
+}
+
+const dyld3::MachOFile* ProcessConfig::DyldCache::getIndexedImageEntry(uint32_t dylibIndex,
+                                                                       uint64_t& mTime, uint64_t& inode) const
+{
+#if BUILDING_CACHE_BUILDER || BUILDING_CACHE_BUILDER_UNIT_TESTS
+    // The cache builder doesn't have a real cache, and instead uses the list of dylibs
+    assert(!cacheBuilderDylibs->empty());
+    const CacheDylib& cacheDylib = (*cacheBuilderDylibs)[dylibIndex];
+    mTime = cacheDylib.mTime;
+    inode = cacheDylib.inode;
+    return cacheDylib.mf;
+#else
+    return (const dyld3::MachOFile*)this->addr->getIndexedImageEntry(dylibIndex, mTime, inode);
+#endif
+}
+
+void ProcessConfig::DyldCache::adjustDevelopmentMode() const
+{
+    // On macOS, we always ship a development cache, but we can force it to behave as
+    // if its a customer cache, ie, don't stat for roots.
+    // This forces it back to a development cache, eg, when overriding the cache using env vars
+#if TARGET_OS_OSX && BUILDING_DYLD
+    (const_cast<DyldCache*>(this))->development = true;
+#endif
+}
+
 //
 // MARK: --- PathOverrides methods ---
 //
 
-ProcessConfig::PathOverrides::PathOverrides(const Process& process, const Security& security, const Logging& log, const DyldCache& cache, SyscallDelegate& syscall)
+ProcessConfig::PathOverrides::PathOverrides(const Process& process, const Security& security, const Logging& log, const DyldCache& cache, SyscallDelegate& syscall, Allocator& allocator)
 {
     // set fallback path mode
     _fallbackPathMode = security.allowClassicFallbackPaths ? FallbackPathMode::classic : FallbackPathMode::restricted;
@@ -845,29 +1409,36 @@ ProcessConfig::PathOverrides::PathOverrides(const Process& process, const Securi
     // process DYLD_* env variables if allowed
     if ( security.allowEnvVarsPath ) {
         char crashMsg[2048];
-        strlcpy(crashMsg, "dyld4 config: ", sizeof(crashMsg));
+        strlcpy(crashMsg, "dyld config: ", sizeof(crashMsg));
         for (const char* const* p = process.envp; *p != nullptr; ++p) {
-            this->addEnvVar(process, security, *p, false, crashMsg);
+            this->addEnvVar(process, security, allocator, *p, false, crashMsg);
         }
         if ( strlen(crashMsg) > 15 ) {
-            // if there is a crash, have DYLD_ env vars show up in crash log
-            CRSetCrashLogMessage(process.strdup(crashMsg));
+            // if there is a crash, have DYLD_ env vars show up in crash log as secondary string
+            // main string is missing symbol/dylib message
+            CRSetCrashLogMessage2(allocator.strdup(crashMsg));
         }
     }
 
-    // process LC_DYLD_ENVIRONMENT variables if allowed
+    // process LC_DYLD_ENVIRONMENT variables
     if ( security.allowEmbeddedVars ) {
         process.mainExecutable->forDyldEnv(^(const char* keyEqualValue, bool& stop) {
-            this->addEnvVar(process, security, keyEqualValue, true, nullptr);
+            this->addEnvVar(process, security, allocator, keyEqualValue, true, nullptr);
         });
     }
 
-    // process DYLD_VERSIONED_* env vars
-    this->processVersionedPaths(process, syscall, cache, process.platform, *process.archs);
+    if ( !cache.cryptexOSPath.empty() )
+        this->_cryptexRootPath = cache.cryptexOSPath.data();
+
+    // process DYLD_VERSIONED_* env vars if allowed
+    if ( security.allowEnvVarsPath )
+        this->processVersionedPaths(process, syscall, cache, process.platform, *process.archs, allocator);
+
+    if ( dontUsePrebuiltForApp() )
+        cache.adjustDevelopmentMode();
 }
 
-
-void ProcessConfig::PathOverrides::checkVersionedPath(const Process& proc, const char* path, SyscallDelegate& sys, const DyldCache& cache, Platform platform, const GradedArchs& archs)
+void ProcessConfig::PathOverrides::checkVersionedPath(SyscallDelegate& sys, const DyldCache& cache, Allocator& allocator, const char* path, Platform platform, const GradedArchs& archs)
 {
     static bool verbose = false;
     if (verbose) console("checkVersionedPath(%s)\n", path);
@@ -886,7 +1457,7 @@ void ProcessConfig::PathOverrides::checkVersionedPath(const Process& proc, const
         else if ( cache.indexOfPath(foundDylibTargetOverridePath, dylibIndex) )  {
             uint64_t unusedMTime = 0;
             uint64_t unusedINode = 0;
-            const MachOAnalyzer* cacheMA = (MachOAnalyzer*)cache.addr->getIndexedImageEntry(dylibIndex, unusedMTime, unusedINode);
+            const MachOAnalyzer* cacheMA = (MachOAnalyzer*)cache.getIndexedImageEntry(dylibIndex, unusedMTime, unusedINode);
             const char* dylibInstallName;
             uint32_t    compatVersion;
             if ( cacheMA->getDylibInstallName(&dylibInstallName, &compatVersion, &targetDylibVersion) ) {
@@ -907,7 +1478,7 @@ void ProcessConfig::PathOverrides::checkVersionedPath(const Process& proc, const
                         if ( sys.getDylibInfo(existing->overridePath, platform, archs, previousDylibVersion, previousInstallName) ) {
                             // if already found an override and its version is greater that this one, don't add this one
                             if ( foundDylibVersion > previousDylibVersion ) {
-                                existing->overridePath = proc.strdup(path);
+                                existing->overridePath = allocator.strdup(path);
                                 if (verbose) console("  override: alter to %s with: %s\n", targetInstallName, path);
                             }
                         }
@@ -916,23 +1487,23 @@ void ProcessConfig::PathOverrides::checkVersionedPath(const Process& proc, const
                 }
                 if ( add ) {
                     //console("  override: %s with: %s\n", installName, overridePath);
-                    addPathOverride(proc, targetInstallName, path);
+                    addPathOverride(allocator, targetInstallName, path);
                 }
             }
         }
         else {
             // <rdar://problem/53215116> DYLD_VERSIONED_LIBRARY_PATH fails to load a dylib if it does not also exist at the system install path
-            addPathOverride(proc, foundDylibTargetOverridePath, path);
+            addPathOverride(allocator, foundDylibTargetOverridePath, path);
         }
     }
 }
 
-void ProcessConfig::PathOverrides::addPathOverride(const Process& proc, const char* installName, const char* overridePath)
+void ProcessConfig::PathOverrides::addPathOverride(Allocator& allocator, const char* installName, const char* overridePath)
 {
-    DylibOverride* newElement = (DylibOverride*)proc.roalloc(sizeof(DylibOverride));
+    DylibOverride* newElement = (DylibOverride*)allocator.malloc(sizeof(DylibOverride));
     newElement->next         = nullptr;
-    newElement->installName  = proc.strdup(installName);
-    newElement->overridePath = proc.strdup(overridePath);
+    newElement->installName  = allocator.strdup(installName);
+    newElement->overridePath = allocator.strdup(overridePath);
     // add to end of linked list
     if ( _versionedOverrides != nullptr )  {
         DylibOverride* last = _versionedOverrides;
@@ -945,20 +1516,22 @@ void ProcessConfig::PathOverrides::addPathOverride(const Process& proc, const ch
     }
 }
 
-void ProcessConfig::PathOverrides::processVersionedPaths(const Process& proc, SyscallDelegate& sys, const DyldCache& cache, Platform platform, const GradedArchs& archs)
+void ProcessConfig::PathOverrides::processVersionedPaths(const Process& proc, SyscallDelegate& sys, const DyldCache& cache, Platform platform,
+                                                         const GradedArchs& archs, Allocator& allocator)
 {
     // check DYLD_VERSIONED_LIBRARY_PATH for dylib overrides
+    __block bool stop = false;
     if ( (_versionedDylibPathsEnv != nullptr) || (_versionedDylibPathExeLC != nullptr) ) {
-        forEachInColonList(_versionedDylibPathsEnv, _versionedDylibPathExeLC, ^(const char* searchDir, bool& stop) {
-            sys.forEachInDirectory(searchDir, false, ^(const char* pathInDir) {
-                this->checkVersionedPath(proc, pathInDir, sys, cache, platform, archs);
+        forEachInColonList(_versionedDylibPathsEnv, _versionedDylibPathExeLC, stop, ^(const char* searchDir, bool&) {
+            sys.forEachInDirectory(searchDir, false, ^(const char* pathInDir, const char* leafName) {
+                this->checkVersionedPath(sys, cache, allocator, pathInDir, platform, archs);
             });
         });
     }
     // check DYLD_VERSIONED_FRAMEWORK_PATH for framework overrides
     if ( (_versionedFrameworkPathsEnv != nullptr) || (_versionedFrameworkPathExeLC != nullptr) ) {
-        forEachInColonList(_versionedFrameworkPathsEnv, _versionedFrameworkPathExeLC, ^(const char* searchDir, bool& stop) {
-            sys.forEachInDirectory(searchDir, true, ^(const char* pathInDir) {
+        forEachInColonList(_versionedFrameworkPathsEnv, _versionedFrameworkPathExeLC, stop, ^(const char* searchDir, bool&) {
+            sys.forEachInDirectory(searchDir, true, ^(const char* pathInDir, const char* leafName) {
                 // ignore paths that don't end in ".framework"
                 size_t pathInDirLen = strlen(pathInDir);
                 if ( (pathInDirLen < 10) || (strcmp(&pathInDir[pathInDirLen-10], ".framework") != 0)  )
@@ -968,17 +1541,18 @@ void ProcessConfig::PathOverrides::processVersionedPaths(const Process& proc, Sy
                 strlcpy(possibleFramework, pathInDir, PATH_MAX);
                 strlcat(possibleFramework, strrchr(pathInDir, '/'), PATH_MAX);
                 *strrchr(possibleFramework, '.') = '\0';
-                this->checkVersionedPath(proc, possibleFramework, sys, cache, platform, archs);
+                this->checkVersionedPath(sys, cache, allocator, possibleFramework, platform, archs);
             });
         });
     }
 }
 
 
-void ProcessConfig::PathOverrides::forEachInsertedDylib(void (^handler)(const char* dylibPath, bool& stop)) const
+void ProcessConfig::PathOverrides::forEachInsertedDylib(void (^handler)(const char* dylibPath, bool&)) const
 {
+    __block bool stop = false;
     if ( _insertedDylibs != nullptr && _insertedDylibs[0] != '\0' ) {
-        forEachInColonList(_insertedDylibs, nullptr, ^(const char* path, bool& stop) {
+        forEachInColonList(_insertedDylibs, nullptr, stop, ^(const char* path, bool&) {
             handler(path, stop);
         });
     }
@@ -1021,11 +1595,11 @@ void ProcessConfig::PathOverrides::forEachExecutableEnvVar(void (^handler)(const
     handleEnvVar("DYLD_VERSIONED_LIBRARY_PATH",   _versionedDylibPathExeLC,        handler);
 }
 
-void ProcessConfig::PathOverrides::setString(const Process& proc, const char*& var, const char* value)
+void ProcessConfig::PathOverrides::setString(Allocator& allocator, const char*& var, const char* value)
 {
     // ivar not set, just set to copy of string
     if ( var == nullptr ) {
-        var = proc.strdup(value);
+        var = allocator.strdup(value);
         return;
     }
     // ivar already in use, build new appended string
@@ -1033,10 +1607,11 @@ void ProcessConfig::PathOverrides::setString(const Process& proc, const char*& v
     strcpy(tmp, var);
     strcat(tmp, ":");
     strcat(tmp, value);
-    var = proc.strdup(tmp);
+    var = allocator.strdup(tmp);
 }
 
-void ProcessConfig::PathOverrides::addEnvVar(const Process& proc, const Security& sec, const char* keyEqualsValue, bool isLC_DYLD_ENV, char* crashMsg)
+void ProcessConfig::PathOverrides::addEnvVar(const Process& proc, const Security& sec, Allocator& allocator,
+                                             const char* keyEqualsValue, bool isLC_DYLD_ENV, char* crashMsg)
 {
     // We have to make a copy of the env vars because the dyld semantics
     // is that the env vars are only looked at once at launch.
@@ -1048,7 +1623,8 @@ void ProcessConfig::PathOverrides::addEnvVar(const Process& proc, const Security
             char* expandedPaths = buffer;
             __block bool needColon = false;
             buffer[0] = '\0';
-            forEachInColonList(value, nullptr,  ^(const char* aValue, bool& innerStop) {
+            __block bool stop = false;
+            forEachInColonList(value, nullptr, stop, ^(const char* aValue, bool&) {
                 if ( !sec.allowAtPaths && (aValue[0] == '@') )
                     return;
                 if ( needColon )
@@ -1072,31 +1648,28 @@ void ProcessConfig::PathOverrides::addEnvVar(const Process& proc, const Security
                     needColon = true;
                 }
             });
-            value = proc.strdup(expandedPaths);
+            value = allocator.strdup(expandedPaths);
         }
-        bool addToCrashMsg = false;
         if ( strncmp(keyEqualsValue, "DYLD_LIBRARY_PATH", 17) == 0 ) {
-            setString(proc, isLC_DYLD_ENV ? _dylibPathOverridesExeLC : _dylibPathOverridesEnv, value);
-            addToCrashMsg = true;
+            setString(allocator, isLC_DYLD_ENV ? _dylibPathOverridesExeLC : _dylibPathOverridesEnv, value);
         }
         else if ( strncmp(keyEqualsValue, "DYLD_FRAMEWORK_PATH", 19) == 0 ) {
-            setString(proc, isLC_DYLD_ENV ? _frameworkPathOverridesExeLC : _frameworkPathOverridesEnv, value);
-            addToCrashMsg = true;
+            setString(allocator, isLC_DYLD_ENV ? _frameworkPathOverridesExeLC : _frameworkPathOverridesEnv, value);
         }
         else if ( strncmp(keyEqualsValue, "DYLD_FALLBACK_FRAMEWORK_PATH", 28) == 0 ) {
-            setString(proc, isLC_DYLD_ENV ? _frameworkPathFallbacksExeLC : _frameworkPathFallbacksEnv, value);
+            setString(allocator, isLC_DYLD_ENV ? _frameworkPathFallbacksExeLC : _frameworkPathFallbacksEnv, value);
         }
         else if ( strncmp(keyEqualsValue, "DYLD_FALLBACK_LIBRARY_PATH", 26) == 0 ) {
-            setString(proc, isLC_DYLD_ENV ? _dylibPathFallbacksExeLC : _dylibPathFallbacksEnv, value);
+            setString(allocator, isLC_DYLD_ENV ? _dylibPathFallbacksExeLC : _dylibPathFallbacksEnv, value);
         }
         else if ( strncmp(keyEqualsValue, "DYLD_VERSIONED_FRAMEWORK_PATH", 28) == 0 ) {
-            setString(proc, isLC_DYLD_ENV ? _versionedFrameworkPathExeLC : _versionedFrameworkPathsEnv, value);
+            setString(allocator, isLC_DYLD_ENV ? _versionedFrameworkPathExeLC : _versionedFrameworkPathsEnv, value);
         }
         else if ( strncmp(keyEqualsValue, "DYLD_VERSIONED_LIBRARY_PATH", 26) == 0 ) {
-            setString(proc, isLC_DYLD_ENV ? _versionedDylibPathExeLC : _versionedDylibPathsEnv, value);
+            setString(allocator, isLC_DYLD_ENV ? _versionedDylibPathExeLC : _versionedDylibPathsEnv, value);
         }
         else if ( strncmp(keyEqualsValue, "DYLD_INSERT_LIBRARIES", 21) == 0 ) {
-            setString(proc, _insertedDylibs, value);
+            setString(allocator, _insertedDylibs, value);
             if ( _insertedDylibs[0] != '\0' ) {
                 _insertedDylibCount = 1;
                 for (const char* s=_insertedDylibs; *s != '\0'; ++s) {
@@ -1104,31 +1677,27 @@ void ProcessConfig::PathOverrides::addEnvVar(const Process& proc, const Security
                         _insertedDylibCount++;
                 }
             }
-            addToCrashMsg = true;
         }
         else if ( strncmp(keyEqualsValue, "DYLD_IMAGE_SUFFIX", 17) == 0 ) {
-            setString(proc, _imageSuffix, value);
-            addToCrashMsg = true;
+            setString(allocator, _imageSuffix, value);
         }
         else if ( (strncmp(keyEqualsValue, "DYLD_ROOT_PATH", 14) == 0) && MachOFile::isSimulatorPlatform(proc.platform) ) {
-            setString(proc, _simRootPath, value);
-             addToCrashMsg = true;
-       }
-        if ( addToCrashMsg && (crashMsg != nullptr) ) {
+            setString(allocator, _simRootPath, value);
+        }
+        if ( (crashMsg != nullptr) && (strncmp(keyEqualsValue, "DYLD_", 5) == 0) ) {
             strlcat(crashMsg, keyEqualsValue, 2048);
             strlcat(crashMsg, " ", 2048);
         }
     }
 }
 
-void ProcessConfig::PathOverrides::forEachInColonList(const char* list1, const char* list2, void (^handler)(const char* path, bool& stop))
+void ProcessConfig::PathOverrides::forEachInColonList(const char* list1, const char* list2, bool& stop, void (^handler)(const char* path, bool&))
 {
     for (const char* list : { list1, list2 }) {
         if (list == nullptr)
             continue;
         char buffer[strlen(list)+1];
         const char* t = list;
-        bool stop = false;
         for (const char* s=list; *s != '\0'; ++s) {
             if (*s != ':')
                 continue;
@@ -1146,17 +1715,17 @@ void ProcessConfig::PathOverrides::forEachInColonList(const char* list1, const c
     }
 }
 
-void ProcessConfig::PathOverrides::forEachDylibFallback(Platform platform, bool disableCustom, void (^handler)(const char* fallbackDir, Type type, bool& stop)) const
+void ProcessConfig::PathOverrides::forEachDylibFallback(Platform platform, bool requestorNeedsFallbacks, bool& stop,
+                                                        void (^handler)(const char* fallbackDir, Type type, bool&)) const
 {
-    __block bool stop = false;
-    if ( !disableCustom && ((_dylibPathFallbacksEnv != nullptr) || (_dylibPathFallbacksExeLC != nullptr)) ) {
-        forEachInColonList(_dylibPathFallbacksEnv, _dylibPathFallbacksExeLC, ^(const char* pth, bool& innerStop) {
-            handler(pth, Type::customFallback, innerStop);
-            if ( innerStop )
-                stop = true;
+    // DYLD_FALLBACK_LIBRARY_PATH works for all binaries, regardless of requestorNeedsFallbacks
+    if ( (_dylibPathFallbacksEnv != nullptr) || (_dylibPathFallbacksExeLC != nullptr) ) {
+        forEachInColonList(_dylibPathFallbacksEnv, _dylibPathFallbacksExeLC, stop, ^(const char* pth, bool&) {
+            handler(pth, Type::customFallback, stop);
         });
     }
-    else {
+    else if ( requestorNeedsFallbacks ) {
+        // if no FALLBACK env vars, then only do fallbacks for old binaries
         switch ( platform ) {
             case Platform::macOS:
                 switch ( _fallbackPathMode ) {
@@ -1199,17 +1768,17 @@ void ProcessConfig::PathOverrides::forEachDylibFallback(Platform platform, bool 
     }
 }
 
-void ProcessConfig::PathOverrides::forEachFrameworkFallback(Platform platform, bool disableCustom, void (^handler)(const char* fallbackDir, Type type, bool& stop)) const
+void ProcessConfig::PathOverrides::forEachFrameworkFallback(Platform platform, bool requestorNeedsFallbacks, bool& stop,
+                                                            void (^handler)(const char* fallbackDir, Type type, bool&)) const
 {
-    __block bool stop = false;
-    if ( !disableCustom && ((_frameworkPathFallbacksEnv != nullptr) || (_frameworkPathFallbacksExeLC != nullptr)) ) {
-        forEachInColonList(_frameworkPathFallbacksEnv, _frameworkPathFallbacksExeLC, ^(const char* pth, bool& innerStop) {
-            handler(pth, Type::customFallback, innerStop);
-            if ( innerStop )
-                stop = true;
+    // DYLD_FALLBACK_FRAMEWORK_PATH works for all binaries, regardless of requestorNeedsFallbacks
+    if ( (_frameworkPathFallbacksEnv != nullptr) || (_frameworkPathFallbacksExeLC != nullptr) ) {
+        forEachInColonList(_frameworkPathFallbacksEnv, _frameworkPathFallbacksExeLC, stop, ^(const char* pth, bool&) {
+            handler(pth, Type::customFallback, stop);
         });
     }
-    else {
+    else if ( requestorNeedsFallbacks ) {
+        // if no FALLBACK env vars, then only do fallbacks for old binaries
         switch ( platform ) {
             case Platform::macOS:
                 switch ( _fallbackPathMode ) {
@@ -1280,25 +1849,23 @@ void ProcessConfig::PathOverrides::addSuffix(const char* path, const char* suffi
 }
 
 void ProcessConfig::PathOverrides::forEachImageSuffix(const char* path, Type type, bool& stop,
-                                                      void (^handler)(const char* possiblePath, Type type, bool& stop)) const
+                                                      void (^handler)(const char* possiblePath, Type type, bool&)) const
 {
     if ( _imageSuffix == nullptr ) {
         handler(path, type, stop);
     }
     else {
-        forEachInColonList(_imageSuffix, nullptr, ^(const char* suffix, bool& innerStop) {
+        forEachInColonList(_imageSuffix, nullptr, stop, ^(const char* suffix, bool&) {
             char npath[strlen(path)+strlen(suffix)+8];
             addSuffix(path, suffix, npath);
-            handler(npath, Type::suffixOverride, innerStop);
-            if ( innerStop )
-                stop = true;
+            handler(npath, Type::suffixOverride, stop);
         });
         if ( !stop )
             handler(path, type, stop);
     }
 }
 
-void ProcessConfig::PathOverrides::forEachPathVariant(const char* initialPath, Platform platform, bool disableCustomFallbacks, bool& stop,
+void ProcessConfig::PathOverrides::forEachPathVariant(const char* initialPath, Platform platform, bool requestorNeedsFallbacks, bool skipFallbacks, bool& stop,
                                                       void (^handler)(const char* possiblePath, Type type, bool& stop)) const
 {
     // check for overrides
@@ -1307,14 +1874,12 @@ void ProcessConfig::PathOverrides::forEachPathVariant(const char* initialPath, P
         const size_t frameworkPartialPathLen = strlen(frameworkPartialPath);
         // look at each DYLD_FRAMEWORK_PATH directory
         if ( (_frameworkPathOverridesEnv != nullptr) || (_frameworkPathOverridesExeLC != nullptr) ) {
-            forEachInColonList(_frameworkPathOverridesEnv, _frameworkPathOverridesExeLC, ^(const char* frDir, bool& innerStop) {
+            forEachInColonList(_frameworkPathOverridesEnv, _frameworkPathOverridesExeLC, stop, ^(const char* frDir, bool&) {
                 char npath[strlen(frDir)+frameworkPartialPathLen+8];
                 strcpy(npath, frDir);
                 strcat(npath, "/");
                 strcat(npath, frameworkPartialPath);
-                forEachImageSuffix(npath, Type::pathDirOverride, innerStop, handler);
-                if ( innerStop )
-                    stop = true;
+                forEachImageSuffix(npath, Type::pathDirOverride, stop, handler);
             });
         }
     }
@@ -1323,14 +1888,12 @@ void ProcessConfig::PathOverrides::forEachPathVariant(const char* initialPath, P
         const size_t libraryLeafNameLen = strlen(libraryLeafName);
         // look at each DYLD_LIBRARY_PATH directory
         if ( (_dylibPathOverridesEnv != nullptr) || (_dylibPathOverridesExeLC != nullptr) ) {
-            forEachInColonList(_dylibPathOverridesEnv, _dylibPathOverridesExeLC, ^(const char* libDir, bool& innerStop) {
+            forEachInColonList(_dylibPathOverridesEnv, _dylibPathOverridesExeLC, stop, ^(const char* libDir, bool&) {
                 char npath[strlen(libDir)+libraryLeafNameLen+8];
                 strcpy(npath, libDir);
                 strcat(npath, "/");
                 strcat(npath, libraryLeafName);
-                forEachImageSuffix(npath, Type::pathDirOverride, innerStop, handler);
-                if ( innerStop )
-                    stop = true;
+                forEachImageSuffix(npath, Type::pathDirOverride, stop, handler);
             });
         }
     }
@@ -1351,7 +1914,7 @@ void ProcessConfig::PathOverrides::forEachPathVariant(const char* initialPath, P
 
         // try rootpath
         bool searchiOSSupport = (platform == Platform::iOSMac);
-    #if (TARGET_OS_OSX && TARGET_CPU_ARM64)
+    #if (TARGET_OS_OSX && TARGET_CPU_ARM64 && BUILDING_DYLD)
         if ( platform == Platform::iOS ) {
             searchiOSSupport = true;
             // <rdar://problem/58959974> some old Almond apps reference old WebKit location
@@ -1382,44 +1945,59 @@ void ProcessConfig::PathOverrides::forEachPathVariant(const char* initialPath, P
     #endif
     }
 
-    // try original path
+    if ( _cryptexRootPath != nullptr ) {
+        // try original path on disk, but not in the shared cache
+        forEachImageSuffix(initialPath, Type::rawPathOnDisk, stop, handler);
+        if ( stop )
+            return;
+
+        // try cryptex mount
+        // Note this is after the above call due to:
+        // rdar://91027811 (dyld should search for dylib overrides in / before /System/Cryptexes/OS)
+        char rtpath[strlen(_cryptexRootPath)+strlen(initialPath)+8];
+        strcpy(rtpath, _cryptexRootPath);
+        strcat(rtpath, initialPath);
+        forEachImageSuffix(rtpath, Type::cryptexPrefix, stop, handler);
+        if ( stop )
+            return;
+    }
+
+    // try original path, including in the shared cache
     forEachImageSuffix(initialPath, Type::rawPath, stop, handler);
     if ( stop )
         return;
 
     // check fallback paths
-    if ( frameworkPartialPath != nullptr ) {
-        const size_t frameworkPartialPathLen = strlen(frameworkPartialPath);
-        // look at each DYLD_FALLBACK_FRAMEWORK_PATH directory
-        forEachFrameworkFallback(platform, disableCustomFallbacks, ^(const char* dir, Type type, bool& innerStop) {
-            char npath[strlen(dir)+frameworkPartialPathLen+8];
-            strcpy(npath, dir);
-            strcat(npath, "/");
-            strcat(npath, frameworkPartialPath);
-            // don't try original path again
-            if ( strcmp(initialPath, npath) != 0 ) {
-                forEachImageSuffix(npath, type, innerStop, handler);
-                if ( innerStop )
-                    stop = true;
-            }
-        });
+    if ( !skipFallbacks ) {
+        if ( frameworkPartialPath != nullptr ) {
+            const size_t frameworkPartialPathLen = strlen(frameworkPartialPath);
+            // look at each DYLD_FALLBACK_FRAMEWORK_PATH directory
+            forEachFrameworkFallback(platform, requestorNeedsFallbacks, stop, ^(const char* dir, Type type, bool&) {
+                char npath[strlen(dir)+frameworkPartialPathLen+8];
+                strcpy(npath, dir);
+                strcat(npath, "/");
+                strcat(npath, frameworkPartialPath);
+                // don't try original path again
+                if ( strcmp(initialPath, npath) != 0 ) {
+                    forEachImageSuffix(npath, type, stop, handler);
+                }
+            });
 
-    }
-   else {
-        const char* libraryLeafName = getLibraryLeafName(initialPath);
-        const size_t libraryLeafNameLen = strlen(libraryLeafName);
-        // look at each DYLD_FALLBACK_LIBRARY_PATH directory
-        forEachDylibFallback(platform, disableCustomFallbacks, ^(const char* dir, Type type, bool& innerStop) {
-            char libpath[strlen(dir)+libraryLeafNameLen+8];
-            strcpy(libpath, dir);
-            strcat(libpath, "/");
-            strcat(libpath, libraryLeafName);
-            if ( strcmp(libpath, initialPath) != 0 ) {
-                forEachImageSuffix(libpath, type, innerStop, handler);
-                if ( innerStop )
-                    stop = true;
-            }
-        });
+        }
+       else {
+            const char* libraryLeafName = getLibraryLeafName(initialPath);
+            const size_t libraryLeafNameLen = strlen(libraryLeafName);
+            // look at each DYLD_FALLBACK_LIBRARY_PATH directory
+            forEachDylibFallback(platform, requestorNeedsFallbacks, stop, ^(const char* dir, Type type, bool&) {
+                char libpath[strlen(dir)+libraryLeafNameLen+8];
+                strcpy(libpath, dir);
+                strcat(libpath, "/");
+                strcat(libpath, libraryLeafName);
+                if ( strcmp(libpath, initialPath) != 0 ) {
+                    forEachImageSuffix(libpath, type, stop, handler);
+                }
+            });
+        }
     }
 }
 
@@ -1438,7 +2016,7 @@ void ProcessConfig::PathOverrides::forEachPathVariant(const char* initialPath, P
 //
 const char* ProcessConfig::PathOverrides::getFrameworkPartialPath(const char* path) const
 {
-    const char* dirDot = strrstr(path, ".framework/");
+    const char* dirDot = Utils::strrstr(path, ".framework/");
     if ( dirDot != nullptr ) {
         const char* dirStart = dirDot;
         for ( ; dirStart >= path; --dirStart) {
@@ -1492,6 +2070,10 @@ const char* ProcessConfig::PathOverrides::typeName(Type type)
             return "Catalyst prefix";
         case simulatorPrefix:
             return "simulator prefix";
+        case cryptexPrefix:
+            return "cryptex prefix";
+        case rawPathOnDisk:
+            return "original path on disk";
         case rawPath:
             return "original path";
         case rpathExpansion:
@@ -1499,7 +2081,7 @@ const char* ProcessConfig::PathOverrides::typeName(Type type)
         case loaderPathExpansion:
             return "@loader_path expansion";
         case executablePathExpansion:
-            return "@executable_path expanstion";
+            return "@executable_path expansion";
         case implictRpathExpansion:
             return "leaf name using rpath";
         case customFallback:
@@ -1529,6 +2111,10 @@ bool ProcessConfig::PathOverrides::dontUsePrebuiltForApp() const
     if ( _versionedDylibPathExeLC || _versionedFrameworkPathExeLC)
         return true;
 
+    // macOS needs us to stat for roots if the load command sets library/framework path
+    if ( _dylibPathOverridesExeLC || _frameworkPathOverridesExeLC )
+        return true;
+
     return false;
 }
 
@@ -1539,77 +2125,118 @@ bool ProcessConfig::PathOverrides::dontUsePrebuiltForApp() const
 
 bool ProcessConfig::simulatorFileMatchesDyldCache(const char *path) const
 {
-#if TARGET_OS_OSX
+#if TARGET_OS_OSX && SUPPORT_VM_LAYOUT
     // On macOS there are three dylibs under libSystem that exist for the simulator to use,
     // but we do not consider them "roots", so fileExists() returns false for them
-    if ( (this->dyldCache.addr != nullptr) && (strncmp(path, "/usr/lib/system/libsystem_", 26) == 0) ) {
-        const char* ending = &path[26];
-        if ( strcmp(ending, "platform.dylib") == 0 ) {
-            // If this was a root when launchd checked, then assume we are a root now
-            if ( this->process.commPage.libPlatformRoot )
-                return false;
+    if ( this->dyldCache.addr == nullptr )
+        return false;
 
-            // If the file system is read-only, then this cannot be a root now
-            if ( !this->process.commPage.bootVolumeWritable )
-                return true;
+    std::string_view tempPath(path);
+    if ( !this->dyldCache.cryptexOSPath.empty() ) {
+        if ( tempPath.starts_with(this->dyldCache.cryptexOSPath) )
+            tempPath.remove_prefix(dyldCache.cryptexOSPath.size());
+    }
 
-            // Possibly a root, open the file and compare UUID to one in dyld cache
-            return this->dyldCache.uuidOfFileMatchesDyldCache(process, syscall, path);
-        }
-        else if ( strcmp(ending, "pthread.dylib") == 0 ) {
-            // If this was a root when launchd checked, then assume we are a root now
-            if ( this->process.commPage.libPthreadRoot )
-                return false;
+    const char* ending = nullptr;
+    if ( tempPath.starts_with("/usr/lib/system/libsystem_") ) {
+        tempPath.remove_prefix(strlen("/usr/lib/system/libsystem_"));
+        ending = tempPath.data();
+    } else {
+        return false;
+    }
 
-            // If the file system is read-only, then this cannot be a root now
-            if ( !this->process.commPage.bootVolumeWritable )
-                return true;
+    if ( strcmp(ending, "platform.dylib") == 0 ) {
+        // If this was a root when launchd checked, then assume we are a root now
+        if ( this->process.commPage.libPlatformRoot )
+            return false;
 
-            // Possibly a root, open the file and compare UUID to one in dyld cache
-            return this->dyldCache.uuidOfFileMatchesDyldCache(process, syscall, path);
-        }
-        else if ( strcmp(ending, "kernel.dylib") == 0 ) {
-            // If this was a root when launchd checked, then assume we are a root now
-            if ( this->process.commPage.libKernelRoot )
-                return false;
+        // If the file system is read-only, then this cannot be a root now
+        if ( !this->process.commPage.bootVolumeWritable )
+            return true;
 
-            // If the file system is read-only, then this cannot be a root now
-            if ( !this->process.commPage.bootVolumeWritable )
-                return true;
+        // Possibly a root, open the file and compare UUID to one in dyld cache
+        return this->dyldCache.uuidOfFileMatchesDyldCache(process, syscall, path);
+    }
+    else if ( strcmp(ending, "pthread.dylib") == 0 ) {
+        // If this was a root when launchd checked, then assume we are a root now
+        if ( this->process.commPage.libPthreadRoot )
+            return false;
 
-            // Possibly a root, open the file and compare UUID to one in dyld cache
-            return this->dyldCache.uuidOfFileMatchesDyldCache(process, syscall, path);
-        }
+        // If the file system is read-only, then this cannot be a root now
+        if ( !this->process.commPage.bootVolumeWritable )
+            return true;
+
+        // Possibly a root, open the file and compare UUID to one in dyld cache
+        return this->dyldCache.uuidOfFileMatchesDyldCache(process, syscall, path);
+    }
+    else if ( strcmp(ending, "kernel.dylib") == 0 ) {
+        // If this was a root when launchd checked, then assume we are a root now
+        if ( this->process.commPage.libKernelRoot )
+            return false;
+
+        // If the file system is read-only, then this cannot be a root now
+        if ( !this->process.commPage.bootVolumeWritable )
+            return true;
+
+        // Possibly a root, open the file and compare UUID to one in dyld cache
+        return this->dyldCache.uuidOfFileMatchesDyldCache(process, syscall, path);
     }
 #endif // TARGET_OS_OSX
     return false;
 }
 
-bool ProcessConfig::fileExists(const char* path, FileID* fileID, bool* notAFile) const
+bool ProcessConfig::fileExists(const char* path, FileID* fileID, int* errNum) const
 {
 #if TARGET_OS_OSX
+    if ( errNum != nullptr )
+        *errNum = ENOENT;
     // On macOS there are three dylibs under libSystem that exist for the simulator to use,
     // but we do not consider them "roots", so fileExists() returns false for them
     if ( simulatorFileMatchesDyldCache(path) )
         return false;
+
+#if 0
+    // On macOS, we scan for roots at boot.  This is only done in PID 1, so we can only use
+    // this result on the shared cache mapped at that point, not driverKit/Rosetta
+    if ( (this->dyldCache.addr != nullptr)
+        && !this->process.commPage.bootVolumeWritable
+        && !this->process.commPage.foundRoot
+        && !this->process.isTranslated ) {
+        if ( (this->process.platform == dyld3::Platform::macOS)
+            || (this->process.platform == dyld3::Platform::iOSMac) ) {
+            if ( this->dyldCache.getCanonicalPath(path) != nullptr )
+                return false;
+
+            // We might be asked about a path in the cryptex.  If so, chop it up to
+            // try get the install name
+            if ( !this->dyldCache.cryptexOSPath.empty() ) {
+                std::string_view installName(path);
+                if ( installName.starts_with(this->dyldCache.cryptexOSPath) ) {
+                    installName.remove_prefix(this->dyldCache.cryptexOSPath.size());
+
+                    if ( this->dyldCache.getCanonicalPath(installName.data()) != nullptr )
+                        return false;
+                }
+            }
+        }
+    }
+#endif // 0
+
 #endif // TARGET_OS_OSX
-    return syscall.fileExists(path, fileID, notAFile);
+    return syscall.fileExists(path, fileID, errNum);
 }
 
 
 const char* ProcessConfig::canonicalDylibPathInCache(const char* dylibPath) const
 {
-    if ( this->dyldCache.addr == nullptr )
-        return nullptr;
-
-    if ( const char* result = this->dyldCache.addr->getCanonicalPath(dylibPath) )
+    if ( const char* result = this->dyldCache.getCanonicalPath(dylibPath) )
         return result;
 
 #if TARGET_OS_OSX
     // on macOS support "Foo.framework/Foo" symlink
     char resolvedPath[PATH_MAX];
     if ( this->syscall.realpath(dylibPath, resolvedPath) ) {
-        return this->dyldCache.addr->getCanonicalPath(resolvedPath);
+        return this->dyldCache.getCanonicalPath(resolvedPath);
     }
 #endif
     return nullptr;
@@ -1628,6 +2255,7 @@ void halt(const char* message)
     strlcpy(error_string, message, sizeof(error_string));
     CRSetCrashLogMessage(error_string);
     console("%s\n", message);
+
     /*
     if ( sSharedCacheLoadInfo.errorMessage != nullptr ) {
         // <rdar://problem/45957449> if dyld fails with a missing dylib and there is no shared cache, display the shared cache load error message
@@ -1643,6 +2271,7 @@ void halt(const char* message)
         strlcpy(error_string, message, sizeof(error_string));
     }
 */
+    //FIXME: Updating the process state here is tricky since we don't have runtimeState
     // don't show back trace, during launch if symbol or dylib missing.  All info is in the error message
     if ( (gProcessInfo->errorKind == DYLD_EXIT_REASON_SYMBOL_MISSING) ||  (gProcessInfo->errorKind == DYLD_EXIT_REASON_DYLIB_MISSING) )
         gProcessInfo->terminationFlags = 1;
@@ -1670,42 +2299,7 @@ void halt(const char* message)
         payloadSize += strlcpy(&payloadBuffer[payloadSize], gProcessInfo->errorSymbol, sizeof(payloadBuffer) - payloadSize) + 1;
     }
     char truncMessage[EXIT_REASON_USER_DESC_MAX_LEN];
-    truncMessage[EXIT_REASON_USER_DESC_MAX_LEN-1] = '\0';
-
-    bool walkingPath = false;
-    size_t pathStart = 0;
-    size_t dstIndex = 0;
-    for (size_t i = 0; i < EXIT_REASON_USER_DESC_MAX_LEN; i++) {
-        bool separator = false;
-        if (message[i] == '\'' ) {
-            separator = true;
-            if ( walkingPath ) {
-                // reached end of path
-                walkingPath = false;
-                size_t pathEnd = i-1;
-                size_t sz = pathEnd - pathStart;
-                const char* path = message + pathStart;
-                if ( memcmp(path, &payloadBuffer[payload->targetDylibPathOffset], sz) == 0
-                    || memcmp(path, &payloadBuffer[payload->clientPathOffset], sz) == 0 ) {
-                    for (size_t j = pathStart; j <= pathEnd; j++) {
-                        truncMessage[dstIndex] = message[j];
-                        dstIndex++;
-                    }
-                }
-            } else {
-                // found new path
-                walkingPath = true;
-                pathStart = i+1;
-            }
-        }
-
-        if ( !walkingPath || separator ) {
-            truncMessage[dstIndex] = message[i];
-            dstIndex++;
-        }
-    }
-    truncMessage[EXIT_REASON_USER_DESC_MAX_LEN-1] = '\0';
-
+    strlcpy(truncMessage, message, EXIT_REASON_USER_DESC_MAX_LEN);
     const bool verbose = false;
     if ( verbose ) {
         console("dyld_abort_payload.version               = 0x%08X\n", payload->version);
@@ -1720,11 +2314,23 @@ void halt(const char* message)
 
 void console(const char* format, ...)
 {
-    ::_simple_dprintf(2, "dyld[%d]: ", getpid());
-    va_list list;
-    va_start(list, format);
-    ::_simple_vdprintf(2, format, list);
-    va_end(list);
+    if ( getpid() == 1 ) {
+#if BUILDING_DYLD
+        int logFD = open("/dev/console", O_WRONLY | O_NOCTTY, 0);
+        ::_simple_dprintf(2, "dyld[%d]: ", getpid());
+        va_list list;
+        va_start(list, format);
+        ::_simple_vdprintf(logFD, format, list);
+        va_end(list);
+        ::close(logFD);
+#endif // BUILDING_DYLD
+    } else {
+        ::_simple_dprintf(2, "dyld[%d]: ", getpid());
+        va_list list;
+        va_start(list, format);
+        ::_simple_vdprintf(2, format, list);
+        va_end(list);
+    }
 }
 
 

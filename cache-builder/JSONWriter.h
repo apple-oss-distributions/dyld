@@ -33,25 +33,31 @@ namespace json {
 
 static inline std::string hex(uint64_t value) {
     char buff[64];
-    sprintf(buff, "0x%llX", value);
+    snprintf(buff, sizeof(buff), "0x%llX", value);
     return buff;
 }
 
 static inline std::string hex4(uint64_t value) {
     char buff[64];
-    sprintf(buff, "0x%04llX", value);
+    snprintf(buff, sizeof(buff), "0x%04llX", value);
     return buff;
 }
 
 static inline std::string hex8(uint64_t value) {
     char buff[64];
-    sprintf(buff, "0x%08llX", value);
+    snprintf(buff, sizeof(buff), "0x%08llX", value);
+    return buff;
+}
+
+static inline std::string unpaddedDecimal(uint64_t value) {
+    char buff[64];
+    snprintf(buff, sizeof(buff), "%llu", value);
     return buff;
 }
 
 static inline std::string decimal(uint64_t value) {
     char buff[64];
-    sprintf(buff, "%llu", value);
+    snprintf(buff, sizeof(buff), "%02llu", value);
     return buff;
 }
 

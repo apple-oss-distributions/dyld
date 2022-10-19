@@ -55,7 +55,6 @@
 
 // BUILD(bridgeos):
 
-#include <stdio.h>
 #include <string.h>
 #include <mach-o/dyld_priv.h>
 #include <dyld/for_dyld_priv.inc>
@@ -262,4 +261,5 @@ int main(void) {
 #endif
 
     PASS("Success");
+    return 0;
 };

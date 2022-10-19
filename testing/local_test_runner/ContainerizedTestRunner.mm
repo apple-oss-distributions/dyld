@@ -50,7 +50,7 @@ struct TestInfo
     CC_SHA1(fullRunline, (CC_LONG)strlen(fullRunline), &hash[0]);
     snprintf(&hashStr[0], CC_SHA1_DIGEST_LENGTH*2+1, "%x%x%x%x", hash[0], hash[1], hash[2], hash[3]);
     char buffer[4096];
-    snprintf(&buffer[0], 4096, "test_%s_%s_%s", info.testName, extension, hashStr);
+    snprintf(&buffer[0], sizeof(buffer), "test_%s_%s_%s", info.testName, extension, hashStr);
     SEL newSel = sel_registerName(buffer);
     IMP newIMP = imp_implementationWithBlock(^(id self) {
         [self launchTest:info.testName withRunLine:fullRunline];
@@ -190,7 +190,7 @@ struct TestInfo
 
 - (void) launchTest:(const char *)test withRunLine:(const char *)runLine {
     char command[4096];
-    snprintf(&command[0], 4096, "cd /AppleInternal/CoreOS/tests/dyld/%s; %s", test, runLine);
+    snprintf(&command[0], sizeof(command), "cd /AppleInternal/CoreOS/tests/dyld/%s; %s", test, runLine);
     [self executeCommandInContainer:command];
 // sudo chroot . /bin/sh -c 'TEST_OUTPUT=BATS /AppleInternal/CoreOS/tests/dyld/dyld_get_sdk_version/sdk-check.exe'
 

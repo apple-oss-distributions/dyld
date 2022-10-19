@@ -106,8 +106,11 @@ struct dyld_cache_image_patches_v2
 struct dyld_cache_image_export_v2
 {
     uint32_t    dylibOffsetOfImpl;              // Offset from the dylib we used to find a dyld_cache_image_patches_v2
-    uint32_t    exportNameOffset;
+    uint32_t    exportNameOffset : 28;
+    uint32_t    patchKind        : 4;           // One of DyldSharedCache::patchKind
 };
+
+static_assert(sizeof(dyld_cache_image_export_v2) == 8, "Wrong size");
 
 struct dyld_cache_image_clients_v2
 {
@@ -126,6 +129,52 @@ struct dyld_cache_patchable_export_v2
 struct dyld_cache_patchable_location_v2
 {
     uint32_t    dylibOffsetOfUse;               // Offset from the dylib we used to get a dyld_cache_image_clients_v2
+    uint32_t    high7                   : 7,
+                addend                  : 5,    // 0..31
+                authenticated           : 1,
+                usesAddressDiversity    : 1,
+                key                     : 2,
+                discriminator           : 16;
+
+    uint64_t getAddend() const {
+        uint64_t unsingedAddend = addend;
+        int64_t signedAddend = (int64_t)unsingedAddend;
+        signedAddend = (signedAddend << 52) >> 52;
+        return (uint64_t)signedAddend;
+    }
+};
+
+//
+// MARK: --- V3 patching.  This is V2 plus support for GOT combining ---
+//
+struct dyld_cache_patch_info_v3 : dyld_cache_patch_info_v2
+{
+    // uint32_t    patchTableVersion;       // == 3
+    // ... other fields from dyld_cache_patch_info_v2
+    uint64_t    gotClientsArrayAddr;        // (unslid) address of array for dyld_cache_image_got_clients_v3 for each image
+    uint64_t    gotClientsArrayCount;       // count of got clients entries.  Should always match the patchTableArrayCount
+    uint64_t    gotClientExportsArrayAddr;  // (unslid) address of array for patch exports for each GOT image
+    uint64_t    gotClientExportsArrayCount; // count of patch exports entries
+    uint64_t    gotLocationArrayAddr;       // (unslid) address of array for patch locations for each GOT patch
+    uint64_t    gotLocationArrayCount;      // count of patch location entries
+};
+
+struct dyld_cache_image_got_clients_v3
+{
+    uint32_t    patchExportsStartIndex;         // Points to dyld_cache_patchable_export_v3[]
+    uint32_t    patchExportsCount;
+};
+
+struct dyld_cache_patchable_export_v3
+{
+    uint32_t    imageExportIndex;               // Points to dyld_cache_image_export_v2
+    uint32_t    patchLocationsStartIndex;       // Points to dyld_cache_patchable_location_v3[]
+    uint32_t    patchLocationsCount;
+};
+
+struct dyld_cache_patchable_location_v3
+{
+    uint64_t    cacheOffsetOfUse;               // Offset from the cache header
     uint32_t    high7                   : 7,
                 addend                  : 5,    // 0..31
                 authenticated           : 1,

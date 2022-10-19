@@ -2,7 +2,7 @@
 // BUILD:  $CC foo.c -dynamiclib  -install_name $RUN_DIR/libfoo.dylib -o $BUILD_DIR/libfoo.dylib
 // BUILD:  $CC main.c -DRUN_DIR="$RUN_DIR" $BUILD_DIR/libfoo.dylib -o $BUILD_DIR/dlopen-RTLD_NOLOAD-basic.exe
 // BUILD:  $SYMLINK libfoo.dylib $BUILD_DIR/libfoo-sym.dylib
-// BUILD:  $CC twice.c -dynamiclib  -install_name $RUN_DIR/libtwice.dylib -o $BUILD_DIR/libtwice.dylib
+// BUILD:  $CC twice.c -dynamiclib  -ltest_support -install_name $RUN_DIR/libtwice.dylib -o $BUILD_DIR/libtwice.dylib
 
 // RUN:  ./dlopen-RTLD_NOLOAD-basic.exe
 

@@ -1,7 +1,8 @@
-#!/usr/bin/python2.7
+#!/usr/bin/python3
 
 import os
 import KernelCollection
+from FixupHelpers import *
 
 # kxld has an implicit alias for a metaclass vtable entry.  Test that we also rewrite that alias
 
@@ -12,21 +13,20 @@ def check(kernel_cache):
     assert len(kernel_cache.dictionary()["dylibs"]) == 2
     assert kernel_cache.dictionary()["dylibs"][0]["name"] == "com.apple.kernel"
     assert kernel_cache.dictionary()["dylibs"][1]["name"] == "com.apple.foo"
-    assert kernel_cache.dictionary()["dylibs"][1]["segments"][2]["name"] == "__DATA_CONST"
-    assert kernel_cache.dictionary()["dylibs"][1]["segments"][2]["vmAddr"] == "0x14000"
+
+    gotVMAddr = findSectionVMAddr(kernel_cache, 1, "__DATA_CONST", "__got")
 
     # Find the address of the symbols to bind to
     kernel_cache.analyze("/vtable-patching-metaclass-alias/main.kc", ["-symbols", "-arch", "arm64"])
     assert len(kernel_cache.dictionary()["dylibs"]) == 2
     assert kernel_cache.dictionary()["dylibs"][0]["name"] == "com.apple.kernel"
-    assert kernel_cache.dictionary()["dylibs"][0]["global-symbols"][0]["name"] == "__ZN15OSMetaClassBase8DispatchE5IORPC"
-    assert kernel_cache.dictionary()["dylibs"][0]["global-symbols"][0]["vmAddr"] == "0xC000"
+    metaclassSymbolVMAddr = findGlobalSymbolVMAddr(kernel_cache, 0, "__ZN15OSMetaClassBase8DispatchE5IORPC")
 
     # Check the fixups
     kernel_cache.analyze("/vtable-patching-metaclass-alias/main.kc", ["-fixups", "-arch", "arm64"])
-    assert len(kernel_cache.dictionary()["fixups"]) == 2
-    assert kernel_cache.dictionary()["fixups"]["0x14000"] == "kc(0) + 0xC000"
-    assert kernel_cache.dictionary()["fixups"]["0x14008"] == "kc(0) + 0xC000"
+    assert len(kernel_cache.dictionary()["fixups"]) == 4
+    assert kernel_cache.dictionary()["fixups"][offsetVMAddr(gotVMAddr, 0)] == "kc(0) + " + metaclassSymbolVMAddr
+    assert kernel_cache.dictionary()["fixups"][offsetVMAddr(gotVMAddr, 8)] == "kc(0) + " + metaclassSymbolVMAddr
     assert len(kernel_cache.dictionary()["dylibs"]) == 2
     assert kernel_cache.dictionary()["dylibs"][0]["name"] == "com.apple.kernel"
     assert kernel_cache.dictionary()["dylibs"][0]["fixups"] == "none"

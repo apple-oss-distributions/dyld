@@ -18,6 +18,7 @@
 .Op Fl fixup_chains
 .Op Fl fixup_chain_details
 .Op Fl symbolic_fixups
+.Op Fl opcodes
 .Op Fl validate_only
 .Ar file(s)
 .Sh DESCRIPTION
@@ -55,6 +56,8 @@ If the binary uses chained fixups, displays the format of the chains and the sta
 Display a table of all the raw fixup chain bits and their meanings.
 .It Fl symbolic_fixups
 Display all fixups, grouped by data symbol.
+.It Fl opcodes
+Display all the opcodes used to generate the rebase and binding information.
 .It Fl validate_only
 Display nothing if binary is valid, or information about what parts are malformed.
 .El

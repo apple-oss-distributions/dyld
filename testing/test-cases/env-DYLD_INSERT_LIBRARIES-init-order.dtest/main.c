@@ -1,5 +1,5 @@
 
-// BUILD:  $CC base.c -dynamiclib -o $BUILD_DIR/libbase.dylib -install_name $RUN_DIR/libbase.dylib
+// BUILD:  $CC base.c -dynamiclib -ltest_support -o $BUILD_DIR/libbase.dylib -install_name $RUN_DIR/libbase.dylib
 // BUILD:  $CC foo.c -dynamiclib -o $BUILD_DIR/libfoo.dylib -install_name $RUN_DIR/libfoo.dylib  $BUILD_DIR/libbase.dylib
 // BUILD:  $CC main.c            -o $BUILD_DIR/env-DYLD_LIBRARY_PATH-init-order.exe  $BUILD_DIR/libbase.dylib
 // BUILD:  $DYLD_ENV_VARS_ENABLE $BUILD_DIR/env-DYLD_LIBRARY_PATH-init-order.exe

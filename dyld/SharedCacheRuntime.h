@@ -35,7 +35,8 @@ class DyldSharedCache;
 namespace dyld3 {
 
 struct SharedCacheOptions {
-    const char*     cacheDirOverride;
+    // Note we look in the default cache dir first, and then the fallback, if not null
+    int             cacheDirFD = -1;
     bool            forcePrivate;
     bool            useHaswell;
     bool            verbose;
@@ -54,7 +55,7 @@ struct SharedCacheLoadInfo {
     bool                        cacheFileFound  = false;
     uint64_t                    FSID            = 0;
     uint64_t                    FSObjID         = 0;
-    char                        path[256]       = {0};
+    bool                        development     = false;
 };
 
 bool loadDyldCache(const SharedCacheOptions& options, SharedCacheLoadInfo* results);

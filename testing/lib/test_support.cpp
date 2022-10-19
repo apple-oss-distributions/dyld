@@ -27,6 +27,10 @@
 #include <utility>
 #include <algorithm>
 
+#ifndef _POSIX_SPAWN_FORCE_4K_PAGES
+#define _POSIX_SPAWN_FORCE_4K_PAGES 0x1000
+#endif /* _POSIX_SPAWN_FORCE_4K_PAGES */
+
 extern "C" {
 #include "execserverServer.h"
 
@@ -127,9 +131,9 @@ inline void GrowableArray<T,QUANT,INIT>::erase(T& targ)
 struct TestState {
     TestState();
     static TestState* getState();
-    void _PASSV(const char* file, unsigned line, const char* format, va_list args) __attribute__ ((noreturn));
-    void _FAILV(const char* file, unsigned line, const char* format, va_list args) __attribute__ ((noreturn));
-    void _LOGV(const char* file, unsigned line, const char* format, va_list args);
+    void _PASSV(const char* file, unsigned line, const char* format, va_list args) __attribute__ ((noreturn, format(printf, 4, 0)));
+    void _FAILV(const char* file, unsigned line, const char* format, va_list args) __attribute__ ((noreturn, format(printf, 4, 0)));
+    void _LOGV(const char* file, unsigned line, const char* format, va_list args) __attribute__ ((format(printf, 4, 0)));
     GrowableArray<std::pair<mach_port_t, _dyld_test_crash_handler_t>>& getCrashHandlers();
 private:
     enum OutputStyle {
@@ -226,7 +230,7 @@ catch_mach_exception_raise_state_identity(mach_port_t exception_port,
 }
 
 _process::_process() :  executablePath(nullptr), args(nullptr), env(nullptr), stdoutHandler(nullptr), stderrHandler(nullptr),
-                        crashHandler(nullptr), exitHandler(nullptr), arch(currentArch), suspended(false) {}
+                        crashHandler(nullptr), exitHandler(nullptr), arch(currentArch), suspended(false), altPageSize(false), pid(0) {}
 _process::~_process() {
     if (stdoutHandler) { Block_release(stdoutHandler);}
     if (stderrHandler) { Block_release(stderrHandler);}
@@ -242,7 +246,9 @@ void _process::set_stderr_handler(_dyld_test_reader_t SEH) { stderrHandler = Blo
 void _process::set_exit_handler(_dyld_test_exit_handler_t EH) { exitHandler = Block_copy(EH); }
 void _process::set_crash_handler(_dyld_test_crash_handler_t CH) { crashHandler = Block_copy(CH); }
 void _process::set_launch_suspended(bool S) { suspended = S; }
+void _process::set_alt_page_size(bool PS) { altPageSize = PS; }
 void _process::set_launch_arch(cpu_type_t A) { arch = A; }
+pid_t _process::get_pid() const { return pid; }
 
 pid_t _process::launch() {
     dispatch_queue_t queue = dispatch_queue_create("com.apple.dyld.test.launch", NULL);
@@ -253,12 +259,17 @@ pid_t _process::launch() {
     dispatch_source_t stderrSource = NULL;
     int stdoutPipe[2];
     int stderrPipe[2];
+    int flags = POSIX_SPAWN_START_SUSPENDED;
+
+    if (altPageSize) {
+        flags |= _POSIX_SPAWN_FORCE_4K_PAGES;
+    }
 
     if (posix_spawn_file_actions_init(&fileActions) != 0) {
         FAIL("Setting up spawn filea actions");
     }
     if (posix_spawnattr_init(&attr) != 0) { FAIL("Setting up spawn attr"); }
-    if (posix_spawnattr_setflags(&attr, POSIX_SPAWN_START_SUSPENDED) != 0) {
+    if (posix_spawnattr_setflags(&attr, flags) != 0) {
         FAIL("Setting up spawn attr: POSIX_SPAWN_START_SUSPENDED");
     }
 
@@ -330,7 +341,6 @@ pid_t _process::launch() {
         dispatch_resume(crashSource);
     }
 
-    pid_t pid;
     uint32_t argc = 0;
     if (args) {
         for (argc = 0; args[argc] != NULL; ++argc) {}
@@ -562,7 +572,7 @@ void TestState::runLeaks(void) {
     auto testState = TestState::getState();
     pid_t currentPid = getpid();
     char pidString[32];
-    sprintf(&pidString[0], "%d", currentPid);
+    snprintf(&pidString[0], sizeof(pidString), "%d", currentPid);
     if (getuid() != 0) {
         printf("Insufficient priviledges, skipping Leak check: %s\n", testState->testName);
         exit(0);
@@ -599,7 +609,7 @@ void TestState::runLeaks(void) {
                 const void * buffer;
                 size_t size;
                 __unused dispatch_data_t map = dispatch_data_create_map(leaksOutput, &buffer, &size);
-                FAIL("Found Leaks:\n\n%s", buffer);
+                FAIL("Found Leaks:\n\n%s", (char*)buffer);
             }
         }
     });

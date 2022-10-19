@@ -35,7 +35,7 @@
 #include <stdio.h>
 #include <mach/mach.h>
 #include <mach/mach_time.h>
-#include <sys/stat.h>
+#include <sys/attr.h>
 #include <sys/mman.h>
 #include <sys/stat.h>
 #include <sys/ioctl.h>
@@ -176,7 +176,11 @@ void* _ZSt15get_new_handlerv()
     return NULL;
 }
 
-
+extern void __cxa_pure_virtual(void);
+void __cxa_pure_virtual()
+{
+    abort_report_np("Pure virtual method called");
+}
 
 // __cxxabiv1::__terminate_handler
 void* _ZN10__cxxabiv119__terminate_handlerE  = &_ZSt9terminatev;
@@ -238,14 +242,14 @@ void __assert_rtn(const char* func, const char* file, int line, const char* fail
 }
 #pragma clang diagnostic pop
 
-int sprintf(char * restrict str, const char * restrict format, ...)
+int snprintf(char * restrict str, size_t size, const char * restrict format, ...)
 {
     va_list list;
     _SIMPLE_STRING s = _simple_salloc();
     va_start(list, format);
     _simple_vsprintf(s, format, list);
     va_end(list);
-    strcpy(str, _simple_string(s));
+    strncpy(str, _simple_string(s), size);
     _simple_sfree(s);
     return 0;
 }
@@ -435,6 +439,23 @@ int open(const char* path, int oflag, ...) {
 
 int close(int fd) {
 	return gSyscallHelpers->close(fd);
+}
+
+int openat(int fd, const char *path, int oflag, ...)
+{
+    char pathBuffer[PATH_MAX] = { 0 };
+    int result = fcntl(fd, F_GETPATH, pathBuffer);
+    if ( result == -1 )
+        return -1;
+    strlcat(pathBuffer, "/", PATH_MAX);
+    strlcat(pathBuffer, path, PATH_MAX);
+
+    va_list args;
+    va_start(args, oflag);
+    result = gSyscallHelpers->open(pathBuffer, oflag, va_arg(args, int));
+    va_end(args);
+
+    return result;
 }
 
 ssize_t pread(int fd, void* buf, size_t nbytes, off_t offset) {
@@ -961,132 +982,7 @@ void _ZN5dyld424notifyMonitoringDyldMainEv() {
         gSyscallHelpers->notifyMonitoringDyldMain();
         return;
     }
-#if SUPPORT_HOST_10_11
-    findHostFunctions();
-    struct dyld_all_image_infos* imageInfo = (struct dyld_all_image_infos*)(gSyscallHelpers->getProcessInfo());
-    for (int slot=0; slot < DYLD_MAX_PROCESS_INFO_NOTIFY_COUNT; ++slot) {
-        if ( (imageInfo->notifyPorts[slot] != 0 ) && !sZombieNotifiers[slot] ) {
-            if ( sNotifyReplyPorts[slot] == 0 ) {
-                if ( !mach_port_allocate(mach_task_self(), MACH_PORT_RIGHT_RECEIVE, &sNotifyReplyPorts[slot]) )
-                    mach_port_insert_right(mach_task_self(), sNotifyReplyPorts[slot], sNotifyReplyPorts[slot], MACH_MSG_TYPE_MAKE_SEND);
-                //dyld::log("allocated reply port %d\n", sNotifyReplyPorts[slot]);
-            }
-            //dyld::log("found port to send to\n");
-            uint8_t messageBuffer[sizeof(mach_msg_header_t) + MAX_TRAILER_SIZE];
-            mach_msg_header_t* h = (mach_msg_header_t*)messageBuffer;
-            h->msgh_bits        = MACH_MSGH_BITS(MACH_MSG_TYPE_COPY_SEND,MACH_MSG_TYPE_MAKE_SEND); // MACH_MSG_TYPE_MAKE_SEND_ONCE
-            h->msgh_id          = DYLD_PROCESS_INFO_NOTIFY_MAIN_ID;
-            h->msgh_local_port    = sNotifyReplyPorts[slot];
-            h->msgh_remote_port    = imageInfo->notifyPorts[slot];
-            h->msgh_reserved    = 0;
-            h->msgh_size        = (mach_msg_size_t)sizeof(messageBuffer);
-            //dyld::log("sending to port[%d]=%d, size=%d, reply port=%d, id=0x%X\n", slot, dyld::gProcessInfo->notifyPorts[slot], h->msgh_size, sNotifyReplyPorts[slot], h->msgh_id);
-            kern_return_t sendResult = mach_msg(h, MACH_SEND_MSG | MACH_RCV_MSG | MACH_RCV_TIMEOUT, h->msgh_size, h->msgh_size, sNotifyReplyPorts[slot], 5000, MACH_PORT_NULL);
-            //dyld::log("send result = 0x%X, msg_id=%d, msg_size=%d\n", sendResult, h->msgh_id, h->msgh_size);
-            if ( sendResult == MACH_SEND_INVALID_DEST ) {
-                // sender is not responding, detatch
-                //dyld::log("process requesting notification gone. deallocation send port %d and receive port %d\n", dyld::gProcessInfo->notifyPorts[slot], sNotifyReplyPorts[slot]);
-                mach_port_deallocate(mach_task_self(), imageInfo->notifyPorts[slot]);
-                mach_port_deallocate(mach_task_self(), sNotifyReplyPorts[slot]);
-                imageInfo->notifyPorts[slot] = 0;
-                sNotifyReplyPorts[slot] = 0;
-            }
-            else if ( sendResult == MACH_RCV_TIMED_OUT ) {
-                // client took too long, ignore him from now on
-                sZombieNotifiers[slot] = true;
-                mach_port_deallocate(mach_task_self(), sNotifyReplyPorts[slot]);
-                sNotifyReplyPorts[slot] = 0;
-            }
-        }
-    }
-#endif
 }
-
-#if SUPPORT_HOST_10_11
-static void notifyMonitoringDyld(bool unloading, unsigned portSlot, unsigned imageCount,  const struct mach_header* loadAddresses[], const char* imagePaths[])
-{
-    if ( sZombieNotifiers[portSlot] )
-        return;
-    struct dyld_all_image_infos* imageInfo = (struct dyld_all_image_infos*)(gSyscallHelpers->getProcessInfo());
-    unsigned entriesSize = imageCount*sizeof(struct dyld_process_info_image_entry);
-    unsigned pathsSize = 0;
-    for (unsigned j=0; j < imageCount; ++j) {
-        pathsSize += (strlen(imagePaths[j]) + 1);
-    }
-    unsigned totalSize = (sizeof(struct dyld_process_info_notify_header) + MAX_TRAILER_SIZE + entriesSize + pathsSize + 127) & -128;   // align
-    if ( totalSize > DYLD_PROCESS_INFO_NOTIFY_MAX_BUFFER_SIZE ) {
-        // Putting all image paths into one message would make buffer too big.
-        // Instead split into two messages.  Recurse as needed until paths fit in buffer.
-        unsigned imageHalfCount = imageCount/2;
-        notifyMonitoringDyld(unloading, portSlot, imageHalfCount, loadAddresses, imagePaths);
-        notifyMonitoringDyld(unloading, portSlot, imageCount - imageHalfCount, &loadAddresses[imageHalfCount], &imagePaths[imageHalfCount]);
-        return;
-    }
-    uint8_t    buffer[totalSize];
-    struct dyld_process_info_notify_header* header = (struct dyld_process_info_notify_header*)buffer;
-    header->version            = 1;
-    header->imageCount        = imageCount;
-    header->imagesOffset    = sizeof(struct dyld_process_info_notify_header);
-    header->stringsOffset    = sizeof(struct dyld_process_info_notify_header) + entriesSize;
-    header->timestamp        = imageInfo->infoArrayChangeTimestamp;
-    struct dyld_process_info_image_entry* entries = (struct dyld_process_info_image_entry*)&buffer[header->imagesOffset];
-    char* const pathPoolStart = (char*)&buffer[header->stringsOffset];
-    char* pathPool = pathPoolStart;
-    for (unsigned j=0; j < imageCount; ++j) {
-        strcpy(pathPool, imagePaths[j]);
-        uint32_t len = (uint32_t)strlen(pathPool);
-        bzero(entries->uuid, 16);
-        const macho_header* mh = (const macho_header*)loadAddresses[j];
-        const uint32_t cmd_count = mh->ncmds;
-        const struct load_command* const cmds = (struct load_command*)((char*)mh + sizeof(macho_header));
-        const struct load_command* cmd = cmds;
-        for (uint32_t i = 0; i < cmd_count; ++i) {
-            if (cmd->cmd == LC_UUID) {
-                    struct uuid_command* uc = (struct uuid_command*)cmd;
-                    memcpy(&entries->uuid[0], uc->uuid, 16);
-                    break;
-            }
-            cmd = (const struct load_command*)(((char*)cmd)+cmd->cmdsize);
-        }
-        entries->loadAddress = (uint64_t)loadAddresses[j];
-        entries->pathStringOffset = (uint32_t)(pathPool - pathPoolStart);
-        entries->pathLength  = len;
-        pathPool += (len +1);
-        ++entries;
-    }
-
-    if ( sNotifyReplyPorts[portSlot] == 0 ) {
-        if ( !mach_port_allocate(mach_task_self(), MACH_PORT_RIGHT_RECEIVE, &sNotifyReplyPorts[portSlot]) )
-            mach_port_insert_right(mach_task_self(), sNotifyReplyPorts[portSlot], sNotifyReplyPorts[portSlot], MACH_MSG_TYPE_MAKE_SEND);
-        //dyld::log("allocated reply port %d\n", sNotifyReplyPorts[portSlot]);
-    }
-    //dyld::log("found port to send to\n");
-    mach_msg_header_t* h = (mach_msg_header_t*)buffer;
-    h->msgh_bits        = MACH_MSGH_BITS(MACH_MSG_TYPE_COPY_SEND,MACH_MSG_TYPE_MAKE_SEND); // MACH_MSG_TYPE_MAKE_SEND_ONCE
-    h->msgh_id            = unloading ? DYLD_PROCESS_INFO_NOTIFY_UNLOAD_ID : DYLD_PROCESS_INFO_NOTIFY_LOAD_ID;
-    h->msgh_local_port    = sNotifyReplyPorts[portSlot];
-    h->msgh_remote_port = imageInfo->notifyPorts[portSlot];
-    h->msgh_reserved    = 0;
-    h->msgh_size        = (mach_msg_size_t)sizeof(buffer);
-    //dyld::log("sending to port[%d]=%d, size=%d, reply port=%d, id=0x%X\n", portSlot, dyld::gProcessInfo->notifyPorts[portSlot], h->msgh_size, sNotifyReplyPorts[portSlot], h->msgh_id);
-    kern_return_t sendResult = mach_msg(h, MACH_SEND_MSG | MACH_RCV_MSG | MACH_RCV_TIMEOUT, h->msgh_size, h->msgh_size, sNotifyReplyPorts[portSlot], 5000, MACH_PORT_NULL);
-    //dyld::log("send result = 0x%X, msg_id=%d, msg_size=%d\n", sendResult, h->msgh_id, h->msgh_size);
-    if ( sendResult == MACH_SEND_INVALID_DEST ) {
-        // sender is not responding, detatch
-        //dyld::log("process requesting notification gone. deallocation send port %d and receive port %d\n", dyld::gProcessInfo->notifyPorts[portSlot], sNotifyReplyPorts[portSlot]);
-        mach_port_deallocate(mach_task_self(), imageInfo->notifyPorts[portSlot]);
-        mach_port_deallocate(mach_task_self(), sNotifyReplyPorts[portSlot]);
-        imageInfo->notifyPorts[portSlot] = 0;
-        sNotifyReplyPorts[portSlot] = 0;
-    }
-    else if ( sendResult == MACH_RCV_TIMED_OUT ) {
-        // client took too long, ignore him from now on
-        sZombieNotifiers[portSlot] = true;
-        mach_port_deallocate(mach_task_self(), sNotifyReplyPorts[portSlot]);
-        sNotifyReplyPorts[portSlot] = 0;
-    }
-}
-#endif
 
 extern void _ZN5dyld420notifyMonitoringDyldEbjPPK11mach_headerPPKc(bool unloading, unsigned imageCount, const struct mach_header* loadAddresses[], const char* imagePaths[]);
 void _ZN5dyld420notifyMonitoringDyldEbjPPK11mach_headerPPKc(bool unloading, unsigned imageCount, const struct mach_header* loadAddresses[], const char* imagePaths[]) {
@@ -1094,12 +990,14 @@ void _ZN5dyld420notifyMonitoringDyldEbjPPK11mach_headerPPKc(bool unloading, unsi
         gSyscallHelpers->notifyMonitoringDyld(unloading, imageCount, loadAddresses, imagePaths);
         return;
     }
-#if SUPPORT_HOST_10_11
-    findHostFunctions();
-    for (int slot=0; slot < DYLD_MAX_PROCESS_INFO_NOTIFY_COUNT; ++slot) {
-        notifyMonitoringDyld(unloading, slot, imageCount, loadAddresses, imagePaths);
+}
+
+extern void _ZN5dyld438notifyMonitoringDyldBeforeInitializersEv(void);
+void _ZN5dyld438notifyMonitoringDyldBeforeInitializersEv() {
+    if ( gSyscallHelpers->version >= 17 ) {
+        gSyscallHelpers->notifyMonitoringDyldBeforeInitializers();
+        return;
     }
-#endif
 }
 
 kern_return_t vm_copy(vm_map_t task, vm_address_t source_address, vm_size_t size, vm_address_t dest_address)
@@ -1130,6 +1028,21 @@ int getattrlistbulk(int fd, void* attrList, void* attrBuf, size_t bufSize, uint6
     return -1;
 }
 
+#ifdef __LP64__
+int getattrlist(const char* path, void* attrList, void * attrBuf, size_t attrBufSize, unsigned int options) {
+#else /* __LP64__ */
+int getattrlist(const char* path, void* attrList, void * attrBuf, size_t attrBufSize, unsigned long options) {
+#endif
+    if ( gSyscallHelpers->version >= 17 )
+        return gSyscallHelpers->getattrlist(path, attrList, attrBuf, attrBufSize, options);
+    return -1;
+}
+
+int getfsstat(struct statfs *buf, int bufsize, int flags) {
+    if ( gSyscallHelpers->version >= 17 )
+        return gSyscallHelpers->getfsstat(buf, bufsize, flags);
+    return -1;
+}
 
 int* __error(void) {
 	return gSyscallHelpers->errnoAddress();
@@ -1198,7 +1111,7 @@ void _dyld_debugger_notification(int mode, unsigned long count, uint64_t machHea
     
 void uuid_unparse_upper(const uuid_t uu, uuid_string_t out)
 {
-    sprintf(out,
+    snprintf(out, sizeof(uuid_string_t),
              "%02X%02X%02X%02X-"
              "%02X%02X-"
              "%02X%02X-"

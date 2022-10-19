@@ -1,5 +1,5 @@
 
-#include "kmod.h"
+#include "../kmod.h"
 
 int startKext() {
 	return 0;

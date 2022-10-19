@@ -1,23 +1,39 @@
-//
-//  VectorTests.m
-//  UnitTests
-//
-//  Created by Louis Gerbarg on 12/28/20.
-//
+/* -*- mode: C++; c-basic-offset: 4; tab-width: 4 -*-
+ *
+ * Copyright (c) 2021 Apple Inc. All rights reserved.
+ *
+ * @APPLE_LICENSE_HEADER_START@
+ *
+ * This file contains Original Code and/or Modifications of Original Code
+ * as defined in and that are subject to the Apple Public Source License
+ * Version 2.0 (the 'License'). You may not use this file except in
+ * compliance with the License. Please obtain a copy of the License at
+ * http://www.opensource.apple.com/apsl/ and read it before using this
+ * file.
+ *
+ * The Original Code and all software distributed under the License are
+ * distributed on an 'AS IS' basis, WITHOUT WARRANTY OF ANY KIND, EITHER
+ * EXPRESS OR IMPLIED, AND APPLE HEREBY DISCLAIMS ALL SUCH WARRANTIES,
+ * INCLUDING WITHOUT LIMITATION, ANY WARRANTIES OF MERCHANTABILITY,
+ * FITNESS FOR A PARTICULAR PURPOSE, QUIET ENJOYMENT OR NON-INFRINGEMENT.
+ * Please see the License for the specific language governing rights and
+ * limitations under the License.
+ *
+ * @APPLE_LICENSE_HEADER_END@
+ */
 
 #import "DyldTestCase.h"
 
-
+#include <memory>
 #include <vector>
 
 #include "Vector.h"
 
-using namespace dyld4;
+using namespace lsl;
 
 @interface VectorTests : DyldTestCase {
-    std::vector<uint64_t>           _testVector;
-    Allocator                       _allocator;
-    bool                            _initialized;
+    std::vector<uint64_t>   _testVector;
+    bool                    _initialized;
 }
 
 @end
@@ -33,19 +49,17 @@ using namespace dyld4;
     }
 }
 
-- (void)tearDown {
-    XCTAssert(_allocator.allocated_bytes() == 0);
-}
-
 - (void)checkVector:(const Vector<uint64_t>&)vec {
     XCTAssert(vec.size() == _testVector.size());
+    std::span<uint64_t> integers = _testVector;
     for (auto i = 0; i < vec.size(); ++i) {
-        XCTAssert(_testVector[i] == vec[i]);
+        XCTAssert(integers[i] == vec[i]);
     }
 }
 
 - (void)testPushBack {
-    Vector<uint64_t> ints(&_allocator);
+    auto allocator = EphemeralAllocator();
+    Vector<uint64_t> ints(allocator);
     for (const auto& i : _testVector) {
         ints.push_back(i);
     }
@@ -53,7 +67,8 @@ using namespace dyld4;
 }
 
 - (void)testEmplaceBack {
-    Vector<uint64_t> ints(&_allocator);
+    auto allocator = EphemeralAllocator();
+    Vector<uint64_t> ints(allocator);
     for (const auto& i : _testVector) {
         ints.emplace_back(i);
     }
@@ -61,7 +76,8 @@ using namespace dyld4;
 }
 
 - (void)testInsert {
-    Vector<uint64_t> ints(&_allocator);
+    auto allocator = EphemeralAllocator();
+    Vector<uint64_t> ints(allocator);
     for (const auto& i : _testVector) {
         ints.insert(ints.end(), i);
     }
@@ -69,26 +85,29 @@ using namespace dyld4;
 }
 
 - (void)testCopyConstructor {
-    Vector<uint64_t> ints(&_allocator);
+    auto allocator = EphemeralAllocator();
+    Vector<uint64_t> ints(allocator);
     for (const auto& i : _testVector) {
         ints.insert(ints.end(), i);
     }
-    Vector<uint64_t> ints2(ints);
+    Vector<uint64_t> ints2(ints, allocator);
     [self checkVector:ints2];
 }
 
 - (void)testMoveConstructor {
-    Vector<uint64_t> ints(&_allocator);
+    auto allocator = EphemeralAllocator();
+    Vector<uint64_t> ints(allocator);
     for (const auto& i : _testVector) {
         ints.insert(ints.end(), i);
     }
-    Vector<uint64_t> ints2(ints);
+    Vector<uint64_t> ints2(ints, allocator);
     [self checkVector:ints2];
 }
 
 
 - (void)testVectorInsertRValue {
-    Vector<uint64_t> ints(&_allocator), ints2(&_allocator);
+    auto allocator = EphemeralAllocator();
+    Vector<uint64_t> ints(allocator), ints2(allocator);
     for (const auto& i : _testVector) {
         ints.insert(ints.end(), i);
     }
@@ -101,7 +120,8 @@ using namespace dyld4;
 }
 
 - (void)testCopyAssignment {
-    Vector<uint64_t> ints(&_allocator), ints2(&_allocator);
+    auto allocator = EphemeralAllocator();
+    Vector<uint64_t> ints(allocator), ints2(allocator);
     for (const auto& i : _testVector) {
         ints.insert(ints.end(), i);
     }
@@ -110,7 +130,8 @@ using namespace dyld4;
 }
 
 - (void) testVectorInsertRange {
-    Vector<uint64_t> ints(&_allocator), ints2(&_allocator);
+    auto allocator = EphemeralAllocator();
+    Vector<uint64_t> ints(allocator), ints2(allocator);
     for (const auto& i : _testVector) {
         ints.insert(ints.end(), i);
     }
@@ -119,16 +140,18 @@ using namespace dyld4;
 }
 
 - (void) testVectorConstructRange {
-    Vector<uint64_t> ints(&_allocator);
+    auto allocator = EphemeralAllocator();
+    Vector<uint64_t> ints(allocator);
     for (const auto& i : _testVector) {
         ints.insert(ints.end(), i);
     }
-    Vector<uint64_t> ints2(ints.begin(), ints.end(), &_allocator);
+    Vector<uint64_t> ints2(ints.begin(), ints.end(), allocator);
     [self checkVector:ints2];
 }
 
 - (void) testVectorPushBackRValue {
-    Vector<uint64_t> ints(&_allocator), ints2(&_allocator);
+    auto allocator = EphemeralAllocator();
+    Vector<uint64_t> ints(allocator), ints2(allocator);
     for (const auto& i : _testVector) {
         ints.insert(ints.end(), i);
     }
@@ -139,7 +162,8 @@ using namespace dyld4;
 }
 
 - (void)testVectorMisc {
-    Vector<uint64_t> ints(&_allocator), ints2(&_allocator);
+    auto allocator = EphemeralAllocator();
+    Vector<uint64_t> ints(allocator), ints2(allocator);
     for (const auto& i : _testVector) {
         ints.insert(ints.end(), i);
     }
@@ -200,8 +224,9 @@ struct MovedInteger
 };
 
 -(void)testVectorEraseMovedElements {
+    auto allocator = EphemeralAllocator();
     // Arrange: make a vector and remove an element
-    Vector<MovedInteger> ints(&_allocator);
+    Vector<MovedInteger> ints(allocator);
     ints.push_back(1);
     ints.push_back(2);
     ints.push_back(3);
@@ -217,6 +242,15 @@ struct MovedInteger
     XCTAssertTrue(size == 2);
     XCTAssertTrue(e0 == 2);
     XCTAssertTrue(e1 == 3);
+}
+
+- (void) testStackAllocatedVectors {
+    STACK_ALLOC_VECTOR(uint64_t, ints, 8);
+    XCTAssertEqual(__ints_vector_allocator.vm_allocated_bytes(), 0, "No vm allocations should be necessary");
+    for (auto i = 0; i < 8; ++i) {
+        ints.push_back(i);
+        XCTAssertEqual(__ints_vector_allocator.vm_allocated_bytes(), 0, "No vm allocations should be necessary");
+    }
 }
 
 @end

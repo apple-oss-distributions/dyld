@@ -1,4 +1,4 @@
-#!/usr/bin/python2.7
+#!/usr/bin/python3
 
 import os
 import KernelCollection
@@ -58,13 +58,13 @@ def check(kernel_cache):
     assert kernel_cache.dictionary()["dylibs"][2]["segments"][0]["name"] == "__TEXT"
     assert kernel_cache.dictionary()["dylibs"][2]["segments"][0]["vmAddr"] == "0xFFFFFF8000206000"
     assert kernel_cache.dictionary()["dylibs"][2]["segments"][1]["name"] == "__DATA"
-    assert kernel_cache.dictionary()["dylibs"][2]["segments"][1]["vmAddr"] == "0xFFFFFF8000215010"
+    assert kernel_cache.dictionary()["dylibs"][2]["segments"][1]["vmAddr"] == "0xFFFFFF80002150D8"
     assert kernel_cache.dictionary()["dylibs"][2]["segments"][2]["name"] == "__LINKEDIT"
     assert kernel_cache.dictionary()["dylibs"][2]["segments"][2]["vmAddr"] == "0xFFFFFF8000218000"
 
     # Check the fixups
     kernel_cache.analyze("/ctf-x86_64/main.kc", ["-fixups", "-arch", "x86_64"])
-    assert len(kernel_cache.dictionary()["fixups"]) == 12
+    assert len(kernel_cache.dictionary()["fixups"]) == 16
     # main.kernel: S s = { &func, &func, &g, &func, &g };
     # _s is at 0xFFFFFF8000208000 which is offset 0x108000 from __HIB
     assert kernel_cache.dictionary()["fixups"]["0x10C000"] == "kc(0) + 0xFFFFFF8000204FF0 : pointer64"
@@ -79,11 +79,11 @@ def check(kernel_cache):
     assert kernel_cache.dictionary()["fixups"]["0x114018"] == "kc(0) + 0xFFFFFF800021402C : pointer64"
     assert kernel_cache.dictionary()["fixups"]["0x114021"] == "kc(0) + 0xFFFFFF800021402C : pointer64"
     # bar.kext: __typeof(&bar) barPtr = &bar;
-    # _barPtr is at 0xFFFFFF8000210030 which is offset 0x110030 from __HIB
-    assert kernel_cache.dictionary()["fixups"]["0x115000"] == "kc(0) + 0xFFFFFF8000205FE0"
+    # _barPtr is at 0xFFFFFF8000210030 which is offset 0x1150C8 from __HIB
+    assert kernel_cache.dictionary()["fixups"]["0x1150C8"] == "kc(0) + 0xFFFFFF8000205FE0"
     # foo.kext: int* gPtr = &g;
-    # _gPtr is at 0xFFFFFF8000210040 which is offset 0x110040 from __HIB
-    assert kernel_cache.dictionary()["fixups"]["0x115010"] == "kc(0) + 0xFFFFFF8000215018"
+    # _gPtr is at 0xFFFFFF8000210040 which is offset 0x1151A0 from __HIB
+    assert kernel_cache.dictionary()["fixups"]["0x1151A0"] == "kc(0) + 0xFFFFFF80002151A8"
     # main.kernel: movl _foo, %esp
     # The _foo reloc is at 0xFFFFFF8000100002 which is offset 0x2 from __HIB
     assert kernel_cache.dictionary()["fixups"]["0x2"] == "kc(0) + 0x100000 : pointer32"

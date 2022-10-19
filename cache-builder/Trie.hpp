@@ -63,6 +63,7 @@
 #include <iterator>
 
 #include <mach-o/loader.h>
+#include "Defines.h"
 
 #if __cplusplus <= 201103L
 namespace std {
@@ -125,7 +126,7 @@ inline bool parse_uleb128(const uint8_t*& p, const uint8_t* end, uint64_t& resul
 };
 
 template <typename V>
-struct Trie {
+struct VIS_HIDDEN Trie {
 	uint32_t count;
 	uint32_t nodeCount;
 

@@ -108,18 +108,33 @@
 
 #include "DyldSharedCache.h"
 #include "Diagnostics.h"
-#include "MachOLoaded.h"
-#include "MachOAnalyzer.h"
 #include "OptimizerObjC.h"
 #include "OptimizerSwift.h"
 #include "PerfectHash.h"
+#include "SwiftVisitor.h"
+#include "Vector.h"
 
-#if BUILDING_CACHE_BUILDER
-#include "SharedCacheBuilder.h"
+#if SUPPORT_VM_LAYOUT
+#include "MachOLoaded.h"
+#include "MachOAnalyzer.h"
+#endif
+
+#if BUILDING_CACHE_BUILDER || BUILDING_CACHE_BUILDER_UNIT_TESTS
+#include "CacheDylib.h"
+#include "Optimizers.h"
+#include "NewSharedCacheBuilder.h"
 #include "objc-shared-cache.h"
 #endif
 
-typedef dyld3::MachOAnalyzer::SwiftProtocolConformance SwiftProtocolConformance;
+using metadata_visitor::ResolvedValue;
+using metadata_visitor::SwiftConformance;
+using metadata_visitor::SwiftVisitor;
+
+#if BUILDING_CACHE_BUILDER || BUILDING_CACHE_BUILDER_UNIT_TESTS
+using cache_builder::BuilderConfig;
+using cache_builder::CacheDylib;
+using cache_builder::SwiftProtocolConformanceOptimizer;
+#endif
 
 // Tracks which types conform to which protocols
 
@@ -197,7 +212,8 @@ uint32_t SwiftHashTable::hash(const SwiftTypeProtocolConformanceLocationKey& key
 
 
 template<>
-bool SwiftHashTable::equal(const SwiftTypeProtocolConformanceLocationKey& key, const SwiftTypeProtocolConformanceLocationKey& value,
+bool SwiftHashTable::equal(const SwiftTypeProtocolConformanceLocationKey& key,
+                           const SwiftTypeProtocolConformanceLocationKey& value,
                            const uint8_t*) const {
     return memcmp(&key, &value, sizeof(SwiftTypeProtocolConformanceLocationKey)) == 0;
 }
@@ -222,7 +238,8 @@ uint32_t SwiftHashTable::hash(const SwiftMetadataProtocolConformanceLocationKey&
 
 
 template<>
-bool SwiftHashTable::equal(const SwiftMetadataProtocolConformanceLocationKey& key, const SwiftMetadataProtocolConformanceLocationKey& value,
+bool SwiftHashTable::equal(const SwiftMetadataProtocolConformanceLocationKey& key,
+                           const SwiftMetadataProtocolConformanceLocationKey& value,
                            const uint8_t*) const {
     return memcmp(&key, &value, sizeof(SwiftMetadataProtocolConformanceLocationKey)) == 0;
 }
@@ -250,7 +267,8 @@ uint32_t SwiftHashTable::hash(const SwiftForeignTypeProtocolConformanceLocationK
 
 
 template<>
-bool SwiftHashTable::equal(const SwiftForeignTypeProtocolConformanceLocationKey& key, const SwiftForeignTypeProtocolConformanceLocationKey& value,
+bool SwiftHashTable::equal(const SwiftForeignTypeProtocolConformanceLocationKey& key,
+                           const SwiftForeignTypeProtocolConformanceLocationKey& value,
                            const uint8_t*) const {
     return memcmp(&key, &value, sizeof(SwiftForeignTypeProtocolConformanceLocationKey)) == 0;
 }
@@ -279,245 +297,26 @@ uint32_t SwiftHashTable::hash(const SwiftForeignTypeProtocolConformanceLookupKey
 
 
 template<>
-bool SwiftHashTable::equal(const SwiftForeignTypeProtocolConformanceLocationKey& key, const SwiftForeignTypeProtocolConformanceLookupKey& value,
+bool SwiftHashTable::equal(const SwiftForeignTypeProtocolConformanceLocationKey& key,
+                           const SwiftForeignTypeProtocolConformanceLookupKey& value,
                            const uint8_t* stringBaseAddress) const {
     std::string_view keyName((const char*)key.key1Buffer(stringBaseAddress), key.key1Size());
     return (key.protocolCacheOffset == value.protocolCacheOffset) && (keyName == value.foreignDescriptorName);
 }
 
 template<>
-SwiftHashTable::CheckByteType SwiftHashTable::checkbyte(const SwiftForeignTypeProtocolConformanceLookupKey& key, const uint8_t* stringBaseAddress) const
+SwiftHashTable::CheckByteType SwiftHashTable::checkbyte(const SwiftForeignTypeProtocolConformanceLookupKey& key,
+                                                        const uint8_t* stringBaseAddress) const
 {
     const std::string_view& name = key.foreignDescriptorName;
     const uint8_t* keyBytes = (const uint8_t*)name.data();
     return ((keyBytes[0] & 0x7) << 5) | ((uint8_t)name.size() & 0x1f);
 }
 
-#if BUILDING_CACHE_BUILDER
-
-// Swift hash tables
-template<typename TargetT>
-static void make_perfect(const std::vector<TargetT> targets, const uint8_t* stringBaseAddress,
-                         objc::PerfectHash& phash)
-{
-    dyld3::OverflowSafeArray<objc::PerfectHash::key> keys;
-
-    /* read in the list of keywords */
-    keys.reserve(targets.size());
-    for (const TargetT& target : targets) {
-        objc::PerfectHash::key mykey;
-        mykey.name1_k = (uint8_t*)target.key1Buffer(stringBaseAddress);
-        mykey.len1_k  = (uint32_t)target.key1Size();
-        mykey.name2_k = (uint8_t*)target.key2Buffer(stringBaseAddress);
-        mykey.len2_k  = (uint32_t)target.key2Size();
-        keys.push_back(mykey);
-    }
-
-    objc::PerfectHash::make_perfect(keys, phash);
-}
-
-template<typename PerfectHashT, typename TargetT>
-void SwiftHashTable::write(const PerfectHashT& phash, const std::vector<TargetT>& targetValues,
-                           const uint8_t* targetValuesBufferBaseAddress,
-                           const uint8_t* stringBaseAddress)
-{
-    // Set header
-    capacity = phash.capacity;
-    occupied = phash.occupied;
-    shift = phash.shift;
-    mask = phash.mask;
-    sentinelTarget = sentinel;
-    roundedTabSize = std::max(phash.mask+1, 4U);
-    salt = phash.salt;
-
-    // Set hash data
-    for (uint32_t i = 0; i < 256; i++) {
-        scramble[i] = phash.scramble[i];
-    }
-    for (uint32_t i = 0; i < phash.mask+1; i++) {
-        tab[i] = phash.tab[i];
-    }
-
-    dyld3::Array<TargetOffsetType> targetsArray = targets();
-    dyld3::Array<CheckByteType> checkBytesArray = checkBytes();
-
-    // Set offsets to the sentinel
-    for (uint32_t i = 0; i < phash.capacity; i++) {
-        targetsArray[i] = sentinel;
-    }
-    // Set checkbytes to 0
-    for (uint32_t i = 0; i < phash.capacity; i++) {
-        checkBytesArray[i] = 0;
-    }
-
-    // Set real value offsets and checkbytes
-    uint32_t offsetOfTargetBaseFromMap = (uint32_t)((uint64_t)targetValuesBufferBaseAddress - (uint64_t)this);
-    bool skipNext = false;
-    for (const TargetT& targetValue : targetValues) {
-        // Skip chains of duplicates
-        bool skipThisEntry = skipNext;
-        skipNext = targetValue.nextIsDuplicate;
-        if ( skipThisEntry )
-            continue;
-
-        uint32_t h = hash<typename TargetT::KeyType>(targetValue, stringBaseAddress);
-        uint32_t offsetOfTargetValueInArray = (uint32_t)((uint64_t)&targetValue - (uint64_t)targetValues.data());
-        assert(targetsArray[h] == sentinel);
-        targetsArray[h] = offsetOfTargetBaseFromMap + offsetOfTargetValueInArray;
-        assert(checkBytesArray[h] == 0);
-        checkBytesArray[h] = checkbyte<typename TargetT::KeyType>(targetValue, stringBaseAddress);
-    }
-}
-
-// Map from an unsigned 32-bit type to its signed counterpart.
-// Used for offset calculations
-template<typename PointerType>
-struct OffsetType {
-};
-
-template<>
-struct OffsetType<uint32_t> {
-    typedef int32_t SignedType;
-};
-
-template<>
-struct OffsetType<uint64_t> {
-    typedef int64_t SignedType;
-};
-
-template <typename PointerType>
-struct header_info_rw {
-};
-
-template<>
-struct header_info_rw<uint64_t> {
-
-    bool getLoaded() const {
-        return isLoaded;
-    }
-
-private:
-#pragma clang diagnostic push
-#pragma clang diagnostic ignored "-Wunused-private-field"
-    uint64_t isLoaded              : 1;
-    uint64_t allClassesRealized    : 1;
-    uint64_t next                  : 62;
-#pragma clang diagnostic pop
-};
-
-template<>
-struct header_info_rw<uint32_t> {
-
-    bool getLoaded() const {
-        return isLoaded;
-    }
-
-private:
-#pragma clang diagnostic push
-#pragma clang diagnostic ignored "-Wunused-private-field"
-    uint32_t isLoaded              : 1;
-    uint32_t allClassesRealized    : 1;
-    uint32_t next                  : 30;
-#pragma clang diagnostic pop
-};
-
-template <typename PointerType>
-class objc_header_info_ro_t {
-private:
-    PointerType mhdr_offset;     // offset to mach_header or mach_header_64
-    PointerType info_offset;     // offset to objc_image_info *
-
-public:
-    const mach_header* mhdr() const {
-        typedef typename OffsetType<PointerType>::SignedType SignedType;
-        return (const mach_header*)(((intptr_t)&mhdr_offset) + (SignedType)mhdr_offset);
-    }
-};
-
-template <typename PointerType>
-struct objc_headeropt_ro_t {
-    uint32_t count;
-    uint32_t entsize;
-    objc_header_info_ro_t<PointerType> headers[0];  // sorted by mhdr address
-
-    objc_header_info_ro_t<PointerType>& getOrEnd(uint32_t i) const {
-        assert(i <= count);
-        return *(objc_header_info_ro_t<PointerType>*)((uint8_t *)&headers + (i * entsize));
-    }
-
-    objc_header_info_ro_t<PointerType>& get(uint32_t i) const {
-        assert(i < count);
-        return *(objc_header_info_ro_t<PointerType>*)((uint8_t *)&headers + (i * entsize));
-    }
-
-    uint32_t index(const objc_header_info_ro_t<PointerType>* hi) const {
-        const objc_header_info_ro_t<PointerType>* begin = &get(0);
-        const objc_header_info_ro_t<PointerType>* end = &getOrEnd(count);
-        assert(hi >= begin && hi < end);
-        return (uint32_t)(((uintptr_t)hi - (uintptr_t)begin) / entsize);
-    }
-
-    objc_header_info_ro_t<PointerType>* get(const mach_header* mhdr)
-    {
-        int32_t start = 0;
-        int32_t end = count;
-        while (start <= end) {
-            int32_t i = (start+end)/2;
-            objc_header_info_ro_t<PointerType> &hi = get(i);
-            if (mhdr == hi.mhdr()) return &hi;
-            else if (mhdr < hi.mhdr()) end = i-1;
-            else start = i+1;
-        }
-
-        return nullptr;
-    }
-};
-
-template <typename PointerType>
-struct objc_headeropt_rw_t {
-    uint32_t count;
-    uint32_t entsize;
-    header_info_rw<PointerType> headers[0];  // sorted by mhdr address
-
-    void* get(uint32_t i) const {
-        assert(i < count);
-        return (void*)((uint8_t *)&headers + (i * entsize));
-    }
-};
-
-static std::optional<uint16_t> getPreoptimizedHeaderRWIndex(const void* headerInfoRO, const void* headerInfoRW, const dyld3::MachOAnalyzer* ma)
-{
-    assert(headerInfoRO != nullptr);
-    assert(headerInfoRW != nullptr);
-    if ( ma->is64() ) {
-        typedef uint64_t PointerType;
-        objc_headeropt_ro_t<PointerType>* hinfoRO = (objc_headeropt_ro_t<PointerType>*)headerInfoRO;
-        objc_headeropt_rw_t<PointerType>* hinfoRW = (objc_headeropt_rw_t<PointerType>*)headerInfoRW;
-
-        objc_header_info_ro_t<PointerType>* hdr = hinfoRO->get(ma);
-        if ( hdr == nullptr )
-            return {};
-        int32_t index = hinfoRO->index(hdr);
-        assert(hinfoRW->entsize == sizeof(header_info_rw<PointerType>));
-        return (uint16_t)index;
-    } else {
-        typedef uint32_t PointerType;
-        objc_headeropt_ro_t<PointerType>* hinfoRO = (objc_headeropt_ro_t<PointerType>*)headerInfoRO;
-        objc_headeropt_rw_t<PointerType>* hinfoRW = (objc_headeropt_rw_t<PointerType>*)headerInfoRW;
-
-        objc_header_info_ro_t<PointerType>* hdr = hinfoRO->get(ma);
-        if ( hdr == nullptr )
-            return {};
-        int32_t index = hinfoRO->index(hdr);
-        assert(hinfoRW->entsize == sizeof(header_info_rw<PointerType>));
-        return (uint16_t)index;
-    }
-}
-
 // Foreign metadata names might not be a regular C string.  Instead they might be
 // a NULL-separated array of C strings.  The "full identity" is the result including any
 // intermidiate NULL characters.  Eg, "NNSFoo\0St" would be a legitimate result
-static std::string_view getForeignFullIdentity(const char* arrayStart)
+std::string_view getForeignFullIdentity(const char* arrayStart)
 {
     // Track the extent of the current component.
     const char* componentStart = arrayStart;
@@ -560,171 +359,68 @@ static std::string_view getForeignFullIdentity(const char* arrayStart)
     return std::string_view(identityBeginning, stringSize);
 }
 
-static bool findProtocolConformances(Diagnostics& diags, const DyldSharedCache* dyldCache,
-                                     std::vector<SwiftTypeProtocolConformanceLocation>& foundTypeProtocolConformances,
-                                     std::vector<SwiftMetadataProtocolConformanceLocation>& foundMetadataProtocolConformances,
-                                     std::vector<SwiftForeignTypeProtocolConformanceLocation>& foundForeignTypeProtocolConformances)
+#if BUILDING_CACHE_BUILDER || BUILDING_CACHE_BUILDER_UNIT_TESTS
+
+template<typename PerfectHashT, typename KeyT, typename TargetT>
+void SwiftHashTable::write(const PerfectHashT& phash, const lsl::Vector<KeyT>& keyValues,
+                           const lsl::Vector<TargetT>& targetValues,
+                           const uint8_t* targetValuesBufferBaseAddress)
 {
-    // If we have the read only data, make sure it has a valid selector table inside.
-    const objc_opt::objc_opt_t* optObjCHeader = dyldCache->objcOpt();
-    const objc::ClassHashTable* classHashTable = nullptr;
-    if ( optObjCHeader != nullptr ) {
-        classHashTable = optObjCHeader->classOpt();
+    // Set header
+    capacity = phash.capacity;
+    occupied = phash.occupied;
+    shift = phash.shift;
+    mask = phash.mask;
+    sentinelTarget = sentinel;
+    roundedTabSize = std::max(phash.mask+1, 4U);
+    salt = phash.salt;
+
+    // Set hash data
+    for (uint32_t i = 0; i < 256; i++) {
+        scramble[i] = phash.scramble[i];
+    }
+    for (uint32_t i = 0; i < phash.mask+1; i++) {
+        tab[i] = phash.tab[i];
     }
 
-    if ( classHashTable == nullptr ) {
-        diags.warning("Skipped optimizing Swift protocols due to missing objc class optimisations");
-        return false;
+    dyld3::Array<TargetOffsetType> targetsArray = targets();
+    dyld3::Array<CheckByteType> checkBytesArray = checkBytes();
+
+    // Set offsets to the sentinel
+    for (uint32_t i = 0; i < phash.capacity; i++) {
+        targetsArray[i] = sentinel;
+    }
+    // Set checkbytes to 0
+    for (uint32_t i = 0; i < phash.capacity; i++) {
+        checkBytesArray[i] = 0;
     }
 
-    const void* headerInfoRO = (const void*)optObjCHeader->headeropt_ro();
-    const void* headerInfoRW = (const void*)optObjCHeader->headeropt_rw();
-    if ( (headerInfoRO == nullptr) || (headerInfoRW == nullptr) ) {
-        diags.warning("Skipped optimizing Swift protocols due to missing objc header infos");
-        return false;
+    // Set real value offsets and checkbytes
+    uint32_t offsetOfTargetBaseFromMap = (uint32_t)((uint64_t)targetValuesBufferBaseAddress - (uint64_t)this);
+    bool skipNext = false;
+    uint32_t keyIndex = 0;
+
+    // Walk all targets.  Keys will exist only for the first target in a sequence with the key
+    for ( const TargetT& targetValue : targetValues ) {
+        // Skip chains of duplicates
+        bool skipThisEntry = skipNext;
+        skipNext = targetValue.nextIsDuplicate;
+        if ( skipThisEntry )
+            continue;
+
+        // Process this key as it wasn't skipped
+        const KeyT& key = keyValues[keyIndex];
+        ++keyIndex;
+
+        uint32_t h = hash(key, nullptr);
+        uint32_t offsetOfTargetValueInArray = (uint32_t)((uint64_t)&targetValue - (uint64_t)targetValues.data());
+        assert(targetsArray[h] == sentinel);
+        targetsArray[h] = offsetOfTargetBaseFromMap + offsetOfTargetValueInArray;
+        assert(checkBytesArray[h] == 0);
+        checkBytesArray[h] = checkbyte(key, nullptr);
     }
 
-    const bool log = false;
-
-    // Find all conformances in all binaries
-    dyldCache->forEachImage(^(const mach_header* machHeader, const char* installName) {
-
-        if ( diags.hasError() )
-            return;
-
-        const dyld3::MachOAnalyzer* ma = (const dyld3::MachOAnalyzer*)machHeader;
-
-        auto vmAddrConverter = ma->makeVMAddrConverter(true);
-        // HACK: At this point in the builder, everything contains vmAddr's.  Setting
-        // the above vmAddrConverter as "rebabed" and a 0 slide, causes nothing to be converted later
-        vmAddrConverter.slide = 0;
-
-        uint64_t binaryCacheOffset = (uint64_t)ma - (uint64_t)dyldCache;
-
-        __block std::unordered_map<uint64_t, const char*> symbols;
-        if ( log ) {
-            uint64_t baseAddress = ma->preferredLoadAddress();
-            ma->forEachGlobalSymbol(diags, ^(const char *symbolName, uint64_t n_value, uint8_t n_type, uint8_t n_sect, uint16_t n_desc, bool &stop) {
-                symbols[n_value - baseAddress] = symbolName;
-            });
-        }
-
-        ma->forEachSwiftProtocolConformance(diags, vmAddrConverter, true,
-                                            ^(uint64_t protocolConformanceRuntimeOffset, const SwiftProtocolConformance &protocolConformance,
-                                              bool &stopProtocolConformance) {
-
-            std::optional<uint16_t> objcIndex = getPreoptimizedHeaderRWIndex(headerInfoRO, headerInfoRW, ma);
-            if ( !objcIndex.has_value() ) {
-                diags.error("Could not find objc header info for Swift dylib: %s", installName);
-                stopProtocolConformance = true;
-                return;
-            }
-
-            uint16_t dylibObjCIndex = *objcIndex;
-
-            // The type descriptor might be a pointer to an objc name/class.  If so, we need to translate that in to a pointer to a type descriptor
-            // For now just skip adding found protocols to objc
-            if ( protocolConformance.typeConformanceRuntimeOffset != 0 ) {
-                SwiftTypeProtocolConformanceLocation protoLoc;
-                protoLoc.protocolConformanceCacheOffset = binaryCacheOffset + protocolConformanceRuntimeOffset;
-                protoLoc.dylibObjCIndex = dylibObjCIndex;
-                protoLoc.typeDescriptorCacheOffset = binaryCacheOffset + protocolConformance.typeConformanceRuntimeOffset;
-                protoLoc.protocolCacheOffset = binaryCacheOffset + protocolConformance.protocolRuntimeOffset;
-                foundTypeProtocolConformances.push_back(protoLoc);
-                if ( log ) {
-                    const char* typeName = "";
-                    const char* protocolName = "";
-                    const char* conformanceName = "";
-                    if ( auto it = symbols.find(protocolConformance.typeConformanceRuntimeOffset); it != symbols.end() )
-                        typeName = it->second;
-                    if ( auto it = symbols.find(protocolConformance.protocolRuntimeOffset); it != symbols.end() )
-                        protocolName = it->second;
-                    if ( auto it = symbols.find(protocolConformanceRuntimeOffset); it != symbols.end() )
-                        conformanceName = it->second;
-                    fprintf(stderr, "%s: (%s, %s) -> %s", ma->installName(), typeName, protocolName, conformanceName);
-                }
-            } else if ( protocolConformance.typeConformanceObjCClassRuntimeOffset != 0 ) {
-                SwiftMetadataProtocolConformanceLocation protoLoc;
-                protoLoc.protocolConformanceCacheOffset = binaryCacheOffset + protocolConformanceRuntimeOffset;
-                protoLoc.dylibObjCIndex = dylibObjCIndex;
-                protoLoc.metadataCacheOffset = binaryCacheOffset + protocolConformance.typeConformanceObjCClassRuntimeOffset;
-                protoLoc.protocolCacheOffset = binaryCacheOffset + protocolConformance.protocolRuntimeOffset;
-                foundMetadataProtocolConformances.push_back(protoLoc);
-                if ( log ) {
-                    const char* metadataName = "";
-                    const char* protocolName = "";
-                    const char* conformanceName = "";
-                    if ( auto it = symbols.find(protocolConformance.typeConformanceObjCClassRuntimeOffset); it != symbols.end() )
-                        metadataName = it->second;
-                    if ( auto it = symbols.find(protocolConformance.protocolRuntimeOffset); it != symbols.end() )
-                        protocolName = it->second;
-                    if ( auto it = symbols.find(protocolConformanceRuntimeOffset); it != symbols.end() )
-                        conformanceName = it->second;
-                    fprintf(stderr, "%s: (%s, %s) -> %s", ma->installName(), metadataName, protocolName, conformanceName);
-                }
-            } else if ( protocolConformance.typeConformanceObjCClassNameRuntimeOffset != 0 ) {
-                const char* className = (const char*)ma + protocolConformance.typeConformanceObjCClassNameRuntimeOffset;
-                classHashTable->forEachClass(className, ^(uint64_t classCacheOffset, uint16_t dylibObjCIndexForClass, bool &stopClasses) {
-                    // exactly one matching class
-                    SwiftMetadataProtocolConformanceLocation protoLoc;
-                    protoLoc.protocolConformanceCacheOffset = binaryCacheOffset + protocolConformanceRuntimeOffset;
-                    protoLoc.dylibObjCIndex = dylibObjCIndex;
-                    protoLoc.metadataCacheOffset = classCacheOffset;
-                    protoLoc.protocolCacheOffset = binaryCacheOffset + protocolConformance.protocolRuntimeOffset;
-                    foundMetadataProtocolConformances.push_back(protoLoc);
-                    if ( log ) {
-                        const char* protocolName = "";
-                        const char* conformanceName = "";
-                        if ( auto it = symbols.find(protocolConformance.protocolRuntimeOffset); it != symbols.end() )
-                            protocolName = it->second;
-                        if ( auto it = symbols.find(protocolConformanceRuntimeOffset); it != symbols.end() )
-                            conformanceName = it->second;
-                        fprintf(stderr, "%s: (%s, %s) -> %s", ma->installName(), className, protocolName, conformanceName);
-                    }
-                });
-            } else {
-                // assert(0 && "Unknown protocol conformance");
-                // Missing weak imports can result in us wanting to skip a confornmance.  Assume that is the case here
-            }
-
-            // Type's can also have foreign names, which are used to identify the descriptor by name instead of just pointer value
-            if ( protocolConformance.foreignMetadataNameRuntimeOffset != 0 ) {
-                uint64_t foreignDescriptorNameCacheOffset = binaryCacheOffset + protocolConformance.foreignMetadataNameRuntimeOffset;
-                const char* name = (const char*)dyldCache + foreignDescriptorNameCacheOffset;
-                std::string_view fullName(name);
-                if ( protocolConformance.foreignMetadataNameHasImportInfo )
-                    fullName = getForeignFullIdentity(name);
-
-                // We only have 16-bits for the length.  Hopefully that is enough!
-                if ( fullName.size() >= (1 << 16) ) {
-                    diags.error("Protocol conformance exceeded name length of 16-bits");
-                    stopProtocolConformance = true;
-                    return;
-                }
-
-                SwiftForeignTypeProtocolConformanceLocation protoLoc;
-                protoLoc.protocolConformanceCacheOffset = binaryCacheOffset + protocolConformanceRuntimeOffset;
-                protoLoc.dylibObjCIndex = dylibObjCIndex;
-                protoLoc.foreignDescriptorNameCacheOffset = (fullName.data() - (const char*)dyldCache);
-                protoLoc.foreignDescriptorNameLength = fullName.size();
-                protoLoc.protocolCacheOffset = binaryCacheOffset + protocolConformance.protocolRuntimeOffset;
-                foundForeignTypeProtocolConformances.push_back(protoLoc);
-                if ( log ) {
-                    const char* typeName = "";
-                    const char* protocolName = "";
-                    const char* conformanceName = "";
-                    typeName = (const char*)dyldCache + protoLoc.foreignDescriptorNameCacheOffset;
-                    if ( auto it = symbols.find(protocolConformance.protocolRuntimeOffset); it != symbols.end() )
-                        protocolName = it->second;
-                    if ( auto it = symbols.find(protocolConformanceRuntimeOffset); it != symbols.end() )
-                        conformanceName = it->second;
-                    fprintf(stderr, "%s: (%s, %s) -> %s", ma->installName(), typeName, protocolName, conformanceName);
-                }
-            }
-        });
-    });
-
-    return !diags.hasError();
+    assert(keyIndex == keyValues.size());
 }
 
 static bool operator<(const SwiftTypeProtocolConformanceLocation& a,
@@ -762,165 +458,365 @@ static bool operator<(const SwiftForeignTypeProtocolConformanceLocation& a,
     return false;
 }
 
-static void optimizeProtocolConformances(Diagnostics& diags, DyldSharedCache* dyldCache,
-                                         uint8_t* swiftReadOnlyBuffer, uint64_t swiftReadOnlyBufferSizeAllocated)
+// Find the protocol conformances in the given dylib and add them to the vector
+static void findProtocolConformances(Diagnostics& diags,
+                                     VMAddress sharedCacheBaseAddress,
+                                     const objc::ClassHashTable* objcClassOpt,
+                                     const void* headerInfoRO, const void* headerInfoRW,
+                                     VMAddress headerInfoROUnslidVMAddr,
+                                     const SwiftVisitor& swiftVisitor,
+                                     CacheVMAddress dylibCacheAddress,
+                                     std::string_view installName,
+                                     std::unordered_map<std::string_view, uint64_t>& canonicalForeignNameOffsets,
+                                     std::unordered_map<uint64_t, std::string_view>& foundForeignNames,
+                                     lsl::Vector<SwiftTypeProtocolConformanceLocation>& foundTypeProtocolConformances,
+                                     lsl::Vector<SwiftMetadataProtocolConformanceLocation>& foundMetadataProtocolConformances,
+                                     lsl::Vector<SwiftForeignTypeProtocolConformanceLocation>& foundForeignTypeProtocolConformances)
 {
-    std::vector<SwiftTypeProtocolConformanceLocation> foundTypeProtocolConformances;
-    std::vector<SwiftMetadataProtocolConformanceLocation> foundMetadataProtocolConformances;
-    std::vector<SwiftForeignTypeProtocolConformanceLocation> foundForeignTypeProtocolConformances;
-    if ( !findProtocolConformances(diags, dyldCache, foundTypeProtocolConformances, foundMetadataProtocolConformances,
-                                   foundForeignTypeProtocolConformances) )
-        return;
+    const bool is64 = (swiftVisitor.pointerSize == 8);
 
-    // Sort the lists, and look for duplicates
+    swiftVisitor.forEachProtocolConformance(^(const SwiftConformance &swiftConformance, bool &stopConformance) {
+        typedef SwiftConformance::SwiftProtocolConformanceFlags SwiftProtocolConformanceFlags;
+        typedef SwiftConformance::SwiftTypeRefPointer SwiftTypeRefPointer;
+        typedef SwiftConformance::TypeContextDescriptor TypeContextDescriptor;
 
-    // Types
-    std::sort(foundTypeProtocolConformances.begin(), foundTypeProtocolConformances.end());
-    for (uint64_t i = 1; i < foundTypeProtocolConformances.size(); ++i) {
+        std::optional<uint16_t> objcIndex;
+        objcIndex = objc::getPreoptimizedHeaderRWIndex(headerInfoRO, headerInfoRW,
+                                                       headerInfoROUnslidVMAddr.rawValue(),
+                                                       dylibCacheAddress.rawValue(),
+                                                       is64);
+        if ( !objcIndex.has_value() ) {
+            diags.error("Could not find objc header info for Swift dylib: %s", installName.data());
+            stopConformance = true;
+            return;
+        }
+
+        uint16_t dylibObjCIndex = *objcIndex;
+
+        // Get the protocol, and skip missing weak imports
+        std::optional<VMAddress> protocolVMAddr = swiftConformance.getProtocolVMAddr(swiftVisitor);
+        if ( !protocolVMAddr.has_value() )
+            return;
+        VMOffset protocolVMOffset = protocolVMAddr.value() - sharedCacheBaseAddress;
+
+        VMAddress conformanceVMAddr = swiftConformance.getVMAddress();
+        VMOffset conformanceVMOffset = conformanceVMAddr - sharedCacheBaseAddress;
+
+        SwiftTypeRefPointer typeRef = swiftConformance.getTypeRef(swiftVisitor);
+        SwiftProtocolConformanceFlags flags = swiftConformance.getProtocolConformanceFlags(swiftVisitor);
+        switch ( flags.typeReferenceKind() ) {
+            case SwiftConformance::SwiftProtocolConformanceFlags::TypeReferenceKind::directTypeDescriptor:
+            case SwiftConformance::SwiftProtocolConformanceFlags::TypeReferenceKind::indirectTypeDescriptor: {
+                std::optional<ResolvedValue> typeDescValue = typeRef.getTypeDescriptor(swiftVisitor);
+                if ( typeDescValue.has_value() ) {
+                    VMAddress typeDescVMAddr = typeDescValue->vmAddress();
+                    VMOffset typeDescVMOffset = typeDescVMAddr - sharedCacheBaseAddress;
+
+                    // Type descriptors might be foreign.  This means that the runtime needs to use their name to identify them
+                    TypeContextDescriptor typeDesc(typeDescValue.value());
+                    if ( typeDesc.isForeignMetadata() ) {
+                        ResolvedValue typeDescNameValue = typeDesc.getName(swiftVisitor);
+                        const char* typeDescName = (const char*)typeDescNameValue.value();
+                        std::string_view fullName(typeDescName);
+                        if ( typeDesc.hasImportInfo() )
+                            fullName = getForeignFullIdentity(typeDescName);
+
+                        // We only have 16-bits for the length.  Hopefully that is enough!
+                        if ( fullName.size() >= (1 << 16) ) {
+                            diags.error("Protocol conformance exceeded name length of 16-bits");
+                            stopConformance = true;
+                            return;
+                        }
+
+                        // The full mame may have moved adjusted the offset we want to record
+                        VMOffset fullNameVMOffset((uint64_t)fullName.data() - (uint64_t)typeDescName);
+
+                        VMAddress nameVMAddr = typeDescNameValue.vmAddress() + fullNameVMOffset;
+                        VMOffset nameVMOffset = nameVMAddr - sharedCacheBaseAddress;
+
+                        auto itAndInserted = canonicalForeignNameOffsets.insert({ fullName, nameVMOffset.rawValue() });
+                        if ( itAndInserted.second ) {
+                            // We inserted the name, so record it
+                            foundForeignNames[nameVMOffset.rawValue()] = fullName;
+                        } else {
+                            // We didn't insert the name, so use the offset already there for this name
+                            nameVMOffset = VMOffset(itAndInserted.first->second);
+                        }
+
+                        SwiftForeignTypeProtocolConformanceLocation protoLoc;
+                        protoLoc.protocolConformanceCacheOffset = conformanceVMOffset.rawValue();
+                        protoLoc.dylibObjCIndex = dylibObjCIndex;
+                        protoLoc.foreignDescriptorNameCacheOffset = nameVMOffset.rawValue();
+                        protoLoc.foreignDescriptorNameLength = fullName.size();
+                        protoLoc.protocolCacheOffset = protocolVMOffset.rawValue();
+                        foundForeignTypeProtocolConformances.push_back(protoLoc);
+                    }
+
+                    SwiftTypeProtocolConformanceLocation protoLoc;
+                    protoLoc.protocolConformanceCacheOffset = conformanceVMOffset.rawValue();
+                    protoLoc.dylibObjCIndex = dylibObjCIndex;
+                    protoLoc.typeDescriptorCacheOffset = typeDescVMOffset.rawValue();
+                    protoLoc.protocolCacheOffset = protocolVMOffset.rawValue();
+                    foundTypeProtocolConformances.push_back(protoLoc);
+                }
+                break;
+            }
+            case SwiftConformance::SwiftProtocolConformanceFlags::TypeReferenceKind::directObjCClassName: {
+                const char* className = typeRef.getClassName(swiftVisitor);
+
+                objcClassOpt->forEachClass(className, ^(uint64_t classCacheOffset, uint16_t dylibObjCIndexForClass,
+                                                        bool &stopClasses) {
+                    // exactly one matching class
+                    SwiftMetadataProtocolConformanceLocation protoLoc;
+                    protoLoc.protocolConformanceCacheOffset = conformanceVMOffset.rawValue();
+                    protoLoc.dylibObjCIndex = dylibObjCIndex;
+                    protoLoc.metadataCacheOffset = classCacheOffset;
+                    protoLoc.protocolCacheOffset = protocolVMOffset.rawValue();
+                    foundMetadataProtocolConformances.push_back(protoLoc);
+                });
+                break;
+            }
+            case SwiftConformance::SwiftProtocolConformanceFlags::TypeReferenceKind::indirectObjCClass: {
+                std::optional<ResolvedValue> classPos = typeRef.getClass(swiftVisitor);
+                if ( classPos.has_value() ) {
+                    VMAddress classVMAddr = classPos->vmAddress();
+                    VMOffset classVMOffset = classVMAddr - sharedCacheBaseAddress;
+
+                    SwiftMetadataProtocolConformanceLocation protoLoc;
+                    protoLoc.protocolConformanceCacheOffset = conformanceVMOffset.rawValue();
+                    protoLoc.dylibObjCIndex = dylibObjCIndex;
+                    protoLoc.metadataCacheOffset = classVMOffset.rawValue();
+                    protoLoc.protocolCacheOffset = protocolVMOffset.rawValue();
+                    foundMetadataProtocolConformances.push_back(protoLoc);
+                }
+                break;
+            }
+        }
+    });
+}
+
+static void make_perfect(const lsl::Vector<SwiftTypeProtocolConformanceLocationKey>& targets,
+                         objc::PerfectHash& phash)
+{
+    dyld3::OverflowSafeArray<objc::PerfectHash::key> keys;
+
+    /* read in the list of keywords */
+    keys.reserve(targets.size());
+    for (const SwiftTypeProtocolConformanceLocationKey& target : targets) {
+        objc::PerfectHash::key mykey;
+        mykey.name1_k = (uint8_t*)target.key1Buffer(nullptr);
+        mykey.len1_k  = (uint32_t)target.key1Size();
+        mykey.name2_k = (uint8_t*)target.key2Buffer(nullptr);
+        mykey.len2_k  = (uint32_t)target.key2Size();
+        keys.push_back(mykey);
+    }
+
+    objc::PerfectHash::make_perfect(keys, phash);
+}
+
+static void emitTypeHashTable(Diagnostics& diag, lsl::Allocator& allocator,
+                              lsl::Vector<SwiftTypeProtocolConformanceLocation>& conformances,
+                              cache_builder::SwiftProtocolConformancesHashTableChunk* hashTableChunk)
+{
+    // Prepare the protocols by sorting them and looking for duplicates
+    std::sort(conformances.begin(), conformances.end());
+    for (uint64_t i = 1; i < conformances.size(); ++i) {
         // Check if this protocol is the same as the previous one
-        auto& prev = foundTypeProtocolConformances[i - 1];
-        auto& current = foundTypeProtocolConformances[i];
+        auto& prev = conformances[i - 1];
+        auto& current = conformances[i];
         if ( std::equal_to<SwiftTypeProtocolConformanceLocationKey>()(prev, current) )
             prev.nextIsDuplicate = 1;
     }
 
-    std::vector<SwiftTypeProtocolConformanceLocationKey> typeProtocolConformanceKeys;
-    for (const auto& protoLoc : foundTypeProtocolConformances) {
+    lsl::Vector<SwiftTypeProtocolConformanceLocationKey> conformanceKeys(allocator);
+    for (const auto& protoLoc : conformances) {
         if ( protoLoc.nextIsDuplicate )
             continue;
-        typeProtocolConformanceKeys.push_back(protoLoc);
+        conformanceKeys.push_back(protoLoc);
     }
 
-    // Metadata
-    std::sort(foundMetadataProtocolConformances.begin(), foundMetadataProtocolConformances.end());
-    for (uint64_t i = 1; i < foundMetadataProtocolConformances.size(); ++i) {
+    // Build the perfect hash table for type conformances
+    objc::PerfectHash perfectHash;
+    make_perfect(conformanceKeys, perfectHash);
+    size_t hashTableSize = SwiftHashTable::size(perfectHash);
+
+    size_t conformanceBufferSize = (conformances.size() * sizeof(*conformances.data()));
+
+    size_t totalBufferSize = hashTableSize + conformanceBufferSize;
+    if ( totalBufferSize > hashTableChunk->subCacheFileSize.rawValue() ) {
+        diag.error("Swift type hash table exceeds buffer size (%lld > %lld)",
+                   (uint64_t)totalBufferSize, hashTableChunk->subCacheFileSize.rawValue());
+        return;
+    }
+
+    // Emit the table
+    uint8_t* hashTableBuffer = hashTableChunk->subCacheBuffer;
+    uint8_t* valuesBuffer = hashTableBuffer + hashTableSize;
+
+    ((SwiftHashTable*)hashTableBuffer)->write(perfectHash, conformanceKeys,
+                                              conformances, valuesBuffer);
+    memcpy(valuesBuffer, conformances.data(), conformanceBufferSize);
+}
+
+static void make_perfect(const lsl::Vector<SwiftMetadataProtocolConformanceLocationKey>& targets,
+                         objc::PerfectHash& phash)
+{
+    dyld3::OverflowSafeArray<objc::PerfectHash::key> keys;
+
+    /* read in the list of keywords */
+    keys.reserve(targets.size());
+    for (const SwiftMetadataProtocolConformanceLocationKey& target : targets) {
+        objc::PerfectHash::key mykey;
+        mykey.name1_k = (uint8_t*)target.key1Buffer(nullptr);
+        mykey.len1_k  = (uint32_t)target.key1Size();
+        mykey.name2_k = (uint8_t*)target.key2Buffer(nullptr);
+        mykey.len2_k  = (uint32_t)target.key2Size();
+        keys.push_back(mykey);
+    }
+
+    objc::PerfectHash::make_perfect(keys, phash);
+}
+
+static void emitMetadataHashTable(Diagnostics& diag, lsl::Allocator& allocator,
+                                  lsl::Vector<SwiftMetadataProtocolConformanceLocation>& conformances,
+                                  cache_builder::SwiftProtocolConformancesHashTableChunk* hashTableChunk)
+{
+    // Prepare the protocols by sorting them and looking for duplicates
+    std::sort(conformances.begin(), conformances.end());
+    for (uint64_t i = 1; i < conformances.size(); ++i) {
         // Check if this protocol is the same as the previous one
-        auto& prev = foundMetadataProtocolConformances[i - 1];
-        auto& current = foundMetadataProtocolConformances[i];
+        auto& prev = conformances[i - 1];
+        auto& current = conformances[i];
         if ( std::equal_to<SwiftMetadataProtocolConformanceLocationKey>()(prev, current) )
             prev.nextIsDuplicate = 1;
     }
 
-    std::vector<SwiftMetadataProtocolConformanceLocationKey> metadataProtocolConformanceKeys;
-    for (const auto& protoLoc : foundMetadataProtocolConformances) {
+    lsl::Vector<SwiftMetadataProtocolConformanceLocationKey> conformanceKeys(allocator);
+    for (const auto& protoLoc : conformances) {
         if ( protoLoc.nextIsDuplicate )
             continue;
-        metadataProtocolConformanceKeys.push_back(protoLoc);
+        conformanceKeys.push_back(protoLoc);
     }
 
-    // Foreign types
-    // First unique the offsets so that they all have the same offset for the same name
-    {
-        std::unordered_map<std::string_view, uint64_t> canonicalForeignNameOffsets;
-        for (auto& protoLoc : foundForeignTypeProtocolConformances) {
-            uint64_t nameOffset = protoLoc.foreignDescriptorNameCacheOffset;
-            const char* name = (const char*)dyldCache + nameOffset;
-            // The name might have additional ImportInfo, which may include null characters.
-            // The size we calculated earlier includes any necessary null characters
-            std::string_view fullName(name, protoLoc.foreignDescriptorNameLength);
-            auto itAndInserted = canonicalForeignNameOffsets.insert({ fullName, nameOffset });
-            if ( !itAndInserted.second ) {
-                // We didn't insert the name, so use the offset already there for this name
-                protoLoc.foreignDescriptorNameCacheOffset = itAndInserted.first->second;
-            }
-        }
+    // Build the perfect hash table for metadata
+    objc::PerfectHash perfectHash;
+    make_perfect(conformanceKeys, perfectHash);
+    size_t hashTableSize = SwiftHashTable::size(perfectHash);
+
+    size_t conformanceBufferSize = (conformances.size() * sizeof(*conformances.data()));
+
+    size_t totalBufferSize = hashTableSize + conformanceBufferSize;
+    if ( totalBufferSize > hashTableChunk->subCacheFileSize.rawValue() ) {
+        diag.error("Swift metadata hash table exceeds buffer size (%lld > %lld)",
+                   (uint64_t)totalBufferSize, hashTableChunk->subCacheFileSize.rawValue());
+        return;
     }
 
-    std::sort(foundForeignTypeProtocolConformances.begin(), foundForeignTypeProtocolConformances.end());
-    for (uint64_t i = 1; i < foundForeignTypeProtocolConformances.size(); ++i) {
+    // Emit the table
+    uint8_t* hashTableBuffer = hashTableChunk->subCacheBuffer;
+    uint8_t* valuesBuffer = hashTableBuffer + hashTableSize;
+
+    ((SwiftHashTable*)hashTableBuffer)->write(perfectHash, conformanceKeys,
+                                              conformances, valuesBuffer);
+    memcpy(valuesBuffer, conformances.data(), conformanceBufferSize);
+}
+
+static void make_perfect(const lsl::Vector<SwiftForeignTypeProtocolConformanceLookupKey>& targets,
+                         const std::unordered_map<uint64_t, std::string_view>& foundForeignNames,
+                         objc::PerfectHash& phash)
+{
+    dyld3::OverflowSafeArray<objc::PerfectHash::key> keys;
+
+    /* read in the list of keywords */
+    keys.reserve(targets.size());
+    for (const SwiftForeignTypeProtocolConformanceLookupKey& target : targets) {
+        objc::PerfectHash::key mykey;
+        mykey.name1_k = (uint8_t*)target.foreignDescriptorName.data();
+        mykey.len1_k  = (uint32_t)target.foreignDescriptorName.size();
+        mykey.name2_k = (uint8_t*)&target.protocolCacheOffset;
+        mykey.len2_k  = (uint32_t)sizeof(target.protocolCacheOffset);
+        keys.push_back(mykey);
+    }
+
+    objc::PerfectHash::make_perfect(keys, phash);
+}
+
+static void emitForeignTypeHashTable(Diagnostics& diag, lsl::Allocator& allocator,
+                                     lsl::Vector<SwiftForeignTypeProtocolConformanceLocation>& conformances,
+                                     const std::unordered_map<uint64_t, std::string_view>& foundForeignNames,
+                                     cache_builder::SwiftProtocolConformancesHashTableChunk* hashTableChunk)
+{
+    // Prepare the protocols by sorting them and looking for duplicates
+    std::sort(conformances.begin(), conformances.end());
+    for (uint64_t i = 1; i < conformances.size(); ++i) {
         // Check if this protocol is the same as the previous one
-        auto& prev = foundForeignTypeProtocolConformances[i - 1];
-        auto& current = foundForeignTypeProtocolConformances[i];
+        auto& prev = conformances[i - 1];
+        auto& current = conformances[i];
         if ( std::equal_to<SwiftForeignTypeProtocolConformanceLocationKey>()(prev, current) )
             prev.nextIsDuplicate = 1;
     }
 
-    std::vector<SwiftForeignTypeProtocolConformanceLocationKey> foreignTypeProtocolConformanceKeys;
-    for (const auto& protoLoc : foundForeignTypeProtocolConformances) {
+    // Note, we use SwiftForeignTypeProtocolConformanceLookupKey as we don't have the cache
+    // buffer available for name offsets in to the cache
+    lsl::Vector<SwiftForeignTypeProtocolConformanceLookupKey> conformanceKeys(allocator);
+    for (const auto& protoLoc : conformances) {
         if ( protoLoc.nextIsDuplicate )
             continue;
-        foreignTypeProtocolConformanceKeys.push_back(protoLoc);
+
+        // HACK: As we are in the cache builder, we don't have an easy way to resolve cache offsets
+        // Given that, we can't just take the cache address and add the name offset to get the string
+        // Instead, we'll look it up in the map
+        uint64_t nameOffset = protoLoc.foreignDescriptorNameCacheOffset;
+        auto it = foundForeignNames.find(nameOffset);
+        assert(it != foundForeignNames.end());
+
+        SwiftForeignTypeProtocolConformanceLookupKey lookupKey;
+        lookupKey.foreignDescriptorName = it->second;
+        lookupKey.protocolCacheOffset = protoLoc.protocolCacheOffset;
+        conformanceKeys.push_back(lookupKey);
     }
 
-    // Build a map of all found conformances
-
-    // Build the perfect hash table for type conformances
-    objc::PerfectHash typeConformancePerfectHash;
-    make_perfect(typeProtocolConformanceKeys, nullptr, typeConformancePerfectHash);
-
-    // Build the perfect hash table for metadata
-    objc::PerfectHash metadataConformancePerfectHash;
-    make_perfect(metadataProtocolConformanceKeys, nullptr, metadataConformancePerfectHash);
-
     // Build the perfect hash table for foreign types
-    objc::PerfectHash foreignTypeConformancePerfectHash;
-    make_perfect(foreignTypeProtocolConformanceKeys, (const uint8_t*)dyldCache, foreignTypeConformancePerfectHash);
+    objc::PerfectHash perfectHash;
+    make_perfect(conformanceKeys, foundForeignNames, perfectHash);
+    size_t hashTableSize = SwiftHashTable::size(perfectHash);
 
-    // Make space for all the hash tables
-    uint8_t* bufferStart = swiftReadOnlyBuffer;
-    uint8_t* bufferEnd = swiftReadOnlyBuffer + swiftReadOnlyBufferSizeAllocated;
+    size_t conformanceBufferSize = (conformances.size() * sizeof(*conformances.data()));
 
-    // Add a header
-    SwiftOptimizationHeader* swiftOptimizationHeader = (SwiftOptimizationHeader*)swiftReadOnlyBuffer;
-    swiftReadOnlyBuffer += sizeof(SwiftOptimizationHeader);
-
-    // Make space for the type conformance map
-    uint8_t* typeConformanceHashTableBuffer = swiftReadOnlyBuffer;
-    size_t typeConformanceHashTableSize = SwiftHashTable::size(typeConformancePerfectHash);
-    swiftReadOnlyBuffer += typeConformanceHashTableSize;
-
-    // Make space for the metadata conformance map
-    uint8_t* metadataConformanceHashTableBuffer = swiftReadOnlyBuffer;
-    size_t metadataConformanceHashTableSize = SwiftHashTable::size(metadataConformancePerfectHash);
-    swiftReadOnlyBuffer += metadataConformanceHashTableSize;
-
-    // Make space for the foreign types conformance map
-    uint8_t* foreignTypeConformanceHashTableBuffer = swiftReadOnlyBuffer;
-    size_t foreignTypeConformanceHashTableSize = SwiftHashTable::size(foreignTypeConformancePerfectHash);
-    swiftReadOnlyBuffer += foreignTypeConformanceHashTableSize;
-
-    // Make space for the type conformance structs
-    uint8_t* typeConformanceBuffer = swiftReadOnlyBuffer;
-    size_t typeConformanceBufferSize = (foundTypeProtocolConformances.size() * sizeof(*foundTypeProtocolConformances.data()));
-    swiftReadOnlyBuffer += typeConformanceBufferSize;
-
-    // Make space for the metadata conformance structs
-    uint8_t* metadataConformanceBuffer = swiftReadOnlyBuffer;
-    size_t metadataConformanceBufferSize = (foundMetadataProtocolConformances.size() * sizeof(*foundMetadataProtocolConformances.data()));
-    swiftReadOnlyBuffer += metadataConformanceBufferSize;
-
-    // Make space for the foreign type conformance structs
-    uint8_t* foreignTypeConformanceBuffer = swiftReadOnlyBuffer;
-    size_t foreignTypeConformanceBufferSize = (foundForeignTypeProtocolConformances.size() * sizeof(*foundForeignTypeProtocolConformances.data()));
-    swiftReadOnlyBuffer += foreignTypeConformanceBufferSize;
-
-    // Check for overflow
-    if ( swiftReadOnlyBuffer > bufferEnd ) {
-        diags.error("Overflow in Swift type hash tables (%lld allocated vs %lld used",
-                    swiftReadOnlyBufferSizeAllocated, (uint64_t)(swiftReadOnlyBuffer - bufferStart));
+    size_t totalBufferSize = hashTableSize + conformanceBufferSize;
+    if ( totalBufferSize > hashTableChunk->subCacheFileSize.rawValue() ) {
+        diag.error("Swift foreign type hash table exceeds buffer size (%lld > %lld)",
+                   (uint64_t)totalBufferSize, hashTableChunk->subCacheFileSize.rawValue());
         return;
     }
 
-    // Write all the hash tables
-    dyldCache->header.swiftOptsOffset = (uint64_t)swiftOptimizationHeader - (uint64_t)dyldCache;
-    dyldCache->header.swiftOptsSize = (uint64_t)swiftReadOnlyBuffer - (uint64_t)bufferStart;
+    // Emit the table
+    uint8_t* hashTableBuffer = hashTableChunk->subCacheBuffer;
+    uint8_t* valuesBuffer = hashTableBuffer + hashTableSize;
 
+    ((SwiftHashTable*)hashTableBuffer)->write(perfectHash, conformanceKeys,
+                                              conformances, valuesBuffer);
+    memcpy(valuesBuffer, conformances.data(), conformanceBufferSize);
+}
+
+static void emitHeader(const BuilderConfig& config, SwiftProtocolConformanceOptimizer& opt)
+{
+    CacheVMAddress cacheBaseAddress = config.layout.cacheBaseAddress;
+    VMOffset typeOffset = opt.typeConformancesHashTable->cacheVMAddress - cacheBaseAddress;
+    VMOffset metadataOffset = opt.metadataConformancesHashTable->cacheVMAddress - cacheBaseAddress;
+    VMOffset foreignOffset = opt.foreignTypeConformancesHashTable->cacheVMAddress - cacheBaseAddress;
+
+    auto* swiftOptimizationHeader = (SwiftOptimizationHeader*)opt.optsHeaderChunk->subCacheBuffer;
     swiftOptimizationHeader->version = 1;
     swiftOptimizationHeader->padding = 0;
-    swiftOptimizationHeader->typeConformanceHashTableCacheOffset = (uint64_t)typeConformanceHashTableBuffer - (uint64_t)dyldCache;
-    swiftOptimizationHeader->metadataConformanceHashTableCacheOffset = (uint64_t)metadataConformanceHashTableBuffer - (uint64_t)dyldCache;
-    swiftOptimizationHeader->foreignTypeConformanceHashTableCacheOffset = (uint64_t)foreignTypeConformanceHashTableBuffer - (uint64_t)dyldCache;
+    swiftOptimizationHeader->typeConformanceHashTableCacheOffset = typeOffset.rawValue();
+    swiftOptimizationHeader->metadataConformanceHashTableCacheOffset = metadataOffset.rawValue();
+    swiftOptimizationHeader->foreignTypeConformanceHashTableCacheOffset = foreignOffset.rawValue();
+}
 
-    ((SwiftHashTable*)typeConformanceHashTableBuffer)->write(typeConformancePerfectHash, foundTypeProtocolConformances,
-                                                             typeConformanceBuffer, nullptr);
-    ((SwiftHashTable*)metadataConformanceHashTableBuffer)->write(metadataConformancePerfectHash, foundMetadataProtocolConformances,
-                                                                 metadataConformanceBuffer, nullptr);
-    ((SwiftHashTable*)foreignTypeConformanceHashTableBuffer)->write(foreignTypeConformancePerfectHash, foundForeignTypeProtocolConformances,
-                                                                    foreignTypeConformanceBuffer, (const uint8_t*)dyldCache);
-    memcpy(typeConformanceBuffer, foundTypeProtocolConformances.data(), typeConformanceBufferSize);
-    memcpy(metadataConformanceBuffer, foundMetadataProtocolConformances.data(), metadataConformanceBufferSize);
-    memcpy(foreignTypeConformanceBuffer, foundForeignTypeProtocolConformances.data(), foreignTypeConformanceBufferSize);
-
+static void checkHashTables()
+{
+#if 0
     // Check that the hash tables work!
     for (const auto& target : foundTypeProtocolConformances) {
         const SwiftHashTable* hashTable = (const SwiftHashTable*)typeConformanceHashTableBuffer;
@@ -1018,53 +914,64 @@ static void optimizeProtocolConformances(Diagnostics& diags, DyldSharedCache* dy
             assert(foundMatch);
         }
     }
-
-    diags.verbose("[Swift]: Wrote %lld bytes of hash tables\n", (uint64_t)(swiftReadOnlyBuffer - bufferStart));
-}
-
-void SharedCacheBuilder::optimizeSwift()
-{
-    DyldSharedCache* dyldCache = (DyldSharedCache*)_subCaches.front()._readExecuteRegion.buffer;
-
-    // The only thing we do for now is optimize protocols conformances.  But we'll put that in
-    // its own method just to keep it self-contained
-    optimizeProtocolConformances(_diagnostics, dyldCache, _swiftReadOnlyBuffer, _swiftReadOnlyBufferSizeAllocated);
-}
-
-static uint32_t hashTableSize(uint32_t maxElements, uint32_t perElementData)
-{
-    uint32_t elementsWithPadding = maxElements*11/10; // if close to power of 2, perfect hash may fail, so don't get within 10% of that
-    uint32_t powTwoCapacity = 1 << (32 - __builtin_clz(elementsWithPadding - 1));
-    uint32_t headerSize = 4*(8+256);
-    return headerSize + powTwoCapacity/2 + powTwoCapacity + powTwoCapacity*perElementData;
-}
-
-// Allocate enough space for the Swift hash tables in the read-only region of the cache
-uint32_t SharedCacheBuilder::computeReadOnlySwift()
-{
-    __block uint32_t numTypeConformances = 0;
-    __block uint32_t numMetadataConformances = 0;
-    __block uint32_t numForeignMetadataConformances = 0;
-    for (DylibInfo& dylib : _sortedDylibs) {
-        Diagnostics diags;
-        dylib.input->mappedFile.mh->forEachSwiftProtocolConformance(diags, dylib.input->mappedFile.mh->makeVMAddrConverter(false), false,
-                                                                    ^(uint64_t protocolConformanceRuntimeOffset,
-                                                                      const SwiftProtocolConformance &protocolConformance,
-                                                                      bool &stopProtocolConformance) {
-            if ( protocolConformance.protocolRuntimeOffset != 0 )
-                ++numTypeConformances;
-            else
-                ++numMetadataConformances;
-
-            if ( protocolConformance.foreignMetadataNameRuntimeOffset != 0 )
-                ++numForeignMetadataConformances;
-        });
-    }
-    // Each conformance entry is 3 uint64_t's internally, plus the space for the hash table
-    uint32_t sizeNeeded = 0x4000 * 3;
-    sizeNeeded += (numTypeConformances * 3 * sizeof(uint64_t)) + hashTableSize(numTypeConformances, 5);;
-    sizeNeeded += (numMetadataConformances * 3 * sizeof(uint64_t)) + hashTableSize(numMetadataConformances, 5);
-    sizeNeeded += (numForeignMetadataConformances * 3 * sizeof(uint64_t)) + hashTableSize(numForeignMetadataConformances, 5);
-    return sizeNeeded;
-}
 #endif
+}
+
+void buildSwiftHashTables(const BuilderConfig& config,
+                          Diagnostics& diag, const std::span<CacheDylib> cacheDylibs,
+                          std::span<metadata_visitor::Segment> extraRegions,
+                          const objc::ClassHashTable* objcClassOpt,
+                          const void* headerInfoRO, const void* headerInfoRW,
+                          CacheVMAddress headerInfoROUnslidVMAddr,
+                          SwiftProtocolConformanceOptimizer& swiftProtocolConformanceOptimizer)
+{
+    lsl::EphemeralAllocator allocator;
+    lsl::Vector<SwiftTypeProtocolConformanceLocation> foundTypeProtocolConformances(allocator);
+    lsl::Vector<SwiftMetadataProtocolConformanceLocation> foundMetadataProtocolConformances(allocator);
+    lsl::Vector<SwiftForeignTypeProtocolConformanceLocation> foundForeignTypeProtocolConformances(allocator);
+
+    std::unordered_map<std::string_view, uint64_t> canonicalForeignNameOffsets;
+    std::unordered_map<uint64_t, std::string_view> foundForeignNames;
+    for ( const CacheDylib& cacheDylib : cacheDylibs ) {
+        SwiftVisitor swiftVisitor = cacheDylib.makeCacheSwiftVisitor(config, extraRegions);
+        findProtocolConformances(diag, VMAddress(config.layout.cacheBaseAddress.rawValue()),
+                                 objcClassOpt,
+                                 headerInfoRO, headerInfoRW,
+                                 VMAddress(headerInfoROUnslidVMAddr.rawValue()),
+                                 swiftVisitor,
+                                 cacheDylib.cacheLoadAddress, cacheDylib.installName,
+                                 canonicalForeignNameOffsets,
+                                 foundForeignNames,
+                                 foundTypeProtocolConformances,
+                                 foundMetadataProtocolConformances,
+                                 foundForeignTypeProtocolConformances);
+        if ( diag.hasError() )
+            return;
+    }
+
+    // We have all the conformances.  Now build the hash tables
+    emitTypeHashTable(diag, allocator,
+                      foundTypeProtocolConformances,
+                      swiftProtocolConformanceOptimizer.typeConformancesHashTable);
+    if ( diag.hasError() )
+        return;
+    emitMetadataHashTable(diag, allocator,
+                          foundMetadataProtocolConformances,
+                          swiftProtocolConformanceOptimizer.metadataConformancesHashTable);
+    if ( diag.hasError() )
+        return;
+    emitForeignTypeHashTable(diag, allocator,
+                             foundForeignTypeProtocolConformances,
+                             foundForeignNames,
+                             swiftProtocolConformanceOptimizer.foreignTypeConformancesHashTable);
+    if ( diag.hasError() )
+        return;
+
+    // Make sure the hash tables work
+    checkHashTables();
+
+    // Emit the header to point to everything else
+    emitHeader(config, swiftProtocolConformanceOptimizer);
+}
+
+#endif // BUILDING_CACHE_BUILDER || BUILDING_CACHE_BUILDER_UNIT_TESTS

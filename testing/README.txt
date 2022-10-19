@@ -33,6 +33,10 @@ Build lines may contain the follow variables:
     $SKIP_INSTALL   - prevents the built binary from being installed
     $SYM_LINK       - creates a symlink
     $CP             - copies a file
+    $INSTALL_NAME_TOOL - Expands to `install_name_tool`.
+    $asanDylibPath  - The absolute path to the platform specific ASan dylib inside the toolchain
+    $asanDylibName  - The name of the platform specific ASan dylib
+    $clangRuntimeDir - The name of the directory containing the clang runtime dylibs.
 
 Once each $CC line is expanded, the build system will consider every full path to a binary and -l variants to dylibs built in the default test
 dir will be considered a dependency, and automatically generate a ninja file that expresses that dependency graph. For other dependencies (such
@@ -55,7 +59,13 @@ three printf like functions (technially they are implemented as macros in order 
 PASS() and FAIL() will take care of appropriately formatting the messages for the various test environments that dyld_tests
 run in. LOG() will capture messages in a per image queue. By default these logs are emitted if a test fails, and they are
 ignored if a test succeeds. While debugging tests logs can be emitted even during success by setting the LOG_ON_SUCCESS
-environment variable. This allows us to leave logging statements in production dyld_tests.Fdtra
+environment variable. This allows us to leave logging statements in production dyld_tests.
+
+Executables built for OSes older than the latest Xcode deployment target, and also all dynamic libraries, do not link with test_support by default. They use header-only variants of the macros described above:
+   #define PASS(...)           printf("[PASS] :"); printf(__VA_ARGS__); printf("\n"); exit(0);
+   #define FAIL(...)           printf("[FAIL] :"); printf(__VA_ARGS__); printf("\n"); exit(0);
+   #define LOG(...)            printf("[LOG] :"); printf(__VA_ARGS__); printf("\n");
+To force those specific binaries to link with test_support instead, -ltest_support should be explicitly added to their BUILD line. Additionally, the BEGIN() macro should be called at the beginning of those tests to be registered by BATS.
 
 Note, to run the tests as root, you need to first set "defaults write com.apple.dt.Xcode EnableRootTesting YES",
 and then check the "Debug process as root" box in the Test scheme on the ContainerizedTestRunner scheme.

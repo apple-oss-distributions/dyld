@@ -23,7 +23,7 @@ bool isParent = true;
 static void* work1(void* mh)
 {
     // fork and exec child
-    pid_t sChildPid = vfork();
+    pid_t sChildPid = fork();
     if ( sChildPid < 0 ) {
         FAIL("Didn't fork");
     }
@@ -48,7 +48,6 @@ static void notifyThread0(const struct mach_header* mh, intptr_t vmaddr_slide)
     // We are in a notifier in a dlopen, so the API and notifier locks are held.
 
     // Spawn a thread to do a fork, which will take the available locks, ie, maybe the loader lock
-    workerThread1;
     if ( pthread_create(&workerThread1, NULL, &work1, NULL) != 0 ) {
         FAIL("pthread_create");
     }

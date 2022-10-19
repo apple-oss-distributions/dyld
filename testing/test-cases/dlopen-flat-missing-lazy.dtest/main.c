@@ -1,12 +1,12 @@
 
-// BUILD(macos,ios,tvos,bridgeos|x86_64,arm64):  $CC foo.c -dynamiclib           -Wl,-undefined,dynamic_lookup -install_name $RUN_DIR/libfoo.dylib -Wl,-no_fixup_chains -o $BUILD_DIR/libfoo.dylib
-// BUILD(macos,ios,tvos,bridgeos|x86_64,arm64):  $CC bar.c -dynamiclib           -Wl,-undefined,dynamic_lookup -install_name $RUN_DIR/libbar.dylib -Wl,-no_fixup_chains -o $BUILD_DIR/libbar.dylib
-// BUILD(macos,ios,tvos,bridgeos|x86_64,arm64):  $CC baz.c -dynamiclib           -Wl,-undefined,dynamic_lookup -install_name $RUN_DIR/libbaz.dylib -Wl,-no_fixup_chains -o $BUILD_DIR/libbaz.dylib
-// BUILD(macos,ios,tvos,bridgeos|x86_64,arm64):  $CC main.c -DRUN_DIR="$RUN_DIR" -Wl,-undefined,dynamic_lookup                                     -Wl,-no_fixup_chains -o $BUILD_DIR/dlopen-flat-missing-lazy.exe
+// BUILD(macos|x86_64,arm64):  $CC foo.c -dynamiclib           -Wl,-undefined,dynamic_lookup -install_name $RUN_DIR/libfoo.dylib -Wl,-no_fixup_chains -o $BUILD_DIR/libfoo.dylib
+// BUILD(macos|x86_64,arm64):  $CC bar.c -dynamiclib           -Wl,-undefined,dynamic_lookup -install_name $RUN_DIR/libbar.dylib -Wl,-no_fixup_chains -o $BUILD_DIR/libbar.dylib
+// BUILD(macos|x86_64,arm64):  $CC baz.c -dynamiclib           -Wl,-undefined,dynamic_lookup -install_name $RUN_DIR/libbaz.dylib -Wl,-no_fixup_chains -o $BUILD_DIR/libbaz.dylib
+// BUILD(macos|x86_64,arm64):  $CC main.c -DRUN_DIR="$RUN_DIR" -Wl,-undefined,dynamic_lookup                                     -Wl,-no_fixup_chains -o $BUILD_DIR/dlopen-flat-missing-lazy.exe
 
-// BUILD(watchos):
+// BUILD(watchos,ios,tvos,bridgeos):
 
-// RUN(macos,ios,tvos,bridgeos|x86_64,arm64):  ./dlopen-flat-missing-lazy.exe
+// RUN:  ./dlopen-flat-missing-lazy.exe
 
 // At launch, any missing flat, lazy symbols in the main executable and dylibs will be bound to the abort handler
 // After dlopen, we try bind again, just in case a defintion exists

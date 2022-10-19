@@ -42,8 +42,7 @@ using dyld3::GradedArchs;
 
 MockO::MockO(uint32_t filetype, const char* archName, Platform platform, const char* minOsStr, const char* sdkStr)
 {
-    _header.cputype     = MachOFile::cpuTypeFromArchName(archName);
-    _header.cpusubtype  = MachOFile::cpuSubtypeFromArchName(archName);
+    MachOFile::cpuTypeFromArchName(archName, &_header.cputype, &_header.cpusubtype);
     _header.magic       = (_header.cputype & CPU_ARCH_ABI64) ? MH_MAGIC_64 : MH_MAGIC;
     _header.filetype    = filetype;
     _header.ncmds       = 0;
@@ -539,11 +538,6 @@ const MachOAnalyzer* MockO::header()
         buildMachO();
 
     return _mf;
-}
-
-const size_t MockO::size() const
-{
-    return _size;
 }
 
 void MockO::save(char savedPath[PATH_MAX])

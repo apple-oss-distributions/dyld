@@ -43,7 +43,7 @@ using dyld4::KernelArgs;
 using dyld4::ProcessConfig;
 using dyld4::APIs;
 using dyld3::Platform;
-
+using dyld3::GradedArchs;
 
 @interface MachOFileTests : XCTestCase
 @end
@@ -160,7 +160,7 @@ using dyld3::Platform;
     // Assert: string formatted as expected
     XCTAssert(strcmp(testStr1, "4660.86.120") == 0);
     XCTAssert(strcmp(testStr2, "65535.255.255") == 0);
-    XCTAssert(strcmp(testStr3, "10.1.0") == 0);
+    XCTAssert(strcmp(testStr3, "10.1") == 0);
 }
 
 - (void)test_builtForPlatform
@@ -244,6 +244,18 @@ using dyld3::Platform;
     XCTAssert(diag.errorMessageContains("length"));
 }
 
+- (void)test_isMachO_empty
+{
+    // Act: test isMachO()
+    Diagnostics diag;
+    bool is = ((dyld3::MachOFile*)1)->isMachO(diag, 0);
+
+    // Assert: isMachO() failed
+    XCTAssertFalse(is);
+    XCTAssertTrue(diag.hasError());
+    XCTAssert(diag.errorMessageContains("MachO header exceeds file length"));
+}
+
 
 - (void)test_forEachLoadCommand
 {
@@ -305,6 +317,93 @@ using dyld3::Platform;
     XCTAssertTrue(diag.hasError());
     XCTAssert(diag.errorMessageContains("load command"));
 }
+
+- (void)test_forEachLoadCommand_lastLoadCommandOverreaches
+{
+    // Arrange: make mach-o file but tweak load command size to be too small
+    MockO mock(MH_DYLIB, "arm64");
+    mach_header* mh = (mach_header*)mock.header();
+    mh->sizeofcmds -= 4;  // make last load command hang over end of range
+
+    // Act: test forEachLoadCommand()
+    Diagnostics  diag;
+    mock.header()->forEachLoadCommand(diag, ^(const load_command* cmd, bool& stop) {
+    });
+
+    // Assert: forEachLoadCommand() had an error
+    XCTAssertTrue(diag.hasError());
+    XCTAssert(diag.errorMessageContains("malformed load command"));
+}
+
+- (void)test_forEachLoadCommand_loadCommandCountTooHigh
+{
+    // Arrange: make mach-o file but tweak load command size to add extra load command
+    MockO mock(MH_DYLIB, "arm64");
+    mach_header* mh = (mach_header*)mock.header();
+    mh->ncmds += 1;  // cause forEachLoadCommand to try to look past end of range
+
+    // Act: test forEachLoadCommand()
+    Diagnostics  diag;
+    mock.header()->forEachLoadCommand(diag, ^(const load_command* cmd, bool& stop) {
+    });
+
+    // Assert: forEachLoadCommand() had an error
+    XCTAssertTrue(diag.hasError());
+    XCTAssert(diag.errorMessageContains("malformed load command"));
+}
+
+- (void)test_forEachLoadCommand_bad_filetype
+{
+    // Arrange: make mach-o file but tweak filetype in mach_header
+    MockO mock(MH_DYLIB, "arm64");
+    mach_header* mh = (mach_header*)mock.header();
+    mh->filetype = 15;
+
+    // Act: test forEachLoadCommand()
+    Diagnostics  diag;
+    mock.header()->forEachLoadCommand(diag, ^(const load_command* cmd, bool& stop) {
+    });
+
+    // Assert: forEachLoadCommand() had an error
+    XCTAssertTrue(diag.hasError());
+    XCTAssert(diag.errorMessageContains("filetype"));
+}
+
+- (void)test_forEachLoadCommand_bad_cmdsize
+{
+    // Arrange: make mach-o file but tweak a load command's size
+    MockO mock(MH_DYLIB, "arm64");
+    load_command* lc = mock.wrenchFindLoadCommand(LC_UUID);
+    lc->cmdsize -= 2; // make the size not a multiple of pointer size
+
+    // Act: test forEachLoadCommand()
+    Diagnostics  diag;
+    mock.header()->forEachLoadCommand(diag, ^(const load_command* cmd, bool& stop) {
+    });
+
+    // Assert: forEachLoadCommand() had an error
+    XCTAssertTrue(diag.hasError());
+    XCTAssert(diag.errorMessageContains("multiple of"));
+}
+
+- (void)test_forEachLoadCommand_load_commands_past_end
+{
+    // Arrange: make mach-o file but tweak so there is one load command which extends past sizeofcmds
+    MockO mock(MH_DYLIB, "arm64");
+    mach_header* mh = (mach_header*)mock.header();
+    mh->ncmds      = 1;
+    mh->sizeofcmds = 4;
+
+    // Act: test forEachLoadCommand()
+    Diagnostics  diag;
+    mock.header()->forEachLoadCommand(diag, ^(const load_command* cmd, bool& stop) {
+    });
+
+    // Assert: forEachLoadCommand() had an error
+    XCTAssertTrue(diag.hasError());
+    XCTAssert(diag.errorMessageContains("extends past sizeofcmds"));
+}
+
 
 - (void)test_getUuid
 {
@@ -605,7 +704,7 @@ using dyld3::Platform;
     // regular arm64 iOS binary
     MockO mockPlatform(MH_EXECUTE, "arm64", Platform::iOS, "14.0");
     // regular arm64 macOS binary that links with nothing
-    MockO mockNoLib(MH_EXECUTE, "arm64");
+    MockO mockNoLib(MH_EXECUTE, "arm64", Platform::macOS, "13.0");
     mockNoLib.wrenchSetNoDependentDylibs();
 
     // Act: test isValidMainExecutable()
@@ -656,7 +755,7 @@ using dyld3::Platform;
 {
     // Arrange: make mach-o files
     // regular x86_64 macOS binary that has in-dyld-cache bit set
-    MockO mockInCacheNew(MH_EXECUTE, "x86_64");
+    MockO mockInCacheNew(MH_EXECUTE, "x86_64", Platform::macOS, "13.0");
     ((mach_header*)mockInCacheNew.header())->flags |= 0x80000000;
     // regular x86_64 macOS binary that has in-dyld-cache bit set but for 10.15
     MockO mockInCacheOld(MH_EXECUTE, "x86_64", Platform::macOS, "10.15");
@@ -677,6 +776,28 @@ using dyld3::Platform;
     XCTAssertTrue(diag_mockInCacheNew.errorMessageContains("MH_EXECUTE is in dyld shared cache"));
 }
 
+- (void)test_validMainExecutable_UUID
+{
+    // Arrange: make mach-o files
+    MockO mockOld(MH_EXECUTE, "arm64e", Platform::macOS, "13.0", "13.0");
+    MockO mockNew(MH_EXECUTE, "arm64e", Platform::macOS, "13.0", "14.0");
+    mockOld.wrenchAddMain();
+    mockOld.wrenchRemoveUUID();
+    mockNew.wrenchAddMain();
+    mockNew.wrenchRemoveUUID();
+
+    // Act: test isValidMainExecutable()
+    const char* execPath = "/foo/exec";
+    Diagnostics diagOld;
+    bool isMockOldValid = mockOld.header()->isValidMainExecutable(diagOld, execPath, mockOld.size(), GradedArchs::arm64e, Platform::macOS);
+    Diagnostics diagNew;
+    bool isMockNewValid = mockNew.header()->isValidMainExecutable(diagNew, execPath, mockNew.size(), GradedArchs::arm64e, Platform::macOS);
+
+    // Assert: mock is a valid main executable
+    XCTAssertTrue(isMockOldValid);
+    XCTAssertFalse(isMockNewValid);
+    XCTAssertTrue(diagNew.errorMessageContains("missing LC_UUID"));
+}
 
 - (void)test_forEachSupportedPlatform_oldMacOS
 {
@@ -735,6 +856,29 @@ using dyld3::Platform;
     XCTAssert(sdk10_7   == 0x0000A0800);    // note: load command has no SDK info, so MachOFile should use minOS for SDK
 }
 
+- (void)test_fat_emptySlice
+{
+    // Arrange: make FAT file with a single slice, but truncate
+    MockO mock1(MH_EXECUTE, "x86_64");
+    Muckle muckle;
+    muckle.addMockO(&mock1);
+
+    ((fat_arch*)((fat_header*)muckle.header() + 1))->size = 0;
+
+    // Act: isFatFileWithSlice() should reject empty slices
+    Diagnostics diag;
+    const dyld3::GradedArchs& archs = dyld3::GradedArchs::forName("x86_64");
+
+    uint64_t sliceOffset;
+    uint64_t sliceLen;
+    bool missingSlice;
+    bool is = muckle.header()->isFatFileWithSlice(diag, 16384, archs,
+                                                  false, sliceOffset, sliceLen, missingSlice);
+    XCTAssertFalse(is);
+    XCTAssertTrue(diag.hasError());
+    XCTAssert(diag.errorMessageContains("MachO header exceeds file length"));
+}
+
 
 - (void)test_fat_archnames
 {
@@ -747,7 +891,7 @@ using dyld3::Platform;
 
     // Act: check parsing of platform info
     char strBuf[256] = { '\0' };
-    muckle.header()->archNames(strBuf);
+    muckle.header()->archNames(strBuf, sizeof(fat_header) + 3 * sizeof(fat_arch));
 
     // Assert: arch names is as expected
     XCTAssert(!strcmp(strBuf, "x86_64,arm64e"));
@@ -773,10 +917,125 @@ using dyld3::Platform;
 
     // Act: check parsing of platform info
     char strBuf[256] = { '\0' };
-    muckle.header()->archNames(strBuf);
+    muckle.header()->archNames(strBuf, sizeof(fat_header) + 3 * sizeof(fat_arch));
 
     // Assert: arch names is as expected
     XCTAssert(!strcmp(strBuf, "x86_64,arm64e"));
+}
+
+- (void)test_fat_oob_arch_read
+{
+    // Arrange: make FAT file header without the actual MachO slices
+    MockO mock1(MH_EXECUTE, "x86_64");
+    MockO mock2(MH_EXECUTE, "i386");
+    Muckle muckle;
+    muckle.addMockO(&mock1);
+    muckle.addMockO(&mock2);
+
+    // Place FAT header right before a page boundary, with the second page being VM_PROT_NONE, so that
+    // out of bounds reads consistently trigger crashes
+    vm_address_t loadAddress = 0;
+    XCTAssertEqual(::vm_allocate(mach_task_self(), &loadAddress, (vm_size_t)vm_page_size * 2, VM_FLAGS_ANYWHERE), KERN_SUCCESS);
+    XCTAssertEqual(::vm_protect(mach_task_self(), loadAddress + vm_page_size, vm_page_size, false, VM_PROT_NONE), KERN_SUCCESS);
+
+    size_t fatFileSize = sizeof(fat_header) + 2 * sizeof(fat_arch);
+    fat_header* fatHeader = (fat_header*)(loadAddress + vm_page_size - fatFileSize);
+    memcpy(fatHeader, muckle.header(), fatFileSize);
+
+    // Malformed fat header; number of archs exceeds the actual file size
+    fatHeader->nfat_arch = OSSwapHostToBigInt32(3);
+
+    // Act: check that malformed header was diagnosed and there's no oob read (no crash)
+    Diagnostics diag;
+    const dyld3::GradedArchs& gradedArchs = dyld3::GradedArchs::forName("arm64e");
+    dyld3::MachOFile::compatibleSlice(diag, fatHeader, fatFileSize, "/foo", dyld3::Platform::macOS, false, gradedArchs);
+    XCTAssert(diag.errorMessageContains("architecture slices extend beyond end of file"));
+}
+
+- (void)test_fat_oob_arch_read_plus_one
+{
+    // Arrange: make FAT file header without the actual MachO slices
+    MockO mock1(MH_EXECUTE, "x86_64");
+    MockO mock2(MH_EXECUTE, "i386");
+    Muckle muckle;
+    muckle.addMockO(&mock1);
+    muckle.addMockO(&mock2);
+
+    // Place FAT header right before a page boundary, with the second page being VM_PROT_NONE, so that
+    // out of bounds reads consistently trigger crashes
+    vm_address_t loadAddress = 0;
+    XCTAssertEqual(::vm_allocate(mach_task_self(), &loadAddress, (vm_size_t)vm_page_size * 2, VM_FLAGS_ANYWHERE), KERN_SUCCESS);
+    XCTAssertEqual(::vm_protect(mach_task_self(), loadAddress + vm_page_size, vm_page_size, false, VM_PROT_NONE), KERN_SUCCESS);
+
+    size_t fatFileSize = sizeof(fat_header) + 2 * sizeof(fat_arch);
+    fat_header* fatHeader = (fat_header*)(loadAddress + vm_page_size - fatFileSize);
+    memcpy(fatHeader, muckle.header(), fatFileSize);
+
+    // Act: check that malformed header was diagnosed and there's no oob read (no crash)
+    Diagnostics diag;
+    const dyld3::GradedArchs& gradedArchs = dyld3::GradedArchs::forName("arm64e");
+    dyld3::MachOFile::compatibleSlice(diag, fatHeader, fatFileSize, "/foo", dyld3::Platform::macOS, false, gradedArchs);
+    XCTAssert(diag.errorMessageContains("architecture slices extend beyond end of file"));
+}
+
+- (void)test_fat_oob_arch64_read
+{
+    // Arrange: make FAT file header without the actual MachO slices
+    MockO mock1(MH_EXECUTE, "x86_64");
+    MockO mock2(MH_EXECUTE, "i386");
+    Muckle muckle;
+    muckle.addMockO(&mock1);
+    muckle.addMockO(&mock2);
+
+    // Place FAT header right before a page boundary, with the second page being VM_PROT_NONE, so that
+    // out of bounds reads consistently trigger crashes
+    vm_address_t loadAddress = 0;
+    XCTAssertEqual(::vm_allocate(mach_task_self(), &loadAddress, (vm_size_t)vm_page_size * 2, VM_FLAGS_ANYWHERE), KERN_SUCCESS);
+    XCTAssertEqual(::vm_protect(mach_task_self(), loadAddress + vm_page_size, vm_page_size, false, VM_PROT_NONE), KERN_SUCCESS);
+
+    size_t fatFileSize = sizeof(fat_header) + 2 * sizeof(fat_arch_64);
+    fat_header* fatHeader = (fat_header*)(loadAddress + vm_page_size - fatFileSize);
+    memcpy(fatHeader, muckle.header(), fatFileSize);
+
+    // Malformed fat header; number of archs exceeds the actual file size
+    fatHeader->magic = OSSwapHostToBigInt32(FAT_MAGIC_64);
+    fatHeader->nfat_arch = OSSwapHostToBigInt32(3);
+
+    // Act: check that malformed header was diagnosed and there's no oob read (no crash)
+    Diagnostics diag;
+    const dyld3::GradedArchs& gradedArchs = dyld3::GradedArchs::forName("arm64e");
+    dyld3::MachOFile::compatibleSlice(diag, fatHeader, fatFileSize, "/foo", dyld3::Platform::macOS, false, gradedArchs);
+    XCTAssert(diag.errorMessageContains("architecture slices extend beyond end of file"));
+}
+
+- (void)test_fat_arch64_header_size_limit
+{
+    // Arrange: make FAT file header without the actual MachO slices
+    MockO mock1(MH_EXECUTE, "x86_64");
+    MockO mock2(MH_EXECUTE, "i386");
+    Muckle muckle;
+    muckle.addMockO(&mock1);
+    muckle.addMockO(&mock2);
+
+    // Place FAT header right before a page boundary, with the second page being VM_PROT_NONE, so that
+    // out of bounds reads consistently trigger crashes
+    vm_address_t loadAddress = 0;
+    XCTAssertEqual(::vm_allocate(mach_task_self(), &loadAddress, (vm_size_t)vm_page_size * 2, VM_FLAGS_ANYWHERE), KERN_SUCCESS);
+    XCTAssertEqual(::vm_protect(mach_task_self(), loadAddress + vm_page_size, vm_page_size, false, VM_PROT_NONE), KERN_SUCCESS);
+
+    size_t fatFileSize = sizeof(fat_header) + 2 * sizeof(fat_arch_64);
+    fat_header* fatHeader = (fat_header*)(loadAddress + vm_page_size - fatFileSize);
+    memcpy(fatHeader, muckle.header(), fatFileSize);
+
+    // Malformed fat header; number of archs exceeds the header size limit
+    fatHeader->magic = OSSwapHostToBigInt32(FAT_MAGIC_64);
+    fatHeader->nfat_arch = OSSwapHostToBigInt32((4096 - sizeof(fat_header)) / sizeof(fat_arch_64) + 1);
+
+    // Act: check that too large header was diagnosed and there's no oob read (no crash)
+    Diagnostics diag;
+    const dyld3::GradedArchs& gradedArchs = dyld3::GradedArchs::forName("arm64e");
+    dyld3::MachOFile::compatibleSlice(diag, fatHeader, fatFileSize, "/foo", dyld3::Platform::macOS, false, gradedArchs);
+    XCTAssert(diag.errorMessageContains("fat header too large"));
 }
 
 @end

@@ -1,4 +1,4 @@
-#!/usr/bin/python2.7
+#!/usr/bin/python3
 
 import os
 import KernelCollection
@@ -20,14 +20,18 @@ def check(kernel_cache):
     assert kernel_cache.dictionary()["dylibs"][0]["local-symbols"] == "none"
     # bar
     assert kernel_cache.dictionary()["dylibs"][1]["name"] == "com.apple.bar"
-    assert len(kernel_cache.dictionary()["dylibs"][1]["global-symbols"]) == 1
+    assert len(kernel_cache.dictionary()["dylibs"][1]["global-symbols"]) == 2
     assert kernel_cache.dictionary()["dylibs"][1]["global-symbols"][0]["name"] == "_bar"
-    assert kernel_cache.dictionary()["dylibs"][1]["local-symbols"] == "none"
+    assert kernel_cache.dictionary()["dylibs"][1]["global-symbols"][1]["name"] == "_kmod_info"
+    assert kernel_cache.dictionary()["dylibs"][1]["local-symbols"][0]["name"] == "_startKext"
+    assert kernel_cache.dictionary()["dylibs"][1]["local-symbols"][1]["name"] == "_endKext"
     # foo
     assert kernel_cache.dictionary()["dylibs"][2]["name"] == "com.apple.foo"
-    assert len(kernel_cache.dictionary()["dylibs"][2]["global-symbols"]) == 1
+    assert len(kernel_cache.dictionary()["dylibs"][2]["global-symbols"]) == 2
     assert kernel_cache.dictionary()["dylibs"][2]["global-symbols"][0]["name"] == "_foo"
-    assert kernel_cache.dictionary()["dylibs"][2]["local-symbols"] == "none"
+    assert kernel_cache.dictionary()["dylibs"][2]["global-symbols"][1]["name"] == "_kmod_info"
+    assert kernel_cache.dictionary()["dylibs"][2]["local-symbols"][0]["name"] == "_startKext"
+    assert kernel_cache.dictionary()["dylibs"][2]["local-symbols"][1]["name"] == "_endKext"
 
 
 # [~]> xcrun -sdk iphoneos.internal cc -arch arm64 -Wl,-static -mkernel -nostdlib -Wl,-add_split_seg_info -Wl,-rename_section,__TEXT,__text,__TEXT_EXEC,__text -Wl,-e,__start -Wl,-pagezero_size,0x0 -Wl,-pie main.c -o main.kernel

@@ -1,4 +1,4 @@
-#!/usr/bin/python2.7
+#!/usr/bin/python3
 
 import os
 import KernelCollection
@@ -18,9 +18,9 @@ def check(kernel_cache):
 
     # Check the fixups
     kernel_cache.analyze("/kext-weak-bind-chained/main.kc", ["-fixups", "-arch", "arm64"])
-    assert len(kernel_cache.dictionary()["fixups"]) == 2
-    assert kernel_cache.dictionary()["fixups"]["0x1C000"] == "kc(0) + 0x1C018"
-    assert kernel_cache.dictionary()["fixups"]["0x1C010"] == "kc(0) + 0x1C018"
+    assert len(kernel_cache.dictionary()["fixups"]) == 6
+    assert kernel_cache.dictionary()["fixups"]["0x1C000"] == "kc(0) + 0x1C19C"
+    assert kernel_cache.dictionary()["fixups"]["0x1C0D0"] == "kc(0) + 0x1C19C"
     assert len(kernel_cache.dictionary()["dylibs"]) == 3
     assert kernel_cache.dictionary()["dylibs"][0]["name"] == "com.apple.kernel"
     assert kernel_cache.dictionary()["dylibs"][0]["fixups"] == "none"

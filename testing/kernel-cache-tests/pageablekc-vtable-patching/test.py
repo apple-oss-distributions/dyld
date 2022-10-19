@@ -1,7 +1,8 @@
-#!/usr/bin/python2.7
+#!/usr/bin/python3
 
 import os
 import KernelCollection
+from FixupHelpers import *
 
 # This verifies that a kext can patch vtables against another kext
 # We put foo.kext in the base KC so that the patch slot in bar.kext has to know to use the correct fixup level in the fixup chain
@@ -19,20 +20,18 @@ def check(kernel_cache):
     
     # From foo, we want to know where the vtable is, and the foo() and fooUsed0() slots in that vtable
     # Foo::foo()
-    assert kernel_cache.dictionary()["dylibs"][1]["global-symbols"][6]["name"] == "__ZN3Foo3fooEv"
-    assert kernel_cache.dictionary()["dylibs"][1]["global-symbols"][6]["vmAddr"] == "0x16ED0"
+    fooFooVMAddr = findGlobalSymbolVMAddr(kernel_cache, 1, "__ZN3Foo3fooEv")
     # Foo::fooUsed0()
-    assert kernel_cache.dictionary()["dylibs"][1]["global-symbols"][7]["name"] == "__ZN3Foo8fooUsed0Ev"
-    assert kernel_cache.dictionary()["dylibs"][1]["global-symbols"][7]["vmAddr"] == "0x16EF0"
-
+    fooFooUsed0VMAddr = findGlobalSymbolVMAddr(kernel_cache, 1, "__ZN3Foo8fooUsed0Ev")
 
     # Check the fixups
     kernel_cache.analyze("/pageablekc-vtable-patching/main.kc", ["-fixups", "-arch", "x86_64"])
     
     # In vtable for Foo, we match the entry for Foo::foo() by looking for its value on the RHS of the fixup
-    assert kernel_cache.dictionary()["fixups"]["0x1D150"] == "kc(0) + 0x16ED0"
+    fooFooFixupAddr = findFixupVMAddr(kernel_cache, "kc(0) + " + fooFooVMAddr)
     # Then the following fixup should be to Foo::fooUsed0()
-    assert kernel_cache.dictionary()["fixups"]["0x1D158"] == "kc(0) + 0x16EF0"
+    nextFixupAddr = offsetVMAddr(fooFooFixupAddr, 8)
+    assert kernel_cache.dictionary()["fixups"][nextFixupAddr] == "kc(0) + " + fooFooUsed0VMAddr
 
 
     # -----------------------------------------------------------
@@ -49,17 +48,18 @@ def check(kernel_cache):
     
     # From bar, find the vtable and its override of foo()
     # Bar::foo()
-    assert kernel_cache.dictionary()["dylibs"][0]["global-symbols"][3]["name"] == "__ZN3Bar3fooEv"
-    assert kernel_cache.dictionary()["dylibs"][0]["global-symbols"][3]["vmAddr"] == "0x4F10"
+    barFooVMAddr = findGlobalSymbolVMAddr(kernel_cache, 0, "__ZN3Bar3fooEv")
 
 
     # Check the fixups
     kernel_cache.analyze("/pageablekc-vtable-patching/pageable.kc", ["-fixups", "-arch", "x86_64"])
 
     # In bar, again match the entry for its Bar::foo() symbol
-    assert kernel_cache.dictionary()["dylibs"][0]["fixups"]["0x8150"] == "kc(1) + 0x4F10"
+    barFooFixupAddr = findPagableFixupVMAddr(kernel_cache, 0, "kc(1) + " + barFooVMAddr)
     # And if the patching was correct, then following entry should be to Foo::fooUsed0()
-    assert kernel_cache.dictionary()["dylibs"][0]["fixups"]["0x8158"] == "kc(0) + 0x12EF0"
+    nextFixupAddr = offsetVMAddr(barFooFixupAddr, 8)
+    offsetOfFooUsed0 = offsetVMAddr(fooFooUsed0VMAddr, -16384)
+    assert kernel_cache.dictionary()["dylibs"][0]["fixups"][nextFixupAddr] == "kc(0) + " + offsetOfFooUsed0
 
 
 # [~]> xcrun -sdk macosx.internal cc -arch x86_64 -Wl,-static -mkernel -nostdlib -Wl,-e,__start -Wl,-pie main.cpp -Wl,-pagezero_size,0x0 -o main.kernel -Wl,-image_base,0x10000 -Wl,-segaddr,__HIB,0x4000 -Wl,-add_split_seg_info -Wl,-install_name,/usr/lib/swift/split.seg.v2.hack -iwithsysroot /System/Library/Frameworks/Kernel.framework/Headers -Wl,-sectcreate,__LINKINFO,__symbolsets,SymbolSets.plist -Wl,-segprot,__LINKINFO,r--,r--

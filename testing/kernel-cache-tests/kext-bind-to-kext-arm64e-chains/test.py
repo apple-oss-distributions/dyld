@@ -1,7 +1,8 @@
-#!/usr/bin/python2.7
+#!/usr/bin/python3
 
 import os
 import KernelCollection
+from FixupHelpers import *
 
 # This tests that kexts can bind to each other using DYLD_CHAINED_PTR_ARM64E_KERNEL
 
@@ -14,37 +15,41 @@ def check(kernel_cache):
     assert kernel_cache.dictionary()["dylibs"][0]["name"] == "com.apple.kernel"
     # bar.kext
     assert kernel_cache.dictionary()["dylibs"][1]["name"] == "com.apple.bar"
-    assert kernel_cache.dictionary()["dylibs"][1]["segments"][3]["name"] == "__DATA_CONST"
-    assert kernel_cache.dictionary()["dylibs"][1]["segments"][3]["vmAddr"] == "0xFFFFFFF00701C000"
     # foo.kext
     assert kernel_cache.dictionary()["dylibs"][2]["name"] == "com.apple.foo"
+
+    # Note down the base addresses and GOT section for later
+    cacheBaseAddress = findCacheBaseVMAddr(kernel_cache)
+    barAuthGOTVMAddr = findSectionVMAddr(kernel_cache, 1, "__DATA_CONST", "__auth_got")
+    barGOTVMAddr = findSectionVMAddr(kernel_cache, 1, "__DATA_CONST", "__got")
 
     # Symbols
     kernel_cache.analyze("/kext-bind-to-kext-arm64e-chains/main.kc", ["-symbols", "-arch", "arm64e"])
+    # main.kernel
+    assert kernel_cache.dictionary()["dylibs"][0]["name"] == "com.apple.kernel"
+    main_func_vmAddr = findGlobalSymbolVMAddr(kernel_cache, 0, "_func")
+    main_funcPtr_vmAddr = findGlobalSymbolVMAddr(kernel_cache, 0, "_funcPtr")
     # bar.kext
     assert kernel_cache.dictionary()["dylibs"][1]["name"] == "com.apple.bar"
-    assert kernel_cache.dictionary()["dylibs"][1]["global-symbols"][1]["name"] == "_fooPtr"
-    assert kernel_cache.dictionary()["dylibs"][1]["global-symbols"][1]["vmAddr"] == "0xFFFFFFF007028000"
+    bar_fooPtr_vmAddr = findGlobalSymbolVMAddr(kernel_cache, 1, "_fooPtr")
     # foo.kext
     assert kernel_cache.dictionary()["dylibs"][2]["name"] == "com.apple.foo"
-    assert kernel_cache.dictionary()["dylibs"][2]["global-symbols"][0]["name"] == "_f"
-    assert kernel_cache.dictionary()["dylibs"][2]["global-symbols"][0]["vmAddr"] == "0xFFFFFFF007028008"
-    assert kernel_cache.dictionary()["dylibs"][2]["global-symbols"][1]["name"] == "_foo"
-    assert kernel_cache.dictionary()["dylibs"][2]["global-symbols"][1]["vmAddr"] == "0xFFFFFFF007018070"
+    foo_foo_vmAddr = findGlobalSymbolVMAddr(kernel_cache, 2, "_foo")
+    foo_f_vmAddr = findGlobalSymbolVMAddr(kernel_cache, 2, "_f")
 
     # Check the fixups
     kernel_cache.analyze("/kext-bind-to-kext-arm64e-chains/main.kc", ["-fixups", "-arch", "arm64e"])
-    assert len(kernel_cache.dictionary()["fixups"]) == 4
+    assert len(kernel_cache.dictionary()["fixups"]) >= 4
     # __DATA_CONST
     # bar.kext: extern int foo();
     # bar.kext: extern int f;
-    assert kernel_cache.dictionary()["fixups"]["0x18000"] == "kc(0) + 0xFFFFFFF007018070 auth(IA addr 0)"
-    assert kernel_cache.dictionary()["fixups"]["0x18008"] == "kc(0) + 0xFFFFFFF007028008"
+    assert kernel_cache.dictionary()["fixups"][fixupOffset(barAuthGOTVMAddr, cacheBaseAddress)] == "kc(0) + " + foo_foo_vmAddr + " auth(IA addr 0)"
+    assert kernel_cache.dictionary()["fixups"][fixupOffset(barGOTVMAddr, cacheBaseAddress)] == "kc(0) + " + foo_f_vmAddr
     # __DATA
     # main.kernel: __typeof(&func) funcPtr = &func;
-    assert kernel_cache.dictionary()["fixups"]["0x20000"] == "kc(0) + 0xFFFFFFF007014000 auth(IA !addr 0)"
+    assert kernel_cache.dictionary()["fixups"][fixupOffset(main_funcPtr_vmAddr, cacheBaseAddress)] == "kc(0) + " + main_func_vmAddr + " auth(IA !addr 0)"
     # bar.kext: __typeof(&foo) fooPtr = &foo;
-    assert kernel_cache.dictionary()["fixups"]["0x24000"] == "kc(0) + 0xFFFFFFF007018070 auth(IA !addr 0)"
+    assert kernel_cache.dictionary()["fixups"][fixupOffset(bar_fooPtr_vmAddr, cacheBaseAddress)] == "kc(0) + " + foo_foo_vmAddr + " auth(IA !addr 42271)"
     assert len(kernel_cache.dictionary()["dylibs"]) == 3
     assert kernel_cache.dictionary()["dylibs"][0]["name"] == "com.apple.kernel"
     assert kernel_cache.dictionary()["dylibs"][0]["fixups"] == "none"

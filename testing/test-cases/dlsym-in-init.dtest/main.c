@@ -1,6 +1,6 @@
 
 
-// BUILD:  $CC foo.c -dynamiclib -o $BUILD_DIR/libfoo.dylib -install_name $RUN_DIR/libfoo.dylib
+// BUILD:  $CC foo.c -ltest_support -dynamiclib -o $BUILD_DIR/libfoo.dylib -install_name $RUN_DIR/libfoo.dylib
 // BUILD:  $CC main.c -o $BUILD_DIR/dlsym-in-init.exe -DRUN_DIR="$RUN_DIR"
 
 // RUN:  ./dlsym-in-init.exe

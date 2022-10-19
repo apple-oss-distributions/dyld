@@ -1,5 +1,5 @@
 
-// BUILD:  $CC foo.c -dynamiclib -o $BUILD_DIR/libfoo.dylib
+// BUILD:  $CC foo.c -dynamiclib -ltest_support -o $BUILD_DIR/libfoo.dylib
 // BUILD:  $CC main.c -o $BUILD_DIR/dlopen-in-inserted-dylib.exe
 
 // RUN:  DYLD_INSERT_LIBRARIES=$RUN_DIR/libfoo.dylib ./dlopen-in-inserted-dylib.exe

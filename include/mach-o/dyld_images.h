@@ -27,6 +27,7 @@
 #include <unistd.h>
 #include <mach/mach.h>
 #include <uuid/uuid.h>
+#include <TargetConditionals.h>
 
 #if defined(__cplusplus) && (BUILDING_LIBDYLD || BUILDING_DYLD)
 #include <atomic>
@@ -69,7 +70,7 @@ extern "C" {
  *
  */
 
-enum dyld_image_mode { dyld_image_adding=0, dyld_image_removing=1, dyld_image_info_change=2 };
+enum dyld_image_mode { dyld_image_adding=0, dyld_image_removing=1, dyld_image_info_change=2, dyld_image_dyld_moved=3 };
 
 struct dyld_image_info {
 	const struct mach_header*	imageLoadAddress;	/* base address image is mapped into */
@@ -110,7 +111,14 @@ enum {	dyld_error_kind_none=0,
 /* internal limit */ 
 #define DYLD_MAX_PROCESS_INFO_NOTIFY_COUNT  8
 
-struct dyld_all_image_infos {
+// Must be aligned to support atomic updates
+// Note sim cannot assume alignment until all host dylds are new enough
+#if TARGET_OS_SIMULATOR
+struct dyld_all_image_infos
+#else
+struct __attribute__((aligned(16))) dyld_all_image_infos
+#endif
+{
 	uint32_t						version;		/* 1 in Mac OS X 10.4 and 10.5 */
 	uint32_t						infoArrayCount;
 #if defined(__cplusplus) && (BUILDING_LIBDYLD || BUILDING_DYLD)

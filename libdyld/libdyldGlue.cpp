@@ -103,7 +103,7 @@ static int legacyDyldLookup4OldBinaries(const char* name, void** address)
 // this is the magic __DATA,__dyld4 section that dyld and libdyld.dylib use to rendezvous
 namespace dyld4 {
     volatile LibdyldDyld4Section gDyld __attribute__((used, visibility("hidden"), section ("__DATA,__dyld4")))
-        = { nullptr, nullptr, { nullptr, &NXArgc, &NXArgv, (const char***)&environ, &__progname}, &legacyDyldLookup4OldBinaries
+        = { nullptr, nullptr, { nullptr, &NXArgc, &NXArgv, (const char***)&environ, &__progname}, &legacyDyldLookup4OldBinaries, tlv_get_addr
         };
 }
 
@@ -183,6 +183,11 @@ int dladdr(const void* addr, Dl_info* result)
     return gDyld.apis->dladdr(addr, result);
 }
 
+void* dlsym(void* handle, const char* symbol)
+{
+    return gDyld.apis->dlsym(handle, symbol);
+}
+
 #if !TARGET_OS_DRIVERKIT
 void* dlopen(const char* path, int mode)
 {
@@ -197,11 +202,6 @@ int dlclose(void* handle)
 char* dlerror()
 {
     return gDyld.apis->dlerror();
-}
-
-void* dlsym(void* handle, const char* symbol)
-{
-    return gDyld.apis->dlsym(handle, symbol);
 }
 
 bool dlopen_preflight(const char* path)
@@ -784,6 +784,42 @@ struct _dyld_protocol_conformance_result _dyld_find_foreign_type_protocol_confor
 uint32_t _dyld_swift_optimizations_version()
 {
     return gDyld.apis->_dyld_swift_optimizations_version();
+}
+
+
+
+//
+// MARK: --- APIs added iOS 16, macOS 13 ---
+//
+const struct mach_header* _dyld_get_dlopen_image_header(void* handle)
+{
+    return gDyld.apis->_dyld_get_dlopen_image_header(handle);
+}
+
+void _dyld_objc_register_callbacks(const _dyld_objc_callbacks* callbacks)
+{
+    gDyld.apis->_dyld_objc_register_callbacks(callbacks);
+}
+
+bool _dyld_has_preoptimized_swift_protocol_conformances(const struct mach_header* mh)
+{
+    return gDyld.apis->_dyld_has_preoptimized_swift_protocol_conformances(mh);
+}
+
+struct _dyld_protocol_conformance_result _dyld_find_protocol_conformance_on_disk(const void *protocolDescriptor,
+                                                                                 const void *metadataType,
+                                                                                 const void *typeDescriptor,
+                                                                                 uint32_t flags)
+{
+    return gDyld.apis->_dyld_find_protocol_conformance_on_disk(protocolDescriptor, metadataType, typeDescriptor, flags);
+}
+
+struct _dyld_protocol_conformance_result _dyld_find_foreign_type_protocol_conformance_on_disk(const void *protocol,
+                                                                                              const char *foreignTypeIdentityStart,
+                                                                                              size_t foreignTypeIdentityLength,
+                                                                                              uint32_t flags)
+{
+    return gDyld.apis->_dyld_find_foreign_type_protocol_conformance_on_disk(protocol, foreignTypeIdentityStart, foreignTypeIdentityLength, flags);
 }
 
 //

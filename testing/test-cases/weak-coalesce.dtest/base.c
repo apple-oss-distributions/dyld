@@ -1,7 +1,8 @@
-#include <stdio.h>
 #include <stdbool.h>
+#include <stdlib.h>
 
 #include "test_support.h"
+
 #include "base.h"
 
 static bool         wasProblem        = false;
@@ -52,13 +53,14 @@ void baseVerifyCoal2(const char* where, int* addr)
 
 void baseCheck()
 {
-    if ( wasProblem )
+    if ( wasProblem ) {
         FAIL("was problem");
-    else if ( checkInCountCoal1 != 4 )
+    } else if ( checkInCountCoal1 != 4 ) {
         FAIL("checkInCountCoal1 != 4");
-    else if ( checkInCountCoal2 != 4 )
-        FAIL("checkInCountCoal2 != 2");
-    else
+    } else if ( checkInCountCoal2 != 4 ) {
+        FAIL("checkInCountCoal2 != 4");
+    } else {
         PASS("Success");
+    }
 }
 

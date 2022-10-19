@@ -1,4 +1,4 @@
-#!/usr/bin/python2.7
+#!/usr/bin/python3
 
 import os
 import KernelCollection
@@ -15,7 +15,7 @@ def findGlobalSymbolVMAddr(kernel_cache, dylib_index, symbol_name):
     return None
 
 def findFixupVMAddr(kernel_cache, fixup_name):
-    for fixup_vmaddr, fixup_target in kernel_cache.dictionary()["fixups"].iteritems():
+    for fixup_vmaddr, fixup_target in kernel_cache.dictionary()["fixups"].items():
         if fixup_target == fixup_name:
             return fixup_vmaddr
     return None
@@ -41,18 +41,18 @@ def check(kernel_cache):
     # Foo::foo()
     fooClassFooVMAddr = findGlobalSymbolVMAddr(kernel_cache, 0, "__ZN3Foo3fooEv")
     if enableLogging:
-        print "fooClassFooVMAddr: " + fooClassFooVMAddr
+        print("fooClassFooVMAddr: " + fooClassFooVMAddr)
 
     # Foo::fooUsed0()
     fooClassUsed0VMAddr = findGlobalSymbolVMAddr(kernel_cache, 0, "__ZN3Foo8fooUsed0Ev")
     if enableLogging:
-        print "fooClassUsed0VMAddr: " + fooClassUsed0VMAddr
+        print("fooClassUsed0VMAddr: " + fooClassUsed0VMAddr)
     
     # From bar, find the vtable and its override of foo()
     # Bar::foo()
     barClassFooVMAddr = findGlobalSymbolVMAddr(kernel_cache, 1, "__ZN3Bar3fooEv")
     if enableLogging:
-        print "barClassFooVMAddr: " + barClassFooVMAddr
+        print("barClassFooVMAddr: " + barClassFooVMAddr)
 
 
     # Check the fixups
@@ -62,25 +62,25 @@ def check(kernel_cache):
     # In vtable for Foo, we match the entry for Foo::foo() by looking for its value on the RHS of the fixup
     fooFooFixupAddr = findFixupVMAddr(kernel_cache, "kc(0) + " + fooClassFooVMAddr + " auth(IA addr 49764)")
     if enableLogging:
-        print "fooFooFixupAddr: " + fooFooFixupAddr
+        print("fooFooFixupAddr: " + fooFooFixupAddr)
     # Then the following fixup should be to Foo::fooUsed0()
     fooFooNextFixupAddr = offsetVMAddr(fooFooFixupAddr, 8)
     if enableLogging:
-        print "fooFooNextFixupAddr: " + fooFooNextFixupAddr
+        print("fooFooNextFixupAddr: " + fooFooNextFixupAddr)
     assert kernel_cache.dictionary()["fixups"][fooFooNextFixupAddr] == "kc(0) + " + fooClassUsed0VMAddr + " auth(IA addr 61962)"
 
     # bar.kext
     # Now in bar, again match the entry for its Bar::foo() symbol
     barFooFixupAddr = findFixupVMAddr(kernel_cache, "kc(0) + " + barClassFooVMAddr + " auth(IA addr 49764)")
     if enableLogging:
-        print "barFooFixupAddr: " + barFooFixupAddr
+        print("barFooFixupAddr: " + barFooFixupAddr)
     # And if the patching was correct, then following entry should be to Foo::fooUsed0()
     barFooNextFixupAddr = offsetVMAddr(barFooFixupAddr, 8)
     if enableLogging:
-        print "barFooNextFixupAddr: " + barFooNextFixupAddr
+        print("barFooNextFixupAddr: " + barFooNextFixupAddr)
     assert kernel_cache.dictionary()["fixups"][barFooNextFixupAddr] == "kc(0) + " + fooClassUsed0VMAddr + " auth(IA addr 61962)"
 
-# [~]> xcrun -sdk iphoneos.internal cc -arch arm64e -Wl,-static -mkernel -nostdlib -Wl,-add_split_seg_info -Wl,-e,__start -Wl,-pie main.cpp foo.cpp -Wl,-pagezero_size,0x0 -Wl,-rename_section,__TEXT,__text,__TEXT_EXEC,__text -o main.kernel  -Wl,-install_name,/usr/lib/swift/split.seg.v2.hack -Wl,-image_base,0xfffffff000000000 -iwithsysroot /System/Library/Frameworks/Kernel.framework/Headers -Wl,-sectcreate,__LINKINFO,__symbolsets,SymbolSets.plist -Wl,-segprot,__LINKINFO,r--,r--  -DFOO_USED=1 -Wl,-kernel -Wl,-fixup_chains
-# [~]> xcrun -sdk iphoneos.internal cc -arch arm64e -Wl,-kext -mkernel -nostdlib -Wl,-add_split_seg_info -Wl,-no_data_const bar.cpp -o extensions/bar.kext/bar -iwithsysroot /System/Library/Frameworks/Kernel.framework/Headers -Wl,-fixup_chains
+# [~]> xcrun -sdk macosx.internal cc -arch arm64e -Wl,-static -mkernel -nostdlib -Wl,-add_split_seg_info -Wl,-e,__start -Wl,-pie main.cpp foo.cpp -Wl,-pagezero_size,0x0 -Wl,-rename_section,__TEXT,__text,__TEXT_EXEC,__text -o main.kernel  -Wl,-install_name,/usr/lib/swift/split.seg.v2.hack -Wl,-image_base,0xfffffff000000000 -iwithsysroot /System/Library/Frameworks/Kernel.framework/Headers -Wl,-sectcreate,__LINKINFO,__symbolsets,SymbolSets.plist -Wl,-segprot,__LINKINFO,r--,r--  -DFOO_USED=1 -Wl,-kernel -Wl,-fixup_chains -target arm64e-apple-macosx12.0.0 -Wl,-version_load_command
+# [~]> xcrun -sdk macosx.internal cc -arch arm64e -Wl,-kext -mkernel -nostdlib -Wl,-add_split_seg_info -Wl,-no_data_const bar.cpp -o extensions/bar.kext/bar -iwithsysroot /System/Library/Frameworks/Kernel.framework/Headers -Wl,-fixup_chains
 # [~]> rm -r extensions/*.kext/*.ld
 

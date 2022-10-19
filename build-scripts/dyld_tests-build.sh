@@ -8,8 +8,10 @@ source $SRCROOT/build-scripts/include.sh
 
 OBJROOT_DYLD_APP_CACHE_UTIL="${TARGET_TEMP_DIR}/Objects_Dyld_App_Cache_Util"
 OBJROOT_RUN_STATIC="${TARGET_TEMP_DIR}/Objects_Run_Static"
+OBJROOT_DRIVERKIT="${TARGET_TEMP_DIR}/driverkit"
 
 SYMROOT=${BUILD_DIR}/${CONFIGURATION}${EFFECTIVE_PLATFORM_NAME}/dyld_tests
+SYMROOT_DRIVERKIT=${BUILD_DIR}/${CONFIGURATION}${EFFECTIVE_PLATFORM_NAME}/dyld_tests-driverkit
 OBJROOT=${PROJECT_TEMP_DIR}/${CONFIGURATION}${EFFECTIVE_PLATFORM_NAME}
 SDKROOT=${SDKROOT:-$(xcrun -sdk macosx.internal --show-sdk-path)}
 
@@ -25,7 +27,10 @@ DK_SYSTEM_HEADER_SEARCH_PATHS="${DK_SDKROOT}/System/DriverKit/Runtime/usr/includ
 
 DERIVED_FILES_DIR=${DERIVED_FILES_DIR}
 LDFLAGS="-L$BUILT_PRODUCTS_DIR"
-DK_LDFLAGS="-L$BUILT_PRODUCTS_DIR-driverkit"
+
+xcodebuild install -target libdyld_driverkit OBJROOT="${OBJROOT_DRIVERKIT}" SYMROOT="${SYMROOT_DRIVERKIT}" DSTROOT="$BUILT_PRODUCTS_DIR-driverkit" -sdk $DK_SDK
+DK_LDFLAGS="-L$BUILT_PRODUCTS_DIR-driverkit/System/DriverKit/usr/lib/system/"
+
 #LLBUILD=$(xcrun --sdk $SDKROOT --find llbuild 2> /dev/null)
 NINJA=${LLBUILD:-`xcrun  --sdk $SDKROOT --find ninja  2> /dev/null`}
 BUILD_TARGET=${ONLY_BUILD_TEST:-all}
@@ -34,17 +39,20 @@ if [ ! -z "$LLBUILD" ]; then
   NINJA="$LLBUILD ninja build"
 fi
 
-if [ -z "$DEPLOYMENT_TARGET_CLANG_ENV_NAME" ]; then
-    echo "Error $$DEPLOYMENT_TARGET_CLANG_ENV_NAME must be set"
+if [ -z "$DEPLOYMENT_TARGET_SETTING_NAME" ]; then
+    echo "Error $$DEPLOYMENT_TARGET_SETTING_NAME must be set"
+    exit 1
 fi
-OSVERSION=${!DEPLOYMENT_TARGET_CLANG_ENV_NAME}
+OSVERSION=${!DEPLOYMENT_TARGET_SETTING_NAME}
 
 if [ -z "$PLATFORM_NAME" ]; then
     echo "Error $$PLATFORM_NAME must be set"
+    exit 1
 fi
 
 if [ -z "$SRCROOT" ]; then
     echo "Error $$SRCROOT must be set"
+    exit 1
 fi
 
 if [ -z "$ARCHS" ]; then

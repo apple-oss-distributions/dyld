@@ -63,6 +63,8 @@
 #include <dispatch/dispatch.h>
 #include <optional>
 
+asm(".linker_option \"-lCrashReporterClient\"");
+
 static int sharedCacheIsValid(const void* mapped_cache, uint64_t size) {
     // First check that the size is good.
     // Note the shared cache may not have a codeSignatureSize value set so we need to first make
@@ -189,6 +191,15 @@ static int sharedCacheIsValid(const void* mapped_cache, uint64_t size) {
     return 0;
 }
 
+static const char* leafName(std::string_view str)
+{
+    const char* start = strrchr(str.data(), '/');
+    if ( start != nullptr )
+        return &start[1];
+    else
+        return str.data();
+}
+
 // A MappedCache provides access to all the parts of a cache file, even those typically not mapped at runtime
 struct MappedCache {
     const DyldSharedCache*  dyldCache               = nullptr;
@@ -200,7 +211,9 @@ struct MappedCache {
 static std::optional<MappedCache> mapCacheFile(const char* path,
                                                uint64_t baseCacheUnslidAddress,
                                                uint8_t* buffer,
-                                               bool isLocalSymbolsCache)
+                                               bool isLocalSymbolsCache,
+                                               const uuid_t expectedUUID,
+                                               void (^crashReporterCallback)(const char* format, ...))
 {
     struct stat statbuf;
     if ( ::stat(path, &statbuf) ) {
@@ -229,6 +242,17 @@ static std::optional<MappedCache> mapCacheFile(const char* path,
         return {};
     }
 
+    if ( !uuid_is_null(expectedUUID) ) {
+        if ( memcmp(header->uuid, expectedUUID, 16) != 0 ) {
+            uuid_string_t expectedUUIDString;
+            uuid_unparse_upper(expectedUUID, expectedUUIDString);
+            uuid_string_t foundUUIDString;
+            uuid_unparse_upper(header->uuid, foundUUIDString);
+            fprintf(stderr, "Error: SubCache UUID mismatch.  Expected %s, got %s\n", expectedUUIDString, foundUUIDString);
+            return {};
+        }
+    }
+
     // Use the cache code signature to see if the cache file is valid.
     // Note we do this now, as we don't even want to trust the mappings are valid.
     {
@@ -247,6 +271,7 @@ static std::optional<MappedCache> mapCacheFile(const char* path,
 
     // The local symbols cache just wants an mmap as we don't want to change offsets there
     if ( isLocalSymbolsCache ) {
+        crashReporterCallback("dyld: Mapping symbols file: %s\n", leafName(path));
         void* mapped_cache = ::mmap(nullptr, (size_t)statbuf.st_size, PROT_READ, MAP_PRIVATE, cache_fd, 0);
         if (mapped_cache == MAP_FAILED) {
             fprintf(stderr, "Error: mmap() for shared cache at %s failed, errno=%d\n", path, errno);
@@ -280,6 +305,7 @@ static std::optional<MappedCache> mapCacheFile(const char* path,
             fprintf(stderr, "Error: failed to allocate space to load shared cache file at %s\n", path);
             return {};
         }
+        crashReporterCallback("dyld: Allocated buffer (0x%llx..0x%llx): %s\n", (uint64_t)result, (uint64_t)result + vmSize, leafName(path));
         buffer = (uint8_t*)result;
     } else {
         subCacheBufferOffset = mappings[0].address - baseCacheUnslidAddress;
@@ -287,7 +313,11 @@ static std::optional<MappedCache> mapCacheFile(const char* path,
 
     for (uint32_t i=0; i < header->mappingCount; ++i) {
         uint64_t mappingAddressOffset = mappings[i].address - mappings[0].address;
-        void* mapped_cache = ::mmap((void*)(buffer + mappingAddressOffset + subCacheBufferOffset), (size_t)mappings[i].size,
+        uint64_t bufferStartAddr = (uint64_t)(buffer + mappingAddressOffset + subCacheBufferOffset);
+        crashReporterCallback("dyld: Mapping 0x%llx -> (0x%llx..0x%llx): %s\n",
+                              mappings[i].fileOffset, bufferStartAddr, bufferStartAddr + mappings[i].size, leafName(path));
+
+        void* mapped_cache = ::mmap((void*)bufferStartAddr, (size_t)mappings[i].size,
                                     PROT_READ, MAP_FIXED | MAP_PRIVATE, cache_fd, mappings[i].fileOffset);
         if (mapped_cache == MAP_FAILED) {
             fprintf(stderr, "Error: mmap() for shared cache at %s failed, errno=%d\n", path, errno);
@@ -324,7 +354,23 @@ struct CacheFiles {
 
 static CacheFiles mapCacheFiles(const char* path)
 {
-    std::optional<MappedCache> mappedCache = mapCacheFile(path, 0, nullptr, false);
+    __block std::string crashReporterMessage;
+    auto crashReporterCallback = ^(const char* format, ...)  __attribute__((format(printf, 1, 2))) {
+        char*   output_string;
+        va_list list;
+        va_start(list, format);
+        vasprintf(&output_string, format, list);
+        va_end(list);
+
+        crashReporterMessage += output_string;
+        free(output_string);
+
+        CRSetCrashLogMessage(crashReporterMessage.c_str());
+    };
+
+    crashReporterCallback("dyld: Starting dsc_extractor\n");
+
+    std::optional<MappedCache> mappedCache = mapCacheFile(path, 0, nullptr, false, UUID_NULL, crashReporterCallback);
     if ( !mappedCache.has_value() )
         return {};
 
@@ -332,6 +378,13 @@ static CacheFiles mapCacheFiles(const char* path)
     caches.push_back(mappedCache.value());
 
     const DyldSharedCache* cache = mappedCache.value().dyldCache;
+    std::string basePath = std::string(path);
+    if ( cache->header.cacheType == kDyldSharedCacheTypeUniversal )
+    {
+        std::size_t pos = basePath.find(DYLD_SHARED_CACHE_DEVELOPMENT_EXT);
+        if (pos != std::string::npos)
+            basePath = basePath.substr(0, basePath.size() - 12);
+    }
 
     // Load all subcaches, if we have them
     if ( cache->header.mappingOffset >= __offsetof(dyld_cache_header, subCacheArrayCount) ) {
@@ -339,21 +392,18 @@ static CacheFiles mapCacheFiles(const char* path)
             const dyld_subcache_entry* subCacheEntries = (dyld_subcache_entry*)((uint8_t*)cache + cache->header.subCacheArrayOffset);
 
             for (uint32_t i = 0; i != cache->header.subCacheArrayCount; ++i) {
-                std::string subCachePath = std::string(path) + "." + dyld3::json::decimal(i + 1);
-                std::optional<MappedCache> mappedSubCache = mapCacheFile(subCachePath.c_str(), cache->unslidLoadAddress(), (uint8_t*)cache, false);
+                std::string subCachePath = std::string(path) + "." + dyld3::json::unpaddedDecimal(i + 1);
+                if ( cache->header.mappingOffset > __offsetof(dyld_cache_header, cacheSubType) ) {
+                    subCachePath = basePath + subCacheEntries[i].fileSuffix;
+                }
+
+                uint8_t uuid[16];
+                cache->getSubCacheUuid(i, uuid);
+
+                std::optional<MappedCache> mappedSubCache = mapCacheFile(subCachePath.c_str(), cache->unslidLoadAddress(), (uint8_t*)cache, false,
+                                                                         uuid, crashReporterCallback);
                 if ( !mappedSubCache.has_value() )
                     return {};
-
-                const DyldSharedCache* subCache = mappedSubCache.value().dyldCache;
-
-                if ( memcmp(subCache->header.uuid, subCacheEntries[i].uuid, 16) != 0 ) {
-                    uuid_string_t expectedUUIDString;
-                    uuid_unparse_upper(subCacheEntries[i].uuid, expectedUUIDString);
-                    uuid_string_t foundUUIDString;
-                    uuid_unparse_upper(subCache->header.uuid, foundUUIDString);
-                    fprintf(stderr, "Error: SubCache[%i] UUID mismatch.  Expected %s, got %s\n", i, expectedUUIDString, foundUUIDString);
-                    return {};
-                }
 
                 caches.push_back(mappedSubCache.value());
             }
@@ -362,27 +412,21 @@ static CacheFiles mapCacheFiles(const char* path)
 
     // On old caches, the locals come from the same file we are extracting from
     std::string localSymbolsCachePath = path;
+    uuid_t localSymbolsUUID;
+    uuid_clear(localSymbolsUUID);
     if ( cache->hasLocalSymbolsInfoFile() ) {
         // On new caches, the locals come from a new subCache file
-        if ( endsWith(localSymbolsCachePath, ".development") )
-            localSymbolsCachePath.resize(localSymbolsCachePath.size() - strlen(".development"));
+        if ( endsWith(localSymbolsCachePath, DYLD_SHARED_CACHE_DEVELOPMENT_EXT) )
+            localSymbolsCachePath.resize(localSymbolsCachePath.size() - strlen(DYLD_SHARED_CACHE_DEVELOPMENT_EXT));
         localSymbolsCachePath += ".symbols";
+
+        uuid_copy(localSymbolsUUID, cache->header.symbolFileUUID);
     }
 
-    std::optional<MappedCache> localSymbolsMappedCache = mapCacheFile(localSymbolsCachePath.c_str(), 0, nullptr, true);
-    if ( localSymbolsMappedCache.has_value() && cache->hasLocalSymbolsInfoFile() ) {
-        // Validate the UUID of the symbols file
-        const DyldSharedCache* subCache = localSymbolsMappedCache.value().dyldCache;
+    std::optional<MappedCache> localSymbolsMappedCache = mapCacheFile(localSymbolsCachePath.c_str(), 0, nullptr, true,
+                                                                      localSymbolsUUID, crashReporterCallback);
 
-        if ( memcmp(subCache->header.uuid, cache->header.symbolFileUUID, 16) != 0 ) {
-            uuid_string_t expectedUUIDString;
-            uuid_unparse_upper(cache->header.symbolFileUUID, expectedUUIDString);
-            uuid_string_t foundUUIDString;
-            uuid_unparse_upper(subCache->header.uuid, foundUUIDString);
-            fprintf(stderr, "Error: Symbols subCache UUID mismatch.  Expected %s, got %s\n", expectedUUIDString, foundUUIDString);
-            return {};
-        }
-    }
+    CRSetCrashLogMessage("");
 
     CacheFiles cacheFiles;
     cacheFiles.caches = std::move(caches);

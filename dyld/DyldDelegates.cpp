@@ -25,6 +25,8 @@
 #include <_simple.h>
 #include <stdint.h>
 #include <string.h>
+#include <sys/attr.h>
+#include <sys/fsgetpath.h>
 #include <mach-o/dyld_priv.h>
 #if BUILDING_DYLD || BUILDING_CLOSURE_UTIL || BUILDING_SHARED_CACHE_UTIL
     #include <sys/socket.h>
@@ -36,8 +38,6 @@
     #else
         #include <sys/mman.h>
     #endif
-    #include <sys/attr.h>
-    #include <sys/fsgetpath.h>
     #include <sys/stat.h>
     #include <sys/types.h>
     #include <sys/xattr.h>
@@ -47,6 +47,8 @@
     #include <System/sys/csr.h>
     #include <System/sys/reason.h>
     #include <kern/kcdata.h>
+    //FIXME: Hack to avoid <sys/commpage.h> being included by <System/machine/cpu_capabilities.h>
+    #include <System/sys/commpage.h>
     #include <System/machine/cpu_capabilities.h>
     #include <System/sys/content_protection.h>
     #include <sandbox/private.h>
@@ -60,8 +62,19 @@
     extern "C" ssize_t __sendto(int, const void*, size_t, int, const struct sockaddr*, socklen_t);
     #include "DyldProcessConfig.h"
 #endif
+#if __has_include(<System/mach/dyld_pager.h>)
+    #include <System/mach/dyld_pager.h>
+#endif
+#ifndef DYLD_VM_END_MWL
+    #define DYLD_VM_END_MWL (-1ull)
+#endif
 
-#if TARGET_OS_SIMULATOR
+// should be in mach/shared_region.h
+extern "C" int __shared_region_check_np(uint64_t* startaddress);
+
+#if !TARGET_OS_SIMULATOR && BUILDING_DYLD
+    #include <libamfi.h>
+#else
 enum
 {
     AMFI_DYLD_INPUT_PROC_IN_SIMULATOR = (1 << 0),
@@ -74,11 +87,11 @@ enum amfi_dyld_policy_output_flag_set
     AMFI_DYLD_OUTPUT_ALLOW_FALLBACK_PATHS           = (1 << 3),
     AMFI_DYLD_OUTPUT_ALLOW_PRINT_VARS               = (1 << 4),
     AMFI_DYLD_OUTPUT_ALLOW_FAILED_LIBRARY_INSERTION = (1 << 5),
+    AMFI_DYLD_OUTPUT_ALLOW_LIBRARY_INTERPOSING      = (1 << 6),
+    AMFI_DYLD_OUTPUT_ALLOW_EMBEDDED_VARS            = (1 << 7),
 };
 extern "C" int amfi_check_dyld_policy_self(uint64_t input_flags, uint64_t* output_flags);
     #include "dyldSyscallInterface.h"
-#else
-    #include <libamfi.h>
 #endif
 
 #include "MachOLoaded.h"
@@ -90,6 +103,12 @@ extern "C" int amfi_check_dyld_policy_self(uint64_t input_flags, uint64_t* outpu
 #include "DyldDelegates.h"
 #include "DebuggerSupport.h"
 #include "Tracing.h"
+#include "Utils.h"
+
+// FIXME: can remove when dyld does not need to build with older SDKs
+#ifndef SYS_map_with_linking_np
+   #define	SYS_map_with_linking_np 550
+#endif
 
 
 using dyld3::MachOFile;
@@ -164,10 +183,10 @@ bool SyscallDelegate::getCWD(char path[MAXPATHLEN]) const
 #endif
 }
 
-const GradedArchs& SyscallDelegate::getGradedArchs(const char* archName, bool keysOff) const
+const GradedArchs& SyscallDelegate::getGradedArchs(const char* archName, bool keysOff, bool osBinariesOnly) const
 {
 #if BUILDING_DYLD
-    return dyld3::GradedArchs::forCurrentOS(keysOff, false); // FIXME, for AS macOS, need to know if main exe is OS binary
+    return dyld3::GradedArchs::forCurrentOS(keysOff, osBinariesOnly);
 #elif BUILDING_CACHE_BUILDER
     return *_gradedArchs;
 #else
@@ -234,6 +253,44 @@ void SyscallDelegate::dtraceUnregisterUserProbe(int registeredID) const
 #endif
 }
 
+bool SyscallDelegate::kernelDyldImageInfoAddress(void*& infoAddress, size_t& infoSize) const
+{
+    task_dyld_info_data_t     task_dyld_info;
+    mach_msg_type_number_t    count           = TASK_DYLD_INFO_COUNT;
+    if ( ::task_info(mach_task_self(), TASK_DYLD_INFO, (task_info_t)&task_dyld_info, &count) == KERN_SUCCESS) {
+        infoAddress = (void*)(long)task_dyld_info.all_image_info_addr;
+        infoSize    = (size_t)task_dyld_info.all_image_info_size;
+        return true;
+    }
+    return false;
+}
+
+bool SyscallDelegate::hasExistingDyldCache(uint64_t& cacheBaseAddress, uint64_t& fsid, uint64_t& fsobjid) const
+{
+    if ( __shared_region_check_np(&cacheBaseAddress) != 0 )
+        return false;
+
+    // FIXME: Unify this with SharedCacheRuntime
+    const DyldSharedCache* dyldCache = (const DyldSharedCache*)cacheBaseAddress;
+    dyld_cache_dynamic_data_header* dynamicData = (dyld_cache_dynamic_data_header*)((uintptr_t)dyldCache + dyldCache->header.dynamicDataOffset);
+    if (strncmp((char*)dynamicData, DYLD_SHARED_CACHE_DYNAMIC_DATA_MAGIC, 16) == 0) {
+        fsid = dynamicData->fsId;
+        fsobjid = dynamicData->fsObjId;
+    } else {
+        fsid = 0;
+        fsobjid = 0;
+    }
+
+    return true;
+}
+
+void SyscallDelegate::disablePageInLinking() const
+{
+#if BUILDING_DYLD && !TARGET_OS_SIMULATOR
+    __shared_region_check_np((uint64_t*)DYLD_VM_END_MWL);
+#endif
+}
+
 void SyscallDelegate::getDyldCache(const dyld3::SharedCacheOptions& opts, dyld3::SharedCacheLoadInfo& loadInfo) const
 {
 #if BUILDING_DYLD
@@ -247,13 +304,23 @@ void SyscallDelegate::getDyldCache(const dyld3::SharedCacheOptions& opts, dyld3:
         gProcessInfo->sharedCacheSlide                = loadInfo.slide;
         gProcessInfo->sharedCacheBaseAddress          = (unsigned long)loadInfo.loadAddress;
         loadInfo.loadAddress->getUUID(gProcessInfo->sharedCacheUUID);
-        dyld3::kdebug_trace_dyld_cache(loadInfo.path, gProcessInfo);
+
+        dyld3::kdebug_trace_dyld_cache(loadInfo.FSObjID, loadInfo.FSID, gProcessInfo->sharedCacheBaseAddress,
+                                       gProcessInfo->sharedCacheUUID);
     }
+#elif BUILDING_CACHE_BUILDER || BUILDING_CACHE_BUILDER_UNIT_TESTS
+    // No caches here
+    loadInfo.loadAddress = nullptr;
+    loadInfo.slide       = 0;
+    loadInfo.errorMessage = nullptr;
 #else
     if ( _dyldCache != nullptr ) {
         loadInfo.loadAddress = _dyldCache;
-        strcpy(loadInfo.path, "supplied");
         loadInfo.slide       = _dyldCache->slide();
+        bool universalDevelopment = false;
+        if ( _dyldCache->header.cacheType == kDyldSharedCacheTypeUniversal)
+            universalDevelopment = _dyldCache->header.cacheSubType == kDyldSharedCacheTypeDevelopment;
+        loadInfo.development = _dyldCache->header.cacheType == kDyldSharedCacheTypeDevelopment || universalDevelopment;
     }
     else {
         loadInfo.loadAddress = nullptr;
@@ -269,7 +336,7 @@ void SyscallDelegate::getDyldCache(const dyld3::SharedCacheOptions& opts, dyld3:
 }
 
 // walk directory and return all dirs/files therein
-void SyscallDelegate::forEachInDirectory(const char* dirPath, bool dirsOnly, void (^handler)(const char* pathInDir)) const
+void SyscallDelegate::forEachInDirectory(const char* dirPath, bool dirsOnly, void (^handler)(const char* pathInDir, const char* leafName)) const
 {
 #if BUILDING_DYLD
     // NOTE: opendir() uses malloc(), so we just lower level getattrlistbulk() instead
@@ -309,10 +376,23 @@ void SyscallDelegate::forEachInDirectory(const char* dirPath, bool dirsOnly, voi
                     }
                     if ( use ) {
                         char newPath[PATH_MAX];
-                        ::strlcpy(newPath, dirPath, PATH_MAX);
-                        ::strlcat(newPath, "/", PATH_MAX);
-                        ::strlcat(newPath, entryName, PATH_MAX);
-                        handler(newPath);
+                        newPath[0] = 0;
+                        if ( Utils::concatenatePaths(newPath, dirPath, PATH_MAX) >= PATH_MAX ) {
+                            use = false;
+                            more = false;
+                            break;
+                        }
+                        if ( Utils::concatenatePaths(newPath, "/", PATH_MAX) >= PATH_MAX ) {
+                            use = false;
+                            more = false;
+                            break;
+                        }
+                        if ( Utils::concatenatePaths(newPath, entryName, PATH_MAX) >= PATH_MAX ) {
+                            use = false;
+                            more = false;
+                            break;
+                        }
+                        handler(newPath, entryName);
                     }
                     entry = (attr_layout*)((uint8_t*)entry + entry->length);
                 }
@@ -325,10 +405,14 @@ void SyscallDelegate::forEachInDirectory(const char* dirPath, bool dirsOnly, voi
     if ( pos != _dirMap.end() ) {
         for (const char* node : pos->second) {
             char newPath[PATH_MAX];
-            ::strlcpy(newPath, dirPath, PATH_MAX);
-            ::strlcat(newPath, "/", PATH_MAX);
-            ::strlcat(newPath, node, PATH_MAX);
-            handler(newPath);
+            newPath[0] = 0;
+            if ( Utils::concatenatePaths(newPath, dirPath, PATH_MAX) >= PATH_MAX )
+                break;
+            if ( Utils::concatenatePaths(newPath, "/", PATH_MAX) >= PATH_MAX )
+                break;
+            if ( Utils::concatenatePaths(newPath, node, PATH_MAX) >= PATH_MAX )
+                break;
+            handler(newPath, node);
         }
     }
 #endif
@@ -390,19 +474,24 @@ bool SyscallDelegate::isMaybeContainerized(const char* homeDir) const
     return homeDir && (strstr(homeDir, "/var/mobile/Containers/Data/") != 0);
 }
 
-bool SyscallDelegate::fileExists(const char* path, FileID* fileID, bool* notAFile) const
+bool SyscallDelegate::fileExists(const char* path, FileID* fileID, int* errNum) const
 {
 #if BUILDING_DYLD || BUILDING_CLOSURE_UTIL
     struct stat sb;
     bool found = (this->stat(path, &sb) == 0);
     if ( found ) {
-        bool isFile = S_ISREG(sb.st_mode);
-        if ( notAFile != nullptr )
-            *notAFile = !isFile;
-        if ( !isFile )
-            found = false;
+        if ( !S_ISREG(sb.st_mode) ) {
+            if ( errNum != nullptr )
+                *errNum = ENOTAFILE_NP;     // magic errno that means not-a-file
+            return false;
+        }
     }
-    if ( found && (fileID != nullptr) ) {
+    else {
+        if ( errNum != nullptr )
+            *errNum = errno;
+        return false;
+    }
+    if ( fileID != nullptr ) {
         uint64_t inode = 0;
 #if __LP64__
         inode = sb.st_ino;
@@ -410,9 +499,9 @@ bool SyscallDelegate::fileExists(const char* path, FileID* fileID, bool* notAFil
         inode = sb.st_ino & 0xFFFFFFFF;  // HACK, work around inode randomly getting high bit set, making them uncomparable.
 #endif
         uint64_t mtime = sb.st_mtime;
-        *fileID = FileID(inode, mtime, true);
+        *fileID = FileID(inode, sb.st_dev, mtime, true);
     }
-    return found;
+    return true;
 #elif BUILDING_CACHE_BUILDER
     if ( path[0] != '/' )
         return false;
@@ -422,10 +511,12 @@ bool SyscallDelegate::fileExists(const char* path, FileID* fileID, bool* notAFil
         found = (_mappedOtherDylibs.count(betterPath) != 0);
     }
     if ( found ) {
-        if ( notAFile != nullptr )
-            *notAFile = false;
         if ( fileID != nullptr )
             *fileID = FileID::none();
+    }
+    else {
+        if ( errNum != nullptr )
+            *errNum = ENOENT;
     }
     return found;
 #else
@@ -512,9 +603,27 @@ bool SyscallDelegate::realpath(const char* input, char output[1024]) const
 #endif
 }
 
+bool SyscallDelegate::realpathdir(const char* dirPath, char output[1024]) const
+{
+#if BUILDING_DYLD
+    int fd = dyld3::open(dirPath, O_RDONLY|O_DIRECTORY, 0);
+    if ( fd == -1 )
+        return false;
+    // use F_GETPATH to get real dir path
+    bool success = (::fcntl(fd, F_GETPATH, output) == 0);
+    ::close(fd);
+    return success;
+#else
+    return false; // FIXME
+#endif
+}
+
 const void* SyscallDelegate::mapFileReadOnly(Diagnostics& diag, const char* path, size_t* size, FileID* fileID, bool* isOSBinary, char* realerPath) const
 {
 #if BUILDING_DYLD || BUILDING_CLOSURE_UTIL
+//    this->getattrlist(path, &attrList, &attrBuf, sizeof(attrBuf), 0);
+    //            err = config.syscall.getattrlist(fsInfos[i].f_mntonname, &attrList, &attrBuf, sizeof(attrBuf), 0);
+
     struct stat statbuf;
     if ( this->stat(path, &statbuf) == -1 ) {
         int err = errno;
@@ -559,7 +668,7 @@ const void* SyscallDelegate::mapFileReadOnly(Diagnostics& diag, const char* path
         inode = statbuf.st_ino & 0xFFFFFFFF;
 #endif
         uint64_t mtime = statbuf.st_mtime;
-        *fileID = FileID(inode, mtime, true);
+        *fileID = FileID(inode, statbuf.st_dev, mtime, true);
     }
     if ( realerPath != nullptr ) {
         this->getpath(fd, realerPath);
@@ -686,9 +795,7 @@ bool SyscallDelegate::saveFileWithAttribute(Diagnostics& diag, const char* path,
     int fd = ::open_dprotected_np(tempPath, O_WRONLY | O_CREAT, PROTECTION_CLASS_D, 0, S_IRUSR | S_IWUSR);
 #endif
     if ( fd == -1 ) {
-        char duptempPath[PATH_MAX];
-        Diagnostics::quotePath(tempPath, duptempPath);
-        diag.error("open/open_dprotected_np('%s') failed, errno=%d", duptempPath, errno);
+        diag.error("open/open_dprotected_np(%s) failed, errno=%d", tempPath, errno);
         return false;
     }
     int result = ::ftruncate(fd, size);
@@ -718,11 +825,7 @@ bool SyscallDelegate::saveFileWithAttribute(Diagnostics& diag, const char* path,
     }
     result = ::rename(tempPath, path);
     if ( result == -1 ) {
-        char duptempPath[PATH_MAX];
-        Diagnostics::quotePath(tempPath, duptempPath);
-        char dupPath[PATH_MAX];
-        Diagnostics::quotePath(path, dupPath);
-        diag.error("rename('%s', '%s') failed, errno=%d", duptempPath, dupPath, errno);
+        diag.error("rename(%s, %s) failed, errno=%d", tempPath, path, errno);
         return false;
     }
     return true;
@@ -731,10 +834,11 @@ bool SyscallDelegate::saveFileWithAttribute(Diagnostics& diag, const char* path,
 #endif
 }
 
-void SyscallDelegate::getpath(int fd, char realerPath[]) const
+bool SyscallDelegate::getpath(int fd, char realerPath[]) const
 {
 #if BUILDING_DYLD
-    ::fcntl(fd, F_GETPATH, realerPath);
+    bool success = (::fcntl(fd, F_GETPATH, realerPath) == 0);
+    return success;
 #elif BUILDING_CLOSURE_UTIL || BUILDING_SHARED_CACHE_UTIL
     if ( _overlayPath != nullptr ) {
         char tempPath[MAXPATHLEN];
@@ -742,7 +846,7 @@ void SyscallDelegate::getpath(int fd, char realerPath[]) const
         if ( success && (strncmp(tempPath, _overlayPath, strlen(_overlayPath)) == 0) ) {
             // Overlay was used, remove it
             strcpy(realerPath, &tempPath[strlen(_overlayPath)]);
-            return;
+            return true;
         }
         // Fall though to other cases as this was only an overlay
     }
@@ -756,9 +860,15 @@ void SyscallDelegate::getpath(int fd, char realerPath[]) const
             else
                 strcpy(realerPath, tempPath);
         }
+        return success;
     } else {
-        ::fcntl(fd, F_GETPATH, realerPath);
+        bool success = (::fcntl(fd, F_GETPATH, realerPath) == 0);
+        return success;
     }
+    return false;
+#elif BUILDING_UNIT_TESTS
+    realerPath[0] = '\0';
+    return false;
 #else
     // FIXME
     abort();
@@ -770,8 +880,7 @@ int SyscallDelegate::getpid() const
 #if BUILDING_DYLD
     return ::getpid();
 #else
-    // FIXME
-    return 100;
+    return _pid;
 #endif
 }
 
@@ -800,6 +909,20 @@ bool SyscallDelegate::sandboxBlockedStat(const char* path) const
     return sandboxBlocked(path, "file-read-metadata");
 }
 
+bool SyscallDelegate::sandboxBlockedSyscall(int syscallNum) const
+{
+#if BUILDING_DYLD && !TARGET_OS_SIMULATOR && !TARGET_OS_DRIVERKIT
+    sandbox_filter_type filter = (sandbox_filter_type)(SANDBOX_FILTER_SYSCALL_NUMBER | SANDBOX_CHECK_NO_REPORT);
+    return (sandbox_check(this->getpid(), "syscall-unix", filter, syscallNum) > 0);
+#else
+    return false;
+#endif
+}
+
+bool SyscallDelegate::sandboxBlockedPageInLinking() const
+{
+    return sandboxBlockedSyscall(SYS_map_with_linking_np);
+}
 
 SyscallDelegate::DyldCommPage::DyldCommPage()
 {
@@ -1044,7 +1167,11 @@ ssize_t SyscallDelegate::fsgetpath(char result[], size_t resultBufferSize, uint6
 #if BUILDING_DYLD
     fsid_t      fsid  = *reinterpret_cast<fsid_t*>(&fsID);
     return ::fsgetpath(result, resultBufferSize, &fsid, objID);
-#else
+#elif BUILDING_UNIT_TESTS
+    if (_bypassMockFS) {
+        fsid_t      fsid  = *reinterpret_cast<fsid_t*>(&fsID);
+        return ::fsgetpath(result, resultBufferSize, &fsid, objID);
+    }
     const auto& pos = _fileIDsToPath.find(makeFsIdPair(fsID,objID));
     if ( pos != _fileIDsToPath.end() ) {
         const std::string& str = pos->second;
@@ -1052,8 +1179,38 @@ ssize_t SyscallDelegate::fsgetpath(char result[], size_t resultBufferSize, uint6
         return strlen(str.c_str());
     }
     return -1;
+#else
+    return -1;
 #endif
 }
+
+int SyscallDelegate::getfsstat(struct statfs *buf, int bufsize, int flags) const {
+#if BUILDING_DYLD || BUILDING_LIB_DYLD
+    return ::getfsstat(buf, bufsize, flags);
+#elif BUILDING_UNIT_TESTS
+    if (_bypassMockFS) {
+        return ::getfsstat(buf, bufsize, flags);
+    }
+    abort();
+#else
+    abort();
+#endif
+}
+
+int SyscallDelegate::getattrlist(const char* path, struct attrlist * attrList, void * attrBuf, size_t attrBufSize, uint32_t options)
+const {
+#if BUILDING_DYLD || BUILDING_LIB_DYLD
+    return ::getattrlist(path, attrList, attrBuf, attrBufSize, options);
+#elif BUILDING_UNIT_TESTS
+    if (_bypassMockFS) {
+        return ::getattrlist(path, attrList, attrBuf, attrBufSize, options);
+    }
+    abort();
+#else
+    abort();
+#endif
+}
+
 
 
 } // namespace

@@ -35,21 +35,34 @@
 
 using dyld3::MachOAnalyzer;
 using dyld3::MachOFile;
+using dyld3::FatFile;
 
 namespace dyld4 {
 
 //////////////////////// "virtual" functions /////////////////////////////////
 
+const dyld3::MachOFile* JustInTimeLoader::mf(RuntimeState&) const
+{
+#if SUPPORT_VM_LAYOUT
+    return this->mappedAddress;
+#else
+    return this->mappedAddress.operator->();
+#endif
+}
+
+#if SUPPORT_VM_LAYOUT
 const MachOLoaded* JustInTimeLoader::loadAddress(RuntimeState&) const
 {
     return mappedAddress;
 }
+#endif
 
 const char* JustInTimeLoader::path() const
 {
     return this->pathOffset ? ((char*)this + this->pathOffset) : nullptr;
 }
 
+#if BUILDING_DYLD || BUILDING_CLOSURE_UTIL || BUILDING_UNIT_TESTS
 bool JustInTimeLoader::contains(RuntimeState& state, const void* addr, const void** segAddr, uint64_t* segSize, uint8_t* segPerms) const
 {
     if ( addr < this->mappedAddress )
@@ -71,58 +84,341 @@ bool JustInTimeLoader::contains(RuntimeState& state, const void* addr, const voi
     });
     return result;
 }
+#endif
 
 bool JustInTimeLoader::matchesPath(const char* path) const
 {
     if ( strcmp(path, this->path()) == 0 )
         return true;
     if ( this->altInstallName ) {
-        if ( strcmp(path, this->analyzer()->installName()) == 0 )
+        if ( strcmp(path, this->mappedAddress->installName()) == 0 )
             return true;
     }
     return false;
 }
 
-FileID JustInTimeLoader::fileID() const
+FileID JustInTimeLoader::fileID(const FileManager& fileManager) const
 {
     return this->fileIdent;
 }
+
+struct HashPointer {
+    static size_t hash(const void* v) {
+        return std::hash<uintptr_t>{}((uintptr_t)v);
+    }
+};
+
+struct EqualPointer {
+    static bool equal(const void* s1, const void* s2) {
+        return s1 == s2;
+    }
+};
+
+typedef dyld3::Map<const void*, bool, HashPointer, EqualPointer> PointerSet;
+
+// A class in the root can be patched only if the __objc_classlist entry for that class is bind to self.  We need to
+// find the class list and check each class.  For meta classes, the ISA in the class should be a bind to self
+#if SUPPORT_VM_LAYOUT
+static void getObjCPatchClasses(const dyld3::MachOAnalyzer* ma, PointerSet& classPointers)
+{
+    if ( !ma->hasChainedFixups() )
+        return;
+
+    Diagnostics diag;
+
+    STACK_ALLOC_OVERFLOW_SAFE_ARRAY(const void*, bindTargets, 32);
+    ma->forEachBindTarget(diag, false, ^(const dyld3::MachOAnalyzer::BindTargetInfo& info, bool& stop) {
+        if ( diag.hasError() ) {
+            stop = true;
+            return;
+        }
+
+        if ( info.libOrdinal == BIND_SPECIAL_DYLIB_SELF ) {
+            void* result = nullptr;
+            bool  resultPointsToInstructions = false;
+            if ( ma->hasExportedSymbol(info.symbolName, nullptr, &result, &resultPointsToInstructions) ) {
+                bindTargets.push_back(result);
+            } else {
+                bindTargets.push_back(nullptr);
+            }
+        } else {
+            bindTargets.push_back(nullptr);
+        }
+    }, ^(const MachOAnalyzer::BindTargetInfo& info, bool& stop) {
+    });
+
+    if ( diag.hasError() )
+        return;
+
+    // Find the classlist and see which entries are binds to self
+    uint64_t classListRuntimeOffset;
+    uint64_t classListSize;
+    bool foundSection = ma->findObjCDataSection("__objc_classlist", classListRuntimeOffset, classListSize);
+    if ( !foundSection )
+        return;
+
+    const uint64_t ptrSize = ma->pointerSize();
+    if ( (classListSize % ptrSize) != 0 ) {
+        diag.error("Invalid objc class section size");
+        return;
+    }
+
+    uint64_t classListCount = classListSize / ptrSize;
+    uint16_t chainedPointerFormat = ma->chainedPointerFormat();
+
+    const uint8_t* arrayBase = (uint8_t*)ma + classListRuntimeOffset;
+    if ( ptrSize == 8 ) {
+        typedef uint64_t PtrTy;
+        for ( uint64_t i = 0; i != classListCount; ++i ) {
+            const PtrTy* classListEntry = (PtrTy*)(arrayBase + (i * sizeof(PtrTy)));
+
+            // Add the class to the patch list if its a bind to self
+            const void* classPtr = nullptr;
+            {
+                const auto* classFixup = (const dyld3::MachOLoaded::ChainedFixupPointerOnDisk*)classListEntry;
+                uint32_t bindOrdinal = 0;
+                int64_t unusedAddend = 0;
+                if ( classFixup->isBind(chainedPointerFormat, bindOrdinal, unusedAddend) ) {
+                    if ( bindOrdinal < bindTargets.count() ) {
+                        classPtr = bindTargets[bindOrdinal];
+                        // Only non-null entries will be binds to self
+                        if ( classPtr != nullptr )
+                            classPointers.insert({ classPtr, true });
+                    }
+                }
+            }
+
+            // Add the metaclass to the patch list if its a bind to self
+            if ( classPtr != nullptr ) {
+                // The metaclass is the class ISA, which  is the first field of the class
+                const auto* metaclassFixup = (const dyld3::MachOLoaded::ChainedFixupPointerOnDisk*)classPtr;
+                uint32_t bindOrdinal = 0;
+                int64_t unusedAddend = 0;
+                if ( metaclassFixup->isBind(chainedPointerFormat, bindOrdinal, unusedAddend) ) {
+                    if ( bindOrdinal < bindTargets.count() ) {
+                        const void* metaclassPtr = bindTargets[bindOrdinal];
+                        // Only non-null entries will be binds to self
+                        if ( metaclassPtr != nullptr )
+                            classPointers.insert({ metaclassPtr, true });
+                    }
+                }
+            }
+        }
+    } else {
+        typedef uint32_t PtrTy;
+        for ( uint64_t i = 0; i != classListCount; ++i ) {
+            const PtrTy* classListEntry = (PtrTy*)(arrayBase + (i * sizeof(PtrTy)));
+
+            // Add the class to the patch list if its a bind to self
+            const void* classPtr = nullptr;
+            {
+                const auto* classFixup = (const dyld3::MachOLoaded::ChainedFixupPointerOnDisk*)classListEntry;
+                uint32_t bindOrdinal = 0;
+                int64_t unusedAddend = 0;
+                if ( classFixup->isBind(chainedPointerFormat, bindOrdinal, unusedAddend) ) {
+                    if ( bindOrdinal < bindTargets.count() ) {
+                        classPtr = bindTargets[bindOrdinal];
+                        // Only non-null entries will be binds to self
+                        if ( classPtr != nullptr )
+                            classPointers.insert({ classPtr, true });
+                    }
+                }
+            }
+
+            // Add the metaclass to the patch list if its a bind to self
+            if ( classPtr != nullptr ) {
+                // The metaclass is the class ISA, which  is the first field of the class
+                const auto* metaclassFixup = (const dyld3::MachOLoaded::ChainedFixupPointerOnDisk*)classPtr;
+                uint32_t bindOrdinal = 0;
+                int64_t unusedAddend = 0;
+                if ( metaclassFixup->isBind(chainedPointerFormat, bindOrdinal, unusedAddend) ) {
+                    if ( bindOrdinal < bindTargets.count() ) {
+                        const void* metaclassPtr = bindTargets[bindOrdinal];
+                        // Only non-null entries will be binds to self
+                        if ( metaclassPtr != nullptr )
+                            classPointers.insert({ metaclassPtr, true });
+                    }
+                }
+            }
+        }
+    }
+}
+
+// A singleton object can only be patched if it matches the layout/authentication expected by the patcher
+// This finds all eligible singleton classes
+static void getSingletonPatches(const dyld3::MachOAnalyzer* ma, PointerSet& objectPointers)
+{
+    Diagnostics diag;
+    ma->forEachSingletonPatch(diag, ^(dyld3::MachOAnalyzer::SingletonPatchKind kind, uint64_t runtimeOffset) {
+        // We only handle a single kind of singleton object for now
+        if ( kind != dyld3::MachOAnalyzer::SingletonPatchKind::cfObj2 )
+            return;
+
+        void* value = (uint8_t*)ma + runtimeOffset;
+        objectPointers.insert({ value, true });
+    });
+}
+
+// Feature flag.  Enable this once we have ld64-804 everywhere
+static const bool enableObjCPatching = true;
+
+static const bool enableSingletonPatching = true;
+
+static bool isEligibleForObjCPatching(RuntimeState& state, uint32_t indexOfOverriddenCachedDylib)
+{
+    const char* path = state.config.dyldCache.addr->getIndexedImagePath(indexOfOverriddenCachedDylib);
+    if ( path == nullptr )
+        return false;
+
+    // Some dylibs put data next to their classes.  Eg, libdispatch puts a vtable before the class.  We can't
+    // make objc patching work in these cases
+    if ( strstr(path, "libdispatch.dylib") != nullptr )
+        return false;
+    if ( strstr(path, "libxpc.dylib") != nullptr )
+        return false;
+    if ( strcmp(path, "/usr/lib/libodmodule.dylib") == 0 )
+        return false;
+    if ( strcmp(path, "/usr/lib/log/liblog_odtypes.dylib") == 0 )
+        return false;
+
+    return true;
+}
+
+#endif // SUPPORT_VM_LAYOUT
 
 const Loader::DylibPatch* JustInTimeLoader::makePatchTable(RuntimeState& state, uint32_t indexOfOverriddenCachedDylib) const
 {
     static const bool extra = false;
 
-    const DyldSharedCache* dyldCache = state.config.dyldCache.addr;
-    assert(dyldCache != nullptr);
+    const PatchTable& patchTable = state.config.dyldCache.patchTable;
+    assert(patchTable.hasValue());
+    //const DyldSharedCache* dyldCache = state.config.dyldCache.addr;
+    //assert(dyldCache != nullptr);
 
     if ( extra )
         state.log("Found %s overrides dyld cache index 0x%04X\n", this->path(), indexOfOverriddenCachedDylib);
-    uint32_t patchCount = dyldCache->patchableExportCount(indexOfOverriddenCachedDylib);
+    uint32_t patchCount = patchTable.patchableExportCount(indexOfOverriddenCachedDylib);
     if ( patchCount != 0 ) {
-        const uint8_t*  thisAddress = (uint8_t*)(this->loadAddress(state));
-        DylibPatch*     table       = (DylibPatch*)state.longTermAllocator.malloc(sizeof(DylibPatch) * (patchCount + 1));;
+        DylibPatch*     table       = (DylibPatch*)state.persistentAllocator.malloc(sizeof(DylibPatch) * (patchCount + 1));;
         __block uint32_t patchIndex = 0;
-        dyldCache->forEachPatchableExport(indexOfOverriddenCachedDylib, ^(uint32_t dylibVMOffsetOfImpl, const char* exportName) {
+
+#if SUPPORT_VM_LAYOUT
+        const uint8_t*  thisAddress = (uint8_t*)(this->loadAddress(state));
+        const uint8_t*  cacheDylibAddress = (uint8_t*)state.config.dyldCache.addr->getIndexedImageEntry(indexOfOverriddenCachedDylib);
+
+        __block PointerSet eligibleClasses;
+        // The cache builder doesn't analyze objc classes as isEligibleForObjCPatching() relies on
+        // parsing the on-disk chained fixup format
+        if ( isEligibleForObjCPatching(state, indexOfOverriddenCachedDylib) )
+            getObjCPatchClasses(this->analyzer(), eligibleClasses);
+
+        __block PointerSet eligibleSingletons;
+        getSingletonPatches(this->analyzer(), eligibleSingletons);
+
+        patchTable.forEachPatchableExport(indexOfOverriddenCachedDylib, ^(uint32_t dylibVMOffsetOfImpl, const char* exportName,
+                                                                          PatchKind patchKind) {
             Diagnostics    exportDiag;
             ResolvedSymbol foundSymbolInfo;
             if ( this->hasExportedSymbol(exportDiag, state, exportName, staticLink, &foundSymbolInfo) ) {
                 if ( extra )
-                    state.log("   will patch cache uses of '%s'\n", exportName);
-                uint8_t*  newImplAddress = (uint8_t*)(foundSymbolInfo.targetLoader->loadAddress(state)) + foundSymbolInfo.targetRuntimeOffset;
-                // note: we are saving a signed 64-bit offset to the impl.  This is to support re-exported symbols
-                table[patchIndex].overrideOffsetOfImpl = newImplAddress - thisAddress;
+                    state.log("   will patch cache uses of '%s' %s\n", exportName, PatchTable::patchKindName(patchKind));
+                const dyld3::MachOAnalyzer* implMA  = (const dyld3::MachOAnalyzer*)foundSymbolInfo.targetLoader->loadAddress(state);
+                uint8_t* newImplAddress = (uint8_t*)implMA + foundSymbolInfo.targetRuntimeOffset;
+
+                bool foundUsableObjCClass = false;
+                bool foundSingletonObject = false;
+                switch ( patchKind ) {
+                    case PatchKind::regular:
+                        break;
+                    case PatchKind::cfObj2: {
+                        if ( !enableSingletonPatching )
+                            break;
+
+                        if ( eligibleSingletons.find(newImplAddress) == eligibleSingletons.end() )
+                            break;
+
+                        const dyld3::MachOAnalyzer* cacheMA = (const dyld3::MachOAnalyzer*)cacheDylibAddress;
+                        const uint8_t* cacheImpl = (uint8_t*)cacheMA + dylibVMOffsetOfImpl;
+                        state.patchedSingletons.push_back({ (uintptr_t)cacheImpl, (uintptr_t)newImplAddress });
+                        foundSingletonObject = true;
+                        break;
+                    }
+                    case PatchKind::objcClass: {
+                        // Check if we can use ObjC patching.  For now this is only for non-swift classes
+                        if ( !enableObjCPatching )
+                            break;
+
+                        if ( eligibleClasses.find(newImplAddress) == eligibleClasses.end() )
+                            break;
+
+                        const dyld3::MachOAnalyzer* cacheMA = (const dyld3::MachOAnalyzer*)cacheDylibAddress;
+                        const uint8_t* cacheImpl = (uint8_t*)cacheMA + dylibVMOffsetOfImpl;
+
+                        if ( implMA->isSwiftClass(newImplAddress) )
+                            break;
+
+                        if ( cacheMA->isSwiftClass(cacheImpl) )
+                            break;
+
+                        // Interpose so that if anyone tries to bind to the class in the root, then they'll instead bind
+                        // to the class in the shared cache
+                        state.patchedObjCClasses.push_back({ (uintptr_t)cacheImpl, (uintptr_t)newImplAddress });
+                        state.objcReplacementClasses.push_back({ cacheMA, (uintptr_t)cacheImpl, implMA, (uintptr_t)newImplAddress });
+                        foundUsableObjCClass = true;
+                        break;
+                    }
+                }
+
+                if ( foundUsableObjCClass ) {
+                    table[patchIndex].overrideOffsetOfImpl = DylibPatch::objcClass;
+                } else if ( foundSingletonObject ) {
+                    table[patchIndex].overrideOffsetOfImpl = DylibPatch::singleton;
+                } else {
+                    // note: we are saving a signed 64-bit offset to the impl.  This is to support re-exported symbols
+                    table[patchIndex].overrideOffsetOfImpl = newImplAddress - thisAddress;
+                }
             }
             else {
                 if ( extra )
                     state.log("   override missing '%s', so uses will be patched to NULL\n", exportName);
-                table[patchIndex].overrideOffsetOfImpl = 0;
+                table[patchIndex].overrideOffsetOfImpl = DylibPatch::missingWeakImport;
             }
             ++patchIndex;
         });
         // mark end of table
-        table[patchIndex].overrideOffsetOfImpl = -1;
+        table[patchIndex].overrideOffsetOfImpl = DylibPatch::endOfPatchTable;
         // record in Loader
         return table;
+#else
+        CacheVMAddress thisVMAddr(this->mf(state)->preferredLoadAddress());
+
+        // The cache builder doesn't lay out dylibs in VM layout, so we need to use VMAddr/VMOffset everywhere
+        patchTable.forEachPatchableExport(indexOfOverriddenCachedDylib, ^(uint32_t dylibVMOffsetOfImpl, const char* exportName,
+                                                                          PatchKind patchKind) {
+            Diagnostics    exportDiag;
+            ResolvedSymbol foundSymbolInfo;
+            if ( this->hasExportedSymbol(exportDiag, state, exportName, staticLink, &foundSymbolInfo) ) {
+                if ( extra )
+                    state.log("   will patch cache uses of '%s' %s\n", exportName, PatchTable::patchKindName(patchKind));
+                CacheVMAddress implBaseVMAddr(foundSymbolInfo.targetLoader->mf(state)->preferredLoadAddress());
+                CacheVMAddress newImplVMAddr = implBaseVMAddr + VMOffset(foundSymbolInfo.targetRuntimeOffset);
+
+                // note: we are saving a signed 64-bit offset to the impl.  This is to support re-exported symbols
+                VMOffset offsetToImpl = newImplVMAddr - thisVMAddr;
+                table[patchIndex].overrideOffsetOfImpl = offsetToImpl.rawValue();
+            }
+            else {
+                if ( extra )
+                    state.log("   override missing '%s', so uses will be patched to NULL\n", exportName);
+                table[patchIndex].overrideOffsetOfImpl = DylibPatch::missingWeakImport;
+            }
+            ++patchIndex;
+        });
+        // mark end of table
+        table[patchIndex].overrideOffsetOfImpl = DylibPatch::endOfPatchTable;
+        // record in Loader
+        return table;
+#endif // SUPPORT_VM_LAYOUT
     }
 
     return nullptr;
@@ -134,9 +430,8 @@ void JustInTimeLoader::loadDependents(Diagnostics& diag, RuntimeState& state, co
         return;
 
     // add first level of dependents
-    const MachOAnalyzer* ma       = (MachOAnalyzer*)this->mappedAddress;
     __block int          depIndex = 0;
-    ma->forEachDependentDylib(^(const char* loadPath, bool isWeak, bool isReExport, bool isUpward, uint32_t compatVersion, uint32_t curVersion, bool& stop) {
+    this->mappedAddress->forEachDependentDylib(^(const char* loadPath, bool isWeak, bool isReExport, bool isUpward, uint32_t compatVersion, uint32_t curVersion, bool& stop) {
         if ( isUpward )
             dependentKind(depIndex) = DependentKind::upward;
         else if ( isReExport )
@@ -160,20 +455,18 @@ void JustInTimeLoader::loadDependents(Diagnostics& diag, RuntimeState& state, co
             LoadChain   nextChain { options.rpathStack, this };
             Diagnostics depDiag;
             LoadOptions depOptions  = options;
+            depOptions.requestorNeedsFallbacks = this->pre2022Binary;
             depOptions.rpathStack   = &nextChain;
             depOptions.canBeMissing = isWeak;
             depLoader               = options.finder ? options.finder(depDiag, state.config.process.platform, loadPath, depOptions) : getLoader(depDiag, state, loadPath, depOptions);
             if ( depDiag.hasError() ) {
-                char dupPath[PATH_MAX];
-                Diagnostics::quotePath(this->path(), dupPath);
-                char dupLoadPath[PATH_MAX];
-                Diagnostics::quotePath(loadPath, dupLoadPath);
-                if ( depDiag.errorMessageContains("dylib not found") ) {
-                    diag.error("Library not loaded: '%s'\n  Referenced from: '%s'\n  Reason: image not found", dupLoadPath, dupPath);
-                }
-                else {
-                    diag.error("Library not loaded: '%s'\n  Referenced from: '%s'\n  Reason: %s", dupLoadPath, dupPath, depDiag.errorMessageCStr());
-                }
+                char  fromUuidStr[64];
+                this->getUuidStr(state, fromUuidStr);
+                // rdar://15648948 (On fatal errors, check binary's min-OS version and note if from the future)
+                Diagnostics tooNewBinaryDiag;
+                this->tooNewErrorAddendum(tooNewBinaryDiag, state);
+                diag.error("Library not loaded: %s\n  Referenced from: <%s> %s%s\n  Reason: %s",
+                           loadPath, fromUuidStr, this->path(), tooNewBinaryDiag.errorMessageCStr(), depDiag.errorMessageCStr());
 #if BUILDING_DYLD
                 if ( options.launching )
                     state.setLaunchMissingDylib(loadPath, this->path());
@@ -273,6 +566,7 @@ bool JustInTimeLoader::representsCachedDylibIndex(uint16_t dylibIndex) const
     return false;
 }
 
+#if BUILDING_DYLD || BUILDING_UNIT_TESTS
 void JustInTimeLoader::logFixup(RuntimeState& state, uint64_t fixupLocRuntimeOffset, uintptr_t newValue, PointerMetaData pmd, const Loader::ResolvedSymbol& target) const
 {
     const MachOAnalyzer* ma       = this->analyzer();
@@ -316,6 +610,7 @@ void JustInTimeLoader::logFixup(RuntimeState& state, uint64_t fixupLocRuntimeOff
             break;
     }
 }
+#endif
 
 bool JustInTimeLoader::overridesDylibInCache(const DylibPatch*& patchTable, uint16_t& cacheDylibOverriddenIndex) const
 {
@@ -327,7 +622,32 @@ bool JustInTimeLoader::overridesDylibInCache(const DylibPatch*& patchTable, uint
     return true;
 }
 
+void JustInTimeLoader::withLayout(Diagnostics &diag, RuntimeState& state,
+                        void (^callback)(const mach_o::Layout &layout)) const
+{
+#if SUPPORT_VM_LAYOUT
+    this->analyzer()->withVMLayout(diag, callback);
+#else
+    // In the cache builder, we must have set a layout if this is a cache dylib
+    if ( this->dylibInDyldCache ) {
+        assert(this->nonRuntimeLayout != nullptr);
+        callback(*this->nonRuntimeLayout);
+        return;
+    }
 
+    // Not in the cache, but the cache builder never uses MachOAnalyzer, so use the MachOFile layout
+    mach_o::MachOFileRef fileRef = this->mf(state);
+    fileRef->withFileLayout(diag, callback);
+#endif
+}
+
+bool JustInTimeLoader::dyldDoesObjCFixups() const
+{
+    // JustInTimeLoaders do not do objc fixups, except for dylibs in dyld cache (which we fixed up at cache build time)
+    return this->dylibInDyldCache;
+}
+
+#if BUILDING_DYLD || BUILDING_UNIT_TESTS
 void JustInTimeLoader::handleStrongWeakDefOverrides(RuntimeState& state, DyldCacheDataConstLazyScopedWriter& cacheDataConst)
 {
     CacheWeakDefOverride cacheWeakDefFixup = ^(uint32_t cachedDylibIndex, uint32_t cachedDylibVMOffset, const ResolvedSymbol& target) {
@@ -390,7 +710,6 @@ void JustInTimeLoader::cacheWeakDefFixup(RuntimeState& state, DyldCacheDataConst
 void JustInTimeLoader::applyFixups(Diagnostics& diag, RuntimeState& state, DyldCacheDataConstLazyScopedWriter& cacheDataConst, bool allowLazyBinds) const
 {
     //state.log("applyFixups: %s\n", this->path());
-#if BUILDING_DYLD
     // if this is in the dyld cache there is normally no fixups need
     if ( this->dylibInDyldCache ) {
         // But if some lower level cached dylib has a root, we
@@ -405,7 +724,6 @@ void JustInTimeLoader::applyFixups(Diagnostics& diag, RuntimeState& state, DyldC
         // images in shared cache don't need any more fixups
         return;
     }
-#endif
 
     CacheWeakDefOverride cacheWeakDefFixup = ^(uint32_t cachedDylibIndex, uint32_t cachedDylibVMOffset, const ResolvedSymbol& target) {
         JustInTimeLoader::cacheWeakDefFixup(state, cacheDataConst, cachedDylibIndex, cachedDylibVMOffset, target);
@@ -423,7 +741,7 @@ void JustInTimeLoader::applyFixups(Diagnostics& diag, RuntimeState& state, DyldC
         }
 
         // Record missing flat-namespace lazy symbols
-        if ( targetAddr == state.libdyldMissingSymbol )
+        if ( target.isMissingFlatLazy )
             missingFlatLazySymbols.push_back({ target.targetSymbolName, (uint32_t)bindTargets.count() });
         bindTargets.push_back(targetAddr);
     }, ^(const ResolvedSymbol& target, bool& stop) {
@@ -441,7 +759,7 @@ void JustInTimeLoader::applyFixups(Diagnostics& diag, RuntimeState& state, DyldC
             }
 
             // Record missing flat-namespace lazy symbols
-            if ( targetAddr == state.libdyldMissingSymbol )
+            if ( target.isMissingFlatLazy )
                 missingFlatLazySymbols.push_back({ target.targetSymbolName, (uint32_t)overrideTargetAddrs.count() });
             overrideTargetAddrs.push_back(targetAddr);
         }
@@ -450,7 +768,7 @@ void JustInTimeLoader::applyFixups(Diagnostics& diag, RuntimeState& state, DyldC
         return;
 
     // do fixups using bind targets table
-    this->applyFixupsGeneric(diag, state, bindTargets, overrideTargetAddrs, true, missingFlatLazySymbols);
+    this->applyFixupsGeneric(diag, state, this->sliceOffset, bindTargets, overrideTargetAddrs, true, missingFlatLazySymbols);
 
     // some old macOS games need __dyld section set up
     if ( (state.config.process.platform == dyld3::Platform::macOS) && (state.libdyldLoader != nullptr) ) {
@@ -476,7 +794,7 @@ void JustInTimeLoader::applyFixups(Diagnostics& diag, RuntimeState& state, DyldC
     }
 
     // mark any __DATA_CONST segments read-only
-    if ( this->hasReadOnlyData )
+    if ( this->hasConstantSegmentsToProtect() )
         this->makeSegmentsReadOnly(state);
 
     if ( diag.noError() )
@@ -496,6 +814,7 @@ void JustInTimeLoader::unmap(RuntimeState& state, bool force) const
     if ( state.config.log.segments )
         state.log("unmapped 0x%012lX->0x%012lX for %s\n", (long)vmStart, (long)vmStart + (long)vmSize, this->path());
 }
+#endif // BUILDING_DYLD || BUILDING_UNIT_TESTS
 
 bool JustInTimeLoader::hasBeenFixedUp(RuntimeState&) const
 {
@@ -515,68 +834,80 @@ bool JustInTimeLoader::beginInitializers(RuntimeState&)
     return false;
 }
 
+#if BUILDING_DYLD || BUILDING_UNIT_TESTS
 void JustInTimeLoader::runInitializers(RuntimeState& state) const
 {
     this->findAndRunAllInitializers(state);
 }
+#endif
 
 ////////////////////////  other functions /////////////////////////////////
 
-static bool hasPlusLoad(const MachOAnalyzer* ma)
+static bool hasPlusLoad(const MachOFile* mh)
 {
     Diagnostics diag;
-    return ma->hasPlusLoadMethod(diag);
+    return mh->hasPlusLoadMethod(diag);
 }
 
-static bool hasDataConst(const MachOAnalyzer* ma)
+static bool hasDataConst(const MachOFile* mh)
 {
     __block bool result = false;
-    ma->forEachSegment(^(const MachOAnalyzer::SegmentInfo& info, bool& stop) {
+    mh->forEachSegment(^(const MachOAnalyzer::SegmentInfo& info, bool& stop) {
         if ( info.readOnlyData )
             result = true;
     });
     return result;
 }
 
-JustInTimeLoader::JustInTimeLoader(const MachOAnalyzer* ma, const Loader::InitialOptions& options,
-                                   const FileID& fileID)
-    : Loader(options), fileIdent(fileID)
+JustInTimeLoader::JustInTimeLoader(const MachOFile* mh, const Loader::InitialOptions& options,
+                                   const FileID& fileID, const mach_o::Layout* layout)
+    : Loader(options, false, false, 0), mappedAddress((const dyld3::MachOLoaded*)mh), fileIdent(fileID)
 {
 }
 
-JustInTimeLoader* JustInTimeLoader::make(RuntimeState& state, const MachOAnalyzer* ma, const char* path, const FileID& fileID, uint64_t sliceOffset,
-                                         bool willNeverUnload, bool leaveMapped, bool overridesCache, uint16_t overridesDylibIndex)
+JustInTimeLoader* JustInTimeLoader::make(RuntimeState& state, const MachOFile* mh, const char* path, const FileID& fileID, uint64_t sliceOffset,
+                                         bool willNeverUnload, bool leaveMapped, bool overridesCache, uint16_t overridesDylibIndex,
+                                         const mach_o::Layout* layout)
 {
     //state.log("JustInTimeLoader::make(%s) willNeverUnload=%d\n", path, willNeverUnload);
     // use malloc and placement new to create object big enough for all info
     bool                   allDepsAreNormal     = true;
-    uint32_t               depCount             = ma->dependentDylibCount(&allDepsAreNormal);
+    uint32_t               depCount             = mh->dependentDylibCount(&allDepsAreNormal);
     uint32_t               minDepCount          = (depCount ? depCount - 1 : 1);
     size_t                 sizeNeeded           = sizeof(JustInTimeLoader) + (minDepCount * sizeof(AuthLoader)) + (allDepsAreNormal ? 0 : depCount) + strlen(path) + 1;
-    void*                  storage              = state.longTermAllocator.malloc(sizeNeeded);
+    void*                  storage              = state.persistentAllocator.malloc(sizeNeeded);
     Loader::InitialOptions options;
-    options.inDyldCache     = DyldSharedCache::inDyldCache(state.config.dyldCache.addr, ma);
-    options.hasObjc         = ma->hasObjC();
-    options.mayHavePlusLoad = hasPlusLoad(ma);
-    options.roData          = hasDataConst(ma);
+#if BUILDING_CACHE_BUILDER || BUILDING_CACHE_BUILDER_UNIT_TESTS
+    options.inDyldCache     = mh->inDyldCache();
+#else
+    options.inDyldCache     = DyldSharedCache::inDyldCache(state.config.dyldCache.addr, mh);
+#endif
+    options.hasObjc         = mh->hasObjC();
+    options.mayHavePlusLoad = hasPlusLoad(mh);
+    options.roData          = hasDataConst(mh);
     options.neverUnloaded   = willNeverUnload || overridesCache; // dylibs in cache never unload, be consistent and don't unload roots either
     options.leaveMapped     = leaveMapped;
-    JustInTimeLoader* p     = new (storage) JustInTimeLoader(ma, options, fileID);
+    options.roObjC          = options.hasObjc && mh->hasSection("__DATA_CONST", "__objc_selrefs");
+    options.pre2022Binary   = !mh->enforceFormat(MachOAnalyzer::Malformed::sdkOnOrAfter2022);
+    JustInTimeLoader* p     = new (storage) JustInTimeLoader(mh, options, fileID, layout);
+
+#if BUILDING_CACHE_BUILDER || BUILDING_CACHE_BUILDER_UNIT_TESTS
+    p->nonRuntimeLayout     = layout;
+#endif
 
     // fill in extra data
-    p->mappedAddress        = ma;
     p->pathOffset           = sizeof(JustInTimeLoader) + (minDepCount * sizeof(AuthLoader)) + (allDepsAreNormal ? 0 : depCount);
     p->dependentsSet        = false;
     p->fixUpsApplied        = false;
     p->inited               = false;
     p->hidden               = false;
-    p->altInstallName       = ma->isDylib() && (strcmp(ma->installName(), path) != 0);
+    p->altInstallName       = mh->isDylib() && (strcmp(mh->installName(), path) != 0);
     p->lateLeaveMapped      = false;
     p->allDepsAreNormal     = allDepsAreNormal;
     p->padding              = 0;
     p->sliceOffset          = sliceOffset;
 
-    if ( !ma->hasExportTrie(p->exportsTrieRuntimeOffset, p->exportsTrieSize) ) {
+    if ( !mh->hasExportTrie(p->exportsTrieRuntimeOffset, p->exportsTrieSize) ) {
         p->exportsTrieRuntimeOffset = 0;
         p->exportsTrieSize          = 0;
     }
@@ -594,7 +925,9 @@ JustInTimeLoader* JustInTimeLoader::make(RuntimeState& state, const MachOAnalyze
 
     state.add(p);
 #if BUILDING_DYLD
-    if ( overridesCache )
+    // The only case where a library in the dyld cache overrides another library in the cache is when an unzippered twin overrides its macOS counterpart.
+    // We don't want hasOverriddenCachedDylib to be set in such case.
+    if ( overridesCache && !options.inDyldCache )
         state.setHasOverriddenCachedDylib();
     if ( state.config.log.loaders )
         state.log("using JustInTimeLoader %p for %s\n", p, path);
@@ -608,40 +941,49 @@ void JustInTimeLoader::forEachBindTarget(Diagnostics& diag, RuntimeState& state,
                                          void (^callback)(const ResolvedSymbol& target, bool& stop),
                                          void (^overrideBindCallback)(const ResolvedSymbol& target, bool& stop)) const
 {
-    const MachOAnalyzer* ma          = (const MachOAnalyzer*)this->mappedAddress;
-    __block unsigned     targetIndex = 0;
-    __block unsigned     overrideBindTargetIndex = 0;
-    ma->forEachBindTarget(diag, allowLazyBinds, ^(const MachOAnalyzer::BindTargetInfo& info, bool& stop) {
-        // Regular and lazy binds
-        assert(targetIndex == info.targetIndex);
-        ResolvedSymbol targetInfo = this->resolveSymbol(diag, state, info.libOrdinal, info.symbolName, info.weakImport, info.lazyBind, cacheWeakDefFixup);
-        targetInfo.targetRuntimeOffset += info.addend;
-        callback(targetInfo, stop);
-        if ( diag.hasError() )
-            stop = true;
-        ++targetIndex;
-    }, ^(const MachOAnalyzer::BindTargetInfo& info, bool& stop) {
-        // Opcode based weak binds
-        assert(overrideBindTargetIndex == info.targetIndex);
-        Diagnostics weakBindDiag; // failures aren't fatal here
-        ResolvedSymbol targetInfo = this->resolveSymbol(weakBindDiag, state, info.libOrdinal, info.symbolName, info.weakImport, info.lazyBind, cacheWeakDefFixup);
-        if ( weakBindDiag.hasError() ) {
-            // In dyld2, it was also ok for a weak bind to be missing.  Then we would let the bind/rebase on this
-            // address handle it
-            targetInfo.targetLoader        = nullptr;
-            targetInfo.targetRuntimeOffset = 0;
-            targetInfo.kind                = ResolvedSymbol::Kind::bindToImage;
-            targetInfo.isCode              = false;
-            targetInfo.isWeakDef           = false;
-        } else {
+    this->withLayout(diag, state, ^(const mach_o::Layout &layout) {
+        mach_o::Fixups fixups(layout);
+
+        __block unsigned     targetIndex = 0;
+        __block unsigned     overrideBindTargetIndex = 0;
+#if SUPPORT_PRIVATE_EXTERNS_WORKAROUND
+        intptr_t             slide = this->analyzer()->getSlide();
+#else
+        intptr_t             slide = 0;
+#endif
+        fixups.forEachBindTarget(diag, allowLazyBinds, slide, ^(const mach_o::Fixups::BindTargetInfo& info, bool& stop) {
+            // Regular and lazy binds
+            assert(targetIndex == info.targetIndex);
+            ResolvedSymbol targetInfo = this->resolveSymbol(diag, state, info.libOrdinal, info.symbolName, info.weakImport, info.lazyBind, cacheWeakDefFixup);
             targetInfo.targetRuntimeOffset += info.addend;
-        }
-        overrideBindCallback(targetInfo, stop);
-        ++overrideBindTargetIndex;
+            callback(targetInfo, stop);
+            if ( diag.hasError() )
+                stop = true;
+            ++targetIndex;
+        }, ^(const mach_o::Fixups::BindTargetInfo& info, bool& stop) {
+            // Opcode based weak binds
+            assert(overrideBindTargetIndex == info.targetIndex);
+            Diagnostics weakBindDiag; // failures aren't fatal here
+            ResolvedSymbol targetInfo = this->resolveSymbol(weakBindDiag, state, info.libOrdinal, info.symbolName, info.weakImport, info.lazyBind, cacheWeakDefFixup);
+            if ( weakBindDiag.hasError() ) {
+                // In dyld2, it was also ok for a weak bind to be missing.  Then we would let the bind/rebase on this
+                // address handle it
+                targetInfo.targetLoader        = nullptr;
+                targetInfo.targetRuntimeOffset = 0;
+                targetInfo.kind                = ResolvedSymbol::Kind::bindToImage;
+                targetInfo.isCode              = false;
+                targetInfo.isWeakDef           = false;
+                targetInfo.isMissingFlatLazy   = false;
+            } else {
+                targetInfo.targetRuntimeOffset += info.addend;
+            }
+            overrideBindCallback(targetInfo, stop);
+            ++overrideBindTargetIndex;
+        });
     });
 }
 
-Loader::FileValidationInfo JustInTimeLoader::getFileValidationInfo() const
+Loader::FileValidationInfo JustInTimeLoader::getFileValidationInfo(FileManager& fileManager) const
 {
     __block FileValidationInfo result;
     // set checkInodeMtime and checkCdHash to false by default
@@ -653,11 +995,27 @@ Loader::FileValidationInfo JustInTimeLoader::getFileValidationInfo() const
         result.mtime           = this->fileIdent.mtime();
     }
     if ( !this->dylibInDyldCache ) {
+#if SUPPORT_VM_LAYOUT
         const MachOAnalyzer* ma = this->analyzer();
         ma->forEachCDHash(^(const uint8_t aCdHash[20]) {
             result.checkCdHash = true;
             memcpy(&result.cdHash[0], &aCdHash[0], 20);
         });
+#else
+        uint32_t codeSignFileOffset = 0;
+        uint32_t codeSignFileSize   = 0;
+        const mach_o::MachOFileRef& ref = this->mappedAddress;
+        if ( ref->hasCodeSignature(codeSignFileOffset, codeSignFileSize) ) {
+            ref->forEachCDHashOfCodeSignature(ref.getOffsetInToFile(codeSignFileOffset), codeSignFileSize,
+                                              ^(const uint8_t aCdHash[20]) {
+                result.checkCdHash = true;
+                memcpy(&result.cdHash[0], &aCdHash[0], 20);
+            });
+        }
+#endif
+
+        auto volumeUUID = fileManager.uuidForFileSystem(this->fileIdent.device());
+        memcpy(&result.uuid[0], &*volumeUUID.begin(), 16);
     }
     return result;
 }
@@ -667,12 +1025,12 @@ const Loader::DylibPatch* JustInTimeLoader::getCatalystMacTwinPatches() const
     return this->overridePatchesCatalystMacTwin;
 }
 
-void JustInTimeLoader::withRegions(const MachOAnalyzer* ma, void (^callback)(const Array<Region>& regions))
+void JustInTimeLoader::withRegions(const MachOFile* mf, void (^callback)(const Array<Region>& regions))
 {
-    uint32_t segCount   = ma->segmentCount();
-    uint64_t vmTextAddr = ma->preferredLoadAddress();
+    uint32_t segCount   = mf->segmentCount();
+    uint64_t vmTextAddr = mf->preferredLoadAddress();
     STACK_ALLOC_ARRAY(Region, regions, segCount * 2);
-    ma->forEachSegment(^(const MachOAnalyzer::SegmentInfo& segInfo, bool& stop) {
+    mf->forEachSegment(^(const MachOAnalyzer::SegmentInfo& segInfo, bool& stop) {
         Region region;
         if ( !segInfo.hasZeroFill || (segInfo.fileSize != 0) ) {
             // add region for content that is not wholely zerofill
@@ -703,36 +1061,48 @@ void JustInTimeLoader::withRegions(const MachOAnalyzer* ma, void (^callback)(con
     callback(regions);
 }
 
-#if BUILDING_CACHE_BUILDER
-JustInTimeLoader* JustInTimeLoader::makeJustInTimeLoaderDyldCache(RuntimeState& state, const MachOAnalyzer* ma, const char* installName,
-                                                                  uint32_t dylibCacheIndex, const FileID& fileID, bool catalystTwin, uint32_t twinIndex)
+#if BUILDING_CACHE_BUILDER || BUILDING_CACHE_BUILDER_UNIT_TESTS
+JustInTimeLoader* JustInTimeLoader::makeJustInTimeLoaderDyldCache(RuntimeState& state, const MachOFile* mf, const char* installName,
+                                                                  uint32_t dylibCacheIndex, const FileID& fileID, bool catalystTwin, uint32_t twinIndex,
+                                                                  const mach_o::Layout* layout)
 {
     bool cacheOverride = catalystTwin;
-    JustInTimeLoader* jitLoader = JustInTimeLoader::make(state, ma, installName, fileID, 0, true, false, cacheOverride, twinIndex);
+    JustInTimeLoader* jitLoader = JustInTimeLoader::make(state, mf, installName, fileID, 0, true, false, cacheOverride, twinIndex, layout);
     jitLoader->ref.app   = false;
     jitLoader->ref.index = dylibCacheIndex;
     return jitLoader;
 }
-#endif
+#endif // BUILDING_CACHE_BUILDER || BUILDING_CACHE_BUILDER_UNIT_TESTS
 
-#if BUILDING_UNIT_TESTS
-JustInTimeLoader* JustInTimeLoader::makeJustInTimeLoader(RuntimeState& state, const MachOAnalyzer* ma, const char* installName)
+#if BUILDING_CACHE_BUILDER_UNIT_TESTS || BUILDING_UNIT_TESTS
+JustInTimeLoader* JustInTimeLoader::makeJustInTimeLoader(RuntimeState& state, const MachOFile* mf, const char* installName)
 {
-    JustInTimeLoader* jitLoader = JustInTimeLoader::make(state, ma, installName, FileID::none(), 0, true, false, false, 0);
+    const mach_o::Layout* layout = nullptr;
+    JustInTimeLoader* jitLoader = JustInTimeLoader::make(state, mf, installName, FileID::none(), 0, true, false, false, 0, layout);
     return jitLoader;
 }
-#endif
+#endif // BUILDING_CACHE_BUILDER || BUILDING_CACHE_BUILDER_UNIT_TESTS
 
-Loader* JustInTimeLoader::makeJustInTimeLoaderDyldCache(Diagnostics& diag, RuntimeState& state, const char* loadPath, const LoadOptions& options, uint32_t dylibCacheIndex)
+Loader* JustInTimeLoader::makeJustInTimeLoaderDyldCache(Diagnostics& diag, RuntimeState& state, const char* loadPath, const LoadOptions& options, uint32_t dylibCacheIndex,
+                                                        const mach_o::Layout* layout)
 {
-    const DyldSharedCache* cache = state.config.dyldCache.addr;
     uint64_t mtime = 0;
     uint64_t inode = 0;
-    const MachOAnalyzer* cacheMA = (MachOAnalyzer*)cache->getIndexedImageEntry(dylibCacheIndex, mtime, inode);
+    const MachOFile* cacheMF = (MachOFile*)state.config.dyldCache.getIndexedImageEntry(dylibCacheIndex, mtime, inode);
 
-    bool fileIDValid = cache->header.dylibsExpectedOnDisk;
-    FileID fileID(inode, mtime, fileIDValid);
-    if ( !cacheMA->loadableIntoProcess(state.config.process.platform, loadPath) ) {
+    bool fileIDValid = state.config.dyldCache.dylibsExpectedOnDisk;
+    uint64_t device = 0;
+
+#if TARGET_OS_SIMULATOR
+    if ( fileIDValid ) {
+        // We need to get the simulator dylib device ID.  This is required if we later want to match this loader by fileID
+        device = state.config.process.dyldSimFSID;
+    }
+#endif
+
+    UUID fsUUID;
+    FileID fileID(inode, device, mtime, fileIDValid);
+    if ( !cacheMF->loadableIntoProcess(state.config.process.platform, loadPath) ) {
         diag.error("wrong platform to load into process");
         return nullptr;
     }
@@ -740,67 +1110,75 @@ Loader* JustInTimeLoader::makeJustInTimeLoaderDyldCache(Diagnostics& diag, Runti
     uint32_t catalystOverideDylibIndex = 0;
     if ( strncmp(loadPath, "/System/iOSSupport/", 19) == 0 ) {
         uint32_t macIndex;
-        if ( cache->hasImagePath(&loadPath[18], macIndex) ) {
+        if ( state.config.dyldCache.indexOfPath(&loadPath[18], macIndex) ) {
             catalystOverrideOfMacSide = true;
             catalystOverideDylibIndex = macIndex;
         }
     }
-    JustInTimeLoader* result = JustInTimeLoader::make(state, cacheMA, loadPath, fileID, 0, true, false, catalystOverrideOfMacSide, catalystOverideDylibIndex);
+    JustInTimeLoader* result = JustInTimeLoader::make(state, cacheMF, loadPath, fileID, 0, true, false, catalystOverrideOfMacSide, catalystOverideDylibIndex, layout);
     result->ref.index = dylibCacheIndex;
 #if BUILDING_DYLD
     if ( state.config.log.segments )
         result->logSegmentsFromSharedCache(state);
     if ( state.config.log.libraries )
-        Loader::logLoad(state, cacheMA, loadPath);
+        result->logLoad(state, loadPath);
 #endif
     return result;
 }
 
-Loader* JustInTimeLoader::makeJustInTimeLoaderDisk(Diagnostics& diag, RuntimeState& state, const char* loadPath, const LoadOptions& options, bool overridesCache, uint32_t overridesCacheIndex)
+Loader* JustInTimeLoader::makeJustInTimeLoaderDisk(Diagnostics& diag, RuntimeState& state, const char* loadPath,
+                                                   const LoadOptions& options, bool overridesCache, uint32_t overridesCacheIndex,
+                                                   const mach_o::Layout* layout)
 {
     __block Loader* result          = nullptr;
     bool            checkIfOSBinary = state.config.process.archs->checksOSBinary();
     state.config.syscall.withReadOnlyMappedFile(diag, loadPath, checkIfOSBinary, ^(const void* mapping, size_t mappedSize, bool isOSBinary, const FileID& fileID, const char* canonicalPath) {
         if ( const MachOFile* mf = MachOFile::compatibleSlice(diag, mapping, mappedSize, loadPath, state.config.process.platform, isOSBinary, *state.config.process.archs) ) {
             // verify the filetype is loadable in this context
-            char dupPath[PATH_MAX];
-            Diagnostics::quotePath(loadPath, dupPath);
             if ( mf->isDylib() ) {
                 if ( !options.canBeDylib ) {
-                    diag.error("cannot load dylib '%s'", dupPath);
+                    diag.error("cannot load dylib '%s'", loadPath);
                     return;
                 }
             }
             else if ( mf->isBundle() ) {
                 if ( !options.canBeBundle ) {
-                    diag.error("cannot link against bundle '%s'", dupPath);
+                    diag.error("cannot link against bundle '%s'", loadPath);
                     return;
                 }
             }
             else if ( mf->isMainExecutable() ) {
                 if ( !options.canBeExecutable ) {
                     if ( options.staticLinkage )
-                        diag.error("cannot link against a main executable '%s'", dupPath);
+                        diag.error("cannot link against a main executable '%s'", loadPath);
                     else
-                        diag.error("cannot dlopen a main executable '%s'", dupPath);
+                        diag.error("cannot dlopen a main executable '%s'", loadPath);
                     return;
                 }
             }
             else {
-                diag.error("unloadable mach-o file type %d '%s'", mf->filetype, dupPath);
+                diag.error("unloadable mach-o file type %d '%s'", mf->filetype, loadPath);
                 return;
             }
             const MachOAnalyzer* ma          = (MachOAnalyzer*)mf;
-            // FIXME: Enable the call to validMachOForArchAndPlatform below
-            /*if ( !ma->validMachOForArchAndPlatform(diag, mappedSize, loadPath, *state.config.process.archs, state.config.process.platform, isOSBinary) ) {
+#if !BUILDING_CACHE_BUILDER
+#if 0
+            if ( !ma->validMachOForArchAndPlatform(diag, mappedSize, loadPath, *state.config.process.archs, state.config.process.platform, isOSBinary) && ma->enforceFormat(dyld3::MachOAnalyzer::Malformed::sdkOnOrAfter2021)) {
                 return;
-            }*/
+            }
+#endif
+#endif
             bool                 leaveMapped = options.rtldNoDelete;
-            bool                 neverUnload = !options.forceUnloadable && (options.launching || ma->neverUnload());
+            bool                 neverUnload;
+#if BUILDING_CACHE_BUILDER || BUILDING_CACHE_BUILDER_UNIT_TESTS
+            // The cache builder only builds executable and shared cache loaders, which are always never unloadable
+            neverUnload = true;
+#else
+            neverUnload = !options.forceUnloadable && (options.launching || ma->neverUnload());
+#endif
             uint64_t             vmSpace     = ma->mappedSize();
-            CodeSignatureInFile  codeSignature;
             FileValidationInfo   fileValidation;
-            bool                 hasCodeSignature = ma->hasCodeSignature(codeSignature.fileOffset, codeSignature.size);
+
             fileValidation.checkInodeMtime = fileID.valid();
             if ( fileValidation.checkInodeMtime ) {
                 fileValidation.inode = fileID.inode();
@@ -808,13 +1186,19 @@ Loader* JustInTimeLoader::makeJustInTimeLoaderDisk(Diagnostics& diag, RuntimeSta
             }
             fileValidation.sliceOffset     = (uint8_t*)mf - (uint8_t*)mapping;
             JustInTimeLoader::withRegions(ma, ^(const Array<Region>& regions) {
-#if BUILDING_CACHE_BUILDER
+#if BUILDING_CACHE_BUILDER || BUILDING_CACHE_BUILDER_UNIT_TESTS
                 // in cache builder, files are already mapped
                 (void)vmSpace;
-                result = JustInTimeLoader::make(state, ma, canonicalPath, FileID::none(), fileValidation.sliceOffset, neverUnload, leaveMapped, overridesCache, overridesCacheIndex);
+                result = JustInTimeLoader::make(state, ma, canonicalPath, FileID::none(), fileValidation.sliceOffset, neverUnload, leaveMapped, overridesCache, overridesCacheIndex, layout);
 #else
+                CodeSignatureInFile  codeSignature;
+                bool hasCodeSignature = ma->hasCodeSignature(codeSignature.fileOffset, codeSignature.size);
                 if ( const MachOAnalyzer* realMA = Loader::mapSegments(diag, state, canonicalPath, vmSpace, codeSignature, hasCodeSignature, regions, neverUnload, false, fileValidation) ) {
-                    result = JustInTimeLoader::make(state, realMA, canonicalPath, fileID, fileValidation.sliceOffset, neverUnload, leaveMapped, overridesCache, overridesCacheIndex);
+                    result = JustInTimeLoader::make(state, realMA, canonicalPath, fileID, fileValidation.sliceOffset, neverUnload, leaveMapped, overridesCache, overridesCacheIndex, layout);
+#if BUILDING_DYLD
+                    if ( state.config.log.libraries )
+                        result->logLoad(state, canonicalPath);
+#endif
                     if ( options.rtldLocal )
                         ((JustInTimeLoader*)result)->hidden = true;
                 }
@@ -825,14 +1209,25 @@ Loader* JustInTimeLoader::makeJustInTimeLoaderDisk(Diagnostics& diag, RuntimeSta
     return result;
 }
 
-Loader* JustInTimeLoader::makeLaunchLoader(Diagnostics& diag, RuntimeState& state, const MachOAnalyzer* mainExe, const char* mainExePath)
+Loader* JustInTimeLoader::makeLaunchLoader(Diagnostics& diag, RuntimeState& state, const MachOAnalyzer* mainExe, const char* mainExePath,
+                                           const mach_o::Layout* layout)
 {
     FileID   mainFileID = FileID::none();
-    uint64_t mainSliceOffset = 0; // FIXME
+    uint64_t mainSliceOffset = Loader::getOnDiskBinarySliceOffset(state, mainExe, mainExePath);
 #if !BUILDING_CACHE_BUILDER
     state.config.syscall.fileExists(mainExePath, &mainFileID);
 #endif
-    return JustInTimeLoader::make(state, mainExe, mainExePath, mainFileID, mainSliceOffset, true, false, false, 0);
+    return JustInTimeLoader::make(state, mainExe, mainExePath, mainFileID, mainSliceOffset, true, false, false, 0, layout);
 }
+
+#if BUILDING_CACHE_BUILDER || BUILDING_CACHE_BUILDER_UNIT_TESTS
+Loader* JustInTimeLoader::makeLaunchLoader(Diagnostics& diag, RuntimeState& state, const MachOFile* mainExe, const char* mainExePath,
+                                           const mach_o::Layout* layout)
+{
+    FileID   mainFileID = FileID::none();
+    uint64_t mainSliceOffset = 0; // FIXME
+    return JustInTimeLoader::make(state, mainExe, mainExePath, mainFileID, mainSliceOffset, true, false, false, 0, layout);
+}
+#endif
 
 } // namespace

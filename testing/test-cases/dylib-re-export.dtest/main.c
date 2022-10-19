@@ -7,8 +7,6 @@
 // RUN:  ./dylib-re-export.exe
 
 
-#include <stdio.h>
-
 #include "test_support.h"
 
 extern int bar();

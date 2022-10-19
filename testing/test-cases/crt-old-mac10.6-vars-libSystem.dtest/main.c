@@ -1,10 +1,10 @@
-// BUILD(macos|x86_64):  $CC main.c    -mmacosx-version-min=10.6 -o $BUILD_DIR/crt-vars10.6-libSystem.exe
+// BUILD(macos|x86_64):  $CC main.c -target apple-macos10.6 -o $BUILD_DIR/crt-vars10.6-libSystem.exe
 
 // BUILD(ios,tvos,watchos,bridgeos):
 
-// RUN:  ./crt-vars10.6-libSystem.exe
+// RUN(macos|x86_64):  ./crt-vars10.6-libSystem.exe
 
-#include <stdio.h>
+#include <stdlib.h>
 #include <dlfcn.h>
 #include <string.h>
 #include <crt_externs.h>
@@ -28,7 +28,6 @@ struct ProgramVars
 extern char**  NXArgv;
 extern int     NXArgc;
 extern char**  environ;
-extern char*   __progname;
 
 
 static const struct ProgramVars* sVars;
@@ -42,6 +41,8 @@ myInit(int argc, const char* argv[], const char* envp[], const char* apple[], co
 
 int main(int argc, const char* argv[])
 {
+    BEGIN();
+
     if ( _NSGetArgv() != &NXArgv ) {
         FAIL("crt-libSystem: _NSGetArgv() != &NXArgv (%p!=%p) for %s", _NSGetArgv(), &NXArgv, argv[0]);
     }
@@ -54,7 +55,7 @@ int main(int argc, const char* argv[])
         FAIL("crt-libSystem: _NSGetEnviron() != &environv (%p!=%p) for %s", _NSGetEnviron(), &environ, argv[0]);
     }
 
-    if ( _NSGetProgname() != &__progname ) {
+    if ( (const char**)_NSGetProgname() != &__progname ) {
         FAIL("crt-libSystem: _NSGetProgname() != &__progname (%p!=%p) for %s", _NSGetProgname(), &__progname, argv[0]);
     }
 
@@ -74,7 +75,7 @@ int main(int argc, const char* argv[])
         FAIL("crt-libSystem: sVars->environPtr != &environ (%p!=%p) for %s", sVars->environPtr, &environ, argv[0]);
     }
 
-    if ( sVars->__prognamePtr != &__progname ) {
+    if ( (const char**)sVars->__prognamePtr != &__progname ) {
         FAIL("crt-libSystem: sVars->__prognamePtr != &__progname (%p!=%p) for %s", sVars->__prognamePtr, &__progname, argv[0]);
     }
 

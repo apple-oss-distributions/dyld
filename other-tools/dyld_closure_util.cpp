@@ -86,11 +86,6 @@ int main(int argc, const char* argv[])
     const char*               printClosureFile = nullptr;
     bool                      listCacheClosures = false;
     bool                      printCachedDylibs = false;
-    bool                      verboseFixups = false;
-    bool                      allowAtPaths = true;
-    bool                      allowFallbackPaths = true;
-    bool                      allowInsertionFailures = false;
-    bool                      printRaw = false;
     std::vector<const char*>  envArgs;
     char                      fsRootRealPath[PATH_MAX];
     char                      fsOverlayRealPath[PATH_MAX];
@@ -115,21 +110,6 @@ int main(int argc, const char* argv[])
                 fprintf(stderr, "-create_closure option requires a path to an executable\n");
                 return 1;
             }
-        }
-        else if ( strcmp(arg, "-verbose_fixups") == 0 ) {
-           verboseFixups = true;
-        }
-        else if ( strcmp(arg, "-no_at_paths") == 0 ) {
-            allowAtPaths = false;
-        }
-        else if ( strcmp(arg, "-no_fallback_paths") == 0 ) {
-            allowFallbackPaths = false;
-        }
-        else if ( strcmp(arg, "-allow_insertion_failures") == 0 ) {
-            allowInsertionFailures = true;
-        }
-        else if ( strcmp(arg, "-raw") == 0 ) {
-            printRaw = true;
         }
         else if ( strcmp(arg, "-fs_root") == 0 ) {
             fsRootPath = argv[++i];
@@ -200,14 +180,12 @@ int main(int argc, const char* argv[])
 
     std::vector<const DyldSharedCache*> dyldCaches;
     const DyldSharedCache* dyldCache = nullptr;
-    bool dyldCacheIsLive = true;
     if ( cacheFilePath != nullptr ) {
         dyldCaches = DyldSharedCache::mapCacheFiles(cacheFilePath);
         // mapCacheFile prints an error if something goes wrong, so just return in that case.
         if ( dyldCaches.empty() )
             return 1;
         dyldCache = dyldCaches.front();
-        dyldCacheIsLive = false;
     }
     else {
         size_t len;
@@ -237,12 +215,13 @@ int main(int argc, const char* argv[])
     osDelegate._rootPath    = fsRootPath;
     osDelegate._overlayPath = fsOverlayPath;
 
-    __block ProcessConfig  config(&kernArgs, osDelegate);
-    RuntimeState           state(config);
+    Allocator&             alloc = Allocator::defaultAllocator();
+    __block ProcessConfig  config(&kernArgs, osDelegate, alloc);
+    RuntimeState           state(config, alloc);
 
      if ( inputMainExecutablePath != nullptr ) {
         config.reset(mainMA, inputMainExecutablePath, osDelegate._dyldCache);
-        state.resetCachedDylibsArrays();
+        state.resetCachedDylibsArrays(dyldCache->dylibsLoaderSet());
 
         // Load the executable from disk
         Diagnostics launchDiag;
@@ -250,7 +229,7 @@ int main(int argc, const char* argv[])
         options.staticLinkage   = true;
         options.launching       = true;
         options.canBeExecutable = true;
-        if ( Loader* mainLoader = JustInTimeLoader::makeJustInTimeLoaderDisk(launchDiag, state, inputMainExecutablePath, options) ) {
+        if ( Loader* mainLoader = JustInTimeLoader::makeJustInTimeLoaderDisk(launchDiag, state, inputMainExecutablePath, options, false, 0, nullptr) ) {
             state.setMainLoader(mainLoader);
 
             // platform was a guess from libSystem.dylib, now we have the actual binary loaded, use its platform
@@ -312,8 +291,13 @@ int main(int argc, const char* argv[])
         size_t       mappedSize;
         Diagnostics  diag;
         if ( const dyld4::PrebuiltLoaderSet* pbls = (dyld4::PrebuiltLoaderSet*)config.syscall.mapFileReadOnly(diag, printClosureFile, &mappedSize) ) {
-            state.setProcessPrebuiltLoaderSet(pbls);
-            pbls->print(state, stdout, /* printComments */ true);
+            if ( pbls->validHeader(state) ) {
+                state.setProcessPrebuiltLoaderSet(pbls);
+                pbls->print(state, stdout, /* printComments */ true);
+            }
+            else {
+                fprintf(stderr, "dyld_closure_util: invalid closure file '%s'\n", printClosureFile);
+            }
             config.syscall.unmapFile(pbls, mappedSize);
         }
         else {
@@ -321,7 +305,7 @@ int main(int argc, const char* argv[])
         }
     }
     else if ( printCachedDylibs ) {
-        state.resetCachedDylibsArrays();
+        state.resetCachedDylibsArrays(config.dyldCache.addr->dylibsLoaderSet());
         if ( const dyld4::PrebuiltLoaderSet* pbls = state.cachedDylibsPrebuiltLoaderSet()) {
             for (int i=0; i < pbls->loaderCount(); ++i) {
                 const dyld4::PrebuiltLoader* pldr = pbls->atIndex(i);
@@ -330,7 +314,7 @@ int main(int argc, const char* argv[])
         }
     }
     else if ( printCachedDylib != nullptr ) {
-        state.resetCachedDylibsArrays();
+        state.resetCachedDylibsArrays(config.dyldCache.addr->dylibsLoaderSet());
         if ( const dyld4::PrebuiltLoader* pldr = config.dyldCache.addr->findPrebuiltLoader(printCachedDylib)  ) {
             pldr->print(state, stdout, /* printComments */ true);
         }

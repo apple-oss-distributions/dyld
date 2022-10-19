@@ -37,6 +37,9 @@
 #include <dlfcn_private.h>
 #include <libc_private.h>
 #include <ptrauth.h>
+#include <pthread/pthread.h>
+#include <pthread/tsd_private.h>
+
 #if !TARGET_OS_DRIVERKIT
   #include <vproc_priv.h>
 #endif
@@ -56,12 +59,13 @@ extern "C" int __cxa_atexit(void (*func)(void*), void* arg, void* dso);
 // implemented in assembly
 extern "C" void* tlv_get_addr(dyld3::MachOAnalyzer::TLV_Thunk*);
 
+uint8_t dyld_process_has_objc_patches = 0;
 
 namespace dyld4 {
 
 uintptr_t LibSystemHelpers::version() const
 {
-    return 2;
+    return 5;
 }
 
 void* LibSystemHelpers::malloc(size_t size) const
@@ -93,6 +97,18 @@ kern_return_t LibSystemHelpers::vm_deallocate(vm_map_t task, vm_address_t addres
 int LibSystemHelpers::pthread_key_create_free(pthread_key_t* key) const
 {
     return ::pthread_key_create(key, &::free);
+}
+
+int LibSystemHelpers::pthread_key_init_free(int key) const
+{
+    return ::pthread_key_init_np(key, &::free);
+}
+
+void LibSystemHelpers::run_async(void* (*func)(void*), void* context) const
+{
+    pthread_t workerThread;
+    pthread_create(&workerThread, NULL, func, context);
+    pthread_detach(workerThread);
 }
 
 static void finalizeListTLV_thunk(void* list)
@@ -178,6 +194,13 @@ LibSystemHelpers::TLVGetAddrFunc LibSystemHelpers::getTLVGetAddrFunc() const
 void LibSystemHelpers::os_unfair_recursive_lock_unlock_forked_child(os_unfair_recursive_lock_t lock) const
 {
     ::os_unfair_recursive_lock_unlock_forked_child(lock);
+}
+
+// Added in version 3
+
+void LibSystemHelpers::setDyldPatchedObjCClasses() const
+{
+    dyld_process_has_objc_patches = 1;
 }
 
 } // namespace dyld4

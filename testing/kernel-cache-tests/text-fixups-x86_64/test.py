@@ -1,4 +1,4 @@
-#!/usr/bin/python2.7
+#!/usr/bin/python3
 
 import os
 import KernelCollection
@@ -65,7 +65,7 @@ def check(kernel_cache):
 
     # Check the fixups
     kernel_cache.analyze("/text-fixups-x86_64/main.kc", ["-fixups", "-arch", "x86_64"])
-    assert len(kernel_cache.dictionary()["fixups"]) == 12
+    assert len(kernel_cache.dictionary()["fixups"]) == 16
     # main.kernel: S s = { &func, &func, &g, &func, &g };
     # _s is at 0xFFFFFF8000208000 which is offset 0x108000 from __HIB
     assert kernel_cache.dictionary()["fixups"]["0x10C000"] == "kc(0) + 0xFFFFFF8000204FF0 : pointer64"
@@ -84,7 +84,7 @@ def check(kernel_cache):
     assert kernel_cache.dictionary()["fixups"]["0x118FF0"] == "kc(0) + 0xFFFFFF8000218FD0"
     # foo.kext: int* gPtr = &g;
     # _gPtr is at 0xFFFFFF8000210040 which is offset 0x110040 from __HIB
-    assert kernel_cache.dictionary()["fixups"]["0x11AFF0"] == "kc(0) + 0xFFFFFF800021B000"
+    assert kernel_cache.dictionary()["fixups"]["0x11AFF0"] == "kc(0) + 0xFFFFFF800021B0C4"
     # main.kernel: movl _foo, %esp
     # The _foo reloc is at 0xFFFFFF8000100002 which is offset 0x2 from __HIB
     assert kernel_cache.dictionary()["fixups"]["0x2"] == "kc(0) + 0x100000 : pointer32"

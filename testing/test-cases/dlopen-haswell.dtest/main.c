@@ -1,9 +1,9 @@
-// BUILD(macos):  $CC a.c -dynamiclib -arch x86_64h -o $BUILD_DIR/libHaswellCheck.dylib -install_name $RUN_DIR/libHaswellCheck.dylib
-// BUILD(macos):  $CC main.c -o $BUILD_DIR/dlopen-haswell.exe -DRUN_DIR="$RUN_DIR"
+// BUILD(macos|x86_64):  $CC a.c -dynamiclib -o $BUILD_DIR/libHaswellCheck.dylib -install_name $RUN_DIR/libHaswellCheck.dylib -arch x86_64h
+// BUILD(macos|x86_64):  $CC main.c -o $BUILD_DIR/dlopen-haswell.exe -DRUN_DIR="$RUN_DIR"
 
 // BUILD(ios,tvos,watchos,bridgeos):
 
-// RUN:  ./dlopen-haswell.exe
+// RUN(macos|x86_64):  ./dlopen-haswell.exe
 
 
 #include <stdbool.h>
@@ -52,6 +52,3 @@ int main(int argc, const char* argv[], const char* envp[], const char* apple[]) 
 	else
         PASS("Success");
 }
-
-
-

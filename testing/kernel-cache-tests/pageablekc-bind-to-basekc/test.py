@@ -1,4 +1,4 @@
-#!/usr/bin/python2.7
+#!/usr/bin/python3
 
 import os
 import KernelCollection
@@ -12,7 +12,7 @@ def check(kernel_cache):
 
     assert kernel_cache.dictionary()["dylibs"][1]["name"] == "com.apple.foo"
     assert kernel_cache.dictionary()["dylibs"][1]["global-symbols"][0]["name"] == "_foo"
-    assert kernel_cache.dictionary()["dylibs"][1]["global-symbols"][0]["vmAddr"] == "0x10000"
+    assert kernel_cache.dictionary()["dylibs"][1]["global-symbols"][0]["vmAddr"] == "0x10010"
 
     # Now build an pageable cache using the baseline kernel collection
     kernel_cache.buildPageableKernelCollection("arm64", "/pageablekc-bind-to-basekc/pageable.kc", "/pageablekc-bind-to-basekc/main.kc", "/pageablekc-bind-to-basekc/extensions", ["com.apple.bar"], [])
@@ -20,9 +20,9 @@ def check(kernel_cache):
 
     # bar.kext
     assert kernel_cache.dictionary()["dylibs"][0]["name"] == "com.apple.bar"
-    assert len(kernel_cache.dictionary()["dylibs"][0]["fixups"]) == 1
+    assert len(kernel_cache.dictionary()["dylibs"][0]["fixups"]) == 3
     # extern int foo()
-    assert kernel_cache.dictionary()["dylibs"][0]["fixups"]["0xC000"] == "kc(0) + 0x10000"
+    assert kernel_cache.dictionary()["dylibs"][0]["fixups"]["0xC000"] == "kc(0) + 0x10010"
 
 
 # [~]> xcrun -sdk iphoneos.internal cc -arch arm64 -Wl,-static -mkernel -nostdlib -Wl,-add_split_seg_info -Wl,-rename_section,__TEXT,__text,__TEXT_EXEC,__text -Wl,-e,__start -Wl,-pagezero_size,0x0 -Wl,-pie main.c -o main.kernel

@@ -27,6 +27,7 @@
 #include <string_view>
 
 #include "Array.h"
+#include "BumpAllocator.h"
 
 namespace dyld3 {
 
@@ -45,7 +46,15 @@ struct Equal {
 
 template<typename KeyT, typename ValueT, class GetHash = Hash<KeyT>, class IsEqual = Equal<KeyT>>
 class Map {
-    typedef std::pair<KeyT, ValueT>     NodeT;
+public:
+
+    // Use our own struct for the NodeT, as std::pair doesn't have the copyable/trivially_construcible traits we need
+    struct NodeT {
+        KeyT    first;
+        ValueT  second;
+    };
+
+private:
     typedef NodeT*                      iterator;
     typedef const NodeT*                const_iterator;
 
@@ -64,6 +73,7 @@ public:
         }
         nodeBuffer.reserve(1024);
     }
+
 
     iterator find(const KeyT& key) {
         // Find the index to look up in the hash buffer
@@ -143,6 +153,22 @@ public:
         return nodeBuffer;
     }
 
+    void reserve(size_t size) {
+        nodeBuffer.reserve(size);
+    }
+
+    bool contains(const KeyT& key) const {
+        return find(key) != end();
+    }
+
+    bool empty() const {
+        return nodeBuffer.empty();
+    }
+
+    size_t size() const {
+        return nodeBuffer.count();
+    }
+
     std::pair<iterator, bool> insert(NodeT&& v) {
         // First see if we have enough space.  We don't want the hash buffer to get too full.
         if (hashBufferUseCount == nextHashBufferGrowth) {
@@ -198,7 +224,7 @@ public:
                 // This node is unused, so we don't have this element.  Lets add it
                 hashBuffer[hashIndex] = nodeBuffer.count();
                 ++hashBufferUseCount;
-                nodeBuffer.push_back(v);
+                nodeBuffer.push_back(std::move(v));
                 return { &nodeBuffer.back(), true };
             }
 
@@ -230,7 +256,19 @@ private:
     dyld3::OverflowSafeArray<NodeT>     nodeBuffer;
 };
 
-template<typename KeyT, typename ValueT, class GetHash = Hash<KeyT>, class IsEqual = Equal<KeyT>>
+
+template<typename T>
+struct HashMulti {
+    static uint64_t hash(const T&, void* state);
+};
+
+template<typename T>
+struct EqualMulti {
+    static bool equal(const T&a, const T& b, void* state);
+};
+
+
+template<typename KeyT, typename ValueT, class GetHash = HashMulti<KeyT>, class IsEqual = EqualMulti<KeyT>>
 class MultiMap {
     
     struct NextNode {
@@ -256,18 +294,26 @@ class MultiMap {
         }
     };
     static_assert(sizeof(NextNode) == sizeof(size_t), "Invalid size");
-    
-    typedef std::pair<KeyT, ValueT>             NodeT;
-    typedef std::tuple<KeyT, ValueT, NextNode>  NodeEntryT;
-    typedef NodeT*                              iterator;
-    typedef const NodeT*                        const_iterator;
+
+    // Use our own struct for the NodeT/NodeEntryT, as std::pair doesn't have the copyable/trivially_construcible traits we need
+    struct NodeT {
+        KeyT    first;
+        ValueT  second;
+    };
+    struct NodeEntryT {
+        KeyT        key;
+        ValueT      value;
+        NextNode    next;
+    };
+    typedef NodeEntryT*                              iterator;
+    typedef const NodeEntryT*                        const_iterator;
 
     enum : size_t {
         SentinelHash        = (size_t)-1
     };
 
 public:
-    MultiMap() {
+    MultiMap(void* externalState) {
         // Keep the hash buffer about 75% full
         nextHashBufferGrowth = 768;
         hashBufferUseCount = 0;
@@ -276,15 +322,38 @@ public:
             hashBuffer.push_back(SentinelHash);
         }
         nodeBuffer.reserve(1024);
+        state = externalState;
     }
-    
+
+    MultiMap(void* externalState, const uint64_t* data) {
+        uint64_t* p = (uint64_t*)data;
+        nextHashBufferGrowth = *p++;
+        hashBufferUseCount = *p++;
+
+        uint64_t hashBufferCount = *p++;
+        hashBuffer.setInitialStorage(p, (uintptr_t)hashBufferCount);
+        hashBuffer.resize((uintptr_t)hashBufferCount);
+        p += hashBufferCount;
+
+        uint64_t nodeBufferCount = *p++;
+        NodeEntryT* nodes = (NodeEntryT*)p;
+        nodeBuffer.setInitialStorage(nodes, (uintptr_t)nodeBufferCount);
+        nodeBuffer.resize((uintptr_t)nodeBufferCount);
+
+        state = externalState;
+    }
+
+    const Array<NodeEntryT>& array() const {
+        return nodeBuffer;
+    }
+
     void forEachEntry(void (^handler)(const KeyT& key, const ValueT** values, uint64_t valuesCount)) const {
         // Walk the top level nodes, skipping dupes
         for (const NodeEntryT& headNode : nodeBuffer) {
-            NextNode nextNode = std::get<2>(headNode);
+            NextNode nextNode = headNode.next;
             if (!nextNode.hasAnyDuplicates()) {
-                const ValueT* value[1] = { &std::get<1>(headNode) };
-                handler(std::get<0>(headNode), value, 1);
+                const ValueT* value[1] = { &headNode.value };
+                handler(headNode.key, value, 1);
                 continue;
             }
             
@@ -293,8 +362,8 @@ public:
             
             // This is the head of a list.  Work out how long the list is
             uint64_t valuesCount = 1;
-            while (std::get<2>(nodeBuffer[nextNode.nextIndex]).hasMoreDuplicates()) {
-                nextNode = std::get<2>(nodeBuffer[nextNode.nextIndex]);
+            while (nodeBuffer[nextNode.nextIndex].next.hasMoreDuplicates()) {
+                nextNode = nodeBuffer[nextNode.nextIndex].next;
                 ++valuesCount;
             }
             
@@ -304,24 +373,134 @@ public:
             // Now make an array with that many value for the callback
             const ValueT* values[valuesCount];
             // Copy in the head
-            values[0] = &std::get<1>(headNode);
+            values[0] = &(headNode.value);
             
             // And copy the remainder
-            nextNode = std::get<2>(headNode);
+            nextNode = headNode.next;
             valuesCount = 1;
-            while (std::get<2>(nodeBuffer[nextNode.nextIndex]).hasMoreDuplicates()) {
-                values[valuesCount] = &std::get<1>(nodeBuffer[nextNode.nextIndex]);
-                nextNode = std::get<2>(nodeBuffer[nextNode.nextIndex]);
+            while (nodeBuffer[nextNode.nextIndex].next.hasMoreDuplicates()) {
+                values[(size_t)valuesCount] = &(nodeBuffer[nextNode.nextIndex].value);
+                nextNode = nodeBuffer[nextNode.nextIndex].next;
                 ++valuesCount;
             }
             
             // Add in the last node
-            values[valuesCount] = &std::get<1>(nodeBuffer[nextNode.nextIndex]);
+            values[(size_t)valuesCount] = &(nodeBuffer[nextNode.nextIndex].value);
             ++valuesCount;
             
             // Finally call the handler with a whole array of values.
-            handler(std::get<0>(headNode), values, valuesCount);
+            handler(headNode.key, values, valuesCount);
         }
+    }
+    void forEachEntry(const KeyT& key, void (^handler)(const ValueT* values[], uint32_t valuesCount)) const {
+            // Find the index to look up in the hash buffer
+            uint64_t hashIndex = GetHash::hash(key, state) & (hashBuffer.count() - 1);
+
+            // Note we'll use a quadratic probe to look past identical hashes until we find our node or a sentinel
+            size_t probeAmount = 1;
+            while (true) {
+                uint64_t nodeBufferIndex = hashBuffer[(size_t)hashIndex];
+
+                if (nodeBufferIndex == SentinelHash) {
+                    // This node is unused, so we don't have this element
+                    return;
+                }
+
+                // If that hash is in use, then check if that node is actually the one we are trying to find
+                if (IsEqual::equal(nodeBuffer[(size_t)nodeBufferIndex].key, key, state)) {
+                    // Keys match so we found this element
+                    const NodeEntryT& headNode = nodeBuffer[(size_t)nodeBufferIndex];
+
+                    NextNode nextNode = headNode.next;
+                    if (!nextNode.hasAnyDuplicates()) {
+                        const ValueT* value[1] = { &headNode.value };
+                        handler(value, 1);
+                        return;
+                    }
+
+                    // This is the head of a list.  Work out how long the list is
+                    uint32_t valuesCount = 1;
+                    while (nodeBuffer[nextNode.nextIndex].next.hasMoreDuplicates()) {
+                        nextNode = nodeBuffer[nextNode.nextIndex].next;
+                        ++valuesCount;
+                    }
+
+                    // Add one more for the last node
+                    ++valuesCount;
+
+                    // Now make an array with that many value for the callback
+                    const ValueT* values[valuesCount];
+                    // Copy in the head
+                    values[0] = &headNode.value;
+
+                    // And copy the remainder
+                    nextNode = headNode.next;
+                    valuesCount = 1;
+                    while (nodeBuffer[nextNode.nextIndex].next.hasMoreDuplicates()) {
+                        values[valuesCount] = &nodeBuffer[nextNode.nextIndex].value;
+                        nextNode = nodeBuffer[nextNode.nextIndex].next;
+                        ++valuesCount;
+                    }
+
+                    // Add in the last node
+                    values[valuesCount] = &nodeBuffer[nextNode.nextIndex].value;
+                    ++valuesCount;
+
+                    // Finally call the handler with a whole array of values.
+                    handler(values, valuesCount);
+                    return;
+                }
+
+                // We didn't find this node, so try with a later one
+                hashIndex += probeAmount;
+                hashIndex &= (hashBuffer.count() - 1);
+                ++probeAmount;
+            }
+
+            assert(0 && "unreachable");
+        }
+
+
+    iterator end() {
+        return nodeBuffer.end();
+    }
+
+    iterator nextDuplicate(iterator node) {
+        NextNode nextNode = node->next;
+
+        if ( !nextNode.hasMoreDuplicates() )
+            return end();
+
+        return &nodeBuffer[nextNode.nextIndex];
+    }
+
+    iterator find(const KeyT& key) {
+        // Find the index to look up in the hash buffer
+        uint64_t hashIndex = GetHash::hash(key, state) & (hashBuffer.count() - 1);
+
+        // Note we'll use a quadratic probe to look past identical hashes until we find our node or a sentinel
+        size_t probeAmount = 1;
+        while (true) {
+            uint64_t nodeBufferIndex = hashBuffer[(size_t)hashIndex];
+
+            if (nodeBufferIndex == SentinelHash) {
+                // This node is unused, so we don't have this element
+                return end();
+            }
+
+            // If that hash is in use, then check if that node is actually the one we are trying to find
+            if (IsEqual::equal(nodeBuffer[(size_t)nodeBufferIndex].key, key, state)) {
+                // Keys match so we found this element
+                return &nodeBuffer[(size_t)nodeBufferIndex];
+            }
+
+            // We didn't find this node, so try with a later one
+            hashIndex += probeAmount;
+            hashIndex &= (hashBuffer.count() - 1);
+            ++probeAmount;
+        }
+
+        assert(0 && "unreachable");
     }
 
     void insert(NodeT&& v) {
@@ -331,7 +510,7 @@ public:
             size_t newHashTableSize = hashBuffer.count() * 2;
             nextHashBufferGrowth *= 2;
 
-            dyld3::OverflowSafeArray<size_t> newHashBuffer;
+            dyld3::OverflowSafeArray<uint64_t> newHashBuffer;
             newHashBuffer.reserve(newHashTableSize);
             for (size_t i = 0; i != newHashTableSize; ++i) {
                 newHashBuffer.push_back(SentinelHash);
@@ -341,20 +520,20 @@ public:
             for (size_t i = 0; i != nodeBuffer.count(); ++i) {
                 // Skip nodes which are not the head of the list
                 // They aren't moving the buffer anyway
-                NextNode nextNode = std::get<2>(nodeBuffer[i]);
+                NextNode nextNode = nodeBuffer[i].next;
                 if (nextNode.isDuplicateEntry || nextNode.isDuplicateTail)
                     continue;
-                const KeyT& key = std::get<0>(nodeBuffer[i]);
-                size_t newHashIndex = GetHash::hash(key) & (newHashBuffer.count() - 1);
+                const KeyT& key = nodeBuffer[i].key;
+                uint64_t newHashIndex = GetHash::hash(key, state) & (newHashBuffer.count() - 1);
 
                 // Note we'll use a quadratic probe to look past identical hashes until we find our node or a sentinel
                 size_t probeAmount = 1;
                 while (true) {
-                    size_t newNodeBufferIndex = newHashBuffer[newHashIndex];
+                    uint64_t newNodeBufferIndex = newHashBuffer[(size_t)newHashIndex];
 
                     if (newNodeBufferIndex == SentinelHash) {
                         // This node is unused, so we don't have this element.  Lets add it
-                        newHashBuffer[newHashIndex] = i;
+                        newHashBuffer[(size_t)newHashIndex] = i;
                         break;
                     }
 
@@ -373,30 +552,30 @@ public:
         }
 
         // Find the index to look up in the hash buffer
-        size_t hashIndex = GetHash::hash(v.first) & (hashBuffer.count() - 1);
+        uint64_t hashIndex = GetHash::hash(v.first, state) & (hashBuffer.count() - 1);
 
         // Note we'll use a quadratic probe to look past identical hashes until we find our node or a sentinel
         size_t probeAmount = 1;
         while (true) {
-            size_t nodeBufferIndex = hashBuffer[hashIndex];
+            uint64_t nodeBufferIndex = hashBuffer[(size_t)hashIndex];
 
             if (nodeBufferIndex == SentinelHash) {
                 // This node is unused, so we don't have this element.  Lets add it
-                hashBuffer[hashIndex] = nodeBuffer.count();
+                hashBuffer[(size_t)hashIndex] = nodeBuffer.count();
                 ++hashBufferUseCount;
                 nodeBuffer.push_back({ v.first, v.second, NextNode::makeNoDuplicates() } );
                 return;
             }
 
             // If that hash is in use, then check if that node is actually the one we are trying to insert
-            if (IsEqual::equal(std::get<0>(nodeBuffer[nodeBufferIndex]), v.first)) {
+            if (IsEqual::equal(nodeBuffer[(size_t)nodeBufferIndex].key, v.first, state)) {
                 // Keys match.  We already have this element
                 // But this is a multimap so add the new element too
                 // Walk from this node to find the end of the chain
-                while (std::get<2>(nodeBuffer[nodeBufferIndex]).hasMoreDuplicates()) {
-                    nodeBufferIndex = std::get<2>(nodeBuffer[nodeBufferIndex]).nextIndex;
+                while (nodeBuffer[(size_t)nodeBufferIndex].next.hasMoreDuplicates()) {
+                    nodeBufferIndex = nodeBuffer[(size_t)nodeBufferIndex].next.nextIndex;
                 }
-                NextNode& tailNode = std::get<2>(nodeBuffer[nodeBufferIndex]);
+                NextNode& tailNode = nodeBuffer[(size_t)nodeBufferIndex].next;
                 if (!tailNode.hasAnyDuplicates()) {
                     // If the previous node has no duplicates then its now the new head of a list
                     tailNode.isDuplicateHead = 1;
@@ -422,16 +601,36 @@ public:
         assert(0 && "unreachable");
     }
 
+    void serialize(dyld4::BumpAllocator& allocator) {
+        allocator.append(&nextHashBufferGrowth, sizeof(nextHashBufferGrowth));
+        allocator.append(&hashBufferUseCount, sizeof(hashBufferUseCount));
+
+        uint64_t count = hashBuffer.count();
+        allocator.append(&count, sizeof(count));
+        allocator.append(hashBuffer.begin(), (size_t)count * sizeof(uint64_t));
+
+        count = nodeBuffer.count();
+        allocator.append(&count, sizeof(count));
+        allocator.append(nodeBuffer.begin(), (size_t)count * sizeof(NodeEntryT));
+    }
+
 private:
-    size_t                                  nextHashBufferGrowth;
-    size_t                                  hashBufferUseCount;
-    dyld3::OverflowSafeArray<size_t>        hashBuffer;
+    uint64_t                                nextHashBufferGrowth;
+    uint64_t                                hashBufferUseCount;
+    dyld3::OverflowSafeArray<uint64_t>      hashBuffer;
     dyld3::OverflowSafeArray<NodeEntryT>    nodeBuffer;
+    void*                                   state;
 };
 
 
 struct HashCString {
     static size_t hash(const char* v) {
+        return std::hash<std::string_view>()(v);
+    }
+};
+
+struct HashCStringMulti {
+    static uint64_t hash(const char* v, const void* state) {
         return std::hash<std::string_view>()(v);
     }
 };
@@ -442,13 +641,19 @@ struct EqualCString {
     }
 };
 
+struct EqualCStringMulti {
+    static bool equal(const char* s1, const char* s2, const void* state) {
+        return strcmp(s1, s2) == 0;
+    }
+};
+
 // CStringMapTo<T> is a Map from a c-string to a T
 template <typename ValueT>
 using CStringMapTo = Map<const char*, ValueT, HashCString, EqualCString>;
 
 // CStringMultiMapTo<T> is a MultiMap from a c-string to a set of T
 template <typename ValueT>
-using CStringMultiMapTo = MultiMap<const char*, ValueT, HashCString, EqualCString>;
+using CStringMultiMapTo = MultiMap<const char*, ValueT, HashCStringMulti, EqualCStringMulti>;
 
 } // namespace dyld3
 

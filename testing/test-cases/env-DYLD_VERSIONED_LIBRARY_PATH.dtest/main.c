@@ -50,7 +50,6 @@
 // RUN: DYLD_VERSIONED_LIBRARY_PATH=$RUN_DIR/alt9 ./env-DYLD_VERSIONED_LIBRARY_PATH-dlopen.exe 10
 // RUN: DYLD_VERSIONED_LIBRARY_PATH="/AppleInternal/CoreOS/tests/dyld/env-DYLD_VERSIONED_LIBRARY_PATH/alt12" ./env-DYLD_VERSIONED_LIBRARY_PATH-missing-dlopen.exe 12
 
-#include <stdio.h>  // fprintf(), NULL
 #include <stdlib.h> // exit(), EXIT_SUCCESS
 #include <string.h>
 #include <stdlib.h> // for atoi()

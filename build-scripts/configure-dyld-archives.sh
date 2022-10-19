@@ -13,3 +13,11 @@ then
   echo \"${SDKROOT}/usr/local/lib/libcorecrypto_static.a\" >> ${DERIVED_SOURCES_DIR}/archives.txt
 fi
 
+# always use a .dirty file.  If none in SDK, use our own
+if [ -f "${SDKROOT}/AppleInternal/DirtyDataFiles/dyld.dirty" ]
+then
+    cp "${SDKROOT}/AppleInternal/DirtyDataFiles/dyld.dirty" "${DERIVED_SOURCES_DIR}/dyld.dirty"
+else
+    cp "${SRCROOT}/dyld/dyld.dirty" "${DERIVED_SOURCES_DIR}/dyld.dirty"
+fi
+

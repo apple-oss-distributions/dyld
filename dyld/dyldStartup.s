@@ -84,10 +84,9 @@ __dyld_start:
     jmp     start
 #elif __x86_64__
     movq    %rsp,%rdi       # save pointer to KernelArgs
-    pushq   $0              # push a zero for debugger end of frames marker
-    movq    $0,%rbp         # first frame
     andq    $-16,%rsp       # force SSE alignment
-    subq    $8,%rsp         # align stack for jump instead of call
+    movq    $0,%rbp         # terminate frame pointer chain
+    pushq   $0              # simulate a call with a return address of zero
     jmp     start
 #elif __arm__
     .syntax unified
@@ -116,7 +115,24 @@ __ZN5dyld412gotoAppStartEmPKNS_10KernelArgsE:
     jmp     *%rdi           # jump to app's start
 #endif
 
-#endif // !TARGET_OS_SIMULATOR
+// switch to dyld in the dyld cache
+// Note: all archs pass parameters in registers.  dyldOnDisk is in second param register and flows through to start()
+    .globl __ZN5dyld422restartWithDyldInCacheEPKNS_10KernelArgsEPKN5dyld39MachOFileEPv
+__ZN5dyld422restartWithDyldInCacheEPKNS_10KernelArgsEPKN5dyld39MachOFileEPv:
+    // void restartWithDyldInCache(const KernelArgs* kernArgs, const MachOFile* dyldOnDisk, void* dyldStart);
+#if __x86_64__
+    movq    %rdi, %rsp      # reset SP to original kernel args
+    jmp     *%rdx           # jump into dyld in cache
+#elif __arm64__
+    mov     sp, x0          // reset SP to original kernel args
+    br      x2
+#elif __arm__
+    .syntax unified
+    mov     sp, r0          // reset SP to original kernel args
+    bx      r2
+#endif
 
+
+#endif // !TARGET_OS_SIMULATOR
 
 

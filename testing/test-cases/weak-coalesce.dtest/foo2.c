@@ -1,5 +1,3 @@
-#include <stdio.h>
-
 #include "test_support.h"
 
 #include "base.h"

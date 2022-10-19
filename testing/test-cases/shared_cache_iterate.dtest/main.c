@@ -40,13 +40,11 @@ static void forEachCacheInDir(const char* dirPath, void (^handler)(const uuid_t 
             if ( entp->d_type != DT_REG )
                 continue;
             const char* leaf = entp->d_name;
-            const char* lastDot = strrchr(leaf, '.');
-            if ( lastDot != NULL ) {
-                // skip files that end in ".[0-9]" as they are sub-caches
-                if ( (lastDot[1] >= '0') && (lastDot[1] <= '9') )
-                    continue;
-                // skip files that end in ".symbols" as they are sub-caches
-                if ( strcmp(lastDot, ".symbols") == 0 )
+            const char* firstDot = strchr(leaf, '.');
+            // check for files with a suffix, to know wether or not they are sub-caches
+            if ( firstDot != NULL ) {
+                // skip files that are not of the format "<baseName>.development", as they are sub-caches
+                if ( strcmp(firstDot, ".development") != 0 )
                     continue;
             }
             if ( strlcpy(cachePath, dirPath, PATH_MAX) >= PATH_MAX )
@@ -80,8 +78,9 @@ int main(int argc, const char* argv[], const char* envp[], const char* apple[]) 
         // have dyld cache
         __block unsigned count      = 0;
         __block bool     badVersion = false;
+        __block int      result     = 0;
         // iterate current cache
-        int result = dyld_shared_cache_iterate_text(currentCacheUUID, ^(const dyld_shared_cache_dylib_text_info* info) {
+        result = dyld_shared_cache_iterate_text(currentCacheUUID, ^(const dyld_shared_cache_dylib_text_info* info) {
             if ( info->version != 2 )
                 badVersion = true;
             ++count;
@@ -145,14 +144,16 @@ int main(int argc, const char* argv[], const char* envp[], const char* apple[]) 
         forEachCacheInDir(cacheDir, ^(const uuid_t uuid) {
             if ( uuid_compare(uuid, currentCacheUUIDptr) != 0 ) {
                 count = 0;
-                int res = dyld_shared_cache_find_iterate_text(uuid, extraSearchDirs, ^(const dyld_shared_cache_dylib_text_info* info) {
+                result = dyld_shared_cache_find_iterate_text(uuid, extraSearchDirs, ^(const dyld_shared_cache_dylib_text_info* info) {
+                    // Check the paths.  This ensures the mmap in the API was large enough to cover every path in the cache
+                    strlen(info->path);
                     ++count;
                 });
-                if ( res != 0 ) {
-                    FAIL("dyld_shared_cache_find_iterate_text() expected result to be nonzero: %d", result);
+                if ( result != 0 ) {
+                    FAIL("dyld_shared_cache_iterate_text() returned non-zero for other path: %d", result);
                 }
                 if ( count < 100 ) {
-                    FAIL("dyld_shared_cache_find_iterate_text() iterated over less than 100 images: %d", count);
+                    FAIL("dyld_shared_cache_find_iterate_text() iterated over less than 100 images for other path: %d", count);
                 }
             }
         });

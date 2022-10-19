@@ -70,7 +70,7 @@ public:
 
     // does actual build of mach-o image
     const MachOAnalyzer* header();
-    const size_t         size() const;
+    const size_t         size() const { return _size; }
     
     // These methods are for making malformed mach-o files for use in unit-tests
     void                 wrenchRemoveDyld();
@@ -233,6 +233,7 @@ public:
 
     // does actual build of FAT image
     const FatFile*  header();
+    size_t          size() const { return _size; }
 
     // write a tmp file (for debugging MockO)
     void            save(char savedPath[PATH_MAX]);

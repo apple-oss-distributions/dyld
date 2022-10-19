@@ -1,4 +1,5 @@
 #include "base.xcconfig"
+#include? "dyld_features.xcconfig"
 
 ALIGNMENT[arch=armv7s]     = -Wl,-segalign,0x4000
 
@@ -20,4 +21,12 @@ ENTRY_NAME[sdk=*simulator*] = __dyld_sim_prepare
 ENTRY_NAME[sdk=iphoneos*]   = __dyld_start
 ENTRY_NAME[sdk=macosx*]     = __dyld_start
 
-OTHER_LDFLAGS = -e $(ENTRY_NAME) -Wl,-exported_symbol,$(ENTRY_NAME) -Wl,-no_inits @$(DERIVED_SOURCES_DIR)/archives.txt -nostdlib -Wl,-dylinker -Wl,-dylinker_install_name,/usr/lib/dyld $(ALIGNMENT) -Wl,-fixup_chains -Wl,-data_const -fapple-link-rtlib
+DIRTY                    = -Wl,-dirty_data_list,$(DERIVED_SOURCES_DIR)/dyld.dirty
+
+LLDB_SUPPORT[sdk=*simulator*] =
+LLDB_SUPPORT[sdk=iphoneos*]   = -Wl,-exported_symbol,_lldb_image_notifier -Wl,-exported_symbol,__dyld_debugger_notification
+LLDB_SUPPORT[sdk=macosx*]     = -Wl,-exported_symbol,_lldb_image_notifier -Wl,-exported_symbol,__dyld_debugger_notification
+
+
+
+OTHER_LDFLAGS = -e $(ENTRY_NAME) -Wl,-exported_symbol,$(ENTRY_NAME) $(LLDB_SUPPORT) -Wl,-no_inits @$(DERIVED_SOURCES_DIR)/archives.txt -nostdlib -Wl,-dylinker -Wl,-dylinker_install_name,/usr/lib/dyld $(ALIGNMENT) -Wl,-fixup_chains -Wl,-data_const -fapple-link-rtlib $(DIRTY)

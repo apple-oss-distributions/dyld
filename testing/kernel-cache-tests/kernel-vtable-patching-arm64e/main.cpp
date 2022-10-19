@@ -53,6 +53,29 @@ OSMetaClassDefineReservedUnused(OSObject, 13);
 OSMetaClassDefineReservedUnused(OSObject, 14);
 OSMetaClassDefineReservedUnused(OSObject, 15);
 
+// To make linking happy  It would be much better to use one of the above macros
+extern "C" void _ZN15OSMetaClassBase25_RESERVEDOSMetaClassBase0Ev() { }
+extern "C" void _ZN15OSMetaClassBase25_RESERVEDOSMetaClassBase1Ev() { }
+extern "C" void _ZN15OSMetaClassBase25_RESERVEDOSMetaClassBase2Ev() { }
+extern "C" void _ZN15OSMetaClassBase25_RESERVEDOSMetaClassBase3Ev() { }
+extern "C" void _ZN15OSMetaClassBase25_RESERVEDOSMetaClassBase4Ev() { }
+extern "C" void _ZN15OSMetaClassBase25_RESERVEDOSMetaClassBase5Ev() { }
+extern "C" void _ZN15OSMetaClassBase25_RESERVEDOSMetaClassBase6Ev() { }
+extern "C" void _ZN15OSMetaClassBase25_RESERVEDOSMetaClassBase7Ev() { }
+extern "C" void _ZN15OSMetaClassBase25_RESERVEDOSMetaClassBase8Ev() { }
+extern "C" void _ZN15OSMetaClassBase25_RESERVEDOSMetaClassBase9Ev() { }
+
+extern "C" void _ZN11OSMetaClass21_RESERVEDOSMetaClass0Ev() { }
+extern "C" void _ZN11OSMetaClass21_RESERVEDOSMetaClass1Ev() { }
+extern "C" void _ZN11OSMetaClass21_RESERVEDOSMetaClass2Ev() { }
+extern "C" void _ZN11OSMetaClass21_RESERVEDOSMetaClass3Ev() { }
+extern "C" void _ZN11OSMetaClass21_RESERVEDOSMetaClass4Ev() { }
+extern "C" void _ZN11OSMetaClass21_RESERVEDOSMetaClass5Ev() { }
+extern "C" void _ZN11OSMetaClass21_RESERVEDOSMetaClass6Ev() { }
+extern "C" void _ZN11OSMetaClass21_RESERVEDOSMetaClass7Ev() { }
+extern "C" void _ZN11OSMetaClass21_RESERVEDOSMetaClass8Ev() { }
+extern "C" void _ZN11OSMetaClass21_RESERVEDOSMetaClass9Ev() { }
+
 // struct IORPC { };
 
 // OSMetaClassBase

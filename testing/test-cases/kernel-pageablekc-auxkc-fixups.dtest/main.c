@@ -7,14 +7,14 @@
 
 // Create the pageable kernel collection
 // BUILD(macos,ios,tvos,bridgeos|x86_64,arm64,arm64e):  $CP extensions/pageable.kext/Info.plist $BUILD_DIR/extensions/pageable-kext/Info.plist
-// BUILD(macos,ios,tvos,bridgeos|x86_64,arm64,arm64e):  $CC pageable.c -o $BUILD_DIR/extensions/pageable-kext/pageable -Wl,-kext -Wl,-kext_objects_dir,$BUILD_DIR/KextObjects -mkernel -nostdlib -Wl,-add_split_seg_info -Wl,-install_name,/usr/lib/swift/split.seg.v2.hack -fno-ptrauth-function-pointer-type-discrimination -O2
+// BUILD(macos,ios,tvos,bridgeos|x86_64,arm64,arm64e):  $CC pageable.c -o $BUILD_DIR/extensions/pageable-kext/pageable -Wl,-kext -mkernel -nostdlib -Wl,-add_split_seg_info -Wl,-install_name,/usr/lib/swift/split.seg.v2.hack -fno-ptrauth-function-pointer-type-discrimination -O2
 // BUILD(macos,ios,tvos,bridgeos|x86_64,arm64,arm64e):  $APP_CACHE_UTIL -create-pageable-kernel-collection $BUILD_DIR/pageable.kc -kernel-collection $BUILD_DIR/kernel.kc -extensions $BUILD_DIR/extensions -bundle-id com.apple.pageable $DEPENDS_ON_ARG $BUILD_DIR/extensions/pageable-kext/Info.plist $DEPENDS_ON_ARG $BUILD_DIR/extensions/pageable-kext/pageable
 
 // Create the aux kernel collection
 // BUILD(macos,ios,tvos,bridgeos|x86_64,arm64,arm64e):  $CP extensions/foo.kext/Info.plist $BUILD_DIR/extensions/foo-kext/Info.plist
 // BUILD(macos,ios,tvos,bridgeos|x86_64,arm64,arm64e):  $CP extensions/bar.kext/Info.plist $BUILD_DIR/extensions/bar-kext/Info.plist
-// BUILD(macos,ios,tvos,bridgeos|x86_64,arm64,arm64e):  $CC foo.c -o $BUILD_DIR/extensions/foo-kext/foo -Wl,-kext -Wl,-kext_objects_dir,$BUILD_DIR/KextObjects -mkernel -nostdlib -Wl,-add_split_seg_info -Wl,-install_name,/usr/lib/swift/split.seg.v2.hack -fno-ptrauth-function-pointer-type-discrimination -O2
-// BUILD(macos,ios,tvos,bridgeos|x86_64,arm64,arm64e):  $CC bar.c -o $BUILD_DIR/extensions/bar-kext/bar -Wl,-kext -Wl,-kext_objects_dir,$BUILD_DIR/KextObjects -mkernel -nostdlib -Wl,-add_split_seg_info -Wl,-install_name,/usr/lib/swift/split.seg.v2.hack -fno-ptrauth-function-pointer-type-discrimination -O2
+// BUILD(macos,ios,tvos,bridgeos|x86_64,arm64,arm64e):  $CC foo.c -o $BUILD_DIR/extensions/foo-kext/foo -Wl,-kext -mkernel -nostdlib -Wl,-add_split_seg_info -Wl,-install_name,/usr/lib/swift/split.seg.v2.hack -fno-ptrauth-function-pointer-type-discrimination -O2
+// BUILD(macos,ios,tvos,bridgeos|x86_64,arm64,arm64e):  $CC bar.c -o $BUILD_DIR/extensions/bar-kext/bar -Wl,-kext -mkernel -nostdlib -Wl,-add_split_seg_info -Wl,-install_name,/usr/lib/swift/split.seg.v2.hack -fno-ptrauth-function-pointer-type-discrimination -O2
 // BUILD(macos,ios,tvos,bridgeos|x86_64,arm64,arm64e):  $APP_CACHE_UTIL -create-aux-kernel-collection $BUILD_DIR/aux.kc -kernel-collection $BUILD_DIR/kernel.kc -pageable-collection $BUILD_DIR/pageable.kc -extensions $BUILD_DIR/extensions  -bundle-id com.apple.foo $DEPENDS_ON_ARG $BUILD_DIR/extensions/foo-kext/Info.plist $DEPENDS_ON_ARG $BUILD_DIR/extensions/bar-kext/Info.plist $DEPENDS_ON_ARG $BUILD_DIR/extensions/foo-kext/foo $DEPENDS_ON_ARG $BUILD_DIR/extensions/bar-kext/bar
 
 // BUILD(watchos):

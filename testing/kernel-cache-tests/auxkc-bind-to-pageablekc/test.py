@@ -1,4 +1,4 @@
-#!/usr/bin/python2.7
+#!/usr/bin/python3
 
 import os
 import KernelCollection
@@ -16,16 +16,16 @@ def check(kernel_cache):
 
     assert kernel_cache.dictionary()["dylibs"][0]["name"] == "com.apple.foo"
     assert kernel_cache.dictionary()["dylibs"][0]["global-symbols"][0]["name"] == "_foo"
-    assert kernel_cache.dictionary()["dylibs"][0]["global-symbols"][0]["vmAddr"] == "0x8000"
+    assert kernel_cache.dictionary()["dylibs"][0]["global-symbols"][0]["vmAddr"] == "0x8010"
 
     # Now build an aux cache using the baseline and pageable kernel collections
     kernel_cache.buildAuxKernelCollection("arm64", "/auxkc-bind-to-pageablekc/aux.kc", "/auxkc-bind-to-pageablekc/main.kc", "/auxkc-bind-to-pageablekc/pageable.kc", "/auxkc-bind-to-pageablekc/extensions", ["com.apple.bar"], [])
     kernel_cache.analyze("/auxkc-bind-to-pageablekc/aux.kc", ["-fixups", "-arch", "arm64"])
 
     # bar.kext
-    assert len(kernel_cache.dictionary()["fixups"]) == 1
+    assert len(kernel_cache.dictionary()["fixups"]) == 3
     # extern int foo()
-    assert kernel_cache.dictionary()["fixups"]["0x4000"] == "kc(1) + 0x8000"
+    assert kernel_cache.dictionary()["fixups"]["0x4000"] == "kc(1) + 0x8010"
 
 
 # [~]> xcrun -sdk iphoneos.internal cc -arch arm64 -Wl,-static -mkernel -nostdlib -Wl,-add_split_seg_info -Wl,-rename_section,__TEXT,__text,__TEXT_EXEC,__text -Wl,-e,__start -Wl,-pagezero_size,0x0 -Wl,-pie main.c -o main.kernel

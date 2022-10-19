@@ -1,4 +1,4 @@
-#!/usr/bin/python2.7
+#!/usr/bin/python3
 
 import os
 import KernelCollection
@@ -50,24 +50,11 @@ def check(kernel_cache):
     assert kernel_cache.dictionary()["dylibs"][2]["segments"][0]["name"] == "__TEXT"
     assert kernel_cache.dictionary()["dylibs"][2]["segments"][0]["vmAddr"] == "0x8000"
     assert kernel_cache.dictionary()["dylibs"][2]["segments"][1]["name"] == "__TEXT_EXEC"
-    assert kernel_cache.dictionary()["dylibs"][2]["segments"][1]["vmAddr"] == "0x14030"
+    assert kernel_cache.dictionary()["dylibs"][2]["segments"][1]["vmAddr"] == "0x14040"
     assert kernel_cache.dictionary()["dylibs"][2]["segments"][2]["name"] == "__DATA"
-    assert kernel_cache.dictionary()["dylibs"][2]["segments"][2]["vmAddr"] == "0x1C010"
+    assert kernel_cache.dictionary()["dylibs"][2]["segments"][2]["vmAddr"] == "0x1C0D8"
     assert kernel_cache.dictionary()["dylibs"][2]["segments"][3]["name"] == "__LINKEDIT"
     assert kernel_cache.dictionary()["dylibs"][2]["segments"][3]["vmAddr"] == "0x20000"
-
-    # Check the fixups
-    kernel_cache.analyze("/bundle-ids/main.kc", ["-fixups", "-arch", "arm64"])
-    assert len(kernel_cache.dictionary()["fixups"]) == 2
-    assert kernel_cache.dictionary()["fixups"]["0x1C000"] == "kc(0) + 0x14000"
-    assert kernel_cache.dictionary()["fixups"]["0x1C010"] == "kc(0) + 0x1C018"
-    assert len(kernel_cache.dictionary()["dylibs"]) == 3
-    assert kernel_cache.dictionary()["dylibs"][0]["name"].endswith("com.apple.kernel")
-    assert kernel_cache.dictionary()["dylibs"][0]["fixups"] == "none"
-    assert kernel_cache.dictionary()["dylibs"][1]["name"].endswith("bar")
-    assert kernel_cache.dictionary()["dylibs"][1]["fixups"] == "none"
-    assert kernel_cache.dictionary()["dylibs"][2]["name"].endswith("foo")
-    assert kernel_cache.dictionary()["dylibs"][2]["fixups"] == "none"
 
 
 # [~]> xcrun -sdk iphoneos.internal cc -arch arm64 -Wl,-static -mkernel -nostdlib -Wl,-add_split_seg_info -Wl,-rename_section,__TEXT,__text,__TEXT_EXEC,__text -Wl,-e,__start -Wl,-pagezero_size,0x0 -Wl,-pie main.c -o main.kernel

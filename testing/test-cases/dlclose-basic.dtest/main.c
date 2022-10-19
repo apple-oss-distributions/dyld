@@ -45,13 +45,13 @@ int main(int argc, const char* argv[], const char* envp[], const char* apple[])
     }
 
     // open and close something from dyld cache
-    void* handle4 = dlopen("/usr/lib/libSystem.B.dylib", RTLD_LAZY);
-    if ( handle4 == NULL ) {
+    void* handleCache = dlopen("/usr/lib/libSystem.B.dylib", RTLD_LAZY);
+    if ( handleCache == NULL ) {
         FAIL("dlopen(\"/usr/lib/libSystem.B.dylib\"), dlerror()=%s", dlerror());
     }
-    int result4 = dlclose(handle4);
+    int result4 = dlclose(handleCache);
     if ( result4 != 0 ) {
-        FAIL("second dlclose() returned %d: %s", result4, dlerror());
+        FAIL("dlclose(handleCache)returned %d: %s", result4, dlerror());
     }
 
     PASS("Success");

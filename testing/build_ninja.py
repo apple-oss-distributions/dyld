@@ -1,4 +1,4 @@
-#!/usr/bin/python2.7
+#!/usr/bin/python3
 
 import plistlib
 import string
@@ -16,7 +16,7 @@ from string import Template
 class BufferedFile:
     def __init__(self, fileName):
         self.data = ""
-    	self.fileName = os.path.abspath(fileName)
+        self.fileName = os.path.abspath(fileName)
     def __enter__(self):
         return self
     def __exit__(self, type, value, traceback):
@@ -30,8 +30,8 @@ class BufferedFile:
                 os.makedirs(dir)
         with open(self.fileName, "w") as file:
             file.write(self.data)
-    def write(self, str):
-        self.data += str
+    def write(self, strn):
+        self.data += str(strn)
 
 class NinjaFile:
     class Variable:
@@ -76,7 +76,10 @@ class NinjaFile:
             result = NinjaFile.lineWrap(buildLine)
             for variable in self.variables: result += ("\n" + NinjaFile.lineWrap("    " + str(variable)))
             return result
-        def addVariable(self, name, value): self.variables.append(NinjaFile.Variable(name, value))
+
+        def addVariable(self, name, value):
+            self.variables.append(NinjaFile.Variable(name, value))
+
         def addDependency(self, dependency):
             if isinstance(dependency, str):
                 self.dependencies.append(dependency)
@@ -110,7 +113,11 @@ class NinjaFile:
     def __exit__(self, type, value, traceback):
         with BufferedFile(self.fileName) as file:
             file.write(str(self))
-    def addRule(self, name, command, deps): self.rules.append(NinjaFile.Rule(name, command, deps))
+    def addRule(self, name, command, deps, addEnvVars=True):
+        modifiedCmd = command
+        if addEnvVars:
+            modifiedCmd = '$envvars ' + modifiedCmd
+        self.rules.append(NinjaFile.Rule(name, modifiedCmd, deps))
     def addVariable(self, name, value): self.variables.append(NinjaFile.Variable(name, value))
     def addInclude(self, file): self.includes.append(NinjaFile.Include(file))
     def newTarget(self, type, name):
@@ -165,18 +172,23 @@ $TARGETS
         words = line.split()
         wordsCount = len(words)-1
         for idx, word in enumerate(words):
+            isLastWord = idx == len(words) - 1
             wordLen = len(word)
             if (wordLen <= lineSpaceAvailable and idx == wordsCount):
                 result += word
             elif wordLen <= lineSpaceAvailable+2:
-                result += "{} ".format(word)
+                result += word
+                if not isLastWord:
+                    result += ' '
                 lineSpaceAvailable -= (wordLen)
             else:
-                result += "$\n{}{} ".format(wrappedLineLeadingSpace, word)
+                result += "$\n{}{}".format(wrappedLineLeadingSpace, word)
+                if not isLastWord:
+                    result += ' '
                 lineSpaceAvailable = 132-(wrappedLineLeadingSpaceLen+wordLen)
         return result
 
-def processBuildLines(ninja, buildLines, testName, platform, osFlag, forceArchs, testDstDir, testSrcDir):
+def processBuildLines(ninja, buildLines, testName, platform, osFlag, osVers, forceArchs, testDstDir, testSrcDir):
     testInstallTarget = ninja.newTarget("phony", "install-{}".format(testName))
     testTarget = ninja.newTarget("phony", testName)
     ninja.findTarget("all").addInput(testTarget)
@@ -184,32 +196,68 @@ def processBuildLines(ninja, buildLines, testName, platform, osFlag, forceArchs,
     for buildLine in buildLines:
         minOS = None
         args = buildLine.split()
+
+        # Handle environment variables.
+        # This sets environment variables for several build commands.
+        envRegex = re.compile(r'^[a-zA-Z0-9_]+=[a-zA-Z0-9_]+$')
+        envVars = []
+        for idx, arg in enumerate(args):
+            if envRegex.match(arg):
+                print("  Adding env var {}".format(arg))
+                envVars.append(arg)
+                continue
+            # Failed match so stop here
+            break
+        # Re-adjust args to parse the remaining args.
+        args = args[idx:]
+        def addEnvVarsTo(target):
+            if len(envVars) > 0:
+                target.addVariable("envvars", " ".join(envVars))
+
         if args[0] == "$DTRACE":
             target = None
             for idx, arg in enumerate(args):
                 if arg == "-o": target = ninja.newTarget("dtrace", args[idx+1])
             for idx, arg in enumerate(args):
                 if arg == "-s": target.addInput(testSrcDir + "/" + args[idx+1])
+            if target:
+                addEnvVarsTo(target)
         elif args[0] == "$CP":
             target = ninja.newTarget("cp", args[2])
-            target.addInput(testSrcDir + "/" + args[1])
+            variablesWithAbsPath = {'$asanDylibPath'}
+            if args[1] in variablesWithAbsPath:
+                target.addInput(args[1])
+            else:
+                target.addInput(testSrcDir + "/" + args[1])
             testTarget.addInput(target)
+            addEnvVarsTo(target)
             installTarget = ninja.newTarget("install", "$INSTALL_DIR/AppleInternal/CoreOS/tests/dyld/{}".format(args[2][9:]))
             installTarget.addInput(target.output)
             installTarget.addVariable("mode", "0644")
+            addEnvVarsTo(installTarget)
             testInstallTarget.addInput(installTarget)
         elif args[0] == "$SYMLINK":
             target = ninja.newTarget("symlink", args[2])
             target.addVariable("source", args[1])
+            addEnvVarsTo(target)
             testTarget.addInput(target)
             installTarget = ninja.newTarget("symlink", "$INSTALL_DIR/AppleInternal/CoreOS/tests/dyld/{}".format(args[2][9:]))
             installTarget.addVariable("source", args[1])
+            addEnvVarsTo(installTarget)
             testInstallTarget.addInput(installTarget)
         elif args[0] == "$STRIP":
             # This is not ideal, but a full argument parser for strip is also a bit heavyweight.
             # So for now, the first argument is the target, and remaining arguments are passed to strip
             target = ninja.findTarget(args[1])
             target.addVariable("extraCmds", "&& strip {} {}".format(target.output, ' '.join(args[2:])))
+        elif args[0] == "$INSTALL_NAME_TOOL":
+            targetBinary = args[-1]
+            target = ninja.findTarget(targetBinary)
+            remainingArgs = args[1:-1]
+            target.addVariable("extraCmds", "&& install_name_tool {} {}".format(
+                target.output,
+                ' '.join(remainingArgs))
+            )
         elif args[0] == "$SKIP_INSTALL":
             target = "$INSTALL_DIR/AppleInternal/CoreOS/tests/dyld/{}".format(args[1][9:])
             ninja.deleteTarget(target)
@@ -217,13 +265,13 @@ def processBuildLines(ninja, buildLines, testName, platform, osFlag, forceArchs,
         elif args[0] == "$DYLD_ENV_VARS_ENABLE":
             if platform != "macos":
                 target = ninja.findTarget(args[1])
-                target.addVariable("entitlements", "--entitlements $SRCROOT/testing/get_task_allow_entitlement.plist")
+                target.addVariable("entitlements", "--entitlements $SRCROOT/configs/get_task_allow_entitlement.plist")
         elif args[0] == "$TASK_FOR_PID_ENABLE":
             target = ninja.findTarget(args[1])
-            target.addVariable("entitlements", "--entitlements $SRCROOT/testing/task_read_for_pid_entitlement.plist")
+            target.addVariable("entitlements", "--entitlements $SRCROOT/configs/task_read_for_pid_entitlement.plist")
         elif args[0] == "$DEXT_SPAWN_ENABLE":
             target = ninja.findTarget(args[1])
-            target.addVariable("entitlements", "--entitlements $SRCROOT/testing/dext_spawn_entitlement.plist")
+            target.addVariable("entitlements", "--entitlements $SRCROOT/configs/dext_spawn_entitlement.plist")
         elif args[0] in ["$CC", "$CXX", "$DKCC"]:
             tool = args[0][1:].lower()
             sources = []
@@ -233,6 +281,8 @@ def processBuildLines(ninja, buildLines, testName, platform, osFlag, forceArchs,
             skipCount = 0
             linkTarget = None
             linkTestSupport = tool != "dkcc"
+            explicitLinkTestSupport = False
+            isDylib = False
             platformVersion = None
             targetNames = [target.output for target in ninja.targets]
             args = [escapedArg.replace("\"", "\\\"") for escapedArg in args[1:]]
@@ -240,7 +290,7 @@ def processBuildLines(ninja, buildLines, testName, platform, osFlag, forceArchs,
             for idx, arg in enumerate(args):
                 if arg == "-o":
                     linkTarget = ninja.newTarget("{}-link".format(tool), args[idx+1])
-                    linkTarget.addDependency("$BUILT_PRODUCTS_DIR/libtest_support.a")
+                    addEnvVarsTo(linkTarget)
                     testTarget.addInput(linkTarget);
                     break
             skipCount = 0
@@ -248,6 +298,7 @@ def processBuildLines(ninja, buildLines, testName, platform, osFlag, forceArchs,
                 if skipCount: skipCount -= 1
                 elif arg == "-o":
                     skipCount = 1
+                    linkTarget.addDependency("$BUILT_PRODUCTS_DIR/libtest_support.a")
                 elif arg == "$DEPENDS_ON_ARG":
                     skipCount = 1
                     dependencies.append(args[idx+1])
@@ -268,6 +319,10 @@ def processBuildLines(ninja, buildLines, testName, platform, osFlag, forceArchs,
                     ldflags.append(nextArg)
                     cflags.append(arg)
                     cflags.append(nextArg)
+                    if osFlag in nextArg:
+                        minOS = nextArg[nextArg.find(osFlag)+len(osFlag):]
+                    if "macabi" in nextArg: # Don't link test support for catalyst apps
+                        linkTestSupport = False
                 elif arg in ["-install_name","-framework", "-rpath","-compatibility_version","-sub_library", "-undefined", "-current_version"]:
                     skipCount = 1
                     nextArg = args[idx+1]
@@ -289,14 +344,14 @@ def processBuildLines(ninja, buildLines, testName, platform, osFlag, forceArchs,
                     ldflags.append(arg)
                 elif arg in ["-dynamiclib","-bundle"]:
                     ldflags.append(arg)
-                    linkTestSupport = False
+                    isDylib = True
+                elif arg in ["-ltest_support"]:
+                    explicitLinkTestSupport = True
                 elif arg.endswith((".s", ".c", ".cpp", ".cxx", ".m", ".mm")):
                     if not arg.startswith("$SRCROOT"): sources.append(testSrcDir + "/" + arg)
                     else: sources.append(arg)
                 elif arg in targetNames:
                     linkTarget.addInput(arg)
-                elif osFlag in arg:
-                    minOS = arg[arg.find('=')+1:]
                 elif arg[:4] == "-Wl,":
                     linkerArgs = arg.split(",")
                     if linkerArgs[1] == "-platform_version":
@@ -321,22 +376,34 @@ def processBuildLines(ninja, buildLines, testName, platform, osFlag, forceArchs,
                 elif arg[:8] == "-fuse-ld":
                     # This is not typically used, but if we ever wanted to try a new ld64, it can be useful
                     ldflags.append(arg)
+                elif arg.startswith('-fsanitize='):
+                    cflags.append(arg)
+                    ldflags.append(arg)
                 else:
                     cflags.append(arg)
+
+            if isDylib and not explicitLinkTestSupport:
+                linkTestSupport = False;
+            #Explicitly disable test support for older binaries
+            if minOS and minOS < osVers:
+                linkTestSupport = False
+
             if linkTestSupport:
-                ldflags.append("-force_load $BUILT_PRODUCTS_DIR/libtest_support.a")
+                ldflags.append("-ltest_support -force_load $BUILT_PRODUCTS_DIR/libtest_support.a")
+            else:
+                cflags.append("-DUSE_PRINTF_MACROS")
             for source in sources:
-                objectHash = hashlib.sha1(linkTarget.output+source+tool+"".join(cflags)).hexdigest()
+                objectHash = hashlib.sha1((linkTarget.output+source+tool+"".join(cflags)).encode('utf-8')).hexdigest()
                 target = ninja.newTarget(tool, "$OBJROOT/dyld_tests.build/Objects-normal/" + objectHash + ".o")
                 target.addInput(source)
                 target.dependencies = dependencies
                 if cflags: target.addVariable("cflags", " ".join(cflags))
-                if minOS: target.addVariable("minOS", "-" + osFlag + "=" + minOS)
+                if minOS: target.addVariable("minOS", "-target " + osFlag + minOS)
                 if forceArchs: target.addVariable("archs", " ".join(["-arch {}".format(arch) for arch in forceArchs]))
+                addEnvVarsTo(target)
                 linkTarget.addInput(target)
             if ldflags: linkTarget.addVariable("ldflags", " ".join(ldflags))
             if platformVersion: linkTarget.addVariable("minOS", platformVersion)
-            elif minOS: linkTarget.addVariable("minOS", "-" + osFlag + "=" + minOS)
             if forceArchs: linkTarget.addVariable("archs", " ".join(["-arch {}".format(arch) for arch in forceArchs]))
             installTarget = ninja.newTarget("install", "$INSTALL_DIR/AppleInternal/CoreOS/tests/dyld/{}".format(linkTarget.output[9:]))
             installTarget.addInput(linkTarget)
@@ -434,7 +501,7 @@ def processRunLines(ninja, runLines, testName, platform, runStatic, symRoot, xcT
                     runFile.write("sudo TEST_OUTPUT=BATS DYLD_USE_CLOSURES=2 {}\n".format(runLine[5:]))
                 else:
                     runFile.write("TEST_OUTPUT=BATS DYLD_USE_CLOSURES=2 {}\n".format(runLine))
-    os.chmod(runFilePath, 0755)
+    os.chmod(runFilePath, 0o755)
     installPath = "$INSTALL_DIR/AppleInternal/CoreOS/tests/dyld/{}/run.sh".format(testName)
     target = ninja.newTarget("install", installPath)
     target.addInput(runFilePath)
@@ -445,7 +512,7 @@ def processRunLines(ninja, runLines, testName, platform, runStatic, symRoot, xcT
 # 2. Set of platforms directive is restricted to
 # 3. Bool indicatin if the directive has a platform specifier
 def parseDirective(line, directive, platform, archs, explicitROS):
-    idx = string.find(line, directive)
+    idx = line.find(directive)
     if idx == -1: return -1, archs, False
     if line[idx + len(directive)] == ':': return idx+len(directive)+1, archs, False
     match = re.match("\((.*?)\)?(?:\|(.*?)\))?\:", line[idx + len(directive):]);
@@ -459,14 +526,16 @@ def parseDirective(line, directive, platform, archs, explicitROS):
         if match.group(2): restrictedArchs = match.group(2).split(",");
         if platforms and platform not in platforms: return -1, archs, foundPlatform
         effectiveArchs = list(set(archs) & set(restrictedArchs))
-        if effectiveArchs: return idx + len(directive) + len(match.group()), effectiveArchs, foundPlatform
+
+        if effectiveArchs:
+            return idx + len(directive) + len(match.group()), effectiveArchs, foundPlatform
         return line.find(':')+1, archs, foundPlatform
     return -1, archs, False
 
 if __name__ == "__main__":
     configPath = sys.argv[1]
     configMap = {}
-    with open(configPath) as configFile:
+    with open(configPath, "r") as configFile:
         for line in configFile.read().splitlines():
             args = line.split()
             configMap[args[0]] = args[2:]
@@ -517,43 +586,66 @@ if __name__ == "__main__":
     osFlag = ""
     if platform == "macosx":
         platform = "macos"
-        osFlag = "mmacosx-version-min"
+        osFlag = "apple-macos"
         sudoCmd = "sudo"
     elif platform == "iphoneos":
         platform = "ios"
-        osFlag = "miphoneos-version-min"
+        osFlag = "apple-ios"
     elif platform == "appletvos":
         platform = "tvos"
-        osFlag = "mtvos-version-min"
+        osFlag = "apple-tvos"
     elif platform == "watchos":
-        osFlag = "mwatchos-version-min"
+        osFlag = "apple-watchos"
     elif platform == "bridgeos":
-        osFlag = "mbridgeos-version-min"
+        osFlag = "apple-bridgeos"
     else:
         sys.stderr.write("Unknown platform\n")
         sys.exit(-1)
+
+    # Find ASan dylib path
+    clangRuntimeDir = subprocess.run(
+        [ccTool, '--print-file-name=lib'],
+        capture_output=True,
+        text=True).stdout.strip()
+    clangRuntimeDir = os.path.join(clangRuntimeDir, 'darwin')
+    if not os.path.exists(clangRuntimeDir):
+        sys.stderr.write(f"Path to Clang runtime dir doesn't exist: '{clangRuntimeDir}'")
+        sys.exit(-1)
+    if platform == 'macos':
+        sanitizerPlatform = 'osx'
+    else:
+        sanitizerPlatform = platform
+    asanDylibName = f"libclang_rt.asan_{sanitizerPlatform}_dynamic.dylib"
+    asanDylibPath = os.path.join(clangRuntimeDir, asanDylibName)
+    if not os.path.exists(asanDylibPath):
+        sys.stderr.write(f"Path to ASan dylib doesn't exist: '{asanDylibPath}'")
+        sys.exit(-1)
+
 
     with NinjaFile(derivedFilesDir + "/build.ninja") as ninja:
         extraCmds = "$extraCmds"
         if "RC_XBS" in os.environ and os.environ["RC_XBS"] == "YES":
             extraCmds = "&& dsymutil -o $out.dSYM $out $extraCmds"
         ninja.addInclude("config.ninja")
-            ninja.addVariable("minOS", "-" + osFlag + "=" + osVers)
+            ninja.addVariable("minOS", "-target " + osFlag + osVers)
         ninja.addVariable("dkMinOS", "-target apple-driverkit")
         ninja.addVariable("archs", " ".join(["-arch {}".format(arch) for arch in archs]))
         ninja.addVariable("mode", "0755")
         ninja.addVariable("headerpaths", headerPaths)
         ninja.addVariable("dkHeaderpaths", dkHeaderPaths)
+        ninja.addVariable("asanDylibPath", asanDylibPath)
+        ninja.addVariable("asanDylibName", asanDylibName)
+        ninja.addVariable("clangRuntimeDir", clangRuntimeDir)
 
         ninja.addRule("cc", "{} -g -MMD -MF $out.d $archs -o $out -c $in $minOS $headerpaths $cflags".format(ccTool), "$out.d")
         ninja.addRule("dkcc", "{} -g -MMD -MF $out.d $archs -o $out -c $in $dkMinOS $dkHeaderpaths $cflags".format(dkCcTool), "$out.d")
         ninja.addRule("cxx", "{} -g -MMD -MF $out.d $archs -o $out -c $in $minOS $headerpaths $cflags".format(cxxTool), "$out.d")
-        ninja.addRule("cc-link", "{}  -g $archs -o $out -ltest_support $in $minOS -isysroot {} {} $ldflags {} && codesign --force --sign - $entitlements $out".format(ccTool, sdkRoot, linkerFlags, extraCmds), False)
+        ninja.addRule("cc-link", "{}  -g $archs -o $out $in $minOS -isysroot {} {} $ldflags {} && codesign --force --sign - $entitlements $out".format(ccTool, sdkRoot, linkerFlags, extraCmds), False)
         ninja.addRule("dkcc-link", "{}  -g $archs -o $out $in $dkMinOS -isysroot {} {} $ldflags {} && codesign --force --sign - $entitlements $out".format(dkCcTool, dkSdkRoot, dkLinkerFlags, extraCmds), False)
-        ninja.addRule("cxx-link", "{}  -g $archs -o $out -ltest_support $in $minOS -isysroot {} {} $ldflags {} && codesign --force --sign - $entitlements $out".format(cxxTool, sdkRoot, linkerFlags, extraCmds), False)
-        ninja.addRule("app-cache-util", "$BUILT_PRODUCTS_DIR/host_tools/dyld_app_cache_util $archs $create_kind $out $flags", False)
+        ninja.addRule("cxx-link", "{}  -g $archs -o $out $in $minOS -isysroot {} {} $ldflags {} && codesign --force --sign - $entitlements $out".format(cxxTool, sdkRoot, linkerFlags, extraCmds), False)
+        ninja.addRule("app-cache-util", "$BUILT_PRODUCTS_DIR/host_tools/dyld_app_cache_util $archs $create_kind $out $flags", False, addEnvVars=False)
         ninja.addRule("dtrace", "/usr/sbin/dtrace -h -s $in -o $out", False)
-        ninja.addRule("cp", "/bin/cp -p $in $out", False)
+        ninja.addRule("cp", "/usr/bin/ditto $in $out", False)
         ninja.addRule("install", "/usr/bin/install -m $mode -o {} -g {} $install_flags $in $out".format(installOwner, installGroup), False)
         ninja.addRule("symlink", "ln -sfh $source $out", False)
 
@@ -639,7 +731,7 @@ if __name__ == "__main__":
                                     missingPlatformDirectives = True
                                     sys.stderr.write("Did not find platform({}) BUILD directive for {}\n".format(platform, testName))
                     if buildLines and (runLines or runStaticLines):
-                        processBuildLines(ninja, buildLines, testName, platform, osFlag, effectiveArchs, testDstDir, testSrcDir)
+                        processBuildLines(ninja, buildLines, testName, platform, osFlag, osVers, effectiveArchs, testDstDir, testSrcDir)
                         if runLines:
                             processRunLines(ninja, runLines, testName, platform, False, symRoot, xctestInvocations)
                         if runStaticLines:
@@ -652,18 +744,18 @@ if __name__ == "__main__":
                 xcTestFile.write("static const TestInfo sTests[] = {\n")
                 xcTestFile.write(",\n".join(xctestInvocations))
                 xcTestFile.write("\n};")
-        os.chmod(runAllScriptPath, 0755)
+        os.chmod(runAllScriptPath, 0o755)
         runAllFilesInstallTarget = ninja.newTarget("install", "$INSTALL_DIR/AppleInternal/CoreOS/tests/dyld/run_all_dyld_tests.sh")
         runAllFilesInstallTarget.addInput("$DERIVED_FILES_DIR/run_all_dyld_tests.sh")
         masterInstallTarget.addInput(runAllFilesInstallTarget)
         batsFilePath = derivedFilesDir + "/dyld.plist"
         batsTests.sort(key=lambda test: test["TestName"])
-        with BufferedFile(batsFilePath) as batsFile:
-            batsConfig = { "BATSConfigVersion": "0.1.0",
-                         "Project":           "dyld_tests",
-                         "Tests":             batsTests }
+        with open(batsFilePath, "wb") as batsFile:
+            batsConfig = { "BATSConfigVersion" : "0.1.0",
+                       "Project"           : "dyld_tests",
+                       "Tests"             : batsTests }
             if batsSuppressedCrashes: batsConfig["IgnoreCrashes"] = batsSuppressedCrashes
-            batsFile.write(plistlib.writePlistToString(batsConfig))
+            plistlib.dump(batsConfig, batsFile, fmt=plistlib.FMT_BINARY)
         os.system('plutil -convert binary1 ' + batsFilePath) # convert the plist in place to binary
         batsConfigInstallTarget = ninja.newTarget("install", "$INSTALL_DIR/AppleInternal/CoreOS/BATS/unit_tests/dyld.plist")
         batsConfigInstallTarget.addInput(batsFilePath)

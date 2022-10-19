@@ -26,6 +26,7 @@
 
 #include <algorithm>
 #include <stdint.h>
+#include <stdio.h>
 #include <assert.h>
 #include <stddef.h>
 #include <mach/mach.h>
@@ -109,14 +110,17 @@ public:
                     OverflowSafeArray(T* stackStorage, uintptr_t stackAllocCount) : Array<T>(stackStorage, stackAllocCount) {}
                     ~OverflowSafeArray();
 
-                    OverflowSafeArray(OverflowSafeArray&) = default;
+                    OverflowSafeArray(const OverflowSafeArray&) = delete;
+                    OverflowSafeArray& operator=(const OverflowSafeArray& other) = delete;
+                    OverflowSafeArray(OverflowSafeArray&&);
                     OverflowSafeArray& operator=(OverflowSafeArray&& other);
 
     void            push_back(const T& t)        { verifySpace(1); this->_elements[this->_usedCount++] = t; }
+    void            push_back(T&& t)             { verifySpace(1); this->_elements[this->_usedCount++] = std::move(t); }
     template <class... Args>
     void            emplace_back(Args&&... args) { verifySpace(1); new (&this->_elements[this->_usedCount++])T(args...); }
     void            default_constuct_back()      { verifySpace(1); new (&this->_elements[this->_usedCount++])T(); }
-    void            clear() { this->_usedCount = 0; }
+    void            clear();
     void            reserve(uintptr_t n) { if (this->_allocCount < n) growTo(n); }
     void            resize(uintptr_t n) {
         if (n == this->_usedCount)
@@ -158,13 +162,23 @@ inline void OverflowSafeArray<T,MAXCOUNT>::growTo(uintptr_t n)
 #if BUILDING_LIBDYLD
         //FIXME We should figure out a way to do this in dyld
         char crashString[256];
-        snprintf(crashString, 256, "OverflowSafeArray failed to allocate %llu bytes, vm_allocate returned: %d\n",
+        snprintf(crashString, sizeof(crashString), "OverflowSafeArray failed to allocate %llu bytes, vm_allocate returned: %d\n",
                 (uint64_t)_overflowBufferSize, kr);
         CRSetCrashLogMessage(crashString);
 #endif
         assert(0);
     }
-    ::memcpy((void*)_overflowBuffer, (void*)this->_elements, this->_usedCount*sizeof(T));
+    if constexpr (std::is_trivially_copyable<T>::value) {
+        ::memcpy((void*)_overflowBuffer, (void*)this->_elements, this->_usedCount*sizeof(T));
+    } else if constexpr (std::is_move_constructible<T>::value) {
+        //static_assert(std::is_trivially_copyable<T>::value, "Type isn't POD, but our destructor doesn't destroy elements");
+        T* newBuffer = (T*)_overflowBuffer;
+        for (uintptr_t i = 0; i != this->_usedCount; ++i)
+            new (&newBuffer[i]) T(std::move(this->_elements[i]));
+    } else {
+        static_assert(std::is_trivially_copyable<T>::value || std::is_move_constructible<T>::value,
+                      "Type must be trivially copyable/move_constructible");
+    }
     this->_elements = (T*)_overflowBuffer;
     this->_allocCount = _overflowBufferSize / sizeof(T);
 
@@ -173,8 +187,21 @@ inline void OverflowSafeArray<T,MAXCOUNT>::growTo(uintptr_t n)
 }
 
 template <typename T, uintptr_t MAXCOUNT>
+inline void OverflowSafeArray<T,MAXCOUNT>::clear()
+{
+    if constexpr (!std::is_trivially_destructible<T>::value) {
+        for (uintptr_t i = 0; i != this->_usedCount; ++i)
+            this->_elements[i].~T();
+    }
+    this->_usedCount = 0;
+}
+
+template <typename T, uintptr_t MAXCOUNT>
 inline OverflowSafeArray<T,MAXCOUNT>::~OverflowSafeArray()
 {
+    // Call clear in case there are element destructors to call
+    clear();
+
     if ( _overflowBuffer != 0 )
         ::vm_deallocate(mach_task_self(), _overflowBuffer, _overflowBufferSize);
 }
@@ -189,6 +216,14 @@ inline OverflowSafeArray<T,MAXCOUNT>& OverflowSafeArray<T,MAXCOUNT>::operator=(O
     if ( _overflowBuffer != 0 )
         ::vm_deallocate(mach_task_self(), _overflowBuffer, _overflowBufferSize);
 
+    new (this) OverflowSafeArray<T,MAXCOUNT>(std::move(other));
+    return *this;
+}
+
+template <typename T, uintptr_t MAXCOUNT>
+inline OverflowSafeArray<T,MAXCOUNT>::OverflowSafeArray(OverflowSafeArray<T,MAXCOUNT>&& other)
+{
+
     // Now take the buffer from the other array
     this->_elements     = other._elements;
     this->_allocCount   = other._allocCount;
@@ -202,7 +237,6 @@ inline OverflowSafeArray<T,MAXCOUNT>& OverflowSafeArray<T,MAXCOUNT>::operator=(O
     other._usedCount            = 0;
     other._overflowBuffer       = 0;
     other._overflowBufferSize   = 0;
-    return *this;
 }
 
 

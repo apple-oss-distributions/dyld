@@ -3,7 +3,6 @@
 
 // RUN: ./libdsc-test.exe
 
-#include <stdio.h>
 #include <stdlib.h>
 #include <string.h> 
 #include <mach-o/dyld_priv.h>
@@ -22,16 +21,16 @@ int main(int argc, const char* argv[], const char* envp[], const char* apple[])
     if ( cacheStart != NULL ) {
         dyld_shared_cache_iterate(cacheStart, cacheLen, ^(const dyld_shared_cache_dylib_info* dylibInfo, const dyld_shared_cache_segment_info* segInfo) {
             if ( false ) {
-                printf("%p %s\n", dylibInfo->machHeader, dylibInfo->path);
-                printf("    dylib.version=%d\n", dylibInfo->version);
-                printf("    dylib.isAlias=%d\n", dylibInfo->isAlias);
-                printf("    dylib.inode=%lld\n",   dylibInfo->inode);
-                printf("    dylib.modTime=%lld\n", dylibInfo->modTime);
-                printf("    segment.name=         %s\n", segInfo->name);
-                printf("    segment.fileOffset=   0x%08llX\n", segInfo->fileOffset);
-                printf("    segment.fileSize=     0x%08llX\n", segInfo->fileSize);
-                printf("    segment.address=      0x%08llX\n", segInfo->address);
-                printf("    segment.addressOffset=0x%08llX\n", segInfo->addressOffset);
+                LOG("%p %s", dylibInfo->machHeader, dylibInfo->path);
+                LOG("    dylib.version=%d", dylibInfo->version);
+                LOG("    dylib.isAlias=%d", dylibInfo->isAlias);
+                LOG("    dylib.inode=%lld",   dylibInfo->inode);
+                LOG("    dylib.modTime=%lld", dylibInfo->modTime);
+                LOG("    segment.name=         %s", segInfo->name);
+                LOG("    segment.fileOffset=   0x%08llX", segInfo->fileOffset);
+                LOG("    segment.fileSize=     0x%08llX", segInfo->fileSize);
+                LOG("    segment.address=      0x%08llX", segInfo->address);
+                LOG("    segment.addressOffset=0x%08llX", segInfo->addressOffset);
             }
         });
     }

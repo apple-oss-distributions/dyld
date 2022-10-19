@@ -26,6 +26,8 @@
 #define DyldDelegates_h
 
 #include <stdint.h>
+#include <sys/param.h>
+#include <sys/mount.h>
 #include <sys/socket.h>
 #include <sys/syslog.h>
 #include <sys/uio.h>
@@ -39,41 +41,46 @@
 
 #include "Defines.h"
 #include "Array.h"
+#include "UUID.h"
 #include "MachOAnalyzer.h"
 #include "SharedCacheRuntime.h"
 
 class DyldSharedCache;
 
+namespace dyld4 {
+
+using lsl::UUID;
 using dyld3::MachOAnalyzer;
 using dyld3::GradedArchs;
 using dyld3::Array;
 
-namespace dyld4 {
-
 // for detecting symlinks and hard links, so dyld does not load same file twice
 struct FileID
 {
-    FileID() = delete;
-    FileID(uint64_t inode, uint64_t mtime, bool isValid) : iNode(inode), modTime(mtime), isValid(isValid) { }
+    FileID(uint64_t inode, uint64_t device, uint64_t mtime, bool valid) : _inode(inode), _device(device), _modTime(mtime), _isValid(valid)  { }
 
-    bool            valid() const { return isValid; }
-    uint64_t        inode() const { return iNode; }
-    uint64_t        mtime() const { return modTime; }
-
-    static FileID   none() { return FileID(0, 0, false); }
+    bool            valid() const   { return _isValid; }
+    uint64_t        inode() const   { return _inode; }
+    uint64_t        device() const   { return _device; }
+    uint64_t        mtime() const   { return _modTime; }
+    static FileID   none() { return FileID(); }
 
     bool            operator==(const FileID& other) const {
         // Note, if either this or other is invalid, the result is false
-        return (isValid && other.isValid) && (iNode==other.iNode) && (modTime==other.modTime);
+        return (_device == other._device) && (_isValid && other._isValid) && (_inode==other._inode) && (_modTime==other._modTime);
     }
     bool            operator!=(const FileID& other) const { return !(*this == other); }
 
 private:
-    uint64_t        iNode   = 0;
-    uint64_t        modTime = 0;
-    bool            isValid = false;
+    FileID() = default; // We have this here so none() can default construct an empty UUID
+    uint64_t        _inode      = 0;
+    uint64_t        _device     = 0;
+    uint64_t        _modTime    = 0;
+    bool            _isValid    = false;
 
 };
+
+#define ENOTAFILE_NP  666 // magic errno returned by SyscallDelegate::fileExists() if S_ISREG() is false
 
 // all dyld syscalls goes through this delegate, which enables cache building and off line testing
 class SyscallDelegate
@@ -83,17 +90,20 @@ public:
     bool                internalInstall() const;
     bool                isTranslated() const;
     bool                getCWD(char path[MAXPATHLEN]) const;
-    const GradedArchs&  getGradedArchs(const char* archName, bool keysOff) const;
+    const GradedArchs&  getGradedArchs(const char* archName, bool keysOff, bool osBinariesOnly) const;
     int                 openLogFile(const char* path) const;
+    bool                hasExistingDyldCache(uint64_t& cacheBaseAddress, uint64_t& fsid, uint64_t& fsobjid) const;
+    void                disablePageInLinking() const;
     void                getDyldCache(const dyld3::SharedCacheOptions& opts, dyld3::SharedCacheLoadInfo& loadInfo) const;
-    void                forEachInDirectory(const char* dir, bool dirs, void (^handler)(const char* pathInDir)) const;
+    void                forEachInDirectory(const char* dir, bool dirs, void (^handler)(const char* pathInDir, const char* leafName)) const;
     bool                getDylibInfo(const char* dylibPath, dyld3::Platform platform, const GradedArchs& archs, uint32_t& version, char installName[PATH_MAX]) const;
     bool                isContainerized(const char* homeDir) const;
     bool                isMaybeContainerized(const char* homeDir) const;
-    bool                fileExists(const char* path, FileID* fileID=nullptr, bool* notAFile=nullptr) const;
+    bool                fileExists(const char* path, FileID* fileID=nullptr, int* errNum=nullptr) const;
     bool                dirExists(const char* path) const;
     bool                mkdirs(const char* path) const;
-    bool                realpath(const char* input, char output[1024]) const;
+    bool                realpath(const char* filePath, char output[1024]) const;
+    bool                realpathdir(const char* dirPath, char output[1024]) const;
     const void*         mapFileReadOnly(Diagnostics& diag, const char* path, size_t* size=nullptr, FileID* fileID=nullptr, bool* isOSBinary=nullptr, char* betterPath=nullptr) const;
     void                unmapFile(const void* buffer, size_t size) const;
     void                withReadOnlyMappedFile(Diagnostics& diag, const char* path, bool checkIfOSBinary, void (^handler)(const void* mapping, size_t mappedSize, bool isOSBinary, const FileID& fileID, const char* realPath)) const;
@@ -104,27 +114,43 @@ public:
     bool                sandboxBlockedOpen(const char* path) const;
     bool                sandboxBlockedStat(const char* path) const;
     bool                sandboxBlocked(const char* path, const char* kind) const;
-    void                getpath(int fd, char* realerPath) const;
+    bool                sandboxBlockedSyscall(int syscallNum) const;
+    bool                sandboxBlockedPageInLinking() const;
+    bool                getpath(int fd, char* realerPath) const;
     bool                onHaswell() const;
     bool                dtraceUserProbesEnabled() const;
     void                dtraceRegisterUserProbes(dof_ioctl_data_t* probes) const;
     void                dtraceUnregisterUserProbe(int registeredID) const;
+    bool                kernelDyldImageInfoAddress(void*& infoAddress, size_t& infoSize) const;
 
     struct DyldCommPage
     {
-        uint64_t  forceCustomerCache  :  1,     // dyld_flags=0x00000001
-                  testMode            :  1,     // dyld_flags=0x00000002
-                  forceDevCache       :  1,     // dyld_flags=0x00000004
-                  unusedFlagsLow      : 14,
-                  enableCompactInfo   :  1,     // dyld_flags=0x00020000
-                  forceRODataConst    :  1,     // dyld_flags=0x00040000
-                  forceRWDataConst    :  1,     // dyld_flags=0x00080000
-                  unusedFlagsHigh     : 12,
-                  libPlatformRoot     :  1,
-                  libPthreadRoot      :  1,
-                  libKernelRoot       :  1,
-                  bootVolumeWritable  :  1,
-                  unused3             : 28;
+        uint64_t  forceCustomerCache        :  1,     // dyld_flags=0x00000001
+                  testMode                  :  1,     // dyld_flags=0x00000002
+                  forceDevCache             :  1,     // dyld_flags=0x00000004
+                  skipIgnition              :  1,     // dyld_flags=0x00000008
+                  useSystemCache            :  1,     // dyld_flags=0x00000010
+                  useSystemDriverKitCache   :  1,     // dyld_flags=0x00000020
+                  unusedFlagsLow            : 12,
+                  enableCompactInfo         :  1,     // dyld_flags=0x00040000
+                  disableCompactInfo        :  1,     // dyld_flags=0x00080000
+                  forceRODataConst          :  1,     // dyld_flags=0x00100000
+                  forceRWDataConst          :  1,     // dyld_flags=0x00200000
+                  unusedFlagsHigh           :  10,
+                  libPlatformRoot           :  1,
+                  libPthreadRoot            :  1,
+                  libKernelRoot             :  1,
+                  bootVolumeWritable        :  1,
+                  foundRoot                 :  1,
+                  unused3                   : 27;
+
+        // The comm page flags are divided in two.  The low 32-bits are owned by
+        // the boot-arg.  The high 32-bit should be set by launchd (pid 1).  Due to
+        // macOS pivoting, there are 2 pid 1's at boot, so we need to reset these bits
+        // to avoid the first pid 1's decision leaking in to the second
+        enum Masks : uint64_t {
+            bootArgsMask = 0x00000000FFFFFFFFULL,
+        };
 
                   DyldCommPage();
     };
@@ -154,6 +180,9 @@ public:
     kern_return_t       vm_protect(task_port_t, vm_address_t, vm_size_t, bool which, uint32_t perms) const;
     int                 mremap_encrypted(void*, size_t len, uint32_t, uint32_t cpuType, uint32_t cpuSubtype) const;
     ssize_t             fsgetpath(char result[], size_t resultBufferSize, uint64_t fsid, uint64_t objid) const;
+    int                 getfsstat(struct statfs *buf, int bufsize, int flags) const;
+    int                 getattrlist(const char* path, struct attrlist * attrList, void * attrBuf, size_t attrBufSize, uint32_t options)
+    const ;
 
 #if !BUILDING_DYLD
     typedef std::map<std::string, std::vector<const char*>> PathToPathList;
@@ -163,20 +192,21 @@ public:
 
     static uint64_t     makeFsIdPair(uint64_t fsid, uint64_t objid) { return (fsid << 32) |  objid; }
 
-#if BUILDING_CACHE_BUILDER
+#if BUILDING_CACHE_BUILDER || BUILDING_CACHE_BUILDER_UNIT_TESTS
     struct MappingInfo { const void* mappingStart; size_t mappingSize; };
-    typedef std::map<std::string, MappingInfo> PathToMapping;
+    typedef std::map<std::string_view, MappingInfo> PathToMapping;
 #endif
 
     uint64_t                _amfiFlags       = -1;
     DyldCommPage            _commPageFlags;
     bool                    _internalInstall = false;
+    int                     _pid             = 100;
     const char*             _cwd             = nullptr;
     PathToPathList          _dirMap;
     const DyldSharedCache*  _dyldCache       = nullptr;
     PathToDylibInfo         _dylibInfoMap;
     FileIDsToPath           _fileIDsToPath;
-#if BUILDING_CACHE_BUILDER
+#if BUILDING_CACHE_BUILDER || BUILDING_CACHE_BUILDER_UNIT_TESTS
     PathToMapping           _mappedOtherDylibs;
     const GradedArchs*      _gradedArchs    = nullptr;
 #endif
@@ -187,6 +217,10 @@ public:
     const char*             _rootPath       = nullptr;
     // An overlay to layer on top of the root path.  It must be a real path
     const char*             _overlayPath    = nullptr;
+#endif
+
+#if BUILDING_UNIT_TESTS
+    bool                    _bypassMockFS   = false;
 #endif
 
 #endif // !BUILDING_DYLD

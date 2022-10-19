@@ -29,7 +29,14 @@
 #include <mach-o/fat.h>
 #include <uuid/uuid.h>
 
+#include <array>
+#include <optional>
+#include <string_view>
+
+#include "Defines.h"
+#include "UUID.h"
 #include "Diagnostics.h"
+#include "MachOLayout.h"
 #include "SupportedArchs.h"
 #include <mach-o/fixup-chains.h>
 #include <mach-o/loader.h>
@@ -80,9 +87,12 @@
 
 namespace dyld3 {
 
+using lsl::UUID;
+
 // replacements for posix that handle EINTR
 int	stat(const char* path, struct stat* buf) VIS_HIDDEN;
 int	open(const char* path, int flag, int other) VIS_HIDDEN;
+int fstatat(int fd, const char *path, struct stat *buf, int flag) VIS_HIDDEN;
 
 
 /// Returns true if (addLHS + addRHS) > b, or if the add overflowed
@@ -113,15 +123,18 @@ enum class Platform {
     driverKit           = 10,   // PLATFORM_DRIVERKIT
 };
 
-struct MachOFile; // forward ref
-
 // A prioritized list of architectures
 class VIS_HIDDEN GradedArchs {
 public:
+    struct CpuGrade { uint32_t type = 0; uint32_t subtype = 0; bool osBinary = false; uint16_t grade = 0; };
     // never construct new ones - just use existing static instances
     GradedArchs()                   = delete;
     GradedArchs(const GradedArchs&) = delete;
+    constexpr GradedArchs(const CpuGrade& cg0, const CpuGrade& cg1 = {0,0,false,0} , const CpuGrade& cg2 = {0,0,false,0}) : _orderedCpuTypes({cg0, cg1, cg2, CpuGrade()}) {}
 
+#if BUILDING_LIBDYLD || BUILDING_UNIT_TESTS
+    static const GradedArchs&  launchCurrentOS(const char* simArches); // for emulating how the kernel chooses which slice to exec()
+#endif
     static const GradedArchs&  forCurrentOS(bool keysOff, bool platformBinariesOnly);
     static const GradedArchs&  forName(const char* archName, bool keysOff = false);
 
@@ -129,6 +142,8 @@ public:
     int                     grade(uint32_t cputype, uint32_t cpusubtype, bool platformBinariesOnly) const;
     const char*             name() const;
     bool                    checksOSBinary() const;
+    bool                    supports64() const;
+    void                    forEachArch(bool platformBinariesOnly, void (^handler)(const char* name)) const;
 
     // pre-built lists for existing hardware
 #ifdef i386
@@ -147,14 +162,25 @@ public:
     static const GradedArchs armv7k;          // watch thru series 3
     static const GradedArchs armv7s;          // deprecated
     static const GradedArchs armv7;           // deprecated
+    static const GradedArchs armv6m;          // firmware
+    static const GradedArchs armv7m;          // firmware
+    static const GradedArchs armv7em;         // firmware
+    static const GradedArchs armv8m;          // firmware
+
 #if SUPPORT_ARCH_arm64_32
     static const GradedArchs arm64_32;        // watch series 4 and later
+#endif
+#if BUILDING_LIBDYLD || BUILDING_UNIT_TESTS
+    static const GradedArchs launch_AS;       // Apple Silicon macs
+    static const GradedArchs launch_AS_Sim;   // iOS simulator for Apple Silicon macs
+    static const GradedArchs launch_Intel_h;  // Intel macs with haswell cpu
+    static const GradedArchs launch_Intel;    // Intel macs
+    static const GradedArchs launch_Intel_Sim; // iOS simulator for Intel macs
 #endif
 
 // private:
 // should be private, but compiler won't statically initialize static members above
-    struct CpuGrade { uint32_t type; uint32_t subtype; bool osBinary; uint16_t grade; };
-    const CpuGrade     _orderedCpuTypes[3];  // zero terminated
+    const std::array<CpuGrade, 4>     _orderedCpuTypes;  // zero terminated
 };
 
 
@@ -164,7 +190,7 @@ struct VIS_HIDDEN FatFile : fat_header
     static const FatFile*  isFatFile(const void* fileContent);
     void                   forEachSlice(Diagnostics& diag, uint64_t fileLen, void (^callback)(uint32_t sliceCpuType, uint32_t sliceCpuSubType, const void* sliceStart, uint64_t sliceSize, bool& stop)) const;
     bool                   isFatFileWithSlice(Diagnostics& diag, uint64_t fileLen, const GradedArchs& archs, bool osBinary, uint64_t& sliceOffset, uint64_t& sliceLen, bool& missingSlice) const;
-    const char*            archNames(char strBuf[256]) const;
+    const char*            archNames(char strBuf[256], uint64_t fileLen) const;
 private:
     bool                   isValidSlice(Diagnostics& diag, uint64_t fileLen, uint32_t sliceIndex,
                                         uint32_t sliceCpuType, uint32_t sliceCpuSubType, uint64_t sliceOffset, uint64_t sliceLen) const;
@@ -177,10 +203,11 @@ private:
 // Only info from mach_header or load commands is accessible (no LINKEDIT info)
 struct VIS_HIDDEN MachOFile : mach_header
 {
+    typedef mach_o::ChainedFixupPointerOnDisk ChainedFixupPointerOnDisk;
+
     static const char*      archName(uint32_t cputype, uint32_t cpusubtype);
     static const char*      platformName(Platform platform);
-    static uint32_t         cpuTypeFromArchName(const char* archName);
-    static uint32_t         cpuSubtypeFromArchName(const char* archName);
+    static bool             cpuTypeFromArchName(const char* archName, cpu_type_t* cputype, cpu_subtype_t* cpusubtype);
     static void             packedVersionToString(uint32_t packedVersion, char versionString[32]);
     static const char*      currentArchName();
     static Platform         currentPlatform();
@@ -190,6 +217,7 @@ struct VIS_HIDDEN MachOFile : mach_header
     static bool             isSimulatorPlatform(Platform platform, Platform* basePlatform=nullptr);
     static bool             isSharedCacheEligiblePath(const char* path);
     static const MachOFile* compatibleSlice(Diagnostics& diag, const void* content, size_t size, const char* path, Platform, bool isOSBinary, const GradedArchs&);
+    static const MachOFile* isMachO(const void* content);
 
     bool            hasMachOMagic() const;
     bool            isMachO(Diagnostics& diag, uint64_t fileSize) const;
@@ -202,6 +230,7 @@ struct VIS_HIDDEN MachOFile : mach_header
     bool            isKextBundle() const;
     bool            isFileSet() const;
     bool            isPreload() const;
+    bool            isDyld() const;
     bool            isPIE() const;
     bool            isArch(const char* archName) const;
     const char*     archName() const;
@@ -215,17 +244,25 @@ struct VIS_HIDDEN MachOFile : mach_header
     bool            isZippered() const;
     bool            inDyldCache() const;
     bool            getUuid(uuid_t uuid) const;
+    UUID            uuid() const;
     bool            hasWeakDefs() const;
     bool            usesWeakDefs() const;
+    bool            isBuiltForSimulator() const;
     bool            hasThreadLocalVariables() const;
     bool            getDylibInstallName(const char** installName, uint32_t* compatVersion, uint32_t* currentVersion) const;
     void            forEachSupportedPlatform(void (^callback)(Platform platform, uint32_t minOS, uint32_t sdk)) const;
+    void            forEachSupportedBuildTool(void (^callback)(Platform platform, uint32_t tool, uint32_t version)) const;
     const char*     installName() const;  // returns nullptr is no install name
     void            forEachDependentDylib(void (^callback)(const char* loadPath, bool isWeak, bool isReExport, bool isUpward, uint32_t compatVersion, uint32_t curVersion, bool& stop)) const;
     void            forEachInterposingSection(Diagnostics& diag, void (^handler)(uint64_t vmOffset, uint64_t vmSize, bool& stop)) const;
+#if BUILDING_CACHE_BUILDER || BUILDING_CACHE_BUILDER_UNIT_TESTS
     bool            canBePlacedInDyldCache(const char* path, void (^failureReason)(const char*)) const;
+    bool            canHavePrebuiltExecutableLoader(dyld3::Platform platform, const std::string_view& path,
+                                                    void (^failureReason)(const char*)) const;
+#endif
 #if BUILDING_APP_CACHE_UTIL
     bool            canBePlacedInKernelCollection(const char* path, void (^failureReason)(const char*)) const;
+    bool            usesClassicRelocationsInKernelCollection() const;
 #endif
     bool            canHavePrecomputedDlopenClosure(const char* path, void (^failureReason)(const char*)) const;
     bool            canBeFairPlayEncrypted() const;
@@ -238,11 +275,74 @@ struct VIS_HIDDEN MachOFile : mach_header
     bool            enforceCompatVersion() const;
     bool            hasInterposingTuples() const;
     bool            isRestricted() const;
+    void            removeLoadCommand(Diagnostics& diag, void (^callback)(const load_command* cmd, bool& remove, bool& stop));
+    bool            hasSection(const char* segName, const char* sectName) const;
+    void            forEachRPath(void (^callback)(const char* rPath, bool& stop)) const;
+    bool            inCodeSection(uint32_t runtimeOffset) const;
+    uint32_t        dependentDylibCount(bool* allDepsAreNormal = nullptr) const;
+    bool            hasPlusLoadMethod(Diagnostics& diag) const;
+    uint32_t        getFixupsLoadCommandFileOffset() const;
+    bool            hasInitializer(Diagnostics& diag) const;
+    void            forEachInitializerPointerSection(Diagnostics& diag, void (^callback)(uint32_t sectionOffset, uint32_t sectionSize, bool& stop)) const;
+    bool            hasCodeSignature() const;
+    bool            hasCodeSignature(uint32_t& fileOffset, uint32_t& size) const;
+    bool            hasObjC() const;
+    uint64_t        mappedSize() const;
+    uint32_t        segmentCount() const;
+    void            forEachDOFSection(Diagnostics& diag, void (^callback)(uint32_t offset)) const;
+    bool            hasObjCMessageReferences() const;
+    uint32_t        loadCommandsFreeSpace() const;
 
-    const thread_command*   unixThreadLoadCommand() const;
-    uint32_t                entryAddrRegisterIndexForThreadCmd() const;
-    uint64_t                entryAddrFromThreadCmd(const thread_command* cmd) const;
-    uint64_t                preferredLoadAddress() const;
+    // Looks for the given section in the segments in order: __DATA, __DATA_CONST, __DATA_DIRTY.
+    // Returns true if it finds a section, and sets the out parameters to the first section it found.
+    // Returns false if the given section doesn't exist in any of the given segments.
+    bool            findObjCDataSection(const char* sectionName, uint64_t& sectionRuntimeOffset, uint64_t& sectionSize) const;
+
+    enum class Malformed { linkeditOrder, linkeditAlignment, linkeditPermissions, dyldInfoAndlocalRelocs, segmentOrder,
+                            textPermissions, executableData, writableData, codeSigAlignment, sectionsAddrRangeWithinSegment,
+                            noLinkedDylibs, loaderPathsAreReal, mainExecInDyldCache, noUUID, zerofillSwiftMetadata, sdkOnOrAfter2021, sdkOnOrAfter2022 };
+    bool            enforceFormat(Malformed) const;
+
+    bool            validSegments(Diagnostics& diag, const char* path, size_t fileLen) const;
+
+    // used at runtime to validate loaded image matches closure
+    void            forEachCDHashOfCodeSignature(const void* codeSigStart, size_t codeSignLen,
+                                                 void (^callback)(const uint8_t cdHash[20])) const;
+
+    static void     forEachTreatAsWeakDef(void (^handler)(const char* symbolName));
+
+    // used by closure builder to find the offset and size of the trie.
+    bool            hasExportTrie(uint32_t& runtimeOffset, uint32_t& size) const;
+
+    const thread_command*           unixThreadLoadCommand() const;
+    const linkedit_data_command*    chainedFixupsCmd() const;
+    uint32_t                        entryAddrRegisterIndexForThreadCmd() const;
+    bool                            use64BitEntryRegs() const;
+    uint64_t                        entryAddrFromThreadCmd(const thread_command* cmd) const;
+    uint64_t                        preferredLoadAddress() const;
+    bool                            getEntry(uint64_t& offset, bool& usesCRT) const;
+
+    // used by DyldSharedCache to find closure
+    static const uint8_t*   trieWalk(Diagnostics& diag, const uint8_t* start, const uint8_t* end, const char* symbol);
+
+#if !SUPPORT_VM_LAYOUT
+    // Get the layout information for this MachOFile.  Requires that the file is in file layout, not VM layout.
+    // If you have a MachOLoaded/MachOAnalyzer, do not use this method
+    bool                    getLinkeditLayout(Diagnostics& diag, mach_o::LinkeditLayout& layout) const;
+    void                    withFileLayout(Diagnostics &diag, void (^callback)(const mach_o::Layout& layout)) const;
+#endif
+
+    // Note all kinds have the low bit set, and all offsets to values don't
+    enum class SingletonPatchKind : uint32_t
+    {
+        unknown = 0,
+
+        // An ISA, followed by a uintptr_t of constant data
+        cfObj2 = 1
+    };
+
+    void forEachSingletonPatch(Diagnostics& diag, void (^handler)(SingletonPatchKind kind,
+                                                                  uint64_t runtimeOffset)) const;
 
     struct SegmentInfo
     {
@@ -282,9 +382,34 @@ struct VIS_HIDDEN MachOFile : mach_header
     void            forEachSection(void (^callback)(const SectionInfo& sectInfo, bool malformedSectionRange, bool& stop)) const;
     void            forEachLoadCommand(Diagnostics& diag, void (^callback)(const load_command* cmd, bool& stop)) const;
 
+    struct PointerMetaData
+    {
+                    PointerMetaData();
+                    PointerMetaData(const ChainedFixupPointerOnDisk* fixupLoc, uint16_t pointer_format);
+
+        uint32_t    diversity         : 16,
+                    high8             :  8,
+                    authenticated     :  1,
+                    key               :  2,
+                    usesAddrDiversity :  1;
+    };
+
+    static uint16_t chainedPointerFormat(const dyld_chained_fixups_header* chainHeader);
+    static void     withChainStarts(Diagnostics& diag, const dyld_chained_fixups_header* chainHeader, void (^callback)(const dyld_chained_starts_in_image*));
+
+    static void     forEachFixupChainSegment(Diagnostics& diag, const dyld_chained_starts_in_image* starts,
+                                             void (^handler)(const dyld_chained_starts_in_segment* segInfo, uint32_t segIndex, bool& stop));
+    static void     forEachFixupInSegmentChains(Diagnostics& diag, const dyld_chained_starts_in_segment* segInfo,
+                                                bool notifyNonPointers, uint8_t* segmentContent,
+                                                void (^handler)(ChainedFixupPointerOnDisk* fixupLocation, bool& stop));
+    static bool     walkChain(Diagnostics& diag, ChainedFixupPointerOnDisk* start, uint16_t pointer_format,
+                              bool notifyNonPointers, uint32_t max_valid_pointer,
+                              void (^handler)(ChainedFixupPointerOnDisk* fixupLocation, bool& stop));
+    static void     forEachChainedFixupTarget(Diagnostics& diag, const dyld_chained_fixups_header* chainHeader, const linkedit_data_command* chainedFixups,
+                                              void (^callback)(int libOrdinal, const char* symbolName, uint64_t addend, bool weakImport, bool& stop));
+
 protected:
     bool            hasMachOBigEndianMagic() const;
-    void            removeLoadCommand(Diagnostics& diag, void (^callback)(const load_command* cmd, bool& remove, bool& stop));
     bool            hasLoadCommand(uint32_t) const;
 
     const encryption_info_command* findFairPlayEncryptionLoadCommand() const;
@@ -304,6 +429,15 @@ protected:
         uint32_t    loadCommand;
     };
     static const PlatformInfo   _s_platformInfos[];
+
+    void    analyzeSegmentsLayout(uint64_t& vmSpace, bool& hasZeroFill) const;
+
+    // This calls the callback for all code directories required for a given platform/binary combination.
+    // On watchOS main executables this is all cd hashes.
+    // On watchOS dylibs this is only the single cd hash we need (by rank defined by dyld, not the kernel).
+    // On all other platforms this always returns a single best cd hash (ranked to match the kernel).
+    // Note the callback parameter is really a CS_CodeDirectory.
+    void    forEachCodeDirectoryBlob(const void* codeSigStart, size_t codeSignLen, void (^callback)(const void* cd)) const;
 };
 
 

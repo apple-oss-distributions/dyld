@@ -34,7 +34,13 @@ namespace IMPCaches {
 class IMPCachesBuilder;
 }
 
+namespace dyld3 {
+struct MachOAnalyzer;
+}
+
 class SharedCacheBuilder : public CacheBuilder {
+    using MachOLoaded   = dyld3::MachOLoaded;
+    using MachOAnalyzer = dyld3::MachOAnalyzer;
 private:
     // For Large Shared Caches, each cache is split in to chunks.  This represents a single chunk, for some number of dylibs
     struct SubCache {
@@ -48,25 +54,36 @@ private:
         uint64_t                                    _linkeditFirstDylibIndex        = 0;
         uint64_t                                    _linkeditNumDylibs              = 0;
 
-        // SubCache layouts can get quite complex with where are when to add padding, especially between caches
+        // SubCache layouts can get quite complex with where and when to add padding, especially between caches
         // For example, for split caches, we add a small amount of LINKEDIT after DATA, then start a new subcache
         // and emit the rest of LINKEDIT.  We don't want padding between those LINKEDITs
         bool                                        _addPaddingAfterText            = true;
         bool                                        _addPaddingAfterData            = true;
 
+        bool                                        _isStubsSubCache                = false;
+        uint64_t                                    _stubsAddr                      = 0;
+
         Region                                      _readExecuteRegion;
+        std::optional<Region>                       _devReadExecuteRegion;
+
         // 0 or more __DATA regions.
         // Split caches might have 0 in some SubCache's, while regular SubCache's will have 1 or more
         std::vector<Region>                         _dataRegions;
         // Split caches might not have their own LINKEDIT
         std::optional<Region>                       _readOnlyRegion;
         UnmappedRegion                              _codeSignatureRegion;
+        std::optional<UnmappedRegion>               _devCodeSignatureRegion;
 
         // Note this is mutable as the only parallel writes to it are done atomically to the bitmap
         mutable ASLR_Tracker                        _aslrTracker;
+        CacheBuilder::CoalescedGOTSection*          _coalescedGOTs              = nullptr;
+        CacheBuilder::CoalescedGOTSection*          _coalescedAuthGOTs          = nullptr;
         uint64_t                                    _nonLinkEditReadOnlySize    = 0;
         uint8_t                                     _cdHashFirst[20];
         uint8_t                                     _cdHashSecond[20];
+        uint8_t                                     _devCdHashFirst[20];
+        uint8_t                                     _devCdHashSecond[20];
+
 
         // Rosetta.  We need to reserve space for the translation of x86_64 caches
         uint64_t                                    _rosettaReadOnlyAddr        = 0;
@@ -94,8 +111,11 @@ private:
         uint64_t highestFileOffset() const;
 
         const std::string   cdHashFirst() const;
+        const std::string   devCdHashFirst() const;
         const std::string   cdHashSecond() const;
+        const std::string   devCdHashSecond() const;
         const std::string   uuid() const;
+        const std::string   devUuid() const;
     };
 public:
     SharedCacheBuilder(const DyldSharedCache::CreateOptions& options, const dyld3::closure::FileSystem& fileSystem);
@@ -105,6 +125,9 @@ public:
         uint64_t bufferSize = 0;
         std::string cdHash  = "";
         std::string uuid    = "";
+        bool isDevRegion    = false;
+        bool isData         = false;
+        bool isLinkedit     = false;
     };
 
     void                                        build(std::vector<InputFile>& inputFiles,
@@ -119,11 +142,11 @@ public:
                                                       std::vector<DyldSharedCache::FileAlias>& aliases);
 
     void                                        writeFile(const std::string& path);
-    void                                        writeBuffers(std::vector<CacheBuffer>& cacheBuffers);
+    void                                        writeBuffers(std::vector<CacheBuffer>& cacheBuffers, bool customerOnly=false, bool devOnly=false);
     void                                        writeSymbolFileBuffer(CacheBuffer& cacheBuffer);
     void                                        writeMapFile(const std::string& path);
     std::string                                 getMapFileBuffer() const;
-    std::string                                 getMapFileJSONBuffer(const std::string& cacheDisposition) const;
+    std::string                                 getMapFileJSONBuffer(const std::string& cacheDisposition, bool devRegion) const;
     void                                        deleteBuffer();
     const std::set<std::string>                 warnings();
     const std::set<const dyld3::MachOAnalyzer*> evictions();
@@ -133,7 +156,8 @@ public:
     void                                        forEachCacheSymlink(void (^callback)(const std::string& path));
 
     void                                        forEachDylibInfo(void (^callback)(const DylibInfo& dylib, Diagnostics& dylibDiag,
-                                                                                  ASLR_Tracker& dylibASLRTracker)) override final;
+                                                                                  ASLR_Tracker& dylibASLRTracker,
+                                                                                  const CacheBuilder::DylibSectionCoalescer* sectionCoalescer)) override final;
 
     struct DylibInfo : CacheBuilder::DylibInfo {
         // <class name, metaclass> -> pointer
@@ -141,11 +165,13 @@ public:
 
         // The ASLRTracker used to slide this dylib's __DATA* segments
         ASLR_Tracker* _aslrTracker = nullptr;
+
+        DylibSectionCoalescer  _coalescer;
     };
 
 private:
 
-    void        writeSlideInfoV1();
+    void        writeSlideInfoV1(SubCache& subCache);
 
     template <typename P> void writeSlideInfoV2(SubCache& subCache);
     template <typename P> bool makeRebaseChainV2(uint8_t* pageContent, uint16_t lastLocationOffset, uint16_t newOffset, const struct dyld_cache_slide_info2* info,
@@ -155,32 +181,45 @@ private:
                                                std::vector<uint16_t>& pageStarts, std::vector<uint16_t>& pageExtras);
 
     void        writeSlideInfoV3(SubCache& subCache);
-    uint16_t    pageStartV3(uint8_t* pageContent, uint32_t pageSize, const bool bitmap[], SubCache& subCache);
+    uint16_t    pageStartV3(uint8_t* pageContent, uint32_t pageSize, const bool bitmap[], SubCache& subCache, bool supportsAuthenticatedPointers);
     void        setPointerContentV3(dyld3::MachOLoaded::ChainedFixupPointerOnDisk* loc, uint64_t targetVMAddr, size_t next,
-                                    SubCache& subCache);
+                                    SubCache& subCache, bool supportsAuthenticatedPointers);
 
     template <typename P> void writeSlideInfoV4(SubCache& subCache);
     template <typename P> bool makeRebaseChainV4(uint8_t* pageContent, uint16_t lastLocationOffset, uint16_t newOffset, const struct dyld_cache_slide_info4* info);
     template <typename P> void addPageStartsV4(uint8_t* pageContent, const bool bitmap[], const struct dyld_cache_slide_info4* info,
                                              std::vector<uint16_t>& pageStarts, std::vector<uint16_t>& pageExtras);
 
+    // 0: Split Cache layout, which is __TEXT, __TEXT, ..., __DATA, __LINKEDIT.
+    // 1: Regular layout, which is __TEXT, __DATA, __LINKEDIT, __TEXT, __DATA, __LINKEDIT, ...
+    // 2: Hybrid layout, which is __TEXT, __TEXT, __TEXT, ..., __DATA, __LINKEDIT, __TEXT, __TEXT, __TEXT, ..., __DATA, __LINKEDIT
+    enum CacheLayout {
+        Split         = 0,
+        Classic       = 1,
+        Multi         = 2
+    };
+
     struct ArchLayout
     {
-        uint64_t    sharedMemoryStart;
-        uint64_t    sharedMemorySize;
-        uint64_t    subCacheTextLimit;
-        uint64_t    sharedRegionPadding;
-        uint64_t    pointerDeltaMask;
-        const char* archName;
-        uint16_t    csPageSize;
-        uint8_t     sharedRegionAlignP2;
-        uint8_t     slideInfoBytesPerPage;
-        bool        sharedRegionsAreDiscontiguous;
-        bool        is64;
-        bool        useValueAdd;
-        // True:  Split Cache layout, which is __TEXT, __TEXT, ..., __DATA, __LINKEDIT.
-        // False: Regular layout, which is __TEXT, __DATA, __LINKEDIT, __TEXT, __DATA, __LINKEDIT, ...
-        bool        useSplitCacheLayout;
+        uint64_t     sharedMemoryStart;
+        uint64_t     sharedMemorySize;
+        uint64_t     subCacheTextLimit;
+        uint64_t     subCacheStubsLimit;
+        uint64_t     sharedRegionPadding;
+        uint64_t     pointerDeltaMask;
+        const char*  archName;
+        dyld3::Platform onlyPlatform;
+        uint16_t     csPageSize;
+        uint8_t      sharedRegionAlignP2;
+        uint8_t      slideInfoBytesPerPage;
+        bool         sharedRegionsAreDiscontiguous;
+        bool         is64;
+        bool         useValueAdd;
+        // 0: Split Cache layout, which is __TEXT, __TEXT, ..., __DATA, __LINKEDIT.
+        // 1: Regular layout, which is __TEXT, __DATA, __LINKEDIT, __TEXT, __DATA, __LINKEDIT, ...
+        // 2: Hybrid layout, which is __TEXT, __TEXT, __TEXT, ..., __DATA, __LINKEDIT, __TEXT, __TEXT, __TEXT, ..., __DATA, __LINKEDIT
+        CacheLayout  cacheLayout;
+        uint8_t      stubSize;
     };
 
     static const ArchLayout  _s_archLayout[];
@@ -188,6 +227,7 @@ private:
 
     void        makeSortedDylibs(const std::vector<LoadedMachO>& dylibs, const std::unordered_map<std::string, unsigned> sortOrder);
     void        processSelectorStrings(const std::vector<LoadedMachO>& executables, IMPCaches::HoleMap& selectorsHoleMap);
+    void        parseGOTs();
     void        parseCoalescableSegments(IMPCaches::SelectorMap& selectorMap, IMPCaches::HoleMap& selectorsHoleMap);
     void        computeSubCaches();
     void        assignSegmentAddresses(uint64_t objcROSize, uint64_t objcRWSize, uint64_t swiftROSize);
@@ -202,7 +242,7 @@ private:
     size_t      evictLeafDylibs(uint64_t reductionTarget, std::vector<LoadedMachO>& overflowDylibs);
 
     void        fipsSign();
-    void        codeSign(SubCache& subCache);
+    void        codeSign(SubCache& subCache, bool signDevStubs);
     uint64_t    pathHash(const char* path);
     static void writeSharedCacheHeader(const SubCache& subCache, const DyldSharedCache::CreateOptions& options,
                                        const ArchLayout& layout,
@@ -218,10 +258,11 @@ private:
     void        buildPatchTables(const std::unordered_map<std::string, uint32_t>& loaderToIndexMap);
     void        buildDylibsTrie(const std::vector<DyldSharedCache::FileAlias>& aliases, std::unordered_map<std::string, uint32_t>& dylibPathToDylibIndex);
 
-    bool        writeSubCache(const SubCache& subCache, void (^cacheSizeCallback)(uint64_t size), bool (^copyCallback)(const uint8_t* src, uint64_t size, uint64_t dstOffset));
+    bool        writeSubCache(const SubCache& subCache, bool devRegion, void (^cacheSizeCallback)(uint64_t size), bool (^copyCallback)(const uint8_t* src, uint64_t size, uint64_t dstOffset));
 
     // implemented in OptimizerObjC.cpp
     void        optimizeObjC(bool impCachesSuccess, const std::vector<const IMPCaches::Selector*> & inlinedSelectors);
+    void        optimizeTLVs();
     uint32_t    computeReadOnlyObjC(uint32_t selRefCount, uint32_t classDefCount, uint32_t protocolDefCount);
     uint32_t    computeReadWriteObjC(uint32_t imageCount, uint32_t protocolDefCount);
 
@@ -236,6 +277,7 @@ private:
     Region&     getSharedCacheReadOnlyRegion();
 
     typedef std::unordered_map<std::string, const dyld3::MachOAnalyzer*> InstallNameToMA;
+    typedef std::unordered_map<uint64_t, std::pair<uint64_t, uint8_t*>>  StubsToIslands;
 
     typedef uint64_t                                                CacheOffset;
 
@@ -258,13 +300,14 @@ private:
     uint64_t                                    _selectorStringsFromExecutables         = 0;
     uint8_t*                                    _swiftReadOnlyBuffer                    = nullptr;
     uint64_t                                    _swiftReadOnlyBufferSizeAllocated       = 0;
+    StubsToIslands                              _stubsToIslands;
     InstallNameToMA                             _installNameToCacheDylib;
     std::unordered_map<std::string, uint32_t>   _dataDirtySegsOrder;
     std::map<void*, std::string>                _missingWeakImports;
     const dyld4::PrebuiltLoaderSet*             _cachedDylibsLoaderSet                  = nullptr;
     bool                                        _someDylibsUsedChainedFixups            = false;
     std::unordered_set<std::string>             _dylibAliases;
-    IMPCaches::IMPCachesBuilder* _impCachesBuilder;
+    IMPCaches::IMPCachesBuilder*                _impCachesBuilder;
 
     // Cache patching
 
@@ -290,7 +333,7 @@ private:
                                 discriminator           : 16;
         };
 
-        // Records all uses of a given locatoin
+        // Records all uses of a given location
         struct Uses
         {
             std::map<CacheOffset, std::vector<dyld_cache_patchable_location>> _uses;
@@ -299,6 +342,8 @@ private:
         // Map from client dylib to the locations in which it uses a given symbol
         // Map from client dylib to the cache offsets it binds to
         std::map<const dyld3::MachOLoaded*, Uses> _clientToUses;
+
+        Uses                                      _coalescedGOTUses;
 
         // Set of all exports from the exporting dylib that are eligible for patching
         std::set<CacheOffset>                     _usedExports;

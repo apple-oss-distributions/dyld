@@ -42,7 +42,7 @@
 #include <vector>
 #include <unordered_map>
 #include <unordered_set>
-#include "SharedCacheBuilder.h"
+// #include "SharedCacheBuilder.h"
 #include "FileUtils.h"
 #endif
 
@@ -61,14 +61,18 @@
 #include <sstream>
 #endif
 
+using dyld3::MachOFile;
+using dyld3::MachOLoaded;
+using dyld3::MachOAnalyzer;
 using dyld4::PrebuiltLoader;
 using dyld4::PrebuiltLoaderSet;
+
 #if (BUILDING_LIBDYLD || BUILDING_DYLD)
 VIS_HIDDEN bool gEnableSharedCacheDataConst = false;
 #endif
 
 
-#if BUILDING_CACHE_BUILDER
+#if 0 // BUILDING_CACHE_BUILDER
 DyldSharedCache::CreateResults DyldSharedCache::create(const CreateOptions&               options,
                                                        const dyld3::closure::FileSystem&  fileSystem,
                                                        const std::vector<MappedMachO>&    dylibsToCache,
@@ -230,10 +234,17 @@ const T DyldSharedCache::getAddrField(uint64_t addr) const {
     return (const T)(addr + slide);
 }
 
-uint64_t DyldSharedCache::getCodeSignAddress() const
-{
-    auto mappings = (const dyld_cache_mapping_info*)((uint8_t*)this + header.mappingOffset);
-    return mappings[header.mappingCount-1].address + mappings[header.mappingCount-1].size;
+const char* DyldSharedCache::getCacheTypeName(uint64_t cacheType) {
+    switch ( cacheType ) {
+        case kDyldSharedCacheTypeDevelopment:
+            return "development";
+        case kDyldSharedCacheTypeProduction:
+            return "production";
+        case kDyldSharedCacheTypeUniversal:
+            return "universal";
+        default:
+            return "unknown";
+    }
 }
 
 void DyldSharedCache::forEachRegion(void (^handler)(const void* content, uint64_t vmAddr, uint64_t size,
@@ -281,7 +292,11 @@ void DyldSharedCache::forEachRange(void (^handler)(const char* mappingName,
                         uint32_t initProt, uint32_t maxProt, uint64_t flags, bool& stopRegion) {
             const char* mappingName = "";
             if ( maxProt & VM_PROT_EXECUTE ) {
-                mappingName = "__TEXT";
+                if ( flags & DYLD_CACHE_MAPPING_TEXT_STUBS ) {
+                    mappingName = "__TEXT_STUBS";
+                } else {
+                    mappingName = "__TEXT";
+                }
             } else if ( maxProt & VM_PROT_WRITE ) {
                 if ( flags & DYLD_CACHE_MAPPING_AUTH_DATA ) {
                     if ( flags & DYLD_CACHE_MAPPING_DIRTY_DATA )
@@ -336,9 +351,8 @@ void DyldSharedCache::forEachCache(void (^handler)(const DyldSharedCache *cache,
     if ( header.mappingOffset <= __offsetof(dyld_cache_header, subCacheArrayCount) )
         return;
 
-    const dyld_subcache_entry* subCaches = (const dyld_subcache_entry*)((uint8_t*)this + header.subCacheArrayOffset);
     for (uint32_t i = 0; i != header.subCacheArrayCount; ++i) {
-        const DyldSharedCache* cache = (const DyldSharedCache*)((uint8_t*)this + subCaches[i].cacheVMOffset);
+        const DyldSharedCache* cache = (const DyldSharedCache*)((uint8_t*)this + this->getSubCacheVmOffset(i));
         handler(cache, stop);
         if ( stop )
             return;
@@ -351,6 +365,43 @@ uint32_t DyldSharedCache::numSubCaches() const {
         return 0;
 
     return header.subCacheArrayCount;
+}
+
+int32_t DyldSharedCache::getSubCacheIndex(const void* addr) const
+{
+    __block int32_t index = 0;
+    __block bool found = false;
+    this->forEachCache(^(const DyldSharedCache *cache, bool &stopCache) {
+        bool readOnly = false;
+        if ( cache->inCache(addr, sizeof(uint64_t), readOnly) ) {
+            stopCache = true;
+            found = true;
+            return;
+        }
+        index++;
+    });
+    int32_t result = found ? index : -1;
+    return result;
+}
+
+void DyldSharedCache::getSubCacheUuid(uint8_t index, uint8_t uuid[]) const {
+    if (header.mappingOffset <= __offsetof(dyld_cache_header, cacheSubType) ) {
+        const dyld_subcache_entry_v1* subCacheEntries = (dyld_subcache_entry_v1*)((uint8_t*)this + header.subCacheArrayOffset);
+        memcpy(uuid, subCacheEntries[index].uuid, 16);
+    } else {
+        const dyld_subcache_entry* subCacheEntries = (dyld_subcache_entry*)((uint8_t*)this + header.subCacheArrayOffset);
+        memcpy(uuid, subCacheEntries[index].uuid, 16);
+    }
+}
+
+uint64_t DyldSharedCache::getSubCacheVmOffset(uint8_t index) const {
+    if (header.mappingOffset <= __offsetof(dyld_cache_header, cacheSubType) ) {
+        const dyld_subcache_entry_v1* subCacheEntries = (dyld_subcache_entry_v1*)((uint8_t*)this + header.subCacheArrayOffset);
+        return subCacheEntries[index].cacheVMOffset;
+    } else {
+        const dyld_subcache_entry* subCacheEntries = (dyld_subcache_entry*)((uint8_t*)this + header.subCacheArrayOffset);
+        return subCacheEntries[index].cacheVMOffset;
+    }
 }
 
 bool DyldSharedCache::inCache(const void* addr, size_t length, bool& readOnly) const
@@ -573,6 +624,13 @@ const mach_header* DyldSharedCache::getIndexedImageEntry(uint32_t index, uint64_
     return (mach_header*)((uint8_t*)this + dylibs[index].address - mappings[0].address);
 }
 
+const mach_header* DyldSharedCache::getIndexedImageEntry(uint32_t index) const
+{
+    uint64_t mTime = 0;
+    uint64_t inode = 0;
+    return this->getIndexedImageEntry(index, mTime, inode);
+}
+
 
  const char* DyldSharedCache::getIndexedImagePath(uint32_t index) const
 {
@@ -646,9 +704,9 @@ std::string DyldSharedCache::mapFile() const
         else if ( maxProt == VM_PROT_READ )
             prot = "RO";
         if ( size > 1024*1024 )
-            sprintf(lineBuffer, "mapping  %s %4lluMB 0x%0llX -> 0x%0llX\n", prot, size/(1024*1024), vmAddr, vmAddr+size);
+            snprintf(lineBuffer, sizeof(lineBuffer), "mapping  %s %4lluMB 0x%0llX -> 0x%0llX\n", prot, size/(1024*1024), vmAddr, vmAddr+size);
         else
-            sprintf(lineBuffer, "mapping  %s %4lluKB 0x%0llX -> 0x%0llX\n", prot, size/1024,        vmAddr, vmAddr+size);
+            snprintf(lineBuffer, sizeof(lineBuffer), "mapping  %s %4lluKB 0x%0llX -> 0x%0llX\n", prot, size/1024,        vmAddr, vmAddr+size);
         result += lineBuffer;
     });
 
@@ -660,7 +718,7 @@ std::string DyldSharedCache::mapFile() const
         const dyld3::MachOFile* mf = (dyld3::MachOFile*)mh;
         mf->forEachSegment(^(const dyld3::MachOFile::SegmentInfo& info, bool& stop) {
             char lineBuffer[256];
-            sprintf(lineBuffer, "\t%16s 0x%08llX -> 0x%08llX\n", info.segName, info.vmAddr, info.vmAddr+info.vmSize);
+            snprintf(lineBuffer, sizeof(lineBuffer), "\t%16s 0x%08llX -> 0x%08llX\n", info.segName, info.vmAddr, info.vmAddr+info.vmSize);
             result += lineBuffer;
         });
         result += "\n";
@@ -758,41 +816,15 @@ bool DyldSharedCache::hasImagePath(const char* dylibPath, uint32_t& imageIndex) 
     return false;
 }
 
-bool DyldSharedCache::isOverridablePath(const char* dylibPath) const
-{
-    // all dylibs in customer dyld cache cannot be overridden except libdispatch.dylib
-    if ( header.cacheType == kDyldSharedCacheTypeProduction ) {
-        return (strcmp(dylibPath, "/usr/lib/system/libdispatch.dylib") == 0);
-    }
-    // in dev caches we can override all paths
-    return true;
-}
-
-bool DyldSharedCache::hasNonOverridablePath(const char* dylibPath) const
-{
-    // all dylibs in customer dyld cache cannot be overridden except libdispatch.dylib
-    bool pathIsInDyldCacheWhichCannotBeOverridden = false;
-    if ( header.cacheType == kDyldSharedCacheTypeProduction ) {
-        uint32_t imageIndex;
-        pathIsInDyldCacheWhichCannotBeOverridden = this->hasImagePath(dylibPath, imageIndex);
-        if ( pathIsInDyldCacheWhichCannotBeOverridden && isOverridablePath(dylibPath) )
-            pathIsInDyldCacheWhichCannotBeOverridden = false;
-    }
-    return pathIsInDyldCacheWhichCannotBeOverridden;
-}
-
 intptr_t DyldSharedCache::slide() const
 {
     const dyld_cache_mapping_info* mappings = (dyld_cache_mapping_info*)((char*)this + header.mappingOffset);
     return (intptr_t)this - (intptr_t)(mappings[0].address);
 }
 
-const PrebuiltLoader* DyldSharedCache::findPrebuiltLoader(const char* path) const
+const PrebuiltLoaderSet* DyldSharedCache::dylibsLoaderSet() const
 {
     if ( header.mappingOffset < __offsetof(dyld_cache_header, programTrieSize) )
-        return nullptr;
-    uint32_t imageIndex;
-    if ( !this->hasImagePath(path, imageIndex) )
         return nullptr;
     const dyld_cache_mapping_info* mappings = (dyld_cache_mapping_info*)((char*)this + header.mappingOffset);
     if ( mappings[0].fileOffset != 0 )
@@ -803,7 +835,20 @@ const PrebuiltLoader* DyldSharedCache::findPrebuiltLoader(const char* path) cons
         return nullptr;
     uintptr_t                slide        = (uintptr_t)this - (uintptr_t)(mappings[0].address);
     const PrebuiltLoaderSet* pbLoaderSet  = (PrebuiltLoaderSet*)(this->header.dylibsPBLSetAddr + slide);
-    return pbLoaderSet->atIndex(imageIndex);
+    return pbLoaderSet;
+}
+
+const PrebuiltLoader* DyldSharedCache::findPrebuiltLoader(const char* path) const
+{
+    if ( header.mappingOffset < __offsetof(dyld_cache_header, programTrieSize) )
+        return nullptr;
+    uint32_t imageIndex;
+    if ( !this->hasImagePath(path, imageIndex) )
+        return nullptr;
+    if ( const PrebuiltLoaderSet* pbLoaderSet = this->dylibsLoaderSet() )
+        return pbLoaderSet->atIndex(imageIndex);
+
+    return nullptr;
 }
 
 void DyldSharedCache::forEachLaunchLoaderSet(void (^handler)(const char* executableRuntimePath, const PrebuiltLoaderSet* pbls)) const
@@ -853,17 +898,22 @@ const PrebuiltLoaderSet* DyldSharedCache::findLaunchLoaderSet(const char* execut
 
 bool DyldSharedCache::hasLaunchLoaderSetWithCDHash(const char* cdHashString) const
 {
+    return (findLaunchLoaderSetWithCDHash(cdHashString) != nullptr);
+}
+
+const dyld4::PrebuiltLoaderSet* DyldSharedCache::findLaunchLoaderSetWithCDHash(const char* cdHashString) const
+{
     if ( cdHashString == nullptr )
-        return false;
+        return nullptr;
 
     // Check source doesn't overflow buffer.  strncat unfortunately isn't available
     if ( strlen(cdHashString) >= 128 )
-        return false;
+        return nullptr;
 
-    char buffer[128] = { '\0' };
-    strcat(buffer, "/cdhash/");
-    strlcat(buffer, cdHashString, sizeof(buffer));
-    return findLaunchLoaderSet(buffer) != nullptr;
+    char cdPath[140];
+    strlcpy(cdPath, "/cdhash/", sizeof(cdPath));
+    strlcat(cdPath, cdHashString, sizeof(cdPath));
+    return findLaunchLoaderSet(cdPath);
 }
 
 
@@ -1001,6 +1051,11 @@ void DyldSharedCache::forEachDylibPath(void (^handler)(const char* dylibPath, ui
     }
 }
 
+const void* DyldSharedCache::patchTable() const
+{
+    return getAddrField<const void*>(header.patchInfoAddr);
+}
+
 uint32_t DyldSharedCache::patchInfoVersion() const {
     if ( header.mappingOffset <= __offsetof(dyld_cache_header, swiftOptsSize) ) {
         return 1;
@@ -1026,25 +1081,13 @@ uint32_t DyldSharedCache::patchableExportCount(uint32_t imageIndex) const {
         return patchArray[imageIndex].patchExportsCount;
     }
 
-    // V2 and newer structs
-    if ( patchVersion == 2 ) {
-        const dyld_cache_patch_info_v2* patchInfo = getAddrField<dyld_cache_patch_info_v2*>(header.patchInfoAddr);
-        const dyld_cache_image_patches_v2* patchArray = getAddrField<dyld_cache_image_patches_v2*>(patchInfo->patchTableArrayAddr);
-
-        // FIXME: This shouldn't be possible.  The cache builder always adds 1 dyld_cache_image_patches_v2 per-image.  But for now
-        // be conservative to match V1.
-        if (imageIndex > patchInfo->patchTableArrayCount)
-            return 0;
-
-        const dyld_cache_image_patches_v2& imagePatches = patchArray[imageIndex];
-        return imagePatches.patchExportsCount;
-    }
-
-    // Unknown version
-    assert(false);
+    // V2/V3 and newer structs
+    PatchTable patchTable(this->patchTable(), header.patchInfoAddr);
+    return patchTable.patchableExportCount(imageIndex);
 }
 
-void DyldSharedCache::forEachPatchableExport(uint32_t imageIndex, void (^handler)(uint32_t dylibVMOffsetOfImpl, const char* exportName)) const {
+void DyldSharedCache::forEachPatchableExport(uint32_t imageIndex, void (^handler)(uint32_t dylibVMOffsetOfImpl, const char* exportName,
+                                                                                  PatchKind patchKind)) const {
     if ( header.patchInfoAddr == 0 )
         return;
 
@@ -1078,40 +1121,18 @@ void DyldSharedCache::forEachPatchableExport(uint32_t imageIndex, void (^handler
 
             // Convert from a cache offset to an offset from the input image
             uint32_t imageOffset = (uint32_t)((cacheUnslidAddress + patchExport.cacheOffsetOfImpl) - imageLoadAddress);
-            handler(imageOffset, exportName);
+            handler(imageOffset, exportName, PatchKind::regular);
         }
 
         return;
     }
 
-    // V2 and newer structs
-    if ( patchVersion == 2 ) {
-        const auto* patchInfo = getAddrField<dyld_cache_patch_info_v2*>(header.patchInfoAddr);
-        const auto* patchArray = getAddrField<dyld_cache_image_patches_v2*>(patchInfo->patchTableArrayAddr);
-        const auto* imageExports = getAddrField<dyld_cache_image_export_v2*>(patchInfo->patchImageExportsArrayAddr);
-        const char* exportNames = getAddrField<char*>(patchInfo->patchExportNamesAddr);
-
-        // FIXME: This shouldn't be possible.  The cache builder always adds 1 dyld_cache_image_patches_v2 per-image.  But for now
-        // be conservative to match V1.
-        if (imageIndex > patchInfo->patchTableArrayCount)
-            return;
-
-        const dyld_cache_image_patches_v2& imagePatches = patchArray[imageIndex];
-        // FIXME: This shouldn't be possible.  We should catch this in the builder instead
-        if ( (imagePatches.patchExportsStartIndex + imagePatches.patchExportsCount) > patchInfo->patchImageExportsArrayCount )
-            return;
-
-        for (uint64_t exportIndex = 0; exportIndex != imagePatches.patchExportsCount; ++exportIndex) {
-            const dyld_cache_image_export_v2& imageExport = imageExports[imagePatches.patchExportsStartIndex + exportIndex];
-            const char* exportName = ( imageExport.exportNameOffset < patchInfo->patchExportNamesSize ) ? &exportNames[imageExport.exportNameOffset] : "";
-            handler(imageExport.dylibOffsetOfImpl, exportName);
-        }
-        return;
-    }
-
-    assert(false);
+    // V2 newer structs
+    PatchTable patchTable(this->patchTable(), header.patchInfoAddr);
+    patchTable.forEachPatchableExport(imageIndex, handler);
 }
 
+#if BUILDING_SHARED_CACHE_UTIL
 void DyldSharedCache::forEachPatchableUseOfExport(uint32_t imageIndex, uint32_t dylibVMOffsetOfImpl,
                                                   void (^handler)(uint32_t userImageIndex, uint32_t userVMOffset,
                                                                   MachOLoaded::PointerMetaData pmd, uint64_t addend)) const {
@@ -1226,66 +1247,11 @@ void DyldSharedCache::forEachPatchableUseOfExport(uint32_t imageIndex, uint32_t 
         return;
     }
 
-    // V2 and newer structs
-    if ( patchVersion == 2 ) {
-        const auto* patchInfo = getAddrField<dyld_cache_patch_info_v2*>(header.patchInfoAddr);
-        const auto* patchArray = getAddrField<dyld_cache_image_patches_v2*>(patchInfo->patchTableArrayAddr);
-        const auto* imageExports = getAddrField<dyld_cache_image_export_v2*>(patchInfo->patchImageExportsArrayAddr);
-        const auto* clientArray = getAddrField<dyld_cache_image_clients_v2*>(patchInfo->patchClientsArrayAddr);
-        const auto* clientExports = getAddrField<dyld_cache_patchable_export_v2*>(patchInfo->patchClientExportsArrayAddr);
-        const auto* patchLocations = getAddrField<dyld_cache_patchable_location_v2*>(patchInfo->patchLocationArrayAddr);
-
-        // FIXME: This shouldn't be possible.  The cache builder always adds 1 dyld_cache_image_patches_v2 per-image.  But for now
-        // be conservative to match V1.
-        if (imageIndex > patchInfo->patchTableArrayCount)
-            return;
-
-        const dyld_cache_image_patches_v2& imagePatches = patchArray[imageIndex];
-        // FIXME: This shouldn't be possible.  We should catch this in the builder instead
-        if ( (imagePatches.patchClientsStartIndex + imagePatches.patchClientsCount) > patchInfo->patchClientsArrayCount )
-            return;
-
-        for (uint64_t clientIndex = 0; clientIndex != imagePatches.patchClientsCount; ++clientIndex) {
-            const dyld_cache_image_clients_v2& client = clientArray[imagePatches.patchClientsStartIndex + clientIndex];
-
-            // FIXME: This shouldn't be possible.  We should catch this in the builder instead
-            if ( (client.patchExportsStartIndex + client.patchExportsCount) > patchInfo->patchClientExportsArrayCount )
-                return;
-
-            for (uint64_t exportIndex = 0; exportIndex != client.patchExportsCount; ++exportIndex) {
-                const dyld_cache_patchable_export_v2& clientExport = clientExports[client.patchExportsStartIndex + exportIndex];
-
-                // The client export points to an image export from the image we are rooting
-                if ( clientExport.imageExportIndex > patchInfo->patchImageExportsArrayCount )
-                    return;
-
-                const dyld_cache_image_export_v2& imageExport = imageExports[clientExport.imageExportIndex];
-
-                if ( imageExport.dylibOffsetOfImpl != dylibVMOffsetOfImpl )
-                    continue;
-
-                if ( (clientExport.patchLocationsStartIndex + clientExport.patchLocationsCount) > patchInfo->patchLocationArrayCount )
-                    return;
-
-                for (uint64_t locationIndex = 0; locationIndex != clientExport.patchLocationsCount; ++locationIndex) {
-                    const dyld_cache_patchable_location_v2& patchLocation = patchLocations[clientExport.patchLocationsStartIndex + locationIndex];
-
-                    dyld3::MachOLoaded::PointerMetaData pmd;
-                    pmd.diversity         = patchLocation.discriminator;
-                    pmd.high8             = patchLocation.high7 << 1;
-                    pmd.authenticated     = patchLocation.authenticated;
-                    pmd.key               = patchLocation.key;
-                    pmd.usesAddrDiversity = patchLocation.usesAddressDiversity;
-
-                    handler(client.clientDylibIndex, patchLocation.dylibOffsetOfUse, pmd, patchLocation.getAddend());
-                }
-            }
-        }
-        return;
-    }
-
-    assert(false);
+    // V2/V3 and newer structs
+    PatchTable patchTable(this->patchTable(), header.patchInfoAddr);
+    patchTable.forEachPatchableUseOfExport(imageIndex, dylibVMOffsetOfImpl, handler);
 }
+#endif
 
 bool DyldSharedCache::shouldPatchClientOfImage(uint32_t imageIndex, uint32_t userImageIndex) const {
     if ( header.patchInfoAddr == 0 )
@@ -1299,33 +1265,9 @@ bool DyldSharedCache::shouldPatchClientOfImage(uint32_t imageIndex, uint32_t use
         return false;
     }
 
-    // V2 and newer structs
-    if ( patchVersion == 2 ) {
-        const auto* patchInfo = getAddrField<dyld_cache_patch_info_v2*>(header.patchInfoAddr);
-        const auto* patchArray = getAddrField<dyld_cache_image_patches_v2*>(patchInfo->patchTableArrayAddr);
-        const auto* clientArray = getAddrField<dyld_cache_image_clients_v2*>(patchInfo->patchClientsArrayAddr);
-
-        // FIXME: This shouldn't be possible.  The cache builder always adds 1 dyld_cache_image_patches_v2 per-image.  But for now
-        // be conservative to match V1.
-        if (imageIndex > patchInfo->patchTableArrayCount)
-            return false;
-
-        const dyld_cache_image_patches_v2& imagePatches = patchArray[imageIndex];
-        // FIXME: This shouldn't be possible.  We should catch this in the builder instead
-        if ( (imagePatches.patchClientsStartIndex + imagePatches.patchClientsCount) > patchInfo->patchClientsArrayCount )
-            return false;
-
-        for (uint64_t clientIndex = 0; clientIndex != imagePatches.patchClientsCount; ++clientIndex) {
-            const dyld_cache_image_clients_v2& client = clientArray[imagePatches.patchClientsStartIndex + clientIndex];
-
-            // We only want fixups in a specific image.  Skip any others
-            if ( client.clientDylibIndex == userImageIndex )
-                return true;
-        }
-        return false;
-    }
-
-    assert(false);
+    // V2/V3 and newer structs
+    PatchTable patchTable(this->patchTable(), header.patchInfoAddr);
+    return patchTable.imageHasClient(imageIndex, userImageIndex);
 }
 
 void DyldSharedCache::forEachPatchableUseOfExportInImage(uint32_t imageIndex, uint32_t dylibVMOffsetOfImpl, uint32_t userImageIndex,
@@ -1444,72 +1386,10 @@ void DyldSharedCache::forEachPatchableUseOfExportInImage(uint32_t imageIndex, ui
         return;
     }
 
-    // V2 and newer structs
-    if ( patchVersion == 2 ) {
-        const auto* patchInfo = getAddrField<dyld_cache_patch_info_v2*>(header.patchInfoAddr);
-        const auto* patchArray = getAddrField<dyld_cache_image_patches_v2*>(patchInfo->patchTableArrayAddr);
-        const auto* imageExports = getAddrField<dyld_cache_image_export_v2*>(patchInfo->patchImageExportsArrayAddr);
-        const auto* clientArray = getAddrField<dyld_cache_image_clients_v2*>(patchInfo->patchClientsArrayAddr);
-        const auto* clientExports = getAddrField<dyld_cache_patchable_export_v2*>(patchInfo->patchClientExportsArrayAddr);
-        const auto* patchLocations = getAddrField<dyld_cache_patchable_location_v2*>(patchInfo->patchLocationArrayAddr);
-
-        // FIXME: This shouldn't be possible.  The cache builder always adds 1 dyld_cache_image_patches_v2 per-image.  But for now
-        // be conservative to match V1.
-        if (imageIndex > patchInfo->patchTableArrayCount)
-            return;
-
-        const dyld_cache_image_patches_v2& imagePatches = patchArray[imageIndex];
-        // FIXME: This shouldn't be possible.  We should catch this in the builder instead
-        if ( (imagePatches.patchClientsStartIndex + imagePatches.patchClientsCount) > patchInfo->patchClientsArrayCount )
-            return;
-
-        for (uint64_t clientIndex = 0; clientIndex != imagePatches.patchClientsCount; ++clientIndex) {
-            const dyld_cache_image_clients_v2& client = clientArray[imagePatches.patchClientsStartIndex + clientIndex];
-
-            // We only want fixups in a specific image.  Skip any others
-            if ( client.clientDylibIndex != userImageIndex )
-                continue;
-
-            // FIXME: This shouldn't be possible.  We should catch this in the builder instead
-            if ( (client.patchExportsStartIndex + client.patchExportsCount) > patchInfo->patchClientExportsArrayCount )
-                return;
-
-            for (uint64_t exportIndex = 0; exportIndex != client.patchExportsCount; ++exportIndex) {
-                const dyld_cache_patchable_export_v2& clientExport = clientExports[client.patchExportsStartIndex + exportIndex];
-
-                // The client export points to an image export from the image we are rooting
-                if ( clientExport.imageExportIndex > patchInfo->patchImageExportsArrayCount )
-                    return;
-
-                const dyld_cache_image_export_v2& imageExport = imageExports[clientExport.imageExportIndex];
-
-                if ( imageExport.dylibOffsetOfImpl != dylibVMOffsetOfImpl )
-                    continue;
-
-                if ( (clientExport.patchLocationsStartIndex + clientExport.patchLocationsCount) > patchInfo->patchLocationArrayCount )
-                    return;
-
-                for (uint64_t locationIndex = 0; locationIndex != clientExport.patchLocationsCount; ++locationIndex) {
-                    const dyld_cache_patchable_location_v2& patchLocation = patchLocations[clientExport.patchLocationsStartIndex + locationIndex];
-
-                    dyld3::MachOLoaded::PointerMetaData pmd;
-                    pmd.diversity         = patchLocation.discriminator;
-                    pmd.high8             = patchLocation.high7 << 1;
-                    pmd.authenticated     = patchLocation.authenticated;
-                    pmd.key               = patchLocation.key;
-                    pmd.usesAddrDiversity = patchLocation.usesAddressDiversity;
-
-                    handler(patchLocation.dylibOffsetOfUse, pmd, patchLocation.getAddend());
-                }
-            }
-
-            // We only wanted to process this image.  We are now done
-            break;
-        }
-        return;
-    }
-
-    assert(false);
+    // V2/V3 and newer structs
+    PatchTable patchTable(this->patchTable(), header.patchInfoAddr);
+    patchTable.forEachPatchableUseOfExportInImage(imageIndex, dylibVMOffsetOfImpl,
+                                                  userImageIndex, handler);
 }
 
 void DyldSharedCache::forEachPatchableUseOfExport(uint32_t imageIndex, uint32_t dylibVMOffsetOfImpl,
@@ -1519,6 +1399,9 @@ void DyldSharedCache::forEachPatchableUseOfExport(uint32_t imageIndex, uint32_t 
         return;
 
     uint32_t patchVersion = patchInfoVersion();
+
+    // Get GOT patches if we have them
+    this->forEachPatchableGOTUseOfExport(imageIndex, dylibVMOffsetOfImpl, handler);
 
     if ( patchVersion == 1 ) {
         // Old cache.  The patch table uses the V1 structs
@@ -1565,89 +1448,46 @@ void DyldSharedCache::forEachPatchableUseOfExport(uint32_t imageIndex, uint32_t 
         return;
     }
 
-    // V2 and newer structs
-    if ( patchVersion == 2 ) {
-        const auto* patchInfo = getAddrField<dyld_cache_patch_info_v2*>(header.patchInfoAddr);
-        const auto* patchArray = getAddrField<dyld_cache_image_patches_v2*>(patchInfo->patchTableArrayAddr);
-        const auto* imageExports = getAddrField<dyld_cache_image_export_v2*>(patchInfo->patchImageExportsArrayAddr);
-        const auto* clientArray = getAddrField<dyld_cache_image_clients_v2*>(patchInfo->patchClientsArrayAddr);
-        const auto* clientExports = getAddrField<dyld_cache_patchable_export_v2*>(patchInfo->patchClientExportsArrayAddr);
-        const auto* patchLocations = getAddrField<dyld_cache_patchable_location_v2*>(patchInfo->patchLocationArrayAddr);
+    // V2/V3 and newer structs
+    auto getDylibAddress = ^(uint32_t dylibImageIndex) {
+        auto* clientMF = (dyld3::MachOFile*)(this->getIndexedImageEntry(dylibImageIndex));
+        if ( clientMF == nullptr )
+            return 0ULL;
+        return clientMF->preferredLoadAddress();
+    };
+    PatchTable patchTable(this->patchTable(), header.patchInfoAddr);
+    patchTable.forEachPatchableCacheUseOfExport(imageIndex, dylibVMOffsetOfImpl,
+                                                this->unslidLoadAddress(),
+                                                getDylibAddress, handler);
+}
 
-        // FIXME: This shouldn't be possible.  The cache builder always adds 1 dyld_cache_image_patches_v2 per-image.  But for now
-        // be conservative to match V1.
-        if (imageIndex > patchInfo->patchTableArrayCount)
-            return;
+void DyldSharedCache::forEachPatchableGOTUseOfExport(uint32_t imageIndex, uint32_t dylibVMOffsetOfImpl,
+                                                     void (^handler)(uint64_t cacheVMOffset,
+                                                                     MachOFile::PointerMetaData pmd,
+                                                                     uint64_t addend)) const {
+    if ( header.patchInfoAddr == 0 )
+        return;
 
-        const dyld_cache_image_patches_v2& imagePatches = patchArray[imageIndex];
-        // FIXME: This shouldn't be possible.  We should catch this in the builder instead
-        if ( (imagePatches.patchClientsStartIndex + imagePatches.patchClientsCount) > patchInfo->patchClientsArrayCount )
-            return;
+    uint32_t patchVersion = patchInfoVersion();
 
-        uint64_t cacheUnslidAddress = unslidLoadAddress();
-
-        for (uint64_t clientIndex = 0; clientIndex != imagePatches.patchClientsCount; ++clientIndex) {
-            const dyld_cache_image_clients_v2& client = clientArray[imagePatches.patchClientsStartIndex + clientIndex];
-
-            // FIXME: This shouldn't be possible.  We should catch this in the builder instead
-            if ( (client.patchExportsStartIndex + client.patchExportsCount) > patchInfo->patchClientExportsArrayCount )
-                return;
-
-            // The callback wants a cache offset, so convert from "image + address" to a cache offset
-            uint64_t clientModTime;
-            uint64_t clientINode;
-            const dyld3::MachOAnalyzer* clientMA = (dyld3::MachOAnalyzer*)(this->getIndexedImageEntry(client.clientDylibIndex, clientModTime, clientINode));
-            if ( clientMA == nullptr )
-                return;
-
-            uint64_t clientUnslidAddress = clientMA->preferredLoadAddress();
-
-            for (uint64_t exportIndex = 0; exportIndex != client.patchExportsCount; ++exportIndex) {
-                const dyld_cache_patchable_export_v2& clientExport = clientExports[client.patchExportsStartIndex + exportIndex];
-
-                // The client export points to an image export from the image we are rooting
-                if ( clientExport.imageExportIndex > patchInfo->patchImageExportsArrayCount )
-                    return;
-
-                const dyld_cache_image_export_v2& imageExport = imageExports[clientExport.imageExportIndex];
-
-                if ( imageExport.dylibOffsetOfImpl != dylibVMOffsetOfImpl )
-                    continue;
-
-                if ( (clientExport.patchLocationsStartIndex + clientExport.patchLocationsCount) > patchInfo->patchLocationArrayCount )
-                    return;
-
-                for (uint64_t locationIndex = 0; locationIndex != clientExport.patchLocationsCount; ++locationIndex) {
-                    const dyld_cache_patchable_location_v2& patchLocation = patchLocations[clientExport.patchLocationsStartIndex + locationIndex];
-
-                    dyld3::MachOLoaded::PointerMetaData pmd;
-                    pmd.diversity         = patchLocation.discriminator;
-                    pmd.high8             = patchLocation.high7 << 1;
-                    pmd.authenticated     = patchLocation.authenticated;
-                    pmd.key               = patchLocation.key;
-                    pmd.usesAddrDiversity = patchLocation.usesAddressDiversity;
-
-                    uint64_t cacheOffset = (clientUnslidAddress + patchLocation.dylibOffsetOfUse) - cacheUnslidAddress;
-                    handler(cacheOffset, pmd, patchLocation.getAddend());
-                }
-            }
-        }
+    if ( patchVersion == 1 ) {
+        // Old cache.  Only V3 has GOT patching
         return;
     }
 
-    assert(false);
+    // V3 and newer structs
+    PatchTable patchTable(this->patchTable(), header.patchInfoAddr);
+    patchTable.forEachPatchableGOTUseOfExport(imageIndex, dylibVMOffsetOfImpl, handler);
 }
 
 #if !(BUILDING_LIBDYLD || BUILDING_DYLD)
 // MRM map file generator
-std::string DyldSharedCache::generateJSONMap(const char* disposition) const {
+std::string DyldSharedCache::generateJSONMap(const char* disposition, uuid_t cache_uuid, bool verbose) const {
     dyld3::json::Node cacheNode;
 
     cacheNode.map["version"].value = "1";
     cacheNode.map["disposition"].value = disposition;
     cacheNode.map["base-address"].value = dyld3::json::hex(unslidLoadAddress());
-    uuid_t cache_uuid;
-    getUUID(cache_uuid);
     uuid_string_t cache_uuidStr;
     uuid_unparse(cache_uuid, cache_uuidStr);
     cacheNode.map["uuid"].value = cache_uuidStr;
@@ -1670,6 +1510,21 @@ std::string DyldSharedCache::generateJSONMap(const char* disposition) const {
             segmentNode.map["name"].value = info.segName;
             segmentNode.map["start-vmaddr"].value = dyld3::json::hex(info.vmAddr);
             segmentNode.map["end-vmaddr"].value = dyld3::json::hex(info.vmAddr + info.vmSize);
+
+            // Add sections in verbose mode
+            if ( verbose ) {
+                __block dyld3::json::Node sectionsNode;
+                ma->forEachSection(^(const dyld3::MachOAnalyzer::SectionInfo& sectInfo, bool malformedSectionRange, bool& stopSection) {
+                    if ( sectInfo.segInfo.segIndex == info.segIndex ) {
+                        dyld3::json::Node sectionNode;
+                        sectionNode.map["name"].value = sectInfo.sectName;
+                        sectionNode.map["size"] = dyld3::json::Node(sectInfo.sectSize);
+                        sectionsNode.array.push_back(sectionNode);
+                    }
+                });
+                if ( !sectionsNode.array.empty() )
+                    segmentNode.map["sections"] = std::move(sectionsNode);
+            }
             segmentsNode.array.push_back(segmentNode);
         });
         imageNode.map["segments"] = segmentsNode;
@@ -1721,8 +1576,10 @@ dyld3::MachOAnalyzer::VMAddrConverter DyldSharedCache::makeVMAddrConverter(bool 
     // until we find one with slide info
     forEachCache(^(const DyldSharedCache *cache, bool& stopCache) {
         cache->forEachSlideInfo(^(uint64_t mappingStartAddress, uint64_t mappingSize, const uint8_t *mappingPagesStart, uint64_t slideInfoOffset, uint64_t slideInfoSize, const dyld_cache_slide_info *slideInfoHeader) {
-            assert(slideInfoHeader->version >= 2);
-            if ( slideInfoHeader->version == 2 ) {
+            if ( slideInfoHeader->version == 1 ) {
+                pointerFormat   = VMAddrConverter::SharedCacheFormat::v1;
+                pointerValueAdd = 0;
+            } else if ( slideInfoHeader->version == 2 ) {
                 const dyld_cache_slide_info2* slideInfo = (dyld_cache_slide_info2*)(slideInfoHeader);
                 assert(slideInfo->delta_mask == 0x00FFFF0000000000);
                 pointerFormat   = VMAddrConverter::SharedCacheFormat::v2_x86_64_tbi;
@@ -1756,13 +1613,19 @@ dyld3::MachOAnalyzer::VMAddrConverter DyldSharedCache::makeVMAddrConverter(bool 
 #endif
 
 bool DyldSharedCache::inDyldCache(const DyldSharedCache* cache, const dyld3::MachOFile* mf) {
-    // FIXME: The cache PBLS has a null state.config.dyldCache.addr when built, so we can't do the
-    // range check.  We might be able to remove the #if below if we can instead set the cache in the config.
-#if BUILDING_CACHE_BUILDER
-    return mf->inDyldCache();
-#else
     return mf->inDyldCache() && (cache != nullptr) && ((uintptr_t)mf >= (uintptr_t)cache) && ((uintptr_t)mf < ((uintptr_t)cache + cache->mappedSize()));
-#endif
+}
+
+bool DyldSharedCache::isSubCachePath(const char* leafName)
+{
+    const char* firstDot = strchr(leafName, '.');
+    // check for files with a suffix, to know wether or not they are sub-caches
+    if ( firstDot != NULL ) {
+        // skip files that are not of the format "<baseName>.development", as they are sub-caches
+        if ( strcmp(firstDot, ".development") != 0 )
+            return true;
+    }
+    return false;
 }
 
 #if !(BUILDING_LIBDYLD || BUILDING_DYLD)
@@ -1771,6 +1634,8 @@ const DyldSharedCache* DyldSharedCache::mapCacheFile(const char* path,
                                            uint64_t baseCacheUnslidAddress,
                                            uint8_t* buffer)
 {
+    // We don't need to map R-X as we aren't running the code here, so only allow mapping up to RW
+    const uint32_t maxPermissions = VM_PROT_READ | VM_PROT_WRITE;
     struct stat statbuf;
     if ( ::stat(path, &statbuf) ) {
         fprintf(stderr, "Error: stat failed for dyld shared cache at %s\n", path);
@@ -1789,6 +1654,11 @@ const DyldSharedCache* DyldSharedCache::mapCacheFile(const char* path,
         return nullptr;
     }
     const dyld_cache_header*       header   = (dyld_cache_header*)firstPage;
+    if ( strncmp(header->magic, "dyld_v1", 7) != 0 ) {
+        fprintf(stderr, "Error: Expected cache file magic to be 'dyld_v1...' in %s\n", path);
+        return nullptr;
+    }
+
    if ( header->mappingCount == 0 ) {
         fprintf(stderr, "Error: No mapping in shared cache file at %s\n", path);
         return nullptr;
@@ -1819,7 +1689,7 @@ const DyldSharedCache* DyldSharedCache::mapCacheFile(const char* path,
     for (uint32_t i=0; i < header->mappingCount; ++i) {
         uint64_t mappingAddressOffset = mappings[i].address - mappings[0].address;
         void* mapped_cache = ::mmap((void*)(buffer + mappingAddressOffset + subCacheBufferOffset), (size_t)mappings[i].size,
-                                    mappings[i].maxProt, MAP_FIXED | MAP_PRIVATE, cache_fd, mappings[i].fileOffset);
+                                    mappings[i].maxProt & maxPermissions, MAP_FIXED | MAP_PRIVATE, cache_fd, mappings[i].fileOffset);
         if (mapped_cache == MAP_FAILED) {
             fprintf(stderr, "Error: mmap() for shared cache at %s failed, errno=%d\n", path, errno);
             return nullptr;
@@ -1839,20 +1709,33 @@ std::vector<const DyldSharedCache*> DyldSharedCache::mapCacheFiles(const char* p
     std::vector<const DyldSharedCache*> caches;
     caches.push_back(cache);
 
+    std::string basePath = std::string(path);
+    if ( cache->header.cacheType == kDyldSharedCacheTypeUniversal )
+    {
+        std::size_t pos = basePath.find(DYLD_SHARED_CACHE_DEVELOPMENT_EXT);
+        if (pos != std::string::npos)
+            basePath = basePath.substr(0, basePath.size() - 12);
+    }
     // Load all subcaches, if we have them
     if ( cache->header.mappingOffset >= __offsetof(dyld_cache_header, subCacheArrayCount) ) {
         if ( cache->header.subCacheArrayCount != 0 ) {
             const dyld_subcache_entry* subCacheEntries = (dyld_subcache_entry*)((uint8_t*)cache + cache->header.subCacheArrayOffset);
+            bool hasCacheSuffix = cache->header.mappingOffset > __offsetof(dyld_cache_header, cacheSubType);
 
             for (uint32_t i = 0; i != cache->header.subCacheArrayCount; ++i) {
-                std::string subCachePath = std::string(path) + "." + dyld3::json::decimal(i + 1);
+                std::string subCachePath = std::string(path) + "." + dyld3::json::unpaddedDecimal(i + 1);
+                if ( hasCacheSuffix ) {
+                    subCachePath = basePath + subCacheEntries[i].fileSuffix;
+                }
                 const DyldSharedCache* subCache = DyldSharedCache::mapCacheFile(subCachePath.c_str(), cache->unslidLoadAddress(), (uint8_t*)cache);
                 if ( subCache == nullptr )
                     return {};
 
-                if ( memcmp(subCache->header.uuid, subCacheEntries[i].uuid, 16) != 0 ) {
+                uint8_t uuid[16];
+                cache->getSubCacheUuid(i, uuid);
+                if ( memcmp(subCache->header.uuid, uuid, 16) != 0 ) {
                     uuid_string_t expectedUUIDString;
-                    uuid_unparse_upper(subCacheEntries[i].uuid, expectedUUIDString);
+                    uuid_unparse_upper(uuid, expectedUUIDString);
                     uuid_string_t foundUUIDString;
                     uuid_unparse_upper(subCache->header.uuid, foundUUIDString);
                     fprintf(stderr, "Error: SubCache[%i] UUID mismatch.  Expected %s, got %s\n", i, expectedUUIDString, foundUUIDString);
@@ -1966,7 +1849,21 @@ const uint8_t* DyldSharedCache::legacyCacheDataRegionBuffer() const
     return (uint8_t*)(legacyCacheDataRegionMapping()->address) + slide;
 }
 
-const objc_opt::objc_opt_t* DyldSharedCache::objcOpt() const
+const ObjCOptimizationHeader* DyldSharedCache::objcOpts() const
+{
+    if ( header.mappingOffset <= __offsetof(dyld_cache_header, objcOptsSize) )
+        return nullptr;
+
+    return (const ObjCOptimizationHeader*)((char*)this + header.objcOptsOffset);
+}
+
+#if BUILDING_CACHE_BUILDER
+const objc_opt::objc_opt_t* DyldSharedCache::oldObjcOpt() const
+{
+    return nullptr;
+}
+#else
+const objc_opt::objc_opt_t* DyldSharedCache::oldObjcOpt() const
 {
     // Find the objc image
     __block const dyld3::MachOAnalyzer* objcMA = nullptr;
@@ -1975,15 +1872,6 @@ const objc_opt::objc_opt_t* DyldSharedCache::objcOpt() const
         uint64_t mTime;
         uint64_t inode;
         objcMA = (dyld3::MachOAnalyzer*)(this->getIndexedImageEntry(imageIndex, mTime, inode));
-    } else {
-#if BUILDING_CACHE_BUILDER
-        // The cache builder might call this before prior to the trie being written.
-        // In this case, we can still use the image list which is always available
-        forEachImage(^(const mach_header *mh, const char *installName) {
-            if ( !strcmp(installName, "/usr/lib/libobjc.A.dylib") )
-                objcMA = (const dyld3::MachOAnalyzer*)mh;
-        });
-#endif
     }
 
     if ( objcMA == nullptr )
@@ -2012,6 +1900,7 @@ const objc_opt::objc_opt_t* DyldSharedCache::objcOpt() const
 
     return nullptr;
 }
+#endif
 
 const void* DyldSharedCache::objcOptPtrs() const
 {
@@ -2050,31 +1939,109 @@ const void* DyldSharedCache::objcOptPtrs() const
     return objcPointersContent;
 }
 
+bool DyldSharedCache::hasOptimizedObjC() const
+{
+    return (this->objcOpts() != nullptr) || (this->oldObjcOpt() != nullptr);
+}
+
+uint32_t DyldSharedCache::objcOptVersion() const
+{
+    if ( const ObjCOptimizationHeader* opts = this->objcOpts() )
+        return opts->version;
+    if ( const objc_opt::objc_opt_t* opts = this->oldObjcOpt() )
+        return opts->version;
+    return 0;
+}
+
+uint32_t DyldSharedCache::objcOptFlags() const
+{
+    if ( const ObjCOptimizationHeader* opts = this->objcOpts() )
+        return 0;
+    if ( const objc_opt::objc_opt_t* opts = this->oldObjcOpt() )
+        return opts->flags;
+    return 0;
+}
+
+const objc::HeaderInfoRO* DyldSharedCache::objcHeaderInfoRO() const
+{
+    if ( const ObjCOptimizationHeader* opts = this->objcOpts() ) {
+        if ( opts->headerInfoROCacheOffset != 0 )
+            return (const objc::HeaderInfoRO*)((char*)this + opts->headerInfoROCacheOffset);
+        return nullptr;
+    }
+    if ( const objc_opt::objc_opt_t* opts = this->oldObjcOpt() )
+        return (const objc::HeaderInfoRO*)opts->headeropt_ro();
+    return nullptr;
+}
+
+const objc::HeaderInfoRW* DyldSharedCache::objcHeaderInfoRW() const
+{
+    if ( const ObjCOptimizationHeader* opts = this->objcOpts() ) {
+        if ( opts->headerInfoRWCacheOffset != 0 )
+            return (const objc::HeaderInfoRW*)((char*)this + opts->headerInfoRWCacheOffset);
+        return nullptr;
+    }
+    if ( const objc_opt::objc_opt_t* opts = this->oldObjcOpt() )
+        return (const objc::HeaderInfoRW*)opts->headeropt_rw();
+    return nullptr;
+}
+
+const objc::SelectorHashTable* DyldSharedCache::objcSelectorHashTable() const
+{
+    if ( const ObjCOptimizationHeader* opts = this->objcOpts() ) {
+        if ( opts->selectorHashTableCacheOffset != 0 )
+            return (const objc::SelectorHashTable*)((char*)this + opts->selectorHashTableCacheOffset);
+        return nullptr;
+    }
+    if ( const objc_opt::objc_opt_t* opts = this->oldObjcOpt() )
+        return opts->selectorOpt();
+    return nullptr;
+}
+
+const objc::ClassHashTable* DyldSharedCache::objcClassHashTable() const
+{
+    if ( const ObjCOptimizationHeader* opts = this->objcOpts() ) {
+        if ( opts->classHashTableCacheOffset != 0 )
+            return (const objc::ClassHashTable*)((char*)this + opts->classHashTableCacheOffset);
+        return nullptr;
+    }
+    if ( const objc_opt::objc_opt_t* opts = this->oldObjcOpt() )
+        return opts->classOpt();
+    return nullptr;
+}
+
+const objc::ProtocolHashTable* DyldSharedCache::objcProtocolHashTable() const
+{
+    if ( const ObjCOptimizationHeader* opts = this->objcOpts() ) {
+        if ( opts->protocolHashTableCacheOffset != 0 )
+            return (const objc::ProtocolHashTable*)((char*)this + opts->protocolHashTableCacheOffset);
+        return nullptr;
+    }
+    if ( const objc_opt::objc_opt_t* opts = this->oldObjcOpt() )
+        return opts->protocolOpt();
+    return nullptr;
+}
+
+const void* DyldSharedCache::objcRelativeMethodListsBaseAddress() const
+{
+    if ( const ObjCOptimizationHeader* opts = this->objcOpts() ) {
+        if ( opts->relativeMethodSelectorBaseAddressOffset != 0 )
+            return (const void*)((char*)this + opts->relativeMethodSelectorBaseAddressOffset);
+        return nullptr;
+    }
+    if ( const objc_opt::objc_opt_t* opts = this->oldObjcOpt() )
+        return opts->relativeMethodListsBaseAddress();
+    return nullptr;
+}
+
 #if !(BUILDING_LIBDYLD || BUILDING_DYLD)
 uint64_t DyldSharedCache::sharedCacheRelativeSelectorBaseVMAddress() const {
-    if ( header.mappingOffset <= __offsetof(dyld_cache_header, symbolFileUUID) )
+    const void* value = this->objcRelativeMethodListsBaseAddress();
+    if ( !value )
         return 0;
 
-    // In newer shared caches, relative method list selectors are offsets from the magic selector in libobjc
-    __block uint64_t sharedCacheRelativeSelectorBaseVMAddress = 0;
-    constexpr std::string_view magicSelector = "\xf0\x9f\xa4\xaf";
-    dyld3::MachOAnalyzer::VMAddrConverter vmAddrConverter = makeVMAddrConverter(false);
-    uint64_t sharedCacheSlide = (uint64_t)this - unslidLoadAddress();
-    forEachImage(^(const mach_header *mh, const char *installName) {
-        if ( !strcmp(installName, "/usr/lib/libobjc.A.dylib") ) {
-            const dyld3::MachOAnalyzer* ma = (const dyld3::MachOAnalyzer*)mh;
-            Diagnostics diag;
-            ma->forEachObjCSelectorReference(diag, vmAddrConverter,
-                                             ^(uint64_t selRefVMAddr, uint64_t selRefTargetVMAddr, bool &stop) {
-                const char* selValue = (const char*)(selRefTargetVMAddr + sharedCacheSlide);
-                if ( selValue == magicSelector ) {
-                    sharedCacheRelativeSelectorBaseVMAddress = selRefTargetVMAddr;
-                    stop = true;
-                }
-            });
-        }
-    });
-    return sharedCacheRelativeSelectorBaseVMAddress;
+    uint64_t vmOffset = (uint64_t)value - (uint64_t)this;
+    return this->unslidLoadAddress() + vmOffset;
 }
 #endif
 

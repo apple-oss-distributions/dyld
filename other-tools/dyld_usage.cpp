@@ -41,7 +41,7 @@
 #include <libutil.h>
 #include <ktrace/session.h>
 #include <dispatch/dispatch.h>
-#include <System/sys/kdebug.h>
+#include <sys/kdebug_private.h>
 
 #include "Tracing.h"
 
@@ -186,6 +186,22 @@ struct output_renderer {
         }
     }
 
+    void flushInterrupted() {
+        if (!_currentRootEvent) {
+            return;
+        }
+
+        std::ostringstream ostream;
+        outputConsoleLine(_currentRootEvent, columns, ostream, 0,
+                "root event was interrupted, flushing events", true);
+        std::cerr << ostream.str();
+        std::cerr.flush();
+
+        _eventStack.clear();
+        output(_currentRootEvent);
+        _currentRootEvent = nullptr;
+    }
+
     bool empty() { return !_currentRootEvent && _eventStack.empty() && _rootEvents.empty(); }
 private:
     template<typename T>
@@ -216,7 +232,7 @@ private:
     }
 
     struct event_pair {
-        event_pair(ktrace_event_t E) : _startTime(E->timestamp), _depth(0), _threadid((unsigned long)(E->threadid)),
+        event_pair(ktrace_event_t E) : _startTime(E->timestamp), _endTime(0), _depth(0), _threadid((unsigned long)(E->threadid)),
                                        _eventCode(KDBG_EXTRACT_CODE(E->debugid)), _walltime(E->walltime) {};
         virtual ~event_pair(){}
         std::vector<std::shared_ptr<event_pair>>& children() { return _children; }
@@ -278,6 +294,11 @@ private:
     }
 
     std::string duration(std::shared_ptr<event_pair> event) {
+        // interrupted event with no end timestamp
+        if (event->endTimestamp() == 0) {
+            return "";
+        }
+
         std::ostringstream result;
         uint64_t usecs = (mach_to_nano(event->endTimestamp() - event->startTimestamp()) + (NSEC_PER_USEC - 1)) / NSEC_PER_USEC;
         uint64_t secs = usecs / USEC_PER_SEC;
@@ -327,8 +348,15 @@ public:
             extended = true;
         }
 
+        outputConsoleLine(node, width, sstr, depth, line.str(), extended);
+
+        for (const auto& child : node->children()) {
+            outputConsole(child, width, sstr, depth+1);
+        }
+    }
+
+    void outputConsoleLine(std::shared_ptr<event_pair> node, uint64_t width, std::ostringstream& sstr, uint64_t depth, std::string lineStr, bool extended) {
         std::string timestampStr = timestamp(node, extended);
-        std::string lineStr = line.str();
         std::string commandStr = process(node, extended);
         std::string durationStr = duration(node);
         size_t lineMax = (size_t)width - (timestampStr.length() + commandStr.length() + durationStr.length() + 2*(size_t)depth + 3);
@@ -337,10 +365,6 @@ public:
         sstr << timestampStr << " ";
         std::fill_n(std::ostream_iterator<char>(sstr), 2*depth, ' ');
         sstr << lineStr << " " << durationStr << " " << commandStr << std::endl;
-
-        for (const auto& child : node->children()) {
-            outputConsole(child, width, sstr, depth+1);
-        }
     }
 
     void outputJSON(std::shared_ptr<event_pair> node, std::ostringstream& sstr) {
@@ -632,6 +656,10 @@ struct OutputManager {
     std::map<unsigned long, std::unique_ptr<output_renderer>> sOutputRenders;
 
     void flush() {
+        for (const auto& renderer: sOutputRenders) {
+            renderer.second->flushInterrupted();
+        }
+
         if (JSON_Tracing_flag) {
             std::ostringstream ostream;
             ostream << "{\"displayTimeUnit\":\"ns\"";
@@ -707,11 +735,18 @@ setup_ktrace_callbacks(void)
             return;
         auto i = sOutputManager.sOutputRenders.find((size_t)(event->threadid));
         if (i == sOutputManager.sOutputRenders.end()) {
-            sOutputManager.sOutputRenders.emplace(std::make_pair(event->threadid, std::make_unique<output_renderer>(s, event)));
-            i = sOutputManager.sOutputRenders.find((size_t)(event->threadid));
+            i = sOutputManager.sOutputRenders.emplace(event->threadid, std::make_unique<output_renderer>(s, event)).first;
         }
         i->second->recordEvent(event);
         if (i->second->empty()) {
+            sOutputManager.sOutputRenders.erase(i);
+        }
+    });
+
+    ktrace_set_thread_exit_handler(s, ^(uint64_t tid, const char* execname) {
+        if (auto i = sOutputManager.sOutputRenders.find((size_t)tid); i != sOutputManager.sOutputRenders.end()) {
+            // Renderer still registered, so the thread might have finished unexpectedly with missing end event
+            i->second->flushInterrupted();
             sOutputManager.sOutputRenders.erase(i);
         }
     });

@@ -64,8 +64,8 @@ struct dyld_all_image_infos_32 {
     uint32_t                        dyldPath;
     uint32_t                        notifyMachPorts[8];
     uint32_t                        reserved;
-    uint64_t                        cacheFSID;
-    uint64_t                        cacheFSObjID;
+    uint64_t                        sharedCacheFSID;
+    uint64_t                        sharedCacheFSObjID;
     uint32_t                        compact_dyld_image_info_addr;
     uint32_t                        compact_dyld_image_info_size;
     uint32_t                        platform;
@@ -107,8 +107,8 @@ struct dyld_all_image_infos_64 {
     uint64_t                dyldPath;
     uint32_t                notifyMachPorts[8];
     uint64_t                reserved[7];
-    uint64_t                cacheFSID;
-    uint64_t                cacheFSObjID;
+    uint64_t                sharedCacheFSID;
+    uint64_t                sharedCacheFSObjID;
     uint64_t                compact_dyld_image_info_addr;
     uint64_t                compact_dyld_image_info_size;
     uint32_t                platform;
@@ -151,6 +151,9 @@ struct dyld_aot_image_info_64 {
 #endif
 #ifndef DYLD_REMOTE_EVENT_SHARED_CACHE_MAPPED
 #define DYLD_REMOTE_EVENT_SHARED_CACHE_MAPPED       (2)
+#endif
+#ifndef DYLD_REMOTE_EVENT_BEFORE_INITIALIZERS
+#define DYLD_REMOTE_EVENT_BEFORE_INITIALIZERS  DYLD_REMOTE_EVENT_SHARED_CACHE_MAPPED
 #endif
 
 struct dyld_process_info_image_entry {

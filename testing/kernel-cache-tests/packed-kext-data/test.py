@@ -1,4 +1,4 @@
-#!/usr/bin/python2.7
+#!/usr/bin/python3
 
 import os
 import KernelCollection
@@ -20,13 +20,13 @@ def check(kernel_cache):
     assert kernel_cache.dictionary()["dylibs"][1]["name"] == "com.apple.bar"
     assert kernel_cache.dictionary()["dylibs"][1]["segments"][2]["name"] == "__DATA"
     assert kernel_cache.dictionary()["dylibs"][1]["segments"][2]["vmAddr"] == "0x20000"
-    assert kernel_cache.dictionary()["dylibs"][1]["segments"][2]["vmSize"] == "0x4"
+    assert kernel_cache.dictionary()["dylibs"][1]["segments"][2]["vmSize"] == "0xC8"
     # foo.kext
     assert kernel_cache.dictionary()["dylibs"][2]["name"] == "com.apple.foo"
     assert len(kernel_cache.dictionary()["dylibs"][2]["segments"]) == 4
     assert kernel_cache.dictionary()["dylibs"][2]["segments"][2]["name"] == "__DATA"
-    assert kernel_cache.dictionary()["dylibs"][2]["segments"][2]["vmAddr"] == "0x20004"
-    assert kernel_cache.dictionary()["dylibs"][2]["segments"][2]["vmSize"] == "0x4"
+    assert kernel_cache.dictionary()["dylibs"][2]["segments"][2]["vmAddr"] == "0x200C8"
+    assert kernel_cache.dictionary()["dylibs"][2]["segments"][2]["vmSize"] == "0xC8"
 
 
 # [~]> xcrun -sdk iphoneos.internal cc -arch arm64 -Wl,-static -mkernel -nostdlib -Wl,-add_split_seg_info -Wl,-rename_section,__TEXT,__text,__TEXT_EXEC,__text -Wl,-e,__start -Wl,-pagezero_size,0x0 -Wl,-pie main.c -o main.kernel

@@ -206,36 +206,47 @@ static Node parseNode(Diagnostics& diags, id jsonObject) {
 }
 
 Node readJSON(Diagnostics& diags, const char* filePath) {
-    NSInputStream* inputStream = [NSInputStream inputStreamWithFileAtPath:[NSString stringWithUTF8String:filePath]];
-    if (!inputStream) {
-        diags.error("Could not option json file: '%s'\n", filePath);
-        return Node();
-    }
-    [inputStream open];
+    Node resultNode;
 
-    NSError* error = nil;
-    id jsonObject = [NSJSONSerialization JSONObjectWithStream:inputStream options:NSJSONReadingMutableContainers error:&error];
-    if (!jsonObject) {
-        diags.error("Could not deserializer json file: '%s' because '%s'\n", filePath, [[error localizedFailureReason] UTF8String]);
+    @autoreleasepool {
+        NSInputStream* inputStream = [NSInputStream inputStreamWithFileAtPath:[NSString stringWithUTF8String:filePath]];
+        if (!inputStream) {
+            diags.error("Could not option json file: '%s'\n", filePath);
+            return Node();
+        }
+        [inputStream open];
+
+        NSError* error = nil;
+        id jsonObject = [NSJSONSerialization JSONObjectWithStream:inputStream options:NSJSONReadingMutableContainers error:&error];
+        if (!jsonObject) {
+            diags.error("Could not deserialize json file: '%s' because '%s'\n", filePath, [[error debugDescription] UTF8String]);
+            [inputStream close];
+            return Node();
+        }
+
+        resultNode = parseNode(diags, jsonObject);
         [inputStream close];
-        return Node();
     }
 
-    Node node = parseNode(diags, jsonObject);
-    [inputStream close];
-    return node;
+    return resultNode;
 }
 
 Node readJSON(Diagnostics& diags, const void * contents, size_t length) {
-    NSData* data = [NSData dataWithBytes:contents length:length];
-    NSError* error = nil;
-    id jsonObject = [NSJSONSerialization JSONObjectWithData:data options:NSJSONReadingMutableContainers error:&error];
-    if (!jsonObject) {
-        diags.error("Could not deserialize json because '%s'\n", [[error localizedFailureReason] UTF8String]);
-        return Node();
+    Node resultNode;
+
+    @autoreleasepool {
+        NSData* data = [NSData dataWithBytes:contents length:length];
+        NSError* error = nil;
+        id jsonObject = [NSJSONSerialization JSONObjectWithData:data options:NSJSONReadingMutableContainers error:&error];
+        if (!jsonObject) {
+            diags.error("Could not deserialize json because '%s'\n", [[error debugDescription] UTF8String]);
+            return Node();
+        }
+
+        resultNode = parseNode(diags, jsonObject);
     }
 
-    return parseNode(diags, jsonObject);
+    return resultNode;
 }
 
 } //namespace json

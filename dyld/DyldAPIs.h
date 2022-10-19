@@ -25,17 +25,26 @@
 #define DYLD_APIS_H
 
 #include "DyldRuntimeState.h"
+#include "OptimizerSwift.h"
+
+#if !BUILDING_DYLD && !BUILDING_LIBDYLD
+typedef struct dyld_process_s*              dyld_process_t;
+typedef struct dyld_process_snapshot_s*     dyld_process_snapshot_t;
+typedef struct dyld_shared_cache_s*         dyld_shared_cache_t;
+typedef struct dyld_image_s*                dyld_image_t;
+#endif
 
 namespace dyld4 {
 
+struct RuntimeLocks;
 
 class VIS_HIDDEN APIs : public RuntimeState
 {
 public:
 #if BUILDING_DYLD
-    static      APIs&                         bootstrap(const ProcessConfig& c, RuntimeLocks& locks);
+                                            APIs(const ProcessConfig& c, Allocator& alloc, RuntimeLocks& locks) : RuntimeState(c, alloc, locks) { }
 #else
-    static      APIs&                         bootstrap(const ProcessConfig& c);
+                                            APIs(const ProcessConfig& c, Allocator& alloc) : RuntimeState(c, alloc) { }
 #endif
 
     //
@@ -236,13 +245,27 @@ public:
     virtual     void                                _dyld_after_fork_dlopen_parent();
     virtual     void                                _dyld_after_fork_dlopen_child();
 
+    //
+    // Added iOS 16, macOS 13
+    //
+    virtual     const struct mach_header*           _dyld_get_dlopen_image_header(void* handle);
+    virtual     void                                _dyld_objc_register_callbacks(const _dyld_objc_callbacks* callbacks);
+    virtual     bool                                _dyld_has_preoptimized_swift_protocol_conformances(const struct mach_header* mh);
+    virtual     _dyld_protocol_conformance_result   _dyld_find_protocol_conformance_on_disk(const void *protocolDescriptor,
+                                                                                            const void *metadataType,
+                                                                                            const void *typeDescriptor,
+                                                                                            uint32_t flags);
+    virtual     _dyld_protocol_conformance_result   _dyld_find_foreign_type_protocol_conformance_on_disk(const void *protocol,
+                                                                                                         const char *foreignTypeIdentityStart,
+                                                                                                         size_t foreignTypeIdentityLength,
+                                                                                                         uint32_t flags);
+
 
 private:
-#if BUILDING_DYLD
-                            APIs(const ProcessConfig& c, RuntimeLocks& locks, Allocator* alloc) : RuntimeState(c, locks, *alloc) {}
-#else
-                            APIs(const ProcessConfig& c, Allocator* alloc) : RuntimeState(c, *alloc) {}
-#endif
+
+    typedef SwiftTypeProtocolConformanceDiskLocationKey          TypeKey;
+    typedef SwiftMetadataProtocolConformanceDiskLocationKey      MetadataKey;
+    typedef SwiftForeignTypeProtocolConformanceDiskLocationKey   ForeignKey;
 
     // internal helpers
     uint32_t                getSdkVersion(const mach_header* mh);

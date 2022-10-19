@@ -6,7 +6,6 @@
 
 // RUN:  DYLD_LIBRARY_PATH=$RUN_DIR/override/  ./interpose-replaced-dylib.exe
 
-#include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 #include <zlib.h>
@@ -24,7 +23,7 @@ extern const char* zlibVersion();
 int main(int argc, const char* argv[])
 {
     const char* version = zlibVersion();
-    printf("zlibVersion() returned \"%s\"\n", version);
+    LOG("zlibVersion() returned \"%s\"", version);
 /*
     if ( usingMyDylib != expectMyDylib ) {
         // Not using the right dylib

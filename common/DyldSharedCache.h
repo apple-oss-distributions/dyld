@@ -44,7 +44,10 @@
 #include "CachePatching.h"
 #include "Diagnostics.h"
 #include "MachOAnalyzer.h"
+
+#if !(BUILDING_LIBDYLD || BUILDING_DYLD)
 #include "JSON.h"
+#endif
 
 namespace dyld4 {
     class PrebuiltLoader;
@@ -55,13 +58,41 @@ namespace objc_opt {
 struct objc_opt_t;
 }
 
+namespace objc
+{
+struct HeaderInfoRO;
+struct HeaderInfoRW;
+class SelectorHashTable;
+class ClassHashTable;
+class ProtocolHashTable;
+}
+
 struct SwiftOptimizationHeader;
+
+struct VIS_HIDDEN ObjCOptimizationHeader
+{
+    uint32_t version;
+    uint32_t flags;
+    uint64_t headerInfoROCacheOffset;
+    uint64_t headerInfoRWCacheOffset;
+    uint64_t selectorHashTableCacheOffset;
+    uint64_t classHashTableCacheOffset;
+    uint64_t protocolHashTableCacheOffset;
+    uint64_t relativeMethodSelectorBaseAddressOffset;
+};
 
 class VIS_HIDDEN DyldSharedCache
 {
 public:
 
 #if BUILDING_CACHE_BUILDER
+    // FIXME: Delete this as its no longer used
+    struct FileAlias
+    {
+        std::string             realPath;
+        std::string             aliasPath;
+    };
+
     enum CodeSigningDigestMode
     {
         SHA256only = 0,
@@ -82,7 +113,7 @@ public:
         const dyld3::GradedArchs*                   archs;
         dyld3::Platform                             platform;
         LocalSymbolsMode                            localSymbolMode;
-        bool                                        optimizeStubs;
+        uint64_t                                    cacheConfiguration;
         bool                                        optimizeDyldDlopens;
         bool                                        optimizeDyldLaunches;
         CodeSigningDigestMode                       codeSigningDigestMode;
@@ -123,13 +154,6 @@ public:
         std::string                             errorMessage;
         std::set<std::string>                   warnings;
         std::set<const dyld3::MachOAnalyzer*>   evictions;
-    };
-
-
-    struct FileAlias
-    {
-        std::string             realPath;
-        std::string             aliasPath;
     };
 
 
@@ -202,16 +226,9 @@ public:
 
 
     //
-    // Is this path (which we know is in the shared cache), overridable
-    //
-    bool                isOverridablePath(const char* dylibPath) const;
-
-
-    //
     // Path is to a dylib in the cache and this is an optimized cache so that path cannot be overridden
     //
     bool                hasNonOverridablePath(const char* dylibPath) const;
-
 
     //
     // Check if this shared cache file contains local symbols info
@@ -227,12 +244,10 @@ public:
     //
     const bool          hasLocalSymbolsInfoFile() const;
 
-
     //
-    // Get code signature mapped address
+    // Get string name for a given cache type
     //
-    uint64_t             getCodeSignAddress() const;
-
+    static const char*   getCacheTypeName(uint64_t cacheType);
 
     //
     // Searches cache for dylib with specified mach_header
@@ -249,6 +264,7 @@ public:
     // Get image entry from index
     //
     const mach_header*  getIndexedImageEntry(uint32_t index, uint64_t& mTime, uint64_t& node) const;
+    const mach_header*  getIndexedImageEntry(uint32_t index) const;
 
 
     // iterates over all dylibs and aliases
@@ -305,7 +321,22 @@ public:
     uint32_t            numSubCaches() const;
 
     //
-    // Returns the address of the the first dyld_cache_image_info in the cache
+    // Returns index of subCache containing the address
+    //
+    int32_t            getSubCacheIndex(const void* addr) const;
+
+    //
+    // Gets uuid of the subCache
+    //
+    void            getSubCacheUuid(uint8_t index, uint8_t uuid[]) const;
+
+    //
+    // Returns the vmOffset of the subCache
+    //
+    uint64_t  getSubCacheVmOffset(uint8_t index) const;
+
+    //
+    // Returns the address of the first dyld_cache_image_info in the cache
     //
     const dyld_cache_image_info* images() const;
     
@@ -372,6 +403,11 @@ public:
     //
     uint64_t            mappedSize() const;
 
+    //
+    // Returns the cache PBLS, if one exists
+    //
+    const dyld4::PrebuiltLoaderSet* dylibsLoaderSet() const;
+
 
     //
     // searches cache for PrebuiltLoader for image
@@ -395,6 +431,11 @@ public:
     const dyld4::PrebuiltLoaderSet* findLaunchLoaderSet(const char* executablePath) const;
 
     //
+    // searches cache for PrebuiltLoader for program
+    //
+    const dyld4::PrebuiltLoaderSet* findLaunchLoaderSetWithCDHash(const char* cdHashString) const;
+
+    //
     // searches cache for PrebuiltLoader for program by cdHash
     //
     bool hasLaunchLoaderSetWithCDHash(const char* cdHashString) const;
@@ -415,14 +456,19 @@ public:
     const uint8_t* legacyCacheDataRegionBuffer() const;
 
     //
-    // Returns a pointer to the shared cache optimized Objective-C data structures
-    //
-    const objc_opt::objc_opt_t* objcOpt() const;
-
-    //
     // Returns a pointer to the shared cache optimized Objective-C pointer structures
     //
     const void* objcOptPtrs() const;
+
+    bool                            hasOptimizedObjC() const;
+    uint32_t                        objcOptVersion() const;
+    uint32_t                        objcOptFlags() const;
+    const objc::HeaderInfoRO*       objcHeaderInfoRO() const;
+    const objc::HeaderInfoRW*       objcHeaderInfoRW() const;
+    const objc::SelectorHashTable*  objcSelectorHashTable() const;
+    const objc::ClassHashTable*     objcClassHashTable() const;
+    const objc::ProtocolHashTable*  objcProtocolHashTable() const;
+    const void*                     objcRelativeMethodListsBaseAddress() const;
 
 #if !(BUILDING_LIBDYLD || BUILDING_DYLD)
     //
@@ -453,12 +499,18 @@ public:
     //
     bool              addressInText(uint64_t cacheOffset, uint32_t* index) const;
 
+    const void*       patchTable() const;
+
     uint32_t          patchInfoVersion() const;
     uint32_t          patchableExportCount(uint32_t imageIndex) const;
-    void              forEachPatchableExport(uint32_t imageIndex, void (^handler)(uint32_t dylibVMOffsetOfImpl, const char* exportName)) const;
+    void              forEachPatchableExport(uint32_t imageIndex,
+                                             void (^handler)(uint32_t dylibVMOffsetOfImpl, const char* exportName,
+                                                             PatchKind kind)) const;
+#if BUILDING_SHARED_CACHE_UTIL
     void              forEachPatchableUseOfExport(uint32_t imageIndex, uint32_t dylibVMOffsetOfImpl,
                                                   void (^handler)(uint32_t userImageIndex, uint32_t userVMOffset,
                                                                   dyld3::MachOLoaded::PointerMetaData pmd, uint64_t addend)) const;
+#endif
     // Use this when you have a root of at imageIndex, and are trying to patch a cached dylib at userImageIndex
     bool              shouldPatchClientOfImage(uint32_t imageIndex, uint32_t userImageIndex) const;
     void              forEachPatchableUseOfExportInImage(uint32_t imageIndex, uint32_t dylibVMOffsetOfImpl, uint32_t userImageIndex,
@@ -467,10 +519,14 @@ public:
     void              forEachPatchableUseOfExport(uint32_t imageIndex, uint32_t dylibVMOffsetOfImpl,
                                                   void (^handler)(uint64_t cacheVMOffset,
                                                                   dyld3::MachOLoaded::PointerMetaData pmd, uint64_t addend)) const;
+    // Used to walk just the GOT uses of a given export.  The above method will walk both regular and GOT uses
+    void              forEachPatchableGOTUseOfExport(uint32_t imageIndex, uint32_t dylibVMOffsetOfImpl,
+                                                     void (^handler)(uint64_t cacheVMOffset,
+                                                                     dyld3::MachOLoaded::PointerMetaData pmd, uint64_t addend)) const;
 
 #if !(BUILDING_LIBDYLD || BUILDING_DYLD)
     // MRM map file generator
-    std::string generateJSONMap(const char* disposition) const;
+    std::string generateJSONMap(const char* disposition, uuid_t cache_uuid, bool verbose) const;
 
     // This generates a JSON representation of deep reverse dependency information in the cache.
     // For each dylib, the output will contain the list of all the other dylibs transitively
@@ -495,9 +551,12 @@ public:
     dyld3::MachOAnalyzer::VMAddrConverter makeVMAddrConverter(bool contentRebased) const;
 #endif
 
-    // Returns if the the given MachO is in the shared cache range.
+    // Returns true if the given MachO is in the shared cache range.
     // Returns false if the cache is null.
     static bool inDyldCache(const DyldSharedCache* cache, const dyld3::MachOFile* mf);
+
+    // Returns ture if the given path is a subCache filepath.
+    static bool isSubCachePath(const char* leafName);
 
 #if !(BUILDING_LIBDYLD || BUILDING_DYLD)
     //
@@ -532,6 +591,16 @@ private:
     void findDependentsRecursively(std::unordered_map<std::string, std::set<std::string>> &transitiveDependents, const std::unordered_map<std::string, std::set<std::string>> &reverseDependencyMap, std::set<std::string> & visited, const std::string &loadPath) const;
     void computeTransitiveDependents(std::unordered_map<std::string, std::set<std::string>> & transitiveDependents) const;
 #endif
+
+    //
+    // Returns a pointer to the old shared cache optimized Objective-C data structures
+    //
+    const objc_opt::objc_opt_t* oldObjcOpt() const;
+
+    //
+    // Returns a pointer to the new shared cache optimized Objective-C data structures
+    //
+    const ObjCOptimizationHeader* objcOpts() const;
 };
 
 

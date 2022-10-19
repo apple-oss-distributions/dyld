@@ -1,5 +1,5 @@
 
-// BUILD:  $CC foo.c -dynamiclib -o $BUILD_DIR/libfoo.dylib -install_name $RUN_DIR/liblock.dylib
+// BUILD:  $CC foo.c -dynamiclib -ltest_support -o $BUILD_DIR/libfoo.dylib -install_name $RUN_DIR/liblock.dylib
 // BUILD:  $CC main.c -o $BUILD_DIR/dlopen-RTLD_NOLOAD-lock.exe  -DRUN_DIR="$RUN_DIR"
 
 // RUN:  ./dlopen-RTLD_NOLOAD-lock.exe

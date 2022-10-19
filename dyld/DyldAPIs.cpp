@@ -29,6 +29,7 @@
 #include <dlfcn.h>
 #include <dlfcn_private.h>
 #include <mach-o/dyld_images.h>
+#include <mach/shared_region.h>
 #include <_simple.h>
 #include <libkern/OSAtomic.h>
 #include <dyld/VersionMap.h>
@@ -56,12 +57,16 @@
 #include "dyld_process_info_internal.h"
 #include "DyldProcessConfig.h"
 #include "DyldRuntimeState.h"
+#include "Processatlas.h"
 #include "OptimizerSwift.h"
 #include "PrebuiltObjC.h"
+#include "PrebuiltSwift.h"
 #include "objc-shared-cache.h"
 #include "OptimizerObjC.h"
 #include "DyldAPIs.h"
 #include "JustInTimeLoader.h"
+#include "RemoteNotificationResponder.h"
+#include "Utils.h"
 
 // internal libc.a variable that needs to be reset during fork()
 extern mach_port_t mach_task_self_;
@@ -94,6 +99,8 @@ RecursiveAutoLock::RecursiveAutoLock(RuntimeState& state, bool skip)
 #if BUILDING_DYLD
     if ( (_libSystemHelpers != nullptr) && !_skip )
         _libSystemHelpers->os_unfair_recursive_lock_lock_with_options(&_lock, OS_UNFAIR_LOCK_NONE);
+#else
+    (void)_libSystemHelpers;
 #endif // !BUILDING_DYLD
 }
 
@@ -108,8 +115,13 @@ RecursiveAutoLock::~RecursiveAutoLock()
 
 static void* handleFromLoader(const Loader* ldr, bool firstOnly)
 {
+    uintptr_t dyldStart  = (uintptr_t)&__dso_handle;
+
+    // We need the low bit to store the "firstOnly" flag.  Loaders should be
+    // at least 4-byte aligned though, so this is ok
+    assert((((uintptr_t)ldr) & 1) == 0);
     uintptr_t flags = (firstOnly ? 1 : 0);
-    void* handle = (void*)((((uintptr_t)ldr) << 1) | flags);
+    void* handle = (void*)(((uintptr_t)ldr ^ dyldStart) | flags);
 
 #if __has_feature(ptrauth_calls)
     if ( handle != nullptr )
@@ -121,6 +133,8 @@ static void* handleFromLoader(const Loader* ldr, bool firstOnly)
 
 static const Loader* loaderFromHandle(void* h, bool& firstOnly)
 {
+    uintptr_t dyldStart  = (uintptr_t)&__dso_handle;
+
 #if __has_feature(ptrauth_calls)
     if ( h != nullptr ) {
         // Note we don't use ptrauth_auth_data, as we don't want to crash on bad handles
@@ -132,7 +146,7 @@ static const Loader* loaderFromHandle(void* h, bool& firstOnly)
 #endif
 
     firstOnly = (((uintptr_t)h) & 1);
-    return (Loader*)(((uintptr_t)h) >> 1);
+    return (Loader*)((((uintptr_t)h) & ~1) ^ dyldStart);
 }
 
 bool APIs::validLoader(const Loader* maybeLoader)
@@ -142,12 +156,33 @@ bool APIs::validLoader(const Loader* maybeLoader)
     if ( maybeLoader == nullptr )
         return false;
     // verifier loader is within the Allocator pool, or in a PrebuiltLoaderSet
-    bool inDynamicPool    = this->longTermAllocator.owned(maybeLoader, sizeof(Loader));
+    bool inDynamicPool    = this->persistentAllocator.owned(maybeLoader, sizeof(Loader));
     bool inPrebuiltLoader = !inDynamicPool && this->inPrebuiltLoader(maybeLoader, sizeof(Loader));
     if ( !inDynamicPool && !inPrebuiltLoader )
         return false;
     // pointer into memory we own, so safe to dereference and see if it has magic header
     return maybeLoader->hasMagic();
+}
+
+const mach_header* APIs::_dyld_get_dlopen_image_header(void* handle)
+{
+    if ( handle == RTLD_SELF ) {
+        void* callerAddress = __builtin_return_address(0);
+        if ( const Loader* caller = findImageContaining(callerAddress) )
+            return caller->analyzer(*this);
+    }
+    if ( handle == RTLD_MAIN_ONLY ) {
+        return mainExecutableLoader->analyzer(*this);
+    }
+
+    bool          firstOnly;
+    const Loader* ldr = loaderFromHandle(handle, firstOnly);
+    if ( !validLoader(ldr) ) {
+        // if an invalid 'handle` passed in, return NULL
+        return nullptr;
+    }
+
+    return ldr->analyzer(*this);
 }
 
 static const void* stripPointer(const void* ptr)
@@ -158,26 +193,6 @@ static const void* stripPointer(const void* ptr)
     return ptr;
 #endif
 }
-
-#if BUILDING_DYLD
-APIs& APIs::bootstrap(const ProcessConfig& config, RuntimeLocks& locks)
-{
-    // create an Allocator inside its own allocation pool
-    Allocator*  allocator = Allocator::bootstrap();
-
-    // allocate APIs object with allocator and pass ownership of allocator to the object
-    return *new (allocator) APIs(config, locks, allocator);
-}
-#else
-APIs& APIs::bootstrap(const ProcessConfig& config)
-{
-    // create an Allocator inside its own allocation pool
-    Allocator*  allocator = Allocator::bootstrap();
-
-    // allocate APIs object with allocator and pass ownership of allocator to the object
-    return *new (allocator) APIs(config, allocator);
-}
-#endif
 
 void APIs::_libdyld_initialize(const dyld4::LibSystemHelpers* helpers)
 {
@@ -577,9 +592,9 @@ bool APIs::dyld_minos_at_least(const mach_header* mh, dyld_build_version_t atLea
 
 __attribute__((aligned(64)))
 bool APIs::dyld_program_minos_at_least (dyld_build_version_t version) {
-    __builtin_assume(config.process.mainExecutableMinOSVersionSet != 0);
-    __builtin_assume(config.process.mainExecutableMinOSVersion != 0);
-    __builtin_assume((dyld_platform_t)config.process.basePlatform != 0);
+//    contract(config.process.mainExecutableMinOSVersionSet != 0);
+//    contract(config.process.mainExecutableMinOSVersion != 0);
+//    contract((dyld_platform_t)config.process.basePlatform != 0);
 
     uint32_t currentVersion = 0;
     bool defaultResult = true;
@@ -604,9 +619,9 @@ bool APIs::dyld_program_minos_at_least (dyld_build_version_t version) {
 
 __attribute__((aligned(64)))
 bool APIs::dyld_program_sdk_at_least (dyld_build_version_t version) {
-    __builtin_assume(config.process.mainExecutableSDKVersionSet != 0);
-    __builtin_assume(config.process.mainExecutableSDKVersion != 0);
-    __builtin_assume((dyld_platform_t)config.process.basePlatform != 0);
+//    contract(config.process.mainExecutableSDKVersionSet != 0);
+//    contract(config.process.mainExecutableSDKVersion != 0);
+//    contract((dyld_platform_t)config.process.basePlatform != 0);
 
     uint32_t currentVersion = 0;
     bool defaultResult = true;
@@ -829,13 +844,39 @@ void APIs::_dyld_register_func_for_remove_image(void (*func)(const mach_header* 
     });
 }
 
+// FIXME: Remove this once libobjc moves to _dyld_objc_register_callbacks()
 void APIs::_dyld_objc_notify_register(_dyld_objc_notify_mapped   mapped,
                                       _dyld_objc_notify_init     init,
                                       _dyld_objc_notify_unmapped unmapped)
 {
     if ( config.log.apis )
         log("_dyld_objc_notify_register(%p, %p, %p)\n", mapped, init, unmapped);
-    setObjCNotifiers(mapped, init, unmapped);
+    setObjCNotifiers(mapped, init, unmapped, nullptr, nullptr);
+
+    // If we have prebuilt loaders, then the objc optimisations may hide duplicate classes from libobjc.
+    // We need to print the same warnings libobjc would have.
+    if ( const PrebuiltLoaderSet* mainSet = this->processPrebuiltLoaderSet() )
+        mainSet->logDuplicateObjCClasses(*this);
+}
+
+void APIs::_dyld_objc_register_callbacks(const _dyld_objc_callbacks* callbacks)
+{
+    if ( config.log.apis ) {
+        void** p = (void**)callbacks;
+        log("_dyld_objc_register_callbacks(%lu, %p, %p, %p, %p)\n", callbacks->version, p[1], p[2], p[31], p[4]);
+    }
+
+    if ( callbacks->version == 1 ) {
+        const _dyld_objc_callbacks_v1* v1 = (const _dyld_objc_callbacks_v1*)callbacks;
+        setObjCNotifiers(v1->mapped, v1->init, v1->unmapped, v1->patches, nullptr);
+    }
+    else if ( callbacks->version == 2 ) {
+        const _dyld_objc_callbacks_v2* v2 = (const _dyld_objc_callbacks_v2*)callbacks;
+        setObjCNotifiers(nullptr, v2->init, v2->unmapped, v2->patches, v2->mapped);
+    }
+    else {
+
+    }
 
     // If we have prebuilt loaders, then the objc optimisations may hide duplicate classes from libobjc.
     // We need to print the same warnings libobjc would have.
@@ -949,6 +990,16 @@ bool APIs::findImageMappedAt(const void* addr, const MachOLoaded** ml, bool* nev
             }
         }
     });
+
+    // [NSBundle bundleForClass] will call dyld_image_path_containing_address(cls) with the shared
+    // cache version of the class, not the one in the root.  We need to return the path to the root
+    // so that resources can be found relative to the bundle
+    if ( !result && !this->patchedObjCClasses.empty() ) {
+        for ( const InterposeTupleAll& tuple : this->patchedObjCClasses ) {
+            if ( tuple.replacement == (uintptr_t)addr )
+                return this->findImageMappedAt((void*)tuple.replacee, ml, neverUnloads, path, segAddr, segSize, segPerms);
+        }
+    }
 
     return result;
 }
@@ -1215,6 +1266,23 @@ void* APIs::dlopen_from(const char* path, int mode, void* addressInCaller)
             return RTLD_DEFAULT;
     }
 
+    // Fast path.  If we are dlopening a shared cache path, and its already initialized, then we can just return it
+    if ( const PrebuiltLoaderSet* cachePBLS = cachedDylibsPrebuiltLoaderSet() ) {
+        uint32_t dylibInCacheIndex = 0;
+        if ( this->config.dyldCache.indexOfPath(path, dylibInCacheIndex) ) {
+            const PrebuiltLoader* ldr = cachePBLS->atIndex(dylibInCacheIndex);
+            if ( ldr->isInitialized(*this) ) {
+                // make handle
+                void* result = handleFromLoader(ldr, firstOnly);
+                if ( config.log.apis ) {
+                    log("      dlopen(%s) => %p\n", Loader::leafName(path), result);
+                }
+                timer.setData4(result);
+                return result;
+            }
+        }
+    }
+
     // don't take the lock until after the check for path==NULL
     // don't take the lock in RTLD_NOLOAD mode, since that will never change the set of loaded images
     bool skipApiLock = (mode & RTLD_NOLOAD);
@@ -1223,13 +1291,16 @@ void* APIs::dlopen_from(const char* path, int mode, void* addressInCaller)
     // some aspect of dlopen depend on who called it
     const Loader* caller = findImageContaining(addressInCaller);
 
-    __block void*           result    = nullptr;
-    __block const Loader*   topLoader = nullptr;
-    STACK_ALLOC_OVERFLOW_SAFE_ARRAY(const Loader*, loadersToNotify, 32);
-    withLoadersWriteLock(^{
+    void*           result    = nullptr;
+    const Loader*   topLoader = nullptr;
+    STACK_ALLOC_VECTOR(const Loader*, loadersToNotify, 32);
+    //FIXME: We need this inlined, so it needs to be a lambda, but __block variables are incompatible, so make a pointer
+    withLoadersWriteLock([&]{
         // since we have the dyld lock, any appends to state.loaded will be from this dlopen
         // so record the length now, and cut it back to that point if dlopen fails
         const uintptr_t startLoaderCount = loaded.size();
+        const size_t startPatchedObjCClassesCount = this->patchedObjCClasses.size();
+        const size_t startPatchedSingletonsCount = this->patchedSingletons.size();
         Diagnostics     diag;
 
         // try to load specified dylib
@@ -1252,12 +1323,12 @@ void* APIs::dlopen_from(const char* path, int mode, void* addressInCaller)
         options.canBeExecutable  = (config.process.platform == dyld3::Platform::macOS);
 #endif
         options.forceUnloadable  = (mode & RTLD_UNLOADABLE);
-        options.useFallBackPaths = (strchr(path, '/') == nullptr);
+        options.requestorNeedsFallbacks = caller ? caller->pre2022Binary : false;
         options.rpathStack       = (caller ? &loadChainCaller : &loadChainMain);
         options.finder           = nullptr;
         topLoader = Loader::getLoader(diag, *this, path, options);
         if ( topLoader == nullptr ) {
-            setErrorString("dlopen(%s, 0x%04X): %s", path, mode, diag.errorMessage());
+            setErrorString("dlopen(%s, 0x%04X): %s", path, mode, diag.errorMessageCStr());
             return;
         }
 
@@ -1291,10 +1362,11 @@ void* APIs::dlopen_from(const char* path, int mode, void* addressInCaller)
         depOptions.rtldLocal       = false; // RTLD_LOCAL only effects top level dylib
         depOptions.rtldNoDelete    = (mode & RTLD_NODELETE);
         depOptions.canBeDylib      = true;
+        depOptions.requestorNeedsFallbacks = topLoader->pre2022Binary;
         depOptions.rpathStack      = &loadChain;
         ((Loader*)topLoader)->loadDependents(diag, *this, depOptions);
         // only do fixups and notifications if new dylibs are loaded (could be dlopen that just bumps the ref count)
-        STACK_ALLOC_ARRAY(const Loader*, newLoaders, loaded.size() - startLoaderCount);
+        STACK_ALLOC_VECTOR(const Loader*, newLoaders, loaded.size() - startLoaderCount);
         for (size_t i = startLoaderCount; i != loaded.size(); ++i)
             newLoaders.push_back(loaded[i]);
 
@@ -1309,19 +1381,24 @@ void* APIs::dlopen_from(const char* path, int mode, void* addressInCaller)
 
             // do fixups
             {
-                dyld3::ScopedTimer(DBG_DYLD_TIMING_APPLY_FIXUPS, 0, 0, 0);
+                dyld3::ScopedTimer fixupsTimer(DBG_DYLD_TIMING_APPLY_FIXUPS, 0, 0, 0);
                 DyldCacheDataConstLazyScopedWriter cacheDataConst(*this);
                 for ( const Loader* ldr : newLoaders ) {
                     bool allowLazyBinds = ((mode & RTLD_NOW) == 0);
                     ldr->applyFixups(diag, *this, cacheDataConst, allowLazyBinds);
                     if ( diag.hasError() )
                         break;
+#if BUILDING_DYLD
+                    // Roots need to patch the uniqued GOTs in the cache
+                    //FIXME: Is the right place to conditionalize this?
+                    ldr->applyCachePatches(*this, cacheDataConst);
+#endif
                 }
             }
 
             if ( diag.noError() ) {
                 // add to permanent ranges
-                STACK_ALLOC_ARRAY(const Loader*, nonCacheNeverUnloadLoaders, newLoaders.count());
+                STACK_ALLOC_ARRAY(const Loader*, nonCacheNeverUnloadLoaders, newLoaders.size());
                 for (const Loader* ldr : newLoaders) {
                     if ( !ldr->dylibInDyldCache && ldr->neverUnload )
                         nonCacheNeverUnloadLoaders.push_back(ldr);
@@ -1343,7 +1420,7 @@ void* APIs::dlopen_from(const char* path, int mode, void* addressInCaller)
                 }
 
                 // Store loaders to be notified later
-                loadersToNotify.reserve(newLoaders.count());
+                loadersToNotify.reserve(newLoaders.size());
                 for (const Loader* ldr : newLoaders)
                     loadersToNotify.push_back(ldr);
             }
@@ -1357,7 +1434,7 @@ void* APIs::dlopen_from(const char* path, int mode, void* addressInCaller)
         // If there was an error while loading or doing fixups, then unload everything added in this dlopen.
         // This has to be done while we still have the LoadersLock
         if ( diag.hasError() ) {
-            setErrorString("dlopen(%s, 0x%04X): %s", path, mode, diag.errorMessage());
+            setErrorString("dlopen(%s, 0x%04X): %s", path, mode, diag.errorMessageCStr());
 
             // Remove missing lazy symbols for the new loaders.  These were recorded eagerly during symbol binding
             removeMissingFlatLazySymbols(newLoaders);
@@ -1367,6 +1444,9 @@ void* APIs::dlopen_from(const char* path, int mode, void* addressInCaller)
                 for ( const Loader* incompleteLoader : newLoaders )
                     this->removeDynamicDependencies(incompleteLoader);
             }
+
+            // Remove the loaders from the image lists
+            notifyDebuggerUnload(newLoaders);
 
             // unmap everthing just loaded (note: unmap() does not unmap stuff in shared cache)
             for ( const Loader* ldr : newLoaders )
@@ -1381,6 +1461,23 @@ void* APIs::dlopen_from(const char* path, int mode, void* addressInCaller)
             }
             result    = nullptr;
             topLoader = nullptr;
+
+            // Clear any potential objc patching entries from the lists.  We aren't going to do patching
+            // on these binaries as the dlopen failed
+            this->objcReplacementClasses.clear();
+            while ( this->patchedObjCClasses.size() > startPatchedObjCClassesCount ) {
+                this->patchedObjCClasses.pop_back();
+            }
+            while ( this->patchedSingletons.size() > startPatchedSingletonsCount ) {
+                this->patchedSingletons.pop_back();
+            }
+        }
+
+        // on success, run objc notifiers.  This has to be done while still in the write lock as
+        // the notifier mutates the list of objc classes
+        if ( (topLoader != nullptr) && ((mode & RTLD_NOLOAD) == 0) && diag.noError() ) {
+            doSingletonPatching();
+            notifyObjCPatching();
         }
     });
 
@@ -1472,7 +1569,7 @@ bool APIs::dlopen_preflight(const char* path)
     bool                topStop = false;
     __block bool        result  = false;
     __block Diagnostics diag;
-    config.pathOverrides.forEachPathVariant(path, config.process.platform, false, topStop, ^(const char* possiblePath, ProcessConfig::PathOverrides::Type type, bool& stop) {
+    config.pathOverrides.forEachPathVariant(path, config.process.platform, false, true, topStop, ^(const char* possiblePath, ProcessConfig::PathOverrides::Type type, bool& stop) {
         __block Diagnostics possiblePathDiag;
         config.syscall.withReadOnlyMappedFile(possiblePathDiag, possiblePath, true, ^(const void* mapping, size_t mappedSize, bool isOSBinary, const FileID&, const char*) {
             if ( MachOFile::compatibleSlice(possiblePathDiag, mapping, mappedSize, path, config.process.platform, isOSBinary, *config.process.archs) != nullptr ) {
@@ -1481,16 +1578,14 @@ bool APIs::dlopen_preflight(const char* path)
             }
         });
         if ( !result && possiblePathDiag.hasError() ) {
-            char dupPath[PATH_MAX];
-            Diagnostics::quotePath(possiblePath, dupPath);
             if ( diag.noError() )
-                diag.error("tried: '%s' (%s)", dupPath, possiblePathDiag.errorMessageCStr());
+                diag.error("tried: '%s' (%s)", possiblePath, possiblePathDiag.errorMessageCStr());
             else
-                diag.appendError(", '%s' (%s)", dupPath, possiblePathDiag.errorMessageCStr());
+                diag.appendError(", '%s' (%s)", possiblePath, possiblePathDiag.errorMessageCStr());
         }
     });
     if ( !result && diag.hasError() )
-        setErrorString("dlopen_preflight(%s) => false, '%s'", path, diag.errorMessageCStr());
+        setErrorString("dlopen_preflight(%s) => false, %s", path, diag.errorMessageCStr());
 
     if ( config.log.apis )
         log("      dlopen_preflight(%s) => %d\n", Loader::leafName(path), result);
@@ -1811,14 +1906,14 @@ bool APIs::dyld_has_inserted_or_interposing_libraries()
     return result;
 }
 
-static void* mapStartOfCache(const char* path, size_t length)
+static void* mapStartOfCache(const char* path, size_t& length)
 {
     struct stat statbuf;
     if ( ::stat(path, &statbuf) == -1 )
         return NULL;
 
     if ( statbuf.st_size < length )
-        return NULL;
+        length = (size_t)statbuf.st_size;
 
     int cache_fd = dyld3::open(path, O_RDONLY, 0);
     if ( cache_fd < 0 )
@@ -1836,28 +1931,25 @@ static void* mapStartOfCache(const char* path, size_t length)
 static const DyldSharedCache* findCacheInDirAndMap(RuntimeState& state, const uuid_t cacheUuid, const char* dirPath, size_t& sizeMapped)
 {
     __block const DyldSharedCache* result = nullptr;
-    state.config.syscall.forEachInDirectory(dirPath, false, ^(const char* pathInDir) {
-        if ( const char* lastDot = strrchr(pathInDir, '.') ) {
-            // skip files that end in ".[0-9]" as they are sub-caches
-            if ( (lastDot[1] >= '0') && (lastDot[1] <= '9') )
-                return;
-            // skip files that end in ".symbols" as they are sub-caches
-            if ( strcmp(lastDot, ".symbols") == 0 )
-                return;
-        }
+    state.config.syscall.forEachInDirectory(dirPath, false, ^(const char* pathInDir, const char* leafName) {
+        if ( DyldSharedCache::isSubCachePath(leafName) )
+            return;
+        // FIXME: This needs to be at least large enough to read the path for any shared cache image.  We need to do something better
+        // than a hard coded value here.
+        size_t mapSize =  0x100000;
         if ( result == nullptr ) {
-            result = (DyldSharedCache*)mapStartOfCache(pathInDir, 0x00100000);
+            result = (DyldSharedCache*)mapStartOfCache(pathInDir, mapSize);
             if ( result != nullptr ) {
                 uuid_t foundUuid;
                 result->getUUID(foundUuid);
                 if ( ::memcmp(foundUuid, cacheUuid, 16) != 0 ) {
                     // wrong uuid, unmap and keep looking
-                    ::munmap((void*)result, 0x00100000);
+                    ::munmap((void*)result, mapSize);
                     result = nullptr;
                 }
                 else {
                     // found cache
-                    sizeMapped = 0x00100000;
+                    sizeMapped = mapSize;
                 }
             }
         }
@@ -1882,16 +1974,58 @@ int APIs::dyld_shared_cache_find_iterate_text(const uuid_t cacheUuid, const char
         // look first is default location for cache files
 #if TARGET_OS_IPHONE
         sharedCache = findCacheInDirAndMap(*this, cacheUuid, IPHONE_DYLD_SHARED_CACHE_DIR, sizeMapped);
+        // if not there, look in cryptex locations
+        if ( sharedCache == nullptr ) {
+            for (int i = 0; i < sizeof(cryptexPrefixes)/sizeof(char*); i++) {
+                const char* prefix = cryptexPrefixes[i];
+                char cacheDir[PATH_MAX];
+                cacheDir[0] = 0;
+                if ( Utils::concatenatePaths(cacheDir, prefix, PATH_MAX) >= PATH_MAX )
+                    continue;
+                if ( Utils::concatenatePaths(cacheDir, IPHONE_DYLD_SHARED_CACHE_DIR, PATH_MAX) >= PATH_MAX )
+                    continue;
+                sharedCache = findCacheInDirAndMap(*this, cacheUuid, cacheDir, sizeMapped);
+                if ( sharedCache != nullptr )
+                    break;
+            }
+        }
 #else
         // on macOS look first in new system location, then old location
         sharedCache = findCacheInDirAndMap(*this, cacheUuid, MACOSX_MRM_DYLD_SHARED_CACHE_DIR, sizeMapped);
-        if ( sharedCache == nullptr )
-            sharedCache = findCacheInDirAndMap(*this, cacheUuid, MACOSX_DYLD_SHARED_CACHE_DIR, sizeMapped);
+        // if not there, look in cryptex locations
+        if ( sharedCache == nullptr ) {
+            for (int i = 0; i < sizeof(cryptexPrefixes)/sizeof(char*); i++) {
+                const char* prefix = cryptexPrefixes[i];
+                char cacheDir[PATH_MAX];
+                cacheDir[0] = 0;
+            if ( Utils::concatenatePaths(cacheDir, prefix, PATH_MAX) >= PATH_MAX )
+                    continue;
+                if ( Utils::concatenatePaths(cacheDir, MACOSX_MRM_DYLD_SHARED_CACHE_DIR, PATH_MAX) >= PATH_MAX )
+                    continue;
+                sharedCache = findCacheInDirAndMap(*this, cacheUuid, cacheDir, sizeMapped);
+                if ( sharedCache != nullptr )
+                    break;
+            }
+        }
 #endif
         if ( sharedCache == nullptr ) {
             // look in DriverKit location
             sharedCache = findCacheInDirAndMap(*this, cacheUuid, DRIVERKIT_DYLD_SHARED_CACHE_DIR, sizeMapped);
-
+            // if not there, look in cryptex Driverkit locations
+            if ( sharedCache == nullptr ) {
+                for (int i = 0; i < sizeof(cryptexPrefixes)/sizeof(char*); i++) {
+                    const char* prefix = cryptexPrefixes[i];
+                    char cacheDir[PATH_MAX];
+                    cacheDir[0] = 0;
+                    if ( Utils::concatenatePaths(cacheDir, prefix, PATH_MAX) >= PATH_MAX )
+                        continue;
+                    if ( Utils::concatenatePaths(cacheDir, DRIVERKIT_DYLD_SHARED_CACHE_DIR, PATH_MAX) >= PATH_MAX )
+                        continue;
+                    sharedCache = findCacheInDirAndMap(*this, cacheUuid, cacheDir, sizeMapped);
+                    if ( sharedCache != nullptr )
+                        break;
+                }
+            }
             // if not there, look in extra search locations
             if ( sharedCache == nullptr ) {
                 for ( const char** p = extraSearchDirs; *p != nullptr; ++p ) {
@@ -1980,21 +2114,12 @@ const char* APIs::_dyld_get_objc_selector(const char* selName)
     //if ( config.log.apis )
     //    log("_dyld_get_objc_selector(%s)\n", selName);
 
-    if ( const objc_opt::objc_opt_t* opts = config.dyldCache.objCCacheInfo ) {
-        // The selector table meaning changed from version 15 -> version 16.
-        // Version 15 is the legacy table with cache offsets
-        if ( opts->oldClassOpt() ) {
-            if ( const legacy_objc_opt::objc_selopt_t* selectorHashTable = (legacy_objc_opt::objc_selopt_t*)opts->selectorOpt() ) {
-                if ( const char* uniqueName = selectorHashTable->get(selName) ) {
-                    return uniqueName;
-                }
-            }
-        } else {
-            if ( const objc::SelectorHashTable* selectorHashTable = opts->selectorOpt() ) {
-                if ( const char* uniqueName = selectorHashTable->get(selName) ) {
-                    return uniqueName;
-                }
-            }
+    // The selector table meaning changed from version 15 -> version 16.
+    // Version 15 is the legacy table with cache offsets
+    // We don't support that old version here, as dyld is always using a new enough cache
+    if ( const objc::SelectorHashTable* selectorHashTable = config.dyldCache.objcSelectorHashTable ) {
+        if ( const char* uniqueName = selectorHashTable->get(selName) ) {
+            return uniqueName;
         }
     }
 
@@ -2021,44 +2146,21 @@ void APIs::_dyld_for_each_objc_class(const char* className,
     }
 
     // Also check the table in the shared cache
-    if ( const objc_opt::objc_opt_t* opts = config.dyldCache.objCCacheInfo ) {
-        if ( const objc::ClassHashTable* classHashTable = opts->classOpt() ) {
-            classHashTable->forEachClass(className,
-                                         ^(uint64_t objectCacheOffset, uint16_t dylibObjCIndex, bool &stopObjects) {
-                const objc::objc_headeropt_rw_t<uintptr_t>* headerInfoRW = (objc::objc_headeropt_rw_t<uintptr_t>*)opts->headeropt_rw();
-                if ( headerInfoRW->isLoaded(dylibObjCIndex) ) {
-                    // Dylib is loaded, so tell objc about it
-                    bool callbackStop = false;
-                    callback((uint8_t*)config.dyldCache.addr + objectCacheOffset, true, &callbackStop);
-                    if ( callbackStop )
-                        stopObjects = true;
-                }
-            });
-        } else if ( const void* oldClassHashTable = opts->oldClassOpt() ) {
-            // Legacy hash table.  When running a split cache dyld against a cache which hasn't rebuilt yet
-            const legacy_objc_opt::objc_clsopt_t* classes = (const legacy_objc_opt::objc_clsopt_t*)oldClassHashTable;
-
-            void *cls;
-            void *hi;
-            uint32_t count = classes->getClassAndHeader(className, cls, hi);
-            if ( count == 1 ) {
+    // The cache class table meaning changed from version 15 -> version 16.
+    // Version 15 is the legacy table with cache offsets
+    // We don't support that old version here, as dyld is always using a new enough cache
+    if ( const objc::ClassHashTable* classHashTable = config.dyldCache.objcClassHashTable ) {
+        classHashTable->forEachClass(className,
+                                     ^(uint64_t objectCacheOffset, uint16_t dylibObjCIndex, bool &stopObjects) {
+            const auto* headerInfoRW = (objc::objc_headeropt_rw_t<uintptr_t>*)config.dyldCache.objcHeaderInfoRW;
+            if ( headerInfoRW->isLoaded(dylibObjCIndex) ) {
+                // Dylib is loaded, so tell objc about it
                 bool callbackStop = false;
-                callback(cls, ((legacy_objc_opt::header_info*)hi)->isLoaded(opts->headeropt_ro(), opts->headeropt_rw()), &callbackStop);
-                return;
+                callback((uint8_t*)config.dyldCache.addr + objectCacheOffset, true, &callbackStop);
+                if ( callbackStop )
+                    stopObjects = true;
             }
-            else if (count > 1) {
-                // more than one matching class - find one that is loaded
-                void *clslist[count];
-                void *hilist[count];
-                classes->getClassesAndHeaders(className, clslist, hilist);
-                for (uint32_t i = 0; i < count; i++) {
-                    bool callbackStop = false;
-                    callback(clslist[i], ((legacy_objc_opt::header_info*)hilist[i])->isLoaded(opts->headeropt_ro(), opts->headeropt_rw()), &callbackStop);
-                    if ( callbackStop )
-                        return;
-                }
-            }
-        }
+        });
     }
 }
 
@@ -2077,87 +2179,54 @@ void APIs::_dyld_for_each_objc_protocol(const char* protocolName,
     }
 
     // Also check the table in the shared cache
-    if ( const objc_opt::objc_opt_t* opts = config.dyldCache.objCCacheInfo ) {
-        if ( const objc::ProtocolHashTable* protocolHashTable = opts->protocolOpt() ) {
-            protocolHashTable->forEachProtocol(protocolName,
-                                               ^(uint64_t objectCacheOffset, uint16_t dylibObjCIndex, bool &stopObjects) {
-                const objc::objc_headeropt_rw_t<uintptr_t>* headerInfoRW = (objc::objc_headeropt_rw_t<uintptr_t>*)opts->headeropt_rw();
-                if ( headerInfoRW->isLoaded(dylibObjCIndex) ) {
-                    // Dylib is loaded, so tell objc about it
-                    bool callbackStop = false;
-                    callback((uint8_t*)config.dyldCache.addr + objectCacheOffset, true, &callbackStop);
-                    if ( callbackStop )
-                        stopObjects = true;
-                }
-            });
-        } else if ( const void* oldProtocolHashTable = opts->oldProtocolOpt2() ) {
-            // Legacy hash table.  When running a split cache dyld against a cache which hasn't rebuilt yet
-            const legacy_objc_opt::objc_clsopt_t* protocols = (const legacy_objc_opt::objc_clsopt_t*)oldProtocolHashTable;
-
-            void *cls;
-            void *hi;
-            uint32_t count = protocols->getClassAndHeader(protocolName, cls, hi);
-            if ( count == 1 ) {
+    // The cache protocol table meaning changed from version 15 -> version 16.
+    // Version 15 is the legacy table with cache offsets
+    // We don't support that old version here, as dyld is always using a new enough cache
+    if ( const objc::ProtocolHashTable* protocolHashTable = config.dyldCache.objcProtocolHashTable ) {
+        protocolHashTable->forEachProtocol(protocolName,
+                                           ^(uint64_t objectCacheOffset, uint16_t dylibObjCIndex, bool &stopObjects) {
+            const auto* headerInfoRW = (objc::objc_headeropt_rw_t<uintptr_t>*)config.dyldCache.objcHeaderInfoRW;
+            if ( headerInfoRW->isLoaded(dylibObjCIndex) ) {
+                // Dylib is loaded, so tell objc about it
                 bool callbackStop = false;
-                callback(cls, ((legacy_objc_opt::header_info*)hi)->isLoaded(opts->headeropt_ro(), opts->headeropt_rw()), &callbackStop);
-                return;
+                callback((uint8_t*)config.dyldCache.addr + objectCacheOffset, true, &callbackStop);
+                if ( callbackStop )
+                    stopObjects = true;
             }
-            else if (count > 1) {
-                // more than one matching class - find one that is loaded
-                void *clslist[count];
-                void *hilist[count];
-                protocols->getClassesAndHeaders(protocolName, clslist, hilist);
-                for (uint32_t i = 0; i < count; i++) {
-                    bool callbackStop = false;
-                    callback(clslist[i], ((legacy_objc_opt::header_info*)hilist[i])->isLoaded(opts->headeropt_ro(), opts->headeropt_rw()), &callbackStop);
-                    if ( callbackStop )
-                        return;
-                }
-            }
-        }
+        });
     }
 }
 
 void APIs::_dyld_visit_objc_classes(void (^callback)(const void* classPtr))
 {
-    if ( const objc_opt::objc_opt_t* opts = config.dyldCache.objCCacheInfo ) {
-        if ( const objc::ClassHashTable* classOpt = opts->classOpt() ) {
-            classOpt->forEachClass(^(uint32_t bucketIndex, const char *className, const dyld3::Array<uint64_t>& implCacheOffsets) {
-                for (uint64_t implCacheOffset : implCacheOffsets)
-                    callback((const void*)((uintptr_t)config.dyldCache.addr + implCacheOffset));
-            });
-        } else if ( const void* oldClassHashTable = opts->oldClassOpt() ) {
-            // Legacy hash table.  When running a split cache dyld against a cache which hasn't rebuilt yet
-            const legacy_objc_opt::objc_clsopt_t* classes = (const legacy_objc_opt::objc_clsopt_t*)oldClassHashTable;
-
-            classes->forEachClass(^(const dyld3::Array<const void *>& classArray) {
-                for (const void* cls : classArray)
-                    callback(cls);
-            });
-        }
+    // The cache class table meaning changed from version 15 -> version 16.
+    // Version 15 is the legacy table with cache offsets
+    // We don't support that old version here, as dyld is always using a new enough cache
+    if ( const objc::ClassHashTable* classOpt = config.dyldCache.objcClassHashTable ) {
+        typedef objc::ClassHashTable::ObjectAndDylibIndex ObjectAndDylibIndex;
+        classOpt->forEachClass(^(uint32_t bucketIndex, const char *className,
+                                 const dyld3::Array<ObjectAndDylibIndex>& implCacheInfos) {
+            for (const ObjectAndDylibIndex& implCacheInfo : implCacheInfos)
+                callback((const void*)((uintptr_t)config.dyldCache.addr + implCacheInfo.first));
+        });
     }
 }
 
 uint32_t APIs::_dyld_objc_class_count(void)
 {
-    if ( const objc_opt::objc_opt_t* opts = config.dyldCache.objCCacheInfo ) {
-        if ( const objc::ClassHashTable* classOpt = opts->classOpt() ) {
-            return classOpt->classCount();
-        } else if ( const void* oldClassHashTable = opts->oldClassOpt() ) {
-            // Legacy hash table.  When running a split cache dyld against a cache which hasn't rebuilt yet
-            const legacy_objc_opt::objc_clsopt_t* classes = (const legacy_objc_opt::objc_clsopt_t*)oldClassHashTable;
-            return classes->classCount();
-        }
+    // The cache class table meaning changed from version 15 -> version 16.
+    // Version 15 is the legacy table with cache offsets
+    // We don't support that old version here, as dyld is always using a new enough cache
+    if ( const objc::ClassHashTable* classOpt = config.dyldCache.objcClassHashTable ) {
+        return classOpt->classCount();
     }
     return 0;
 }
 
 bool APIs::_dyld_objc_uses_large_shared_cache(void)
 {
-    if ( const objc_opt::objc_opt_t* opts = config.dyldCache.objCCacheInfo ) {
-        return (opts->flags & objc_opt::LargeSharedCache) != 0;
-    }
-    return false;
+    // This is always true, as every cache is on a new enough platform to have Large Shared Caches
+    return true;
 }
 
 struct header_info_rw {
@@ -2202,8 +2271,8 @@ APIs::_dyld_find_protocol_conformance(const void *protocolDescriptor,
                                       const void *typeDescriptor) const
 {
     const objc_headeropt_rw_t* objcHeaderInfoRW = nullptr;
-    if ( const objc_opt::objc_opt_t* opts = config.dyldCache.objCCacheInfo )
-        objcHeaderInfoRW = (objc_headeropt_rw_t*)opts->headeropt_rw();
+    if ( const objc::HeaderInfoRW* optRW = config.dyldCache.objcHeaderInfoRW )
+        objcHeaderInfoRW = (objc_headeropt_rw_t*)optRW;
 
     const SwiftOptimizationHeader* swiftOptHeader = config.dyldCache.swiftCacheInfo;
 
@@ -2279,8 +2348,8 @@ APIs::_dyld_find_foreign_type_protocol_conformance(const void *protocol,
                                                    size_t foreignTypeIdentityLength) const
 {
     const objc_headeropt_rw_t* objcHeaderInfoRW = nullptr;
-    if ( const objc_opt::objc_opt_t* opts = config.dyldCache.objCCacheInfo )
-        objcHeaderInfoRW = (objc_headeropt_rw_t*)opts->headeropt_rw();
+    if ( const objc::HeaderInfoRW* optRW = config.dyldCache.objcHeaderInfoRW )
+        objcHeaderInfoRW = (objc_headeropt_rw_t*)optRW;
 
     const SwiftOptimizationHeader* swiftOptHeader = config.dyldCache.swiftCacheInfo;
 
@@ -2321,8 +2390,156 @@ APIs::_dyld_find_foreign_type_protocol_conformance(const void *protocol,
     return { _dyld_protocol_conformance_result_kind_not_found, nullptr };
 }
 
-uint32_t APIs::_dyld_swift_optimizations_version() const {
+uint32_t APIs::_dyld_swift_optimizations_version() const
+{
     return 1;
+
+}
+
+
+bool APIs::_dyld_has_preoptimized_swift_protocol_conformances(const struct mach_header* mh)
+{
+    const dyld3::MachOAnalyzer* ma = (const dyld3::MachOAnalyzer*)mh;
+    // return early if is not a swift binary
+    if ( !ma->hasSwift() )
+        return false;
+
+    if ( const PrebuiltLoaderSet* mainSet = this->processPrebuiltLoaderSet() ) {
+        // return early if there is no prebuilt swift protocols in the closure
+        if ( !mainSet->hasOptimizedSwift() )
+            return false;
+
+        size_t ldrCount = mainSet->loaderCount();
+        for (size_t i = 0; i < ldrCount; i++) {
+            const PrebuiltLoader* ldr = mainSet->atIndex(i);
+            const dyld3::MachOAnalyzer* maLoader = ldr->analyzer(*this);
+            if ( maLoader ==  ma )
+                return true;
+        }
+    }
+    return false;
+}
+
+struct _dyld_protocol_conformance_result
+APIs::_dyld_find_protocol_conformance_on_disk(const void *protocolDescriptor,
+                                              const void *metadataType,
+                                              const void *typeDescriptor,
+                                              uint32_t flags)
+{
+    const PrebuiltLoaderSet* mainSet = this->processPrebuiltLoaderSet();
+    if ( mainSet == nullptr || !mainSet->hasOptimizedSwift()) {
+        return { _dyld_protocol_conformance_result_kind_not_found, nullptr };
+    }
+
+    const uint64_t* typeProtocolTable = mainSet->swiftTypeProtocolTable();
+    if ( typeDescriptor != nullptr && typeProtocolTable != nullptr && this->typeProtocolMap != nullptr) {
+
+        APIs::TypeKey protocolKey = {
+            PrebuiltLoader::BindTargetRef::makeAbsolute((uint64_t)typeDescriptor),
+            PrebuiltLoader::BindTargetRef::makeAbsolute((uint64_t)protocolDescriptor)
+        };
+
+        auto* protocolTargetIt = typeProtocolMap->find(protocolKey);
+        if ( protocolTargetIt != typeProtocolMap->end() ) {
+            bool foundTypeConformance = false;
+            while ( true ) {
+                if ( EqualTypeConformanceLookupKey::equal(protocolTargetIt->key, (uint64_t)typeDescriptor, (uint64_t)protocolDescriptor, this) ) {
+                    foundTypeConformance = true;
+                    break;
+                }
+                if ( !protocolTargetIt->next.hasMoreDuplicates() )
+                    break;
+                protocolTargetIt = typeProtocolMap->nextDuplicate(protocolTargetIt);
+            }
+
+            if ( foundTypeConformance ) {
+                const auto& conformanceTarget = protocolTargetIt->value;
+                uint16_t idx = conformanceTarget.protocolConformance.loaderRef().index;
+                uint8_t* loaderAddress = (uint8_t*)mainSet->atIndex(idx)->loadAddress(*this);
+                const uint8_t* conformanceDescriptor = loaderAddress + conformanceTarget.protocolConformance.offset();
+                return { _dyld_protocol_conformance_result_kind_found_descriptor, conformanceDescriptor };
+            }
+        }
+    }
+
+    const uint64_t* metadataProtocolTable = mainSet->swiftMetadataProtocolTable();
+    if ( metadataType != nullptr && metadataProtocolTable != nullptr && this->metadataProtocolMap != nullptr) {
+
+        APIs::MetadataKey protocolKey = {
+            PrebuiltLoader::BindTargetRef::makeAbsolute((uint64_t)metadataType),
+            PrebuiltLoader::BindTargetRef::makeAbsolute((uint64_t)protocolDescriptor)
+        };
+        auto* protocolTargetIt = metadataProtocolMap->find(protocolKey);
+        if ( protocolTargetIt != metadataProtocolMap->end() ) {
+            bool foundMetadataConformance = false;
+            while ( true ) {
+                if ( EqualMetadataConformanceLookupKey::equal(protocolTargetIt->key, (uint64_t)metadataType, (uint64_t)protocolDescriptor, this) ) {
+                    foundMetadataConformance = true;
+                    break;
+                }
+                if ( !protocolTargetIt->next.hasMoreDuplicates() )
+                    break;
+                protocolTargetIt = metadataProtocolMap->nextDuplicate(protocolTargetIt);
+            }
+
+            if ( foundMetadataConformance ) {
+                const auto& conformanceTarget = protocolTargetIt->value;
+                uint16_t idx = conformanceTarget.protocolConformance.loaderRef().index;
+                uint8_t* loaderAddress = (uint8_t*)mainSet->atIndex(idx)->loadAddress(*this);
+                const uint8_t* conformanceDescriptor = loaderAddress + conformanceTarget.protocolConformance.offset();
+                return { _dyld_protocol_conformance_result_kind_found_descriptor, conformanceDescriptor };
+            }
+        }
+    }
+
+    return { _dyld_protocol_conformance_result_kind_not_found, nullptr };
+}
+
+struct _dyld_protocol_conformance_result
+APIs::_dyld_find_foreign_type_protocol_conformance_on_disk(const void *protocol,
+                                                           const char *foreignTypeIdentityStart,
+                                                           size_t foreignTypeIdentityLength,
+                                                           uint32_t flags)
+{
+    const PrebuiltLoaderSet* mainSet = this->processPrebuiltLoaderSet();
+    if ( mainSet == nullptr || !mainSet->hasOptimizedSwift())
+        return { _dyld_protocol_conformance_result_kind_not_found, nullptr };
+
+    const uint64_t* foreignTable = mainSet->swiftForeignTypeProtocolTable();
+    if ( foreignTable == nullptr || this->foreignProtocolMap == nullptr)
+        return { _dyld_protocol_conformance_result_kind_not_found, nullptr };
+
+    APIs::ForeignKey protocolKey = {
+        0,
+        PrebuiltLoader::BindTargetRef::makeAbsolute((uint64_t)foreignTypeIdentityStart),
+        foreignTypeIdentityLength,
+        PrebuiltLoader::BindTargetRef::makeAbsolute((uint64_t)protocol)
+    };
+
+    auto* protocolTargetIt = foreignProtocolMap->find(protocolKey);
+    if ( protocolTargetIt != foreignProtocolMap->end() ) {
+
+        bool foundForeignTypeConformance = false;
+        while ( true ) {
+            if ( EqualForeignConformanceLookupKey::equal(protocolTargetIt->key, foreignTypeIdentityStart, foreignTypeIdentityLength, (uint64_t)protocol, this) ) {
+                foundForeignTypeConformance = true;
+                break;
+            }
+            if ( !protocolTargetIt->next.hasMoreDuplicates() )
+                break;
+            protocolTargetIt = foreignProtocolMap->nextDuplicate(protocolTargetIt);
+        }
+
+        if ( foundForeignTypeConformance ) {
+            const auto conformanceTarget = protocolTargetIt->value;
+            uint16_t idx = conformanceTarget.protocolConformance.loaderRef().index;
+            uint8_t* loaderAddress = (uint8_t*)mainSet->atIndex(idx)->loadAddress(*this);
+            const uint8_t* conformanceDescriptor = loaderAddress + conformanceTarget.protocolConformance.offset();
+            return { _dyld_protocol_conformance_result_kind_found_descriptor, conformanceDescriptor };
+        }
+    }
+
+    return { _dyld_protocol_conformance_result_kind_not_found, nullptr };
 }
 
 const mach_header* APIs::_dyld_get_prog_image_header()
@@ -2468,137 +2685,16 @@ void APIs::obsolete()
 {
 #if BUILDING_DYLD
     halt("obsolete dyld API called");
+#else
+    abort();
 #endif
 }
 
-#if !TARGET_OS_SIMULATOR
-#define DYLD_PROCESS_INFO_NOTIFY_MAGIC 0x49414E46
-
-struct RemoteNotificationResponder {
-    RemoteNotificationResponder(const RemoteNotificationResponder&) = delete;
-    RemoteNotificationResponder(RemoteNotificationResponder&&) = delete;
-    RemoteNotificationResponder() {
-        if (gProcessInfo->notifyPorts[0] != DYLD_PROCESS_INFO_NOTIFY_MAGIC) {
-            // No notifier found, early out
-            _namesCnt = 0;
-            return;
-        }
-        kern_return_t kr = task_dyld_process_info_notify_get(_names, &_namesCnt);
-        while (kr == KERN_NO_SPACE) {
-            // In the future the SPI may return the size we need, but for now we just double the count. Since we don't want to depend on the
-            // return value in _nameCnt we set it to have a minimm of 16, double the inline storage value
-            _namesCnt = std::max<uint32_t>(16, 2*_namesCnt);
-            _namesSize = _namesCnt*sizeof(mach_port_t);
-            kr = vm_allocate(mach_task_self(), (vm_address_t*)&_names, _namesSize, VM_FLAGS_ANYWHERE);
-            if (kr != KERN_SUCCESS) {
-                // We could not allocate memory, time to error out
-                break;
-            }
-            kr = task_dyld_process_info_notify_get(_names, &_namesCnt);
-            if (kr != KERN_SUCCESS) {
-                // We failed, so deallocate the memory. If the failures was KERN_NO_SPACE we will loop back and try again
-                (void)vm_deallocate(mach_task_self(), (vm_address_t)_names, _namesSize);
-                _namesSize = 0;
-            }
-        }
-        if (kr != KERN_SUCCESS) {
-            // We failed, set _namesCnt to 0 so nothing else will happen
-            _namesCnt = 0;
-        }
-    }
-    ~RemoteNotificationResponder() {
-        if (_namesCnt) {
-            for (auto i = 0; i < _namesCnt; ++i) {
-                (void)mach_port_deallocate(mach_task_self(), _names[i]);
-            }
-            if (_namesSize != 0) {
-                // We are not using inline memory, we need to free it
-                (void)vm_deallocate(mach_task_self(), (vm_address_t)_names, _namesSize);
-            }
-        }
-    }
-    void sendMessage(mach_msg_id_t msgId, mach_msg_size_t sendSize, mach_msg_header_t* buffer) {
-        if (_namesCnt == 0) { return; }
-        // Allocate a port to listen on in this monitoring task
-        mach_port_t replyPort = MACH_PORT_NULL;
-        mach_port_options_t options = { .flags = MPO_CONTEXT_AS_GUARD | MPO_STRICT, .mpl = { 1 }};
-        kern_return_t kr = mach_port_construct(mach_task_self(), &options, (mach_port_context_t)&replyPort, &replyPort);
-        if (kr != KERN_SUCCESS) {
-            return;
-        }
-        for (auto i = 0; i < _namesCnt; ++i) {
-//            fprintf(stderr, "Sending: %u\n", _names[i]);
-            if (_names[i] == MACH_PORT_NULL) { continue; }
-            // Assemble a message
-            uint8_t replyBuffer[sizeof(mach_msg_header_t) + MAX_TRAILER_SIZE];
-            mach_msg_header_t*     msg = buffer;
-            msg->msgh_bits         = MACH_MSGH_BITS(MACH_MSG_TYPE_COPY_SEND,MACH_MSG_TYPE_MAKE_SEND_ONCE);
-            msg->msgh_id           = msgId;
-            msg->msgh_local_port   = replyPort;
-            msg->msgh_remote_port  = _names[i];
-            msg->msgh_reserved     = 0;
-            msg->msgh_size         = sendSize;
-            kr = mach_msg_overwrite(msg, MACH_SEND_MSG | MACH_RCV_MSG, msg->msgh_size, sizeof(replyBuffer), replyPort, 0, MACH_PORT_NULL,
-                                     (mach_msg_header_t*)&replyBuffer[0], 0);
-            if (kr != KERN_SUCCESS) {
-                // Send failed, we may have been psuedo recieved. destroy the message
-                (void)mach_msg_destroy(msg);
-                // Mark the port as null. It does not matter why we failed... if it is s single message we will not retry, if it
-                // is a fragmented message then subsequent messages will not decode correctly
-                _names[i] = MACH_PORT_NULL;
-            }
-        }
-        (void)mach_port_destruct(mach_task_self(), replyPort, 0, (mach_port_context_t)&replyPort);
-    }
-
-    bool const active() const {
-        for (auto i = 0; i < _namesCnt; ++i) {
-            if (_names[i] != MACH_PORT_NULL) {
-                return true;
-            }
-        }
-        return false;
-    }
-
-    void blockOnSynchronousEvent(uint32_t event) {
-//        fprintf(stderr, "Blocking: %u\n", event);
-        uint8_t buffer[sizeof(mach_msg_header_t) + MAX_TRAILER_SIZE];
-        sendMessage(DYLD_PROCESS_EVENT_ID_BASE + event, sizeof(mach_msg_header_t), (mach_msg_header_t*)buffer);
-    }
-private:
-    mach_port_t             _namesArray[8] = {0};
-    mach_port_name_array_t  _names = (mach_port_name_array_t)&_namesArray[0];
-    mach_msg_type_number_t  _namesCnt = 8;
-    vm_size_t               _namesSize = 0;
-};
-
-//FIXME: Remove this once we drop support for iOS 11 simulators
-// This is an enormous hack to keep remote introspection of older simulators working
-//   It works by interposing mach_msg, and redirecting message sent to a special port name. Messages to that portname will trigger a full set
-//   of sends to all kernel registered notifiers. In this mode mach_msg_sim_interposed() must return KERN_SUCCESS or the older dyld_sim may
-//   try to cleanup the notifer array.
-
-kern_return_t mach_msg_sim_interposed(    mach_msg_header_t* msg, mach_msg_option_t option, mach_msg_size_t send_size, mach_msg_size_t rcv_size,
-                                      mach_port_name_t rcv_name, mach_msg_timeout_t timeout, mach_port_name_t notify) {
-    if (msg->msgh_remote_port != DYLD_PROCESS_INFO_NOTIFY_MAGIC) {
-        // Not the magic port, so just pass through to the real mach_msg()
-        return mach_msg(msg, option, send_size, rcv_size, rcv_name, timeout, notify);
-    }
-
-    // The magic port. We know dyld_sim is trying to message observers, so lets call into our messaging code directly.
-    // This is kind of weird since we effectively built a buffer in dyld_sim, then pass it to mach_msg, which we interpose, unpack, and then
-    // pass to send_message which then sends the buffer back out vis mach_message_overwrite(), but it should work at least as well as the old
-    // way.
-    RemoteNotificationResponder responder;
-    responder.sendMessage(msg->msgh_id, send_size, msg);
-
-    // We always return KERN_SUCCESS, otherwise old dyld_sims might clear the port
-    return KERN_SUCCESS;
-}
-
+#if !TARGET_OS_SIMULATOR && !BUILDING_CACHE_BUILDER_UNIT_TESTS
 static void notifyMonitoringDyld(RemoteNotificationResponder& responder, bool unloading, unsigned imageCount,
                                  const struct mach_header* loadAddresses[], const char* imagePaths[])
 {
+#if BUILDING_DYLD
     // Make sure there is at least enough room to hold a the largest single file entry that can exist.
     static_assert((MAXPATHLEN + sizeof(dyld_process_info_image_entry) + 1 + MAX_TRAILER_SIZE) <= DYLD_PROCESS_INFO_NOTIFY_MAX_BUFFER_SIZE);
 
@@ -2646,44 +2742,156 @@ static void notifyMonitoringDyld(RemoteNotificationResponder& responder, bool un
     } else {
         responder.sendMessage(DYLD_PROCESS_INFO_NOTIFY_LOAD_ID, totalSize, (mach_msg_header_t*)buffer);
     }
+#endif /* BUILDING_DYLD */
 }
 
 void notifyMonitoringDyld(bool unloading, unsigned imageCount, const struct mach_header* loadAddresses[],
                                  const char* imagePaths[])
 {
-    dyld3::ScopedTimer(DBG_DYLD_REMOTE_IMAGE_NOTIFIER, 0, 0, 0);
+#if BUILDING_DYLD
+    dyld3::ScopedTimer timer(DBG_DYLD_REMOTE_IMAGE_NOTIFIER, 0, 0, 0);
     RemoteNotificationResponder responder;
     if (!responder.active()) { return; }
     notifyMonitoringDyld(responder, unloading, imageCount, loadAddresses, imagePaths);
+#endif /* BUILDING_DYLD */
+
 }
 
 void notifyMonitoringDyldMain() {
-    dyld3::ScopedTimer(DBG_DYLD_REMOTE_IMAGE_NOTIFIER, 0, 0, 0);
+#if BUILDING_DYLD
+    dyld3::ScopedTimer timer(DBG_DYLD_REMOTE_IMAGE_NOTIFIER, 0, 0, 0);
     RemoteNotificationResponder responder;
     uint8_t buffer[sizeof(mach_msg_header_t) + MAX_TRAILER_SIZE];
     responder.sendMessage(DYLD_PROCESS_INFO_NOTIFY_MAIN_ID, sizeof(mach_msg_header_t), (mach_msg_header_t*)buffer);
     responder.blockOnSynchronousEvent(DYLD_REMOTE_EVENT_MAIN);
+#endif /* BUILDING_DYLD */
 }
 
-void notifyMonitoringDyldSharedCacheMap() {
-    dyld3::ScopedTimer(DBG_DYLD_REMOTE_IMAGE_NOTIFIER, 0, 0, 0);
+void notifyMonitoringDyldBeforeInitializers() {
+#if BUILDING_DYLD
+    dyld3::ScopedTimer timer(DBG_DYLD_REMOTE_IMAGE_NOTIFIER, 0, 0, 0);
     RemoteNotificationResponder responder;
-    responder.blockOnSynchronousEvent(DYLD_REMOTE_EVENT_SHARED_CACHE_MAPPED);
+    responder.blockOnSynchronousEvent(DYLD_REMOTE_EVENT_BEFORE_INITIALIZERS);
+#endif /* BUILDING_DYLD */
 }
+
+#if BUILDING_DYLD && !TARGET_OS_SIMULATOR
+/* Since legacy simulators call notifyMonitoringDyld we can use it as a choke point to have the host dyld generate compact info
+   for them. Since we don't have access to the runtime state here and we can't change the call signature need to just materialize
+   everythign it needs here */
+void notifyMonitoringDyldSimSupport(bool unloading, unsigned imageCount, const mach_header* loadAddresses[], const char* imagePaths[]) {
+    static Allocator* glueAllocator = nullptr;
+    if (!glueAllocator) {
+        glueAllocator = &Allocator::persistentAllocator();
+    }
+
+    EphemeralAllocator ephemeralAllocator;
+    SyscallDelegate syscall;
+    FileManager fileManager(ephemeralAllocator, &syscall);
+    const std::span<std::byte> data((std::byte*)gProcessInfo->compact_dyld_image_info_addr, gProcessInfo->compact_dyld_image_info_size);
+    UniquePtr<ProcessSnapshot> processSnapshot;
+    if (gProcessInfo->compact_dyld_image_info_addr) {
+        processSnapshot = ephemeralAllocator.makeUnique<ProcessSnapshot>(ephemeralAllocator, fileManager, true, data);
+    } else {
+        processSnapshot = ephemeralAllocator.makeUnique<ProcessSnapshot>(ephemeralAllocator, fileManager, true);
+    }
+
+    if (unloading) {
+        for (auto i = 0; i < imageCount; ++i) {
+            processSnapshot->removeImageAtAddress((uint64_t)loadAddresses[i]);
+        }
+    } else {
+        for (auto i = 0; i < imageCount; ++i) {
+            const struct mach_header* mh =  loadAddresses[i];
+            if (mh->flags & MH_DYLIB_IN_CACHE) {
+                if (!processSnapshot->sharedCache()) {
+                    // Process snapshot has no shared cache, but this is
+                    // `MH_DYLIB_IN_CACHE` so shared cache should have been loaded.
+                    if (gProcessInfo->sharedCacheFSID && gProcessInfo->sharedCacheFSObjID) {
+                        auto sharedCache = Atlas::SharedCache(
+                               ephemeralAllocator,
+                               fileManager.fileRecordForVolumeDevIDAndObjID(
+                                   gProcessInfo->sharedCacheFSID,
+                                   gProcessInfo->sharedCacheFSObjID),
+                               processSnapshot->identityMapper(), gProcessInfo->sharedCacheBaseAddress, true);
+                       processSnapshot->addSharedCache(std::move(sharedCache));
+                   } else {
+                       halt("notifyMonitoringDyldSimSupport() tried to add a"
+                            "shared cache image, but there's no information about"
+                            "the shared cache location");
+                   }
+                }
+                processSnapshot->addSharedCacheImage(mh);
+            } else {
+                uuid_t rawUUID;
+                lsl::UUID machoUUID;
+                if (((MachOFile*)mh)->getUuid(rawUUID)) {
+                    machoUUID = rawUUID;
+                }
+                auto file = fileManager.fileRecordForPath(imagePaths[i]);
+                auto image = dyld4::Atlas::Image(ephemeralAllocator, std::move(file), processSnapshot->identityMapper(), mh);
+                processSnapshot->addImage(std::move(image));
+            }
+        }
+    }
+    auto compactInfoData    = processSnapshot->serialize();
+    auto compactInfo        = (std::byte*)glueAllocator->malloc(compactInfoData.size());
+    std::copy(compactInfoData.begin(), compactInfoData.end(), &compactInfo[0]);
+
+    // We do not need a compare and swap since we are under a lock, but we do need the updates to be atomic to out of process observers
+    struct CompactInfoDescriptor {
+        uintptr_t   addr;
+        size_t      size;
+    } __attribute__((aligned(16)));
+    CompactInfoDescriptor               newDescripter;
+    std::atomic<CompactInfoDescriptor>* currentDescriptor = (std::atomic<CompactInfoDescriptor>*)&gProcessInfo->compact_dyld_image_info_addr;
+    auto oldInfo = gProcessInfo->compact_dyld_image_info_addr;
+    newDescripter.addr = (uintptr_t)compactInfo;
+    newDescripter.size = compactInfoData.size();
+#if __i386__
+    // i386 is missing the atomic primitive, but we only need to be guaraantee the write does not sheer, as the only thing
+    // accessing this outside of a lock is the kernel or a remote process
+    *((uint64_t*)&currentDescriptor) = *((uint64_t*)&newDescripter);
+#else
+    currentDescriptor->store(newDescripter, std::memory_order_relaxed);
+#endif
+    if (oldInfo) {
+        // This might be info setup by the dyld runtime state, and if so we don't know the tpro state. If the oldInfo is not
+        // owned by the glueAllocator then purposefully leak it.
+        auto allocationMetadata = lsl::AllocationMetadata::getForPointer((void*)oldInfo);
+        auto oldAllocator = &allocationMetadata->allocator();
+        if (oldAllocator == glueAllocator) {
+            glueAllocator->free((void*)oldInfo);
+        }
+    }
+    {
+        // TODO: Move timer events into the responder class
+        // Use a scope to prevent compiler reordering timer
+        dyld3::ScopedTimer timer(DBG_DYLD_REMOTE_IMAGE_NOTIFIER, 0, 0, 0);
+        RemoteNotificationResponder responder;
+        responder.blockOnSynchronousEvent(DYLD_REMOTE_EVENT_ATLAS_CHANGED);
+    }
+    notifyMonitoringDyld(unloading, imageCount, loadAddresses, imagePaths);
+}
+#endif
 
     #if TARGET_OS_OSX
 void coresymbolication_load_notifier(void* connection, uint64_t timestamp, const char* path, const struct mach_header* mh)
 {
+#if BUILDING_DYLD
     const mach_header* loadAddress[] = { mh };
     const char*        loadPath[]    = { path };
-    dyld4::notifyMonitoringDyld(false, 1, loadAddress, loadPath);
+    dyld4::notifyMonitoringDyldSimSupport(false, 1, loadAddress, loadPath);
+#endif /* BUILDING_DYLD */
 }
 
 void coresymbolication_unload_notifier(void* connection, uint64_t timestamp, const char* path, const struct mach_header* mh)
 {
+#if BUILDING_DYLD
     const mach_header* loadAddress = { mh };
     const char*        loadPath    = { path };
-    dyld4::notifyMonitoringDyld(true, 1, &loadAddress, &loadPath);
+    dyld4::notifyMonitoringDyldSimSupport(true, 1, &loadAddress, &loadPath);
+#endif /* BUILDING_DYLD */
 }
     #endif // TARGET_OS_OSX
 
@@ -2691,6 +2899,7 @@ void coresymbolication_unload_notifier(void* connection, uint64_t timestamp, con
 extern void notifyMonitoringDyldMain() VIS_HIDDEN;
 extern void notifyMonitoringDyld(bool unloading, unsigned imageCount, const struct mach_header* loadAddresses[],
                                  const char* imagePaths[]) VIS_HIDDEN;
+extern void notifyMonitoringDyldBeforeInitializers() VIS_HIDDEN;
 #endif // !TARGET_OS_SIMULATOR
 
 //
@@ -2825,7 +3034,8 @@ NSModule APIs::NSLinkModule(NSObjectFileImage ofi, const char* moduleName, uint3
         return nullptr;
 
     // dlopen the binary outside of the read lock as we don't want to risk deadlock
-    ofi->handle = dlopen(ofi->path, openMode);
+    void* callerAddress = __builtin_return_address(0);
+    ofi->handle = dlopen_from(ofi->path, openMode, callerAddress);
     if ( ofi->handle == nullptr ) {
         if ( config.log.apis )
             log("NSLinkModule(%p, %s) => NULL (%s)\n", ofi, moduleName, dlerror());
@@ -3184,7 +3394,8 @@ bool APIs::NSAddLibrary(const char* pathName)
 #if TARGET_OS_OSX
     if ( config.log.apis )
         log("NSAddLibrary(%s)\n", pathName);
-    return (dlopen(pathName, 0) != nullptr);
+    void* callerAddress = __builtin_return_address(0);
+    return (dlopen_from(pathName, 0, callerAddress) != nullptr);
 #else
     obsolete();
 #endif // TARGET_OS_OSX
@@ -3195,7 +3406,8 @@ bool APIs::NSAddLibraryWithSearching(const char* pathName)
 #if TARGET_OS_OSX
     if ( config.log.apis )
         log("NSAddLibraryWithSearching(%s)\n", pathName);
-    return (dlopen(pathName, 0) != nullptr);
+    void* callerAddress = __builtin_return_address(0);
+    return (dlopen_from(pathName, 0, callerAddress) != nullptr);
 #else
     obsolete();
 #endif // TARGET_OS_OSX
@@ -3211,7 +3423,8 @@ const mach_header* APIs::NSAddImage(const char* imageName, uint32_t options)
     if ( (options & NSADDIMAGE_OPTION_RETURN_ONLY_IF_LOADED) != 0 )
         dloptions |= RTLD_NOLOAD;
 
-    void* h = dlopen(imageName, dloptions);
+    void* callerAddress = __builtin_return_address(0);
+    void* h = dlopen_from(imageName, dloptions, callerAddress);
     if ( h != nullptr ) {
         bool               firstOnly;
         const Loader*      ldr = loaderFromHandle(h, firstOnly);
@@ -3318,6 +3531,10 @@ void APIs::_dyld_lookup_and_bind_fully(const char* symbolName, void** address, N
 // This is factored out of dyldMain.cpp to support old macOS apps that use crt1.o 
 void APIs::runAllInitializersForMain()
 {
+    // disable page-in linking, not used for dlopen() loaded images
+    if ( !config.security.internalInstall || (config.process.pageInLinkingMode != 3) )
+        config.syscall.disablePageInLinking();
+
     // run libSystem's initializer first
     const_cast<Loader*>(this->libSystemLoader)->beginInitializers(*this);
     this->libSystemLoader->runInitializers(*this);
@@ -3329,12 +3546,20 @@ void APIs::runAllInitializersForMain()
     // Iterate using indices so that the array doesn't grow underneath us if a +load dloopen's
     for ( uint32_t i = 0; i != this->loaded.size(); ++i ) {
         const Loader* ldr = this->loaded[i];
-        if ( ldr->analyzer(*this)->isDylib() && (strncmp(ldr->analyzer(*this)->installName(), "/usr/lib/system/lib", 19) == 0) ) {
+        if ( (ldr->dylibInDyldCache || ldr->analyzer(*this)->isDylib()) && (strncmp(ldr->analyzer(*this)->installName(), "/usr/lib/system/lib", 19) == 0) ) {
             // check install name instead of path, to handle DYLD_LIBRARY_PATH overrides of libsystem sub-dylibs
             const_cast<Loader*>(ldr)->beginInitializers(*this);
             this->notifyObjCInit(ldr);
+            const_cast<Loader*>(ldr)->runInitializers(*this);
         }
     }
+
+#if TARGET_OS_OSX
+    // If we're PID 1, scan for roots
+    if ( (this->config.process.pid == 1) && (this->libSystemHelpers->version() >= 5) ) {
+        this->libSystemHelpers->run_async(&ProcessConfig::scanForRoots, (void*)&this->config);
+    }
+#endif // TARGET_OS_OSX
 
     // run all other initializers bottom-up, running inserted dylib initializers first
     // Iterate using indices so that the array doesn't grow underneath us if an initializer dloopen's

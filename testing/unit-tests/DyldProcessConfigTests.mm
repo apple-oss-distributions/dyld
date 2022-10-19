@@ -17,6 +17,7 @@ extern const dyld3::MachOAnalyzer __dso_handle;   // mach_header of this program
 using dyld4::ProcessConfig;
 using dyld4::KernelArgs;
 using dyld4::SyscallDelegate;
+using lsl::Allocator;
 
 typedef ProcessConfig::PathOverrides::Type  PathType;
 
@@ -42,20 +43,22 @@ public:
 
     KernelArgs*           kernArgs()     { return &_kernArgs; }
     SyscallDelegate&      osDelegate()   { return _osDelegate; }
+    Allocator&            allocator()    { return _allocator; }
 
 private:
     SyscallDelegate      _osDelegate;
     KernelArgs           _kernArgs;
+    Allocator&           _allocator;
 };
 
 ProcessConfigTester::ProcessConfigTester(MockO& main, const std::vector<const char*>& argv, const std::vector<const char*>& envp, const std::vector<const char*>& apple)
-    : _kernArgs(main.header(), argv, envp, apple)
+    : _kernArgs(main.header(), argv, envp, apple), _allocator(Allocator::persistentAllocator())
 {
 }
 
 // used when the executable does not matter, just testing env vars
 ProcessConfigTester::ProcessConfigTester(MockO& main, const std::vector<const char*>& envp)
-    : _kernArgs(main.header(), {"test.exe"}, envp, {"executable_path=/foo/test.exe"})
+    : _kernArgs(main.header(), {"test.exe"}, envp, {"executable_path=/foo/test.exe"}), _allocator(Allocator::persistentAllocator())
 {
     // use current dyld cache by default
     size_t len;
@@ -80,7 +83,7 @@ ProcessConfigTester::ProcessConfigTester(MockO& main, const std::vector<const ch
     ProcessConfigTester tester(main, {"test.exe"}, {"TMPDIR=/tmp"}, {"junk=other", "executable_path=/foo/test.exe"});
 
     // Act: run dyld's ProcessConfig constructor
-    ProcessConfig testConfig(tester.kernArgs(), tester.osDelegate());
+    ProcessConfig testConfig(tester.kernArgs(), tester.osDelegate(), tester.allocator());
 
     // Assert: verify ProcessConfig worked properly
     XCTAssert(testConfig.process.argc == 1);                                                    // "argc wrong
@@ -99,7 +102,7 @@ ProcessConfigTester::ProcessConfigTester(MockO& main, const std::vector<const ch
     tester.osDelegate()._internalInstall = false;
 
     // Act: run dyld's ProcessConfig constructor
-    ProcessConfig testConfig(tester.kernArgs(), tester.osDelegate());
+    ProcessConfig testConfig(tester.kernArgs(), tester.osDelegate(), tester.allocator());
 
     // Assert: verify ProcessConfig is for customer install
     XCTAssertFalse(testConfig.process.commPage.testMode);             // test mode should not be true for non-internal installs
@@ -113,9 +116,10 @@ ProcessConfigTester::ProcessConfigTester(MockO& main, const std::vector<const ch
     MockO main(MH_EXECUTE, "arm64");
     ProcessConfigTester tester(main, {"test.exe"}, {}, {"executable_path=/foo/test.exe", "dyld_flags=0xFFFFFF"});
     tester.osDelegate()._internalInstall = true;
+    tester.osDelegate()._pid = 1;
 
     // Act: run dyld's ProcessConfig constructor
-    ProcessConfig testConfig(tester.kernArgs(), tester.osDelegate());
+    ProcessConfig testConfig(tester.kernArgs(), tester.osDelegate(), tester.allocator());
 
     // Assert: verify ProcessConfig is for internal install
     XCTAssertTrue(testConfig.process.commPage.testMode);               // test mode should be true for internal installs, given dyld_flags
@@ -130,7 +134,7 @@ ProcessConfigTester::ProcessConfigTester(MockO& main, const std::vector<const ch
     ProcessConfigTester tester(main, {"other.exe"}, {}, {"executable_path=/foo/test5.exe"});
 
     // Act: run dyld's ProcessConfig constructor
-    ProcessConfig testConfig(tester.kernArgs(), tester.osDelegate());
+    ProcessConfig testConfig(tester.kernArgs(), tester.osDelegate(), tester.allocator());
 
     // Assert: verify ProcessConfig worked properly with executable_path set
     XCTAssert(strcmp(testConfig.process.mainExecutablePath, "/foo/test5.exe") == 0);
@@ -145,7 +149,7 @@ ProcessConfigTester::ProcessConfigTester(MockO& main, const std::vector<const ch
     tester.osDelegate()._fileIDsToPath[SyscallDelegate::makeFsIdPair(0x1234,0x5678)] = "/bar/fileid.exe";
 
     // Act: run dyld's ProcessConfig constructor
-    ProcessConfig testConfig(tester.kernArgs(), tester.osDelegate());
+    ProcessConfig testConfig(tester.kernArgs(), tester.osDelegate(), tester.allocator());
 
     // Assert: verify ProcessConfig converted executable_file to path
     XCTAssert(strcmp(testConfig.process.mainExecutablePath, "/bar/fileid.exe") == 0);
@@ -161,7 +165,7 @@ ProcessConfigTester::ProcessConfigTester(MockO& main, const std::vector<const ch
     tester.osDelegate()._fileIDsToPath[SyscallDelegate::makeFsIdPair(0x1234,0x5678)] = "/bar/fileid.exe";
 
     // Act: run dyld's ProcessConfig constructor
-    ProcessConfig testConfig(tester.kernArgs(), tester.osDelegate());
+    ProcessConfig testConfig(tester.kernArgs(), tester.osDelegate(), tester.allocator());
 
     // Assert: verify ProcessConfig converted executable_file to path, but kept symlink path for unreal path
     XCTAssert(strcmp(testConfig.process.mainExecutablePath, "/bar/fileid.exe") == 0);
@@ -176,7 +180,7 @@ ProcessConfigTester::ProcessConfigTester(MockO& main, const std::vector<const ch
     ProcessConfigTester tester(main, {"/foo/argv0name"}, {}, {"other=stuff"});
 
     // Act: run dyld's ProcessConfig constructor
-    ProcessConfig testConfig(tester.kernArgs(), tester.osDelegate());
+    ProcessConfig testConfig(tester.kernArgs(), tester.osDelegate(), tester.allocator());
 
     // Assert: verify ProcessConfig worked properly with no executable_path=, by falling back to argv[0]
     XCTAssert(strcmp(testConfig.process.mainExecutablePath, "/foo/argv0name") == 0);
@@ -191,7 +195,7 @@ ProcessConfigTester::ProcessConfigTester(MockO& main, const std::vector<const ch
     tester.setCWD("/foo/dir");
 
     // Act: run dyld's ProcessConfig constructor
-    ProcessConfig testConfig(tester.kernArgs(), tester.osDelegate());
+    ProcessConfig testConfig(tester.kernArgs(), tester.osDelegate(), tester.allocator());
 
     // Assert: verify ProcessConfig worked properly with no executable_path=, by falling back to argv[0] and using cwd
     XCTAssert(strcmp(testConfig.process.mainExecutablePath, "/foo/dir/bar.exe") == 0);
@@ -205,7 +209,7 @@ ProcessConfigTester::ProcessConfigTester(MockO& main, const std::vector<const ch
     ProcessConfigTester tester(main, {});
 
     // Act: run dyld's ProcessConfig constructor
-    ProcessConfig testConfig(tester.kernArgs(), tester.osDelegate());
+    ProcessConfig testConfig(tester.kernArgs(), tester.osDelegate(), tester.allocator());
 
     // Assert: verify ProcessConfig worked properly to extract the platform from the binary
     XCTAssert(testConfig.process.platform == dyld3::Platform::macOS);
@@ -218,7 +222,7 @@ ProcessConfigTester::ProcessConfigTester(MockO& main, const std::vector<const ch
     ProcessConfigTester tester(main, {});
 
     // Act: run dyld's ProcessConfig constructor
-    ProcessConfig testConfig(tester.kernArgs(), tester.osDelegate());
+    ProcessConfig testConfig(tester.kernArgs(), tester.osDelegate(), tester.allocator());
 
     // Assert: verify ProcessConfig worked properly to extract the platform from the binary
     XCTAssert(testConfig.process.platform == dyld3::Platform::iOS);
@@ -232,7 +236,7 @@ ProcessConfigTester::ProcessConfigTester(MockO& main, const std::vector<const ch
     ProcessConfigTester tester(main, {});
 
     // Act: run dyld's ProcessConfig constructor
-    ProcessConfig testConfig(tester.kernArgs(), tester.osDelegate());
+    ProcessConfig testConfig(tester.kernArgs(), tester.osDelegate(), tester.allocator());
 
     // Assert: verify ProcessConfig worked properly to extract the platform from the binary
     XCTAssert(testConfig.process.platform == dyld3::Platform::iOSMac);
@@ -247,7 +251,7 @@ ProcessConfigTester::ProcessConfigTester(MockO& main, const std::vector<const ch
     ProcessConfigTester tester(main, {"DYLD_FORCE_PLATFORM=6"});
 
     // Act: run dyld's ProcessConfig constructor
-    ProcessConfig testConfig(tester.kernArgs(), tester.osDelegate());
+    ProcessConfig testConfig(tester.kernArgs(), tester.osDelegate(), tester.allocator());
 
     // Assert: verify ProcessConfig worked properly to extract the platform from the binary
     XCTAssert(testConfig.process.platform == dyld3::Platform::iOSMac);
@@ -260,7 +264,7 @@ ProcessConfigTester::ProcessConfigTester(MockO& main, const std::vector<const ch
     ProcessConfigTester tester(main, {"DYLD_FORCE_PLATFORM=6"});
 
     // Act: run dyld's ProcessConfig constructor
-    ProcessConfig testConfig(tester.kernArgs(), tester.osDelegate());
+    ProcessConfig testConfig(tester.kernArgs(), tester.osDelegate(), tester.allocator());
 
     // Assert: verify ProcessConfig did not respect DYLD_FORCE_PLATFORM because binary did not opt-in
     XCTAssert(testConfig.process.platform == dyld3::Platform::macOS);
@@ -274,7 +278,7 @@ ProcessConfigTester::ProcessConfigTester(MockO& main, const std::vector<const ch
     ProcessConfigTester tester(main, {});
 
     // Act: run dyld's ProcessConfig constructor
-    ProcessConfig testConfig(tester.kernArgs(), tester.osDelegate());
+    ProcessConfig testConfig(tester.kernArgs(), tester.osDelegate(), tester.allocator());
 
     // Assert: verify ProcessConfig worked properly to compute the graded set of archs that can be loaded
     XCTAssert(testConfig.process.archs == &dyld3::GradedArchs::arm64_32);
@@ -287,7 +291,7 @@ ProcessConfigTester::ProcessConfigTester(MockO& main, const std::vector<const ch
     ProcessConfigTester tester(main, {});
 
     // Act: run dyld's ProcessConfig constructor
-    ProcessConfig testConfig(tester.kernArgs(), tester.osDelegate());
+    ProcessConfig testConfig(tester.kernArgs(), tester.osDelegate(), tester.allocator());
 
     // Assert: verify ProcessConfig worked properly to compute the graded set of archs that can be loaded with keys off
     XCTAssert(testConfig.process.archs == &dyld3::GradedArchs::arm64e);
@@ -300,7 +304,7 @@ ProcessConfigTester::ProcessConfigTester(MockO& main, const std::vector<const ch
     ProcessConfigTester tester(main, {"test.exe"}, {}, {"ptrauth_disabled=1", "executable_path=/foo/test.exe"});
 
     // Act: run dyld's ProcessConfig constructor
-    ProcessConfig testConfig(tester.kernArgs(), tester.osDelegate());
+    ProcessConfig testConfig(tester.kernArgs(), tester.osDelegate(), tester.allocator());
 
     // Assert: verify ProcessConfig worked properly to compute the graded set of archs that can be loaded with keys off
     XCTAssert(testConfig.process.archs == &dyld3::GradedArchs::arm64e_keysoff);
@@ -313,7 +317,7 @@ ProcessConfigTester::ProcessConfigTester(MockO& main, const std::vector<const ch
     ProcessConfigTester tester(main, {"OTHER=here", "DYLD_LIBRARY_PATH=/tmp", "DYLD_PRINT_LIBRARIES=1", "OTHER2=there"});
 
     // Act: run dyld's ProcessConfig constructor
-    ProcessConfig testConfig(tester.kernArgs(), tester.osDelegate());
+    ProcessConfig testConfig(tester.kernArgs(), tester.osDelegate(), tester.allocator());
 
     // Assert: verify ProcessConfig preseved all env vars
     XCTAssert(testConfig.process.environ("OTHER") != nullptr);
@@ -330,7 +334,7 @@ ProcessConfigTester::ProcessConfigTester(MockO& main, const std::vector<const ch
     tester.setAMFI(0x29);    // turn off three flags
 
     // Act: run dyld's ProcessConfig constructor
-    ProcessConfig testConfig(tester.kernArgs(), tester.osDelegate());
+    ProcessConfig testConfig(tester.kernArgs(), tester.osDelegate(), tester.allocator());
 
     // Assert: verify ProcessConfig removed just DYLD_* env vars
     XCTAssert(testConfig.process.environ("OTHER") != nullptr);
@@ -348,7 +352,7 @@ ProcessConfigTester::ProcessConfigTester(MockO& main, const std::vector<const ch
     tester.setAMFI(0x5555); // alternate bits on and off
 
     // Act: run dyld's ProcessConfig constructor
-    ProcessConfig testConfig(tester.kernArgs(), tester.osDelegate());
+    ProcessConfig testConfig(tester.kernArgs(), tester.osDelegate(), tester.allocator());
 
     // Assert: verify ProcessConfig worked properly to set alternate allow flags
     XCTAssertTrue( testConfig.security.allowAtPaths);
@@ -367,9 +371,10 @@ ProcessConfigTester::ProcessConfigTester(MockO& main, const std::vector<const ch
     ProcessConfigTester tester(main, {"test.exe"}, {"DYLD_AMFI_FAKE=0x5555"}, {"dyld_flags=0x2", "executable_path=/foo/test.exe"});
     tester.setInternalInstall(true); // enable test mode, so DYLD_AMFI_FAKE is checked
     tester.setAMFI(0xAAAA); // opposite of what DYLD_AMFI_FAKE overrides to
+    tester.osDelegate()._pid = 1;
 
     // Act: run dyld's ProcessConfig constructor
-    ProcessConfig testConfig(tester.kernArgs(), tester.osDelegate());
+    ProcessConfig testConfig(tester.kernArgs(), tester.osDelegate(), tester.allocator());
 
     // Assert: verify ProcessConfig used DYLD_AMFI_FAKE because in test mode
     XCTAssertTrue( testConfig.security.allowAtPaths);
@@ -389,7 +394,7 @@ ProcessConfigTester::ProcessConfigTester(MockO& main, const std::vector<const ch
     tester.setAMFI(0xAAAA); // opposite of what DYLD_AMFI_FAKE overrides to
 
     // Act: run dyld's ProcessConfig constructor
-    ProcessConfig testConfig(tester.kernArgs(), tester.osDelegate());
+    ProcessConfig testConfig(tester.kernArgs(), tester.osDelegate(), tester.allocator());
 
     // Assert: verify ProcessConfig used DYLD_AMFI_FAKE because in test mode
     XCTAssertFalse(testConfig.security.allowAtPaths);
@@ -407,7 +412,7 @@ ProcessConfigTester::ProcessConfigTester(MockO& main, const std::vector<const ch
     ProcessConfigTester tester(main, {});
 
     // Act: run dyld's ProcessConfig constructor
-    ProcessConfig testConfig(tester.kernArgs(), tester.osDelegate());
+    ProcessConfig testConfig(tester.kernArgs(), tester.osDelegate(), tester.allocator());
 
     // Assert: verify ProcessConfig sets all logging to off by default
     XCTAssertFalse(testConfig.log.segments);
@@ -430,7 +435,7 @@ ProcessConfigTester::ProcessConfigTester(MockO& main, const std::vector<const ch
                               "DYLD_PRINT_LOADERS=1", "DYLD_PRINT_LIBRARIES=1" });
 
     // Act: run dyld's ProcessConfig constructor
-    ProcessConfig testConfig(tester.kernArgs(), tester.osDelegate());
+    ProcessConfig testConfig(tester.kernArgs(), tester.osDelegate(), tester.allocator());
 
     // Assert: verify ProcessConfig sets all logging to true because of DYLD_PRINT_ env vars
     XCTAssertTrue(testConfig.log.segments);
@@ -450,7 +455,7 @@ ProcessConfigTester::ProcessConfigTester(MockO& main, const std::vector<const ch
     ProcessConfigTester tester(main, {});
 
     // Act: run dyld's ProcessConfig constructor
-    ProcessConfig testConfig(tester.kernArgs(), tester.osDelegate());
+    ProcessConfig testConfig(tester.kernArgs(), tester.osDelegate(), tester.allocator());
 
     // Asset: verify ProcessConfig sets skipMain to false by default
     XCTAssertFalse(testConfig.security.skipMain );
@@ -464,7 +469,7 @@ ProcessConfigTester::ProcessConfigTester(MockO& main, const std::vector<const ch
     tester.setInternalInstall(true); // enable test mode
 
     // Act: run dyld's ProcessConfig constructor
-    ProcessConfig testConfig(tester.kernArgs(), tester.osDelegate());
+    ProcessConfig testConfig(tester.kernArgs(), tester.osDelegate(), tester.allocator());
 
     // Assert: verify ProcessConfig sees DYLD_SKIP_MAIN and sets skipMain to true
     XCTAssertTrue(testConfig.security.skipMain );
@@ -478,7 +483,7 @@ ProcessConfigTester::ProcessConfigTester(MockO& main, const std::vector<const ch
     tester.setInternalInstall(false); // disable test mode
 
     // Act: run dyld's ProcessConfig constructor
-    ProcessConfig testConfig(tester.kernArgs(), tester.osDelegate());
+    ProcessConfig testConfig(tester.kernArgs(), tester.osDelegate(), tester.allocator());
 
     // Assert: verify ProcessConfig ignores DYLD_SKIP_MAIN because this is not an internal install
     XCTAssertFalse(testConfig.security.skipMain );
@@ -493,7 +498,7 @@ ProcessConfigTester::ProcessConfigTester(MockO& main, const std::vector<const ch
     tester.setInternalInstall(true);
 
     // Act: run dyld's ProcessConfig constructor
-    ProcessConfig testConfig(tester.kernArgs(), tester.osDelegate());
+    ProcessConfig testConfig(tester.kernArgs(), tester.osDelegate(), tester.allocator());
 
     // Assert: verify ProcessConfig is configured to have no dyld shared cache
     XCTAssert(testConfig.dyldCache.addr == nullptr);
@@ -509,7 +514,7 @@ ProcessConfigTester::ProcessConfigTester(MockO& main, const std::vector<const ch
     ProcessConfigTester tester(main, {});
 
     // Act: run dyld's ProcessConfig constructor
-    ProcessConfig testConfig(tester.kernArgs(), tester.osDelegate());
+    ProcessConfig testConfig(tester.kernArgs(), tester.osDelegate(), tester.allocator());
 
     // Assert: verify ProcessConfig is configured to use current dyld shared cache
     size_t len;
@@ -529,7 +534,7 @@ ProcessConfigTester::ProcessConfigTester(MockO& main, const std::vector<const ch
     ProcessConfigTester tester(main, {"test.exe"}, {}, {"executable_boothash=0123456789ABCDef", "executable_path=/foo/test.exe"});
 
     // Act: run dyld's ProcessConfig constructor
-    ProcessConfig testConfig(tester.kernArgs(), tester.osDelegate());
+    ProcessConfig testConfig(tester.kernArgs(), tester.osDelegate(), tester.allocator());
     STACK_ALLOC_ARRAY(uint8_t, bootToken, 128);
     bool bootTokenBuilt = testConfig.buildBootToken(bootToken);
 
@@ -545,7 +550,7 @@ ProcessConfigTester::ProcessConfigTester(MockO& main, const std::vector<const ch
     ProcessConfigTester tester(main, {});
 
     // Act: run dyld's ProcessConfig constructor
-    ProcessConfig testConfig(tester.kernArgs(), tester.osDelegate());
+    ProcessConfig testConfig(tester.kernArgs(), tester.osDelegate(), tester.allocator());
     STACK_ALLOC_ARRAY(uint8_t, bootToken, 128);
     bool bootTokenBuilt = testConfig.buildBootToken(bootToken);
 
@@ -560,7 +565,7 @@ ProcessConfigTester::ProcessConfigTester(MockO& main, const std::vector<const ch
     ProcessConfigTester tester(main, {});
 
     // Act: run dyld's ProcessConfig constructor
-    ProcessConfig testConfig(tester.kernArgs(), tester.osDelegate());
+    ProcessConfig testConfig(tester.kernArgs(), tester.osDelegate(), tester.allocator());
 
     // Assert: verify ProcessConfig by default says don't look for or save PrebuiltLoaderSet
     //XCTAssertFalse(testConfig.saveAppClosureFile()); // FIXME requires new dyld cache format
@@ -574,7 +579,7 @@ ProcessConfigTester::ProcessConfigTester(MockO& main, const std::vector<const ch
     ProcessConfigTester tester(main, {"HOME=/foo/bar", "DYLD_USE_CLOSURES=1"});
 
     // Act: run dyld's ProcessConfig constructor
-    ProcessConfig testConfig(tester.kernArgs(), tester.osDelegate());
+    ProcessConfig testConfig(tester.kernArgs(), tester.osDelegate(), tester.allocator());
 
     // Assert: verify ProcessConfig sees DYLD_USE_CLOSURES as building and saving PrebuildLoaderSet
 //    XCTAssertTrue( testConfig.saveAppClosureFile());      // FIXME requires new dyld cache format
@@ -588,7 +593,7 @@ ProcessConfigTester::ProcessConfigTester(MockO& main, const std::vector<const ch
     ProcessConfigTester tester(main, {"HOME=/foo/bar", "DYLD_USE_CLOSURES=2"});
 
     // Act: run dyld's ProcessConfig constructor
-    ProcessConfig testConfig(tester.kernArgs(), tester.osDelegate());
+    ProcessConfig testConfig(tester.kernArgs(), tester.osDelegate(), tester.allocator());
 
     // Assert: verify ProcessConfig sees DYLD_USE_CLOSURES as building and saving PrebuildLoaderSet
     XCTAssertFalse(testConfig.saveAppClosureFile());
@@ -603,7 +608,7 @@ ProcessConfigTester::ProcessConfigTester(MockO& main, const std::vector<const ch
                                {"executable_boothash=0123456789ABCDef", "executable_path=/foo/test.exe"});
 
     // Act: run dyld's ProcessConfig constructor
-    ProcessConfig testConfig(tester.kernArgs(), tester.osDelegate());
+    ProcessConfig testConfig(tester.kernArgs(), tester.osDelegate(), tester.allocator());
 
     // Assert: verify ProcessConfig sees this as a containerized app that loads/saves PrebuiltLoaderSet
 //    XCTAssertTrue(testConfig.saveAppClosureFile());  // requires a dyld cache
@@ -618,7 +623,7 @@ ProcessConfigTester::ProcessConfigTester(MockO& main, const std::vector<const ch
                                {"executable_boothash=0123456789ABCDef", "executable_path=/foo/test.exe"});
 
     // Act: run dyld's ProcessConfig constructor
-    ProcessConfig testConfig(tester.kernArgs(), tester.osDelegate());
+    ProcessConfig testConfig(tester.kernArgs(), tester.osDelegate(), tester.allocator());
 
     // Assert: verify ProcessConfig disables saving/loading PrebuiltLoaderSet when DYLD_FRAMEWORK_PATH exists
     XCTAssertFalse(testConfig.saveAppClosureFile());
@@ -646,15 +651,37 @@ ProcessConfigTester::ProcessConfigTester(MockO& main, const std::vector<const ch
 - (void)testDefaultFallbackFrameworkPathsMac
 {
     // Arrange: set up PathOverrides object
+    MockO main(MH_EXECUTE, "x86_64", Platform::macOS, "13.0");
+    ProcessConfigTester tester(main, {});
+
+    // Act: record each path searched
+    ProcessConfig testConfig(tester.kernArgs(), tester.osDelegate(), tester.allocator());
+    __block std::vector<std::string> pathsSearched;
+    __block std::vector<PathType>    pathType;
+    bool                             stop = false;
+    testConfig.pathOverrides.forEachPathVariant("/stuff/Foo.framework/Foo", dyld3::Platform::macOS, false, false, stop, ^(const char* possiblePath, PathType type, bool&) {
+        pathsSearched.push_back(possiblePath);
+        pathType.push_back(type);
+    });
+
+    // Assert: verify original path is first, then fallback paths
+    XCTAssert(pathsSearched.size() == 1);
+    XCTAssert(pathsSearched[0] == "/stuff/Foo.framework/Foo");
+    XCTAssert(pathType[0] == ProcessConfig::PathOverrides::Type::rawPath);
+}
+
+- (void)testDefaultFallbackFrameworkPathsMacOld
+{
+    // Arrange: set up PathOverrides object
     MockO main(MH_EXECUTE, "x86_64", Platform::macOS, "10.15");
     ProcessConfigTester tester(main, {});
 
     // Act: record each path searched
-    ProcessConfig testConfig(tester.kernArgs(), tester.osDelegate());
+    ProcessConfig testConfig(tester.kernArgs(), tester.osDelegate(), tester.allocator());
     __block std::vector<std::string> pathsSearched;
     __block std::vector<PathType>    pathType;
     bool                             stop = false;
-    testConfig.pathOverrides.forEachPathVariant("/stuff/Foo.framework/Foo", dyld3::Platform::macOS, false, stop, ^(const char* possiblePath, PathType type, bool&) {
+    testConfig.pathOverrides.forEachPathVariant("/stuff/Foo.framework/Foo", dyld3::Platform::macOS, true, false, stop, ^(const char* possiblePath, PathType type, bool&) {
         pathsSearched.push_back(possiblePath);
         pathType.push_back(type);
     });
@@ -672,15 +699,37 @@ ProcessConfigTester::ProcessConfigTester(MockO& main, const std::vector<const ch
 - (void)testDefaultFallbackFrameworkPaths
 {
     // Arrange: set up PathOverrides object
+    MockO main(MH_EXECUTE, "arm64", Platform::iOS, "16.0");
+    ProcessConfigTester tester(main, {});
+
+    // Act: record each path searched
+    ProcessConfig testConfig(tester.kernArgs(), tester.osDelegate(), tester.allocator());
+    __block std::vector<std::string> pathsSearched;
+    __block std::vector<PathType>    pathType;
+    bool                             stop = false;
+    testConfig.pathOverrides.forEachPathVariant("/stuff/Foo.framework/Foo", dyld3::Platform::iOS, false, false, stop, ^(const char* possiblePath, PathType type, bool&) {
+        pathsSearched.push_back(possiblePath);
+        pathType.push_back(type);
+    });
+
+    // Assert: verify original path is first, then /System/Library
+    XCTAssert(pathsSearched.size() == 1);
+    XCTAssert(pathsSearched[0] == "/stuff/Foo.framework/Foo");
+    XCTAssert(pathType[0] == ProcessConfig::PathOverrides::Type::rawPath);
+}
+
+- (void)testDefaultFallbackFrameworkPathsOld
+{
+    // Arrange: set up PathOverrides object
     MockO main(MH_EXECUTE, "arm64", Platform::iOS, "13.0");
     ProcessConfigTester tester(main, {});
 
     // Act: record each path searched
-    ProcessConfig testConfig(tester.kernArgs(), tester.osDelegate());
+    ProcessConfig testConfig(tester.kernArgs(), tester.osDelegate(), tester.allocator());
     __block std::vector<std::string> pathsSearched;
     __block std::vector<PathType>    pathType;
     bool                             stop = false;
-    testConfig.pathOverrides.forEachPathVariant("/stuff/Foo.framework/Foo", dyld3::Platform::iOS, false, stop, ^(const char* possiblePath, PathType type, bool&) {
+    testConfig.pathOverrides.forEachPathVariant("/stuff/Foo.framework/Foo", dyld3::Platform::iOS, true, false, stop, ^(const char* possiblePath, PathType type, bool&) {
         pathsSearched.push_back(possiblePath);
         pathType.push_back(type);
     });
@@ -693,6 +742,8 @@ ProcessConfigTester::ProcessConfigTester(MockO& main, const std::vector<const ch
     XCTAssert(pathType[1] == ProcessConfig::PathOverrides::Type::standardFallback);
 }
 
+
+
 - (void)testDefaultFallbackFrameworkPathRepeats
 {
     // Arrange: set up PathOverrides object
@@ -700,11 +751,11 @@ ProcessConfigTester::ProcessConfigTester(MockO& main, const std::vector<const ch
     ProcessConfigTester tester(main, {});
 
     // Act: record each path searched
-    ProcessConfig testConfig(tester.kernArgs(), tester.osDelegate());
+    ProcessConfig testConfig(tester.kernArgs(), tester.osDelegate(), tester.allocator());
     __block std::vector<std::string> pathsSearched;
     __block std::vector<PathType>    pathType;
     bool                             stop = false;
-    testConfig.pathOverrides.forEachPathVariant("/System/Library/Frameworks/Foo.framework/Foo", dyld3::Platform::iOS, false, stop, ^(const char* possiblePath, PathType type, bool&) {
+    testConfig.pathOverrides.forEachPathVariant("/System/Library/Frameworks/Foo.framework/Foo", dyld3::Platform::iOS, false, false, stop, ^(const char* possiblePath, PathType type, bool&) {
         pathsSearched.push_back(possiblePath);
         pathType.push_back(type);
     });
@@ -722,11 +773,11 @@ ProcessConfigTester::ProcessConfigTester(MockO& main, const std::vector<const ch
     ProcessConfigTester tester(main, {"DYLD_FALLBACK_FRAMEWORK_PATHS=/yonder:/hither"});
 
     // Act: record each path searched
-     ProcessConfig testConfig(tester.kernArgs(), tester.osDelegate());
+     ProcessConfig testConfig(tester.kernArgs(), tester.osDelegate(), tester.allocator());
     __block std::vector<std::string> pathsSearched;
     __block std::vector<PathType>    pathType;
     bool                             stop = false;
-    testConfig.pathOverrides.forEachPathVariant("/stuff/Foo.framework/Foo", dyld3::Platform::macOS, false, stop, ^(const char* possiblePath, PathType type, bool&) {
+    testConfig.pathOverrides.forEachPathVariant("/stuff/Foo.framework/Foo", dyld3::Platform::macOS, false, false, stop, ^(const char* possiblePath, PathType type, bool&) {
         pathsSearched.push_back(possiblePath);
         pathType.push_back(type);
     });
@@ -748,11 +799,33 @@ ProcessConfigTester::ProcessConfigTester(MockO& main, const std::vector<const ch
     ProcessConfigTester tester(main, {});
 
     // Act: record each path searched
-    ProcessConfig testConfig(tester.kernArgs(), tester.osDelegate());
+    ProcessConfig testConfig(tester.kernArgs(), tester.osDelegate(), tester.allocator());
     __block std::vector<std::string> pathsSearched;
     __block std::vector<PathType>    pathType;
     bool                             stop = false;
-    testConfig.pathOverrides.forEachPathVariant("/stuff/libfoo.dylib", dyld3::Platform::macOS, false, stop, ^(const char* possiblePath, PathType type, bool&) {
+    testConfig.pathOverrides.forEachPathVariant("/stuff/libfoo.dylib", dyld3::Platform::macOS, false, false, stop, ^(const char* possiblePath, PathType type, bool&) {
+        pathsSearched.push_back(possiblePath);
+        pathType.push_back(type);
+    });
+
+    // Assert: verify original path is first, then fallback paths
+    XCTAssert(pathsSearched.size() == 1);
+    XCTAssert(pathsSearched[0] == "/stuff/libfoo.dylib");
+    XCTAssert(pathType[0] == ProcessConfig::PathOverrides::Type::rawPath);
+}
+
+- (void)testDefaultFallbackLibraryPathsOld
+{
+    // Arrange: set up PathOverrides object
+    MockO main(MH_EXECUTE, "arm64", Platform::iOS, "13.0");
+    ProcessConfigTester tester(main, {});
+
+    // Act: record each path searched
+    ProcessConfig testConfig(tester.kernArgs(), tester.osDelegate(), tester.allocator());
+    __block std::vector<std::string> pathsSearched;
+    __block std::vector<PathType>    pathType;
+    bool                             stop = false;
+    testConfig.pathOverrides.forEachPathVariant("/stuff/libfoo.dylib", dyld3::Platform::macOS, true, false, stop, ^(const char* possiblePath, PathType type, bool&) {
         pathsSearched.push_back(possiblePath);
         pathType.push_back(type);
     });
@@ -767,7 +840,6 @@ ProcessConfigTester::ProcessConfigTester(MockO& main, const std::vector<const ch
     XCTAssert(pathType[2] == ProcessConfig::PathOverrides::Type::standardFallback);
 }
 
-
 - (void)testCustomFallbackLibraryPaths
 {
     // Arrange: set up PathOverrides object
@@ -775,11 +847,11 @@ ProcessConfigTester::ProcessConfigTester(MockO& main, const std::vector<const ch
     ProcessConfigTester tester(main, {"DYLD_FALLBACK_LIBRARY_PATHS=/yonder:/hither"});
 
     // Act: record each path searched
-    ProcessConfig testConfig(tester.kernArgs(), tester.osDelegate());
+    ProcessConfig testConfig(tester.kernArgs(), tester.osDelegate(), tester.allocator());
     __block std::vector<std::string> pathsSearched;
     __block std::vector<PathType>    pathType;
     bool                             stop = false;
-    testConfig.pathOverrides.forEachPathVariant("/stuff/libfoo.dylib", dyld3::Platform::macOS, false, stop, ^(const char* possiblePath, PathType type, bool&) {
+    testConfig.pathOverrides.forEachPathVariant("/stuff/libfoo.dylib", dyld3::Platform::macOS, false, false, stop, ^(const char* possiblePath, PathType type, bool&) {
         pathsSearched.push_back(possiblePath);
         pathType.push_back(type);
     });
@@ -794,31 +866,6 @@ ProcessConfigTester::ProcessConfigTester(MockO& main, const std::vector<const ch
     XCTAssert(pathType[2] == ProcessConfig::PathOverrides::Type::customFallback);
 }
 
-- (void)testCustomNoFallbackLibraryPaths
-{
-    // Arrange: set up PathOverrides object
-    MockO main(MH_EXECUTE, "x86_64", Platform::macOS, "10.15");
-    ProcessConfigTester tester(main, {"DYLD_FALLBACK_LIBRARY_PATHS=/yonder:/hither"});
-
-    // Act: record each path searched
-    ProcessConfig testConfig(tester.kernArgs(), tester.osDelegate());
-    __block std::vector<std::string> pathsSearched;
-    __block std::vector<PathType>    pathType;
-    bool                             stop = false;
-    testConfig.pathOverrides.forEachPathVariant("/stuff/libfoo.dylib", dyld3::Platform::macOS, true, stop, ^(const char* possiblePath, PathType type, bool&) {
-        pathsSearched.push_back(possiblePath);
-        pathType.push_back(type);
-    });
-
-    // Assert: verify original path is first, an no fallbacks are searched
-    XCTAssert(pathsSearched.size() == 3);
-    XCTAssert(pathsSearched[0] == "/stuff/libfoo.dylib");
-    XCTAssert(pathsSearched[1] == "/usr/local/lib/libfoo.dylib");
-    XCTAssert(pathsSearched[2] == "/usr/lib/libfoo.dylib");
-    XCTAssert(pathType[0] == ProcessConfig::PathOverrides::Type::rawPath);
-    XCTAssert(pathType[1] == ProcessConfig::PathOverrides::Type::standardFallback);
-    XCTAssert(pathType[2] == ProcessConfig::PathOverrides::Type::standardFallback);
-}
 
 - (void)testVersionedDylibs
 {
@@ -846,11 +893,11 @@ ProcessConfigTester::ProcessConfigTester(MockO& main, const std::vector<const ch
 
 
     // Act: record if overrides found
-    ProcessConfig testConfig(tester.kernArgs(), tester.osDelegate());
+    ProcessConfig testConfig(tester.kernArgs(), tester.osDelegate(), tester.allocator());
     bool         stop = false;
     __block bool foundYonderA = false;
     __block bool foundHitherA = false;
-    testConfig.pathOverrides.forEachPathVariant("/usr/lib/libA.dylib", dyld3::Platform::macOS, false, stop, ^(const char* possiblePath, PathType type, bool&) {
+    testConfig.pathOverrides.forEachPathVariant("/usr/lib/libA.dylib", dyld3::Platform::macOS, false, false, stop, ^(const char* possiblePath, PathType type, bool&) {
         //fprintf(stderr, "path: %s\n", possiblePath);
         if ( strcmp(possiblePath, "/yonder/libA.dylib") == 0 )
             foundYonderA = true;
@@ -859,7 +906,7 @@ ProcessConfigTester::ProcessConfigTester(MockO& main, const std::vector<const ch
     });
     __block bool foundYonderB = false;
     __block bool foundHitherB = false;
-    testConfig.pathOverrides.forEachPathVariant("/usr/lib/libB.dylib", dyld3::Platform::macOS, false, stop, ^(const char* possiblePath, PathType type, bool&) {
+    testConfig.pathOverrides.forEachPathVariant("/usr/lib/libB.dylib", dyld3::Platform::macOS, false, false, stop, ^(const char* possiblePath, PathType type, bool&) {
         //fprintf(stderr, "path: %s\n", possiblePath);
         if ( strcmp(possiblePath, "/yonder/libB.dylib") == 0 )
             foundYonderB = true;
@@ -868,7 +915,7 @@ ProcessConfigTester::ProcessConfigTester(MockO& main, const std::vector<const ch
     });
     __block bool foundYonderC = false;
     __block bool foundHitherC = false;
-    testConfig.pathOverrides.forEachPathVariant("/usr/lib/libC.dylib", dyld3::Platform::macOS, false, stop, ^(const char* possiblePath, PathType type, bool&) {
+    testConfig.pathOverrides.forEachPathVariant("/usr/lib/libC.dylib", dyld3::Platform::macOS, false, false, stop, ^(const char* possiblePath, PathType type, bool&) {
         //fprintf(stderr, "path: %s\n", possiblePath);
         if ( strcmp(possiblePath, "/yonder/libC.dylib") == 0 )
             foundYonderC = true;
@@ -877,7 +924,7 @@ ProcessConfigTester::ProcessConfigTester(MockO& main, const std::vector<const ch
     });
     __block bool foundYonderD = false;
     __block bool foundHitherD = false;
-    testConfig.pathOverrides.forEachPathVariant("/usr/lib/libD.dylib", dyld3::Platform::macOS, false, stop, ^(const char* possiblePath, PathType type, bool&) {
+    testConfig.pathOverrides.forEachPathVariant("/usr/lib/libD.dylib", dyld3::Platform::macOS, false, false, stop, ^(const char* possiblePath, PathType type, bool&) {
         //fprintf(stderr, "path: %s\n", possiblePath);
         if ( strcmp(possiblePath, "/yonder/libD.dylib") == 0 )
             foundYonderD = true;
@@ -886,7 +933,7 @@ ProcessConfigTester::ProcessConfigTester(MockO& main, const std::vector<const ch
     });
     __block bool foundYonderE = false;
     __block bool foundHitherE = false;
-    testConfig.pathOverrides.forEachPathVariant("/usr/lib/libE.dylib", dyld3::Platform::macOS, false, stop, ^(const char* possiblePath, PathType type, bool&) {
+    testConfig.pathOverrides.forEachPathVariant("/usr/lib/libE.dylib", dyld3::Platform::macOS, false, false, stop, ^(const char* possiblePath, PathType type, bool&) {
         //fprintf(stderr, "path: %s\n", possiblePath);
         if ( strcmp(possiblePath, "/yonder/libE.dylib") == 0 )
             foundYonderE = true;
@@ -895,7 +942,7 @@ ProcessConfigTester::ProcessConfigTester(MockO& main, const std::vector<const ch
     });
     __block bool foundYonderF = false;
     __block bool foundHitherF = false;
-    testConfig.pathOverrides.forEachPathVariant("/usr/lib/libF.dylib", dyld3::Platform::macOS, false, stop, ^(const char* possiblePath, PathType type, bool&) {
+    testConfig.pathOverrides.forEachPathVariant("/usr/lib/libF.dylib", dyld3::Platform::macOS, false, false, stop, ^(const char* possiblePath, PathType type, bool&) {
         //fprintf(stderr, "path: %s\n", possiblePath);
         if ( strcmp(possiblePath, "/yonder/libF.dylib") == 0 )
             foundYonderF = true;
@@ -928,10 +975,10 @@ ProcessConfigTester::ProcessConfigTester(MockO& main, const std::vector<const ch
     tester.osDelegate()._dylibInfoMap["/newstuff/libNew.dylib"]  = {1, "/usr/lib/libNew.dylib"};
 
     // Act: record if overrides found
-    ProcessConfig testConfig(tester.kernArgs(), tester.osDelegate());
+    ProcessConfig testConfig(tester.kernArgs(), tester.osDelegate(), tester.allocator());
     bool         stop          = false;
     __block bool foundNewStuff = false;
-    testConfig.pathOverrides.forEachPathVariant("/usr/lib/libNew.dylib", dyld3::Platform::macOS, false, stop, ^(const char* possiblePath, PathType type, bool&) {
+    testConfig.pathOverrides.forEachPathVariant("/usr/lib/libNew.dylib", dyld3::Platform::macOS, false, false, stop, ^(const char* possiblePath, PathType type, bool&) {
         //fprintf(stderr, "new path: %s\n", possiblePath);
         if ( strcmp(possiblePath, "/newstuff/libNew.dylib") == 0 )
             foundNewStuff = true;
@@ -961,8 +1008,8 @@ ProcessConfigTester::ProcessConfigTester(MockO& main, const std::vector<const ch
     bool         stop       = false;
     __block bool foundAlt1A = false;
     __block bool foundAlt2A = false;
-    ProcessConfig testConfig(tester.kernArgs(), tester.osDelegate());
-    testConfig.pathOverrides.forEachPathVariant("/usr/lib/libA.dylib", dyld3::Platform::macOS, false, stop, ^(const char* possiblePath, PathType type, bool&) {
+    ProcessConfig testConfig(tester.kernArgs(), tester.osDelegate(), tester.allocator());
+    testConfig.pathOverrides.forEachPathVariant("/usr/lib/libA.dylib", dyld3::Platform::macOS, false, false, stop, ^(const char* possiblePath, PathType type, bool&) {
         //fprintf(stderr, "dup path: %s\n", possiblePath);
         if ( strcmp(possiblePath, "/alt1/libA.dylib") == 0 )
             foundAlt1A = true;
@@ -971,7 +1018,7 @@ ProcessConfigTester::ProcessConfigTester(MockO& main, const std::vector<const ch
     });
     __block bool foundAlt1B = false;
     __block bool foundAlt2B = false;
-    testConfig.pathOverrides.forEachPathVariant("/usr/lib/libB.dylib", dyld3::Platform::macOS, false, stop, ^(const char* possiblePath, PathType type, bool&) {
+    testConfig.pathOverrides.forEachPathVariant("/usr/lib/libB.dylib", dyld3::Platform::macOS, false, false, stop, ^(const char* possiblePath, PathType type, bool&) {
         //fprintf(stderr, "dup path: %s\n", possiblePath);
         if ( strcmp(possiblePath, "/alt1/libB.dylib") == 0 )
             foundAlt1B = true;
@@ -1014,11 +1061,11 @@ ProcessConfigTester::ProcessConfigTester(MockO& main, const std::vector<const ch
 
 
     // Act: record if overrides found
-    ProcessConfig testConfig(tester.kernArgs(), tester.osDelegate());
+    ProcessConfig testConfig(tester.kernArgs(), tester.osDelegate(), tester.allocator());
     bool         stop         = false;
     __block bool foundYonderA = false;
     __block bool foundHitherA = false;
-    testConfig.pathOverrides.forEachPathVariant("/System/Library/PrivateFrameworks/A.framework/A", dyld3::Platform::macOS, false, stop, ^(const char* possiblePath, PathType type, bool&) {
+    testConfig.pathOverrides.forEachPathVariant("/System/Library/PrivateFrameworks/A.framework/A", dyld3::Platform::macOS, false, false, stop, ^(const char* possiblePath, PathType type, bool&) {
         //fprintf(stderr, "path: %s\n", possiblePath);
         if ( strcmp(possiblePath, "/yonder/A.framework/A") == 0 )
             foundYonderA = true;
@@ -1028,7 +1075,7 @@ ProcessConfigTester::ProcessConfigTester(MockO& main, const std::vector<const ch
     __block bool foundYonderB = false;
     __block bool foundHitherB = false;
     __block bool foundBaseB = false;
-    testConfig.pathOverrides.forEachPathVariant("/System/Library/PrivateFrameworks/B.framework/B", dyld3::Platform::macOS, false, stop, ^(const char* possiblePath, PathType type, bool&) {
+    testConfig.pathOverrides.forEachPathVariant("/System/Library/PrivateFrameworks/B.framework/B", dyld3::Platform::macOS, false, false, stop, ^(const char* possiblePath, PathType type, bool&) {
         //fprintf(stderr, "path: %s\n", possiblePath);
         if ( strcmp(possiblePath, "/yonder/B.framework/B") == 0 )
             foundYonderB = true;
@@ -1040,7 +1087,7 @@ ProcessConfigTester::ProcessConfigTester(MockO& main, const std::vector<const ch
     __block bool foundYonderC = false;
     __block bool foundHitherC = false;
     __block bool foundBaseC = false;
-    testConfig.pathOverrides.forEachPathVariant("/System/Library/PrivateFrameworks/C.framework/C", dyld3::Platform::macOS, false, stop, ^(const char* possiblePath, PathType type, bool&) {
+    testConfig.pathOverrides.forEachPathVariant("/System/Library/PrivateFrameworks/C.framework/C", dyld3::Platform::macOS, false, false, stop, ^(const char* possiblePath, PathType type, bool&) {
         //fprintf(stderr, "path: %s\n", possiblePath);
         if ( strcmp(possiblePath, "/yonder/C.framework/C") == 0 )
             foundYonderC = true;
@@ -1051,7 +1098,7 @@ ProcessConfigTester::ProcessConfigTester(MockO& main, const std::vector<const ch
     });
     __block bool foundYonderD = false;
     __block bool foundHitherD = false;
-    testConfig.pathOverrides.forEachPathVariant("/System/Library/PrivateFrameworks/D.framework/D", dyld3::Platform::macOS, false, stop, ^(const char* possiblePath, PathType type, bool&) {
+    testConfig.pathOverrides.forEachPathVariant("/System/Library/PrivateFrameworks/D.framework/D", dyld3::Platform::macOS, false, false, stop, ^(const char* possiblePath, PathType type, bool&) {
         //fprintf(stderr, "path: %s\n", possiblePath);
         if ( strcmp(possiblePath, "/yonder/D.framework/D") == 0 )
             foundYonderD = true;
@@ -1061,7 +1108,7 @@ ProcessConfigTester::ProcessConfigTester(MockO& main, const std::vector<const ch
     __block bool foundYonderE = false;
     __block bool foundHitherE = false;
     __block bool foundBaseE = false;
-    testConfig.pathOverrides.forEachPathVariant("/System/Library/PrivateFrameworks/E.framework/E", dyld3::Platform::macOS, false, stop, ^(const char* possiblePath, PathType type, bool&) {
+    testConfig.pathOverrides.forEachPathVariant("/System/Library/PrivateFrameworks/E.framework/E", dyld3::Platform::macOS, false, false, stop, ^(const char* possiblePath, PathType type, bool&) {
         //fprintf(stderr, "path: %s\n", possiblePath);
         if ( strcmp(possiblePath, "/yonder/E.framework/E") == 0 )
             foundYonderE = true;
@@ -1073,7 +1120,7 @@ ProcessConfigTester::ProcessConfigTester(MockO& main, const std::vector<const ch
     __block bool foundYonderF = false;
     __block bool foundHitherF = false;
     __block bool foundBaseF = false;
-    testConfig.pathOverrides.forEachPathVariant("/System/Library/PrivateFrameworks/F.framework/F", dyld3::Platform::macOS, false, stop, ^(const char* possiblePath, PathType type, bool&) {
+    testConfig.pathOverrides.forEachPathVariant("/System/Library/PrivateFrameworks/F.framework/F", dyld3::Platform::macOS, false, false, stop, ^(const char* possiblePath, PathType type, bool&) {
         //fprintf(stderr, "path: %s\n", possiblePath);
         if ( strcmp(possiblePath, "/yonder/F.framework/F") == 0 )
             foundYonderF = true;
@@ -1114,8 +1161,8 @@ ProcessConfigTester::ProcessConfigTester(MockO& main, const std::vector<const ch
     // Act: record if overrides found
     bool         stop          = false;
     __block bool foundNewStuff = false;
-    ProcessConfig testConfig(tester.kernArgs(), tester.osDelegate());
-    testConfig.pathOverrides.forEachPathVariant("/System/Library/PrivateFrameworks/New.framework/New", dyld3::Platform::macOS, false, stop, ^(const char* possiblePath, PathType type, bool&) {
+    ProcessConfig testConfig(tester.kernArgs(), tester.osDelegate(), tester.allocator());
+    testConfig.pathOverrides.forEachPathVariant("/System/Library/PrivateFrameworks/New.framework/New", dyld3::Platform::macOS, false, false, stop, ^(const char* possiblePath, PathType type, bool&) {
         //fprintf(stderr, "new path: %s\n", possiblePath);
         if ( strcmp(possiblePath, "/newstuff/New.framework/New") == 0 )
             foundNewStuff = true;
@@ -1145,8 +1192,8 @@ ProcessConfigTester::ProcessConfigTester(MockO& main, const std::vector<const ch
     bool         stop       = false;
     __block bool foundAlt1A = false;
     __block bool foundAlt2A = false;
-    ProcessConfig testConfig(tester.kernArgs(), tester.osDelegate());
-    testConfig.pathOverrides.forEachPathVariant("/System/Library/PrivateFrameworks/A.framework/A", dyld3::Platform::macOS, false, stop, ^(const char* possiblePath, PathType type, bool&) {
+    ProcessConfig testConfig(tester.kernArgs(), tester.osDelegate(), tester.allocator());
+    testConfig.pathOverrides.forEachPathVariant("/System/Library/PrivateFrameworks/A.framework/A", dyld3::Platform::macOS, false, false, stop, ^(const char* possiblePath, PathType type, bool&) {
         //fprintf(stderr, "dup path: %s\n", possiblePath);
         if ( strcmp(possiblePath, "/alt1/A.framework/A") == 0 )
             foundAlt1A = true;
@@ -1155,7 +1202,7 @@ ProcessConfigTester::ProcessConfigTester(MockO& main, const std::vector<const ch
     });
     __block bool foundAlt1B = false;
     __block bool foundAlt2B = false;
-    testConfig.pathOverrides.forEachPathVariant("/System/Library/PrivateFrameworks/B.framework/B", dyld3::Platform::macOS, false, stop, ^(const char* possiblePath, PathType type, bool&) {
+    testConfig.pathOverrides.forEachPathVariant("/System/Library/PrivateFrameworks/B.framework/B", dyld3::Platform::macOS, false, false, stop, ^(const char* possiblePath, PathType type, bool&) {
         //fprintf(stderr, "dup path: %s\n", possiblePath);
         if ( strcmp(possiblePath, "/alt1/B.framework/B") == 0 )
             foundAlt1B = true;
@@ -1179,7 +1226,7 @@ ProcessConfigTester::ProcessConfigTester(MockO& main, const std::vector<const ch
     ProcessConfigTester tester(main, {});
 
     // Act: record if we can use a prebuilt loader
-    ProcessConfig testConfig(tester.kernArgs(), tester.osDelegate());
+    ProcessConfig testConfig(tester.kernArgs(), tester.osDelegate(), tester.allocator());
     bool dontUsePrebuiltForApp = testConfig.pathOverrides.dontUsePrebuiltForApp();
 
     // Assert: We should be able to use prebuilt loaders using DYLD_LIBRARY_PATH in LC_DYLD_ENVIRONMENT
@@ -1194,7 +1241,7 @@ ProcessConfigTester::ProcessConfigTester(MockO& main, const std::vector<const ch
     ProcessConfigTester tester(main, {});
 
     // Act: record if we can use a prebuilt loader
-    ProcessConfig testConfig(tester.kernArgs(), tester.osDelegate());
+    ProcessConfig testConfig(tester.kernArgs(), tester.osDelegate(), tester.allocator());
     bool dontUsePrebuiltForApp = testConfig.pathOverrides.dontUsePrebuiltForApp();
 
     // Assert: We should be able to use prebuilt loaders using DYLD_FRAMEWORK_PATH in LC_DYLD_ENVIRONMENT
@@ -1209,7 +1256,7 @@ ProcessConfigTester::ProcessConfigTester(MockO& main, const std::vector<const ch
     ProcessConfigTester tester(main, {});
 
     // Act: record if we can use a prebuilt loader
-    ProcessConfig testConfig(tester.kernArgs(), tester.osDelegate());
+    ProcessConfig testConfig(tester.kernArgs(), tester.osDelegate(), tester.allocator());
     bool dontUsePrebuiltForApp = testConfig.pathOverrides.dontUsePrebuiltForApp();
 
     // Assert: We should be able to use prebuilt loaders using DYLD_FALLBACK_LIBRARY_PATH in LC_DYLD_ENVIRONMENT
@@ -1224,7 +1271,7 @@ ProcessConfigTester::ProcessConfigTester(MockO& main, const std::vector<const ch
     ProcessConfigTester tester(main, {});
 
     // Act: record if we can use a prebuilt loader
-    ProcessConfig testConfig(tester.kernArgs(), tester.osDelegate());
+    ProcessConfig testConfig(tester.kernArgs(), tester.osDelegate(), tester.allocator());
     bool dontUsePrebuiltForApp = testConfig.pathOverrides.dontUsePrebuiltForApp();
 
     // Assert: We should be able to use prebuilt loaders using DYLD_FALLBACK_FRAMEWORK_PATH in LC_DYLD_ENVIRONMENT
@@ -1239,7 +1286,7 @@ ProcessConfigTester::ProcessConfigTester(MockO& main, const std::vector<const ch
     ProcessConfigTester tester(main, {});
 
     // Act: record if we can use a prebuilt loader
-    ProcessConfig testConfig(tester.kernArgs(), tester.osDelegate());
+    ProcessConfig testConfig(tester.kernArgs(), tester.osDelegate(), tester.allocator());
     bool dontUsePrebuiltForApp = testConfig.pathOverrides.dontUsePrebuiltForApp();
 
     // Assert: We should not be able to use prebuilt loaders using LC_DYLD_ENVIRONMENT
@@ -1254,7 +1301,7 @@ ProcessConfigTester::ProcessConfigTester(MockO& main, const std::vector<const ch
     ProcessConfigTester tester(main, {});
 
     // Act: record if we can use a prebuilt loader
-    ProcessConfig testConfig(tester.kernArgs(), tester.osDelegate());
+    ProcessConfig testConfig(tester.kernArgs(), tester.osDelegate(), tester.allocator());
     bool dontUsePrebuiltForApp = testConfig.pathOverrides.dontUsePrebuiltForApp();
 
     // Assert: We should not be able to use prebuilt loaders using LC_DYLD_ENVIRONMENT

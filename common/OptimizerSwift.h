@@ -26,6 +26,19 @@
 #define OptimizerSwift_h
 
 #include "Array.h"
+#include "Diagnostics.h"
+#include "OptimizerObjC.h"
+#include "PrebuiltLoader.h"
+#include "Vector.h"
+
+#if BUILDING_CACHE_BUILDER || BUILDING_CACHE_BUILDER_UNIT_TESTS
+#include "CacheDylib.h"
+#include "Optimizers.h"
+#endif
+
+#include <string_view>
+
+using dyld4::PrebuiltLoader;
 
 struct SwiftOptimizationHeader {
     uint32_t version;
@@ -44,7 +57,7 @@ struct SwiftTypeProtocolConformanceLocationKey
     // To make it easier to hash different sized structs in the same algorithm,
     // we pass each value individually to the perfect hash
     const uint8_t* key1Buffer(const uint8_t* stringBaseAddress) const {
-        return (const uint8_t*)&typeDescriptorCacheOffset;
+        return (const uint8_t*)&typeDescriptorCacheOffset ;
     }
 
     const uint32_t key1Size() const {
@@ -74,6 +87,19 @@ struct SwiftTypeProtocolConformanceLocation : SwiftTypeProtocolConformanceLocati
                      dylibObjCIndex                 : 16;   // Index in to the HeaderInfoRW dylibs for the dylib containing this conformance
         };
     };
+};
+
+// This is the key to the map from (type descriptor, protocol) to value
+struct SwiftTypeProtocolConformanceDiskLocationKey
+{
+    PrebuiltLoader::BindTargetRef typeDescriptor;
+    PrebuiltLoader::BindTargetRef protocol;
+};
+
+// This is the value for the map from (type, protocol) to value
+struct SwiftTypeProtocolConformanceDiskLocation
+{
+    PrebuiltLoader::BindTargetRef protocolConformance;
 };
 
 // This is the key to the map from (metadata, protocol) to value
@@ -117,6 +143,19 @@ struct SwiftMetadataProtocolConformanceLocation : SwiftMetadataProtocolConforman
     };
 };
 
+// This is the key to the map from (metadata, protocol) to value
+struct SwiftMetadataProtocolConformanceDiskLocationKey
+{
+    PrebuiltLoader::BindTargetRef metadataDescriptor;
+    PrebuiltLoader::BindTargetRef protocol;
+};
+
+// This is the value for the map from (metadata, protocol) to value
+struct SwiftMetadataProtocolConformanceDiskLocation
+{
+    PrebuiltLoader::BindTargetRef protocolConformance;
+};
+
 // This is the key to the map from (foreign type name, protocol) to value
 struct SwiftForeignTypeProtocolConformanceLocationKey
 {
@@ -147,7 +186,6 @@ struct SwiftForeignTypeProtocolConformanceLocationKey
         return sizeof(protocolCacheOffset);
     }
 };
-
 static_assert(sizeof(SwiftForeignTypeProtocolConformanceLocationKey) == 16);
 
 // The start of this struct, the SwiftTypeProtocolConformanceLocationKey, is the key
@@ -164,6 +202,23 @@ struct SwiftForeignTypeProtocolConformanceLocation : SwiftForeignTypeProtocolCon
                      dylibObjCIndex                 : 16;   // Index in to the HeaderInfoRW dylibs for the dylib containing this conformance
         };
     };
+};
+
+// This is the key to the map from (foreign type name, protocol) to value
+struct SwiftForeignTypeProtocolConformanceDiskLocationKey
+{
+    uint64_t                      originalPointer;
+    PrebuiltLoader::BindTargetRef foreignDescriptor;
+    uint64_t                      foreignDescriptorNameLength;
+    PrebuiltLoader::BindTargetRef protocol;
+};
+
+static_assert(sizeof(SwiftForeignTypeProtocolConformanceDiskLocationKey) == 32);
+
+// This is the value for the map from (foreign type name, protocol) to value
+struct SwiftForeignTypeProtocolConformanceDiskLocation
+{
+    PrebuiltLoader::BindTargetRef protocolConformance;
 };
 
 // At runtime, we lookup foreign types with a string instead of an offset.  This is the key which does that lookup
@@ -309,11 +364,10 @@ public:
         return nullptr;
     }
 
-#if BUILDING_CACHE_BUILDER
-    template<typename PerfectHashT, typename TargetT>
-    void write(const PerfectHashT& phash, const std::vector<TargetT>& targets,
-               const uint8_t* targetValuesBufferBaseAddress,
-               const uint8_t* stringBaseAddress);
+#if BUILDING_CACHE_BUILDER || BUILDING_CACHE_BUILDER_UNIT_TESTS
+    template<typename PerfectHashT, typename KeyT, typename TargetT>
+    void write(const PerfectHashT& phash, const lsl::Vector<KeyT>& keyValues,
+               const lsl::Vector<TargetT>& targets, const uint8_t* targetValuesBufferBaseAddress);
 #endif
 
     template<typename TargetT>
@@ -344,5 +398,19 @@ public:
     }
 
 };
+
+#if BUILDING_CACHE_BUILDER || BUILDING_CACHE_BUILDER_UNIT_TESTS
+void buildSwiftHashTables(const cache_builder::BuilderConfig& config,
+                          Diagnostics& diag, const std::span<cache_builder::CacheDylib> cacheDylibs,
+                          std::span<metadata_visitor::Segment> extraRegions,
+                          const objc::ClassHashTable* objcClassOpt,
+                          const void* headerInfoRO, const void* headerInfoRW,
+                          CacheVMAddress headerInfoROUnslidVMAddr,
+                          cache_builder::SwiftProtocolConformanceOptimizer& swiftProtocolConformanceOptimizer);
+#endif // BUILDING_CACHE_BUILDER || BUILDING_CACHE_BUILDER_UNIT_TESTS
+
+std::optional<uint16_t> getPreoptimizedHeaderRWIndex(const void* headerInfoRO, const void* headerInfoRW, const dyld3::MachOAnalyzer* ma);
+
+std::string_view getForeignFullIdentity(const char* arrayStart);
 
 #endif /* OptimizerSwift_h */

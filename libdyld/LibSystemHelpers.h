@@ -77,6 +77,15 @@ struct VIS_HIDDEN  [[clang::ptrauth_vtable_pointer(process_independent, address_
 #pragma clang diagnostic ignored "-Wunguarded-availability-new"
     virtual void            os_unfair_recursive_lock_unlock_forked_child(os_unfair_recursive_lock_t lock) const;
 #pragma clang diagnostic pop
+
+    // Added in version 3
+    virtual void            setDyldPatchedObjCClasses() const;
+
+    // Added in version 4
+    virtual int             pthread_key_init_free(int key) const;
+
+    // Added in version 5
+    virtual void            run_async(void* (*func)(void*), void* context) const;
 };
 
 } // namespace

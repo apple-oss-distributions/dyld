@@ -22,6 +22,8 @@ static void* work(void* mh)
     h = dlopen("/foo/bad/path/junk.dylib", RTLD_NOLOAD);
     if ( h != NULL )
         FAIL("dlopen(\"/foo/bad/path/junk.dylib\", RTLD_NOLOAD) returned non-NULL");
+
+    return NULL;
 }
 
 

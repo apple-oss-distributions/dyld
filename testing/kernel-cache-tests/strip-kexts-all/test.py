@@ -1,4 +1,4 @@
-#!/usr/bin/python2.7
+#!/usr/bin/python3
 
 import os
 import KernelCollection
@@ -21,10 +21,13 @@ def check(kernel_cache):
     assert kernel_cache.dictionary()["dylibs"][0]["local-symbols"][0]["name"] == "_z"
     # bar
     assert kernel_cache.dictionary()["dylibs"][1]["name"] == "com.apple.bar"
-    assert len(kernel_cache.dictionary()["dylibs"][1]["global-symbols"]) == 1
+    assert len(kernel_cache.dictionary()["dylibs"][1]["global-symbols"]) == 2
     assert kernel_cache.dictionary()["dylibs"][1]["global-symbols"][0]["name"] == "_bar"
-    assert len(kernel_cache.dictionary()["dylibs"][1]["local-symbols"]) == 1
-    assert kernel_cache.dictionary()["dylibs"][1]["local-symbols"][0]["name"] == "_y"
+    assert kernel_cache.dictionary()["dylibs"][1]["global-symbols"][1]["name"] == "_kmod_info"
+    assert len(kernel_cache.dictionary()["dylibs"][1]["local-symbols"]) == 3
+    assert kernel_cache.dictionary()["dylibs"][1]["local-symbols"][0]["name"] == "_startKext"
+    assert kernel_cache.dictionary()["dylibs"][1]["local-symbols"][1]["name"] == "_endKext"
+    assert kernel_cache.dictionary()["dylibs"][1]["local-symbols"][2]["name"] == "_y"
     # foo
     assert kernel_cache.dictionary()["dylibs"][2]["name"] == "com.apple.foo"
     assert kernel_cache.dictionary()["dylibs"][2]["global-symbols"] == "none"

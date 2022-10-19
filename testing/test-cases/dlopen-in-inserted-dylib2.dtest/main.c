@@ -1,5 +1,5 @@
 
-// BUILD(ios,tvos,watchos,bridgeos):  $CC foo.m -dynamiclib -o $BUILD_DIR/libfoo.dylib -lobjc -WL,-install_name,/usr/lib/system/lib/fake_install_name.dylib
+// BUILD(ios,tvos,watchos,bridgeos):  $CC foo.m -dynamiclib -ltest_support -o $BUILD_DIR/libfoo.dylib -Wno-objc-load-method -lobjc -Wl,-install_name,/usr/lib/system/lib/fake_install_name.dylib
 // BUILD(ios,tvos,watchos,bridgeos):  $CC main.c -o $BUILD_DIR/dlopen-in-inserted-dylib2.exe
 
 // Don't build test for macOS.  It causes Foundation to crash with unrecognised selectors

@@ -1,7 +1,8 @@
-#!/usr/bin/python2.7
+#!/usr/bin/python3
 
 import os
 import KernelCollection
+from FixupHelpers import *
 
 # Symbol sets can have a prefix with an implicit * wildcard on the end which re-exports anything from xnu with that name
 
@@ -12,31 +13,24 @@ def check(kernel_cache):
     assert len(kernel_cache.dictionary()["dylibs"]) == 2
     assert kernel_cache.dictionary()["dylibs"][0]["name"] == "com.apple.kernel"
     assert kernel_cache.dictionary()["dylibs"][1]["name"] == "com.apple.foo"
-    assert kernel_cache.dictionary()["dylibs"][1]["segments"][2]["name"] == "__DATA_CONST"
-    assert kernel_cache.dictionary()["dylibs"][1]["segments"][2]["vmAddr"] == "0x14000"
+    
+    fooGOTVMAddr = findSectionVMAddr(kernel_cache, 1, "__DATA_CONST", "__got")
 
     # Check the symbols
     kernel_cache.analyze("/symbol-sets-prefix/main.kc", ["-symbols", "-arch", "arm64"])
     assert kernel_cache.dictionary()["dylibs"][0]["name"] == "com.apple.kernel"
-    assert len(kernel_cache.dictionary()["dylibs"][0]["global-symbols"]) == 6
-    assert kernel_cache.dictionary()["dylibs"][0]["global-symbols"][0]["name"] == "__mh_execute_header"
-    assert kernel_cache.dictionary()["dylibs"][0]["global-symbols"][1]["name"] == "__start"
-    assert kernel_cache.dictionary()["dylibs"][0]["global-symbols"][2]["name"] == "_symbol_from_xnu0"
-    assert kernel_cache.dictionary()["dylibs"][0]["global-symbols"][2]["vmAddr"] == "0xC000"
-    assert kernel_cache.dictionary()["dylibs"][0]["global-symbols"][3]["name"] == "_symbol_from_xnu1"
-    assert kernel_cache.dictionary()["dylibs"][0]["global-symbols"][3]["vmAddr"] == "0xC00C"
-    assert kernel_cache.dictionary()["dylibs"][0]["global-symbols"][4]["name"] == "_symbol_from_xnu2"
-    assert kernel_cache.dictionary()["dylibs"][0]["global-symbols"][4]["vmAddr"] == "0xC018"
-    assert kernel_cache.dictionary()["dylibs"][0]["global-symbols"][5]["name"] == "_symbol_from_xnu3"
-    assert kernel_cache.dictionary()["dylibs"][0]["global-symbols"][5]["vmAddr"] == "0xC024"
+    xnu0_vmAddr = findGlobalSymbolVMAddr(kernel_cache, 0, "_symbol_from_xnu0")
+    xnu1_vmAddr = findGlobalSymbolVMAddr(kernel_cache, 0, "_symbol_from_xnu1")
+    xnu2_vmAddr = findGlobalSymbolVMAddr(kernel_cache, 0, "_symbol_from_xnu2")
+    xnu3_vmAddr = findGlobalSymbolVMAddr(kernel_cache, 0, "_symbol_from_xnu3")
 
     # Check the fixups
     kernel_cache.analyze("/symbol-sets-prefix/main.kc", ["-fixups", "-arch", "arm64"])
-    assert len(kernel_cache.dictionary()["fixups"]) == 4
-    assert kernel_cache.dictionary()["fixups"]["0x14000"] == "kc(0) + 0xC000"
-    assert kernel_cache.dictionary()["fixups"]["0x14008"] == "kc(0) + 0xC00C"
-    assert kernel_cache.dictionary()["fixups"]["0x14010"] == "kc(0) + 0xC018"
-    assert kernel_cache.dictionary()["fixups"]["0x14018"] == "kc(0) + 0xC024"
+    assert len(kernel_cache.dictionary()["fixups"]) == 6
+    assert kernel_cache.dictionary()["fixups"][offsetVMAddr(fooGOTVMAddr, 0)] == "kc(0) + " + xnu0_vmAddr
+    assert kernel_cache.dictionary()["fixups"][offsetVMAddr(fooGOTVMAddr, 8)] == "kc(0) + " + xnu1_vmAddr
+    assert kernel_cache.dictionary()["fixups"][offsetVMAddr(fooGOTVMAddr, 16)] == "kc(0) + " + xnu2_vmAddr
+    assert kernel_cache.dictionary()["fixups"][offsetVMAddr(fooGOTVMAddr, 24)] == "kc(0) + " + xnu3_vmAddr
     assert len(kernel_cache.dictionary()["dylibs"]) == 2
     assert kernel_cache.dictionary()["dylibs"][0]["name"] == "com.apple.kernel"
     assert kernel_cache.dictionary()["dylibs"][0]["fixups"] == "none"
