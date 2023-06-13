@@ -393,7 +393,9 @@ bool PrebuiltSwift::findProtocolConformances(Diagnostics& diag, PrebuiltObjC& pr
 #if BUILDING_CACHE_BUILDER || BUILDING_CLOSURE_UTIL || BUILDING_CACHE_BUILDER_UNIT_TESTS
             auto it = vmAddrToFixupTargetMap.find(ptr.targetValue.vmAddress().rawValue());
             if ( it != vmAddrToFixupTargetMap.end() ) {
-                const PrebuiltLoader::BindTargetRef& bindTarget = it->second.first;
+                PrebuiltLoader::BindTargetRef bindTarget(diag, it->second.first);
+                if ( diag.hasError() )
+                    return false;
                 if ( bindTarget.isAbsolute() && (bindTarget.offset() == 0) )
                     return true;
             }

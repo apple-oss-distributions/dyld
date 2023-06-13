@@ -51,12 +51,12 @@ void FileManager::swap(FileManager& other) {
 }
 
 
-FileRecord FileManager::fileRecordForPath(const char* filePath) {
-    auto str = _allocator->strdup(filePath);
+FileRecord FileManager::fileRecordForPath(Allocator& allocator, const char* filePath) {
+    auto str = allocator.strdup(filePath);
     return FileRecord(*this, UniquePtr<const char>(str));
 }
 
-FileRecord FileManager::fileRecordForStat(struct stat& sb) {
+FileRecord FileManager::fileRecordForStat(const struct stat& sb) {
     return FileRecord(*this, sb);
 }
 
@@ -243,7 +243,7 @@ FileRecord::FileRecord(FileManager& fileManager, uint64_t objectID, uint64_t dev
         }
     }
 
-FileRecord::FileRecord(FileManager& fileManager, struct stat& sb)
+FileRecord::FileRecord(FileManager& fileManager, const struct stat& sb)
     :  _fileManager(&fileManager), _objectID(sb.st_ino), _device(sb.st_dev), _volume(_fileManager->uuidForFileSystem(_device)), _mtime(sb.st_mtime), _statResult(0) {}
 
 FileRecord::FileRecord(const FileRecord& other)

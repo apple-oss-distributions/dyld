@@ -381,7 +381,7 @@ const Loader::DylibPatch* JustInTimeLoader::makePatchTable(RuntimeState& state, 
             else {
                 if ( extra )
                     state.log("   override missing '%s', so uses will be patched to NULL\n", exportName);
-                table[patchIndex].overrideOffsetOfImpl = DylibPatch::missingWeakImport;
+                table[patchIndex].overrideOffsetOfImpl = DylibPatch::missingSymbol;
             }
             ++patchIndex;
         });
@@ -410,7 +410,7 @@ const Loader::DylibPatch* JustInTimeLoader::makePatchTable(RuntimeState& state, 
             else {
                 if ( extra )
                     state.log("   override missing '%s', so uses will be patched to NULL\n", exportName);
-                table[patchIndex].overrideOffsetOfImpl = DylibPatch::missingWeakImport;
+                table[patchIndex].overrideOffsetOfImpl = DylibPatch::missingSymbol;
             }
             ++patchIndex;
         });
@@ -690,7 +690,8 @@ void JustInTimeLoader::cacheWeakDefFixup(RuntimeState& state, DyldCacheDataConst
     //state.log("cache patch: dylibIndex=%d, exportCacheOffset=0x%08X, target=%s\n", cachedDylibIndex, exportCacheOffset,target.targetSymbolName);
     dyldcache->forEachPatchableUseOfExport(cachedDylibIndex, cachedDylibVMOffset,
                                            ^(uint64_t cacheVMOffset,
-                                             dyld3::MachOLoaded::PointerMetaData pmd, uint64_t addend) {
+                                             dyld3::MachOLoaded::PointerMetaData pmd, uint64_t addend,
+                                             bool isWeakImport) {
         uintptr_t* loc     = (uintptr_t*)(((uint8_t*)dyldcache) + cacheVMOffset);
         uintptr_t  newImpl = (uintptr_t)(Loader::resolvedAddress(state, target) + addend);
 #if __has_feature(ptrauth_calls)

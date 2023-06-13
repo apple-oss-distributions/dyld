@@ -210,7 +210,7 @@ void dyld_for_each_installed_shared_cache(void (^block)(dyld_shared_cache_t cach
 
 bool dyld_shared_cache_for_file(const char* filePath, void (^block)(dyld_shared_cache_t cache)) {
     EphemeralAllocator ephemeralAllocator;
-    auto cacheFile = defaultFileManager().fileRecordForPath(filePath);
+    auto cacheFile = defaultFileManager().fileRecordForPath(ephemeralAllocator, filePath);
     auto cache = SharedCache::createForFileRecord(ephemeralAllocator, std::move(cacheFile));
     if (cache) {
         cache.withUnsafe([&](auto cachePtr) {
@@ -313,6 +313,7 @@ bool dyld_image_local_nlist_content_4Symbolication(dyld_image_t image,
     if ( !sharedCache )
         return false;
 
+    __block bool result = true;
     if ( auto localsFileData = sharedCache->localSymbols() ) {
         uint64_t textOffsetInCache = atlasImage->sharedCacheVMOffset();
 
@@ -325,17 +326,19 @@ bool dyld_image_local_nlist_content_4Symbolication(dyld_image_t image,
                     const macho_nlist<P>* allLocalNlists = (macho_nlist<P>*)getLocalNlistEntries(localInfo);
                     const macho_nlist<P>* dylibNListsStart = &allLocalNlists[nlistStartIndex];
                     contentReader(dylibNListsStart, nlistCount, getLocalStrings(localInfo));
-                } else {
+                } else if ( atlasImage->pointerSize() == 4 ) {
                     typedef Pointer32<LittleEndian> P;
                     const macho_nlist<P>* allLocalNlists = (macho_nlist<P>*)getLocalNlistEntries(localInfo);
                     const macho_nlist<P>* dylibNListsStart = &allLocalNlists[nlistStartIndex];
                     contentReader(dylibNListsStart, nlistCount, getLocalStrings(localInfo));
+                } else {
+                    result = false;
                 }
                 stop = true;
             }
         });
-        return true;
+        return result;
     }
-    return true;
+    return result;
 }
 

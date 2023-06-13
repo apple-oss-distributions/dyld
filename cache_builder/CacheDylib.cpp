@@ -961,7 +961,7 @@ void CacheDylib::calculateBindTargets(Diagnostics& diag,
                 // Actually change the bindTarget to reflect the new type
                 bindTarget.kind = BindTarget::Kind::cacheImage;
                 bindTarget.inputImage.~InputImage();
-                bindTarget.cacheImage = (BindTarget::CacheImage) { VMOffset(targetCacheVMAddr - inputImage.targetDylib->cacheLoadAddress), inputImage.targetDylib, inputImage.isWeak };
+                bindTarget.cacheImage = (BindTarget::CacheImage) { VMOffset(targetCacheVMAddr - inputImage.targetDylib->cacheLoadAddress), inputImage.targetDylib, inputImage.isWeakDef };
                 break;
             }
             case BindTarget::Kind::cacheImage:
@@ -971,6 +971,7 @@ void CacheDylib::calculateBindTargets(Diagnostics& diag,
         }
 
         bindTarget.addend = addend;
+        bindTarget.isWeakImport = weakImport;
         this->bindTargets.push_back(std::move(bindTarget));
         dylibPatchInfo.bindTargetNames.push_back(std::move(bindTargetAndName.second));
     };
@@ -1056,14 +1057,14 @@ void CacheDylib::bindLocation(Diagnostics& diag, const BuilderConfig& config,
             auto gotIt = coalescedGOTs.find(fixupVMAddr);
             if ( gotIt != coalescedGOTs.end() ) {
                 // Probably a missing weak import.  Rewrite the original GOT anyway, but also the coalesced one
-                dyld_cache_patchable_location patchLoc(gotIt->second, pmd, addend);
+                dyld_cache_patchable_location patchLoc(gotIt->second, pmd, addend, bindTarget.isWeakImport);
                 auto& gotUses = dylibPatchInfo.bindGOTUses[bindOrdinal];
                 gotUses.emplace_back((PatchInfo::GOTInfo){ patchLoc, VMOffset(targetValue) });
             } else {
                 auto authgotIt = coalescedAuthGOTs.find(fixupVMAddr);
                 if ( authgotIt != coalescedAuthGOTs.end() ) {
                     // Probably a missing weak import.  Rewrite the original GOT anyway, but also the coalesced one
-                    dyld_cache_patchable_location patchLoc(authgotIt->second, pmd, addend);
+                    dyld_cache_patchable_location patchLoc(authgotIt->second, pmd, addend, bindTarget.isWeakImport);
                     auto &gotUses = dylibPatchInfo.bindAuthGOTUses[bindOrdinal];
                     gotUses.emplace_back((PatchInfo::GOTInfo){ patchLoc, VMOffset(targetValue) });
                 }
@@ -1132,7 +1133,7 @@ void CacheDylib::bindLocation(Diagnostics& diag, const BuilderConfig& config,
 
                 auto gotIt = coalescedGOTs.find(fixupVMAddr);
                 if ( gotIt != coalescedGOTs.end() ) {
-                    dyld_cache_patchable_location patchLoc(gotIt->second, patchTablePMD, patchTableAddend);
+                    dyld_cache_patchable_location patchLoc(gotIt->second, patchTablePMD, patchTableAddend, bindTarget.isWeakImport);
                     auto& gotUses = dylibPatchInfo.bindGOTUses[bindOrdinal];
                     gotUses.emplace_back((PatchInfo::GOTInfo){ patchLoc, finalVMOffset });
 
@@ -1148,7 +1149,7 @@ void CacheDylib::bindLocation(Diagnostics& diag, const BuilderConfig& config,
                 } else {
                     auto authgotIt = coalescedAuthGOTs.find(fixupVMAddr);
                     if ( authgotIt != coalescedAuthGOTs.end() ) {
-                        dyld_cache_patchable_location patchLoc(authgotIt->second, patchTablePMD, patchTableAddend);
+                        dyld_cache_patchable_location patchLoc(authgotIt->second, patchTablePMD, patchTableAddend, bindTarget.isWeakImport);
                         auto& gotUses = dylibPatchInfo.bindAuthGOTUses[bindOrdinal];
                         gotUses.emplace_back((PatchInfo::GOTInfo){ patchLoc, finalVMOffset });
 
@@ -1163,7 +1164,7 @@ void CacheDylib::bindLocation(Diagnostics& diag, const BuilderConfig& config,
                         this->segments[segIndex].tracker.remove(fixupLoc);
                     } else {
                         // Location wasn't coalesced.  So add to the regular list of uses
-                        dylibPatchInfo.bindUses[bindOrdinal].emplace_back(fixupVMAddr, patchTablePMD, patchTableAddend);
+                        dylibPatchInfo.bindUses[bindOrdinal].emplace_back(fixupVMAddr, patchTablePMD, patchTableAddend, bindTarget.isWeakImport);
                     }
                 }
             }

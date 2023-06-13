@@ -176,7 +176,7 @@ public:
         // We need a few special values for markers.  These shouldn't be valid offsets
         enum : int64_t {
             endOfPatchTable     = -1,
-            missingWeakImport   = 0,
+            missingSymbol       = 0,
             objcClass           = 1,
             singleton           = 2
         };

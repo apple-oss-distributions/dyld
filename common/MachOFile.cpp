@@ -1870,18 +1870,19 @@ bool MachOFile::canBePlacedInDyldCache(const char* path, void (^failureReason)(c
         }
 
         // <rdar://problem/57769033> dyld_cache_patchable_location only supports addend in range 0..31
+        // rdar://96164956 (dyld needs to support arbitrary addends in cache patch table)
         const bool is64bit = is64();
         __block bool addendTooLarge = false;
+        const uint64_t tooLargeRegularAddend = 1 << 23;
+        const uint64_t tooLargeAuthAddend = 1 << 5;
         if ( this->hasChainedFixups() ) {
 
             // with chained fixups, addends can be in the import table or embedded in a bind pointer
+            __block std::vector<uint64_t> targetAddends;
             fixups.forEachChainedFixupTarget(diag, ^(int libOrdinal, const char* symbolName, uint64_t addend, bool weakImport, bool& stop) {
                 if ( is64bit )
                     addend &= 0x00FFFFFFFFFFFFFF; // ignore TBI
-                if ( addend > 31 ) {
-                    addendTooLarge = true;
-                    stop = true;
-                }
+                targetAddends.push_back(addend);
             });
             // check each pointer for embedded addend
             fixups.withChainStarts(diag, ^(const dyld_chained_starts_in_image* starts) {
@@ -1889,26 +1890,60 @@ bool MachOFile::canBePlacedInDyldCache(const char* path, void (^failureReason)(c
                     switch (segInfo->pointer_format) {
                         case DYLD_CHAINED_PTR_ARM64E:
                         case DYLD_CHAINED_PTR_ARM64E_USERLAND:
+                            if ( fixupLoc->arm64e.bind.bind ) {
+                                uint64_t ordinal = fixupLoc->arm64e.bind.ordinal;
+                                uint64_t addend = (ordinal < targetAddends.size()) ? targetAddends[ordinal] : 0;
+                                if ( fixupLoc->arm64e.bind.auth ) {
+                                    if ( addend >= tooLargeAuthAddend ) {
+                                        addendTooLarge = true;
+                                        stop = true;
+                                    }
+                                } else {
+                                    addend += fixupLoc->arm64e.signExtendedAddend();
+                                    if ( addend >= tooLargeRegularAddend ) {
+                                        addendTooLarge = true;
+                                        stop = true;
+                                    }
+                                }
+                            }
+                            break;
                         case DYLD_CHAINED_PTR_ARM64E_USERLAND24:
-                            if ( fixupLoc->arm64e.bind.bind && !fixupLoc->arm64e.authBind.auth ) {
-                                if ( fixupLoc->arm64e.bind.addend > 31 ) {
-                                    addendTooLarge = true;
-                                    stop = true;
+                            if ( fixupLoc->arm64e.bind24.bind ) {
+                                uint64_t ordinal = fixupLoc->arm64e.bind24.ordinal;
+                                uint64_t addend = (ordinal < targetAddends.size()) ? targetAddends[ordinal] : 0;
+                                if ( fixupLoc->arm64e.bind24.auth ) {
+                                    if ( addend >= tooLargeAuthAddend ) {
+                                        addendTooLarge = true;
+                                        stop = true;
+                                    }
+                                } else {
+                                    addend += fixupLoc->arm64e.signExtendedAddend();
+                                    if ( addend >= tooLargeRegularAddend ) {
+                                        addendTooLarge = true;
+                                        stop = true;
+                                    }
                                 }
                             }
                             break;
                         case DYLD_CHAINED_PTR_64:
-                        case DYLD_CHAINED_PTR_64_OFFSET:
+                        case DYLD_CHAINED_PTR_64_OFFSET: {
                             if ( fixupLoc->generic64.rebase.bind ) {
-                                if ( fixupLoc->generic64.bind.addend > 31 ) {
+                                uint64_t ordinal = fixupLoc->generic64.bind.ordinal;
+                                uint64_t addend = (ordinal < targetAddends.size()) ? targetAddends[ordinal] : 0;
+                                addend += fixupLoc->generic64.bind.addend;
+                                if ( addend >= tooLargeRegularAddend ) {
                                     addendTooLarge = true;
                                     stop = true;
                                 }
                             }
                             break;
+                        }
                         case DYLD_CHAINED_PTR_32:
                             if ( fixupLoc->generic32.bind.bind ) {
-                                if ( fixupLoc->generic32.bind.addend > 31 ) {
+                                uint64_t ordinal = fixupLoc->generic32.bind.ordinal;
+                                uint64_t addend = (ordinal < targetAddends.size()) ? targetAddends[ordinal] : 0;
+                                addend += fixupLoc->generic32.bind.addend;
+                                if ( addend >= tooLargeRegularAddend ) {
                                     addendTooLarge = true;
                                     stop = true;
                                 }
@@ -1924,7 +1959,7 @@ bool MachOFile::canBePlacedInDyldCache(const char* path, void (^failureReason)(c
                 uint64_t addend = info.addend;
                 if ( is64bit )
                     addend &= 0x00FFFFFFFFFFFFFF; // ignore TBI
-                if ( addend > 31 ) {
+                if ( addend >= tooLargeRegularAddend ) {
                     addendTooLarge = true;
                     stop = true;
                 }
@@ -3262,6 +3297,15 @@ MachOFile::PointerMetaData::PointerMetaData(const ChainedFixupPointerOnDisk* fix
                 this->high8             = fixupLoc->generic64.rebase.high8;
             break;
     }
+}
+
+bool MachOFile::PointerMetaData::operator==(const PointerMetaData& other) const
+{
+    return (this->diversity == other.diversity)
+        && (this->high8 == other.high8)
+        && (this->authenticated == other.authenticated)
+        && (this->key == other.key)
+        && (this->usesAddrDiversity == other.usesAddrDiversity);
 }
 
 #if !SUPPORT_VM_LAYOUT

@@ -83,24 +83,9 @@ using namespace lsl;
     allocator.destroy();
 }
 
-//FIXME: We need mach exception handling for this test to make sense
-- (void) disabledTestWriteProtect {
-    auto& allocator = Allocator::persistentAllocator();
-    auto buffer = (char *)allocator.malloc(128);
-    memset(buffer, 0x1f, 128);
-    allocator.writeProtect(true);
-    for (auto i = 0; i < 128; ++i) {
-        XCTAssert(buffer[i] == 0x1f);
-    }
-
-    // FIXME: Implement mach exception handling on this to test write protection and make sure we do not regress it
-    //    memset(buffer.address, 0x2e, buffer.size);
-    allocator.writeProtect(false);
-    allocator.free(buffer);
-    XCTAssert(allocator.allocated_bytes() == 0, "allocator.allocated_bytes() = %zu\n", allocator.allocated_bytes());
-}
-
 - (void) testEphemeralAllocatorPerformance {
+// Skip performance on DEBUG builds since validation adds enough overhead it dominates the actual test and makes the results meaningless
+#if !DEBUG
     self.randomSeed = 8848042ULL;
     EphemeralAllocator allocator;
     auto testSequence = TestSequence([self uniformRandomFrom:0 to:std::numeric_limits<uint64_t>::max()]);
@@ -109,9 +94,12 @@ using namespace lsl;
     [self measureBlock:^{
         testSequenceRef.runMallocTests(self, allocatorPtr, false);
     }];
+#endif
 }
 
 - (void) testPersistentAllocatorPerformance {
+// Skip performance on DEBUG builds since validation adds enough overhead it dominates the actual test and makes the results meaningless
+#if !DEBUG
     self.randomSeed = 8848042ULL;
     auto& allocator = Allocator::persistentAllocator();
     auto testSequence = TestSequence([self uniformRandomFrom:0 to:std::numeric_limits<uint64_t>::max()]);
@@ -121,6 +109,7 @@ using namespace lsl;
         testSequenceRef.runMallocTests(self, allocatorPtr, false);
     }];
     allocator.destroy();
+#endif
 }
 
 @end

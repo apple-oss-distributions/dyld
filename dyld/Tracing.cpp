@@ -38,7 +38,9 @@ os_fault_with_payload(uint32_t reason_namespace, uint64_t reason_code,
                       void *payload, uint32_t payload_size, const char *reason_string,
                       uint64_t reason_flags) __attribute__((cold));
 
+#if BUILDING_DYLD
 extern const dyld3::MachOAnalyzer __dso_handle;
+#endif
 
 namespace dyld3 {
 

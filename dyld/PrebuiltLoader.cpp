@@ -63,20 +63,25 @@ class PrebuiltLoader;
 // MARK: --- PrebuiltLoader::BindTargetRef methods ---
 //
 
-PrebuiltLoader::BindTargetRef::BindTargetRef(const ResolvedSymbol& targetSymbol)
+PrebuiltLoader::BindTargetRef::BindTargetRef(Diagnostics& diag, const ResolvedSymbol& targetSymbol)
 {
     uint64_t value63;
     uint64_t high2;
     uint64_t high8;
     uint64_t low39;
     switch ( targetSymbol.kind ) {
-        case ResolvedSymbol::Kind::bindAbsolute:
+        case ResolvedSymbol::Kind::bindAbsolute: {
             value63    = targetSymbol.targetRuntimeOffset & 0x7FFFFFFFFFFFFFFFULL;
             high2      = targetSymbol.targetRuntimeOffset >> 62;
             _abs.kind  = 1;
             _abs.value = value63;
-            assert((high2 == 0) || (high2 == 3) && "unencodeable absolute symbol value");
+            bool encodable = (high2 == 0) || (high2 == 3);
+            if ( !encodable ) {
+                diag.error("unencodeable absolute value (0x%llx) for symbol '%s'", targetSymbol.targetRuntimeOffset, targetSymbol.targetSymbolName);
+                return;
+            }
             break;
+        }
         case ResolvedSymbol::Kind::bindToImage: {
             LoaderRef loaderRef = (targetSymbol.targetLoader != nullptr) ? targetSymbol.targetLoader->ref : LoaderRef::missingWeakImage();
 
@@ -1210,15 +1215,25 @@ void PrebuiltLoader::serialize(Diagnostics& diag, RuntimeState& state, const Jus
         p->bindTargetRefsCount = 0;
         jitLoader.forEachBindTarget(diag, state, cacheWeakDefFixup, true, ^(const ResolvedSymbol& resolvedTarget, bool& stop) {
             // Regular and lazy binds
-            BindTargetRef bindRef(resolvedTarget);
+            BindTargetRef bindRef(diag, resolvedTarget);
+            if ( diag.hasError() ) {
+                stop = true;
+                return;
+            }
             allocator.append(&bindRef, sizeof(BindTargetRef));
             p->bindTargetRefsCount += 1;
             assert(p->bindTargetRefsCount != 0 && "bindTargetRefsCount overflow");
         }, ^(const ResolvedSymbol& resolvedTarget, bool& stop) {
             // Opcode based weak binds
-            BindTargetRef bindRef(resolvedTarget);
+            BindTargetRef bindRef(diag, resolvedTarget);
+            if ( diag.hasError() ) {
+                stop = true;
+                return;
+            }
             overrideBindTargets.push_back(bindRef);
         });
+        if ( diag.hasError() )
+            return;
     }
 
     // Everything from this point onwards needs 32-bit offsets
@@ -2105,7 +2120,7 @@ const PrebuiltLoaderSet* PrebuiltLoaderSet::makeLaunchSet(Diagnostics& diag, Run
     STACK_ALLOC_OVERFLOW_SAFE_ARRAY(CachePatch, cachePatches, 16);
     Loader::CacheWeakDefOverride cacheWeakDefFixup = ^(uint32_t cachedDylibIndex, uint32_t cachedDylibVMOffset, const Loader::ResolvedSymbol& target) {
         //state.log("patch index=%d, cacheOffset=0x%08x, symbol=%s, targetLoader=%s\n", cachedDylibIndex, exportCacheOffset, target.targetSymbolName, target.targetLoader->leafName());
-        CachePatch patch = { cachedDylibIndex, cachedDylibVMOffset, PrebuiltLoader::BindTargetRef(target) };
+        CachePatch patch = { cachedDylibIndex, cachedDylibVMOffset, PrebuiltLoader::BindTargetRef(diag, target) };
         cachePatches.push_back(patch);
     };
 

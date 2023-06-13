@@ -1218,6 +1218,145 @@ ProcessConfigTester::ProcessConfigTester(MockO& main, const std::vector<const ch
     XCTAssertFalse(foundAlt2B);
 }
 
+- (void)testCataylstPrefix
+{
+    // Arrange: set up PathOverrides object
+    MockO main(MH_EXECUTE, "x86_64", Platform::iOSMac, "12.0");
+    ProcessConfigTester tester(main, {});
+
+    // Act: record each path searched
+    ProcessConfig testConfig(tester.kernArgs(), tester.osDelegate(), tester.allocator());
+    __block std::vector<std::string> pathsSearched;
+    __block std::vector<PathType>    pathType;
+    bool                             stop = false;
+    testConfig.pathOverrides.forEachPathVariant("/stuff/libfoo.dylib", dyld3::Platform::iOSMac, false, false, stop, ^(const char* possiblePath, PathType type, bool&) {
+        pathsSearched.push_back(possiblePath);
+        pathType.push_back(type);
+    });
+
+    // Assert: verify catalyst prefix path is first, then original path
+    XCTAssert(pathsSearched.size() == 2);
+    XCTAssert(pathsSearched[0] == "/System/iOSSupport/stuff/libfoo.dylib");
+    XCTAssert(pathsSearched[1] == "/stuff/libfoo.dylib");
+    XCTAssert(pathType[0] == ProcessConfig::PathOverrides::Type::catalystPrefix);
+    XCTAssert(pathType[1] == ProcessConfig::PathOverrides::Type::rawPath);
+}
+
+- (void)testCataylstPrefix2
+{
+    // Arrange: set up PathOverrides object
+    MockO main(MH_EXECUTE, "x86_64", Platform::iOSMac, "12.0");
+    ProcessConfigTester tester(main, {});
+
+    // Act: record each path searched
+    ProcessConfig testConfig(tester.kernArgs(), tester.osDelegate(), tester.allocator());
+    __block std::vector<std::string> pathsSearched;
+    __block std::vector<PathType>    pathType;
+    bool                             stop = false;
+    testConfig.pathOverrides.forEachPathVariant("/System/iOSSupport/stuff/libfoo.dylib", dyld3::Platform::iOSMac, false, false, stop, ^(const char* possiblePath, PathType type, bool&) {
+        pathsSearched.push_back(possiblePath);
+        pathType.push_back(type);
+    });
+
+    // Assert: verify we only return the original path, as it already contained the catalyst prefix
+    XCTAssert(pathsSearched.size() == 1);
+    XCTAssert(pathsSearched[0] == "/System/iOSSupport/stuff/libfoo.dylib");
+    XCTAssert(pathType[0] == ProcessConfig::PathOverrides::Type::rawPath);
+}
+
+- (void)testCryptexPrefix
+{
+    // Arrange: set up PathOverrides object
+    MockO main(MH_EXECUTE, "x86_64", Platform::macOS, "12.0");
+    ProcessConfigTester tester(main, {});
+
+    // Act: record each path searched
+    ProcessConfig testConfig(tester.kernArgs(), tester.osDelegate(), tester.allocator());
+    testConfig.pathOverrides.setCryptexRootPath("/System/Cryptexes/OS");
+
+    __block std::vector<std::string> pathsSearched;
+    __block std::vector<PathType>    pathType;
+    bool                             stop = false;
+    testConfig.pathOverrides.forEachPathVariant("/stuff/libfoo.dylib", dyld3::Platform::macOS, false, false, stop, ^(const char* possiblePath, PathType type, bool&) {
+        pathsSearched.push_back(possiblePath);
+        pathType.push_back(type);
+    });
+
+    // Assert: verify we look on disk for the root, then in the cryptex, then the original path
+    XCTAssert(pathsSearched.size() == 3);
+    XCTAssert(pathsSearched[0] == "/stuff/libfoo.dylib");
+    XCTAssert(pathsSearched[1] == "/System/Cryptexes/OS/stuff/libfoo.dylib");
+    XCTAssert(pathsSearched[2] == "/stuff/libfoo.dylib");
+    XCTAssert(pathType[0] == ProcessConfig::PathOverrides::Type::rawPathOnDisk);
+    XCTAssert(pathType[1] == ProcessConfig::PathOverrides::Type::cryptexPrefix);
+    XCTAssert(pathType[2] == ProcessConfig::PathOverrides::Type::rawPath);
+}
+
+- (void)testCryptexCatalystPrefix
+{
+    // Arrange: set up PathOverrides object
+    MockO main(MH_EXECUTE, "x86_64", Platform::iOSMac, "12.0");
+    ProcessConfigTester tester(main, {});
+
+    // Act: record each path searched
+    ProcessConfig testConfig(tester.kernArgs(), tester.osDelegate(), tester.allocator());
+    testConfig.pathOverrides.setCryptexRootPath("/System/Cryptexes/OS");
+
+    __block std::vector<std::string> pathsSearched;
+    __block std::vector<PathType>    pathType;
+    bool                             stop = false;
+    testConfig.pathOverrides.forEachPathVariant("/stuff/Foo.framework/Foo", dyld3::Platform::iOSMac, false, false, stop, ^(const char* possiblePath, PathType type, bool&) {
+        pathsSearched.push_back(possiblePath);
+        pathType.push_back(type);
+    });
+
+    // Assert: verify that we look on disk in the catalyst prefix, then the cryptex, then in catalyst in the cache
+    // And then, the same again for without the catalyst prefix
+    XCTAssert(pathsSearched.size() == 6);
+    XCTAssert(pathsSearched[0] == "/System/iOSSupport/stuff/Foo.framework/Foo");
+    XCTAssert(pathsSearched[1] == "/System/Cryptexes/OS/System/iOSSupport/stuff/Foo.framework/Foo");
+    XCTAssert(pathsSearched[2] == "/System/iOSSupport/stuff/Foo.framework/Foo");
+    XCTAssert(pathsSearched[3] == "/stuff/Foo.framework/Foo");
+    XCTAssert(pathsSearched[4] == "/System/Cryptexes/OS/stuff/Foo.framework/Foo");
+    XCTAssert(pathsSearched[5] == "/stuff/Foo.framework/Foo");
+    XCTAssert(pathType[0] == ProcessConfig::PathOverrides::Type::catalystPrefixOnDisk);
+    XCTAssert(pathType[1] == ProcessConfig::PathOverrides::Type::cryptexCatalystPrefix);
+    XCTAssert(pathType[2] == ProcessConfig::PathOverrides::Type::catalystPrefix);
+    XCTAssert(pathType[3] == ProcessConfig::PathOverrides::Type::rawPathOnDisk);
+    XCTAssert(pathType[4] == ProcessConfig::PathOverrides::Type::cryptexPrefix);
+    XCTAssert(pathType[5] == ProcessConfig::PathOverrides::Type::rawPath);
+}
+
+// As above, but the path already has the catalyst prefix so don't add it again
+- (void)testCryptexCatalystPrefix2
+{
+    // Arrange: set up PathOverrides object
+    MockO main(MH_EXECUTE, "x86_64", Platform::iOSMac, "12.0");
+    ProcessConfigTester tester(main, {});
+
+    // Act: record each path searched
+    ProcessConfig testConfig(tester.kernArgs(), tester.osDelegate(), tester.allocator());
+    testConfig.pathOverrides.setCryptexRootPath("/System/Cryptexes/OS");
+
+    __block std::vector<std::string> pathsSearched;
+    __block std::vector<PathType>    pathType;
+    bool                             stop = false;
+    testConfig.pathOverrides.forEachPathVariant("/System/iOSSupport/stuff/Foo.framework/Foo", dyld3::Platform::iOSMac, false, false, stop, ^(const char* possiblePath, PathType type, bool&) {
+        pathsSearched.push_back(possiblePath);
+        pathType.push_back(type);
+    });
+
+    // Assert: verify that we look on disk in the catalyst prefix, then the cryptex, then in catalyst in the cache
+    // And then, the same again for without the catalyst prefix
+    XCTAssert(pathsSearched.size() == 3);
+    XCTAssert(pathsSearched[0] == "/System/iOSSupport/stuff/Foo.framework/Foo");
+    XCTAssert(pathsSearched[1] == "/System/Cryptexes/OS/System/iOSSupport/stuff/Foo.framework/Foo");
+    XCTAssert(pathsSearched[2] == "/System/iOSSupport/stuff/Foo.framework/Foo");
+    XCTAssert(pathType[0] == ProcessConfig::PathOverrides::Type::rawPathOnDisk);
+    XCTAssert(pathType[1] == ProcessConfig::PathOverrides::Type::cryptexPrefix);
+    XCTAssert(pathType[2] == ProcessConfig::PathOverrides::Type::rawPath);
+}
+
 - (void)testLibraryPathLC
 {
     // Arrange: Add DYLD_LIBRARY_PATH via LC_DYLD_ENVIRONMENT
@@ -1229,8 +1368,9 @@ ProcessConfigTester::ProcessConfigTester(MockO& main, const std::vector<const ch
     ProcessConfig testConfig(tester.kernArgs(), tester.osDelegate(), tester.allocator());
     bool dontUsePrebuiltForApp = testConfig.pathOverrides.dontUsePrebuiltForApp();
 
-    // Assert: We should be able to use prebuilt loaders using DYLD_LIBRARY_PATH in LC_DYLD_ENVIRONMENT
-    XCTAssertFalse(dontUsePrebuiltForApp);
+    // Assert: We should not be able to use prebuilt loaders using DYLD_LIBRARY_PATH in LC_DYLD_ENVIRONMENT
+    // See rdar://95151924
+    XCTAssertTrue(dontUsePrebuiltForApp);
 }
 
 - (void)testFrameworkPathLC
@@ -1244,8 +1384,9 @@ ProcessConfigTester::ProcessConfigTester(MockO& main, const std::vector<const ch
     ProcessConfig testConfig(tester.kernArgs(), tester.osDelegate(), tester.allocator());
     bool dontUsePrebuiltForApp = testConfig.pathOverrides.dontUsePrebuiltForApp();
 
-    // Assert: We should be able to use prebuilt loaders using DYLD_FRAMEWORK_PATH in LC_DYLD_ENVIRONMENT
-    XCTAssertFalse(dontUsePrebuiltForApp);
+    // Assert: We should not be able to use prebuilt loaders using DYLD_FRAMEWORK_PATH in LC_DYLD_ENVIRONMENT
+    // See rdar://95151924
+    XCTAssertTrue(dontUsePrebuiltForApp);
 }
 
 - (void)testFallbackLibraryPathLC

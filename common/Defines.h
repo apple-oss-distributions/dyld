@@ -59,10 +59,12 @@
 // OR
 // 2. We are running anything on 32 bit hardware where we have limited address space
 #if BUILDING_DYLD || !__LP64__
-#define ALLOCATOR_DEFAULT_POOL_SIZE (256*1024)
+#define PERSISTENT_ALLOCATOR_DEFAULT_POOL_SIZE (256*1024)
 #else
-#define ALLOCATOR_DEFAULT_POOL_SIZE (16*1024*1024)
+#define PERSISTENT_ALLOCATOR_DEFAULT_POOL_SIZE (1024*1024)
 #endif
+
+#define EPHEMERAL_ALLOCATOR_DEFAULT_POOL_SIZE (4*1024*1024)
 
 #if TARGET_OS_OSX && defined(__x86_64__)
 #define SUPPPORT_PRE_LC_MAIN (1)
@@ -103,15 +105,12 @@
 
 #if defined(DEBUG) && DEBUG
 #define contract assert
+#define PERSISTENT_ALLOCATOR_VALIDATION (1)
+#define BTREE_VALIDATION                (1)
 #else
 #define contract __builtin_assume
+#define PERSISTENT_ALLOCATOR_VALIDATION (0)
+#define BTREE_VALIDATION                (0)
 #endif
-
-#if BUILDING_DYLD
-#define CONCURRENT_ALLOCATOR_SUPPORT        (0)
-#else
-#define CONCURRENT_ALLOCATOR_SUPPORT        (1)
-#endif
-
 
 #endif /* DYLD_DEFINES_H */

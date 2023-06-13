@@ -54,11 +54,12 @@ static uint32_t addBind(CacheDylib& fromDylib, PatchInfo& fromDylibPatchInfo,
     CacheDylib::BindTarget::CacheImage cacheImage = {
         .targetRuntimeOffset = runtimeOffset,
         .targetDylib         = &toDylib,
-        .isWeak              = false
+        .isWeakDef           = false
     };
     CacheDylib::BindTarget bindTarget = {
         .kind = CacheDylib::BindTarget::Kind::cacheImage,
         .addend = 0,
+        .isWeakImport = false,
         .cacheImage = cacheImage
     };
 
@@ -75,20 +76,20 @@ static uint32_t addBind(CacheDylib& fromDylib, PatchInfo& fromDylibPatchInfo,
 }
 
 static void addUse(CacheDylib& fromDylib, PatchInfo& fromDylibPatchInfo,
-                   uint32_t bindIndex, CacheVMAddress cacheVMAddr)
+                   uint32_t bindIndex, CacheVMAddress cacheVMAddr,
+                   dyld3::MachOFile::PointerMetaData pmd = { },
+                   uint64_t addend = 0, bool isWeakImport = false)
 {
-    dyld3::MachOFile::PointerMetaData pmd = { };
-    uint64_t addend = 0;
-    dyld_cache_patchable_location loc(cacheVMAddr, pmd, addend);
+    dyld_cache_patchable_location loc(cacheVMAddr, pmd, addend, isWeakImport);
     fromDylibPatchInfo.bindUses[bindIndex].push_back(std::move(loc));
 }
 
 static void addGOTUse(CacheDylib& fromDylib, PatchInfo& fromDylibPatchInfo,
-                      uint32_t bindIndex, CacheVMAddress cacheVMAddr)
+                      uint32_t bindIndex, CacheVMAddress cacheVMAddr,
+                      dyld3::MachOFile::PointerMetaData pmd = { },
+                      uint64_t addend = 0, bool isWeakImport = false)
 {
-    dyld3::MachOFile::PointerMetaData pmd = { };
-    uint64_t addend = 0;
-    dyld_cache_patchable_location loc(cacheVMAddr, pmd, addend);
+    dyld_cache_patchable_location loc(cacheVMAddr, pmd, addend, isWeakImport);
     PatchInfo::GOTInfo gotInfo = {
         .patchInfo = loc,
         .targetValue = VMOffset(),
@@ -120,6 +121,7 @@ struct FoundExportUse
     uint32_t userVMOffset;
     dyld3::MachOFile::PointerMetaData pmd;
     uint64_t addend;
+    bool isWeakImport;
 };
 
 static std::vector<FoundExportUse> getExportUses(const PatchTable& patchTable, uint32_t dylibIndex,
@@ -128,8 +130,9 @@ static std::vector<FoundExportUse> getExportUses(const PatchTable& patchTable, u
     __block std::vector<FoundExportUse> uses;
     patchTable.forEachPatchableUseOfExport(dylibIndex, (uint32_t)dylibVMOffsetOfImpl.rawValue(),
                                            ^(uint32_t userImageIndex, uint32_t userVMOffset,
-                                             dyld3::MachOFile::PointerMetaData pmd, uint64_t addend) {
-        uses.push_back({ userImageIndex, userVMOffset, pmd, addend });
+                                             dyld3::MachOFile::PointerMetaData pmd, uint64_t addend,
+                                             bool isWeakImport) {
+        uses.push_back({ userImageIndex, userVMOffset, pmd, addend, isWeakImport });
     });
     return uses;
 }
@@ -139,6 +142,7 @@ struct FoundExportCacheUse
     uint64_t cacheOffset;
     dyld3::MachOFile::PointerMetaData pmd;
     uint64_t addend;
+    bool isWeakImport;
 };
 
 static std::vector<FoundExportCacheUse> getExportCacheUses(const PatchTable& patchTable,
@@ -156,8 +160,9 @@ static std::vector<FoundExportCacheUse> getExportCacheUses(const PatchTable& pat
                                                 cacheUnslidAddress.rawValue(),
                                                 getDylibAddressHandler,
                                                 ^(uint64_t cacheVMOffset,
-                                                  dyld3::MachOFile::PointerMetaData pmd, uint64_t addend) {
-        uses.push_back({ cacheVMOffset, pmd, addend });
+                                                  dyld3::MachOFile::PointerMetaData pmd, uint64_t addend,
+                                                  bool isWeakImport) {
+        uses.push_back({ cacheVMOffset, pmd, addend, isWeakImport });
     });
     return uses;
 }
@@ -169,8 +174,9 @@ static std::vector<FoundExportUse> getExportUsesIn(const PatchTable& patchTable,
     patchTable.forEachPatchableUseOfExportInImage(dylibIndex, (uint32_t)dylibVMOffsetOfImpl.rawValue(),
                                                   userImageIndex,
                                                   ^(uint32_t userVMOffset,
-                                                    dyld3::MachOFile::PointerMetaData pmd, uint64_t addend) {
-        uses.push_back({ userImageIndex, userVMOffset, pmd, addend });
+                                                    dyld3::MachOFile::PointerMetaData pmd, uint64_t addend,
+                                                    bool isWeakImport) {
+        uses.push_back({ userImageIndex, userVMOffset, pmd, addend, isWeakImport });
     });
     return uses;
 }
@@ -180,6 +186,7 @@ struct FoundGOTUse
     uint64_t userCacheVMOffset;
     dyld3::MachOFile::PointerMetaData pmd;
     uint64_t addend;
+    bool isWeakImport;
 };
 
 static std::vector<FoundGOTUse> getGOTUsesIn(const PatchTable& patchTable, uint32_t dylibIndex,
@@ -188,8 +195,8 @@ static std::vector<FoundGOTUse> getGOTUsesIn(const PatchTable& patchTable, uint3
     __block std::vector<FoundGOTUse> uses;
     patchTable.forEachPatchableGOTUseOfExport(dylibIndex, (uint32_t)dylibVMOffsetOfImpl.rawValue(),
                                               ^(uint64_t cacheVMOffset, dyld3::MachOFile::PointerMetaData pmd,
-                                                uint64_t addend) {
-        uses.push_back({ cacheVMOffset, pmd, addend });
+                                                uint64_t addend, bool isWeakImport) {
+        uses.push_back({ cacheVMOffset, pmd, addend, isWeakImport });
     });
     return uses;
 }
@@ -439,6 +446,170 @@ static std::vector<FoundGOTUse> getGOTUsesIn(const PatchTable& patchTable, uint3
     XCTAssertFalse(zeroIsClientOfOne);
     XCTAssertFalse(oneIsClientOfOne);
     XCTAssertFalse(twoIsClientOfOne);
+}
+
+static void testAddend(uint64_t addend, dyld3::MachOFile::PointerMetaData pmd, bool isWeakImport)
+{
+    // Arrange: mock up dylibs and binds
+    PatchTableBuilder::PatchableClassesSet patchableClasses;
+    PatchTableBuilder::PatchableSingletonsSet patchableCFObj2;
+    CacheVMAddress cacheBaseAddress(0x180000000ULL);
+    CacheVMAddress patchTableAddress(0x200000000ULL);
+    CacheVMAddress dylibAddresses[2] = {
+        cacheBaseAddress + VMOffset(0x10000ULL),
+        cacheBaseAddress + VMOffset(0x20000ULL)
+    };
+
+    PatchInfo patchInfos[2];
+    CacheDylib cacheDylibs[2];
+    cacheDylibs[0].cacheLoadAddress = dylibAddresses[0];
+    cacheDylibs[1].cacheLoadAddress = dylibAddresses[1];
+    cacheDylibs[0].cacheIndex = 0;
+    cacheDylibs[1].cacheIndex = 1;
+
+    // Dylib 1 should use an export from dylib 0
+    VMOffset exportVMOffset(0x1000ULL);
+    VMOffset useVMOffset(0x2000ULL);
+    CacheVMAddress useVMAddr = dylibAddresses[1] + useVMOffset;
+    uint32_t bindIndex0 = addBind(cacheDylibs[1], patchInfos[1],
+                                  cacheDylibs[0], exportVMOffset, "symbol0");
+    addUse(cacheDylibs[1], patchInfos[1], bindIndex0, useVMAddr, pmd, addend, isWeakImport);
+
+    // Act:
+    PatchTableBuilder builder;
+    Error err1 = builder.build(cacheDylibs, patchInfos, patchableClasses, patchableCFObj2, cacheBaseAddress);
+
+    std::vector<uint8_t> buffer(builder.getPatchTableSize());
+    Error err2 = builder.write(buffer.data(), buffer.size(), patchTableAddress.rawValue());
+    const PatchTable patchTable(buffer.data(), patchTableAddress.rawValue());
+    uint64_t numImages = patchTable.numImages();
+    uint32_t numExports0 = patchTable.patchableExportCount(0);
+    uint32_t numExports1 = patchTable.patchableExportCount(1);
+
+    // Walk the exports.  Dylib 0 should have 1 export, and dylib 1 should have none
+    std::vector<FoundExport> foundExports0 = getExports(patchTable, 0);
+    std::vector<FoundExport> foundExports1 = getExports(patchTable, 1);
+
+    // Walk the uses via different forEach methods
+    std::vector<FoundExportUse> uses0 = getExportUses(patchTable, 0, exportVMOffset);
+    std::vector<FoundExportUse> uses1 = getExportUses(patchTable, 1, exportVMOffset);
+    std::vector<FoundExportUse> usesWrongOffset = getExportUses(patchTable, 0, VMOffset(0x0ULL));
+    std::vector<FoundExportUse> usesOfZeroInOne = getExportUsesIn(patchTable, 0, exportVMOffset, 1);
+    std::vector<FoundExportUse> usesOfOneInZero = getExportUsesIn(patchTable, 1, exportVMOffset, 0);
+
+    // Walk the uses as cache offsets
+    std::vector<FoundExportCacheUse> cacheUses = getExportCacheUses(patchTable, 0, exportVMOffset,
+                                                                    cacheBaseAddress, dylibAddresses);
+
+    // Dylib 0 should have dylib 1 as a client, and dylib 1 should have no clients
+    bool zeroIsClientOfZero = patchTable.imageHasClient(0, 0);
+    bool oneIsClientOfZero = patchTable.imageHasClient(0, 1);
+    bool twoIsClientOfZero = patchTable.imageHasClient(0, 2);
+    bool zeroIsClientOfOne = patchTable.imageHasClient(1, 0);
+    bool oneIsClientOfOne = patchTable.imageHasClient(1, 1);
+    bool twoIsClientOfOne = patchTable.imageHasClient(1, 2);
+
+    // Assert:
+    XCTAssertFalse(err1.hasError());
+    XCTAssertFalse(err2.hasError());
+    XCTAssertTrue(numImages == 2);
+    XCTAssertTrue(numExports0 == 1);
+    XCTAssertTrue(numExports1 == 0);
+    XCTAssertTrue(numExports0 == foundExports0.size());
+    XCTAssertTrue(numExports1 == foundExports1.size());
+
+    // Should find 1 used export from dylib 0, and none from dylib 1
+    XCTAssertTrue(foundExports0[0].dylibVMOffsetOfImpl == exportVMOffset.rawValue());
+    XCTAssertTrue(!strcmp(foundExports0[0].exportName, "symbol0"));
+    XCTAssertTrue(foundExports0[0].patchKind == PatchKind::regular);
+
+    // Should find 1 use in dylib 1, of a value in dylib 0
+    XCTAssertTrue(uses0.size() == 1);
+    XCTAssertTrue(uses0[0].userImageIndex == 1);
+    XCTAssertTrue(uses0[0].userVMOffset == useVMOffset.rawValue());
+    XCTAssertTrue(uses0[0].pmd.diversity            == pmd.diversity);
+    XCTAssertTrue(uses0[0].pmd.high8                == pmd.high8);
+    XCTAssertTrue(uses0[0].pmd.authenticated        == pmd.authenticated);
+    XCTAssertTrue(uses0[0].pmd.key                  == pmd.key);
+    XCTAssertTrue(uses0[0].pmd.usesAddrDiversity    == pmd.usesAddrDiversity);
+    XCTAssertTrue(uses0[0].addend == addend);
+    XCTAssertTrue(uses0[0].isWeakImport == isWeakImport);
+
+    // Also look in the "in image" version of the callback
+    XCTAssertTrue(usesOfZeroInOne.size() == 1);
+    XCTAssertTrue(usesOfZeroInOne[0].userImageIndex == 1);
+    XCTAssertTrue(usesOfZeroInOne[0].userVMOffset == useVMOffset.rawValue());
+    XCTAssertTrue(usesOfZeroInOne[0].pmd.diversity            == pmd.diversity);
+    XCTAssertTrue(usesOfZeroInOne[0].pmd.high8                == pmd.high8);
+    XCTAssertTrue(usesOfZeroInOne[0].pmd.authenticated        == pmd.authenticated);
+    XCTAssertTrue(usesOfZeroInOne[0].pmd.key                  == pmd.key);
+    XCTAssertTrue(usesOfZeroInOne[0].pmd.usesAddrDiversity    == pmd.usesAddrDiversity);
+    XCTAssertTrue(usesOfZeroInOne[0].addend == addend);
+    XCTAssertTrue(usesOfZeroInOne[0].isWeakImport == isWeakImport);
+
+    // Also look in the cache offset version of the callback
+    XCTAssertTrue(cacheUses.size() == 1);
+    VMOffset useCacheVMOffset = useVMAddr - cacheBaseAddress;
+    XCTAssertTrue(cacheUses[0].cacheOffset == useCacheVMOffset.rawValue());
+    XCTAssertTrue(cacheUses[0].pmd.diversity            == pmd.diversity);
+    XCTAssertTrue(cacheUses[0].pmd.high8                == pmd.high8);
+    XCTAssertTrue(cacheUses[0].pmd.authenticated        == pmd.authenticated);
+    XCTAssertTrue(cacheUses[0].pmd.key                  == pmd.key);
+    XCTAssertTrue(cacheUses[0].pmd.usesAddrDiversity    == pmd.usesAddrDiversity);
+    XCTAssertTrue(cacheUses[0].addend == addend);
+    XCTAssertTrue(cacheUses[0].isWeakImport == isWeakImport);
+
+    // Should find no other uses
+    XCTAssertTrue(uses1.empty());
+    XCTAssertTrue(usesWrongOffset.empty());
+    XCTAssertTrue(usesOfOneInZero.size() == 0);
+
+    // Only dylib 1 should be a client of dylib 0
+    XCTAssertTrue(oneIsClientOfZero);
+    XCTAssertFalse(zeroIsClientOfZero);
+    XCTAssertFalse(twoIsClientOfZero);
+    XCTAssertFalse(zeroIsClientOfOne);
+    XCTAssertFalse(oneIsClientOfOne);
+    XCTAssertFalse(twoIsClientOfOne);
+}
+
+// A patch table with 2 dylibs, where one dylib uses one exports from the other
+- (void)testAddends
+{
+    const uint32 numEntries = 6;
+    uint64_t addends[numEntries] = {
+        0,
+        0,
+        1,
+        1,
+        31,
+        (1 << 23) - 1,
+    };
+
+    dyld3::MachOFile::PointerMetaData pmds[numEntries];
+    pmds[1].diversity = 20;
+    pmds[1].high8 = 30;
+    pmds[1].authenticated = 1;
+    pmds[1].key = 2;
+    pmds[1].usesAddrDiversity = 1;
+    pmds[2].high8 = 100;
+    pmds[3].diversity = 20;
+    pmds[3].high8 = 0;
+    pmds[3].authenticated = 1;
+    pmds[3].key = 0;
+    pmds[3].usesAddrDiversity = 1;
+    pmds[4].diversity = 20;
+    pmds[4].high8 = 0;
+    pmds[4].authenticated = 1;
+    pmds[4].key = 2;
+    pmds[4].usesAddrDiversity = 0;
+    pmds[5].high8 = 100;
+
+    bool isWeakImport[numEntries] = { false, true, true, false, true, false };
+
+    for ( uint32_t i = 0; i != numEntries; ++i ) {
+        testAddend(addends[i], pmds[i], isWeakImport[i]);
+    }
 }
 
 // A patch table with 2 dylibs, where one dylib uses one ObjC export from the other
@@ -718,10 +889,22 @@ static std::vector<FoundGOTUse> getGOTUsesIn(const PatchTable& patchTable, uint3
     VMOffset useVMOffset0(0x2000ULL);
     VMOffset useVMOffset1(0x2001ULL);
     VMOffset useVMOffset2(0x2002ULL);
+    uint64_t addend0 = 0;
+    uint64_t addend1 = 31;
+    uint64_t addend2 = (1 << 23) - 1;
+    dyld3::MachOFile::PointerMetaData pmd0;
+    dyld3::MachOFile::PointerMetaData pmd1;
+    pmd1.diversity = 20;
+    pmd1.high8 = 30;
+    pmd1.authenticated = 1;
+    pmd1.key = 2;
+    pmd1.usesAddrDiversity = 1;
+    dyld3::MachOFile::PointerMetaData pmd2;
+    pmd2.high8 = 100;
     uint32_t bindIndex0 = addBind(cacheDylibs[1], patchInfos[1], cacheDylibs[0], exportVMOffset, "symbol0");
-    addGOTUse(cacheDylibs[1], patchInfos[1], bindIndex0, dylibAddress1 + useVMOffset0);
-    addGOTUse(cacheDylibs[1], patchInfos[1], bindIndex0, dylibAddress1 + useVMOffset1);
-    addGOTUse(cacheDylibs[1], patchInfos[1], bindIndex0, dylibAddress1 + useVMOffset2);
+    addGOTUse(cacheDylibs[1], patchInfos[1], bindIndex0, dylibAddress1 + useVMOffset0, pmd0, addend0);
+    addGOTUse(cacheDylibs[1], patchInfos[1], bindIndex0, dylibAddress1 + useVMOffset1, pmd1, addend1);
+    addGOTUse(cacheDylibs[1], patchInfos[1], bindIndex0, dylibAddress1 + useVMOffset2, pmd2, addend2);
 
     // Act:
     PatchTableBuilder builder;
@@ -762,26 +945,26 @@ static std::vector<FoundGOTUse> getGOTUsesIn(const PatchTable& patchTable, uint3
     VMOffset vmOffset2 = (dylibAddress1 + useVMOffset2) - cacheBaseAddress;
     XCTAssertTrue(uses0.size() == 3);
     XCTAssertTrue(uses0[0].userCacheVMOffset == vmOffset0.rawValue());
-    XCTAssertTrue(uses0[0].pmd.diversity            == 0);
-    XCTAssertTrue(uses0[0].pmd.high8                == 0);
-    XCTAssertTrue(uses0[0].pmd.authenticated        == 0);
-    XCTAssertTrue(uses0[0].pmd.key                  == 0);
-    XCTAssertTrue(uses0[0].pmd.usesAddrDiversity    == 0);
-    XCTAssertTrue(uses0[0].addend == 0);
+    XCTAssertTrue(uses0[0].pmd.diversity            == pmd0.diversity);
+    XCTAssertTrue(uses0[0].pmd.high8                == pmd0.high8);
+    XCTAssertTrue(uses0[0].pmd.authenticated        == pmd0.authenticated);
+    XCTAssertTrue(uses0[0].pmd.key                  == pmd0.key);
+    XCTAssertTrue(uses0[0].pmd.usesAddrDiversity    == pmd0.usesAddrDiversity);
+    XCTAssertTrue(uses0[0].addend == addend0);
     XCTAssertTrue(uses0[1].userCacheVMOffset == vmOffset1.rawValue());
-    XCTAssertTrue(uses0[1].pmd.diversity            == 0);
-    XCTAssertTrue(uses0[1].pmd.high8                == 0);
-    XCTAssertTrue(uses0[1].pmd.authenticated        == 0);
-    XCTAssertTrue(uses0[1].pmd.key                  == 0);
-    XCTAssertTrue(uses0[1].pmd.usesAddrDiversity    == 0);
-    XCTAssertTrue(uses0[1].addend == 0);
+    XCTAssertTrue(uses0[1].pmd.diversity            == pmd1.diversity);
+    XCTAssertTrue(uses0[1].pmd.high8                == pmd1.high8);
+    XCTAssertTrue(uses0[1].pmd.authenticated        == pmd1.authenticated);
+    XCTAssertTrue(uses0[1].pmd.key                  == pmd1.key);
+    XCTAssertTrue(uses0[1].pmd.usesAddrDiversity    == pmd1.usesAddrDiversity);
+    XCTAssertTrue(uses0[1].addend == addend1);
     XCTAssertTrue(uses0[2].userCacheVMOffset == vmOffset2.rawValue());
-    XCTAssertTrue(uses0[2].pmd.diversity            == 0);
-    XCTAssertTrue(uses0[2].pmd.high8                == 0);
-    XCTAssertTrue(uses0[2].pmd.authenticated        == 0);
-    XCTAssertTrue(uses0[2].pmd.key                  == 0);
-    XCTAssertTrue(uses0[2].pmd.usesAddrDiversity    == 0);
-    XCTAssertTrue(uses0[2].addend == 0);
+    XCTAssertTrue(uses0[2].pmd.diversity            == pmd2.diversity);
+    XCTAssertTrue(uses0[2].pmd.high8                == pmd2.high8);
+    XCTAssertTrue(uses0[2].pmd.authenticated        == pmd2.authenticated);
+    XCTAssertTrue(uses0[2].pmd.key                  == pmd2.key);
+    XCTAssertTrue(uses0[2].pmd.usesAddrDiversity    == pmd2.usesAddrDiversity);
+    XCTAssertTrue(uses0[2].addend == addend2);
 
     // Should have no uses of dylib 1
     XCTAssertTrue(uses1.empty());
@@ -815,6 +998,14 @@ static std::vector<FoundGOTUse> getGOTUsesIn(const PatchTable& patchTable, uint3
     VMOffset exportVMOffset0_0(0x3000ULL);
     VMOffset exportVMOffset0_1(0x2000ULL);
     VMOffset exportVMOffset0_2(0x1000ULL);
+    dyld3::MachOFile::PointerMetaData pmdDylib1UsesFromDylib0[6] = { };
+    pmdDylib1UsesFromDylib0[0].diversity = 20;
+    pmdDylib1UsesFromDylib0[0].high8 = 30;
+    pmdDylib1UsesFromDylib0[0].authenticated = 1;
+    pmdDylib1UsesFromDylib0[0].key = 2;
+    pmdDylib1UsesFromDylib0[0].usesAddrDiversity = 1;
+    uint64_t addendDylib1UsesFromDylib0[6] = { 0, 30, 0, 5, 0, 0 };
+    bool isWeakImportDylib1UsesFromDylib0[6] = { false, true, true, false, true, false };
     {
         CacheVMAddress useVMAddr1_0 = dylibAddress1 + VMOffset(0x10000ULL);
         CacheVMAddress useVMAddr1_1 = dylibAddress1 + VMOffset(0x20000ULL);
@@ -825,12 +1016,12 @@ static std::vector<FoundGOTUse> getGOTUsesIn(const PatchTable& patchTable, uint3
         uint32_t bindIndex0 = addBind(cacheDylibs[1], patchInfos[1], cacheDylibs[0], exportVMOffset0_0, "symbol0");
         uint32_t bindIndex1 = addBind(cacheDylibs[1], patchInfos[1], cacheDylibs[0], exportVMOffset0_1, "symbol1");
         uint32_t bindIndex2 = addBind(cacheDylibs[1], patchInfos[1], cacheDylibs[0], exportVMOffset0_2, "symbol2");
-        addGOTUse(cacheDylibs[1], patchInfos[1], bindIndex0, useVMAddr1_0);
-        addGOTUse(cacheDylibs[1], patchInfos[1], bindIndex0, useVMAddr1_1);
-        addGOTUse(cacheDylibs[1], patchInfos[1], bindIndex0, useVMAddr1_2);
-        addGOTUse(cacheDylibs[1], patchInfos[1], bindIndex1, useVMAddr1_3);
-        addGOTUse(cacheDylibs[1], patchInfos[1], bindIndex1, useVMAddr1_4);
-        addGOTUse(cacheDylibs[1], patchInfos[1], bindIndex2, useVMAddr1_5);
+        addGOTUse(cacheDylibs[1], patchInfos[1], bindIndex0, useVMAddr1_0, pmdDylib1UsesFromDylib0[0], addendDylib1UsesFromDylib0[0], isWeakImportDylib1UsesFromDylib0[0]);
+        addGOTUse(cacheDylibs[1], patchInfos[1], bindIndex0, useVMAddr1_1, pmdDylib1UsesFromDylib0[1], addendDylib1UsesFromDylib0[1], isWeakImportDylib1UsesFromDylib0[1]);
+        addGOTUse(cacheDylibs[1], patchInfos[1], bindIndex0, useVMAddr1_2, pmdDylib1UsesFromDylib0[2], addendDylib1UsesFromDylib0[2], isWeakImportDylib1UsesFromDylib0[2]);
+        addGOTUse(cacheDylibs[1], patchInfos[1], bindIndex1, useVMAddr1_3, pmdDylib1UsesFromDylib0[3], addendDylib1UsesFromDylib0[3], isWeakImportDylib1UsesFromDylib0[3]);
+        addGOTUse(cacheDylibs[1], patchInfos[1], bindIndex1, useVMAddr1_4, pmdDylib1UsesFromDylib0[4], addendDylib1UsesFromDylib0[4], isWeakImportDylib1UsesFromDylib0[4]);
+        addGOTUse(cacheDylibs[1], patchInfos[1], bindIndex2, useVMAddr1_5, pmdDylib1UsesFromDylib0[5], addendDylib1UsesFromDylib0[5], isWeakImportDylib1UsesFromDylib0[5]);
     }
     // Uses of dylib 0 from dylib 2
     {
@@ -920,6 +1111,26 @@ static std::vector<FoundGOTUse> getGOTUsesIn(const PatchTable& patchTable, uint3
         XCTAssertTrue(usesDylib0Export0[3].userCacheVMOffset == useVMOffset2_0.rawValue());
         XCTAssertTrue(usesDylib0Export0[4].userCacheVMOffset == useVMOffset2_1.rawValue());
         XCTAssertTrue(usesDylib0Export0[5].userCacheVMOffset == useVMOffset2_2.rawValue());
+
+        // Verified the PMDs, addends, and weak imports
+        XCTAssertTrue(usesDylib0Export0[0].pmd == pmdDylib1UsesFromDylib0[0]);
+        XCTAssertTrue(usesDylib0Export0[1].pmd == pmdDylib1UsesFromDylib0[1]);
+        XCTAssertTrue(usesDylib0Export0[2].pmd == pmdDylib1UsesFromDylib0[2]);
+        XCTAssertTrue(usesDylib0Export0[3].pmd == dyld3::MachOFile::PointerMetaData());
+        XCTAssertTrue(usesDylib0Export0[4].pmd == dyld3::MachOFile::PointerMetaData());
+        XCTAssertTrue(usesDylib0Export0[5].pmd == dyld3::MachOFile::PointerMetaData());
+        XCTAssertTrue(usesDylib0Export0[0].addend == addendDylib1UsesFromDylib0[0]);
+        XCTAssertTrue(usesDylib0Export0[1].addend == addendDylib1UsesFromDylib0[1]);
+        XCTAssertTrue(usesDylib0Export0[2].addend == addendDylib1UsesFromDylib0[2]);
+        XCTAssertTrue(usesDylib0Export0[3].addend == 0);
+        XCTAssertTrue(usesDylib0Export0[4].addend == 0);
+        XCTAssertTrue(usesDylib0Export0[5].addend == 0);
+        XCTAssertTrue(usesDylib0Export0[0].isWeakImport == isWeakImportDylib1UsesFromDylib0[0]);
+        XCTAssertTrue(usesDylib0Export0[1].isWeakImport == isWeakImportDylib1UsesFromDylib0[1]);
+        XCTAssertTrue(usesDylib0Export0[2].isWeakImport == isWeakImportDylib1UsesFromDylib0[2]);
+        XCTAssertTrue(usesDylib0Export0[3].isWeakImport == false);
+        XCTAssertTrue(usesDylib0Export0[4].isWeakImport == false);
+        XCTAssertTrue(usesDylib0Export0[5].isWeakImport == false);
     }
 
     // Dylib 0 export 1 is used 2 times from dylib 1 and 2 times from dylib 2

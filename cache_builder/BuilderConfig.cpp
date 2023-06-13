@@ -177,7 +177,8 @@ SlideInfo::SlideInfo(const BuilderOptions& options, const Layout& layout)
         this->slideInfoFormat = SlideInfoFormat::v1;
 
         // 128 bytes per page.  Enough for a bitmap with 1-bit entry per 32-bit location
-        this->slideInfoBytesPerDataPage = 128;
+        // Plus 2-bytes per page for the TOC offset
+        this->slideInfoBytesPerDataPage = 130;
     }
     else {
         assert("Unknown arch");

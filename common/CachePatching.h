@@ -79,10 +79,7 @@ struct dyld_cache_patchable_location_v1
                         discriminator           : 16;
 
     uint64_t getAddend() const {
-        uint64_t unsingedAddend = addend;
-        int64_t signedAddend = (int64_t)unsingedAddend;
-        signedAddend = (signedAddend << 52) >> 52;
-        return (uint64_t)signedAddend;
+        return addend;
     }
 };
 
@@ -170,10 +167,7 @@ struct dyld_cache_patchable_location_v2
                 discriminator           : 16;
 
     uint64_t getAddend() const {
-        uint64_t unsingedAddend = addend;
-        int64_t signedAddend = (int64_t)unsingedAddend;
-        signedAddend = (signedAddend << 52) >> 52;
-        return (uint64_t)signedAddend;
+        return addend;
     }
 };
 
@@ -216,12 +210,107 @@ struct dyld_cache_patchable_location_v3
                 discriminator           : 16;
 
     uint64_t getAddend() const {
-        uint64_t unsingedAddend = addend;
-        int64_t signedAddend = (int64_t)unsingedAddend;
-        signedAddend = (signedAddend << 52) >> 52;
-        return (uint64_t)signedAddend;
+        return addend;
     }
 };
+
+//
+// MARK: --- V4 patching.  This is V3 plus a new layout for larger addends ---
+//
+
+struct dyld_cache_patch_info_v4 : dyld_cache_patch_info_v3 {
+    // We didn't add any new files, just changed the type of the patch location structs below
+};
+
+struct dyld_cache_patchable_location_v4
+{
+    struct Auth
+    {
+        uint32_t    authenticated           : 1,    // == 1
+                    high7                   : 7,
+                    isWeakImport            : 1,
+                    addend                  : 5,    // 0..31
+                    usesAddressDiversity    : 1,
+                    keyIsD                  : 1,    // B keys are not permitted.  So this is just whether the A key is I or D (0 => I, 1 => D)
+                    discriminator           : 16;
+    };
+    struct Regular
+    {
+        uint32_t    authenticated           : 1,    // == 0
+                    high7                   : 7,
+                    isWeakImport            : 1,
+                    addend                  : 23;
+    };
+
+    uint32_t    dylibOffsetOfUse;               // Offset from the dylib we used to get a dyld_cache_image_clients_v2
+    union {
+        Auth auth;
+        Regular regular;
+    };
+
+    void getPMD(dyld3::MachOFile::PointerMetaData& pmd) const {
+        if ( this->auth.authenticated ) {
+            pmd.diversity         = auth.discriminator;
+            pmd.high8             = auth.high7 << 1;
+            pmd.authenticated     = auth.authenticated;
+            pmd.key               = auth.keyIsD ? 2 : 0;
+            pmd.usesAddrDiversity = auth.usesAddressDiversity;
+        } else {
+            pmd.diversity         = 0;
+            pmd.high8             = regular.high7 << 1;
+            pmd.authenticated     = 0;
+            pmd.key               = 0;
+            pmd.usesAddrDiversity = 0;
+        }
+    }
+
+    uint64_t getAddend() const {
+        return this->auth.authenticated ? this->auth.addend : this->regular.addend;
+    }
+
+    bool isWeakImport() const {
+        return this->auth.authenticated ? this->auth.isWeakImport : this->regular.isWeakImport;
+    }
+};
+
+static_assert(sizeof(dyld_cache_patchable_location_v4) == sizeof(uint64_t), "Overflow");
+
+struct dyld_cache_patchable_location_v4_got
+{
+    uint64_t    cacheOffsetOfUse;               // Offset from the cache header
+    union {
+        dyld_cache_patchable_location_v4::Auth auth;
+        dyld_cache_patchable_location_v4::Regular regular;
+    };
+    uint32_t unusedPadding;
+
+    void getPMD(dyld3::MachOFile::PointerMetaData& pmd) const {
+        if ( this->auth.authenticated ) {
+            pmd.diversity         = auth.discriminator;
+            pmd.high8             = auth.high7 << 1;
+            pmd.authenticated     = auth.authenticated;
+            pmd.key               = auth.keyIsD ? 2 : 0;
+            pmd.usesAddrDiversity = auth.usesAddressDiversity;
+        } else {
+            pmd.diversity         = 0;
+            pmd.high8             = regular.high7 << 1;
+            pmd.authenticated     = 0;
+            pmd.key               = 0;
+            pmd.usesAddrDiversity = 0;
+        }
+    }
+
+    uint64_t getAddend() const {
+        return this->auth.authenticated ? this->auth.addend : this->regular.addend;
+    }
+
+    bool isWeakImport() const {
+        return this->auth.authenticated ? this->auth.isWeakImport : this->regular.isWeakImport;
+    }
+};
+
+static_assert(sizeof(dyld_cache_patchable_location_v4_got) == (2 * sizeof(uint64_t)), "Overflow");
+
 
 // The base class for patch tables.  Forwards to one of the subclasses, depending on the version
 // Note that the version 1 table doesn't use the struct below, as it had a different layout.
@@ -259,18 +348,21 @@ struct PatchTable
 
     // Walk all uses of a given export in a given dylib
     typedef void (^ExportUseHandler)(uint32_t userImageIndex, uint32_t userVMOffset,
-                                     dyld3::MachOFile::PointerMetaData pmd, uint64_t addend);
+                                     dyld3::MachOFile::PointerMetaData pmd, uint64_t addend,
+                                     bool isWeakImport);
     void forEachPatchableUseOfExport(uint32_t imageIndex, uint32_t dylibVMOffsetOfImpl,
                                      ExportUseHandler handler) const;
 
     typedef void (^ExportUseInImageHandler)(uint32_t userVMOffset,
-                                            dyld3::MachOFile::PointerMetaData pmd, uint64_t addend);
+                                            dyld3::MachOFile::PointerMetaData pmd, uint64_t addend,
+                                            bool isWeakImport);
     void forEachPatchableUseOfExportInImage(uint32_t imageIndex, uint32_t dylibVMOffsetOfImpl,
                                             uint32_t userImageIndex,
                                             ExportUseInImageHandler handler) const;
 
     typedef void (^ExportCacheUseHandler)(uint64_t cacheVMOffset,
-                                          dyld3::MachOFile::PointerMetaData pmd, uint64_t addend);
+                                          dyld3::MachOFile::PointerMetaData pmd, uint64_t addend,
+                                          bool isWeakImport);
     typedef uint64_t (^GetDylibAddressHandler)(uint32_t dylibCacheIndex);
     void forEachPatchableCacheUseOfExport(uint32_t imageIndex, uint32_t dylibVMOffsetOfImpl,
                                           uint64_t cacheUnslidAddress,
@@ -278,7 +370,7 @@ struct PatchTable
                                           ExportCacheUseHandler handler) const;
 
     typedef void (^GOTUseHandler)(uint64_t cacheVMOffset, dyld3::MachOFile::PointerMetaData pmd,
-                                  uint64_t addend);
+                                  uint64_t addend, bool isWeakImport);
     void forEachPatchableGOTUseOfExport(uint32_t imageIndex, uint32_t dylibVMOffsetOfImpl,
                                         GOTUseHandler handler) const;
 
@@ -362,10 +454,43 @@ struct PatchTableV3 : PatchTableV2
 
 private:
     const dyld_cache_patch_info_v3*             info() const;
+    std::span<dyld_cache_patchable_location_v3> gotPatchableLocations() const;
+
+protected:
+    // These are also used by PatchTableV4, so we need them to be protected, not private
     std::span<dyld_cache_image_got_clients_v3>  gotClients() const;
     std::span<dyld_cache_patchable_export_v3>   gotClientExports() const;
-    std::span<dyld_cache_patchable_location_v3> gotPatchableLocations() const;
     std::span<dyld_cache_patchable_export_v3>   gotClientExportsForImage(uint32_t imageIndex) const;
+};
+
+// Wraps a dyld_cache_patch_info_v4 with various helper methods.  Use PatchTable above to
+// dispatch to this automatically
+struct PatchTableV4 : PatchTableV3
+{
+    // "virtual" methods from PatchTable
+    using PatchTableV3::numImages;
+    using PatchTableV3::patchableExportCount;
+    using PatchTableV3::imageHasClient;
+    using PatchTableV3::forEachPatchableExport;
+
+    // We need new versions of all of these as the patch location is used by them
+    void forEachPatchableUseOfExport(uint32_t imageIndex, uint32_t dylibVMOffsetOfImpl,
+                                     ExportUseHandler handler) const;
+    void forEachPatchableUseOfExportInImage(uint32_t imageIndex, uint32_t dylibVMOffsetOfImpl,
+                                            uint32_t userImageIndex,
+                                            ExportUseInImageHandler handler) const;
+    void forEachPatchableCacheUseOfExport(uint32_t imageIndex, uint32_t dylibVMOffsetOfImpl,
+                                          uint64_t cacheUnslidAddress,
+                                          GetDylibAddressHandler getDylibHandler,
+                                          ExportCacheUseHandler handler) const;
+    void forEachPatchableGOTUseOfExport(uint32_t imageIndex, uint32_t dylibVMOffsetOfImpl,
+                                        GOTUseHandler handler) const;
+
+private:
+    const dyld_cache_patch_info_v4*     info() const;
+
+    std::span<dyld_cache_patchable_location_v4> patchableLocations() const;
+    std::span<dyld_cache_patchable_location_v4_got> gotPatchableLocations() const;
 };
 
 #if BUILDING_CACHE_BUILDER || BUILDING_CACHE_BUILDER_UNIT_TESTS
@@ -376,7 +501,8 @@ struct CacheDylib;
 
 struct dyld_cache_patchable_location
 {
-    dyld_cache_patchable_location(CacheVMAddress cacheVMAddr, dyld3::MachOFile::PointerMetaData pmd, uint64_t addend);
+    dyld_cache_patchable_location(CacheVMAddress cacheVMAddr, dyld3::MachOFile::PointerMetaData pmd,
+                                  uint64_t addend, bool isWeakImport);
     ~dyld_cache_patchable_location() = default;
     dyld_cache_patchable_location(const dyld_cache_patchable_location&) = default;
     dyld_cache_patchable_location(dyld_cache_patchable_location&&) = default;
@@ -387,11 +513,13 @@ struct dyld_cache_patchable_location
 
     CacheVMAddress      cacheVMAddr;
     uint64_t            high7                   : 7,
-                        addend                  : 5,    // 0..31
+                        unused                  : 4,
+                        isWeakImport            : 1,
                         authenticated           : 1,
                         usesAddressDiversity    : 1,
                         key                     : 2,
-                        discriminator           : 16;
+                        discriminator           : 16,
+                        addend                  : 32;
 };
 
 // There will be one of these PatchInfo structs for each dylib in the cache
@@ -506,15 +634,15 @@ private:
     std::vector<DylibClients>   dylibClients;
     ExportToNameMap             exportsToName;
     
-    std::vector<dyld_cache_image_patches_v2>        patchImages;
-    std::vector<dyld_cache_image_export_v2>         imageExports;
-    std::vector<dyld_cache_image_clients_v2>        patchClients;
-    std::vector<dyld_cache_patchable_export_v2>     clientExports;
-    std::vector<dyld_cache_patchable_location_v2>   patchLocations;
-    std::vector<char>                               patchExportNames;
-    std::vector<dyld_cache_image_got_clients_v3>    gotClients;
-    std::vector<dyld_cache_patchable_export_v3>     gotClientExports;
-    std::vector<dyld_cache_patchable_location_v3>   gotPatchLocations;
+    std::vector<dyld_cache_image_patches_v2>            patchImages;
+    std::vector<dyld_cache_image_export_v2>             imageExports;
+    std::vector<dyld_cache_image_clients_v2>            patchClients;
+    std::vector<dyld_cache_patchable_export_v2>         clientExports;
+    std::vector<dyld_cache_patchable_location_v4>       patchLocations;
+    std::vector<char>                                   patchExportNames;
+    std::vector<dyld_cache_image_got_clients_v3>        gotClients;
+    std::vector<dyld_cache_patchable_export_v3>         gotClientExports;
+    std::vector<dyld_cache_patchable_location_v4_got>   gotPatchLocations;
     
     const bool                  log = false;
 };

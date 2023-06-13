@@ -33,6 +33,7 @@
 #include "Allocator.h"
 #include "BTree.h"
 #include "StringUtils.h"
+#include "DyldRuntimeState.h"
 
 // TODO: Reenable ASAN support once we have time to debug it
 
@@ -48,13 +49,62 @@ void __cxa_pure_virtual()
 }
 #endif
 
+
 #define ALLOCATOR_LOGGING_ENABLED (0)
 
+#if BUILDING_DYLD && TARGET_OS_OSX && __x86_64__
 extern "C" void* __dso_handle;
+#endif
 
 namespace lsl {
 
-EphemeralAllocator::EphemeralAllocator(void* B, size_t S) : _freeBuffer({B,S}) {}
+void Lock::lock() {
+    if (!_lock) { return; }
+    assertNotOwner();
+#if BUILDING_DYLD
+    assert(_runtimeState != nullptr);
+    _runtimeState->libSystemHelpers->os_unfair_lock_lock_with_options(_lock, OS_UNFAIR_LOCK_NONE);
+#else /* BUILDING_DYLD */
+    os_unfair_lock_lock_with_options(_lock, OS_UNFAIR_LOCK_NONE);
+#endif /* BUILDING_DYLD */
+}
+void Lock::unlock() {
+    if (!_lock) { return; }
+    assertOwner();
+#if BUILDING_DYLD
+    assert(_runtimeState != nullptr);
+    _runtimeState->libSystemHelpers->os_unfair_lock_unlock(_lock);
+#else /* BUILDING_DYLD */
+    os_unfair_lock_unlock(_lock);
+#endif /* BUILDING_DYLD */
+}
+
+void Lock::assertNotOwner() {
+    if (!_lock) { return; }
+    os_unfair_lock_assert_not_owner(_lock);
+}
+void Lock::assertOwner() {
+    if (!_lock) { return; }
+    os_unfair_lock_assert_owner(_lock);
+}
+
+EphemeralAllocator::EphemeralAllocator() {
+    MemoryManager memoryManager;
+    _memoryManager = &memoryManager;
+    _memoryManager = new (this->aligned_alloc(alignof(MemoryManager), sizeof(MemoryManager))) MemoryManager(std::move(memoryManager));    // Don't count the space used by the MemoryManager
+    _allocatedBytes = 0;
+}
+
+EphemeralAllocator::EphemeralAllocator(MemoryManager& memoryManager) : _memoryManager(&memoryManager) {}
+
+EphemeralAllocator::EphemeralAllocator(void* B, size_t S) : _freeBuffer({B,S}) {
+    MemoryManager memoryManager;
+    _memoryManager = &memoryManager;
+    _memoryManager = new (this->aligned_alloc(alignof(MemoryManager), sizeof(MemoryManager))) MemoryManager(std::move(memoryManager));
+    // Don't count the space used by the MemoryManager
+    _allocatedBytes = 0;
+}
+EphemeralAllocator::EphemeralAllocator(void* B, size_t S, MemoryManager& memoryManager) : _memoryManager(&memoryManager), _freeBuffer({B,S}){}
 
 EphemeralAllocator::EphemeralAllocator(EphemeralAllocator&& other) {
     swap(other);
@@ -69,35 +119,33 @@ EphemeralAllocator& EphemeralAllocator::operator=(EphemeralAllocator&& other) {
     return *this;
 }
 
-void* Allocator::align(size_t alignment, size_t size, void*& ptr, size_t& space) {
-    void* r = nullptr;
-    if (size <= space) {
-        char* p1 = static_cast<char*>(ptr);
-        char* p2 = reinterpret_cast<char*>(reinterpret_cast<size_t>(p1 + (alignment - 1)) & -alignment);
-        size_t d = static_cast<size_t>(p2 - p1);
-        if (d <= space - size) {
-            r = p2;
-            ptr = r;
-            space -= d;
-        }
-    }
-    return r;
+bool MemoryManager::Buffer::align(size_t alignment, size_t targetSize) {
+    if (targetSize > size) { return false; }
+    char* p1 = static_cast<char*>(address);
+    char* p2 = reinterpret_cast<char*>(reinterpret_cast<size_t>(p1 + (alignment - 1)) & -alignment);
+    size_t d = static_cast<size_t>(p2 - p1);
+    if (d > size - targetSize) { return false; }
+    address = p2;
+    size -= d;
+    return true;
 }
 
 void EphemeralAllocator::swap(EphemeralAllocator& other) {
     using std::swap;
     if (this == &other) { return; }
-    swap(_freeBuffer.size,     other._freeBuffer.size);
-    swap(_freeBuffer.address,  other._freeBuffer.address);
-    swap(_regionList,          other._regionList);
-    swap(_allocatedBytes,      other._allocatedBytes);
+    swap(_memoryManager,        other._memoryManager);
+    swap(_freeBuffer.size,      other._freeBuffer.size);
+    swap(_freeBuffer.address,   other._freeBuffer.address);
+    swap(_regionList,           other._regionList);
+    swap(_allocatedBytes,       other._allocatedBytes);
 }
 
 void EphemeralAllocator::reset() {
 #if BUILDING_CACHE_BUILDER || BUILDING_CACHE_BUILDER_UNIT_TESTS
     // HACK: The cache builder doesn't free allocations in the ProcessConfig
 #else
-    contract(_allocatedBytes == 0);
+    // FIXME: re-enable this assertion once we figure out the problem with the builders.
+    // assert(_allocatedBytes == 0);
 #endif
     if (_regionList != nullptr) {
         void* cleanupSpace = alloca(1024);
@@ -107,46 +155,46 @@ void EphemeralAllocator::reset() {
             regions.push_back(i->buffer);
         }
         for(auto& region : regions) {
-            vm_deallocate_bytes(region.address, region.size);
+            _memoryManager->vm_deallocate_bytes(region.address, region.size);
         }
         _regionList = nullptr;
         _freeBuffer = { nullptr, 0 };
     }
 }
 
-[[nodiscard]] Allocator::Buffer EphemeralAllocator::allocate_buffer(std::size_t nbytes, std::size_t alignment, std::size_t prefix, Allocator** deallocator) {
-    contract(prefix == 16 || prefix == 0);
-    *deallocator = this;
+[[nodiscard]] Allocator::Buffer EphemeralAllocator::allocate_buffer(std::size_t nbytes, std::size_t alignment, std::size_t prefix) {
+    assert(prefix == 16 || prefix == 0);
     // First space for the prefix
     *((uintptr_t*)&_freeBuffer.address) += prefix;
     _freeBuffer.size -= prefix;
-    if ((_freeBuffer.size == 0 - prefix) || (!align(alignment, nbytes, _freeBuffer.address, _freeBuffer.size))) {
+    if ((_freeBuffer.size == 0 - prefix) || (!_freeBuffer.align(alignment, nbytes))) {
 #if __LP64__
-        size_t size = std::max<size_t>(4*nbytes, ALLOCATOR_DEFAULT_POOL_SIZE);
+        size_t size = std::max<size_t>(4*nbytes, EPHEMERAL_ALLOCATOR_DEFAULT_POOL_SIZE);
 #else
-        size_t size = std::max<size_t>(nbytes+65536, ALLOCATOR_DEFAULT_POOL_SIZE);
+        size_t size = std::max<size_t>(nbytes+65536, EPHEMERAL_ALLOCATOR_DEFAULT_POOL_SIZE);
 #endif
-        _freeBuffer = vm_allocate_bytes(size, vm_allocate_flags());
+        _freeBuffer = _memoryManager->vm_allocate_bytes(size);
 //        ASAN_UNPOISON_MEMORY_REGION(_freeBuffer.address, sizeof(RegionListEntry));
         _regionList = new (_freeBuffer.address) RegionListEntry({ _freeBuffer, _regionList});
         size_t roundedSize = prefix + ((sizeof(RegionListEntry) + 15) & (-16));
         *((uintptr_t*)&_freeBuffer.address) += roundedSize;
         _freeBuffer.size -= roundedSize;
-        (void)align(alignment, nbytes, _freeBuffer.address, _freeBuffer.size);
+        _freeBuffer.align(alignment, nbytes);
     }
+    assert((uintptr_t)_freeBuffer.address%16 == 0);
 
     Allocator::Buffer result = { (void*)((uintptr_t)_freeBuffer.address-prefix), nbytes+prefix };
     *((uintptr_t*)&_freeBuffer.address) += nbytes;
     _freeBuffer.size -= nbytes;
     _allocatedBytes += (nbytes + prefix);
 
-//    fprintf(stderr, "  Allocated %zu @ 0x%lx\n", result.size, result.address);
+//    fprintf(stderr, "%llu @ 0x%lx(%llx) Allocated\n", result.size, (uintptr_t)result.address, (uintptr_t)this);
 //    fprintf(stderr, "SPACE: %lu, 0x%lx\n", _freeBuffer.size, (uintptr_t)_freeBuffer.address);
     return result;
 }
 
 void EphemeralAllocator::deallocate_buffer(Buffer buffer) {
-//    fprintf(stderr, "Deallocated %zu @ 0x%lx\n", buffer.size, buffer.address);
+//    fprintf(stderr, "%llu @ 0x%lx(%llx) Deallocated\n", buffer.size, (uintptr_t)buffer.address, (uintptr_t)this);
     _allocatedBytes -= buffer.size;
 }
 
@@ -293,7 +341,7 @@ Allocator::Buffer Allocator::Buffer::findSpace(size_t targetSize, size_t targetA
     Buffer result = *this;
     result.address = (void*)((uintptr_t)result.address + prefix);
     result.size -= prefix;
-    if (align(targetAlignment, targetSize, result.address, result.size)) {
+    if (result.align(targetAlignment, targetSize)) {
         result.address = (void*)((uintptr_t)result.address - prefix);
         result.size = (targetSize + prefix);
         return result;
@@ -315,41 +363,35 @@ bool Allocator::Buffer::succeeds(const Buffer& other) const {
 
 
 void Allocator::Buffer::dump() const {
-    printf("\t%zu @ 0x%lx - 0x%lx\n", size, (uintptr_t)address, (uintptr_t)address+size);
+    printf("\t%lu @ 0x%lx - 0x%lx\n", size, (uintptr_t)address, (uintptr_t)address+size);
 }
 
 #pragma mark -
 #pragma mark Primitive allocator implementations
 
-//TODO: Remove this once it lands in XNU
-#ifndef VM_FLAGS_TPRO
-#define VM_FLAGS_TPRO (0) //Set it to zero since if xnu does not export the flag it probably does not support it yet
-#endif
-
-int Allocator::vm_allocate_flags() const {
-    int result = 0;
-#if BUILDING_DYLD
-    // Only include the dyld tag for allocations made by dyld
-    result |= VM_MAKE_TAG(VM_MEMORY_DYLD);
-#endif /* BUILDING_DYLD */
-    return result;
+[[nodiscard]] Lock::Guard MemoryManager::lockGuard() {
+    return Lock::Guard(_lock);
 }
 
-[[nodiscard]] Allocator::Buffer Allocator::vm_allocate_bytes(std::size_t size, int flags) {
-    size_t targetSize = (size + (PAGE_SIZE-1)) & (-1*PAGE_SIZE);
+[[nodiscard]] MemoryManager::Buffer MemoryManager::vm_allocate_bytes(std::size_t size) {
+    size_t targetSize = ((size + (PAGE_SIZE-1)) & (-1*PAGE_SIZE)) + PAGE_SIZE;
     vm_address_t    result;
-    kern_return_t kr = vm_allocate(mach_task_self(), &result, targetSize, VM_FLAGS_ANYWHERE | flags);
+    // We allocate an extra page to use as a guard page
+    kern_return_t kr = vm_allocate(mach_task_self(), &result, targetSize, VM_FLAGS_ANYWHERE | vmFlags());
 #if BUILDING_DYLD && TARGET_OS_OSX && __x86_64__
     // rdar://79214654 support wine games that need low mem.  Move dyld heap out of low mem
     if ( (kr == KERN_SUCCESS) && (result < 0x100000000ULL) ) {
         vm_address_t result2 = (long)&__dso_handle + 0x00200000; // look for vm range after dyld
-        kern_return_t kr2 = vm_allocate(mach_task_self(), &result2, targetSize, VM_FLAGS_FIXED | flags);
+        kern_return_t kr2 = vm_allocate(mach_task_self(), &result2, targetSize, VM_FLAGS_FIXED | vmFlags());
         if ( kr2 == KERN_SUCCESS ) {
             (void)vm_deallocate(mach_task_self(), result, targetSize);
             result = result2;
         }
     }
 #endif /* BUILDING_DYLD && TARGET_OS_OSX && __x86_64__ */
+
+    // Remove the guard page
+    targetSize -= PAGE_SIZE;
 
     if (kr != KERN_SUCCESS) {
         char buffer[1024];
@@ -365,22 +407,29 @@ int Allocator::vm_allocate_flags() const {
         assert(0 && "vm_allocate failed");
         return {nullptr, 0};
     }
-//    ASAN_POISON_MEMORY_REGION((void*)result, targetSize);
+
+    // Force accesses to the guard page to fault
+    (void)vm_protect(mach_task_self(), result+targetSize, PAGE_SIZE, true, VM_PROT_NONE);
+
+    ASAN_POISON_MEMORY_REGION((void*)result, targetSize);
 //    fprintf(stderr, "0x%lx - 0x%lx\t  VM_ALLOCATED\n", (uintptr_t)result, (uintptr_t)result+targetSize);
     return {(void*)result, targetSize};
 }
 
-void Allocator::vm_deallocate_bytes(void* p, std::size_t size) {
+void MemoryManager::vm_deallocate_bytes(void* p, std::size_t size) {
 //    fprintf(stderr, "0x%lx - 0x%lx\tVM_DEALLOCATED\n", (uintptr_t)p, (uintptr_t)p+size);
-    (void)vm_deallocate(mach_task_self(), (vm_address_t)p, size);
+    //FIXME: We need to unpoison memory here because the same addresses can be allocated by libraries and passed back to us later
+    //FIXME: We can remove this hack if we do somehting like interpose vm_allocate and track allocations there
+    ASAN_UNPOISON_MEMORY_REGION(p, size);
+    (void)vm_deallocate(mach_task_self(), (vm_address_t)p, size + PAGE_SIZE);
 }
 
-[[nodiscard]] Allocator::Buffer Allocator::allocate_buffer(std::size_t nbytes, std::size_t alignment, Allocator** deallocator) {
+[[nodiscard]] Allocator::Buffer Allocator::allocate_buffer(std::size_t nbytes, std::size_t alignment) {
     size_t targetAlignment = std::max<size_t>(16ULL, alignment);
     size_t targetSize = (std::max<size_t>(nbytes, 16ULL) + (targetAlignment-1)) & (-1*targetAlignment);
     targetSize = AllocationMetadata::goodSize(targetSize);
-    auto result = allocate_buffer(targetSize, targetAlignment, 0, deallocator);
-//    fprintf(stderr, "0x%lx - 0x%lx\t     ALLOCATED\n", (uintptr_t)result.address, (uintptr_t)result.address+result.size);
+    auto result = allocate_buffer(targetSize, targetAlignment, 0);
+//    fprintf(stderr, "0x%lx - 0x%lx\t     ALLOCATED (tid: %u)\n", (uintptr_t)result.address, (uintptr_t)result.address+result.size, mach_thread_self());
 //    ASAN_UNPOISON_MEMORY_REGION(result.address, result.size);
     return result;
 }
@@ -389,37 +438,41 @@ void Allocator::deallocate_buffer(void* p, std::size_t nbytes, std::size_t align
     const size_t targetAlignment = std::max<size_t>(16ULL, alignment);
     size_t targetSize = (std::max<size_t>(nbytes, 16ULL) + (targetAlignment-1)) & (-1*targetAlignment);
 //    ASAN_POISON_MEMORY_REGION(p, targetSize);
-//    fprintf(stderr, "0x%lx - 0x%lx\t   DEALLOCATED\n", (uintptr_t)p, (uintptr_t)p+targetSize);
+//    fprintf(stderr, "0x%lx - 0x%lx\t   DEALLOCATED (tid: %u)\n", (uintptr_t)p, (uintptr_t)p+targetSize, mach_thread_self());
     deallocate_buffer({p, targetSize});
 }
 
 void* Allocator::malloc(size_t size) {
-    return this->aligned_alloc(kGranuleSize, size);
+    void* result = this->aligned_alloc(kGranuleSize, size);
+//    fprintf(stderr, "MALLOC(0x%lx)\n", (uintptr_t)result);
+    return result;
 }
 
 void* Allocator::aligned_alloc(size_t alignment, size_t size) {
     static_assert(sizeof(size_t) == sizeof(Allocator*), "Ensure size_t is pointer sized");
     static_assert(kGranuleSize >= (sizeof(size_t) == sizeof(Allocator*)), "Ensure we can fit all metadata in a granule");
-//    fprintf(stderr, "0x%lx\taligned_alloc\t%lu\t%lu\n", (uintptr_t)this, size, alignment);
     const size_t targetAlignment = std::max<size_t>(16ULL, alignment);
     size_t targetSize = (std::max<size_t>(size, 16ULL) + (targetAlignment-1)) & (-1*targetAlignment);
     targetSize = AllocationMetadata::goodSize(targetSize);
-    Allocator *deallocator = nullptr;
     
-    auto buffer = allocate_buffer(targetSize, targetAlignment, 16, &deallocator);
+    auto buffer = allocate_buffer(targetSize, targetAlignment, 16);
 //    ASAN_UNPOISON_MEMORY_REGION(buffer.address, buffer.size);
     contract(buffer.address != nullptr);
     // We are guaranteed a 1 granule managed we can use for storage;
     //    fprintf(stderr, "(tid 0x%lx)\t0x%lx\tstashing\t0x%lx\n", foo, (uintptr_t)buffer.address, (uintptr_t)this);
-    (void)new (buffer.address) AllocationMetadata(deallocator, buffer.size-kGranuleSize);
+    (void)new (buffer.address) AllocationMetadata(this, buffer.size-kGranuleSize);
+//    fprintf(stderr, "aligned_alloc\t0x%lx\t%lu\t%lu\n", (uintptr_t)buffer.address+kGranuleSize, size, alignment);
+//    fprintf(stderr, "ALIGNED_ALLOC(0x%lx): %llu\n", (uintptr_t)buffer.address+kGranuleSize, buffer.size-kGranuleSize);
     return (void*)((uintptr_t)buffer.address+kGranuleSize);
 }
 
 void Allocator::free(void* ptr) {
+//    fprintf(stderr, "FREE(0x%lx)\n", (uintptr_t)ptr);
     contract((uintptr_t)ptr%16==0);
     if (!ptr) { return; }
     // We are guaranteed a 1 granule prefeix we can use for storage
     auto metadata = AllocationMetadata::getForPointer(ptr);
+//    fprintf(stderr, "free\t0x%lx\t%lu\n", (uintptr_t)ptr, metadata->size());
     metadata->allocator().deallocate_buffer((void*)((uintptr_t)ptr-kGranuleSize), (uintptr_t)metadata->size()+kGranuleSize, kGranuleSize);
 }
 
@@ -430,33 +483,18 @@ char* Allocator::strdup(const char* str)
     return result;
 }
 
-#if CONCURRENT_ALLOCATOR_SUPPORT
-Allocator& Allocator::defaultAllocator() {
-    static Allocator* allocator = nullptr;
-    static dispatch_once_t onceToken;
-    dispatch_once(&onceToken, ^{
-        allocator = &Allocator::concurrentAllocator();
-    });
-    return *allocator;
-}
-#endif
-
 #pragma mark -
 #pragma mark Persistent Allocator
 
-#if CONCURRENT_ALLOCATOR_SUPPORT
-struct ConcurrentAllocator;
-#endif
-
 struct VIS_HIDDEN PersistentAllocator : Allocator {
-    PersistentAllocator(const Buffer& B, bool useHWTPro = false);
-    void    writeProtect(bool protect) override;
-    bool    owned(const void* p, std::size_t nbytes) const override;
-    void    debugDump() const override;
-    void    validate() const override;
-    void    destroy() override;
-    size_t  allocated_bytes() const override;
-    size_t  vm_allocated_bytes() const override;
+    PersistentAllocator(const Buffer& B, MemoryManager&& memoryManager);
+    bool            owned(const void* p, std::size_t nbytes) const override;
+    void            debugDump() const override;
+    void            validate() const override;
+    void            destroy() override;
+    size_t          allocated_bytes() const override;
+    size_t          vm_allocated_bytes() const override;
+    MemoryManager*  memoryManager() override;
 
 //    void operator delete  ( void* ptr, std::align_val_t al ) {
 //        // Do nothing here, deletion is handled manually
@@ -465,34 +503,41 @@ struct VIS_HIDDEN PersistentAllocator : Allocator {
         x.swap(y);
     }
 protected:
-    Buffer  allocate_buffer(std::size_t nbytes, std::size_t alignment, std::size_t prefix, Allocator** deallocator) override;
+    Buffer  allocate_buffer(std::size_t nbytes, std::size_t alignment, std::size_t prefix) override;
     void    deallocate_buffer(Buffer buffer) override;
     void    deallocate_buffer_safe(Buffer buffer, bool internal);
-    int     vm_allocate_flags() const override;
 private:
     friend struct Allocator;
-    friend struct ConcurrentAllocator;
+    friend struct MemoryManager;
+
+    void    processDeallocations(Buffer* begin, Buffer* end);
     void    swap(PersistentAllocator& other);
-    void    addToFreeBlockTrees(Buffer buffer, bool freeRegions);
+    void    addToFreeBlockTrees(Buffer buffer);
     PersistentAllocator& operator=(PersistentAllocator&& other);
     struct RegionSizeCompare {
         bool operator() (const Buffer& x, const Buffer& y) const {
             if (x.size == y.size) { return x.address < y.address; }
-            return (uintptr_t)x.size < (uintptr_t)y.size;
+            return x.size < y.size;
         }
     };
+    struct RegionAddressCompare {
+        bool operator() (const Buffer& x, const Buffer& y) const {
+            if (x.address == y.address) { return x.size < y.size; }
+            return x.address < y.address;
+        }
+    };
+
     void reloadMagazine();
     void reserveRange(BTree<Buffer, RegionSizeCompare>::iterator& i, Buffer buffer);
-    void processDeallocationChain();
     // This is a special private allocator used for the collection classes used in the longterm allocator. It is a refillable magazine
     // that we pass into those collections so they never reenter the allocator and then themselves. It is the responsbility of the
     // longterm allocator to make sure the magazine always has enough allocations available to get to the next point where it is safe to
     // refill it
     template<uint32_t S, uint32_t A>
     struct MagazineAllocator : Allocator {
-        MagazineAllocator(PersistentAllocator& allocator) : _longtermAlloactor(allocator) {}
-        Buffer allocate_buffer(std::size_t nbytes, std::size_t alignment, std::size_t prefix, Allocator** deallocator) override {
-            *deallocator = this;
+        MagazineAllocator(PersistentAllocator& allocator) : _persistentAllocator(allocator) {}
+        Buffer allocate_buffer(std::size_t nbytes, std::size_t alignment, std::size_t prefix) override {
+            assert(_magazine[0].size != 0);
             contract(nbytes == S);
             contract(alignment == A);
             auto result = _magazine[0];
@@ -500,18 +545,23 @@ private:
             _magazine[0].size -= S;
             _magazine[0].address = (void*)((uintptr_t)_magazine[0].address + S);
             if (_magazine[0].size == 0) {
-                std::copy(&_magazine[1], &_magazine[_magazineDepth--], &_magazine[0]);
+                std::copy(&_magazine[1], _magazine.end(), &_magazine[0]);
+                _magazine[3] = {nullptr, 0};
+                --_magazineDepth;
             }
             return result;
         }
-        void    writeProtect(bool protect) override {};
         bool    owned(const void* p, std::size_t nbytes) const override { return false; }
-        void    deallocate_buffer(Buffer buffer) override { _longtermAlloactor.deallocate_buffer_safe(buffer, true); }
+        void    deallocate_buffer(Buffer buffer) override {
+            _persistentAllocator.deallocate_buffer_safe(buffer, true);
+        }
         size_t  allocated_bytes() const override { return 0; }
         size_t  vm_allocated_bytes() const override { return 0; }
         void    destroy() override {}
 
         void refill(Buffer buffer) {
+            assert(buffer.size > 0);
+            assert((uintptr_t)buffer.address > 0);
             contract(buffer.size%S == 0);
             contract(((uintptr_t)buffer.address)%A == 0);
             contract(_magazineDepth != 4);
@@ -534,56 +584,38 @@ private:
             swap(_magazineDepth,   other._magazineDepth);
         }
         // We can prove the maximumn number of entries necessary for the magazine is 4 and
-        std::array<Buffer, 4>   _magazine;
+        std::array<Buffer, 4>   _magazine = {};
         uint8_t                 _magazineDepth = 0;
-        PersistentAllocator&  _longtermAlloactor;
+        PersistentAllocator&    _persistentAllocator;
     };
     struct DeallocationRecord {
         DeallocationRecord(size_t S) : size(S) {}
         size_t              size;
         DeallocationRecord* next;
     };
-    BTree<Buffer>::Node                     _regionListRoot         = BTree<Buffer>::Node(0x01, &_magazine);
-    BTree<Buffer>::Node                     _freeAddressHashRoot    = BTree<Buffer>::Node(0x01, &_magazine);
-    BTree<Buffer, RegionSizeCompare>::Node  _freeSizeHashRoot       = BTree<Buffer, RegionSizeCompare>::Node (0x01, &_magazine);
-    BTree<Buffer>                           _regionList             = BTree<Buffer>(_magazine, &_regionListRoot);
-    BTree<Buffer>                           _freeAddressHash        = BTree<Buffer>(_magazine, &_freeAddressHashRoot);
-    BTree<Buffer, RegionSizeCompare>        _freeSizeHash           = BTree<Buffer, RegionSizeCompare>(_magazine, &_freeSizeHashRoot);
-    MagazineAllocator<256,256>              _magazine               = MagazineAllocator<256,256>(*this);
-    std::atomic<std::size_t>                _allocatedBytes         = 0;
-    std::atomic<DeallocationRecord*>        _deallocationChian      = nullptr;
-#if CONCURRENT_ALLOCATOR_SUPPORT
-    ConcurrentAllocator*                    _concurrentAllocator    = nullptr;
-    os_unfair_lock_s                        _abandonedAllocatorLock = OS_UNFAIR_LOCK_INIT;
-    std::atomic<bool>                       _abandoned              = false;
-    bool                                    _main                   = false;
-#endif
+    BTree<Buffer, RegionAddressCompare>         _regionList             = BTree<Buffer, RegionAddressCompare>(_magazine);
+    BTree<Buffer, RegionAddressCompare>         _freeAddressHash        = BTree<Buffer, RegionAddressCompare>(_magazine);
+    BTree<Buffer, RegionSizeCompare>            _freeSizeHash           = BTree<Buffer, RegionSizeCompare>(_magazine);
+    MagazineAllocator<256,256>                  _magazine               = MagazineAllocator<256,256>(*this);
+    std::atomic<std::size_t>                    _allocatedBytes         = 0;
+    DeallocationRecord*                          _deallocationChian      = nullptr;
+    bool                                        _useHWTPro              = false;
+    MemoryManager*                              _memoryManager          = nullptr;
 };
 
-#if CONCURRENT_ALLOCATOR_SUPPORT
-struct VIS_HIDDEN ConcurrentAllocator : Allocator {
-                                    ConcurrentAllocator(PersistentAllocator& A, size_t F);
-    void                            destroy() override;
-    bool                            owned(const void* p, std::size_t nbytes) const override;
-    size_t                          allocated_bytes() const override;
-    size_t                          vm_allocated_bytes() const override;
-    static  ConcurrentAllocator&    bootstrap(); // Initializes a pool and hosts the Allocator within that pool
-protected:
-    Buffer  allocate_buffer(std::size_t nbytes, std::size_t alignment, std::size_t prefix, Allocator** deallocator) override;
-    void    deallocate_buffer(Buffer buffer) override;
-private:
-    friend struct Allocator;
-    friend struct PersistentAllocator;
-    static void                         threadDestructor(void*);
-    PersistentAllocator&                getThreadLocalAllocator();
-    PersistentAllocator**               _threadAllocators           = nullptr;
-    PersistentAllocator*                _threadAllocatorsOwner      = nullptr;
-    size_t                              _threadAllocatorsSize       = 0;
-    size_t                              _threadAllocatorsCapacity   = 0;
-    pthread_key_t                       _key                        = 0;
-    mutable os_unfair_lock_s            _lock                       = OS_UNFAIR_LOCK_INIT;
-    std::atomic<size_t>                 _allocatedBytes             = 0;
-};
+#if !BUILDING_DYLD
+Allocator& Allocator::defaultAllocator() {
+    static os_unfair_lock_s unfairLock = OS_UNFAIR_LOCK_INIT;
+    static Allocator* allocator = nullptr;
+    static dispatch_once_t onceToken;
+
+    dispatch_once(&onceToken, ^{
+        Lock lock(nullptr, &unfairLock);
+        MemoryManager bootStapMemoryManager(std::move(lock));
+        allocator = &Allocator::persistentAllocator(std::move(bootStapMemoryManager));
+    });
+    return *allocator;
+}
 #endif
 
 size_t PersistentAllocator::allocated_bytes() const {
@@ -598,47 +630,79 @@ size_t PersistentAllocator::vm_allocated_bytes() const {
     return result;
 }
 
-PersistentAllocator::PersistentAllocator(const Buffer& B, bool useHWTPro)
-{
-    static_assert(sizeof(BTree<Buffer, std::less<Buffer>>::Node) == 256, "Nodes for btrees used in allocators must be 256 bytes");
-    static_assert(sizeof(BTree<Buffer, RegionSizeCompare>::Node) == 256, "Nodes for btrees used in allocators must be 256 bytes");
-    auto roundedSize = ((sizeof(PersistentAllocator) + 15) & (-16));
-    Buffer freespace = B;
-    freespace.address = (void*)((uintptr_t)freespace.address + roundedSize);
-    freespace.size -= roundedSize;
-    _regionList.insert(B);
-    _freeSizeHash.insert(freespace);
-    _freeAddressHash.insert(freespace);
+MemoryManager* PersistentAllocator::memoryManager() {
+    return _memoryManager;
 }
 
+PersistentAllocator::PersistentAllocator(const Buffer& buffer, MemoryManager&& memoryManager) {
+    static_assert(sizeof(BTree<Buffer, std::less<Buffer>>::Node) == 256, "Nodes for btrees used in allocators must be 256 bytes");
+    static_assert(sizeof(BTree<Buffer, RegionSizeCompare>::Node) == 256, "Nodes for btrees used in allocators must be 256 bytes");
+
+    // First set the memoryManager via a pointer so it can be used during boostrap
+    _memoryManager = &memoryManager;
+
+    // Round and align the free space appropriate
+    auto roundedSize = ((sizeof(PersistentAllocator) + 255) & (-256));
+    size_t magazineSize = 12*256;
+    Buffer magazineStorage = { (void*)((uintptr_t)buffer.address + roundedSize), magazineSize};
+    _magazine.refill(magazineStorage);
+    Buffer freespace = { (void*)((uintptr_t)buffer.address + roundedSize + magazineSize), buffer.size - (roundedSize + magazineSize)};
+
+    // Insert the freesapce into the allocator
+    _regionList.insert(buffer);
+    _freeSizeHash.insert(freespace);
+    _freeAddressHash.insert(freespace);
+
+    // Next reassign it via move construction so the lock manager lives in the persistent allocator
+    _memoryManager = new (this->aligned_alloc(alignof(MemoryManager), sizeof(MemoryManager))) MemoryManager(std::move(memoryManager));
+    _memoryManager->_allocator = this;
+
+    // Reset the allocated bytes so the embedded MemoryManager is not counted against destroying the zone
+    _allocatedBytes = 0;
+}
+
+
 void PersistentAllocator::debugDump() const {
+    fprintf(stderr, "_regionList\n");
+    for (const auto& region : _regionList) {
+        fprintf(stderr, "\t%lu @ 0x%lx\n", region.size, (uintptr_t)region.address);
+    }
     fprintf(stderr, "_freeSizeHash\n");
     for (const auto& region : _freeSizeHash) {
-        fprintf(stderr, "\t%zu @ 0x%lx\n", region.size, (uintptr_t)region.address);
+        fprintf(stderr, "\t%lu @ 0x%lx\n", region.size, (uintptr_t)region.address);
     }
     fprintf(stderr, "_freeAddressHash\n");
     for (const auto& region : _freeAddressHash) {
-        fprintf(stderr, "\t0x%lx: %zu\n", (uintptr_t)region.address, region.size);
+        fprintf(stderr, "\t0x%lx: %lu\n", (uintptr_t)region.address, region.size);
     }
 }
 
 void PersistentAllocator::validate() const {
-#if BUILDING_UNIT_TESTS
+#if PERSISTENT_ALLOCATOR_VALIDATION
+    _regionList.validate();
+    _freeSizeHash.validate();
+    _freeAddressHash.validate();
     for (const auto& region : _freeSizeHash) {
         if (_freeAddressHash.find(region) == _freeAddressHash.end()) {
-            fprintf(stderr, "REGION MISSING(addr) %zu, 0x%lx\n", region.size, (uintptr_t)region.address);
+            fprintf(stdout, "REGION MISSING(addr) %lu, 0x%lx\n", region.size, (uintptr_t)region.address);
+            debugDump();
+            abort();
         }
     }
     Buffer last = { nullptr, 0 };
     for (const auto& region : _freeAddressHash) {
         if (last) {
             if (((uintptr_t)last.address + last.size) >= (uintptr_t)region.address) {
-                fprintf(stderr, "OVERLAP\t0x%lx-0x%lx\t0x%lx-0x%lx\n", (uintptr_t)last.address, (uintptr_t)last.address + last.size, (uintptr_t)region.address, (uintptr_t)region.address+region.size);
+                fprintf(stdout, "OVERLAP\t0x%lx-0x%lx\t0x%lx-0x%lx\n", (uintptr_t)last.address, (uintptr_t)last.address + last.size, (uintptr_t)region.address, (uintptr_t)region.address+region.size);
+                debugDump();
+                abort();
             }
         }
         last = region;
         if (_freeSizeHash.find(region) == _freeSizeHash.end()) {
-            fprintf(stderr, "REGION MISSING(size) %zu, 0x%lx\n", region.size, (uintptr_t)region.address);
+            fprintf(stdout, "REGION MISSING(size) %lu, 0x%lx\n", region.size, (uintptr_t)region.address);
+            debugDump();
+            abort();
         }
     }
 #endif
@@ -672,13 +736,14 @@ void PersistentAllocator::reserveRange(BTree<Buffer, RegionSizeCompare>::iterato
     Buffer prolog = { nullptr, 0 };
     Buffer epilog = { nullptr, 0 };
     i->remainders(buffer, prolog, epilog);
-    _freeSizeHash.erase(i);
+    i = _freeSizeHash.erase(i);
     j = _freeAddressHash.erase(j);
     if (epilog) {
         _freeSizeHash.insert(epilog);
         auto insert_op =_freeAddressHash.insert(j, epilog);
-        contract(insert_op.second == true);
+        assert(insert_op.second == true);
         j = insert_op.first;
+        j.validate();
     }
     if (prolog) {
         (void)_freeSizeHash.insert(prolog);
@@ -686,32 +751,36 @@ void PersistentAllocator::reserveRange(BTree<Buffer, RegionSizeCompare>::iterato
     }
 }
 
-Allocator::Buffer PersistentAllocator::allocate_buffer(std::size_t nbytes, std::size_t alignment, std::size_t prefix, Allocator** deallocator) {
-    *deallocator = this;
-    contract(_freeSizeHash.size() == _freeAddressHash.size());
-    const size_t targetAlignment = std::max<size_t>(16ULL, alignment);
-    size_t targetSize = (std::max<size_t>(nbytes, 16ULL) + (targetAlignment-1)) & (-1*targetAlignment);
-    Buffer result = { nullptr, 0 };
-    auto i = _freeSizeHash.lower_bound({ nullptr, targetSize + prefix });
-    for(; i != _freeSizeHash.end(); ++i) {
-        result = i->findSpace(targetSize, alignment, prefix);
-        _allocatedBytes += result.size;
-        if (result) {
-            reserveRange(i, result);
-            reloadMagazine();
-            return result;
+Allocator::Buffer PersistentAllocator::allocate_buffer(std::size_t nbytes, std::size_t alignment, std::size_t prefix) {
+    __unused auto lock = _memoryManager->lockGuard();
+    while (1) {
+        contract(_freeSizeHash.size() == _freeAddressHash.size());
+        const size_t targetAlignment = std::max<size_t>(16ULL, alignment);
+        size_t targetSize = (std::max<size_t>(nbytes, 16ULL) + (targetAlignment-1)) & (-1*targetAlignment);
+        Buffer result = { nullptr, 0 };
+        auto i = _freeSizeHash.lower_bound({ nullptr, targetSize + prefix });
+        for(; i != _freeSizeHash.end(); ++i) {
+            result = i->findSpace(targetSize, alignment, prefix);
+            _allocatedBytes += result.size;
+            if (result) {
+                reserveRange(i, result);
+                reloadMagazine();
+                validate();
+                return result;
+            }
         }
+        // We did not find enough space, vm_allocate a new region and then loop back around to try again
+        Buffer newRegion;
+        if (targetSize+targetAlignment+kGranuleSize < PERSISTENT_ALLOCATOR_DEFAULT_POOL_SIZE) {
+            newRegion = _memoryManager->vm_allocate_bytes(PERSISTENT_ALLOCATOR_DEFAULT_POOL_SIZE);
+        } else {
+            newRegion = _memoryManager->vm_allocate_bytes(targetSize+targetAlignment+kGranuleSize);
+        }
+        _regionList.insert(newRegion);
+        _freeSizeHash.insert(newRegion);
+        _freeAddressHash.insert(newRegion);
+        reloadMagazine();
     }
-    // We did not find enough space, vm_allocate a new region and then try again
-    Buffer newRegion;
-    if (targetSize+targetAlignment+kGranuleSize < ALLOCATOR_DEFAULT_POOL_SIZE) {
-        newRegion = vm_allocate_bytes(ALLOCATOR_DEFAULT_POOL_SIZE, vm_allocate_flags());
-    } else {
-        newRegion = vm_allocate_bytes(targetSize+targetAlignment+kGranuleSize, vm_allocate_flags());
-    }
-    _regionList.insert(newRegion);
-    addToFreeBlockTrees(newRegion, false);
-    return allocate_buffer(nbytes, alignment, prefix, deallocator);
 }
 
 // This is an alternate deallocation mechanism that creates a link list of deallocated buffers. It is intened to be used when
@@ -726,88 +795,63 @@ Allocator::Buffer PersistentAllocator::allocate_buffer(std::size_t nbytes, std::
 void PersistentAllocator::deallocate_buffer_safe(Buffer buffer, bool internal) {
 //    ASAN_UNPOISON_MEMORY_REGION(buffer.address, sizeof(DeallocationRecord));
     auto newRecord = new (buffer.address) DeallocationRecord(buffer.size);
-    newRecord->next = _deallocationChian.load(std::memory_order_relaxed);
-    while(!_deallocationChian.compare_exchange_weak(newRecord->next, newRecord,
-                                      std::memory_order_release,
-                                      std::memory_order_relaxed)) {}
+    newRecord->next = _deallocationChian;
+    _deallocationChian = newRecord;
     if (!internal) {
         _allocatedBytes -= buffer.size;
     }
 }
 
-void PersistentAllocator::processDeallocationChain() {
-    // First check if there is a deallocation chain
-    for (auto deallocationRecord = _deallocationChian.load(std::memory_order_relaxed);
-         deallocationRecord != nullptr;
-         deallocationRecord = _deallocationChian.load(std::memory_order_relaxed)) {
-        // If there is CAS it with null
-        while(!_deallocationChian.compare_exchange_weak(deallocationRecord, nullptr,
-                                          std::memory_order_release,
-                                          std::memory_order_relaxed)) {}
-        // We have a chain, walk through it add all the entries to a set backed by an ephemeral allocator
-        contract(deallocationRecord != nullptr);
-        auto tempAllocator = EphemeralAllocator(alloca(1024), 1024);
-        auto deallocations = BTree<Buffer>(tempAllocator);
-        while (deallocationRecord != nullptr) {
-//            ASAN_UNPOISON_MEMORY_REGION(deallocationRecord, sizeof(DeallocationRecord));
-            deallocations.insert({(void*)deallocationRecord, deallocationRecord->size});
-            deallocationRecord = deallocationRecord->next;
+void PersistentAllocator::processDeallocations(Buffer* begin, Buffer* end) {
+    Buffer currentDeallocation = { nullptr, 0};
+
+    // Walk thrugh and free the allocations, coalescing as we go to reduce operations
+    for (auto i = begin; i != end; ++i) {
+        if (!currentDeallocation) {
+            currentDeallocation = *i;
+        } else if (i->succeeds(currentDeallocation)) {
+            currentDeallocation.size += i->size;
+        } else  {
+            addToFreeBlockTrees(currentDeallocation);
+            currentDeallocation = *i;
         }
-        // Walk the set and coalesce adjacent buffers
-        Buffer currentDeallocation = { nullptr, 0};
-        for (auto i : deallocations ) {
-            if (!currentDeallocation) {
-                currentDeallocation = i;
-            } else if (i.succeeds(currentDeallocation)) {
-                currentDeallocation.size += i.size;
-            } else  {
-                addToFreeBlockTrees(currentDeallocation, true);
-                currentDeallocation = i;
-            }
-//            ASAN_POISON_MEMORY_REGION(i.address, i.size);
-        }
-        if (currentDeallocation) {
-            addToFreeBlockTrees(currentDeallocation, true);
-        }
+        //            ASAN_POISON_MEMORY_REGION(i.address, i.size);
+    }
+    if (currentDeallocation) {
+        addToFreeBlockTrees(currentDeallocation);
     }
 }
 
 void PersistentAllocator::deallocate_buffer(Buffer buffer) {
-#if CONCURRENT_ALLOCATOR_SUPPORT
-    if (_concurrentAllocator) {
-        _concurrentAllocator->_allocatedBytes.fetch_sub(buffer.size, std::memory_order_release);
-        auto& allocator = _concurrentAllocator->getThreadLocalAllocator();
-        if (&allocator != this) {
-            if (_abandoned.load(std::memory_order_acquire) == true) {
-                // Allocator is abandonned, take a lock and do its work
-                os_unfair_lock_lock(&_abandonedAllocatorLock);
-                processDeallocationChain();
-                _allocatedBytes -= buffer.size;
-                addToFreeBlockTrees(buffer, true);
-                auto CA = _concurrentAllocator;
-                if (_allocatedBytes == 0) {
-                    os_unfair_lock_lock(&CA->_lock);
-                    std::remove(&CA->_threadAllocators[0],
-                                &CA->_threadAllocators[CA->_threadAllocatorsSize--], this);
-                    destroy();
-                    os_unfair_lock_unlock(&CA->_lock);
-                    // We can't unlock _abandonedAllocatorLock because we just deallocated it
-                    return;
-                }
-                os_unfair_lock_unlock(&_abandonedAllocatorLock);
-            } else {
-                deallocate_buffer_safe(buffer, false);
+    __unused auto lock =  _memoryManager->lockGuard();
+    std::array<Buffer, 20>  deallocations;
+    size_t                  deallocationCount = 0;
+    // First add the thing we are actually deallocating
+    deallocations[deallocationCount++] = buffer;
+
+    // Run in a loop to in case the magazine returns more buffers from this operation
+    while (_deallocationChian != nullptr) {
+        // Now add any pending deallocation from the magazine
+        for (auto i = _deallocationChian; i != nullptr; i = i->next) {
+            // Add the element into the array such that the array remains sorted
+            Buffer freedRegion = {(void*)i, i->size};
+            auto insertion_point = std::lower_bound(deallocations.begin(), deallocations.begin()+deallocationCount, freedRegion);
+            std::copy_backward(insertion_point, deallocations.begin()+deallocationCount, deallocations.begin()+deallocationCount+1);
+            *insertion_point = freedRegion;
+            deallocationCount++;
+            if (deallocationCount == 20) {
+                processDeallocations(deallocations.begin(), deallocations.end());
+                deallocationCount = 0;
             }
-            return;
         }
+        _deallocationChian = nullptr;
     }
-#endif
-    processDeallocationChain();
+    processDeallocations(deallocations.begin(), deallocations.begin()+deallocationCount);
     _allocatedBytes -= buffer.size;
-    addToFreeBlockTrees(buffer, true);
+    validate();
 }
 
-void PersistentAllocator::addToFreeBlockTrees(Buffer buffer, bool freeRegions) {
+void PersistentAllocator::addToFreeBlockTrees(Buffer buffer) {
     contract(_freeSizeHash.size() == _freeAddressHash.size());
     auto i = _freeAddressHash.lower_bound(buffer);
     if (i != _freeAddressHash.end() && i->succeeds(buffer)) {
@@ -828,32 +872,17 @@ void PersistentAllocator::addToFreeBlockTrees(Buffer buffer, bool freeRegions) {
     }
     auto k = _freeSizeHash.insert(buffer);
     _freeAddressHash.insert(i, buffer);
-//    assert(*k.first == buffer);
-//    validate();
-//    debugDump();
 
-    if (freeRegions && (buffer.size >= ALLOCATOR_DEFAULT_POOL_SIZE)) {
-        auto first = _regionList.end();
-        auto last = _regionList.end();
-        for (auto j = _regionList.begin(); j != _regionList.end(); ++j) {
-            if (buffer.contains(*j)) {
-                if (first == _regionList.end()) {
-                    first = j;
-                }
-                last = j;
-            } else if (j->address > buffer.address) {
-                break;
-            }
-        }
-
-        if (first != _regionList.end()) {
-            Buffer deallocatedBuffer = { first->address, (uintptr_t)last->address+last->size-(uintptr_t)first->address };
-            vm_deallocate_bytes(deallocatedBuffer.address, deallocatedBuffer.size);
-            reserveRange(k.first, deallocatedBuffer);
-            _regionList.erase(first);
+    // We only need to check if a region has been freed if the contiguous size of the buffer is greater than the minimum region size
+    if (buffer.size >= PERSISTENT_ALLOCATOR_DEFAULT_POOL_SIZE) {
+        // Since there are guard pages between vm_allocates we know there is at most one freed region
+        auto j = _regionList.find(buffer);
+        if (j != _regionList.end()) {
+            _memoryManager->vm_deallocate_bytes(j->address, j->size);
+            reserveRange(k.first, buffer);
+            _regionList.erase(j);
         }
     }
-//    validate();
     reloadMagazine();
 }
 
@@ -862,61 +891,75 @@ void PersistentAllocator::destroy() {
     STACK_ALLOC_VECTOR(Buffer, regions, _regionList.size());
     std::copy(_regionList.begin(), _regionList.end(), std::back_inserter(regions));
     for (auto region : regions) {
-        Allocator::vm_deallocate_bytes(region.address, region.size);
+//        fprintf(stderr, "PersistentAllocator2: ");
+        _memoryManager->vm_deallocate_bytes(region.address, region.size);
     }
 }
 
-
-void PersistentAllocator::writeProtect(bool protect) {
-    for (const auto& region : _regionList) {
-//        if (protect) {
-//            fprintf(stderr, "0x%lx - 0x%lx\t  PROTECT\n", (uintptr_t)region.address, (uintptr_t)region.address+region.size);
-//        } else {
-//            fprintf(stderr, "0x%lx - 0x%lx\t  UNPROTECT\n", (uintptr_t)region.address, (uintptr_t)region.address+region.size);
-//        }
-        if (mprotect(region.address, region.size, protect ? PROT_READ : (PROT_READ | PROT_WRITE)) == -1) {
-            //printf("FAILED: %d", errno);
+void MemoryManager::writeProtect(bool protect) {
+    if (!_allocator) { return; }
+    if (protect) {
+        // fprintf(stderr, "writeProtect(true) called 0x%u -> 0x%u\n", _writeableCount, _writeableCount-1);
+        for (const auto& region : _allocator->_regionList) {
+            // fprintf(stderr, "0x%lx - 0x%lx\t  PROTECT\n", (uintptr_t)region.address, (uintptr_t)region.address+region.size);
+            if (mprotect(region.address, region.size, PROT_READ) == -1) {
+                // printf("FAILED: %d", errno);
+            }
+        }
+    } else {
+        // fprintf(stderr, "writeProtect(false) called 0x%u -> 0x%u\n", _writeableCount, _writeableCount+1);
+        for (const auto& region : _allocator->_regionList) {
+            // fprintf(stderr, "0x%lx - 0x%lx\t  UNPROTECT\n", (uintptr_t)region.address, (uintptr_t)region.address+region.size);
+            if (mprotect(region.address, region.size, (PROT_READ | PROT_WRITE)) == -1) {
+                // printf("FAILED: %d", errno);
+            }
         }
     }
 }
 
-int PersistentAllocator::vm_allocate_flags() const {
-    int result = Allocator::vm_allocate_flags();
-    return result;
-}
 
 // In order to prevent reentrancy issues the BTrees used to implement this allocator cannot make any calls that would recursively mutate
 // themselves. We solve that by preloading a magazine of appropriately sized allocations we can hand out without updating the B+Trees, then
 // refill it when it would not cause reentrancy
 void PersistentAllocator::reloadMagazine() {
     static_assert(sizeof(BTree<Buffer, std::less<Buffer>>::Node) == 256);
-    static_assert(alignof(BTree<Buffer, std::less<Buffer>>::Node) == 256);
     static_assert(sizeof(BTree<Buffer, RegionSizeCompare>::Node) == 256);
+    static_assert(alignof(BTree<Buffer, std::less<Buffer>>::Node) == 256);
     static_assert(alignof(BTree<Buffer, RegionSizeCompare>::Node) == 256);
-    size_t requiredMagazineSlots = 2*((_freeSizeHash.depth()+1)+(_freeAddressHash.depth()+1))+(_regionList.depth()+1);
+    size_t requiredMagazineSlots = 2*(_freeSizeHash.depth()+_freeAddressHash.depth()+_regionList.depth())+3;
     if (requiredMagazineSlots <= _magazine.size()) { return; }
     size_t size = 256*((2*requiredMagazineSlots)-_magazine.size());
     for(auto i = _freeSizeHash.lower_bound({ nullptr, size }); i != _freeSizeHash.end(); ++i) {
         auto space = i->findSpace(size, 256, 0);
         if (space) {
-            reserveRange(i, space);
-//            ASAN_UNPOISON_MEMORY_REGION(space.address, space.size);
             _magazine.refill(space);
-            break;
+            reserveRange(i, space);
+            return;
         }
     }
+    // We did not find enough space, vm_allocate a new region directly, and increase the required slots
+    Buffer newRegion = _memoryManager->vm_allocate_bytes(std::max<size_t>(size, PERSISTENT_ALLOCATOR_DEFAULT_POOL_SIZE));
+    assert(newRegion.address != nullptr);
+    Buffer space = { newRegion.address, size};
+    _magazine.refill(space);
+    // Safe to call becuase we just refilled and and any misses are guaranteed to be serviced by that
+    _regionList.insert(newRegion);
+    newRegion.address = (void*)((uintptr_t)newRegion.address + size);
+    newRegion.size -= size;
+    _freeSizeHash.insert(newRegion);
+    _freeAddressHash.insert(newRegion);
 }
 
-Allocator& Allocator::persistentAllocator(bool useHWTPro) {
-    int flags = 0;
-    #if BUILDING_DYLD
-    // Only include the dyld tag for allocations made by dyld
-    flags |= VM_MAKE_TAG(VM_MEMORY_DYLD);
-    #endif /* BUILDING_DYLD */
 
-    Buffer buffer = Allocator::vm_allocate_bytes(ALLOCATOR_DEFAULT_POOL_SIZE, flags);
-//    ASAN_UNPOISON_MEMORY_REGION(buffer.address, sizeof(PersistentAllocator));
-    return *new (buffer.address) PersistentAllocator(buffer, useHWTPro);
+
+Allocator& Allocator::persistentAllocator(MemoryManager&& memoryManager) {
+    Buffer buffer       = memoryManager.vm_allocate_bytes(PERSISTENT_ALLOCATOR_DEFAULT_POOL_SIZE);
+    return *new (buffer.address) PersistentAllocator(buffer, std::move(memoryManager));
+}
+
+Allocator& Allocator::persistentAllocator() {
+    MemoryManager memoryManager;
+    return persistentAllocator(std::move(memoryManager));
 }
 
 bool PersistentAllocator::owned(const void* p, std::size_t nbytes) const {
@@ -927,158 +970,13 @@ bool PersistentAllocator::owned(const void* p, std::size_t nbytes) const {
     return false;
 }
 
-#if CONCURRENT_ALLOCATOR_SUPPORT
-
-void ConcurrentAllocator::threadDestructor(void* key) {
-    auto threadLocalAllocator = (PersistentAllocator*)key;
-    auto CA = threadLocalAllocator->_concurrentAllocator;
-    bool deallocate = false;
-    os_unfair_lock_lock(&threadLocalAllocator->_abandonedAllocatorLock);
-    threadLocalAllocator->_abandoned.store(true, std::memory_order_release);
-    threadLocalAllocator->processDeallocationChain();
-    if (threadLocalAllocator->allocated_bytes() == 0) {
-        deallocate = true;
-    }
-    os_unfair_lock_unlock(&threadLocalAllocator->_abandonedAllocatorLock);
-    if (deallocate) {
-        os_unfair_lock_lock(&CA->_lock);
-        std::remove(&CA->_threadAllocators[0],
-                    &CA->_threadAllocators[CA->_threadAllocatorsSize--], threadLocalAllocator);
-        threadLocalAllocator->destroy();
-        os_unfair_lock_unlock(&CA->_lock);
-    }
-}
-
-Allocator& Allocator::concurrentAllocator() {
-    Buffer threadLocalBuffer = Allocator::vm_allocate_bytes(ALLOCATOR_DEFAULT_POOL_SIZE, 0);
-//    ASAN_UNPOISON_MEMORY_REGION(threadLocalBuffer.address, sizeof(PersistentAllocator));
-    auto threadLocalAllocator = new (threadLocalBuffer.address) PersistentAllocator(threadLocalBuffer);
-    threadLocalAllocator->_main = true;
-    Allocator* deallocator = nullptr;
-    Buffer buffer = threadLocalAllocator->allocate_buffer(sizeof(ConcurrentAllocator), alignof(ConcurrentAllocator), 0, &deallocator);
-//    ASAN_UNPOISON_MEMORY_REGION(buffer.address, sizeof(PersistentAllocator));
-    return *new (buffer.address) ConcurrentAllocator(*threadLocalAllocator, buffer.size);
-}
-
-ConcurrentAllocator::ConcurrentAllocator(PersistentAllocator& allocator, size_t F) {
-    int err = pthread_key_create(&_key, ConcurrentAllocator::threadDestructor);
-    contract(err == 0);
-    allocator._concurrentAllocator  = this;
-
-//    fprintf(stderr, "(tid 0x%lx)\tCreated allocator: 0x%lx\n", (uintptr_t)pthread_self(),(uintptr_t)&A);
-    pthread_setspecific(_key, (const void*)&allocator);
-    Allocator* deallocator = nullptr;
-    Buffer buffer               = allocator.allocate_buffer(32*sizeof(PersistentAllocator*), alignof(PersistentAllocator*), 0, &deallocator);
-//    ASAN_UNPOISON_MEMORY_REGION(buffer.address, 32*sizeof(PersistentAllocator));
-    _threadAllocators           = (PersistentAllocator**)buffer.address;
-    _threadAllocators[0]        = &allocator;
-    _threadAllocatorsSize       = 1;
-    _threadAllocatorsCapacity   = buffer.size/sizeof(PersistentAllocator*);
-    _threadAllocatorsOwner      = &allocator;
-}
-
-void ConcurrentAllocator::destroy() {
-    contract(_allocatedBytes.load(std::memory_order_acquire) == 0);
-    os_unfair_lock_lock(&_lock);
-    pthread_key_delete(_key);
-    size_t  allocatorsSize          = _threadAllocatorsSize;
-    size_t  allocatorsCapacity      = _threadAllocatorsCapacity;
-    void*   allocatorsAllocation    = (void*)_threadAllocators;
-    PersistentAllocator* allocators[allocatorsSize];
-
-    std::copy(&_threadAllocators[0], &_threadAllocators[allocatorsSize], &allocators[0]);
-    for(auto i = 0; i < allocatorsSize; ++i) {
-        allocators[i]->_concurrentAllocator = nullptr;
-    }
-    for(auto i = 0; i < allocatorsSize; ++i) {
-        if (allocators[i]->_main) {
-            allocators[i]->deallocate_buffer({ (void*)this, AllocationMetadata::goodSize<ConcurrentAllocator>()});
-            break;
-        }
-    }
-    for(auto i = 0; i < allocatorsSize; ++i) {
-        if (allocators[i]->owned(allocatorsAllocation, sizeof(PersistentAllocator*)*allocatorsCapacity)) {
-            allocators[i]->deallocate_buffer({allocatorsAllocation, sizeof(PersistentAllocator*)*allocatorsCapacity});
-            break;
-        }
-    }
-    for(auto i = 0; i < allocatorsSize; ++i) {
-        allocators[i]->destroy();
-    }
-    // Do not unlock _lock, it has been deallocated
-}
-
-bool ConcurrentAllocator::owned(const void* p, std::size_t nbytes) const {
-    bool result = false;
-    os_unfair_lock_lock(&_lock);
-    for (auto i = 0; i < _threadAllocatorsSize; ++i) {
-        if (_threadAllocators[i]->owned(p, nbytes)) {
-            result = true;
-            break;
-        }
-    }
-    os_unfair_lock_unlock(&_lock);
-    return result;
-}
-
-size_t ConcurrentAllocator::vm_allocated_bytes() const {
-    size_t result = 0;
-    // This is racy, but without locking all the allocators there is no way to make this totally accurate
-    // we only use it for debugging and to validate the allocator is zeroed out anyway
-    os_unfair_lock_lock(&_lock);
-    for (auto i = 0; i < _threadAllocatorsSize; ++i) {
-        result += _threadAllocators[i]->vm_allocated_bytes();
-    }
-    os_unfair_lock_unlock(&_lock);
-    return result;
-}
-
-size_t ConcurrentAllocator::allocated_bytes() const {
-    return _allocatedBytes.load(std::memory_order_relaxed);
-}
-
-PersistentAllocator& ConcurrentAllocator::getThreadLocalAllocator() {
-    auto result = (PersistentAllocator*)pthread_getspecific(_key);
-    if (result == nullptr) {
-        result = (PersistentAllocator*)&Allocator::persistentAllocator();
-        result->_concurrentAllocator = this;
-//        fprintf(stderr, "Created allocator: 0x%lx\n", (uintptr_t)result);
-        pthread_setspecific(_key, (const void*)result);
-        os_unfair_lock_lock(&_lock);
-        if (_threadAllocatorsSize == _threadAllocatorsCapacity) {
-            Allocator* deallocator      = nullptr;
-            Buffer buffer               = result->allocate_buffer(_threadAllocatorsCapacity*2*sizeof(PersistentAllocator*),
-                                                                  alignof(PersistentAllocator*), 0, &deallocator);
-//            ASAN_UNPOISON_MEMORY_REGION(buffer.address, _threadAllocatorsCapacity*2*sizeof(PersistentAllocator));
-            std::copy(&_threadAllocators[0], &_threadAllocators[_threadAllocatorsSize], (PersistentAllocator**)buffer.address);
-            _allocatedBytes.fetch_add(_threadAllocatorsCapacity*sizeof(PersistentAllocator*), std::memory_order_relaxed);
-            _threadAllocatorsOwner->deallocate_buffer({(void*)_threadAllocators, _threadAllocatorsCapacity*sizeof(PersistentAllocator*)});
-//            ASAN_POISON_MEMORY_REGION((void*)_threadAllocators, _threadAllocatorsCapacity*sizeof(PersistentAllocator));
-            _threadAllocatorsCapacity   = _threadAllocatorsCapacity * 2;
-            _threadAllocators           = (PersistentAllocator**)buffer.address;
-            _threadAllocatorsCapacity   = buffer.size/sizeof(PersistentAllocator*);
-            _threadAllocatorsOwner      = result;
-        }
-        _threadAllocators[_threadAllocatorsSize++] = result;
-        os_unfair_lock_unlock(&_lock);
-    }
-//    fprintf(stderr, "Returning allocator: 0x%lx\n", (uintptr_t)result);
-    return *result;
-}
-
-Allocator::Buffer ConcurrentAllocator::allocate_buffer(std::size_t nbytes, std::size_t alignment, std::size_t prefix, Allocator** deallocator) {
-    auto& allocator = getThreadLocalAllocator();
-    auto result     = allocator.allocate_buffer(nbytes, alignment, prefix, deallocator);
-    _allocatedBytes.fetch_add(result.size, std::memory_order_relaxed);
-    return result;
-}
-
-void ConcurrentAllocator::deallocate_buffer(Allocator::Buffer buffer) {
-    // This should never be called because the deallocations should be handled by the thread local allocators
-    assert(false);
-}
-#endif
-
 } // namespace lsl
+
+//VIS_HIDDEN void* operator new(std::size_t count, lsl::Allocator& allocator) {
+//    return allocator.malloc(count);
+//}
+//VIS_HIDDEN void* operator new(std::size_t count, std::align_val_t al, lsl::Allocator& allocator) {
+//    return allocator.aligned_alloc((size_t)al, count);
+//}
 
 

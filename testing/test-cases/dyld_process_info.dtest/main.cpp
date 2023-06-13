@@ -95,7 +95,7 @@ cpu_type_t otherArch[] = { CPU_TYPE_ARM64 };
 #endif
 
 
-static void launchTest(bool launchOtherArch, bool launchSuspended, bool forceIOSMac, bool altPageSize)
+static void launchTest(bool launchOtherArch, bool launchSuspended, bool forceIOSMac, bool  altPageSize, bool useCorpse)
 {
     if (altPageSize) {
         int supported = 0;
@@ -103,7 +103,10 @@ static void launchTest(bool launchOtherArch, bool launchSuspended, bool forceIOS
         int r = sysctlbyname("debug.vm_mixed_pagesize_supported", &supported, &supported_size, NULL, 0);
         if (r != 0 || !supported) { return; }
     }
-    LOG("launchTest %s", launchSuspended ? "suspended" : "unsuspended");
+    LOG("launchTest %s / %s / %s / %s", launchSuspended ? "suspended" : "unsuspended",
+                                        launchOtherArch ? "alternative arch" : "native arch",
+                                        altPageSize ? "alternative page size" : "native page size",
+                                        useCorpse ? "corpse" : "live process");
     const char * program = RUN_DIR "/linksWithCF.exe";
 
     _process process;
@@ -113,22 +116,22 @@ static void launchTest(bool launchOtherArch, bool launchSuspended, bool forceIOS
         process.set_alt_page_size(true);
     }
     if (forceIOSMac) {
-        LOG("Launching native");
+        LOG("\tLaunching native");
         const char* env[] = { "TEST_OUTPUT=None", "DYLD_FORCE_PLATFORM=6", NULL};
         process.set_env(env);
     } else {
-        LOG("Launching iOSMac");
+        LOG("\tLaunching iOSMac");
         const char* env[] = { "TEST_OUTPUT=None", NULL};
         process.set_env(env);
     }
     pid_t pid = process.launch();
-    LOG("launchTest pid: %d", pid);
+    LOG("\tlaunchTest pid: %d", pid);
 
     task_t task;
     if (task_read_for_pid(mach_task_self(), pid, &task) != KERN_SUCCESS) {
         FAIL("task_read_for_pid() failed");
     }
-    LOG("launchTest task: %u", task);
+    LOG("\tlaunchTest task: %u", task);
 
     // wait until process is up and has suspended itself
     if (!launchSuspended) {
@@ -138,27 +141,52 @@ static void launchTest(bool launchOtherArch, bool launchSuspended, bool forceIOS
         dispatch_source_t signalSource = dispatch_source_create(DISPATCH_SOURCE_TYPE_SIGNAL, SIGUSR1,
                                                                 0, queue);
         dispatch_source_set_event_handler(signalSource, ^{
-            LOG("Recieved signal");
+            LOG("\tRecieved signal");
             oneShotSemaphore();
             dispatch_source_cancel(signalSource);
         });
         dispatch_resume(signalSource);
         dispatch_block_wait(oneShotSemaphore, DISPATCH_TIME_FOREVER);
     }
-    LOG("task running");
+    LOG("\ttask running");
+
+    if (useCorpse) {
+        mach_port_t corpse;
+        kern_return_t kr = KERN_SUCCESS;
+        kr = task_generate_corpse(task, &corpse);
+        // FIXME: The system rate limits corpses, and I don't currently have a way to stop it.
+        // Even once the port is deallocated it does not seem to reset the slot, will need to talk to xnu folks
+        if (kr == KERN_RESOURCE_SHORTAGE) {
+            LOG("\tCORPSE limit exceeded");
+            return;
+        }
+        LOG("\tGENERATED CORPSE: 0x%x", corpse);
+        if (kr != KERN_SUCCESS) {
+            FAIL("task_generate_corpse() failed: %u", kr);
+        }
+    }
 
     inspectProcess(task, launchSuspended, !launchSuspended, forceIOSMac);
+    if (useCorpse) {
+        kern_return_t kr = mach_port_deallocate(mach_task_self(), task);
+    }
 }
 
 int main(int argc, const char* argv[], const char* envp[], const char* apple[]) {
     signal(SIGUSR1, SIG_IGN);
-    launchTest(false, false, false, false);
-    launchTest(false, true, false, false);
+    launchTest(false, false, false, false, false);
+    launchTest(false, true, false, false, false);
+    launchTest(false, false, false, false, true);
+    launchTest(false, true, false, false, true);
 #if __MAC_OS_X_VERSION_MIN_REQUIRED
-    launchTest(false, false, true, false);
-    launchTest(false, true, true, false);
-    launchTest(false, false, false, true);
-    launchTest(false, true, false, true);
+    launchTest(false, false, true, false, false);
+    launchTest(false, true, true, false, false);
+    launchTest(false, false, false, true, false);
+    launchTest(false, true, false, true, false);
+    launchTest(false, false, true, false, true);
+    launchTest(false, true, true, false, true);
+    launchTest(false, false, false, true, true);
+    launchTest(false, true, false, true, true);
     //FIXME: This functionality is broken, but it is an edge case no one should ever hit
     //launchTest(true, true, true);
 #endif

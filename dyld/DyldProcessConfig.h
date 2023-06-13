@@ -326,9 +326,13 @@ public:
     public:
                                         PathOverrides(const Process&, const Security&, const Logging&, const DyldCache&, SyscallDelegate&, Allocator&);
 
-        enum Type { pathDirOverride, versionedOverride, suffixOverride, catalystPrefix, simulatorPrefix, cryptexPrefix,
+        enum Type { pathDirOverride, versionedOverride, suffixOverride, catalystPrefixOnDisk, catalystPrefix, simulatorPrefix, cryptexCatalystPrefix, cryptexPrefix,
                     rawPathOnDisk, rawPath, rpathExpansion, loaderPathExpansion, executablePathExpansion, implictRpathExpansion,
                     customFallback, standardFallback };
+
+        // rawPathOnDisk and catalystPrefixOnDisk should both check only the disk and not the shared cache.
+        // This returns true if we are a Type such as those
+        static bool                     isOnDiskOnlyType(Type& t) { return (t == catalystPrefixOnDisk) || (t == rawPathOnDisk); }
 
         void                            forEachPathVariant(const char* requestedPath, dyld3::Platform platform, bool requestorNeedsFallbacks, bool skipFallbacks, bool& stop,
                                                            void (^handler)(const char* possiblePath, Type type, bool& stop)) const;
@@ -339,6 +343,10 @@ public:
         const char*                     simRootPath() const { return _simRootPath; }
         const char*                     cryptexRootPath() const { return _cryptexRootPath; }
         const char*                     getFrameworkPartialPath(const char* path) const;
+
+#if BUILDING_UNIT_TESTS
+        void                            setCryptexRootPath(const char* path) { this->_cryptexRootPath = path; }
+#endif
 
         static const char*              getLibraryLeafName(const char* path);
         static const char*              typeName(Type);

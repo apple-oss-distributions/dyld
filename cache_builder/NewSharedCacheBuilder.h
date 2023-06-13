@@ -104,8 +104,8 @@ public:
     std::string                 developmentJSONMap(std::string_view disposition) const;
     std::string                 developmentCacheUUID() const;
     std::string                 customerLoggingPrefix() const;
-    std::optional<std::string>  customerJSONMap(std::string_view disposition) const;
-    std::optional<std::string>  customerCacheUUID() const;
+    std::string                 customerJSONMap(std::string_view disposition) const;
+    std::string                 customerCacheUUID() const;
 
 #if BUILDING_CACHE_BUILDER_UNIT_TESTS
     // We need everything public to write tests

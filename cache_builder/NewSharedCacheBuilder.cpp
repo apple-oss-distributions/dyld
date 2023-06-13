@@ -2021,7 +2021,7 @@ void SharedCacheBuilder::estimatePatchTableSize()
     size += sizeof(dyld_cache_patchable_export_v2) * numBindTargets;
 
     // 1 entry per location we bind to
-    size += sizeof(dyld_cache_patchable_location_v2) * numBinds;
+    size += sizeof(dyld_cache_patchable_location_v4) * numBinds;
 
     this->patchTableOptimizer.patchTableTotalByteSize = size;
     
@@ -2072,8 +2072,10 @@ void SharedCacheBuilder::estimateCacheLoadersSize()
     }
 
     // Estimating the size of executable loaders is hard as they may contain ObjC/Swift hash tables,
-    // patch tables, etc.  For now, 16KB/executable seems about right
-    this->prebuiltLoaderBuilder.executablesLoaderSize = 16_KB * this->exeInputFiles.size();
+    // patch tables, etc.  For now, 20KB/executable seems about right
+    // FIXME: Small programs like daemons need just 500 bytes or so, but large /Applications need up to 1MB
+    // Come up with a better estimate
+    this->prebuiltLoaderBuilder.executablesLoaderSize = 20_KB * this->exeInputFiles.size();
 
     // Estimate the trie size
     // Assume they are all at a high offset
@@ -2884,9 +2886,6 @@ Error SharedCacheBuilder::copyImportedSymbols(SubCache& subCache,
                                               uint32_t& sourceStringSize,
                                               uint32_t& sourceStringCount)
 {
-    if ( options.localSymbolsMode == cache_builder::LocalSymbolsMode::strip )
-        return Error();
-
     // Map from strings to their offsets in to the new string buffer
     auto& stringMap = subCache.symbolStringsOptimizer.stringMap;
 
@@ -3329,7 +3328,7 @@ static void parseGOTs(const CacheDylib* dylib, const DylibSegmentChunk* chunk,
         MachOFile::PointerMetaData pmd(fixup, chainedFixupFormat);
 
         typedef CoalescedGOTSection::GOTKey Key;
-        Key key = { bindTarget.symbolName, targetInstallName, pmd };
+        Key key = { bindTarget.symbolName, targetInstallName, pmd, bindTarget.weakImport };
 
         int cacheSectionOffset = (int)(cacheGotSection->gotTargetsToOffsets.size() * pointerSize);
         auto itAndInserted = cacheGotSection->gotTargetsToOffsets.insert({ key, cacheSectionOffset });
@@ -3626,11 +3625,17 @@ void SharedCacheBuilder::calculateSlideInfoSize()
         }
         totalRegionVMSize = alignPage(totalRegionVMSize);
 
+        uint64_t pagesToSlide = (totalRegionVMSize.rawValue() / builderConfig.slideInfo.slideInfoPageSize);
+
         // Slide info needs a certain number of bytes per page
         uint64_t slideInfoSize = 0;
         switch ( builderConfig.slideInfo.slideInfoFormat.value() ) {
             case cache_builder::SlideInfo::SlideInfoFormat::v1:
                 slideInfoSize += sizeof(dyld_cache_slide_info);
+
+                // HACK: v1 info wants to round up the toc_count to 128 so that all entries start on a 128 boundary
+                // We can do this by just adding one more page
+                ++pagesToSlide;
                 break;
             case cache_builder::SlideInfo::SlideInfoFormat::v2:
                 slideInfoSize += sizeof(dyld_cache_slide_info2);
@@ -3639,7 +3644,7 @@ void SharedCacheBuilder::calculateSlideInfoSize()
                 slideInfoSize += sizeof(dyld_cache_slide_info3);
                 break;
         }
-        slideInfoSize += (totalRegionVMSize.rawValue() / builderConfig.slideInfo.slideInfoPageSize) * builderConfig.slideInfo.slideInfoBytesPerDataPage;
+        slideInfoSize += pagesToSlide * builderConfig.slideInfo.slideInfoBytesPerDataPage;
 
         slideInfo->cacheVMSize      = CacheVMSize(slideInfoSize);
         slideInfo->subCacheFileSize = CacheFileSize(slideInfoSize);
@@ -6887,14 +6892,14 @@ std::string SharedCacheBuilder::developmentJSONMap(std::string_view disposition)
     return "";
 }
 
-std::optional<std::string> SharedCacheBuilder::customerJSONMap(std::string_view disposition) const
+std::string SharedCacheBuilder::customerJSONMap(std::string_view disposition) const
 {
     for ( const SubCache& subCache : this->subCaches ) {
         if ( subCache.isMainCustomerCache() )
             return this->generateJSONMap(disposition, subCache);
     }
 
-    return std::nullopt;
+    return "";
 }
 
 std::string SharedCacheBuilder::developmentCacheUUID() const
@@ -6908,14 +6913,14 @@ std::string SharedCacheBuilder::developmentCacheUUID() const
     return "";
 }
 
-std::optional<std::string> SharedCacheBuilder::customerCacheUUID() const
+std::string SharedCacheBuilder::customerCacheUUID() const
 {
     for ( const SubCache& subCache : this->subCaches ) {
         if ( subCache.isMainCustomerCache() )
             return subCache.uuidString;
     }
 
-    return std::nullopt;
+    return "";
 }
 
 void SharedCacheBuilder::warning(const char *format, ...)

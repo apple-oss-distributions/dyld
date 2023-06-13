@@ -78,6 +78,11 @@
 
 extern struct mach_header __dso_handle;
 
+// If a root is used that overrides a dylib in the dyld cache, dyld patches all uses of the dylib in the cache
+// to point to the new dylib.  But if that dylib is missing some symbol, dyld will patch other clients to point
+// to BAD_ROOT_ADDRESS instead.  That will cause a crash and the crash will be easy to identify in crash logs.
+#define BAD_ROOT_ADDRESS 0xbad4007
+
 
 using dyld3::MachOAnalyzer;
 using dyld3::MachOFile;
@@ -617,7 +622,7 @@ const Loader* Loader::getLoader(Diagnostics& diag, RuntimeState& state, const ch
                             FileID possiblePathFileID = FileID::none();
                             if ( customerCache ) {
                                 // for customer cache, check cache first and only stat() if overridable
-                                if ( type != ProcessConfig::PathOverrides::rawPathOnDisk )
+                                if ( !ProcessConfig::PathOverrides::isOnDiskOnlyType(type) )
                                     possiblePathIsInDyldCache = state.config.dyldCache.indexOfPath(possiblePath, dylibInCacheIndex);
                                 if ( possiblePathIsInDyldCache ) {
                                     if ( state.config.dyldCache.isOverridablePath(possiblePath) ) {
@@ -634,7 +639,7 @@ const Loader* Loader::getLoader(Diagnostics& diag, RuntimeState& state, const ch
                             else {
                                 // for dev caches, always stat() and check cache
                                 possiblePathHasFileOnDisk  = state.config.fileExists(possiblePath, &possiblePathFileID, &possiblePathOnDiskErrNo);
-                                if ( type != ProcessConfig::PathOverrides::rawPathOnDisk )
+                                if ( !ProcessConfig::PathOverrides::isOnDiskOnlyType(type) )
                                     possiblePathIsInDyldCache  = state.config.dyldCache.indexOfPath(possiblePath, dylibInCacheIndex);
                                 possiblePathOverridesCache = possiblePathHasFileOnDisk && (originalPathIsInDyldCache || possiblePathIsInDyldCache);
                             }
@@ -687,7 +692,7 @@ const Loader* Loader::getLoader(Diagnostics& diag, RuntimeState& state, const ch
 #endif
                             // if possiblePath not a file and not in dyld cache, skip to next possible path
                             if ( !possiblePathHasFileOnDisk && !possiblePathIsInDyldCache ) {
-                                if ( options.pathNotFoundHandler && (type != ProcessConfig::PathOverrides::rawPathOnDisk) )
+                                if ( options.pathNotFoundHandler && !ProcessConfig::PathOverrides::isOnDiskOnlyType(type) )
                                     options.pathNotFoundHandler(possiblePath);
                                 // append each path tried to diag
                                 if ( diag.noError() )
@@ -695,7 +700,7 @@ const Loader* Loader::getLoader(Diagnostics& diag, RuntimeState& state, const ch
                                 else
                                     diag.appendError(", ");
                                 const char* sharedCacheMsg = "";
-                                if ( (type != ProcessConfig::PathOverrides::rawPathOnDisk) && mightBeInSharedCache(possiblePath) )
+                                if ( !ProcessConfig::PathOverrides::isOnDiskOnlyType(type) && mightBeInSharedCache(possiblePath) )
                                     sharedCacheMsg = (state.config.dyldCache.addr != nullptr) ? ", not in dyld cache" : ", no dyld cache";
                                 if ( possiblePathOnDiskErrNo == ENOENT )
                                     diag.appendError("'%s' (no such file%s)", possiblePath, sharedCacheMsg);
@@ -1781,8 +1786,8 @@ void Loader::applyFixupsGeneric(Diagnostics& diag, RuntimeState& state, uint64_t
     if ( ma->hasChainedFixups() ) {
         bool applyFixupsNow = true;
 #if !TARGET_OS_SIMULATOR
-        // only do page in linking, if binary has standard chained fixups and config allows
-        if ( (state.config.process.pageInLinkingMode != 0) && ma->hasChainedFixupsLoadCommand() ) {
+        // only do page in linking, if binary has standard chained fixups, config allows, and not so many targets that is wastes wired memory
+        if ( (state.config.process.pageInLinkingMode != 0) && ma->hasChainedFixupsLoadCommand() && (bindTargets.count() < 10000) ) {
             this->setUpPageInLinking(diag, state, slide, sliceOffset, bindTargets);
             // if we cannot do page-in-linking, then do fixups now
             applyFixupsNow = diag.hasError();
@@ -1876,17 +1881,18 @@ void Loader::findAndRunAllInitializers(RuntimeState& state) const
     Diagnostics                           diag;
     const MachOAnalyzer*                  ma              = this->analyzer(state);
     dyld3::MachOAnalyzer::VMAddrConverter vmAddrConverter = ma->makeVMAddrConverter(true);
-    ma->forEachInitializer(diag, vmAddrConverter, ^(uint32_t offset) {
-        Initializer func = (Initializer)((uint8_t*)ma + offset);
-        if ( state.config.log.initializers )
-            state.log("running initializer %p in %s\n", func, this->path());
+    state.memoryManager.withReadOnlyMemory([&]{
+        ma->forEachInitializer(diag, vmAddrConverter, ^(uint32_t offset) {
+            Initializer func = (Initializer)((uint8_t*)ma + offset);
+            if ( state.config.log.initializers )
+                state.log("running initializer %p in %s\n", func, this->path());
 #if __has_feature(ptrauth_calls)
-        func = __builtin_ptrauth_sign_unauthenticated(func, ptrauth_key_asia, 0);
+            func = __builtin_ptrauth_sign_unauthenticated(func, ptrauth_key_asia, 0);
 #endif
-        dyld3::ScopedTimer timer(DBG_DYLD_TIMING_STATIC_INITIALIZER, (uint64_t)ma, (uint64_t)func, 0);
-        func(state.config.process.argc, state.config.process.argv, state.config.process.envp, state.config.process.apple, state.vars);
+            dyld3::ScopedTimer timer(DBG_DYLD_TIMING_STATIC_INITIALIZER, (uint64_t)ma, (uint64_t)func, 0);
+            func(state.config.process.argc, state.config.process.argv, state.config.process.envp, state.config.process.apple, state.vars);
+        });
     });
-
     // don't support static terminators in arm64e binaries
     if ( ma->isArch("arm64e") )
         return;
@@ -1934,30 +1940,28 @@ void Loader::runInitializersBottomUp(RuntimeState& state, Array<const Loader*>& 
 void Loader::runInitializersBottomUpPlusUpwardLinks(RuntimeState& state) const
 {
     //state.log("runInitializersBottomUpPlusUpwardLinks() %s\n", this->path());
-    state.incWritable();
+    state.memoryManager.withWritableMemory([&]{
+        // recursively run all initializers
+        STACK_ALLOC_ARRAY(const Loader*, danglingUpwards, state.loaded.size());
+        this->runInitializersBottomUp(state, danglingUpwards);
 
-    // recursively run all initializers
-    STACK_ALLOC_ARRAY(const Loader*, danglingUpwards, state.loaded.size());
-    this->runInitializersBottomUp(state, danglingUpwards);
+        //state.log("runInitializersBottomUpPlusUpwardLinks(%s), found %d dangling upwards\n", this->path(), danglingUpwards.count());
 
-    //state.log("runInitializersBottomUpPlusUpwardLinks(%s), found %d dangling upwards\n", this->path(), danglingUpwards.count());
-
-    // go back over all images that were upward linked, and recheck they were initialized (might be danglers)
-    STACK_ALLOC_ARRAY(const Loader*, extraDanglingUpwards, state.loaded.size());
-    for ( const Loader* ldr : danglingUpwards ) {
-        //state.log("running initializers for dangling upward link %s\n", ldr->path());
-        ldr->runInitializersBottomUp(state, extraDanglingUpwards);
-    }
-    if ( !extraDanglingUpwards.empty() ) {
-        // incase of double upward dangling images, check initializers again
-        danglingUpwards.resize(0);
-        for ( const Loader* ldr : extraDanglingUpwards ) {
+        // go back over all images that were upward linked, and recheck they were initialized (might be danglers)
+        STACK_ALLOC_ARRAY(const Loader*, extraDanglingUpwards, state.loaded.size());
+        for ( const Loader* ldr : danglingUpwards ) {
             //state.log("running initializers for dangling upward link %s\n", ldr->path());
-            ldr->runInitializersBottomUp(state, danglingUpwards);
+            ldr->runInitializersBottomUp(state, extraDanglingUpwards);
         }
-    }
-
-    state.decWritable();
+        if ( !extraDanglingUpwards.empty() ) {
+            // incase of double upward dangling images, check initializers again
+            danglingUpwards.resize(0);
+            for ( const Loader* ldr : extraDanglingUpwards ) {
+                //state.log("running initializers for dangling upward link %s\n", ldr->path());
+                ldr->runInitializersBottomUp(state, danglingUpwards);
+            }
+        }
+    });
 }
 #endif // BUILDING_DYLD || BUILDING_UNIT_TESTS
 
@@ -2610,7 +2614,8 @@ void Loader::applyInterposingToDyldCache(RuntimeState& state)
                 return;
             uintptr_t newLoc = tuple.replacement;
             dyldCache->forEachPatchableUseOfExport(imageIndex, dylibVMOffsetOfImpl,
-                                                   ^(uint64_t cacheVMOffset, MachOLoaded::PointerMetaData pmd, uint64_t addend) {
+                                                   ^(uint64_t cacheVMOffset, MachOLoaded::PointerMetaData pmd, uint64_t addend,
+                                                     bool isWeakImport) {
                 uintptr_t* loc      = (uintptr_t*)((uintptr_t)dyldCache + cacheVMOffset);
                 uintptr_t  newValue = newLoc + (uintptr_t)addend;
     #if __has_feature(ptrauth_calls)
@@ -2646,7 +2651,7 @@ void Loader::applyCachePatchesToOverride(RuntimeState& state, const Loader* dyli
         return;
 
     uint32_t patchVersion = dyldCache->patchInfoVersion();
-    assert((patchVersion == 2) || (patchVersion == 3));
+    assert((patchVersion == 2) || (patchVersion == 3) || (patchVersion == 4));
     __block bool suspended = false;
     __block const DylibPatch* cachePatch = patches;
     dyldCache->forEachPatchableExport(overriddenDylibIndex, ^(uint32_t dylibVMOffsetOfImpl, const char* exportName,
@@ -2668,13 +2673,14 @@ void Loader::applyCachePatchesToOverride(RuntimeState& state, const Loader* dyli
                 break;
         }
 
-        uintptr_t targetRuntimeAddress = 0;
-        if ( patch->overrideOffsetOfImpl != DylibPatch::missingWeakImport )
+        uintptr_t targetRuntimeAddress = BAD_ROOT_ADDRESS;   // magic value to cause a unique crash is missing symbol in root is used
+        if ( patch->overrideOffsetOfImpl != DylibPatch::missingSymbol )
             targetRuntimeAddress = (uintptr_t)(this->loadAddress(state)) + ((intptr_t)patch->overrideOffsetOfImpl);
         
         dyldCache->forEachPatchableUseOfExportInImage(overriddenDylibIndex, dylibVMOffsetOfImpl, dylibToPatchIndex,
                                                       ^(uint32_t userVMOffset,
-                                                        dyld3::MachOLoaded::PointerMetaData pmd, uint64_t addend) {
+                                                        dyld3::MachOLoaded::PointerMetaData pmd, uint64_t addend,
+                                                        bool isWeakImport) {
             // ensure dyld cache __DATA_CONST is writeable
             cacheDataConst.makeWriteable();
 
@@ -2687,6 +2693,10 @@ void Loader::applyCachePatchesToOverride(RuntimeState& state, const Loader* dyli
             uintptr_t* loc                  = (uintptr_t*)((uint8_t*)dylibToPatchMA + userVMOffset);
             uintptr_t  newValue             = targetRuntimeAddress + (uintptr_t)addend;
 
+            // if client in dyld cache is ok with symbol being missing, set its use to NULL instead of bad-missing-value
+            if ( isWeakImport && (targetRuntimeAddress == BAD_ROOT_ADDRESS) )
+                newValue = 0;
+
             // if overridden dylib is also interposed, use interposing
             for ( const InterposeTupleAll& tuple : state.interposingTuplesAll ) {
                 if ( tuple.replacee == newValue ) {
@@ -2694,7 +2704,7 @@ void Loader::applyCachePatchesToOverride(RuntimeState& state, const Loader* dyli
                 }
             }
 #if __has_feature(ptrauth_calls)
-            if ( pmd.authenticated ) {
+            if ( pmd.authenticated && (newValue != 0) ) {
                 newValue = dyld3::MachOLoaded::ChainedFixupPointerOnDisk::Arm64e::signPointer(newValue, loc, pmd.usesAddrDiversity, pmd.diversity, pmd.key);
                 if ( *loc != newValue ) {
                     *loc = newValue;
@@ -2783,8 +2793,13 @@ void Loader::applyCachePatches(RuntimeState& state, DyldCacheDataConstLazyScoped
                 break;
         }
 
+        uintptr_t targetRuntimeAddress = BAD_ROOT_ADDRESS;   // magic value to cause a unique crash is missing symbol in root is used
+        if ( patch->overrideOffsetOfImpl != DylibPatch::missingSymbol )
+            targetRuntimeAddress = (uintptr_t)(this->loadAddress(state)) + ((intptr_t)patch->overrideOffsetOfImpl);
+
         dyldCache->forEachPatchableGOTUseOfExport(overriddenDylibIndex, dylibVMOffsetOfImpl,
-                                                  ^(uint64_t cacheVMOffset, dyld3::MachOLoaded::PointerMetaData pmd, uint64_t addend) {
+                                                  ^(uint64_t cacheVMOffset, dyld3::MachOLoaded::PointerMetaData pmd, uint64_t addend,
+                                                    bool isWeakImport) {
             // ensure dyld cache __DATA_CONST is writeable
             cacheDataConst.makeWriteable();
 
@@ -2793,11 +2808,15 @@ void Loader::applyCachePatches(RuntimeState& state, DyldCacheDataConstLazyScoped
                 state.setVMAccountingSuspending(true);
                 suspended = true;
             }
-            uintptr_t  targetRuntimeAddress = patch->overrideOffsetOfImpl ? (uintptr_t)(this->loadAddress(state)) + ((intptr_t)patch->overrideOffsetOfImpl) : 0;
-            uintptr_t* loc                  = (uintptr_t*)((uint8_t*)dyldCache + cacheVMOffset);
-            uintptr_t  newValue             = targetRuntimeAddress + (uintptr_t)addend;
+            uintptr_t* loc      = (uintptr_t*)((uint8_t*)dyldCache + cacheVMOffset);
+            uintptr_t  newValue = targetRuntimeAddress + (uintptr_t)addend;
+
+            // if client in dyld cache is ok with symbol being missing, set its use to NULL instead of bad-missing-value
+            if ( isWeakImport && (targetRuntimeAddress == BAD_ROOT_ADDRESS) )
+                newValue = 0;
+
 #if __has_feature(ptrauth_calls)
-            if ( pmd.authenticated ) {
+            if ( pmd.authenticated && (newValue != 0) ) {
                 newValue = dyld3::MachOLoaded::ChainedFixupPointerOnDisk::Arm64e::signPointer(newValue, loc, pmd.usesAddrDiversity, pmd.diversity, pmd.key);
                 if ( *loc != newValue ) {
                     *loc = newValue;

@@ -22,6 +22,7 @@
  * @APPLE_LICENSE_HEADER_END@
  */
 
+
 #ifndef  LSL_BTree_h
 #define  LSL_BTree_h
 
@@ -45,7 +46,7 @@
 
 namespace lsl {
 
-template<typename T, class C=std::less<T>, bool M=false>
+template<typename T, class C=std::less<T>, bool Multi=false>
 struct TRIVIAL_ABI BTree {
     using key_type          = T;
     using value_type        = T;
@@ -58,164 +59,134 @@ struct TRIVIAL_ABI BTree {
 private:
     template<uint32_t LC, uint32_t IC>
     struct __attribute__((aligned (256))) TRIVIAL_ABI NodeCore {
-        //TODO: This can be probably be replaced with std::span when we move to C++20
-        template<typename U>
-        struct IteratorProxy {
-                        IteratorProxy(const uint8_t* begin, size_t size) : _begin((const U*)begin), _end(&_begin[size]) {}
-            const U*    begin() const                   { return _begin; }
-            const U*    end() const                     { return _end; }
-            const U&    operator[](uint8_t idx) const   { return begin()[idx]; }
-            U&          operator[](uint8_t idx)         { return const_cast<U&>(std::as_const(*this).operator[](idx)); }
-            uint8_t     size() const                    { return _end - _begin; }
-        private:
-            const U* _begin;
-            const U* _end;
-        };
-        using KeyIterator = value_type;
-        using ChildIterator = NodeCore*;
+        NodeCore(bool leaf) : _metadata(leaf<<7) {
+            if (leaf) {
+                for (auto& key : _data.leaf.keys) {
+                    (void)new ((void*)&key) T();
+                }
+            } else {
+                for (auto& key : _data.internal.keys) {
+                    (void)new ((void*)&key) T();
+                }
+            }
+        }
+        NodeCore(const NodeCore& other) = default;
+        NodeCore& operator=(const NodeCore& other) = default;
+        NodeCore(NodeCore&&) = delete;
+        NodeCore& operator=(NodeCore&& other) = delete;
+        NodeCore(NodeCore* child) : _metadata(0) {
+            for (auto& key : _data.internal.keys) {
+                (void)new ((void*)&key) T();
+            }
+            children()[0] = child;
+        }
 
+        ~NodeCore() {
+            assert(empty());
+        }
         uint8_t size() const {
-            return (_metadata & 0x00ff);
+            return (_metadata & 0x7f);
         }
         bool leaf() const {
-            return ((_metadata & 0x0100)>>8);
-        }
-
-        NodeCore(uint8_t flags, Allocator* allocator) : _metadata(((uint64_t)allocator<<9) | (flags << 8)) {
-            contract((uintptr_t)this%alignof(Node)==0);
-            for (auto i = 0; i < (leaf() ? LC : IC); ++i) {
-                (void)new ((void*)&keys()[i]) value_type();
-            }
-            for (auto i = 0; i < (leaf() ? 0 : IC+1); ++i) {
-                children()[i] = nullptr;
-            }
-        }
-        Allocator* allocator() const {
-            return (Allocator*)(_metadata>>9);
-        }
-        NodeCore(const NodeCore& other, Allocator* allocator) : _metadata(((uint64_t)allocator<<9) | (other.leaf() << 8)){
-            _metadata += other.size();
-            for (auto i = 0; i < (leaf() ? LC : IC); ++i) {
-                if (i < other.size()) {
-                    keys()[i] = std::move(other.keys()[i]);
-                } else {
-                    (void)new ((void*)&keys()[i]) value_type();
-                }
-            }
-            for (auto i = 0; i < (leaf() ? 0 : IC+1); ++i) {
-                if (i < (other.size()+1)) {
-                    children()[i] = other.children()[i];
-                } else {
-                    children()[i] = nullptr;
-                }
-            }
-        }
-        NodeCore(const NodeCore&) = delete;
-        NodeCore(NodeCore&&) = delete;
-        ~NodeCore() {
-            contract(empty());
-        }
-        NodeCore& operator=(NodeCore&& other) {
-            swap(other);
-            return *this;
-        }
-        void deallocateChildren() {
-            if (!leaf()) {
-                for (auto& child : children()) {
-                    child->deallocateChildren();
-                    child->allocator()->deallocate_buffer((void*)child, sizeof(NodeCore), alignof(NodeCore));
-                }
-            }
-            if constexpr(!std::is_trivially_destructible<value_type>::value) {
-                for (auto i = 0; i < (leaf() ? LC : IC); ++i) {
-                    keys()[i].~T();
-                }
-            }
-            _metadata &= ~0x00ff;
+            return (_metadata >> 7);
         }
         bool empty() const {
             return (size() == 0);
         }
-        uint8_t capacity() const {
-            if (leaf()) { return LC; }
-            return IC;
-        };
+        static
+        void deallocate(NodeCore* node, Allocator* allocator) {
+            // If this is not a leaf recurse
+            if (!node->leaf()) {
+                for (auto& child : node->children()) {
+                    deallocate(child, allocator);
+                }
+            }
+            // If keys need destructros called call them
+            if constexpr(!std::is_trivially_destructible<value_type>::value) {
+                for (auto i = 0; i < node->capacity(); ++i) {
+                    node->keys()[i].~T();
+                }
+            }
+            allocator->deallocate_buffer((void*)node, sizeof(Node), alignof(Node));
+        }
         bool full() const {
             return (size() == capacity());
         }
+        uint8_t capacity() const {
+            if (leaf()) {
+                return LC;
+            } else {
+                return IC;
+            }
+        };
         uint8_t pivot() const {
             return (capacity()/2);
         }
-        IteratorProxy<KeyIterator> keys() const {
-            return IteratorProxy<KeyIterator>(&_data[0], size());
+        std::span<value_type> keys() const {
+            if (leaf()) {
+                return std::span<value_type>((value_type*)&_data.leaf.keys[0], size());
+            } else {
+                return std::span<value_type>((value_type*)&_data.internal.keys[0], size());
+            }
         }
-        IteratorProxy<ChildIterator> children() const {
-            assert(!leaf());
-            return IteratorProxy<ChildIterator>(&_data[__offsetof(InternalStorage, children)], leaf() ? 0 : size()+1);
+        std::span<NodeCore*> children() const {
+            assert(!leaf() && "Leaf nodes do not contain children");
+            return std::span<NodeCore*>((NodeCore**)&_data.internal.children[0], size()+1);
         }
         reference operator[](difference_type idx) {
             return keys()[idx];
         }
-
-        void insert(uint8_t idx, value_type&& key) {
+        void insert(uint8_t index, value_type&& key) {
             assert(size() != capacity());
-            assert(idx != capacity());
-            for (auto i = size(); i > idx; --i) {
-                keys()[i] = std::move(keys()[i-1]);
-            }
-            keys()[idx] = std::move(key);
+            assert(index != capacity());
+            std::move_backward(keys().begin()+index, keys().end(), keys().end()+1);
+            keys()[index] = std::move(key);
             // Size is the lowest bits of _metadata
             ++_metadata;
         }
 
-        void erase(uint8_t idx) {
+        void erase(uint8_t index) {
             assert(leaf());
-            assert(size() > idx);
-            for (auto i = idx; i < size()-1; ++i) {
-                keys()[i] = std::move(keys()[i+1]);
-            }
+            assert(size() > index);
+            std::move(keys().begin()+index+1, keys().end(), keys().begin()+index);
             // Size is the lowest bits of _metadata
             --_metadata;
         }
 
         void splitChild(uint8_t index, Allocator& allocator) {
-            assert(!leaf());
-            assert(size() < capacity());
-            Node*& child = children()[index];
-            const uint8_t end = child->capacity();
-            const uint8_t pivot = child->pivot();
-            assert(child->full());
+            assert(!leaf() && "Leaf nodes do not have children to split");
+            assert(size() < capacity() && "There must be room in this node for an additional child");
+            assert(children()[index]->full() && "The child being split must be full");
 
-            // Create and populate the new child
-            Allocator* deallocator = nullptr;
-            auto newNodeBuffer = allocator.allocate_buffer(sizeof(NodeCore), alignof(NodeCore), &deallocator);
-            auto newChild = new (newNodeBuffer.address) NodeCore(child->leaf(), deallocator);
-            for(auto i = pivot+1; i < end; ++i) {
-                newChild->keys()[i-(pivot+1)] = std::move(child->keys()[i]);
-                ++newChild->_metadata;
-                --child->_metadata;
-            }
-            if (!newChild->leaf()) {
-                for(auto i = pivot+1; i < end+1; ++i) {
-                    newChild->children()[i-(pivot+1)] = child->children()[i];
-                }
-            }
+            Node*&          child       = children()[index];
+            const uint8_t   pivot       = child->pivot();
+            const uint8_t   keysToMove  = child->keys().size() - (pivot + 1);
 
-            // Make space for the new child
-            for (auto i = size(); i > index; --i) {
-                keys()[i] = std::move(keys()[i-1]);
-                children()[i+1] = children()[i];
-            }
+            // Make room for the new node
+            std::move_backward(keys().begin()+index, keys().end(), keys().end()+1);
+            std::move_backward(children().begin()+index+1, children().end(), children().end()+1);
 
-            // Insert the new child
+            //  Move pivot key up to root
             keys()[index] =  std::move(child->keys()[pivot]);
-            children()[index+1] = newChild;
-            // Size is the lowest bits of _metadata
-            ++_metadata;
-            --child->_metadata;
 
-            assert(!newChild->full());
-            assert(!child->full());
+            // Create and insert the new child
+            auto childStorage = allocator.allocate_buffer(sizeof(Node), alignof(Node));
+            auto newChild = new (childStorage.address) NodeCore(child->leaf());
+            children()[index+1] = newChild;
+
+            // Move keys into the new mode
+            std::move(child->keys().begin()+pivot+1, child->keys().begin()+pivot+1+keysToMove, newChild->keys().begin());
+
+            // Move children into the new mode
+            if (!child->leaf()) {
+                std::move(child->children().begin()+pivot+1, child->children().begin()+pivot+2+keysToMove, newChild->children().begin());
+            }
+
+            // Adjust metadata;
+            child->_metadata    -=  (keysToMove+1);
+            newChild->_metadata +=  keysToMove;
+            ++_metadata;
+            assert(!newChild->full() && !child->full() && "After split the child nodes should be full");
         }
 
         void rotateFromLeft(uint8_t idx) {
@@ -226,21 +197,19 @@ private:
             const uint8_t targetSize = totalSize/2;
             const uint8_t shift = left->size() - targetSize;
 
-            for (auto i = 0; i < right->size(); ++i) {
-                right->keys()[right->size()+shift-i-1] = std::move(right->keys()[right->size()-i-1]);
-            }
+            //Shift the keys in the right node to make room
+            std::move_backward(right->keys().begin(), right->keys().end(), right->keys().end()+shift);
+
+            // Copy the keys from the left node to the right
+            std::move(left->keys().end()-shift+1, left->keys().end(), right->keys().begin());
+
+            //Shift the key at the node inthe parent index
             right->keys()[shift-1] = std::move(keys()[idx-1]);
-            for (auto i = 1; i < shift; ++i) {
-                right->keys()[i-1] = std::move(left->keys()[left->size()-shift+i]);
-            }
             keys()[idx-1] = std::move(left->keys()[left->size()-shift]);
+
             if (!left->leaf()) {
-                for (auto i = 0; i < right->size()+1; ++i) {
-                    right->children()[right->size()+shift-i] = right->children()[right->size()-i];
-                }
-                for (auto i = 0; i < shift; ++i) {
-                    right->children()[i] = left->children()[left->size()+1-shift+i];
-                }
+                std::move_backward(right->children().begin(), right->children().end(), right->children().end()+shift);
+                std::move(left->children().end()-shift, left->children().end(), right->children().begin());
             }
             left->_metadata -= shift;
             right->_metadata += shift;
@@ -255,91 +224,74 @@ private:
             const uint8_t shift = right->size() - targetSize;
 
             left->keys()[left->size()] = std::move(keys()[idx]);
-            for (auto i = 1; i < shift; ++i) {
-                left->keys()[left->size()+i] = std::move(right->keys()[i-1]);
-            }
             keys()[idx] = std::move(right->keys()[shift-1]);
-            for (auto i = 0; i < right->size()-shift; ++i) {
-                right->keys()[i] = std::move(right->keys()[shift+i]);
-            }
+
+            std::move(right->keys().begin(), right->keys().begin()+shift, left->keys().end()+1);
+            std::move(right->keys().begin()+shift, right->keys().end(), right->keys().begin());
+
             if (!left->leaf()) {
-                for (auto i = 0; i < shift; ++i) {
-                    left->children()[left->size()+1+i] = right->children()[i];
-                }
-                for (auto i = 0; i < right->size()-shift+1; ++i) {
-                    right->children()[i] = right->children()[i+shift];
-                }
+                std::move(right->children().begin(), right->children().begin()+shift, left->children().end());
+                std::move(right->children().begin()+shift, right->children().end(), right->children().begin());
             }
             left->_metadata += shift;
             right->_metadata -= shift;
         }
 
-        // This is only safe to be called after rebalance has failed in both directions.
-        // That rebalnce fails means that both the left and the right node can be merged with.
-        void merge(uint8_t idx) {
-            contract(!leaf());
-            contract(idx < size());
+        void merge(Allocator* allocator, uint8_t index) {
+            assert(!leaf() && "A leaf node does not have children to merge");
+            assert(index < size() && "A node must have a successor node to merge with");
             // We will merge with the left node unless we can't becasue it is the left most node (0)
-            Node* left = children()[idx];;
-            Node* right = children()[idx+1];;
-            left->keys()[left->size()] = std::move(keys()[idx]);
-            for (auto i = idx; i < size()-1; ++i) {
-                keys()[i] = std::move(keys()[i+1]);
-                children()[i+1] = children()[i+2];
-            }
-            for(auto i = 0; i < right->size(); ++i) {
-                left->keys()[left->size()+1+i] = std::move(right->keys()[i]);
-            }
+            Node* left = children()[index];
+            Node* right = children()[index+1];
+
+            // Move the key from the index down into the merged child and shift eleements
+            left->keys()[left->size()] = std::move(keys()[index]);
+            std::move(keys().begin()+index+1, keys().end(), keys().begin()+index);
+            std::move(children().begin()+index+2, children().end(), children().begin()+index+1);
+
+            // Merge the contents of the node we are abot to deallocate
+            std::move(right->keys().begin(), right->keys().end(), left->keys().end()+1);
             if (!left->leaf()) {
-                for(auto i = 0; i < right->size()+1; ++i) {
-                    left->children()[left->size()+1+i] = right->children()[i];
-                }
+                std::move(right->children().begin(), right->children().end(), left->children().end());
             }
+
+            //Adjust metadata
             left->_metadata += (right->size()+1);
-            // Size is the lowest bits of _metadata
             --_metadata;
-            allocator()->deallocate_buffer((void *)right, sizeof(NodeCore), alignof(NodeCore));
+
+            // deallocate empty node
+            allocator->deallocate_buffer((void*)right, sizeof(Node), alignof(Node));
         }
-        friend void swap(NodeCore& x, NodeCore& y) {
-            x.swap(y);
+
+        uint8_t lower_bound_index(const T& key, value_compare comp) const {
+            return std::lower_bound(keys().begin(), keys().end(), key, comp) - keys().begin();
+        };
+
+        uint8_t begin_index() const {
+            return 0;
+        }
+
+        uint8_t end_index() const {
+            return size();
         }
     private:
         friend struct BTree;
         struct  LeafStorage {
-            value_type elements[LC];
+            std::array<value_type,LC> keys;
         };
         struct  InternalStorage {
-            value_type  elements[IC];
-            NodeCore*   children[IC+1];
+            std::array<value_type,IC>   keys;
+            std::array<NodeCore* ,IC+1> children;
         };
-        void swap(NodeCore& other) {
-            using std::swap;
-            if (this == &other) { return; }
-            std::array<value_type, LC>  tempKeys;
-            std::array<NodeCore*, IC+1> tempChildren;
-
-            // other -> Local temp
-            std::move(&other.keys()[0], &other.keys()[other.size()], &tempKeys[0]);
-            if (!other.leaf()) {
-                std::move(other.children().begin(), other.children().end(), &tempChildren[0]);
-            }
-
-            // this -> other
-            std::move(&keys()[0], &keys()[size()], &other.keys()[0]);
-            if (!leaf()) {
-                std::move(children().begin(), children().end(), &other.children()[0]);
-            }
-
-            // local temp -> this
-            std::move(&tempKeys[0], &tempKeys[other.size()], &keys()[0]);
-            if (!leaf()) {
-                std::move(&tempChildren[0], &tempChildren[other.size()+1], &children()[0]);
-            }
-            std::swap(_metadata,    other._metadata);
-        }
+        union Data {
+            constexpr Data() {}
+            LeafStorage     leaf;
+            InternalStorage internal;
+            ~Data() {}
+        };
          __attribute__((aligned(std::max(alignof(LeafStorage), alignof(InternalStorage)))))
-        std::array<uint8_t, (std::max(sizeof(LeafStorage), sizeof(InternalStorage)))>   _data;
-        uint64_t                                                                        _metadata   = 0;
+        Data        _data;
+        uint8_t     _metadata   = 0;
     };
 
     static const uint16_t kTargetSize = 256;
@@ -371,7 +323,7 @@ private:
     }
 
     constexpr static uint8_t getLeafNodeCapacity() {
-        if (sizeof(T) == 1) { return 124; }
+        if (sizeof(T) == 1) { return 255; }
         uint16_t targetSize = sizeof(NodeCore<getInteriorNodeCapacity(),1>);
         if (targetSize < kTargetSize) { targetSize = kTargetSize; }
         return getLeafNodeCapacity<255>(targetSize);
@@ -395,6 +347,10 @@ public:
     static const uint8_t kMaxDepth = getMaxDepth();
     using Node = NodeCore<kLeafNodeCapacity, kInteriorNodeCapacity>;
 
+    // This iterator is a series of nodes and indexes used to sequentially walk an ordered tree. An iterator with 0 depth is the
+    // end iterator. As an internal implementation detail incrementing an end() iterator will actually cycle back to begin()
+    // This simplifies some of iterator increment and decrement logic, and is safe for the collection to do to in its own iterator
+    // even though it is not generally safe in C++
     struct  const_iterator {
         using iterator_category = std::bidirectional_iterator_tag;
         using value_type        = T;
@@ -403,7 +359,11 @@ public:
         using reference         = value_type&;
 
         const_iterator(const const_iterator& other)
-            : _rootNode(other._rootNode), _currentNode(other._currentNode), _currentDepth(other._currentDepth), _indexes(other._indexes) {}
+            : _btree(other._btree), _nodes(other._nodes), _indexes(other._indexes), _depth(other._depth) {
+#if BTREE_VALIDATION
+                    _generation = other._generation;
+#endif
+            }
 
         const_iterator& operator=(const const_iterator& other) {
             auto tmp = other;
@@ -411,54 +371,113 @@ public:
             return *this;
         }
 
-        const_iterator(const Node* node, uint8_t depth, std::array<uint8_t, kMaxDepth>& indexes)
-                : _rootNode(node), _currentNode(const_cast<Node*>(node)), _currentDepth(depth),  _indexes(indexes) {
-            for (auto i = 0; i < depth; ++i) {
-                _indexes[i] = indexes[i];
-                if (!_currentNode->leaf()) {
-                    _currentNode = _currentNode->children()[_indexes[i]];
-                } else {
-                    // Only allow leafs on the last index
-                    assert(i == depth-1);
+        const_iterator(const BTree* btree) : _btree(const_cast<BTree*>(btree)) {
+#if BTREE_VALIDATION
+                _generation = _btree->_generation;
+#endif
+        }
+
+        // This is the "lower_bound" constructor
+        const_iterator(const BTree* btree, const value_type& key, value_compare comp) : const_iterator(btree) {
+            if (btree->depth() == 0) { return; }
+            // Setup the inital node
+            auto nextNode = btree->_root;
+            for (uint8_t i = 0; i < btree->_depth; ++i) {
+                // Figure out the lower_bound_index within the node
+                _nodes[i] = nextNode;
+                _indexes[i] = _nodes[i]->lower_bound_index(key, comp);
+                if (_indexes[i] != _nodes[i]->end_index() && comp(_nodes[i]->keys()[_indexes[i]], key)) {
+                    // The key is an exact match, return early
+                    _depth = i + 1;
+                    return;
+                }
+                // Prep the next node unless we are in the final iteration
+                if (i+1 != btree->_depth) {
+                    nextNode = _nodes[i]->children()[_indexes[i]];
                 }
             }
-        }
-        std::array<Node*,kMaxDepth> materializeNodes(uint16_t start = 0) const {
-            std::array<Node*,kMaxDepth> result;
-            if (start == 0) {
-                result[0] = const_cast<Node*>(_rootNode);
+            _depth = btree->_depth;
+            // We have an iterator that hits a leaf node. The last index in an iterator cannot be the end_index of the node it is
+            // part of, so lower the depth until it is not
+            while ((_depth != 0) && (_indexes[_depth-1] == _nodes[_depth-1]->end_index())) {
+                --_depth;
             }
-            for (auto i = std::max<uint16_t>(1, start); i <= _currentDepth; ++i) {
-                result[i] = result[i-1]->children()[_indexes[i-1]];
-            }
-            return result;
         }
         reference operator*() {
-            return *&(*_currentNode)[_indexes[_currentDepth]];
+            checkGeneration();
+            return (*_nodes[_depth-1])[_indexes[_depth-1]];
         }
         pointer operator->() const {
-            return &(*_currentNode)[_indexes[_currentDepth]];
+            checkGeneration();
+            return &(*_nodes[_depth-1])[_indexes[_depth-1]];
         }
 
         const_iterator& operator++() {
-            ++_indexes[_currentDepth];
-            if (_currentNode->leaf()) {
-                if (_indexes[_currentDepth] == _currentNode->size()) {
-                    auto nodes = materializeNodes();
-                    while ((_currentDepth != 0) && _currentNode->size() == _indexes[_currentDepth]) {
-                        --_currentDepth;
-                        _currentNode = nodes[_currentDepth];
+            checkGeneration();
+            if (_depth == 0) {
+                // This is technically an end() iterator, but our internal implementation is such that end-1 == begin
+                // We could include this code in the begin() function, but leaving it here provides symmetry between ++ and --,
+                // and leave all the complex code related to it in the iterator instead of the collection.
+                auto nextNode = _btree->_root;
+                for (_depth = 0; _depth < _btree->_depth; ++_depth) {
+                    _nodes[_depth]      = nextNode;
+                    _indexes[_depth]    = 0;
+                    // Prep the next node unless we are in the final iteration
+                    if (_depth+1 != _btree->_depth) {
+                        nextNode = _nodes[_depth]->children()[0];
                     }
                 }
-            } else {
-                _currentNode = _currentNode->children()[_indexes[_currentDepth]];
-                _currentDepth++;
-                _indexes[_currentDepth] = 0;
-                while (!_currentNode->leaf()) {
-                    _currentNode = *_currentNode->children().begin();
-                    _currentDepth++;
-                    _indexes[_currentDepth] = 0;
+            } else if (_depth == _btree->_depth) {
+                // This is a leaf node. Increment the value
+                ++_indexes[_depth-1];
+                for (uint8_t i = 0; i < _btree->_depth; ++i) {
+                    uint8_t currentDepth = _btree->_depth - (i + 1);
+                    // If the index exceeds the number of elements in the node ascend until we find a node where it doesn't
+                    if (_indexes[currentDepth] != _nodes[currentDepth]->size()) { break; }
+                    _depth = currentDepth;
                 }
+            } else {
+                // This is an interior node, increment and then descend down the 0th indexes until we hit a leaf
+                for ( ++_indexes[_depth-1]; _depth != _btree->_depth; ++_depth) {
+                    _nodes[_depth]      = _nodes[_depth-1]->children()[_indexes[_depth-1]];
+                    _indexes[_depth]    = 0;
+                }
+            }
+            return *this;
+        }
+
+        const_iterator& operator--() {
+            checkGeneration();
+            if (_depth == 0) {
+                auto nextNode = _btree->_root;
+                for (_depth = 0; _depth < _btree->_depth; ++_depth) {
+                    _nodes[_depth]      = nextNode;
+                    _indexes[_depth]    = _nodes[_depth]->size();
+                    // Prep the next node unless we are in the final iteration
+                    if (_depth+1 != _btree->_depth) {
+                        nextNode = _nodes[_depth]->children()[_nodes[_depth]->size()];
+                    }
+                }
+                // The last node is a leaf, which means it has one less index than the interior nodes, so fix it up
+                --_indexes[_depth-1];
+            } else if (_depth == _btree->_depth) {
+                // This is a leaf node. Decrement the value
+                if (_indexes[_depth-1] > 0) {
+                    --_indexes[_depth-1];
+                } else {
+                    while (_indexes[_depth-1] == 0) {
+                        --_depth;
+                    }
+                    --_indexes[_depth-1];
+                }
+            } else {
+                // This is an interior node, decrement and then descend down the 0th indexes until we hit a leaf
+                while (_depth != _btree->_depth) {
+                    _nodes[_depth]      = _nodes[_depth-1]->children()[_indexes[_depth-1]];
+                    _indexes[_depth]    = _nodes[_depth]->size();
+                    ++_depth;
+                }
+                --_indexes[_depth-1];
             }
             return *this;
         }
@@ -467,50 +486,20 @@ public:
            ++*this;
            return tmp;
         }
-
-        const_iterator& operator--() {
-            if (_currentNode->leaf()) {
-                if (_indexes[_currentDepth] != 0) {
-                    --_indexes[_currentDepth];
-                } else {
-                    auto nodes = materializeNodes();
-                    while ((_currentDepth != 0) && _indexes[_currentDepth] == 0) {
-                        --_indexes[_currentDepth];
-                        --_currentDepth;
-                        _currentNode = nodes[_currentDepth];
-                    }
-                    --_indexes[_currentDepth];
-                }
-            } else {
-                while (!_currentNode->leaf()) {
-                    _currentNode = _currentNode->children()[_indexes[_currentDepth]];
-                    _currentDepth++;
-                    _indexes[_currentDepth] = _currentNode->size();
-                }
-                --_indexes[_currentDepth];
-            }
-            return *this;
-        }
         const_iterator operator--(int) const {
            auto result = *this;
             --*this;
            return result;
         }
         std::strong_ordering operator<=>(const const_iterator& other) const {
-            for (auto i = 0; i <= std::min(_currentDepth, other._currentDepth); ++i) {
-                if (_indexes[i] < other._indexes[i]) {
-                    return std::strong_ordering::less;
-                } else if (_indexes[i] > other._indexes[i]) {
-                    return std::strong_ordering::greater;
+            for (auto i = 0; i < std::min(_depth, other._depth); ++i) {
+                auto result = _indexes[i] <=> other._indexes[i];
+                if (result != std::strong_ordering::equal) {
+                    return result;
                 }
             }
-            // The indexes were the same up to this point, see if one set is larger
-            if (_currentDepth > other._currentDepth) {
-                return std::strong_ordering::less;
-            } else if (_currentDepth < other._currentDepth) {
-                return std::strong_ordering::greater;
-            }
-            return std::strong_ordering::equal;
+            // The indexes were the same up to this point, and one iterator has hit _depth. Whichever is shorter is ordered first
+            return (_depth <=> other._depth);
         }
         bool operator==(const const_iterator& other) const {
             return (operator<=>(other) == std::strong_ordering::equal);
@@ -518,173 +507,203 @@ public:
         friend void swap(const_iterator& x, const_iterator& y) {
             x.swap(y);
         }
-private:
-        void swap(const_iterator& other) {
-            using std::swap;
-            swap(_rootNode,     other._rootNode);
-            swap(_currentNode,  other._currentNode);
-            swap(_currentDepth, other._currentDepth);
-            swap(_indexes,      other._indexes);
-        }
-        // Returns: true if the tree depth decreased, false otherwise
-        bool rebalanceFromErasure() {
-            contract(_currentNode->leaf());
-            auto nodes = materializeNodes();
-            for (int8_t i = _currentDepth-1; i >= 0; --i) {
-                // If the node has at least pivot() elements then we are done
-                if (nodes[i+1]->size() >= nodes[i+1]->pivot()) { break; }
-                auto node = nodes[i];               // The node we containing the potentially illegal child node
-                auto& index = _indexes[i];          // The index into the node pointing to the potentially illegal child node
-                auto& childIndex = _indexes[i+1];   // The index within the potentially illegal child node
-                int8_t rightScore = 0;
-                int8_t leftScore = 0;
-                if (index != node->size()) {
-                    rightScore = node->children()[index+1]->size()-node->children()[index+1]->pivot();
-                }
-                if (index != 0) {
-                    leftScore = node->children()[index-1]->size()-node->children()[index-1]->pivot();
-                }
-                if ((rightScore > 0) && (rightScore >= leftScore)) {
-                    // The right node has enough children, rotate them in
-                    node->rotateFromRight(index);
-                } else if ((leftScore > 0) && (leftScore > rightScore)) {
-                    // The left node has enough children, rotate them in
-                    uint8_t oldSize = node->children()[index]->size();
-                    node->rotateFromLeft(index);
-                    // Update the child index since a number of new elements appeared at the beginning of the node
-                    childIndex += (node->children()[index]->size() - oldSize);
-                } else if (index != node->size()) {
-                    // Rotate did not work merge the right node in
-                    node->merge(index);
-                } else {
-                    // Merge the left node into this node
-                    // We need to update both index and childIndex
-                    childIndex += (node->children()[--index]->size()+1);
-                    node->merge(index);
-                }
-                nodes[i+1] = nodes[i]->children()[_indexes[i]];
+
+        /* This validation routine can be run to check if the iterator is valid. That means:
+         *
+         * 1. The depth is either:
+         *   A. 0 (EMPTY)
+         *   B, Less than the depth of the btree if it is an interior node
+         *   C. Equal to the depth of the btree if it is a leaf node
+         * 2. That at depth of iteraotr X: key < _node[X][_indexes[X]]
+         * 3. That at depth of iteraotr X: _node[X-1][_indexes[X-1]] < key
+         * 4. That for each entry in the path next node is what the index points to: _nodes[X+1] == _nodes[X][_indexes[X]]
+         */
+        void validate() const {
+            if constexpr(!BTREE_VALIDATION) { return; }
+            assert((_depth == 0) || currentNode()->leaf() == (_btree->_depth == _depth));
+            if (_depth == 0) { return; }
+            for (auto i = 0; i < _depth-1; ++i) {
+                assert(_nodes[i+1] == _nodes[i]->children()[_indexes[i]]);
             }
-            // Okay, we've merged the nodes, now deal with fact that our index path my exceed the bounds
-            // of a Node. We handle that by deleting levels off depth from the path until we get to a valid
-            // entry which will be successor
-            for (int8_t i = _currentDepth; i > 0; --i) {
-                if (nodes[i]->size() != _indexes[i]) { break; }
-                --_currentDepth;
-            }
-            _currentNode = nodes[_currentDepth];
-            // Finally we need to handle the case where the root node only has a single entry, by making
-            // that entry the new root node
-            if (!_rootNode->leaf() && _rootNode->size() == 0) {
-                auto oldNode = _rootNode->children()[0];
-                _rootNode = new ((void*)_rootNode) Node(*oldNode, _rootNode->allocator());
-                oldNode->allocator()->deallocate_buffer((void *)oldNode, sizeof(Node), alignof(Node));
-                std::move(&_indexes[1], &_indexes[_currentDepth+1],&_indexes[0]);
-                if (_currentDepth == 0) {
-                    // if _currentDepth == 0 then there was only a single entry then this was end(),
-                    // so just set the index to make the iterator == end()
-                    _indexes[0] = _rootNode->size();
-                } else {
-                    --_currentDepth;
-                    if (_currentDepth == 0) {
-                        // Normally we don't have adjust the node, but since we moved the root node we need to reset it
-                        // if we pointed to the drynamically allocated node we copied into the root node
-                        _currentNode = nodes[0];
+            auto& key = (*_nodes[_depth-1])[_indexes[_depth-1]];
+            for (auto i = 0; i < _depth; ++i) {
+                if (_indexes[i] != 0) {
+                    auto& previousKey = _nodes[i]->keys()[_indexes[i]-1];
+                    if constexpr(Multi) {
+                        assert(_btree->_comp(previousKey, key) || (!_btree->_comp(previousKey, key) && !_btree->_comp(key, previousKey)));
+                    } else {
+                        assert(_btree->_comp(previousKey, key));
                     }
                 }
-                return true;
             }
-            // Finally, fixup the _currentNode pointer
-            return false;
+            for (auto i = 0; i < _depth-1; ++i) {
+                if (_indexes[i] < _nodes[i]->size()) {
+                    auto& nextKey = _nodes[i]->keys()[_indexes[i]];
+                    if constexpr(Multi) {
+                        assert(_btree->_comp(key, nextKey) || (!_btree->_comp(key, nextKey) && !_btree->_comp(nextKey, key)));
+                    } else {
+                        assert(_btree->_comp(key, nextKey));
+                    }
+                }
+            }
+        }
+private:
+        uint8_t depth() const {
+            return _depth;
+        }
+        uint8_t& currentIndex() {
+            return _indexes[_depth-1];
+        }
+        Node* currentNode() const {
+            return _nodes[_depth-1];
+        }
+        std::array<Node*,kMaxDepth>& nodes() {
+            return _nodes;
+        }
+        std::array<uint8_t,kMaxDepth>& indexes() {
+            return _indexes;
         }
 
-        // The basic algorithm here only works when the index path points to a value in the a leaf node.
-        // This can be an issue because sometimes it is possible to have to split an iterator that does not
-        // point to such a node (see lower_bound case 3). We can exploit the following properties though:
-        //
-        // 1. Any index path that points to a non-leaf node will point to a node whose children are leafs
-        // 2. Any index path pointing into a non-leaf node can be safely decremented
-        // 3. Decrementing such a node will result in the last element of a leaf node
-        // 4. Any non-leaf node that needs to be split will need to split the leaf node proceeding it
-        //
-        // Using that we can simply decrement the iterator if it is a non-leaf node, perform the split algorithm, then increment the pointer
-        //
-        // Returns: true if the tree depth increased, false otherwise
-        bool prepareForInsertion(Allocator& allocator) {
-            bool result = false;
-            bool isLeaf = _currentNode->leaf();
-            if (!isLeaf) { --*this; }
-            contract(_currentNode->leaf());
-            if (!_currentNode->full()) {
-                if (!isLeaf) {++*this; }
-                return result;
+        void prepareForInsertion() {
+            assert(_depth == _btree->_depth && "prepareForInsertion only works on iterators leaf nodes");
+            uint8_t splitStart  = 0;
+            // If it is not a leaf
+            // Empty slots in the leaf node, nothing to do here
+            if (!_nodes[_depth-1]->full()) {
+                return;
             }
-            auto nodes = materializeNodes();
-            int8_t i;
-            for (i = _currentDepth; i >= 0; --i) {
-                if (!nodes[i]->full()) { break; }
+            for (uint8_t i = 0; i < _depth; ++i) {
+                if (!_nodes[i]->full()) {
+                    // If this node is not earliest the split can start is after, move the start down
+                    splitStart = i;
+                }
             }
-            if (i == -1 && nodes[0]->full()) {
-                // The root is full
-                Allocator* deallocator = nullptr;
-                auto  oldRootBuffer = allocator.allocate_buffer(sizeof(Node), alignof(Node), &deallocator);
-                contract(oldRootBuffer.address != nullptr);
-                auto oldRootPtr = new (oldRootBuffer.address) Node(*_rootNode, deallocator);
-                auto newRootNode = new ((void*)_rootNode) Node(0x00, _rootNode->allocator());
-                newRootNode->children()[0] = oldRootPtr;
-                ++_currentDepth;
-                ++i;
-                std::move_backward(&_indexes[0], &_indexes[_currentDepth], &_indexes[_currentDepth+1]);
-                std::move_backward(&nodes[1], &nodes[_currentDepth], &nodes[_currentDepth+1]);
+            // If the root is full. Create a new root with the old root as its only child and no keys, and then split the old root
+            if (splitStart == 0 && _nodes[0]->full()) {
+                auto rootStorage = _btree->_allocator->allocate_buffer(sizeof(Node), alignof(Node));
+                _btree->_root = new (rootStorage.address) Node(_btree->_root);
+                std::move_backward(_indexes.begin(), _indexes.begin() + _depth,  _indexes.begin() + _depth + 1);
+                std::move_backward(_nodes.begin(), _nodes.begin() + _depth ,  _nodes.begin() + _depth + 1);
                 _indexes[0] = 0;
-                nodes[1] = oldRootPtr;
-                result = true;
+                _nodes[0] = _btree->_root;
+                ++_btree->_depth;
+                ++_depth;
             }
-            _currentNode = nodes[i];
-            contract(!_currentNode->leaf());
-            for (; i < _currentDepth; ++i) {
-                _currentNode->splitChild(_indexes[i], allocator);
-                auto newNode = _currentNode->children()[_indexes[i]];
+            // We know where the split starts, walk down the entire tree and split it
+            for (uint8_t i = splitStart; i+1 < _depth; ++i) {
+                _nodes[i]->splitChild(_indexes[i], *_btree->_allocator);
+                auto newNode = _nodes[i]->children()[_indexes[i]];
                 if (_indexes[i+1] > newNode->size()) {
                     ++_indexes[i];
                     _indexes[i+1] = _indexes[i+1] - (newNode->size()+1);
-                    newNode = _currentNode->children()[_indexes[i]];
+                    _nodes[i+1] = _nodes[i]->children()[_indexes[i]];
                 }
-                _currentNode = newNode;
             }
-            if (!isLeaf) {++*this; }
-            return result;
+        }
+        // Returns: true if the tree depth decreased, false otherwise
+        void rebalanceFromErasure() {
+            assert(_depth == _btree->_depth && "rebalanceFromErasure only works on iterators to leaf nodes");
+            for (uint8_t i = 0; i < _btree->_depth-1; ++i) {
+                uint8_t currentDepth = _btree->_depth - (i + 2);
+                // If the node has at least pivot() elements then we are done
+                if (_nodes[currentDepth+1]->size() >= _nodes[currentDepth+1]->pivot()) { break; }
+
+                auto& node              = _nodes[currentDepth];
+                auto& nodeIndex         = _indexes[currentDepth];
+                auto& childNodeIndex    = _indexes[currentDepth+1];
+                int8_t rightScore = 0;
+                int8_t leftScore = 0;
+                if (nodeIndex != node->size()) {
+                    rightScore = node->children()[nodeIndex+1]->size()-node->children()[nodeIndex+1]->pivot();
+                }
+                if (nodeIndex != 0) {
+                    leftScore = node->children()[nodeIndex-1]->size()-node->children()[nodeIndex-1]->pivot();
+                }
+
+                if ((rightScore > 0) && (rightScore >= leftScore)) {
+                    // The right node has enough children, rotate them in
+                    node->rotateFromRight(nodeIndex);
+                } else if ((leftScore > 0) && (leftScore > rightScore)) {
+                    // The left node has enough children, rotate them in
+                    uint8_t oldSize = node->children()[nodeIndex]->size();
+                    node->rotateFromLeft(nodeIndex);
+                    // Update the child index since a number of new elements appeared at the beginning of the node
+                    childNodeIndex += (node->children()[nodeIndex]->size() - oldSize);
+                } else if (nodeIndex != node->size()) {
+                    // Rotate did not work merge the right node in
+                    node->merge(_btree->_allocator, nodeIndex);
+                } else {
+                    // Merge the left node into this node
+                    // We need to update both index, childIndex, and the childNode entry in _nodes
+                    childNodeIndex += (node->children()[--nodeIndex]->size()+1);
+                    node->merge(_btree->_allocator, nodeIndex);
+                    _nodes[currentDepth+1] = _nodes[currentDepth]->children()[_indexes[currentDepth]];
+                }
+            }
+
+            // FHandle the case where the root node only has a single entry, by making that entry the new root node
+            if (_nodes[0]->size() == 0) {
+                assert(_indexes[0] == 0);
+                std::move(_indexes.begin() + 1, _indexes.begin() + _depth, _indexes.begin());
+                std::move(_nodes.begin() + 1, _nodes.begin() + _depth, _nodes.begin());
+                --_depth;
+                _btree->_allocator->deallocate_buffer((void*)_btree->_root, sizeof(Node), alignof(Node));
+                --_btree->_depth;
+                if (_depth) {
+                    _btree->_root = _nodes[0];
+                } else {
+                    _btree->_root = nullptr;
+                }
+            }
+
+            // Okay, we've merged the nodes, now deal with fact that our index path my exceed the bounds
+            // of a Node. We handle that by deleting levels off depth from the path until we get to a valid
+            // entry which will be successor
+            for (uint8_t i = 0; i < _btree->_depth; ++i) {
+                uint8_t currentDepth = _btree->_depth - (i + 1);
+                if (_nodes[currentDepth]->size() != _indexes[currentDepth]) { break; }
+                --_depth;
+            }
+        }
+        void setGeneration(uint64_t generation) {
+#if BTREE_VALIDATION
+            _generation = generation;
+#endif
+        }
+        void checkGeneration() const {
+#if BTREE_VALIDATION
+            assert(_btree->_generation == _generation);
+#endif
+        }
+        void swap(const_iterator& other) {
+            using std::swap;
+            swap(_btree,    other._btree);
+            swap(_nodes,    other._nodes);
+            swap(_indexes,  other._indexes);
+            swap(_depth,    other._depth);
+#if BTREE_VALIDATION
+            swap(_generation,    other._generation);
+#endif
         }
     public:
         friend struct BTree;
-        const Node*                     _rootNode;
-        Node*                           _currentNode;
-        uint8_t                         _currentDepth;
-        std::array<uint8_t, kMaxDepth> _indexes = {0};
+        BTree*                          _btree      = nullptr;
+#if BTREE_VALIDATION
+        uint64_t                        _generation = 0;
+#endif
+        std::array<Node*,   kMaxDepth>  _nodes      = {nullptr};
+        std::array<uint8_t, kMaxDepth>  _indexes    = {0};
+        uint8_t                         _depth      = 0;
+
     };
     using iterator = const_iterator;
 
     const_iterator cbegin() const {
-        std::array<uint8_t, kMaxDepth> indexes = {0};
-        if (!_root) {
-            return const_iterator(_root, 0, indexes);
-        }
-        auto node = _root;
-        for(auto i = 0; i < kMaxDepth; ++i) {
-            indexes[i] = 0;
-            if (node->leaf()) { return const_iterator(_root, i, indexes); }
-            node = *node->children().begin();
-        }
-        __builtin_unreachable();
+        return ++const_iterator(this);
     }
 
     const_iterator cend() const {
-        std::array<uint8_t, kMaxDepth> indexes = {0};
-        if (_root) {
-            indexes[0] = _root->size();
-        } else {
-            indexes[0] = 0;
-        }
-        return const_iterator(_root, 0, indexes);
+        return const_iterator(this);
     }
 
     const_iterator  begin() const   { return cbegin(); }
@@ -695,47 +714,12 @@ private:
     // The lower_bound index path will point to one of the 4 things.
     // 1. An index path directly to an element equal to key
     // 2. An index path to a leaf node that contains the first element greater than the key
-    // 3. An index path to an interior node one level above the leaf nodes. This will only happen if the key
-    //    is greater than the last elment of the leaf and less then interior key that points to it
+    // 3. An index path to an interior node. This will only happen if the key is greater than the last elment of the leaf node and less then interior key that points to it
     // 4. It be an index path to the last valid node in the tree, with the leaf index incremeneted by one.
     //    this is the index path representation of the end iterator
-    //
-    // These cases may need to specially handled prepareForInsertion() and rebalanceFromErasure()
+
     const_iterator lower_bound(const value_type& key) const {
-        if (!_root) {
-            return end();
-        }
-        const Node* node = _root;
-        std::array<uint8_t, kMaxDepth> indexes = {0};
-        for(auto i = 0; i < kMaxDepth; ++i) {
-            auto j = std::lower_bound(node->keys().begin(), node->keys().end(), key, _comp);
-            if (j == node->keys().end()) {
-                if (node->leaf()) {
-                    // We hit a leaf but the lower_bound is not inside of it, create
-                    // an iterator to the last element in the leaf and increment it;
-                    indexes[i] = node->size()-1;
-                    return std::next(iterator(_root, i, indexes));
-                } else {
-                    // There are is one more child then there are keys, so if it larger than the largest key the index is size()
-                    indexes[i] = node->size();
-                }
-            } else {
-                indexes[i] = j-(node->keys().begin());
-                if (node->leaf() || !_comp(key, *j)) {
-                    auto result = iterator(_root, i, indexes);
-                    if constexpr(M) {
-                        while (result != begin()) {
-                            auto previous = std::prev(result);
-                            if (_comp(*previous, *result)) { break; }
-                            result = previous;
-                        }
-                    }
-                    return result;
-                }
-            }
-            node = node->children()[indexes[i]];
-        }
-        __builtin_unreachable();
+        return iterator(this, key, _comp);
     }
 
     const_iterator find(const value_type& key) const {
@@ -745,7 +729,9 @@ private:
    }
 
     iterator lower_bound(const value_type& key) {
-        return iterator(std::as_const(*this).lower_bound(key));
+        auto i = iterator(std::as_const(*this).lower_bound(key));
+        i.validate();
+        return i;
     }
 
     iterator find(const value_type& key) {
@@ -753,34 +739,41 @@ private:
     }
 
     std::pair<iterator, bool> insert_internal(iterator&& i, value_type&& key) {
+        i.checkGeneration();
         if (!_root) {
-            Allocator* deallocator = nullptr;
-            auto newNodeBuffer = _allocator->allocate_buffer(sizeof(Node), alignof(Node), &deallocator);
-            _root = new (newNodeBuffer.address) Node(0x01, deallocator);
-            i = std::move(lower_bound(key));
+            auto rootStorage = _allocator->allocate_buffer(sizeof(Node), alignof(Node));
+            _root = new (rootStorage.address) Node(true);
+            _depth = 1;
+            i.nodes()[0] = _root;
+            i._depth = 1;
+            i.currentNode()->insert(0, std::move(key));
+            ++_size;
+            validate();
+            i.validate();
+            return { i, true };
         }
         bool rotated = false;
 
-        if constexpr(!M) {
+        if constexpr(!Multi) {
             if ((i != end()) && !_comp(key, *i)) { return { i, false }; }
         }
 
-        if (_size != 0 && (i == end() || !i._currentNode->leaf())) {
+        if ((i == end() || (i.depth() != _depth))){
             --i;
             rotated = true;
         }
-        if (i.prepareForInsertion(*_allocator)) {
-            ++_depth;
-        }
-        uint8_t leafIndex = i._indexes[i._currentDepth];
+        i.prepareForInsertion();
+        uint8_t& leafIndex = i.currentIndex();
         if (rotated) {
             ++leafIndex;
         }
-        i._currentNode->insert(leafIndex, std::move(key));
-        if (rotated) {
-            ++i;
-        }
+        i.currentNode()->insert(leafIndex, std::move(key));
         ++_size;
+#if BTREE_VALIDATION
+            i.setGeneration(++_generation);
+            validate();
+            i.validate();
+#endif
         return { i, true };
     }
 
@@ -818,31 +811,33 @@ private:
     // to find the next value, and swap it. While that temporarily results in an ordering
     // violation, the issue will be resolved as soon as we delete the value
     iterator erase(iterator i) {
-        bool swapped = false;
-        if (!i._currentNode->leaf()) {
-//            fprintf(stderr, "ADJUST\n");
+        i.checkGeneration();
+        bool rotated = false;
+        if (i.depth() != _depth) {
             auto& oldElement = *i;
             ++i;
             std::swap(oldElement, *i);
-            swapped = true;
+            rotated = true;
         }
-        i._currentNode->erase(i._indexes[i._currentDepth]);
-        if (i.rebalanceFromErasure()) {
-            --_depth;
-        }
-        if ((--_size == 0) && _shouldFreeRoot) {
-            _root->deallocateChildren();
-            _root->allocator()->deallocate_buffer((void*)_root, sizeof(Node), alignof(Node));
-            _root = nullptr;
-        }
-        if (swapped) {
+        assert(i.currentNode()->leaf());
+        i.currentNode()->erase(i.indexes()[i.depth()-1]);
+        // We have an iterator that hits a leaf node. The last index in an iterator cannot be the end_index of the node it is
+        // part of, so lower the depth until it is not
+        i.rebalanceFromErasure();
+        if (rotated) {
             --i;
         }
+        --_size;
+#if BTREE_VALIDATION
+        i.setGeneration(++_generation);
+        validate();
+        i.validate();
+#endif
         return i;
     }
     size_type erase(const value_type& key) {
         auto i = find(key);
-        if constexpr(M) {
+        if constexpr(Multi) {
             size_type result = 0;
             while (i != end() && !_comp(*i, key) && !_comp(key, *i)) {
                 i = erase(i);
@@ -861,17 +856,17 @@ private:
     bool        empty() const   { return (size() == 0); }
     void        clear() {
         if (_root) {
-            _root->deallocateChildren();
-            if (_shouldFreeRoot) {
-                _root->allocator()->deallocate_buffer((void*)_root, sizeof(Node), alignof(Node));
-                _root = nullptr;
-            }
+            Node::deallocate(_root, _allocator);
+            _root = nullptr;
         }
+#if BTREE_VALIDATION
+        ++_generation;
+#endif
         _size = 0;
-        _depth = 1;
+        _depth = 0;
     }
     size_type count(const value_type& key) const {
-        if constexpr(M) {
+        if constexpr(Multi) {
             size_type result = 0;
             for (auto i = find(key); i != end() && !_comp(*i, key) && !_comp(key, *i); ++i) {
                 ++result;
@@ -916,6 +911,7 @@ private:
 //            }
 //        }
 //    }
+//
 //    void dumpVizEdges(const Node* node) const {
 //        if (!node->leaf()) {
 //            uint8_t index = 0;
@@ -930,34 +926,32 @@ private:
 //    void dumpViz() const {
 //        printf("digraph g {\n");
 //        printf("node [shape = record,height=.1];\n");
-//        dumpVizNodes(&_root);
-//        dumpVizEdges(&_root);
+//        dumpVizNodes(_root);
+//        dumpVizEdges(_root);
 //        printf("}\n\n");
 //    }
 //#endif
+    BTree() = default;
+    explicit BTree(Allocator& allocator) :  _allocator(&allocator) {}
+    explicit BTree(Allocator& allocator, Node* root) :  _root(root), _allocator(&allocator) {}
+    explicit BTree(value_compare comp, Allocator& allocator) : _allocator(&allocator), _comp(comp) {}
     template< class InputIt1,  class InputIt2>
-    void bulkConstruct(InputIt1 first, InputIt2 last, Allocator& allocator) {
-        contract(size() == 0);
-        //TODO: Make this fast someday, by:
-        // 1. Sequentialy building full nodes bottom up
-        // 2. Taking the right most nodes (which may not be full) and balancing them
+    BTree( InputIt1 first, InputIt2 last, value_compare comp, Allocator& allocator) : BTree(comp, allocator) {
         for (auto i = first; i != last; ++i) {
             insert(*i);
         }
     }
-    BTree() = default;
-    explicit BTree(Allocator& allocator) :  _allocator(&allocator) {}
-    explicit BTree(Allocator& allocator, Node* root) :  _root(root), _allocator(&allocator), _shouldFreeRoot(false) {}
-    explicit BTree(value_compare comp, Allocator& allocator) : _allocator(&allocator), _comp(comp) {}
-    template< class InputIt1,  class InputIt2>
-    BTree( InputIt1 first, InputIt2 last, value_compare comp, Allocator& allocator) : BTree(comp, allocator) {
-        //TOOO: Replace this with an optimized creation algorithm
-        bulkConstruct(first, last, allocator);
-    }
     ~BTree() {
         clear();
     }
-    BTree(const BTree& other, Allocator& allocator) : BTree(other.begin(), other.end(), value_compare(), allocator) {}
+    BTree(const BTree& other, Allocator& allocator) :  _allocator(&allocator) {
+        //TODO: Make this fast and compact someday, by:
+        // 1. Sequentialy building full nodes bottom up
+        // 2. Taking the right most nodes (which may not be full) and balancing them
+        for (auto& i : other) {
+            insert(end(), i);
+        }
+    }
     BTree(const BTree& other) : BTree(other, _allocator) {}
     BTree(BTree&& other) {
         swap(other);
@@ -977,6 +971,72 @@ private:
     friend void swap(BTree& x, BTree& y) {
         x.swap(y);
     }
+    void validate() const {
+        if constexpr(!BTREE_VALIDATION) { return; }
+        uint64_t size = validate(_depth, _root);
+        assert(size == _size);
+    }
+
+    uint64_t validate(uint8_t depth, Node* node) const {
+        static uint64_t count = 0;
+        ++count;
+        if (_depth == 0) {
+            assert(node == nullptr);
+            return 0;
+        }
+        assert(node != nullptr);
+        uint64_t result = node->size();
+        key_type* lastKey = nullptr;
+
+        if (depth == 1) {
+            assert(node->leaf());
+        } else {
+            assert(!node->leaf());
+            auto child = node->children()[0];
+            lastKey = &child->keys()[child->size()-1];
+        }
+        uint32_t i;
+        for (i = 0; i < node->size(); ++i) {
+            key_type *key = &node->keys()[i];
+            if (lastKey) {
+                if constexpr(Multi) {
+                    assert(_comp(*lastKey, *key) || (!_comp(*lastKey, *key) && !_comp(*key, *lastKey)));
+                } else {
+                    assert(_comp(*lastKey, *key));
+                }
+            }
+            if (!node->leaf()) {
+                result += validate(depth-1, node->children()[i]);
+            }
+            lastKey = key;
+        }
+#if 0
+        // This only works correctly for well behaved types, it fails for things like strings. Disabled by default, but useful for
+        // debugging
+        if (std::is_default_constructible<key_type>::value && !std::is_trivially_destructible<value_type>::value) {
+            key_type default_value;
+            for ( ; i < node->capacity(); ++i) {
+                key_type *key = &node->keys()[i];
+                assert(!_comp(default_value, *key));
+                assert(!_comp(*key, default_value));
+            }
+        }
+#endif
+        if (!node->leaf()) {
+            result += validate(depth-1, node->children()[node->size()]);
+        }
+        if (!node->leaf()) {
+            auto child = node->children()[node->size()];
+            key_type *key = &child->keys()[child->size()-1];
+            if constexpr(Multi) {
+                assert(_comp(*lastKey, *key) || (!_comp(*lastKey, *key) && !_comp(*key, *lastKey)));
+            } else {
+                assert(_comp(*lastKey, *key));
+            }
+        }
+
+        return result;
+    }
 private:
     void swap(BTree& other) {
         using std::swap;
@@ -986,13 +1046,18 @@ private:
         swap(_comp,         other._comp);
         swap(_size,         other._size);
         swap(_depth,        other._depth);
+#if BTREE_VALIDATION
+        swap(_generation,    other._generation);
+#endif
     }
     Node*           _root           = nullptr;
     Allocator*      _allocator      = nullptr;
     value_compare   _comp           = value_compare();
+#if BTREE_VALIDATION
+    uint64_t        _generation     = 0;
+#endif
     size_type       _size           = 0;
-    uint8_t         _depth          = 1;
-    bool            _shouldFreeRoot = true;
+    uint8_t         _depth          = 0;
 };
 
 };

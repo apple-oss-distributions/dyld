@@ -387,6 +387,8 @@ struct VIS_HIDDEN MachOFile : mach_header
                     PointerMetaData();
                     PointerMetaData(const ChainedFixupPointerOnDisk* fixupLoc, uint16_t pointer_format);
 
+        bool        operator==(const PointerMetaData& other) const;
+
         uint32_t    diversity         : 16,
                     high8             :  8,
                     authenticated     :  1,

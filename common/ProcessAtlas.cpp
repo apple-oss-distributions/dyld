@@ -133,6 +133,15 @@ Bitmap::Bitmap(Allocator& allocator, std::span<std::byte>& data) {
     data = data.last(data.size()-byteSize);
 }
 
+Bitmap::Bitmap(Bitmap&& other) {
+    swap(other);
+}
+
+Bitmap& Bitmap::operator=(Bitmap&& other) {
+    swap(other);
+    return *this;
+}
+
 void Bitmap::setBit(size_t bit) {
     contract(bit < _size);
     _bitmap.withUnsafe([&](std::byte* bitmap) {
@@ -582,8 +591,11 @@ Image::Image(RuntimeState* state, Allocator& ephemeralAllocator, SharedPtr<Mappe
         auto fileID = ldr->fileID(state->fileManager);
         if (fileID.inode() &&  fileID.device()) {
             _file = state->fileManager.fileRecordForFileID(ldr->fileID(state->fileManager));
+            if ( _file.volume().empty() ) {
+                _file = state->fileManager.fileRecordForPath(ephemeralAllocator, ldr->path());
+            }
         } else {
-            _file = state->fileManager.fileRecordForPath(ldr->path());
+            _file = state->fileManager.fileRecordForPath(ephemeralAllocator, ldr->path());
         }
     }
 #endif
@@ -612,24 +624,32 @@ void Image::swap(Image& other) {
     using std::swap;
 
     if (this == &other) { return; }
-    std::swap(_uuid,                other._uuid);
-    std::swap(_ml,                  other._ml);
-    std::swap(_sharedCacheSlide,    other._sharedCacheSlide);
-    std::swap(_rebasedAddress,      other._rebasedAddress);
-    std::swap(_mapper,              other._mapper);
-    std::swap(_sharedCache,         other._sharedCache);
-    std::swap(_installname,         other._installname);
-    std::swap(_file,                other._file);
-    std::swap(_uuidLoaded,          other._uuidLoaded);
-    std::swap(_installnameLoaded,   other._installnameLoaded);
+    swap(_uuid,                 other._uuid);
+    swap(_ml,                   other._ml);
+    swap(_sharedCacheSlide,     other._sharedCacheSlide);
+    swap(_rebasedAddress,       other._rebasedAddress);
+    swap(_mapper,               other._mapper);
+    swap(_sharedCache,          other._sharedCache);
+    swap(_installname,          other._installname);
+    swap(_file,                 other._file);
+    swap(_uuidLoaded,           other._uuidLoaded);
+    swap(_installnameLoaded,    other._installnameLoaded);
+    swap(_mapperFailed,         other._mapperFailed);
 }
 
 const MachOLoaded* Image::ml() const {
-    void* slidML = (void*)rebasedAddress();
+    if (_mapperFailed) {
+        return nullptr;
+    }
     if (!_ml) {
+        void* slidML = (void*)rebasedAddress();
         // Note, using 4k here as we might be an arm64e process inspecting an x86_64 image, which uses 4k pages
-        if (!_mapper) {
+        if (!_mapper && !_mapperFailed) {
             _mapper = Mapper::mapperForMachO(_transactionalAllocator, _file, _uuid, _rebasedAddress);
+        }
+        if (!_mapper) {
+            _mapperFailed = true;
+            return nullptr;
         }
         _ml = _mapper->map<MachOLoaded>(slidML, 4096);
         size_t size = _ml->sizeofcmds;
@@ -651,7 +671,7 @@ const UUID& Image::uuid() const {
     if (!_uuidLoaded) {
         uuid_t fileUUID;
         const MachOLoaded* mh = ml();
-        if (mh->hasMachOMagic()) {
+        if (mh && mh->hasMachOMagic()) {
             if (mh->getUuid(fileUUID))
                 _uuid = UUID(fileUUID);
         }
@@ -667,7 +687,9 @@ uint64_t Image::rebasedAddress() const {
 
 const char* Image::installname() const {
     if (!_installnameLoaded) {
-        _installname = ml()->installName();
+        if (ml()) {
+            _installname = ml()->installName();
+        }
         _installnameLoaded = true;
     }
     return _installname;
@@ -690,10 +712,12 @@ uint64_t Image::sharedCacheVMOffset() const {
 }
 
 uint32_t Image::pointerSize() {
+    if (!ml()) { return 0; }
     return ml()->pointerSize();
 }
 
 bool Image::forEachSegment(void (^block)(const char* segmentName, uint64_t vmAddr, uint64_t vmSize, int perm)) {
+    if (!ml()) { return false; }
     __block uint64_t slide = (uint64_t)_rebasedAddress - ml()->preferredLoadAddress();
     ml()->forEachSegment(^(const MachOLoaded::SegmentInfo &info, bool &stop) {
         uint64_t vmAddr = 0x0;
@@ -712,6 +736,7 @@ bool Image::forEachSegment(void (^block)(const char* segmentName, uint64_t vmAdd
 }
 
 bool Image::forEachSection(void (^block)(const char* segmentName, const char* sectionName, uint64_t vmAddr, uint64_t vmSize)) {
+    if (!ml()) { return false; }
     __block uint64_t slide = (uint64_t)_rebasedAddress - ml()->preferredLoadAddress();
     ml()->forEachSection(^(const MachOLoaded::SectionInfo &info, bool malformedSectionRange, bool &stop) {
         uint64_t sectAddr = 0x0;
@@ -726,6 +751,7 @@ bool Image::forEachSection(void (^block)(const char* segmentName, const char* se
 }
 
 bool Image::contentForSegment(const char* segmentName, void (^contentReader)(const void* content, uint64_t vmAddr, uint64_t vmSize)) {
+    if (!ml()) { return false; }
     __block bool result = false;
     __block uint64_t slide = (uint64_t)_rebasedAddress - ml()->preferredLoadAddress();
     ml()->forEachSegment(^(const MachOLoaded::SegmentInfo &info, bool &stop) {
@@ -931,7 +957,7 @@ void SharedCache::forEachInstalledCacheWithSystemPath(Allocator& _ephemeralAlloc
                     continue;
 
                 // FIXME: The memory managemnt here is awful, fix with allocators
-                auto cacheFile = fileManager.fileRecordForPath(cachePath);
+                auto cacheFile = fileManager.fileRecordForPath(_ephemeralAllocator, cachePath);
                 auto cache = Atlas::SharedCache::createForFileRecord(_ephemeralAllocator, std::move(cacheFile));
                 if (cache) {
                     cache.withUnsafe([&](auto cachePtr){
@@ -1052,7 +1078,7 @@ UniquePtr<SharedCacheLocals> SharedCache::localSymbols() const {
             return nullptr;
     }
     // TODO: Create Path extension helpers for FileRecord
-    auto localSymbolsCacheFile = _file.fileManager().fileRecordForPath(localSymbolsCachePath);
+    auto localSymbolsCacheFile = _file.fileManager().fileRecordForPath(_ephemeralAllocator, localSymbolsCachePath);
     auto [fileMapper, baseAddress] = Mapper::mapperForSharedCacheLocals(_ephemeralAllocator, localSymbolsCacheFile);
     if (!fileMapper) { return nullptr; }
     // Use placement new since operator new is not available
@@ -1243,7 +1269,7 @@ UniquePtr<ProcessSnapshot> Process::synthesizeSnapshot(kern_return_t *kr) {
                     executablePath[len] = '\0';
                 }
                 SharedPtr<Mapper> mapper = nullptr;
-                auto file = _fileManager.fileRecordForPath(executablePath);
+                auto file = _fileManager.fileRecordForPath(_transactionalAllocator, executablePath);
                 uuid_t rawUUID;
                 mf->getUuid(rawUUID);
                 auto uuid = UUID(rawUUID);
@@ -1255,7 +1281,7 @@ UniquePtr<ProcessSnapshot> Process::synthesizeSnapshot(kern_return_t *kr) {
                     executablePath[len] = '\0';
                 }
                 SharedPtr<Mapper> mapper = nullptr;
-                auto file = _fileManager.fileRecordForPath(executablePath);
+                auto file = _fileManager.fileRecordForPath(_transactionalAllocator, executablePath);
                 uuid_t rawUUID;
                 mf->getUuid(rawUUID);
                 auto uuid = UUID(rawUUID);
@@ -1577,7 +1603,7 @@ ProcessSnapshot::ProcessSnapshot(Allocator& ephemeralAllocator, FileManager& fil
         if (!serializer.deserialize(data)) {
             // Deerialization failed, reset the snapshot and mark invalid
             _images.clear();
-            _bitmap             = Bitmap();
+            _bitmap             = nullptr;
             _sharedCache        = nullptr;
             _platform           = 0;
             _initialImageCount  = 0;
@@ -1600,7 +1626,7 @@ void ProcessSnapshot::forEachImage(void (^block)(Image* image)) {
         if (processedCacheImages) { return; }
         processedCacheImages = true;
         for (auto i = 0; i < _sharedCache->imageCount(); ++i) {
-            if (!_bitmap.checkBit(i)) { continue; }
+            if (!_bitmap->checkBit(i)) { continue; }
             _sharedCache->withImageForIndex(i, ^(Image *image) {
                 block(image);
             });
@@ -1623,8 +1649,8 @@ void ProcessSnapshot::forEachImageNotIn(const ProcessSnapshot& other, void (^blo
         if (processedCacheImages) { return; }
         if (!_sharedCache) { return; }
         for (auto i = 0; i < _sharedCache->imageCount(); ++i) {
-            if (!_bitmap.checkBit(i)) { continue; }
-            if (other._sharedCache && other._bitmap.checkBit(i)) { continue; }
+            if (!_bitmap->checkBit(i)) { continue; }
+            if (other._sharedCache && other._bitmap->checkBit(i)) { continue; }
             _sharedCache->withImageForIndex(i, ^(Image *image) {
                 block(image);
             });
@@ -1666,7 +1692,7 @@ UniquePtr<SharedCache>& ProcessSnapshot::sharedCache() {
 void ProcessSnapshot::addImages(RuntimeState* state, const std::span<const Loader*>& loaders) {
     for (auto& ldr : loaders) {
         if (_sharedCache && ldr->dylibInDyldCache) {
-            _bitmap.setBit(ldr->ref.index);
+            _bitmap->setBit(ldr->ref.index);
         } else {
             _images.insert(_transactionalAllocator.makeUnique<Image>(state, _ephemeralAllocator, identityMapper(), ldr));
         }
@@ -1688,7 +1714,7 @@ void ProcessSnapshot::addImage(Image&& image) {
 #if BUILDING_DYLD || BUILDING_UNIT_TESTS
 void ProcessSnapshot::addSharedCache(SharedCache&& sharedCache) {
     _sharedCache = _transactionalAllocator.makeUnique<SharedCache>(std::move(sharedCache));
-    _bitmap = Bitmap(_transactionalAllocator, _sharedCache->imageCount());
+    _bitmap = _transactionalAllocator.makeUnique<Bitmap>(_transactionalAllocator, _sharedCache->imageCount());
 }
 
 void ProcessSnapshot::addSharedCacheImage(const struct mach_header* mh) {
@@ -1701,7 +1727,7 @@ void ProcessSnapshot::addSharedCacheImage(const struct mach_header* mh) {
         return (other.loadAddress == ((uint64_t)mh-slide));
     });
     assert(i != images.end());
-    _bitmap.setBit(i-images.begin());
+    _bitmap->setBit(i-images.begin());
 }
 
 
@@ -1874,7 +1900,7 @@ void ProcessSnapshot::Serializer::readMappedFileInfo(std::span<std::byte>& data,
     }
     if (flags & kMappedFileFlagsHasFilePath) {
         uint64_t pathOffset = readPVLEUInt64(data);
-        file = _fileManager.fileRecordForPath(&_stringTableBuffer[(size_t)pathOffset]);
+        file = _fileManager.fileRecordForPath(_ephemeralAllocator, &_stringTableBuffer[(size_t)pathOffset]);
     }
 }
 
@@ -1883,6 +1909,7 @@ Vector<std::byte> ProcessSnapshot::Serializer::serialize() {
     _genCount++;
     auto result = Vector<std::byte>(_ephemeralAllocator);
     // We need unique all the strings and UUIDs and place them in sorted tables
+    // FIXME: We should use vectors and sort them since it faster in pathological cases, but we need a non-allocating sort
     OrderedSet<const char*, lsl::ConstCharStarCompare>   stringSet(_ephemeralAllocator);
     OrderedSet<UUID>                                     volumeUUIDSet(_ephemeralAllocator);
     if (PAGE_SIZE == 16384) {
@@ -1905,7 +1932,7 @@ Vector<std::byte> ProcessSnapshot::Serializer::serialize() {
         if (file.persistent()) {
             volumeUUIDSet.insert(file.volume());
         } else if (auto filePath = file.getPath()) {
-            stringSet.insert(file.getPath());
+            stringSet.insert(filePath);
         } else {
             stringSet.insert("???");
         }
@@ -1948,7 +1975,7 @@ Vector<std::byte> ProcessSnapshot::Serializer::serialize() {
     if (_processFlags & kProcessFlagsHasSharedCache) {
         uint64_t address = _sharedCache->rebasedAddress()/((_processFlags & kProcessFlagsHas16kPages) ? 16384 : 4096);
         emitMappedFileInfo(address, _sharedCache->uuid(), _sharedCache->file(), result);
-        _bitmap.emit(result);
+        _bitmap->emit(result);
     }
 
     emitPVLEUInt64(_images.size(), result);
@@ -2027,7 +2054,7 @@ bool ProcessSnapshot::Serializer::deserialize(const std::span<std::byte> data) {
 
         _sharedCache = _transactionalAllocator.makeUnique<SharedCache>(_ephemeralAllocator, std::move(file), mapper,
                                                                        rebasedAddress, _processFlags & kProcessFlagsHasPrivateCache);
-        _bitmap = Bitmap(_transactionalAllocator, i);
+        _bitmap = _transactionalAllocator.makeUnique<Bitmap>(_transactionalAllocator, i);
     }
     auto imageCount = readPVLEUInt64(i);
     uint64_t lastAddress = 0;
@@ -2041,16 +2068,12 @@ bool ProcessSnapshot::Serializer::deserialize(const std::span<std::byte> data) {
         SharedPtr<Mapper> mapper = nullptr;
         if (_processSnapshot._useIdentityMapper) {
             mapper = _processSnapshot.identityMapper();
-        } else {
+        }
 #if BUILDING_DYLD || BUILDING_UNIT_TESTS
+        else {
             mapper = _transactionalAllocator.makeShared<Mapper>(_transactionalAllocator);
-#else
-            mapper = Mapper::mapperForMachO(_transactionalAllocator, file, uuid, (const void*)rebasedAddress);
+        }
 #endif
-        }
-        if (!mapper) {
-            return false;
-        }
         auto image = Image(_ephemeralAllocator, std::move(file), mapper, (const struct mach_header*)rebasedAddress, uuid);
         _images.insert(_transactionalAllocator.makeUnique<Image>(std::move(image)));
     }

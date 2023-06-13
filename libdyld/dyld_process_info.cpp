@@ -42,6 +42,7 @@
 #include "DebuggerSupport.h"
 #include "DyldProcessConfig.h"
 
+#define IMAGE_COUNT_MAX 8192
 RemoteBuffer& RemoteBuffer::operator=(RemoteBuffer&& other) {
     std::swap(_localAddress, other._localAddress);
     std::swap(_size, other._size);
@@ -271,13 +272,20 @@ private:
     // char                     stringPool[]
 };
 
+static uint32_t addWithOverflowOrReturnZero(uint32_t a, uint32_t b)
+{
+    uint32_t result = 0;
+    assert( !__builtin_add_overflow(a, b, &result) );
+    return result;
+}
+
 dyld_process_info_base::dyld_process_info_base(dyld_platform_t platform, unsigned imageCount, unsigned aotImageCount, size_t totalSize)
  :  _retainCount(1), _cacheInfoOffset(sizeof(dyld_process_info_base)),
-    _aotCacheInfoOffset(sizeof(dyld_process_info_base) + sizeof(dyld_process_cache_info)),
-    _stateInfoOffset(sizeof(dyld_process_info_base) + sizeof(dyld_process_cache_info) + sizeof(dyld_process_aot_cache_info)),
-    _imageInfosOffset(sizeof(dyld_process_info_base) + sizeof(dyld_process_cache_info) + sizeof(dyld_process_aot_cache_info) + sizeof(dyld_process_state_info)),
-    _aotImageInfosOffset(sizeof(dyld_process_info_base) + sizeof(dyld_process_cache_info) + sizeof(dyld_process_aot_cache_info) + sizeof(dyld_process_state_info) + imageCount*sizeof(ImageInfo)),
-    _segmentInfosOffset(sizeof(dyld_process_info_base) + sizeof(dyld_process_cache_info) + sizeof(dyld_process_aot_cache_info) + sizeof(dyld_process_state_info) + imageCount*sizeof(ImageInfo) + aotImageCount*sizeof(dyld_aot_image_info_64)),
+    _aotCacheInfoOffset(_cacheInfoOffset + sizeof(dyld_process_cache_info)),
+    _stateInfoOffset(_aotCacheInfoOffset + sizeof(dyld_process_aot_cache_info)),
+    _imageInfosOffset(_stateInfoOffset + sizeof(dyld_process_state_info)),
+    _aotImageInfosOffset(addWithOverflowOrReturnZero(_imageInfosOffset, imageCount*sizeof(ImageInfo))),
+    _segmentInfosOffset(addWithOverflowOrReturnZero(_aotImageInfosOffset, aotImageCount*sizeof(dyld_aot_image_info_64))),
     _freeSpace(totalSize), _platform(platform),
     _firstImage((ImageInfo*)(((uint8_t*)this) + _imageInfosOffset)),
     _curImage((ImageInfo*)(((uint8_t*)this) + _imageInfosOffset)),
@@ -288,6 +296,7 @@ dyld_process_info_base::dyld_process_info_base(dyld_platform_t platform, unsigne
     _curSegmentIndex(0),
     _stringRevBumpPtr((char*)(this)+totalSize)
 {
+
 }
 
 template<typename T1, typename T2>
@@ -344,7 +353,7 @@ dyld_process_info_ptr dyld_process_info_base::make(task_t task, const T1& allIma
     // terrible things that corrupt their own image lists and we need to stop clients from crashing
     // reading them. We can try to do something more advanced in the future. rdar://27446361
     uint32_t imageCount = allImageInfo.infoArrayCount;
-    imageCount = MIN(imageCount, 8192);
+    imageCount = MIN(imageCount, IMAGE_COUNT_MAX);
     size_t imageArraySize = imageCount * sizeof(T2);
 
     withRemoteBuffer(task, infoArray, imageArraySize, false, kr, ^(void *buffer, size_t size) {
@@ -366,6 +375,7 @@ dyld_process_info_ptr dyld_process_info_base::make(task_t task, const T1& allIma
             countOfPathsNeedingCopying = imageCount+1;
         }
         unsigned imageCountWithDyld = imageCount+1;
+        unsigned aotImageCount = MIN(allImageInfo.aotInfoCount, IMAGE_COUNT_MAX);
 
         // allocate result object
         size_t allocationSize = sizeof(dyld_process_info_base)
@@ -373,7 +383,7 @@ dyld_process_info_ptr dyld_process_info_base::make(task_t task, const T1& allIma
                                     + sizeof(dyld_process_aot_cache_info)
                                     + sizeof(dyld_process_state_info)
                                     + sizeof(ImageInfo)*(imageCountWithDyld)
-                                    + sizeof(dyld_aot_image_info_64)*(allImageInfo.aotInfoCount) // add the size necessary for aot info to this buffer
+                                    + sizeof(dyld_aot_image_info_64)*(aotImageCount) // add the size necessary for aot info to this buffer
                                     + sizeof(SegmentInfo)*imageCountWithDyld*10
                                     + countOfPathsNeedingCopying*PATH_MAX;
         void* storage = malloc(allocationSize);
@@ -483,9 +493,18 @@ dyld_process_info_ptr dyld_process_info_base::makeSuspended(task_t task, const T
 
     // The task is not suspended, exit
     if (ti.suspend_count == 0) {
-        // Just need a code here to disambiguate our failures
-        *kr = KERN_ALREADY_WAITING;
-        return  nullptr;
+        // Even if the process is not suspended it might never make forward progress. This is because it might be a corpse, which
+        // despite not being runnable may not have the suspended flag set. The only way to tell if it is a corpse is to to try to
+        // map the corpse data, even though we don't actually need the corpse data
+        mach_vm_address_t kcd_addr_begin = 0;
+        mach_vm_size_t kcd_size = 0;
+        *kr = task_map_corpse_info_64(mach_task_self(), task, &kcd_addr_begin, &kcd_size);
+        if (*kr != KERN_SUCCESS) {
+            // Not a corpse, so forward progress is possible. Return so that make() can pause and retry
+            return nullptr;
+        }
+        // It is a corpse. Unmap the corpse info and keep scavenging the suspended process
+        vm_deallocate(mach_task_self(), (vm_address_t)kcd_addr_begin, (vm_size_t)kcd_size);
     }
 
     __block unsigned        imageCount = 0;  // main executable and dyld
@@ -534,6 +553,15 @@ dyld_process_info_ptr dyld_process_info_base::makeSuspended(task_t task, const T
     //fprintf(stderr, "dyld: addr=0x%llX, path=%s\n", dyldAddress, dyldPathBuffer);
     //fprintf(stderr, "app:  addr=0x%llX, path=%s\n", mainExecutableAddress, mainExecutablePathBuffer);
 
+    // fill in info for dyld
+    if ( dyldAddress == 0 ) {
+        // if dyld was not found in vm walk, then we've switched to the dyld in the cache
+        dyldAddress = allImageInfo.dyldImageLoadAddress;
+        strcpy(dyldPathBuffer, "/usr/lib/dyld");
+        ++imageCount;
+    }
+
+    imageCount = MIN(imageCount, IMAGE_COUNT_MAX);
     // explicitly set aot image count to 0 in the suspended case
     unsigned aotImageCount = 0;
 
@@ -571,12 +599,6 @@ dyld_process_info_ptr dyld_process_info_base::makeSuspended(task_t task, const T
     stateInfo->initialImageCount   = imageCount;
     stateInfo->dyldState           = dyld_process_state_not_started;
 
-    // fill in info for dyld
-    if ( dyldAddress == 0 ) {
-        // if dyld was not found in vm walk, then we've switched to the dyld in the cache
-        dyldAddress = allImageInfo.dyldImageLoadAddress;
-        strcpy(dyldPathBuffer, "/usr/lib/dyld");
-    }
     if ( dyldAddress != 0 ) {
         if ((*kr = obj->addDyldImage(task, dyldAddress, 0, dyldPath))) {
             return nullptr;
@@ -592,17 +614,6 @@ dyld_process_info_ptr dyld_process_info_base::makeSuspended(task_t task, const T
 
     if (allImageInfo.infoArrayChangeTimestamp != timestamp) {
         *kr = KERN_INVALID_VALUE;
-        return  nullptr;
-    }
-
-    count = MACH_TASK_BASIC_INFO_COUNT;
-    if ((*kr = task_info(task, MACH_TASK_BASIC_INFO, (task_info_t)&ti, &count))) {
-        return  nullptr;
-    }
-
-    // The task is not suspended, exit
-    if (ti.suspend_count == 0) {
-        *kr = KERN_ABORTED;
         return  nullptr;
     }
 

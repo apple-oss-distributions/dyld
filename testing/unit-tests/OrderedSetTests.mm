@@ -43,10 +43,45 @@ using namespace lsl;
 
 @implementation OrderedSetTests
 
+struct NonTriviallyDestructedInt {
+    NonTriviallyDestructedInt(uint64_t value) : _value(value) {}
+    NonTriviallyDestructedInt()                                             = default;
+    NonTriviallyDestructedInt(const NonTriviallyDestructedInt&)             = default;
+    NonTriviallyDestructedInt& operator=(const NonTriviallyDestructedInt&)  = default;
+    NonTriviallyDestructedInt& operator=(NonTriviallyDestructedInt&& other) {
+        swap(other);
+        return *this;
+    }
+    NonTriviallyDestructedInt(NonTriviallyDestructedInt&& other) {
+        swap(other);
+    }
+    ~NonTriviallyDestructedInt() {
+        //Make sure the optiizer does not decide we are trivial;
+        if (_value == ~0ULL) { abort(); }
+    }
+    auto    operator<=>(const NonTriviallyDestructedInt&) const = default;
+private:
+    void swap(NonTriviallyDestructedInt& other) {
+        if (&other == this) { return; }
+        using std::swap;
+        swap(_value, other._value);
+    }
+    uint64_t _value = 0;
+};
+
+- (void) testOrderedNontrivialDestructors {
+    auto allocator = EphemeralAllocator();
+    OrderedSet<NonTriviallyDestructedInt> set(allocator);
+    for (uint32_t i = 0;  i < 10000; ++i) {
+        set.insert(NonTriviallyDestructedInt(i));
+    }
+}
+
+
 - (void) testOrderedSetCreation {
     auto allocator = EphemeralAllocator();
     OrderedSet<uint64_t> set(allocator);
-    for (uint32_t i = 0;  i <= 3000; ++i) {
+    for (uint32_t i = 0;  i < 10000; ++i) {
         set.insert([self uniformRandomFrom:0 to:std::numeric_limits<uint64_t>::max()]);
     }
     auto set2 = OrderedSet(set, allocator);
@@ -119,12 +154,11 @@ using namespace lsl;
 };
 
 - (void) testOrderedMultiSetMutations {
-    self.randomSeed = 8097896182481744822ULL;
     auto allocator = EphemeralAllocator();
     std::multiset<uint64_t> oldSet;
     OrderedMultiSet<uint64_t> newSet(allocator);
     // Do stuff
-    for (uint32_t i = 0;  i <= 300000; ++i) {
+    for (uint32_t i = 0;  i < 30000; ++i) {
         uint64_t value = [self uniformRandomFrom:0 to:10000];
         if ([self randomBool]) {
             XCTAssertEqual(*newSet.insert(value), value);
@@ -148,50 +182,52 @@ using namespace lsl;
 
 - (void) testOrderedSetMutations {
     auto allocator = EphemeralAllocator();
-    std::set<uint64_t> oldSet;
-    OrderedSet<uint64_t> newSet(allocator);
-    // Do stuff
-    for (uint32_t i = 0;  i <= 300000; ++i) {
-        uint64_t value = [self uniformRandomFrom:0 to:10000];
-        if ([self randomBool]) {
-            auto w = newSet.insert(value);
-            auto x = oldSet.insert(value);
-            XCTAssertEqual(w.second, x.second, "Insertion success state should be equal");
-            if (w.first == newSet.end()) {
-                XCTAssertEqual(x.first, oldSet.end());
+    {
+        std::set<uint64_t> oldSet;
+        OrderedSet<uint64_t> newSet(allocator);
+        // Do stuff
+        for (uint32_t i = 0;  i < 30000; ++i) {
+            uint64_t value = [self uniformRandomFrom:0 to:10000];
+            if ([self randomBool]) {
+                auto w = newSet.insert(value);
+                auto x = oldSet.insert(value);
+                XCTAssertEqual(w.second, x.second, "Insertion success state should be equal");
+                if (w.first == newSet.end()) {
+                    XCTAssertEqual(x.first, oldSet.end());
+                } else {
+                    XCTAssertEqual(*w.first, *x.first, "Insertion success state should be equal");
+                }
             } else {
-                XCTAssertEqual(*w.first, *x.first, "Insertion success state should be equal");
+                XCTAssertEqual(newSet.erase(value), oldSet.erase(value), "Erase success state should be equal");
             }
-        } else {
-            XCTAssertEqual(newSet.erase(value), oldSet.erase(value), "Erase success state should be equal");
         }
-    }
-    auto w = oldSet.begin();
-    for (auto j : newSet) {
-        XCTAssert(*(w++) == j);
-    }
-    XCTAssert(w == oldSet.end());
-    Vector<uint64_t> removals(allocator);
-    removals.reserve(newSet.size());
-    std::copy(newSet.begin(), newSet.end(), std::back_inserter(removals));
-    for (auto i = 0; i < 5*newSet.size(); ++i) {
-        auto target1 = [self uniformRandomFrom:0 to:newSet.size()-1];
-        auto target2 = [self uniformRandomFrom:0 to:newSet.size()-1];
-        std::swap(removals[target1], removals[target2]);
-    }
-    for (auto i : removals) {
-        auto j = newSet.find(i);
-        auto k = std::next(j);
-        bool y = (k != newSet.end());
-        uint64_t x = 0;
-        if (y) { x = *k; }
-        XCTAssertNotEqual(j, newSet.end());
-        auto l = newSet.erase(j);
-        if (y) {
-            XCTAssertEqual(x,*l);
+        auto w = oldSet.begin();
+        for (auto j : newSet) {
+            XCTAssert(*(w++) == j);
         }
+        XCTAssert(w == oldSet.end());
+        Vector<uint64_t> removals(allocator);
+        removals.reserve(newSet.size());
+        std::copy(newSet.begin(), newSet.end(), std::back_inserter(removals));
+        for (auto i = 0; i < 5*newSet.size(); ++i) {
+            auto target1 = [self uniformRandomFrom:0 to:newSet.size()-1];
+            auto target2 = [self uniformRandomFrom:0 to:newSet.size()-1];
+            std::swap(removals[target1], removals[target2]);
+        }
+        for (auto i : removals) {
+            auto j = newSet.find(i);
+            auto k = std::next(j);
+            bool y = (k != newSet.end());
+            uint64_t x = 0;
+            if (y) { x = *k; }
+            XCTAssertNotEqual(j, newSet.end());
+            auto l = newSet.erase(j);
+            if (y) {
+                XCTAssertEqual(x,*l);
+            }
+        }
+        XCTAssertTrue(newSet.empty());
     }
-    XCTAssertTrue(newSet.empty());
 }
 
 - (void) testOrderedSetStress {

@@ -1135,7 +1135,8 @@ void DyldSharedCache::forEachPatchableExport(uint32_t imageIndex, void (^handler
 #if BUILDING_SHARED_CACHE_UTIL
 void DyldSharedCache::forEachPatchableUseOfExport(uint32_t imageIndex, uint32_t dylibVMOffsetOfImpl,
                                                   void (^handler)(uint32_t userImageIndex, uint32_t userVMOffset,
-                                                                  MachOLoaded::PointerMetaData pmd, uint64_t addend)) const {
+                                                                  MachOLoaded::PointerMetaData pmd, uint64_t addend,
+                                                                  bool isWeakImport)) const {
     if ( header.patchInfoAddr == 0 )
         return;
 
@@ -1241,7 +1242,7 @@ void DyldSharedCache::forEachPatchableUseOfExport(uint32_t imageIndex, uint32_t 
                 pmd.key               = patchLocation.key;
                 pmd.usesAddrDiversity = patchLocation.usesAddressDiversity;
 
-                handler(userImageIndex, userVMOffset, pmd, patchLocation.getAddend());
+                handler(userImageIndex, userVMOffset, pmd, patchLocation.getAddend(), false);
             }
         }
         return;
@@ -1271,7 +1272,8 @@ bool DyldSharedCache::shouldPatchClientOfImage(uint32_t imageIndex, uint32_t use
 }
 
 void DyldSharedCache::forEachPatchableUseOfExportInImage(uint32_t imageIndex, uint32_t dylibVMOffsetOfImpl, uint32_t userImageIndex,
-                                                         void (^handler)(uint32_t userVMOffset, MachOLoaded::PointerMetaData pmd, uint64_t addend)) const {
+                                                         void (^handler)(uint32_t userVMOffset, MachOLoaded::PointerMetaData pmd, uint64_t addend,
+                                                                         bool isWeakImport)) const {
     if ( header.patchInfoAddr == 0 )
         return;
 
@@ -1379,7 +1381,7 @@ void DyldSharedCache::forEachPatchableUseOfExportInImage(uint32_t imageIndex, ui
                     pmd.key               = patchLocation.key;
                     pmd.usesAddrDiversity = patchLocation.usesAddressDiversity;
 
-                    handler(userVMOffset, pmd, patchLocation.getAddend());
+                    handler(userVMOffset, pmd, patchLocation.getAddend(), false);
                 }
             }
         }
@@ -1394,7 +1396,8 @@ void DyldSharedCache::forEachPatchableUseOfExportInImage(uint32_t imageIndex, ui
 
 void DyldSharedCache::forEachPatchableUseOfExport(uint32_t imageIndex, uint32_t dylibVMOffsetOfImpl,
                                                   void (^handler)(uint64_t cacheVMOffset,
-                                                                  MachOLoaded::PointerMetaData pmd, uint64_t addend)) const {
+                                                                  MachOLoaded::PointerMetaData pmd, uint64_t addend,
+                                                                  bool isWeakImport)) const {
     if ( header.patchInfoAddr == 0 )
         return;
 
@@ -1442,7 +1445,7 @@ void DyldSharedCache::forEachPatchableUseOfExport(uint32_t imageIndex, uint32_t 
                 pmd.key               = patchLocation.key;
                 pmd.usesAddrDiversity = patchLocation.usesAddressDiversity;
 
-                handler(patchLocation.cacheOffset, pmd, patchLocation.getAddend());
+                handler(patchLocation.cacheOffset, pmd, patchLocation.getAddend(), false);
             }
         }
         return;
@@ -1464,7 +1467,8 @@ void DyldSharedCache::forEachPatchableUseOfExport(uint32_t imageIndex, uint32_t 
 void DyldSharedCache::forEachPatchableGOTUseOfExport(uint32_t imageIndex, uint32_t dylibVMOffsetOfImpl,
                                                      void (^handler)(uint64_t cacheVMOffset,
                                                                      MachOFile::PointerMetaData pmd,
-                                                                     uint64_t addend)) const {
+                                                                     uint64_t addend,
+                                                                     bool isWeakImport)) const {
     if ( header.patchInfoAddr == 0 )
         return;
 

@@ -108,6 +108,9 @@ static const MachOAnalyzer* getDyldMH()
 
 #if TARGET_OS_SIMULATOR
 const dyld::SyscallHelpers* gSyscallHelpers = nullptr;
+
+// <rdar://problem/100180105> We need to guarantee there is some non-zerofill content to prvent crashes in old dylds
+__attribute__((used, section("__DATA,__sim_fix"))) uint64_t r100180105 = 1;
 #endif
 
 namespace dyld4 {
@@ -311,6 +314,10 @@ __attribute__((noinline)) static MainFunc prepareSim(RuntimeState& state, const 
         halt("dyld_sim cannot allocate space");
     __block const char* mappingStr = nullptr;
     sliceMapping->forEachSegment(^(const MachOAnalyzer::SegmentInfo& info, bool& stop) {
+        // <rdar://problem/100180105> Mapping zero filled regions fails with mmap of size 0
+        if ( info.fileSize == 0)
+            return;
+
         uintptr_t requestedLoadAddress = (uintptr_t)(info.vmAddr - dyldSimPreferredLoadAddress + dyldSimLoadAddress);
         void*     segAddress           = ::mmap((void*)requestedLoadAddress, (size_t)info.fileSize, info.protections, MAP_FIXED | MAP_PRIVATE, fd, fileOffset + info.fileOffset);
         //state.log("dyld_sim %s mapped at %p\n", seg->segname, segAddress);
@@ -340,12 +347,12 @@ __attribute__((noinline)) static MainFunc prepareSim(RuntimeState& state, const 
     info.imageFilePath    = state.persistentAllocator.strdup(dyldSimPath);
     info.imageFileModDate = sb.st_mtime;
 
-    auto processSnapshot = state.getCurrentProcessSnapshot();
-    auto file = state.fileManager.fileRecordForStat(sb);
-    auto image = Image(state.ephemeralAllocator, std::move(file), processSnapshot->identityMapper(), (const mach_header*)dyldSimLoadAddress);
-    processSnapshot->setInitialImageCount(state.initialImageCount());
-    processSnapshot->addImage(std::move(image));
-    state.commitProcessSnapshot();
+    state.withCurrentProcessSnapshot(^(EphemeralAllocator& ephemeralAllocator, ProcessSnapshot* processSnapshot){
+        auto file = state.fileManager.fileRecordForStat(sb);
+        auto image = Image(ephemeralAllocator, std::move(file), processSnapshot->identityMapper(), (const mach_header*)dyldSimLoadAddress);
+        processSnapshot->setInitialImageCount(state.initialImageCount());
+        processSnapshot->addImage(std::move(image));
+    });
 
     //TODO: move legacy all_image_info management into ProcessSnapshot
     addImagesToAllImages(state, 1, &info, state.initialImageCount());
@@ -570,6 +577,7 @@ __attribute__((noinline)) static MainFunc prepare(APIs& state, const MachOAnalyz
             //state.log("%s loading dependents of %s\n", depsDiag.errorMessage(), ldr->path());
             // let debugger/crashreporter know about dylibs we were able to load
             uintptr_t topCount = topLevelLoaders.count();
+
             STACK_ALLOC_VECTOR(const Loader*, newLoaders, state.loaded.size() - topCount);
             for (size_t i = topCount; i != state.loaded.size(); ++i)
                 newLoaders.push_back(state.loaded[i]);
@@ -658,7 +666,8 @@ __attribute__((noinline)) static MainFunc prepare(APIs& state, const MachOAnalyz
             uintptr_t newImpl = (uintptr_t)patch.patchTo.value(state);
             state.config.dyldCache.addr->forEachPatchableUseOfExport(patch.cacheDylibIndex, patch.cacheDylibVMOffset,
                                                                      ^(uint64_t cacheVMOffset,
-                                                                       dyld3::MachOLoaded::PointerMetaData pmd, uint64_t addend) {
+                                                                       dyld3::MachOLoaded::PointerMetaData pmd, uint64_t addend,
+                                                                       bool isWeakImport) {
                 uintptr_t* loc      = (uintptr_t*)(((uint8_t*)state.config.dyldCache.addr) + cacheVMOffset);
                 uintptr_t  newValue = newImpl + (uintptr_t)addend;
 #if __has_feature(ptrauth_calls)
@@ -1077,82 +1086,86 @@ void start(const KernelArgs* kernArgs, void* prevDyldMH)
     // handle switching to dyld in dyld cache for native platforms
     handleDyldInCache(dyldMA, kernArgs, (MachOFile*)prevDyldMH);
 
-    bool useHWTPro = false;
-    // create an Allocator inside its own allocation pool
-    Allocator& allocator = Allocator::persistentAllocator(useHWTPro);
-
-    // use placement new to construct ProcessConfig object in the Allocator pool
-    ProcessConfig& config = *new (allocator.aligned_alloc(alignof(ProcessConfig), sizeof(ProcessConfig))) ProcessConfig(kernArgs, sSyscallDelegate, allocator);
-
-#if !SUPPPORT_PRE_LC_MAIN
+#if! SUPPPORT_PRE_LC_MAIN
     // stack allocate RuntimeLocks. They cannot be in the Allocator pool which is usually read-only
     RuntimeLocks  sLocks;
 #endif
 
-    // create APIs (aka RuntimeState) object in the allocator
-    APIs& state = *new (allocator.aligned_alloc(alignof(APIs), sizeof(APIs))) APIs(config, allocator, sLocks);
+
+    // Declare everything we need outside of the allocator scope
+    Allocator*      allocator   = nullptr;
+    APIs*           state       = nullptr;
+    MainFunc        appMain     = nullptr;
+
+    // Setup the memory manager object before the allocator so the allocator can use it before copying it internally
+    MemoryManager bootStrapMemoryManager((const char**)kernArgs->findApple());
+    bootStrapMemoryManager.withWritableMemory([&] {
+        // Setup the persistent allocator
+        allocator = &Allocator::persistentAllocator(std::move(bootStrapMemoryManager));
+
+        // use placement new to construct ProcessConfig object in the Allocator pool
+        ProcessConfig& config  = *new (allocator->aligned_alloc(alignof(ProcessConfig), sizeof(ProcessConfig))) ProcessConfig(kernArgs, sSyscallDelegate, *allocator);
+
+        // create APIs (aka RuntimeState) object in the allocator
+        state = new (allocator->aligned_alloc(alignof(APIs), sizeof(APIs))) APIs(config, *allocator, sLocks);
 
 #if !TARGET_OS_SIMULATOR
-    // FIXME: we should move this earlier, but for now we need the runtime state to inited before setup compact info
-    // Until we do that compact info may miss certain very early dyld crashes
-    auto processSnapshot = state.getCurrentProcessSnapshot();
-    processSnapshot->setPlatform((uint64_t)state.config.process.platform);
-    processSnapshot->setDyldState(dyld_process_state_dyld_initialized);
-    FileRecord cacheFileRecord = state.fileManager.fileRecordForVolumeDevIDAndObjID(gProcessInfo->sharedCacheFSID, gProcessInfo->sharedCacheFSObjID);
-    if (cacheFileRecord.exists()) {
-        auto sharedCache = SharedCache(state.ephemeralAllocator, std::move(cacheFileRecord), processSnapshot->identityMapper(), (uint64_t)config.dyldCache.addr, gProcessInfo->processDetachedFromSharedRegion);
-        processSnapshot->addSharedCache(std::move(sharedCache));
-    }
+        // FIXME: we should move this earlier, but for now we need the runtime state to inited before setup compact info
+        // Until we do that compact info may miss certain very early dyld crashes
+        state->withCurrentProcessSnapshot(^(EphemeralAllocator& ephemeralAllocator, ProcessSnapshot* processSnapshot){
+            processSnapshot->setPlatform((uint64_t)state->config.process.platform);
+            processSnapshot->setDyldState(dyld_process_state_dyld_initialized);
+            FileRecord cacheFileRecord = state->fileManager.fileRecordForVolumeDevIDAndObjID(gProcessInfo->sharedCacheFSID, gProcessInfo->sharedCacheFSObjID);
+            if (cacheFileRecord.exists()) {
+                auto sharedCache = SharedCache(ephemeralAllocator, std::move(cacheFileRecord), processSnapshot->identityMapper(), (uint64_t)config.dyldCache.addr, gProcessInfo->processDetachedFromSharedRegion);
+                processSnapshot->addSharedCache(std::move(sharedCache));
+            }
 
-    // Add dyld to compact info
-    if ( dyldMA->inDyldCache() && processSnapshot->sharedCache() ) {
-        processSnapshot->addSharedCacheImage((const struct mach_header *)dyldMA);
-    } else {
-        FileRecord dyldFile;
-        if (state.config.process.dyldFSID && state.config.process.dyldObjID) {
-            dyldFile = state.fileManager.fileRecordForVolumeDevIDAndObjID(state.config.process.dyldFSID, state.config.process.dyldObjID);
-            if ( dyldFile.volume().empty() )
-                dyldFile = state.fileManager.fileRecordForPath(state.config.process.dyldPath);
-        } else {
-            dyldFile = state.fileManager.fileRecordForPath(state.config.process.dyldPath);
-        }
-        auto dyldImage = Image(state.ephemeralAllocator, std::move(dyldFile), processSnapshot->identityMapper(), (const mach_header*)getDyldMH());
-        processSnapshot->addImage(std::move(dyldImage));
-    }
+            // Add dyld to compact info
+            if ( dyldMA->inDyldCache() && processSnapshot->sharedCache() ) {
+                processSnapshot->addSharedCacheImage((const struct mach_header *)dyldMA);
+            } else {
+                FileRecord dyldFile;
+                if (state->config.process.dyldFSID && state->config.process.dyldObjID) {
+                    dyldFile = state->fileManager.fileRecordForVolumeDevIDAndObjID(state->config.process.dyldFSID, state->config.process.dyldObjID);
+                    if ( dyldFile.volume().empty() )
+                        dyldFile = state->fileManager.fileRecordForPath(ephemeralAllocator, state->config.process.dyldPath);
+                } else {
+                    dyldFile = state->fileManager.fileRecordForPath(ephemeralAllocator, state->config.process.dyldPath);
+                }
+                auto dyldImage = Image(ephemeralAllocator, std::move(dyldFile), processSnapshot->identityMapper(), (const mach_header*)getDyldMH());
+                processSnapshot->addImage(std::move(dyldImage));
+            }
 
-    // Add the main executable to compact info
-    FileRecord mainExecutableFile;
-    if (state.config.process.mainExecutableFSID && state.config.process.mainExecutableObjID) {
-        mainExecutableFile = state.fileManager.fileRecordForVolumeDevIDAndObjID(state.config.process.mainExecutableFSID, state.config.process.mainExecutableObjID);
-        if ( mainExecutableFile.volume().empty() )
-            mainExecutableFile = state.fileManager.fileRecordForPath(state.config.process.mainExecutablePath);
-    } else {
-        mainExecutableFile = state.fileManager.fileRecordForPath(state.config.process.mainExecutablePath);
-    }
-    auto mainExecutableImage = Image(state.ephemeralAllocator, std::move(mainExecutableFile), processSnapshot->identityMapper(), (const mach_header*)state.config.process.mainExecutable);
-    processSnapshot->addImage(std::move(mainExecutableImage));
-    processSnapshot->setInitialImageCount(state.initialImageCount());
-    state.commitProcessSnapshot();
+            // Add the main executable to compact info
+            FileRecord mainExecutableFile;
+            if (state->config.process.mainExecutableFSID && state->config.process.mainExecutableObjID) {
+                mainExecutableFile = state->fileManager.fileRecordForVolumeDevIDAndObjID(state->config.process.mainExecutableFSID, state->config.process.mainExecutableObjID);
+                if ( mainExecutableFile.volume().empty() )
+                    mainExecutableFile = state->fileManager.fileRecordForPath(ephemeralAllocator, state->config.process.mainExecutablePath);
+            } else {
+                mainExecutableFile = state->fileManager.fileRecordForPath(ephemeralAllocator, state->config.process.mainExecutablePath);
+            }
+            auto mainExecutableImage = Image(ephemeralAllocator, std::move(mainExecutableFile), processSnapshot->identityMapper(), (const mach_header*)state->config.process.mainExecutable);
+            processSnapshot->addImage(std::move(mainExecutableImage));
+            processSnapshot->setInitialImageCount(state->initialImageCount());
+        });
 #endif
-
-    // load all dependents of program and bind them together
-    MainFunc appMain = prepare(state, dyldMA);
-
-
-    // now make all dyld Allocated data structures read-only
-    state.decWritable();
+        // load all dependents of program and bind them together
+        appMain = prepare(*state, dyldMA);
+    });
 
     // call main() and if it returns, call exit() with the result
     // Note: this is organized so that a backtrace in a program's main thread shows just "start" below "main"
-    int result = appMain(state.config.process.argc, state.config.process.argv, state.config.process.envp, state.config.process.apple);
+    int result = appMain(state->config.process.argc, state->config.process.argv, state->config.process.envp, state->config.process.apple);
 
     // if we got here, main() returned (as opposed to program calling exit())
 #if TARGET_OS_OSX
     // <rdar://74518676> libSystemHelpers is not set up for simulators, so directly call _exit()
-    if ( MachOFile::isSimulatorPlatform(state.config.process.platform) )
+    if ( MachOFile::isSimulatorPlatform(state->config.process.platform) )
         _exit(result);
 #endif
-    state.libSystemHelpers->exit(result);
+    state->libSystemHelpers->exit(result);
 }
 
 } // namespace
@@ -1224,7 +1237,9 @@ MainFunc _dyld_sim_prepare(int argc, const char* argv[], const char* envp[], con
     kernArgs->mainExecutable = (MachOAnalyzer*)mainExecutableMH;
 
      // create an Allocator inside its own allocation pool
-    Allocator& allocator = Allocator::persistentAllocator();
+    // Setup the memory manager object before the allocator so the allocator can use it before copying it internally
+    MemoryManager bootStapMemoryManager((const char**)kernArgs->findApple());
+    Allocator& allocator = Allocator::persistentAllocator(std::move(bootStapMemoryManager));
 
     // use placement new to construct ProcessConfig object in the Allocator pool
     ProcessConfig& config = *new (allocator.aligned_alloc(alignof(ProcessConfig), sizeof(ProcessConfig))) ProcessConfig(kernArgs, sSyscallDelegate, allocator);
@@ -1232,14 +1247,16 @@ MainFunc _dyld_sim_prepare(int argc, const char* argv[], const char* envp[], con
     // create APIs (aka RuntimeState) object in the allocator
     APIs& state = *new (allocator.aligned_alloc(alignof(APIs), sizeof(APIs))) APIs(config, allocator, sLocks);
 
-    // now that allocator is up, we can update image list
-    syncProcessInfo(state.persistentAllocator);
+    // function pointer that will be set to the entry point. Declare it here so the value can escape from withWritableMemory()
+    MainFunc result = nullptr;
 
-    // load all dependents of program and bind them together, then return address of main()
-    MainFunc result = prepare(state, dyldMA);
+    allocator.memoryManager()->withWritableMemory([&] {
+        // now that allocator is up, we can update image list
+        syncProcessInfo(state.persistentAllocator);
 
-    // now make all dyld Allocated data structures read-only
-    state.decWritable();
+        // load all dependents of program and bind them together, then return address of main()
+        result = prepare(state, dyldMA);
+    });
 
     // return fake main, which calls real main() then simulator exit()
     *startGlue   = 1;  // means result is pointer to main(), as opposed to crt1.o entry

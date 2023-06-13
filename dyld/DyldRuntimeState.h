@@ -29,6 +29,7 @@
 #include <mach-o/dyld.h>
 #include <mach-o/dyld_priv.h>
 #include <os/lock_private.h>
+#include <os/atomic_private.h>
 
 #include "Defines.h"
 #include "MachOLoaded.h"
@@ -45,7 +46,7 @@
 #include "Map.h"
 #include "UUID.h"
 #include "OrderedMap.h"
-
+#include "Tracing.h"
 
 namespace dyld4 {
 
@@ -55,6 +56,7 @@ using lsl::OrderedMap;
 using lsl::Vector;
 using lsl::Allocator;
 using lsl::EphemeralAllocator;
+using lsl::MemoryManager;
 using dyld3::MachOLoaded;
 using dyld3::MachOAnalyzer;
 
@@ -105,11 +107,10 @@ struct RuntimeLocks
     os_unfair_recursive_lock        notifiersLock         = OS_UNFAIR_RECURSIVE_LOCK_INIT;
     os_unfair_recursive_lock        tlvInfosLock          = OS_UNFAIR_RECURSIVE_LOCK_INIT;
     os_unfair_recursive_lock        apiLock               = OS_UNFAIR_RECURSIVE_LOCK_INIT;
+    os_unfair_lock_s                allocatorLock         = OS_LOCK_UNFAIR_INIT;
   #if !TARGET_OS_SIMULATOR
-    os_lock_unfair_s                logSerializer         = OS_LOCK_UNFAIR_INIT;
+    os_unfair_lock_s                logSerializer         = OS_LOCK_UNFAIR_INIT;
   #endif
-    pthread_mutex_t                 writableLock          = PTHREAD_MUTEX_INITIALIZER;
-    int                             writeableCount        = 1;
 };
 #endif // !BUILDING_DYLD
 
@@ -235,7 +236,6 @@ class [[clang::ptrauth_vtable_pointer(process_independent, address_discriminatio
 public:
     const ProcessConfig&            config;
     Allocator&                      persistentAllocator;
-    EphemeralAllocator              ephemeralAllocator;
     const Loader*                   mainExecutableLoader = nullptr;
     Vector<ConstAuthLoader>         loaded;
     const Loader*                   libSystemLoader      = nullptr;
@@ -244,9 +244,10 @@ public:
     const void*                     libdyldMissingSymbol = nullptr;
 #endif
     uint64_t                        libdyldMissingSymbolRuntimeOffset = 0;
+    MemoryManager&                  memoryManager;
 #if BUILDING_DYLD
     RuntimeLocks&                   _locks;
-#endif
+#endif /* BUILDING_DYLD */
     dyld4::ProgramVars*             vars                 = nullptr;
     const LibSystemHelpers*         libSystemHelpers     = nullptr;
     Vector<InterposeTupleAll>       interposingTuplesAll;
@@ -265,16 +266,17 @@ public:
 #if BUILDING_DYLD
                                 RuntimeState(const ProcessConfig& c, Allocator& alloc, RuntimeLocks& locks)
 #else
-                                RuntimeState(const ProcessConfig& c, Allocator& alloc = Allocator::defaultAllocator())
+                                RuntimeState(const ProcessConfig& c, Allocator& alloc = Allocator::persistentAllocator())
 #endif
-    : config(c), persistentAllocator(alloc), loaded(alloc),
+                                    : config(c), persistentAllocator(alloc),
+                                    loaded(alloc), memoryManager(*alloc.memoryManager()),
 #if BUILDING_DYLD
                                     _locks(locks),
-#endif
+#endif /* BUILDING_DYLD */
                                     interposingTuplesAll(alloc), interposingTuplesSpecific(alloc),
                                     patchedObjCClasses(alloc), objcReplacementClasses(alloc),
                                     patchedSingletons(alloc),
-                                    fileManager(persistentAllocator, &config.syscall),
+                                    fileManager(alloc, &config.syscall),
                                     _notifyAddImage(alloc), _notifyRemoveImage(alloc),
                                     _notifyLoadImage(alloc), _notifyBulkLoadImage(alloc),
                                     _tlvInfos(alloc), _loadersNeedingDOFUnregistration(alloc),
@@ -322,19 +324,22 @@ public:
     template<typename F>
     ALWAYS_INLINE void          withNotifiersWriteLock(F work)
     {
-    #if BUILDING_DYLD
-        if ( this->libSystemHelpers != nullptr ) {
-            this->libSystemHelpers->os_unfair_recursive_lock_lock_with_options(&_locks.notifiersLock, OS_UNFAIR_LOCK_NONE);
-              this->incWritable();
-                 work();
-              this->decWritable();
-            this->libSystemHelpers->os_unfair_recursive_lock_unlock(&_locks.notifiersLock);
-        }
-        else
-    #endif
-        {
-            work();
-        }
+        // We wrap with withWritableMemory outside the BUILDING_DYLD because we need to swap the writability in early dyld (before
+        // libSystemHelpers is configured) and it compiles to a noop for non-dyld targets.
+        memoryManager.withWritableMemory([&]{
+        #if BUILDING_DYLD
+            if ( this->libSystemHelpers != nullptr ) {
+                this->libSystemHelpers->os_unfair_recursive_lock_lock_with_options(&_locks.notifiersLock, OS_UNFAIR_LOCK_NONE);
+                work();
+                this->libSystemHelpers->os_unfair_recursive_lock_unlock(&_locks.notifiersLock);
+            }
+            else
+        #endif
+            {
+                work();
+            }
+        });
+
     }
 
     void                        addPermanentRanges(const Array<const Loader*>& neverUnloadLoaders);
@@ -384,53 +389,21 @@ public:
     template<typename F>
     ALWAYS_INLINE void          withLoadersWriteLock(F work)
     {
-        #if BUILDING_DYLD
-        if ( this->libSystemHelpers != nullptr ) {
-            this->libSystemHelpers->os_unfair_recursive_lock_lock_with_options(&_locks.loadersLock, OS_UNFAIR_LOCK_NONE);
-            this->incWritable();
-            work();
-            this->decWritable();
-            this->libSystemHelpers->os_unfair_recursive_lock_unlock(&_locks.loadersLock);
-        }
-        else
-        #endif
-        {
-            work();
-        }
-    }
-
-    ALWAYS_INLINE void          incWritable()
-    {
-        #if BUILDING_DYLD
-        // FIXME: move inc/decWritable() into Allocator to replace writeProtect()
-        pthread_mutex_lock(&_locks.writableLock);
-        _locks.writeableCount += 1;
-        if ( _locks.writeableCount == 1 ) {
-            {
-                persistentAllocator.writeProtect(false);
+        // We wrap with withWritableMemory outside the BUILDING_DYLD because we need to swap the writability in early dyld (before
+        // libSystemHelpers is configured) and it compiles to a noop for non-dyld targets.
+        memoryManager.withWritableMemory([&]{
+            #if BUILDING_DYLD
+            if ( this->libSystemHelpers != nullptr ) {
+                this->libSystemHelpers->os_unfair_recursive_lock_lock_with_options(&_locks.loadersLock, OS_UNFAIR_LOCK_NONE);
+                work();
+                this->libSystemHelpers->os_unfair_recursive_lock_unlock(&_locks.loadersLock);
             }
-        }
-        pthread_mutex_unlock(&_locks.writableLock);
-        #endif
-    }
-
-    ALWAYS_INLINE void          decWritable()
-    {
-        #if BUILDING_DYLD
-        pthread_mutex_lock(&_locks.writableLock);
-        _locks.writeableCount -= 1;
-        if ( _locks.writeableCount == 0 ) {
-            // We are done all write operations, so we can tear down the ephemeral allocator and write protect the persistent one
-#if !TARGET_OS_SIMULATOR
-            freeProcessSnapshot();
-#endif
-            ephemeralAllocator.reset();
+            else
+            #endif
             {
-                persistentAllocator.writeProtect(true);
+                work();
             }
-        }
-        pthread_mutex_unlock(&_locks.writableLock);
-        #endif
+        });
     }
 
 #if BUILDING_DYLD
@@ -460,9 +433,7 @@ public:
     virtual void*               _instantiateTLVs(pthread_key_t key);
 
 #if !TARGET_OS_SIMULATOR
-    ProcessSnapshot*            getCurrentProcessSnapshot();
-    void                        commitProcessSnapshot();
-    void                        freeProcessSnapshot();
+    void                        withCurrentProcessSnapshot(void (^work)(EphemeralAllocator& ephemeralAllocator, ProcessSnapshot* processSnapshot));
 #endif
 
 protected:
@@ -635,7 +606,9 @@ private:
     bool                            _vmAccountingSuspended    = false;
 #endif // TARGET_OS_IPHONE && !TARGET_OS_SIMULATOR
     UniquePtr<OrderedMap<uint64_t,UUID>>    _fsUUIDMap;
-    ProcessSnapshot*                        _processSnapshot    = nullptr;
+#if !TARGET_OS_SIMULATOR
+    os_unfair_lock_s                _processSnapshotLock    = OS_UNFAIR_LOCK_INIT;
+#endif
 };
 
 

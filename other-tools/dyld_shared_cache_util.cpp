@@ -2763,7 +2763,8 @@ int main (int argc, const char* argv[]) {
                                PatchTable::patchKindName(patchKind), exportName);
                         dyldCache->forEachPatchableUseOfExport(imageIndex, dylibVMOffsetOfImpl,
                                                                ^(uint32_t userImageIndex, uint32_t userVMOffset,
-                                                                 dyld3::MachOLoaded::PointerMetaData pmd, uint64_t addend) {
+                                                                 dyld3::MachOLoaded::PointerMetaData pmd, uint64_t addend,
+                                                                 bool isWeakImport) {
                             // Get the image so that we can convert from dylib offset to cache offset
                             uint64_t mTime;
                             uint64_t inode;
@@ -2786,23 +2787,26 @@ int main (int argc, const char* argv[]) {
 
                             uint64_t sectionOffset = patchLocVmAddr-usageAt.vmAddr;
 
+                            const char* weakImportString = isWeakImport ? " (weak-import)" : "";
+
                             if ( addend == 0 ) {
                                 if ( pmd.authenticated ) {
-                                    printf("        used by: %s(0x%04llX) (PAC: div=%d, addr=%s, key=%s) in %s\n",
-                                           usageAt.segName, sectionOffset,
+                                    printf("        used by: %s(0x%04llX)%s (PAC: div=%d, addr=%s, key=%s) in %s\n",
+                                           usageAt.segName, sectionOffset, weakImportString,
                                            pmd.diversity, pmd.usesAddrDiversity ? "true" : "false", keyNames[pmd.key],
                                            userInstallName.data());
                                 } else {
-                                    printf("        used by: %s(0x%04llX) in %s\n", usageAt.segName, sectionOffset, userInstallName.data());
+                                    printf("        used by: %s(0x%04llX)%s in %s\n", usageAt.segName, sectionOffset, weakImportString, userInstallName.data());
                                 }
                             } else {
                                 if ( pmd.authenticated ) {
-                                    printf("        used by: %s(0x%04llX) (addend=%lld) (PAC: div=%d, addr=%s, key=%s) in %s\n",
-                                           usageAt.segName, sectionOffset, addend,
+                                    printf("        used by: %s(0x%04llX)%s (addend=%lld) (PAC: div=%d, addr=%s, key=%s) in %s\n",
+                                           usageAt.segName, sectionOffset, weakImportString, addend,
                                            pmd.diversity, pmd.usesAddrDiversity ? "true" : "false", keyNames[pmd.key],
                                            userInstallName.data());
                                 } else {
-                                    printf("        used by: %s(0x%04llX) (addend=%lld) in %s\n", usageAt.segName, sectionOffset, addend, userInstallName.data());
+                                    printf("        used by: %s(0x%04llX)%s (addend=%lld) in %s\n", usageAt.segName, sectionOffset, weakImportString,
+                                           addend, userInstallName.data());
                                 }
                             }
                         });
@@ -2810,26 +2814,28 @@ int main (int argc, const char* argv[]) {
                         // Print GOT uses
                         dyldCache->forEachPatchableGOTUseOfExport(imageIndex, dylibVMOffsetOfImpl,
                                                                   ^(uint64_t cacheVMOffset,
-                                                                    dyld3::MachOLoaded::PointerMetaData pmd, uint64_t addend) {
+                                                                    dyld3::MachOLoaded::PointerMetaData pmd, uint64_t addend,
+                                                                    bool isWeakImport) {
 
                             // FIXME: We can't get this from MachoLoaded without having a fixup location to call
                             static const char* keyNames[] = {
                                 "IA", "IB", "DA", "DB"
                             };
 
+                            const char* weakImportString = isWeakImport ? " (weak-import)" : "";
                             if ( addend == 0 ) {
                                 if ( pmd.authenticated ) {
-                                    printf("        used by: GOT (PAC: div=%d, addr=%s, key=%s)\n",
-                                           pmd.diversity, pmd.usesAddrDiversity ? "true" : "false", keyNames[pmd.key]);
+                                    printf("        used by: GOT%s (PAC: div=%d, addr=%s, key=%s)\n",
+                                           weakImportString, pmd.diversity, pmd.usesAddrDiversity ? "true" : "false", keyNames[pmd.key]);
                                 } else {
-                                    printf("        used by: GOT\n");
+                                    printf("        used by: GOT%s\n", weakImportString);
                                 }
                             } else {
                                 if ( pmd.authenticated ) {
-                                    printf("        used by: GOT (addend=%lld) (PAC: div=%d, addr=%s, key=%s)\n",
-                                           addend, pmd.diversity, pmd.usesAddrDiversity ? "true" : "false", keyNames[pmd.key]);
+                                    printf("        used by: GOT%s (addend=%lld) (PAC: div=%d, addr=%s, key=%s)\n",
+                                           weakImportString, addend, pmd.diversity, pmd.usesAddrDiversity ? "true" : "false", keyNames[pmd.key]);
                                 } else {
-                                    printf("        used by: GOT (addend=%lld)\n", addend);
+                                    printf("        used by: GOT%s (addend=%lld)\n", weakImportString, addend);
                                 }
                             }
                         });

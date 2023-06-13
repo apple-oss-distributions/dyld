@@ -65,7 +65,7 @@ namespace dyld4 {
 
 uintptr_t LibSystemHelpers::version() const
 {
-    return 5;
+    return 6;
 }
 
 void* LibSystemHelpers::malloc(size_t size) const
@@ -201,6 +201,16 @@ void LibSystemHelpers::os_unfair_recursive_lock_unlock_forked_child(os_unfair_re
 void LibSystemHelpers::setDyldPatchedObjCClasses() const
 {
     dyld_process_has_objc_patches = 1;
+}
+
+// Added in version 6
+void LibSystemHelpers::os_unfair_lock_lock_with_options(os_unfair_lock_t lock, os_unfair_lock_options_t options) const
+{
+    ::os_unfair_lock_lock_with_options(lock, options);
+}
+void LibSystemHelpers::os_unfair_lock_unlock(os_unfair_lock_t lock) const
+{
+    ::os_unfair_lock_unlock(lock);
 }
 
 } // namespace dyld4

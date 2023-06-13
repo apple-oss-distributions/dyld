@@ -146,7 +146,6 @@
 		37C1489025D1B3F600E00E7E /* Allocator.cpp in Sources */ = {isa = PBXBuildFile; fileRef = 37C1488525D1258B00E00E7E /* Allocator.cpp */; };
 		37CA9BD52746DC08008485A5 /* RemoteNotificationResponder.cpp in Sources */ = {isa = PBXBuildFile; fileRef = 37CA9BD32746DC08008485A5 /* RemoteNotificationResponder.cpp */; };
 		37CB5E1226FAA36100DDC20A /* OrderedMapTests.mm in Sources */ = {isa = PBXBuildFile; fileRef = 37CB5E1126FAA36100DDC20A /* OrderedMapTests.mm */; };
-		37CB5E1426FE549800DDC20A /* ConcurrentAllocatorTests.mm in Sources */ = {isa = PBXBuildFile; fileRef = 37CB5E1326FE549800DDC20A /* ConcurrentAllocatorTests.mm */; };
 		37D4A763273E46EC00DA709B /* CRC32cTestCase.mm in Sources */ = {isa = PBXBuildFile; fileRef = 37D4A762273E46EC00DA709B /* CRC32cTestCase.mm */; };
 		37D4D75E25DAEC9E00F65044 /* OptimizerSwift.cpp in Sources */ = {isa = PBXBuildFile; fileRef = C13F65FA25CCE33A0097F92E /* OptimizerSwift.cpp */; };
 		37D4D75F25DAEC9E00F65044 /* OptimizerSwift.h in Sources */ = {isa = PBXBuildFile; fileRef = C13F65F925CCE33A0097F92E /* OptimizerSwift.h */; };
@@ -929,7 +928,6 @@
 		37CA9BD32746DC08008485A5 /* RemoteNotificationResponder.cpp */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.cpp.cpp; path = RemoteNotificationResponder.cpp; sourceTree = "<group>"; };
 		37CA9BD42746DC08008485A5 /* RemoteNotificationResponder.h */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.c.h; path = RemoteNotificationResponder.h; sourceTree = "<group>"; };
 		37CB5E1126FAA36100DDC20A /* OrderedMapTests.mm */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.cpp.objcpp; path = OrderedMapTests.mm; sourceTree = "<group>"; };
-		37CB5E1326FE549800DDC20A /* ConcurrentAllocatorTests.mm */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.cpp.objcpp; path = ConcurrentAllocatorTests.mm; sourceTree = "<group>"; };
 		37CB5E1526FE556D00DDC20A /* AllocatorTestSequence.h */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.c.h; path = AllocatorTestSequence.h; sourceTree = "<group>"; };
 		37D4A762273E46EC00DA709B /* CRC32cTestCase.mm */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.cpp.objcpp; path = CRC32cTestCase.mm; sourceTree = "<group>"; };
 		37D92BC826F0694C008F0309 /* OrderedMap.h */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.c.h; path = OrderedMap.h; sourceTree = "<group>"; };
@@ -1797,7 +1795,6 @@
 				37CB5E1526FE556D00DDC20A /* AllocatorTestSequence.h */,
 				37C1488925D1B3C200E00E7E /* AllocatorTests.mm */,
 				3736CB562708F67100BDA046 /* SmartPointerTests.mm */,
-				37CB5E1326FE549800DDC20A /* ConcurrentAllocatorTests.mm */,
 				379EF49C26D3747600703900 /* OrderedSetTests.mm */,
 				37CB5E1126FAA36100DDC20A /* OrderedMapTests.mm */,
 				37C1488B25D1B3C200E00E7E /* DyldTestCase.h */,
@@ -3356,7 +3353,6 @@
 				C1DC827B27F53585003D33E5 /* MetadataVisitor.cpp in Sources */,
 				F9D7EF1E24F0C1C0002930F3 /* ClosureFileSystemPhysical.cpp in Sources */,
 				F9D7EF1D24F0C1B8002930F3 /* DyldSharedCache.cpp in Sources */,
-				37CB5E1426FE549800DDC20A /* ConcurrentAllocatorTests.mm in Sources */,
 				379EF49D26D3747600703900 /* OrderedSetTests.mm in Sources */,
 				F9D7EF1924F0C1A5002930F3 /* MachOFile.cpp in Sources */,
 				C1DC827E27F535AF003D33E5 /* CachePatching.cpp in Sources */,

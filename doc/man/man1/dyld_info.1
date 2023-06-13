@@ -17,6 +17,7 @@
 .Op Fl fixups
 .Op Fl fixup_chains
 .Op Fl fixup_chain_details
+.Op Fl function_starts
 .Op Fl symbolic_fixups
 .Op Fl opcodes
 .Op Fl validate_only
@@ -54,6 +55,8 @@ Display a simple table of fixup locations and what dyld will set them to.
 If the binary uses chained fixups, displays the format of the chains and the starts.
 .It Fl fixup_chain_details
 Display a table of all the raw fixup chain bits and their meanings.
+.It Fl symbolic_fixups
+Display the offset of all functions starts and their name.
 .It Fl symbolic_fixups
 Display all fixups, grouped by data symbol.
 .It Fl opcodes

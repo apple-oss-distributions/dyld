@@ -1130,7 +1130,11 @@ uint64_t MachOAnalyzer::localRelocBaseAddress(const SegmentInfo segmentsInfos[],
                 return segmentsInfos[i].vmAddr;
         }
     }
-    return segmentsInfos[0].vmAddr;
+    // reloc base address is start of TEXT segment
+    if ( this->isMainExecutable() && (segmentsInfos[0].protections == 0) )
+        return segmentsInfos[1].vmAddr;
+    else
+        return segmentsInfos[0].vmAddr;
 }
 
 uint64_t MachOAnalyzer::externalRelocBaseAddress(const SegmentInfo segmentsInfos[], uint32_t segCount) const

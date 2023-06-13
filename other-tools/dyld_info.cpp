@@ -1343,12 +1343,15 @@ static void printPatching(const dyld3::MachOAnalyzer* ma)
 static void printFunctionStarts(const dyld3::MachOAnalyzer* ma)
 {
     printf("    -function_starts:\n");
-    printf("        offset\n");
-
-    uint64_t loadAddress = ma->preferredLoadAddress();
     ma->forEachFunctionStart(^(uint64_t runtimeOffset) {
-        uint64_t targetVMAddr = loadAddress + runtimeOffset;
-        printf("        0x%08llX\n", targetVMAddr);
+        uint64_t targetVMAddr = (uint64_t)ma+runtimeOffset;
+        const char* symbolName = nullptr;
+        uint64_t symbolLoadAddr = 0;
+        if ( ma->findClosestSymbol(targetVMAddr, &symbolName, &symbolLoadAddr) ) {
+            printf("        0x%08llX  %s\n", runtimeOffset, symbolName);
+        } else {
+            printf("        0x%08llX\n", runtimeOffset);
+        }
     });
 }
 

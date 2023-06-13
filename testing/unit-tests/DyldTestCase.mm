@@ -83,8 +83,8 @@ TestState::TestState(const std::vector<const char*>& envp)
 
 
 - (bool) randomBool {
-    std::uniform_int_distribution<bool> dist(0, 1);
-    return dist(_mt);
+    std::uniform_int_distribution<uint8_t> dist(0, 1);
+    return (dist(_mt) == 1);
 }
 
 - (uint64_t) uniformRandomFrom:(uint64_t)lowerBound to:(uint64_t)upperBound {

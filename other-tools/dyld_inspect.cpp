@@ -19,6 +19,8 @@ static void usage()
             "\t-shared_cache_address    print shared cache base address\n"
             //"\t-shared_cache_path       print shared cache path\n"
             "\t-shared_cache            print all shared cache options\n"
+            //FIXME: Keep hidden for now, make public once we settle on the output format
+//            "\t-images                  print all images loaded in the process\n"
         );
 }
 
@@ -30,9 +32,10 @@ int main(int argc, const char* argv[], const char* envp[], const char* apple[])
     }
 
     bool allProcesses = false;
-    int specificProcessPID = 0;
-    bool printSharedCacheUUID = false;
-    bool printSharedCacheAddress = false;
+    int specificProcessPID          = 0;
+    bool printSharedCacheUUID       = false;
+    bool printSharedCacheAddress    = false;
+    bool printImages                = false;
     //bool printSharedCachePath = false;
     bool gotOption = false;
     for (int i=1; i < argc; ++i) {
@@ -52,6 +55,11 @@ int main(int argc, const char* argv[], const char* envp[], const char* apple[])
         else if ( strcmp(arg, "-shared_cache") == 0 ) {
             printSharedCacheUUID = true;
             printSharedCacheAddress = true;
+            // printSharedCachePath = true;
+            gotOption = true;
+        }
+        else if ( strcmp(arg, "-images") == 0 ) {
+            printImages = true;
             // printSharedCachePath = true;
             gotOption = true;
         }
@@ -134,10 +142,6 @@ int main(int argc, const char* argv[], const char* envp[], const char* apple[])
         uuid_clear(cacheUUID);
         dyld_shared_cache_copy_uuid(dyldSharedCache, &cacheUUID);
 
-        // All done.  Free the data structures
-        dyld_process_snapshot_dispose(dyldSnapshot);
-        dyld_process_dispose(dyldProcess);
-
         bool printSeparator = false;
         if ( allProcesses ) {
             if ( printSeparator ) printf("  ");
@@ -160,6 +164,38 @@ int main(int argc, const char* argv[], const char* envp[], const char* apple[])
             printf("0x%08llx", cacheBaseAddress);
         }
         printf("\n");
+
+        if (printImages) {
+            dyld_process_snapshot_for_each_image(dyldSnapshot, ^(dyld_image_t image) {
+                if ( allProcesses ) {
+                    printf("      ");
+                }
+                uuid_t imageUUID;
+                uuid_clear(imageUUID);
+                dyld_image_copy_uuid(image, &imageUUID);
+                uuid_string_t uuidString;
+                uuid_unparse_upper(imageUUID, uuidString);
+                printf("%s", uuidString);
+                const char* installname = dyld_image_get_installname(image);
+                const char* file_path = dyld_image_get_file_path(image);
+                if (file_path) {
+                    printf("%s\n", file_path);
+                } else if (installname) {
+                    printf("%s\n", installname);
+                }
+                dyld_image_for_each_segment_info(image, ^(const char *segmentName, uint64_t vmAddr, uint64_t vmSize, int perm) {
+                    if ( allProcesses ) {
+                        printf("            %16s 0x%08llx-0x%08llx\n", segmentName, vmAddr, vmAddr+vmSize);
+                    } else {
+                        printf("      %16s 0x%08llx-0x%08llx\n", segmentName, vmAddr, vmAddr+vmSize);
+                    }
+                });
+            });
+        }
+
+        // All done.  Free the data structures
+        dyld_process_snapshot_dispose(dyldSnapshot);
+        dyld_process_dispose(dyldProcess);
     };
 
     if ( allProcesses ) {

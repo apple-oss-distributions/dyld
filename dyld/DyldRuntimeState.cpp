@@ -24,6 +24,7 @@
 #include <TargetConditionals.h>
 #include <_simple.h>
 #include <stdint.h>
+#include <os/lock.h>
 #include <sys/sysctl.h>
 #include <sys/socket.h>
 #include <sys/syslog.h>
@@ -83,6 +84,7 @@ extern "C" int amfi_check_dyld_policy_self(uint64_t input_flags, uint64_t* outpu
 #include "RemoteNotificationResponder.h"
 #include "Vector.h"
 
+using lsl::Lock;
 using dyld3::MachOAnalyzer;
 using dyld3::MachOFile;
 using dyld3::Platform;
@@ -473,7 +475,7 @@ void RuntimeState::vlog(const char* format, va_list list)
 #else
 #if BUILDING_DYLD && !TARGET_OS_SIMULATOR
     // prevent multi-thread log() calls from intermingling their text
-    os_lock_lock(&_locks.logSerializer);
+    os_unfair_lock_lock(&_locks.logSerializer);
 #endif
     // lazy initialize logging output
     if ( !_logSetUp )
@@ -503,7 +505,7 @@ void RuntimeState::vlog(const char* format, va_list list)
     }
 
 #if BUILDING_DYLD && !TARGET_OS_SIMULATOR
-    os_lock_unlock(&_locks.logSerializer);
+    os_unfair_lock_unlock(&_locks.logSerializer);
 #endif
 #endif
 }
@@ -906,26 +908,23 @@ void RuntimeState::decDlRefCount(const Loader* ldr)
     if ( ldr->neverUnload )
         return;
 
-    this->incWritable();
-
-    bool doCollect = false;
-    for (auto it=_dlopenRefCounts.begin(); it != _dlopenRefCounts.end(); ++it) {
-        if ( it->loader == ldr ) {
-            // found existing DlopenCount entry, bump counter
-            it->refCount -= 1;
-            if ( it->refCount == 0 ) {
-                _dlopenRefCounts.erase(it);
-                doCollect = true;
-                break;
+    memoryManager.withWritableMemory([&]{
+        bool doCollect = false;
+        for (auto it=_dlopenRefCounts.begin(); it != _dlopenRefCounts.end(); ++it) {
+            if ( it->loader == ldr ) {
+                // found existing DlopenCount entry, bump counter
+                it->refCount -= 1;
+                if ( it->refCount == 0 ) {
+                    _dlopenRefCounts.erase(it);
+                    doCollect = true;
+                    break;
+                }
+                return;
             }
-            this->decWritable();
-            return;
         }
-    }
-    if ( doCollect )
-        garbageCollectImages();
-
-    this->decWritable();
+        if ( doCollect )
+            garbageCollectImages();
+    });
 }
 
 class VIS_HIDDEN Reaper
@@ -1192,9 +1191,10 @@ void RuntimeState::notifyDebuggerLoad(const std::span<const Loader*>& newLoaders
 
 #if !TARGET_OS_SIMULATOR
     // Add to processSnapshot
-    getCurrentProcessSnapshot()->addImages(this, newLoaders);
-    commitProcessSnapshot();
-#endif
+    withCurrentProcessSnapshot(^(EphemeralAllocator& ephemeralAllocator, ProcessSnapshot* processSnapshot){
+        processSnapshot->addImages(this, newLoaders);
+    });
+#endif /* !TARGET_OS_SIMULATOR */
 
     //TODO: Move all this logic into ProcessSnapshot
     // notify debugger
@@ -1221,9 +1221,11 @@ void RuntimeState::notifyDebuggerUnload(const std::span<const Loader*>& removing
 #if BUILDING_DYLD
 
 #if !TARGET_OS_SIMULATOR
-    getCurrentProcessSnapshot()->removeImages(this, removingLoaders);
-    commitProcessSnapshot();
-#endif
+    // Remove from processSnapshot
+    withCurrentProcessSnapshot(^(EphemeralAllocator& ephemeralAllocator, ProcessSnapshot* processSnapshot){
+        processSnapshot->removeImages(this, removingLoaders);
+    });
+#endif /* !TARGET_OS_SIMULATOR */
 
     //TODO: Move all this logic into ProcessSnapshot
     // notify debugger
@@ -1615,63 +1617,64 @@ void RuntimeState::setObjCNotifiers(_dyld_objc_notify_mapped mapped, _dyld_objc_
                                     _dyld_objc_notify_unmapped unmapped, _dyld_objc_notify_patch_class patchClass,
                                     _dyld_objc_notify_mapped2 mapped2)
 {
-    _notifyObjCMapped       = mapped;
-    _notifyObjCInit         = init;
-    _notifyObjCUnmapped     = unmapped;
-    _notifyObjCPatchClass   = patchClass;
-    _notifyObjCMapped2      = mapped2;
+    memoryManager.withWritableMemory([&]{
+        _notifyObjCMapped       = mapped;
+        _notifyObjCInit         = init;
+        _notifyObjCUnmapped     = unmapped;
+        _notifyObjCPatchClass   = patchClass;
+        _notifyObjCMapped2      = mapped2;
+        withLoadersReadLock(^{
+            if ( (_notifyObjCPatchClass != nullptr) && !this->objcReplacementClasses.empty() ) {
+                // Tell Symbolication that we are patching classes
+                this->setDyldPatchedObjCClasses();
 
-    withLoadersReadLock(^{
-        if ( (_notifyObjCPatchClass != nullptr) && !this->objcReplacementClasses.empty() ) {
-            // Tell Symbolication that we are patching classes
-            this->setDyldPatchedObjCClasses();
+                for ( const ObjCClassReplacement& classReplacement : this->objcReplacementClasses )
+                    (*_notifyObjCPatchClass)(classReplacement.cacheMH, (void*)classReplacement.cacheImpl,
+                                             classReplacement.rootMH, (const void*)classReplacement.rootImpl);
+                if ( this->config.log.notifications ) {
+                    this->log("objc-patch-class-notifier called with %ld patches:\n", this->objcReplacementClasses.size());
+                }
 
-            for ( const ObjCClassReplacement& classReplacement : this->objcReplacementClasses )
-                (*_notifyObjCPatchClass)(classReplacement.cacheMH, (void*)classReplacement.cacheImpl,
-                                         classReplacement.rootMH, (const void*)classReplacement.rootImpl);
-            if ( this->config.log.notifications ) {
-                this->log("objc-patch-class-notifier called with %ld patches:\n", this->objcReplacementClasses.size());
+                // Clear the replacement classes.  We don't want to notify about them again if a dlopen happens
+                this->objcReplacementClasses.clear();
             }
 
-            // Clear the replacement classes.  We don't want to notify about them again if a dlopen happens
-            this->objcReplacementClasses.clear();
-        }
+            // callback about already loaded images
+            size_t maxCount = this->loaded.size();
+            STACK_ALLOC_ARRAY(const mach_header*, mhs, maxCount);
+            STACK_ALLOC_ARRAY(const char*, paths, maxCount);
+            STACK_ALLOC_ARRAY(_dyld_objc_notify_mapped_info, infos, maxCount);
+            for ( const Loader* ldr : loaded ) {
+                // don't need _mutex here because this is called when process is still single threaded
+                const MachOLoaded* ml = ldr->loadAddress(*this);
+                if ( ldr->hasObjC ) {
+                    paths.push_back(ldr->path());
+                    mhs.push_back(ml);
+                    infos.push_back({ml, ldr->path(), ldr->dyldDoesObjCFixups(), 0});
 
-        // callback about already loaded images
-        size_t maxCount = this->loaded.size();
-        STACK_ALLOC_ARRAY(const mach_header*, mhs, maxCount);
-        STACK_ALLOC_ARRAY(const char*, paths, maxCount);
-        STACK_ALLOC_ARRAY(_dyld_objc_notify_mapped_info, infos, maxCount);
-        for ( const Loader* ldr : loaded ) {
-            // don't need _mutex here because this is called when process is still single threaded
-            const MachOLoaded* ml = ldr->loadAddress(*this);
-            if ( ldr->hasObjC ) {
-                paths.push_back(ldr->path());
-                mhs.push_back(ml);
-                infos.push_back({ml, ldr->path(), ldr->dyldDoesObjCFixups(), 0});
-
-                // Make the memory read-write while map_images runs
-                if ( ldr->hasConstantSegmentsToProtect() && ldr->hasReadOnlyObjC )
-                    ldr->makeSegmentsReadWrite(*this);
-            }
-        }
-        if ( !mhs.empty() ) {
-            if ( _notifyObjCMapped != nullptr )
-                (*_notifyObjCMapped)((uint32_t)mhs.count(), &paths[0], &mhs[0]);
-            if ( _notifyObjCMapped2 != nullptr )
-                (*_notifyObjCMapped2)((uint32_t)mhs.count(), &infos[0]);
-            if ( this->config.log.notifications ) {
-                this->log("objc-mapped-notifier called with %ld images:\n", mhs.count());
-                for ( uintptr_t i = 0; i < mhs.count(); ++i ) {
-                    this->log(" objc-mapped: %p %s\n", mhs[i], paths[i]);
+                    // Make the memory read-write while map_images runs
+                    if ( ldr->hasConstantSegmentsToProtect() && ldr->hasReadOnlyObjC )
+                        ldr->makeSegmentsReadWrite(*this);
                 }
             }
-            // Make the memory read-only after map_images runs
-            for ( const Loader* ldr : loaded ) {
-                if ( ldr->hasObjC && ldr->hasConstantSegmentsToProtect() && ldr->hasReadOnlyObjC )
-                    ldr->makeSegmentsReadOnly(*this);
+            if ( !mhs.empty() ) {
+                if ( _notifyObjCMapped != nullptr )
+                    (*_notifyObjCMapped)((uint32_t)mhs.count(), &paths[0], &mhs[0]);
+                if ( _notifyObjCMapped2 != nullptr )
+                    (*_notifyObjCMapped2)((uint32_t)mhs.count(), &infos[0]);
+                if ( this->config.log.notifications ) {
+                    this->log("objc-mapped-notifier called with %ld images:\n", mhs.count());
+                    for ( uintptr_t i = 0; i < mhs.count(); ++i ) {
+                        this->log(" objc-mapped: %p %s\n", mhs[i], paths[i]);
+                    }
+                }
+                // Make the memory read-only after map_images runs
+                for ( const Loader* ldr : loaded ) {
+                    if ( ldr->hasObjC && ldr->hasConstantSegmentsToProtect() && ldr->hasReadOnlyObjC )
+                        ldr->makeSegmentsReadOnly(*this);
+                }
             }
-        }
+        });
     });
 }
 
@@ -1743,6 +1746,10 @@ void RuntimeState::initialize()
         if ( ma->hasThreadLocalVariables() )
             this->setUpTLVs(ma);
     }
+
+    // __pthread_init has run, TSDs work now, so enable allocator locking before we go multi-threaded
+    Lock lock(this, &_locks.allocatorLock);
+    this->memoryManager.adoptLock(std::move(lock));
 #endif // BUILDING_DYLD
 }
 
@@ -2492,69 +2499,67 @@ bool RuntimeState::inPrebuiltLoader(const void* p, size_t len) const
 }
 
 #if !TARGET_OS_SIMULATOR
-ProcessSnapshot* RuntimeState::getCurrentProcessSnapshot() {
-#if BUILDING_DYLD
-    if (!_processSnapshot) {
+void RuntimeState::withCurrentProcessSnapshot(void (^work)(EphemeralAllocator& ephemeralAllocator, ProcessSnapshot* processSnapshot)) {
+#if BUILDING_DYLD && !__i386__
+    if (!config.process.enableCompactInfo) { return; }
+    EphemeralAllocator ephemeralAllocator;
+    {
+        UniquePtr<ProcessSnapshot> processSnapshot = nullptr;
+        os_unfair_lock_lock(&_processSnapshotLock);
+        // Get the current compact info
         if (gProcessInfo->compact_dyld_image_info_addr) {
             const std::span<std::byte> data((std::byte*)gProcessInfo->compact_dyld_image_info_addr, gProcessInfo->compact_dyld_image_info_size);
-            _processSnapshot = ephemeralAllocator.makeUnique<ProcessSnapshot>(ephemeralAllocator, fileManager, true, data).release();
+            processSnapshot = ephemeralAllocator.makeUnique<ProcessSnapshot>(ephemeralAllocator, fileManager, true, data);
         } else {
-            _processSnapshot = ephemeralAllocator.makeUnique<ProcessSnapshot>(ephemeralAllocator, fileManager, true).release();
+            processSnapshot = ephemeralAllocator.makeUnique<ProcessSnapshot>(ephemeralAllocator, fileManager, true);
         }
-    }
-#endif
-    return _processSnapshot;
-}
 
-void RuntimeState::commitProcessSnapshot() {
-    if (!config.process.enableCompactInfo) { return; }
-#if BUILDING_DYLD && !__i386__
-    contract(_processSnapshot != nullptr);
-    auto compactInfoData    = _processSnapshot->serialize();
-    auto compactInfo        = (std::byte*)persistentAllocator.malloc(compactInfoData.size());
-    std::copy(compactInfoData.begin(), compactInfoData.end(), &compactInfo[0]);
+        processSnapshot.withUnsafe([&](ProcessSnapshot* snapshot) {
+            work(ephemeralAllocator, snapshot);
+        });
 
-    // We do not need a compare and swap since we are under a lock, but we do need the updates to be atomic to out of process observers
-    struct CompactInfoDescriptor {
-        uintptr_t   addr;
-        size_t      size;
-    } __attribute__((aligned(16)));
-    CompactInfoDescriptor               newDescriptor;
-    newDescriptor.addr = (uintptr_t)compactInfo;
-    newDescriptor.size = compactInfoData.size();
-    auto oldInfo = gProcessInfo->compact_dyld_image_info_addr;
+        // Commit the new compact info
+        auto compactInfoData    = processSnapshot->serialize();
+        auto compactInfo        = (std::byte*)persistentAllocator.malloc(compactInfoData.size());
+        std::copy(compactInfoData.begin(), compactInfoData.end(), &compactInfo[0]);
+
+
+        // We do not need a compare and swap since we are under a lock, but we do need the updates to be atomic to out of process observers
+        struct CompactInfoDescriptor {
+            uintptr_t   addr;
+            size_t      size;
+        } __attribute__((aligned(16)));
+        CompactInfoDescriptor               newDescriptor;
+        newDescriptor.addr = (uintptr_t)compactInfo;
+        newDescriptor.size = compactInfoData.size();
+        auto oldInfo = gProcessInfo->compact_dyld_image_info_addr;
 #if __arm__ || !__LP64__
-    // armv32 archs are missing the atomic primitive, but we only need to be guaraantee the write does not sheer, as the only thing
-    // accessing this outside of a lock is the kernel or a remote process
-    auto currentDescriptor = (uint64_t*)&gProcessInfo->compact_dyld_image_info_addr;
-    *currentDescriptor = *((uint64_t*)&newDescriptor);
+        // armv32 archs are missing the atomic primitive, but we only need to be guaraantee the write does not sheer, as the only thing
+        // accessing this outside of a lock is the kernel or a remote process
+        auto currentDescriptor = (uint64_t*)&gProcessInfo->compact_dyld_image_info_addr;
+        *currentDescriptor = *((uint64_t*)&newDescriptor);
 #else
-    std::atomic<CompactInfoDescriptor>* currentDescriptor = (std::atomic<CompactInfoDescriptor>*)&gProcessInfo->compact_dyld_image_info_addr;
-    currentDescriptor->store(newDescriptor, std::memory_order_relaxed);
-#endif
-    if (oldInfo) {
-        persistentAllocator.free((void*)oldInfo);
+        std::atomic<CompactInfoDescriptor>* currentDescriptor = (std::atomic<CompactInfoDescriptor>*)&gProcessInfo->compact_dyld_image_info_addr;
+        currentDescriptor->store(newDescriptor, std::memory_order_relaxed);
+#endif /* __arm__ || !__LP64__*/
+
+        // fprintf(stderr, "Compact info %p -> %p\n", (void*)oldInfo, (void*)gProcessInfo->compact_dyld_image_info_addr);
+        if (oldInfo) {
+            persistentAllocator.free((void*)oldInfo);
+        }
+        {
+            // TODO: Move timer events into the responder class
+            // Use a scope to prevent compiler reordering timer
+            dyld3::ScopedTimer timer(DBG_DYLD_REMOTE_IMAGE_NOTIFIER, 0, 0, 0);
+            RemoteNotificationResponder responder;
+            responder.blockOnSynchronousEvent(DYLD_REMOTE_EVENT_ATLAS_CHANGED);
+        }
+        os_unfair_lock_unlock(&_processSnapshotLock);
     }
-    {
-        // TODO: Move timer events into the responder class
-        // Use a scope to prevent compiler reordering timer
-        dyld3::ScopedTimer timer(DBG_DYLD_REMOTE_IMAGE_NOTIFIER, 0, 0, 0);
-        RemoteNotificationResponder responder;
-        responder.blockOnSynchronousEvent(DYLD_REMOTE_EVENT_ATLAS_CHANGED);
-    }
-#endif
+#endif /* BUILDING_DYLD && !__i386__ */
 }
 
-void RuntimeState::freeProcessSnapshot() {
-#if BUILDING_DYLD
-    if (_processSnapshot) {
-        _processSnapshot->~ProcessSnapshot();
-        ephemeralAllocator.free((void*)_processSnapshot);
-        _processSnapshot = nullptr;
-    }
-#endif
-}
-#endif
+#endif /* !TARGET_OS_SIMULATOR */
 
 void RuntimeState::takeLockBeforeFork()
 {
@@ -2565,7 +2570,12 @@ void RuntimeState::takeLockBeforeFork()
         this->libSystemHelpers->os_unfair_recursive_lock_lock_with_options(&_locks.loadersLock, OS_UNFAIR_LOCK_NONE);
         this->libSystemHelpers->os_unfair_recursive_lock_lock_with_options(&_locks.notifiersLock, OS_UNFAIR_LOCK_NONE);
         this->libSystemHelpers->os_unfair_recursive_lock_lock_with_options(&_locks.tlvInfosLock, OS_UNFAIR_LOCK_NONE);
-        // FIXME: logSerializer
+        if (this->libSystemHelpers->version() >= 6) {
+            this->libSystemHelpers->os_unfair_lock_lock_with_options(&_locks.allocatorLock, OS_UNFAIR_LOCK_NONE);
+#if !TARGET_OS_SIMULATOR
+            this->libSystemHelpers->os_unfair_lock_lock_with_options(&_locks.logSerializer, OS_UNFAIR_LOCK_NONE);
+#endif
+        }
     }
 #endif
 }
@@ -2578,7 +2588,12 @@ void RuntimeState::releaseLockInForkParent()
         this->libSystemHelpers->os_unfair_recursive_lock_unlock(&_locks.loadersLock);
         this->libSystemHelpers->os_unfair_recursive_lock_unlock(&_locks.notifiersLock);
         this->libSystemHelpers->os_unfair_recursive_lock_unlock(&_locks.tlvInfosLock);
-        // FIXME: logSerializer
+        if (this->libSystemHelpers->version() >= 6) {
+            this->libSystemHelpers->os_unfair_lock_unlock(&_locks.allocatorLock);
+#if !TARGET_OS_SIMULATOR
+            this->libSystemHelpers->os_unfair_lock_unlock(&_locks.logSerializer);
+#endif
+        }
     }
 #endif
 }
@@ -2591,7 +2606,10 @@ void RuntimeState::resetLockInForkChild()
         this->libSystemHelpers->os_unfair_recursive_lock_unlock_forked_child(&_locks.loadersLock);
         this->libSystemHelpers->os_unfair_recursive_lock_unlock_forked_child(&_locks.notifiersLock);
         this->libSystemHelpers->os_unfair_recursive_lock_unlock_forked_child(&_locks.tlvInfosLock);
-        // FIXME: logSerializer
+        _locks.allocatorLock    = OS_LOCK_UNFAIR_INIT;
+#if !TARGET_OS_SIMULATOR
+        _locks.logSerializer    = OS_LOCK_UNFAIR_INIT;
+#endif
     }
 #endif
 }
@@ -2613,7 +2631,6 @@ void RuntimeState::releaseDlopenLockInForkParent()
     // This is on the parent side after fork().  We just to an unlock to undo the lock we did before form
     if ( this->libSystemHelpers != nullptr ) {
         this->libSystemHelpers->os_unfair_recursive_lock_unlock(&_locks.apiLock);
-        // FIXME: logSerializer
     }
 #endif
 }
@@ -2624,7 +2641,6 @@ void RuntimeState::resetDlopenLockInForkChild()
     // This is the child side after fork().  The locks are all taken, and will be reset to their initial state
     if ( (this->libSystemHelpers != nullptr) && (this->libSystemHelpers->version() >= 2) ) {
         this->libSystemHelpers->os_unfair_recursive_lock_unlock_forked_child(&_locks.apiLock);
-        // FIXME: logSerializer
     }
 #endif
 }

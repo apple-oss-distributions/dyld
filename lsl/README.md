@@ -9,7 +9,6 @@ functionality:
 * Allocators
 ** `EphemeralAllocator`: A fast bump pointer allocator, intended for use with scoped operations
 ** `PersistentAllocator`: A best fit allocator intended for long lived allocations
-** `ConcurrentAllocator`: A lock free per-thread best fit allocator
 
 * SmartPointers
 ** `UniquePtr`: A pointer for object ownership and automatic memory reclamation

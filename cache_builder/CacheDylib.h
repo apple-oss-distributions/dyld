@@ -140,14 +140,14 @@ struct CacheDylib
         {
             VMOffset            targetRuntimeOffset;
             const CacheDylib*   targetDylib;
-            bool                isWeak;
+            bool                isWeakDef;
         };
 
         struct CacheImage
         {
             VMOffset            targetRuntimeOffset;
             const CacheDylib*   targetDylib;
-            bool                isWeak;
+            bool                isWeakDef;
         };
 
         Kind        kind    = Kind::absolute;
@@ -161,6 +161,7 @@ struct CacheDylib
             CacheImage  cacheImage;
         };
         uint64_t    addend  = 0;
+        bool        isWeakImport;
     };
 
     typedef std::pair<BindTarget, std::string> BindTargetAndName;

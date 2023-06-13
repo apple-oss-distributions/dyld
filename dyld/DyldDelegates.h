@@ -131,7 +131,8 @@ public:
                   skipIgnition              :  1,     // dyld_flags=0x00000008
                   useSystemCache            :  1,     // dyld_flags=0x00000010
                   useSystemDriverKitCache   :  1,     // dyld_flags=0x00000020
-                  unusedFlagsLow            : 12,
+                  logRoots                  :  1,     // dyld_flags=0x00000040
+                  unusedFlagsLow            : 11,
                   enableCompactInfo         :  1,     // dyld_flags=0x00040000
                   disableCompactInfo        :  1,     // dyld_flags=0x00080000
                   forceRODataConst          :  1,     // dyld_flags=0x00100000

@@ -88,7 +88,7 @@ class PrebuiltLoader : public Loader
 public:
     union BindTargetRef {
     public:
-                    BindTargetRef(const ResolvedSymbol&);
+                    BindTargetRef(Diagnostics& diag, const ResolvedSymbol&);
                     BindTargetRef(const BindTarget&);
 #if SUPPORT_VM_LAYOUT
         uint64_t    value(RuntimeState&) const;

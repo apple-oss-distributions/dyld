@@ -62,6 +62,7 @@ struct CoalescedGOTSection : CoalescedSection
         std::string_view                    targetSymbolName;
         std::string_view                    targetDylibName;
         dyld3::MachOFile::PointerMetaData   pmd;
+        bool                                isWeakImport;
     };
 
     struct Hash
@@ -74,6 +75,7 @@ struct CoalescedGOTSection : CoalescedSection
             hash ^= std::hash<std::string_view>{}(v.targetSymbolName);
             hash ^= std::hash<std::string_view>{}(v.targetDylibName);
             hash ^= std::hash<uint32_t>{}(*(uint32_t*)&v.pmd);
+            hash ^= std::hash<bool>{}(v.isWeakImport);
             return hash;
         }
     };
@@ -82,7 +84,8 @@ struct CoalescedGOTSection : CoalescedSection
     {
         bool operator()(const GOTKey& a, const GOTKey& b) const
         {
-            return (a.targetSymbolName == b.targetSymbolName)
+            return (a.isWeakImport == b.isWeakImport)
+                && (a.targetSymbolName == b.targetSymbolName)
                 && (a.targetDylibName == b.targetDylibName)
                 && (memcmp(&a.pmd, &b.pmd, sizeof(a.pmd)) == 0);
         }

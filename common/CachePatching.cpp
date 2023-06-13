@@ -55,6 +55,8 @@ uint64_t PatchTable::numImages() const
             return ((PatchTableV2*)this)->numImages();
         case 3:
             return ((PatchTableV3*)this)->numImages();
+        case 4:
+            return ((PatchTableV4*)this)->numImages();
         default:
             assert("Unknown patch table version");
             break;
@@ -69,6 +71,8 @@ uint32_t PatchTable::patchableExportCount(uint32_t imageIndex) const
             return ((PatchTableV2*)this)->patchableExportCount(imageIndex);
         case 3:
             return ((PatchTableV3*)this)->patchableExportCount(imageIndex);
+        case 4:
+            return ((PatchTableV4*)this)->patchableExportCount(imageIndex);
         default:
             assert("Unknown patch table version");
             break;
@@ -83,6 +87,8 @@ bool PatchTable::imageHasClient(uint32_t imageIndex, uint32_t userImageIndex) co
             return ((PatchTableV2*)this)->imageHasClient(imageIndex, userImageIndex);
         case 3:
             return ((PatchTableV3*)this)->imageHasClient(imageIndex, userImageIndex);
+        case 4:
+            return ((PatchTableV4*)this)->imageHasClient(imageIndex, userImageIndex);
         default:
             assert("Unknown patch table version");
             break;
@@ -97,6 +103,8 @@ void PatchTable::forEachPatchableExport(uint32_t imageIndex, ExportHandler handl
             return ((PatchTableV2*)this)->forEachPatchableExport(imageIndex, handler);
         case 3:
             return ((PatchTableV3*)this)->forEachPatchableExport(imageIndex, handler);
+        case 4:
+            return ((PatchTableV4*)this)->forEachPatchableExport(imageIndex, handler);
         default:
             assert("Unknown patch table version");
             break;
@@ -113,6 +121,9 @@ void PatchTable::forEachPatchableUseOfExport(uint32_t imageIndex, uint32_t dylib
                                                                       handler);
         case 3:
             return ((PatchTableV3*)this)->forEachPatchableUseOfExport(imageIndex, dylibVMOffsetOfImpl,
+                                                                      handler);
+        case 4:
+            return ((PatchTableV4*)this)->forEachPatchableUseOfExport(imageIndex, dylibVMOffsetOfImpl,
                                                                       handler);
         default:
             assert("Unknown patch table version");
@@ -131,6 +142,9 @@ void PatchTable::forEachPatchableUseOfExportInImage(uint32_t imageIndex, uint32_
                                                                              userImageIndex, handler);
         case 3:
             return ((PatchTableV3*)this)->forEachPatchableUseOfExportInImage(imageIndex, dylibVMOffsetOfImpl,
+                                                                             userImageIndex, handler);
+        case 4:
+            return ((PatchTableV4*)this)->forEachPatchableUseOfExportInImage(imageIndex, dylibVMOffsetOfImpl,
                                                                              userImageIndex, handler);
         default:
             assert("Unknown patch table version");
@@ -154,6 +168,11 @@ void PatchTable::forEachPatchableCacheUseOfExport(uint32_t imageIndex, uint32_t 
                                                                            cacheUnslidAddress,
                                                                            getDylibHandler,
                                                                            handler);
+        case 4:
+            return ((PatchTableV4*)this)->forEachPatchableCacheUseOfExport(imageIndex, dylibVMOffsetOfImpl,
+                                                                           cacheUnslidAddress,
+                                                                           getDylibHandler,
+                                                                           handler);
         default:
             assert("Unknown patch table version");
             break;
@@ -169,6 +188,9 @@ void PatchTable::forEachPatchableGOTUseOfExport(uint32_t imageIndex, uint32_t dy
                                                                          handler);
         case 3:
             return ((PatchTableV3*)this)->forEachPatchableGOTUseOfExport(imageIndex, dylibVMOffsetOfImpl,
+                                                                         handler);
+        case 4:
+            return ((PatchTableV4*)this)->forEachPatchableGOTUseOfExport(imageIndex, dylibVMOffsetOfImpl,
                                                                          handler);
         default:
             assert("Unknown patch table version");
@@ -352,7 +374,7 @@ void PatchTableV2::forEachPatchableUseOfExport(uint32_t imageIndex, uint32_t dyl
                 pmd.authenticated     = loc.authenticated;
                 pmd.key               = loc.key;
                 pmd.usesAddrDiversity = loc.usesAddressDiversity;
-                handler(imageClient.clientDylibIndex, loc.dylibOffsetOfUse, pmd, loc.getAddend());
+                handler(imageClient.clientDylibIndex, loc.dylibOffsetOfUse, pmd, loc.getAddend(), false);
             }
 
             // We found the export, so we're done with this client.  There might be uses in other
@@ -389,7 +411,7 @@ void PatchTableV2::forEachPatchableUseOfExportInImage(uint32_t imageIndex, uint3
             pmd.authenticated     = loc.authenticated;
             pmd.key               = loc.key;
             pmd.usesAddrDiversity = loc.usesAddressDiversity;
-            handler(loc.dylibOffsetOfUse, pmd, loc.getAddend());
+            handler(loc.dylibOffsetOfUse, pmd, loc.getAddend(), false);
         }
 
         // We found the export, so we're done
@@ -434,7 +456,7 @@ void PatchTableV2::forEachPatchableCacheUseOfExport(uint32_t imageIndex, uint32_
                 pmd.authenticated     = loc.authenticated;
                 pmd.key               = loc.key;
                 pmd.usesAddrDiversity = loc.usesAddressDiversity;
-                handler(cacheOffset, pmd, loc.getAddend());
+                handler(cacheOffset, pmd, loc.getAddend(), false);
             }
         }
     }
@@ -532,7 +554,182 @@ void PatchTableV3::forEachPatchableGOTUseOfExport(uint32_t imageIndex, uint32_t 
         pmd.authenticated     = loc.authenticated;
         pmd.key               = loc.key;
         pmd.usesAddrDiversity = loc.usesAddressDiversity;
-        handler(loc.cacheOffsetOfUse, pmd, loc.getAddend());
+        handler(loc.cacheOffsetOfUse, pmd, loc.getAddend(), false);
+    }
+}
+
+//
+// MARK: --- PatchTableV4 methods ---
+//
+
+const dyld_cache_patch_info_v4* PatchTableV4::info() const
+{
+    return (dyld_cache_patch_info_v4*)this->table;
+}
+
+std::span<dyld_cache_patchable_location_v4> PatchTableV4::patchableLocations() const
+{
+    uint64_t offset = info()->patchLocationArrayAddr - this->tableVMAddr;
+    return { (dyld_cache_patchable_location_v4*)(this->table + offset), (size_t)info()->patchLocationArrayCount };
+}
+
+std::span<dyld_cache_patchable_location_v4_got> PatchTableV4::gotPatchableLocations() const
+{
+    uint64_t offset = info()->gotLocationArrayAddr - this->tableVMAddr;
+    return { (dyld_cache_patchable_location_v4_got*)(this->table + offset), (size_t)info()->gotLocationArrayCount };
+}
+
+// This is extremely inefficient, so only used by tests and cache util
+#if BUILDING_CACHE_BUILDER_UNIT_TESTS || BUILDING_SHARED_CACHE_UTIL
+void PatchTableV4::forEachPatchableUseOfExport(uint32_t imageIndex, uint32_t dylibVMOffsetOfImpl,
+                                               ExportUseHandler handler) const
+{
+    std::span<dyld_cache_image_clients_v2>      imageClients = this->clientsForImage(imageIndex);
+    std::span<dyld_cache_image_export_v2>       cacheImageExports = this->imageExports();
+    std::span<dyld_cache_patchable_export_v2>   cacheClientExports = this->clientExports();
+    std::span<dyld_cache_patchable_location_v4> cachePatchableLocations = this->patchableLocations();
+
+    // Each image has a list of clients
+    for ( const dyld_cache_image_clients_v2& imageClient : imageClients ) {
+        // Each client has a list of exports from the image
+        auto exportsForClient = cacheClientExports.subspan(imageClient.patchExportsStartIndex,
+                                                           imageClient.patchExportsCount);
+        for ( const dyld_cache_patchable_export_v2& clientExport : exportsForClient ) {
+            const dyld_cache_image_export_v2& imageExport = cacheImageExports[clientExport.imageExportIndex];
+
+            // Skip exports which aren't the one we are looking for
+            if ( imageExport.dylibOffsetOfImpl != dylibVMOffsetOfImpl )
+                continue;
+
+            // The client may have multiple locations to patch for the same symbol
+            auto patchableLocationsForExport = cachePatchableLocations.subspan(clientExport.patchLocationsStartIndex,
+                                                                               clientExport.patchLocationsCount);
+            for ( const dyld_cache_patchable_location_v4& loc : patchableLocationsForExport ) {
+                dyld3::MachOFile::PointerMetaData pmd;
+                loc.getPMD(pmd);
+                handler(imageClient.clientDylibIndex, loc.dylibOffsetOfUse, pmd, loc.getAddend(), loc.isWeakImport());
+            }
+
+            // We found the export, so we're done with this client.  There might be uses in other
+            // clients though
+            break;
+        }
+    }
+}
+#endif // BUILDING_CACHE_BUILDER_UNIT_TESTS || BUILDING_SHARED_CACHE_UTIL
+
+void PatchTableV4::forEachPatchableUseOfExportInImage(uint32_t imageIndex, uint32_t dylibVMOffsetOfImpl,
+                                                      uint32_t userImageIndex,
+                                                      ExportUseInImageHandler handler) const
+{
+    std::span<dyld_cache_image_export_v2>       cacheImageExports = this->imageExports();
+    std::span<dyld_cache_patchable_location_v4> cachePatchableLocations = this->patchableLocations();
+
+    // Get the exports used by this client in the given image
+    std::span<dyld_cache_patchable_export_v2> clientExports = this->clientsExportsForImageAndClient(imageIndex, userImageIndex);
+    for ( const dyld_cache_patchable_export_v2& clientExport : clientExports ) {
+        const dyld_cache_image_export_v2& imageExport = cacheImageExports[clientExport.imageExportIndex];
+
+        // Skip exports which aren't the one we are looking for
+        if ( imageExport.dylibOffsetOfImpl != dylibVMOffsetOfImpl )
+            continue;
+
+        // The client may have multiple locations to patch for the same symbol
+        auto patchableLocationsForExport = cachePatchableLocations.subspan(clientExport.patchLocationsStartIndex,
+                                                                           clientExport.patchLocationsCount);
+        for ( const dyld_cache_patchable_location_v4& loc : patchableLocationsForExport ) {
+            dyld3::MachOFile::PointerMetaData pmd;
+            loc.getPMD(pmd);
+            handler(loc.dylibOffsetOfUse, pmd, loc.getAddend(), loc.isWeakImport());
+        }
+
+        // We found the export, so we're done
+        break;
+    }
+}
+
+void PatchTableV4::forEachPatchableCacheUseOfExport(uint32_t imageIndex, uint32_t dylibVMOffsetOfImpl,
+                                                    uint64_t cacheUnslidAddress,
+                                                    GetDylibAddressHandler getDylibHandler,
+                                                    ExportCacheUseHandler handler) const
+{
+    std::span<dyld_cache_image_clients_v2>      imageClients = this->clientsForImage(imageIndex);
+    std::span<dyld_cache_image_export_v2>       cacheImageExports = this->imageExports();
+    std::span<dyld_cache_patchable_export_v2>   cacheClientExports = this->clientExports();
+    std::span<dyld_cache_patchable_location_v4> cachePatchableLocations = this->patchableLocations();
+
+    // Each image has a list of clients
+    for ( const dyld_cache_image_clients_v2& imageClient : imageClients ) {
+        // We need the address of the client to compute cache offsets later
+        uint64_t clientUnslidAddress = getDylibHandler(imageClient.clientDylibIndex);
+
+        // Each client has a list of exports from the image
+        auto exportsForClient = cacheClientExports.subspan(imageClient.patchExportsStartIndex,
+                                                           imageClient.patchExportsCount);
+
+        for ( const dyld_cache_patchable_export_v2& clientExport : exportsForClient ) {
+            const dyld_cache_image_export_v2& imageExport = cacheImageExports[clientExport.imageExportIndex];
+
+            // Skip exports which aren't the one we are looking for
+            if ( imageExport.dylibOffsetOfImpl != dylibVMOffsetOfImpl )
+                continue;
+
+            // The client may have multiple locations to patch for the same symbol
+            auto patchableLocationsForExport = cachePatchableLocations.subspan(clientExport.patchLocationsStartIndex,
+                                                                               clientExport.patchLocationsCount);
+            for ( const dyld_cache_patchable_location_v4& loc : patchableLocationsForExport ) {
+                uint64_t cacheOffset = (clientUnslidAddress + loc.dylibOffsetOfUse) - cacheUnslidAddress;
+                dyld3::MachOFile::PointerMetaData pmd;
+                loc.getPMD(pmd);
+                handler(cacheOffset, pmd, loc.getAddend(), loc.isWeakImport());
+            }
+        }
+    }
+}
+
+void PatchTableV4::forEachPatchableGOTUseOfExport(uint32_t imageIndex, uint32_t dylibVMOffsetOfImpl,
+                                                  GOTUseHandler handler) const
+{
+    auto gotClientExports = this->gotClientExportsForImage(imageIndex);
+    auto cacheImageExports = this->imageExports();
+    auto cachePatchableLocations = this->gotPatchableLocations();
+
+    if ( gotClientExports.empty() )
+        return;
+
+    // Binary search for the dylibOffset we want.  This works because they were sorted in the cache builder
+    const dyld_cache_patchable_export_v3* foundClientExport = nullptr;
+    int64_t start = 0;
+    int64_t end = (int64_t)gotClientExports.size() - 1;
+    while ( start <= end ) {
+        int64_t i = (start + end) / 2;
+
+        // Get element[i]
+        const dyld_cache_patchable_export_v3& clientExport = gotClientExports[(uint32_t)i];
+        const dyld_cache_image_export_v2& imageExport = cacheImageExports[clientExport.imageExportIndex];
+
+        if ( imageExport.dylibOffsetOfImpl == dylibVMOffsetOfImpl ) {
+            foundClientExport = &clientExport;
+            break;
+        }
+
+        if ( dylibVMOffsetOfImpl < imageExport.dylibOffsetOfImpl ) {
+            end = i-1;
+        } else {
+            start = i+1;
+        }
+    }
+
+    if ( foundClientExport == nullptr )
+        return;
+
+    // The client may have multiple locations to patch for the same symbol
+    auto patchableLocationsForExport = cachePatchableLocations.subspan(foundClientExport->patchLocationsStartIndex,
+                                                                       foundClientExport->patchLocationsCount);
+    for ( const dyld_cache_patchable_location_v4_got& loc : patchableLocationsForExport ) {
+        dyld3::MachOFile::PointerMetaData pmd;
+        loc.getPMD(pmd);
+        handler(loc.cacheOffsetOfUse, pmd, loc.getAddend(), loc.isWeakImport());
     }
 }
 
@@ -796,14 +993,22 @@ void PatchTableBuilder::calculatePatchTable(const std::span<CacheDylib>& cacheDy
                 // Now add the list of locations.
                 // At this point we need to translate from the locations the cache recorded to what we encode
                 for ( const dyld_cache_patchable_location& use : uses ) {
-                    dyld_cache_patchable_location_v2 loc;
+                    dyld_cache_patchable_location_v4 loc;
                     loc.dylibOffsetOfUse     = (uint32_t)(use.cacheVMAddr - clientDylibVMAddr).rawValue();
-                    loc.high7                = use.high7;
-                    loc.addend               = use.addend;
-                    loc.authenticated        = use.authenticated;
-                    loc.usesAddressDiversity = use.usesAddressDiversity;
-                    loc.key                  = use.key;
-                    loc.discriminator        = use.discriminator;
+                    if ( use.authenticated ) {
+                        loc.auth.high7                = use.high7;
+                        loc.auth.isWeakImport         = use.isWeakImport;
+                        loc.auth.addend               = use.addend;
+                        loc.auth.authenticated        = use.authenticated;
+                        loc.auth.usesAddressDiversity = use.usesAddressDiversity;
+                        loc.auth.keyIsD               = (use.key == 2) ? 1 : 0;  // IA == 0, DA == 2
+                        loc.auth.discriminator        = use.discriminator;
+                    } else {
+                        loc.regular.high7                = use.high7;
+                        loc.regular.isWeakImport         = use.isWeakImport;
+                        loc.regular.addend               = use.addend;
+                        loc.regular.authenticated        = use.authenticated;
+                    }
                     patchLocations.push_back(loc);
                 }
             }
@@ -845,14 +1050,22 @@ void PatchTableBuilder::calculatePatchTable(const std::span<CacheDylib>& cacheDy
                 // Now add the list of locations.
                 // At this point we need to translate from the locations the cache recorded to what we encode
                 for (const dyld_cache_patchable_location& use : uses) {
-                    dyld_cache_patchable_location_v3 loc;
+                    dyld_cache_patchable_location_v4_got loc;
                     loc.cacheOffsetOfUse            = (use.cacheVMAddr - cacheBaseAddress).rawValue();
-                    loc.high7                       = use.high7;
-                    loc.addend                      = use.addend;
-                    loc.authenticated               = use.authenticated;
-                    loc.usesAddressDiversity        = use.usesAddressDiversity;
-                    loc.key                         = use.key;
-                    loc.discriminator               = use.discriminator;
+                    if ( use.authenticated ) {
+                        loc.auth.high7                = use.high7;
+                        loc.auth.isWeakImport         = use.isWeakImport;
+                        loc.auth.addend               = use.addend;
+                        loc.auth.authenticated        = use.authenticated;
+                        loc.auth.usesAddressDiversity = use.usesAddressDiversity;
+                        loc.auth.keyIsD               = (use.key == 2) ? 1 : 0; // IA == 0, DA == 2
+                        loc.auth.discriminator        = use.discriminator;
+                    } else {
+                        loc.regular.high7                = use.high7;
+                        loc.regular.isWeakImport         = use.isWeakImport;
+                        loc.regular.addend               = use.addend;
+                        loc.regular.authenticated        = use.authenticated;
+                    }
                     gotPatchLocations.push_back(loc);
                 }
             }
@@ -943,10 +1156,10 @@ Error PatchTableBuilder::write(uint8_t* buffer, uint64_t bufferSize,
                      bufferSize / 1024 / 1024, patchInfoSize / 1024);
     }
     
-    dyld_cache_patch_info_v3 patchInfo;
-    patchInfo.patchTableVersion             = 3;
+    dyld_cache_patch_info_v4 patchInfo;
+    patchInfo.patchTableVersion             = 4;
     patchInfo.patchLocationVersion          = 0;
-    patchInfo.patchTableArrayAddr           = patchInfoAddr + sizeof(dyld_cache_patch_info_v3);
+    patchInfo.patchTableArrayAddr           = patchInfoAddr + sizeof(dyld_cache_patch_info_v4);
     patchInfo.patchTableArrayCount          = patchImages.size();
     patchInfo.patchImageExportsArrayAddr    = patchInfo.patchTableArrayAddr + (patchInfo.patchTableArrayCount * sizeof(dyld_cache_image_patches_v2));
     patchInfo.patchImageExportsArrayCount   = imageExports.size();
@@ -956,13 +1169,13 @@ Error PatchTableBuilder::write(uint8_t* buffer, uint64_t bufferSize,
     patchInfo.patchClientExportsArrayCount  = clientExports.size();
     patchInfo.patchLocationArrayAddr        = patchInfo.patchClientExportsArrayAddr + (patchInfo.patchClientExportsArrayCount * sizeof(dyld_cache_patchable_export_v2));
     patchInfo.patchLocationArrayCount       = patchLocations.size();
-    patchInfo.gotClientsArrayAddr           = patchInfo.patchLocationArrayAddr + (patchInfo.patchLocationArrayCount * sizeof(dyld_cache_patchable_location_v2));
+    patchInfo.gotClientsArrayAddr           = patchInfo.patchLocationArrayAddr + (patchInfo.patchLocationArrayCount * sizeof(dyld_cache_patchable_location_v4));
     patchInfo.gotClientsArrayCount          = gotClients.size();
     patchInfo.gotClientExportsArrayAddr     = patchInfo.gotClientsArrayAddr + (patchInfo.gotClientsArrayCount * sizeof(dyld_cache_image_got_clients_v3));
     patchInfo.gotClientExportsArrayCount    = gotClientExports.size();
     patchInfo.gotLocationArrayAddr          = patchInfo.gotClientExportsArrayAddr + (patchInfo.gotClientExportsArrayCount * sizeof(dyld_cache_patchable_export_v3));
     patchInfo.gotLocationArrayCount         = gotPatchLocations.size();
-    patchInfo.patchExportNamesAddr          = patchInfo.gotLocationArrayAddr + (patchInfo.gotLocationArrayCount * sizeof(dyld_cache_patchable_location_v3));
+    patchInfo.patchExportNamesAddr          = patchInfo.gotLocationArrayAddr + (patchInfo.gotLocationArrayCount * sizeof(dyld_cache_patchable_location_v4_got));
     patchInfo.patchExportNamesSize          = patchExportNames.size();
 
     // (dylib, client) patch table
@@ -1014,15 +1227,17 @@ Error PatchTableBuilder::build(const std::span<CacheDylib>& cacheDylibs,
 
 dyld_cache_patchable_location::dyld_cache_patchable_location(CacheVMAddress cacheVMAddr,
                                                              dyld3::MachOFile::PointerMetaData pmd,
-                                                             uint64_t addend)
+                                                             uint64_t addend, bool isWeakImport)
 {
     this->cacheVMAddr          = cacheVMAddr;
     this->high7                = pmd.high8 >> 1;
-    this->addend               = addend;
+    this->isWeakImport         = isWeakImport ? 1 : 0;
+    this->unused               = 0;
     this->authenticated        = pmd.authenticated;
     this->usesAddressDiversity = pmd.usesAddrDiversity;
     this->key                  = pmd.key;
     this->discriminator        = pmd.diversity;
+    this->addend               = addend;
     // check for truncations
     assert(this->addend == addend);
     assert((this->high7 << 1) == pmd.high8);

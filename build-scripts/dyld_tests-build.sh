@@ -103,6 +103,7 @@ if [ "${PLATFORM_NAME}" == "watchos" ]
 then
     echo "watchOS does not need native dyld_app_cache_util"
 else
+    mkdir -p "${BUILT_PRODUCTS_DIR}"
     xcodebuild install -target dyld_app_cache_util -sdk macosx.internal -configuration ${CONFIGURATION} MACOSX_DEPLOYMENT_TARGET=${MACOSX_DEPLOYMENT_TARGET} OBJROOT="${OBJROOT_DYLD_APP_CACHE_UTIL}" SRCROOT="${SRCROOT}" DSTROOT="${BUILT_PRODUCTS_DIR}" SYMROOT="${SYMROOT}" RC_ProjectSourceVersion="${RC_ProjectSourceVersion}" INSTALL_PATH="/host_tools" RC_ARCHS="${NATIVE_ARCH_ACTUAL}" DISABLE_SDK_METADATA_PARSING=YES
 fi
 

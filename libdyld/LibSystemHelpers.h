@@ -86,6 +86,10 @@ struct VIS_HIDDEN  [[clang::ptrauth_vtable_pointer(process_independent, address_
 
     // Added in version 5
     virtual void            run_async(void* (*func)(void*), void* context) const;
+
+    // Added in version 6
+    virtual void            os_unfair_lock_lock_with_options(os_unfair_lock_t lock, os_unfair_lock_options_t options) const;
+    virtual void            os_unfair_lock_unlock(os_unfair_lock_t lock) const;
 };
 
 } // namespace

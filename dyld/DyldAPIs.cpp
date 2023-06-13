@@ -196,11 +196,14 @@ static const void* stripPointer(const void* ptr)
 
 void APIs::_libdyld_initialize(const dyld4::LibSystemHelpers* helpers)
 {
-    // libSystem.dylib is being initialized, set helpers pointer
-    this->libSystemHelpers = helpers;
+    // Since this called from libdyld`_dyld_initializer the allocator will be marked read only
+    memoryManager.withWritableMemory([&]{
+        // libSystem.dylib is being initialized, set helpers pointer
+        this->libSystemHelpers = helpers;
 
-    // set up thread-local-variable and dlerror handling
-    this->initialize();
+        // set up thread-local-variable and dlerror handling
+        this->initialize();
+    });
 }
 
 uint32_t APIs::_dyld_image_count()
@@ -1294,7 +1297,6 @@ void* APIs::dlopen_from(const char* path, int mode, void* addressInCaller)
     void*           result    = nullptr;
     const Loader*   topLoader = nullptr;
     STACK_ALLOC_VECTOR(const Loader*, loadersToNotify, 32);
-    //FIXME: We need this inlined, so it needs to be a lambda, but __block variables are incompatible, so make a pointer
     withLoadersWriteLock([&]{
         // since we have the dyld lock, any appends to state.loaded will be from this dlopen
         // so record the length now, and cut it back to that point if dlopen fails
@@ -1721,7 +1723,7 @@ void* APIs::dlsym(void* handle, const char* symbolName)
 #endif
         if ( config.log.apis )
             log("     dlsym(\"%s\") => %p\n", symbolName, ptr);
-        timer.setData4(ptr);
+        timer.setData4((uint64_t)(stripPointer(ptr)));
         return ptr;
     }
     if ( config.log.apis )
@@ -2828,7 +2830,7 @@ void notifyMonitoringDyldSimSupport(bool unloading, unsigned imageCount, const m
                 if (((MachOFile*)mh)->getUuid(rawUUID)) {
                     machoUUID = rawUUID;
                 }
-                auto file = fileManager.fileRecordForPath(imagePaths[i]);
+                auto file = fileManager.fileRecordForPath(ephemeralAllocator, imagePaths[i]);
                 auto image = dyld4::Atlas::Image(ephemeralAllocator, std::move(file), processSnapshot->identityMapper(), mh);
                 processSnapshot->addImage(std::move(image));
             }

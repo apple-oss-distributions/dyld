@@ -112,10 +112,12 @@ struct VIS_HIDDEN Mapper {
         }
     private:
         void swap(Pointer& other) {
-            std::swap(_mapper,  other._mapper);
-            std::swap(_size,    other._size);
-            std::swap(_pointer, other._pointer);
-            std::swap(_mmapped, other._mmapped);
+            if (this == &other) { return; }
+            using std::swap;
+            swap(_mapper,  other._mapper);
+            swap(_size,    other._size);
+            swap(_pointer, other._pointer);
+            swap(_mmapped, other._mmapped);
         }
         SharedPtr<Mapper>   _mapper     = nullptr;
         uint64_t            _size       = 0;
@@ -204,6 +206,7 @@ private:
     mutable const char*                     _installname        = nullptr;
     mutable bool                            _uuidLoaded         = false;
     mutable bool                            _installnameLoaded  = false;
+    mutable bool                            _mapperFailed       = false;
 };
 
 struct VIS_HIDDEN SharedCacheLocals {
@@ -255,18 +258,30 @@ private:
     bool                                _private;
 };
 
-// TODO: This should probably live somewhere else;
 struct VIS_HIDDEN Bitmap {
-    Bitmap() = default;
+    Bitmap()                            = delete;
+    Bitmap(const Bitmap&)               = delete;
+    Bitmap(Bitmap&&);
+    Bitmap& operator=(const Bitmap&)    = delete;
+    Bitmap& operator=(Bitmap&&);
     Bitmap(Allocator& allocator, size_t size);
     Bitmap(Allocator& allocator, std::span<std::byte>& data);
     void setBit(size_t bit);
     bool checkBit(size_t bit)  const;
     void emit(Vector<std::byte>& data) const;
     size_t size() const;
+    friend void swap(Bitmap& x, Bitmap& y) {
+        x.swap(y);
+    }
 private:
-    size_t                  _size;
-    UniquePtr<std::byte>    _bitmap;
+    void swap(Bitmap& other) {
+        if (this == &other) { return; }
+        using std::swap;
+        swap(_size,     other._size);
+        swap(_bitmap,   other._bitmap);
+    }
+    size_t                  _size   = 0;
+    UniquePtr<std::byte>    _bitmap = nullptr;
 };
 
 struct VIS_HIDDEN ProcessSnapshot {
@@ -333,7 +348,7 @@ private:
         FileManager&                    _fileManager;
         OrderedSet<UniquePtr<Image>>&   _images;
         UniquePtr<SharedCache>&         _sharedCache;
-        Bitmap&                         _bitmap;
+        UniquePtr<Bitmap>&              _bitmap;
         Vector<UUID>                    _volumeUUIDs;
         Vector<const char *>            _strings;
         Vector<char>                    _stringTableBuffer;
@@ -353,7 +368,7 @@ private:
     Allocator&                      _ephemeralAllocator;
     FileManager&                    _fileManager;
     OrderedSet<UniquePtr<Image>>    _images;
-    Bitmap                          _bitmap;
+    UniquePtr<Bitmap>               _bitmap;
     UniquePtr<SharedCache>          _sharedCache;
     SharedPtr<Mapper>               _identityMapper;
     uint64_t                        _platform           = 0;

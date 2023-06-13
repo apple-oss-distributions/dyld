@@ -246,10 +246,10 @@ struct MovedInteger
 
 - (void) testStackAllocatedVectors {
     STACK_ALLOC_VECTOR(uint64_t, ints, 8);
-    XCTAssertEqual(__ints_vector_allocator.vm_allocated_bytes(), 0, "No vm allocations should be necessary");
+    XCTAssertEqual(__ints_allocator.vm_allocated_bytes(), 0, "No vm allocations should be necessary");
     for (auto i = 0; i < 8; ++i) {
         ints.push_back(i);
-        XCTAssertEqual(__ints_vector_allocator.vm_allocated_bytes(), 0, "No vm allocations should be necessary");
+        XCTAssertEqual(__ints_allocator.vm_allocated_bytes(), 0, "No vm allocations should be necessary");
     }
 }
 

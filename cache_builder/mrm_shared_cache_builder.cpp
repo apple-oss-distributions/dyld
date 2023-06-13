@@ -62,9 +62,9 @@ struct BuildInstance {
     std::string                                     loggingPrefix;
     std::string                                     jsonMap;
     std::string                                     mainCacheUUID;
-    std::optional<std::string>                      customerLoggingPrefix;
-    std::optional<std::string>                      customerJsonMap;
-    std::optional<std::string>                      customerMainCacheUUID;
+    std::string                                     customerLoggingPrefix;
+    std::string                                     customerJsonMap;
+    std::string                                     customerMainCacheUUID;
     std::string                                     macOSMap;       // For compatibility with update_dyld_shared_cache's .map file
     std::string                                     macOSMapPath;   // Owns the string for the path
     std::string                                     cdHashType;     // Owns the data for the cdHashType
@@ -723,7 +723,7 @@ static void createBuildResults(struct MRMSharedCacheBuilder* builder)
             cacheBuildResult.errors                 = buildInstance.errors.empty() ? nullptr : buildInstance.errors.data();
             cacheBuildResult.numErrors              = buildInstance.errors.size();
             cacheBuildResult.uuidString             = buildInstance.mainCacheUUID.empty() ? "" : buildInstance.mainCacheUUID.c_str();
-            cacheBuildResult.mapJSON                = buildInstance.jsonMap.c_str();
+            cacheBuildResult.mapJSON                = buildInstance.jsonMap.empty() ? "" : buildInstance.jsonMap.c_str();
 
             builder->cacheResultStorage.emplace_back(cacheBuildResult);
 
@@ -733,14 +733,14 @@ static void createBuildResults(struct MRMSharedCacheBuilder* builder)
         if ( shouldEmitCustomerCache(builder->options) ) {
             CacheResult cacheBuildResult;
             cacheBuildResult.version              = 1;
-            cacheBuildResult.loggingPrefix        = buildInstance.customerLoggingPrefix->c_str();
-            cacheBuildResult.deviceConfiguration  = buildInstance.customerLoggingPrefix->c_str();
+            cacheBuildResult.loggingPrefix        = buildInstance.customerLoggingPrefix.c_str();
+            cacheBuildResult.deviceConfiguration  = buildInstance.customerLoggingPrefix.c_str();
             cacheBuildResult.warnings             = nullptr;
             cacheBuildResult.numWarnings          = 0;
             cacheBuildResult.errors               = nullptr;
             cacheBuildResult.numErrors            = 0;
-            cacheBuildResult.uuidString           = buildInstance.customerMainCacheUUID->empty() ? "" : buildInstance.customerMainCacheUUID->c_str();
-            cacheBuildResult.mapJSON              = buildInstance.customerJsonMap->c_str();
+            cacheBuildResult.uuidString           = buildInstance.customerMainCacheUUID.empty() ? "" : buildInstance.customerMainCacheUUID.c_str();
+            cacheBuildResult.mapJSON              = buildInstance.customerJsonMap.empty() ? "" : buildInstance.customerJsonMap.c_str();
 
             if ( !emittedWarningsAndErrors ) {
                 cacheBuildResult.warnings         = buildInstance.warnings.empty() ? nullptr : buildInstance.warnings.data();

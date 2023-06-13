@@ -38,7 +38,7 @@ using namespace lsl;
 - (void) testOrderedMap {
     auto allocator = EphemeralAllocator();
     OrderedMap<uint64_t,uint64_t> map(allocator);
-    for (uint32_t i = 0;  i <= 300000; ++i) {
+    for (uint32_t i = 0;  i < 300000; ++i) {
         uint64_t key = [self uniformRandomFrom:0 to:10000];
         uint64_t value = [self uniformRandomFrom:0 to:10000];
         auto j = map.insert({key,value});
@@ -84,7 +84,7 @@ using namespace lsl;
     std::multiset<uint64_t,uint64_t> oldMap;
     OrderedMultiMap<uint64_t,uint64_t> newMap(allocator);
     // Do stuff
-    for (uint32_t i = 0;  i <= 300000; ++i) {
+    for (uint32_t i = 0;  i < 300000; ++i) {
         uint64_t value1 = [self uniformRandomFrom:0 to:10000];
         uint64_t value2 = [self uniformRandomFrom:0 to:10000];
         auto value = std::make_pair(value1, value2);

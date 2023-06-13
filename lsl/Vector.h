@@ -89,7 +89,6 @@ struct TRIVIAL_ABI Vector {
     Vector(Vector&& other, Allocator& allocator) : _allocator(&allocator) {
         std::swap(_size,        other._size);
         if (_allocator == other._allocator) {
-            std::swap(_deallocator,     other._deallocator);
             std::swap(_allocationSize,  other._allocationSize);
             std::swap(_buffer,          other._buffer);
         } else {
@@ -173,22 +172,20 @@ struct TRIVIAL_ABI Vector {
                 }
             }
             if (_buffer) {
-                _deallocator->deallocate_buffer((void*)_buffer, _allocationSize, std::max(16UL, alignof(T)));
+                _allocator->deallocate_buffer((void*)_buffer, _allocationSize, std::max(16UL, alignof(T)));
             }
             _buffer = nullptr;
             _size = 0;
             _allocationSize = 0;
         } else {
-            Allocator* deallocator = nullptr;
-            auto [newBuffer, newBufferSize] = _allocator->allocate_buffer(sizeof(T)*newCapacity, std::max(16UL, alignof(T)), &deallocator);
+            auto [newBuffer, newBufferSize] = _allocator->allocate_buffer(sizeof(T)*newCapacity, std::max(16UL, alignof(T)));
             std::move(&_buffer[0], &_buffer[newCapacity], (value_type *)newBuffer);
             for (auto i = &_buffer[newCapacity]; i != &_buffer[_size]; ++i) {
                 i->~value_type();
             }
             if (_buffer) {
-                _deallocator->deallocate_buffer((void*)_buffer, _allocationSize, std::max(16UL, alignof(T)));
+                _allocator->deallocate_buffer((void*)_buffer, _allocationSize, std::max(16UL, alignof(T)));
             }
-            _deallocator = deallocator;
             _buffer = (value_type *)newBuffer;
             _size = newCapacity;
             _allocationSize = newBufferSize;
@@ -197,8 +194,7 @@ struct TRIVIAL_ABI Vector {
     // This function exists purely to support stack allocated arrays
     void reserveExact(size_type newCapacity) {
         if (newCapacity <= capacity()) { return; }
-        Allocator* deallocator = nullptr;
-        auto buffer = _allocator->allocate_buffer(sizeof(T)*newCapacity, std::max(16UL, alignof(T)), &deallocator);
+        auto buffer = _allocator->allocate_buffer(sizeof(T)*newCapacity, std::max(16UL, alignof(T)));
         for (auto i = 0; i < _size; ++i) {
             (void)new ((void*)((uintptr_t)buffer.address+(i*sizeof(T)))) T(std::move(_buffer[i]));
         }
@@ -208,9 +204,8 @@ struct TRIVIAL_ABI Vector {
             }
         }
         if (_buffer) {
-            _deallocator->deallocate_buffer((void*)_buffer, _allocationSize, std::max(16UL, alignof(T)));
+            _allocator->deallocate_buffer((void*)_buffer, _allocationSize, std::max(16UL, alignof(T)));
         }
-        _deallocator = deallocator;
         _buffer = (value_type *)buffer.address;
         _size = std::min(newCapacity, _size);
         _allocationSize = buffer.size;
@@ -325,13 +320,11 @@ private:
 
         if (this == &other) { return; }
         swap(_allocator,        other._allocator);
-        swap(_deallocator,      other._deallocator);
         swap(_size,             other._size);
         swap(_allocationSize,   other._allocationSize);
         swap(_buffer,           other._buffer);
     }
     Allocator*  _allocator      = nullptr;
-    Allocator*  _deallocator    = nullptr;
     value_type* _buffer         = nullptr;
     size_t      _size           = 0;
     size_t      _allocationSize = 0;
@@ -339,16 +332,22 @@ private:
 
 } // namespace lsl
 
-#define STACK_ALLOC_VECTOR(_type, _name, _count)                                                                        \
-    void* __##_name##_vector_storage = alloca(std::min(16UL,alignof(_type))+(sizeof(_type)*_count));                    \
-    EphemeralAllocator __##_name##_vector_allocator(__##_name##_vector_storage, alignof(_type)+(sizeof(_type)*_count)); \
-    lsl::Vector<_type> _name(__##_name##_vector_allocator);                                                             \
+#define STACK_ALLOC_VECTOR_BYTE_SIZE(_type, _count) (16UL   + alignof(_type)              + sizeof(_type)*_count        \
+                                                            + alignof(EphemeralAllocator) + sizeof(EphemeralAllocator)  \
+                                                            + alignof(MemoryManager)      + sizeof(MemoryManager))
+
+#define STACK_ALLOCATOR(_name, _count)                              \
+    void*  __##_name##_allocator_storage = alloca(_count);          \
+    EphemeralAllocator _name(__##_name##_allocator_storage, _count);
+
+#define STACK_ALLOC_VECTOR(_type, _name, _count)                                        \
+    STACK_ALLOCATOR(__##_name##_allocator, STACK_ALLOC_VECTOR_BYTE_SIZE(_type,_count))  \
+    lsl::Vector<_type> _name(__##_name##_allocator);                                    \
     _name.reserveExact(_count);
 
-#define BLOCK_STACK_ALLOC_VECTOR(_type, _name, _count)                                                                        \
-    void* __##_name##_vector_storage = alloca(std::min(16UL,alignof(_type))+(sizeof(_type)*_count));                    \
-    EphemeralAllocator __##_name##_vector_allocator(__##_name##_vector_storage, alignof(_type)+(sizeof(_type)*_count)); \
-    __block lsl::Vector<_type> _name(__##_name##_vector_allocator);                                                             \
+#define BLOCK_STACK_ALLOC_VECTOR(_type, _name, _count)                                  \
+    STACK_ALLOCATOR(__##_name##_allocator, STACK_ALLOC_VECTOR_BYTE_SIZE(_type,_count))  \
+    __block lsl::Vector<_type> _name(__##_name##_allocator);                            \
     _name.reserveExact(_count);
 
 #endif /*  LSL_Vector_h */

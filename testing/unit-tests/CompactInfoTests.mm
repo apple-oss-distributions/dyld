@@ -83,7 +83,7 @@ using lsl::UniquePtr;
                 process.addImage(std::move(image));
                 removableAddresses.insert((uint64_t)mh);
             } else {
-                auto file = fileManager.fileRecordForPath(imagePath);
+                auto file = fileManager.fileRecordForPath(allocator, imagePath);
                 auto image = Image(allocator, std::move(file), process.identityMapper(), mh);
                 process.addImage(std::move(image));
                 removableAddresses.insert((uint64_t)mh);

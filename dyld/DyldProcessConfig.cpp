@@ -260,7 +260,8 @@ void ProcessConfig::scanForRoots() const
 
             // dyld4::console("dyld: checking for root at %s\n", possiblePath);
             if ( this->syscall.fileExists(possiblePath) ) {
-                // dyld4::console("dyld: found root at %s\n", possiblePath);
+                if ( commPage.logRoots )
+                    dyld4::console("dyld: found root at %s\n", possiblePath);
                 foundRoot = true;
                 innerStop = true;
                 return;
@@ -790,7 +791,6 @@ ProcessConfig::Logging::Logging(const Process& process, const Security& security
 // MARK: --- DyldCache methods ---
 //
 
-#if BUILDING_DYLD || BUILDING_CACHE_BUILDER || BUILDING_CLOSURE_UTIL
 static const char* getSystemCacheDir(dyld3::Platform platform)
 {
     if ( platform == dyld3::Platform::driverKit )
@@ -804,7 +804,6 @@ static const char* getSystemCacheDir(dyld3::Platform platform)
     return IPHONE_DYLD_SHARED_CACHE_DIR;
 #endif
 }
-#endif // BUILDING_DYLD || BUILDING_CACHE_BUILDER
 
 // Shared caches may be found in the system cache dir, or an override
 // via env vars, or a cryptex from libignition.  This works out which one
@@ -1098,7 +1097,7 @@ ProcessConfig::DyldCache::DyldCache(Process& process, const Security& security, 
             }
 #endif // TARGET_OS_OSX
 
-#if BUILDING_CACHE_BUILDER || BUILDING_CLOSURE_UTIL
+#if BUILDING_CACHE_BUILDER || BUILDING_CLOSURE_UTIL || BUILDING_SHARED_CACHE_UTIL
             this->path = allocator.strdup(getSystemCacheDir(process.platform));
 #else
             if (loadInfo.FSID && loadInfo.FSObjID) {
@@ -1109,6 +1108,9 @@ ProcessConfig::DyldCache::DyldCache(Process& process, const Security& security, 
             } else {
 #if BUILDING_DYLD
                 halt("dyld shared region dynamic config data was not set\n");
+#elif BUILDING_UNIT_TESTS
+                // Not quite right, but hopefully close enough for what the unit tests need
+                this->path = allocator.strdup(getSystemCacheDir(process.platform));
 #else
                 abort();
 #endif
@@ -1239,6 +1241,7 @@ void ProcessConfig::DyldCache::setupDyldCommPage(Process& proc, const Security& 
         proc.commPage.forceDevCache      = false;
         proc.commPage.bootVolumeWritable = false;
         proc.commPage.foundRoot          = false;
+        proc.commPage.logRoots           = false;
     }
 #endif
 
@@ -1912,26 +1915,6 @@ void ProcessConfig::PathOverrides::forEachPathVariant(const char* initialPath, P
     // paths staring with @ are never valid for finding in iOSSupport or simulator
     if ( initialPath[0] != '@' ) {
 
-        // try rootpath
-        bool searchiOSSupport = (platform == Platform::iOSMac);
-    #if (TARGET_OS_OSX && TARGET_CPU_ARM64 && BUILDING_DYLD)
-        if ( platform == Platform::iOS ) {
-            searchiOSSupport = true;
-            // <rdar://problem/58959974> some old Almond apps reference old WebKit location
-            if ( strcmp(initialPath, "/System/Library/PrivateFrameworks/WebKit.framework/WebKit") == 0 )
-                initialPath = "/System/Library/Frameworks/WebKit.framework/WebKit";
-        }
-    #endif
-
-        // try looking in Catalyst support dir
-        if ( searchiOSSupport && (strncmp(initialPath, "/System/iOSSupport/", 19) != 0) ) {
-            char rtpath[strlen("/System/iOSSupport")+strlen(initialPath)+8];
-            strcpy(rtpath, "/System/iOSSupport");
-            strcat(rtpath, initialPath);
-            forEachImageSuffix(rtpath, Type::catalystPrefix, stop, handler);
-            if ( stop )
-                return;
-        }
     #if TARGET_OS_SIMULATOR
         if ( _simRootPath != nullptr ) {
             // try simulator prefix
@@ -1943,23 +1926,86 @@ void ProcessConfig::PathOverrides::forEachPathVariant(const char* initialPath, P
                 return;
         }
     #endif
-    }
 
-    if ( _cryptexRootPath != nullptr ) {
-        // try original path on disk, but not in the shared cache
-        forEachImageSuffix(initialPath, Type::rawPathOnDisk, stop, handler);
-        if ( stop )
-            return;
+        // try rootpaths
+        bool searchiOSSupport = (platform == Platform::iOSMac);
+    #if (TARGET_OS_OSX && TARGET_CPU_ARM64 && BUILDING_DYLD)
+        if ( platform == Platform::iOS ) {
+            searchiOSSupport = true;
+            // <rdar://problem/58959974> some old Almond apps reference old WebKit location
+            if ( strcmp(initialPath, "/System/Library/PrivateFrameworks/WebKit.framework/WebKit") == 0 )
+                initialPath = "/System/Library/Frameworks/WebKit.framework/WebKit";
+        }
+    #endif
 
-        // try cryptex mount
-        // Note this is after the above call due to:
-        // rdar://91027811 (dyld should search for dylib overrides in / before /System/Cryptexes/OS)
-        char rtpath[strlen(_cryptexRootPath)+strlen(initialPath)+8];
-        strcpy(rtpath, _cryptexRootPath);
-        strcat(rtpath, initialPath);
-        forEachImageSuffix(rtpath, Type::cryptexPrefix, stop, handler);
-        if ( stop )
-            return;
+        if ( searchiOSSupport && (strncmp(initialPath, "/System/iOSSupport/", 19) == 0) )
+            searchiOSSupport = false;
+
+        bool searchCryptexPrefix = (_cryptexRootPath != nullptr);
+        if ( searchCryptexPrefix ) {
+
+            // try looking in Catalyst support dir, but not in the shared cache
+            if ( searchiOSSupport ) {
+                {
+                    char rtpath[strlen("/System/iOSSupport")+strlen(initialPath)+8];
+                    strcpy(rtpath, "/System/iOSSupport");
+                    strcat(rtpath, initialPath);
+                    forEachImageSuffix(rtpath, Type::catalystPrefixOnDisk, stop, handler);
+                    if ( stop )
+                        return;
+                }
+
+                {
+                    // try cryptex mount
+                    // Note this is after the above call due to:
+                    // rdar://91027811 (dyld should search for dylib overrides in / before /System/Cryptexes/OS)
+                    char rtpath[strlen(_cryptexRootPath)+strlen("/System/iOSSupport")+strlen(initialPath)+8];
+                    strcpy(rtpath, _cryptexRootPath);
+                    strcat(rtpath, "/System/iOSSupport");
+                    strcat(rtpath, initialPath);
+                    forEachImageSuffix(rtpath, Type::cryptexCatalystPrefix, stop, handler);
+                    if ( stop )
+                        return;
+                }
+
+                // try looking in Catalyst support dir
+                if ( searchiOSSupport ) {
+                    char rtpath[strlen("/System/iOSSupport")+strlen(initialPath)+8];
+                    strcpy(rtpath, "/System/iOSSupport");
+                    strcat(rtpath, initialPath);
+                    forEachImageSuffix(rtpath, Type::catalystPrefix, stop, handler);
+                    if ( stop )
+                        return;
+
+                    searchiOSSupport = false;
+                }
+            }
+
+            // try original path on disk, but not in the shared cache
+            forEachImageSuffix(initialPath, Type::rawPathOnDisk, stop, handler);
+            if ( stop )
+                return;
+
+            // try cryptex mount
+            // Note this is after the above call due to:
+            // rdar://91027811 (dyld should search for dylib overrides in / before /System/Cryptexes/OS)
+            char rtpath[strlen(_cryptexRootPath)+strlen(initialPath)+8];
+            strcpy(rtpath, _cryptexRootPath);
+            strcat(rtpath, initialPath);
+            forEachImageSuffix(rtpath, Type::cryptexPrefix, stop, handler);
+            if ( stop )
+                return;
+        }
+
+        // try looking in Catalyst support dir
+        if ( searchiOSSupport ) {
+            char rtpath[strlen("/System/iOSSupport")+strlen(initialPath)+8];
+            strcpy(rtpath, "/System/iOSSupport");
+            strcat(rtpath, initialPath);
+            forEachImageSuffix(rtpath, Type::catalystPrefix, stop, handler);
+            if ( stop )
+                return;
+        }
     }
 
     // try original path, including in the shared cache
@@ -2066,10 +2112,14 @@ const char* ProcessConfig::PathOverrides::typeName(Type type)
             return "DYLD_VERSIONED_FRAMEWORK/LIBRARY_PATH";
         case suffixOverride:
             return "DYLD_IMAGE_SUFFIX";
+        case catalystPrefixOnDisk:
+            return "Catalyst prefix on disk";
         case catalystPrefix:
             return "Catalyst prefix";
         case simulatorPrefix:
             return "simulator prefix";
+        case cryptexCatalystPrefix:
+            return "cryptex Catalyst prefix";
         case cryptexPrefix:
             return "cryptex prefix";
         case rawPathOnDisk:
