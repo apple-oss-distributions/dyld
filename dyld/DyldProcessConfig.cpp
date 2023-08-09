@@ -709,9 +709,9 @@ uint64_t ProcessConfig::Security::getAMFI(const Process& proc, SyscallDelegate& 
     // let DYLD_AMFI_FAKE override actual AMFI flags, but only on internalInstalls with boot-arg set
     bool testMode = proc.commPage.testMode;
     if ( const char* amfiFake = proc.environ("DYLD_AMFI_FAKE") ) {
-        //console("env DYLD_AMFI_FAKE set, boot-args dyld_flags=%s\n", this->getAppleParam("dyld_flags"));
+        //console("env DYLD_AMFI_FAKE set, boot-args dyld_flags=%s\n", proc.appleParam("dyld_flags"));
         if ( !testMode ) {
-            //console("env DYLD_AMFI_FAKE ignored because boot-args dyld_flags=2 is missing (%s)\n", this->getAppleParam("dyld_flags"));
+            //console("env DYLD_AMFI_FAKE ignored because boot-args dyld_flags=2 is missing (%s)\n", proc.appleParam("dyld_flags"));
         }
         else if ( !this->internalInstall ) {
             //console("env DYLD_AMFI_FAKE ignored because not running on an Internal install\n");
@@ -1423,7 +1423,7 @@ ProcessConfig::PathOverrides::PathOverrides(const Process& process, const Securi
         }
     }
 
-    // process LC_DYLD_ENVIRONMENT variables
+    // process LC_DYLD_ENVIRONMENT variables if allowed
     if ( security.allowEmbeddedVars ) {
         process.mainExecutable->forDyldEnv(^(const char* keyEqualValue, bool& stop) {
             this->addEnvVar(process, security, allocator, keyEqualValue, true, nullptr);
@@ -1433,9 +1433,8 @@ ProcessConfig::PathOverrides::PathOverrides(const Process& process, const Securi
     if ( !cache.cryptexOSPath.empty() )
         this->_cryptexRootPath = cache.cryptexOSPath.data();
 
-    // process DYLD_VERSIONED_* env vars if allowed
-    if ( security.allowEnvVarsPath )
-        this->processVersionedPaths(process, syscall, cache, process.platform, *process.archs, allocator);
+    // process DYLD_VERSIONED_* env vars
+    this->processVersionedPaths(process, syscall, cache, process.platform, *process.archs, allocator);
 
     if ( dontUsePrebuiltForApp() )
         cache.adjustDevelopmentMode();
