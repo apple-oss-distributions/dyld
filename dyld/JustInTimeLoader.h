@@ -26,7 +26,7 @@
 
 
 #include <stdint.h>
-#include <unistd.h>
+#include <TargetConditionals.h>
 
 #include "Defines.h"
 #include "Loader.h"
@@ -37,18 +37,15 @@
 #include "MachOAnalyzer.h"
 #endif
 
-#include "FileManager.h"
-
 class DyldSharedCache;
 
 namespace dyld4 {
-
 using lsl::UUID;
 using dyld3::MachOAnalyzer;
-using dyld4::FileManager;
 
 class PrebuiltLoader;
 class DyldCacheDataConstLazyScopedWriter;
+
 
 class JustInTimeLoader : public Loader
 {
@@ -61,17 +58,20 @@ public:
     const char*                 path() const;
     bool                        contains(RuntimeState& state, const void* addr, const void** segAddr, uint64_t* segSize, uint8_t* segPerms) const;
     bool                        matchesPath(const char* path) const;
-    FileID                      fileID(const FileManager& fileManager) const;
+    FileID                      fileID(const RuntimeState& state) const;
     uint32_t                    dependentCount() const;
     Loader*                     dependent(const RuntimeState& state, uint32_t depIndex, DependentKind* kind=nullptr) const;
     bool                        getExportsTrie(uint64_t& runtimeOffset, uint32_t& size) const;
     bool                        hiddenFromFlat(bool forceGlobal) const;
     bool                        representsCachedDylibIndex(uint16_t dylibIndex) const;
     void                        loadDependents(Diagnostics& diag, RuntimeState& state, const LoadOptions& options);
+#if SUPPORT_IMAGE_UNLOADING
     void                        unmap(RuntimeState& state, bool force=false) const;
+#endif
     void                        applyFixups(Diagnostics&, RuntimeState& state, DyldCacheDataConstLazyScopedWriter&, bool allowLazyBinds) const;
     bool                        overridesDylibInCache(const DylibPatch*& patchTable, uint16_t& cacheDylibOverriddenIndex) const;
     bool                        dyldDoesObjCFixups() const;
+    const SectionLocations*     getSectionLocations() const;
     void                        withLayout(Diagnostics &diag, RuntimeState& state, void (^callback)(const mach_o::Layout &layout)) const;
     // these are private "virtual" methods
     bool                        hasBeenFixedUp(RuntimeState&) const;
@@ -81,17 +81,17 @@ public:
     bool                shouldLeaveMapped() const { return this->leaveMapped || this->lateLeaveMapped; }
     void                setLateLeaveMapped() { this->lateLeaveMapped = true; }
     bool                isOverrideOfCachedDylib() const { return overridesCache; }
+    const PseudoDylib*  pseudoDylib() const { return pd; }
 
-    // functions are used to create PrebuiltLoader from JustInTimeLoader
-    void                forEachBindTarget(Diagnostics& diag, RuntimeState& state, CacheWeakDefOverride patcher, bool allowLazyBinds,
-                                          void (^callback)(const ResolvedSymbol& target, bool& stop),
-                                          void (^overrideBindCallback)(const ResolvedSymbol& target, bool& stop)) const;
-    FileValidationInfo  getFileValidationInfo(FileManager& fileManager) const;
+
+    FileValidationInfo  getFileValidationInfo(RuntimeState& state) const;
     static void         withRegions(const MachOFile* mf, void (^callback)(const Array<Region>& regions));
 
 #if BUILDING_DYLD || BUILDING_UNIT_TESTS
     static void         handleStrongWeakDefOverrides(RuntimeState& state, DyldCacheDataConstLazyScopedWriter& cacheDataConst);
 #endif
+
+    static void         parseSectionLocations(const dyld3::MachOFile* mf, SectionLocations& metadata);
 
     // Wehn patching an iOSMac dylib, we may need an additional patch table for the macOS twin. This returns that patch table
     const DylibPatch*   getCatalystMacTwinPatches() const;
@@ -112,20 +112,35 @@ public:
     static Loader*      makeLaunchLoader(Diagnostics& diag, RuntimeState& state, const MachOAnalyzer* mainExe, const char* mainExePath,
                                          const mach_o::Layout* layout);
 
+    static const Loader* makePseudoDylibLoader(Diagnostics& diag, RuntimeState &state, const char* path, const LoadOptions& options, const PseudoDylib* pd);
+
 private:
 
-#if SUPPORT_VM_LAYOUT
-    const MachOLoaded*          mappedAddress;
-#else
-    const mach_o::MachOFileRef  mappedAddress;
-#endif
 
 #if BUILDING_CACHE_BUILDER || BUILDING_CACHE_BUILDER_UNIT_TESTS
     // The layout of the Mach-O in the cache builder may not match the file layout seen in
     // a MachOFile, or the VM layout in a MachOLoaded.  This pointer, which is required to be set, will give
     // us the layout of the mach-o in the builder
     const mach_o::Layout* nonRuntimeLayout = nullptr;
-#endif
+#endif // BUILDING_CACHE_BUILDER || BUILDING_CACHE_BUILDER_UNIT_TESTS
+
+    void                        logFixup(RuntimeState& state, uint64_t fixupLocRuntimeOffset, uintptr_t newValue, PointerMetaData pmd, const Loader::ResolvedSymbol& target) const;
+    void                        fixupUsesOfOverriddenDylib(const JustInTimeLoader* overriddenDylib) const;
+    static void                 cacheWeakDefFixup(RuntimeState& state, DyldCacheDataConstLazyScopedWriter& cacheDataConst,
+                                                  uint32_t cachedDylibIndex, uint32_t cachedDylibVMOffset, const ResolvedSymbol& target);
+    const DylibPatch*           makePatchTable(RuntimeState& state, uint32_t indexOfOverriddenCachedDylib) const;
+    static JustInTimeLoader*    make(RuntimeState& state, const MachOFile* mh, const char* path, const FileID& fileID, uint64_t sliceOffset,
+                                     bool willNeverUnload, bool leaveMapped, bool overridesCache, uint16_t dylibIndex, const mach_o::Layout* layout);
+
+
+
+protected:
+#if SUPPORT_VM_LAYOUT
+    const MachOLoaded*          mappedAddress;
+    const MachOAnalyzer*        analyzer() const { return (MachOAnalyzer*)mappedAddress; }
+#else
+    const mach_o::MachOFileRef  mappedAddress;
+#endif //SUPPORT_VM_LAYOUT
 
     mutable uint64_t     pathOffset         : 16,
                          dependentsSet      :  1,
@@ -143,30 +158,17 @@ private:
     FileID               fileIdent;
     const DylibPatch*    overridePatches;
     const DylibPatch*    overridePatchesCatalystMacTwin;
+    const PseudoDylib*   pd;
     uint32_t             exportsTrieRuntimeOffset;
     uint32_t             exportsTrieSize;
+    SectionLocations     sectionLocations;
     AuthLoader           dependents[1];
     // DependentsKind[]: If allDepsAreNormal is false, then we have an array here too, with 1 entry per dependent
 
-#if SUPPORT_VM_LAYOUT
-    const MachOAnalyzer*        analyzer() const { return (MachOAnalyzer*)mappedAddress; }
-#endif
 
-    void                        logFixup(RuntimeState& state, uint64_t fixupLocRuntimeOffset, uintptr_t newValue, PointerMetaData pmd, const Loader::ResolvedSymbol& target) const;
-    void                        fixupUsesOfOverriddenDylib(const JustInTimeLoader* overriddenDylib) const;
-    DependentKind&              dependentKind(uint32_t depIndex);
-    static void                 cacheWeakDefFixup(RuntimeState& state, DyldCacheDataConstLazyScopedWriter& cacheDataConst,
-                                                  uint32_t cachedDylibIndex, uint32_t cachedDylibVMOffset, const ResolvedSymbol& target);
-    const DylibPatch*           makePatchTable(RuntimeState& state, uint32_t indexOfOverriddenCachedDylib) const;
-    static JustInTimeLoader*    make(RuntimeState& state, const MachOFile* mh, const char* path, const FileID& fileID, uint64_t sliceOffset,
-                                     bool willNeverUnload, bool leaveMapped, bool overridesCache, uint16_t dylibIndex, const mach_o::Layout* layout);
-
-
-
-private:
-                        JustInTimeLoader(const MachOFile* mh, const Loader::InitialOptions& options, const FileID& fileID, const mach_o::Layout* layout);
+    DependentKind&      dependentKind(uint32_t depIndex);
+                        JustInTimeLoader(const MachOFile* mh, const Loader::InitialOptions& options, const FileID& fileID, const mach_o::Layout* layout, bool isPremapped);
 };
-
 
 }  // namespace dyld4
 

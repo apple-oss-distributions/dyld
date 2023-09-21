@@ -22,19 +22,27 @@
 * @APPLE_LICENSE_HEADER_END@
 */
 
-// For now just for compact info, but in the long run we can use this to centralize convenience macros and configuration options
+// Centralize convenience macros and configuration options
 
 #ifndef DYLD_DEFINES_H
 #define DYLD_DEFINES_H
 
 #include <TargetConditionals.h>
 
+#ifndef TARGET_OS_EXCLAVEKIT
+//TODO: EXCLAVES remove
+#define TARGET_OS_EXCLAVEKIT 0
+#endif
+
 #define VIS_HIDDEN      __attribute__((visibility("hidden")))
 #define TRIVIAL_ABI     [[clang::trivial_abi]]
 #define NO_DEBUG        [[gnu::nodebug]]
 #define ALWAYS_INLINE   __attribute__((always_inline))
 
-#define SUPPORT_ROSETTA (TARGET_OS_OSX && __x86_64__)
+#define SUPPORT_IMAGE_UNLOADING (BUILDING_DYLD && !TARGET_OS_EXCLAVEKIT)
+
+// Rosetta support is defined by whether or not a platform has librosetta_trap
+#define SUPPORT_ROSETTA (__has_include(<Rosetta/Dyld/Traps.h>) && (__x86_64__ || __arm64e__))  && TARGET_OS_OSX
 
 
 #define SUPPORT_PRIVATE_EXTERNS_WORKAROUND (BUILDING_DYLD && TARGET_OS_OSX && __x86_64__)
@@ -54,6 +62,12 @@
 #define SUPPORT_HOST_INTROSPECTION (1)
 #endif
 
+#define HAS_EXTERNAL_STATE (BUILDING_DYLD && !TARGET_OS_EXCLAVEKIT)
+
+#define SUPPORT_CREATING_PREBUILTLOADERS ((BUILDING_DYLD && !TARGET_OS_SIMULATOR && !TARGET_OS_EXCLAVEKIT) || BUILDING_CACHE_BUILDER || BUILDING_CLOSURE_UTIL)
+#define SUPPORT_CREATING_PREMAPPEDLOADERS (BUILDING_DYLD && TARGET_OS_EXCLAVEKIT)
+
+
 // Default to a 16MB pool for most uses cases, but we want a smaller 256KB pool when:
 // 1. We are building dyld, since most of the time we only allocate 2-3 pages and we can hand pack a bunch of virtual address spacew
 // OR
@@ -64,7 +78,12 @@
 #define PERSISTENT_ALLOCATOR_DEFAULT_POOL_SIZE (1024*1024)
 #endif
 
+#if !TARGET_OS_EXCLAVEKIT
 #define EPHEMERAL_ALLOCATOR_DEFAULT_POOL_SIZE (4*1024*1024)
+#else
+#define EPHEMERAL_ALLOCATOR_DEFAULT_POOL_SIZE (128*1024)
+#endif
+
 
 #if TARGET_OS_OSX && defined(__x86_64__)
 #define SUPPPORT_PRE_LC_MAIN (1)
@@ -96,7 +115,9 @@
 #define BUILDING_CACHE_BUILDER 0
 #endif
 
-#if !TARGET_OS_DRIVERKIT && (BUILDING_LIBDYLD || BUILDING_DYLD || BUILDING_SHARED_CACHE_EXTRACTOR || BUILDING_SHARED_CACHE_UTIL || BUILDING_LIBDSC)
+#define SUPPORT_CLASSIC_RELOCS (!TARGET_OS_EXCLAVEKIT && (!BUILDING_DYLD || TARGET_OS_OSX) )
+
+#if !TARGET_OS_DRIVERKIT && !TARGET_OS_EXCLAVEKIT && (BUILDING_LIBDYLD || BUILDING_DYLD || BUILDING_SHARED_CACHE_EXTRACTOR || BUILDING_SHARED_CACHE_UTIL || BUILDING_LIBDSC)
   #include <CrashReporterClient.h>
 #else
   #define CRSetCrashLogMessage(x)
@@ -111,6 +132,18 @@
 #define contract __builtin_assume
 #define PERSISTENT_ALLOCATOR_VALIDATION (0)
 #define BTREE_VALIDATION                (0)
+#endif
+
+
+#ifndef PATH_MAX
+  #define PATH_MAX 1024
+#endif
+
+#if TARGET_OS_EXCLAVEKIT
+   #define PAGE_SIZE (16384)
+   #define trunc_page(x)   ((x) & (~(PAGE_SIZE - 1)))
+   #define round_page(x)   trunc_page((x) + (PAGE_SIZE - 1))
+   #define bzero(p, s) memset(p, 0, s)
 #endif
 
 #endif /* DYLD_DEFINES_H */

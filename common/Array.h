@@ -29,10 +29,12 @@
 #include <stdio.h>
 #include <assert.h>
 #include <stddef.h>
-#include <mach/mach.h>
 #include <TargetConditionals.h>
-
 #include "Defines.h"
+#if !TARGET_OS_EXCLAVEKIT
+#include <mach/mach.h>
+#endif
+#include "Allocator.h"
 
 namespace dyld3 {
 
@@ -72,7 +74,7 @@ public:
     void            remove(size_t idx)            { assert(idx < _usedCount); ::memmove(&_elements[idx], &_elements[idx+1], sizeof(T)*(_usedCount-idx-1)); }
     void            resize(size_t count)          { assert(count <= _allocCount); _usedCount = count; }
     void            clear()                       { _usedCount = 0; }
-    
+
 protected:
     T*          _elements;
     uintptr_t   _allocCount;
@@ -138,36 +140,42 @@ protected:
     void            verifySpace(uintptr_t n)     { if (this->_usedCount+n > this->_allocCount) growTo(this->_usedCount + n); }
 
 private:
-    vm_address_t    _overflowBuffer         = 0;
-    vm_size_t       _overflowBufferSize     = 0;
+    void *          _overflowBuffer         = 0;
+    size_t          _overflowBufferSize     = 0;
 };
 
 
 template <typename T, uintptr_t MAXCOUNT>
 inline void OverflowSafeArray<T,MAXCOUNT>::growTo(uintptr_t n)
 {
-    vm_address_t    oldBuffer      = _overflowBuffer;
-    vm_size_t       oldBufferSize  = _overflowBufferSize;
+    void *          oldBuffer      = _overflowBuffer;
+    size_t          oldBufferSize  = _overflowBufferSize;
     if ( MAXCOUNT != 0xFFFFFFFF ) {
         assert(oldBufferSize == 0); // only re-alloc once
         // MAXCOUNT is specified, so immediately jump to that size
-        _overflowBufferSize = round_page(std::max(MAXCOUNT, n) * sizeof(T));
+        //_overflowBufferSize = round_page(std::max(MAXCOUNT, n) * sizeof(T));
     }
     else {
        // MAXCOUNT is not specified, keep doubling size
        _overflowBufferSize = round_page(std::max(this->_allocCount * 2, n) * sizeof(T));
     }
-    kern_return_t kr = ::vm_allocate(mach_task_self(), &_overflowBuffer, _overflowBufferSize, VM_FLAGS_ANYWHERE | VM_MAKE_TAG(VM_MEMORY_DYLD));
-    if (kr != KERN_SUCCESS) {
-#if BUILDING_LIBDYLD
+#if !TARGET_OS_EXCLAVEKIT
+    int kr = ::vm_allocate(mach_task_self(), (vm_address_t*)&_overflowBuffer, _overflowBufferSize, VM_FLAGS_ANYWHERE | VM_MAKE_TAG(VM_MEMORY_DYLD));
+#else
+    _overflowBuffer = lsl::MemoryManager::allocate_pages(_overflowBufferSize);
+    int kr = 0;
+#endif
+    if (kr != 0) {
+#if BUILDING_LIBDYLD && !TARGET_OS_EXCLAVEKIT
         //FIXME We should figure out a way to do this in dyld
         char crashString[256];
         snprintf(crashString, sizeof(crashString), "OverflowSafeArray failed to allocate %llu bytes, vm_allocate returned: %d\n",
-                (uint64_t)_overflowBufferSize, kr);
+                 (uint64_t)_overflowBufferSize, kr);
         CRSetCrashLogMessage(crashString);
 #endif
         assert(0);
     }
+
     if constexpr (std::is_trivially_copyable<T>::value) {
         ::memcpy((void*)_overflowBuffer, (void*)this->_elements, this->_usedCount*sizeof(T));
     } else if constexpr (std::is_move_constructible<T>::value) {
@@ -183,7 +191,11 @@ inline void OverflowSafeArray<T,MAXCOUNT>::growTo(uintptr_t n)
     this->_allocCount = _overflowBufferSize / sizeof(T);
 
     if ( oldBuffer != 0 )
-        ::vm_deallocate(mach_task_self(), oldBuffer, oldBufferSize);
+#if !TARGET_OS_EXCLAVEKIT
+        ::vm_deallocate(mach_task_self(), (vm_address_t)oldBuffer, oldBufferSize);
+#else
+        lsl::MemoryManager::deallocate_pages(oldBuffer, oldBufferSize);
+#endif
 }
 
 template <typename T, uintptr_t MAXCOUNT>
@@ -203,7 +215,11 @@ inline OverflowSafeArray<T,MAXCOUNT>::~OverflowSafeArray()
     clear();
 
     if ( _overflowBuffer != 0 )
-        ::vm_deallocate(mach_task_self(), _overflowBuffer, _overflowBufferSize);
+#if !TARGET_OS_EXCLAVEKIT
+        ::vm_deallocate(mach_task_self(), (vm_address_t)_overflowBuffer, _overflowBufferSize);
+#else
+    lsl::MemoryManager::deallocate_pages(_overflowBuffer, _overflowBufferSize);
+#endif
 }
 
 template <typename T, uintptr_t MAXCOUNT>
@@ -214,7 +230,11 @@ inline OverflowSafeArray<T,MAXCOUNT>& OverflowSafeArray<T,MAXCOUNT>::operator=(O
 
     // Free our buffer if we have one
     if ( _overflowBuffer != 0 )
-        ::vm_deallocate(mach_task_self(), _overflowBuffer, _overflowBufferSize);
+#if !TARGET_OS_EXCLAVEKIT
+        vm_deallocate(mach_task_self(), (vm_address_t)_overflowBuffer, _overflowBufferSize);
+#else
+    lsl::MemoryManager::deallocate_pages(_overflowBuffer, _overflowBufferSize);
+#endif
 
     new (this) OverflowSafeArray<T,MAXCOUNT>(std::move(other));
     return *this;

@@ -24,6 +24,8 @@
 
 #include <TargetConditionals.h>
 
+#if !TARGET_OS_EXCLAVEKIT
+
 #include "dyld_introspection.h"
 #include "dyld_cache_format.h"
 #include "ProcessAtlas.h"
@@ -342,3 +344,5 @@ bool dyld_image_local_nlist_content_4Symbolication(dyld_image_t image,
     return result;
 }
 
+
+#endif // !TARGET_OS_EXCLAVEKIT

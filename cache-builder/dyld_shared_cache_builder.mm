@@ -915,6 +915,7 @@ static void buildCacheFromJSONManifest(Diagnostics& diags, const SharedCacheBuil
                     dylibsInNewCaches.insert(fileResults[i]);
             }
             if ( buildOptions.platform == Platform::macOS ) {
+                //FIXME: We should be using MH_SIM_SUPPORT now that all the relevent binaries include it in their headers
                 // macOS has to leave the simulator support binaries on disk
                 // It won't put them in the result of getFilesToRemove() so we need to manually add them
                 simulatorSupportDylibs.insert("/usr/lib/system/libsystem_kernel.dylib");

@@ -138,8 +138,10 @@ private:
     void            findCanonicalObjCProtocolNames();
     void            findObjCClasses();
     void            findObjCProtocols();
+    void            findObjCCategories();
     void            estimateObjCHashTableSizes();
     void            calculateObjCCanonicalProtocolsSize();
+    void            calculateObjCCategoriesSize();
     void            estimateSwiftHashTableSizes();
     void            calculateCacheDylibsTrie();
     void            estimatePatchTableSize();
@@ -169,6 +171,7 @@ private:
     void            setupSplitSegAdjustors();
     void            adjustObjCClasses();
     void            adjustObjCProtocols();
+    void            adjustObjCCategories();
 
     // Final passes to run, after dylib passes
     void            emitObjCSelectorStrings();
@@ -183,6 +186,7 @@ private:
     error::Error    emitUniquedGOTs();
     error::Error    emitCanonicalObjCProtocols();
     error::Error    computeObjCClassLayout();
+    error::Error    emitPreAttachedObjCCategories();
     void            computeSlideInfo();
     void            emitCacheDylibsTrie();
     error::Error    emitPatchTable();
@@ -256,6 +260,7 @@ private:
     ObjCSelectorOptimizer                objcSelectorOptimizer;
     ObjCClassOptimizer                   objcClassOptimizer;
     ObjCProtocolOptimizer                objcProtocolOptimizer;
+    ObjCCategoryOptimizer                objcCategoryOptimizer;
     SwiftProtocolConformanceOptimizer    swiftProtocolConformanceOptimizer;
     DylibTrieOptimizer                   dylibTrieOptimizer;
     PatchTableOptimizer                  patchTableOptimizer;

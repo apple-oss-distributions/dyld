@@ -32,11 +32,17 @@ namespace dyld4 {
 struct RemoteNotificationResponder {
     RemoteNotificationResponder(const RemoteNotificationResponder&) = delete;
     RemoteNotificationResponder(RemoteNotificationResponder&&) = delete;
-    RemoteNotificationResponder();
+    RemoteNotificationResponder(mach_port_t notifyPortValue);
     ~RemoteNotificationResponder();
+    void notifyMonitorOfImageListChanges(bool unloading, unsigned imageCount, const struct mach_header* loadAddresses[], const char* imagePaths[], uint64_t lastUpdateTime);
+    void notifyMonitorOfMainCalled();
+    void notifyMonitorOfDyldBeforeInitializers();
     void sendMessage(mach_msg_id_t msgId, mach_msg_size_t sendSize, mach_msg_header_t* buffer);
     bool const active() const;
     void blockOnSynchronousEvent(uint32_t event);
+    
+    enum { DYLD_PROCESS_INFO_NOTIFY_MAGIC = 0x49414E46 };
+
 private:
     mach_port_t             _namesArray[8] = {0};
     mach_port_name_array_t  _names = (mach_port_name_array_t)&_namesArray[0];

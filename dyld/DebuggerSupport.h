@@ -29,21 +29,21 @@
 #include <span>
 
 #include "Defines.h"
-#include "Allocator.h"
-//#include "CompactInfo.h"
-#include "DyldRuntimeState.h"
 
+namespace lsl {
+    struct Allocator;
+}
 namespace dyld4 {
-    using lsl::Allocator;
-    void addImagesToAllImages(RuntimeState& state, uint32_t infoCount, const dyld_image_info info[],  uint32_t initialImageCount);
+    class RuntimeState;
+    void addImagesToAllImages(lsl::Allocator& persistentAllocator, uint32_t infoCount, const dyld_image_info info[],  uint32_t initialImageCount);
     void removeImageFromAllImages(const mach_header* loadAddress);
-    void addNonSharedCacheImageUUID(Allocator&, const dyld_uuid_info& info);
+    void addNonSharedCacheImageUUID(lsl::Allocator&, const dyld_uuid_info& info);
 #if TARGET_OS_SIMULATOR
     void syncProcessInfo(Allocator& allocator);
 #endif
 
 #if SUPPORT_ROSETTA
-    void addAotImagesToAllAotImages(Allocator&, uint32_t aotInfoCount, const dyld_aot_image_info aotInfo[]);
+    void addAotImagesToAllAotImages(lsl::Allocator&, uint32_t aotInfoCount, const dyld_aot_image_info aotInfo[]);
     void removeAotImageFromAllAotImages(const mach_header* loadAddress);
 #endif
 }

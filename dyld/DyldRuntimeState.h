@@ -28,17 +28,17 @@
 #include <stdarg.h>
 #include <mach-o/dyld.h>
 #include <mach-o/dyld_priv.h>
-#include <os/lock_private.h>
-#include <os/atomic_private.h>
-
+#include <TargetConditionals.h>
+#if !TARGET_OS_EXCLAVEKIT
+  #include <os/atomic_private.h>
+  #include <os/lock_private.h>
+#endif
 #include "Defines.h"
 #include "MachOLoaded.h"
 #include "MachOAnalyzer.h"
 #include "Array.h"
 #include "DyldProcessConfig.h"
-#include "LibSystemHelpers.h"
 #include "Allocator.h"
-#include "FileManager.h"
 #include "Loader.h"
 #include "MurmurHash.h"
 #include "OptimizerSwift.h"
@@ -46,6 +46,13 @@
 #include "Map.h"
 #include "UUID.h"
 #include "OrderedMap.h"
+#include "LibSystemHelpers.h"
+#if !TARGET_OS_EXCLAVEKIT
+  #include "FileManager.h"
+#endif
+#if HAS_EXTERNAL_STATE
+  #include "ExternallyViewableState.h"
+#endif
 #include "Tracing.h"
 
 namespace dyld4 {
@@ -64,6 +71,8 @@ namespace Atlas {
 struct ProcessSnapshot;
 };
 using Atlas::ProcessSnapshot;
+
+class DyldCacheDataConstLazyScopedWriter;
 
 class Loader;
 class Reaper;
@@ -98,21 +107,80 @@ struct ObjCClassReplacement
 typedef void                (*NotifyFunc)(const mach_header* mh, intptr_t slide);
 typedef void                (*LoadNotifyFunc)(const mach_header* mh, const char* path, bool unloadable);
 typedef void                (*BulkLoadNotifier)(unsigned count, const mach_header* mhs[], const char* paths[]);
-typedef int                 (*MainFunc)(int argc, const char* const argv[], const char* const envp[], const char* const apple[]);
+    typedef int             (*MainFunc)(int argc, const char* const argv[], const char* const envp[], const char* const apple[]);
 
-#if BUILDING_DYLD
 struct RuntimeLocks
 {
-    os_unfair_recursive_lock        loadersLock           = OS_UNFAIR_RECURSIVE_LOCK_INIT;
-    os_unfair_recursive_lock        notifiersLock         = OS_UNFAIR_RECURSIVE_LOCK_INIT;
-    os_unfair_recursive_lock        tlvInfosLock          = OS_UNFAIR_RECURSIVE_LOCK_INIT;
-    os_unfair_recursive_lock        apiLock               = OS_UNFAIR_RECURSIVE_LOCK_INIT;
-    os_unfair_lock_s                allocatorLock         = OS_LOCK_UNFAIR_INIT;
-  #if !TARGET_OS_SIMULATOR
-    os_unfair_lock_s                logSerializer         = OS_LOCK_UNFAIR_INIT;
-  #endif
+public:
+                            RuntimeLocks();
+
+    void                    withLoadersReadLock(void (^work)());
+    template<typename F>
+    ALWAYS_INLINE void      withLoadersWriteLock(MemoryManager& memoryManager, F work)
+    {
+        // We wrap with withWritableMemory outside the BUILDING_DYLD because we need to swap the writability in early dyld (before
+        // libSystemHelpers is configured) and it compiles to a noop for non-dyld targets.
+        memoryManager.withWritableMemory([&]{
+            #if BUILDING_DYLD
+            if ( this->_libSystemHelpers != nullptr ) {
+                this->_libSystemHelpers->os_unfair_recursive_lock_lock_with_options(&_loadersLock, OS_UNFAIR_LOCK_NONE);
+                work();
+                this->_libSystemHelpers->os_unfair_recursive_lock_unlock(&_loadersLock);
+            }
+            else
+            #endif // BUILDING_DYLD
+            {
+                work();
+            }
+        });
+    }
+    void                    withNotifiersReadLock(void (^work)());
+    template<typename F>
+    ALWAYS_INLINE void      withNotifiersWriteLock(MemoryManager& memoryManager, F work)
+    {
+        // We wrap with withWritableMemory outside the BUILDING_DYLD because we need to swap the writability in early dyld (before
+        // libSystemHelpers is configured) and it compiles to a noop for non-dyld targets.
+        memoryManager.withWritableMemory([&]{
+        #if BUILDING_DYLD
+            if ( this->_libSystemHelpers != nullptr ) {
+                this->_libSystemHelpers->os_unfair_recursive_lock_lock_with_options(&_notifiersLock, OS_UNFAIR_LOCK_NONE);
+                work();
+                this->_libSystemHelpers->os_unfair_recursive_lock_unlock(&_notifiersLock);
+            }
+            else
+        #endif // BUILDING_DYLD
+            {
+                work();
+            }
+        });
+
+    }
+    void                    withTLVLock(void (^work)());
+
+    // Helpers to reset locks across fork()
+    void                    takeLockBeforeFork();
+    void                    releaseLockInForkParent();
+    void                    resetLockInForkChild();
+    void                    takeDlopenLockBeforeFork();
+    void                    releaseDlopenLockInForkParent();
+    void                    resetDlopenLockInForkChild();
+    void                    setHelpers(const LibSystemHelpers* helpers) { _libSystemHelpers = helpers; }
+
+private:
+    const LibSystemHelpers*   _libSystemHelpers      = nullptr;
+#if BUILDING_DYLD
+    dyld_recursive_mutex  _loadersLock;
+    dyld_recursive_mutex  _notifiersLock;
+    dyld_recursive_mutex  _tlvInfosLock;
+    dyld_recursive_mutex  _apiLock;
+
+public:
+    dyld_mutex         allocatorLock;
+#if !TARGET_OS_SIMULATOR
+    dyld_mutex          logSerializer;
+    #endif // !TARGET_OS_SIMULATOR
+#endif // BUILDING_DYLD
 };
-#endif // !BUILDING_DYLD
 
 
 struct WeakDefMapValue {
@@ -124,6 +192,7 @@ struct WeakDefMapValue {
 
 typedef dyld3::CStringMapTo<WeakDefMapValue> WeakDefMap;
 
+#if SUPPORT_CREATING_PREBUILTLOADERS || BUILDING_UNIT_TESTS || BUILDING_CACHE_BUILDER_UNIT_TESTS
 #if SUPPORT_VM_LAYOUT
 struct EqualTypeConformanceLookupKey {
     static bool equal(const SwiftTypeProtocolConformanceDiskLocationKey& key, uint64_t typeDescriptor, uint64_t protocol, RuntimeState* state) {
@@ -146,7 +215,7 @@ struct EqualForeignConformanceLookupKey {
         return (strncmp(keyStr, foreignDescriptor, (size_t)key.foreignDescriptorNameLength) == 0) && (key.foreignDescriptorNameLength == foreignLength) && (key.protocol.value(*state) == protocol);
     }
 };
-#endif
+#endif // SUPPORT_VM_LAYOUT
 
 const uint64_t twelveBitsMask = 0xFFF;
 
@@ -226,7 +295,47 @@ struct HashForeignConformanceKey {
 typedef dyld3::MultiMap<SwiftTypeProtocolConformanceDiskLocationKey, SwiftTypeProtocolConformanceDiskLocation, HashTypeConformanceKey, EqualTypeConformanceKey> TypeProtocolMap;
 typedef dyld3::MultiMap<SwiftMetadataProtocolConformanceDiskLocationKey, SwiftMetadataProtocolConformanceDiskLocation, HashMetadataConformanceKey, EqualMetadataConformanceKey> MetadataProtocolMap;
 typedef dyld3::MultiMap<SwiftForeignTypeProtocolConformanceDiskLocationKey, SwiftForeignTypeProtocolConformanceDiskLocation, HashForeignConformanceKey, EqualForeignConformanceKey> ForeignProtocolMap;
+#endif // SUPPORT_CREATING_PREBUILTLOADERS || BUILDING_UNIT_TESTS || BUILDING_CACHE_BUILDER_UNIT_TESTS
 
+struct PseudoDylibCallbacks {
+    _dyld_pseudodylib_dispose_error_message dispose_error_message = nullptr;
+    _dyld_pseudodylib_initialize initialize = nullptr;
+    _dyld_pseudodylib_deinitialize deinitialize = nullptr;
+    _dyld_pseudodylib_lookup_symbols lookupSymbols = nullptr;
+    _dyld_pseudodylib_lookup_address lookupAddress = nullptr;
+    _dyld_pseudodylib_find_unwind_sections findUnwindSections = nullptr;
+};
+
+// Describes a named, opaque, in-memory data structure that supports dylib-like
+// operations via the given callbacks.
+class PseudoDylib {
+public:
+    static PseudoDylib* create(Allocator& A, const char* identifier, void* addr, size_t size, PseudoDylibCallbacks* callbacks, void* context);
+
+    void* getAddress() const { return base; }
+    size_t getSize() const { return size; }
+    bool contains(const void* p) const {
+        return p >= base && p < ((char*)base + size);
+    }
+    const char* getIdentifier() const { return identifier; }
+
+    void disposeErrorMessage(char* errMsg) const;
+    char* initialize() const;
+    char* deinitialize() const;
+    char* lookupSymbols(std::span<const char*> names,
+                        std::span<void*> addrs,
+                        std::span<_dyld_pseudodylib_symbol_flags> flags) const;
+    int lookupAddress(const void* addr, Dl_info *info) const;
+    char* findUnwindSections(const void* addr, bool* found, dyld_unwind_sections* info) const;
+private:
+    PseudoDylib() = default;
+
+    void*                           base = nullptr;          // base of PseudoDylib address range.
+    size_t                          size = 0;                // size of PseudoDylib address range.
+    PseudoDylibCallbacks*           callbacks = nullptr;     // Callbacks for this PseudoDylib.
+    void*                           context = nullptr;       // Context pointer for callbacks.
+    const char*                     identifier = nullptr;    // PseudeDylib name from LC_ID_DYLIB.
+};
 
 //
 // Note: need to force vtable ptr auth so that libdyld.dylib from base OS and driverkit use same ABI
@@ -245,9 +354,7 @@ public:
 #endif
     uint64_t                        libdyldMissingSymbolRuntimeOffset = 0;
     MemoryManager&                  memoryManager;
-#if BUILDING_DYLD
-    RuntimeLocks&                   _locks;
-#endif /* BUILDING_DYLD */
+    RuntimeLocks&                   locks;
     dyld4::ProgramVars*             vars                 = nullptr;
     const LibSystemHelpers*         libSystemHelpers     = nullptr;
     Vector<InterposeTupleAll>       interposingTuplesAll;
@@ -258,30 +365,39 @@ public:
     size_t                          numSingletonObjectsPatched = 0;
     uint64_t                        weakDefResolveSymbolCount = 0;
     WeakDefMap*                     weakDefMap                = nullptr;
+#if SUPPORT_CREATING_PREBUILTLOADERS || BUILD_FOR_UNIT_TESTS
     TypeProtocolMap*                typeProtocolMap     = nullptr;
     MetadataProtocolMap*            metadataProtocolMap = nullptr;
     ForeignProtocolMap*             foreignProtocolMap  = nullptr;
+#endif // SUPPORT_CREATING_PREBUILTLOADERS || BUILD_FOR_UNIT_TESTS
+#if !TARGET_OS_EXCLAVEKIT
     FileManager                     fileManager;
+#endif
+#if HAS_EXTERNAL_STATE
+    ExternallyViewableState         externallyViewable;
+#endif
+    Vector<PseudoDylib*>            pseudoDylibs;
 
 #if BUILDING_DYLD
-                                RuntimeState(const ProcessConfig& c, Allocator& alloc, RuntimeLocks& locks)
-#else
-                                RuntimeState(const ProcessConfig& c, Allocator& alloc = Allocator::persistentAllocator())
+    StructuredError                 structuredError;
 #endif
+
+                                RuntimeState(const ProcessConfig& c, RuntimeLocks& locks, Allocator& alloc = Allocator::persistentAllocator())
                                     : config(c), persistentAllocator(alloc),
                                     loaded(alloc), memoryManager(*alloc.memoryManager()),
-#if BUILDING_DYLD
-                                    _locks(locks),
-#endif /* BUILDING_DYLD */
+                                    locks(locks),
                                     interposingTuplesAll(alloc), interposingTuplesSpecific(alloc),
                                     patchedObjCClasses(alloc), objcReplacementClasses(alloc),
                                     patchedSingletons(alloc),
-                                    fileManager(alloc, &config.syscall),
+#if !TARGET_OS_EXCLAVEKIT
+                                    fileManager(persistentAllocator, &config.syscall),
+#endif
+                                    pseudoDylibs(alloc),
                                     _notifyAddImage(alloc), _notifyRemoveImage(alloc),
                                     _notifyLoadImage(alloc), _notifyBulkLoadImage(alloc),
                                     _tlvInfos(alloc), _loadersNeedingDOFUnregistration(alloc),
                                     _missingFlatLazySymbols(alloc), _dynamicReferences(alloc),
-                                    _dlopenRefCounts(alloc), _dynamicNeverUnloads(alloc) {}
+                                    _dlopenRefCounts(alloc), _dynamicNeverUnloads(alloc) { }
 
     void                        setMainLoader(const Loader*);
     void                        add(const Loader*);
@@ -290,6 +406,7 @@ public:
     void                        setMainFunc(MainFunc func)   { _driverKitMain = func; }
 
     void                        setDyldLoader(const Loader* ldr);
+    void                        setHelpers(const LibSystemHelpers* helpers);
 
     uint8_t*                    appState(uint16_t index);
     uint8_t*                    cachedDylibState(uint16_t index);
@@ -308,7 +425,7 @@ public:
     void                        vlog(const char* format, va_list list) __attribute__((format(printf, 2, 0)));
 
     void                        setObjCNotifiers(_dyld_objc_notify_mapped, _dyld_objc_notify_init, _dyld_objc_notify_unmapped,
-                                                 _dyld_objc_notify_patch_class, _dyld_objc_notify_mapped2);
+                                                 _dyld_objc_notify_patch_class, _dyld_objc_notify_mapped2, _dyld_objc_notify_init2);
     void                        addNotifyAddFunc(const Loader* callbackLoader, NotifyFunc);
     void                        addNotifyRemoveFunc(const Loader* callbackLoader, NotifyFunc);
     void                        addNotifyLoadImage(const Loader* callbackLoader, LoadNotifyFunc);
@@ -319,40 +436,19 @@ public:
     void                        buildInterposingTables();
 #endif
 
-    void                        withNotifiersReadLock(void (^work)());
-
-    template<typename F>
-    ALWAYS_INLINE void          withNotifiersWriteLock(F work)
-    {
-        // We wrap with withWritableMemory outside the BUILDING_DYLD because we need to swap the writability in early dyld (before
-        // libSystemHelpers is configured) and it compiles to a noop for non-dyld targets.
-        memoryManager.withWritableMemory([&]{
-        #if BUILDING_DYLD
-            if ( this->libSystemHelpers != nullptr ) {
-                this->libSystemHelpers->os_unfair_recursive_lock_lock_with_options(&_locks.notifiersLock, OS_UNFAIR_LOCK_NONE);
-                work();
-                this->libSystemHelpers->os_unfair_recursive_lock_unlock(&_locks.notifiersLock);
-            }
-            else
-        #endif
-            {
-                work();
-            }
-        });
-
-    }
 
     void                        addPermanentRanges(const Array<const Loader*>& neverUnloadLoaders);
     bool                        inPermanentRange(uintptr_t start, uintptr_t end, uint8_t* perms, const Loader** loader);
 
     void                        notifyLoad(const std::span<const Loader*>& newLoaders);
     void                        notifyUnload(const std::span<const Loader*>& removeLoaders);
-    void                        doSingletonPatching();
+    void                        doSingletonPatching(DyldCacheDataConstLazyScopedWriter& cacheDataConst);
     void                        notifyObjCPatching();
     void                        notifyDebuggerLoad(const Loader* oneLoader);
     void                        notifyDebuggerLoad(const std::span<const Loader*>& newLoaders);
     void                        notifyDebuggerUnload(const std::span<const Loader*>& removingLoaders);
     void                        notifyDtrace(const std::span<const Loader*>& newLoaders);
+    bool                        libSystemInitialized() const { return (libSystemHelpers != nullptr); }
 
     void                        incDlRefCount(const Loader* ldr);  // used by dlopen
     void                        decDlRefCount(const Loader* ldr);  // used by dlclose
@@ -374,8 +470,9 @@ public:
     void                        setVMAccountingSuspending(bool mode);
     bool                        hasOverriddenCachedDylib() { return _hasOverriddenCachedDylib; }
     void                        setHasOverriddenCachedDylib() { _hasOverriddenCachedDylib = true; }
-
-    pthread_key_t               dlerrorPthreadKey() { return _dlerrorPthreadKey; }
+    bool                        hasOverriddenUnzipperedTwin() { return _hasOverriddenUnzipperedTwin; }
+    void                        setHasOverriddenUnzipperedTwin() { _hasOverriddenUnzipperedTwin = true; }
+    dyld_thread_key_t           dlerrorPthreadKey() { return _dlerrorPthreadKey; }
 
     typedef void  (*TLV_TermFunc)(void* objAddr);
 
@@ -383,28 +480,6 @@ public:
     void                        setUpTLVs(const MachOAnalyzer* ma);
     void                        addTLVTerminationFunc(TLV_TermFunc func, void* objAddr);
     void                        exitTLV();
-
-    void                        withLoadersReadLock(void (^work)());
-
-    template<typename F>
-    ALWAYS_INLINE void          withLoadersWriteLock(F work)
-    {
-        // We wrap with withWritableMemory outside the BUILDING_DYLD because we need to swap the writability in early dyld (before
-        // libSystemHelpers is configured) and it compiles to a noop for non-dyld targets.
-        memoryManager.withWritableMemory([&]{
-            #if BUILDING_DYLD
-            if ( this->libSystemHelpers != nullptr ) {
-                this->libSystemHelpers->os_unfair_recursive_lock_lock_with_options(&_locks.loadersLock, OS_UNFAIR_LOCK_NONE);
-                work();
-                this->libSystemHelpers->os_unfair_recursive_lock_unlock(&_locks.loadersLock);
-            }
-            else
-            #endif
-            {
-                work();
-            }
-        });
-    }
 
 #if BUILDING_DYLD
     void                        initializeClosureMode();
@@ -430,21 +505,7 @@ public:
 
     // this need to be virtual to be callable from libdyld.dylb
     virtual void                _finalizeListTLV(void* l);
-    virtual void*               _instantiateTLVs(pthread_key_t key);
-
-#if !TARGET_OS_SIMULATOR
-    void                        withCurrentProcessSnapshot(void (^work)(EphemeralAllocator& ephemeralAllocator, ProcessSnapshot* processSnapshot));
-#endif
-
-protected:
-
-    // Helpers to reset locks across fork()
-    void                        takeLockBeforeFork();
-    void                        releaseLockInForkParent();
-    void                        resetLockInForkChild();
-    void                        takeDlopenLockBeforeFork();
-    void                        releaseDlopenLockInForkParent();
-    void                        resetDlopenLockInForkChild();
+    virtual void*               _instantiateTLVs(dyld_thread_key_t key);
 
 private:
     //
@@ -500,7 +561,7 @@ private:
     struct TLV_Info
     {
         const MachOAnalyzer*    ma;
-        pthread_key_t           key;
+        uint32_t                key;
         uint32_t                initialContentOffset;
         uint32_t                initialContentSize;
     };
@@ -568,7 +629,8 @@ private:
     _dyld_objc_notify_init          _notifyObjCInit         = nullptr;
     _dyld_objc_notify_unmapped      _notifyObjCUnmapped     = nullptr;
     _dyld_objc_notify_patch_class   _notifyObjCPatchClass   = nullptr;
-    _dyld_objc_notify_mapped2       _notifyObjCMapped2       = nullptr;
+    _dyld_objc_notify_mapped2       _notifyObjCMapped2      = nullptr;
+    _dyld_objc_notify_init2         _notifyObjCInit2        = nullptr;
     Vector<NotifyFunc>              _notifyAddImage;
     Vector<NotifyFunc>              _notifyRemoveImage;
     Vector<LoadNotifyFunc>          _notifyLoadImage;
@@ -589,26 +651,24 @@ private:
 #endif
     bool                            _saveAppClosureFile;
     bool                            _failIfCouldBuildAppClosureFile;
-    uint32_t                        _initialImageCount        = 256;
-    PermanentRanges*                _permanentRanges          = nullptr;
-    MainFunc                        _driverKitMain            = nullptr;
+    uint32_t                        _initialImageCount              = 256;
+    PermanentRanges*                _permanentRanges                = nullptr;
+    MainFunc                        _driverKitMain                  = nullptr;
     Vector<DlopenCount>             _dlopenRefCounts;
     Vector<const Loader*>           _dynamicNeverUnloads;
-    std::atomic<int32_t>            _gcCount                  = 0;
-    pthread_key_t                   _tlvTerminatorsKey        = 0;
-    pthread_key_t                   _dlerrorPthreadKey        = 0;
-    int                             _logDescriptor            = -1;
-    bool                            _logToSyslog              = false;
-    bool                            _logSetUp                 = false;
-    bool                            _hasOverriddenCachedDylib = false;
-    bool                            _wrotePrebuiltLoaderSet   = false;
+    std::atomic<int32_t>            _gcCount                        = 0;
+    dyld_thread_key_t               _tlvTerminatorsKey              = -1;
+    dyld_thread_key_t               _dlerrorPthreadKey              = -1;
+    int                             _logDescriptor                  = -1;
+    bool                            _logToSyslog                    = false;
+    bool                            _logSetUp                       = false;
+    bool                            _hasOverriddenCachedDylib       = false;
+    bool                            _hasOverriddenUnzipperedTwin    = false;
+    bool                            _wrotePrebuiltLoaderSet         = false;
 #if TARGET_OS_IPHONE && !TARGET_OS_SIMULATOR
     bool                            _vmAccountingSuspended    = false;
 #endif // TARGET_OS_IPHONE && !TARGET_OS_SIMULATOR
     UniquePtr<OrderedMap<uint64_t,UUID>>    _fsUUIDMap;
-#if !TARGET_OS_SIMULATOR
-    os_unfair_lock_s                _processSnapshotLock    = OS_UNFAIR_LOCK_INIT;
-#endif
 };
 
 
@@ -652,18 +712,12 @@ protected:
 };
 
 
-
-void notifyMonitoringDyld(bool unloading, unsigned imageCount, const mach_header* loadAddresses[], const char* imagePaths[]);
-void notifyMonitoringDyldMain();
-void notifyMonitoringDyldBeforeInitializers();
-#if BUILDING_DYLD && !TARGET_OS_SIMULATOR
-void notifyMonitoringDyldSimSupport(bool unloading, unsigned imageCount, const mach_header* loadAddresses[], const char* imagePaths[]);
-#endif
-void coresymbolication_load_notifier(void* connection, uint64_t timestamp, const char* path, const mach_header* mh);
-void coresymbolication_unload_notifier(void* connection, uint64_t timestamp, const char* path, const mach_header* mh);
+#if !TARGET_OS_EXCLAVEKIT
 kern_return_t mach_msg_sim_interposed(mach_msg_header_t* msg, mach_msg_option_t option, mach_msg_size_t send_size, mach_msg_size_t rcv_size,
                                       mach_port_name_t rcv_name, mach_msg_timeout_t timeout, mach_port_name_t notify);
+#endif
 
+#if BUILDING_DYLD || BUILDING_UNIT_TESTS
 //
 // The implementation of all dyld load/unload API's must hold a global lock
 // so that the next load/unload does start until the current is complete.
@@ -684,13 +738,10 @@ public:
     RecursiveAutoLock(RuntimeState& state, bool skip=false);
     ~RecursiveAutoLock();
 private:
-    const LibSystemHelpers*     _libSystemHelpers = nullptr;
-#if BUILDING_DYLD
-    os_unfair_recursive_lock&   _lock;
-    bool                        _skip;
-#endif
+    RuntimeLocks&       _runtimeLocks;
+    bool                _skip;
 };
-
+#endif // BUILDING_DYLD || BUILDING_UNIT_TESTS
 
 } // namespace
 

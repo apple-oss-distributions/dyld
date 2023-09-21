@@ -27,7 +27,9 @@
 
 #include "Array.h"
 #include "Diagnostics.h"
+#if !TARGET_OS_EXCLAVEKIT
 #include "OptimizerObjC.h"
+#endif
 #include "PrebuiltLoader.h"
 #include "Vector.h"
 
@@ -89,6 +91,7 @@ struct SwiftTypeProtocolConformanceLocation : SwiftTypeProtocolConformanceLocati
     };
 };
 
+#if SUPPORT_CREATING_PREBUILTLOADERS || BUILDING_UNIT_TESTS || BUILDING_CACHE_BUILDER_UNIT_TESTS
 // This is the key to the map from (type descriptor, protocol) to value
 struct SwiftTypeProtocolConformanceDiskLocationKey
 {
@@ -101,6 +104,7 @@ struct SwiftTypeProtocolConformanceDiskLocation
 {
     PrebuiltLoader::BindTargetRef protocolConformance;
 };
+#endif // SUPPORT_CREATING_PREBUILTLOADERS || BUILDING_UNIT_TESTS || BUILDING_CACHE_BUILDER_UNIT_TESTS
 
 // This is the key to the map from (metadata, protocol) to value
 struct SwiftMetadataProtocolConformanceLocationKey
@@ -143,6 +147,7 @@ struct SwiftMetadataProtocolConformanceLocation : SwiftMetadataProtocolConforman
     };
 };
 
+#if SUPPORT_CREATING_PREBUILTLOADERS || BUILDING_UNIT_TESTS || BUILDING_CACHE_BUILDER_UNIT_TESTS
 // This is the key to the map from (metadata, protocol) to value
 struct SwiftMetadataProtocolConformanceDiskLocationKey
 {
@@ -155,6 +160,7 @@ struct SwiftMetadataProtocolConformanceDiskLocation
 {
     PrebuiltLoader::BindTargetRef protocolConformance;
 };
+#endif // SUPPORT_CREATING_PREBUILTLOADERS || BUILDING_UNIT_TESTS || BUILDING_CACHE_BUILDER_UNIT_TESTS
 
 // This is the key to the map from (foreign type name, protocol) to value
 struct SwiftForeignTypeProtocolConformanceLocationKey
@@ -204,6 +210,7 @@ struct SwiftForeignTypeProtocolConformanceLocation : SwiftForeignTypeProtocolCon
     };
 };
 
+#if SUPPORT_CREATING_PREBUILTLOADERS || BUILDING_UNIT_TESTS || BUILDING_CACHE_BUILDER_UNIT_TESTS
 // This is the key to the map from (foreign type name, protocol) to value
 struct SwiftForeignTypeProtocolConformanceDiskLocationKey
 {
@@ -220,6 +227,7 @@ struct SwiftForeignTypeProtocolConformanceDiskLocation
 {
     PrebuiltLoader::BindTargetRef protocolConformance;
 };
+#endif // SUPPORT_CREATING_PREBUILTLOADERS || BUILDING_UNIT_TESTS || BUILDING_CACHE_BUILDER_UNIT_TESTS
 
 // At runtime, we lookup foreign types with a string instead of an offset.  This is the key which does that lookup
 struct SwiftForeignTypeProtocolConformanceLookupKey

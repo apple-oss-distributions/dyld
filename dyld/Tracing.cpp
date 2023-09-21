@@ -20,8 +20,14 @@
  *
  * @APPLE_LICENSE_HEADER_END@
  */
+
+#include <TargetConditionals.h>
+
+#if !TARGET_OS_EXCLAVEKIT
+
 #include <atomic>
 #include <assert.h>
+
 #include <mach/mach.h>
 #include <kern/kcdata.h>
 #include <mach-o/dyld_priv.h>
@@ -195,3 +201,4 @@ void syntheticBacktrace(const char *reason, bool enableExternally) {
 
 };
 
+#endif // !TARGET_OS_EXCLAVEKIT

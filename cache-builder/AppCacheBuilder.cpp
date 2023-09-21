@@ -175,6 +175,10 @@ void AppCacheBuilder::forEachRegion(void (^callback)(const Region& region)) cons
     if ( dataConstRegion.sizeInUse != 0 )
         callback(dataConstRegion);
 
+    // dataSptmRegion
+    if ( dataSptmRegion.sizeInUse != 0 )
+        callback(dataSptmRegion);
+
     // branchGOTsRegion
     if ( branchGOTsRegion.bufferSize != 0 )
         callback(branchGOTsRegion);
@@ -287,6 +291,17 @@ uint64_t AppCacheBuilder::numBranchRelocationTargets() {
     return totalTargets;
 }
 
+bool AppCacheBuilder::hasSancovGateSection() const
+{
+    for ( const AppCacheDylibInfo& dylib : sortedDylibs ) {
+        const dyld3::MachOAnalyzer* ma = dylib.input->mappedFile.mh;
+        if ( ma->hasSection("__DATA", "__sancov_gate") )
+            return true;
+    }
+
+    return false;
+}
+
 bool AppCacheBuilder::removeStubs()
 {
     // Only eliminate stubs in the base kernel collection.  We could eliminate stubs
@@ -295,6 +310,9 @@ bool AppCacheBuilder::removeStubs()
         return false;
 
     if ( _options.archs != &dyld3::GradedArchs::arm64e )
+        return false;
+
+    if ( hasSancovGateSection() )
         return false;
 
     return true;
@@ -634,6 +652,51 @@ void AppCacheBuilder::assignSegmentRegionsAndOffsets()
         dataConstRegion.maxProt     = VM_PROT_READ;
         dataConstRegion.name        = "__DATA_CONST";
     }
+
+    // __DATA_SPTM segments
+    {
+        __block uint64_t offsetInRegion = 0;
+        for (DylibInfo& dylib : sortedDylibs) {
+            if (!dylib.input->mappedFile.mh->hasSplitSeg())
+                continue;
+
+            __block uint64_t textSegVmAddr = 0;
+            dylib.input->mappedFile.mh->forEachSegment(^(const dyld3::MachOFile::SegmentInfo& segInfo, bool& stop) {
+                if ( strcmp(segInfo.segName, "__TEXT") == 0 )
+                    textSegVmAddr = segInfo.vmAddr;
+                if ( (segInfo.protections & VM_PROT_EXECUTE) != 0 )
+                    return;
+                if ( (strcmp(segInfo.segName, "__DATA_SPTM") != 0) )
+                    return;
+                uint32_t minAlignmentP2 = getMinAlignment(dylib.input->mappedFile.mh);
+                offsetInRegion = align(offsetInRegion, segInfo.p2align);
+                offsetInRegion = align(offsetInRegion, minAlignmentP2);
+                size_t copySize = std::min((size_t)segInfo.fileSize, (size_t)segInfo.sizeOfSections);
+                uint64_t dstCacheSegmentSize = align(segInfo.sizeOfSections, minAlignmentP2);
+                SegmentMappingInfo loc;
+                loc.srcSegment             = (uint8_t*)dylib.input->mappedFile.mh + segInfo.vmAddr - textSegVmAddr;
+                loc.segName                = segInfo.segName;
+                loc.dstSegment             = nullptr;
+                loc.dstCacheUnslidAddress  = offsetInRegion; // This will be updated later once we've assigned addresses
+                loc.dstCacheFileOffset     = (uint32_t)offsetInRegion;
+                loc.dstCacheSegmentSize    = (uint32_t)dstCacheSegmentSize;
+                loc.dstCacheFileSize       = (uint32_t)copySize;
+                loc.copySegmentSize        = (uint32_t)copySize;
+                loc.srcSegmentIndex        = segInfo.segIndex;
+                loc.parentRegion           = &dataSptmRegion;
+                dylib.cacheLocation[segInfo.segIndex] = loc;
+                offsetInRegion += loc.dstCacheSegmentSize;
+            });
+        }
+
+        // align r/o region end
+        dataSptmRegion.bufferSize  = align(offsetInRegion, 14);
+        dataSptmRegion.sizeInUse   = dataSptmRegion.bufferSize;
+        dataSptmRegion.initProt    = VM_PROT_READ;
+        dataSptmRegion.maxProt     = VM_PROT_READ;
+        dataSptmRegion.name        = "__DATA_SPTM";
+    }
+
 
     // Branch GOTs
     if ( branchTargetsFromKexts != 0 ) {
@@ -1105,6 +1168,8 @@ void AppCacheBuilder::assignSegmentRegionsAndOffsets()
         uint64_t numBytesForPageStarts = 0;
         if ( dataConstRegion.sizeInUse != 0 )
             numBytesForPageStarts += sizeof(dyld_chained_starts_in_segment) + (sizeof(uint16_t) * numWritablePagesToFixup(dataConstRegion.bufferSize));
+        if ( dataSptmRegion.sizeInUse != 0 )
+            numBytesForPageStarts += sizeof(dyld_chained_starts_in_segment) + (sizeof(uint16_t) * numWritablePagesToFixup(dataSptmRegion.bufferSize));
         if ( branchGOTsRegion.bufferSize != 0 )
             numBytesForPageStarts += sizeof(dyld_chained_starts_in_segment) + (sizeof(uint16_t) * numWritablePagesToFixup(branchGOTsRegion.bufferSize));
         if ( readWriteRegion.sizeInUse != 0 )
@@ -4209,6 +4274,8 @@ void AppCacheBuilder::writeFixups()
 
         if ( dataConstRegion.sizeInUse != 0 )
             addSegmentStarts(dataConstRegion);
+        if ( dataSptmRegion.sizeInUse != 0 )
+            addSegmentStarts(dataSptmRegion);
         if ( branchGOTsRegion.sizeInUse != 0 )
             addSegmentStarts(branchGOTsRegion);
         if ( readWriteRegion.sizeInUse != 0 )
@@ -4303,6 +4370,12 @@ void AppCacheBuilder::getRegionOrder(bool dataRegionFirstInVMOrder,
     if ( dataConstRegion.sizeInUse != 0 ) {
         vmOrder.emplace_back(&dataConstRegion, 14, 14);
         fileOrder.emplace_back(&dataConstRegion, 14, 14);
+    }
+
+    // __DATA_SPTM
+    if ( dataSptmRegion.sizeInUse != 0 ) {
+        vmOrder.emplace_back(&dataSptmRegion, 14, 14);
+        fileOrder.emplace_back(&dataSptmRegion, 14, 14);
     }
 
     // Split seg __TEXT_EXEC
@@ -5193,6 +5266,13 @@ void AppCacheBuilder::buildAppCache(const std::vector<InputDylib>& dylibs)
                 firstDataRegion = &dataConstRegion;
             if ( (lastDataRegion == nullptr) || (dataConstRegion.buffer > lastDataRegion->buffer) )
                 lastDataRegion = &dataConstRegion;
+        }
+
+        if ( dataSptmRegion.sizeInUse != 0 ) {
+            if ( firstDataRegion == nullptr )
+                firstDataRegion = &dataSptmRegion;
+            if ( (lastDataRegion == nullptr) || (dataSptmRegion.buffer > lastDataRegion->buffer) )
+                lastDataRegion = &dataSptmRegion;
         }
 
         if ( branchGOTsRegion.bufferSize != 0 ) {

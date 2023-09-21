@@ -22,6 +22,10 @@
  * @APPLE_LICENSE_HEADER_END@
  */
 
+#include <TargetConditionals.h>
+
+#if !TARGET_OS_EXCLAVEKIT
+
 #include <fcntl.h>
 #include <unistd.h>
 #include <sys/attr.h>
@@ -108,13 +112,13 @@ void FileManager::reloadFSInfos() const {
             // groups that are not relevent here.
             uint64_t f_fsid = (*((uint64_t*)&fsInfos[i].f_fsid)) & 0x00ffffffff;
             if (_fsUUIDMap->find(f_fsid) != _fsUUIDMap->end()) { continue; }
-#if TARGET_OS_OSX
-            // On macOS getattrlist() can upcall when used against a non-root volume which results in a deadlock.
+
+            // getattrlist() can upcall when used against a non-root volume which results in a deadlock.
             if ((fsInfos[i].f_flags & MNT_ROOTFS) == 0) {
                 _fsUUIDMap->insert({f_fsid, UUID()});
                 continue;
             }
-#endif
+
             int             err;
             attrlist        attrList;
             VolAttrBuf      attrBuf;
@@ -184,13 +188,13 @@ UniquePtr<char> FileManager::getPath(const UUID& VID, uint64_t OID) {
 
 UniquePtr<char> FileManager::getPath(uint64_t fsid, uint64_t OID) {
     if ((fsid == 0) || (OID == 0)) { return nullptr; }
-    char path[MAXPATHLEN];
-    ssize_t result = this->fsgetpath(&path[0], MAXPATHLEN, fsid, OID);
+    char path[PATH_MAX];
+    ssize_t result = this->fsgetpath(&path[0], PATH_MAX, fsid, OID);
 #if !__LP64__
     //FIXME: Workaround for missing stat high bit on 32 bit platforms
     if (result == -1) {
         OID = 0x0fffffff00000000ULL | OID;
-        result = this->fsgetpath(&path[0], MAXPATHLEN, fsid, OID);
+        result = this->fsgetpath(&path[0], PATH_MAX, fsid, OID);
     }
 #endif
     if (result == -1) {
@@ -377,3 +381,5 @@ const UUID& FileRecord::volume() const {
 }
 
 }; /* namedpace dyld4 */
+
+#endif // !TARGET_OS_EXCLAVEKIT

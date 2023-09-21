@@ -51,7 +51,56 @@ extern void _dyld_dlopen_atfork_prepare(void);
 extern void _dyld_dlopen_atfork_parent(void);
 extern void _dyld_dlopen_atfork_child(void);
 
+typedef struct _dyld_section_location_info_s* _dyld_section_location_info_t;
 
+// These are all the precomputed sections we know about
+// Note that all changes to the order, including adding new entries, should involve
+// bumping the value in SectionLocations::version
+// Always add new entries to the end.  We can't reorder existing entries, as they
+// are used in the open source drop of the swift runtime
+enum _dyld_section_location_kind {
+    // TEXT:
+    _dyld_section_location_text_swift5_protos                  = 0x0,
+    _dyld_section_location_text_swift5_proto,
+    _dyld_section_location_text_swift5_types,
+    _dyld_section_location_text_swift5_replace,
+    _dyld_section_location_text_swift5_replace2,
+    _dyld_section_location_text_swift5_ac_funcs,
+
+    // DATA*:
+    _dyld_section_location_objc_image_info,
+    _dyld_section_location_data_sel_refs,
+    _dyld_section_location_data_msg_refs,
+    _dyld_section_location_data_class_refs,
+    _dyld_section_location_data_super_refs,
+    _dyld_section_location_data_protocol_refs,
+    _dyld_section_location_data_class_list,
+    _dyld_section_location_data_non_lazy_class_list,
+    _dyld_section_location_data_stub_list,
+    _dyld_section_location_data_category_list,
+    _dyld_section_location_data_category_list2,
+    _dyld_section_location_data_non_lazy_category_list,
+    _dyld_section_location_data_protocol_list,
+    _dyld_section_location_data_objc_fork_ok,
+    _dyld_section_location_data_raw_isa,
+
+    // Note, always add new entries before this
+    _dyld_section_location_count,
+};
+
+// Contains the result from _dyld_lookup_section_info.
+// Can be one of:
+//   found a section: { start_address_of_section, section_size }
+//   unknown section: { nullptr, -1 }
+//   not in dylib   : { nullptr, 0 }
+struct _dyld_section_info_result {
+    void*   buffer;
+    size_t  bufferSize;
+};
+
+extern struct _dyld_section_info_result _dyld_lookup_section_info(const struct mach_header* mh,
+                                                                  _dyld_section_location_info_t locationHandle,
+                                                                  enum _dyld_section_location_kind kind);
 
 typedef void (*_dyld_objc_notify_mapped)(unsigned count, const char* const paths[], const struct mach_header* const mh[]);
 typedef void (*_dyld_objc_notify_init)(const char* path, const struct mach_header* mh);
@@ -59,12 +108,14 @@ typedef void (*_dyld_objc_notify_unmapped)(const char* path, const struct mach_h
 typedef void (*_dyld_objc_notify_patch_class)(const struct mach_header* originalMH, void* originalClass,
                                               const struct mach_header* replacementMH, const void* replacementClass);
 struct _dyld_objc_notify_mapped_info {
-    const struct mach_header*   mh;
-    const char*                 path;
-    uint32_t                    dyldOptimized :  1,
-                                flags         : 31;
+    const struct mach_header*       mh;
+    const char*                     path;
+    _dyld_section_location_info_t   sectionLocationMetadata;
+    uint32_t                        dyldObjCRefsOptimized   :  1,
+                                    flags                   : 31;
 };
 typedef void (*_dyld_objc_notify_mapped2)(unsigned count, const struct _dyld_objc_notify_mapped_info infos[]);
+typedef void (*_dyld_objc_notify_init2)(const struct _dyld_objc_notify_mapped_info* info);
 
 //
 // Note: only for use by objc runtime
@@ -99,7 +150,7 @@ struct _dyld_objc_callbacks_v2
 {
     uintptr_t                       version; // == 2
     _dyld_objc_notify_mapped2       mapped;
-    _dyld_objc_notify_init          init;
+    _dyld_objc_notify_init2         init;
     _dyld_objc_notify_unmapped      unmapped;
     _dyld_objc_notify_patch_class   patches;
 };
@@ -750,6 +801,94 @@ extern const char* dyldVersionString;
 // True if dyld told objc to patch classes
 extern uint8_t dyld_process_has_objc_patches;
 
+// Symbol flags type for symbols defined via the pseudo-dylibs APIs.
+typedef uint64_t _dyld_pseudodylib_symbol_flags;
+
+// Flag values for _dyld_pseudodylib_symbol_flags.
+#define DYLD_PSEUDODYLIB_SYMBOL_FLAGS_NONE 0
+#define DYLD_PSEUDODYLIB_SYMBOL_FLAGS_FOUND 1
+#define DYLD_PSEUDODYLIB_SYMBOL_FLAGS_WEAK_DEF 2
+#define DYLD_PSEUDODYLIB_SYMBOL_FLAGS_CALLABLE 4
+
+typedef void (*_dyld_pseudodylib_dispose_error_message)(char *err_msg);
+typedef char* (*_dyld_pseudodylib_initialize)(void* pd_ctx, const void* mh);
+typedef char* (*_dyld_pseudodylib_deinitialize)(void* pd_ctx, const void* mh);
+typedef char* (*_dyld_pseudodylib_lookup_symbols)(void* pd_ctx, const void* mh, const char *names[], size_t num_names,
+                                                   void* addrs[], _dyld_pseudodylib_symbol_flags flags[]);
+typedef int (*_dyld_pseudodylib_lookup_address)(void* pd_ctx, const void* mh, const void* addr, struct dl_info* dl);
+typedef char* (*_dyld_pseudodylib_find_unwind_sections)(void* pd_ctx, const void* mh, const void* addr, bool* found, struct dyld_unwind_sections* info);
+
+// Versioned struct to hold pseudo-dylib callbacks.
+// See _dyld_pseudodylib_callbacks_v1.
+struct _dyld_pseudodylib_callbacks {
+    uintptr_t version;
+};
+
+// Callbacks to implement pseudo-dylib behavior.
+//
+// dispose_error_message will be called to destroy error messages returned by the other callbacks.
+// initialize will be called by dlopen to run initializers in the pseudo-dylib.
+// deinitialize will be called by dlclose to run deinitializers.
+// lookup_symbols will be called to find the address of symbols defined by the pseudo-dylib (e.g. by dlsym).
+// lookup_address will be called by dladdr to find information about the given address.
+// find_unwind_sections will be called by _dyld_find_unwind_sections.
+struct _dyld_pseudodylib_callbacks_v1 {
+    uintptr_t version; // == 1
+    _dyld_pseudodylib_dispose_error_message dispose_error_message;
+    _dyld_pseudodylib_initialize initialize;
+    _dyld_pseudodylib_deinitialize deinitialize;
+    _dyld_pseudodylib_lookup_symbols lookup_symbols;
+    _dyld_pseudodylib_lookup_address lookup_address;
+    _dyld_pseudodylib_find_unwind_sections find_unwind_sections;
+};
+
+typedef struct _dyld_pseudodylib_callbacks_opaque*
+    _dyld_pseudodylib_callbacks_handle;
+typedef struct _dyld_pseudodylib_opaque* _dyld_pseudodylib_handle;
+
+// pseudo-dylib registration SPIs.
+//
+// These APIs can be used to register "pseudo-dylibs" which present as dylibs when accessed via the dlfcn.h functions
+// (dlopen, dlclose, dladdr, dlsym), but are backed by a set of callbacks rather than a full mach-o image.
+//
+// _dyld_pseudodylib_register_callbacks is used to register a set of callbacks that can be shared between multiple
+// pseudo-dylibs. On success, _dyld_pseudodylib_register_callbacks will return a handle that can be used in calls
+// to register pseudo-dylib instances (see _dyld_pseudodylib_register below). On failure it will return null.
+// Registered callbacks should be deregistered by calling _dyld_pseudodylib_deregister_callbacks once all pseudo-dylibs
+// using the callbacks have been deregistered.
+//
+// _dyld_pseudodylib_register is used to register an instance of a pseudo-dylib. This can be thought of as equivalent
+// to creating a dylib on disk: the pseudo-dylib is not yet open, but can be found via its install-name by dlopen.
+// Registration takes the address range that the pseudo-dylib can occupy, and this range must start with a valid mach
+// header and load commands containing, at minimum, an LC_VERSION_MIN and LC_ID_DYLIB command identifying the pseudo-dylib's
+// install name. The callbacks argument identifies the set of callbacks to use for this pseudo-dylib instance, and the
+// opaque context pointer will be passed to each of these callbacks. Once a pseduo-dylib is no longer needed it should be
+// deregistered by calling _dyld_pseudodylib_deregister (equivalent to "rm'ing" a dylib on disk).
+//
+// Exists in Mac OS X 14.0 and later
+// Exists in iOS 17.0 and later
+extern _dyld_pseudodylib_callbacks_handle _dyld_pseudodylib_register_callbacks(const struct _dyld_pseudodylib_callbacks* callbacks);
+extern void _dyld_pseudodylib_deregister_callbacks(_dyld_pseudodylib_callbacks_handle callbacks_handle);
+extern _dyld_pseudodylib_handle _dyld_pseudodylib_register(
+    void* addr, size_t size, _dyld_pseudodylib_callbacks_handle callbacks_handle, void* context);
+extern void _dyld_pseudodylib_deregister(_dyld_pseudodylib_handle pd_handle);
+
+
+// Called only by libobjc to check if dyld has loaded the image described by imageID, that contains pre-optimized categories
+// The imageID parameter is a private interface between dyld and libobjc, and no assumption should be made about its value.
+// Exists in Mac OS X 14.0 and later
+// Exists in iOS 17.0 and later
+extern bool _dyld_is_preoptimized_objc_image_loaded(uint16_t imageID);
+
+// Called only by libobjc to access RW objc header information from the shared cache
+// Exists in Mac OS X 14.0 and later
+// Exists in iOS 17.0 and later
+extern void* _dyld_for_objc_header_opt_rw();
+
+// Called only by libobjc to access RO objc header information from the shared cache
+// Exists in Mac OS X 14.0 and later
+// Exists in iOS 17.0 and later
+extern const void* _dyld_for_objc_header_opt_ro();
 #if __cplusplus
 }
 #endif /* __cplusplus */

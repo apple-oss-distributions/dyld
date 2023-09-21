@@ -26,13 +26,14 @@
 #define DyldDelegates_h
 
 #include <stdint.h>
-#include <sys/param.h>
-#include <sys/mount.h>
-#include <sys/socket.h>
-#include <sys/syslog.h>
-#include <sys/uio.h>
-#include <sys/un.h>
-#include <sys/dtrace.h>
+#include <TargetConditionals.h>
+#if !TARGET_OS_EXCLAVEKIT
+  #include <sys/socket.h>
+  #include <sys/syslog.h>
+  #include <sys/uio.h>
+  #include <sys/un.h>
+  #include <sys/dtrace.h>
+#endif
 
 #if !BUILDING_DYLD
   #include <vector>
@@ -86,10 +87,11 @@ private:
 class SyscallDelegate
 {
 public:
+#if !TARGET_OS_EXCLAVEKIT
     uint64_t            amfiFlags(bool restricted, bool fairPlayEncryted) const;
     bool                internalInstall() const;
     bool                isTranslated() const;
-    bool                getCWD(char path[MAXPATHLEN]) const;
+    bool                getCWD(char path[PATH_MAX]) const;
     const GradedArchs&  getGradedArchs(const char* archName, bool keysOff, bool osBinariesOnly) const;
     int                 openLogFile(const char* path) const;
     bool                hasExistingDyldCache(uint64_t& cacheBaseAddress, uint64_t& fsid, uint64_t& fsobjid) const;
@@ -182,8 +184,7 @@ public:
     int                 mremap_encrypted(void*, size_t len, uint32_t, uint32_t cpuType, uint32_t cpuSubtype) const;
     ssize_t             fsgetpath(char result[], size_t resultBufferSize, uint64_t fsid, uint64_t objid) const;
     int                 getfsstat(struct statfs *buf, int bufsize, int flags) const;
-    int                 getattrlist(const char* path, struct attrlist * attrList, void * attrBuf, size_t attrBufSize, uint32_t options)
-    const ;
+    int                 getattrlist(const char* path, struct attrlist * attrList, void * attrBuf, size_t attrBufSize, uint32_t options) const;
 
 #if !BUILDING_DYLD
     typedef std::map<std::string, std::vector<const char*>> PathToPathList;
@@ -219,6 +220,7 @@ public:
     // An overlay to layer on top of the root path.  It must be a real path
     const char*             _overlayPath    = nullptr;
 #endif
+#endif // !TARGET_OS_EXCLAVEKIT
 
 #if BUILDING_UNIT_TESTS
     bool                    _bypassMockFS   = false;

@@ -27,13 +27,33 @@
 
 #include <stdio.h>
 #include <stdint.h>
-#include <sys/stat.h>
-#include <sys/param.h>
-#include <sys/mount.h>
 #include <uuid/uuid.h>
 #include <mach-o/loader.h>
-#include <System/sys/reason.h>
-#include <sys/kdebug_private.h>
+#include <TargetConditionals.h>
+#include "Defines.h"
+#if TARGET_OS_EXCLAVEKIT
+  #define KDBG_CODE(a, b, c) (c)
+  #define DBG_DYLD_UUID (5)
+  #define DBG_DYLD_UUID_MAP_A             (0)
+  #define DBG_DYLD_UUID_MAP_B             (1)
+  #define DBG_DYLD_UUID_MAP_32_A          (2)
+  #define DBG_DYLD_UUID_MAP_32_B          (3)
+  #define DBG_DYLD_UUID_MAP_32_C          (4)
+  #define DBG_DYLD_UUID_UNMAP_A           (5)
+  #define DBG_DYLD_UUID_UNMAP_B           (6)
+  #define DBG_DYLD_UUID_UNMAP_32_A        (7)
+  #define DBG_DYLD_UUID_UNMAP_32_B        (8)
+  #define DBG_DYLD_UUID_UNMAP_32_C        (9)
+  #define DBG_DYLD_UUID_SHARED_CACHE_A    (10)
+  #define DBG_DYLD_UUID_SHARED_CACHE_B    (11)
+  #define DBG_DYLD_UUID_SHARED_CACHE_32_A (12)
+  #define DBG_DYLD_UUID_SHARED_CACHE_32_B (13)
+  #define DBG_DYLD_UUID_SHARED_CACHE_32_C (14)
+  #define DBG_DYLD_AOT_UUID_MAP_A         (15)
+  #define DBG_DYLD_AOT_UUID_MAP_B         (16)
+#else
+  #include <sys/kdebug_private.h>
+#endif
 
 #include "Defines.h"
 
@@ -90,15 +110,19 @@ struct VIS_HIDDEN kt_arg {
     uint64_t value() const { return _value; }
 private:
     void prepare(uint32_t code) {
+#if !TARGET_OS_EXCLAVEKIT
         if (_str) {
             _value = kdebug_trace_string(code, 0, _str);
             if (_value == (uint64_t)-1) _value = 0;
         }
+#endif
     }
     void destroy(uint32_t code) {
+#if !TARGET_OS_EXCLAVEKIT
         if (_str && _value) {
             kdebug_trace_string(code, _value, nullptr);
         }
+#endif
     }
     friend class ScopedTimer;
     friend uint64_t kdebug_trace_dyld_duration_start(uint32_t code, kt_arg data1, kt_arg data2, kt_arg data3);
@@ -113,15 +137,15 @@ public:
     [[nodiscard]]
     ScopedTimer(uint32_t code, kt_arg data1, kt_arg data2, kt_arg data3)
         : code(code), data1(data1), data2(data2), data3(data3), data4(0), data5(0), data6(0) {
-//#if BUILDING_LIBDYLD || BUILDING_DYLD
+#if !TARGET_OS_EXCLAVEKIT
         startTimer();
-//#endif
+#endif // !TARGET_OS_EXCLAVEKIT
     }
 
     ~ScopedTimer() {
-//#if BUILDING_LIBDYLD || BUILDING_DYLD
+#if !TARGET_OS_EXCLAVEKIT
         endTimer();
-//#endif
+#endif // !TARGET_OS_EXCLAVEKIT
     }
 
     void setData4(kt_arg data) { data4 = data; }
@@ -143,9 +167,11 @@ private:
     uint64_t current_trace_id = 0;
 };
 
+#if !TARGET_OS_EXCLAVEKIT
 VIS_HIDDEN
 void kdebug_trace_dyld_image(const uint32_t code, const char* path, const uuid_t* uuid_bytes,
                              const fsobj_id_t fsobjid, const fsid_t fsid, const mach_header* load_addr);
+#endif
 
 VIS_HIDDEN
 void kdebug_trace_dyld_cache(uint64_t fsobjid, uint64_t fsid, uint64_t sharedCacheBaseAddress,

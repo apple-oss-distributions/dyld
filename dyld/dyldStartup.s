@@ -69,7 +69,9 @@
 // This assembly code just needs to align the stack and jump into the C code for:
 //      dyld::start(dyld4::KernelArgs*)
 //
-#if !TARGET_OS_SIMULATOR
+// For ExclaveKit, the startup code is defined in crt0_dyld.S provided by ExclavePlatform
+//
+#if !TARGET_OS_SIMULATOR && !TARGET_OS_EXCLAVEKIT
     .text
     .align    4
     .globl __dyld_start
@@ -117,6 +119,7 @@ __ZN5dyld412gotoAppStartEmPKNS_10KernelArgsE:
 
 // switch to dyld in the dyld cache
 // Note: all archs pass parameters in registers.  dyldOnDisk is in second param register and flows through to start()
+    .text
     .globl __ZN5dyld422restartWithDyldInCacheEPKNS_10KernelArgsEPKN5dyld39MachOFileEPv
 __ZN5dyld422restartWithDyldInCacheEPKNS_10KernelArgsEPKN5dyld39MachOFileEPv:
     // void restartWithDyldInCache(const KernelArgs* kernArgs, const MachOFile* dyldOnDisk, void* dyldStart);

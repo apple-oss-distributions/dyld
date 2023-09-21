@@ -33,6 +33,19 @@
 #include <span>
 #include <string_view>
 
+#ifndef VM_PROT_READ
+    #define VM_PROT_READ    1
+#endif
+
+#ifndef VM_PROT_WRITE
+    #define VM_PROT_WRITE   2
+#endif
+
+#ifndef VM_PROT_EXECUTE
+    #define VM_PROT_EXECUTE 4
+#endif
+
+
 namespace dyld3 {
 struct MachOFile;
 }
@@ -107,6 +120,7 @@ struct VIS_HIDDEN SegmentLayout
     bool writable() const   { return protections & VM_PROT_WRITE; }
     bool executable() const { return protections & VM_PROT_EXECUTE; }
 };
+
 
 // Contains pointers to all the pieces of LINKEDIT
 struct VIS_HIDDEN Linkedit

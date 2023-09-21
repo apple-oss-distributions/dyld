@@ -41,11 +41,7 @@ struct RuntimeLocks;
 class VIS_HIDDEN APIs : public RuntimeState
 {
 public:
-#if BUILDING_DYLD
-                                            APIs(const ProcessConfig& c, Allocator& alloc, RuntimeLocks& locks) : RuntimeState(c, alloc, locks) { }
-#else
-                                            APIs(const ProcessConfig& c, Allocator& alloc) : RuntimeState(c, alloc) { }
-#endif
+                                            APIs(const ProcessConfig& c, RuntimeLocks& locks, Allocator& alloc)  : RuntimeState(c, locks, alloc) { }
 
     //
     // private call from libdyld.dylib into dyld to tell that libSystem.dylib is initialized
@@ -260,12 +256,31 @@ public:
                                                                                                          size_t foreignTypeIdentityLength,
                                                                                                          uint32_t flags);
 
+    //
+    // Added iOS 17, macOS 14
+    //
+    // The pseudo-dylib functions are new in iOS 17 / macOS 14.
+    virtual     _dyld_section_info_result           _dyld_lookup_section_info(const struct mach_header* mh,
+                                                                              _dyld_section_location_info_t locationHandle,
+                                                                              _dyld_section_location_kind kind);
+
+    virtual _dyld_pseudodylib_callbacks_handle      _dyld_pseudodylib_register_callbacks(const struct _dyld_pseudodylib_callbacks* callbacks);
+    virtual void                                    _dyld_pseudodylib_deregister_callbacks(_dyld_pseudodylib_callbacks_handle callbacks);
+    virtual _dyld_pseudodylib_handle                _dyld_pseudodylib_register(void* addr, size_t size, _dyld_pseudodylib_callbacks_handle callbacks_handle, void* context);
+    virtual void                                    _dyld_pseudodylib_deregister(_dyld_pseudodylib_handle pd_handle);
+
+    virtual     bool                                _dyld_is_preoptimized_objc_image_loaded(uint16_t imageID);
+
+    virtual     void*                               _dyld_for_objc_header_opt_rw();
+    virtual     const void*                         _dyld_for_objc_header_opt_ro();
 
 private:
 
+#if SUPPORT_CREATING_PREBUILTLOADERS || BUILDING_UNIT_TESTS
     typedef SwiftTypeProtocolConformanceDiskLocationKey          TypeKey;
     typedef SwiftMetadataProtocolConformanceDiskLocationKey      MetadataKey;
     typedef SwiftForeignTypeProtocolConformanceDiskLocationKey   ForeignKey;
+#endif // SUPPORT_CREATING_PREBUILTLOADERS || BUILDING_UNIT_TESTS
 
     // internal helpers
     uint32_t                getSdkVersion(const mach_header* mh);
@@ -274,7 +289,7 @@ private:
     uint32_t                deriveVersionFromDylibs(const dyld3::MachOFile* mf);
     void                    forEachPlatform(const dyld3::MachOFile* mf, void (^callback)(dyld_platform_t platform, uint32_t sdk_version, uint32_t min_version));
     uint32_t                basePlaform(uint32_t reqPlatform) const;
-    bool                    findImageMappedAt(const void* addr, const MachOLoaded** ml, bool* neverUnloads = nullptr, const char** path = nullptr, const void** segAddr = nullptr, uint64_t* segSize = nullptr, uint8_t* segPerms = nullptr);
+    bool                    findImageMappedAt(const void* addr, const MachOLoaded** ml, bool* neverUnloads = nullptr, const char** path = nullptr, const void** segAddr = nullptr, uint64_t* segSize = nullptr, uint8_t* segPerms = nullptr, const Loader** loader = nullptr);
     void                    clearErrorString();
     void                    setErrorString(const char* format, ...) __attribute__((format(printf, 2, 3)));
     const Loader*           findImageContaining(void* addr);

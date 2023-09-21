@@ -288,6 +288,12 @@ static inline VMAddress& operator+=(VMAddress& a, const VMOffset& b)
     return a;
 }
 
+// VMAddr - VMOffset -> VMAddr
+static inline VMAddress operator-(const VMAddress& a, const VMOffset& b)
+{
+    return VMAddress(a.rawValue() - b.rawValue());
+}
+
 #if BUILDING_CACHE_BUILDER || BUILDING_CACHE_BUILDER_UNIT_TESTS
 // VMAddr + VMSize -> VMAddr
 static inline VMAddress operator+(const VMAddress& a, const CacheVMSize& b)
@@ -348,6 +354,13 @@ static inline CacheVMAddress operator+(const CacheVMAddress& a, const VMOffset& 
 static inline CacheVMAddress operator+(const CacheVMAddress& a, const CacheVMSize& b)
 {
     return CacheVMAddress(a.rawValue() + b.rawValue());
+}
+
+// VMAddr + VMOffset -> VMAddr
+static inline CacheVMAddress& operator+=(CacheVMAddress& a, const VMOffset& b)
+{
+    a = CacheVMAddress(a.rawValue() + b.rawValue());
+    return a;
 }
 
 // VMAddr + VMSize -> VMAddr

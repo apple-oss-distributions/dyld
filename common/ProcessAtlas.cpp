@@ -24,6 +24,8 @@
 
 #include <TargetConditionals.h>
 
+#if !TARGET_OS_EXCLAVEKIT
+
 #include <atomic>
 #include <cstring>
 #include <Block.h>
@@ -39,8 +41,8 @@
 #include <sys/stat.h>
 #include <sys/fsgetpath.h>
 
-#include <mach/mach_vm.h>
 #include <mach/mach_time.h> // mach_absolute_time()
+#include <mach/mach_vm.h>
 #include <mach-o/dyld_priv.h> // FIXME: We can remove this once we fully integrate into dyld4
 #include "dyld_cache_format.h"
 //FIXME: We should remove this header
@@ -588,9 +590,9 @@ void Mapper::dump() const {
 #if BUILDING_DYLD
 Image::Image(RuntimeState* state, Allocator& ephemeralAllocator, SharedPtr<Mapper>& mapper, const Loader* ldr)
     :   _ephemeralAllocator(ephemeralAllocator), _mapper(mapper), _rebasedAddress((void*)ldr->loadAddress(*state)) {
-        auto fileID = ldr->fileID(state->fileManager);
+        auto fileID = ldr->fileID(*state);
         if (fileID.inode() &&  fileID.device()) {
-            _file = state->fileManager.fileRecordForFileID(ldr->fileID(state->fileManager));
+            _file = state->fileManager.fileRecordForFileID(ldr->fileID(*state));
             if ( _file.volume().empty() ) {
                 _file = state->fileManager.fileRecordForPath(ephemeralAllocator, ldr->path());
             }
@@ -2005,17 +2007,17 @@ bool ProcessSnapshot::Serializer::deserialize(const std::span<std::byte> data) {
     _timestamp          = read<uint64_t>(i);
     _crc32c             = read<uint32_t>(i);
     if (_magic != kMagic) {
-        assert(0);
+        return false;
     }
     if (_version != 0) {
-        assert(0);
+        return false;
     }
     CRC32c checksumer;
     checksumer(std::span(&data[0], 32));
     checksumer((uint32_t)0); // Zero out the actual checksum
     checksumer(std::span(&data[36], data.size() - 36));
     if (_crc32c != checksumer) {
-        assert(0);
+        return false;
     }
     _processFlags           = readPVLEUInt64(i);
     _platform               = readPVLEUInt64(i);
@@ -2082,3 +2084,4 @@ bool ProcessSnapshot::Serializer::deserialize(const std::span<std::byte> data) {
 
 };
 };
+#endif // !TARGET_OS_EXCLAVEKIT

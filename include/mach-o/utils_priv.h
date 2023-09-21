@@ -30,6 +30,7 @@
 #include <mach-o/loader.h>
 #include <Availability.h>
 
+#include <TargetConditionals.h>
 
 #if __cplusplus
 extern "C" {
@@ -51,7 +52,7 @@ extern "C" {
  *		The string returned is static and does not need to be deallocated.
  */
 extern const char* _Nullable macho_dylib_install_name(const struct mach_header* _Nonnull mh)
-__API_AVAILABLE(macos(13.0), ios(16.0), tvos(16.0), watchos(8.0));
+__API_AVAILABLE(macos(13.0), ios(16.0), tvos(16.0), watchos(8.0)) ;
 
 
 

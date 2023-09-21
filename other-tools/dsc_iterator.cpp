@@ -22,6 +22,10 @@
  * @APPLE_LICENSE_HEADER_END@
  */
 
+#include <TargetConditionals.h>
+
+#if !TARGET_OS_EXCLAVEKIT
+
 #include <stdlib.h>
 #include <stdio.h>
 #include <Availability.h>
@@ -100,3 +104,5 @@ extern int dyld_shared_cache_iterate(const void* shared_cache_file, uint32_t sha
     });
     return result;
 }
+
+#endif // !TARGET_OS_EXCLAVEKIT

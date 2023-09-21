@@ -140,9 +140,10 @@ private:
             assert(size() != capacity());
             assert(index != capacity());
             std::move_backward(keys().begin()+index, keys().end(), keys().end()+1);
-            keys()[index] = std::move(key);
-            // Size is the lowest bits of _metadata
+            // Size is the lowest bits of _metadata before we access keys to avoid
+            // a potential out of band access
             ++_metadata;
+            keys()[index] = std::move(key);
         }
 
         void erase(uint8_t index) {
@@ -166,6 +167,10 @@ private:
             std::move_backward(keys().begin()+index, keys().end(), keys().end()+1);
             std::move_backward(children().begin()+index+1, children().end(), children().end()+1);
 
+            // We need to increase the size of the keys in the node before we work on it to avoid
+            // exceeding the bounds of the span if the index is the last key
+            ++_metadata;
+
             //  Move pivot key up to root
             keys()[index] =  std::move(child->keys()[pivot]);
 
@@ -185,7 +190,7 @@ private:
             // Adjust metadata;
             child->_metadata    -=  (keysToMove+1);
             newChild->_metadata +=  keysToMove;
-            ++_metadata;
+
             assert(!newChild->full() && !child->full() && "After split the child nodes should be full");
         }
 

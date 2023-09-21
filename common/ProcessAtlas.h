@@ -27,15 +27,20 @@
 
 #include <atomic>
 #include <cstdint>
-#include <mach/mach.h>
-#include <dispatch/dispatch.h>
+#include <TargetConditionals.h>
+#include "Defines.h"
+#if !TARGET_OS_EXCLAVEKIT
+  #include <mach/mach.h>
+  #include <dispatch/dispatch.h>
+#endif
 
 #include "UUID.h"
 #include "Vector.h"
-#include "Defines.h"
 #include "Allocator.h"
 #include "OrderedSet.h"
-#include "FileManager.h"
+#if !TARGET_OS_EXCLAVEKIT
+  #include "FileManager.h"
+#endif
 #include "DyldRuntimeState.h"
 #include "dyld_cache_format.h"
 
@@ -51,6 +56,8 @@ struct MachOLoaded;
 }
 
 namespace dyld4 {
+struct FileManager;
+struct FileRecord;
 namespace Atlas {
 using dyld3::MachOLoaded;
 using lsl::UniquePtr;
@@ -196,7 +203,9 @@ private:
     const MachOLoaded*  ml() const;
 
     Allocator&                              _ephemeralAllocator;
+#if !TARGET_OS_EXCLAVEKIT
     mutable FileRecord                      _file;
+#endif
     mutable SharedPtr<Mapper>               _mapper             = nullptr;
     mutable UUID                            _uuid;
     mutable Mapper::Pointer<MachOLoaded>    _ml;
@@ -248,7 +257,9 @@ private:
     friend struct ProcessSnapshot;
 
     Allocator&                          _ephemeralAllocator;
+#if !TARGET_OS_EXCLAVEKIT
     FileRecord                          _file;
+#endif
     UUID                                _uuid;
     uint64_t                            _size;
     Mapper::Pointer<dyld_cache_header>  _header;

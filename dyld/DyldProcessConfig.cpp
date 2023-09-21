@@ -22,12 +22,14 @@
  */
 
 #include <TargetConditionals.h>
-#include <_simple.h>
-#include <stdint.h>
-#include <dyld/VersionMap.h>
-#include <mach-o/dyld_priv.h>
-#include <sys/syscall.h>
-#if BUILDING_DYLD
+#if !TARGET_OS_EXCLAVEKIT
+  #include <_simple.h>
+  #include <stdint.h>
+  #include <dyld/VersionMap.h>
+  #include <mach/mach_time.h> // mach_absolute_time()
+  #include <mach-o/dyld_priv.h>
+  #include <sys/syscall.h>
+  #if BUILDING_DYLD
     #include <sys/socket.h>
     #include <sys/syslog.h>
     #include <sys/uio.h>
@@ -42,13 +44,15 @@
     #if !TARGET_OS_DRIVERKIT
         #include <vproc_priv.h>
     #endif
-// no libc header for send() syscall interface
-extern "C" ssize_t __sendto(int, const void*, size_t, int, const struct sockaddr*, socklen_t);
-#endif
+  // no libc header for send() syscall interface
+  extern "C" ssize_t __sendto(int, const void*, size_t, int, const struct sockaddr*, socklen_t);
+  #endif // BUILDING_DYLD
+#endif // !TARGET_OS_EXCLAVEKIT
 
 #include <string_view>
 
-#if !TARGET_OS_SIMULATOR && BUILDING_DYLD
+#if !TARGET_OS_EXCLAVEKIT
+#if  BUILDING_DYLD && !TARGET_OS_SIMULATOR
     #include <libamfi.h>
 #else
 enum
@@ -68,16 +72,16 @@ enum amfi_dyld_policy_output_flag_set
 };
 extern "C" int amfi_check_dyld_policy_self(uint64_t input_flags, uint64_t* output_flags);
     #include "dyldSyscallInterface.h"
-#endif
+#endif //  BUILDING_DYLD && !TARGET_OS_SIMULATOR
+#endif // !TARGET_OS_EXCLAVEKIT
 
+#include "Defines.h"
 #include "MachOLoaded.h"
 #include "MachOAnalyzer.h"
 #include "DyldSharedCache.h"
 #include "SharedCacheRuntime.h"
 #include "Loader.h"
 #include "DyldProcessConfig.h"
-#include "DebuggerSupport.h"
-#include "Defines.h"
 #include "Utils.h"
 
 #if BUILDING_DYLD && SUPPORT_IGNITION
@@ -88,6 +92,7 @@ extern "C" int amfi_check_dyld_policy_self(uint64_t input_flags, uint64_t* outpu
 using dyld3::MachOFile;
 using dyld3::Platform;
 
+#if !TARGET_OS_EXCLAVEKIT
 static bool hexCharToByte(const char hexByte, uint8_t& value)
 {
     if ( hexByte >= '0' && hexByte <= '9' ) {
@@ -132,6 +137,8 @@ static uint64_t hexToUInt64(const char* startHexByte, const char** endHexByte)
     return retval;
 }
 
+#endif // !TARGET_OS_EXCLAVEKIT
+
 
 namespace dyld4 {
 
@@ -161,6 +168,8 @@ KernelArgs::KernelArgs(const MachOFile* mh, const std::vector<const char*>& argv
 }
 #endif
 
+
+#if !TARGET_OS_EXCLAVEKIT
 const char** KernelArgs::findArgv() const
 {
     return (const char**)&args[0];
@@ -181,6 +190,7 @@ const char** KernelArgs::findApple() const
     ++p;
     return p;
 }
+#endif // !TARGET_OS_EXCLAVEKIT
 
 
 //
@@ -194,11 +204,11 @@ ProcessConfig::ProcessConfig(const KernelArgs* kernArgs, SyscallDelegate& syscal
     dyldCache(process, security, log, syscallDelegate, allocator),
     pathOverrides(process, security, log, dyldCache, syscallDelegate, allocator)
 {
-#if TARGET_OS_OSX
+#if TARGET_OS_OSX && !TARGET_OS_EXCLAVEKIT
     // hack to allow macOS 13 dyld to run chrooted on older kernels
     if ( (this->dyldCache.addr == nullptr) || (this->dyldCache.addr->header.mappingOffset <= __offsetof(dyld_cache_header, cacheSubType)) )
         this->process.pageInLinkingMode = 0;
-#endif
+#endif // TARGET_OS_OSX && !TARGET_OS_EXCLAVEKIT
 }
 
 #if !BUILDING_DYLD
@@ -220,7 +230,7 @@ void ProcessConfig::reset(const MachOFile* mainExe, const char* mainPath, const 
 
 void ProcessConfig::scanForRoots() const
 {
-#if BUILDING_DYLD && TARGET_OS_OSX
+#if BUILDING_DYLD && TARGET_OS_OSX && !TARGET_OS_EXCLAVEKIT
     if ( this->dyldCache.addr == nullptr )
         return;
 
@@ -273,7 +283,7 @@ void ProcessConfig::scanForRoots() const
 
     this->syscall.setDyldCommPageFlags(commPage);
 
-#endif // BUILDING_DYLD && TARGET_OS_OSX
+#endif // #if BUILDING_DYLD && TARGET_OS_OSX && !TARGET_OS_EXCLAVEKIT
 }
 
 void* ProcessConfig::scanForRoots(void* context)
@@ -288,20 +298,36 @@ void* ProcessConfig::scanForRoots(void* context)
 // MARK: --- Process methods ---
 //
 
-static bool defaultDataConst(DyldCommPage commPage)
+bool ProcessConfig::Process::defaultDataConst()
 {
-    if ( commPage.forceRWDataConst ) {
+#if TARGET_OS_EXCLAVEKIT
+    return false;
+#else
+    if ( this->commPage.forceRWDataConst ) {
         return false;
-    } else if ( commPage.forceRWDataConst ) {
+    } else if ( this->commPage.forceRWDataConst ) {
         return true;
     } else {
         // __DATA_CONST is enabled by default, as the above boot-args didn't override it
         return true;
     }
+#endif
 }
 
-static bool defaultCompactInfo(DyldCommPage commPage)
+bool ProcessConfig::Process::defaultTproDataConst()
 {
+#if TARGET_OS_EXCLAVEKIT
+    return false;
+#else
+   return (this->appleParam("dyld_hw_tpro_pagers") != nullptr);
+#endif
+}
+
+bool ProcessConfig::Process::defaultCompactInfo()
+{
+#if TARGET_OS_EXCLAVEKIT
+    return false;
+#else
     if ( commPage.enableCompactInfo ) {
         return true;
     } else if ( commPage.disableCompactInfo ) {
@@ -309,48 +335,93 @@ static bool defaultCompactInfo(DyldCommPage commPage)
     } else {
         return true;
     }
+#endif
 }
 
 
+#if TARGET_OS_EXCLAVEKIT
+static dyld3::OverflowSafeArray<PreMappedFileEntry> parseExclaveMappingDescriptor(const char* data)
+{
+    dyld3::OverflowSafeArray<PreMappedFileEntry> result;
+    while (1) {
+        uintptr_t address;
+        memcpy(&address, data, sizeof(address));
+        data += sizeof(address);
+        if (address == 0)
+            break;
+
+        uintptr_t size;
+        memcpy(&size, data, sizeof(size));
+        data += sizeof(size);
+
+        const char *path = data;
+        size_t path_len = strlen(data);
+        data += path_len + 1;
+
+        result.push_back({ .loadAddress = (mach_header*)address, .mappedSize = size, .path = path });
+    }
+
+    return result;
+}
+#endif // TARGET_OS_EXCLAVEKIT
+
 ProcessConfig::Process::Process(const KernelArgs* kernArgs, SyscallDelegate& syscall, Allocator& allocator)
 {
+#if TARGET_OS_EXCLAVEKIT
+    this->entry_vec              = kernArgs->entry_vec;
+    uint32_t* startupPtr         = (uint32_t*)kernArgs->mappingDescriptor;
+    this->startupContractVersion = *startupPtr;
+    startupPtr++;
+    assert(this->startupContractVersion == 1);
+    this->preMappedFiles      = parseExclaveMappingDescriptor((const char*)startupPtr);
+    this->mainExecutable      = (MachOAnalyzer*)this->preMappedFiles[0].loadAddress;
+    this->mainExecutablePath  = this->preMappedFiles[0].path;
+    this->progname            = PathOverrides::getLibraryLeafName(this->mainExecutablePath);
+    //TODO: EXCLAVES Update/Remove argc, argv, etc.
+    this->argc                = 1;
+    this->argv                = NULL;
+    this->envp                = NULL;
+    this->apple               = NULL;
+#else
     this->mainExecutable                                            = kernArgs->mainExecutable;
     this->argc                                                      = (int)kernArgs->argc;
     this->argv                                                      = kernArgs->findArgv();
     this->envp                                                      = kernArgs->findEnvp();
     this->apple                                                     = kernArgs->findApple();
     this->pid                                                       = syscall.getpid();
-    this->platform                                                  = this->getMainPlatform();
+    this->commPage                                                  = syscall.dyldCommPageFlags();
+    this->isTranslated                                              = syscall.isTranslated();
     std::tie(this->mainExecutableFSID, this->mainExecutableObjID)   = this->getMainFileID();
+    std::tie(this->dyldFSID, this->dyldObjID)                       = this->getDyldFileID();
     this->mainUnrealPath                                            = this->getMainUnrealPath(syscall, allocator);
     this->mainExecutablePath                                        = this->getMainPath(syscall, allocator);
-    std::tie(this->dyldFSID, this->dyldObjID)                       = this->getDyldFileID();
-#if TARGET_OS_SIMULATOR
-    std::tie(this->dyldSimFSID, this->dyldSimObjID)                 = this->getDyldSimFileID(syscall);
-#endif
-    this->dyldPath                                                  = this->getDyldPath(syscall, allocator);
     this->progname                                                  = PathOverrides::getLibraryLeafName(this->mainUnrealPath);
-    this->catalystRuntime                                           = this->usesCatalyst();
-    this->commPage                                                  = syscall.dyldCommPageFlags();
+    this->dyldPath                                                  = this->getDyldPath(syscall, allocator);
     if ( this->pid == 1 ) {
         // The comm page flags are effectively a namespace.  PID 1 should mask out the bits it owns
         *((uint64_t*)&this->commPage) &= DyldCommPage::bootArgsMask;
-
 #if TARGET_OS_OSX
         // Only macOS uses the "foundRoot" variable.  But its only set later in scanForRoots().
         // Until that runs, assume we have roots, as we don't know for sure that we don't
         this->commPage.foundRoot = true;
-#endif
+#endif // TARGET_OS_OSX
     }
+#endif // TARGET_OS_EXCLAVEKIT
+    this->platform                                                  = this->getMainPlatform();
+    this->catalystRuntime                                           = this->usesCatalyst();
     this->archs                                                     = this->getMainArchs(syscall);
-    this->isTranslated                                              = syscall.isTranslated();
-    this->enableDataConst                                           = defaultDataConst(this->commPage);
-    this->enableCompactInfo                                         = defaultCompactInfo(this->commPage);
+    this->enableDataConst                                           = this->defaultDataConst();
+    this->enableTproDataConst                                       = this->defaultTproDataConst();
+    this->enableCompactInfo                                         = this->defaultCompactInfo();
+#if TARGET_OS_SIMULATOR
+    std::tie(this->dyldSimFSID, this->dyldSimObjID)                 = this->getDyldSimFileID(syscall);
+#endif
+#if !TARGET_OS_EXCLAVEKIT
 #if TARGET_OS_OSX
     this->proactivelyUseWeakDefMap = (strncmp(progname, "MATLAB",6) == 0); // rdar://81498849
 #else
     this->proactivelyUseWeakDefMap = false;
-#endif
+#endif // TARGET_OS_OSX
     this->pageInLinkingMode  = 2;
     if ( syscall.internalInstall() ) {
         if ( const char* mode = environ("DYLD_PAGEIN_LINKING") ) {
@@ -369,32 +440,36 @@ ProcessConfig::Process::Process(const KernelArgs* kernArgs, SyscallDelegate& sys
         this->pageInLinkingMode = 0;
     }
 #if __has_feature(ptrauth_calls)
-    // FIXME: don't use page-in linking for these process that use B keys
+        // FIXME: don't use page-in linking for these process that use B keys
     if ( strcmp(this->mainExecutablePath, "/usr/libexec/adid") == 0 )
         this->pageInLinkingMode = 0;
     if ( strcmp(this->mainExecutablePath, "/usr/libexec/fairplaydeviceidentityd") == 0 )
         this->pageInLinkingMode = 0;
-  #if TARGET_OS_OSX
+    if ( strcmp(this->mainExecutablePath, "/System/Library/PrivateFrameworks/CoreADI.framework/Versions/A/adid") == 0 )
+        this->pageInLinkingMode = 0;
+#if TARGET_OS_OSX
     if ( strcmp(this->mainExecutablePath, "/System/Library/PrivateFrameworks/CoreFP.framework/Versions/A/fairplayd") == 0 )
         this->pageInLinkingMode = 0;
-  #else
+#else
     if ( strncmp(this->mainExecutablePath, "/usr/sbin/fairplayd", 19) == 0 )
         this->pageInLinkingMode = 0;
-  #endif
-
-#endif
+#endif // TARGET_OS_OSX
+#endif // __has_feature(ptrauth_calls)
 
 #if TARGET_OS_TV && __arm64__
     // rdar://88514639 disable page-in-linking for tvOS
     this->pageInLinkingMode = 0;
-#endif
+#endif // TARGET_OS_TV && __arm64__
 #if TARGET_OS_OSX
     // don't use page-in-linking when running under rosetta
     if ( this->isTranslated )
         this->pageInLinkingMode = 0;
-#endif
+#endif // TARGET_OS_OSX
+
+#endif // !TARGET_OS_EXCLAVEKIT
 }
 
+#if !TARGET_OS_EXCLAVEKIT
 const char* ProcessConfig::Process::appleParam(const char* key) const
 {
     return _simple_getenv((const char**)apple, key);
@@ -422,8 +497,8 @@ const char* ProcessConfig::Process::pathFromFileHexStrings(SyscallDelegate& sys,
 {
     auto [fsID, objID] = fileIDFromFileHexStrings(encodedFileInfo);
     if (fsID && objID) {
-        char pathFromIDs[MAXPATHLEN];
-        if ( sys.fsgetpath(pathFromIDs, MAXPATHLEN, fsID, objID) != -1 ) {
+        char pathFromIDs[PATH_MAX];
+        if ( sys.fsgetpath(pathFromIDs, PATH_MAX, fsID, objID) != -1 ) {
             // return read-only copy of absolute path
             return allocator.strdup(pathFromIDs);
         }
@@ -456,13 +531,15 @@ std::pair<uint64_t, uint64_t> ProcessConfig::Process::getDyldSimFileID(SyscallDe
 
 const char* ProcessConfig::Process::getDyldPath(SyscallDelegate& sys, Allocator& allocator)
 {
+#if !TARGET_OS_EXCLAVEKIT
     if (dyldFSID && dyldObjID) {
-        char pathFromIDs[MAXPATHLEN];
-        if ( sys.fsgetpath(pathFromIDs, MAXPATHLEN, dyldFSID, dyldObjID) != -1 ) {
+        char pathFromIDs[PATH_MAX];
+        if ( sys.fsgetpath(pathFromIDs, PATH_MAX, dyldFSID, dyldObjID) != -1 ) {
             return allocator.strdup(pathFromIDs);
         }
     }
-
+#endif
+    
     // something wrong with "dyld_file=", fallback to default
     return "/usr/lib/dyld";
 }
@@ -478,8 +555,8 @@ std::pair<uint64_t, uint64_t> ProcessConfig::Process::getMainFileID() {
 const char* ProcessConfig::Process::getMainPath(SyscallDelegate& sys, Allocator& allocator)
 {
     if (mainExecutableFSID && mainExecutableObjID) {
-        char pathFromIDs[MAXPATHLEN];
-        if ( sys.fsgetpath(pathFromIDs, MAXPATHLEN, mainExecutableFSID, mainExecutableObjID) != -1 ) {
+        char pathFromIDs[PATH_MAX];
+        if ( sys.fsgetpath(pathFromIDs, PATH_MAX, mainExecutableFSID, mainExecutableObjID) != -1 ) {
             return allocator.strdup(pathFromIDs);
         }
     }
@@ -508,36 +585,16 @@ const char* ProcessConfig::Process::getMainUnrealPath(SyscallDelegate& sys, Allo
             mainPath += 2;
         }
         // have relative path, use cwd to make absolute
-        char buff[MAXPATHLEN];
+        char buff[PATH_MAX];
         if ( sys.getCWD(buff) ) {
-            strlcat(buff, "/", MAXPATHLEN);
-            strlcat(buff, mainPath, MAXPATHLEN);
+            strlcat(buff, "/", PATH_MAX);
+            strlcat(buff, mainPath, PATH_MAX);
             mainPath = allocator.strdup(buff);
         }
     }
 
     return mainPath;
 }
-
-bool ProcessConfig::Process::usesCatalyst()
-{
-#if BUILDING_DYLD
-    #if TARGET_OS_OSX
-        #if __arm64__
-            // on Apple Silicon macs, iOS apps and Catalyst apps use catalyst runtime
-            return ( (this->platform == Platform::iOSMac) || (this->platform == Platform::iOS) );
-        #else
-            return (this->platform == Platform::iOSMac);
-        #endif
-    #else
-        return false;
-    #endif
-#else
-    // FIXME: may need a way to fake iOS-apps-on-Mac for unit tests
-    return ( this->platform == Platform::iOSMac );
-#endif
-}
-
 
 uint32_t ProcessConfig::Process::findVersionSetEquivalent(dyld3::Platform versionPlatform, uint32_t version) const {
     uint32_t candidateVersion = 0;
@@ -563,7 +620,26 @@ uint32_t ProcessConfig::Process::findVersionSetEquivalent(dyld3::Platform versio
 
     return candidateVersionEquivalent;
 };
+#endif // !TARGET_OS_EXCLAVEKIT
 
+bool ProcessConfig::Process::usesCatalyst()
+{
+#if BUILDING_DYLD
+    #if TARGET_OS_OSX
+        #if __arm64__
+            // on Apple Silicon macs, iOS apps and Catalyst apps use catalyst runtime
+            return ( (this->platform == Platform::iOSMac) || (this->platform == Platform::iOS) );
+        #else
+            return (this->platform == Platform::iOSMac);
+        #endif
+    #else
+        return false;
+    #endif // TARGET_OS_OSX
+#else
+    // FIXME: may need a way to fake iOS-apps-on-Mac for unit tests
+    return ( this->platform == Platform::iOSMac );
+#endif// BUILDING_DYLD
+}
 
 Platform ProcessConfig::Process::getMainPlatform()
 {
@@ -577,6 +653,7 @@ Platform ProcessConfig::Process::getMainPlatform()
         this->mainExecutableMinOSVersion = minOS;
     });
 
+#if !TARGET_OS_EXCLAVEKIT
     // platform overrides only applicable on macOS, and can only force to 6 or 2
     if ( result == dyld3::Platform::macOS ) {
         if ( const char* forcedPlatform = this->environ("DYLD_FORCE_PLATFORM") ) {
@@ -607,6 +684,7 @@ Platform ProcessConfig::Process::getMainPlatform()
     this->basePlatform = MachOFile::basePlatform(result);
     this->mainExecutableSDKVersionSet = findVersionSetEquivalent(this->basePlatform, this->mainExecutableSDKVersion);
     this->mainExecutableMinOSVersionSet = findVersionSetEquivalent(this->basePlatform, this->mainExecutableMinOSVersion);
+#endif // !TARGET_OS_EXCLAVEKIT
 
     return result;
 }
@@ -614,6 +692,9 @@ Platform ProcessConfig::Process::getMainPlatform()
 
 const GradedArchs* ProcessConfig::Process::getMainArchs(SyscallDelegate& sys)
 {
+#if TARGET_OS_EXCLAVEKIT
+    return &GradedArchs::arm64e;
+#else
     bool keysOff        = false;
     bool osBinariesOnly = false;
 #if BUILDING_CLOSURE_UTIL
@@ -651,6 +732,7 @@ const GradedArchs* ProcessConfig::Process::getMainArchs(SyscallDelegate& sys)
     }
 #endif
     return &sys.getGradedArchs(mainExecutable->archName(), keysOff, osBinariesOnly);
+#endif
 }
 
 
@@ -660,6 +742,9 @@ const GradedArchs* ProcessConfig::Process::getMainArchs(SyscallDelegate& sys)
 
 ProcessConfig::Security::Security(Process& process, SyscallDelegate& syscall)
 {
+#if TARGET_OS_EXCLAVEKIT
+    this->internalInstall           = false; // FIXME
+#else
     this->internalInstall           = syscall.internalInstall();  // Note: must be set up before calling getAMFI()
     this->skipMain                  = this->internalInstall && process.environ("DYLD_SKIP_MAIN");
 
@@ -698,8 +783,10 @@ ProcessConfig::Security::Security(Process& process, SyscallDelegate& syscall)
         return;
 
     this->pruneEnvVars(process);
+#endif // !TARGET_OS_EXCLAVEKIT
 }
 
+#if !TARGET_OS_EXCLAVEKIT
 uint64_t ProcessConfig::Security::getAMFI(const Process& proc, SyscallDelegate& sys)
 {
     uint32_t fpTextOffset;
@@ -709,9 +796,9 @@ uint64_t ProcessConfig::Security::getAMFI(const Process& proc, SyscallDelegate& 
     // let DYLD_AMFI_FAKE override actual AMFI flags, but only on internalInstalls with boot-arg set
     bool testMode = proc.commPage.testMode;
     if ( const char* amfiFake = proc.environ("DYLD_AMFI_FAKE") ) {
-        //console("env DYLD_AMFI_FAKE set, boot-args dyld_flags=%s\n", this->getAppleParam("dyld_flags"));
+        //console("env DYLD_AMFI_FAKE set, boot-args dyld_flags=%s\n", proc.appleParam("dyld_flags"));
         if ( !testMode ) {
-            //console("env DYLD_AMFI_FAKE ignored because boot-args dyld_flags=2 is missing (%s)\n", this->getAppleParam("dyld_flags"));
+            //console("env DYLD_AMFI_FAKE ignored because boot-args dyld_flags=2 is missing (%s)\n", proc.appleParam("dyld_flags"));
         }
         else if ( !this->internalInstall ) {
             //console("env DYLD_AMFI_FAKE ignored because not running on an Internal install\n");
@@ -753,6 +840,7 @@ void ProcessConfig::Security::pruneEnvVars(Process& proc)
             *d++ = NULL;
     }
 }
+#endif // !TARGET_OS_EXCLAVEKIT
 
 
 //
@@ -761,6 +849,7 @@ void ProcessConfig::Security::pruneEnvVars(Process& proc)
 
 ProcessConfig::Logging::Logging(const Process& process, const Security& security, SyscallDelegate& syscall)
 {
+#if !TARGET_OS_EXCLAVEKIT
     this->segments       = security.allowEnvVarsPrint && process.environ("DYLD_PRINT_SEGMENTS");
     this->libraries      = security.allowEnvVarsPrint && process.environ("DYLD_PRINT_LIBRARIES");
     this->fixups         = security.allowEnvVarsPrint && process.environ("DYLD_PRINT_BINDINGS");
@@ -783,6 +872,18 @@ ProcessConfig::Logging::Logging(const Process& process, const Security& security
             }
         }
     }
+#else
+    this->segments       = true;
+    this->libraries      = true;
+    this->fixups         = false;
+    this->initializers   = true;
+    this->apis           = true;
+    this->notifications  = true;
+    this->interposing    = true;
+    this->loaders        = true;
+    this->searching      = true;
+    this->env            = true;
+#endif
 }
 
 
@@ -791,6 +892,7 @@ ProcessConfig::Logging::Logging(const Process& process, const Security& security
 // MARK: --- DyldCache methods ---
 //
 
+#if !TARGET_OS_EXCLAVEKIT
 static const char* getSystemCacheDir(dyld3::Platform platform)
 {
     if ( platform == dyld3::Platform::driverKit )
@@ -804,7 +906,6 @@ static const char* getSystemCacheDir(dyld3::Platform platform)
     return IPHONE_DYLD_SHARED_CACHE_DIR;
 #endif
 }
-
 // Shared caches may be found in the system cache dir, or an override
 // via env vars, or a cryptex from libignition.  This works out which one
 struct CacheFinder
@@ -957,9 +1058,12 @@ CacheFinder::~CacheFinder()
         this->syscall.close(this->cacheDirFD);
     }
 }
+#endif // !TARGET_OS_EXCLAVEKIT
+
 
 ProcessConfig::DyldCache::DyldCache(Process& process, const Security& security, const Logging& log, SyscallDelegate& syscall, Allocator& allocator)
 {
+#if !TARGET_OS_EXCLAVEKIT
     bool forceCustomerCache = process.commPage.forceCustomerCache;
     bool forceDevCache      = process.commPage.forceDevCache;
 
@@ -1025,6 +1129,11 @@ ProcessConfig::DyldCache::DyldCache(Process& process, const Security& security, 
     this->unslidLoadAddress       = 0;
     this->development             = false;
     this->dylibsExpectedOnDisk    = false;
+#if TARGET_OS_SIMULATOR
+    this->privateCache            = true;
+#else
+    this->privateCache            = opts.forcePrivate;
+#endif
     this->path                    = nullptr;
     this->objcHeaderInfoRO        = nullptr;
     this->objcHeaderInfoRW        = nullptr;
@@ -1049,6 +1158,8 @@ ProcessConfig::DyldCache::DyldCache(Process& process, const Security& security, 
 
         if ( loadInfo.loadAddress != nullptr ) {
             this->addr      = loadInfo.loadAddress;
+            this->fsID      = loadInfo.FSID;
+            this->fsObjID   = loadInfo.FSObjID;
             this->development = loadInfo.development;
             this->dylibsExpectedOnDisk  = this->addr->header.dylibsExpectedOnDisk;
 
@@ -1144,8 +1255,12 @@ ProcessConfig::DyldCache::DyldCache(Process& process, const Security& security, 
     if ( process.pid == 1 )
 #endif
         this->setupDyldCommPage(process, security, syscall);
+#else
+    //TODO: EXCLAVES
+#endif // !TARGET_OS_EXCLAVEKIT
 }
 
+#if !TARGET_OS_EXCLAVEKIT
 #if SUPPORT_VM_LAYOUT
 bool ProcessConfig::DyldCache::uuidOfFileMatchesDyldCache(const Process& proc, const SyscallDelegate& sys, const char* dylibPath) const
 {
@@ -1281,6 +1396,7 @@ void ProcessConfig::DyldCache::setupDyldCommPage(Process& proc, const Security& 
 
     sys.setDyldCommPageFlags(proc.commPage);
 }
+#endif // !TARGET_OS_EXCLAVEKIT
 
 bool ProcessConfig::DyldCache::indexOfPath(const char* dylibPath, uint32_t& dylibIndex) const
 {
@@ -1295,11 +1411,12 @@ bool ProcessConfig::DyldCache::indexOfPath(const char* dylibPath, uint32_t& dyli
         }
     }
     return false;
-#else
+#elif !TARGET_OS_EXCLAVEKIT
     if ( this->addr == nullptr )
         return false;
-
     return this->addr->hasImagePath(dylibPath, dylibIndex);
+#else
+    return false;
 #endif
 }
 
@@ -1315,13 +1432,15 @@ bool ProcessConfig::DyldCache::findMachHeaderImageIndex(const mach_header* mh, u
     }
     assert("Unknown dylib");
     return false;
-#else
+#elif !TARGET_OS_EXCLAVEKIT
     return this->addr->findMachHeaderImageIndex(mh, imageIndex);
+#else
+    return false;
 #endif
 }
 
 
-#if SUPPORT_VM_LAYOUT
+#if SUPPORT_VM_LAYOUT && !TARGET_OS_EXCLAVEKIT
 void ProcessConfig::DyldCache::makeDataConstWritable(const Logging& lg, const SyscallDelegate& sys, bool writable) const
 {
     const uint32_t perms = (writable ? VM_PROT_WRITE | VM_PROT_READ | VM_PROT_COPY : VM_PROT_READ);
@@ -1340,7 +1459,7 @@ void ProcessConfig::DyldCache::makeDataConstWritable(const Logging& lg, const Sy
         });
     });
 }
-#endif // SUPPORT_VM_LAYOUT
+#endif // SUPPORT_VM_LAYOUT && !TARGET_OS_EXCLAVEKIT
 
 bool ProcessConfig::DyldCache::isAlwaysOverridablePath(const char* dylibPath)
 {
@@ -1370,8 +1489,10 @@ const char* ProcessConfig::DyldCache::getIndexedImagePath(uint32_t dylibIndex) c
     assert(!cacheBuilderDylibs->empty());
     const CacheDylib& cacheDylib = (*cacheBuilderDylibs)[dylibIndex];
     return cacheDylib.mf->installName();
-#else
+#elif !TARGET_OS_EXCLAVEKIT
     return this->addr->getIndexedImagePath(dylibIndex);
+#else
+    return nullptr;
 #endif
 }
 
@@ -1385,8 +1506,10 @@ const dyld3::MachOFile* ProcessConfig::DyldCache::getIndexedImageEntry(uint32_t 
     mTime = cacheDylib.mTime;
     inode = cacheDylib.inode;
     return cacheDylib.mf;
-#else
+#elif !TARGET_OS_EXCLAVEKIT
     return (const dyld3::MachOFile*)this->addr->getIndexedImageEntry(dylibIndex, mTime, inode);
+#else
+    return nullptr;
 #endif
 }
 
@@ -1406,6 +1529,7 @@ void ProcessConfig::DyldCache::adjustDevelopmentMode() const
 
 ProcessConfig::PathOverrides::PathOverrides(const Process& process, const Security& security, const Logging& log, const DyldCache& cache, SyscallDelegate& syscall, Allocator& allocator)
 {
+#if !TARGET_OS_EXCLAVEKIT
     // set fallback path mode
     _fallbackPathMode = security.allowClassicFallbackPaths ? FallbackPathMode::classic : FallbackPathMode::restricted;
 
@@ -1423,7 +1547,7 @@ ProcessConfig::PathOverrides::PathOverrides(const Process& process, const Securi
         }
     }
 
-    // process LC_DYLD_ENVIRONMENT variables
+    // process LC_DYLD_ENVIRONMENT variables if allowed
     if ( security.allowEmbeddedVars ) {
         process.mainExecutable->forDyldEnv(^(const char* keyEqualValue, bool& stop) {
             this->addEnvVar(process, security, allocator, keyEqualValue, true, nullptr);
@@ -1433,14 +1557,15 @@ ProcessConfig::PathOverrides::PathOverrides(const Process& process, const Securi
     if ( !cache.cryptexOSPath.empty() )
         this->_cryptexRootPath = cache.cryptexOSPath.data();
 
-    // process DYLD_VERSIONED_* env vars if allowed
-    if ( security.allowEnvVarsPath )
-        this->processVersionedPaths(process, syscall, cache, process.platform, *process.archs, allocator);
+    // process DYLD_VERSIONED_* env vars
+    this->processVersionedPaths(process, syscall, cache, process.platform, *process.archs, allocator);
 
     if ( dontUsePrebuiltForApp() )
         cache.adjustDevelopmentMode();
+#endif // !TARGET_OS_EXCLAVEKIT
 }
 
+#if !TARGET_OS_EXCLAVEKIT
 void ProcessConfig::PathOverrides::checkVersionedPath(SyscallDelegate& sys, const DyldCache& cache, Allocator& allocator, const char* path, Platform platform, const GradedArchs& archs)
 {
     static bool verbose = false;
@@ -1693,6 +1818,8 @@ void ProcessConfig::PathOverrides::addEnvVar(const Process& proc, const Security
         }
     }
 }
+#endif // !TARGET_OS_EXCLAVEKIT
+
 
 void ProcessConfig::PathOverrides::forEachInColonList(const char* list1, const char* list2, bool& stop, void (^handler)(const char* path, bool&))
 {
@@ -1831,7 +1958,7 @@ void ProcessConfig::PathOverrides::forEachFrameworkFallback(Platform platform, b
 //
 void ProcessConfig::PathOverrides::addSuffix(const char* path, const char* suffix, char* result) const
 {
-    strcpy(result, path);
+    strlcpy(result, path, PATH_MAX);
 
     // find last slash
     char* start = strrchr(result, '/');
@@ -1843,11 +1970,11 @@ void ProcessConfig::PathOverrides::addSuffix(const char* path, const char* suffi
     // find last dot after last slash
     char* dot = strrchr(start, '.');
     if ( dot != NULL ) {
-        strcpy(dot, suffix);
-        strcat(&dot[strlen(suffix)], &path[dot-result]);
+        strlcpy(dot, suffix, PATH_MAX);
+        strlcat(&dot[strlen(suffix)], &path[dot-result], PATH_MAX);
     }
     else {
-        strcat(result, suffix);
+        strlcat(result, suffix, PATH_MAX);
     }
 }
 
@@ -1878,10 +2005,11 @@ void ProcessConfig::PathOverrides::forEachPathVariant(const char* initialPath, P
         // look at each DYLD_FRAMEWORK_PATH directory
         if ( (_frameworkPathOverridesEnv != nullptr) || (_frameworkPathOverridesExeLC != nullptr) ) {
             forEachInColonList(_frameworkPathOverridesEnv, _frameworkPathOverridesExeLC, stop, ^(const char* frDir, bool&) {
-                char npath[strlen(frDir)+frameworkPartialPathLen+8];
-                strcpy(npath, frDir);
-                strcat(npath, "/");
-                strcat(npath, frameworkPartialPath);
+                size_t npathSize = strlen(frDir)+frameworkPartialPathLen+8;
+                char npath[npathSize];
+                strlcpy(npath, frDir, npathSize);
+                strlcat(npath, "/", npathSize);
+                strlcat(npath, frameworkPartialPath, npathSize);
                 forEachImageSuffix(npath, Type::pathDirOverride, stop, handler);
             });
         }
@@ -1892,10 +2020,11 @@ void ProcessConfig::PathOverrides::forEachPathVariant(const char* initialPath, P
         // look at each DYLD_LIBRARY_PATH directory
         if ( (_dylibPathOverridesEnv != nullptr) || (_dylibPathOverridesExeLC != nullptr) ) {
             forEachInColonList(_dylibPathOverridesEnv, _dylibPathOverridesExeLC, stop, ^(const char* libDir, bool&) {
-                char npath[strlen(libDir)+libraryLeafNameLen+8];
-                strcpy(npath, libDir);
-                strcat(npath, "/");
-                strcat(npath, libraryLeafName);
+                size_t npathSize = strlen(libDir)+libraryLeafNameLen+8;
+                char npath[npathSize];
+                strlcpy(npath, libDir, npathSize);
+                strlcat(npath, "/", npathSize);
+                strlcat(npath, libraryLeafName, npathSize);
                 forEachImageSuffix(npath, Type::pathDirOverride, stop, handler);
             });
         }
@@ -1914,29 +2043,29 @@ void ProcessConfig::PathOverrides::forEachPathVariant(const char* initialPath, P
 
     // paths staring with @ are never valid for finding in iOSSupport or simulator
     if ( initialPath[0] != '@' ) {
-
-    #if TARGET_OS_SIMULATOR
+#if TARGET_OS_SIMULATOR
         if ( _simRootPath != nullptr ) {
             // try simulator prefix
-            char rtpath[strlen(_simRootPath)+strlen(initialPath)+8];
-            strcpy(rtpath, _simRootPath);
-            strcat(rtpath, initialPath);
+            size_t rtpathSize = strlen(_simRootPath)+strlen(initialPath)+8;
+            char rtpath[rtpathSize];
+            strlcpy(rtpath, _simRootPath, rtpathSize);
+            strlcat(rtpath, initialPath, rtpathSize);
             forEachImageSuffix(rtpath, Type::simulatorPrefix, stop, handler);
             if ( stop )
                 return;
         }
-    #endif
+#endif
 
         // try rootpaths
         bool searchiOSSupport = (platform == Platform::iOSMac);
-    #if (TARGET_OS_OSX && TARGET_CPU_ARM64 && BUILDING_DYLD)
+#if (TARGET_OS_OSX && TARGET_CPU_ARM64 && BUILDING_DYLD)
         if ( platform == Platform::iOS ) {
             searchiOSSupport = true;
             // <rdar://problem/58959974> some old Almond apps reference old WebKit location
             if ( strcmp(initialPath, "/System/Library/PrivateFrameworks/WebKit.framework/WebKit") == 0 )
                 initialPath = "/System/Library/Frameworks/WebKit.framework/WebKit";
         }
-    #endif
+#endif
 
         if ( searchiOSSupport && (strncmp(initialPath, "/System/iOSSupport/", 19) == 0) )
             searchiOSSupport = false;
@@ -1947,9 +2076,10 @@ void ProcessConfig::PathOverrides::forEachPathVariant(const char* initialPath, P
             // try looking in Catalyst support dir, but not in the shared cache
             if ( searchiOSSupport ) {
                 {
-                    char rtpath[strlen("/System/iOSSupport")+strlen(initialPath)+8];
-                    strcpy(rtpath, "/System/iOSSupport");
-                    strcat(rtpath, initialPath);
+                    size_t rtpathLen = strlen("/System/iOSSupport")+strlen(initialPath)+8;
+                    char rtpath[rtpathLen];
+                    strlcpy(rtpath, "/System/iOSSupport", rtpathLen);
+                    strlcat(rtpath, initialPath, rtpathLen);
                     forEachImageSuffix(rtpath, Type::catalystPrefixOnDisk, stop, handler);
                     if ( stop )
                         return;
@@ -1959,10 +2089,11 @@ void ProcessConfig::PathOverrides::forEachPathVariant(const char* initialPath, P
                     // try cryptex mount
                     // Note this is after the above call due to:
                     // rdar://91027811 (dyld should search for dylib overrides in / before /System/Cryptexes/OS)
-                    char rtpath[strlen(_cryptexRootPath)+strlen("/System/iOSSupport")+strlen(initialPath)+8];
-                    strcpy(rtpath, _cryptexRootPath);
-                    strcat(rtpath, "/System/iOSSupport");
-                    strcat(rtpath, initialPath);
+                    size_t rtpathLen = strlen(_cryptexRootPath)+strlen("/System/iOSSupport")+strlen(initialPath)+8;
+                    char rtpath[rtpathLen];
+                    strlcpy(rtpath, _cryptexRootPath, rtpathLen);
+                    strlcat(rtpath, "/System/iOSSupport", rtpathLen);
+                    strlcat(rtpath, initialPath, rtpathLen);
                     forEachImageSuffix(rtpath, Type::cryptexCatalystPrefix, stop, handler);
                     if ( stop )
                         return;
@@ -1970,9 +2101,10 @@ void ProcessConfig::PathOverrides::forEachPathVariant(const char* initialPath, P
 
                 // try looking in Catalyst support dir
                 if ( searchiOSSupport ) {
-                    char rtpath[strlen("/System/iOSSupport")+strlen(initialPath)+8];
-                    strcpy(rtpath, "/System/iOSSupport");
-                    strcat(rtpath, initialPath);
+                    size_t rtpathLen = strlen("/System/iOSSupport")+strlen(initialPath)+8;
+                    char rtpath[rtpathLen];
+                    strlcpy(rtpath, "/System/iOSSupport", rtpathLen);
+                    strlcat(rtpath, initialPath, rtpathLen);
                     forEachImageSuffix(rtpath, Type::catalystPrefix, stop, handler);
                     if ( stop )
                         return;
@@ -1989,9 +2121,10 @@ void ProcessConfig::PathOverrides::forEachPathVariant(const char* initialPath, P
             // try cryptex mount
             // Note this is after the above call due to:
             // rdar://91027811 (dyld should search for dylib overrides in / before /System/Cryptexes/OS)
-            char rtpath[strlen(_cryptexRootPath)+strlen(initialPath)+8];
-            strcpy(rtpath, _cryptexRootPath);
-            strcat(rtpath, initialPath);
+            size_t rtpathLen = strlen(_cryptexRootPath)+strlen(initialPath)+8;
+            char rtpath[rtpathLen];
+            strlcpy(rtpath, _cryptexRootPath, rtpathLen);
+            strlcat(rtpath, initialPath ,rtpathLen);
             forEachImageSuffix(rtpath, Type::cryptexPrefix, stop, handler);
             if ( stop )
                 return;
@@ -1999,9 +2132,10 @@ void ProcessConfig::PathOverrides::forEachPathVariant(const char* initialPath, P
 
         // try looking in Catalyst support dir
         if ( searchiOSSupport ) {
-            char rtpath[strlen("/System/iOSSupport")+strlen(initialPath)+8];
-            strcpy(rtpath, "/System/iOSSupport");
-            strcat(rtpath, initialPath);
+            size_t rtpathLen = strlen("/System/iOSSupport")+strlen(initialPath)+8;
+            char rtpath[rtpathLen];
+            strlcpy(rtpath, "/System/iOSSupport", rtpathLen);
+            strlcat(rtpath, initialPath, rtpathLen);
             forEachImageSuffix(rtpath, Type::catalystPrefix, stop, handler);
             if ( stop )
                 return;
@@ -2019,10 +2153,11 @@ void ProcessConfig::PathOverrides::forEachPathVariant(const char* initialPath, P
             const size_t frameworkPartialPathLen = strlen(frameworkPartialPath);
             // look at each DYLD_FALLBACK_FRAMEWORK_PATH directory
             forEachFrameworkFallback(platform, requestorNeedsFallbacks, stop, ^(const char* dir, Type type, bool&) {
-                char npath[strlen(dir)+frameworkPartialPathLen+8];
-                strcpy(npath, dir);
-                strcat(npath, "/");
-                strcat(npath, frameworkPartialPath);
+                size_t npathSize = strlen(dir)+frameworkPartialPathLen+8;
+                char npath[npathSize];
+                strlcpy(npath, dir, npathSize);
+                strlcat(npath, "/", npathSize);
+                strlcat(npath, frameworkPartialPath, npathSize);
                 // don't try original path again
                 if ( strcmp(initialPath, npath) != 0 ) {
                     forEachImageSuffix(npath, type, stop, handler);
@@ -2035,10 +2170,11 @@ void ProcessConfig::PathOverrides::forEachPathVariant(const char* initialPath, P
             const size_t libraryLeafNameLen = strlen(libraryLeafName);
             // look at each DYLD_FALLBACK_LIBRARY_PATH directory
             forEachDylibFallback(platform, requestorNeedsFallbacks, stop, ^(const char* dir, Type type, bool&) {
-                char libpath[strlen(dir)+libraryLeafNameLen+8];
-                strcpy(libpath, dir);
-                strcat(libpath, "/");
-                strcat(libpath, libraryLeafName);
+                size_t libpathSize = strlen(dir)+libraryLeafNameLen+8;
+                char libpath[libpathSize];
+                strlcpy(libpath, dir, libpathSize);
+                strlcat(libpath, "/", libpathSize);
+                strlcat(libpath, libraryLeafName, libpathSize);
                 if ( strcmp(libpath, initialPath) != 0 ) {
                     forEachImageSuffix(libpath, type, stop, handler);
                 }
@@ -2173,9 +2309,9 @@ bool ProcessConfig::PathOverrides::dontUsePrebuiltForApp() const
 // MARK: --- ProcessConfig methods ---
 //
 
+#if TARGET_OS_OSX && SUPPORT_VM_LAYOUT && !TARGET_OS_EXCLAVEKIT
 bool ProcessConfig::simulatorFileMatchesDyldCache(const char *path) const
 {
-#if TARGET_OS_OSX && SUPPORT_VM_LAYOUT
     // On macOS there are three dylibs under libSystem that exist for the simulator to use,
     // but we do not consider them "roots", so fileExists() returns false for them
     if ( this->dyldCache.addr == nullptr )
@@ -2231,13 +2367,16 @@ bool ProcessConfig::simulatorFileMatchesDyldCache(const char *path) const
         // Possibly a root, open the file and compare UUID to one in dyld cache
         return this->dyldCache.uuidOfFileMatchesDyldCache(process, syscall, path);
     }
-#endif // TARGET_OS_OSX
     return false;
 }
+#endif // TARGET_OS_OSX
 
 bool ProcessConfig::fileExists(const char* path, FileID* fileID, int* errNum) const
 {
-#if TARGET_OS_OSX
+#if TARGET_OS_EXCLAVEKIT
+    return false;
+#else
+  #if TARGET_OS_OSX && BUILDING_DYLD
     if ( errNum != nullptr )
         *errNum = ENOENT;
     // On macOS there are three dylibs under libSystem that exist for the simulator to use,
@@ -2245,44 +2384,17 @@ bool ProcessConfig::fileExists(const char* path, FileID* fileID, int* errNum) co
     if ( simulatorFileMatchesDyldCache(path) )
         return false;
 
-#if 0
-    // On macOS, we scan for roots at boot.  This is only done in PID 1, so we can only use
-    // this result on the shared cache mapped at that point, not driverKit/Rosetta
-    if ( (this->dyldCache.addr != nullptr)
-        && !this->process.commPage.bootVolumeWritable
-        && !this->process.commPage.foundRoot
-        && !this->process.isTranslated ) {
-        if ( (this->process.platform == dyld3::Platform::macOS)
-            || (this->process.platform == dyld3::Platform::iOSMac) ) {
-            if ( this->dyldCache.getCanonicalPath(path) != nullptr )
-                return false;
-
-            // We might be asked about a path in the cryptex.  If so, chop it up to
-            // try get the install name
-            if ( !this->dyldCache.cryptexOSPath.empty() ) {
-                std::string_view installName(path);
-                if ( installName.starts_with(this->dyldCache.cryptexOSPath) ) {
-                    installName.remove_prefix(this->dyldCache.cryptexOSPath.size());
-
-                    if ( this->dyldCache.getCanonicalPath(installName.data()) != nullptr )
-                        return false;
-                }
-            }
-        }
-    }
-#endif // 0
-
-#endif // TARGET_OS_OSX
+  #endif // TARGET_OS_OSX
     return syscall.fileExists(path, fileID, errNum);
+#endif // TARGET_OS_EXCLAVEKIT
 }
-
 
 const char* ProcessConfig::canonicalDylibPathInCache(const char* dylibPath) const
 {
     if ( const char* result = this->dyldCache.getCanonicalPath(dylibPath) )
         return result;
 
-#if TARGET_OS_OSX
+#if TARGET_OS_OSX && !TARGET_OS_EXCLAVEKIT
     // on macOS support "Foo.framework/Foo" symlink
     char resolvedPath[PATH_MAX];
     if ( this->syscall.realpath(dylibPath, resolvedPath) ) {
@@ -2298,10 +2410,16 @@ const char* ProcessConfig::canonicalDylibPathInCache(const char* dylibPath) cons
 //
 
 #if BUILDING_DYLD
+#if !TARGET_OS_EXCLAVEKIT
 static char error_string[1024]; // FIXME: check if anything still needs the error_string global symbol, or if abort_with_payload superceeds it
+#endif // !TARGET_OS_EXCLAVEKIT
 
-void halt(const char* message)
+void halt(const char* message, const StructuredError* errorInfo)
 {
+#if TARGET_OS_EXCLAVEKIT
+    console("%s\n", message);
+    abort();
+#else
     strlcpy(error_string, message, sizeof(error_string));
     CRSetCrashLogMessage(error_string);
     console("%s\n", message);
@@ -2321,32 +2439,33 @@ void halt(const char* message)
         strlcpy(error_string, message, sizeof(error_string));
     }
 */
-    //FIXME: Updating the process state here is tricky since we don't have runtimeState
-    // don't show back trace, during launch if symbol or dylib missing.  All info is in the error message
-    if ( (gProcessInfo->errorKind == DYLD_EXIT_REASON_SYMBOL_MISSING) ||  (gProcessInfo->errorKind == DYLD_EXIT_REASON_DYLIB_MISSING) )
-        gProcessInfo->terminationFlags = 1;
-
-    gProcessInfo->errorMessage = error_string;
     char                payloadBuffer[EXIT_REASON_PAYLOAD_MAX_LEN];
     dyld_abort_payload* payload    = (dyld_abort_payload*)payloadBuffer;
     payload->version               = 1;
-    payload->flags                 = (uint32_t)gProcessInfo->terminationFlags;
+    payload->flags                 = 0;
     payload->targetDylibPathOffset = 0;
     payload->clientPathOffset      = 0;
     payload->symbolOffset          = 0;
     int payloadSize                = sizeof(dyld_abort_payload);
 
-    if ( gProcessInfo->errorTargetDylibPath != NULL ) {
-        payload->targetDylibPathOffset = payloadSize;
-        payloadSize += strlcpy(&payloadBuffer[payloadSize], gProcessInfo->errorTargetDylibPath, sizeof(payloadBuffer) - payloadSize) + 1;
-    }
-    if ( gProcessInfo->errorClientOfDylibPath != NULL ) {
-        payload->clientPathOffset = payloadSize;
-        payloadSize += strlcpy(&payloadBuffer[payloadSize], gProcessInfo->errorClientOfDylibPath, sizeof(payloadBuffer) - payloadSize) + 1;
-    }
-    if ( gProcessInfo->errorSymbol != NULL ) {
-        payload->symbolOffset = payloadSize;
-        payloadSize += strlcpy(&payloadBuffer[payloadSize], gProcessInfo->errorSymbol, sizeof(payloadBuffer) - payloadSize) + 1;
+    uintptr_t kind = DYLD_EXIT_REASON_OTHER;
+    if ( errorInfo != nullptr ) {
+        // don't show back trace, during launch if symbol or dylib missing.  All info is in the error message
+        kind = errorInfo->kind;
+        if ( (kind == DYLD_EXIT_REASON_SYMBOL_MISSING) || (kind == DYLD_EXIT_REASON_DYLIB_MISSING) )
+            payload->flags = 1;
+        if ( errorInfo->targetDylibPath != nullptr ) {
+            payload->targetDylibPathOffset = payloadSize;
+            payloadSize += strlcpy(&payloadBuffer[payloadSize], errorInfo->targetDylibPath, sizeof(payloadBuffer) - payloadSize) + 1;
+        }
+        if ( errorInfo->clientOfDylibPath != nullptr ) {
+            payload->clientPathOffset = payloadSize;
+            payloadSize += strlcpy(&payloadBuffer[payloadSize], errorInfo->clientOfDylibPath, sizeof(payloadBuffer) - payloadSize) + 1;
+        }
+        if ( errorInfo->symbolName != nullptr ) {
+            payload->symbolOffset = payloadSize;
+            payloadSize += strlcpy(&payloadBuffer[payloadSize], errorInfo->symbolName, sizeof(payloadBuffer) - payloadSize) + 1;
+        }
     }
     char truncMessage[EXIT_REASON_USER_DESC_MAX_LEN];
     strlcpy(truncMessage, message, EXIT_REASON_USER_DESC_MAX_LEN);
@@ -2358,14 +2477,21 @@ void halt(const char* message)
         console("dyld_abort_payload.clientPathOffset      = 0x%08X (%s)\n", payload->clientPathOffset, payload->clientPathOffset ? &payloadBuffer[payload->clientPathOffset] : "");
         console("dyld_abort_payload.symbolOffset          = 0x%08X (%s)\n", payload->symbolOffset, payload->symbolOffset ? &payloadBuffer[payload->symbolOffset] : "");
     }
-    abort_with_payload(OS_REASON_DYLD, gProcessInfo->errorKind ? gProcessInfo->errorKind : DYLD_EXIT_REASON_OTHER, payloadBuffer, payloadSize, truncMessage, 0);
+    abort_with_payload(OS_REASON_DYLD, kind, payloadBuffer, payloadSize, truncMessage, 0);
+#endif // TARGET_OS_EXCLAVEKIT
 }
 #endif // BUILDING_DYLD
 
 void console(const char* format, ...)
 {
+#if TARGET_OS_EXCLAVEKIT
+    va_list list;
+    va_start(list, format);
+    vfprintf(stderr, format, list);
+    va_end(list);
+#else
     if ( getpid() == 1 ) {
-#if BUILDING_DYLD
+  #if BUILDING_DYLD
         int logFD = open("/dev/console", O_WRONLY | O_NOCTTY, 0);
         ::_simple_dprintf(2, "dyld[%d]: ", getpid());
         va_list list;
@@ -2373,7 +2499,7 @@ void console(const char* format, ...)
         ::_simple_vdprintf(logFD, format, list);
         va_end(list);
         ::close(logFD);
-#endif // BUILDING_DYLD
+  #endif // BUILDING_DYLD
     } else {
         ::_simple_dprintf(2, "dyld[%d]: ", getpid());
         va_list list;
@@ -2381,6 +2507,7 @@ void console(const char* format, ...)
         ::_simple_vdprintf(2, format, list);
         va_end(list);
     }
+#endif // TARGET_OS_EXCLAVEKIT
 }
 
 

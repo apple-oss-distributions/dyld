@@ -263,6 +263,30 @@ const char* ObjCOptsHeaderChunk::name() const
 }
 
 //
+// MARK: --- ObjCImageInfoChunk methods ---
+//
+
+ObjCImageInfoChunk::ObjCImageInfoChunk()
+    : Chunk(Kind::objcHeaderInfoRO, Alignment::struct64)
+{
+}
+
+ObjCImageInfoChunk::~ObjCImageInfoChunk()
+{
+
+}
+
+void ObjCImageInfoChunk::dump() const
+{
+    printf("ObjCImageInfoChunk\n");
+}
+
+const char* ObjCImageInfoChunk::name() const
+{
+    return "objc image info";
+}
+
+//
 // MARK: --- ObjCHeaderInfoReadOnlyChunk methods ---
 //
 
@@ -477,6 +501,30 @@ const char* ObjCCanonicalProtocolsChunk::name() const
 {
     return "objc canonical protocols";
 }
+//
+// MARK: --- ObjCCategoriesChunk methods ---
+//
+
+ObjCPreAttachedCategoriesChunk::ObjCPreAttachedCategoriesChunk()
+    : SlidChunk(Kind::objcPreAttachedCategories, (uint64_t)Alignment::struct64)
+{
+}
+
+ObjCPreAttachedCategoriesChunk::~ObjCPreAttachedCategoriesChunk()
+{
+
+}
+
+void ObjCPreAttachedCategoriesChunk::dump() const
+{
+    printf("ObjCPreAttachedCategoriesChunk\n");
+}
+
+const char* ObjCPreAttachedCategoriesChunk::name() const
+{
+    return "objc pre-attached categories";
+}
+
 
 //
 // MARK: --- ObjCIMPCachesChunk methods ---

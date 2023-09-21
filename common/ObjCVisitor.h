@@ -25,6 +25,7 @@
 #ifndef ObjCVisitor_h
 #define ObjCVisitor_h
 
+#include "OptimizerObjC.h"
 #include "MetadataVisitor.h"
 #include "MachOFile.h"
 #include "Types.h"
@@ -55,6 +56,8 @@ struct Category;
 struct Class;
 struct IVar;
 struct IVarList;
+struct Property;
+struct PropertyList;
 struct Method;
 struct MethodList;
 struct Protocol;
@@ -76,6 +79,8 @@ struct Visitor : metadata_visitor::Visitor
     void forEachSelectorReference(void (^callback)(metadata_visitor::ResolvedValue& value)) const;
     void forEachSelectorReference(void (^callback)(VMAddress selRefVMAddr, VMAddress selRefTargetVMAddr,
                                                    const char* selectorString)) const;
+
+    void withImageInfo(void (^callback)(const uint32_t version, const uint32_t flags)) const;
 
 #if BUILDING_CACHE_BUILDER_UNIT_TESTS
     // We need everything public to write tests
@@ -145,6 +150,8 @@ struct Method
 #endif
 
     void convertNameToOffset(const Visitor& objcVisitor, uint32_t nameOffset);
+
+    static uint32_t getSize(bool is64);
 
 private:
 
@@ -248,6 +255,8 @@ struct MethodList
         uint8_t     methodArrayBase[]; // Note this is the start the array method_t[0]
     };
 
+    static_assert(sizeof(method_list_t) == 8, "makeEmptyMethodList expects a buffer without the method array");
+
     uint32_t numMethods() const;
 
     bool usesOffsetsFromSelectorBuffer() const;
@@ -259,11 +268,16 @@ struct MethodList
     void setIsSorted();
     void setUsesOffsetsFromSelectorBuffer();
 
-#if BUILDING_CACHE_BUILDER_UNIT_TESTS
+    // Creates an empty shared cache method list (one that is fixed up), and returns
+    // its size
+    static size_t makeEmptyMethodList(void* buffer);
+
+    // Returns true if this method list is a list of lists, ie, used for attaching categories to
+    // classes in the cache builder
+    bool isListOfLists() const;
+
     const void*                 getLocation() const;
     std::optional<VMAddress>    getVMAddress() const;
-#endif
-
 private:
     const std::optional<metadata_visitor::ResolvedValue> methodListPos;
 };
@@ -284,10 +298,12 @@ struct ProtocolList
     __attribute__((used))
     void dump(const Visitor& objcVisitor) const;
 
-#if BUILDING_CACHE_BUILDER_UNIT_TESTS
+    // Returns true if this method list is a list of lists, ie, used for attaching categories to
+    // classes in the cache builder
+    bool isListOfLists() const;
+
     const void*                 getLocation() const;
     std::optional<VMAddress>    getVMAddress() const;
-#endif
 
 private:
 
@@ -300,6 +316,8 @@ private:
 
     typedef protocol_list_t<uint32_t> protocol_list32_t;
     typedef protocol_list_t<uint64_t> protocol_list64_t;
+
+    typedef ListOfListsEntry* protocol_list_list;
 
     metadata_visitor::ResolvedValue getProtocolField(const Visitor& objcVisitor, uint64_t i) const;
 
@@ -386,6 +404,79 @@ private:
     const std::optional<metadata_visitor::ResolvedValue> ivarListPos;
 };
 
+// A wrapped around an individual objc Property in a Property list
+struct Property
+{
+    Property(metadata_visitor::ResolvedValue propertyPos) : propertyPos(propertyPos) { }
+
+    const char*             getName(const Visitor& objcVisitor) const;
+    const char*             getAttributes(const Visitor& objcVisitor) const;
+
+private:
+
+    template<typename PtrTy>
+    struct property_t {
+        PtrTy       nameVMAddr;       // const char *
+        PtrTy       attributesVMAddr; // const char *
+    };
+
+    typedef property_t<uint32_t> property32_t;
+    typedef property_t<uint64_t> property64_t;
+
+    enum class Field
+    {
+        name,
+        attributes
+    };
+
+    const void* getFieldPos(const Visitor& objcVisitor, Field field) const;
+
+    const metadata_visitor::ResolvedValue propertyPos;
+};
+
+// A wrapper around an Property list.  Points to the property list in the mach-o buffer, and can be used
+// to find the other fields of the property list.
+struct PropertyList
+{
+    PropertyList(std::optional<metadata_visitor::ResolvedValue> propertyListPos) : propertyListPos(propertyListPos) { }
+
+    // Note a property list looks like this to libobjc:
+    struct property_list_t {
+
+        uint32_t getElementSize() const
+        {
+            return this->entsize;
+        }
+
+        uint32_t getCount() const
+        {
+            return this->count;
+        }
+
+        const uint8_t* propertyBase() const {
+            return &this->propertyArrayBase[0];
+        }
+
+    private:
+        uint32_t    entsize;
+        uint32_t    count;
+        uint8_t     propertyArrayBase[]; // Note this is the start the array property_t[0]
+    };
+
+    uint32_t numProperties() const;
+    Property getProperty(const Visitor& objcVisitor, uint32_t i) const;
+
+    // Returns true if this method list is a list of lists, ie, used for attaching categories to
+    // classes in the cache builder
+    bool isListOfLists() const;
+
+    const void*                 getLocation() const;
+    std::optional<VMAddress>    getVMAddress() const;
+
+private:
+    const std::optional<metadata_visitor::ResolvedValue> propertyListPos;
+};
+
 struct ClassData
 {
     ClassData(metadata_visitor::ResolvedValue classDataPos) : classDataPos(classDataPos) { }
@@ -450,6 +541,7 @@ struct Class
     metadata_visitor::ResolvedValue                 getMethodCache(const Visitor& objcVisitor) const;
     std::optional<metadata_visitor::ResolvedValue>  getMethodCacheProperties(const Visitor& objcVisitor) const;
     ClassData                                       getClassData(const Visitor& objcVisitor) const;
+    VMAddress                                       getClassDataVMAddr(const Visitor& objcVisitor) const;
     std::optional<uint32_t>                         swiftClassFlags(const Visitor& objcVisitor) const;
 
     std::optional<VMAddress>                    getSuperclassVMAddr(const Visitor& objcVisitor) const;
@@ -475,16 +567,21 @@ struct Class
     bool isSwift(const Visitor& objcVisitor) const;
     bool isUnfixedBackwardDeployingStableSwift(const Visitor& objcVisitor) const;
 
-    bool                isRootClass(const Visitor& objcVisitor) const;
-    uint32_t            getInstanceStart(const Visitor& objcVisitor) const;
-    void                setInstanceStart(const Visitor& objcVisitor, uint32_t value) const;
-    uint32_t            getInstanceSize(const Visitor& objcVisitor) const;
-    void                setInstanceSize(const Visitor& objcVisitor, uint32_t value) const;
-    const char*         getName(const Visitor& objcVisitor) const;
-    VMAddress           getNameVMAddr(const Visitor& objcVisitor) const;
-    MethodList          getBaseMethods(const Visitor& objcVisitor) const;
-    ProtocolList        getBaseProtocols(const Visitor& objcVisitor) const;
-    IVarList            getIVars(const Visitor& objcVisitor) const;
+    bool                                  isRootClass(const Visitor& objcVisitor) const;
+    uint32_t                              getInstanceStart(const Visitor& objcVisitor) const;
+    void                                  setInstanceStart(const Visitor& objcVisitor, uint32_t value) const;
+    uint32_t                              getInstanceSize(const Visitor& objcVisitor) const;
+    void                                  setInstanceSize(const Visitor& objcVisitor, uint32_t value) const;
+    const char*                           getName(const Visitor& objcVisitor) const;
+    VMAddress                             getNameVMAddr(const Visitor& objcVisitor) const;
+    MethodList                            getBaseMethods(const Visitor& objcVisitor) const;
+    metadata_visitor::ResolvedValue       setBaseMethodsVMAddr(const Visitor& objcVisitor, VMAddress vmAddr,
+                                             const dyld3::MachOFile::PointerMetaData& PMD);
+    ProtocolList                          getBaseProtocols(const Visitor& objcVisitor) const;
+    metadata_visitor::ResolvedValue       setBaseProtocolsVMAddr(const Visitor& objcVisitor, VMAddress vmAddr);
+    IVarList                              getIVars(const Visitor& objcVisitor) const;
+    PropertyList                          getBaseProperties(const Visitor& objcVisitor) const;
+    metadata_visitor::ResolvedValue       setBasePropertiesVMAddr(const Visitor& objcVisitor, VMAddress vmAddr);
 
     const void* getLocation() const;
     VMAddress   getVMAddress() const;
@@ -556,13 +653,20 @@ struct Category
     Category(metadata_visitor::ResolvedValue categoryPos) : categoryPos(categoryPos) { }
 
     const char*         getName(const Visitor& objcVisitor) const;
+    const void*         getLocation() const;
+    VMAddress           getVMAddress() const;
+    VMAddress           getNameVMAddr(const Visitor& objcVisitor) const;
     MethodList          getInstanceMethods(const Visitor& objcVisitor) const;
     MethodList          getClassMethods(const Visitor& objcVisitor) const;
     ProtocolList        getProtocols(const Visitor& objcVisitor) const;
+    PropertyList        getInstanceProperties(const Visitor& objcVisitor) const;
+    PropertyList        getClassProperties(const Visitor& objcVisitor) const;
 
     // Gets the raw fixup and chained pointer format for the class fixup
     void withClass(const Visitor& objcVisitor,
                    void (^handler)(const dyld3::MachOFile::ChainedFixupPointerOnDisk* fixup, uint16_t pointerFormat)) const;
+
+    static uint32_t getSize(bool is64);
 
 private:
 
@@ -575,6 +679,7 @@ private:
         PtrTy classMethodsVMAddr;
         PtrTy protocolsVMAddr;
         PtrTy instancePropertiesVMAddr;
+        PtrTy classPropertiesVMAddr;
     };
 
     typedef category_t<uint32_t> category32_t;
@@ -587,7 +692,8 @@ private:
         instanceMethods,
         classMethods,
         protocols,
-        instanceProperties
+        instanceProperties,
+        classProperties
     };
 
     const void* getFieldPos(const Visitor& objcVisitor, Field field) const;

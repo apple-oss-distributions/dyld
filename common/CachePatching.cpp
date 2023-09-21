@@ -23,7 +23,7 @@
  */
 
 #include "CachePatching.h"
-#include "Error.h"
+#include "../cache_builder/Error.h"
 #include "Types.h"
 
 #if BUILDING_CACHE_BUILDER || BUILDING_CACHE_BUILDER_UNIT_TESTS

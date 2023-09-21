@@ -101,16 +101,24 @@ struct ObjCOptimizer
     // The Chunk in a SubCache which will contain the HeaderInfoROWarray
     const ObjCHeaderInfoReadWriteChunk*     headerInfoReadWriteChunk = nullptr;
 
+    // How much space we need for the objc ImageInfo array
+    uint64_t                                imageInfoSize = 0;
+
+    // The Chunk in a SubCache which will contain the objc image info array
+    const ObjCImageInfoChunk*               imageInfoChunk = nullptr;
+
     struct header_info_ro_32_t
     {
         int32_t mhdr_offset;     // offset to mach_header or mach_header_64
         int32_t info_offset;     // offset to objc_image_info *
+        int32_t metadata_offset; // offset to Loader*
     };
 
     struct header_info_ro_64_t
     {
         int64_t mhdr_offset;     // offset to mach_header or mach_header_64
         int64_t info_offset;     // offset to objc_image_info *
+        int64_t metadata_offset; // offset to Loader*
     };
 
     struct header_info_ro_list_t
@@ -288,6 +296,48 @@ struct ObjCProtocolOptimizer
 
     // Map of all protocols in all dylibs.  Can contain duplicates with the same name
     objc::protocol_map                      protocols;
+};
+
+struct ObjCCategoryOptimizer
+{
+    
+    struct Category
+    {
+        Category(std::string_view name)
+            : name(name) { }
+        Category() = delete;
+        ~Category() = default;
+        Category(const Category&) = delete;
+        Category& operator=(const Category&) = delete;
+        Category(Category&&) = default;
+        Category& operator=(Category&&) = default;
+
+        std::string_view         name;
+        std::optional<uint64_t>  dylibObjcIndex;
+        std::optional<VMAddress> vmAddress;
+        std::optional<VMAddress> iMethodListVMAddress;
+        std::optional<VMAddress> cMethodListVMAddress;
+        std::optional<VMAddress> protocolListVMAddress;
+        std::optional<VMAddress> iPropertyListVMAddress;
+        std::optional<VMAddress> cPropertyListVMAddress;
+        std::optional<VMAddress> classVMAddress;
+        std::optional<uint64_t>  classDylibIndex;
+    };
+    // How much space we need for the category data
+    uint64_t                                categoriesTotalByteSize = 0;
+
+    // The Chunk in a SubCache which will contain the category data
+    ObjCPreAttachedCategoriesChunk*         categoriesChunk = nullptr;
+
+    // Holds all the categories to pre-attach.
+    std::vector<Category>                   categories;
+
+    // Holds the objc index of libraries that have pre-attached categories
+    std::set<uint16_t>                      preAttachedDylibs;
+
+    // Holds the objc index of libraries that have opcode fixups
+    std::set<uint16_t>                      excludedDylibs;
+
 };
 
 struct SwiftProtocolConformanceOptimizer

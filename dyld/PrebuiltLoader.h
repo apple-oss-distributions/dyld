@@ -24,9 +24,6 @@
 #ifndef PreBuiltLoader_h
 #define PreBuiltLoader_h
 
-#include <unistd.h>
-#include <stdio.h>
-
 #include "Loader.h"
 #include "JustInTimeLoader.h"
 #include "CachePatching.h"
@@ -65,7 +62,7 @@ struct ObjCBinaryInfo;
 struct PrebuiltLoaderSet;
 class ProcessConfig;
 class ObjCSelectorOpt;
-class ObjCClassOpt;
+class ObjCDataStructOpt;
 struct PrebuiltObjC;
 struct PrebuiltSwift;
 
@@ -161,6 +158,8 @@ public:
     uint32_t            overrideBindTargetRefsOffset;
     uint32_t            overrideBindTargetRefsCount;
 
+    SectionLocations    sectionLocations;
+
     // followed by:
     //  path chars
     //  dep kind array
@@ -178,17 +177,20 @@ public:
     uint32_t                    flags() const;
     bool                        contains(RuntimeState& state, const void* addr, const void** segAddr, uint64_t* segSize, uint8_t* segPerms) const;
     bool                        matchesPath(const char* path) const;
-    FileID                      fileID(const FileManager& fileManager) const;
+    FileID                      fileID(const RuntimeState& state) const;
     uint32_t                    dependentCount() const;
     Loader*                     dependent(const RuntimeState& state, uint32_t depIndex, DependentKind* kind=nullptr) const;
     bool                        getExportsTrie(uint64_t& runtimeOffset, uint32_t& size) const;
     bool                        hiddenFromFlat(bool forceGlobal) const;
     bool                        representsCachedDylibIndex(uint16_t dylibIndex) const;
     void                        loadDependents(Diagnostics& diag, RuntimeState& state, const LoadOptions& options);
+#if SUPPORT_IMAGE_UNLOADING
     void                        unmap(RuntimeState& state, bool force=false) const;
+#endif
     void                        applyFixups(Diagnostics&, RuntimeState& state, DyldCacheDataConstLazyScopedWriter&, bool allowLazyBinds) const;
     bool                        overridesDylibInCache(const DylibPatch*& patchTable, uint16_t& cacheDylibOverriddenIndex) const;
     bool                        dyldDoesObjCFixups() const;
+    const SectionLocations*     getSectionLocations() const;
     void                        withLayout(Diagnostics &diag, RuntimeState& state, void (^callback)(const mach_o::Layout &layout)) const;
     // these are private "virtual" methods
     bool                        hasBeenFixedUp(RuntimeState&) const;
@@ -206,10 +208,12 @@ public:
     void                        withCDHash(void (^callback)(const uint8_t cdHash[20])) const;
 #endif
 
+#if SUPPORT_CREATING_PREBUILTLOADERS || BUILDING_UNIT_TESTS || BUILDING_CACHE_BUILDER_UNIT_TESTS
     // creating PrebuiltLoaders
     static void                 serialize(Diagnostics& diag, RuntimeState& state, const JustInTimeLoader& jitLoader,
                                           LoaderRef buildRef, CacheWeakDefOverride patcher, const PrebuiltObjC& prebuiltObjC,
                                           const PrebuiltSwift& prebuiltSwift, BumpAllocator& allocator);
+#endif // SUPPORT_CREATING_PREBUILTLOADERS || BUILDING_UNIT_TESTS || BUILDING_CACHE_BUILDER_UNIT_TESTS
 
     static PrebuiltLoader*      makeCachedDylib(PrebuiltLoaderSet* dyldCacheLoaders, const MachOLoaded* ml, const char* path, size_t& size);
 
@@ -257,9 +261,9 @@ struct PrebuiltLoaderSet
     const PrebuiltLoader*   atIndex(uint16_t) const;
     bool                    findIndex(const char* path, uint16_t& index) const;
     bool                    hasCacheUUID(uint8_t uuid[20]) const;
-    const ObjCSelectorOpt*  objcSelectorOpt() const;
-    const ObjCClassOpt*     objcClassOpt() const;
-    const ObjCClassOpt*     objcProtocolOpt() const;
+    const ObjCSelectorOpt*    objcSelectorOpt() const;
+    const ObjCDataStructOpt*  objcClassOpt() const;
+    const ObjCDataStructOpt*  objcProtocolOpt() const;
     const uint64_t*           swiftTypeProtocolTable() const;
     const uint64_t*           swiftMetadataProtocolTable() const;
     const uint64_t*           swiftForeignTypeProtocolTable() const;

@@ -838,9 +838,6 @@ main(int argc, char *argv[])
             ktrace_exclude_process(s, "csh");
             ktrace_exclude_process(s, "sh");
             ktrace_exclude_process(s, "zsh");
-#if TARGET_OS_EMBEDDED
-            ktrace_exclude_process(s, "dropbear");
-#endif /* TARGET_OS_EMBEDDED */
         }
     }
 

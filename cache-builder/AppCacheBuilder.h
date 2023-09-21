@@ -175,6 +175,8 @@ private:
     bool                                fixupsArePerKext() const;
     void                                forEachRegion(void (^callback)(const Region& region)) const;
 
+    bool                                hasSancovGateSection() const;
+
     Options                             appCacheOptions;
     const dyld3::MachOAppCache*         existingKernelCollection = nullptr;
     const dyld3::MachOAppCache*         pageableKernelCollection = nullptr;
@@ -193,6 +195,7 @@ private:
     Region                              branchStubsRegion;
     Region                              textBootExecRegion;
     Region                              dataConstRegion;
+    Region                              dataSptmRegion;
     Region                              branchGOTsRegion;
     Region                              readWriteRegion;
     Region                              hibernateRegion;

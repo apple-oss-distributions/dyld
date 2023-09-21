@@ -23,10 +23,17 @@
 #ifndef _DYLD_PROCESS_INFO_
 #define _DYLD_PROCESS_INFO_
 
+#include <TargetConditionals.h>
+#if !TARGET_OS_EXCLAVEKIT
+  #include <dispatch/dispatch.h>
+  #include <mach/mach.h>
+  #include <stdint.h>
+  #include <unistd.h>
+#endif
 #include <stdbool.h>
-#include <unistd.h>
-#include <mach/mach.h>
-#include <dispatch/dispatch.h>
+
+
+
 #include <uuid/uuid.h>
 
 //FIXME we should include dyld_priv.h, but we need to do this to workaround a header search path bug in tapi
@@ -89,6 +96,7 @@ typedef struct dyld_process_state_info dyld_process_state_info;
 
 typedef const struct dyld_process_info_base* dyld_process_info;
 
+#if !TARGET_OS_EXCLAVEKIT
 //
 // Generate a dyld_process_info object for specified task.
 //
@@ -147,6 +155,8 @@ extern void _dyld_process_info_notify_main(dyld_process_info_notify objc, void (
 // stop notifications and invalid dyld_process_info_notify object
 extern void  _dyld_process_info_notify_release(dyld_process_info_notify object);
 extern void  _dyld_process_info_notify_retain(dyld_process_info_notify object);
+
+#endif // !TARGET_OS_EXCLAVEKIT
 
 
 #ifdef __cplusplus

@@ -54,6 +54,32 @@ struct Method
     std::string_view name;
 };
 
+struct Protocol
+{
+    Protocol(std::string_view name);
+    Protocol() = delete;
+    ~Protocol() = default;
+    Protocol(const Method&) = delete;
+    Protocol& operator=(const Protocol&) = delete;
+    Protocol(Protocol&&) = default;
+    Protocol& operator=(Protocol&&) = default;
+
+    std::string_view name;
+};
+
+struct Property
+{
+    Property(std::string_view name);
+    Property() = delete;
+    ~Property() = default;
+    Property(const Method&) = delete;
+    Property& operator=(const Property&) = delete;
+    Property(Property&&) = default;
+    Property& operator=(Property&&) = default;
+
+    std::string_view name;
+};
+
 struct Class
 {
     Class(std::string_view name, bool isMetaClass, bool isRootClass);
@@ -83,11 +109,14 @@ struct Category
     Category(Category&&) = default;
     Category& operator=(Category&&) = default;
 
-    std::string_view    name;
-    std::vector<Method> instanceMethods;
-    std::vector<Method> classMethods;
-    const Class*        cls         = nullptr;
-    const Dylib*        classDylib  = nullptr;
+    std::string_view        name;
+    std::vector<Method>     instanceMethods;
+    std::vector<Method>     classMethods;
+    std::vector<Protocol>   protocols;
+    std::vector<Property>   instanceProperties;
+    std::vector<Property>   classProperties;
+    const Class*            cls         = nullptr;
+    const Dylib*            classDylib  = nullptr;
 };
 
 struct Dylib

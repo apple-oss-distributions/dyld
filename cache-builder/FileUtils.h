@@ -33,7 +33,11 @@
 #include <vector>
 #include <unordered_map>
 #include <unordered_set>
-#include <dispatch/dispatch.h>
+#include <TargetConditionals.h>
+#include "Defines.h"
+#if !TARGET_OS_EXCLAVEKIT
+  #include <dispatch/dispatch.h>
+#endif
 
 #include "DyldSharedCache.h"
 #include "JSON.h"

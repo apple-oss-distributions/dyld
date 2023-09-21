@@ -29,7 +29,6 @@
 #include <sys/cdefs.h>
 
 #include <dirent.h>
-
 #if __has_include(<libamfi.h>) && !TARGET_OS_SIMULATOR && BUILDING_DYLD
     #include <libamfi.h>
 #else
@@ -54,6 +53,8 @@ __END_DECLS
 #include <sys/fsgetpath.h>
 #include <unistd.h>
 #include <System/sys/reason.h>
+
+struct dyld_all_image_infos;
 
 #define DYLD_SYSCALL_VTABLE_ENTRY(x) __typeof__ (x) *x
 
@@ -101,8 +102,8 @@ namespace dyld {
 		DYLD_SYSCALL_VTABLE_ENTRY(OSMemoryBarrier);
 #pragma clang diagnostic pop
 #endif
-		void*			(*getProcessInfo)(void); // returns dyld_all_image_infos*;
-		int*			(*errnoAddress)(void);
+        struct dyld_all_image_infos* (*getProcessInfo)(void);
+		int*			    (*errnoAddress)(void);
 		DYLD_SYSCALL_VTABLE_ENTRY(mach_absolute_time);
 		// Added in version 2
 		DYLD_SYSCALL_VTABLE_ENTRY(thread_switch);
@@ -138,8 +139,8 @@ namespace dyld {
 		// Add in version 10
 		DYLD_SYSCALL_VTABLE_ENTRY(amfi_check_dyld_policy_self);
 		// Add in version 11
-		void			(*notifyMonitoringDyldMain)(void);
-		void			(*notifyMonitoringDyld)(bool unloading, unsigned imageCount, const struct mach_header* loadAddresses[], const char* imagePaths[]);
+		void			(*notifyMonitorOfMainCalled)(void);
+		void			(*notifyMonitorOfImageListChanges)(bool unloading, unsigned imageCount, const struct mach_header* loadAddresses[], const char* imagePaths[]);
 		// Add in version 12
 		DYLD_SYSCALL_VTABLE_ENTRY(mach_msg_destroy);
 		DYLD_SYSCALL_VTABLE_ENTRY(mach_port_construct);
@@ -156,7 +157,7 @@ namespace dyld {
         // Add in version 17
         DYLD_SYSCALL_VTABLE_ENTRY(getattrlist);
         DYLD_SYSCALL_VTABLE_ENTRY(getfsstat);
-        void            (*notifyMonitoringDyldBeforeInitializers)(void);
+        void            (*notifyMonitorOfDyldBeforeInitializers)(void);
 	};
 
 #if __cplusplus
@@ -166,6 +167,4 @@ namespace dyld {
     extern struct SyscallHelpers* gSyscallHelpers;
 #endif
 
-
-
-#endif
+#endif // __DYLD_SYSCALL_HELPERS__

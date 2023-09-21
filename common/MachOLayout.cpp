@@ -25,9 +25,13 @@
 #include "MachOLayout.h"
 #include "MachOFile.h"
 
+#include <TargetConditionals.h>
+#include "Defines.h"
+#if SUPPORT_CLASSIC_RELOCS
+  #include <mach-o/reloc.h>
+  #include <mach-o/x86_64/reloc.h>
+#endif
 #include <mach-o/nlist.h>
-#include <mach-o/reloc.h>
-#include <mach-o/x86_64/reloc.h>
 
 // FIXME: We should get this from cctools
 #define DYLD_CACHE_ADJ_V2_FORMAT 0x7F
@@ -148,6 +152,7 @@ bool Layout::isValidLinkeditLayout(Diagnostics &diag, const char *path) const
             *bp++ = {"chained fixups",          ptrSize, blob.fileOffset,   blob.bufferSize };
     }
 
+#if SUPPORT_CLASSIC_RELOCS
     if ( const Linkedit& blob = this->linkedit.localRelocs; blob.hasValue() ) {
         if ( blob.entryCount != 0 ) {
             uint32_t bufferSize = (uint32_t)(blob.entryCount * sizeof(relocation_info));
@@ -160,6 +165,7 @@ bool Layout::isValidLinkeditLayout(Diagnostics &diag, const char *path) const
             *bp++ = {"external relocations",    ptrSize, blob.fileOffset,   bufferSize };
         }
     }
+#endif
     if ( const Linkedit& blob = this->linkedit.indirectSymbolTable; blob.hasValue() ) {
         if ( blob.entryCount != 0 ) {
             uint32_t bufferSize = (uint32_t)(blob.entryCount * sizeof(uint32_t));
@@ -461,8 +467,10 @@ void Fixups::forEachBindTarget(Diagnostics& diag, bool allowLazyBinds, intptr_t 
         this->forEachBindTarget_ChainedFixups(diag, handler);
     else if ( this->layout.mf->hasOpcodeFixups() )
         this->forEachBindTarget_Opcodes(diag, allowLazyBinds, handler, overrideHandler);
+#if SUPPORT_CLASSIC_RELOCS
     else
         this->forEachBindTarget_Relocations(diag, slide, handler);
+#endif
 }
 
 void Fixups::forEachBindTarget_ChainedFixups(Diagnostics& diag, void (^handler)(const BindTargetInfo& info, bool& stop)) const
@@ -1366,6 +1374,7 @@ bool Fixups::forEachRebaseLocation_Relocations(Diagnostics& diag,
     });
 }
 
+#if SUPPORT_CLASSIC_RELOCS
 // relocs are normally sorted, we don't want to use qsort because it may switch to mergesort which uses malloc
 static void sortRelocations(dyld3::Array<relocation_info>& relocs)
 {
@@ -1593,6 +1602,7 @@ bool Fixups::forEachBind_Relocations(Diagnostics& diag, bool supportPrivateExter
 
     return false;
 }
+#endif // SUPPORT_CLASSIC_RELOCS
 
 void Fixups::forEachIndirectPointer(Diagnostics& diag, bool supportPrivateExternsWorkaround, intptr_t slide,
                                     void (^handler)(uint64_t pointerAddress, bool bind, int bindLibOrdinal, const char* bindSymbolName,

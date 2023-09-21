@@ -1,4 +1,4 @@
-module MachO_Private.dyld [system] [extern_c] {
+module MachO_Private.dyld [system] {
   header "dyld_priv.h"
   export *
 

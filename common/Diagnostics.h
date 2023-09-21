@@ -27,12 +27,12 @@
 
 #include <stdint.h>
 #include <stdarg.h>
+#include <TargetConditionals.h>
 
 #if BUILDING_CACHE_BUILDER || BUILDING_UNIT_TESTS || BUILDING_CACHE_BUILDER_UNIT_TESTS
-#include <set>
-#include <string>
-#include <vector>
-#include <dispatch/dispatch.h>
+  #include <set>
+  #include <string>
+  #include <vector>
 #endif
 
 #include "Defines.h"
@@ -73,8 +73,11 @@ public:
 #endif
 
 private:
-
+#if TARGET_OS_EXCLAVEKIT
+    char                     _strBuf[1024];
+#else
     void*                    _buffer = nullptr;
+#endif
 #if BUILDING_CACHE_BUILDER || BUILDING_UNIT_TESTS || BUILDING_CACHE_BUILDER_UNIT_TESTS
     std::string              _prefix;
     std::set<std::string>    _warnings;

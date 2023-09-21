@@ -30,10 +30,6 @@
 #ifndef _DLFCN_H_
 #define _DLFCN_H_
 
-#ifdef __cplusplus
-extern "C" {
-#endif
-
 #include <sys/cdefs.h>
 
 #if !defined(_POSIX_C_SOURCE) || defined(_DARWIN_C_SOURCE)
@@ -44,6 +40,10 @@ extern "C" {
  #define __DYLDDL_DRIVERKIT_UNAVAILABLE __API_UNAVAILABLE(driverkit)
 #else
  #define __DYLDDL_DRIVERKIT_UNAVAILABLE
+#endif
+
+#ifdef __cplusplus
+extern "C" {
 #endif
 
 /*
@@ -57,9 +57,18 @@ typedef struct dl_info {
 } Dl_info;
 
 extern int dladdr(const void *, Dl_info *);
+
+#ifdef __cplusplus
+}
+#endif
+
 #else
  #define __DYLDDL_DRIVERKIT_UNAVAILABLE
 #endif /* not POSIX */
+
+#ifdef __cplusplus
+extern "C" {
+#endif
 
 extern int dlclose(void * __handle) __DYLDDL_DRIVERKIT_UNAVAILABLE;
 extern char * dlerror(void) __DYLDDL_DRIVERKIT_UNAVAILABLE;

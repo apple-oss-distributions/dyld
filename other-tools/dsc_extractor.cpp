@@ -22,6 +22,10 @@
  * @APPLE_LICENSE_HEADER_END@
  */
 
+#include <TargetConditionals.h>
+
+#if !TARGET_OS_EXCLAVEKIT
+
 #include <stdlib.h>
 #include <stdio.h>
 #include <unistd.h>
@@ -1109,6 +1113,6 @@ int main(int argc, const char* argv[])
 
 #endif
 
-
+#endif // !TARGET_OS_EXCLAVEKIT
 
 

@@ -216,7 +216,7 @@ struct VIS_HIDDEN MachOFile : mach_header
     static int64_t          read_sleb128(Diagnostics& diag, const uint8_t*& p, const uint8_t* end);
     static bool             isSimulatorPlatform(Platform platform, Platform* basePlatform=nullptr);
     static bool             isSharedCacheEligiblePath(const char* path);
-    static const MachOFile* compatibleSlice(Diagnostics& diag, const void* content, size_t size, const char* path, Platform, bool isOSBinary, const GradedArchs&);
+    static const MachOFile* compatibleSlice(Diagnostics& diag, const void* content, size_t size, const char* path, Platform, bool isOSBinary, const GradedArchs&, bool internalInstall=false);
     static const MachOFile* isMachO(const void* content);
 
     bool            hasMachOMagic() const;
@@ -240,7 +240,7 @@ struct VIS_HIDDEN MachOFile : mach_header
     uint32_t        pointerSize() const;
     bool            uses16KPages() const;
     bool            builtForPlatform(Platform, bool onlyOnePlatform=false) const;
-    bool            loadableIntoProcess(Platform processPlatform, const char* path) const;
+    bool            loadableIntoProcess(Platform processPlatform, const char* path, bool internalInstall=false) const;
     bool            isZippered() const;
     bool            inDyldCache() const;
     bool            getUuid(uuid_t uuid) const;

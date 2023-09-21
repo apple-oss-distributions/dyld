@@ -336,9 +336,9 @@ private:
                                                             + alignof(EphemeralAllocator) + sizeof(EphemeralAllocator)  \
                                                             + alignof(MemoryManager)      + sizeof(MemoryManager))
 
-#define STACK_ALLOCATOR(_name, _count)                              \
-    void*  __##_name##_allocator_storage = alloca(_count);          \
-    EphemeralAllocator _name(__##_name##_allocator_storage, _count);
+#define STACK_ALLOCATOR(_name, _count)                      \
+    void*  __##_name##_storage = alloca(_count);            \
+    EphemeralAllocator _name(__##_name##_storage, _count);
 
 #define STACK_ALLOC_VECTOR(_type, _name, _count)                                        \
     STACK_ALLOCATOR(__##_name##_allocator, STACK_ALLOC_VECTOR_BYTE_SIZE(_type,_count))  \

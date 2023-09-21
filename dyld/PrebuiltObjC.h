@@ -24,6 +24,8 @@
 #ifndef PreBuiltObjC_h
 #define PreBuiltObjC_h
 
+#if SUPPORT_CREATING_PREBUILTLOADERS || BUILDING_UNIT_TESTS || BUILDING_CACHE_BUILDER_UNIT_TESTS
+
 #include "Array.h"
 #include "Map.h"
 #include "DyldSharedCache.h"
@@ -217,10 +219,11 @@ public:
     void forEachString(void (^callback)(const PrebuiltLoader::BindTargetRef& target)) const;
 };
 
-class VIS_HIDDEN ObjCClassOpt : public ObjCStringTable {
-    // This table starts off with the string hash map.  If we find the class name string at a
-    // given index, then we can find the associated class information at the same index in the
-    // classOffsets table.
+class VIS_HIDDEN ObjCDataStructOpt : public ObjCStringTable {
+    // This table starts off with the string hash map.
+    // If we find the class or protocol name string at a given index,
+    // then we can find the associated class information at the same index
+    // in the classOffsets table.
 
     // If classOffsets[i] points to a regular bind target, then that is an offset in to an image
     // for the class in question.
@@ -228,22 +231,22 @@ class VIS_HIDDEN ObjCClassOpt : public ObjCStringTable {
     // which is a list of implementations for that class.
 private:
     // ...ObjCStringTable fields...
-    // PrebuiltLoader::BindTargetRef classTargets[capacity]; /* offsets from &capacity to class_t and header_info */
+    // PrebuiltLoader::BindTargetRef dataStructTargets[capacity]; /* offsets from &capacity to class_t and header_info */
     // uint64_t duplicateCount;
     // PrebuiltLoader::BindTargetRef duplicateTargets[duplicatedClasses];
 
-    PrebuiltLoader::BindTargetRef* classTargetsStart() { return (PrebuiltLoader::BindTargetRef*)&targetsOffset()[capacity]; }
-    const PrebuiltLoader::BindTargetRef* classTargetsStart() const { return (const PrebuiltLoader::BindTargetRef*)&targetsOffset()[capacity]; }
+    PrebuiltLoader::BindTargetRef* dataStructTargetsStart() { return (PrebuiltLoader::BindTargetRef*)&targetsOffset()[capacity]; }
+    const PrebuiltLoader::BindTargetRef* dataStructTargetsStart() const { return (const PrebuiltLoader::BindTargetRef*)&targetsOffset()[capacity]; }
 
-    dyld3::Array<PrebuiltLoader::BindTargetRef> classTargets() {
-        return dyld3::Array<PrebuiltLoader::BindTargetRef>((PrebuiltLoader::BindTargetRef*)classTargetsStart(), capacity, capacity);
+    dyld3::Array<PrebuiltLoader::BindTargetRef> dataStructTargets() {
+        return dyld3::Array<PrebuiltLoader::BindTargetRef>((PrebuiltLoader::BindTargetRef*)dataStructTargetsStart(), capacity, capacity);
     }
-    const dyld3::Array<PrebuiltLoader::BindTargetRef> classTargets() const {
-        return dyld3::Array<PrebuiltLoader::BindTargetRef>((PrebuiltLoader::BindTargetRef*)classTargetsStart(), capacity, capacity);
+    const dyld3::Array<PrebuiltLoader::BindTargetRef> dataStructTargets() const {
+        return dyld3::Array<PrebuiltLoader::BindTargetRef>((PrebuiltLoader::BindTargetRef*)dataStructTargetsStart(), capacity, capacity);
     }
 
-    uint64_t& duplicateCount() { return *(uint64_t*)&classTargetsStart()[capacity]; }
-    const uint64_t& duplicateCount() const { return *(const uint64_t*)&classTargetsStart()[capacity]; }
+    uint64_t& duplicateCount() { return *(uint64_t*)&dataStructTargetsStart()[capacity]; }
+    const uint64_t& duplicateCount() const { return *(const uint64_t*)&dataStructTargetsStart()[capacity]; }
 
     PrebuiltLoader::BindTargetRef* duplicateOffsetsStart() { return (PrebuiltLoader::BindTargetRef*)(&duplicateCount()+1); }
     const PrebuiltLoader::BindTargetRef* duplicateOffsetsStart() const { return (const PrebuiltLoader::BindTargetRef*)(&duplicateCount()+1); }
@@ -262,17 +265,17 @@ public:
     static size_t size(const objc::PerfectHash& phash, uint32_t numClassesWithDuplicates,
                        uint32_t totalDuplicates);
 
-    bool forEachClass(const char* className, RuntimeState& state,
-                      void (^callback)(void* classPtr, bool isLoaded, bool* stop)) const;
+    bool forEachDataStruct(const char* dataStructName, RuntimeState& state,
+                      void (^callback)(void* dataStructPtr, bool isLoaded, bool* stop)) const;
 
-    void forEachClass(RuntimeState& state,
-                      void (^callback)(const PrebuiltLoader::BindTargetRef& nameTarget,
-                                       const Array<PrebuiltLoader::BindTargetRef>& implTargets)) const;
+    void forEachDataStruct(RuntimeState& state,
+                           void (^callback)(const PrebuiltLoader::BindTargetRef& nameTarget,
+                                            const Array<PrebuiltLoader::BindTargetRef>& implTargets)) const;
 
     bool hasDuplicates() const { return duplicateCount() != 0; }
 
     void write(const objc::PerfectHash& phash, const Array<StringToTargetMapNodeT>& strings,
-               const dyld3::CStringMultiMapTo<PrebuiltLoader::BindTarget>& classes,
+               const dyld3::CStringMultiMapTo<PrebuiltLoader::BindTarget>& dataStructs,
                uint32_t numClassesWithDuplicates, uint32_t totalDuplicates);
 };
 
@@ -287,6 +290,8 @@ struct PrebuiltObjC
     typedef dyld3::CStringMapTo<Loader::BindTarget>                               DuplicateClassesMapTy;
     typedef dyld3::CStringMultiMapTo<PrebuiltLoader::BindTarget>                  ClassMapTy;
     typedef dyld3::CStringMultiMapTo<PrebuiltLoader::BindTarget>                  ProtocolMapTy;
+
+    enum ObjCStructKind { classes, protocols };
 
     struct ObjCOptimizerImage {
 
@@ -785,7 +790,7 @@ struct objc_headeropt_rw_t {
 };
 
 };
-
+#endif // SUPPORT_CREATING_PREBUILTLOADERS || BUILDING_UNIT_TESTS || BUILDING_CACHE_BUILDER_UNIT_TESTS
 
 #endif // PreBuiltObjC_h
 

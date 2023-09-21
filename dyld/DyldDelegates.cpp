@@ -22,13 +22,14 @@
  */
 
 #include <TargetConditionals.h>
-#include <_simple.h>
+//#include <_simple.h>
 #include <stdint.h>
 #include <string.h>
-#include <sys/attr.h>
-#include <sys/fsgetpath.h>
+
 #include <mach-o/dyld_priv.h>
-#if BUILDING_DYLD || BUILDING_CLOSURE_UTIL || BUILDING_SHARED_CACHE_UTIL
+#if (BUILDING_DYLD || BUILDING_CLOSURE_UTIL || BUILDING_SHARED_CACHE_UTIL || BUILDING_CACHE_BUILDER) && !TARGET_OS_EXCLAVEKIT
+    #include <sys/attr.h>
+    #include <sys/fsgetpath.h>
     #include <sys/socket.h>
     #include <sys/syslog.h>
     #include <sys/uio.h>
@@ -43,6 +44,8 @@
     #include <sys/xattr.h>
     #include <sys/fcntl.h>
     #include <sys/sysctl.h>
+    #include <sys/param.h>
+    #include <sys/mount.h>
     #include <dirent.h>
     #include <System/sys/csr.h>
     #include <System/sys/reason.h>
@@ -72,7 +75,8 @@
 // should be in mach/shared_region.h
 extern "C" int __shared_region_check_np(uint64_t* startaddress);
 
-#if !TARGET_OS_SIMULATOR && BUILDING_DYLD
+#if !TARGET_OS_EXCLAVEKIT
+#if BUILDING_DYLD && !TARGET_OS_SIMULATOR
     #include <libamfi.h>
 #else
 enum
@@ -92,18 +96,26 @@ enum amfi_dyld_policy_output_flag_set
 };
 extern "C" int amfi_check_dyld_policy_self(uint64_t input_flags, uint64_t* output_flags);
     #include "dyldSyscallInterface.h"
-#endif
+#endif // BUILDING_DYLD && !TARGET_OS_SIMULATOR
+#endif // !TARGET_OS_EXCLAVEKIT
 
+#include "Defines.h"
 #include "MachOLoaded.h"
 #include "MachOAnalyzer.h"
 #include "DyldSharedCache.h"
 #include "SharedCacheRuntime.h"
 #include "StringUtils.h"
-#include "FileUtils.h"
 #include "DyldDelegates.h"
-#include "DebuggerSupport.h"
 #include "Tracing.h"
 #include "Utils.h"
+#include "RosettaSupport.h"
+
+#if !TARGET_OS_EXCLAVEKIT
+  #include "FileUtils.h"
+#endif
+#if HAS_EXTERNAL_STATE
+  #include "ExternallyViewableState.h"
+#endif
 
 // FIXME: can remove when dyld does not need to build with older SDKs
 #ifndef SYS_map_with_linking_np
@@ -116,6 +128,8 @@ using dyld3::MachOAnalyzer;
 using dyld3::FatFile;
 
 namespace dyld4 {
+
+#if !TARGET_OS_EXCLAVEKIT
 
 uint64_t SyscallDelegate::amfiFlags(bool restricted, bool fairPlayEncryted) const
 {
@@ -158,13 +172,17 @@ bool SyscallDelegate::internalInstall() const
 bool SyscallDelegate::isTranslated() const
 {
 #if BUILDING_DYLD && SUPPORT_ROSETTA
-    return ((*(uint64_t*)_COMM_PAGE_CPU_CAPABILITIES64) & kIsTranslated);
+    bool is_translated = false;
+    if (rosetta_dyld_is_translated(&is_translated) == KERN_SUCCESS) {
+        return is_translated;
+    }
+    return false;
 #else
     return false;
 #endif
 }
 
-bool SyscallDelegate::getCWD(char path[MAXPATHLEN]) const
+bool SyscallDelegate::getCWD(char path[PATH_MAX]) const
 {
 #if BUILDING_DYLD
     // note: don't use getcwd() because it calls malloc()
@@ -178,7 +196,7 @@ bool SyscallDelegate::getCWD(char path[MAXPATHLEN]) const
 #else
     if ( _cwd == nullptr )
         return false;
-    ::strlcpy(path, _cwd, MAXPATHLEN);
+    ::strlcpy(path, _cwd, PATH_MAX);
     return true;
 #endif
 }
@@ -298,15 +316,9 @@ void SyscallDelegate::getDyldCache(const dyld3::SharedCacheOptions& opts, dyld3:
     localOpts.useHaswell                = onHaswell();
     loadDyldCache(localOpts, &loadInfo);
     if ( loadInfo.loadAddress != nullptr ) {
-        gProcessInfo->processDetachedFromSharedRegion = opts.forcePrivate;
-        gProcessInfo->sharedCacheFSID                 = loadInfo.FSID;
-        gProcessInfo->sharedCacheFSObjID              = loadInfo.FSObjID;
-        gProcessInfo->sharedCacheSlide                = loadInfo.slide;
-        gProcessInfo->sharedCacheBaseAddress          = (unsigned long)loadInfo.loadAddress;
-        loadInfo.loadAddress->getUUID(gProcessInfo->sharedCacheUUID);
-
-        dyld3::kdebug_trace_dyld_cache(loadInfo.FSObjID, loadInfo.FSID, gProcessInfo->sharedCacheBaseAddress,
-                                       gProcessInfo->sharedCacheUUID);
+        uuid_t cacheUuid;
+        loadInfo.loadAddress->getUUID(cacheUuid);
+        dyld3::kdebug_trace_dyld_cache(loadInfo.FSObjID, loadInfo.FSID, (unsigned long)loadInfo.loadAddress, cacheUuid);
     }
 #elif BUILDING_CACHE_BUILDER || BUILDING_CACHE_BUILDER_UNIT_TESTS
     // No caches here
@@ -841,7 +853,7 @@ bool SyscallDelegate::getpath(int fd, char realerPath[]) const
     return success;
 #elif BUILDING_CLOSURE_UTIL || BUILDING_SHARED_CACHE_UTIL
     if ( _overlayPath != nullptr ) {
-        char tempPath[MAXPATHLEN];
+        char tempPath[PATH_MAX];
         bool success = (fcntl(fd, F_GETPATH, tempPath) == 0);
         if ( success && (strncmp(tempPath, _overlayPath, strlen(_overlayPath)) == 0) ) {
             // Overlay was used, remove it
@@ -851,7 +863,7 @@ bool SyscallDelegate::getpath(int fd, char realerPath[]) const
         // Fall though to other cases as this was only an overlay
     }
     if ( _rootPath != nullptr ) {
-        char tempPath[MAXPATHLEN];
+        char tempPath[PATH_MAX];
         bool success = (fcntl(fd, F_GETPATH, tempPath) == 0);
         if ( success ) {
             // Assuming was used, remove it
@@ -1211,6 +1223,7 @@ const {
 #endif
 }
 
+#endif // !TARGET_OS_EXCLAVEKIT
 
 
 } // namespace

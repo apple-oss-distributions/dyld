@@ -104,6 +104,7 @@ struct Logger
 
     bool printTimers    = false;
     bool printStats     = false;
+    bool printDebug     = false;
 
 private:
     std::string logPrefix;

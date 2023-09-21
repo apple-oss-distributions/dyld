@@ -22,23 +22,30 @@
  */
 
 
+#include <TargetConditionals.h>
+#include "Defines.h"
+#if !TARGET_OS_EXCLAVEKIT
 #include <sys/types.h>
 #include <sys/stat.h>
 #include <sys/errno.h>
 #include <sys/mman.h>
 #include <mach/mach.h>
 #include <fcntl.h>
+#include <unistd.h>
+#endif
+
 #include <stdlib.h>
 #include <stdio.h>
-#include <unistd.h>
 #include <assert.h>
-#include <mach-o/reloc.h>
 #include <mach-o/nlist.h>
+
+#if !TARGET_OS_EXCLAVEKIT
 extern "C" {
   #include <corecrypto/ccdigest.h>
   #include <corecrypto/ccsha1.h>
   #include <corecrypto/ccsha2.h>
 }
+#endif
 
 #include "MachOFile.h"
 #include "MachOLoaded.h"

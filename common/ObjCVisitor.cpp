@@ -22,6 +22,10 @@
  * @APPLE_LICENSE_HEADER_END@
  */
 
+#include <TargetConditionals.h>
+
+#if !TARGET_OS_EXCLAVEKIT
+
 #include "ObjCVisitor.h"
 
 #if SUPPORT_VM_LAYOUT
@@ -33,7 +37,7 @@
 #endif
 
 using namespace objc_visitor;
-using metadata_visitor::ResolvedValue;
+using ResolvedValue = metadata_visitor::ResolvedValue;
 
 #if !SUPPORT_VM_LAYOUT
 using metadata_visitor::Segment;
@@ -248,6 +252,11 @@ ClassData Class::getClassData(const Visitor& objcVisitor) const
     return ClassData(targetValue);
 }
 
+VMAddress Class::getClassDataVMAddr(const Visitor& objcVisitor) const
+{
+    return getClassData(objcVisitor).getVMAddress();
+}
+
 bool Class::isRootClass(const Visitor& objcVisitor) const
 {
     ClassData data = getClassData(objcVisitor);
@@ -278,6 +287,17 @@ MethodList Class::getBaseMethods(const Visitor& objcVisitor) const
     return objcVisitor.resolveOptionalRebase(field);
 }
 
+#if BUILDING_CACHE_BUILDER || BUILDING_CACHE_BUILDER_UNIT_TESTS
+ResolvedValue Class::setBaseMethodsVMAddr(const Visitor& objcVisitor, VMAddress vmAddr,
+                                 const dyld3::MachOFile::PointerMetaData& PMD)
+{
+    ClassData classData = getClassData(objcVisitor);
+    ResolvedValue field = classData.getField(objcVisitor, ClassData::Field::baseMethods);;
+    objcVisitor.setTargetVMAddress(field, CacheVMAddress(vmAddr.rawValue()), PMD);
+    return field;
+}
+#endif
+
 ProtocolList Class::getBaseProtocols(const Visitor& objcVisitor) const
 {
     ClassData classData = getClassData(objcVisitor);
@@ -285,12 +305,39 @@ ProtocolList Class::getBaseProtocols(const Visitor& objcVisitor) const
     return objcVisitor.resolveOptionalRebase(field);
 }
 
+#if BUILDING_CACHE_BUILDER || BUILDING_CACHE_BUILDER_UNIT_TESTS
+ResolvedValue Class::setBaseProtocolsVMAddr(const Visitor& objcVisitor, VMAddress vmAddr)
+{
+    ClassData classData = getClassData(objcVisitor);
+    ResolvedValue field = classData.getField(objcVisitor, ClassData::Field::baseProtocols);
+    objcVisitor.updateTargetVMAddress(field, CacheVMAddress(vmAddr.rawValue()));
+    return field;
+}
+#endif
+
 IVarList Class::getIVars(const Visitor& objcVisitor) const
 {
     ClassData classData = getClassData(objcVisitor);
     ResolvedValue field = classData.getField(objcVisitor, ClassData::Field::ivars);
     return objcVisitor.resolveOptionalRebase(field);
 }
+
+PropertyList Class::getBaseProperties(const Visitor& objcVisitor) const
+{
+    ClassData classData = getClassData(objcVisitor);
+    ResolvedValue field = classData.getField(objcVisitor, ClassData::Field::baseProperties);
+    return objcVisitor.resolveOptionalRebase(field);
+}
+
+#if BUILDING_CACHE_BUILDER || BUILDING_CACHE_BUILDER_UNIT_TESTS
+ResolvedValue Class::setBasePropertiesVMAddr(const Visitor& objcVisitor, VMAddress vmAddr)
+{
+    ClassData classData = getClassData(objcVisitor);
+    ResolvedValue field = classData.getField(objcVisitor, ClassData::Field::baseProperties);
+    objcVisitor.updateTargetVMAddress(field, CacheVMAddress(vmAddr.rawValue()));
+    return field;
+}
+#endif
 
 uint32_t Class::getInstanceStart(const Visitor& objcVisitor) const
 {
@@ -419,6 +466,8 @@ const void* Category::getFieldPos(const Visitor& objcVisitor, Field field) const
                 return &category32->protocolsVMAddr;
             case Field::instanceProperties:
                 return &category32->instancePropertiesVMAddr;
+            case Field::classProperties:
+                return &category32->classPropertiesVMAddr;
         }
     } else {
         const category64_t* category64 = (const category64_t*)this->categoryPos.value();
@@ -435,6 +484,8 @@ const void* Category::getFieldPos(const Visitor& objcVisitor, Field field) const
                 return &category64->protocolsVMAddr;
             case Field::instanceProperties:
                 return &category64->instancePropertiesVMAddr;
+            case Field::classProperties:
+                return &category64->classPropertiesVMAddr;
         }
     }
 }
@@ -443,6 +494,22 @@ const char* Category::getName(const Visitor& objcVisitor) const
 {
     ResolvedValue field = objcVisitor.getField(this->categoryPos, this->getFieldPos(objcVisitor, Field::name));
     return (const char*)objcVisitor.resolveRebase(field).value();
+}
+
+VMAddress Category::getVMAddress() const
+{
+    return this->categoryPos.vmAddress();
+}
+
+const void* Category::getLocation() const
+{
+    return this->categoryPos.value();
+}
+
+VMAddress Category::getNameVMAddr(const Visitor& objcVisitor) const
+{
+    ResolvedValue field = objcVisitor.getField(this->categoryPos, this->getFieldPos(objcVisitor, Field::name));
+    return objcVisitor.resolveRebase(field).vmAddress();
 }
 
 MethodList Category::getInstanceMethods(const Visitor& objcVisitor) const
@@ -463,20 +530,42 @@ ProtocolList Category::getProtocols(const Visitor& objcVisitor) const
     return objcVisitor.resolveOptionalRebase(field);
 }
 
+PropertyList Category::getInstanceProperties(const Visitor& objcVisitor) const
+{
+    ResolvedValue field = objcVisitor.getField(this->categoryPos, this->getFieldPos(objcVisitor, Field::instanceProperties));
+    return objcVisitor.resolveOptionalRebase(field);
+}
+
+PropertyList Category::getClassProperties(const Visitor& objcVisitor) const
+{
+    ResolvedValue field = objcVisitor.getField(this->categoryPos, this->getFieldPos(objcVisitor, Field::classProperties));
+    return objcVisitor.resolveOptionalRebase(field);
+}
+
 #if BUILDING_CACHE_BUILDER || BUILDING_CACHE_BUILDER_UNIT_TESTS
 void Category::withClass(const Visitor& objcVisitor,
                          void (^handler)(const dyld3::MachOFile::ChainedFixupPointerOnDisk* fixup, uint16_t pointerFormat)) const
 {
-    assert(objcVisitor.pointerSize == 8);
-
     assert(objcVisitor.isOnDiskBinary());
     uint16_t chainedPointerFormat = this->categoryPos.chainedPointerFormat().value();
 
-    const void* fieldPos = &((const category64_t*)this->categoryPos.value())->clsVMAddr;
+    const void* fieldPos = nullptr;
+    if ( objcVisitor.pointerSize == 8 ) {
+        fieldPos = &((const category64_t*)this->categoryPos.value())->clsVMAddr;
+    } else if (objcVisitor.pointerSize == 4 ){
+        fieldPos = &((const category32_t*)this->categoryPos.value())->clsVMAddr;
+    }
+    assert(fieldPos != nullptr);
+
     dyld3::MachOFile::ChainedFixupPointerOnDisk* fieldFixup = (dyld3::MachOFile::ChainedFixupPointerOnDisk*)fieldPos;
     handler(fieldFixup, chainedPointerFormat);
 }
 #endif
+
+uint32_t Category::getSize(bool is64)
+{
+    return is64 ? sizeof(category64_t) : sizeof(category32_t);
+}
 
 //
 // MARK: --- Protocol methods ---
@@ -845,6 +934,18 @@ void MethodList::setIsSorted()
     methodList->setIsSorted();
 }
 
+size_t MethodList::makeEmptyMethodList(void* buffer)
+{
+    assert(buffer != nullptr);
+    method_list_t* methodList = (method_list_t*)buffer;
+    bzero(methodList, sizeof(method_list_t));
+
+    methodList->setIsUniqued();
+    methodList->setIsSorted();
+
+    return sizeof(method_list_t);
+}
+
 void MethodList::setUsesOffsetsFromSelectorBuffer()
 {
     if ( !methodListPos.has_value() )
@@ -858,7 +959,15 @@ void MethodList::setUsesOffsetsFromSelectorBuffer()
     methodList->setUsesOffsetsFromSelectorBuffer();
 }
 
-#if BUILDING_CACHE_BUILDER_UNIT_TESTS
+bool MethodList::isListOfLists() const
+{
+    if ( !methodListPos.has_value() )
+        return false;
+
+    const ResolvedValue& methodListValue = this->methodListPos.value();
+    return methodListValue.vmAddress().rawValue() & 1;
+}
+
 const void* MethodList::getLocation() const
 {
     if ( !this->methodListPos.has_value() )
@@ -868,9 +977,10 @@ const void* MethodList::getLocation() const
 
 std::optional<VMAddress> MethodList::getVMAddress() const
 {
+    if ( !this->methodListPos.has_value() )
+        return { };
     return this->methodListPos->vmAddress();
 }
-#endif
 
 static Method::Kind getKind(const MethodList::method_list_t* methodList)
 {
@@ -988,7 +1098,17 @@ const char* Method::getName(const Visitor& objcVisitor) const
             return (const char*)objcVisitor.resolveRebase(nameSelRefValue).value();
         }
         case Kind::relativeDirect: {
+#if BUILDING_SHARED_CACHE_UTIL
+            const uint8_t* fieldPos = (const uint8_t*)&((const relative_method_t*)this->methodPos.value())->nameOffset;
+            uint32_t nameOffsetInBuffer = *(uint32_t*)fieldPos;
+
+            VMAddress nameVMAddr = objcVisitor.sharedCacheSelectorStringsBaseAddress() + VMOffset((uint64_t)nameOffsetInBuffer);
+            ResolvedValue nameValue = objcVisitor.getValueFor(nameVMAddr);
+            return (const char*)nameValue.value();
+#else
+            // dyld should never walk direct methods as the objc closure optimizations skip cache dylibs
             assert(0);
+#endif
         }
         case Kind::pointer: {
             ResolvedValue nameField = this->getNameField(objcVisitor);
@@ -1248,6 +1368,11 @@ void Method::convertNameToOffset(const Visitor& objcVisitor, uint32_t nameOffset
     }
 }
 
+uint32_t Method::getSize(bool is64)
+{
+    return is64 ? sizeof(method64_t) : sizeof(method32_t);
+}
+
 //
 // MARK: --- IVarList methods ---
 //
@@ -1294,6 +1419,61 @@ std::optional<VMAddress> IVarList::getVMAddress() const
     return this->ivarListPos->vmAddress();
 }
 #endif
+
+//
+// MARK: --- PropertyList methods ---
+//
+uint32_t PropertyList::numProperties() const
+{
+    if ( !this->propertyListPos.has_value() )
+        return 0;
+
+    const ResolvedValue& propertyListValue = this->propertyListPos.value();
+
+    const property_list_t* propertyList = (const property_list_t*)propertyListValue.value();
+    assert(propertyList != nullptr);
+
+    return propertyList->getCount();
+}
+
+Property PropertyList::getProperty(const Visitor& objcVisitor, uint32_t i) const
+{
+    assert(this->propertyListPos.has_value());
+
+    const ResolvedValue& propertyListValue = this->propertyListPos.value();
+
+    const property_list_t* propertyList = (const property_list_t*)propertyListValue.value();
+    assert(propertyList != nullptr);
+
+    const uint8_t* propertyListBase = propertyList->propertyBase();
+    const uint8_t* property = propertyListBase + (i * propertyList->getElementSize());
+
+    ResolvedValue propertyValue = objcVisitor.getField(propertyListValue, property);
+    return Property(propertyValue);
+}
+
+const void* PropertyList::getLocation() const
+{
+    if ( !this->propertyListPos.has_value() )
+        return nullptr;
+    return this->propertyListPos->value();
+}
+
+std::optional<VMAddress> PropertyList::getVMAddress() const
+{
+    if ( !this->propertyListPos.has_value() )
+        return { };
+    return this->propertyListPos->vmAddress();
+}
+
+bool PropertyList::isListOfLists() const
+{
+    if ( !propertyListPos.has_value() )
+        return false;
+
+    const ResolvedValue& propertyListValue = this->propertyListPos.value();
+    return propertyListValue.vmAddress().rawValue() & 1;
+}
 
 //
 // MARK: --- ProtocolList methods ---
@@ -1349,7 +1529,6 @@ void ProtocolList::setProtocol(const Visitor& objcVisitor, uint64_t i, VMAddress
 }
 #endif
 
-#if BUILDING_CACHE_BUILDER_UNIT_TESTS
 const void* ProtocolList::getLocation() const
 {
     if ( !this->protocolListPos.has_value() )
@@ -1359,9 +1538,20 @@ const void* ProtocolList::getLocation() const
 
 std::optional<VMAddress> ProtocolList::getVMAddress() const
 {
+    if ( !this->protocolListPos.has_value() )
+        return { };
     return this->protocolListPos->vmAddress();
 }
-#endif
+
+bool ProtocolList::isListOfLists() const
+{
+    if ( !protocolListPos.has_value() )
+        return false;
+
+    const ResolvedValue& protocolListValue = this->protocolListPos.value();
+    return protocolListValue.vmAddress().rawValue() & 1;
+}
+
 
 void ProtocolList::dump(const Visitor& objcVisitor) const
 {
@@ -1454,6 +1644,43 @@ bool IVar::elided(const Visitor& objcVisitor) const
     uint32_t size = *(uint32_t*)this->getFieldPos(objcVisitor, Field::size);
     // swift can optimize away ivars.  It leaves the meta data about them, but they have no ivar offset to update
     return (size == 0);
+}
+
+//
+// MARK: --- Property methods ---
+//
+
+const void* Property::getFieldPos(const Visitor& objcVisitor, Field field) const
+{
+    if ( objcVisitor.pointerSize == 4 ) {
+        const property32_t* property32 = (const property32_t*)this->propertyPos.value();
+        switch ( field ) {
+            case Field::name:
+                return &property32->nameVMAddr;
+            case Field::attributes:
+                return &property32->attributesVMAddr;
+        }
+    } else {
+        const property64_t* property64 = (const property64_t*)this->propertyPos.value();
+        switch ( field ) {
+            case Field::name:
+                return &property64->nameVMAddr;
+            case Field::attributes:
+                return &property64->attributesVMAddr;
+        }
+    }
+}
+
+const char* Property::getName(const Visitor& objcVisitor) const
+{
+    ResolvedValue field = objcVisitor.getField(this->propertyPos, this->getFieldPos(objcVisitor, Field::name));
+    return (const char*)objcVisitor.resolveRebase(field).value();
+}
+
+const char* Property::getAttributes(const Visitor& objcVisitor) const
+{
+    ResolvedValue field = objcVisitor.getField(this->propertyPos, this->getFieldPos(objcVisitor, Field::attributes));
+    return (const char*)objcVisitor.resolveRebase(field).value();
 }
 
 //
@@ -1674,3 +1901,21 @@ void Visitor::forEachProtocolReference(void (^callback)(ResolvedValue& value))
     }
 }
 
+void Visitor::withImageInfo(void (^callback)(const uint32_t version, const uint32_t flags)) const
+{
+    std::optional<DataSection> imageInfoSection = findObjCDataSection("__objc_imageinfo");
+    if ( !imageInfoSection.has_value() )
+        return;
+
+    assert((imageInfoSection->sectSize % pointerSize) == 0);
+    const ResolvedValue& sectionValue = imageInfoSection->sectionBase;
+
+    struct objc_image_info {
+        int32_t version;
+        uint32_t flags;
+    };
+    const objc_image_info* sectionBase = (const objc_image_info*)sectionValue.value();
+    callback(sectionBase->version, sectionBase->flags);
+}
+
+#endif // !TARGET_OS_EXCLAVEKIT

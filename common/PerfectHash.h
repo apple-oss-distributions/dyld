@@ -37,7 +37,6 @@
 #endif
 
 namespace objc {
-
 uint64_t lookup8(const uint8_t *k, size_t length, uint64_t level);
 
 #if BUILDING_CACHE_BUILDER || BUILDING_UNIT_TESTS || BUILDING_CACHE_BUILDER_UNIT_TESTS
@@ -74,6 +73,7 @@ typedef std::unordered_multimap<const char *, std::pair<uint64_t, uint16_t>, has
 
 // class name => (class vmaddress, dylib objc index)
 typedef std::unordered_multimap<const char *, std::pair<uint64_t, uint16_t>, hashstr, eqstr> class_map;
+
 
 #endif // #if BUILDING_CACHE_BUILDER
 

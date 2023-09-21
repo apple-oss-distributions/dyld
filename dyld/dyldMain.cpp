@@ -25,43 +25,45 @@
 #include <stdint.h>
 #include <string.h>
 #include <stdarg.h>
-#include <unistd.h>
-#include <errno.h>
-#include <fcntl.h>
-#include <pthread.h>
-#include <libproc.h>
-#include <mach/mach_time.h> // mach_absolute_time()
-#include <mach/mach_init.h>
-#include <mach/shared_region.h>
-#include <sys/param.h>
-#include <sys/types.h>
-#include <sys/stat.h>
-#include <sys/syscall.h>
-#include <sys/sysctl.h>
-#include <sys/mman.h>
-#include <sys/ioctl.h>
-#include <libkern/OSAtomic.h>
-#include <_simple.h>
-#include <os/lock_private.h>
-#include <Availability.h>
-#include <System/sys/codesign.h>
-#include <System/sys/csr.h>
-#include <System/sys/reason.h>
-#include <System/machine/cpu_capabilities.h>
-#include <CrashReporterClient.h>
-#include <libproc_internal.h>
-#if !TARGET_OS_SIMULATOR && BUILDING_DYLD
+#include <TargetConditionals.h>
+#if !TARGET_OS_EXCLAVEKIT
+  #include <unistd.h>
+  #include <errno.h>
+  #include <fcntl.h>
+  #include <pthread.h>
+  #include <libproc.h>
+  #include <mach/mach_time.h> // mach_absolute_time()
+  #include <mach/mach_init.h>
+  #include <mach/shared_region.h>
+  #include <sys/param.h>
+  #include <sys/types.h>
+  #include <sys/stat.h>
+  #include <sys/syscall.h>
+  #include <sys/sysctl.h>
+  #include <sys/mman.h>
+  #include <sys/ioctl.h>
+  #include <libkern/OSAtomic.h>
+  #include <_simple.h>
+  #include <os/lock_private.h>
+  #include <Availability.h>
+  #include <System/sys/codesign.h>
+  #include <System/sys/csr.h>
+  #include <System/sys/reason.h>
+  #include <System/machine/cpu_capabilities.h>
+  #include <CrashReporterClient.h>
+  #include <libproc_internal.h>
+  #if !TARGET_OS_SIMULATOR
     #include <libamfi.h>
-#endif
+  #endif // !TARGET_OS_SIMULATOR
+#else
+  #include <knrheap/heap.h>
+#endif // !TARGET_OS_EXCLAVEKIT
 #if __has_feature(ptrauth_calls)
     #include <ptrauth.h>
 #endif
 
 #include "Defines.h"
 #include "StringUtils.h"
-#include "dyld_process_info.h"
-#include "dyld_process_info_internal.h"
-#include "dyldSyscallInterface.h"
 #include "MachOLoaded.h"
 #include "DyldSharedCache.h"
 #include "SharedCacheRuntime.h"
@@ -69,26 +71,39 @@
 #include "Loader.h"
 #include "JustInTimeLoader.h"
 #include "PrebuiltLoader.h"
-#include "DebuggerSupport.h"
+#include "PremappedLoader.h"
 #include "DyldProcessConfig.h"
 #include "DyldRuntimeState.h"
-#include "ProcessAtlas.h"
 #include "DyldAPIs.h"
+#include "ProcessAtlas.h"
+
+#if !TARGET_OS_EXCLAVEKIT
+  #include "dyld_process_info.h"
+  #include "dyld_process_info_internal.h"
+  #include "dyldSyscallInterface.h"
+#endif // !TARGET_OS_EXCLAVEKIT
+
+#if HAS_EXTERNAL_STATE
+  #include "ExternallyViewableState.h"
+#endif
 
 using dyld3::FatFile;
 using dyld3::GradedArchs;
 using dyld3::MachOAnalyzer;
 using dyld3::MachOFile;
 using dyld3::MachOLoaded;
+using lsl::EphemeralAllocator;
 
-using dyld4::Atlas::Image;
-using dyld4::Atlas::Mapper;
-using dyld4::Atlas::SharedCache;
+#if TARGET_OS_EXCLAVEKIT
+  extern "C" void bootinfo_init(uintptr_t bootinfo);
+  extern "C" void plat_common_parse_entry_vec(xrt__entry_vec_t vec[10], xrt__entry_args_t *args);
+#else
+  extern "C" void mach_init();
+  extern "C" void __guard_setup(const char* apple[]);
+  extern "C" void _subsystem_init(const char* apple[]);
+#endif
 
-extern "C" void mach_init();
-extern "C" void __guard_setup(const char* apple[]);
-extern "C" void _subsystem_init(const char* apple[]);
-
+#if !TARGET_OS_SIMULATOR
 static const MachOAnalyzer* getDyldMH()
 {
 #if __LP64__
@@ -103,13 +118,14 @@ static const MachOAnalyzer* getDyldMH()
         p -= 0x1000;
     }
     return (MachOAnalyzer*)p;
-#endif
+#endif // __LP64__
 }
+#endif // !TARGET_OS_SIMULATOR
 
 #if TARGET_OS_SIMULATOR
 const dyld::SyscallHelpers* gSyscallHelpers = nullptr;
 
-// <rdar://problem/100180105> We need to guarantee there is some non-zerofill content to prvent crashes in old dylds
+// <rdar://problem/100180105> We need to guarantee there is some non-zerofill content to prevent crashes in old dylds
 __attribute__((used, section("__DATA,__sim_fix"))) uint64_t r100180105 = 1;
 #endif
 
@@ -126,17 +142,14 @@ void restartWithDyldInCache(const KernelArgs* kernArgs, const MachOFile* dyldOnD
 // no header because only called from assembly
 extern void start(const KernelArgs* kernArgs);
 
-#if TARGET_OS_OSX
-static void* getProcessInfo()
-{
-    return gProcessInfo;
-}
+#if TARGET_OS_OSX && !TARGET_OS_EXCLAVEKIT
+
+RuntimeState* sHostState = nullptr;
 
 __attribute__((format(printf, 1, 0)))
 static void sim_vlog(const char* format, va_list list)
 {
-    // FIXME this should go through RuntimeState object
-    _simple_vdprintf(STDERR_FILENO, format, list);
+    sHostState->vlog(format, list);
 }
 
 static char* getcwd_sans_malloc(char* buf, size_t size)
@@ -158,6 +171,31 @@ static char* realpath_sans_malloc(const char* file_name, char* resolved_name)
 static DIR* opendir_fake(const char*) {
     // <rdar://81126810> Allow old simulator binaries to call back opendir
     return nullptr;
+}
+
+static void sim_coresymbolication_load_notifier(void* connection, uint64_t timestamp, const char* path, const struct mach_header* mh)
+{
+    sHostState->externallyViewable.coresymbolication_load_notifier(connection, timestamp, path, mh);
+}
+
+static void sim_coresymbolication_unload_notifier(void* connection, uint64_t timestamp, const char* path, const struct mach_header* mh)
+{
+    sHostState->externallyViewable.coresymbolication_unload_notifier(connection, timestamp, path, mh);
+}
+
+static void sim_notifyMonitorOfImageListChanges(bool unloading, unsigned imageCount, const mach_header* loadAddresses[], const char* imagePaths[])
+{
+    sHostState->externallyViewable.notifyMonitorOfImageListChangesSim(unloading, imageCount, loadAddresses, imagePaths);
+}
+
+static void sim_notifyMonitorOfMainCalled()
+{
+    sHostState->externallyViewable.notifyMonitorOfMainCalled();
+}
+
+static void sim_notifyMonitorOfDyldBeforeInitializers()
+{
+    sHostState->externallyViewable.notifyMonitorOfDyldBeforeInitializers();
 }
 
 // These are syscalls that the macOS dyld makes available to dyld_sim
@@ -190,7 +228,11 @@ static const dyld::SyscallHelpers sSysCalls = {
     &mach_timebase_info,
     &OSAtomicCompareAndSwapPtrBarrier,
     &OSMemoryBarrier,
-    &getProcessInfo,
+#if HAS_EXTERNAL_STATE
+    &ExternallyViewableState::getProcessInfo,
+#else
+    nullptr,
+#endif
     &__error,
     &mach_absolute_time,
     // added in version 2
@@ -200,14 +242,14 @@ static const dyld::SyscallHelpers sSysCalls = {
     nullptr, // &readdir_r,
     nullptr, // &closedir,
     // added in version 4
-    &coresymbolication_load_notifier,
-    &coresymbolication_unload_notifier,
+    &sim_coresymbolication_load_notifier,
+    &sim_coresymbolication_unload_notifier,
     // Added in version 5
     &proc_regionfilename,
     &getpid,
     &mach_port_insert_right,
     &mach_port_allocate,
-    &mach_msg_sim_interposed,
+    &mach_msg,
     // Added in version 6
     &abort_with_payload,
     // Added in version 7
@@ -227,8 +269,8 @@ static const dyld::SyscallHelpers sSysCalls = {
     // Added in version 10
     &amfi_check_dyld_policy_self,
     // Added in version 11
-    &notifyMonitoringDyldMain,
-    &notifyMonitoringDyldSimSupport,
+    &sim_notifyMonitorOfMainCalled,
+    &sim_notifyMonitorOfImageListChanges,
     // Add in version 12
     &mach_msg_destroy,
     &mach_port_construct,
@@ -245,7 +287,7 @@ static const dyld::SyscallHelpers sSysCalls = {
     // Add in version 17
     &getattrlist,
     &getfsstat,
-    &notifyMonitoringDyldBeforeInitializers,
+    &sim_notifyMonitorOfDyldBeforeInitializers,
 };
 
 __attribute__((noinline)) static MainFunc prepareSim(RuntimeState& state, const char* dyldSimPath)
@@ -341,37 +383,23 @@ __attribute__((noinline)) static MainFunc prepareSim(RuntimeState& state, const 
     if ( !((MachOAnalyzer*)dyldSimLoadAddress)->getEntry(entryOffset, usesCRT) )
         halt("dyld_sim entry not found");
 
-    // notify debugger that dyld_sim is loaded
-    dyld_image_info info;
-    info.imageLoadAddress = (mach_header*)dyldSimLoadAddress;
-    info.imageFilePath    = state.persistentAllocator.strdup(dyldSimPath);
-    info.imageFileModDate = sb.st_mtime;
+    // save off host state object for use later if dyld_sim calls back into host to notify
+    sHostState = &state;
 
-    state.withCurrentProcessSnapshot(^(EphemeralAllocator& ephemeralAllocator, ProcessSnapshot* processSnapshot){
-        auto file = state.fileManager.fileRecordForStat(sb);
-        auto image = Image(ephemeralAllocator, std::move(file), processSnapshot->identityMapper(), (const mach_header*)dyldSimLoadAddress);
-        processSnapshot->setInitialImageCount(state.initialImageCount());
-        processSnapshot->addImage(std::move(image));
-    });
-
-    //TODO: move legacy all_image_info management into ProcessSnapshot
-    addImagesToAllImages(state, 1, &info, state.initialImageCount());
-    gProcessInfo->notification(dyld_image_adding, 1, &info);
-
-    // notify any other processing inspecting this one
-    // notify any processes tracking loads in this process
-    const char* pathsBuffer[1] = { info.imageFilePath };
-    const mach_header* mhBuffer[1] = { info.imageLoadAddress };
-    notifyMonitoringDyld(false, 1, &mhBuffer[0], &pathsBuffer[0]);
+#if HAS_EXTERNAL_STATE
+    // add dyld_sim to the image list for the debugger to see
+    EphemeralAllocator ephemeralAllocator;
+    FileRecord dyldSimFile = state.fileManager.fileRecordForStat(sb);
+    state.externallyViewable.addImageInfo(ephemeralAllocator, {state.fileManager.fsidForUUID(dyldSimFile.volume()), dyldSimFile.objectID(), state.persistentAllocator.strdup(dyldSimPath), (void*)dyldSimLoadAddress});
+#endif
 
 	// <rdar://problem/5077374> have host dyld detach macOS shared cache from process before jumping into dyld_sim
     if ( state.config.log.segments )
         console("deallocating host dyld shared cache\n");
     dyld3::deallocateExistingSharedCache();
-    gProcessInfo->processDetachedFromSharedRegion = true;
-    gProcessInfo->sharedCacheSlide        = 0;
-    gProcessInfo->sharedCacheBaseAddress  = 0;
-    ::bzero(gProcessInfo->sharedCacheUUID,sizeof(uuid_t));
+#if HAS_EXTERNAL_STATE
+    state.externallyViewable.detachFromSharedRegion();
+#endif
 
     // call kdebug trace for each image
     if ( kdebug_is_enabled(KDBG_CODE(DBG_DYLD, DBG_DYLD_UUID, DBG_DYLD_UUID_MAP_A)) ) {
@@ -380,7 +408,7 @@ __attribute__((noinline)) static MainFunc prepareSim(RuntimeState& state, const 
         ((MachOAnalyzer*)dyldSimLoadAddress)->getUuid(dyldUuid);
         fsid_t             dyldFsid    = { { sb.st_dev, 0 } };
         fsobj_id_t         dyldFfsobjid = *(fsobj_id_t*)&sb.st_ino;
-        dyld3::kdebug_trace_dyld_image(DBG_DYLD_UUID_MAP_A, info.imageFilePath, &dyldUuid, dyldFfsobjid, dyldFsid, info.imageLoadAddress);
+        dyld3::kdebug_trace_dyld_image(DBG_DYLD_UUID_MAP_A, dyldSimPath, &dyldUuid, dyldFfsobjid, dyldFsid, (mach_header*)dyldSimLoadAddress);
     }
 
     //TODO: Remove once drop support for simulators older than iOS 15, tvOS 15, and watchOS 8
@@ -404,21 +432,22 @@ __attribute__((noinline)) static MainFunc prepareSim(RuntimeState& state, const 
         }
     });
 
+#if HAS_EXTERNAL_STATE
     if (setSimulatorSharedCachePath) {
         struct stat cacheStatBuf;
-        char cachePath[MAXPATHLEN];
+        char cachePath[PATH_MAX];
         const char* cacheDir = state.config.process.environ("DYLD_SHARED_CACHE_DIR");
         if (cacheDir) {
-            strlcpy(cachePath, cacheDir, MAXPATHLEN);
-            strlcat(cachePath, "/dyld_sim_shared_cache_", MAXPATHLEN);
-            strlcat(cachePath, ((dyld3::MachOFile*)dyldSimLoadAddress)->archName(), MAXPATHLEN);
+            strlcpy(cachePath, cacheDir, PATH_MAX);
+            strlcat(cachePath, "/dyld_sim_shared_cache_", PATH_MAX);
+            strlcat(cachePath, ((dyld3::MachOFile*)dyldSimLoadAddress)->archName(), PATH_MAX);
             if (state.config.syscall.stat(cachePath, &cacheStatBuf) == 0) {
-                gProcessInfo->sharedCacheFSID = cacheStatBuf.st_dev;
-                gProcessInfo->sharedCacheFSObjID = cacheStatBuf.st_ino;
+                state.externallyViewable.setSharedCacheInfo(ephemeralAllocator, 0, {(uint64_t)cacheStatBuf.st_dev, (uint64_t)cacheStatBuf.st_ino, nullptr, nullptr}, true);
             }
         }
     }
-
+    state.externallyViewable.commit(state.persistentAllocator, ephemeralAllocator);
+#endif
     // jump into new simulator dyld
     typedef MainFunc (*sim_entry_proc_t)(int argc, const char* const argv[], const char* const envp[], const char* const apple[],
                                          const mach_header* mainExecutableMH, const mach_header* dyldMH, uintptr_t dyldSlide,
@@ -432,18 +461,19 @@ __attribute__((noinline)) static MainFunc prepareSim(RuntimeState& state, const 
                       state.config.process.mainExecutable, (mach_header*)dyldSimLoadAddress,
                       (uintptr_t)(dyldSimLoadAddress - dyldSimPreferredLoadAddress), &sSysCalls, &startGlue);
 }
-#endif // TARGET_OS_OSX
+#endif // TARGET_OS_OSX && !TARGET_OS_EXCLAVEKIT
 
 //
 // If the DYLD_SKIP_MAIN environment is set to 1, dyld will return the
 // address of this function instead of main() in the target program which
 // __dyld_start jumps to. Useful for qualifying dyld itself.
 //
+#if !TARGET_OS_EXCLAVEKIT
 static int fake_main(int argc, const char* const argv[], const char* const envp[], const char* const apple[])
 {
     return 0;
 }
-
+#endif // !TARGET_OS_EXCLAVEKIT
 
 //
 // Load any dependent dylibs and bind all together.
@@ -451,10 +481,40 @@ static int fake_main(int argc, const char* const argv[], const char* const envp[
 //
 __attribute__((noinline)) static MainFunc prepare(APIs& state, const MachOAnalyzer* dyldMH)
 {
-    gProcessInfo->terminationFlags = 0; // by default show backtrace in crash logs
-    gProcessInfo->platform         = (uint32_t)state.config.process.platform;
-    gProcessInfo->dyldPath         = state.config.process.dyldPath;
+#if TARGET_OS_EXCLAVEKIT
+    Diagnostics diag;
+    Loader* mainLoader = PremappedLoader::makeLaunchLoader(diag, state, state.config.process.mainExecutable, state.config.process.mainExecutablePath, nullptr);
+    state.loaded.reserve(256);
+    state.setMainLoader(mainLoader);
 
+    /*for (auto& e : state.config.process.preMappedFiles) {
+        console("PREMAPPED %s(0x%zx): 0x%llx => 0x%llx\n", e.path, e.mappedSize, (uint64_t)e.loadAddress, (uint64_t)e.loadAddress+e.mappedSize);
+    }*/
+    Loader::LoadChain   loadChainMain { nullptr, mainLoader };
+    Loader::LoadOptions depOptions;
+    depOptions.staticLinkage   = true;
+    depOptions.launching       = true;
+    depOptions.insertedDylib   = false;
+    depOptions.canBeDylib      = true;
+    depOptions.rpathStack      = &loadChainMain;
+    Diagnostics depsDiag;
+    mainLoader->loadDependents(depsDiag, state, depOptions);
+    if ( depsDiag.hasError() ) {
+        state.log("%s loading dependents of %s\n", depsDiag.errorMessage(), mainLoader->path());
+        // let crashreporter know about dylibs we were able to load
+        halt(depsDiag.errorMessage(), &state.structuredError);
+    }
+
+    // do fixups
+    DyldCacheDataConstLazyScopedWriter  cacheDataConst(state);
+    for ( const Loader* ldr : state.loaded ) {
+        Diagnostics fixupDiag;
+        ldr->applyFixups(fixupDiag, state, cacheDataConst, true);
+        if ( fixupDiag.hasError() ) {
+            halt(fixupDiag.errorMessage());
+        }
+    }
+#else
     uint64_t launchTraceID = 0;
     if ( dyld3::kdebug_trace_dyld_enabled(DBG_DYLD_TIMING_LAUNCH_EXECUTABLE) ) {
         launchTraceID = dyld3::kdebug_trace_dyld_duration_start(DBG_DYLD_TIMING_LAUNCH_EXECUTABLE, (uint64_t)state.config.process.mainExecutable, 0, 0);
@@ -478,7 +538,7 @@ __attribute__((noinline)) static MainFunc prepare(APIs& state, const MachOAnalyz
     else if ( isSimulatorProgram ) {
         halt("DYLD_ROOT_PATH not set for simulator program");
     }
-#endif
+#endif // TARGET_OS_OSX
 
 #if 0
     // check if main executable is valid
@@ -497,14 +557,16 @@ __attribute__((noinline)) static MainFunc prepare(APIs& state, const MachOAnalyz
         }
     }
 
+    Loader*                  mainLoader = nullptr;
+#if SUPPORT_CREATING_PREBUILTLOADERS
     // check for pre-built Loader
     state.initializeClosureMode();
     const PrebuiltLoaderSet* mainSet    = state.processPrebuiltLoaderSet();
-    Loader*                  mainLoader = nullptr;
     if ( mainSet != nullptr ) {
         mainLoader = (Loader*)mainSet->atIndex(0);
         state.loaded.reserve(state.initialImageCount()); // help avoid reallocations of Vector
     }
+#endif // SUPPORT_CREATING_PREBUILTLOADERS
     if ( mainLoader == nullptr ) {
         // if no pre-built Loader, make a just-in-time one
         state.loaded.reserve(512);  // guess starting point for Vector size
@@ -513,27 +575,22 @@ __attribute__((noinline)) static MainFunc prepare(APIs& state, const MachOAnalyz
                                                         state.config.process.mainExecutablePath, nullptr);
         if ( buildDiag.hasError() ) {
             state.log("%s in %s\n", buildDiag.errorMessage(), state.config.process.mainExecutablePath);
-            halt(buildDiag.errorMessage());
+            halt(buildDiag.errorMessage(), &state.structuredError);
         }
     }
     state.setMainLoader(mainLoader);
     // start by just adding main executable to debuggers's known image list
     state.notifyDebuggerLoad(mainLoader);
 
+#if SUPPORT_CREATING_PREBUILTLOADERS
     const bool needToWritePrebuiltLoaderSet = !mainLoader->isPrebuilt && (state.saveAppClosureFile() || state.failIfCouldBuildAppClosureFile());
-
-    // <rdar://problem/10583252> Add dyld to uuidArray to enable symbolication of stackshots (unless dyld is in the cache)
-    if ( !dyldMH->inDyldCache() ) {
-        dyld_uuid_info dyldInfo;
-        dyldInfo.imageLoadAddress = dyldMH;
-        dyldMH->getUuid(dyldInfo.imageUUID);
-        addNonSharedCacheImageUUID(state.persistentAllocator, dyldInfo);
-    }
+#endif // SUPPORT_CREATING_PREBUILTLOADERS
 
     // load any inserted dylibs
     STACK_ALLOC_OVERFLOW_SAFE_ARRAY(Loader*, topLevelLoaders, 16);
     topLevelLoaders.push_back(mainLoader);
     Loader::LoadChain   loadChainMain { nullptr, mainLoader };
+
     Loader::LoadOptions options;
     options.staticLinkage   = true;
     options.launching       = true;
@@ -543,6 +600,17 @@ __attribute__((noinline)) static MainFunc prepare(APIs& state, const MachOAnalyz
     state.config.pathOverrides.forEachInsertedDylib(^(const char* dylibPath, bool& stop) {
         Diagnostics insertDiag;
         if ( Loader* insertedDylib = (Loader*)Loader::getLoader(insertDiag, state, dylibPath, options) ) {
+            // Make sure we haven't already loaded this dylib
+            // This can happen if we have 2 of the same dylib in the DYLD_INSERT_LIBRARIES, or
+            // if we have 2 different libraries with the same leaf name and DYLD_FALLBACK_LIBRARY_PATH
+            // ends up with them resolving to the same dylib
+            for ( const Loader* ldr : topLevelLoaders ) {
+                if ( ldr == insertedDylib ) {
+                    if ( state.config.log.libraries )
+                        state.log("skipping duplicate inserted dylib '%s'\n", dylibPath);
+                    return;
+                }
+            }
             topLevelLoaders.push_back(insertedDylib);
             state.notifyDebuggerLoad(insertedDylib);
             if ( insertedDylib->isPrebuilt )
@@ -560,30 +628,40 @@ __attribute__((noinline)) static MainFunc prepare(APIs& state, const MachOAnalyz
         state.loaded.push_back(mainLoader);
     }
 
+#if SUPPORT_CREATING_PREBUILTLOADERS
     // for recording files that must be missing
     __block MissingPaths missingPaths;
     auto missingLogger = ^(const char* mustBeMissingPath) {
         missingPaths.addPath(mustBeMissingPath);
     };
+#endif
 
     // recursively load everything needed by main executable and inserted dylibs
     Diagnostics depsDiag;
-    options.insertedDylib = false;
+    Loader::LoadOptions depOptions;
+    depOptions.staticLinkage   = true;
+    depOptions.launching       = true;
+    depOptions.insertedDylib   = false;
+    depOptions.canBeDylib      = true;
+    depOptions.rpathStack      = &loadChainMain;
+#if SUPPORT_CREATING_PREBUILTLOADERS
     if ( needToWritePrebuiltLoaderSet )
-        options.pathNotFoundHandler = missingLogger;
+        depOptions.pathNotFoundHandler = missingLogger;
+#endif
     for ( Loader* ldr : topLevelLoaders ) {
-        ldr->loadDependents(depsDiag, state, options);
+        ldr->loadDependents(depsDiag, state, depOptions);
         if ( depsDiag.hasError() ) {
             //state.log("%s loading dependents of %s\n", depsDiag.errorMessage(), ldr->path());
             // let debugger/crashreporter know about dylibs we were able to load
             uintptr_t topCount = topLevelLoaders.count();
-
             STACK_ALLOC_VECTOR(const Loader*, newLoaders, state.loaded.size() - topCount);
             for (size_t i = topCount; i != state.loaded.size(); ++i)
                 newLoaders.push_back(state.loaded[i]);
             state.notifyDebuggerLoad(newLoaders);
-            gProcessInfo->terminationFlags = 1; // don't show back trace, because nothing interesting
-            halt(depsDiag.errorMessage());
+#if HAS_EXTERNAL_STATE
+            state.externallyViewable.disableCrashReportBacktrace();
+#endif
+            halt(depsDiag.errorMessage(), &state.structuredError);
         }
     }
 
@@ -600,10 +678,6 @@ __attribute__((noinline)) static MainFunc prepare(APIs& state, const MachOAnalyz
         // notify kernel about any dtrace static user probes
         state.notifyDtrace(newLoaders);
     }
-
-    // <rdar://problem/7739489> record initial count of images
-    // so CrashReporter can note which images were dynamically loaded
-    gProcessInfo->initialImageCount = state.loaded.size();
 
     // add to permanent ranges
     STACK_ALLOC_ARRAY(const Loader*, nonCacheNeverUnloadLoaders, state.loaded.size());
@@ -635,14 +709,13 @@ __attribute__((noinline)) static MainFunc prepare(APIs& state, const MachOAnalyz
         // This happens automatically for anything bound at launch, but the dyld cache is pre-bound so we need
         // to patch any binds that are overridden by this non-weak in the main executable.
         // Note on macOS we also allow dylibs to have non-weak overrides of weak-defs
-        if ( !mainLoader->isPrebuilt )
-            JustInTimeLoader::handleStrongWeakDefOverrides(state, cacheDataConst);
+        JustInTimeLoader::handleStrongWeakDefOverrides(state, cacheDataConst);
 
         for ( const Loader* ldr : state.loaded ) {
             Diagnostics fixupDiag;
             ldr->applyFixups(fixupDiag, state, cacheDataConst, true);
             if ( fixupDiag.hasError() ) {
-                halt(fixupDiag.errorMessage());
+                halt(fixupDiag.errorMessage(), &state.structuredError);
             }
 
             // Roots need to patch the uniqued GOTs in the cache
@@ -650,7 +723,7 @@ __attribute__((noinline)) static MainFunc prepare(APIs& state, const MachOAnalyz
         }
 
         // Do singleton patching if we have it
-        state.doSingletonPatching();
+        state.doSingletonPatching(cacheDataConst);
     }
 
     // if there is interposing, the apply interpose tuples to the dyld cache
@@ -658,6 +731,7 @@ __attribute__((noinline)) static MainFunc prepare(APIs& state, const MachOAnalyz
         Loader::applyInterposingToDyldCache(state);
     }
 
+#if SUPPORT_CREATING_PREBUILTLOADERS
     // if mainLoader is prebuilt, there may be overrides of weak-defs in the dyld cache
     if ( mainLoader->isPrebuilt ) {
         DyldCacheDataConstLazyScopedWriter  dataConstWriter(state);
@@ -684,6 +758,7 @@ __attribute__((noinline)) static MainFunc prepare(APIs& state, const MachOAnalyz
             });
         });
     }
+#endif // SUPPORT_CREATING_PREBUILTLOADERS
 
     // call kdebug trace for each image
     if ( kdebug_is_enabled(KDBG_CODE(DBG_DYLD, DBG_DYLD_UUID, DBG_DYLD_UUID_MAP_A)) ) {
@@ -717,53 +792,43 @@ __attribute__((noinline)) static MainFunc prepare(APIs& state, const MachOAnalyz
             kdebug_trace_dyld_image(DBG_DYLD_UUID_MAP_A, ldr->path(), &uuid, fsobjid, fsid, ml);
         }
     }
+#endif // TARGET_OS_EXCLAVEKIT
 
-    // notify any other processing inspecting this one
-    // notify any processes tracking loads in this process
-    STACK_ALLOC_ARRAY(const char*, pathsBuffer, state.loaded.size());
-    STACK_ALLOC_ARRAY(const mach_header*, mhBuffer, state.loaded.size());
-    for ( const Loader* ldr :  state.loaded ) {
-        pathsBuffer.push_back(ldr->path());
-        mhBuffer.push_back(ldr->loadAddress(state));
-    }
-
-    notifyMonitoringDyld(false, (unsigned int)state.loaded.size(), &mhBuffer[0], &pathsBuffer[0]);
+    if ( state.libdyldLoader == nullptr )
+        halt("libdyld.dylib not found");
 
     // wire up libdyld.dylib to dyld
-    LibdyldDyld4Section* libdyld4Section = nullptr;
-    if ( state.libdyldLoader != nullptr ) {
-        const MachOLoaded* libdyldML = state.libdyldLoader->loadAddress(state);
-        uint64_t           sectSize;
-        libdyld4Section = (LibdyldDyld4Section*)libdyldML->findSectionContent("__DATA", "__dyld4", sectSize, true);
+    const MachOLoaded* libdyldML = state.libdyldLoader->loadAddress(state);
+    uint64_t           sectSize;
+    LibdyldDyld4Section* libdyld4Section = (LibdyldDyld4Section*)libdyldML->findSectionContent("__DATA", "__dyld4", sectSize, true);
 #if __has_feature(ptrauth_calls)
-        if ( libdyld4Section == nullptr )
-            libdyld4Section = (LibdyldDyld4Section*)libdyldML->findSectionContent("__AUTH", "__dyld4", sectSize, true);
+    if ( libdyld4Section == nullptr )
+        libdyld4Section = (LibdyldDyld4Section*)libdyldML->findSectionContent("__AUTH", "__dyld4", sectSize, true);
 #endif
-        if ( libdyld4Section != nullptr ) {
-            // set pointer to global APIs object
-            libdyld4Section->apis = &state;
-            // set the pointer to dyld_all_image_infos
-            libdyld4Section->allImageInfos = gProcessInfo;
-            // program vars (e.g. environ) are usually defined in libdyld.dylib (but might be defined in main excutable for old macOS binaries)
-            // remember location of progams vars so libc can sync them
-            state.vars                 = &libdyld4Section->defaultVars;
-            state.vars->mh             = state.config.process.mainExecutable;
-            *state.vars->NXArgcPtr     = state.config.process.argc;
-            *state.vars->NXArgvPtr     = (const char**)state.config.process.argv;
-            *state.vars->environPtr    = (const char**)state.config.process.envp;
-            *state.vars->__prognamePtr = state.config.process.progname;
-        }
-        else {
-            halt("compatible libdyld.dylib not found");
-        }
-    }
-    else {
-        halt("libdyld.dylib not found");
-    }
+    if ( libdyld4Section == nullptr )
+        halt("compatible libdyld.dylib not found");
+
+    // set pointer to global APIs object
+    libdyld4Section->apis = &state;
+#if HAS_EXTERNAL_STATE
+    state.externallyViewable.storeProcessInfoPointer((dyld_all_image_infos**)&libdyld4Section->allImageInfos); // FIXME: only needed for dyld_process_info_base::make() to find dyld cache
+#endif
+    // program vars (e.g. environ) are usually defined in libdyld.dylib (but might be defined in main excutable for old macOS binaries)
+    // remember location of progams vars so libc can sync them
+    state.vars                 = &libdyld4Section->defaultVars;
+    state.vars->mh             = state.config.process.mainExecutable;
+    *state.vars->__prognamePtr = state.config.process.progname;
+#if !TARGET_OS_EXCLAVEKIT
+    *state.vars->NXArgcPtr     = state.config.process.argc;
+    *state.vars->NXArgvPtr     = (const char**)state.config.process.argv;
+    *state.vars->environPtr    = (const char**)state.config.process.envp;
+#else
+    // fill in the ExclaveKit parts of ProgramVars, to be passed to Libsystem's initializer
+    state.vars->entry_vec      = state.config.process.entry_vec;
+#endif
     if ( state.libSystemLoader == nullptr )
         halt("program does not link with libSystem.B.dylib");
-
-#if !TARGET_OS_SIMULATOR
+#if SUPPORT_CREATING_PREBUILTLOADERS && !TARGET_OS_SIMULATOR
     // if launched with JustInTimeLoader, may need to serialize it
     if ( needToWritePrebuiltLoaderSet ) {
         dyld3::ScopedTimer timer(DBG_DYLD_TIMING_BUILD_CLOSURE, 0, 0, 0);
@@ -788,9 +853,16 @@ __attribute__((noinline)) static MainFunc prepare(APIs& state, const MachOAnalyz
     if ( state.config.process.environ("DYLD_JUST_BUILD_CLOSURE") != nullptr ) {
         return &fake_main;
     }
-#endif
+#endif // SUPPORT_CREATING_PREBUILTLOADERS && !TARGET_OS_SIMULATOR
 
-#if SUPPPORT_PRE_LC_MAIN
+#if !SUPPPORT_PRE_LC_MAIN
+    // run all initializers
+#if HAS_EXTERNAL_STATE
+    if ( state.externallyViewable.notifyMonitorNeeded() )
+        state.externallyViewable.notifyMonitorOfDyldBeforeInitializers();
+#endif // HAS_EXTERNAL_STATE
+    state.runAllInitializersForMain();
+#else
     uint32_t                progVarsOffset;
     dyld3::DyldLookFunc*    dyldLookupFuncAddr = nullptr;
     bool                    crtRunsInitializers = false;
@@ -805,83 +877,78 @@ __attribute__((noinline)) static MainFunc prepare(APIs& state, const MachOAnalyz
         state.vars                = varsInApp;
     }
     if ( dyldLookupFuncAddr ) {
-        if ( libdyld4Section != nullptr ) {
-            *dyldLookupFuncAddr = (dyld3::DyldLookFunc)libdyld4Section->dyldLookupFuncAddr;
-        } else {
+        if ( libdyld4Section == nullptr )
             halt("compatible libdyld.dylib not found");
-        }
+        *dyldLookupFuncAddr = (dyld3::DyldLookFunc)libdyld4Section->dyldLookupFuncAddr;
     }
 
     if ( !crtRunsInitializers )
         state.runAllInitializersForMain();
-
-#else
-
-    // run all initializers
-    dyld4::notifyMonitoringDyldBeforeInitializers();
-    state.runAllInitializersForMain();
-
-#endif // SUPPPORT_PRE_LC_MAIN
+#endif // !SUPPPORT_PRE_LC_MAIN
 
 
-
+#if HAS_EXTERNAL_STATE
     // notify we are about to call main
-    notifyMonitoringDyldMain();
+    if ( state.externallyViewable.notifyMonitorNeeded() )
+        state.externallyViewable.notifyMonitorOfMainCalled();
+#endif
+
+    void *result;
+
+#if !TARGET_OS_EXCLAVEKIT
     if ( dyld3::kdebug_trace_dyld_enabled(DBG_DYLD_TIMING_LAUNCH_EXECUTABLE) ) {
         dyld3::kdebug_trace_dyld_duration_end(launchTraceID, DBG_DYLD_TIMING_LAUNCH_EXECUTABLE, 0, 0, 4);
     }
+
     ARIADNEDBG_CODE(220, 1);
 
-    MainFunc result;
     if ( state.config.security.skipMain ) {
         return &fake_main;
     }
-    else if ( state.config.process.platform == dyld3::Platform::driverKit ) {
-        result = state.mainFunc();
+
+    if ( state.config.process.platform == dyld3::Platform::driverKit ) {
+        result = (void*)state.mainFunc();
         if ( result == 0 )
             halt("DriverKit main entry point not set");
 #if __has_feature(ptrauth_calls)
         // HACK: DriverKit signs the pointer with a diversity different than dyld expects when calling the pointer.
-        result = (MainFunc)__builtin_ptrauth_strip((void*)result, ptrauth_key_function_pointer);
-        result = (MainFunc)__builtin_ptrauth_sign_unauthenticated((void*)result, 0, 0);
-#endif
+        result = (void*)__builtin_ptrauth_strip(result, ptrauth_key_function_pointer);
+        result = (void*)__builtin_ptrauth_sign_unauthenticated(result, 0, 0);
+#endif // __has_feature(ptrauth_calls)
+        return (MainFunc)result;
     }
-    else {
-        // find entry point for main executable
-        uint64_t entryOffset;
-        bool     usesCRT;
-        if ( !state.config.process.mainExecutable->getEntry(entryOffset, usesCRT) )
-            halt("main executable has no entry point");
-        result = (MainFunc)((uintptr_t)state.config.process.mainExecutable + entryOffset);
-        if ( usesCRT ) {
-            // main executable uses LC_UNIXTHREAD, dyld needs to cut back kernel arg stack and jump to "start"
-#if SUPPPORT_PRE_LC_MAIN
-            // backsolve for KernelArgs (original stack entry point in _dyld_start)
-            const KernelArgs* kernArgs = (KernelArgs*)(&state.config.process.argv[-2]);
-            gotoAppStart((uintptr_t)result, kernArgs);
-#else
-            halt("main executable is missing LC_MAIN");
-#endif
-        }
-#if __has_feature(ptrauth_calls)
-        result = (MainFunc)__builtin_ptrauth_sign_unauthenticated((void*)result, 0, 0);
-#endif
-    }
+#endif // !TARGET_OS_EXCLAVEKIT
 
-    return result;
+    // find entry point for main executable
+    uint64_t entryOffset;
+    bool     usesCRT;
+    if ( !state.config.process.mainExecutable->getEntry(entryOffset, usesCRT) ) {
+        halt("main executable has no entry point");
+    }
+    result = (void*)((uintptr_t)state.config.process.mainExecutable + entryOffset);
+    if ( usesCRT ) {
+        // main executable uses LC_UNIXTHREAD, dyld needs to cut back kernel arg stack and jump to "start"
+#if SUPPPORT_PRE_LC_MAIN
+        // backsolve for KernelArgs (original stack entry point in _dyld_start)
+        const KernelArgs* kernArgs = (KernelArgs*)(&state.config.process.argv[-2]);
+        gotoAppStart((uintptr_t)result, kernArgs);
+#else
+        halt("main executable is missing LC_MAIN");
+#endif
+    }
+#if __has_feature(ptrauth_calls)
+        result = (void*)__builtin_ptrauth_sign_unauthenticated(result, 0, 0);
+#endif
+
+    return (MainFunc)result;
 }
 
 
 // SyscallDelegate object which is held onto by config object for life of process
 SyscallDelegate sSyscallDelegate;
 
-#if SUPPPORT_PRE_LC_MAIN
-// old macOS binaries need stack reset, so RuntimeLocks cannot be stack allocated
-static RuntimeLocks sLocks;
-#endif
 
-
-
+#if !TARGET_OS_SIMULATOR && !TARGET_OS_EXCLAVEKIT
 static void handleDyldInCache(const MachOFile* dyldMF, const KernelArgs* kernArgs, const MachOFile* prevDyldMH)
 {
 #if __i386__
@@ -891,38 +958,10 @@ static void handleDyldInCache(const MachOFile* dyldMF, const KernelArgs* kernArg
     if ( dyldMF->inDyldCache() ) {
         // We need to drop the additional send right we got by calling task_self_trap() via mach_init() a second time
         mach_port_mod_refs(mach_task_self(), mach_task_self(), MACH_PORT_RIGHT_SEND, -1);
-        // in case dyld moved, switch the process info that kernel is using
         bool    usingNewProcessInfo = false;
-        void*   dyldInfoAddress;
-        size_t  dyldInfoSize;
-        if ( sSyscallDelegate.kernelDyldImageInfoAddress(dyldInfoAddress, dyldInfoSize) ) {
-            struct dyld_all_image_infos* oldProcessInfo = (dyld_all_image_infos*)dyldInfoAddress;
-            if ( proc_set_dyld_all_image_info(gProcessInfo, sizeof(dyld_all_image_infos)) == 0 ) {
-                // we've switch the dyld_all_image_infos that the kernel knows about to the one in the dyld cache
-                usingNewProcessInfo = true;
-                // if the process is being monitored transfer over the port
-                if ( oldProcessInfo->notifyPorts[0] != 0 )
-                    gProcessInfo->notifyPorts[0] = oldProcessInfo->notifyPorts[0];
-                // in case being debugged, tell lldb that dyld moved
-                __typeof(&lldb_image_notifier) prevNotifyLLDB = oldProcessInfo->notification;
-                dyld_image_info info = { dyldMF, "/usr/lib/dyld", 0 };
-                prevNotifyLLDB(dyld_image_dyld_moved, 1, &info);
-            }
-            else {
-                // we were unable to switch dyld_all_image_infos, so update old one
-                gProcessInfo = oldProcessInfo;
-                __typeof(&lldb_image_notifier) prevNotifyLLDB = gProcessInfo->notification;
-                // switch struct in disk-dyld to point to dyld in cache
-                gProcessInfo->dyldImageLoadAddress = dyldMF;
-                gProcessInfo->dyldPath             = "/usr/lib/dyld";
-                gProcessInfo->notification         = &lldb_image_notifier;
-                gProcessInfo->dyldVersion          = "cache";
-                // in case being debugged, tell lldb that dyld moved
-                dyld_image_info info = { dyldMF, "/usr/lib/dyld", 0 };
-                prevNotifyLLDB(dyld_image_dyld_moved, 1, &info);
-            }
-        }
-
+  #if HAS_EXTERNAL_STATE
+        usingNewProcessInfo = ExternallyViewableState::switchToDyldInDyldCache(dyldMF);
+  #endif // HAS_EXTERNAL_STATE
         // Instruments tracks mapped images.  dyld is considered mapped from the process info
         // but we now need to tell Instruments that we are unmapping the dyld its tracking.
         // Note there was no previous MAP event for dyld, just the process info
@@ -942,14 +981,16 @@ static void handleDyldInCache(const MachOFile* dyldMF, const KernelArgs* kernArg
 
         // Also use the older notifiers to tell Instruments that we unloaded dyld
         // First update the timestamp as load/unload events historically always had a non-zero timestamp
-        gProcessInfo->infoArrayChangeTimestamp = mach_absolute_time();
+#if HAS_EXTERNAL_STATE && TARGET_OS_OSX
+        ExternallyViewableState::getProcessInfo()->infoArrayChangeTimestamp = mach_absolute_time();
         {
             const char* pathsBuffer[1] = { "/usr/lib/dyld" };
             const mach_header* mhBuffer[1] = { prevDyldMH };
-            notifyMonitoringDyld(true, 1, &mhBuffer[0], &pathsBuffer[0]);
+            ExternallyViewableState::notifyMonitoringDyld(true, 1, &mhBuffer[0], &pathsBuffer[0]);
         }
+#endif // HAS_EXTERNAL_STATE && TARGET_OS_OSX
 
-        // We then need to tell Instruments that we have mapped a new dyld
+        // We then need to tell Instruments that we have mapped a new dyld.
         // Note we really need to keep this adjacent to the unmap event above, as we don't want Instruments to see
         // code running in a memory range which is untracked.
         if ( kdebug_is_enabled(KDBG_CODE(DBG_DYLD, DBG_DYLD_UUID, DBG_DYLD_UUID_MAP_A)) ) {
@@ -961,12 +1002,14 @@ static void handleDyldInCache(const MachOFile* dyldMF, const KernelArgs* kernArg
             kdebug_trace_dyld_image(DBG_DYLD_UUID_MAP_A, "/usr/lib/dyld", &dyldUuid, dyldFfsobjid, dyldFsid, dyldMF);
         }
 
-        // Also use the older notifiers to tell Instruments that we loade a new dyld
+#if HAS_EXTERNAL_STATE && TARGET_OS_OSX
+        // Also use the older notifiers to tell Instruments that we loaded a new dyld
         {
             const char* pathsBuffer[1] = { "/usr/lib/dyld" };
             const mach_header* mhBuffer[1] = { dyldMF };
-            notifyMonitoringDyld(false, 1, &mhBuffer[0], &pathsBuffer[0]);
+            ExternallyViewableState::notifyMonitoringDyld(false, 1, &mhBuffer[0], &pathsBuffer[0]);
         }
+#endif // HAS_EXTERNAL_STATE && TARGET_OS_OSX
 
         // unload disk based dyld now that we are running with one in the dyld cache
         struct Seg { void* start; size_t size; };
@@ -993,8 +1036,8 @@ static void handleDyldInCache(const MachOFile* dyldMF, const KernelArgs* kernArg
         // rosetta translated processes don't use dyld-in-cache
         if ( sSyscallDelegate.isTranslated() )
              return;
-    #endif
-  #endif
+    #endif // SUPPORT_ROSETTA
+  #endif // TARGET_OS_OSX
         // don't use dyld-in-cache with private dyld caches
         if ( _simple_getenv(kernArgs->findEnvp(), "DYLD_SHARED_REGION") != nullptr )
             return;
@@ -1017,12 +1060,12 @@ static void handleDyldInCache(const MachOFile* dyldMF, const KernelArgs* kernArg
                             const char* overrideStr = _simple_getenv(kernArgs->findEnvp(), "DYLD_IN_CACHE");
                              if ( (overrideStr == nullptr) || (strcmp(overrideStr, "0") != 0) ) {
                                 // update all_image_info in case lldb attaches during transition
-                                gProcessInfo->dyldImageLoadAddress = dyldInCacheMF;
-
+#if HAS_EXTERNAL_STATE
+                                ExternallyViewableState::switchDyldLoadAddress(dyldInCacheMF);
+#endif
                                  // Tell Instruments we have a shared cache before we start using an image in the cache
                                  dyld3::kdebug_trace_dyld_cache(cacheFSObjID, cacheFSID, cacheBaseAddress,
                                                                 dyldCacheHeader->header.uuid);
-
                                 // cut back stack and restart but using dyld in the cache
                                 restartWithDyldInCache(kernArgs, dyldMF, (void*)(long)(dyldCacheHeader->header.dyldInCacheEntry + cacheSlide));
                             }
@@ -1032,12 +1075,103 @@ static void handleDyldInCache(const MachOFile* dyldMF, const KernelArgs* kernArg
             }
         }
     }
+#endif // __i386__
+}
+#endif // !TARGET_OS_SIMULATOR && !TARGET_OS_EXCLAVEKIT
+
+static void rebaseSelf(const MachOAnalyzer* dyldMA)
+{
+    assert(dyldMA->hasChainedFixups());
+    // Note: withChainStarts() and fixupAllChainedFixups() cannot use any static DATA pointers as they are not rebased yet
+    uintptr_t slide = dyldMA->getSlide();
+    __block Diagnostics diag;
+    dyldMA->withChainStarts(diag, 0, ^(const dyld_chained_starts_in_image* starts) {
+        dyldMA->fixupAllChainedFixups(diag, starts, slide, dyld3::Array<const void*>(), nullptr);
+    });
+    diag.assertNoError();
+
+#if !TARGET_OS_EXCLAVEKIT
+    // make __DATA_CONST read-only (kernel maps it r/w)
+    dyldMA->forEachSegment(^(const MachOAnalyzer::SegmentInfo& segInfo, bool& stop) {
+        if ( segInfo.readOnlyData ) {
+            const uint8_t* start = (uint8_t*)(segInfo.vmAddr + slide);
+            size_t         size  = (size_t)segInfo.vmSize;
+            sSyscallDelegate.mprotect((void*)start, size, PROT_READ);
+        }
+    });
 #endif
 }
+
+// Do any set up needed by any linked static libraries
+static void initializeLibc(KernelArgs* kernArgs)
+{
+#if TARGET_OS_EXCLAVEKIT
+    xrt__entry_args_t args = {
+            .launched_roottask = 0,
+    };
+    plat_common_parse_entry_vec((xrt__entry_vec_t *)kernArgs->entry_vec, &args);
+    bootinfo_init(args.bootinfo_virt);
+    kernArgs->mappingDescriptor = (const void*)args.dyld_mapping_descriptor;
+
+    // Make knrheap not panic because libxrt may attempt heap allocation
+    _liblibc_knrheap_panic_on_exhaustion = false;
+#else
+    mach_init();
+
+    // set up random value for stack canary
+    const char** apple = kernArgs->findApple();
+    __guard_setup(apple);
+
+    // setup so that open_with_subsystem() works
+    _subsystem_init(apple);
+#endif // TARGET_OS_EXCLAVEKIT
+}
+
+#if HAS_EXTERNAL_STATE
+static void setInitialExternallyVisibleState(RuntimeState& state, Allocator& ephemeralAllocator, const MachOAnalyzer* dyldMA)
+{
+    // if there is a dyld cache, add dyld shared cache info to ExternallyViewableState
+    if ( state.config.dyldCache.addr != nullptr ) {
+        state.externallyViewable.setSharedCacheInfo(ephemeralAllocator, state.config.dyldCache.slide,
+                                                    {state.config.dyldCache.fsID, state.config.dyldCache.fsObjID,state.config.dyldCache.path, state.config.dyldCache.addr},
+                                                    state.config.dyldCache.privateCache);
+    }
+
+#if TARGET_OS_SIMULATOR
+    // If this is a simulator then the host already registered the main executable,
+    // dyld and dyld_sim before transferring to dyld_sim, no need to do it again.
+    // Add the main executable to ExternallyViewableState to support older hosts that only add dyld_sim to the image list.
+    if ( state.externallyViewable.imageInfoCount() == 1 ) {
+        state.externallyViewable.addImageInfoOld({state.config.process.mainExecutableFSID, state.config.process.mainExecutableObjID, state.config.process.mainExecutablePath, state.config.process.mainExecutable}, /*timestamp*/ 0, /*mod time */ 0 );
+    }
+#else
+    // Add dyld info to ExternallyViewableState
+    state.externallyViewable.setDyld(ephemeralAllocator, {state.config.process.dyldFSID, state.config.process.dyldObjID, state.config.process.dyldPath, dyldMA});
+
+    // Add the main executable to ExternallyViewableState
+    state.externallyViewable.addImageInfo(ephemeralAllocator, {state.config.process.mainExecutableFSID, state.config.process.mainExecutableObjID, state.config.process.mainExecutablePath, state.config.process.mainExecutable});
+
+    // Set the initial number of images, before initializers are run
+    state.setInitialImageCount(1);
+    state.externallyViewable.setInitialImageCount(state.initialImageCount());
+
+    // For simulator processes, wait until dyld_sim is added to image list before committing
+    if ( !MachOFile::isSimulatorPlatform(state.config.process.platform) ) {
+        // now let rest of world see the main executable and dyld in this process
+        state.externallyViewable.commit(state.persistentAllocator, ephemeralAllocator);
+    }
+#endif // !TARGET_OS_SIMULATOR
+}
+#endif
 
 //
 // Entry point for dyld.  The kernel loads dyld and jumps to __dyld_start which
 // sets up some registers and call this function.
+//
+// For ExclaveKit, ExclavePlatform jumps to __dyld_start (defined in a crt0),
+// creates the entry vector containing the type and value of arguments passed by the launcher,
+// and calls this function with the entry vector as argument. The function does not call main,
+// nor exit, but finalize_process_startup, which never returns.
 //
 // Note: this function never returns, it calls exit().  Therefore stack protectors
 // are useless, since the epilog is never executed.  Marking the fucntion no-return
@@ -1045,135 +1179,106 @@ static void handleDyldInCache(const MachOFile* dyldMF, const KernelArgs* kernArg
 // with armv7k codegen since it access the random value through a GOT slot in the
 // prolog, but dyld is not rebased yet.
 //
-void start(const KernelArgs* kernArgs, void* prevDyldMH) __attribute__((noreturn)) __asm("start");
-void start(const KernelArgs* kernArgs, void* prevDyldMH)
+#if !TARGET_OS_SIMULATOR
+void start(KernelArgs* kernArgs, void* prevDyldMH) __attribute__((noreturn)) __asm("start");
+void start(KernelArgs* kernArgs, void* prevDyldMH)
 {
     // Emit kdebug tracepoint to indicate dyld bootstrap has started <rdar://46878536>
+#if !TARGET_OS_EXCLAVEKIT
     // Note: this is called before dyld is rebased, so kdebug_trace_dyld_marker() cannot use any global variables
     dyld3::kdebug_trace_dyld_marker(DBG_DYLD_TIMING_BOOTSTRAP_START, 0, 0, 0, 0);
+#endif // !TARGET_OS_EXCLAVEKIT
 
     // walk all fixups chains and rebase dyld
-    // Note: withChainStarts() and fixupAllChainedFixups() cannot use any static DATA pointers as they are not rebased yet
     const MachOAnalyzer* dyldMA = getDyldMH();
-    uintptr_t            slide  = dyldMA->getSlide();
-    if ( !dyldMA->inDyldCache() ) {
-        assert(dyldMA->hasChainedFixups());
-        __block Diagnostics diag;
-        dyldMA->withChainStarts(diag, 0, ^(const dyld_chained_starts_in_image* starts) {
-            dyldMA->fixupAllChainedFixups(diag, starts, slide, dyld3::Array<const void*>(), nullptr);
-        });
-        diag.assertNoError();
+    if ( !dyldMA->inDyldCache() )
+        rebaseSelf(dyldMA);
 
-        // make __DATA_CONST read-only (kernel maps it r/w)
-        dyldMA->forEachSegment(^(const MachOAnalyzer::SegmentInfo& segInfo, bool& stop) {
-            if ( segInfo.readOnlyData ) {
-                const uint8_t* start = (uint8_t*)(segInfo.vmAddr + slide);
-                size_t         size  = (size_t)segInfo.vmSize;
-                sSyscallDelegate.mprotect((void*)start, size, PROT_READ);
-            }
-        });
-    }
+#if TARGET_OS_EXCLAVEKIT
+    KernelArgs actualKernelArgs = {
+        .entry_vec = (xrt__entry_vec_t *)kernArgs,
+        .mappingDescriptor = nullptr,
+    };
+    kernArgs = &actualKernelArgs;
+#endif
+    // Do any set up needed by any linked static libraries
+    initializeLibc(kernArgs);
 
-    // Now, we can call functions that use DATA
-    mach_init();
-
-    // set up random value for stack canary
-    __guard_setup(kernArgs->findApple());
-
-    // setup so that open_with_subsystem() works
-    _subsystem_init(kernArgs->findApple());
-
+#if !TARGET_OS_EXCLAVEKIT
     // handle switching to dyld in dyld cache for native platforms
     handleDyldInCache(dyldMA, kernArgs, (MachOFile*)prevDyldMH);
-
-#if! SUPPPORT_PRE_LC_MAIN
-    // stack allocate RuntimeLocks. They cannot be in the Allocator pool which is usually read-only
-    RuntimeLocks  sLocks;
-#endif
-
-
+#endif // !TARGET_OS_EXCLAVEKIT
+    
+#if SUPPPORT_PRE_LC_MAIN
+    // old macOS binaries reset the stack and jump into crt1.o glue, so RuntimeLocks cannot be stack allocated
+    // we cannot use "static RuntimeLocks locks;" because the compiler will generate an initializer or guards
+    static uint8_t sLocksStaticStorage[sizeof(RuntimeLocks)] __attribute__((aligned(alignof(RuntimeLocks))));
+    RuntimeLocks& locks = *new (sLocksStaticStorage) RuntimeLocks();
+#else
+    // stack allocate RuntimeLocks. They cannot be in the Allocator pool because the pool is usually read-only
+    RuntimeLocks locks;
+#endif // SUPPPORT_PRE_LC_MAIN
+    
     // Declare everything we need outside of the allocator scope
     Allocator*      allocator   = nullptr;
     APIs*           state       = nullptr;
     MainFunc        appMain     = nullptr;
-
-    // Setup the memory manager object before the allocator so the allocator can use it before copying it internally
+    
+#if !TARGET_OS_EXCLAVEKIT
     MemoryManager bootStrapMemoryManager((const char**)kernArgs->findApple());
+#else
+    MemoryManager bootStrapMemoryManager;
+#endif // !TARGET_OS_EXCLAVEKIT
+
     bootStrapMemoryManager.withWritableMemory([&] {
+        EphemeralAllocator ephemeralAllocator;
         // Setup the persistent allocator
         allocator = &Allocator::persistentAllocator(std::move(bootStrapMemoryManager));
-
+        
         // use placement new to construct ProcessConfig object in the Allocator pool
         ProcessConfig& config  = *new (allocator->aligned_alloc(alignof(ProcessConfig), sizeof(ProcessConfig))) ProcessConfig(kernArgs, sSyscallDelegate, *allocator);
 
         // create APIs (aka RuntimeState) object in the allocator
-        state = new (allocator->aligned_alloc(alignof(APIs), sizeof(APIs))) APIs(config, *allocator, sLocks);
+        state = new (allocator->aligned_alloc(alignof(APIs), sizeof(APIs))) APIs(config, locks, *allocator);
 
-#if !TARGET_OS_SIMULATOR
-        // FIXME: we should move this earlier, but for now we need the runtime state to inited before setup compact info
-        // Until we do that compact info may miss certain very early dyld crashes
-        state->withCurrentProcessSnapshot(^(EphemeralAllocator& ephemeralAllocator, ProcessSnapshot* processSnapshot){
-            processSnapshot->setPlatform((uint64_t)state->config.process.platform);
-            processSnapshot->setDyldState(dyld_process_state_dyld_initialized);
-            FileRecord cacheFileRecord = state->fileManager.fileRecordForVolumeDevIDAndObjID(gProcessInfo->sharedCacheFSID, gProcessInfo->sharedCacheFSObjID);
-            if (cacheFileRecord.exists()) {
-                auto sharedCache = SharedCache(ephemeralAllocator, std::move(cacheFileRecord), processSnapshot->identityMapper(), (uint64_t)config.dyldCache.addr, gProcessInfo->processDetachedFromSharedRegion);
-                processSnapshot->addSharedCache(std::move(sharedCache));
-            }
+#if HAS_EXTERNAL_STATE
+        // set initial state for ExternallyViewableState
+        state->externallyViewable.init(state->persistentAllocator, ephemeralAllocator, state->fileManager, state->config.process.platform);
+        // publish initial externally visible state that has main program and dyld
+        setInitialExternallyVisibleState(*state, ephemeralAllocator, dyldMA);
+#endif // HAS_EXTERNAL_STATE
 
-            // Add dyld to compact info
-            if ( dyldMA->inDyldCache() && processSnapshot->sharedCache() ) {
-                processSnapshot->addSharedCacheImage((const struct mach_header *)dyldMA);
-            } else {
-                FileRecord dyldFile;
-                if (state->config.process.dyldFSID && state->config.process.dyldObjID) {
-                    dyldFile = state->fileManager.fileRecordForVolumeDevIDAndObjID(state->config.process.dyldFSID, state->config.process.dyldObjID);
-                    if ( dyldFile.volume().empty() )
-                        dyldFile = state->fileManager.fileRecordForPath(ephemeralAllocator, state->config.process.dyldPath);
-                } else {
-                    dyldFile = state->fileManager.fileRecordForPath(ephemeralAllocator, state->config.process.dyldPath);
-                }
-                auto dyldImage = Image(ephemeralAllocator, std::move(dyldFile), processSnapshot->identityMapper(), (const mach_header*)getDyldMH());
-                processSnapshot->addImage(std::move(dyldImage));
-            }
-
-            // Add the main executable to compact info
-            FileRecord mainExecutableFile;
-            if (state->config.process.mainExecutableFSID && state->config.process.mainExecutableObjID) {
-                mainExecutableFile = state->fileManager.fileRecordForVolumeDevIDAndObjID(state->config.process.mainExecutableFSID, state->config.process.mainExecutableObjID);
-                if ( mainExecutableFile.volume().empty() )
-                    mainExecutableFile = state->fileManager.fileRecordForPath(ephemeralAllocator, state->config.process.mainExecutablePath);
-            } else {
-                mainExecutableFile = state->fileManager.fileRecordForPath(ephemeralAllocator, state->config.process.mainExecutablePath);
-            }
-            auto mainExecutableImage = Image(ephemeralAllocator, std::move(mainExecutableFile), processSnapshot->identityMapper(), (const mach_header*)state->config.process.mainExecutable);
-            processSnapshot->addImage(std::move(mainExecutableImage));
-            processSnapshot->setInitialImageCount(state->initialImageCount());
-        });
-#endif
         // load all dependents of program and bind them together
         appMain = prepare(*state, dyldMA);
     });
 
+#if TARGET_OS_EXCLAVEKIT
+    // inform liblibc_plat that all static initializers have run and let it finalize the process startup
+    state->vars->finalize_process_startup(appMain);
+
+    // if we get here, finalize_process_startup returned (it's not supposed to)
+    halt("finalize_process_startup wrongly returned");
+#else
     // call main() and if it returns, call exit() with the result
     // Note: this is organized so that a backtrace in a program's main thread shows just "start" below "main"
     int result = appMain(state->config.process.argc, state->config.process.argv, state->config.process.envp, state->config.process.apple);
 
     // if we got here, main() returned (as opposed to program calling exit())
-#if TARGET_OS_OSX
+#if TARGET_OS_OSX && !TARGET_OS_EXCLAVEKIT
     // <rdar://74518676> libSystemHelpers is not set up for simulators, so directly call _exit()
     if ( MachOFile::isSimulatorPlatform(state->config.process.platform) )
         _exit(result);
-#endif
+#endif // TARGET_OS_OSX && !TARGET_OS_EXCLAVEKIT
     state->libSystemHelpers->exit(result);
+#endif // TARGET_OS_EXCLAVEKIT
 }
+#endif // !TARGET_OS_SIMULATOR
 
 } // namespace
 
 #if TARGET_OS_SIMULATOR
 using namespace dyld4;
 
-static RuntimeLocks sLocks;
 
 // glue to handle if main() in simulator program returns
 // if _dyld_sim_prepare() returned main() then main() would return
@@ -1191,69 +1296,58 @@ static int start_sim(int argc, const char* const argv[], const char* const envp[
 }
 
 extern "C" MainFunc _dyld_sim_prepare(int argc, const char* argv[], const char* envp[], const char* apple[],
-                                 const mach_header* mainExecutableMH, const MachOAnalyzer* dyldMA, uintptr_t dyldSlide,
-                                 const dyld::SyscallHelpers*, uintptr_t* startGlue);
+                                      const mach_header* mainExecutableMH, const MachOAnalyzer* dyldMA, uintptr_t dyldSlide,
+                                      const dyld::SyscallHelpers*, uintptr_t* startGlue);
 
 MainFunc _dyld_sim_prepare(int argc, const char* argv[], const char* envp[], const char* apple[],
-                      const mach_header* mainExecutableMH, const MachOAnalyzer* dyldMA, uintptr_t dyldSimSlide,
-                      const dyld::SyscallHelpers* sc, uintptr_t* startGlue)
+                           const mach_header* mainExecutableMH, const MachOAnalyzer* dyldMA, uintptr_t dyldSimSlide,
+                           const dyld::SyscallHelpers* sc, uintptr_t* startGlue)
 {
-    // walk all fixups chains and rebase dyld_sim
-    // Note: withChainStarts() and fixupAllChainedFixups() cannot use any static DATA pointers as they are not rebased yet
-    assert(dyldMA->hasChainedFixups());
-    uintptr_t           slide = (long)dyldMA; // all fixup chain based images have a base address of zero, so slide == load address
-    __block Diagnostics diag;
-    dyldMA->withChainStarts(diag, 0, ^(const dyld_chained_starts_in_image* starts) {
-        dyldMA->fixupAllChainedFixups(diag, starts, slide, dyld3::Array<const void*>(), nullptr);
-    });
-    diag.assertNoError();
-
     // save table of syscall pointers
     gSyscallHelpers = sc;
 
-     // make __DATA_CONST read-only (kernel maps it r/w)
-    dyldMA->forEachSegment(^(const MachOAnalyzer::SegmentInfo& segInfo, bool& stop) {
-        if ( segInfo.readOnlyData ) {
-            const uint8_t* start = (uint8_t*)(segInfo.vmAddr + slide);
-            size_t         size  = (size_t)segInfo.vmSize;
-            sSyscallDelegate.mprotect((void*)start, size, PROT_READ);
-        }
-    });
-
-    // Now, we can call functions that use DATA
-    mach_init();
-
-    // set up random value for stack canary
-    __guard_setup(apple);
-
-    // setup gProcessInfo to point to host dyld's struct
-    gProcessInfo = (struct dyld_all_image_infos*)(sc->getProcessInfo());
+    // walk all fixups chains and rebase dyld_sim and make DATA_CONST r/o
+    rebaseSelf(dyldMA);
 
     // back solve for KernelArgs because host dyld does not pass it
     KernelArgs* kernArgs = (KernelArgs*)(((uint8_t*)argv) - 2 * sizeof(void*));
+
     // before dyld4, the main executable mach_header was removed from the stack
     // so we need to force it back to allow KernelArgs to work like non-simulator processes
     // FIXME: remove when sims only run on dyld4 based macOS hosts
     kernArgs->mainExecutable = (MachOAnalyzer*)mainExecutableMH;
 
+    // Do any set up needed by any linked static libraries
+    initializeLibc(kernArgs);
+
      // create an Allocator inside its own allocation pool
     // Setup the memory manager object before the allocator so the allocator can use it before copying it internally
-    MemoryManager bootStapMemoryManager((const char**)kernArgs->findApple());
+    MemoryManager bootStapMemoryManager((const char**)apple);
     Allocator& allocator = Allocator::persistentAllocator(std::move(bootStapMemoryManager));
 
     // use placement new to construct ProcessConfig object in the Allocator pool
     ProcessConfig& config = *new (allocator.aligned_alloc(alignof(ProcessConfig), sizeof(ProcessConfig))) ProcessConfig(kernArgs, sSyscallDelegate, allocator);
 
+    // we cannot use "static RuntimeLocks locks;" because the compiler will generate an initializer or guards
+    static uint8_t sLocksStaticStorage[sizeof(RuntimeLocks)] __attribute__((aligned(alignof(RuntimeLocks))));
+    RuntimeLocks& locks = *new (sLocksStaticStorage) RuntimeLocks();
+
     // create APIs (aka RuntimeState) object in the allocator
-    APIs& state = *new (allocator.aligned_alloc(alignof(APIs), sizeof(APIs))) APIs(config, allocator, sLocks);
+    APIs& state = *new (allocator.aligned_alloc(alignof(APIs), sizeof(APIs))) APIs(config, locks, allocator);
 
     // function pointer that will be set to the entry point. Declare it here so the value can escape from withWritableMemory()
     MainFunc result = nullptr;
-
     allocator.memoryManager()->withWritableMemory([&] {
+        EphemeralAllocator ephemeralAllocator;
         // now that allocator is up, we can update image list
-        syncProcessInfo(state.persistentAllocator);
+#if HAS_EXTERNAL_STATE
+        // set initial state for ExternallyViewableState
+        state.externallyViewable.initSim(state.persistentAllocator, ephemeralAllocator, state.config.process.platform,
+                                         (struct dyld_all_image_infos*)(sc->getProcessInfo()), sc);
 
+        // publish initial externally visible state that has main program and dyld
+        setInitialExternallyVisibleState(state, ephemeralAllocator, dyldMA);
+#endif
         // load all dependents of program and bind them together, then return address of main()
         result = prepare(state, dyldMA);
     });

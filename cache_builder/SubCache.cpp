@@ -754,7 +754,6 @@ void SubCache::addObjCReadOnlyChunk(Chunk* chunk)
 // All objc optimizations need to be contiguous, but that means if any need AUTH then all do
 void SubCache::addObjCReadWriteChunk(const BuilderConfig& config, Chunk* chunk)
 {
-    // Add canonical objc protocols
     if ( config.layout.hasAuthRegion ) {
         addAuthChunk(chunk);
     }
@@ -926,6 +925,17 @@ void SubCache::addObjCHeaderInfoReadOnlyChunk(ObjCOptimizer& objcOptimizer)
     this->addObjCReadOnlyChunk(this->objcHeaderInfoRO.get());
 }
 
+void SubCache::addObjCImageInfoChunk(ObjCOptimizer& objcOptimizer)
+{
+    this->objcImageInfo = std::make_unique<ObjCImageInfoChunk>();
+    this->objcImageInfo->cacheVMSize         = CacheVMSize(objcOptimizer.imageInfoSize);
+    this->objcImageInfo->subCacheFileSize    = CacheFileSize(objcOptimizer.imageInfoSize);
+
+    objcOptimizer.imageInfoChunk = this->objcImageInfo.get();
+
+    this->addObjCReadOnlyChunk(this->objcImageInfo.get());
+}
+
 void SubCache::addObjCSelectorStringsChunk(ObjCSelectorOptimizer& objCSelectorOptimizer)
 {
     this->objcSelectorStrings = std::make_unique<ObjCStringsChunk>();
@@ -1003,17 +1013,6 @@ void SubCache::addObjCProtocolSwiftDemangledNamesChunk(ObjCProtocolOptimizer& ob
     this->addObjCReadOnlyChunk(this->objcSwiftDemangledNameStrings.get());
 }
 
-void SubCache::addObjCIMPCachesChunk(ObjCIMPCachesOptimizer& objcIMPCachesOptimizer)
-{
-    this->objcIMPCaches = std::make_unique<ObjCIMPCachesChunk>();
-    this->objcIMPCaches->cacheVMSize                        = CacheVMSize(objcIMPCachesOptimizer.impCachesTotalByteSize);
-    this->objcIMPCaches->subCacheFileSize                   = CacheFileSize(objcIMPCachesOptimizer.impCachesTotalByteSize);
-
-    objcIMPCachesOptimizer.impCachesChunk = this->objcIMPCaches.get();
-
-    this->addLinkeditChunk(this->objcIMPCaches.get());
-}
-
 void SubCache::addObjCCanonicalProtocolsChunk(const BuilderConfig& config,
                                               ObjCProtocolOptimizer& objcProtocolOptimizer)
 {
@@ -1025,6 +1024,30 @@ void SubCache::addObjCCanonicalProtocolsChunk(const BuilderConfig& config,
 
     // Add canonical objc protocols
     addObjCReadWriteChunk(config, this->objcCanonicalProtocols.get());
+}
+
+void SubCache::addObjCIMPCachesChunk(ObjCIMPCachesOptimizer& objcIMPCachesOptimizer)
+{
+    this->objcIMPCaches = std::make_unique<ObjCIMPCachesChunk>();
+    this->objcIMPCaches->cacheVMSize                        = CacheVMSize(objcIMPCachesOptimizer.impCachesTotalByteSize);
+    this->objcIMPCaches->subCacheFileSize                   = CacheFileSize(objcIMPCachesOptimizer.impCachesTotalByteSize);
+
+    objcIMPCachesOptimizer.impCachesChunk = this->objcIMPCaches.get();
+
+    this->addLinkeditChunk(this->objcIMPCaches.get());
+}
+
+void SubCache::addObjCCategoriesChunk(const BuilderConfig& config,
+                                     ObjCCategoryOptimizer& objcCategoryOptimizer)
+{
+    this->objcCategories = std::make_unique<ObjCPreAttachedCategoriesChunk>();
+    this->objcCategories->cacheVMSize        = CacheVMSize(objcCategoryOptimizer.categoriesTotalByteSize);
+    this->objcCategories->subCacheFileSize   = CacheFileSize(objcCategoryOptimizer.categoriesTotalByteSize);
+
+    objcCategoryOptimizer.categoriesChunk = this->objcCategories.get();
+
+    // Add objc categories
+    addObjCReadOnlyChunk(this->objcCategories.get());
 }
 
 void SubCache::addCacheTrieChunk(DylibTrieOptimizer& dylibTrieOptimizer)
@@ -1362,7 +1385,7 @@ void SubCache::writeCacheHeader(const BuilderOptions& options, const BuilderConf
     dyldCacheHeader->platform                      = (uint8_t)options.platform;
     dyldCacheHeader->formatVersion                 = 0; //dyld3::closure::kFormatVersion;
     dyldCacheHeader->dylibsExpectedOnDisk          = !options.dylibsRemovedFromDisk;
-    dyldCacheHeader->simulator                     = options.isSimultor();
+    dyldCacheHeader->simulator                     = options.isSimulator();
     dyldCacheHeader->locallyBuiltCache             = options.isLocallyBuiltCache;
     dyldCacheHeader->builtFromChainedFixups        = false; // no longer used
     dyldCacheHeader->sharedRegionStart             = this->subCacheVMAddress.rawValue();

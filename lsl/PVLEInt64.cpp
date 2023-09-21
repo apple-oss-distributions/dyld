@@ -22,6 +22,10 @@
  * @APPLE_LICENSE_HEADER_END@
  */
 
+#include <TargetConditionals.h>
+
+#if !TARGET_OS_EXCLAVEKIT
+
 #include <bit>
 
 #include "Defines.h"
@@ -72,3 +76,5 @@ int64_t readPVLEInt64(std::span<std::byte>& data) {
 }
 
 };
+
+#endif // !TARGET_OS_EXCLAVEKIT

@@ -49,6 +49,7 @@
 #include "JSONWriter.h"
 #include "FileUtils.h"
 #include "SwiftVisitor.h"
+#include "ChainedFixups.h"
 
 // FIXME: We should get this from cctools
 #define DYLD_CACHE_ADJ_V2_FORMAT 0x7F
@@ -302,6 +303,10 @@ static void printChains(const dyld3::MachOAnalyzer* ma)
     const uint32_t*                 fwStarts;
     Diagnostics                     diag;
     if ( ma->hasChainedFixups() ) {
+        const dyld_chained_fixups_header& header = *ma->chainedFixupsHeader();
+        printf("imports_format: %d (%s)\n", header.imports_format, mach_o::ChainedFixups::importsFormatName(header.imports_format));
+        printf("imports_count: %u\n",       header.imports_count);
+
         ma->withChainStarts(diag, 0, ^(const dyld_chained_starts_in_image* starts) {
             for (int i=0; i < starts->seg_count; ++i) {
                 if ( starts->seg_info_offset[i] == 0 )
@@ -459,6 +464,56 @@ static void printChainDetails(const dyld3::MachOAnalyzer* ma)
                                     ^(ChainedFixupPointerOnDisk* fixupLoc, bool& stop) {
             printChainEntryDetails(ma, fixupLoc, fwPointerFormat, maxValidPointer);
         });
+    }
+    if ( diag.hasError() )
+        fprintf(stderr, "dyld_info: %s\n", diag.errorMessage());
+}
+
+static void printChainHeader(const dyld3::MachOAnalyzer* ma)
+{
+    printf("    -fixup_chain_header:\n");
+
+    uint16_t                        fwPointerFormat;
+    uint32_t                        fwStartsCount;
+    const uint32_t*                 fwStarts;
+    __block Diagnostics             diag;
+    if ( ma->hasChainedFixups() ) {
+        const dyld_chained_fixups_header* chainsHeader = ma->chainedFixupsHeader();
+        printf("        dyld_chained_fixups_header:\n");
+        printf("            fixups_version  0x%08X\n", chainsHeader->fixups_version);
+        printf("            starts_offset   0x%08X\n", chainsHeader->starts_offset);
+        printf("            imports_offset  0x%08X\n", chainsHeader->imports_offset);
+        printf("            symbols_offset  0x%08X\n", chainsHeader->symbols_offset);
+        printf("            imports_count   0x%08X\n", chainsHeader->imports_count);
+        printf("            imports_format  0x%08X\n", chainsHeader->imports_format);
+        printf("            symbols_format  0x%08X\n", chainsHeader->symbols_format);
+        ma->withChainStarts(diag, 0, ^(const dyld_chained_starts_in_image* starts) {
+            printf("        dyld_chained_starts_in_image:\n");
+            printf("            seg_count              0x%08X\n", starts->seg_count);
+            for ( uint32_t i = 0; i != starts->seg_count; ++i )
+                printf("            seg_info_offset[%d]     0x%08X\n", i, starts->seg_info_offset[i]);
+
+            for (uint32_t segIndex = 0; segIndex < starts->seg_count; ++segIndex) {
+                if ( starts->seg_info_offset[segIndex] == 0 )
+                    continue;
+
+                printf("        dyld_chained_starts_in_segment:\n");
+                const dyld_chained_starts_in_segment* segInfo = (dyld_chained_starts_in_segment*)((uint8_t*)starts + starts->seg_info_offset[segIndex]);
+                printf("            size                0x%08X\n", segInfo->size);
+                printf("            page_size           0x%08X\n", segInfo->page_size);
+                printf("            pointer_format      0x%08X\n", segInfo->pointer_format);
+                printf("            segment_offset      0x%08llX\n", segInfo->segment_offset);
+                printf("            max_valid_pointer   0x%08X\n", segInfo->max_valid_pointer);
+                printf("            page_count          0x%08X\n", segInfo->page_count);
+            }
+        });
+
+        printf("        targets:\n");
+        ma->forEachChainedFixupTarget(diag, ^(int libOrdinal, const char *symbolName, uint64_t addend, bool weakImport, bool &stop) {
+            printf("            symbol          %s\n", symbolName);
+        });
+    } else if ( ma->hasFirmwareChainStarts(&fwPointerFormat, &fwStartsCount, &fwStarts) ) {
+        printf("firmware chains\n");
     }
     if ( diag.hasError() )
         fprintf(stderr, "dyld_info: %s\n", diag.errorMessage());
@@ -754,7 +809,7 @@ static void printFixups(const dyld3::MachOAnalyzer* ma, const char* path)
             fixup.type              = "bind";
             fixup.targetSymbolName  = bindTargets[targetIndex].symbolName;
             fixup.targetDylib       = ordinalName(ma, bindTargets[targetIndex].libOrdinal);
-            fixup.targetAddend      = 0;
+            fixup.targetAddend      = bindTargets[targetIndex].addend;
             fixups.push_back(fixup);
        }, ^(uint64_t runtimeOffset, unsigned overrideBindTargetIndex, bool& stop) {
            FixupInfo fixup;
@@ -765,7 +820,7 @@ static void printFixups(const dyld3::MachOAnalyzer* ma, const char* path)
            fixup.type              = "weak-bind";
            fixup.targetSymbolName  = overrideBindTargets[overrideBindTargetIndex].symbolName;
            fixup.targetDylib       = ordinalName(ma, overrideBindTargets[overrideBindTargetIndex].libOrdinal);
-           fixup.targetAddend      = 0;
+            fixup.targetAddend     = bindTargets[overrideBindTargetIndex].addend;
            fixups.push_back(fixup);
       });
     }
@@ -1238,7 +1293,8 @@ static void printSwiftProtocolConformances(const dyld3::MachOAnalyzer* ma,
 
     uint64_t loadAddress = ma->preferredLoadAddress();
 
-    __block metadata_visitor::SwiftVisitor swiftVisitor(dyldCache, ma);
+    uint64_t sharedCacheRelativeSelectorBaseVMAddress = dyldCache->sharedCacheRelativeSelectorBaseVMAddress();
+    __block metadata_visitor::SwiftVisitor swiftVisitor(dyldCache, ma, VMAddress(sharedCacheRelativeSelectorBaseVMAddress));
     swiftVisitor.forEachProtocolConformance(^(const metadata_visitor::SwiftConformance &swiftConformance, bool &stopConformance) {
         VMAddress protocolConformanceVMAddr = swiftConformance.getVMAddress();
         metadata_visitor::SwiftPointer protocolPtr = swiftConformance.getProtocolPointer(swiftVisitor);
@@ -1313,7 +1369,7 @@ static void printSharedRegion(const dyld3::MachOAnalyzer* ma)
             std::string_view toSegmentName      = sectionNames[(uint32_t)toSectionIndex].first;
             std::string_view toSectionName      = sectionNames[(uint32_t)toSectionIndex].second;
             uint64_t fromVMAddr                 = sectionVMAddrs[(uint32_t)fromSectionIndex] + fromSectionOffset;
-            uint64_t toVMAddr                   = sectionVMAddrs[(uint32_t)toSectionIndex] + fromSectionOffset;
+            uint64_t toVMAddr                   = sectionVMAddrs[(uint32_t)toSectionIndex] + toSectionOffset;
             printf("        %-16s %-16s 0x%08llx      %-16s %-16s 0x%08llx\n",
                    fromSegmentName.data(), fromSectionName.data(), fromVMAddr,
                    toSegmentName.data(), toSectionName.data(), toVMAddr);
@@ -1451,6 +1507,7 @@ static void usage()
             "\t-imports              print all symbols needed from other dylibs\n"
             "\t-fixup_chains         print info about chain format and starts\n"
             "\t-fixup_chain_details  print detailed info about every fixup in chain\n"
+            "\t-fixup_chain_header   print detailed info about the fixup chains header\n"
             "\t-symbolic_fixups      print ranges of each atom of DATA with symbol name and fixups\n"
             "\t-swift_protocols      print swift protocols\n"
             "\t-objc                 print objc classes, categories, etc\n"
@@ -1483,6 +1540,7 @@ struct PrintOptions
     bool    fixups              = false;
     bool    fixupChains         = false;
     bool    fixupChainDetails   = false;
+    bool    fixupChainHeader    = false;
     bool    symbolicFixups      = false;
     bool    objc                = false;
     bool    swiftProtocols      = false;
@@ -1526,6 +1584,9 @@ int main(int argc, const char* argv[])
         }
         else if ( strcmp(arg, "-fixup_chain_details") == 0 ) {
             printOptions.fixupChainDetails = true;
+        }
+        else if ( strcmp(arg, "-fixup_chain_header") == 0 ) {
+            printOptions.fixupChainHeader = true;
         }
         else if ( strcmp(arg, "-symbolic_fixups") == 0 ) {
             printOptions.symbolicFixups = true;
@@ -1754,6 +1815,9 @@ int main(int argc, const char* argv[])
 
                 if ( printOptions.fixupChainDetails )
                     printChainDetails(ma);
+
+                if ( printOptions.fixupChainHeader )
+                    printChainHeader(ma);
 
                 if ( printOptions.symbolicFixups )
                     printSymbolicFixups(ma, path);

@@ -29,25 +29,33 @@
 #include <string.h>
 #include <stdint.h>
 #include <time.h>
-#include <fcntl.h>
-#include <unistd.h>
+#include <TargetConditionals.h>
+#if TARGET_OS_EXCLAVEKIT
+  #include <liblibc/liblibc.h>
+  #include <liblibc/file.h>
+  extern void abort_report_np(const char* format, ...) __attribute__((noreturn,format(printf, 1, 2)));
+  extern void __assert_rtn(const char* func, const char* file, int line, const char* failedexpr);
+#else
+  #include <fcntl.h>
+  #include <unistd.h>
+  #include <mach/mach.h>
+  #include <mach/mach_time.h>
+  #include <sys/stat.h>
+  #include <sys/mman.h>
+  #include <sys/stat.h>
+  #include <sys/ioctl.h>
+  #include <libkern/OSAtomic.h>
+  #include <libc_private.h>
+  #include <pthread.h>
+  #include <corecrypto/ccdigest.h>
+  #include <corecrypto/ccsha1.h>
+  #include <corecrypto/ccsha2.h>
+  #include <_simple.h>
+#endif
 #include <stdarg.h>
 #include <stdio.h>
-#include <mach/mach.h>
-#include <mach/mach_time.h>
-#include <sys/attr.h>
-#include <sys/mman.h>
-#include <sys/stat.h>
-#include <sys/ioctl.h>
 #include <uuid/uuid.h>
-#include <TargetConditionals.h>
-#include <libkern/OSAtomic.h>
-#include <libc_private.h>
 #include <errno.h>
-#include <pthread.h>
-#include <corecrypto/ccdigest.h>
-#include <corecrypto/ccsha1.h>
-#include <corecrypto/ccsha2.h>
 
 #if TARGET_OS_SIMULATOR
 	#include "dyldSyscallInterface.h"
@@ -89,92 +97,22 @@
     };
 #endif
 
-// from _simple.h in libc
-typedef struct _SIMPLE*	_SIMPLE_STRING;
-extern void				_simple_vdprintf(int __fd, const char *__fmt, va_list __ap);
-extern void				_simple_dprintf(int __fd, const char *__fmt, ...);
-extern _SIMPLE_STRING	_simple_salloc(void);
-extern int				_simple_vsprintf(_SIMPLE_STRING __b, const char *__fmt, va_list __ap);
-extern void				_simple_sfree(_SIMPLE_STRING __b);
-extern char *			_simple_string(_SIMPLE_STRING __b);
-
 // dyld::log(const char* format, ...)
 extern void _ZN5dyld43logEPKcz(const char*, ...);
 
-// dyld::halt(const char* msg);
-extern void _ZN5dyld44haltEPKc(const char* msg) __attribute__((noreturn));
+// dyld::halt(const char* msg, const StructuredError*);
+extern void halt(const char* msg, void* extra) __attribute__((noreturn)) __asm("__ZN5dyld44haltEPKcPKNS_15StructuredErrorE");
 
 extern void dyld_fatal_error(const char* errString) __attribute__((noreturn));
 
-
-// abort called by C++ unwinding code
-void abort()
+__attribute__((noreturn))
+void _libcpp_verbose_abort(const char* msg, ...) __asm("__ZNSt3__122__libcpp_verbose_abortEPKcz");
+void _libcpp_verbose_abort(const char* msg, ...)
 {
-	_ZN5dyld44haltEPKc("dyld calling abort()\n");
+    halt(msg, NULL);
+    __builtin_unreachable(); // never reached, but needed to tell the compiler that the function never returns
 }
 
-// std::terminate called by C++ unwinding code
-extern void _ZSt9terminatev(void);
-void _ZSt9terminatev()
-{
-	_ZN5dyld44haltEPKc("dyld std::terminate()\n");
-}
-
-// std::unexpected called by C++ unwinding code
-extern void _ZSt10unexpectedv(void);
-void _ZSt10unexpectedv()
-{
-	_ZN5dyld44haltEPKc("dyld std::unexpected()\n");
-}
-
-// __cxxabiv1::__terminate(void (*)()) called to terminate process
-extern void _ZN10__cxxabiv111__terminateEPFvvE(void);
-void _ZN10__cxxabiv111__terminateEPFvvE()
-{
-	_ZN5dyld44haltEPKc("dyld std::__terminate()\n");
-}
-
-// __cxxabiv1::__unexpected(void (*)()) called to terminate process
-extern void _ZN10__cxxabiv112__unexpectedEPFvvE(void);
-void _ZN10__cxxabiv112__unexpectedEPFvvE()
-{
-	_ZN5dyld44haltEPKc("dyld std::__unexpected()\n");
-}
-
-// std::__terminate() called by C++ unwinding code
-extern void _ZSt11__terminatePFvvE(void (*func)(void));
-void _ZSt11__terminatePFvvE(void (*func)(void))
-{
-	_ZN5dyld44haltEPKc("dyld std::__terminate()\n");
-}
-
-// std::__unexpected() called by C++ unwinding code
-extern void _ZSt12__unexpectedPFvvE(void (*func)(void));
-void _ZSt12__unexpectedPFvvE(void (*func)(void))
-{
-	_ZN5dyld44haltEPKc("dyld std::__unexpected()\n");
-}
-
-// terminate_handler get_terminate()
-extern void* _ZSt13get_terminatev(void);
-void* _ZSt13get_terminatev()
-{
-    return NULL;
-}
-
-// unexpected_handler get_unexpected()
-extern void* _ZSt14get_unexpectedv(void);
-void* _ZSt14get_unexpectedv()
-{
-    return NULL;
-}
-
-// new_handler get_new_handler()
-extern void* _ZSt15get_new_handlerv(void);
-void* _ZSt15get_new_handlerv()
-{
-    return NULL;
-}
 
 extern void __cxa_pure_virtual(void);
 void __cxa_pure_virtual()
@@ -182,27 +120,17 @@ void __cxa_pure_virtual()
     abort_report_np("Pure virtual method called");
 }
 
-// __cxxabiv1::__terminate_handler
-void* _ZN10__cxxabiv119__terminate_handlerE  = &_ZSt9terminatev;
 
-// __cxxabiv1::__unexpected_handler
-void* _ZN10__cxxabiv120__unexpected_handlerE = &_ZSt10unexpectedv;
-
-
-int	myfprintf(FILE* file, const char* format, ...) __asm("_fprintf");
-
-// called by libuwind code before aborting
-size_t fwrite(const void* ptr, size_t size, size_t nitme, FILE* stream)
-{
-	return myfprintf(stream, "%s", (char*)ptr);
-}
-
-// called by libuwind code before aborting
+// called by misc code, assume using stderr
 int	fprintf(FILE* file, const char* format, ...)
 {
 	va_list	list;
 	va_start(list, format);
+#if TARGET_OS_EXCLAVEKIT
+    vfprintf(file, format, list);
+#else
 	_simple_vdprintf(STDERR_FILENO, format, list);
+#endif
 	va_end(list);
 	return 0;
 }
@@ -210,21 +138,12 @@ int	fprintf(FILE* file, const char* format, ...)
 // called by LIBC_ABORT
 void abort_report_np(const char* format, ...)
 {
-	va_list list;
-	const char *str;
-	_SIMPLE_STRING s = _simple_salloc();
-	if ( s != NULL ) {
-		va_start(list, format);
-		_simple_vsprintf(s, format, list);
-		va_end(list);
-		str = _simple_string(s);
-	}
-	else {
-		// _simple_salloc failed, but at least format may have useful info by itself
-		str = format;
-	}
-	_ZN5dyld44haltEPKc(str);
-	// _ZN5dyld44haltEPKc doesn't return, so we can't call _simple_sfree
+    char strBuf[1024];
+    va_list list;
+    va_start(list, format);
+    vsnprintf(strBuf, sizeof(strBuf), format, list);
+    va_end(list);
+    halt(strBuf, NULL);
 }
 
 // libc uses assert()
@@ -242,38 +161,36 @@ void __assert_rtn(const char* func, const char* file, int line, const char* fail
 }
 #pragma clang diagnostic pop
 
-int snprintf(char * restrict str, size_t size, const char * restrict format, ...)
+#if !TARGET_OS_EXCLAVEKIT
+
+// abort various libc.a and libc++.a functions
+void abort()
+{
+    halt("dyld calling abort()\n", NULL);
+}
+
+// clang sometimes optimizes fprintf to fwrite
+size_t fwrite(const void* ptr, size_t size, size_t nitme, FILE* stream)
+{
+    return write(STDERR_FILENO, ptr, size*nitme);
+}
+
+int vsnprintf(char* str, size_t size, const char*  format, va_list list)
+{
+    _SIMPLE_STRING s = _simple_salloc();
+    int result = _simple_vsprintf(s, format, list);
+    strlcpy(str, _simple_string(s), size);
+    _simple_sfree(s);
+    return result;
+}
+
+int snprintf(char* str, size_t size, const char* format, ...)
 {
     va_list list;
-    _SIMPLE_STRING s = _simple_salloc();
     va_start(list, format);
-    _simple_vsprintf(s, format, list);
+    int result = vsnprintf(str, size, format, list);
     va_end(list);
-    strncpy(str, _simple_string(s), size);
-    _simple_sfree(s);
-    return 0;
-}
-
-/*
- * We have our own localtime() to avoid needing the notify API which is used
- * by the code in libc.a for localtime() which is used by arc4random().
- */
-struct tm* localtime(const time_t* t)
-{
-	return (struct tm*)NULL;
-}
-
-// malloc calls exit(-1) in case of errors...
-void exit(int x)
-{
-	_ZN5dyld44haltEPKc("exit()");
-}
-
-// static initializers make calls to __cxa_atexit
-extern void __cxa_atexit(void);
-void __cxa_atexit()
-{
-	// do nothing, dyld never terminates
+    return result;
 }
 
 //
@@ -305,74 +222,23 @@ void __guard_setup(const char* apple[])
 		}
 	}
 #if !TARGET_OS_SIMULATOR
-#if __LP64__
-	__stack_chk_guard = ((long)arc4random() << 32) | arc4random();
-#else
-	__stack_chk_guard = arc4random();
-#endif
+  #if __LP64__
+    __stack_chk_guard = ((long)arc4random() << 32) | arc4random();
+  #else
+    __stack_chk_guard = arc4random();
+  #endif
 #endif
 }
+#endif // !TARGET_OS_EXCLAVEKIT
 
-extern void _ZN5dyld44haltEPKc(const char*);
+#if TARGET_OS_EXCLAVEKIT
+  uintptr_t __stack_chk_guard = 0x535441434B475244;
+#endif // TARGET_OS_EXCLAVEKIT
+
 extern void __stack_chk_fail(void);
 void __stack_chk_fail()
 {
-	_ZN5dyld44haltEPKc("stack buffer overrun");
-}
-
-
-// std::_throw_bad_alloc()
-extern void _ZSt17__throw_bad_allocv(void);
-void _ZSt17__throw_bad_allocv()
-{
-	_ZN5dyld44haltEPKc("__throw_bad_alloc()");
-}
-
-// std::_throw_length_error(const char* x)
-extern void _ZSt20__throw_length_errorPKc(void);
-void _ZSt20__throw_length_errorPKc()
-{
-	_ZN5dyld44haltEPKc("_throw_length_error()");
-}
-
-// The aligned version of new isn't in libc++abi-static.a but might be called
-// by __libcpp_allocate unless it is optimized perfectly
-extern void* _Znwm(unsigned long size);
-extern void* _ZnwmSt11align_val_t(unsigned long size, size_t align);
-void* _ZnwmSt11align_val_t(unsigned long size, size_t align) {
-    return _Znwm(size);
-}
-
-// The aligned version of new isn't in libc++abi-static.a but might be called
-// by __libcpp_deallocate unless it is optimized perfectly
-extern void _ZdlPv(void* ptr);
-extern void _ZdlPvSt11align_val_t(void* ptr, size_t align);
-void _ZdlPvSt11align_val_t(void* ptr, size_t align) {
-    _ZdlPv(ptr);
-}
-
-// the libc.a version of this drags in ASL
-extern void __chk_fail(void);
-void __chk_fail()
-{
-	_ZN5dyld44haltEPKc("__chk_fail()");
-}
-
-
-// referenced by libc.a(pthread.o) but unneeded in dyld
-extern void set_malloc_singlethreaded(void);
-void set_malloc_singlethreaded() {}
-int PR_5243343_flag = 0;
-
-
-// used by some pthread routines
-char* mach_error_string(mach_error_t err)
-{
-	return (char *)"unknown error code";
-}
-char* mach_error_type(mach_error_t err)
-{
-	return (char *)"(unknown/unknown)";
+    halt("stack buffer overrun", NULL);
 }
 
 // _pthread_reap_thread calls fprintf(stderr).
@@ -380,32 +246,6 @@ char* mach_error_type(mach_error_t err)
 FILE* __stderrp = NULL;
 FILE* __stdoutp = NULL;
 
-// work with c++abi.a
-void (*__cxa_terminate_handler)(void) = _ZSt9terminatev;
-void (*__cxa_unexpected_handler)(void) = _ZSt10unexpectedv;
-
-extern void abort_message(const char* format, ...);
-void abort_message(const char* format, ...)
-{
-	va_list	list;
-	va_start(list, format);
-	_simple_vdprintf(STDERR_FILENO, format, list);
-	va_end(list);
-}
-
-extern void __cxa_bad_typeid(void);
-void __cxa_bad_typeid()
-{
-	_ZN5dyld44haltEPKc("__cxa_bad_typeid()");
-}
-
-#if 0
-// to work with libc++
-void _ZNKSt3__120__vector_base_commonILb1EE20__throw_length_errorEv()
-{
-	_ZN5dyld44haltEPKc("std::vector<>::_throw_length_error()");
-}
-#endif
 
 #if 0
 // libc.a sometimes missing memset
@@ -543,11 +383,12 @@ void _ZN5dyld43logEPKcz(const char* format, ...) {
 
 #if __i386__
 extern void _ZN4dyld4vlogEPKcPc(const char* format, va_list list);
-void _ZN4dyld4vlogEPKcPc(const char* format, va_list list) {
+void _ZN4dyld4vlogEPKcPc(const char* format, va_list list)
 #else
 extern void _ZN4dyld4vlogEPKcP13__va_list_tag(const char* format, va_list list);
-void _ZN4dyld4vlogEPKcP13__va_list_tag(const char* format, va_list list) {
+void _ZN4dyld4vlogEPKcP13__va_list_tag(const char* format, va_list list)
 #endif
+{
 	gSyscallHelpers->vlog(format, list);
 }
 
@@ -620,29 +461,13 @@ int	readdir_r(DIR* dirp, struct dirent* entry, struct dirent **result) {
 
 // HACK: readdir() is not used in dyld_sim, but it is pulled in by libc.a, then dead stripped.
 struct dirent* readdir(DIR *dirp) {
-    _ZN5dyld44haltEPKc("dyld_sim readdir() not supported\n");
+    halt("dyld_sim readdir() not supported\n", NULL);
 }
 
 int closedir(DIR* dirp) {
 	if ( gSyscallHelpers->version < 3 )
 		return EPERM;
 	return gSyscallHelpers->closedir(dirp);
-}
-
-extern void coresymbolication_load_notifier(void* connection, uint64_t timestamp, const char* path, const struct mach_header* mh);
-void coresymbolication_load_notifier(void* connection, uint64_t timestamp, const char* path, const struct mach_header* mh)
-{
-	// if host dyld supports this notifier, call into host dyld
-	if ( gSyscallHelpers->version >= 4 )
-		return gSyscallHelpers->coresymbolication_load_notifier(connection, timestamp, path, mh);
-}
-
-extern void coresymbolication_unload_notifier(void* connection, uint64_t timestamp, const char* path, const struct mach_header* mh);
-void coresymbolication_unload_notifier(void* connection, uint64_t timestamp, const char* path, const struct mach_header* mh)
-{
-	// if host dyld supports this notifier, call into host dyld
-	if ( gSyscallHelpers->version >= 4 )
-		return gSyscallHelpers->coresymbolication_unload_notifier(connection, timestamp, path, mh);
 }
 
 int mprotect(void* addr, size_t len, int prot)
@@ -935,7 +760,7 @@ void abort_with_payload(uint32_t reason_namespace, uint64_t reason_code, void* p
 {
 	if ( gSyscallHelpers->version >= 6 )
 		gSyscallHelpers->abort_with_payload(reason_namespace, reason_code, payload, payload_size, reason_string, reason_flags);
-    _ZN5dyld44haltEPKc(reason_string);
+    halt(reason_string, NULL);
 }
 
 kern_return_t   task_info(task_name_t target_task, task_flavor_t flavor, task_info_t task_info_out, mach_msg_type_number_t *task_info_outCnt) {
@@ -976,30 +801,6 @@ int amfi_check_dyld_policy_self(uint64_t inFlags, uint64_t* outFlags)
     return 0;
 }
 
-extern void _ZN5dyld424notifyMonitoringDyldMainEv(void);
-void _ZN5dyld424notifyMonitoringDyldMainEv() {
-    if ( gSyscallHelpers->version >= 11 ) {
-        gSyscallHelpers->notifyMonitoringDyldMain();
-        return;
-    }
-}
-
-extern void _ZN5dyld420notifyMonitoringDyldEbjPPK11mach_headerPPKc(bool unloading, unsigned imageCount, const struct mach_header* loadAddresses[], const char* imagePaths[]);
-void _ZN5dyld420notifyMonitoringDyldEbjPPK11mach_headerPPKc(bool unloading, unsigned imageCount, const struct mach_header* loadAddresses[], const char* imagePaths[]) {
-    if ( gSyscallHelpers->version >= 11 ) {
-        gSyscallHelpers->notifyMonitoringDyld(unloading, imageCount, loadAddresses, imagePaths);
-        return;
-    }
-}
-
-extern void _ZN5dyld438notifyMonitoringDyldBeforeInitializersEv(void);
-void _ZN5dyld438notifyMonitoringDyldBeforeInitializersEv() {
-    if ( gSyscallHelpers->version >= 17 ) {
-        gSyscallHelpers->notifyMonitoringDyldBeforeInitializers();
-        return;
-    }
-}
-
 kern_return_t vm_copy(vm_map_t task, vm_address_t source_address, vm_size_t size, vm_address_t dest_address)
 {
     if ( gSyscallHelpers->version >= 13 )
@@ -1029,10 +830,11 @@ int getattrlistbulk(int fd, void* attrList, void* attrBuf, size_t bufSize, uint6
 }
 
 #ifdef __LP64__
-int getattrlist(const char* path, void* attrList, void * attrBuf, size_t attrBufSize, unsigned int options) {
+int getattrlist(const char* path, void* attrList, void * attrBuf, size_t attrBufSize, unsigned int options)
 #else /* __LP64__ */
-int getattrlist(const char* path, void* attrList, void * attrBuf, size_t attrBufSize, unsigned long options) {
+int getattrlist(const char* path, void* attrList, void * attrBuf, size_t attrBufSize, unsigned long options)
 #endif
+{
     if ( gSyscallHelpers->version >= 17 )
         return gSyscallHelpers->getattrlist(path, attrList, attrBuf, attrBufSize, options);
     return -1;
@@ -1045,13 +847,13 @@ int getfsstat(struct statfs *buf, int bufsize, int flags) {
 }
 
 int* __error(void) {
-	return gSyscallHelpers->errnoAddress();
+    return gSyscallHelpers->errnoAddress();
 }
 
 extern void mach_init(void);
 void mach_init() {
-	mach_task_self_ = task_self_trap();
-	//_task_reply_port = _mach_reply_port();
+    mach_task_self_ = task_self_trap();
+    //_task_reply_port = _mach_reply_port();
 }
 
 mach_port_t mach_task_self_ = MACH_PORT_NULL;
@@ -1072,15 +874,15 @@ void* _NSConcreteGlobalBlock[32];
 extern void _Block_object_assign(void * p1, const void * p2, const int p3);
 void _Block_object_assign(void * p1, const void * p2, const int p3)
 {
-	_ZN5dyld44haltEPKc("_Block_object_assign()");
+    halt("_Block_object_assign()", NULL);
 }
 
 extern void _Block_object_dispose(const void* object, int flags);
 void _Block_object_dispose(const void* object, int flags)
 {
-	// only support stack blocks in dyld: BLOCK_FIELD_IS_BYREF=8
-	if ( flags != 8 )
-		_ZN5dyld44haltEPKc("_Block_object_dispose()");
+    // only support stack blocks in dyld: BLOCK_FIELD_IS_BYREF=8
+    if ( flags != 8 )
+        halt("_Block_object_dispose()", NULL);
 }
 
 
@@ -1108,21 +910,5 @@ void _dyld_debugger_notification(int mode, unsigned long count, uint64_t machHea
 }
 
 #endif
-    
-void uuid_unparse_upper(const uuid_t uu, uuid_string_t out)
-{
-    snprintf(out, sizeof(uuid_string_t),
-             "%02X%02X%02X%02X-"
-             "%02X%02X-"
-             "%02X%02X-"
-             "%02X%02X-"
-             "%02X%02X%02X%02X%02X%02X",
-             uu[0], uu[1], uu[2], uu[3],
-             uu[4], uu[5],
-             uu[6], uu[7],
-             uu[8], uu[9],
-             uu[10], uu[11], uu[12], uu[13], uu[14], uu[15]);
-}
-
 
 

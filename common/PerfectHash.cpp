@@ -40,6 +40,11 @@ Source is http://burtleburtle.net/bob/c/perfect.c
 ------------------------------------------------------------------------------
 */
 
+#include <TargetConditionals.h>
+
+#if !TARGET_OS_EXCLAVEKIT
+
+#include <strings.h>
 #include "PerfectHash.h"
 
 #if BUILDING_CACHE_BUILDER || BUILDING_UNIT_TESTS || BUILDING_CACHE_BUILDER_UNIT_TESTS
@@ -832,3 +837,5 @@ void PerfectHash::make_perfect(const dyld3::OverflowSafeArray<const char*>& stri
 }
 
 } // namespace objc
+
+#endif // !TARGET_OS_EXCLAVEKIT

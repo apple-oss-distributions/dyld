@@ -21,12 +21,17 @@
  * @APPLE_LICENSE_HEADER_END@
  */
 
+#include <TargetConditionals.h>
+
+#if !TARGET_OS_EXCLAVEKIT
+
 #include <assert.h>
 #include <unistd.h>
 #include <sys/stat.h>
 #include <sys/types.h>
 #include <sys/fcntl.h>
 
+#include "Defines.h"
 #include "UUID.h"
 #include "Loader.h"
 #include "PrebuiltLoader.h"
@@ -35,11 +40,12 @@
 #include "MachOAnalyzer.h"
 #include "DyldProcessConfig.h"
 #include "DyldRuntimeState.h"
-#include "ProcessAtlas.h"
 #include "PrebuiltObjC.h"
 #include "PrebuiltSwift.h"
 #include "OptimizerObjC.h"
 #include "objc-shared-cache.h"
+
+#if SUPPORT_CREATING_PREBUILTLOADERS || BUILDING_UNIT_TESTS || BUILDING_CACHE_BUILDER_UNIT_TESTS
 
 // HACK: This is just to avoid building the version in the unit tests
 #if BUILDING_CACHE_BUILDER_UNIT_TESTS
@@ -245,10 +251,10 @@ bool PrebuiltLoader::matchesPath(const char* path) const
     return false;
 }
 
-FileID PrebuiltLoader::fileID(const FileManager& fileManager) const
+FileID PrebuiltLoader::fileID(const RuntimeState& state) const
 {
     if ( const FileValidationInfo* fvi = fileValidationInfo() )
-        return FileID(fvi->inode, fileManager.fsidForUUID(fvi->uuid), fvi->mtime, fvi->checkInodeMtime);
+        return FileID(fvi->inode, fvi->deviceID, fvi->mtime, fvi->checkInodeMtime);
     return FileID::none();
 }
 
@@ -368,12 +374,14 @@ void PrebuiltLoader::loadDependents(Diagnostics& diag, RuntimeState& state, cons
     ldrState = State::dependentsMapped;
 }
 
+#if SUPPORT_IMAGE_UNLOADING
 void PrebuiltLoader::unmap(RuntimeState& state, bool force) const
 {
     // only called during a dlopen() failure, roll back state 
     State& ldrState = this->loaderState(state);
     ldrState = State::notMapped;
 }
+#endif
 
 #if BUILDING_DYLD || BUILDING_UNIT_TESTS
 void PrebuiltLoader::applyFixups(Diagnostics& diag, RuntimeState& state, DyldCacheDataConstLazyScopedWriter& cacheDataConst, bool allowLazyBinds) const
@@ -384,7 +392,10 @@ void PrebuiltLoader::applyFixups(Diagnostics& diag, RuntimeState& state, DyldCac
     if ( this->dylibInDyldCache ) {
         // But if some lower level cached dylib has a root, we
         // need to patch this image's uses of that rooted dylib.
-        if ( state.hasOverriddenCachedDylib() ) {
+        // We also need to patch if there are unzippered twins.
+        // In that case, we need to make sure that if this binary is in the cache and linked to
+        // the macOS side of the unzippered twins, then the iOSMac unzippered twin can now patch this dylib
+        if ( state.hasOverriddenCachedDylib() || state.hasOverriddenUnzipperedTwin() ) {
             // have each other image apply to me any cache patching it has
             for ( const Loader* ldr : state.loaded ) {
                 ldr->applyCachePatchesTo(state, this, cacheDataConst);
@@ -507,7 +518,6 @@ bool PrebuiltLoader::representsCachedDylibIndex(uint16_t dylibIndex) const
     dylibIndex = 0xFFFF;
     return false; // cannot make PrebuiltLoader for images that override the dyld cache
 }
-
 
 void PrebuiltLoader::recursiveMarkBeingValidated(const RuntimeState& state) const
 {
@@ -669,7 +679,7 @@ void PrebuiltLoader::invalidateInIsolation(const RuntimeState& state) const
                                                           }
                                                           FileID foundFileID = FileID::none();
                                                           if ( state.config.fileExists(possiblePath, &foundFileID) ) {
-                                                              FileID recordedFileID = this->fileID(state.fileManager);
+                                                              FileID recordedFileID = this->fileID(state);
                                                               // Note: sim caches will have valid() fileIDs, others won't
                                                               if ( recordedFileID.valid() ) {
                                                                   if ( foundFileID != recordedFileID ) {
@@ -701,7 +711,7 @@ void PrebuiltLoader::invalidateInIsolation(const RuntimeState& state) const
     else {
 #if BUILDING_DYLD
         // not in dyld cache
-        FileID recordedFileID = this->fileID(state.fileManager);
+        FileID recordedFileID = this->fileID(state);
         if ( recordedFileID.valid() ) {
             // have recorded file inode (such as for embedded framework in 3rd party app)
             FileID foundFileID = FileID::none();
@@ -752,6 +762,11 @@ bool PrebuiltLoader::dyldDoesObjCFixups() const
 
     // dylibs in dyld cache (had objc fixed up at cache build time)
     return this->dylibInDyldCache;
+}
+
+const SectionLocations* PrebuiltLoader::getSectionLocations() const
+{
+    return &this->sectionLocations;
 }
 
 Array<Loader::Region> PrebuiltLoader::segments() const
@@ -824,7 +839,7 @@ void PrebuiltLoader::setMF(RuntimeState& state, const dyld3::MachOFile* mf) cons
 ////////////////////////  other functions /////////////////////////////////
 
 PrebuiltLoader::PrebuiltLoader(const Loader& jitLoader)
-    : Loader(InitialOptions(jitLoader), true, false, 0)
+    : Loader(InitialOptions(jitLoader), true, false, 0, false)
 {
 }
 
@@ -1152,7 +1167,7 @@ void PrebuiltLoader::serialize(Diagnostics& diag, RuntimeState& state, const Jus
     // append FileValidationInfo
     if ( !jitLoader.dylibInDyldCache || state.config.dyldCache.dylibsExpectedOnDisk ) {
         allocator.align(__alignof__(FileValidationInfo));
-        FileValidationInfo info = jitLoader.getFileValidationInfo(state.fileManager);
+        FileValidationInfo info = jitLoader.getFileValidationInfo(state);
         uintptr_t          off  = allocator.size() - serializationStart;
         p->fileValidationOffset = off;
         assert(p->fileValidationOffset == off && "uint16_t fileValidationOffset overflow");
@@ -1169,6 +1184,9 @@ void PrebuiltLoader::serialize(Diagnostics& diag, RuntimeState& state, const Jus
         p->regionsCount = regions.count();
         allocator.append(&regions[0], sizeof(Region) * regions.count());
     });
+
+    // append section locations
+    p->sectionLocations = *jitLoader.getSectionLocations();
 
     // add catalyst support info
     bool isMacOSOrCataylyst = (state.config.process.basePlatform == dyld3::Platform::macOS) || (state.config.process.basePlatform == dyld3::Platform::iOSMac);
@@ -1363,6 +1381,7 @@ void PrebuiltLoader::print(RuntimeState& state, FILE* out, bool printComments) c
         fprintf(out, "      \"file-info\":  {\n");
         if ( fileInfo->checkInodeMtime ) {
             fprintf(out, "          \"slice-offset\":    \"0x%llX\",\n", fileInfo->sliceOffset);
+            fprintf(out, "          \"deviceID\":        \"0x%llX\",\n", fileInfo->deviceID);
             fprintf(out, "          \"inode\":           \"0x%llX\",\n", fileInfo->inode);
             fprintf(out, "          \"mod-time\":        \"0x%llX\",\n", fileInfo->mtime);
         }
@@ -1580,7 +1599,7 @@ bool PrebuiltLoaderSet::isValid(RuntimeState& state) const
 
     return !somethingInvalid;
 }
-#endif
+#endif // SUPPORT_VM_LAYOUT
 
 const PrebuiltLoader* PrebuiltLoaderSet::findLoader(const char* path) const
 {
@@ -1626,16 +1645,16 @@ const ObjCSelectorOpt* PrebuiltLoaderSet::objcSelectorOpt() const {
     return (const ObjCSelectorOpt*)((uint8_t*)this + this->objcSelectorHashTableOffset);
 }
 
-const ObjCClassOpt* PrebuiltLoaderSet::objcClassOpt() const {
+const ObjCDataStructOpt* PrebuiltLoaderSet::objcClassOpt() const {
     if ( this->objcClassHashTableOffset == 0 )
         return nullptr;
-    return (const ObjCClassOpt*)((uint8_t*)this + this->objcClassHashTableOffset);
+    return (const ObjCDataStructOpt*)((uint8_t*)this + this->objcClassHashTableOffset);
 }
 
-const ObjCClassOpt* PrebuiltLoaderSet::objcProtocolOpt() const {
+const ObjCDataStructOpt* PrebuiltLoaderSet::objcProtocolOpt() const {
     if ( this->objcProtocolHashTableOffset == 0 )
         return nullptr;
-    return (const ObjCClassOpt*)((uint8_t*)this + this->objcProtocolHashTableOffset);
+    return (const ObjCDataStructOpt*)((uint8_t*)this + this->objcProtocolHashTableOffset);
 }
 
 const uint64_t* PrebuiltLoaderSet::swiftTypeProtocolTable() const {
@@ -1665,7 +1684,7 @@ bool PrebuiltLoaderSet::hasOptimizedSwift() const {
 void PrebuiltLoaderSet::logDuplicateObjCClasses(RuntimeState& state) const
 {
 #if BUILDING_DYLD || BUILDING_UNIT_TESTS
-    if ( const ObjCClassOpt* classesHashTable = objcClassOpt() ) {
+    if ( const ObjCDataStructOpt* classesHashTable = objcClassOpt() ) {
         if ( !classesHashTable->hasDuplicates() || !state.config.log.initializers )
             return;
 
@@ -1676,7 +1695,7 @@ void PrebuiltLoaderSet::logDuplicateObjCClasses(RuntimeState& state) const
             duplicateClassesToIgnore[className] = true;
         });
 
-        classesHashTable->forEachClass(state, ^(const PrebuiltLoader::BindTargetRef &nameTarget,
+        classesHashTable->forEachDataStruct(state, ^(const PrebuiltLoader::BindTargetRef &nameTarget,
                                                 const Array<PrebuiltLoader::BindTargetRef> &implTargets) {
             // Skip entries without duplicates
             if ( implTargets.count() == 1 )
@@ -1698,7 +1717,7 @@ void PrebuiltLoaderSet::logDuplicateObjCClasses(RuntimeState& state) const
             }
         });
     }
-#endif
+#endif // BUILDING_DYLD || BUILDING_UNIT_TESTS
 }
 
 #if BUILDING_CLOSURE_UTIL
@@ -1764,11 +1783,11 @@ void PrebuiltLoaderSet::print(RuntimeState& state, FILE* out, bool printComments
     }
 
     // Objc classes
-    if ( const ObjCClassOpt* clsOpt = this->objcClassOpt() ) {
+    if ( const ObjCDataStructOpt* clsOpt = this->objcClassOpt() ) {
         fprintf(out, ",\n  \"objc-class-table\": [");
         needComma = false;
 
-        clsOpt->forEachClass(state, ^(const PrebuiltLoader::BindTargetRef& nameTarget,
+        clsOpt->forEachDataStruct(state, ^(const PrebuiltLoader::BindTargetRef& nameTarget,
                                       const Array<PrebuiltLoader::BindTargetRef>& implTargets) {
             const Loader::LoaderRef& nameRef = nameTarget.loaderRef();
             if ( needComma )
@@ -1806,11 +1825,11 @@ void PrebuiltLoaderSet::print(RuntimeState& state, FILE* out, bool printComments
     }
 
     // Objc protocols
-    if ( const ObjCClassOpt* protocolOpt = this->objcProtocolOpt() ) {
+    if ( const ObjCDataStructOpt* protocolOpt = this->objcProtocolOpt() ) {
         fprintf(out, ",\n  \"objc-protocol-table\": [");
         needComma = false;
 
-        protocolOpt->forEachClass(state, ^(const PrebuiltLoader::BindTargetRef& nameTarget,
+        protocolOpt->forEachDataStruct(state, ^(const PrebuiltLoader::BindTargetRef& nameTarget,
                                            const Array<PrebuiltLoader::BindTargetRef>& implTargets) {
             const Loader::LoaderRef& nameRef = nameTarget.loaderRef();
             if ( needComma )
@@ -2369,3 +2388,7 @@ void MissingPaths::forEachPath(void (^callback)(const char* path)) const
 
 
 } // namespace dyld4
+
+#endif // SUPPORT_CREATING_PREBUILTLOADERS || BUILDING_UNIT_TESTS || BUILDING_CACHE_BUILDER_UNIT_TESTS
+
+#endif // !TARGET_OS_EXCLAVEKIT

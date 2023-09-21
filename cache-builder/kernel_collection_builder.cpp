@@ -29,6 +29,7 @@
 #include "ClosureFileSystemNull.h"
 #include "MachOAppCache.h"
 
+#include <dispatch/dispatch.h>
 #include <span>
 #include <string>
 #include <vector>

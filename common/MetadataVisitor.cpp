@@ -22,6 +22,10 @@
  * @APPLE_LICENSE_HEADER_END@
  */
 
+#include <TargetConditionals.h>
+
+#if !TARGET_OS_EXCLAVEKIT
+
 #include "MetadataVisitor.h"
 
 #if SUPPORT_VM_LAYOUT
@@ -102,8 +106,10 @@ VMAddress ResolvedValue::vmAddress() const
 
 #if POINTERS_ARE_UNSLID
 
-Visitor::Visitor(const DyldSharedCache* dyldCache, const dyld3::MachOAnalyzer* dylibMA)
-    : dylibMA(dylibMA), dylibBaseAddress(dylibMA->preferredLoadAddress())
+Visitor::Visitor(const DyldSharedCache* dyldCache, const dyld3::MachOAnalyzer* dylibMA,
+                 std::optional<VMAddress> selectorStringsBaseAddress)
+    : dylibMA(dylibMA), dylibBaseAddress(dylibMA->preferredLoadAddress()),
+      selectorStringsBaseAddress(selectorStringsBaseAddress)
 {
     pointerSize = dylibMA->pointerSize();
 
@@ -114,7 +120,7 @@ Visitor::Visitor(const DyldSharedCache* dyldCache, const dyld3::MachOAnalyzer* d
             cache->forEachSlideInfo(^(uint64_t mappingStartAddress, uint64_t mappingSize, const uint8_t *mappingPagesStart, uint64_t slideInfoOffset, uint64_t slideInfoSize, const dyld_cache_slide_info *slideInfoHeader) {
                 if ( slideInfoHeader->version == 1 ) {
                     this->sharedCacheChainedPointerFormat       = SharedCacheFormat::v1;
-                    this->onDiskDylibChainedPointerBaseAddress  = VMAddress(0ULL);
+                    this->onDiskDylibChainedPointerBaseAddress  = VMAddress(dyldCache->unslidLoadAddress());
                 } else if ( slideInfoHeader->version == 2 ) {
                     const dyld_cache_slide_info2* slideInfo = (dyld_cache_slide_info2*)(slideInfoHeader);
                     assert(slideInfo->delta_mask == 0x00FFFF0000000000);
@@ -184,12 +190,14 @@ Visitor::Visitor(VMAddress chainedPointerBaseAddress, const dyld3::MachOFile* dy
 
 #endif
 
-#if BUILDING_CACHE_BUILDER || BUILDING_CACHE_BUILDER_UNIT_TESTS
+#if BUILDING_CACHE_BUILDER || BUILDING_CACHE_BUILDER_UNIT_TESTS || POINTERS_ARE_UNSLID
 VMAddress Visitor::sharedCacheSelectorStringsBaseAddress() const
 {
     return this->selectorStringsBaseAddress.value();
 }
+#endif
 
+#if BUILDING_CACHE_BUILDER || BUILDING_CACHE_BUILDER_UNIT_TESTS
 VMAddress Visitor::getOnDiskDylibChainedPointerBaseAddress() const
 {
     assert(this->isOnDiskDylib);
@@ -262,7 +270,7 @@ ResolvedValue Visitor::resolveRebase(const ResolvedValue& value) const
             case SharedCacheFormat::none:
                 assert(false);
             case SharedCacheFormat::v1: {
-                // Nothing to do here.  We don't have chained fixup bits to remove, or a value_add to apply
+                runtimeOffset = *(uint32_t*)value.value() - onDiskDylibChainedPointerBaseAddress.rawValue();
                 break;
             }
             case SharedCacheFormat::v2_x86_64_tbi: {
@@ -424,7 +432,10 @@ std::optional<ResolvedValue> Visitor::resolveOptionalRebase(const ResolvedValue&
             case SharedCacheFormat::none:
                 assert(false);
             case SharedCacheFormat::v1: {
-                // Nothing to do here.  We don't have chained fixup bits to remove, or a value_add to apply
+                uint64_t rawvalue = *(uint32_t*)value.value();
+                if ( rawvalue == 0 )
+                    return { };
+                runtimeOffset = rawvalue - onDiskDylibChainedPointerBaseAddress.rawValue();
                 break;
             }
             case SharedCacheFormat::v2_x86_64_tbi: {
@@ -681,3 +692,5 @@ void Visitor::updateTargetVMAddress(ResolvedValue& value, CacheVMAddress vmAddr)
     }
 }
 #endif
+
+#endif // !TARGET_OS_EXCLAVEKIT

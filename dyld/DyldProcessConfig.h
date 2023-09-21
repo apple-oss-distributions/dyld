@@ -28,9 +28,46 @@
 #include <stdarg.h>
 #include <stdint.h>
 #include <dlfcn.h>
-//#include <mach-o/dyld.h>
-//#include <mach-o/dyld_priv.h>
+#include <TargetConditionals.h>
+#if TARGET_OS_EXCLAVEKIT
 
+//#include <platform/platform.h>
+//TODO: remove structs and include platform/platform.h when rdar://102210941 is fixed
+typedef struct {
+    bool launched_roottask;
+    uint64_t platform_id;
+    uintptr_t bootinfo_virt;
+    uintptr_t plat_bootinfo_virt;
+    struct {
+        uint64_t words[2];
+        size_t count;
+    } entropy;
+    struct {
+        uintptr_t phys;
+        size_t size;
+    } global_der;
+    struct {
+        uintptr_t metadata_virt;
+        uintptr_t assets_virt;
+    } bundle;
+    uintptr_t init_endpoint;
+    uintptr_t dyld_mapping_descriptor;
+    uintptr_t tbplc_mapping_descriptor;
+    uintptr_t device_tree_virt;
+    size_t device_tree_size;
+    struct {
+        uintptr_t initdata_virt;
+        uintptr_t initdata_size;
+        uintptr_t cnodes_virt;
+        uintptr_t cnodes_size;
+    } tightbeam;
+} xrt__entry_args_t;
+
+typedef struct {
+    uintptr_t kind;
+    uintptr_t value;
+} xrt__entry_vec_t;
+#endif
 #include "Defines.h"
 #include "Array.h"
 #include "DyldSharedCache.h"
@@ -56,12 +93,17 @@ using dyld3::MachOLoaded;
 using dyld3::MachOAnalyzer;
 using dyld3::GradedArchs;
 
-typedef dyld4::SyscallDelegate::DyldCommPage   DyldCommPage;
 
 class APIs;
 
 #if BUILDING_DYLD
-void halt(const char* message)  __attribute__((noreturn));
+struct StructuredError {
+    uintptr_t     kind              = 0;
+    const char*   clientOfDylibPath = nullptr;
+    const char*   targetDylibPath   = nullptr;
+    const char*   symbolName        = nullptr;
+ };
+void halt(const char* message, const StructuredError* errInfo=nullptr)  __attribute__((noreturn));
 #endif
 void console(const char* format, ...) __attribute__((format(printf, 1, 2)));
 
@@ -72,11 +114,14 @@ struct ProgramVars
     const char***    NXArgvPtr;
     const char***    environPtr;
     const char**     __prognamePtr;
+#if TARGET_OS_EXCLAVEKIT
+    void             *entry_vec;
+    void            (*finalize_process_startup)(int(*main)(int argc, const char* const argv[], const char* const envp[], const char* const apple[]));
+#endif
 };
 
 // how static initializers are called
-typedef void (*Initializer)(int argc, const char* const argv[], const char* const envp[], const char* const apple[], const ProgramVars* vars);
-
+  typedef void (*Initializer)(int argc, const char* const argv[], const char* const envp[], const char* const apple[], const ProgramVars* vars);
 
 
 //
@@ -97,29 +142,43 @@ struct LibdyldDyld4Section {
 
 extern volatile LibdyldDyld4Section gDyld;
 
+#if TARGET_OS_EXCLAVEKIT
+struct PreMappedFileEntry {
+    const mach_header*  loadAddress;
+    size_t              mappedSize;
+    const char*         path;
+};
+#endif
 
 // how kernel pass argc,argv,envp on the stack to main executable
 struct KernelArgs
 {
-#if SUPPORT_VM_LAYOUT
-    const MachOAnalyzer*  mainExecutable;
+#if TARGET_OS_EXCLAVEKIT
+    xrt__entry_vec_t*           entry_vec;
+    const void*                 mappingDescriptor; // set only after call to liblibc_plat_parse_entry_vec
 #else
+  #if SUPPORT_VM_LAYOUT
+    const MachOAnalyzer*  mainExecutable;
+  #else
     const MachOFile*      mainExecutable;
-#endif
+  #endif
     uintptr_t             argc;
-#define MAX_KERNEL_ARGS   128
+  #define MAX_KERNEL_ARGS   128
     const char*           args[MAX_KERNEL_ARGS]; // argv[], then envp[], then apple[]
 
     const char**          findArgv() const;
     const char**          findEnvp() const;
     const char**          findApple() const;
+#endif
 
 #if !BUILDING_DYLD
                           KernelArgs(const MachOFile* mh, const std::vector<const char*>& argv, const std::vector<const char*>& envp, const std::vector<const char*>& apple);
 #endif
 };
 
-
+#if !TARGET_OS_EXCLAVEKIT
+typedef dyld4::SyscallDelegate::DyldCommPage   DyldCommPage;
+#endif
 
 //
 // ProcessConfig holds the fixed, initial state of the process. That is, all the information
@@ -168,17 +227,24 @@ public:
         uint64_t                    dyldSimFSID;
         uint64_t                    dyldSimObjID;
 #endif
+#if TARGET_OS_EXCLAVEKIT
+        xrt__entry_vec_t*                              entry_vec;
+        uint32_t                                       startupContractVersion;
+        dyld3::OverflowSafeArray<PreMappedFileEntry>   preMappedFiles;
+#else
+        DyldCommPage                commPage;
+#endif
         int                         argc;
         const char* const*          argv;
         const char* const*          envp;
         const char* const*          apple;
         const char*                 progname;
-        DyldCommPage                commPage;
         const GradedArchs*          archs;
         int                         pid;
         bool                        isTranslated;
         bool                        catalystRuntime; // Mac Catalyst app or iOS-on-mac app
         bool                        enableDataConst; // Temporarily allow disabling __DATA_CONST for bringup
+        bool                        enableTproDataConst; // Enable HW TPRO protections for __DATA_CONST
         bool                        enableCompactInfo; // Temporarily allow disabling Compact Info during bringup
         bool                        proactivelyUseWeakDefMap;
         int                         pageInLinkingMode;
@@ -200,6 +266,9 @@ public:
         dyld3::Platform                 getMainPlatform();
         const GradedArchs*              getMainArchs(SyscallDelegate& osDelegate);
         bool                            usesCatalyst();
+        bool                            defaultDataConst();
+        bool                            defaultTproDataConst();
+        bool                            defaultCompactInfo();
     };
 
     //
@@ -211,6 +280,7 @@ public:
                                     Security(Process& process, SyscallDelegate&);
 
         bool                        internalInstall;
+#if !TARGET_OS_EXCLAVEKIT
         bool                        allowAtPaths;
         bool                        allowEnvVarsPrint;
         bool                        allowEnvVarsPath;
@@ -224,6 +294,7 @@ public:
      private:
         uint64_t                    getAMFI(const Process& process, SyscallDelegate& syscall);
         void                        pruneEnvVars(Process& process);
+#endif // !TARGET_OS_EXCLAVEKIT
    };
 
     //
@@ -260,6 +331,8 @@ public:
                                     DyldCache(Process&, const Security&, const Logging&, SyscallDelegate&, Allocator&);
 
         const DyldSharedCache*          addr;
+        uint64_t                        fsID;
+        uint64_t                        fsObjID;
 #if SUPPORT_VM_LAYOUT
         uintptr_t                       slide;
 #endif
@@ -280,6 +353,7 @@ public:
         uint32_t                        dylibCount;
         bool                            development;
         bool                            dylibsExpectedOnDisk;
+        bool                            privateCache;
 
 #if BUILDING_CACHE_BUILDER || BUILDING_CACHE_BUILDER_UNIT_TESTS
         // In the cache builder, the dylibs might not be mapped in their runtime layout,
@@ -394,8 +468,10 @@ public:
     };
 
 
+#if !TARGET_OS_EXCLAVEKIT
     // wrappers for macOS that causes special three libsystem dylibs to not exist if they match what is in dyld cache
     bool simulatorFileMatchesDyldCache(const char* path) const;
+#endif
     bool fileExists(const char* path, FileID* fileID=nullptr, int* errNum=nullptr) const;
 
     // if there is a dyld cache and the supplied path is in the dyld cache at that path or a symlink, return canonical path

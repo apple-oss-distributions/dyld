@@ -24,15 +24,18 @@
 #ifndef RosettaSupport_h
 #define RosettaSupport_h
 
-#include <unistd.h>
+//#include <unistd.h>
 #include <stdint.h>
 
+#include <mach-o/dyld_images.h>
 #include <TargetConditionals.h>
 
 #include "Defines.h"
 
 
 #if SUPPORT_ROSETTA
+
+#include <Rosetta/Dyld/Traps.h>
 
 struct dyld_all_runtime_info {
     uint64_t                    image_count;
@@ -50,19 +53,19 @@ struct dyld_all_runtime_info {
 // Called once at launch to get AOT info about main executable
 inline int aot_get_runtime_info(dyld_all_runtime_info*& info)
 {
-    return syscall(0x7000004, &info);
+    return rosetta_dyld_get_runtime_info((const void**)&info);
 }
 
 // Called computing image size from disk to get info about translated mapping
 inline int aot_get_extra_mapping_info(int fd, const char* path, uint64_t& extraAllocSize, char aotPath[], size_t aotPathSize)
 {
-    return syscall(0x7000001, fd, path, &extraAllocSize, aotPath, aotPathSize);
+    return rosetta_dyld_get_aot_size(fd, path, &extraAllocSize, aotPath, aotPathSize);
 }
 
 // Called when mmap()ing disk image, to add in translated mapping
 inline int aot_map_extra(const char* path, const mach_header* mh, const void* mappingEnd, const mach_header*& aotMapping, uint64_t& aotMappingSize, uint8_t aotImageKey[32])
 {
-    return syscall(0x7000002, path, mh, mappingEnd, &aotMapping, &aotMappingSize, aotImageKey);
+    return rosetta_dyld_map_aot(path, (uint64_t)mh, (uint64_t)mappingEnd, (uint64_t*)&aotMapping, (uint64_t*)&aotMappingSize, aotImageKey);
 }
 
 #pragma clang diagnostic pop

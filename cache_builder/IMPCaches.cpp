@@ -2121,6 +2121,16 @@ Method::Method(std::string_view name)
 {
 }
 
+Protocol::Protocol(std::string_view name)
+    : name(name)
+{
+}
+
+Property::Property(std::string_view name)
+    : name(name)
+{
+}
+
 Class::Class(std::string_view name, bool isMetaClass, bool isRootClass)
     : name(name), isMetaClass(isMetaClass), isRootClass(isRootClass)
 {

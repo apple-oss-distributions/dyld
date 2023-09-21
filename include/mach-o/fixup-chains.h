@@ -256,7 +256,7 @@ enum {
 // DYLD_CHAINED_IMPORT
 struct dyld_chained_import
 {
-    uint32_t    lib_ordinal :  8,
+    uint32_t    lib_ordinal :  8,   // -15 .. 240 (0xF1 .. 0xF0)
                 weak_import :  1,
                 name_offset : 23;
 };
@@ -264,7 +264,7 @@ struct dyld_chained_import
 // DYLD_CHAINED_IMPORT_ADDEND
 struct dyld_chained_import_addend
 {
-    uint32_t    lib_ordinal :  8,
+    uint32_t    lib_ordinal :  8,   // -15 .. 240 (0xF1 .. 0xF0)
                 weak_import :  1,
                 name_offset : 23;
     int32_t     addend;
@@ -273,7 +273,7 @@ struct dyld_chained_import_addend
 // DYLD_CHAINED_IMPORT_ADDEND64
 struct dyld_chained_import_addend64
 {
-    uint64_t    lib_ordinal : 16,
+    uint64_t    lib_ordinal : 16,   // -15 .. 65520 (0xFFF1 .. 0xFFF0)
                 weak_import :  1,
                 reserved    : 15,
                 name_offset : 32;

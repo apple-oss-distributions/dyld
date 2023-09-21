@@ -20,8 +20,11 @@
  * 
  * @APPLE_LICENSE_HEADER_END@
  */
- 
-#include <System/machine/cpu_capabilities.h>
+
+#include <TargetConditionals.h>
+#if !TARGET_OS_EXCLAVEKIT
+  #include <System/machine/cpu_capabilities.h>
+#endif
 
 // bool save_xxm = (*((uint32_t*)_COMM_PAGE_CPU_CAPABILITIES) & kHasAVX1_0) != 0;
 

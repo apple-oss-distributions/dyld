@@ -22,20 +22,27 @@
  */
 
 
+#include <TargetConditionals.h>
+#if !TARGET_OS_EXCLAVEKIT
+  #include <libc_private.h>
+  #include <sys/errno.h>
+  #include <sys/mman.h>
+  #include <sys/stat.h>
+  #include <_simple.h>
+#endif // !TARGET_OS_EXCLAVEKIT
+
 #include <string.h>
 #include <stdint.h>
-#include <sys/errno.h>
-#include <sys/mman.h>
-#include <sys/stat.h>
+
+
 #include <TargetConditionals.h>
-#include <_simple.h>
 #include <mach-o/dyld_priv.h>
 #include <malloc/malloc.h>
 #include <mach-o/dyld.h>
 #include <mach-o/dyld_priv.h>
 #include <dlfcn.h>
 #include <dlfcn_private.h>
-#include <libc_private.h>
+
 #include <ptrauth.h>
 #include <pthread.h>
 
@@ -49,9 +56,9 @@ using dyld4::gDyld;
 extern "C" void* tlv_get_addr(dyld3::MachOAnalyzer::TLV_Thunk*);
 
 // called from threadLocalHelpers.s
-extern "C" void* instantiateTLVs_thunk(pthread_key_t key);
+extern "C" void* instantiateTLVs_thunk(uint32_t key);
 VIS_HIDDEN
-void* instantiateTLVs_thunk(pthread_key_t key)
+void* instantiateTLVs_thunk(uint32_t key)
 {
     // Called by _tlv_get_addr on slow path to allocate thread
     // local storge for the current thread.
@@ -840,6 +847,52 @@ void _dyld_dlopen_atfork_child()
     gDyld.apis->_dyld_after_fork_dlopen_child();
 }
 
+//
+// MARK: --- APIs added iOS 17.x, macOS 14.x ---
+//
+struct _dyld_section_info_result _dyld_lookup_section_info(const struct mach_header* mh,
+                                                           _dyld_section_location_info_t locationHandle,
+                                                           _dyld_section_location_kind kind)
+{
+    return gDyld.apis->_dyld_lookup_section_info(mh, locationHandle, kind);
+}
+
+
+_dyld_pseudodylib_callbacks_handle _dyld_pseudodylib_register_callbacks(const struct _dyld_pseudodylib_callbacks* callbacks)
+{
+    return gDyld.apis->_dyld_pseudodylib_register_callbacks(callbacks);
+}
+
+void _dyld_pseudodylib_deregister_callbacks(_dyld_pseudodylib_callbacks_handle callbacks_handle)
+{
+    gDyld.apis->_dyld_pseudodylib_deregister_callbacks(callbacks_handle);
+}
+
+_dyld_pseudodylib_handle _dyld_pseudodylib_register(
+        void* addr, size_t size, _dyld_pseudodylib_callbacks_handle callbacks_handle, void* context)
+{
+    return gDyld.apis->_dyld_pseudodylib_register(addr, size, callbacks_handle, context);
+}
+
+void _dyld_pseudodylib_deregister(_dyld_pseudodylib_handle pd_handle)
+{
+    gDyld.apis->_dyld_pseudodylib_deregister(pd_handle);
+}
+
+bool _dyld_is_preoptimized_objc_image_loaded(uint16_t imageID)
+{
+    return gDyld.apis->_dyld_is_preoptimized_objc_image_loaded(imageID);
+}
+
+void* _dyld_for_objc_header_opt_rw()
+{
+    return gDyld.apis->_dyld_for_objc_header_opt_rw();
+}
+
+const void* _dyld_for_objc_header_opt_ro()
+{
+    return gDyld.apis->_dyld_for_objc_header_opt_ro();
+}
 //
 // MARK: --- crt data symbols ---
 //

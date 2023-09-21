@@ -24,8 +24,8 @@
 #ifndef BumpAllocator_h
 #define BumpAllocator_h
 
-#include <unistd.h>
-#include <stdio.h>
+#include <stdint.h>
+#include <stddef.h>
 
 namespace dyld4 {
 

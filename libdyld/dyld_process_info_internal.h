@@ -32,6 +32,11 @@
 #include <limits.h>
 #include <stdio.h>
 #include <uuid/uuid.h>
+#include <TargetConditionals.h>
+#include "Defines.h"
+#if !TARGET_OS_EXCLAVEKIT
+  #include <mach/task.h>
+#endif
 
 #include <array>
 

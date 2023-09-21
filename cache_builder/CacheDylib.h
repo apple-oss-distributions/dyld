@@ -44,6 +44,7 @@ struct BuilderConfig;
 struct InputFile;
 struct ObjCIMPCachesOptimizer;
 struct ObjCSelectorOptimizer;
+struct ObjCCategoryOptimizer;
 struct StubOptimizer;
 struct UnmappedSymbolsOptimizer;
 
@@ -97,7 +98,9 @@ struct CacheDylib
     void fipsSign(Timer::AggregateTimer& timer);
     void addObjcSegments(Diagnostics& diag, Timer::AggregateTimer& timer,
                          const ObjCHeaderInfoReadOnlyChunk* headerInfoReadOnlyChunk,
+                         const ObjCImageInfoChunk* imageInfoChunk,
                          const ObjCProtocolHashTableChunk* protocolHashTableChunk,
+                         const ObjCPreAttachedCategoriesChunk* preAttachedCategoriesChunk,
                          const ObjCHeaderInfoReadWriteChunk* headerInfoReadWriteChunk,
                          const ObjCCanonicalProtocolsChunk* canonicalProtocolsChunk);
 
@@ -175,7 +178,8 @@ struct CacheDylib
 
     objc_visitor::Visitor makeCacheObjCVisitor(const BuilderConfig& config,
                                                const Chunk* selectorStringsChunk,
-                                               const ObjCCanonicalProtocolsChunk* canonicalProtocolsChunk) const;
+                                               const ObjCCanonicalProtocolsChunk* canonicalProtocolsChunk,
+                                               const ObjCPreAttachedCategoriesChunk* categoriesChunk) const;
 
     metadata_visitor::SwiftVisitor makeCacheSwiftVisitor(const BuilderConfig& config,
                                                          std::span<metadata_visitor::Segment> extraRegions) const;

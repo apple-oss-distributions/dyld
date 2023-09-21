@@ -22,10 +22,16 @@
  */
 
 
+#include <TargetConditionals.h>
+
+#if !TARGET_OS_EXCLAVEKIT
+
 #include "objc-shared-cache.h"
 #include "OptimizerObjC.h"
 #include "PrebuiltSwift.h"
 #include "SwiftVisitor.h"
+
+#if SUPPORT_CREATING_PREBUILTLOADERS || BUILDING_UNIT_TESTS || BUILDING_CACHE_BUILDER_UNIT_TESTS
 
 using metadata_visitor::ResolvedValue;
 using metadata_visitor::SwiftPointer;
@@ -254,7 +260,9 @@ static SwiftVisitor makeSwiftVisitor(Diagnostics& diag, RuntimeState& state,
 #if POINTERS_ARE_UNSLID
     const dyld3::MachOAnalyzer* dylibMA = ldr->analyzer(state);
 
-    SwiftVisitor swiftVisitor(state.config.dyldCache.addr, dylibMA);
+    const DyldSharedCache* dyldCache = (const DyldSharedCache*)state.config.dyldCache.addr;
+    uint64_t sharedCacheRelativeSelectorBaseVMAddress = dyldCache->sharedCacheRelativeSelectorBaseVMAddress();
+    SwiftVisitor swiftVisitor(dyldCache, dylibMA, VMAddress(sharedCacheRelativeSelectorBaseVMAddress));
     return swiftVisitor;
 #elif SUPPORT_VM_LAYOUT
     const dyld3::MachOAnalyzer* dylibMA = ldr->analyzer(state);
@@ -672,3 +680,7 @@ void PrebuiltSwift::make(Diagnostics& diag, PrebuiltObjC& prebuiltObjC, RuntimeS
 
 
 } // namespace dyld4
+
+#endif // SUPPORT_CREATING_PREBUILTLOADERS || BUILDING_UNIT_TESTS || BUILDING_CACHE_BUILDER_UNIT_TESTS
+
+#endif // !TARGET_OS_EXCLAVEKIT

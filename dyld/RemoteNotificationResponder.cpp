@@ -22,18 +22,21 @@
  * @APPLE_LICENSE_HEADER_END@
  */
 
-#include "DebuggerSupport.h"
+#include <TargetConditionals.h>
+
+#if !TARGET_OS_EXCLAVEKIT
+
+#include "MachOFile.h"
 #include "dyld_process_info_internal.h"
 
 #include "RemoteNotificationResponder.h"
 
 #if !TARGET_OS_SIMULATOR
-#define DYLD_PROCESS_INFO_NOTIFY_MAGIC 0x49414E46
 
 namespace dyld4 {
 
-RemoteNotificationResponder::RemoteNotificationResponder() {
-    if (gProcessInfo->notifyPorts[0] != DYLD_PROCESS_INFO_NOTIFY_MAGIC) {
+RemoteNotificationResponder::RemoteNotificationResponder(mach_port_t notifyPortValue) {
+    if (notifyPortValue != DYLD_PROCESS_INFO_NOTIFY_MAGIC) {
         // No notifier found, early out
         _namesCnt = 0;
         return;
@@ -116,12 +119,75 @@ bool const RemoteNotificationResponder::active() const {
     return false;
 }
 
+void RemoteNotificationResponder::notifyMonitorOfImageListChanges(bool unloading, unsigned imageCount, const struct mach_header* loadAddresses[], const char* imagePaths[], uint64_t lastUpdateTime)
+{
+#if BUILDING_DYLD
+    // Make sure there is at least enough room to hold a the largest single file entry that can exist.
+    static_assert((PATH_MAX + sizeof(dyld_process_info_image_entry) + 1 + MAX_TRAILER_SIZE) <= DYLD_PROCESS_INFO_NOTIFY_MAX_BUFFER_SIZE);
+
+    unsigned entriesSize = imageCount*sizeof(dyld_process_info_image_entry);
+    unsigned pathsSize = 0;
+    for (unsigned j=0; j < imageCount; ++j)
+        pathsSize += (strlen(imagePaths[j]) + 1);
+
+    unsigned totalSize = (sizeof(struct dyld_process_info_notify_header) + entriesSize + pathsSize + 127) & -128;   // align
+    // The reciever has a fixed buffer of DYLD_PROCESS_INFO_NOTIFY_MAX_BUFFER_SIZE, whcih needs to hold both the message and a trailer.
+    // If the total size exceeds that we need to fragment the message.
+    if ( (totalSize + MAX_TRAILER_SIZE) > DYLD_PROCESS_INFO_NOTIFY_MAX_BUFFER_SIZE ) {
+        // Putting all image paths into one message would make buffer too big.
+        // Instead split into two messages.  Recurse as needed until paths fit in buffer.
+        unsigned imageHalfCount = imageCount/2;
+        this->notifyMonitorOfImageListChanges(unloading, imageHalfCount, loadAddresses, imagePaths, lastUpdateTime);
+        this->notifyMonitorOfImageListChanges(unloading, imageCount - imageHalfCount, &loadAddresses[imageHalfCount], &imagePaths[imageHalfCount], lastUpdateTime);
+        return;
+    }
+    uint8_t buffer[totalSize + MAX_TRAILER_SIZE];
+    dyld_process_info_notify_header* header = (dyld_process_info_notify_header*)buffer;
+    header->version          = 1;
+    header->imageCount       = imageCount;
+    header->imagesOffset     = sizeof(dyld_process_info_notify_header);
+    header->stringsOffset    = sizeof(dyld_process_info_notify_header) + entriesSize;
+    header->timestamp        = lastUpdateTime;
+    dyld_process_info_image_entry* entries = (dyld_process_info_image_entry*)&buffer[header->imagesOffset];
+    char* const pathPoolStart = (char*)&buffer[header->stringsOffset];
+    char* pathPool = pathPoolStart;
+    for (unsigned j=0; j < imageCount; ++j) {
+        strcpy(pathPool, imagePaths[j]);
+        uint32_t len = (uint32_t)strlen(pathPool);
+        bzero(entries->uuid, 16);
+        dyld3::MachOFile* mf = (dyld3::MachOFile*)loadAddresses[j];
+        mf->getUuid(entries->uuid);
+        entries->loadAddress = (uint64_t)loadAddresses[j];
+        entries->pathStringOffset = (uint32_t)(pathPool - pathPoolStart);
+        entries->pathLength  = len;
+        pathPool += (len +1);
+        ++entries;
+    }
+    mach_msg_id_t msgID = unloading ? DYLD_PROCESS_INFO_NOTIFY_UNLOAD_ID : DYLD_PROCESS_INFO_NOTIFY_LOAD_ID;
+    this->sendMessage(msgID, totalSize, (mach_msg_header_t*)buffer);
+#endif /* BUILDING_DYLD */
+}
+
+void RemoteNotificationResponder::notifyMonitorOfMainCalled()
+{
+    uint8_t buffer[sizeof(mach_msg_header_t) + MAX_TRAILER_SIZE];
+    this->sendMessage(DYLD_PROCESS_INFO_NOTIFY_MAIN_ID, sizeof(mach_msg_header_t), (mach_msg_header_t*)buffer);
+    this->blockOnSynchronousEvent(DYLD_REMOTE_EVENT_MAIN);
+}
+
+void RemoteNotificationResponder::notifyMonitorOfDyldBeforeInitializers()
+{
+    this->blockOnSynchronousEvent(DYLD_REMOTE_EVENT_BEFORE_INITIALIZERS);
+}
+
+
 void RemoteNotificationResponder::blockOnSynchronousEvent(uint32_t event) {
 //        fprintf(stderr, "Blocking: %u\n", event);
     uint8_t buffer[sizeof(mach_msg_header_t) + MAX_TRAILER_SIZE];
     sendMessage(DYLD_PROCESS_EVENT_ID_BASE + event, sizeof(mach_msg_header_t), (mach_msg_header_t*)buffer);
 }
 
+#if 0
 //FIXME: Remove this once we drop support for iOS 11 simulators
 // This is an enormous hack to keep remote introspection of older simulators working
 //   It works by interposing mach_msg, and redirecting message sent to a special port name. Messages to that portname will trigger a full set
@@ -130,7 +196,7 @@ void RemoteNotificationResponder::blockOnSynchronousEvent(uint32_t event) {
 
 kern_return_t mach_msg_sim_interposed(    mach_msg_header_t* msg, mach_msg_option_t option, mach_msg_size_t send_size, mach_msg_size_t rcv_size,
                                       mach_port_name_t rcv_name, mach_msg_timeout_t timeout, mach_port_name_t notify) {
-    if (msg->msgh_remote_port != DYLD_PROCESS_INFO_NOTIFY_MAGIC) {
+    if (msg->msgh_remote_port != RemoteNotificationResponder::DYLD_PROCESS_INFO_NOTIFY_MAGIC) {
         // Not the magic port, so just pass through to the real mach_msg()
         return mach_msg(msg, option, send_size, rcv_size, rcv_name, timeout, notify);
     }
@@ -145,6 +211,10 @@ kern_return_t mach_msg_sim_interposed(    mach_msg_header_t* msg, mach_msg_optio
     // We always return KERN_SUCCESS, otherwise old dyld_sims might clear the port
     return KERN_SUCCESS;
 }
+#endif // 0
+
 };
 
 #endif /* !TARGET_OS_SIMULATOR */
+
+#endif // !TARGET_OS_EXCLAVEKIT

@@ -21,21 +21,27 @@
  * @APPLE_LICENSE_HEADER_END@
  */
 
-#include <sys/types.h>
-#include <sys/stat.h>
-#include <sys/errno.h>
-#include <sys/fcntl.h>
-#include <sys/mman.h>
-#include <mach/mach.h>
+#include <TargetConditionals.h>
+#include "Defines.h"
+#if !TARGET_OS_EXCLAVEKIT
+  #include <sys/types.h>
+  #include <sys/fcntl.h>
+  #include <sys/mman.h>
+  #include <mach/mach.h>
+  #include <unistd.h>
+#endif
+
+#if SUPPORT_CLASSIC_RELOCS
+  #include <mach-o/reloc.h>
+  #include <mach-o/x86_64/reloc.h>
+#endif
+
 #include <assert.h>
 #include <limits.h>
 #include <stdlib.h>
 #include <string.h>
-#include <unistd.h>
-#include <mach-o/reloc.h>
-#include <mach-o/x86_64/reloc.h>
 #include <mach-o/nlist.h>
-#include <TargetConditionals.h>
+#include <ptrauth.h>
 
 #include "MachOAnalyzer.h"
 #include "CodeSigningTypes.h"
@@ -64,6 +70,7 @@ bool MachOAnalyzer::isValidMainExecutable(Diagnostics& diag, const char* path, u
     return true;
 }
 
+#if !TARGET_OS_EXCLAVEKIT
 bool MachOAnalyzer::loadFromBuffer(Diagnostics& diag, const closure::FileSystem& fileSystem,
                                    const char* path, const GradedArchs& archs, Platform platform,
                                    closure::LoadedFileInfo& info)
@@ -124,7 +131,7 @@ bool MachOAnalyzer::loadFromBuffer(Diagnostics& diag, const closure::FileSystem&
 
 
 closure::LoadedFileInfo MachOAnalyzer::load(Diagnostics& diag, const closure::FileSystem& fileSystem,
-                                            const char* path, const GradedArchs& archs, Platform platform, char realerPath[MAXPATHLEN])
+                                            const char* path, const GradedArchs& archs, Platform platform, char realerPath[PATH_MAX])
 {
     // FIXME: This should probably be an assert, but if we happen to have a diagnostic here then something is wrong
     // above us and we should quickly return instead of doing unnecessary work.
@@ -153,6 +160,7 @@ closure::LoadedFileInfo MachOAnalyzer::load(Diagnostics& diag, const closure::Fi
         return {};
     return info;
 }
+
 
 // for use with already mmap()ed file
 bool MachOAnalyzer::isOSBinary(int fd, uint64_t sliceOffset, uint64_t sliceSize) const
@@ -202,6 +210,7 @@ bool MachOAnalyzer::sliceIsOSBinary(int fd, uint64_t sliceOffset, uint64_t slice
 
     return result;
 }
+#endif // !TARGET_OS_EXCLAVEKIT
 
 
 
@@ -214,7 +223,7 @@ void MachOAnalyzer::validateDyldCacheDylib(Diagnostics& diag, const char* path) 
 }
 #endif
 
-bool MachOAnalyzer::validMachOForArchAndPlatform(Diagnostics& diag, size_t sliceLength, const char* path, const GradedArchs& archs, Platform reqPlatform, bool isOSBinary) const
+bool MachOAnalyzer::validMachOForArchAndPlatform(Diagnostics& diag, size_t sliceLength, const char* path, const GradedArchs& archs, Platform reqPlatform, bool isOSBinary, bool internalInstall) const
 {
     // must start with mach-o magic value
     if ( (this->magic != MH_MAGIC) && (this->magic != MH_MAGIC_64) ) {
@@ -295,13 +304,13 @@ bool MachOAnalyzer::validMachOForArchAndPlatform(Diagnostics& diag, size_t slice
         }
     } else
 #endif
-    if ( !this->loadableIntoProcess(reqPlatform, path) ) {
+    if ( !this->loadableIntoProcess(reqPlatform, path, internalInstall) ) {
         diag.error("could not use '%s' because it was not built for platform %s", path, MachOFile::platformName(reqPlatform));
         return false;
     }
 
     // validate dylib loads
-    if ( !validEmbeddedPaths(diag, reqPlatform, path) )
+    if ( !validEmbeddedPaths(diag, reqPlatform, path, internalInstall) )
         return false;
 
     // validate segments
@@ -398,6 +407,7 @@ bool MachOAnalyzer::validLoadCommands(Diagnostics& diag, const char* path, size_
     return true;
 }
 
+#if !TARGET_OS_EXCLAVEKIT
 const MachOAnalyzer* MachOAnalyzer::remapIfZeroFill(Diagnostics& diag, const closure::FileSystem& fileSystem, closure::LoadedFileInfo& info) const
 {
     uint64_t vmSpaceRequired;
@@ -482,8 +492,9 @@ const MachOAnalyzer* MachOAnalyzer::remapIfZeroFill(Diagnostics& diag, const clo
 
     return this;
 }
+#endif // !TARGET_OS_EXCLAVEKIT
 
-bool MachOAnalyzer::validEmbeddedPaths(Diagnostics& diag, Platform platform, const char* path) const
+bool MachOAnalyzer::validEmbeddedPaths(Diagnostics& diag, Platform platform, const char* path, bool internalInstall) const
 {
     __block int         index = 1;
     __block bool        allGood = true;
@@ -1025,6 +1036,7 @@ void MachOAnalyzer::forEachRebase(Diagnostics& diag,
             return;
     }
 
+#if SUPPORT_CLASSIC_RELOCS
     if ( leInfo.dynSymTab != nullptr ) {
         // old binary, walk relocations
         const uint64_t                  relocsStartAddress = localRelocBaseAddress(segmentsInfo, leInfo.layout.linkeditSegIndex);
@@ -1101,6 +1113,7 @@ void MachOAnalyzer::forEachRebase(Diagnostics& diag,
             }
         });
     }
+#endif // SUPPORT_CLASSIC_RELOCS
 }
 
 bool MachOAnalyzer::segIndexAndOffsetForAddress(uint64_t addr, const SegmentInfo segmentsInfos[], uint32_t segCount, uint32_t& segIndex, uint64_t& segOffset) const
@@ -1692,6 +1705,7 @@ void MachOAnalyzer::forEachBind(Diagnostics& diag,
     else if ( leInfo.chainedFixups != nullptr ) {
         // binary uses chained fixups, so do nothing
     }
+#if SUPPORT_CLASSIC_RELOCS
     else if ( leInfo.dynSymTab != nullptr ) {
         // old binary, process external relocations
         const uint64_t                  relocsStartAddress = externalRelocBaseAddress(segmentsInfo, leInfo.layout.linkeditSegIndex);
@@ -1790,7 +1804,7 @@ void MachOAnalyzer::forEachBind(Diagnostics& diag,
             }
         });
     }
-
+#endif // SUPPORT_CLASSIC_RELOCS
 }
 
 bool MachOAnalyzer::validChainedFixupsInfo(Diagnostics& diag, const char* path) const
@@ -1922,7 +1936,7 @@ bool MachOAnalyzer::validChainedFixupsInfo(Diagnostics& diag, const char* path) 
             diag.error("chained fixups, page_start array overflows size");
             return false;
         }
-        uint32_t maxOverflowIndex = (uint32_t)(segInfo->size - offsetof(dyld_chained_starts_in_segment, page_start[segInfo->page_count]))/sizeof(uint16_t);
+        uint32_t maxOverflowIndex = (uint32_t)(segInfo->size - offsetof(dyld_chained_starts_in_segment, page_start[0]))/sizeof(uint16_t);
         for (int pageIndex=0; pageIndex < segInfo->page_count; ++pageIndex) {
             uint16_t offsetInPage = segInfo->page_start[pageIndex];
             if ( offsetInPage == DYLD_CHAINED_PTR_START_NONE )
@@ -2727,6 +2741,7 @@ bool MachOAnalyzer::hasLazyPointers(uint32_t& runtimeOffset, uint32_t& size) con
     return (size != 0);
 }
 
+#if !TARGET_OS_EXCLAVEKIT
 void MachOAnalyzer::forEachCDHash(void (^handler)(const uint8_t cdHash[20])) const
 {
     Diagnostics diag;
@@ -2759,6 +2774,7 @@ bool MachOAnalyzer::usesLibraryValidation() const
 
     return requiresLV;
 }
+#endif // !TARGET_OS_EXCLAVEKIT
 
 bool MachOAnalyzer::canHavePrecomputedDlopenClosure(const char* path, void (^failureReason)(const char*)) const
 {
@@ -3955,6 +3971,38 @@ void MachOAnalyzer::forEachObjCProtocol(Diagnostics& diag, const VMAddrConverter
     forEachObjCProtocol(protocolListRuntimeOffset, protocolListSize / ptrSize, vmAddrConverter, callback);
 }
 
+static void ignorePreoptimizedListsOfLists(uint64_t& listVMAddr, intptr_t slide)
+{
+    // If this is a list of lists, then we likely just want the class list.  So go to the end which is where
+    // we emitted it
+    if ( listVMAddr & 1 ) {
+        struct ListOfListsEntry {
+            union {
+                struct {
+                    uint64_t imageIndex: 16;
+                    int64_t  offset: 48;
+                };
+                struct {
+                    uint32_t entsize;
+                    uint32_t count;
+                };
+            };
+        };
+
+        listVMAddr = listVMAddr & ~1;
+        const ListOfListsEntry* listHeader = (const ListOfListsEntry*)(listVMAddr + slide);
+        if ( listHeader->count != 0 ) {
+            const ListOfListsEntry& listEntry = (listHeader + 1)[listHeader->count - 1];
+
+            // The list entry is a relative offset to the target
+            // Work out the VMAddress of that target
+            uint64_t listEntryVMOffset{(uint64_t)&listEntry - (uint64_t)listHeader};
+            uint64_t listEntryVMAddr = listVMAddr + listEntryVMOffset;
+            listVMAddr = listEntryVMAddr + (uint64_t)listEntry.offset;
+        }
+    }
+}
+
 void MachOAnalyzer::forEachObjCMethod(uint64_t methodListVMAddr, const VMAddrConverter& vmAddrConverter,
                                       uint64_t sharedCacheRelativeSelectorBaseVMAddress,
                                       void (^handler)(uint64_t methodVMAddr, const ObjCMethod& method, bool& stop)) const
@@ -3964,6 +4012,8 @@ void MachOAnalyzer::forEachObjCMethod(uint64_t methodListVMAddr, const VMAddrCon
 
     const uint64_t ptrSize = pointerSize();
     intptr_t slide = getSlide();
+
+    ignorePreoptimizedListsOfLists(methodListVMAddr, slide);
 
     if ( ptrSize == 8 ) {
         typedef uint64_t PtrTy;
@@ -4132,6 +4182,8 @@ void MachOAnalyzer::forEachObjCProperty(uint64_t propertyListVMAddr, const VMAdd
     const uint64_t ptrSize = pointerSize();
     intptr_t slide = getSlide();
 
+    ignorePreoptimizedListsOfLists(propertyListVMAddr, slide);
+
     if ( ptrSize == 8 ) {
         typedef uint64_t PtrTy;
         struct property_list_t {
@@ -4199,6 +4251,8 @@ void MachOAnalyzer::forEachObjCProtocol(uint64_t protocolListVMAddr, const VMAdd
 
     auto ptrSize = pointerSize();
     intptr_t slide = getSlide();
+
+    ignorePreoptimizedListsOfLists(protocolListVMAddr, slide);
 
     if ( ptrSize == 8 ) {
         typedef uint64_t PtrTy;
@@ -4444,7 +4498,7 @@ void MachOAnalyzer::forEachWeakDef(Diagnostics& diag,
     });
 }
 
-template<typename P> void MachOAnalyzer::forEachThreadLocalVariableInSection(Diagnostics& diag, const MachOAnalyzer::SectionInfo& sectInfo, void (^handler)(TLV_Resolver* tlvThunkAddr, uintptr_t* keyAddr)) const {
+template<typename P> void MachOAnalyzer::forEachThreadLocalVariableInSection(Diagnostics& diag, const MachOAnalyzer::SectionInfo& sectInfo, void (^handler)(TLV_ResolverPtr tlvThunkAddr, uintptr_t* keyAddr)) const {
     uintptr_t  baseAddress = (uintptr_t)this->preferredLoadAddress();
     intptr_t   slide       = (uintptr_t)this - baseAddress;
     const uint8_t* content = (uint8_t*)((uintptr_t)sectInfo.sectAddr + slide);
@@ -4452,11 +4506,11 @@ template<typename P> void MachOAnalyzer::forEachThreadLocalVariableInSection(Dia
     FixedSizeTLVThunk<P>* slotsStart = (FixedSizeTLVThunk<P>*)content;
     FixedSizeTLVThunk<P>* slotsEnd   =  &slotsStart[count];
     for (FixedSizeTLVThunk<P>* p=slotsStart; p < slotsEnd; ++p) {
-        handler((TLV_Resolver*)&(p->thunk), (uintptr_t*)&(p->key));
+        handler((TLV_ResolverPtr)&(p->thunk), (uintptr_t*)&(p->key));
     }
 }
 
-MachOAnalyzer::TLV_InitialContent MachOAnalyzer::forEachThreadLocalVariable(Diagnostics& diag, void (^handler)(TLV_Resolver *tlvThunkAddr, uintptr_t* keyAddr)) const
+MachOAnalyzer::TLV_InitialContent MachOAnalyzer::forEachThreadLocalVariable(Diagnostics& diag, void (^handler)(TLV_ResolverPtr tlvThunkAddr, uintptr_t* keyAddr)) const
 {
     __block TLV_InitialContent result = { 0, 0 };
 
@@ -4504,8 +4558,10 @@ void MachOAnalyzer::forEachBindTarget(Diagnostics& diag, bool allowLazyBinds,
         this->forEachBindTarget_ChainedFixups(diag, handler);
     else if ( this->hasOpcodeFixups() )
         this->forEachBindTarget_Opcodes(diag, allowLazyBinds, handler, overrideHandler);
+#if SUPPORT_CLASSIC_RELOCS
     else
         this->forEachBindTarget_Relocations(diag, handler);
+#endif
 }
 
 struct WeakBindInfo
@@ -4642,6 +4698,7 @@ void MachOAnalyzer::forEachBindTarget_ChainedFixups(Diagnostics& diag, void (^ha
 }
 
 
+#if SUPPORT_CLASSIC_RELOCS
 // old binary, walk external relocations and indirect symbol table
 void MachOAnalyzer::forEachBindTarget_Relocations(Diagnostics& diag, void (^handler)(const BindTargetInfo& info, bool& stop)) const
 {
@@ -4675,6 +4732,7 @@ void MachOAnalyzer::forEachBindTarget_Relocations(Diagnostics& diag, void (^hand
         }
     });
 }
+#endif // SUPPORT_CLASSIC_RELOCS
 
 
 void MachOAnalyzer::forEachBindLocation_Relocations(Diagnostics& diag, void (^handler)(uint64_t runtimeOffset, unsigned targetIndex, bool& stop)) const
@@ -4704,7 +4762,7 @@ void MachOAnalyzer::forEachBindLocation_Relocations(Diagnostics& diag, void (^ha
     });
 }
 
-
+#if SUPPORT_CLASSIC_RELOCS
 bool MachOAnalyzer::forEachBind_Relocations(Diagnostics& diag, const LinkEditInfo& leInfo, const SegmentInfo segmentsInfo[],
                                             bool supportPrivateExternsWorkaround, BindDetailedHandler handler) const
 {
@@ -4817,6 +4875,7 @@ bool MachOAnalyzer::forEachBind_Relocations(Diagnostics& diag, const LinkEditInf
 
     return false;
 }
+#endif
 
 void MachOAnalyzer::forEachBindLocation_Opcodes(Diagnostics& diag, void (^handler)(uint64_t runtimeOffset, unsigned targetIndex, bool& stop),
                                                 void (^overrideHandler)(uint64_t runtimeOffset, unsigned overrideBindTargetIndex, bool& stop)) const
@@ -5208,7 +5267,7 @@ bool MachOAnalyzer::forEachRebase_Opcodes(Diagnostics& diag, const LinkEditInfo&
             case REBASE_OPCODE_DO_REBASE_ULEB_TIMES:
                 count = read_uleb128(diag, p, end);
                 for (uint32_t i=0; i < count; ++i) {
-                    handler("REBASE_OPCODE_DO_REBASE_ADD_ADDR_ULEB", leInfo, segmentsInfo, segIndexSet, ptrSize, segIndex, segOffset, kind, stop);
+                    handler("REBASE_OPCODE_DO_REBASE_ULEB_TIMES", leInfo, segmentsInfo, segIndexSet, ptrSize, segIndex, segOffset, kind, stop);
                     segOffset += ptrSize;
                     if ( stop )
                         break;
@@ -5237,6 +5296,7 @@ bool MachOAnalyzer::forEachRebase_Opcodes(Diagnostics& diag, const LinkEditInfo&
     return stop;
 }
 
+#if SUPPORT_CLASSIC_RELOCS
 bool MachOAnalyzer::forEachRebaseLocation_Relocations(Diagnostics& diag, void (^handler)(uint64_t runtimeOffset, bool& stop)) const
 {
     LinkEditInfo leInfo;
@@ -5368,6 +5428,7 @@ bool MachOAnalyzer::forEachRebase_Relocations(Diagnostics& diag, const LinkEditI
 
     return stop;
 }
+#endif // SUPPORT_CLASSIC_RELOCS
 
 bool MachOAnalyzer::getLinkeditLayout(Diagnostics& diag, uint64_t linkeditFileOffset,
                                       const uint8_t* linkeditStartAddr, mach_o::LinkeditLayout& layout) const

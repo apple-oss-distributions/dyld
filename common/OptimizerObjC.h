@@ -25,7 +25,6 @@
 #define _OPTIMIZER_OBJC_H_
 
 #include <mach-o/loader.h>
-
 #include <optional>
 
 #include "Diagnostics.h"
@@ -34,13 +33,18 @@
 
 namespace objc {
 
+struct objc_image_info {
+    int32_t version;
+    uint32_t flags;
+};
+
 // Precomputed perfect hash table of strings.
 // Base class for precomputed selector, class and protocol tables.
 class VIS_HIDDEN StringHashTable
 {
 protected:
     typedef uint8_t  CheckByteType;
-    typedef int32_t StringOffset;
+    typedef int32_t  StringOffset;
 
     uint32_t version;
     uint32_t capacity;
@@ -84,7 +88,7 @@ protected:
         return hash(key, strlen(key));
     }
 
-    // The check bytes areused to reject strings that aren't in the table
+    // The check bytes are used to reject strings that aren't in the table
     // without paging in the table's cstring data. This checkbyte calculation
     // catches 4785/4815 rejects when launching Safari; a perfect checkbyte
     // would catch 4796/4815.
@@ -257,8 +261,8 @@ public:
 #endif
 };
 
-// This is used for classes and protocols
-// The keys are strings, eg, class/protocol names.  Those are encoded as 32-bit offsets from the
+// This is used for classes, protocols and categories
+// The keys are strings, eg, class/protocol  names.  Those are encoded as 32-bit offsets from the
 // 'this' pointer of the map.
 // Given this, all keys must be within 32-bits of the map, even if that requires copying strings in to
 // nearby memory.
@@ -447,7 +451,7 @@ protected:
                 callback(i, objectName, implTarget);
             }
             else {
-                // This class/protocol has mulitple implementations.
+                // This class/protocol  has mulitple implementations.
                 uint32_t count = data.duplicate.count;
                 ObjectAndDylibIndex objectInfos[count];
                 const ObjectData* list  = &duplicateOffsets()[data.duplicate.index];
@@ -538,7 +542,7 @@ protected:
                 uint32_t dest = duplicateCount();
                 duplicateCount() += count;
                 if ( size() > remaining ) {
-                    diag.error("protocol section too small (metadata not optimized)");
+                    diag.error("class/protocol section too small (metadata not optimized)");
                     return;
                 }
 
@@ -662,6 +666,10 @@ struct header_info_rw<uint64_t> {
         return isLoaded;
     }
 
+    void setLoaded() {
+        isLoaded = true;
+    }
+
 private:
     uint64_t isLoaded              : 1;
     uint64_t allClassesRealized    : 1;
@@ -674,6 +682,10 @@ struct header_info_rw<uintptr_t> {
 
     bool getLoaded() const {
         return isLoaded;
+    }
+
+    void setLoaded() {
+        isLoaded = true;
     }
 
 private:
@@ -690,6 +702,10 @@ struct header_info_rw<uint32_t> {
         return isLoaded;
     }
 
+    void setLoaded() {
+        isLoaded = true;
+    }
+
 private:
     uint32_t isLoaded              : 1;
     uint32_t allClassesRealized    : 1;
@@ -702,6 +718,10 @@ struct header_info_rw<uintptr_t> {
 
     bool getLoaded() const {
         return isLoaded;
+    }
+
+    void setLoaded() {
+        isLoaded = true;
     }
 
 private:
@@ -725,6 +745,10 @@ public:
     const uint64_t mhdrVMAddr(uint64_t baseVMAddr) const {
         return baseVMAddr + mhdr_offset;
     }
+
+    const void* imageInfo() const {
+        return (uint8_t*)&info_offset + info_offset;
+    }
 };
 
 template<>
@@ -736,6 +760,10 @@ private:
 public:
     const uint64_t mhdrVMAddr(uint64_t baseVMAddr) const {
         return baseVMAddr + mhdr_offset;
+    }
+
+    const void* imageInfo() const {
+        return (uint8_t*)&info_offset + info_offset;
     }
 };
 
@@ -793,6 +821,10 @@ struct objc_headeropt_rw_t {
     uint32_t entsize;
     header_info_rw<PointerType> headers[0];  // sorted by mhdr address
 
+    uint32_t getCount() const {
+        return count;
+    }
+
     void* get(uint32_t i) const {
         assert(i < count);
         return (void*)((uint8_t *)&headers + (i * entsize));
@@ -800,6 +832,10 @@ struct objc_headeropt_rw_t {
 
     bool isLoaded(uint32_t i) const {
         return ((header_info_rw<PointerType>*)get(i))->getLoaded();
+    }
+
+    void setLoaded(uint32_t i) const {
+       ((header_info_rw<PointerType>*)get(i))->setLoaded();
     }
 };
 
@@ -873,6 +909,21 @@ static std::optional<uint16_t> getPreoptimizedHeaderRWIndex(const void* headerIn
 #pragma clang diagnostic pop // "-Wunused-function"
 
 } // namespace objc
+
+// relative_list_list_t in objc is equivalent to a contiguous array of ListOfListsEntry,
+// where the first entry consists in both the entry size and list count.
+struct ListOfListsEntry {
+    union {
+        struct {
+            uint64_t imageIndex: 16;
+            int64_t  offset: 48;
+        };
+        struct {
+            uint32_t entsize;
+            uint32_t count;
+        };
+    };
+};
 
 struct ImpCacheHeader_v1 {
     int32_t  fallback_class_offset;

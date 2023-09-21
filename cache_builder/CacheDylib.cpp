@@ -182,6 +182,17 @@ static const bool segmentHasAuthFixups(const MachOFile* mf, uint32_t segmentInde
                 });
             });
         }
+
+        // Move to auth if __objc_const or __objc_data is present.
+        // This allows new method lists added by the category optimizer to be signed.
+        mf->forEachSection(^(const dyld3::MachOAnalyzer::SectionInfo &sectInfo, bool malformedSectionRange, bool &stop) {
+            if ( sectInfo.segInfo.segIndex != segmentIndexToSearch )
+                return;
+            if ( !strcmp(sectInfo.sectName, "__objc_const") || !strcmp(sectInfo.sectName, "__objc_data")) {
+                foundAuthFixup = true;
+                stop = true;
+            }
+        });
     });
 
     return foundAuthFixup;
@@ -200,16 +211,6 @@ static bool segmentSupportsDataConst(Diagnostics& diag, const BuilderConfig& con
         isBadSwiftLibrary = layout.hasSection(segmentName, "__objc_const");
     });
     if ( isBadSwiftLibrary )
-        return false;
-
-    // <rdar://problem/69813664> _NSTheOneTruePredicate is incompatible with __DATA_CONST
-    if ( (cacheDylib.installName == "/System/Library/Frameworks/Foundation.framework/Foundation")
-        || (cacheDylib.installName == "/System/Library/Frameworks/Foundation.framework/Versions/C/Foundation") )
-        return false;
-
-    // rdar://74112547 CF writes to kCFNull constant object
-    if ( (cacheDylib.installName == "/System/Library/Frameworks/CoreFoundation.framework/CoreFoundation")
-        || (cacheDylib.installName == "/System/Library/Frameworks/CoreFoundation.framework/Versions/A/CoreFoundation") )
         return false;
 
     // rdar://77149283 libcrypto.0.9.8.dylib writes to __DATA_CONST
@@ -627,7 +628,7 @@ void CacheDylib::categorizeLinkedit(const BuilderConfig& config)
 
 void CacheDylib::copyRawSegments(const BuilderConfig& config, Timer::AggregateTimer& timer)
 {
-    const bool log = false;
+    const bool log = config.log.printDebug;
 
     Timer::AggregateTimer::Scope timedScope(timer, "dylib copyRawSegments time");
 
@@ -1439,6 +1440,7 @@ void CacheDylib::updateObjCSelectorReferences(Diagnostics& diag, const BuilderCo
     lsl::EphemeralAllocator allocator;
     __block objc_visitor::Visitor objcVisitor = this->makeCacheObjCVisitor(config,
                                                                            objcSelectorOptimizer.selectorStringsChunk,
+                                                                           nullptr,
                                                                            nullptr);
 
     // Update every selector reference to point to the canonical selectors
@@ -1672,7 +1674,7 @@ void CacheDylib::convertObjCMethodListsToOffsets(Diagnostics& diag, const Builde
     Timer::AggregateTimer::Scope timedScope(timer, "dylib convertObjCMethodListsToOffsets time");
 
     lsl::EphemeralAllocator allocator;
-    __block objc_visitor::Visitor objcVisitor = this->makeCacheObjCVisitor(config, selectorStringsChunk, nullptr);
+    __block objc_visitor::Visitor objcVisitor = this->makeCacheObjCVisitor(config, selectorStringsChunk, nullptr, nullptr);
 
     auto visitMethodList = ^(objc_visitor::MethodList objcMethodList) {
         // Skip pointer based method lists
@@ -1730,7 +1732,7 @@ void CacheDylib::sortObjCMethodLists(Diagnostics& diag, const BuilderConfig& con
     Timer::AggregateTimer::Scope timedScope(timer, "dylib sortObjCMethodLists time");
 
     lsl::EphemeralAllocator allocator;
-    __block objc_visitor::Visitor objcVisitor = this->makeCacheObjCVisitor(config, selectorStringsChunk, nullptr);
+    __block objc_visitor::Visitor objcVisitor = this->makeCacheObjCVisitor(config, selectorStringsChunk, nullptr, nullptr);
 
     auto visitMethodList = ^(objc_visitor::MethodList               objcMethodList,
                              std::optional<metadata_visitor::ResolvedValue> extendedMethodTypes) {
@@ -1872,7 +1874,7 @@ void CacheDylib::optimizeLoadsFromConstants(const BuilderConfig& config,
                                             Timer::AggregateTimer& timer,
                                             const ObjCStringsChunk* selectorStringsChunk)
 {
-    const bool logSelectors = false;
+    const bool logSelectors = config.log.printDebug;
 
     Timer::AggregateTimer::Scope timedScope(timer, "dylib optimizeLoadsFromConstants time");
 
@@ -2124,7 +2126,7 @@ Error CacheDylib::emitObjCIMPCaches(const BuilderConfig& config, Timer::Aggregat
     if ( !objcIMPCachesOptimizer.builder )
         return Error();
 
-    const bool log = false;
+    const bool log = config.log.printDebug;
 
     Timer::AggregateTimer::Scope timedScope(timer, "emitObjCIMPCaches time");
 
@@ -2141,7 +2143,7 @@ Error CacheDylib::emitObjCIMPCaches(const BuilderConfig& config, Timer::Aggregat
         return Error();
 
     lsl::EphemeralAllocator allocator;
-    __block objc_visitor::Visitor objcVisitor = this->makeCacheObjCVisitor(config, nullptr, nullptr);
+    __block objc_visitor::Visitor objcVisitor = this->makeCacheObjCVisitor(config, nullptr, nullptr, nullptr);
 
     // Walk the classes in this dylib, and see if any have an IMP cache
     objcVisitor.forEachClassAndMetaClass(^(objc_visitor::Class& objcClass, bool& stopClass) {
@@ -2741,7 +2743,9 @@ static void addObjcSegments(Diagnostics& diag, const dyld3::MachOFile* objcMF,
 
 void CacheDylib::addObjcSegments(Diagnostics& diag, Timer::AggregateTimer& timer,
                                  const ObjCHeaderInfoReadOnlyChunk* headerInfoReadOnlyChunk,
+                                 const ObjCImageInfoChunk* imageInfoChunk,
                                  const ObjCProtocolHashTableChunk* protocolHashTableChunk,
+                                 const ObjCPreAttachedCategoriesChunk* preAttachedCategoriesChunk,
                                  const ObjCHeaderInfoReadWriteChunk* headerInfoReadWriteChunk,
                                  const ObjCCanonicalProtocolsChunk* canonicalProtocolsChunk)
 {
@@ -2754,16 +2758,18 @@ void CacheDylib::addObjcSegments(Diagnostics& diag, Timer::AggregateTimer& timer
     // Find the ranges for OBJC_RO and OBJC_RW
 
     // Read-only
-    // Note these asserts are just to make sure we use the correct
-    static_assert(Chunk::Kind::objcHeaderInfoRO < Chunk::Kind::objcStrings);
+    // Note these asserts are just to make sure we use the correct chunks for the start/end
+    static_assert(Chunk::Kind::objcHeaderInfoRO < Chunk::Kind::objcImageInfo);
+    static_assert(Chunk::Kind::objcImageInfo < Chunk::Kind::objcStrings);
     static_assert(Chunk::Kind::objcStrings < Chunk::Kind::objcSelectorsHashTable);
     static_assert(Chunk::Kind::objcSelectorsHashTable < Chunk::Kind::objcClassesHashTable);
     static_assert(Chunk::Kind::objcClassesHashTable < Chunk::Kind::objcProtocolsHashTable);
     static_assert(Chunk::Kind::objcProtocolsHashTable < Chunk::Kind::objcIMPCaches);
+    static_assert(Chunk::Kind::objcIMPCaches < Chunk::Kind::objcPreAttachedCategories);
 
     CacheFileOffset readOnlyFileOffset = headerInfoReadOnlyChunk->subCacheFileOffset;
     CacheVMAddress readOnlyVMAddr = headerInfoReadOnlyChunk->cacheVMAddress;
-    CacheVMSize readOnlyVMSize = (protocolHashTableChunk->cacheVMAddress + protocolHashTableChunk->cacheVMSize) - readOnlyVMAddr;
+    CacheVMSize readOnlyVMSize = (preAttachedCategoriesChunk->cacheVMAddress + preAttachedCategoriesChunk->cacheVMSize) - readOnlyVMAddr;
 
 
     // Read-write
@@ -2788,7 +2794,8 @@ void CacheDylib::addObjcSegments(Diagnostics& diag, Timer::AggregateTimer& timer
 
 objc_visitor::Visitor CacheDylib::makeCacheObjCVisitor(const BuilderConfig& config,
                                                        const Chunk* selectorStringsChunk,
-                                                       const ObjCCanonicalProtocolsChunk* canonicalProtocolsChunk) const
+                                                       const ObjCCanonicalProtocolsChunk* canonicalProtocolsChunk,
+                                                       const ObjCPreAttachedCategoriesChunk* categoriesChunk) const
 {
     // Get the segment ranges.  We need this as the dylib's segments are in different buffers, not in VM layout
     std::vector<metadata_visitor::Segment> cacheSegments;
@@ -2829,6 +2836,19 @@ objc_visitor::Visitor CacheDylib::makeCacheObjCVisitor(const BuilderConfig& conf
         segment.startVMAddr = VMAddress(canonicalProtocolsChunk->cacheVMAddress.rawValue());
         segment.endVMAddr   = VMAddress((canonicalProtocolsChunk->cacheVMAddress + canonicalProtocolsChunk->cacheVMSize).rawValue());
         segment.bufferStart = canonicalProtocolsChunk->subCacheBuffer;
+
+        // Cache segments never have a chained format. They always use the Fixup struct
+        segment.onDiskDylibChainedPointerFormat = { };
+
+        cacheSegments.push_back(std::move(segment));
+    }
+
+    // Add the categories data chunk too.  That way we can resolve references which land on it
+    if ( categoriesChunk != nullptr ) {
+        metadata_visitor::Segment segment;
+        segment.startVMAddr = VMAddress(categoriesChunk->cacheVMAddress.rawValue());
+        segment.endVMAddr   = VMAddress((categoriesChunk->cacheVMAddress + categoriesChunk->cacheVMSize).rawValue());
+        segment.bufferStart = categoriesChunk->subCacheBuffer;
 
         // Cache segments never have a chained format. They always use the Fixup struct
         segment.onDiskDylibChainedPointerFormat = { };

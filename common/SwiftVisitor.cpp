@@ -22,6 +22,10 @@
  * @APPLE_LICENSE_HEADER_END@
  */
 
+#include <TargetConditionals.h>
+
+#if !TARGET_OS_EXCLAVEKIT
+
 #include "SwiftVisitor.h"
 
 #if SUPPORT_VM_LAYOUT
@@ -371,3 +375,5 @@ ResolvedValue SwiftConformance::TypeContextDescriptor::getName(const SwiftVisito
     VMAddress targetVMAddr = nameField.vmAddress() + offsetFromNameField;
     return swiftVisitor.getValueFor(targetVMAddr);
 }
+
+#endif // !TARGET_OS_EXCLAVEKIT

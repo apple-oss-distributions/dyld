@@ -54,6 +54,9 @@ const char* const neverStubEliminateSymbols[] = {
     "_cp_drawable_present",
     "_cp_drawable_encode_present",
     "_cp_drawable_enqueue_present",
+    "_CGImageDestinationFinalize",
+    "_CGImageSourceCreateThumbnailAtIndex",
+    "_CGImageSourceCreateImageAtIndex",
     "_ctime",
     "_ctime_r",
     "_dispatch_after",
@@ -298,12 +301,22 @@ const char* const neverStubEliminateSymbols[] = {
     "_write",
     "_writev",
     "_writev$UNIX2003",
+    "___pwrite_nocancel",
+    "___pwritev_nocancel",
+    "___write_nocancel",
+    "___writev_nocancel",
+    "_pwrite$NOCANCEL",
+    "_pwritev$NOCANCEL",
+    "_write$NOCANCEL",
+    "_writev$NOCANCEL",
     "_xpc_connection_send_message_with_reply_sync",
     // <rdar://problem/22050956> always use stubs for C++ symbols that can be overridden
     "__ZdaPv",
     "__ZdlPv",
     "__Znam",
     "__Znwm",
+    "__ZnwmSt19__type_descriptor_t",
+    "__ZnamSt19__type_descriptor_t",
 
     nullptr
 };

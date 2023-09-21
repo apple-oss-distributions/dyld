@@ -21,33 +21,23 @@
  * @APPLE_LICENSE_HEADER_END@
  */
 
-#include <iostream>
 
 #include <stdint.h>
 #include <stdio.h>
 #include <string.h>
 #include <assert.h>
-#include <uuid/uuid.h>
-#include <fcntl.h>
-#include <errno.h>
-#include <_simple.h>
-#include <unistd.h>
-#include <sys/uio.h>
-#include <sys/param.h>
-#include <sys/sysctl.h>
-#include <sys/resource.h>
-#include <sys/types.h>
-#include <sys/stat.h>
-#include <sys/mman.h>
-#include <dirent.h>
-#include <mach/mach.h>
-#include <mach/machine.h>
-#include <mach/mach_time.h>
-#include <mach-o/loader.h>
-#include <mach-o/nlist.h>
-#include <mach-o/fat.h>
-#include <pthread.h>
-#include <libc_private.h>
+#include <TargetConditionals.h>
+#include "Defines.h"
+#if TARGET_OS_EXCLAVEKIT
+  extern "C" void abort_report_np(const char* format, ...) __attribute__((noreturn,format(printf, 1, 2)));
+#else
+  #include <_simple.h>
+  #include <libc_private.h>
+#endif
+#if BUILDING_CACHE_BUILDER || BUILDING_UNIT_TESTS || BUILDING_CACHE_BUILDER_UNIT_TESTS
+  #include <mach/mach_time.h> // mach_absolute_time()
+  #include <iostream>
+#endif
 
 #include "Diagnostics.h"
 
@@ -61,6 +51,9 @@ Diagnostics::Diagnostics(bool verbose)
     : _prefix(""), _verbose(verbose)
 #endif
 {
+#if TARGET_OS_EXCLAVEKIT
+    _strBuf[0] = '\0';
+#endif
 }
 
 #if BUILDING_CACHE_BUILDER || BUILDING_UNIT_TESTS || BUILDING_CACHE_BUILDER_UNIT_TESTS
@@ -85,9 +78,13 @@ void Diagnostics::error(const char* format, ...)
 
 void Diagnostics::error(const char* format, va_list list)
 {
+#if TARGET_OS_EXCLAVEKIT
+    vsnprintf(_strBuf, sizeof(_strBuf), format, list);
+#else
     if ( _buffer == nullptr )
         _buffer = _simple_salloc();
     _simple_vsprintf(_buffer, format, list);
+#endif
 
 #if BUILDING_CACHE_BUILDER || BUILDING_UNIT_TESTS || BUILDING_CACHE_BUILDER_UNIT_TESTS
     if ( !_verbose )
@@ -103,42 +100,62 @@ void Diagnostics::error(const char* format, va_list list)
 
  void Diagnostics::appendError(const char* format, ...)
  {
-    if ( _buffer != nullptr )
+#if TARGET_OS_EXCLAVEKIT
+    size_t len = strlen(_strBuf);
+    va_list list;
+    va_start(list, format);
+    vsnprintf(&_strBuf[len], sizeof(_strBuf)-len, format, list);
+    va_end(list);
+#else
+   if ( _buffer != nullptr )
         _simple_sresize(_buffer);
     va_list list;
     va_start(list, format);
     error(format, list);
     va_end(list);
+#endif
  }
 
 bool Diagnostics::hasError() const
 {
+#if TARGET_OS_EXCLAVEKIT
+    return (*_strBuf != '\0');
+#else
     return _buffer != nullptr;
+#endif
 }
 
 bool Diagnostics::noError() const
 {
+#if TARGET_OS_EXCLAVEKIT
+    return (*_strBuf == '\0');
+#else
     return _buffer == nullptr;
+#endif
 }
 
 void Diagnostics::clearError()
 {
+#if TARGET_OS_EXCLAVEKIT
+    *_strBuf = '\0';
+#else
     if ( _buffer )
         _simple_sfree(_buffer);
     _buffer = nullptr;
+#endif
 }
 
 void Diagnostics::assertNoError() const
 {
-    if ( _buffer != nullptr )
-        abort_report_np("%s", _simple_string(_buffer));
+    if ( hasError() )
+        abort_report_np("%s", errorMessageCStr());
 }
 
 bool Diagnostics::errorMessageContains(const char* subString) const
 {
-    if ( _buffer == nullptr )
+    if ( noError() )
         return false;
-    return (strstr(_simple_string(_buffer), subString) != nullptr);
+    return (strstr(errorMessageCStr(), subString) != nullptr);
 }
 
 #if BUILDING_CACHE_BUILDER || BUILDING_UNIT_TESTS || BUILDING_CACHE_BUILDER_UNIT_TESTS
@@ -220,7 +237,13 @@ void Diagnostics::clearWarnings()
 
 const char* Diagnostics::errorMessage() const
 {
-    return _buffer ? _simple_string(_buffer) : "";
+    if ( noError() )
+        return "";
+#if TARGET_OS_EXCLAVEKIT
+    return _strBuf;
+#else
+    return _simple_string(_buffer);
+#endif
 }
 
 #endif

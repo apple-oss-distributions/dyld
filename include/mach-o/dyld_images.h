@@ -24,10 +24,9 @@
 #define _DYLD_IMAGES_
 
 #include <stdbool.h>
-#include <unistd.h>
-#include <mach/mach.h>
 #include <uuid/uuid.h>
 #include <TargetConditionals.h>
+
 
 #if defined(__cplusplus) && (BUILDING_LIBDYLD || BUILDING_DYLD)
 #include <atomic>
@@ -166,7 +165,11 @@ struct __attribute__((aligned(16))) dyld_all_image_infos
 	uint64_t						infoArrayChangeTimestamp;
 #endif
 	const char*						dyldPath;
-	mach_port_t						notifyPorts[DYLD_MAX_PROCESS_INFO_NOTIFY_COUNT];
+#if TARGET_OS_EXCLAVEKIT
+	uint32_t						notifyPorts[DYLD_MAX_PROCESS_INFO_NOTIFY_COUNT];
+#else
+    mach_port_t                     notifyPorts[DYLD_MAX_PROCESS_INFO_NOTIFY_COUNT];
+#endif
 #if __LP64__
 	uintptr_t						reserved[11-(DYLD_MAX_PROCESS_INFO_NOTIFY_COUNT/2)];
 #else

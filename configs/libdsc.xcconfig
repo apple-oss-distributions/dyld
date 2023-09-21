@@ -1,0 +1,3 @@
+#include "base.xcconfig"
+
+SKIP_INSTALL[sdk=exclavekit*] = YES

@@ -25,14 +25,15 @@
 #define Loader_h
 
 #include <ptrauth.h>
+#include <TargetConditionals.h>
 
-#include <cstdint>
-#include <span>
 #include "Defines.h"
 #include "Array.h"
 #include "DyldDelegates.h"
 #include "DyldProcessConfig.h"
-#include "FileManager.h"
+
+// For _dyld_section_location_kind.  Note we want our copy, not the copy in the SDK
+#include "dyld_priv.h"
 
 #if SUPPORT_VM_LAYOUT
 #include "MachOLoaded.h"
@@ -51,7 +52,6 @@ class DyldSharedCache;
 
 namespace dyld4 {
 
-using dyld4::FileManager;
 using dyld3::MachOLoaded;
 using dyld3::MachOAnalyzer;
 using dyld3::Array;
@@ -59,16 +59,30 @@ using dyld3::Array;
 typedef dyld3::MachOLoaded::PointerMetaData    PointerMetaData;
 
 class PrebuiltLoader;
+class PseudoDylib;
 class JustInTimeLoader;
+class PremappedLoader;
 class RuntimeState;
 class DyldCacheDataConstLazyScopedWriter;
 
+struct SectionLocations
+{
+    uint32_t version = 1;
+    uint32_t flags   = 0;
+
+    static constexpr uint32_t count = _dyld_section_location_count;
+
+    uint64_t offsets[count];
+    uint64_t sizes[count];
+};
+
 //
 //  At runtime there is one Loader object for each mach-o image loaded.
-//  Loader is an abstract base class.  The two concrete classes
-//  instantiated at runtime are PrebuiltLoader and JustInTimeLoader.
+//  Loader is an abstract base class.  The three concrete classes
+//  instantiated at runtime are PrebuiltLoader, JustInTimeLoader and Premapped.
 //  PrebuiltLoader objects mmap()ed in read-only from disk.
 //  JustInTimeLoader objects are malloc()ed.
+//  PremappedLoader objects are mapped by the exclave core
 //
 class Loader
 {
@@ -94,6 +108,7 @@ public:
                         leaveMapped        :  1,  // RTLD_NODELETE
                         hasReadOnlyObjC    :  1,  // Has __DATA_CONST,__objc_selrefs section
                         pre2022Binary      :  1,
+                        isPremapped        :  1,  // mapped by exclave core
                         padding            :  6;
     LoaderRef           ref;
 
@@ -144,10 +159,10 @@ public:
     struct FileValidationInfo
     {
         uint64_t    sliceOffset;
+        uint64_t    deviceID;
         uint64_t    inode;
         uint64_t    mtime;
         uint8_t     cdHash[20];         // to validate file has not changed since PrebuiltLoader was built
-        uint8_t     uuid[16];
         bool        checkInodeMtime;
         bool        checkCdHash;
     };
@@ -182,7 +197,7 @@ public:
         };
     };
 
-    // these are the "virtual" methods that JustInTimeLoader and PrebuiltLoader implement
+    // these are the "virtual" methods that JustInTimeLoader, PrebuiltLoader and PremappedLoader implement
     const dyld3::MachOFile* mf(RuntimeState& state) const;
 #if SUPPORT_VM_LAYOUT
     const MachOLoaded*      loadAddress(RuntimeState& state) const;
@@ -190,17 +205,22 @@ public:
     const char*             path() const;
     bool                    contains(RuntimeState& state, const void* addr, const void** segAddr, uint64_t* segSize, uint8_t* segPerms) const;
     bool                    matchesPath(const char* path) const;
-    FileID                  fileID(const FileManager& fileManager) const;
+#if !TARGET_OS_EXCLAVEKIT
+    FileID                  fileID(const RuntimeState& state) const;
+#endif
     uint32_t                dependentCount() const;
     Loader*                 dependent(const RuntimeState& state, uint32_t depIndex, DependentKind* kind=nullptr) const;
     bool                    hiddenFromFlat(bool forceGlobal=false) const;
     bool                    representsCachedDylibIndex(uint16_t dylibIndex) const;
     bool                    getExportsTrie(uint64_t& runtimeOffset, uint32_t& size) const;
     void                    loadDependents(Diagnostics& diag, RuntimeState& state, const LoadOptions& options);
+#if SUPPORT_IMAGE_UNLOADING
     void                    unmap(RuntimeState& state, bool force=false) const;
+#endif
     void                    applyFixups(Diagnostics&, RuntimeState&, DyldCacheDataConstLazyScopedWriter&, bool allowLazyBinds) const;
     bool                    overridesDylibInCache(const DylibPatch*& patchTable, uint16_t& cacheDylibOverriddenIndex) const;
     bool                    dyldDoesObjCFixups() const;
+    const SectionLocations* getSectionLocations() const;
     void                    withLayout(Diagnostics &diag, RuntimeState& state, void (^callback)(const mach_o::Layout &layout)) const;
 
     // these are private
@@ -235,8 +255,13 @@ public:
     void                    applyFixupsGeneric(Diagnostics&, RuntimeState& state, uint64_t sliceOffset, const Array<const void*>& bindTargets,
                                                const Array<const void*>& overrideBindTargets, bool laziesMustBind,
                                                const Array<MissingFlatLazySymbol>& missingFlatLazySymbols) const;
+    void                    forEachBindTarget(Diagnostics& diag, RuntimeState& state,
+                                              CacheWeakDefOverride patcher, bool allowLazyBinds,
+                                          void (^callback)(const ResolvedSymbol& target, bool& stop),
+                                          void (^overrideBindCallback)(const ResolvedSymbol& target, bool& stop)) const;
     const JustInTimeLoader* isJustInTimeLoader() const { return (this->isPrebuilt ? nullptr               : (JustInTimeLoader*)this); };
     const PrebuiltLoader*   isPrebuiltLoader() const   { return (this->isPrebuilt ? (PrebuiltLoader*)this : nullptr); };
+    const PremappedLoader*  isPremappedLoader() const   { return (this->isPremapped ? (PremappedLoader*)this : nullptr); };
     void                    getUuidStr(RuntimeState&, char uuidStr[64]) const;
     void                    logLoad(RuntimeState&, const char* path) const;
     void                    tooNewErrorAddendum(Diagnostics& diag, RuntimeState&) const;
@@ -248,7 +273,6 @@ public:
     static void             uuidToStr(uuid_t uuid, char  uuidStr[64]);
     static void             applyInterposingToDyldCache(RuntimeState& state);
     static uintptr_t        interpose(RuntimeState& state, uintptr_t value, const Loader* forLoader=nullptr);
-    static const Loader*    alreadyLoaded(RuntimeState& state, const char* loadPath);
     static const Loader*    getLoader(Diagnostics& diag, RuntimeState& state, const char* loadPath, const LoadOptions& options);
     static const char*      leafName(const char* path);
     static void             forEachResolvedAtPathVar(RuntimeState& state, const char* loadPath, const LoadOptions& options, ProcessConfig::PathOverrides::Type type, bool& stop,
@@ -288,21 +312,24 @@ protected:
     };
 
 
-                               Loader(const InitialOptions& options, bool prebuilt, bool prebuiltApp, bool prebuiltIndex)
+                               Loader(const InitialOptions& options, bool prebuilt, bool prebuiltApp, bool prebuiltIndex, bool premapped)
                                        : magic(kMagic), isPrebuilt(prebuilt), dylibInDyldCache(options.inDyldCache),
                                          hasObjC(options.hasObjc), mayHavePlusLoad(options.mayHavePlusLoad), hasReadOnlyData(options.roData),
                                          neverUnload(options.neverUnloaded), leaveMapped(options.leaveMapped), hasReadOnlyObjC(options.roObjC),
-                                         pre2022Binary(options.pre2022Binary), padding(0),
+                                         pre2022Binary(options.pre2022Binary), isPremapped(premapped), padding(0),
                                          ref(prebuiltApp, prebuiltIndex) { }
 
     void                        setUpPageInLinking(Diagnostics& diag, RuntimeState& state, uintptr_t slide, uint64_t sliceOffset, const Array<const void*>& bindTargets) const;
 
     static bool                 expandAtLoaderPath(RuntimeState& state, const char* loadPath, const LoadOptions& options, const Loader* ldr, bool fromLCRPATH, char fixedPath[]);
     static bool                 expandAtExecutablePath(RuntimeState& state, const char* loadPath, const LoadOptions& options, bool fromLCRPATH, char fixedPath[]);
+    static const Loader*        makePremappedLoader(Diagnostics& diag, RuntimeState& state, const char* path, const LoadOptions& options, const mach_o::Layout* layout);
     static const Loader*        makeDiskLoader(Diagnostics& diag, RuntimeState& state, const char* path, const LoadOptions& options, bool overridesDyldCache, uint32_t dylibIndex,
                                                const mach_o::Layout* layout);
     static const Loader*        makeDyldCacheLoader(Diagnostics& diag, RuntimeState& state, const char* path, const LoadOptions& options, uint32_t dylibIndex,
                                                     const mach_o::Layout* layout);
+
+    static const Loader*        makePseudoDylibLoader(Diagnostics& diag, RuntimeState &state, const char* path, const LoadOptions& options, const PseudoDylib* pd);
 
 #if SUPPORT_VM_LAYOUT
     static const MachOAnalyzer* mapSegments(Diagnostics&, RuntimeState&, const char* path, uint64_t vmSpace,

@@ -1,13 +1,16 @@
 #include "base.xcconfig"
 
 INSTALL_PATH                = /usr/local/lib
-EXECUTABLE_NAME             = libdyld_introspection.a
 GENERATE_MASTER_OBJECT_FILE = YES
 GCC_SYMBOLS_PRIVATE_EXTERN  = YES
 
-SKIP_INSTALL_Release        = NO
-SKIP_INSTALL_Debug          = YES
-SKIP_INSTALL                = $(SKIP_INSTALL_$(CONFIGURATION))
+SKIP_INSTALL_Release          = NO
+SKIP_INSTALL_Debug            = YES
+SKIP_INSTALL                  = $(SKIP_INSTALL_$(CONFIGURATION))
+SKIP_INSTALL[sdk=exclavekit*] = YES
+
+// Disable building the _asan variant for dyld on ExclaveKit
+BUILD_VARIANTS[sdk=exclavekit*] = normal
 
 GCC_PREPROCESSOR_DEFINITIONS_Release    =
 GCC_PREPROCESSOR_DEFINITIONS_Debug      =  DEBUG=1

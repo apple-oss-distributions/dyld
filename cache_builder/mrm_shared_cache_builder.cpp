@@ -546,8 +546,9 @@ static bool createBuilders(struct MRMSharedCacheBuilder* builder)
                                                                        cacheKind, forceDevelopmentSubCacheSuffix);
 
         options->logPrefix                   = loggingPrefix;
-        options->timePasses                  = timePasses(builder->options);
-        options->stats                       = printStats(builder->options);
+        options->debug                       = builder->options->verboseDiagnostics;
+        options->timePasses                  = options->debug ? true : timePasses(builder->options);
+        options->stats                       = options->debug ? true : printStats(builder->options);
         options->dylibOrdering               = parseOrderFile(builder->dylibOrderFileData);
         options->dirtyDataSegmentOrdering    = parseOrderFile(builder->dirtyDataOrderFileData);
         options->objcOptimizations           = parseObjcOptimizationsFile(diag, builder->objcOptimizationsFileData,

@@ -217,7 +217,8 @@ int main(int argc, const char* argv[])
 
     Allocator&             alloc = Allocator::defaultAllocator();
     __block ProcessConfig  config(&kernArgs, osDelegate, alloc);
-    RuntimeState           state(config, alloc);
+    RuntimeLocks           locks;
+    RuntimeState           state(config, locks, alloc);
 
      if ( inputMainExecutablePath != nullptr ) {
         config.reset(mainMA, inputMainExecutablePath, osDelegate._dyldCache);

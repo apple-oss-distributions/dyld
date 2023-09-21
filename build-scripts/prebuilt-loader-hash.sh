@@ -1,7 +1,13 @@
 #!/bin/bash
+set -e
 
 echo -e "#include \"PrebuiltLoader.h\"\nint foo() { return sizeof(dyld4::PrebuiltLoader)+sizeof(dyld4::PrebuiltLoaderSet)+sizeof(dyld4::ObjCBinaryInfo)+sizeof(dyld4::Loader::DylibPatch)+sizeof(dyld4::Loader::FileValidationInfo); }\n" > ${DERIVED_FILE_DIR}/test.cpp
-xcrun -sdk macosx clang++ -std=c++2a -w -Wno-incompatible-sysroot -fsyntax-only -Xclang -fdump-record-layouts -Icommon -Idyld -Iinclude -Icache-builder -Icache_builder -Ilsl ${DERIVED_FILE_DIR}/test.cpp > ${DERIVED_FILE_DIR}/test.out
+
+PLATFORM_SDK="macosx.internal"
+
+xcrun -sdk ${PLATFORM_SDK} clang++ -arch arm64 -std=c++2a -w -Wno-incompatible-sysroot -fsyntax-only -Xclang -fdump-record-layouts -Icommon -Idyld -Iinclude -Icache-builder -Icache_builder -Ilsl -Iinclude/mach-o ${DERIVED_FILE_DIR}/test.cpp > ${DERIVED_FILE_DIR}/test.out
+
+
 grep -A100 "class dyld4::PrebuiltLoader"                ${DERIVED_FILE_DIR}/test.out | grep -B100 -m1 sizeof= > ${DERIVED_FILE_DIR}/pbl.ast
 grep -A100 "struct dyld4::PrebuiltLoaderSet"            ${DERIVED_FILE_DIR}/test.out | grep -B100 -m1 sizeof= > ${DERIVED_FILE_DIR}/pbls.ast
 grep -A100 "struct dyld4::ObjCBinaryInfo"               ${DERIVED_FILE_DIR}/test.out | grep -B100 -m1 sizeof= > ${DERIVED_FILE_DIR}/pblsobjc.ast

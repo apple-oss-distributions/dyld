@@ -36,6 +36,7 @@
 #include "ObjCVisitor.h"
 #include "Trie.hpp"
 #include "JustInTimeLoader.h"
+#include "OptimizerObjC.h"
 #include "OptimizerSwift.h"
 #include "PrebuiltLoader.h"
 #include "DyldProcessConfig.h"
@@ -61,6 +62,7 @@ using dyld4::Loader;
 using dyld4::ProcessConfig;
 using dyld4::RuntimeState;
 using dyld4::SyscallDelegate;
+using dyld4::RuntimeLocks;
 
 using lsl::EphemeralAllocator;
 
@@ -197,8 +199,10 @@ Error SharedCacheBuilder::estimateGlobalOptimizations()
     this->findCanonicalObjCProtocolNames();
     this->findObjCClasses();
     this->findObjCProtocols();
+    this->findObjCCategories();
     this->estimateObjCHashTableSizes();
     this->calculateObjCCanonicalProtocolsSize();
+    this->calculateObjCCategoriesSize();
 
     // Note, swift hash tables depends on findObjCClasses()
     this->estimateSwiftHashTableSizes();
@@ -238,8 +242,8 @@ Error SharedCacheBuilder::createSubCaches()
     return Error();
 }
 
-// This is phase 4 of the build() process.  It takes the inputs and Optimizers
-// from the previous phases, and creates the SubCache objects
+// This is phase 4 of the build() process. It takes the inputs and Optimizers
+// from the previous phases, and emits them to the cache buffers
 // Inputs:  subCaches, various Optimizers
 // Outputs: emitted objc strings in the subCache buffers
 Error SharedCacheBuilder::preDylibEmitChunks()
@@ -250,6 +254,7 @@ Error SharedCacheBuilder::preDylibEmitChunks()
     this->setupSplitSegAdjustors();
     this->adjustObjCClasses();
     this->adjustObjCProtocols();
+    this->adjustObjCCategories();
 
     // Note this could be after dylib passes, but having the strings emitted now makes
     // it easier to debug the ObjC dylib passes
@@ -261,8 +266,8 @@ Error SharedCacheBuilder::preDylibEmitChunks()
     return Error();
 }
 
-// This is phase 4 of the build() process.
-// It runs the passes on each of the cacheDylib's
+// This is phase 5 of the build() process.
+// It runs the passes on each of the cache Dylibs
 // Inputs:  subCaches, various Optimizers
 // Outputs: emitted objc strings in the subCache buffers
 Error SharedCacheBuilder::runDylibPasses()
@@ -334,12 +339,13 @@ Error SharedCacheBuilder::runDylibPasses()
     return err;
 }
 
-// This is phase 5 of the build() process.  It takes the Optimizers
+// This is phase 6 of the build() process. It takes the Optimizers
 // from the previous phases, and emits them to the cache buffers
 // Inputs:  subCaches, various Optimizers
-// Outputs: emitted optimiations in the subCache buffers
+// Outputs: emitted optimizations in the subCache buffers
 Error SharedCacheBuilder::postDylibEmitChunks()
 {
+
     this->optimizeTLVs();
 
     if ( Error error = this->emitUniquedGOTs(); error.hasError() )
@@ -349,7 +355,25 @@ Error SharedCacheBuilder::postDylibEmitChunks()
     if ( Error error = this->emitCanonicalObjCProtocols(); error.hasError() )
         return error;
 
+    this->emitCacheDylibsTrie();
+    if ( Error error = this->emitPatchTable(); error.hasError() )
+        return error;
+
+    // Note, this must be after we emit the patch table
+    if ( Error error = this->emitCacheDylibsPrebuiltLoaders(); error.hasError() )
+        return error;
+
     this->emitObjCHashTables();
+
+    bool preAttachedCategories = true;
+    if ( preAttachedCategories ) {
+        // Note this has to be after anyone walking the objc metadata format
+        if ( Error error = this->emitPreAttachedObjCCategories(); error.hasError() )
+            return error;
+    }
+
+    // Note, this must be after emitCacheDylibsPrebuiltLoaders() as it needs the offset to the SectionLocations*
+    // in the PrebuiltLoader*
     this->emitObjCHeaderInfo();
     if ( Error error = this->computeObjCClassLayout(); error.hasError() )
         return error;
@@ -361,14 +385,6 @@ Error SharedCacheBuilder::postDylibEmitChunks()
     // Note, this has to be after we've emitted the objc class hash table, and after emitting
     // the objc header info
     if ( Error error = this->emitSwiftHashTables(); error.hasError() )
-        return error;
-
-    this->emitCacheDylibsTrie();
-    if ( Error error = this->emitPatchTable(); error.hasError() )
-        return error;
-
-    // Note, this must be after we emit the patch table
-    if ( Error error = this->emitCacheDylibsPrebuiltLoaders(); error.hasError() )
         return error;
 
     // Note, this has to be after we've emitted the objc hash tables and the objc header infos
@@ -385,8 +401,8 @@ Error SharedCacheBuilder::postDylibEmitChunks()
     return Error();
 }
 
-// This is phase 6 of the build() process.  it does any final work to emit
-// the sub caches
+// This is phase 7 of the build() process. It does any final work
+// to emit the sub caches
 // Inputs: everything else
 // Outputs: final emitted data in the sub caches
 Error SharedCacheBuilder::finalize()
@@ -1372,6 +1388,8 @@ void SharedCacheBuilder::findObjCDylibs()
         this->objcOptimizer.headerInfoReadWriteByteSize += (uint32_t)this->objcOptimizer.objcDylibs.size() * sizeof(ObjCOptimizer::header_info_rw_32_t);
     }
 
+    this->objcOptimizer.imageInfoSize = this->objcOptimizer.objcDylibs.size() * sizeof(objc::objc_image_info);
+
     if ( this->config.log.printStats ) {
         stats.add("  objc: found %lld objc dylibs\n", (uint64_t)this->objcOptimizer.objcDylibs.size());
     }
@@ -1751,6 +1769,162 @@ void SharedCacheBuilder::findObjCProtocols()
     }
 }
 
+// Walk all the dylibs and build a map of ObjC categories
+void SharedCacheBuilder::findObjCCategories()
+{
+    if ( this->objcOptimizer.objcDylibs.empty() )
+        return;
+
+    Stats        stats(this->config);
+    Timer::Scope timedScope(this->config, "findObjCCategories time");
+
+    // Reserve space for 15k categories, as we have 10k as of writing
+    const uint32_t numCategoriesToReserve = 1 << 14;
+    this->objcCategoryOptimizer.categories.reserve(numCategoriesToReserve);
+    size_t objcIndex = 0;
+    for (size_t cacheIndex = 0; cacheIndex < this->cacheDylibs.size(); cacheIndex++) {
+        CacheDylib& cacheDylib = this->cacheDylibs[cacheIndex];
+        if ( !cacheDylib.inputMF->hasObjC() )
+            continue;
+
+        // Skip dylibs with opcode fixups, as the Category visitor operates on chained fixups to find classes
+        if ( cacheDylib.inputMF->hasOpcodeFixups() ) {
+            this->objcCategoryOptimizer.excludedDylibs.insert(objcIndex);
+            objcIndex++;
+            continue;
+        }
+        struct BindTarget {
+            std::string_view        symbolName;
+            std::optional<uint32_t> targetDylibIndex;
+            bool                    isWeakImport     = false;
+        };
+        __block std::vector<BindTarget> bindTargets;
+        __block Diagnostics diag;
+        cacheDylib.inputMF->withFileLayout(diag, ^(const mach_o::Layout& layout) {
+            mach_o::Fixups fixups(layout);
+
+            fixups.forEachBindTarget(diag, false, 0, ^(const mach_o::Fixups::BindTargetInfo& info, bool& stop) {
+                if ( info.libOrdinal == BIND_SPECIAL_DYLIB_SELF ) {
+                    bindTargets.push_back({ info.symbolName, cacheDylib.cacheIndex, info.weakImport });
+                } else if ( info.libOrdinal < 0 ) {
+                    // A special ordinal such as weak.  Just put in a placeholder for now
+                    bindTargets.push_back({ info.symbolName, std::nullopt, info.weakImport });
+                } else {
+                    assert(info.libOrdinal <= (int)cacheDylib.dependents.size());
+                    const CacheDylib *targetDylib = cacheDylib.dependents[info.libOrdinal-1].dylib;
+                    assert(info.weakImport || (targetDylib != nullptr));
+                    std::optional<uint32_t> targetDylibIndex;
+                    if ( targetDylib != nullptr )
+                        targetDylibIndex = targetDylib->cacheIndex;
+                    bindTargets.push_back({ info.symbolName, targetDylibIndex, info.weakImport });
+                }
+
+                if ( diag.hasError() )
+                    stop = true;
+            }, ^(const mach_o::Fixups::BindTargetInfo& info, bool& stop) {
+                // This shouldn't happen with chained fixups
+                assert(0);
+            });
+        });
+        diag.assertNoError();
+
+        __block objc_visitor::Visitor objCVisitor = makeInputDylibObjCVisitor(cacheDylib);
+
+        __block bool categoriesHaveClassProperties = false;
+        objCVisitor.withImageInfo(^(const uint32_t version, const uint32_t flags) {
+            const uint64_t hasCategoryClassPropertiesFlag = (1 << 6);
+            categoriesHaveClassProperties = (flags & hasCategoryClassPropertiesFlag);
+        });
+
+        objCVisitor.forEachCategory(^(const objc_visitor::Category &objcCategory, bool &stopCategory) {
+
+            __block ObjCCategoryOptimizer::Category objCCategoryInfo(objcCategory.getName(objCVisitor));
+            objCCategoryInfo.dylibObjcIndex = objcIndex;
+            objCCategoryInfo.vmAddress = objcCategory.getVMAddress();
+
+            objcCategory.withClass(objCVisitor, ^(const dyld3::MachOFile::ChainedFixupPointerOnDisk *fixup, uint16_t pointerFormat) {
+                assert(fixup->raw64 != 0);
+
+                uint64_t runtimeOffset = 0;
+                if ( fixup->isRebase(pointerFormat, objCVisitor.getOnDiskDylibChainedPointerBaseAddress().rawValue(), runtimeOffset) ) {
+                    // Rebase to a class in this image.
+                    objCCategoryInfo.classDylibIndex = cacheDylib.cacheIndex;
+                    objCCategoryInfo.classVMAddress = VMAddress(runtimeOffset);
+                } else {
+                    uint32_t bindOrdinal = 0;
+                    int64_t bindAddend = 0;
+                    if ( fixup->isBind(pointerFormat, bindOrdinal, bindAddend) ) {
+                        BindTarget& bindTarget = bindTargets[bindOrdinal];
+                        FoundSymbol foundSymbol = findTargetClass(diag, this->cacheDylibs,
+                                                                  bindTarget.symbolName,
+                                                                  bindTarget.targetDylibIndex);
+                        if ( foundSymbol.foundInDylib == nullptr ) {
+                            // Ignore category if class is missing. Usually due to a weak-link
+                            if ( !bindTarget.isWeakImport ) {
+                                this->warning("Class %s could not be found for category %s in %s.", bindTarget.symbolName.data(), objCCategoryInfo.name.data(), cacheDylib.installName.data());
+                            }
+                            return;
+                        }
+                        objCCategoryInfo.classVMAddress = VMAddress(foundSymbol.offsetInDylib.rawValue());
+                        objCCategoryInfo.classDylibIndex = foundSymbol.foundInDylib->cacheIndex;
+                    } else {
+                        assert(0);
+                    }
+                }
+            });
+
+            if ( !objCCategoryInfo.classVMAddress.has_value() )
+                return;
+
+            // instance methods
+            {
+                objc_visitor::MethodList objcMethodList = objcCategory.getInstanceMethods(objCVisitor);
+                uint32_t numMethods = objcMethodList.numMethods();
+                if ( numMethods > 0 )
+                    objCCategoryInfo.iMethodListVMAddress = objcMethodList.getVMAddress().value();
+            }
+            
+            // class methods
+            {
+                objc_visitor::MethodList objcMethodList = objcCategory.getClassMethods(objCVisitor);
+                uint32_t numMethods = objcMethodList.numMethods();
+                if ( numMethods > 0 )
+                    objCCategoryInfo.cMethodListVMAddress = objcMethodList.getVMAddress().value();
+            }
+
+            // protocols
+            {
+                objc_visitor::ProtocolList protocols = objcCategory.getProtocols(objCVisitor);
+                uint64_t numProtocols = protocols.numProtocols(objCVisitor);
+                if ( numProtocols > 0 )
+                    objCCategoryInfo.protocolListVMAddress = protocols.getVMAddress().value();
+            }
+
+            // instance properties
+            {
+                objc_visitor::PropertyList objcPropertyList = objcCategory.getInstanceProperties(objCVisitor);
+                uint64_t numProperties = objcPropertyList.numProperties();
+                if ( numProperties > 0 )
+                    objCCategoryInfo.iPropertyListVMAddress = objcPropertyList.getVMAddress().value();
+            }
+
+            // class properties
+            if ( categoriesHaveClassProperties ) {
+                objc_visitor::PropertyList objcPropertyList = objcCategory.getClassProperties(objCVisitor);
+                uint64_t numProperties = objcPropertyList.numProperties();
+                if ( numProperties > 0 )
+                    objCCategoryInfo.cPropertyListVMAddress = objcPropertyList.getVMAddress().value();
+            }
+            this->objcCategoryOptimizer.categories.push_back(std::move(objCCategoryInfo));
+        });
+        objcIndex++;
+    }
+
+    if ( this->config.log.printStats ) {
+        stats.add("  objc: found %lld categories\n", (uint64_t)this->objcCategoryOptimizer.categories.size());
+    }
+}
+
 static uint32_t hashTableSize(uint32_t maxElements, uint32_t perElementData)
 {
     uint32_t elementsWithPadding = maxElements * 11 / 10; // if close to power of 2, perfect hash may fail, so don't get within 10% of that
@@ -1807,6 +1981,71 @@ void SharedCacheBuilder::calculateObjCCanonicalProtocolsSize()
 
     if ( this->config.log.printStats ) {
         stats.add("  objc: canonical protocols size: %lld\n", (uint64_t)this->objcProtocolOptimizer.canonicalProtocolsTotalByteSize);
+    }
+}
+
+void SharedCacheBuilder::calculateObjCCategoriesSize()
+{
+    if ( this->objcOptimizer.objcDylibs.empty() )
+        return;
+
+    Stats        stats(this->config);
+    Timer::Scope timedScope(this->config, "calculateObjCCanonicalCategoriesSize time");
+
+    uint64_t sizeAndCountSize = sizeof(struct ListOfListsEntry);
+    uint64_t listEntrySize = sizeof(struct ListOfListsEntry);
+
+    // Add an empty method list that all lists of lists can use if the need it
+    // This is used for classes when they don't have method lists, but we want them to
+    // FIXME: Get the size from somewhere.  Its really the { uint32_t entsize; uint32_t count }
+    this->objcCategoryOptimizer.categoriesTotalByteSize += 8;
+
+    // This will allocate one listEntrySize for each category list.
+    // We might end up using less if the category does not extend a specific list.
+    // This will also allocate one listEntrySize and one sizeAndCountSize
+    // for every list in the original class.
+    // We might end up using less due to multiple categories extending the same class.
+    for ( auto& categoryInfo : this->objcCategoryOptimizer.categories ) {
+
+        if ( categoryInfo.iMethodListVMAddress.has_value()) {
+            // instance methods
+            this->objcCategoryOptimizer.categoriesTotalByteSize += sizeAndCountSize;
+            this->objcCategoryOptimizer.categoriesTotalByteSize += listEntrySize;
+            // original instance methods
+            this->objcCategoryOptimizer.categoriesTotalByteSize += listEntrySize;
+        }
+        if ( categoryInfo.cMethodListVMAddress.has_value()) {
+            // class methods
+            this->objcCategoryOptimizer.categoriesTotalByteSize += sizeAndCountSize;
+            this->objcCategoryOptimizer.categoriesTotalByteSize += listEntrySize;
+            // original class methods
+            this->objcCategoryOptimizer.categoriesTotalByteSize += listEntrySize;
+        }
+        if ( categoryInfo.protocolListVMAddress.has_value()) {
+            // protocols
+            this->objcCategoryOptimizer.categoriesTotalByteSize += sizeAndCountSize;
+            this->objcCategoryOptimizer.categoriesTotalByteSize += listEntrySize;
+            // original protocols
+            this->objcCategoryOptimizer.categoriesTotalByteSize += listEntrySize;
+        }
+        if ( categoryInfo.iPropertyListVMAddress.has_value()) {
+            // instance properties
+            this->objcCategoryOptimizer.categoriesTotalByteSize += sizeAndCountSize;
+            this->objcCategoryOptimizer.categoriesTotalByteSize += listEntrySize;
+            // original instance properties
+            this->objcCategoryOptimizer.categoriesTotalByteSize += listEntrySize;
+        }
+        if ( categoryInfo.cPropertyListVMAddress.has_value()) {
+            // instance properties
+            this->objcCategoryOptimizer.categoriesTotalByteSize += sizeAndCountSize;
+            this->objcCategoryOptimizer.categoriesTotalByteSize += listEntrySize;
+            // original class properties
+            this->objcCategoryOptimizer.categoriesTotalByteSize += listEntrySize;
+        }
+    }
+
+    if ( this->config.log.printStats ) {
+        stats.add("  objc: categories size: %lld\n", (uint64_t)this->objcCategoryOptimizer.categoriesTotalByteSize);
     }
 }
 
@@ -2185,11 +2424,17 @@ void SharedCacheBuilder::addObjCOptimizationsToSubCache(SubCache& subCache)
     // Add canonical objc protocols
     subCache.addObjCCanonicalProtocolsChunk(this->config, this->objcProtocolOptimizer);
 
+    // Add objc categories
+    subCache.addObjCCategoriesChunk(this->config, this->objcCategoryOptimizer);
+
     // Add objc opts header
     subCache.addObjCOptsHeaderChunk(this->objcOptimizer);
 
     // Add objc header info RO
     subCache.addObjCHeaderInfoReadOnlyChunk(this->objcOptimizer);
+
+    // Add objc image info
+    subCache.addObjCImageInfoChunk(this->objcOptimizer);
 
     // Add selector strings and hash table. These need to be adjacent as the table has offsets in
     // to the string section
@@ -3363,7 +3608,7 @@ static void parseGOTs(const CacheDylib* dylib, const DylibSegmentChunk* chunk,
 Error SharedCacheBuilder::calculateUniqueGOTs()
 {
     // Skip this optimiation on simulator until we've qualified it there
-    if ( this->options.isSimultor() )
+    if ( this->options.isSimulator() )
         return Error();
 
     Stats        stats(this->config);
@@ -3684,7 +3929,7 @@ void SharedCacheBuilder::calculateCodeSignatureSize()
 
 void SharedCacheBuilder::printSubCaches() const
 {
-    const bool printSegments = false;
+    const bool printSegments = this->config.log.printDebug;
 
     if ( !this->config.log.printStats )
         return;
@@ -4137,7 +4382,7 @@ Error SharedCacheBuilder::computeSubCacheLayout()
         if ( Error error = computeSubCacheContiguousVMLayout(); error.hasError() )
             return error;
     } else {
-        if ( this->options.isSimultor() ) {
+        if ( this->options.isSimulator() ) {
             if ( Error error = computeSubCacheDiscontiguousSimVMLayout(); error.hasError() )
                 return error;
         } else {
@@ -4171,7 +4416,7 @@ Error SharedCacheBuilder::computeSubCacheLayout()
 
 Error SharedCacheBuilder::allocateSubCacheBuffers()
 {
-    const bool log = false;
+    const bool log = this->options.debug;
 
     Timer::Scope timedScope(this->config, "allocateSubCacheBuffers time");
 
@@ -4487,6 +4732,76 @@ void SharedCacheBuilder::adjustObjCProtocols()
     }
 }
 
+void SharedCacheBuilder::adjustObjCCategories()
+{
+    if ( this->objcOptimizer.objcDylibs.empty() )
+        return;
+
+    Timer::Scope timedScope(this->config, "adjustObjCCategories time");
+
+    // Categories were stored as input dylib VMAddr's.  Convert to cache dylib VMAddr's
+    for ( auto& categoryInfo : this->objcCategoryOptimizer.categories ) {
+        CacheDylib* cacheDylib =  this->objcOptimizer.objcDylibs[categoryInfo.dylibObjcIndex.value()];
+
+        // category address
+        if ( categoryInfo.vmAddress.has_value() ) {
+            uint64_t inputAddr = categoryInfo.vmAddress.value().rawValue();
+            InputDylibVMAddress inputVMAddr(inputAddr);
+            CacheVMAddress cacheVMAddr = cacheDylib->adjustor->adjustVMAddr(inputVMAddr);
+            categoryInfo.vmAddress = VMAddress(cacheVMAddr.rawValue());
+        }
+
+        // class address
+        if ( categoryInfo.classVMAddress.has_value() ) {
+            CacheDylib& classDylib = this->cacheDylibs[categoryInfo.classDylibIndex.value()];
+            uint64_t inputAddr = categoryInfo.classVMAddress.value().rawValue();
+            InputDylibVMAddress inputVMAddr(inputAddr);
+            CacheVMAddress cacheVMAddr = classDylib.adjustor->adjustVMAddr(inputVMAddr);
+            categoryInfo.classVMAddress = VMAddress(cacheVMAddr.rawValue());
+        }
+
+        // instance methods
+        if ( categoryInfo.iMethodListVMAddress.has_value() ) {
+            uint64_t inputAddr = categoryInfo.iMethodListVMAddress.value().rawValue();
+            InputDylibVMAddress inputVMAddr(inputAddr);
+            CacheVMAddress cacheVMAddr = cacheDylib->adjustor->adjustVMAddr(inputVMAddr);
+            categoryInfo.iMethodListVMAddress = VMAddress(cacheVMAddr.rawValue());
+        }
+
+        // class methods
+        if ( categoryInfo.cMethodListVMAddress.has_value() ) {
+            uint64_t inputAddr = categoryInfo.cMethodListVMAddress.value().rawValue();
+            InputDylibVMAddress inputVMAddr(inputAddr);
+            CacheVMAddress cacheVMAddr = cacheDylib->adjustor->adjustVMAddr(inputVMAddr);
+            categoryInfo.cMethodListVMAddress = VMAddress(cacheVMAddr.rawValue());
+        }
+
+        // protocols
+        if ( categoryInfo.protocolListVMAddress.has_value() ) {
+            uint64_t inputAddr = categoryInfo.protocolListVMAddress.value().rawValue();
+            InputDylibVMAddress inputVMAddr(inputAddr);
+            CacheVMAddress cacheVMAddr = cacheDylib->adjustor->adjustVMAddr(inputVMAddr);
+            categoryInfo.protocolListVMAddress = VMAddress(cacheVMAddr.rawValue());
+        }
+
+        // instance properties
+        if ( categoryInfo.iPropertyListVMAddress.has_value() ) {
+            uint64_t inputAddr = categoryInfo.iPropertyListVMAddress.value().rawValue();
+            InputDylibVMAddress inputVMAddr(inputAddr);
+            CacheVMAddress cacheVMAddr = cacheDylib->adjustor->adjustVMAddr(inputVMAddr);
+            categoryInfo.iPropertyListVMAddress = VMAddress(cacheVMAddr.rawValue());
+        }
+
+        // class properties
+        if ( categoryInfo.cPropertyListVMAddress.has_value() ) {
+            uint64_t inputAddr = categoryInfo.cPropertyListVMAddress.value().rawValue();
+            InputDylibVMAddress inputVMAddr(inputAddr);
+            CacheVMAddress cacheVMAddr = cacheDylib->adjustor->adjustVMAddr(inputVMAddr);
+            categoryInfo.cPropertyListVMAddress = VMAddress(cacheVMAddr.rawValue());
+        }
+    }
+}
+
 Error SharedCacheBuilder::emitPatchTable()
 {
     Stats        stats(this->config);
@@ -4495,7 +4810,7 @@ Error SharedCacheBuilder::emitPatchTable()
     // Skip this optimization on simulator until we've qualified it there
     __block PatchTableBuilder::PatchableClassesSet      patchableObjCClasses;
     __block PatchTableBuilder::PatchableSingletonsSet   patchableCFObj2;
-    if ( !this->options.isSimultor() ) {
+    if ( !this->options.isSimulator() ) {
         for ( const CacheDylib& cacheDylib : this->cacheDylibs ) {
             __block objc_visitor::Visitor objcVisitor = makeInputDylibObjCVisitor(cacheDylib);
             objcVisitor.forEachClassAndMetaClass(^(const objc_visitor::Class& objcClass, bool& stopClass) {
@@ -4546,7 +4861,7 @@ static const MachOFile* getFakeMainExecutable(const BuilderOptions& options,
                                               std::span<CacheDylib> cacheDylibs,
                                               std::span<InputFile*> executableFiles)
 {
-    if ( options.isSimultor() ) {
+    if ( options.isSimulator() ) {
         std::string_view installName = "/usr/lib/libSystem.B.dylib";
         for ( const CacheDylib& cacheDylib : cacheDylibs ) {
             if ( cacheDylib.installName == installName ) {
@@ -4861,7 +5176,8 @@ Error SharedCacheBuilder::emitCacheDylibsPrebuiltLoaders()
     SyscallDelegate    osDelegate;
     EphemeralAllocator alloc;
     ProcessConfig      processConfig(&kernArgs, osDelegate, alloc);
-    RuntimeState       state(processConfig, alloc);
+    RuntimeLocks       locks;
+    RuntimeState       state(processConfig, locks, alloc);
 
     // FIXME: This is terrible and needs to be a real reset method
     processConfig.dyldCache.cacheBuilderDylibs = &processConfigDylibs;
@@ -4951,7 +5267,7 @@ static Error findProtocolClass(const BuilderConfig& config,
 
             CacheVMAddress cacheOptPtrsVMAddr = cacheDylib->adjustor->adjustVMAddr(inputOptPtrsVMAddress);
 
-            objc_visitor::Visitor objcVisitor = cacheDylib->makeCacheObjCVisitor(config, nullptr, nullptr);
+            objc_visitor::Visitor objcVisitor = cacheDylib->makeCacheObjCVisitor(config, nullptr, nullptr, nullptr);
 
             metadata_visitor::ResolvedValue protocolClassValue = objcVisitor.getValueFor(VMAddress(cacheOptPtrsVMAddr.rawValue()));
             protocolClassVMAddr                           = objcVisitor.resolveRebase(protocolClassValue).vmAddress();
@@ -5079,7 +5395,8 @@ Error SharedCacheBuilder::emitExecutablePrebuiltLoaders()
         //osDelegate._dyldCache           = dyldCache;
         EphemeralAllocator alloc;
         ProcessConfig      processConfig(&kernArgs, osDelegate, alloc);
-        RuntimeState       state(processConfig, alloc);
+        RuntimeLocks       locks;
+        RuntimeState       state(processConfig, locks, alloc);
         RuntimeState*      statePtr = &state;
         Diagnostics        launchDiag;
 
@@ -5423,9 +5740,9 @@ void SharedCacheBuilder::emitObjCHashTables()
     Diagnostics diag;
 
     // Find the subCache with the hash tables
-    cache_builder::ObjCSelectorHashTableChunk* selectorsHashTable = nullptr;
-    cache_builder::ObjCClassHashTableChunk*    classesHashTable   = nullptr;
-    cache_builder::ObjCProtocolHashTableChunk* protocolsHashTable = nullptr;
+    cache_builder::ObjCSelectorHashTableChunk* selectorsHashTable  = nullptr;
+    cache_builder::ObjCClassHashTableChunk*    classesHashTable    = nullptr;
+    cache_builder::ObjCProtocolHashTableChunk* protocolsHashTable  = nullptr;
     for ( SubCache& subCache : this->subCaches ) {
         if ( subCache.objcSelectorsHashTable ) {
             assert(selectorsHashTable == nullptr);
@@ -5502,15 +5819,32 @@ void SharedCacheBuilder::emitObjCHeaderInfo()
 
     Timer::Scope timedScope(this->config, "emitObjCHeaderInfo time");
 
+    // We need the prebuilt loaders from the cache dylibs as they contain SectionLocations.
+    auto* cachedDylibsLoaderSet = this->prebuiltLoaderBuilder.cachedDylibsLoaderSet;
+    assert(cachedDylibsLoaderSet != nullptr);
+
     // Emit header info RO
     auto* readOnlyList    = (ObjCOptimizer::header_info_ro_list_t*)this->objcOptimizer.headerInfoReadOnlyChunk->subCacheBuffer;
     readOnlyList->count   = (uint32_t)this->objcOptimizer.objcDylibs.size();
     readOnlyList->entsize = this->config.layout.is64 ? sizeof(ObjCOptimizer::header_info_ro_64_t) : sizeof(ObjCOptimizer::header_info_ro_32_t);
 
+    // We're also going to populate the objc image info array with the image infos we have here
+    auto* imageInfoArray   = (objc::objc_image_info*)this->objcOptimizer.imageInfoChunk->subCacheBuffer;
+    CacheVMAddress cacheImageInfoBaseAddress = this->objcOptimizer.imageInfoChunk->cacheVMAddress;
+    assert(this->objcOptimizer.imageInfoChunk->subCacheFileSize.rawValue() == (readOnlyList->count * sizeof(objc::objc_image_info)));
+
     for ( uint32_t i = 0; i != readOnlyList->count; ++i ) {
         CacheDylib& cacheDylib = *this->objcOptimizer.objcDylibs[i];
 
-        __block CacheVMAddress  cacheImageInfoAddress;
+        const uint64_t dyldCategoriesOptimizedFlag = (1 << 0);
+        const uint64_t optimizedByDyldFlag         = (1 << 3);
+
+        // We want the headerinfo_ro_t to point to the imageInfo in the contiguous buffer
+        // not the imageinfo in the original dylib
+        // Note: We only have standard (8-byte) image infos in the array right now.  We'll ignore
+        // the array for any elements which use a different sized image info.
+        __block CacheVMAddress cacheImageInfoAddress = cacheImageInfoBaseAddress + VMOffset((uint64_t)i * sizeof(objc::objc_image_info));
+
         __block uint8_t*        cacheImageInfoBuffer = nullptr;
         cacheDylib.forEachCacheSection(^(std::string_view segmentName, std::string_view sectionName,
                                          uint8_t* sectionBuffer, CacheVMAddress sectionVMAddr,
@@ -5520,7 +5854,11 @@ void SharedCacheBuilder::emitObjCHeaderInfo()
             if ( sectionName != "__objc_imageinfo" )
                 return;
 
-            cacheImageInfoAddress = sectionVMAddr;
+            if ( sectionVMSize.rawValue() != sizeof(objc::objc_image_info) ) {
+                // Skip the optimized array and use this element directly
+                cacheImageInfoAddress = sectionVMAddr;
+            }
+
             cacheImageInfoBuffer = sectionBuffer;
             stop = true;
         });
@@ -5529,6 +5867,12 @@ void SharedCacheBuilder::emitObjCHeaderInfo()
 
         void*          arrayElement     = &readOnlyList->arrayBase[0] + (i * readOnlyList->entsize);
         CacheVMAddress machHeaderVMAddr = cacheDylib.cacheLoadAddress;
+
+        // Get the PrebuiltLoader* for this cache dylib
+        const PrebuiltLoader* ldr = cachedDylibsLoaderSet->atIndex(cacheDylib.cacheIndex);
+        assert(ldr->path() == cacheDylib.installName);
+
+        CacheVMAddress ldrVMAddr = getVMAddressInSection(*this->prebuiltLoaderBuilder.cacheDylibsLoaderChunk, ldr);
 
         if ( this->config.layout.is64 ) {
             ObjCOptimizer::header_info_ro_64_t* element = (ObjCOptimizer::header_info_ro_64_t*)arrayElement;
@@ -5546,6 +5890,13 @@ void SharedCacheBuilder::emitObjCHeaderInfo()
             element->info_offset           = infoOffset;
             // Check for truncation
             assert(element->info_offset == infoOffset);
+
+            // metadata_offset
+            CacheVMAddress metadataOffsetVMAddr = getVMAddressInSection(*this->objcOptimizer.headerInfoReadOnlyChunk, &element->metadata_offset);
+            int64_t metadataOffset         = ldrVMAddr.rawValue() - metadataOffsetVMAddr.rawValue();
+            element->metadata_offset       = metadataOffset;
+            // Check for truncation
+            assert(element->metadata_offset == metadataOffset);
         }
         else {
             ObjCOptimizer::header_info_ro_32_t* element = (ObjCOptimizer::header_info_ro_32_t*)arrayElement;
@@ -5563,15 +5914,25 @@ void SharedCacheBuilder::emitObjCHeaderInfo()
             element->info_offset           = (int32_t)infoOffset;
             // Check for truncation
             assert(element->info_offset == infoOffset);
+
+            // metadata_offset
+            CacheVMAddress metadataOffsetVMAddr = getVMAddressInSection(*this->objcOptimizer.headerInfoReadOnlyChunk, &element->metadata_offset);
+            int64_t       metadataOffset   = ldrVMAddr.rawValue() - metadataOffsetVMAddr.rawValue();
+            element->metadata_offset       = (int32_t)metadataOffset;
+            // Check for truncation
+            assert(element->metadata_offset == metadataOffset);
         }
 
         // Set the dylib to be optimized, which lets it use this header info
-        struct objc_image_info {
-            int32_t version;
-            uint32_t flags;
-        };
-        objc_image_info* info = (objc_image_info*)cacheImageInfoBuffer;
-        info->flags = info->flags | (1 << 3);
+        objc::objc_image_info* info = (objc::objc_image_info*)cacheImageInfoBuffer;
+        info->flags |= optimizedByDyldFlag;
+        if ( this->objcCategoryOptimizer.preAttachedDylibs.contains(i) ) {
+            if ( !this->objcCategoryOptimizer.excludedDylibs.contains(i) )
+                info->flags |= dyldCategoriesOptimizedFlag;
+        }
+
+        // Also copy in to the contiguous space
+        memcpy(&imageInfoArray[i], info, sizeof(objc::objc_image_info));
     }
 
     // Emit header info RW
@@ -6081,7 +6442,7 @@ Error SharedCacheBuilder::emitCanonicalObjCProtocols()
 
     Timer::Scope timedScope(this->config, "emitCanonicalObjCProtocols time");
 
-    const bool log = false;
+    const bool log = this->options.debug;
 
     // We need to find the Protocol class from libojc
     VMAddress                  protocolClassVMAddr;
@@ -6097,7 +6458,8 @@ Error SharedCacheBuilder::emitCanonicalObjCProtocols()
 
     for ( CacheDylib* cacheDylib : this->objcOptimizer.objcDylibs ) {
         objcVisitors.push_back(cacheDylib->makeCacheObjCVisitor(config, nullptr,
-                                                                this->objcProtocolOptimizer.canonicalProtocolsChunk));
+                                                                this->objcProtocolOptimizer.canonicalProtocolsChunk,
+                                                                this->objcCategoryOptimizer.categoriesChunk));
     }
 
     // The offset in the protocol buffer for the next protocol to emit
@@ -6256,14 +6618,14 @@ Error SharedCacheBuilder::computeObjCClassLayout()
 
     Timer::Scope timedScope(this->config, "computeObjCClassLayout time");
 
-    const bool log = false;
+    const bool log = this->options.debug;
 
     // We need to walk all classes in all dylibs.  Each dylib needs its own objc visitor object
     std::vector<objc_visitor::Visitor> objcVisitors;
     objcVisitors.reserve(this->cacheDylibs.size());
 
     for ( CacheDylib& cacheDylib : this->cacheDylibs ) {
-        objcVisitors.push_back(cacheDylib.makeCacheObjCVisitor(config, nullptr, nullptr));
+        objcVisitors.push_back(cacheDylib.makeCacheObjCVisitor(config, nullptr, nullptr, nullptr));
     }
 
     // Check for missing superclasses, but only error on customer/universal caches
@@ -6432,6 +6794,396 @@ Error SharedCacheBuilder::computeObjCClassLayout()
     return Error();
 }
 
+Error SharedCacheBuilder::emitPreAttachedObjCCategories()
+{
+    
+    if ( this->objcOptimizer.objcDylibs.empty() )
+        return Error();
+
+    Timer::Scope timedScope(this->config, "dylib emitPreAttachedObjCCategories time");
+
+    ObjCPreAttachedCategoriesChunk* categoriesChunk = this->objcCategoryOptimizer.categoriesChunk;
+
+    // Build reverse map of categories for fast lookup during optimization
+    __block std::unordered_multimap<size_t, uint64_t> dylibsToClasses;
+    __block std::unordered_multimap<uint64_t, const ObjCCategoryOptimizer::Category*> classMap;
+    __block std::unordered_multimap<uint64_t, const ObjCCategoryOptimizer::Category*> metaClassMap;
+    auto& categories = this->objcCategoryOptimizer.categories;
+    for (size_t i = 0; i < categories.size(); i++) {
+        dylibsToClasses.insert({ categories[i].classDylibIndex.value(), categories[i].classVMAddress.value().rawValue() });
+        classMap.insert({ categories[i].classVMAddress.value().rawValue(), &categories[i] });
+    }
+
+    __block dyld3::MachOFile::PointerMetaData methodListPMD;
+    if ( this->config.layout.hasAuthRegion ) {
+        methodListPMD.diversity         = 0xC310;
+        methodListPMD.high8             = 0;
+        methodListPMD.authenticated     = 1;
+        methodListPMD.key               = ptrauth_key_asda;
+        methodListPMD.usesAddrDiversity = 1;
+    }
+
+    __block uint64_t chunkOffset = 0;
+
+    // The very first thing we want to do is make an empty class method list
+    // All classes which have no method lists will have this added as the last entry
+    // in their list
+    assert(categoriesChunk->subCacheFileSize.rawValue() >= 8);
+    void* emptyMethodListLocation = categoriesChunk->subCacheBuffer;
+    CacheVMAddress emptyMethodListVMAddr = categoriesChunk->cacheVMAddress;
+    chunkOffset += objc_visitor::MethodList::makeEmptyMethodList(emptyMethodListLocation);
+
+    auto visitCategoryMetaClass = ^(objc_visitor::Visitor &objCVisitor,
+                                size_t classCacheIndex, size_t classObjcIndex,
+                                objc_visitor::Class &objcClass,
+                                std::span<DylibSegmentChunk> cacheDylibSegments) {
+        auto metaClassRange = metaClassMap.equal_range(objcClass.getVMAddress().rawValue());
+        if ( metaClassRange.first == metaClassRange.second )
+            return;
+
+        //fprintf(stderr, "meta class %s %s 0x%llx\n", this->cacheDylibs[classCacheIndex].installName.data(), objcClass.getName(objCVisitor), objcClass.getVMAddress().rawValue());
+        // class method lists
+        {
+            uint8_t* listBuffer = categoriesChunk->subCacheBuffer + chunkOffset;
+            uint64_t firstEntryOffset = chunkOffset;
+            ListOfListsEntry* listHeader = (ListOfListsEntry*)listBuffer;
+            ListOfListsEntry* listEntry = listHeader + 1;
+
+            bool createdNewList = false;
+            for (auto classEntry = metaClassRange.first; classEntry != metaClassRange.second; classEntry++) {
+                const ObjCCategoryOptimizer::Category* category = classEntry->second;
+                if ( !category->cMethodListVMAddress.has_value() )
+                    continue;
+
+                //fprintf(stderr, "  meta cat %s 0x%llx %s (%llu) => %zu\n", category->name.data(), category->vmAddress.value().rawValue(), this->objcOptimizer.objcDylibs[category->dylibObjcIndex.value()]->installName.data(), category->dylibObjcIndex.value(), classObjcIndex);
+                if ( !createdNewList ) {
+                    createdNewList = true;
+                    // New list with count and entry size
+                    listHeader->entsize = sizeof(ListOfListsEntry);
+                    listHeader->count = 0;
+                    chunkOffset += sizeof(ListOfListsEntry);
+                }
+
+                listEntry->imageIndex = category->dylibObjcIndex.value();
+                int64_t destVMAddr = (int64_t)category->cMethodListVMAddress.value().rawValue();
+                listEntry->offset = destVMAddr - getVMAddressInSection(*categoriesChunk, listEntry).rawValue();
+                listEntry++;
+                listHeader->count++;
+                chunkOffset += sizeof(ListOfListsEntry);
+            }
+
+            if ( createdNewList ) {
+                objc_visitor::MethodList methodList = objcClass.getBaseMethods(objCVisitor);
+                // add original method list
+                if ( methodList.numMethods() > 0 ) {
+                    listEntry->imageIndex = classObjcIndex;
+                    int64_t destVMAddr = (int64_t)methodList.getVMAddress().value().rawValue();
+                    listEntry->offset = destVMAddr - getVMAddressInSection(*categoriesChunk, listEntry).rawValue();
+                } else {
+                    // add an empty list entry if no original was found
+                    listEntry->imageIndex = classObjcIndex;
+                    int64_t destVMAddr = (int64_t)emptyMethodListVMAddr.rawValue();
+                    listEntry->offset = destVMAddr - getVMAddressInSection(*categoriesChunk, listEntry).rawValue();
+                }
+                listEntry++;
+                listHeader->count++;
+                chunkOffset += sizeof(ListOfListsEntry);
+                //fprintf(stderr, "Total cMethod list lists: %d\n", listHeader->count);
+                // store new base methods pointer to update
+                CacheVMAddress newBaseMethods = categoriesChunk->cacheVMAddress + VMOffset(firstEntryOffset);
+                metadata_visitor::ResolvedValue field = objcClass.setBaseMethodsVMAddr(objCVisitor,
+                                                                                       VMAddress(newBaseMethods.rawValue() | 1),
+                                                                                       methodListPMD);
+                cacheDylibSegments[field.segmentIndex()].tracker.add(field.value());
+            }
+        }
+        // class property lists
+        {
+            uint8_t* listBuffer = categoriesChunk->subCacheBuffer + chunkOffset;
+            uint64_t firstEntryOffset = chunkOffset;
+            ListOfListsEntry* listHeader = (ListOfListsEntry*)listBuffer;
+            ListOfListsEntry* listEntry = listHeader + 1;
+
+            bool createdNewList = false;
+            for (auto classEntry = metaClassRange.first; classEntry != metaClassRange.second; classEntry++) {
+                const ObjCCategoryOptimizer::Category* category = classEntry->second;
+                if ( !category->cPropertyListVMAddress.has_value() )
+                    continue;
+
+                //fprintf(stderr, "  meta cat %s 0x%llx %s (%llu) => %zu\n", category->name.data(), category->vmAddress.value().rawValue(), this->objcOptimizer.objcDylibs[category->dylibObjcIndex.value()]->installName.data(), category->dylibObjcIndex.value(), classObjcIndex);
+                if ( !createdNewList ) {
+                    createdNewList = true;
+                    // New list with count and entry size
+                    listHeader->entsize = sizeof(ListOfListsEntry);
+                    listHeader->count = 0;
+                    chunkOffset += sizeof(ListOfListsEntry);
+                }
+
+                listEntry->imageIndex = category->dylibObjcIndex.value();
+                int64_t destVMAddr = (int64_t)category->cPropertyListVMAddress.value().rawValue();
+                listEntry->offset = destVMAddr - getVMAddressInSection(*categoriesChunk, listEntry).rawValue();
+                listEntry++;
+                listHeader->count++;
+                chunkOffset += sizeof(ListOfListsEntry);
+            }
+
+            if ( createdNewList ) {
+                objc_visitor::PropertyList propertyList = objcClass.getBaseProperties(objCVisitor);
+                // add original method list
+                if ( propertyList.numProperties() > 0 ) {
+                    listEntry->imageIndex = classObjcIndex;
+                    int64_t destVMAddr = (int64_t)propertyList.getVMAddress().value().rawValue();
+                    listEntry->offset = destVMAddr - getVMAddressInSection(*categoriesChunk, listEntry).rawValue();
+                } else {
+                    // add an empty list entry if no original was found
+                    // Zeroing the entry will make the offset point to itself
+                    // That will then be interpreted as a ListOfListsEntry of count 0
+                    // This also means that the image at index 0 needs to always be libobjc.A.dylib
+                    listEntry->imageIndex = 0;
+                    listEntry->offset = 0;
+                }
+                listEntry++;
+                listHeader->count++;
+                chunkOffset += sizeof(ListOfListsEntry);
+
+                //fprintf(stderr, "Total cProperty list lists: %d\n", listHeader->count);
+                // store new base properties pointer to update
+                CacheVMAddress newBaseProperties = categoriesChunk->cacheVMAddress + VMOffset(firstEntryOffset);
+                metadata_visitor::ResolvedValue field = objcClass.setBasePropertiesVMAddr(objCVisitor,
+                                                                                          VMAddress(newBaseProperties.rawValue() | 1));
+                cacheDylibSegments[field.segmentIndex()].tracker.add(field.value());
+            }
+        }
+        return;
+    };
+    auto visitCategoryClass = ^(objc_visitor::Visitor &objCVisitor,
+                                size_t classCacheIndex, size_t classObjcIndex,
+                                objc_visitor::Class &objcClass,
+                                std::span<DylibSegmentChunk> cacheDylibSegments) {
+        auto classRange = classMap.equal_range(objcClass.getVMAddress().rawValue());
+        if ( classRange.first == classRange.second )
+            return;
+
+        //fprintf(stderr, "class %s %s 0x%llx\n", this->cacheDylibs[classCacheIndex].installName.data(), objcClass.getName(objCVisitor), objcClass.getVMAddress().rawValue());
+        // instance method lists
+        {
+            uint8_t* listBuffer = categoriesChunk->subCacheBuffer + chunkOffset;
+            uint64_t firstEntryOffset = chunkOffset;
+            ListOfListsEntry* listHeader = (ListOfListsEntry*)listBuffer;
+            ListOfListsEntry* listEntry = listHeader + 1;
+
+            bool createdNewList = false;
+            for (auto classEntry = classRange.first; classEntry != classRange.second; classEntry++) {
+                const ObjCCategoryOptimizer::Category* category = classEntry->second;
+                if ( !category->iMethodListVMAddress.has_value() )
+                    continue;
+
+                //fprintf(stderr, "  cat %s 0x%llx %s (%llu) => %zu\n", category->name.data(), category->vmAddress.value().rawValue(), this->objcOptimizer.objcDylibs[category->dylibObjcIndex.value()]->installName.data(), category->dylibObjcIndex.value(), classObjcIndex);
+                if ( !createdNewList ) {
+                    createdNewList = true;
+                    // New list with count and entry size
+                    listHeader->entsize = sizeof(ListOfListsEntry);
+                    listHeader->count = 0;
+                    chunkOffset += sizeof(ListOfListsEntry);
+                }
+
+                listEntry->imageIndex = category->dylibObjcIndex.value();
+                int64_t destVMAddr = (int64_t)category->iMethodListVMAddress.value().rawValue();
+                listEntry->offset = destVMAddr - getVMAddressInSection(*categoriesChunk, listEntry).rawValue();
+                listEntry++;
+                listHeader->count++;
+                chunkOffset += sizeof(ListOfListsEntry);
+            }
+
+            if ( createdNewList ) {
+                objc_visitor::MethodList methodList = objcClass.getBaseMethods(objCVisitor);
+                // add original method list
+                if ( methodList.numMethods() > 0 ) {
+                    listEntry->imageIndex = classObjcIndex;
+                    int64_t destVMAddr = (int64_t)methodList.getVMAddress().value().rawValue();
+                    listEntry->offset = destVMAddr - getVMAddressInSection(*categoriesChunk, listEntry).rawValue();
+                } else {
+                    // add an empty list entry if no original was found
+                    listEntry->imageIndex = classObjcIndex;
+                    int64_t destVMAddr = (int64_t)emptyMethodListVMAddr.rawValue();
+                    listEntry->offset = destVMAddr - getVMAddressInSection(*categoriesChunk, listEntry).rawValue();
+                }
+                listEntry++;
+                listHeader->count++;
+                chunkOffset += sizeof(ListOfListsEntry);
+                //fprintf(stderr, "Total iMethod list lists: %d\n", listHeader->count);
+                // store new base methods pointer to update
+                CacheVMAddress newBaseMethods = categoriesChunk->cacheVMAddress + VMOffset(firstEntryOffset);
+                metadata_visitor::ResolvedValue field = objcClass.setBaseMethodsVMAddr(objCVisitor,
+                                                                                       VMAddress(newBaseMethods.rawValue() | 1),
+                                                                                       methodListPMD);
+                cacheDylibSegments[field.segmentIndex()].tracker.add(field.value());
+            }
+        }
+
+        // protocol lists
+        {
+            uint8_t* listBuffer = categoriesChunk->subCacheBuffer + chunkOffset;
+            uint64_t firstEntryOffset = chunkOffset;
+            ListOfListsEntry* listHeader = (ListOfListsEntry*)listBuffer;
+            ListOfListsEntry* listEntry = listHeader + 1;
+
+            bool createdNewList = false;
+            for (auto classEntry = classRange.first; classEntry != classRange.second; classEntry++) {
+                const ObjCCategoryOptimizer::Category* category = classEntry->second;
+                if ( !category->protocolListVMAddress.has_value() )
+                    continue;
+
+                //fprintf(stderr, "  cat %s 0x%llx %s (%llu) => %zu\n", category->name.data(), category->vmAddress.value().rawValue(), this->objcOptimizer.objcDylibs[category->dylibObjcIndex.value()]->installName.data(), category->dylibObjcIndex.value(), classObjcIndex);
+                if ( !createdNewList ) {
+                    createdNewList = true;
+                    // New list with count and entry size
+                    listHeader->entsize = sizeof(ListOfListsEntry);
+                    listHeader->count = 0;
+                    chunkOffset += sizeof(ListOfListsEntry);
+                }
+
+                listEntry->imageIndex = category->dylibObjcIndex.value();
+                int64_t destVMAddr = (int64_t)category->protocolListVMAddress.value().rawValue();
+                listEntry->offset = destVMAddr - getVMAddressInSection(*categoriesChunk, listEntry).rawValue();
+                listEntry++;
+                listHeader->count++;
+                chunkOffset += sizeof(ListOfListsEntry);
+            }
+
+            if ( createdNewList ) {
+                objc_visitor::ProtocolList protocolList = objcClass.getBaseProtocols(objCVisitor);
+                // add original protocol list
+                if ( protocolList.numProtocols(objCVisitor) > 0 ) {
+                    listEntry->imageIndex = classObjcIndex;
+                    int64_t destVMAddr = (int64_t)protocolList.getVMAddress().value().rawValue();
+                    listEntry->offset = destVMAddr - getVMAddressInSection(*categoriesChunk, listEntry).rawValue();
+                } else {
+                    // add an empty list entry if no original was found
+                    // Zeroing the entry will make the offset point to itself
+                    // That will then be interpreted as a ListOfListsEntry of count 0
+                    // This also means that the image at index 0 needs to always be libobjc.A.dylib
+                    listEntry->imageIndex = 0;
+                    listEntry->offset = 0;
+                }
+                listEntry++;
+                listHeader->count++;
+                chunkOffset += sizeof(ListOfListsEntry);
+
+                //fprintf(stderr, "Total Protocol list lists: %d\n", listHeader->count);
+                // store new base protocols pointer to update
+                CacheVMAddress newBaseProtocols = categoriesChunk->cacheVMAddress + VMOffset(firstEntryOffset);
+                metadata_visitor::ResolvedValue field = objcClass.setBaseProtocolsVMAddr(objCVisitor,
+                                                                                         VMAddress(newBaseProtocols.rawValue() | 1));
+                cacheDylibSegments[field.segmentIndex()].tracker.add(field.value());
+            }
+        }
+
+        // instance properties
+        {
+            uint8_t* listBuffer = categoriesChunk->subCacheBuffer + chunkOffset;
+            uint64_t firstEntryOffset = chunkOffset;
+            ListOfListsEntry* listHeader = (ListOfListsEntry*)listBuffer;
+            ListOfListsEntry* listEntry = listHeader + 1;
+
+            bool createdNewList = false;
+            for (auto classEntry = classRange.first; classEntry != classRange.second; classEntry++) {
+                const ObjCCategoryOptimizer::Category* category = classEntry->second;
+                if ( !category->iPropertyListVMAddress.has_value() )
+                    continue;
+
+                //fprintf(stderr, "  cat %s 0x%llx %s (%llu) => %zu\n", category->name.data(), category->vmAddress.value().rawValue(), this->objcOptimizer.objcDylibs[category->dylibObjcIndex.value()]->installName.data(), category->dylibObjcIndex.value(), classObjcIndex);
+                if ( !createdNewList ) {
+                    createdNewList = true;
+                    // New list with count and entry size
+                    listHeader->entsize = sizeof(ListOfListsEntry);
+                    listHeader->count = 0;
+                    chunkOffset += sizeof(ListOfListsEntry);
+                }
+
+                listEntry->imageIndex = category->dylibObjcIndex.value();
+                int64_t destVMAddr = (int64_t)category->iPropertyListVMAddress.value().rawValue();
+                listEntry->offset = destVMAddr - getVMAddressInSection(*categoriesChunk, listEntry).rawValue();
+                listEntry++;
+                listHeader->count++;
+                chunkOffset += sizeof(ListOfListsEntry);
+            }
+
+            if ( createdNewList ) {
+                objc_visitor::PropertyList propertyList = objcClass.getBaseProperties(objCVisitor);
+                // add original property list
+                if ( propertyList.numProperties() > 0 ) {
+                    listEntry->imageIndex = classObjcIndex;
+                    int64_t destVMAddr = (int64_t)propertyList.getVMAddress().value().rawValue();
+                    listEntry->offset = destVMAddr - getVMAddressInSection(*categoriesChunk, listEntry).rawValue();
+                } else {
+                    // add an empty list entry if no original was found
+                    // Zeroing the entry will make the offset point to itself
+                    // That will then be interpreted as a ListOfListsEntry of count 0
+                    // This also means that the image at index 0 needs to always be libobjc.A.dylib
+                    listEntry->imageIndex = 0;
+                    listEntry->offset = 0;
+                }
+                listEntry++;
+                listHeader->count++;
+                chunkOffset += sizeof(ListOfListsEntry);
+                //fprintf(stderr, "Total iProperty list lists: %d\n", listHeader->count);
+                // store new base properties pointer to update
+                CacheVMAddress newBaseProperties = categoriesChunk->cacheVMAddress + VMOffset(firstEntryOffset);
+                metadata_visitor::ResolvedValue field = objcClass.setBasePropertiesVMAddr(objCVisitor,
+                                                                                          VMAddress(newBaseProperties.rawValue() | 1));
+                cacheDylibSegments[field.segmentIndex()].tracker.add(field.value());
+            }
+        }
+
+        // class method lists and class properties
+        {
+            // check if we need to update the meta class
+            bool isPatchableClass;
+            VMAddress metaClassVMAddr = objcClass.getISA(objCVisitor, isPatchableClass).vmAddress();
+
+            bool visitMetaClassMap = false;
+            for (auto classEntry = classRange.first; classEntry != classRange.second; classEntry++) {
+                const ObjCCategoryOptimizer::Category* category = classEntry->second;
+                if ( category->cPropertyListVMAddress.has_value() || category->cMethodListVMAddress.has_value() ) {
+                    metaClassMap.insert({ metaClassVMAddr.rawValue(), category });
+                    visitMetaClassMap = true;
+                }
+            }
+            if ( visitMetaClassMap ) {
+                metadata_visitor::ResolvedValue metaClassValue = objCVisitor.getValueFor(metaClassVMAddr);
+                objc_visitor::Class objcMetaClass(metaClassValue, /*isMetaClass*/ true, /*isPatchable*/ false);
+                visitCategoryMetaClass(objCVisitor, classCacheIndex, classObjcIndex, objcMetaClass, cacheDylibSegments);
+            }
+        }
+    };
+
+    size_t objcIndex = 0;
+    for (size_t cacheIndex = 0; cacheIndex < this->cacheDylibs.size(); cacheIndex++) {
+        CacheDylib& cacheDylib = this->cacheDylibs[cacheIndex];
+        if ( !cacheDylib.inputMF->hasObjC() )
+            continue;
+
+        this->objcCategoryOptimizer.preAttachedDylibs.insert(objcIndex);
+        __block objc_visitor::Visitor objCVisitor = cacheDylib.makeCacheObjCVisitor(config, nullptr, nullptr, categoriesChunk);
+
+        // dylibsToClasses can contain multiple entries with the same pair of key/values
+        std::set<uint64_t> visitedClasses;
+        auto dylibToClassRange = dylibsToClasses.equal_range(cacheIndex);
+        for (auto dylibToClass = dylibToClassRange.first; dylibToClass != dylibToClassRange.second; dylibToClass++) {
+            if ( visitedClasses.contains(dylibToClass->second) )
+                continue;
+            visitedClasses.insert(dylibToClass->second);
+            metadata_visitor::ResolvedValue classValue = objCVisitor.getValueFor(VMAddress(dylibToClass->second));
+            objc_visitor::Class objcClass(classValue, /*isMetaClass*/ false, /*isPatchable*/ false);
+            visitCategoryClass(objCVisitor, cacheIndex, objcIndex, objcClass, cacheDylib.segments);
+        }
+        objcIndex++;
+    }
+
+    return Error();
+}
+
 Error SharedCacheBuilder::emitSwiftHashTables()
 {
     if ( this->objcOptimizer.objcDylibs.empty() )
@@ -6488,7 +7240,7 @@ void SharedCacheBuilder::computeSlideInfo()
     Timer::Scope timedScope(this->config, "computeSlideInfo time");
 
     if ( !this->config.slideInfo.slideInfoFormat.has_value() ) {
-        assert(this->options.isSimultor());
+        assert(this->options.isSimulator());
     }
 
     Error err = parallel::forEach(this->subCaches, ^(size_t index, SubCache& subCache) {
@@ -6596,7 +7348,9 @@ void SharedCacheBuilder::addObjcSegments()
         Diagnostics diag;
         cacheDylib.addObjcSegments(diag, aggregateTimer,
                                    this->objcOptimizer.headerInfoReadOnlyChunk,
+                                   this->objcOptimizer.imageInfoChunk,
                                    this->objcProtocolOptimizer.protocolHashTableChunk,
+                                   this->objcCategoryOptimizer.categoriesChunk,
                                    this->objcOptimizer.headerInfoReadWriteChunk,
                                    this->objcProtocolOptimizer.canonicalProtocolsChunk);
     }

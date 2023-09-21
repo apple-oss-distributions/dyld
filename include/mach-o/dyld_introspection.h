@@ -25,6 +25,8 @@
 #define dyld_introspection_h
 
 #include <Availability.h>
+#include <TargetConditionals.h>
+#if !TARGET_OS_EXCLAVEKIT
 
 #include <mach/task.h>
 #include <mach/machine.h>
@@ -354,5 +356,7 @@ extern bool dyld_image_local_nlist_content_4Symbolication(dyld_image_t image,
 
 }
 #endif
+
+#endif // !TARGET_OS_EXCLAVEKIT
 
 #endif /* dyld_introspection_h */

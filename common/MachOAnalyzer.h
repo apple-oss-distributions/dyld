@@ -24,12 +24,24 @@
 #ifndef MachOAnalyzer_h
 #define MachOAnalyzer_h
 
-#include <mach-o/reloc.h>
+#include <TargetConditionals.h>
+#include "Defines.h"
+#if SUPPORT_CLASSIC_RELOCS
+  #include <mach-o/reloc.h>
+#endif
 
 #include "MachOLoaded.h"
 #include "Array.h"
-#include "ClosureFileSystem.h"
 
+#if !TARGET_OS_EXCLAVEKIT
+  #include "ClosureFileSystem.h"
+#endif
+
+#if __has_feature(ptrauth_calls)
+#define __ptrauth_dyld_pointer __ptrauth(0, 0, 0)
+#else
+#define __ptrauth_dyld_pointer
+#endif
 
 namespace dyld3 {
 
@@ -60,17 +72,19 @@ struct VIS_HIDDEN MachOAnalyzer : public MachOLoaded
         textAbsolute32,
     };
 
+#if !TARGET_OS_EXCLAVEKIT
     static bool loadFromBuffer(Diagnostics& diag, const closure::FileSystem& fileSystem,
                                const char* path, const GradedArchs& archs, Platform platform,
                                closure::LoadedFileInfo& info);
     static closure::LoadedFileInfo load(Diagnostics& diag, const closure::FileSystem& fileSystem,
-                                        const char* logicalPath, const GradedArchs& archs, Platform platform, char realerPath[MAXPATHLEN]);
+                                        const char* logicalPath, const GradedArchs& archs, Platform platform, char realerPath[PATH_MAX]);
+#endif
     bool  isValidMainExecutable(Diagnostics& diag, const char* path, uint64_t sliceLength,
                                                      const GradedArchs& archs, Platform platform) const;
 
     typedef void (^ExportsCallback)(const char* symbolName, uint64_t imageOffset, uint64_t flags,
                                     uint64_t other, const char* importName, bool& stop);
-    bool                validMachOForArchAndPlatform(Diagnostics& diag, size_t mappedSize, const char* path, const GradedArchs& archs, Platform platform, bool isOSBinary) const;
+    bool                validMachOForArchAndPlatform(Diagnostics& diag, size_t mappedSize, const char* path, const GradedArchs& archs, Platform platform, bool isOSBinary, bool internalInstall=false) const;
 
     // Caches data useful for converting from raw data to VM addresses
     struct VMAddrConverter {
@@ -160,9 +174,13 @@ struct VIS_HIDDEN MachOAnalyzer : public MachOLoaded
     bool                isOSBinary(int fd, uint64_t sliceOffset, uint64_t sliceSize) const;  // checks if binary is codesigned to be part of the OS
     static bool         sliceIsOSBinary(int fd, uint64_t sliceOffset, uint64_t sliceSize);
 
+#if !TARGET_OS_EXCLAVEKIT
     const MachOAnalyzer*    remapIfZeroFill(Diagnostics& diag, const closure::FileSystem& fileSystem, closure::LoadedFileInfo& info) const;
+#endif
     bool                    neverUnload() const;
+#if SUPPORT_CLASSIC_RELOCS
     void                    sortRelocations(Array<relocation_info>& relocs) const;
+#endif
 
     struct ObjCInfo {
         uint32_t    selRefCount;
@@ -378,6 +396,7 @@ struct VIS_HIDDEN MachOAnalyzer : public MachOLoaded
 
     struct TLV_Thunk;
     typedef void* (*TLV_Resolver)(TLV_Thunk*);
+    typedef TLV_Resolver __ptrauth_dyld_pointer* TLV_ResolverPtr;
 
     // the compiler statically allocated one of these thunks for each thread_local variable
     // the compiler codegens access to a thread_local by calling the thunk to get the address of the variable for the current thread
@@ -407,7 +426,7 @@ struct VIS_HIDDEN MachOAnalyzer : public MachOLoaded
         uint64_t    size;
     };
 
-    TLV_InitialContent  forEachThreadLocalVariable(Diagnostics& diag, void (^handler)(TLV_Resolver* tlvThunkAddr, uintptr_t* keyAddr)) const;
+    TLV_InitialContent  forEachThreadLocalVariable(Diagnostics& diag, void (^handler)(TLV_ResolverPtr tlvThunkAddr, uintptr_t* keyAddr)) const;
 
     struct BindTargetInfo {
         unsigned    targetIndex;
@@ -471,7 +490,7 @@ private:
 
     const uint8_t*          getContentForVMAddr(const LayoutInfo& info, uint64_t vmAddr) const;
     bool                    validLoadCommands(Diagnostics& diag, const char* path, size_t fileLen) const;
-    bool                    validEmbeddedPaths(Diagnostics& diag, Platform platform, const char* path) const;
+    bool                    validEmbeddedPaths(Diagnostics& diag, Platform platform, const char* path, bool internalInstall=false) const;
     bool                    validLinkedit(Diagnostics& diag, const char* path) const;
     bool                    validLinkeditLayout(Diagnostics& diag, const char* path) const;
     bool                    validRebaseInfo(Diagnostics& diag, const char* path) const;
@@ -503,7 +522,7 @@ private:
     void                    recurseTrie(Diagnostics& diag, const uint8_t* const start, const uint8_t* p, const uint8_t* const end,
                                         OverflowSafeArray<char>& cummulativeString, int curStrOffset, bool& stop, MachOAnalyzer::ExportsCallback callback) const;
 
-    template<typename P> void forEachThreadLocalVariableInSection(Diagnostics& diag, const MachOAnalyzer::SectionInfo& sectInfo, void (^handler)(TLV_Resolver* tlvThunkAddr, uintptr_t* keyAddr)) const;
+    template<typename P> void forEachThreadLocalVariableInSection(Diagnostics& diag, const MachOAnalyzer::SectionInfo& sectInfo, void (^handler)(TLV_ResolverPtr tlvThunkAddr, uintptr_t* keyAddr)) const;
 
 };
 

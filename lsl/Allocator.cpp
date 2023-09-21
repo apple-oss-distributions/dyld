@@ -22,22 +22,32 @@
  * @APPLE_LICENSE_HEADER_END@
  */
 
+#include <string.h>
 #include <cstdio>
 #include <algorithm>
-#include <sys/mman.h>
-#include <mach/mach.h>
-#include <malloc/malloc.h>
-#include <sanitizer/asan_interface.h>
 #include <compare>
+#include <TargetConditionals.h>
 #include "Defines.h"
+#if !TARGET_OS_EXCLAVEKIT
+  #include <sys/mman.h>
+  #include <mach/mach.h>
+  #include <mach/mach_vm.h>
+  #include <malloc/malloc.h>
+#endif //  !TARGET_OS_EXCLAVEKIT
+#include <sanitizer/asan_interface.h>
+
 #include "Allocator.h"
 #include "BTree.h"
 #include "StringUtils.h"
+
+
+#if !TARGET_OS_EXCLAVEKIT
 #include "DyldRuntimeState.h"
+#endif // !TARGET_OS_EXCLAVEKIT
 
 // TODO: Reenable ASAN support once we have time to debug it
 
-#if !BUILDING_DYLD
+#if !BUILDING_DYLD && !TARGET_OS_EXCLAVEKIT
 #include <dispatch/dispatch.h>
 #endif
 
@@ -58,6 +68,7 @@ extern "C" void* __dso_handle;
 
 namespace lsl {
 
+#if !TARGET_OS_EXCLAVEKIT
 void Lock::lock() {
     if (!_lock) { return; }
     assertNotOwner();
@@ -86,7 +97,9 @@ void Lock::assertNotOwner() {
 void Lock::assertOwner() {
     if (!_lock) { return; }
     os_unfair_lock_assert_owner(_lock);
+    
 }
+#endif // !TARGET_OS_EXCLAVEKIT
 
 EphemeralAllocator::EphemeralAllocator() {
     MemoryManager memoryManager;
@@ -369,10 +382,101 @@ void Allocator::Buffer::dump() const {
 #pragma mark -
 #pragma mark Primitive allocator implementations
 
+#if TARGET_OS_EXCLAVEKIT
+// ExclaveKit specific page allocator - for now, let's use a fixed-size static arena.
+static char page_alloc_arena[512 * 1024] __attribute__((aligned(PAGE_SIZE)));
+static size_t page_alloc_arena_used = 0;
+
+[[nodiscard]] void* MemoryManager::allocate_pages(size_t size) {
+
+    size_t targetSize = (size + (PAGE_SIZE-1)) & (-1*PAGE_SIZE);
+    if (page_alloc_arena_used + targetSize > sizeof(page_alloc_arena)) {
+        return nullptr;
+    }
+    void *result = page_alloc_arena + page_alloc_arena_used;
+    page_alloc_arena_used += targetSize;
+    return result;
+}
+
+void MemoryManager::deallocate_pages(void* p, size_t size) {
+    // Don't deallocate, for now.
+}
+
+[[nodiscard]] MemoryManager::Buffer MemoryManager::vm_allocate_bytes(std::size_t size) {
+    size_t targetSize = (size + (PAGE_SIZE-1)) & (-1*PAGE_SIZE);
+    void* result = MemoryManager::allocate_pages(targetSize);
+    if ( !result ) {
+        return {nullptr, 0};
+    }
+    return {result, targetSize};
+}
+
+void MemoryManager::vm_deallocate_bytes(void* p, std::size_t size) {
+    // Don't deallocate, for now.
+}
+
+#else
 [[nodiscard]] Lock::Guard MemoryManager::lockGuard() {
     return Lock::Guard(_lock);
 }
 
+#if TARGET_OS_OSX && BUILDING_DYLD && __x86_64__
+[[nodiscard]] MemoryManager::Buffer MemoryManager::vm_allocate_bytes(std::size_t size) {
+    // Only do this on macOS for now due to qualification issue in embedded simulators
+    static const size_t kMOneMegabyte = 0x0100000;
+    // We allocate an extra page to use as a guard page
+    size_t targetSize = ((size + (PAGE_SIZE-1)) & (-1*PAGE_SIZE)) + PAGE_SIZE;
+#if __LP64__
+    mach_vm_address_t result = 0x0100000000;                    // Set to 4GB so that is the first eligible address
+#else
+    mach_vm_address_t result = 0;
+#endif
+    kern_return_t kr = mach_vm_map(mach_task_self(),
+                                   &result,
+                                   targetSize,
+                                   kMOneMegabyte - 1,                  // This mask guarantees 1MB alignment
+                                   VM_FLAGS_ANYWHERE | vmFlags(),
+                                   MEMORY_OBJECT_NULL,          // Allocate memory instead of using an existing object
+                                   0,
+                                   FALSE,
+                                   VM_PROT_READ | VM_PROT_WRITE,
+                                   VM_PROT_ALL,                 // Needs to VM_PROT_ALL for libsyscall glue to pass via trap
+                                   VM_INHERIT_DEFAULT);         // Needs to VM_INHERIT_DEFAULT for libsyscall glue to pass via trap
+    if (kr != KERN_SUCCESS) {
+        // Fall back to vm_allocate() if mach_vm_map() fails. That can happen due to sandbox, or when running un the simulator
+        // on an older host. Technically this is not guaranteed to be above 4GB, but since it requires manually configuring a zero
+        // page to be below 4GB it is safe to assume processes that need it will also setup their sandbox properly so that
+        // mach_vm_map() works.
+
+        // We also need to allocate an extra 1MB so we can align it to 1MB
+        kr = vm_allocate(mach_task_self(), (vm_address_t*)&result, targetSize + kMOneMegabyte, VM_FLAGS_ANYWHERE | vmFlags());
+        if (kr == KERN_SUCCESS) {
+            mach_vm_address_t alignedResult = (result + kMOneMegabyte - 1) & -1*(kMOneMegabyte);
+            if (alignedResult != result) {
+                (void)vm_deallocate(mach_task_self(), (vm_address_t)result,
+                                    (vm_size_t)(alignedResult - result));
+            }
+            (void)vm_deallocate(mach_task_self(), (vm_address_t)(alignedResult+targetSize),
+                                (vm_size_t)((result+targetSize+kMOneMegabyte) - (alignedResult+targetSize)));
+            result = alignedResult;
+        }
+    }
+
+    if (kr != KERN_SUCCESS) {
+        return {nullptr, 0};
+    }
+
+    // Remove the guard page
+    targetSize -= PAGE_SIZE;
+
+    // Force accesses to the guard page to fault
+    (void)vm_protect(mach_task_self(), (vm_address_t)result+targetSize, PAGE_SIZE, true, VM_PROT_NONE);
+
+//    ASAN_POISON_MEMORY_REGION((void*)result, targetSize);
+//    fprintf(stderr, "0x%lx - 0x%lx\t  VM_ALLOCATED\n", (uintptr_t)result, (uintptr_t)result+targetSize);
+    return {(void*)result, targetSize};
+}
+#else /* TARGET_OS_OSX && BUILDING_DYLD && __x86_64__ */
 [[nodiscard]] MemoryManager::Buffer MemoryManager::vm_allocate_bytes(std::size_t size) {
     size_t targetSize = ((size + (PAGE_SIZE-1)) & (-1*PAGE_SIZE)) + PAGE_SIZE;
     vm_address_t    result;
@@ -415,6 +519,7 @@ void Allocator::Buffer::dump() const {
 //    fprintf(stderr, "0x%lx - 0x%lx\t  VM_ALLOCATED\n", (uintptr_t)result, (uintptr_t)result+targetSize);
     return {(void*)result, targetSize};
 }
+#endif /* TARGET_OS_OSX && BUILDING_DYLD && __x86_64__ */
 
 void MemoryManager::vm_deallocate_bytes(void* p, std::size_t size) {
 //    fprintf(stderr, "0x%lx - 0x%lx\tVM_DEALLOCATED\n", (uintptr_t)p, (uintptr_t)p+size);
@@ -423,6 +528,8 @@ void MemoryManager::vm_deallocate_bytes(void* p, std::size_t size) {
     ASAN_UNPOISON_MEMORY_REGION(p, size);
     (void)vm_deallocate(mach_task_self(), (vm_address_t)p, size + PAGE_SIZE);
 }
+#endif // TARGET_OS_EXCLAVEKIT
+
 
 [[nodiscard]] Allocator::Buffer Allocator::allocate_buffer(std::size_t nbytes, std::size_t alignment) {
     size_t targetAlignment = std::max<size_t>(16ULL, alignment);
@@ -459,7 +566,7 @@ void* Allocator::aligned_alloc(size_t alignment, size_t size) {
 //    ASAN_UNPOISON_MEMORY_REGION(buffer.address, buffer.size);
     contract(buffer.address != nullptr);
     // We are guaranteed a 1 granule managed we can use for storage;
-    //    fprintf(stderr, "(tid 0x%lx)\t0x%lx\tstashing\t0x%lx\n", foo, (uintptr_t)buffer.address, (uintptr_t)this);
+    //    fprintf(stderr, "(tid 0x%lx)\t0x%lx\tstashing\t0x%lx\n", mach_thread_self(), (uintptr_t)buffer.address, (uintptr_t)this);
     (void)new (buffer.address) AllocationMetadata(this, buffer.size-kGranuleSize);
 //    fprintf(stderr, "aligned_alloc\t0x%lx\t%lu\t%lu\n", (uintptr_t)buffer.address+kGranuleSize, size, alignment);
 //    fprintf(stderr, "ALIGNED_ALLOC(0x%lx): %llu\n", (uintptr_t)buffer.address+kGranuleSize, buffer.size-kGranuleSize);
@@ -470,7 +577,7 @@ void Allocator::free(void* ptr) {
 //    fprintf(stderr, "FREE(0x%lx)\n", (uintptr_t)ptr);
     contract((uintptr_t)ptr%16==0);
     if (!ptr) { return; }
-    // We are guaranteed a 1 granule prefeix we can use for storage
+    // We are guaranteed a 1 granule prefix we can use for storage
     auto metadata = AllocationMetadata::getForPointer(ptr);
 //    fprintf(stderr, "free\t0x%lx\t%lu\n", (uintptr_t)ptr, metadata->size());
     metadata->allocator().deallocate_buffer((void*)((uintptr_t)ptr-kGranuleSize), (uintptr_t)metadata->size()+kGranuleSize, kGranuleSize);
@@ -478,8 +585,9 @@ void Allocator::free(void* ptr) {
 
 char* Allocator::strdup(const char* str)
 {
-    auto result = (char*)this->malloc(strlen(str)+1);
-    strcpy(result, str);
+    size_t len    = strlen(str);
+    char*  result = (char*)this->malloc(len+1);
+    strlcpy(result, str, len+1);
     return result;
 }
 
@@ -603,7 +711,7 @@ private:
     MemoryManager*                              _memoryManager          = nullptr;
 };
 
-#if !BUILDING_DYLD
+#if !BUILDING_DYLD && !TARGET_OS_EXCLAVEKIT
 Allocator& Allocator::defaultAllocator() {
     static os_unfair_lock_s unfairLock = OS_UNFAIR_LOCK_INIT;
     static Allocator* allocator = nullptr;
@@ -752,7 +860,9 @@ void PersistentAllocator::reserveRange(BTree<Buffer, RegionSizeCompare>::iterato
 }
 
 Allocator::Buffer PersistentAllocator::allocate_buffer(std::size_t nbytes, std::size_t alignment, std::size_t prefix) {
+#if !TARGET_OS_EXCLAVEKIT
     __unused auto lock = _memoryManager->lockGuard();
+#endif // !TARGET_OS_EXCLAVEKIT
     while (1) {
         contract(_freeSizeHash.size() == _freeAddressHash.size());
         const size_t targetAlignment = std::max<size_t>(16ULL, alignment);
@@ -823,7 +933,9 @@ void PersistentAllocator::processDeallocations(Buffer* begin, Buffer* end) {
 }
 
 void PersistentAllocator::deallocate_buffer(Buffer buffer) {
-    __unused auto lock =  _memoryManager->lockGuard();
+#if !TARGET_OS_EXCLAVEKIT
+    __unused auto lock = _memoryManager->lockGuard();
+#endif // !TARGET_OS_EXCLAVEKIT
     std::array<Buffer, 20>  deallocations;
     size_t                  deallocationCount = 0;
     // First add the thing we are actually deallocating
@@ -896,7 +1008,9 @@ void PersistentAllocator::destroy() {
     }
 }
 
+
 void MemoryManager::writeProtect(bool protect) {
+#if !TARGET_OS_EXCLAVEKIT
     if (!_allocator) { return; }
     if (protect) {
         // fprintf(stderr, "writeProtect(true) called 0x%u -> 0x%u\n", _writeableCount, _writeableCount-1);
@@ -915,8 +1029,8 @@ void MemoryManager::writeProtect(bool protect) {
             }
         }
     }
+#endif // !TARGET_OS_EXCLAVEKIT
 }
-
 
 // In order to prevent reentrancy issues the BTrees used to implement this allocator cannot make any calls that would recursively mutate
 // themselves. We solve that by preloading a magazine of appropriately sized allocations we can hand out without updating the B+Trees, then
@@ -951,7 +1065,6 @@ void PersistentAllocator::reloadMagazine() {
 }
 
 
-
 Allocator& Allocator::persistentAllocator(MemoryManager&& memoryManager) {
     Buffer buffer       = memoryManager.vm_allocate_bytes(PERSISTENT_ALLOCATOR_DEFAULT_POOL_SIZE);
     return *new (buffer.address) PersistentAllocator(buffer, std::move(memoryManager));
@@ -969,7 +1082,6 @@ bool PersistentAllocator::owned(const void* p, std::size_t nbytes) const {
     }
     return false;
 }
-
 } // namespace lsl
 
 //VIS_HIDDEN void* operator new(std::size_t count, lsl::Allocator& allocator) {

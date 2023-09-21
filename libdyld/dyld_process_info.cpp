@@ -22,6 +22,9 @@
  * @APPLE_LICENSE_HEADER_END@
  */
 
+#include <TargetConditionals.h>
+#if !TARGET_OS_EXCLAVEKIT
+
 #include <dlfcn.h>
 #include <stdlib.h>
 #include <string.h>
@@ -35,11 +38,11 @@
 #include <libkern/OSAtomic.h>
 #include <mach-o/dyld_process_info.h>
 #include <mach-o/dyld_images.h>
+#include <mach-o/dyld_priv.h>
 
 #include "MachOFile.h"
 #include "dyld_process_info_internal.h"
 #include "Tracing.h"
-#include "DebuggerSupport.h"
 #include "DyldProcessConfig.h"
 
 #define IMAGE_COUNT_MAX 8192
@@ -229,8 +232,8 @@ private:
                                 dyld_process_info_base(dyld_platform_t platform, unsigned imageCount, unsigned aotImageCount, size_t totalSize);
     void*                       operator new (size_t, void* buf) { return buf; }
 
-    static bool                 inCache(uint64_t addr) { return (addr > SHARED_REGION_BASE) && (addr < SHARED_REGION_BASE+SHARED_REGION_SIZE); }
-    kern_return_t               addImage(task_t task, bool sameCacheAsThisProcess, uint64_t imageAddress, uint64_t imagePath, const char* imagePathLocal);
+    static bool                 inCache(uint64_t addr, uint64_t sharedCacheStart, uint64_t sharedCacheEnd) { return (addr > sharedCacheStart) && (addr < sharedCacheEnd); }
+    kern_return_t               addImage(task_t task, bool sameCacheAsThisProcess, uint64_t sharedCacheStart, uint64_t sharedCacheEnd, uint64_t imageAddress, uint64_t imagePath, const char* imagePathLocal);
 
     kern_return_t               addAotImage(dyld_aot_image_info_64 aotImageInfo);
 
@@ -356,10 +359,18 @@ dyld_process_info_ptr dyld_process_info_base::make(task_t task, const T1& allIma
     imageCount = MIN(imageCount, IMAGE_COUNT_MAX);
     size_t imageArraySize = imageCount * sizeof(T2);
 
+    uint64_t sharedCacheStart   = 0;
+    uint64_t sharedCacheEnd     = 0;
+    size_t   sharedCacheLength  = 0;
+    if ( const void* start = _dyld_get_shared_cache_range(&sharedCacheLength) ) {
+        sharedCacheStart = (uint64_t)start;
+        sharedCacheEnd = sharedCacheStart + (uint64_t)sharedCacheLength;
+    }
+
     withRemoteBuffer(task, infoArray, imageArraySize, false, kr, ^(void *buffer, size_t size) {
         // figure out how many path strings will need to be copied and their size
         T2* imageArray = (T2 *)buffer;
-        const dyld_all_image_infos* myInfo = (const dyld_all_image_infos*)dyld4::gDyld.allImageInfos;
+        const dyld_all_image_infos* myInfo = (const dyld_all_image_infos*)dyld4::gDyld.allImageInfos;   // FIXME: should not need dyld_all_image_info
         bool sameCacheAsThisProcess = !allImageInfo.processDetachedFromSharedRegion
             && !myInfo->processDetachedFromSharedRegion
             && ((memcmp(myInfo->sharedCacheUUID, &allImageInfo.sharedCacheUUID[0], 16) == 0)
@@ -367,7 +378,7 @@ dyld_process_info_ptr dyld_process_info_base::make(task_t task, const T1& allIma
         unsigned countOfPathsNeedingCopying = 0;
         if ( sameCacheAsThisProcess ) {
             for (uint32_t i=0; i < imageCount; ++i) {
-                if ( !inCache(imageArray[i].imageFilePath) )
+                if ( !inCache(imageArray[i].imageFilePath, sharedCacheStart, sharedCacheEnd) )
                     ++countOfPathsNeedingCopying;
             }
         }
@@ -439,7 +450,7 @@ dyld_process_info_ptr dyld_process_info_base::make(task_t task, const T1& allIma
         }
         // fill in info for each image
         for (uint32_t i=0; i < imageCount; ++i) {
-            *kr =  info->addImage(task, sameCacheAsThisProcess, imageArray[i].imageLoadAddress, imageArray[i].imageFilePath, NULL);
+            *kr =  info->addImage(task, sameCacheAsThisProcess, sharedCacheStart, sharedCacheEnd, imageArray[i].imageLoadAddress, imageArray[i].imageFilePath, NULL);
             if (*kr != KERN_SUCCESS) {
                 result = nullptr;
                 return;
@@ -607,7 +618,7 @@ dyld_process_info_ptr dyld_process_info_base::makeSuspended(task_t task, const T
 
     // fill in info for each image
     if ( mainExecutableAddress != 0 ) {
-        if ((*kr = obj->addImage(task, false, mainExecutableAddress, 0, mainExecutablePath))) {
+        if ((*kr = obj->addImage(task, false, 0, 0, mainExecutableAddress, 0, mainExecutablePath))) {
             return nullptr;
         }
     }
@@ -641,13 +652,13 @@ const char* dyld_process_info_base::copyPath(task_t task, uint64_t stringAddress
     return retval;
 }
 
-kern_return_t dyld_process_info_base::addImage(task_t task, bool sameCacheAsThisProcess, uint64_t imageAddress, uint64_t imagePath, const char* imagePathLocal)
+kern_return_t dyld_process_info_base::addImage(task_t task, bool sameCacheAsThisProcess, uint64_t sharedCacheStart, uint64_t sharedCacheEnd, uint64_t imageAddress, uint64_t imagePath, const char* imagePathLocal)
 {
     _curImage->loadAddress = imageAddress;
     _curImage->segmentStartIndex = _curSegmentIndex;
     if ( imagePathLocal != NULL ) {
         _curImage->path = addString(imagePathLocal, PATH_MAX);
-    } else if ( sameCacheAsThisProcess && inCache(imagePath) ) {
+    } else if ( sameCacheAsThisProcess && inCache(imagePath, sharedCacheStart, sharedCacheEnd) ) {
         _curImage->path = (const char*)imagePath;
     } else if (imagePath) {
         _curImage->path = copyPath(task, imagePath);
@@ -655,7 +666,7 @@ kern_return_t dyld_process_info_base::addImage(task_t task, bool sameCacheAsThis
         _curImage->path = "";
     }
 
-    if ( sameCacheAsThisProcess && inCache(imageAddress) ) {
+    if ( sameCacheAsThisProcess && inCache(imageAddress, sharedCacheStart, sharedCacheEnd) ) {
         addInfoFromLoadCommands((mach_header*)imageAddress, imageAddress, 32*1024);
     } else {
         auto kr = addInfoFromRemoteLoadCommands(task, imageAddress);
@@ -933,5 +944,6 @@ void _dyld_process_info_for_each_segment(dyld_process_info info, uint64_t machHe
     info->forEachSegment(machHeaderAddress, callback);
 }
 
+#endif // !TARGET_OS_EXCLAVEKIT
 
 

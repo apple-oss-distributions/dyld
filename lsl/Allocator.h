@@ -25,21 +25,22 @@
 #ifndef LSL_Allocator_h
 #define LSL_Allocator_h
 
+#include <TargetConditionals.h>
+#include "Defines.h"
+
 #include <limits>
 #include <cassert>
 #include <compare>
 #include <cstddef>
 #include <utility>
+#if !TARGET_OS_EXCLAVEKIT
 #include <_simple.h>
 #include <mach/vm_statistics.h>
-
 #include <os/lock.h>
-#include <sys/_pthread/_pthread_types.h>
+#include <pthread.h>
+#endif // !TARGET_OS_EXCLAVEKIT
 
 #include <new>
-
-#include "Defines.h"
-
 
 namespace dyld4 {
 class RuntimeState;
@@ -50,6 +51,7 @@ namespace lsl {
 struct Allocator;
 struct PersistentAllocator;
 
+#if !TARGET_OS_EXCLAVEKIT
 #pragma mark -
 #pragma mark Lock abstraction
 
@@ -96,7 +98,7 @@ private:
     dyld4::RuntimeState*    _runtimeState   = nullptr;
     os_unfair_lock_t        _lock           = nullptr;
 };
-
+#endif // !TARGET_OS_EXCLAVEKIT
 #pragma mark -
 #pragma mark Memory Manager
 
@@ -136,22 +138,26 @@ struct VIS_HIDDEN MemoryManager {
     MemoryManager(const char** apple) {
         // Eventually we will use this to parse parameters for controlling comapct info mlock()
         // We need to do this before allocator is created
-#if BUILDING_DYLD
+#if BUILDING_DYLD && !TARGET_OS_EXCLAVEKIT
         if (_simple_getenv(apple, "dyld_hw_tpro") != nullptr) {
             // Start in a writable state to allow bootstrap
             _tproEnable = true;
         }
-#endif
+#endif //  BUILDING_DYLD && !TARGET_OS_EXCLAVEKIT
     }
 
+#if !TARGET_OS_EXCLAVEKIT
     MemoryManager(Lock&& lock) : _lock(std::move(lock)) {}
 
     void adoptLock(Lock&& lock) {
         _lock = std::move(lock);
     }
+#endif // !TARGET_OS_EXCLAVEKIT
 
-    [[nodiscard]] Buffer     vm_allocate_bytes(std::size_t size);
-    void static              vm_deallocate_bytes(void* p, std::size_t size);
+    [[nodiscard]] static void*      allocate_pages(size_t size);
+    static void                     deallocate_pages(void* p, size_t size);
+    [[nodiscard]] Buffer            vm_allocate_bytes(std::size_t size);
+    void static                     vm_deallocate_bytes(void* p, std::size_t size);
     template<typename F>
     ALWAYS_INLINE void          withWritableMemory(F work) {
 #if BUILDING_DYLD
@@ -178,12 +184,14 @@ struct VIS_HIDDEN MemoryManager {
 private:
     friend struct PersistentAllocator;
 
+#if !TARGET_OS_EXCLAVEKIT
     [[nodiscard]] Lock::Guard lockGuard();
+#endif // !TARGET_OS_EXCLAVEKIT
     void writeProtect(bool protect);
 
     __attribute__((always_inline))
     void makeWriteable(WriteProtectionState& previousState) {
-#if BUILDING_DYLD
+#if BUILDING_DYLD && !TARGET_OS_EXCLAVEKIT
         if (_tproEnable) {
             os_compiler_barrier();
             // Stacks are in  memory, so it is possible to attack tpro via writing the stack vars in another thread. To protect
@@ -211,11 +219,11 @@ private:
             }
             ++_writeableCount;
         }
-#endif /* BUILD_DYLD */
+#endif // BUILD_DYLD && !TARGET_OS_EXCLAVEKIT
     }
     __attribute__((always_inline))
     void makeReadOnly(WriteProtectionState& previousState) {
-#if BUILDING_DYLD
+#if BUILDING_DYLD && !TARGET_OS_EXCLAVEKIT
         if (_tproEnable) {
             os_compiler_barrier();
             // Stacks are in  memory, so it is possible to attack tpro via writing the stack vars in another thread. To protect
@@ -243,17 +251,17 @@ private:
                 writeProtect(true);
             }
         }
-#endif /* BUILD_DYLD */
+#endif // BUILD_DYLD && !TARGET_OS_EXCLAVEKIT
     }
     __attribute__((always_inline))
     void restorePreviousState(WriteProtectionState& previousState) {
-#if BUILDING_DYLD
+#if BUILDING_DYLD && !TARGET_OS_EXCLAVEKIT
         if (_tproEnable) {
             os_compiler_barrier();
 #if __has_feature(ptrauth_calls)
             uintptr_t signedWritableState = ptrauth_sign_generic_data(previousState.data, (uintptr_t)&previousState.data);
             if (previousState.signature != signedWritableState) {
-                // Someone tampered with writableState. Process is under attack, we need to aboet();
+                // Someone tampered with writableState. Process is under attack, we need to abort();
                 abort();
             }
 #endif /* __has_feature(ptrauth_calls) */
@@ -273,7 +281,7 @@ private:
 #if __has_feature(ptrauth_calls)
         uintptr_t signedWritableState = ptrauth_sign_generic_data(previousState.data, (uintptr_t)&previousState.data);
         if (previousState.signature != signedWritableState) {
-            // Someone tampered with writable state. Process is under attack, we need to aboet();
+            // Someone tampered with writable state. Process is under attack, we need to abort();
             abort();
         }
 #endif /* __has_feature(ptrauth_calls) */
@@ -291,11 +299,13 @@ private:
                 }
             }
         }
-#endif /* BUILD_DYLD */
+#endif // BUILD_DYLD && !TARGET_OS_EXCLAVEKIT
     }
     void swap(MemoryManager& other) {
         using std::swap;
+#if !TARGET_OS_EXCLAVEKIT
         swap(_lock,                     other._lock);
+#endif // !TARGET_OS_EXCLAVEKIT
         swap(_allocator,                other._allocator);
         swap(_writeableCount,           other._writeableCount);
         swap(_disableMemoryProtection,  other._disableMemoryProtection);
@@ -307,18 +317,20 @@ private:
 
     int vmFlags() const {
         int result = 0;
-#if BUILDING_DYLD
+#if BUILDING_DYLD && !TARGET_OS_EXCLAVEKIT
         if (_tproEnable) {
             // add tpro for memory protection on platform that support it
             result |= VM_FLAGS_TPRO;
         }
         // Only include the dyld tag for allocations made by dyld
         result |= VM_MAKE_TAG(VM_MEMORY_DYLD);
-#endif /* BUILDING_DYLD */
+#endif // BUILDING_DYLD && !TARGET_OS_EXCLAVEKIT
         return result;
     }
 
+#if !TARGET_OS_EXCLAVEKIT
     Lock                    _lock;
+#endif // !TARGET_OS_EXCLAVEKIT
     PersistentAllocator*    _allocator                  = nullptr;
     uint64_t                _writeableCount             = 0;
     bool                    _disableMemoryProtection    = false;
@@ -594,7 +606,6 @@ struct VIS_HIDDEN Allocator {
     static Allocator&       defaultAllocator();
 #endif
     static void* align(size_t alignment, size_t size, void*& ptr, size_t& space);
-
 #pragma mark Primitive methods to be provided by subclasses
 public:
     virtual size_t      allocated_bytes() const = 0;
@@ -612,6 +623,8 @@ protected:
 #pragma mark Common functions for subclasses
     [[nodiscard]] Buffer            allocate_buffer(std::size_t nbytes, std::size_t alignment);
     void                            deallocate_buffer(void* p, std::size_t nbytes, std::size_t alignment);
+    [[nodiscard]] static Buffer     vm_allocate_bytes(std::size_t size, int flags);
+    static void                     vm_deallocate_bytes(void* p, std::size_t size);
     Allocator() = default;
     static_assert(sizeof(AllocationMetadata) <= kGranuleSize, "Granule must be large enough to hold AllocationMetadata");
     static_assert(alignof(AllocationMetadata) <= kGranuleSize, "AllocationMetadata must be naturally aligned ona granule");
@@ -654,8 +667,6 @@ private:
 
 } // namespace lsl
 
-VIS_HIDDEN void* operator new(std::size_t count, lsl::Allocator& allocator);
-VIS_HIDDEN void* operator new(std::size_t count, std::align_val_t al, lsl::Allocator& allocator);
 
 // These are should never be used. To prevent accidental usage, the prototypes exist, but using will cause a link error
 VIS_HIDDEN void* operator new(std::size_t count, lsl::Allocator* allocator);

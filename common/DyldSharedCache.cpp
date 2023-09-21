@@ -22,6 +22,9 @@
  * @APPLE_LICENSE_HEADER_END@
  */
 
+#include <TargetConditionals.h>
+
+#if !TARGET_OS_EXCLAVEKIT
 
 #include <dirent.h>
 #include <sys/errno.h>
@@ -352,7 +355,7 @@ void DyldSharedCache::forEachCache(void (^handler)(const DyldSharedCache *cache,
         return;
 
     for (uint32_t i = 0; i != header.subCacheArrayCount; ++i) {
-        const DyldSharedCache* cache = (const DyldSharedCache*)((uint8_t*)this + this->getSubCacheVmOffset(i));
+        const DyldSharedCache* cache = (const DyldSharedCache*)((uintptr_t)this + this->getSubCacheVmOffset(i));
         handler(cache, stop);
         if ( stop )
             return;
@@ -386,20 +389,20 @@ int32_t DyldSharedCache::getSubCacheIndex(const void* addr) const
 
 void DyldSharedCache::getSubCacheUuid(uint8_t index, uint8_t uuid[]) const {
     if (header.mappingOffset <= __offsetof(dyld_cache_header, cacheSubType) ) {
-        const dyld_subcache_entry_v1* subCacheEntries = (dyld_subcache_entry_v1*)((uint8_t*)this + header.subCacheArrayOffset);
+        const dyld_subcache_entry_v1* subCacheEntries = (dyld_subcache_entry_v1*)((uintptr_t)this + header.subCacheArrayOffset);
         memcpy(uuid, subCacheEntries[index].uuid, 16);
     } else {
-        const dyld_subcache_entry* subCacheEntries = (dyld_subcache_entry*)((uint8_t*)this + header.subCacheArrayOffset);
+        const dyld_subcache_entry* subCacheEntries = (dyld_subcache_entry*)((uintptr_t)this + header.subCacheArrayOffset);
         memcpy(uuid, subCacheEntries[index].uuid, 16);
     }
 }
 
 uint64_t DyldSharedCache::getSubCacheVmOffset(uint8_t index) const {
     if (header.mappingOffset <= __offsetof(dyld_cache_header, cacheSubType) ) {
-        const dyld_subcache_entry_v1* subCacheEntries = (dyld_subcache_entry_v1*)((uint8_t*)this + header.subCacheArrayOffset);
+        const dyld_subcache_entry_v1* subCacheEntries = (dyld_subcache_entry_v1*)((uintptr_t)this + header.subCacheArrayOffset);
         return subCacheEntries[index].cacheVMOffset;
     } else {
-        const dyld_subcache_entry* subCacheEntries = (dyld_subcache_entry*)((uint8_t*)this + header.subCacheArrayOffset);
+        const dyld_subcache_entry* subCacheEntries = (dyld_subcache_entry*)((uintptr_t)this + header.subCacheArrayOffset);
         return subCacheEntries[index].cacheVMOffset;
     }
 }
@@ -542,7 +545,7 @@ const void* DyldSharedCache::getLocalNlistEntries() const
     // check for cache without local symbols info
     if (!this->hasLocalSymbolsInfo())
         return nullptr;
-    const auto localInfo = (dyld_cache_local_symbols_info*)((uint8_t*)this + header.localSymbolsOffset);
+    const auto localInfo = (dyld_cache_local_symbols_info*)((uintptr_t)this + header.localSymbolsOffset);
     return getLocalNlistEntries(localInfo);
 }
 
@@ -551,7 +554,7 @@ const uint32_t DyldSharedCache::getLocalNlistCount() const
     // check for cache without local symbols info
      if (!this->hasLocalSymbolsInfo())
         return 0;
-    const auto localInfo = (dyld_cache_local_symbols_info*)((uint8_t*)this + header.localSymbolsOffset);
+    const auto localInfo = (dyld_cache_local_symbols_info*)((uintptr_t)this + header.localSymbolsOffset);
     return localInfo->nlistCount;
 }
 
@@ -565,7 +568,7 @@ const char* DyldSharedCache::getLocalStrings() const
     // check for cache without local symbols info
      if (!this->hasLocalSymbolsInfo())
         return nullptr;
-    const auto localInfo = (dyld_cache_local_symbols_info*)((uint8_t*)this + header.localSymbolsOffset);
+    const auto localInfo = (dyld_cache_local_symbols_info*)((uintptr_t)this + header.localSymbolsOffset);
     return getLocalStrings(localInfo);
 }
 
@@ -574,7 +577,7 @@ const uint32_t DyldSharedCache::getLocalStringsSize() const
     // check for cache without local symbols info
      if (!this->hasLocalSymbolsInfo())
         return 0;
-    const auto localInfo = (dyld_cache_local_symbols_info*)((uint8_t*)this + header.localSymbolsOffset);
+    const auto localInfo = (dyld_cache_local_symbols_info*)((uintptr_t)this + header.localSymbolsOffset);
     return localInfo->stringsSize;
 }
 
@@ -584,7 +587,7 @@ const dyld3::MachOFile* DyldSharedCache::getImageFromPath(const char* dylibPath)
     const dyld_cache_mapping_info* mappings = (dyld_cache_mapping_info*)((char*)this + header.mappingOffset);
     uint32_t dyldCacheImageIndex;
     if ( hasImagePath(dylibPath, dyldCacheImageIndex) )
-        return (dyld3::MachOFile*)((uint8_t*)this + dylibs[dyldCacheImageIndex].address - mappings[0].address);
+        return (dyld3::MachOFile*)((uintptr_t)this + dylibs[dyldCacheImageIndex].address - mappings[0].address);
     return nullptr;
 }
 
@@ -593,7 +596,7 @@ void DyldSharedCache::forEachLocalSymbolEntry(void (^handler)(uint64_t dylibOffs
     // check for cache without local symbols info
     if (!this->hasLocalSymbolsInfo())
         return;
-    const auto localInfo = (dyld_cache_local_symbols_info*)((uint8_t*)this + header.localSymbolsOffset);
+    const auto localInfo = (dyld_cache_local_symbols_info*)((uintptr_t)this + header.localSymbolsOffset);
 
     if ( header.mappingOffset >= __offsetof(dyld_cache_header, symbolFileUUID) ) {
         // On new caches, the dylibOffset is 64-bits, and is a VM offset
@@ -618,10 +621,10 @@ void DyldSharedCache::forEachLocalSymbolEntry(void (^handler)(uint64_t dylibOffs
 const mach_header* DyldSharedCache::getIndexedImageEntry(uint32_t index, uint64_t& mTime, uint64_t& inode) const
 {
     const dyld_cache_image_info*   dylibs   = images();
-    const dyld_cache_mapping_info* mappings = (dyld_cache_mapping_info*)((char*)this + header.mappingOffset);
+    const dyld_cache_mapping_info* mappings = (dyld_cache_mapping_info*)((uintptr_t)this + header.mappingOffset);
     mTime = dylibs[index].modTime;
     inode = dylibs[index].inode;
-    return (mach_header*)((uint8_t*)this + dylibs[index].address - mappings[0].address);
+    return (mach_header*)((uintptr_t)this + dylibs[index].address - mappings[0].address);
 }
 
 const mach_header* DyldSharedCache::getIndexedImageEntry(uint32_t index) const
@@ -2204,3 +2207,5 @@ void DyldSharedCache::computeTransitiveDependents(std::unordered_map<std::string
     });
 }
 #endif
+
+#endif // !TARGET_OS_EXCLAVEKIT

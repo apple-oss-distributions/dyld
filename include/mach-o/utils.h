@@ -30,12 +30,12 @@
 #include <mach-o/loader.h>
 #include <Availability.h>
 
+#include <TargetConditionals.h>
+
 
 #if __cplusplus
 extern "C" {
 #endif
-
-
 
 /*!
  * @function macho_cpu_type_for_arch_name

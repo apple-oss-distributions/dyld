@@ -24,23 +24,36 @@
 #include <stdlib.h>
 #include <assert.h>
 #include <string.h>
+#include <strings.h>
 #include <stdio.h>
-#include <sys/stat.h>
-#include <sys/types.h>
-#include <sys/errno.h>
-#include <sys/fcntl.h>
-#include <unistd.h>
 #include <TargetConditionals.h>
-#include <mach/host_info.h>
-#include <mach/mach.h>
-#include <mach/mach_host.h>
+#include "Defines.h"
+#if TARGET_OS_EXCLAVEKIT
+  #define OSSwapBigToHostInt32 __builtin_bswap32
+  #define OSSwapBigToHostInt64 __builtin_bswap64
+  #define htonl                __builtin_bswap32
+#else
+  #include <sys/stat.h>
+  #include <sys/types.h>
+  #include <sys/errno.h>
+  #include <sys/fcntl.h>
+  #include <unistd.h>
+  #include <mach/host_info.h>
+  #include <mach/mach.h>
+  #include <mach/mach_host.h>
+#if SUPPORT_CLASSIC_RELOCS
+  #include <mach-o/reloc.h>
+  #include <mach-o/x86_64/reloc.h>
+#endif
 extern "C" {
   #include <corecrypto/ccdigest.h>
   #include <corecrypto/ccsha1.h>
   #include <corecrypto/ccsha2.h>
 }
-#include <mach-o/reloc.h>
-#include <mach-o/x86_64/reloc.h>
+#endif
+
+#include "Defines.h"
+
 #include <mach-o/nlist.h>
 
 #include "Array.h"
@@ -48,13 +61,13 @@ extern "C" {
 #include "SupportedArchs.h"
 #include "CodeSigningTypes.h"
 
-#if BUILDING_DYLD || BUILDING_LIBDYLD
-    // define away restrict until rdar://60166935 is fixed
-    #define restrict
+#if (BUILDING_DYLD || BUILDING_LIBDYLD) && !TARGET_OS_EXCLAVEKIT
     #include <subsystem.h>
 #endif
 
 namespace dyld3 {
+
+#if !TARGET_OS_EXCLAVEKIT
 
 ////////////////////////////  posix wrappers ////////////////////////////////////////
 
@@ -101,6 +114,7 @@ int open(const char* path, int flag, int other)
 
     return result;
 }
+#endif // !TARGET_OS_EXCLAVEKIT
 
 
 ////////////////////////////  FatFile ////////////////////////////////////////
@@ -640,7 +654,7 @@ bool MachOFile::builtForPlatform(Platform reqPlatform, bool onlyOnePlatform) con
     return false;
 }
 
-bool MachOFile::loadableIntoProcess(Platform processPlatform, const char* path) const
+bool MachOFile::loadableIntoProcess(Platform processPlatform, const char* path, bool internalInstall) const
 {
     if ( this->builtForPlatform(processPlatform) )
         return true;
@@ -1223,6 +1237,10 @@ void MachOFile::forEachDependentDylib(void (^callback)(const char* loadPath, boo
     if ( (count == 0) && !stopped ) {
         // The dylibs that make up libSystem can link with nothing
         // except for dylibs in libSystem.dylib which are ok to link with nothing (they are on bottom)
+#if TARGET_OS_EXCLAVEKIT
+        if ( !this->isDylib() || (strncmp(this->installName(), "/System/ExclaveKit/usr/lib/system/", 34) != 0) )
+            callback("/System/ExclaveKit/usr/lib/libSystem.dylib", false, false, false, 0x00010000, 0x00010000, stopped);
+#else
         if ( this->builtForPlatform(Platform::driverKit, true) ) {
             if ( !this->isDylib() || (strncmp(this->installName(), "/System/DriverKit/usr/lib/system/", 33) != 0) )
                 callback("/System/DriverKit/usr/lib/libSystem.B.dylib", false, false, false, 0x00010000, 0x00010000, stopped);
@@ -1231,8 +1249,9 @@ void MachOFile::forEachDependentDylib(void (^callback)(const char* loadPath, boo
             if ( !this->isDylib() || (strncmp(this->installName(), "/usr/lib/system/", 16) != 0) )
                 callback("/usr/lib/libSystem.B.dylib", false, false, false, 0x00010000, 0x00010000, stopped);
         }
+#endif // TARGET_OS_EXCLAVEKIT
     }
-#endif
+#endif // !BUILDING_SHARED_CACHE_UTIL && !BUILDING_DYLDINFO && !BUILDING_UNIT_TESTS
     diag.assertNoError();   // any malformations in the file should have been caught by earlier validate() call
 }
 
@@ -1698,6 +1717,12 @@ static bool platformExcludesSharedCache_sim(const char* installName) {
         return true;
     if ( strcmp(installName, "/System/Library/PrivateFrameworks/NewsUI2.framework/NewsUI2") == 0 )
         return true;
+    if ( strcmp(installName, "/System/Library/PrivateFrameworks/MLCompilerOS.framework/MLCompilerOS") == 0 )
+        return true;
+    if ( strcmp(installName, "/System/Library/PrivateFrameworks/HomeKitDaemon.framework/HomeKitDaemon") == 0 )
+        return true;
+    if ( strcmp(installName, "/System/Library/PrivateFrameworks/HomeKitDaemonLegacy.framework/HomeKitDaemonLegacy") == 0 )
+        return true;
     return false;
 }
 
@@ -2020,6 +2045,33 @@ bool MachOFile::canBePlacedInDyldCache(const char* path, void (^failureReason)(c
             }
 
             if ( !rebasesOk )
+                return;
+        }
+
+        // Check that shared cache dylibs don't use undefined lookup
+        {
+            __block bool bindsOk = true;
+
+            auto checkBind = ^(int libOrdinal, bool& stop) {
+                if ( libOrdinal == BIND_SPECIAL_DYLIB_FLAT_LOOKUP ) {
+                    failureReason("has dynamic_lookup binds");
+                    bindsOk = false;
+                    stop = true;
+                }
+            };
+
+            if (hasChainedFixups()) {
+                fixups.forEachChainedFixupTarget(diag, ^(int libOrdinal, const char* symbolName, uint64_t addend, bool weakImport, bool& stop) {
+                    checkBind(libOrdinal, stop);
+                });
+            } else {
+                auto handler = ^(const mach_o::Fixups::BindTargetInfo &info, bool &stop) {
+                    checkBind(info.libOrdinal, stop);
+                };
+                fixups.forEachBindTarget_Opcodes(diag, true, handler, handler);
+            }
+
+            if ( !bindsOk )
                 return;
         }
 
@@ -2649,12 +2701,12 @@ static void getArchNames(const GradedArchs& archs, bool isOSBinary, char buffer[
     buffer[0] = '\0';
     archs.forEachArch(isOSBinary, ^(const char* archName) {
         if ( buffer[0] != '\0' )
-            strcat(buffer, "' or '");
-        strcat(buffer, archName);
+            strlcat(buffer, "' or '", 256);
+        strlcat(buffer, archName, 256);
     });
 }
 
-const MachOFile* MachOFile::compatibleSlice(Diagnostics& diag, const void* fileContent, size_t contentSize, const char* path, Platform platform, bool isOSBinary, const GradedArchs& archs)
+const MachOFile* MachOFile::compatibleSlice(Diagnostics& diag, const void* fileContent, size_t contentSize, const char* path, Platform platform, bool isOSBinary, const GradedArchs& archs, bool internalInstall)
 {
     const MachOFile* mf = nullptr;
     if ( const dyld3::FatFile* ff = dyld3::FatFile::isFatFile(fileContent) ) {
@@ -2690,7 +2742,7 @@ const MachOFile* MachOFile::compatibleSlice(Diagnostics& diag, const void* fileC
         return nullptr;
     }
 
-    if ( !mf->loadableIntoProcess(platform, path) ) {
+    if ( !mf->loadableIntoProcess(platform, path, internalInstall) ) {
         __block Platform havePlatform = Platform::unknown;
         mf->forEachSupportedPlatform(^(Platform aPlat, uint32_t minOS, uint32_t sdk) {
             havePlatform = aPlat;
@@ -3081,7 +3133,7 @@ bool MachOFile::hasExportTrie(uint32_t& runtimeOffset, uint32_t& size) const
     return true;
 }
 
-
+#if !TARGET_OS_EXCLAVEKIT
 // Note, this has to match the kernel
 static const uint32_t hashPriorities[] = {
     CS_HASHTYPE_SHA1,
@@ -3238,6 +3290,7 @@ void MachOFile::forEachCDHashOfCodeSignature(const void* codeSigStart, size_t co
         }
     });
 }
+#endif // !TARGET_OS_EXCLAVEKIT
 
 // These are mangled symbols for all the variants of operator new and delete
 // which a main executable can define (non-weak) and override the
@@ -3250,7 +3303,8 @@ static const char* const sTreatAsWeak[] = {
     "__ZnwmSt11align_val_t", "__ZnwmSt11align_val_tRKSt9nothrow_t",
     "__ZnamSt11align_val_t", "__ZnamSt11align_val_tRKSt9nothrow_t",
     "__ZdlPvSt11align_val_t", "__ZdlPvSt11align_val_tRKSt9nothrow_t", "__ZdlPvmSt11align_val_t",
-    "__ZdaPvSt11align_val_t", "__ZdaPvSt11align_val_tRKSt9nothrow_t", "__ZdaPvmSt11align_val_t"
+    "__ZdaPvSt11align_val_t", "__ZdaPvSt11align_val_tRKSt9nothrow_t", "__ZdaPvmSt11align_val_t",
+    "__ZnwmSt19__type_descriptor_t", "__ZnamSt19__type_descriptor_t"
 };
 
 void MachOFile::forEachTreatAsWeakDef(void (^handler)(const char* symbolName))

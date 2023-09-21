@@ -28,16 +28,21 @@
 #include <string.h>
 #include <mach-o/loader.h>
 #include <mach-o/dyld_images.h>
-#include <mach-o/dyld_process_info.h>
-#include <mach/mach_time.h>
+#include <TargetConditionals.h>
+#if !TARGET_OS_EXCLAVEKIT
+  #include <mach-o/dyld_process_info.h>
+  #include <mach/mach_time.h>
+#endif
 
 #include "Vector.h"
 #include "Tracing.h"
 #include "Array.h"
 #include "DebuggerSupport.h"
 #include "MachOFile.h"
+#include "dyld_process_info.h"
 
 using lsl::Vector;
+using lsl::Allocator;
 
 extern struct mach_header __dso_handle;
 
@@ -68,20 +73,22 @@ void addNonSharedCacheImageUUID(Allocator& allocator, const dyld_uuid_info& info
 	gProcessInfo->uuidArray = sImageUUIDs->begin();
 }
 
-void addImagesToAllImages(RuntimeState& state, uint32_t infoCount, const dyld_image_info info[], uint32_t initialImageCount)
+void addImagesToAllImages(Allocator& persistentAllocator, uint32_t infoCount, const dyld_image_info info[], uint32_t initialImageCount)
 {
 	// set infoArray to NULL to denote it is in-use
 	gProcessInfo->infoArray = NULL;
 	
 	// append all new images
     if ( sImageInfos == nullptr ) {
-        sImageInfos = Vector<dyld_image_info>::make(state.persistentAllocator);
+        sImageInfos = Vector<dyld_image_info>::make(persistentAllocator);
         sImageInfos->reserve(initialImageCount);
     }
 	for (uint32_t i=0; i < infoCount; ++i)
 		sImageInfos->push_back(info[i]);
 	gProcessInfo->infoArrayCount = (uint32_t)sImageInfos->size();
+#if !TARGET_OS_EXCLAVEKIT
 	gProcessInfo->infoArrayChangeTimestamp = mach_absolute_time();
+#endif
 
 	// set infoArray back to base address of vector (other process can now read)
 	gProcessInfo->infoArray = sImageInfos->begin();
@@ -105,8 +112,9 @@ void addAotImagesToAllAotImages(Allocator& allocator, uint32_t aotInfoCount, con
         sAotImageInfos->push_back(aotInfo[i]);
     }
     gProcessInfo->aotInfoCount = (uint32_t)sAotImageInfos->size();
+#if !TARGET_OS_EXCLAVEKIT
     gProcessInfo->aotInfoArrayChangeTimestamp = mach_absolute_time();
-
+#endif
     // set aotInfoArray back to base address of vector (other process can now read)
     gProcessInfo->aotInfoArray = sAotImageInfos->begin();
 }
@@ -152,8 +160,9 @@ void removeAotImageFromAllAotImages(const mach_header* loadAddress)
         }
     }
     gProcessInfo->aotInfoCount = (uint32_t)sAotImageInfos->size();
+#if !TARGET_OS_EXCLAVEKIT
     gProcessInfo->aotInfoArrayChangeTimestamp  = mach_absolute_time();
-
+#endif
     // set aotInfoArray back to base address of vector
     gProcessInfo->aotInfoArray = sAotImageInfos->begin();
 }
@@ -190,8 +199,9 @@ void removeImageFromAllImages(const mach_header* loadAddress)
 		}
 	}
 	gProcessInfo->uuidArrayCount = sImageUUIDs->size();
+#if !TARGET_OS_EXCLAVEKIT
 	gProcessInfo->infoArrayChangeTimestamp = mach_absolute_time();
-
+#endif
 	// set infoArray back to base address of vector
 	gProcessInfo->uuidArray = sImageUUIDs->begin();
 
@@ -208,7 +218,9 @@ void removeImageFromAllImages(const mach_header* loadAddress)
 	void lldb_image_notifier(enum dyld_image_mode mode, uint32_t infoCount, const dyld_image_info info[])
 	{
 #if BUILDING_DYLD
+  #if !TARGET_OS_EXCLAVEKIT
         dyld3::ScopedTimer timer(DBG_DYLD_GDB_IMAGE_NOTIFIER, 0, 0, 0);
+  #endif
         uint64_t machHeaders[infoCount];
 		for (uint32_t i=0; i < infoCount; ++i) {
 			machHeaders[i] = (uintptr_t)(info[i].imageLoadAddress);

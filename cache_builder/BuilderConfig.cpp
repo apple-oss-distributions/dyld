@@ -42,6 +42,7 @@ cache_builder::Logger::Logger(const BuilderOptions& options)
 {
     this->printTimers = options.timePasses;
     this->printStats  = options.stats;
+    this->printDebug  = options.debug;
 }
 
 void cache_builder::Logger::log(const char* format, ...) const
@@ -85,7 +86,7 @@ cache_builder::Layout::Layout(const BuilderOptions& options)
         // x86_64 uses discontiguous mappings
         this->discontiguous.emplace();
 
-        if ( options.isSimultor() ) {
+        if ( options.isSimulator() ) {
             // The simulator has fixed addresses
             this->discontiguous->simTextSize = CacheVMSize(1.5_GB);
             this->discontiguous->simDataSize = CacheVMSize(1_GB);
@@ -103,7 +104,7 @@ cache_builder::Layout::Layout(const BuilderOptions& options)
         this->contiguous->subCacheStubsLimit = CacheVMSize(110_MB);
     }
 
-    if ( !options.isSimultor() ) {
+    if ( !options.isSimulator() ) {
         // Devices always get large layout.  Simulators get the regular layout
         this->large.emplace();
 
@@ -146,7 +147,7 @@ cache_builder::Layout::Layout(const BuilderOptions& options)
 SlideInfo::SlideInfo(const BuilderOptions& options, const Layout& layout)
 {
     // Compute slide info.  Note the simulator doesn't slide
-    if ( options.isSimultor() )
+    if ( options.isSimulator() )
         return;
 
     std::string_view archName = options.archs.name();

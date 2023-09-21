@@ -25,11 +25,15 @@
 #ifndef FileManager_h
 #define FileManager_h
 
+#if !TARGET_OS_EXCLAVEKIT
 #include "UUID.h"
 #include "Defines.h"
 #include "Allocator.h"
 #include "OrderedMap.h"
 #include "DyldDelegates.h"
+#if !BUILDING_DYLD
+#include <os/lock.h>
+#endif
 
 namespace dyld4 {
 
@@ -140,4 +144,5 @@ private:
 
 }; /* namespace dyld4 */
 
+#endif //!TARGET_OS_EXCLAVEKIT
 #endif /* FileManager_h */

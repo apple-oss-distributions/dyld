@@ -10,22 +10,30 @@ OTHER_CODE_SIGN_FLAGS[sdk=macosx*]       =
 PRODUCT_NAME[sdk=*simulator*] = dyld_sim
 PRODUCT_NAME[sdk=iphoneos*]   = dyld
 PRODUCT_NAME[sdk=macosx*]     = dyld
+PRODUCT_NAME[sdk=exclavekit*] = dyld
 
 INSTALL_PATH   = /usr/lib
+INSTALL_PATH[sdk=exclavekit*]   = $(SYSTEM_PREFIX)/usr/lib
 
-GCC_PREPROCESSOR_DEFINITIONS_Debug = DYLD_VERSION=$(RC_ProjectSourceVersion) BUILDING_DYLD=1 DEBUG=1
+// Disable building the _asan variant for dyld on ExclaveKit
+BUILD_VARIANTS[sdk=exclavekit*] = normal
+
+GCC_PREPROCESSOR_DEFINITIONS_Debug   = DYLD_VERSION=$(RC_ProjectSourceVersion) BUILDING_DYLD=1 DEBUG=1
 GCC_PREPROCESSOR_DEFINITIONS_Release = DYLD_VERSION=$(RC_ProjectSourceVersion) BUILDING_DYLD=1
-GCC_PREPROCESSOR_DEFINITIONS = $(GCC_PREPROCESSOR_DEFINITIONS_$(CONFIGURATION)) $(GCC_PREPROCESSOR_DEFINITIONS_FEATURES)
+GCC_PREPROCESSOR_DEFINITIONS         = $(GCC_PREPROCESSOR_DEFINITIONS_$(CONFIGURATION)) $(GCC_PREPROCESSOR_DEFINITIONS_FEATURES)
+GCC_PREPROCESSOR_DEFINITIONS[sdk=exclavekit*] = $(GCC_PREPROCESSOR_DEFINITIONS_$(CONFIGURATION)) $(GCC_PREPROCESSOR_DEFINITIONS_FEATURES) L4_CONFIG_PLAT_EVP=1
 
 ENTRY_NAME[sdk=*simulator*] = __dyld_sim_prepare
 ENTRY_NAME[sdk=iphoneos*]   = __dyld_start
 ENTRY_NAME[sdk=macosx*]     = __dyld_start
+ENTRY_NAME[sdk=exclavekit*] = __dyld_start
 
 DIRTY                    = -Wl,-dirty_data_list,$(DERIVED_SOURCES_DIR)/dyld.dirty
 
 LLDB_SUPPORT[sdk=*simulator*] =
-LLDB_SUPPORT[sdk=iphoneos*]   = -Wl,-exported_symbol,_lldb_image_notifier -Wl,-exported_symbol,__dyld_debugger_notification
-LLDB_SUPPORT[sdk=macosx*]     = -Wl,-exported_symbol,_lldb_image_notifier -Wl,-exported_symbol,__dyld_debugger_notification
+LLDB_SUPPORT[sdk=exclavekit*] =
+LLDB_SUPPORT[sdk=iphoneos*]   = -Wl,-exported_symbol,_lldb_image_notifier -Wl,-exported_symbol,__dyld_debugger_notification  -Wl,-exported_symbol,_dyld_all_image_infos
+LLDB_SUPPORT[sdk=macosx*]     = -Wl,-exported_symbol,_lldb_image_notifier -Wl,-exported_symbol,__dyld_debugger_notification  -Wl,-exported_symbol,_dyld_all_image_infos
 
 
 

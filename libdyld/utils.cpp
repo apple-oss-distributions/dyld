@@ -21,6 +21,10 @@
  * @APPLE_LICENSE_HEADER_END@
  */
 
+#include <TargetConditionals.h>
+
+#if !TARGET_OS_EXCLAVEKIT
+
 #include <string.h>
 #include <sys/mman.h>
 #include <sys/types.h>
@@ -236,10 +240,13 @@ int macho_best_slice_in_fd(int fd, void (^bestSlice)(const struct mach_header* s
 ///
 /// utils_priv.h
 ///
-const char* _Nullable macho_dylib_install_name(const struct mach_header* _Nonnull mh)
+///
+const char* _Nullable macho_dylib_install_name(const struct mach_header* _Nonnull mh) DYLD_EXCLAVEKIT_UNAVAILABLE
 {
     if ( const MachOFile* mf = MachOFile::isMachO(mh) )
         return mf->installName();
 
     return nullptr;
 }
+
+#endif // !TARGET_OS_EXCLAVEKIT

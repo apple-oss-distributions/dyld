@@ -109,7 +109,8 @@ struct Visitor
 
 #if POINTERS_ARE_UNSLID
     // Everying other than the cache builder has MachOAnalyzer available
-    Visitor(const DyldSharedCache* dyldCache, const dyld3::MachOAnalyzer* dylibMA);
+    Visitor(const DyldSharedCache* dyldCache, const dyld3::MachOAnalyzer* dylibMA,
+            std::optional<VMAddress> selectorStringsBaseAddress);
 #elif SUPPORT_VM_LAYOUT
     // Everying other than the cache builder has MachOAnalyzer available
     Visitor(const dyld3::MachOAnalyzer* dylibMA);
@@ -161,8 +162,11 @@ struct Visitor
 
     uint32_t                    pointerSize = 0;
 
-#if BUILDING_CACHE_BUILDER || BUILDING_CACHE_BUILDER_UNIT_TESTS
+#if BUILDING_CACHE_BUILDER || BUILDING_CACHE_BUILDER_UNIT_TESTS || POINTERS_ARE_UNSLID
     VMAddress                   sharedCacheSelectorStringsBaseAddress() const;
+#endif
+
+#if BUILDING_CACHE_BUILDER || BUILDING_CACHE_BUILDER_UNIT_TESTS || POINTERS_ARE_UNSLID
     VMAddress                   getOnDiskDylibChainedPointerBaseAddress() const;
     const dyld3::MachOFile*     mf() const;
     bool                        isOnDiskBinary() const;
@@ -200,11 +204,12 @@ protected:
     // For an on-disk binary, this is the base address to add to fixup chains
     VMAddress                   onDiskDylibChainedPointerBaseAddress;
     uint16_t                    chainedPointerFormat = 0;
+    std::optional<VMAddress>    selectorStringsBaseAddress;
 
     // If analyzing a shared cache dylib, we might need to crack the shared cache chained fixups
     enum class SharedCacheFormat : uint8_t {
         none            = 0,
-        v1             = 1,
+        v1              = 1,
         v2_x86_64_tbi   = 2,
         v3              = 3,
         v4              = 4,

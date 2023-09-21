@@ -21,6 +21,10 @@
  * @APPLE_LICENSE_HEADER_END@
  */
 
+#include <TargetConditionals.h>
+
+#if !TARGET_OS_EXCLAVEKIT
+
 #include <assert.h>
 #include <unistd.h>
 #include <sys/types.h>
@@ -40,6 +44,7 @@
 #include "objc-shared-cache.h"
 
 
+#if SUPPORT_CREATING_PREBUILTLOADERS || BUILDING_UNIT_TESTS || BUILDING_CACHE_BUILDER_UNIT_TESTS
 using dyld3::OverflowSafeArray;
 typedef dyld4::PrebuiltObjC::ObjCOptimizerImage ObjCOptimizerImage;
 
@@ -158,14 +163,14 @@ void ObjCSelectorOpt::forEachString(void (^callback)(const PrebuiltLoader::BindT
     }
 }
 
-////////////////////////////  ObjCClassOpt ////////////////////////////////////////
+////////////////////////////  ObjCDataStructOpt ////////////////////////////////////////
 
 // Returns true if the class was found and the callback said to stop
 #if BUILDING_DYLD || BUILDING_UNIT_TESTS
-bool ObjCClassOpt::forEachClass(const char* className, RuntimeState& state,
-                                void (^callback)(void* classPtr, bool isLoaded, bool* stop)) const
+bool ObjCDataStructOpt::forEachDataStruct(const char* dataStructName, RuntimeState& state,
+                                void (^callback)(void* dataStructPtr, bool isLoaded, bool* stop)) const
 {
-    uint32_t index = getIndex(className);
+    uint32_t index = getIndex(dataStructName);
     if ( index == ObjCStringTable::indexNotFound )
         return false;
 
@@ -176,27 +181,27 @@ bool ObjCClassOpt::forEachClass(const char* className, RuntimeState& state,
         return false;
 
     const char* nameStringValue = (const char*)nameTarget.value(state);
-    if ( strcmp(className, nameStringValue) != 0 )
+    if ( strcmp(dataStructName, nameStringValue) != 0 )
         return false;
 
     // The name matched so now call the handler on all the classes for this name
-    const Array<PrebuiltLoader::BindTargetRef> classes    = classTargets();
+    const Array<PrebuiltLoader::BindTargetRef> structs    = dataStructTargets();
     const Array<PrebuiltLoader::BindTargetRef> duplicates = duplicateTargets();
 
-    const PrebuiltLoader::BindTargetRef& classTarget = classes[index];
-    if ( !classTarget.isAbsolute() ) {
-        // A regular target points to the single class implementation
-        // This class has a single implementation
-        void* classImpl = (void*)classTarget.value(state);
+    const PrebuiltLoader::BindTargetRef& structTarget = structs[index];
+    if ( !structTarget.isAbsolute() ) {
+        // A regular target points to the single data structure implementation
+        // This data structure has a single implementation
+        void* structImpl = (void*)structTarget.value(state);
         bool  stop      = false;
-        callback(classImpl, true, &stop);
+        callback(structImpl, true, &stop);
         return stop;
     }
     else {
-        // This class has mulitple implementations.
-        // The absolute value of the class target is the index in to the duplicates table
-        // The first entry we point to is the count of duplicates for this class
-        size_t                              duplicateStartIndex  = (size_t)classTarget.value(state);
+        // This data structure has mulitple implementations.
+        // The absolute value of the data structure target is the index in to the duplicates table
+        // The first entry we point to is the count of duplicates for this data structure
+        size_t                              duplicateStartIndex  = (size_t)structTarget.value(state);
         const PrebuiltLoader::BindTargetRef duplicateCountTarget = duplicates[duplicateStartIndex];
         ++duplicateStartIndex;
         assert(duplicateCountTarget.isAbsolute());
@@ -205,9 +210,9 @@ bool ObjCClassOpt::forEachClass(const char* className, RuntimeState& state,
         for ( size_t dupeIndex = 0; dupeIndex != duplicateCount; ++dupeIndex ) {
             const PrebuiltLoader::BindTargetRef& duplicateTarget = duplicates[duplicateStartIndex + dupeIndex];
 
-            void* classImpl = (void*)duplicateTarget.value(state);
+            void* structImpl = (void*)duplicateTarget.value(state);
             bool  stop      = false;
-            callback(classImpl, true, &stop);
+            callback(structImpl, true, &stop);
             if ( stop )
                 return true;
         }
@@ -216,34 +221,34 @@ bool ObjCClassOpt::forEachClass(const char* className, RuntimeState& state,
 }
 #endif
 
-void ObjCClassOpt::forEachClass(RuntimeState& state,
-                                void (^callback)(const PrebuiltLoader::BindTargetRef&        nameTarget,
-                                                 const Array<PrebuiltLoader::BindTargetRef>& implTargets)) const
+void ObjCDataStructOpt::forEachDataStruct(RuntimeState& state,
+                                          void (^callback)(const PrebuiltLoader::BindTargetRef&        nameTarget,
+                                                           const Array<PrebuiltLoader::BindTargetRef>& implTargets)) const
 {
 
     const PrebuiltLoader::BindTargetRef sentinel = getSentinel();
 
     Array<PrebuiltLoader::BindTargetRef> stringTargets = targets();
-    Array<PrebuiltLoader::BindTargetRef> classes       = classTargets();
+    Array<PrebuiltLoader::BindTargetRef> dataStructs   = dataStructTargets();
     Array<PrebuiltLoader::BindTargetRef> duplicates    = duplicateTargets();
     for ( unsigned i = 0; i != capacity; ++i ) {
         const PrebuiltLoader::BindTargetRef& nameTarget = stringTargets[i];
         if ( memcmp(&nameTarget, &sentinel, sizeof(PrebuiltLoader::BindTargetRef)) == 0 )
             continue;
 
-        // Walk each class for this key
-        PrebuiltLoader::BindTargetRef classTarget = classes[i];
-        if ( !classTarget.isAbsolute() ) {
-            // A regular target points to the single class implementation
-            // This class has a single implementation
-            const Array<PrebuiltLoader::BindTargetRef> implTarget(&classTarget, 1, 1);
+        // Walk each data struct for this key
+        PrebuiltLoader::BindTargetRef dataStructTarget = dataStructs[i];
+        if ( !dataStructTarget.isAbsolute() ) {
+            // A regular target points to the single class/protocol implementation
+            // This data structure has a single implementation
+            const Array<PrebuiltLoader::BindTargetRef> implTarget(&dataStructTarget, 1, 1);
             callback(nameTarget, implTarget);
         }
         else {
-            // This class has mulitple implementations.
-            // The absolute value of the class target is the index in to the duplicates table
-            // The first entry we point to is the count of duplicates for this class
-            uintptr_t                           duplicateStartIndex  = (uintptr_t)classTarget.absValue();
+            // This data structure has mulitple implementations.
+            // The absolute value of the data structure target is the index in to the duplicates table
+            // The first entry we point to is the count of duplicates for this data structure
+            uintptr_t                           duplicateStartIndex  = (uintptr_t)dataStructTarget.absValue();
             const PrebuiltLoader::BindTargetRef duplicateCountTarget = duplicates[duplicateStartIndex];
             ++duplicateStartIndex;
             assert(duplicateCountTarget.isAbsolute());
@@ -254,8 +259,8 @@ void ObjCClassOpt::forEachClass(RuntimeState& state,
     }
 }
 
-size_t ObjCClassOpt::size(const objc::PerfectHash& phash, uint32_t numClassesWithDuplicates,
-                          uint32_t totalDuplicates)
+size_t ObjCDataStructOpt::size(const objc::PerfectHash& phash, uint32_t numClassesWithDuplicates,
+                               uint32_t totalDuplicates)
 {
     size_t tableSize = 0;
     tableSize += ObjCStringTable::size(phash);
@@ -265,50 +270,50 @@ size_t ObjCClassOpt::size(const objc::PerfectHash& phash, uint32_t numClassesWit
     return (size_t)align(tableSize, 3);
 }
 
-void ObjCClassOpt::write(const objc::PerfectHash& phash, const Array<StringToTargetMapNodeT>& strings,
-                         const dyld3::CStringMultiMapTo<PrebuiltLoader::BindTarget>& classes,
-                         uint32_t numClassesWithDuplicates, uint32_t totalDuplicates)
+void ObjCDataStructOpt::write(const objc::PerfectHash& phash, const Array<StringToTargetMapNodeT>& strings,
+                              const dyld3::CStringMultiMapTo<PrebuiltLoader::BindTarget>& dataStructs,
+                              uint32_t numClassesWithDuplicates, uint32_t totalDuplicates)
 {
     ObjCStringTable::write(phash, strings);
     duplicateCount() = numClassesWithDuplicates + totalDuplicates;
 
-    __block dyld3::Array<PrebuiltLoader::BindTargetRef> classTargets     = this->classTargets();
-    __block dyld3::Array<PrebuiltLoader::BindTargetRef> duplicateTargets = this->duplicateTargets();
+    __block dyld3::Array<PrebuiltLoader::BindTargetRef> dataStructTargets = this->dataStructTargets();
+    __block dyld3::Array<PrebuiltLoader::BindTargetRef> duplicateTargets   = this->duplicateTargets();
 
     const PrebuiltLoader::BindTargetRef sentinel = getSentinel();
 
     // Set class offsets to 0
     for ( uint32_t i = 0; i < capacity; i++ ) {
-        classTargets[i] = sentinel;
+        dataStructTargets[i] = sentinel;
     }
 
     // Empty the duplicate targets array so that we can push elements in to it.  It already has the correct capacity
     duplicateTargets.resize(0);
 
-    classes.forEachEntry(^(const char* const& key, const PrebuiltLoader::BindTarget** values, uint64_t valuesCount) {
+    dataStructs.forEachEntry(^(const char* const& key, const PrebuiltLoader::BindTarget** values, uint64_t valuesCount) {
         uint32_t keyIndex = getIndex(key);
         assert(keyIndex != indexNotFound);
-        assert(memcmp(&classTargets[keyIndex], &sentinel, sizeof(PrebuiltLoader::BindTargetRef)) == 0);
+        assert(memcmp(&dataStructTargets[keyIndex], &sentinel, sizeof(PrebuiltLoader::BindTargetRef)) == 0);
 
         if ( valuesCount == 1 ) {
             // Only one entry so write it in to the class offsets directly
-            const PrebuiltLoader::BindTarget& classTarget = *(values[0]);
-            classTargets[keyIndex]                        = PrebuiltLoader::BindTargetRef(classTarget);
+            const PrebuiltLoader::BindTarget& dataStructTarget = *(values[0]);
+            dataStructTargets[keyIndex] = PrebuiltLoader::BindTargetRef(dataStructTarget);
             return;
         }
 
-        // We have more than one value.  We add a placeholder to the class offsets which tells us the head
+        // We have more than one value.  We add a placeholder to the class/protocol offsets which tells us the head
         // of the linked list of classes in the duplicates array
 
-        PrebuiltLoader::BindTargetRef classTargetPlaceholder = PrebuiltLoader::BindTargetRef::makeAbsolute(duplicateTargets.count());
-        classTargets[keyIndex]                               = classTargetPlaceholder;
+        PrebuiltLoader::BindTargetRef dataStructTargetPlaceholder = PrebuiltLoader::BindTargetRef::makeAbsolute(duplicateTargets.count());
+        dataStructTargets[keyIndex] = dataStructTargetPlaceholder;
 
         // The first value we push in to the duplicates array for this class is the count
         // of how many duplicates for this class we have
         duplicateTargets.push_back(PrebuiltLoader::BindTargetRef::makeAbsolute(valuesCount));
         for ( size_t i = 0; i != valuesCount; ++i ) {
-            PrebuiltLoader::BindTarget classTarget = *(values[i]);
-            duplicateTargets.push_back(PrebuiltLoader::BindTargetRef(classTarget));
+            PrebuiltLoader::BindTarget dataStructTarget = *(values[i]);
+            duplicateTargets.push_back(PrebuiltLoader::BindTargetRef(dataStructTarget));
         }
     });
 
@@ -624,7 +629,9 @@ static objc_visitor::Visitor makeObjCVisitor(Diagnostics& diag, RuntimeState& st
 #if POINTERS_ARE_UNSLID
     const dyld3::MachOAnalyzer* dylibMA = ldr->analyzer(state);
 
-    objc_visitor::Visitor objcVisitor(state.config.dyldCache.addr, dylibMA);
+    const DyldSharedCache* dyldCache = (const DyldSharedCache*)state.config.dyldCache.addr;
+    uint64_t sharedCacheRelativeSelectorBaseVMAddress = dyldCache->sharedCacheRelativeSelectorBaseVMAddress();
+    objc_visitor::Visitor objcVisitor(dyldCache, dylibMA, VMAddress(sharedCacheRelativeSelectorBaseVMAddress));
     return objcVisitor;
 #elif SUPPORT_VM_LAYOUT
     const dyld3::MachOAnalyzer* dylibMA = ldr->analyzer(state);
@@ -936,12 +943,13 @@ static void optimizeObjCProtocols(RuntimeState& state,
     });
 }
 
+
 static void
-writeClassOrProtocolHashTable(RuntimeState& state, bool classes,
-                              Array<ObjCOptimizerImage>& objcImages,
-                              OverflowSafeArray<uint8_t>& hashTable,
-                              const PrebuiltObjC::DuplicateClassesMapTy& duplicateSharedCacheClassMap,
-                              PrebuiltObjC::ClassMapTy& seenObjectsMap)
+writeObjCDataStructHashTable(RuntimeState& state, PrebuiltObjC::ObjCStructKind objcKind,
+                             Array<ObjCOptimizerImage>& objcImages,
+                             OverflowSafeArray<uint8_t>& hashTable,
+                             const PrebuiltObjC::DuplicateClassesMapTy& duplicateSharedCacheClassMap,
+                             PrebuiltObjC::ClassMapTy& seenObjectsMap)
 {
 
     dyld3::CStringMapTo<PrebuiltLoader::BindTarget>      objectNameMap;
@@ -953,40 +961,51 @@ writeClassOrProtocolHashTable(RuntimeState& state, bool classes,
             continue;
         ObjCOptimizerImage& image = objcImages[reverseIndex];
 
-        const OverflowSafeArray<ObjCOptimizerImage::ObjCObject>& objectLocations = classes ? image.classLocations : image.protocolLocations;
+        if ( objcKind == PrebuiltObjC::ObjCStructKind::classes ) {
+            for ( const ObjCOptimizerImage::ObjCObject& classLocation : image.classLocations ) {
+                //uint64_t nameVMAddr     = ma->preferredLoadAddress() + classImage.offsetOfClassNames + classNameTarget.classNameImageOffset;
+                //printf("%s: 0x%08llx = '%s'\n", li.path(), nameVMAddr, className);
 
-        for ( const ObjCOptimizerImage::ObjCObject& objectLocation : objectLocations ) {
-            //uint64_t nameVMAddr     = ma->preferredLoadAddress() + classImage.offsetOfClassNames + classNameTarget.classNameImageOffset;
-            //printf("%s: 0x%08llx = '%s'\n", li.path(), nameVMAddr, className);
+                // Also track the name
+                PrebuiltLoader::BindTarget nameTarget    = { image.jitLoader, classLocation.nameRuntimeOffset.rawValue() };
+                auto                       itAndInserted = objectNameMap.insert({ classLocation.name, nameTarget });
+                if ( itAndInserted.second ) {
+                    // We inserted the class name so we need to add it to the strings for the closure hash table
+                    objectNames.push_back(classLocation.name);
 
-            // Also track the name
-            PrebuiltLoader::BindTarget nameTarget    = { image.jitLoader, objectLocation.nameRuntimeOffset.rawValue() };
-            auto                       itAndInserted = objectNameMap.insert({ objectLocation.name, nameTarget });
-            if ( itAndInserted.second ) {
-                // We inserted the class name so we need to add it to the strings for the closure hash table
-                objectNames.push_back(objectLocation.name);
+                    // Check if we have a duplicate.  If we do, it will be on the last image which had a duplicate class name,
+                    // but as we walk images backwards, we'll see this before all other images with duplicates.
+                    // Note we only check for duplicates when we know we just inserted the object name in to the map, as this
+                    // ensure's that we only insert each duplicate once
+                        auto duplicateClassIt = duplicateSharedCacheClassMap.find(classLocation.name);
+                        if ( duplicateClassIt != duplicateSharedCacheClassMap.end() ) {
+                            seenObjectsMap.insert({ classLocation.name, duplicateClassIt->second });
+                        }
+                }
 
-                // If we are processing protocols, and this is the first one we've seen, then track its ISA to be fixed up
-                if ( !classes ) {
-                    auto protocolIndexIt = image.protocolIndexMap.find(objectLocation.valueRuntimeOffset);
+                PrebuiltLoader::BindTarget valueTarget = { image.jitLoader, classLocation.valueRuntimeOffset.rawValue() };
+                seenObjectsMap.insert({ classLocation.name, valueTarget });
+            }
+        }
+
+        if ( objcKind == PrebuiltObjC::ObjCStructKind::protocols ) {
+            for ( const ObjCOptimizerImage::ObjCObject& protocolLocation : image.protocolLocations ) {
+                // Also track the name
+                PrebuiltLoader::BindTarget nameTarget    = { image.jitLoader, protocolLocation.nameRuntimeOffset.rawValue() };
+                auto                       itAndInserted = objectNameMap.insert({ protocolLocation.name, nameTarget });
+                if ( itAndInserted.second ) {
+                    // We inserted the protocol name so we need to add it to the strings for the closure hash table
+                    objectNames.push_back(protocolLocation.name);
+
+                    // If we are processing protocols, and this is the first one we've seen, then track its ISA to be fixed up
+                    auto protocolIndexIt = image.protocolIndexMap.find(protocolLocation.valueRuntimeOffset);
                     assert(protocolIndexIt != image.protocolIndexMap.end());
                     image.protocolISAFixups[protocolIndexIt->second] = true;
                 }
 
-                // Check if we have a duplicate.  If we do, it will be on the last image which had a duplicate class name,
-                // but as we walk images backwards, we'll see this before all other images with duplicates.
-                // Note we only check for duplicates when we know we just inserted the object name in to the map, as this
-                // ensure's that we only insert each duplicate once
-                if ( classes ) {
-                    auto duplicateClassIt = duplicateSharedCacheClassMap.find(objectLocation.name);
-                    if ( duplicateClassIt != duplicateSharedCacheClassMap.end() ) {
-                        seenObjectsMap.insert({ objectLocation.name, duplicateClassIt->second });
-                    }
-                }
+                PrebuiltLoader::BindTarget valueTarget = { image.jitLoader, protocolLocation.valueRuntimeOffset.rawValue() };
+                seenObjectsMap.insert({ protocolLocation.name, valueTarget });
             }
-
-            PrebuiltLoader::BindTarget valueTarget = { image.jitLoader, objectLocation.valueRuntimeOffset.rawValue() };
-            seenObjectsMap.insert({ objectLocation.name, valueTarget });
         }
     }
 
@@ -1004,10 +1023,10 @@ writeClassOrProtocolHashTable(RuntimeState& state, bool classes,
     if ( !objectNames.empty() ) {
         objc::PerfectHash phash;
         objc::PerfectHash::make_perfect(objectNames, phash);
-        size_t size = ObjCClassOpt::size(phash, numClassesWithDuplicates, totalDuplicates);
+        size_t size = ObjCDataStructOpt::size(phash, numClassesWithDuplicates, totalDuplicates);
         hashTable.resize(size);
         //printf("Class table size: %lld\n", size);
-        ObjCClassOpt* resultHashTable = (ObjCClassOpt*)hashTable.begin();
+        ObjCDataStructOpt* resultHashTable = (ObjCDataStructOpt*)hashTable.begin();
         resultHashTable->write(phash, objectNameMap.array(), seenObjectsMap,
                                numClassesWithDuplicates, totalDuplicates);
     }
@@ -1036,10 +1055,10 @@ void PrebuiltObjC::commitImage(const ObjCOptimizerImage& image)
 void PrebuiltObjC::generateHashTables(RuntimeState& state)
 {
     // Write out the class table
-    writeClassOrProtocolHashTable(state, true, objcImages, classesHashTable, duplicateSharedCacheClassMap, classMap);
+    writeObjCDataStructHashTable(state, PrebuiltObjC::ObjCStructKind::classes, objcImages, classesHashTable, duplicateSharedCacheClassMap, classMap);
 
     // Write out the protocol table
-    writeClassOrProtocolHashTable(state, false, objcImages, protocolsHashTable, duplicateSharedCacheClassMap, protocolMap);
+    writeObjCDataStructHashTable(state, PrebuiltObjC::ObjCStructKind::protocols, objcImages, protocolsHashTable, duplicateSharedCacheClassMap, protocolMap);
 
     // If we have closure selectors, we need to make a hash table for them.
     if ( !closureSelectorStrings.empty() ) {
@@ -1274,7 +1293,7 @@ void PrebuiltObjC::make(Diagnostics& diag, RuntimeState& state)
     const void*                    headerInfoRW             = state.config.dyldCache.objcHeaderInfoRW;
     VMAddress                      headerInfoROUnslidVMAddr(state.config.dyldCache.objcHeaderInfoROUnslidVMAddr);
 
-    if ( !objcClassOpt || !objcSelOpt || !objcProtocolOpt )
+    if ( !objcClassOpt || !objcSelOpt || !objcProtocolOpt)
         return;
 
     if ( std::optional<VMOffset> offset = getProtocolClassCacheOffset(state); offset.has_value() )
@@ -1466,4 +1485,7 @@ const header_info_rw *getPreoptimizedHeaderRW(const struct header_info *const hd
     return &hinfoRW->headers[index];
 }
 
-}
+}  // namespace dyld4
+#endif // SUPPORT_CREATING_PREBUILTLOADERS || BUILDING_UNIT_TESTS || BUILDING_CACHE_BUILDER_UNIT_TESTS
+
+#endif // !TARGET_OS_EXCLAVEKIT

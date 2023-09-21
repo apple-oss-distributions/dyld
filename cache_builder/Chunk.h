@@ -166,6 +166,9 @@ struct Chunk
         // The objc HeaderInfoRO array
         objcHeaderInfoRO,
 
+        // A copy of all the objc_imageInfo for all the dylibs
+        objcImageInfo,
+
         // A contiguous buffer of objc strings.  There may be multiple of these, eg, selectors, class names, etc.
         objcStrings,
 
@@ -180,6 +183,10 @@ struct Chunk
 
         // A buffer to hold the imp caches
         objcIMPCaches,
+
+        // A buffer to hold the pre-attached categories metadata. This is adjacent to objcIMPCaches so that the
+        // __OBJC_RO segment can cover them
+        objcPreAttachedCategories,
 
         // This is a placeholder for empty address space that can be used at runtime
         dynamicConfig,
@@ -328,6 +335,24 @@ private:
     virtual void dump() const override final;
 };
 
+struct ObjCImageInfoChunk : Chunk
+{
+public:
+    ObjCImageInfoChunk();
+    virtual ~ObjCImageInfoChunk();
+    ObjCImageInfoChunk(const ObjCImageInfoChunk&) = delete;
+    ObjCImageInfoChunk(ObjCImageInfoChunk&&) = delete;
+    ObjCImageInfoChunk& operator=(const ObjCImageInfoChunk&) = delete;
+    ObjCImageInfoChunk& operator=(ObjCImageInfoChunk&&) = delete;
+
+    // Virtual methods
+    const char* name() const override final;
+
+private:
+    __attribute__((used))
+    virtual void dump() const override final;
+};
+
 struct ObjCHeaderInfoReadOnlyChunk : Chunk
 {
 public:
@@ -453,6 +478,26 @@ private:
     __attribute__((used))
     virtual void dump() const override final;
 };
+
+
+struct ObjCPreAttachedCategoriesChunk : SlidChunk
+{
+public:
+    ObjCPreAttachedCategoriesChunk();
+    virtual ~ObjCPreAttachedCategoriesChunk();
+    ObjCPreAttachedCategoriesChunk(const ObjCPreAttachedCategoriesChunk&) = delete;
+    ObjCPreAttachedCategoriesChunk(ObjCPreAttachedCategoriesChunk&&) = delete;
+    ObjCPreAttachedCategoriesChunk& operator=(const ObjCPreAttachedCategoriesChunk&) = delete;
+    ObjCPreAttachedCategoriesChunk& operator=(ObjCPreAttachedCategoriesChunk&&) = delete;
+
+    // Virtual methods
+    const char* name() const override final;
+
+private:
+    __attribute__((used))
+    virtual void dump() const override final;
+};
+
 
 struct ObjCIMPCachesChunk : Chunk
 {

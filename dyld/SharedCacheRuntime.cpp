@@ -22,6 +22,9 @@
  */
 
 
+#include <TargetConditionals.h>
+
+#if !TARGET_OS_EXCLAVEKIT
 
 #include <stdint.h>
 #include <string.h>
@@ -65,6 +68,10 @@ extern "C" int __shared_region_map_and_slide_2_np(uint32_t files_count, const sh
 
 #ifndef VM_PROT_NOAUTH
 #define VM_PROT_NOAUTH  0x40  /* must not interfere with normal prot assignments */
+#endif
+
+#ifndef VM_PROT_TPRO
+#define VM_PROT_TPRO 0x200 /* must not interfere with normal prot assignments */
 #endif
 
 namespace dyld3 {
@@ -456,6 +463,7 @@ static bool preflightCacheFile(const SharedCacheOptions& options, SharedCacheLoa
         uint64_t    slideInfoFileSize   = 0;
         vm_prot_t   authProt            = 0;
         vm_prot_t   initProt            = fileMappings[i].initProt;
+        vm_prot_t   maxProt             = fileMappings[i].maxProt;
         if ( cache->header.mappingOffset <= __offsetof(dyld_cache_header, mappingWithSlideOffset) ) {
             // Old cache without the new slid mappings
             if ( i == 1 ) {
@@ -474,8 +482,12 @@ static bool preflightCacheFile(const SharedCacheOptions& options, SharedCacheLoa
                 authProt = VM_PROT_NOAUTH;
             if ( (slidableMappings[i].flags & DYLD_CACHE_MAPPING_CONST_DATA) != 0 ) {
                 // The cache was built with __DATA_CONST being read-only.  We can override that with a boot-arg
+                // TPRO might not be enabled for this process (unlikely) but could be for others. Allow
+                // the kernel to determine whether to apply the appropriate flags
                 if ( !options.enableReadOnlyDataConst )
                     initProt |= VM_PROT_WRITE;
+                else
+                    maxProt |= VM_PROT_TPRO;
             }
         }
 
@@ -486,7 +498,7 @@ static bool preflightCacheFile(const SharedCacheOptions& options, SharedCacheLoa
         info->mappings[i].sms_file_offset           = fileMappings[i].fileOffset;
         info->mappings[i].sms_slide_size            = 0;
         info->mappings[i].sms_slide_start           = 0;
-        info->mappings[i].sms_max_prot              = fileMappings[i].maxProt;
+        info->mappings[i].sms_max_prot              = maxProt;
         info->mappings[i].sms_init_prot             = initProt;
         if ( slideInfoFileSize != 0 ) {
             uint64_t offsetInLinkEditRegion = (slideInfoFileOffset - linkeditMapping.value()->fileOffset);
@@ -1270,3 +1282,4 @@ void deallocateExistingSharedCache()
 
 } // namespace dyld3
 
+#endif // !TARGET_OS_EXCLAVEKIT
