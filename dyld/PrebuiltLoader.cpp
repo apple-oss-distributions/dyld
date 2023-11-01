@@ -303,6 +303,9 @@ void PrebuiltLoader::map(Diagnostics& diag, RuntimeState& state, const LoadOptio
             this->logSegmentsFromSharedCache(state);
         if ( state.config.log.libraries )
             this->logLoad(state, this->path());
+
+        if ( state.config.process.catalystRuntime && this->isCatalystOverride )
+            state.setHasOverriddenUnzipperedTwin();
 #endif
     }
     else if ( this == state.mainExecutableLoader ) {
@@ -1338,6 +1341,7 @@ void PrebuiltLoader::print(RuntimeState& state, FILE* out, bool printComments) c
     if ( this->dylibInDyldCache ) {
         fprintf(out, "      \"overridable\": \"%s\",\n", this->isOverridable ? "true" : "false");
         fprintf(out, "      \"supports-catalyst\": \"%s\",\n", this->supportsCatalyst ? "true" : "false");
+        fprintf(out, "      \"catalyst-override\": \"%s\",\n", this->isCatalystOverride ? "true" : "false");
         if ( this->indexOfTwin != kNoUnzipperedTwin ) {
             if ( this->supportsCatalyst )
                 fprintf(out, "      \"mac-twin\": \"c.%d\",", this->indexOfTwin);

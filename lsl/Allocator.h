@@ -160,26 +160,34 @@ struct VIS_HIDDEN MemoryManager {
     void static                     vm_deallocate_bytes(void* p, std::size_t size);
     template<typename F>
     ALWAYS_INLINE void          withWritableMemory(F work) {
-#if BUILDING_DYLD
+#if BUILDING_DYLD && !TARGET_OS_EXCLAVEKIT
+        // Purposefully spill into a signed stack slot to prevent attackers replacing the this pointer
+        MemoryManager* __ptrauth_dyld_tpro0 memoryManager = this;
         WriteProtectionState previousState;
-        makeWriteable(previousState);
-#endif /* BUILDING_DYLD */
+        // Barrier to prevent optimizing away memoryManager-> to this->
+        os_compiler_barrier();
+        memoryManager->makeWriteable(previousState);
+#endif // BUILD_DYLD && !TARGET_OS_EXCLAVEKIT
         work();
-#if BUILDING_DYLD
-        restorePreviousState(previousState);
-#endif /* BUILDING_DYLD */
+#if BUILDING_DYLD && !TARGET_OS_EXCLAVEKIT
+        memoryManager->restorePreviousState(previousState);
+#endif // BUILD_DYLD && !TARGET_OS_EXCLAVEKIT
     }
 
     template<typename F>
     ALWAYS_INLINE void          withReadOnlyMemory(F work) {
-#if BUILDING_DYLD
+#if BUILDING_DYLD && !TARGET_OS_EXCLAVEKIT
+        // Purposefully spill into a signed stack slot to prevent attackers replacing the this pointer
+        MemoryManager* __ptrauth_dyld_tpro1 memoryManager = this;
         WriteProtectionState previousState;
-        makeReadOnly(previousState);
-#endif
+        // Barrier to prevent optimizing away memoryManager-> to this->
+        os_compiler_barrier();
+        memoryManager->makeReadOnly(previousState);
+#endif // BUILD_DYLD && !TARGET_OS_EXCLAVEKIT
         work();
-#if BUILDING_DYLD
-        restorePreviousState(previousState);
-#endif
+#if BUILDING_DYLD && !TARGET_OS_EXCLAVEKIT
+        memoryManager->restorePreviousState(previousState);
+#endif // BUILD_DYLD && !TARGET_OS_EXCLAVEKIT
     }
 private:
     friend struct PersistentAllocator;
@@ -198,8 +206,8 @@ private:
             // against this we create a signature that mixes the value of writable and its address then validate it later. If the
             // barriers work the state will never spill to the stack between varification and usage.
             previousState.data      = os_thread_self_restrict_tpro_is_writable();
-#if __has_feature(ptrauth_calls)
-            previousState.signature = ptrauth_sign_generic_data(previousState.data, (uintptr_t)&previousState.data);
+  #if __has_feature(ptrauth_calls)
+            previousState.signature = ptrauth_sign_generic_data(previousState.data, (uintptr_t)&previousState.data | (uintptr_t)this);
 #endif /* __has_feature(ptrauth_calls) */
             if (!previousState.data) {
                 os_thread_self_restrict_tpro_to_rw();
@@ -207,10 +215,9 @@ private:
             os_compiler_barrier();
             return;
         }
-        if (_disableMemoryProtection) { return; }
         previousState.data      = 1;
 #if __has_feature(ptrauth_calls)
-        previousState.signature = ptrauth_sign_generic_data(previousState.data, (uintptr_t)&previousState.data);
+        previousState.signature = ptrauth_sign_generic_data(previousState.data, (uintptr_t)&previousState.data | (uintptr_t)this);
 #endif /* __has_feature(ptrauth_calls) */
         {
             __unused auto lock = lockGuard();
@@ -231,7 +238,7 @@ private:
             // barriers work the state will never spill to the stack between varification and usage.
             previousState.data      = os_thread_self_restrict_tpro_is_writable();
 #if __has_feature(ptrauth_calls)
-            previousState.signature = ptrauth_sign_generic_data(previousState.data, (uintptr_t)&previousState.data);
+            previousState.signature = ptrauth_sign_generic_data(previousState.data, (uintptr_t)&previousState.data | (uintptr_t)this);
 #endif /* __has_feature(ptrauth_calls) */
             if (previousState.data) {
                 os_thread_self_restrict_tpro_to_ro();
@@ -239,10 +246,9 @@ private:
             os_compiler_barrier();
             return;
         }
-        if (_disableMemoryProtection) { return; }
         previousState.data      = -1;
 #if __has_feature(ptrauth_calls)
-        previousState.signature = ptrauth_sign_generic_data(previousState.data, (uintptr_t)&previousState.data);
+        previousState.signature = ptrauth_sign_generic_data(previousState.data, (uintptr_t)&previousState.data | (uintptr_t)this);
 #endif /* __has_feature(ptrauth_calls) */
         {
             __unused auto lock = lockGuard();
@@ -259,7 +265,7 @@ private:
         if (_tproEnable) {
             os_compiler_barrier();
 #if __has_feature(ptrauth_calls)
-            uintptr_t signedWritableState = ptrauth_sign_generic_data(previousState.data, (uintptr_t)&previousState.data);
+            uintptr_t signedWritableState = ptrauth_sign_generic_data(previousState.data, (uintptr_t)&previousState.data | (uintptr_t)this);
             if (previousState.signature != signedWritableState) {
                 // Someone tampered with writableState. Process is under attack, we need to abort();
                 abort();
@@ -277,9 +283,8 @@ private:
             os_compiler_barrier();
             return;
         }
-        if (_disableMemoryProtection) { return; }
 #if __has_feature(ptrauth_calls)
-        uintptr_t signedWritableState = ptrauth_sign_generic_data(previousState.data, (uintptr_t)&previousState.data);
+        uintptr_t signedWritableState = ptrauth_sign_generic_data(previousState.data, (uintptr_t)&previousState.data | (uintptr_t)this);
         if (previousState.signature != signedWritableState) {
             // Someone tampered with writable state. Process is under attack, we need to abort();
             abort();
@@ -308,7 +313,6 @@ private:
 #endif // !TARGET_OS_EXCLAVEKIT
         swap(_allocator,                other._allocator);
         swap(_writeableCount,           other._writeableCount);
-        swap(_disableMemoryProtection,  other._disableMemoryProtection);
 
         // We don't actually swap this because it is a process wide setting, and we may need it to be set correctly
         // even in the bootstrapMemoryProtector adfter move construction
@@ -333,7 +337,6 @@ private:
 #endif // !TARGET_OS_EXCLAVEKIT
     PersistentAllocator*    _allocator                  = nullptr;
     uint64_t                _writeableCount             = 0;
-    bool                    _disableMemoryProtection    = false;
     bool                    _tproEnable                 = false;
 };
 

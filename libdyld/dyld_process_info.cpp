@@ -41,6 +41,7 @@
 #include <mach-o/dyld_priv.h>
 
 #include "MachOFile.h"
+#include "DyldSharedCache.h"
 #include "dyld_process_info_internal.h"
 #include "Tracing.h"
 #include "DyldProcessConfig.h"
@@ -232,7 +233,6 @@ private:
                                 dyld_process_info_base(dyld_platform_t platform, unsigned imageCount, unsigned aotImageCount, size_t totalSize);
     void*                       operator new (size_t, void* buf) { return buf; }
 
-    static bool                 inCache(uint64_t addr, uint64_t sharedCacheStart, uint64_t sharedCacheEnd) { return (addr > sharedCacheStart) && (addr < sharedCacheEnd); }
     kern_return_t               addImage(task_t task, bool sameCacheAsThisProcess, uint64_t sharedCacheStart, uint64_t sharedCacheEnd, uint64_t imageAddress, uint64_t imagePath, const char* imagePathLocal);
 
     kern_return_t               addAotImage(dyld_aot_image_info_64 aotImageInfo);
@@ -376,13 +376,24 @@ dyld_process_info_ptr dyld_process_info_base::make(task_t task, const T1& allIma
             && ((memcmp(myInfo->sharedCacheUUID, &allImageInfo.sharedCacheUUID[0], 16) == 0)
             && (myInfo->sharedCacheSlide == allImageInfo.sharedCacheSlide));
         unsigned countOfPathsNeedingCopying = 0;
-        if ( sameCacheAsThisProcess ) {
-            for (uint32_t i=0; i < imageCount; ++i) {
-                if ( !inCache(imageArray[i].imageFilePath, sharedCacheStart, sharedCacheEnd) )
-                    ++countOfPathsNeedingCopying;
+        // If constexpr is basically superfluous, we only do it to avoid compiler warnings...
+        // The only time when sizeof(T2().imageFilePath) != sizeof(void*) is when a 64 bit process is introspecting a 32 bit process
+        // or vice versa, and in those cases sameCacheAsThisProcess will be false. The issue is the compiler can't know that which
+        // forces it to build the code, which results in the case from imageArray[i].imageFilePath to a (void*) to generate a warning.
+        // By using the constexpr check here we can elide compiling that case and the warning, which prevents -Werror failues.
+        if constexpr(sizeof(T2().imageFilePath) == sizeof(void*)) {
+            if ( sameCacheAsThisProcess ) {
+                const DyldSharedCache* dyldCacheHeader = (DyldSharedCache*)sharedCacheStart;
+                bool readOnly = false;
+                for (uint32_t i=0; i < imageCount; ++i) {
+                    if ( !dyldCacheHeader->inCache((void*)imageArray[i].imageFilePath, 1, readOnly) )
+                        ++countOfPathsNeedingCopying;
+                }
             }
-        }
-        else {
+            else {
+                countOfPathsNeedingCopying = imageCount+1;
+            }
+        } else {
             countOfPathsNeedingCopying = imageCount+1;
         }
         unsigned imageCountWithDyld = imageCount+1;
@@ -654,11 +665,13 @@ const char* dyld_process_info_base::copyPath(task_t task, uint64_t stringAddress
 
 kern_return_t dyld_process_info_base::addImage(task_t task, bool sameCacheAsThisProcess, uint64_t sharedCacheStart, uint64_t sharedCacheEnd, uint64_t imageAddress, uint64_t imagePath, const char* imagePathLocal)
 {
+    const DyldSharedCache* dyldCacheHeader = (DyldSharedCache*)sharedCacheStart;
+    bool readOnly = false;
     _curImage->loadAddress = imageAddress;
     _curImage->segmentStartIndex = _curSegmentIndex;
     if ( imagePathLocal != NULL ) {
         _curImage->path = addString(imagePathLocal, PATH_MAX);
-    } else if ( sameCacheAsThisProcess && inCache(imagePath, sharedCacheStart, sharedCacheEnd) ) {
+    } else if ( sameCacheAsThisProcess &&  dyldCacheHeader->inCache((void*)imagePath, 1, readOnly) ) {
         _curImage->path = (const char*)imagePath;
     } else if (imagePath) {
         _curImage->path = copyPath(task, imagePath);
@@ -666,7 +679,7 @@ kern_return_t dyld_process_info_base::addImage(task_t task, bool sameCacheAsThis
         _curImage->path = "";
     }
 
-    if ( sameCacheAsThisProcess && inCache(imageAddress, sharedCacheStart, sharedCacheEnd) ) {
+    if ( sameCacheAsThisProcess &&  dyldCacheHeader->inCache((void*)imageAddress, 32*1024, readOnly) ) {
         addInfoFromLoadCommands((mach_header*)imageAddress, imageAddress, 32*1024);
     } else {
         auto kr = addInfoFromRemoteLoadCommands(task, imageAddress);
