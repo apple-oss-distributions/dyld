@@ -201,6 +201,11 @@ struct ObjCIMPCachesOptimizer
     // The Chunk in a SubCache which will contain the imp caches
     const ObjCIMPCachesChunk*               impCachesChunk = nullptr;
 
+    // IMP Caches version from libobjc
+    // Defaulted to 4, which is the newest version as of writing.  This was if we
+    // fail to find it in the binary, then we still turn on all the latest features
+    int                                     libobjcImpCachesVersion = 4;
+
     // Constants for the magic section in libobjc where we need to store offsets
     const std::string_view                  sharedCacheOffsetsSegmentName = "__DATA_CONST";
     const std::string_view                  sharedCacheOffsetsSectionName = "__objc_scoffs";

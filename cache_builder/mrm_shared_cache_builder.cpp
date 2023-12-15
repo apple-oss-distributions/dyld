@@ -51,7 +51,8 @@ static const uint32_t MinorVersion = 3;
 
 struct BuildInstance {
     std::unique_ptr<cache_builder::BuilderOptions>  options;
-    std::unique_ptr<SharedCacheBuilder>             builder;
+    std::vector<cache_builder::FileAlias>           aliases;
+    std::vector<cache_builder::FileAlias>           intermediateAliases;
     std::string                                     mainCacheFilePath;
     std::vector<const char*>                        errors;
     std::vector<const char*>                        warnings;
@@ -556,40 +557,12 @@ static bool createBuilders(struct MRMSharedCacheBuilder* builder)
         options->localSymbolsMode            = excludeLocalSymbols(builder->options);
 
         BuildInstance buildInstance;
-        buildInstance.options           = std::move(options);
-        buildInstance.builder           = std::make_unique<SharedCacheBuilder>(*buildInstance.options.get(), builder->fileSystem);
-        buildInstance.mainCacheFilePath = runtimePath;
+        buildInstance.options               = std::move(options);
+        buildInstance.aliases               = aliases;
+        buildInstance.intermediateAliases   = intermediateAliases;
+        buildInstance.mainCacheFilePath     = runtimePath;
 
         builder->builders.push_back(std::move(buildInstance));
-    }
-
-    // Add all the input files
-    __block std::vector<cache_builder::InputFile> inputFiles;
-    builder->fileSystem.forEachFileInfo(^(const char* path, const void* buffer, size_t bufferSize,
-                                          FileFlags fileFlags, uint64_t inode, uint64_t modTime) {
-        switch (fileFlags) {
-            case FileFlags::NoFlags:
-            case FileFlags::MustBeInCache:
-            case FileFlags::ShouldBeExcludedFromCacheIfUnusedLeaf:
-            case FileFlags::RequiredClosure:
-                break;
-            case FileFlags::DylibOrderFile:
-            case FileFlags::DirtyDataOrderFile:
-            case FileFlags::ObjCOptimizationsFile:
-                builder->error("Order files should not be in the file system");
-                return;
-        }
-
-        for (auto& buildInstance : builder->builders) {
-            SharedCacheBuilder* cacheBuilder = buildInstance.builder.get();
-            cacheBuilder->addFile(buffer, bufferSize, path, inode, modTime);
-        }
-    });
-
-    // Add resolved aliases (symlinks)
-    for (auto& buildInstance : builder->builders) {
-        SharedCacheBuilder* cacheBuilder = buildInstance.builder.get();
-        cacheBuilder->setAliases(aliases, intermediateAliases);
     }
 
     return true;
@@ -598,14 +571,65 @@ static bool createBuilders(struct MRMSharedCacheBuilder* builder)
 static void runBuilders(struct MRMSharedCacheBuilder* builder)
 {
     for (auto& buildInstance : builder->builders) {
-        std::unique_ptr<SharedCacheBuilder> cacheBuilder = std::move(buildInstance.builder);
-        Error error = cacheBuilder->build();
+        // The build might overflow, so loop until we don't error from overflow
+        std::vector<std::string> evictedDylibs;
+        std::unordered_set<std::string> evictedDylibsSet;
+        __block std::unique_ptr<SharedCacheBuilder> cacheBuilder;
+        Error error;
+        while ( true ) {
+            cacheBuilder = std::make_unique<SharedCacheBuilder>(*buildInstance.options.get(), builder->fileSystem);
+
+            // Add all the input files
+            __block std::vector<cache_builder::InputFile> inputFiles;
+            builder->fileSystem.forEachFileInfo(^(const char* path, const void* buffer, size_t bufferSize,
+                                                  FileFlags fileFlags, uint64_t inode, uint64_t modTime) {
+                switch (fileFlags) {
+                    case FileFlags::NoFlags:
+                    case FileFlags::MustBeInCache:
+                    case FileFlags::ShouldBeExcludedFromCacheIfUnusedLeaf:
+                    case FileFlags::RequiredClosure:
+                        break;
+                    case FileFlags::DylibOrderFile:
+                    case FileFlags::DirtyDataOrderFile:
+                    case FileFlags::ObjCOptimizationsFile:
+                        builder->error("Order files should not be in the file system");
+                        return;
+                }
+
+                cacheBuilder->addFile(buffer, bufferSize, path, inode, modTime, evictedDylibsSet.count(path));
+            });
+
+            // Add resolved aliases (symlinks)
+            cacheBuilder->setAliases(buildInstance.aliases, buildInstance.intermediateAliases);
+
+            error = cacheBuilder->build();
+
+            // Get result buffers, even if there's an error.  That way we'll free them
+            cacheBuilder->getResults(buildInstance.cacheBuffers);
+
+            if ( !error.hasError() )
+                break;
+
+            // We have an error. If its cache overflow, then we can try again, with some evicted dylibs
+            std::span<const std::string_view> newEvictedDylibs = cacheBuilder->getEvictedDylibs();
+            if ( newEvictedDylibs.empty() ) {
+                // Error wasn't eviction, so something else. Break out an handle it as a fatal error
+                break;
+            }
+
+            // Cache eviction happened. Note down the bad dylibs, and try again
+            // Note we should never have buffer data to free at this point as eviction should be
+            // determined before buffers are allocated
+            for ( const CacheBuffer& buffer : buildInstance.cacheBuffers ) {
+                assert(buffer.bufferData == nullptr);
+            }
+            buildInstance.cacheBuffers.clear();
+            evictedDylibs.insert(evictedDylibs.end(), newEvictedDylibs.begin(), newEvictedDylibs.end());
+            evictedDylibsSet.insert(newEvictedDylibs.begin(), newEvictedDylibs.end());
+        }
 
         buildInstance.loggingPrefix = cacheBuilder->developmentLoggingPrefix();
         buildInstance.customerLoggingPrefix = cacheBuilder->customerLoggingPrefix();
-
-        // Get result buffers, even if there's an error.  That way we'll free them
-        cacheBuilder->getResults(buildInstance.cacheBuffers);
 
         // Track all buffers to be freed/unmapped (see allocateSubCacheBuffers() for allocation)
         for ( const CacheBuffer& buffer : buildInstance.cacheBuffers ) {
@@ -634,6 +658,12 @@ static void runBuilders(struct MRMSharedCacheBuilder* builder)
 
             // First put the warnings in to a vector to own them.
             if ( builder->options->verboseDiagnostics ) {
+                // Add cache eviction warnings, if any
+                for ( std::string path : evictedDylibs ) {
+                    std::string reason = "Dylib located at '" + path + "' not placed in shared cache because: cache overflow";
+                    buildInstance.warningStrings.push_back(reason);
+                }
+
                 cacheBuilder->forEachWarning(^(const std::string_view &str) {
                     buildInstance.warningStrings.push_back(std::string(str));
                 });
@@ -675,6 +705,13 @@ static void runBuilders(struct MRMSharedCacheBuilder* builder)
 
             // Only add warnings if the build was good
             // First put the warnings in to a vector to own them.
+
+            // Add cache eviction warnings, if any
+            for ( std::string path : evictedDylibs ) {
+                std::string reason = "Dylib located at '" + path + "' not placed in shared cache because: cache overflow";
+                buildInstance.warningStrings.push_back(reason);
+            }
+
             cacheBuilder->forEachWarning(^(const std::string_view &str) {
                 buildInstance.warningStrings.push_back(std::string(str));
             });

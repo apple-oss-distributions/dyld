@@ -416,6 +416,13 @@ static inline CacheVMSize operator-(const CacheVMSize& a, const CacheVMSize& b)
     return CacheVMSize(a.rawValue() - b.rawValue());
 }
 
+// VMSize - VMSize -> VMSize
+static inline CacheVMSize& operator-=(CacheVMSize& a, const CacheVMSize& b)
+{
+    a = CacheVMSize(a.rawValue() - b.rawValue());
+    return a;
+}
+
 static inline bool operator>(const CacheVMSize& a, const CacheVMSize& b)
 {
     return a.rawValue() > b.rawValue();

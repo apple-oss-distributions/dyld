@@ -56,7 +56,9 @@ void FileManager::swap(FileManager& other) {
 
 
 FileRecord FileManager::fileRecordForPath(Allocator& allocator, const char* filePath) {
-    auto str = allocator.strdup(filePath);
+    const char* str = nullptr;
+    if ( filePath )
+        str = allocator.strdup(filePath);
     return FileRecord(*this, UniquePtr<const char>(str));
 }
 

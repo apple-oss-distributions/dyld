@@ -112,7 +112,7 @@ void SharedCacheBuilder::forEachCacheSymlink(void (^callback)(const std::string_
 }
 
 void SharedCacheBuilder::addFile(const void* buffer, size_t bufferSize, std::string_view path,
-                                 uint64_t inode, uint64_t modTime)
+                                 uint64_t inode, uint64_t modTime, bool forceNotCacheEligible)
 {
     Diagnostics diag;
     const bool  isOSBinary = false;
@@ -120,10 +120,11 @@ void SharedCacheBuilder::addFile(const void* buffer, size_t bufferSize, std::str
                                                           this->options.platform, isOSBinary,
                                                           this->options.archs) ) {
         InputFile inputFile;
-        inputFile.mf        = mf;
-        inputFile.inode     = inode;
-        inputFile.mtime     = modTime;
-        inputFile.path      = path;
+        inputFile.mf                    = mf;
+        inputFile.inode                 = inode;
+        inputFile.mtime                 = modTime;
+        inputFile.path                  = path;
+        inputFile.forceNotCacheEligible = forceNotCacheEligible;
         allInputFiles.push_back(std::move(inputFile));
         return;
     }
@@ -135,10 +136,11 @@ void SharedCacheBuilder::addFile(const void* buffer, size_t bufferSize, std::str
                                                               dyld3::Platform::iOSMac, isOSBinary,
                                                               this->options.archs) ) {
             InputFile inputFile;
-            inputFile.mf        = mf;
-            inputFile.inode     = inode;
-            inputFile.mtime     = modTime;
-            inputFile.path      = path;
+            inputFile.mf                    = mf;
+            inputFile.inode                 = inode;
+            inputFile.mtime                 = modTime;
+            inputFile.path                  = path;
+            inputFile.forceNotCacheEligible = forceNotCacheEligible;
             allInputFiles.push_back(std::move(inputFile));
             return;
         }
@@ -517,7 +519,7 @@ void SharedCacheBuilder::categorizeInputs()
                 }
             }
 
-            if ( inputFile.mf->canBePlacedInDyldCache(dylibPath.data(), failureHandler) ) {
+            if ( !inputFile.forceNotCacheEligible && inputFile.mf->canBePlacedInDyldCache(dylibPath.data(), failureHandler) ) {
                 CacheDylib cacheDylib(inputFile);
                 this->cacheDylibs.push_back(std::move(cacheDylib));
             }
@@ -978,6 +980,27 @@ void SharedCacheBuilder::estimateIMPCaches()
             // diag.warning("libobjc's magical IMP caches shared cache offsets list section missing (metadata not optimized)");
             return;
         }
+
+        // Also find the _objc_opt_preopt_caches_version symbol, which has the IMP caches version
+        __block Diagnostics diag;
+        cacheDylib.inputMF->withFileLayout(diag, ^(const mach_o::Layout &layout) {
+            mach_o::Layout::FoundSymbol foundInfo;
+            if ( !layout.findExportedSymbol(diag, "_objc_opt_preopt_caches_version", false, foundInfo) )
+                return;
+
+            // We only support header offsets in this dylib, as we are looking for self binds
+            // which are likely only to classes
+            if ( foundInfo.kind != mach_o::Layout::FoundSymbol::Kind::headerOffset )
+                return;
+
+            uint64_t vmAddr = layout.textUnslidVMAddr() + foundInfo.value;
+
+            __block objc_visitor::Visitor objcVisitor = makeInputDylibObjCVisitor(cacheDylib);
+            metadata_visitor::ResolvedValue value = objcVisitor.getValueFor(VMAddress(vmAddr));
+            this->objcIMPCachesOptimizer.libobjcImpCachesVersion = *(int*)value.value();
+        });
+        if ( diag.hasError() )
+            return;
     }
 
     // Find all the objc dylibs, classes, categories
@@ -4107,12 +4130,6 @@ Error SharedCacheBuilder::computeSubCacheContiguousVMLayout()
         assert(this->totalVMSize == totalCustomerCacheSize);
     }
 
-    if ( this->totalVMSize > this->config.layout.cacheSize ) {
-        return Error("Cache overflow (0x%llx > 0x%llx)",
-                     this->totalVMSize.rawValue(),
-                     this->config.layout.cacheSize.rawValue());
-    }
-
     return Error();
 }
 
@@ -4140,6 +4157,7 @@ Error SharedCacheBuilder::computeSubCacheDiscontiguousSimVMLayout()
 
                 // Check for overflow
                 if ( region.subCacheVMSize > this->config.layout.discontiguous->simTextSize ) {
+                    evictLeafDylibs(region.subCacheVMSize - this->config.layout.discontiguous->simTextSize);
                     return Error("Overflow in text (0x%llx > 0x%llx)",
                                  region.subCacheVMSize.rawValue(),
                                  this->config.layout.discontiguous->simTextSize.rawValue());
@@ -4296,14 +4314,105 @@ Error SharedCacheBuilder::computeSubCacheDiscontiguousVMLayout()
     }
 
     this->totalVMSize = CacheVMSize((vmAddress - this->config.layout.cacheBaseAddress).rawValue());
-    
-    if ( this->totalVMSize > this->config.layout.cacheSize ) {
-        return Error("Cache overflow (0x%llx > 0x%llx)",
-                     this->totalVMSize.rawValue(),
-                     this->config.layout.cacheSize.rawValue());
-    }
 
     return Error();
+}
+
+void SharedCacheBuilder::evictLeafDylibs(CacheVMSize reductionTarget)
+{
+    // build a reverse map of all dylib dependencies
+    std::unordered_map<std::string_view, std::unordered_set<std::string_view>> references;
+    // Ensure we have an entry (even if it is empty)
+    for ( const CacheDylib& cacheDylib : cacheDylibs )
+        references[cacheDylib.installName] = { };
+    
+    for ( const CacheDylib& cacheDylib : cacheDylibs ) {
+        for ( const CacheDylib::DependentDylib& depDylib : cacheDylib.dependents ) {
+            // Skip missing weak links
+            if ( depDylib.dylib == nullptr )
+                continue;
+            references[depDylib.dylib->installName].insert(cacheDylib.installName);
+        }
+    }
+
+    struct DylibAndSize
+    {
+        CacheDylib* dylib;
+        CacheVMSize size;
+    };
+
+    // Find the sizes of all the dylibs
+    std::vector<DylibAndSize> dylibsToSort;
+    for ( CacheDylib& cacheDylib : cacheDylibs ) {
+        CacheVMSize segsSize = CacheVMSize(0ULL);
+        for ( const DylibSegmentChunk& segment : cacheDylib.segments ) {
+            if ( segment.segmentName == "__LINKEDIT" )
+                continue;
+
+            segsSize += segment.cacheVMSize;
+        }
+        dylibsToSort.push_back({ &cacheDylib, segsSize });
+    }
+
+    // Build an ordered list of what to remove. At each step we do following
+    // 1) Find all dylibs that nothing else depends on
+    // 2a) If any of those dylibs are not in the order select the largest one of them
+    // 2b) If all the leaf dylibs are in the order file select the last dylib that appears last in the order file
+    // 3) Remove all entries to the removed file from the reverse dependency map
+    // 4) Go back to one and repeat until there are no more evictable dylibs
+    // This results in us always choosing the locally optimal selection, and then taking into account how that impacts
+    // the dependency graph for subsequent selections
+
+    std::vector<DylibAndSize> sortedDylibs;
+    bool candidateFound = true;
+    while ( candidateFound ) {
+        candidateFound = false;
+        DylibAndSize candidate;
+        uint64_t candidateOrder = 0;
+        for( const auto& dylib : dylibsToSort ) {
+            const auto& dylibRefs = references.at(dylib.dylib->installName);
+            if ( !dylibRefs.empty())
+                continue;
+
+            const auto& j = options.dylibOrdering.find(std::string(dylib.dylib->installName));
+            uint64_t order = 0;
+            if ( j != options.dylibOrdering.end() ) {
+                order = j->second;
+            } else {
+                // Not in the order file, set order sot it goes to the front of the list
+                order = UINT64_MAX;
+            }
+            if ( order > candidateOrder || (order == UINT64_MAX && candidate.size < dylib.size) ) {
+                // The new file is either a lower priority in the order file
+                // or the same priority as the candidate but larger
+                candidate = dylib;
+                candidateOrder = order;
+                candidateFound = true;
+            }
+        }
+        if (candidateFound) {
+            sortedDylibs.push_back(candidate);
+            references.erase(candidate.dylib->installName);
+            for (auto& dependent : references) {
+                (void)dependent.second.erase(candidate.dylib->installName);
+            }
+            auto j = std::find_if(dylibsToSort.begin(), dylibsToSort.end(),
+                                  [&candidate](const DylibAndSize& dylib) {
+                return candidate.dylib->installName == dylib.dylib->installName;
+            });
+            if ( j != dylibsToSort.end() ) {
+                dylibsToSort.erase(j);
+            }
+        }
+    }
+
+     // build set of dylibs that if removed will allow cache to build
+    for ( DylibAndSize& dylib : sortedDylibs ) {
+        this->evictedDylibs.push_back(dylib.dylib->inputFile->path);
+        if ( dylib.size > reductionTarget )
+            break;
+        reductionTarget -= dylib.size;
+    }
 }
 
 // In file layout, we need each Region to start page-aligned.  Within a Region, we can pack pages
@@ -4390,6 +4499,13 @@ Error SharedCacheBuilder::computeSubCacheLayout()
                 return error;
         }
     }
+    
+    if ( this->totalVMSize > this->config.layout.cacheSize ) {
+        evictLeafDylibs(this->totalVMSize - this->config.layout.cacheSize);
+        return Error("Cache overflow (0x%llx > 0x%llx)",
+                     this->totalVMSize.rawValue(),
+                     this->config.layout.cacheSize.rawValue());
+    }
 
     // Update Section VMAddr's now that we know where all the Region's are in memory
     for ( SubCache& subCache : this->subCaches ) {
@@ -4403,12 +4519,6 @@ Error SharedCacheBuilder::computeSubCacheLayout()
                 }
             }
         }
-    }
-
-    if ( this->totalVMSize > this->config.layout.cacheSize ) {
-        return Error("Cache overflow (0x%llx > 0x%llx)",
-                     this->totalVMSize.rawValue(),
-                     this->config.layout.cacheSize.rawValue());
     }
 
     return Error();
@@ -6442,7 +6552,7 @@ Error SharedCacheBuilder::emitCanonicalObjCProtocols()
 
     Timer::Scope timedScope(this->config, "emitCanonicalObjCProtocols time");
 
-    const bool log = this->options.debug;
+    const bool log = false;
 
     // We need to find the Protocol class from libojc
     VMAddress                  protocolClassVMAddr;
@@ -6618,7 +6728,7 @@ Error SharedCacheBuilder::computeObjCClassLayout()
 
     Timer::Scope timedScope(this->config, "computeObjCClassLayout time");
 
-    const bool log = this->options.debug;
+    const bool log = false;
 
     // We need to walk all classes in all dylibs.  Each dylib needs its own objc visitor object
     std::vector<objc_visitor::Visitor> objcVisitors;
@@ -7482,6 +7592,11 @@ static const std::string cdHashToString(const uint8_t hash[20])
     for (int i = 0; i < 20; ++i)
         snprintf(&buff[2*i], sizeof(buff), "%2.2x", hash[i]);
     return buff;
+}
+
+std::span<const std::string_view> SharedCacheBuilder::getEvictedDylibs() const
+{
+    return this->evictedDylibs;
 }
 
 void SharedCacheBuilder::getResults(std::vector<CacheBuffer>& results) const

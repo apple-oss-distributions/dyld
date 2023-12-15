@@ -546,7 +546,8 @@ struct Class
 
     std::optional<VMAddress>                    getSuperclassVMAddr(const Visitor& objcVisitor) const;
     std::optional<VMAddress>                    getMethodCachePropertiesVMAddr(const Visitor& objcVisitor) const;
-    void                                        setMethodCachePropertiesVMAddr(const Visitor& objcVisitor, VMAddress vmAddr);
+    void                                        setMethodCachePropertiesVMAddr(const Visitor& objcVisitor, VMAddress vmAddr,
+                                                                               const dyld3::MachOFile::PointerMetaData& PMD);
 
     // Returns the superclass field itself, ie the value of &this->superclass
     metadata_visitor::ResolvedValue             getSuperclassField(const Visitor& objcVisitor) const;

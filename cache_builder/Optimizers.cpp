@@ -169,6 +169,7 @@ const char* const neverStubEliminateSymbols[] = {
     "_modf",
     "_modff",
     "_modfl",
+    "_mprotect",
     "_munlock",
     "_munlockall",
     "_objc_autoreleasePoolPop",

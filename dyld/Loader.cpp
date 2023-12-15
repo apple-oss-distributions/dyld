@@ -595,8 +595,6 @@ const Loader* Loader::makeDyldCacheLoader(Diagnostics& diag, RuntimeState& state
     const PrebuiltLoader* result = state.findPrebuiltLoader(path);
     if ( result != nullptr ) {
         if ( result->mf(state)->loadableIntoProcess(state.config.process.platform, path, state.config.security.internalInstall) ) {
-            if ( state.config.process.catalystRuntime && result->isCatalystOverride )
-                state.setHasOverriddenUnzipperedTwin();
             return result;
         }
     }

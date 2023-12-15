@@ -407,7 +407,7 @@ uint64_t DyldSharedCache::getSubCacheVmOffset(uint8_t index) const {
     }
 }
 
-bool DyldSharedCache::inCache(const void* addr, size_t length, bool& readOnly) const
+bool DyldSharedCache::inCache(const void* addr, size_t length, bool& immutable) const
 {
     // quick out if before start of cache
     if ( addr < this )
@@ -417,22 +417,19 @@ bool DyldSharedCache::inCache(const void* addr, size_t length, bool& readOnly) c
     uintptr_t slide = (uintptr_t)this - (uintptr_t)(mappings[0].address);
     uintptr_t unslidStart = (uintptr_t)addr - slide;
 
-    // quick out if after end of cache
-    const dyld_cache_mapping_info* lastMapping = &mappings[header.mappingCount - 1];
-    if ( unslidStart > (lastMapping->address + lastMapping->size) )
-        return false;
-
-    // walk cache regions
-    const dyld_cache_mapping_info* mappingsEnd = &mappings[header.mappingCount];
-    uintptr_t unslidEnd = unslidStart + length;
-    for (const dyld_cache_mapping_info* m=mappings; m < mappingsEnd; ++m) {
-        if ( (unslidStart >= m->address) && (unslidEnd < (m->address+m->size)) ) {
-            readOnly = ((m->initProt & VM_PROT_WRITE) == 0);
-            return true;
+    // walk cache ranges
+    __block bool found = false;
+    auto inRange = ^(const char* mappingName, uint64_t unslidVMAddr, uint64_t vmSize, uint32_t cacheFileIndex,
+                     uint64_t fileOffset, uint32_t initProt, uint32_t maxProt, bool& stopRange) {
+        if ( (unslidVMAddr <= unslidStart) && ((unslidStart+length) < (unslidVMAddr+vmSize)) ) {
+            found     = true;
+            immutable = ((maxProt & VM_PROT_WRITE) == 0);
+            stopRange = true;
         }
-    }
+    };
+    this->forEachRange(inRange, nullptr);
 
-    return false;
+    return found;
 }
 
 bool DyldSharedCache::isAlias(const char* path) const {

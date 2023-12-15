@@ -2164,9 +2164,18 @@ Error CacheDylib::emitObjCIMPCaches(const BuilderConfig& config, Timer::Aggregat
         if ( objcClass.getMethodCachePropertiesVMAddr(objcVisitor).has_value() )
             return;
 
+        MachOFile::PointerMetaData PMD;
+        if ( config.layout.hasAuthRegion && (objcIMPCachesOptimizer.libobjcImpCachesVersion >= 4) ) {
+            PMD.diversity         = 0x9cff; // hash of "originalPreoptCache"
+            PMD.high8             = 0;
+            PMD.authenticated     = 1;
+            PMD.key               = 2;     // DA
+            PMD.usesAddrDiversity = 1;
+        }
+
         // Set the "vtable" to point to the cache
         CacheVMAddress impCacheVMAddr = objcIMPCachesOptimizer.impCachesChunk->cacheVMAddress + impCacheOffset;
-        objcClass.setMethodCachePropertiesVMAddr(objcVisitor, VMAddress(impCacheVMAddr.rawValue()));
+        objcClass.setMethodCachePropertiesVMAddr(objcVisitor, VMAddress(impCacheVMAddr.rawValue()), PMD);
 
         // Tell the slide info emitter to slide this location
         metadata_visitor::ResolvedValue vtableField = objcClass.getMethodCachePropertiesField(objcVisitor);

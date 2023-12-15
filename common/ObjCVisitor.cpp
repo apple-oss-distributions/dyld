@@ -146,10 +146,11 @@ std::optional<VMAddress> Class::getMethodCachePropertiesVMAddr(const Visitor& ob
 }
 
 #if BUILDING_CACHE_BUILDER || BUILDING_CACHE_BUILDER_UNIT_TESTS
-void Class::setMethodCachePropertiesVMAddr(const Visitor& objcVisitor, VMAddress vmAddr)
+void Class::setMethodCachePropertiesVMAddr(const Visitor& objcVisitor, VMAddress vmAddr,
+                                           const dyld3::MachOFile::PointerMetaData& PMD)
 {
     ResolvedValue field = objcVisitor.getField(this->classPos, this->getFieldPos(objcVisitor, Field::methodCacheProperties));
-    objcVisitor.updateTargetVMAddress(field, CacheVMAddress(vmAddr.rawValue()));
+    objcVisitor.setTargetVMAddress(field, CacheVMAddress(vmAddr.rawValue()), PMD);
 }
 #endif
 

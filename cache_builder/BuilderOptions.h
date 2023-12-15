@@ -83,6 +83,7 @@ struct InputFile
     uint64_t                inode   = 0;
     uint64_t                mtime   = 0;
     std::string             path;
+    bool                    forceNotCacheEligible = false;
 
     bool hasError() const;
     const error::Error& getError() const;

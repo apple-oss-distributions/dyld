@@ -377,9 +377,9 @@ public:
      void                forEachLocalSymbolEntry(void (^handler)(uint64_t dylibCacheVMOffset, uint32_t nlistStartIndex, uint32_t nlistCount, bool& stop)) const;
 
     //
-    // Returns if an address range is in this cache, and if so if in a read-only area
+    // Returns if an address range is in this cache, and if so if in an immutable area
     //
-    bool                inCache(const void* addr, size_t length, bool& readOnly) const;
+    bool                inCache(const void* addr, size_t length, bool& immutable) const;
 
     //
     // Returns true if a path is an alternate path (symlink)

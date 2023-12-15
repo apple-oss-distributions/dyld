@@ -89,6 +89,17 @@ void iterateDirectoryTree(const std::string& pathPrefix, const std::string& path
                 break;
             case DT_LNK:
                 // don't follow symlinks, dylib will be found through absolute path
+#if BUILDING_SIM_CACHE_BUILDER
+                // But special case simulator WebKit and related frameworks that are installed into Cryptex path with symlinks
+                if ( recurse && dirAndFile.starts_with("/System/Library/") && dirAndFile.ends_with(".framework") ) {
+                    char symlinkContent[2048];
+                    if ( readlink(fullDirAndFile.c_str(), symlinkContent, sizeof(symlinkContent)) > 0 ) {
+                        if ( strncmp(symlinkContent, "../../../System/Cryptexes/OS/System/Library/", 44) == 0 )  {
+                            iterateDirectoryTree(pathPrefix, dirAndFile, dirFilter, fileCallback, processFiles, true);
+                       }
+                    }
+                }
+#endif
                 break;
         }
     }

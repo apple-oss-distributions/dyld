@@ -1303,7 +1303,7 @@ int main(int argc, const char* argv[])
             if (requiresConcurrencyLimit) { dispatch_semaphore_wait(concurrencyLimit, DISPATCH_TIME_FOREVER); }
 
             const std::string& jsonPath = jsonPaths[index];
-            Diagnostics diags;
+            Diagnostics diags(options.debug);
             buildCacheFromJSONManifest(diags, options, jsonPath);
 
             if (diags.hasError()) {
@@ -1323,7 +1323,7 @@ int main(int argc, const char* argv[])
         if ( failedToBuildCacheRef )
             return EXIT_FAILURE;
     } else {
-        Diagnostics diags;
+        Diagnostics diags(options.debug);
         buildCacheFromJSONManifest(diags, options, jsonManifestPath);
 
         if (diags.hasError()) {
