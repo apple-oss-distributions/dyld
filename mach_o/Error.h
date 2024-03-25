@@ -45,18 +45,20 @@ public:
                     Error() = default;
                     Error(const char* format, ...)  __attribute__((format(printf, 2, 3)));
                     Error(const char* format, va_list list) __attribute__((format(printf, 2, 0)));
-                    Error(const Error&) = delete;  // can't copy
                     Error(Error&&); // can move
                     Error& operator=(const Error&) = delete; //  can't copy assign
                     Error& operator=(Error&&); // can move
                     ~Error();
 
 
+    void            append(const char* format, ...)  __attribute__((format(printf, 2, 3)));
     bool            hasError() const { return (_buffer != nullptr); }
     bool            noError() const  { return (_buffer == nullptr); }
     explicit        operator bool() const { return hasError(); }
     const char*     message() const;
     bool            messageContains(const char* subString) const;
+
+    static Error    copy(const Error&);
 
     static Error    none() { return Error(); }
 

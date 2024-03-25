@@ -730,7 +730,7 @@ bool IMPCachesBuilder::isClassInterestingOrTracked(const ObjCClass& theClass) co
            (trackedArray.find(classNameStr) != trackedArray.end());
 }
 
-void IMPCachesBuilder::addMethod(IMPCaches::ClassData* classDataPtr, std::string_view methodName, std::string_view installName, std::string_view className, std::string_view catName, bool inlined, bool fromFlattening) {
+bool IMPCachesBuilder::addMethod(IMPCaches::ClassData* classDataPtr, std::string_view methodName, std::string_view installName, std::string_view className, std::string_view catName, bool inlined, bool fromFlattening) {
     std::string_view methodNameView(methodName);
 
     auto [selectorIterator, success] = selectors.map.try_emplace(methodNameView, std::make_unique<Selector>());
@@ -763,6 +763,8 @@ void IMPCachesBuilder::addMethod(IMPCaches::ClassData* classDataPtr, std::string
         thisSelectorData->classes.push_back(classDataPtr);
         classDataPtr->methods.push_back(m);
     }
+
+    return !exists;
 }
 
 void IMPCachesBuilder::inlineMethodIfNeeded(IMPCaches::ClassData* classToInlineIn, std::string_view classToInlineFrom, std::string_view catToInlineFrom, std::string_view installNameToInlineFrom, std::string_view name, std::set<Selector*>& seenSelectors, bool isFlattening) {
@@ -869,10 +871,13 @@ void IMPCachesBuilder::populateMethodLists(DylibState& dylib, int* duplicateClas
         thisData->isMetaclass = theClass.isMetaClass;
         thisData->shouldGenerateImpCache = interesting;
 
+        bool duplicateMethod = false;
         for ( const imp_caches::Method& objcMethod : objcClass.methods ) {
             const bool inlined = false;
             const bool fromFlattening = false;
-            addMethod(thisDataPtr, objcMethod.name, dylib.inputDylib->installName, theClass.className, "", inlined, fromFlattening);
+            bool added = addMethod(thisDataPtr, objcMethod.name, dylib.inputDylib->installName, theClass.className, "", inlined, fromFlattening);
+            if ( !added )
+                duplicateMethod = true;
         }
 
         ClassKey key {
@@ -881,7 +886,7 @@ void IMPCachesBuilder::populateMethodLists(DylibState& dylib, int* duplicateClas
         };
         assert(dylib.impCachesClassData.find(key) == dylib.impCachesClassData.end());
 
-        if (duplicateClasses.find(key) != duplicateClasses.end()) {
+        if (duplicateMethod || (duplicateClasses.find(key) != duplicateClasses.end()) ) {
             // We can't just set shouldGenerateImpCache to false ; we do it later
             // when we have built the flattening hierarchies in order to drop
             // any related classes as well.

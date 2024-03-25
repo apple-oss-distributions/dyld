@@ -35,7 +35,7 @@ namespace dyld3 {
 
 template<typename T>
 struct Hash {
-    static size_t hash(const T&);
+    static uint64_t hash(const T&);
 };
 
 template<typename T>
@@ -58,8 +58,8 @@ private:
     typedef NodeT*                      iterator;
     typedef const NodeT*                const_iterator;
 
-    enum : size_t {
-        SentinelHash = (size_t)-1
+    enum : uint64_t {
+        SentinelHash = (uint64_t)-1
     };
 
 public:
@@ -68,7 +68,7 @@ public:
         nextHashBufferGrowth = 768;
         hashBufferUseCount = 0;
         hashBuffer.reserve(1024);
-        for (size_t i = 0; i != 1024; ++i) {
+        for (uint64_t i = 0; i != 1024; ++i) {
             hashBuffer.push_back(SentinelHash);
         }
         nodeBuffer.reserve(1024);
@@ -77,12 +77,12 @@ public:
 
     iterator find(const KeyT& key) {
         // Find the index to look up in the hash buffer
-        size_t hashIndex = GetHash::hash(key) & (hashBuffer.count() - 1);
+        uint64_t hashIndex = GetHash::hash(key) & (hashBuffer.count() - 1);
 
         // Note we'll use a quadratic probe to look past identical hashes until we find our node or a sentinel
-        size_t probeAmount = 1;
+        uint64_t probeAmount = 1;
         while (true) {
-            size_t nodeBufferIndex = hashBuffer[hashIndex];
+            uint64_t nodeBufferIndex = hashBuffer[hashIndex];
 
             if (nodeBufferIndex == SentinelHash) {
                 // This node is unused, so we don't have this element
@@ -106,12 +106,12 @@ public:
 
     const_iterator find(const KeyT& key) const {
         // Find the index to look up in the hash buffer
-        size_t hashIndex = GetHash::hash(key) & (hashBuffer.count() - 1);
+        uint64_t hashIndex = GetHash::hash(key) & (hashBuffer.count() - 1);
 
         // Note we'll use a quadratic probe to look past identical hashes until we find our node or a sentinel
-        size_t probeAmount = 1;
+        uint64_t probeAmount = 1;
         while (true) {
-            size_t nodeBufferIndex = hashBuffer[hashIndex];
+            uint64_t nodeBufferIndex = hashBuffer[hashIndex];
 
             if (nodeBufferIndex == SentinelHash) {
                 // This node is unused, so we don't have this element
@@ -153,7 +153,7 @@ public:
         return nodeBuffer;
     }
 
-    void reserve(size_t size) {
+    void reserve(uint64_t size) {
         nodeBuffer.reserve(size);
     }
 
@@ -165,7 +165,7 @@ public:
         return nodeBuffer.empty();
     }
 
-    size_t size() const {
+    uint64_t size() const {
         return nodeBuffer.count();
     }
 
@@ -173,24 +173,24 @@ public:
         // First see if we have enough space.  We don't want the hash buffer to get too full.
         if (hashBufferUseCount == nextHashBufferGrowth) {
             // Grow and rehash everything.
-            size_t newHashTableSize = hashBuffer.count() * 2;
+            uint64_t newHashTableSize = hashBuffer.count() * 2;
             nextHashBufferGrowth *= 2;
 
-            dyld3::OverflowSafeArray<size_t> newHashBuffer;
+            dyld3::OverflowSafeArray<uint64_t> newHashBuffer;
             newHashBuffer.reserve(newHashTableSize);
-            for (size_t i = 0; i != newHashTableSize; ++i) {
+            for (uint64_t i = 0; i != newHashTableSize; ++i) {
                 newHashBuffer.push_back(SentinelHash);
             }
 
             // Walk the existing nodes trying to populate the new hash buffer and looking for collisions
-            for (size_t i = 0; i != nodeBuffer.count(); ++i) {
+            for (uint64_t i = 0; i != nodeBuffer.count(); ++i) {
                 const KeyT& key = nodeBuffer[i].first;
-                size_t newHashIndex = GetHash::hash(key) & (newHashBuffer.count() - 1);
+                uint64_t newHashIndex = GetHash::hash(key) & (newHashBuffer.count() - 1);
 
                 // Note we'll use a quadratic probe to look past identical hashes until we find our node or a sentinel
-                size_t probeAmount = 1;
+                uint64_t probeAmount = 1;
                 while (true) {
-                    size_t newNodeBufferIndex = newHashBuffer[newHashIndex];
+                    uint64_t newNodeBufferIndex = newHashBuffer[newHashIndex];
 
                     if (newNodeBufferIndex == SentinelHash) {
                         // This node is unused, so we don't have this element.  Lets add it
@@ -213,12 +213,12 @@ public:
         }
 
         // Find the index to look up in the hash buffer
-        size_t hashIndex = GetHash::hash(v.first) & (hashBuffer.count() - 1);
+        uint64_t hashIndex = GetHash::hash(v.first) & (hashBuffer.count() - 1);
 
         // Note we'll use a quadratic probe to look past identical hashes until we find our node or a sentinel
-        size_t probeAmount = 1;
+        uint64_t probeAmount = 1;
         while (true) {
-            size_t nodeBufferIndex = hashBuffer[hashIndex];
+            uint64_t nodeBufferIndex = hashBuffer[hashIndex];
 
             if (nodeBufferIndex == SentinelHash) {
                 // This node is unused, so we don't have this element.  Lets add it
@@ -250,9 +250,9 @@ public:
     }
 
 private:
-    size_t                              nextHashBufferGrowth;
-    size_t                              hashBufferUseCount;
-    dyld3::OverflowSafeArray<size_t>    hashBuffer;
+    uint64_t                            nextHashBufferGrowth;
+    uint64_t                            hashBufferUseCount;
+    dyld3::OverflowSafeArray<uint64_t>  hashBuffer;
     dyld3::OverflowSafeArray<NodeT>     nodeBuffer;
 };
 
@@ -272,10 +272,10 @@ template<typename KeyT, typename ValueT, class GetHash = HashMulti<KeyT>, class 
 class MultiMap {
     
     struct NextNode {
-        size_t isDuplicateHead  : 1;
-        size_t isDuplicateEntry : 1;
-        size_t isDuplicateTail  : 1;
-        size_t nextIndex        : 29;
+        uint64_t isDuplicateHead  : 1;
+        uint64_t isDuplicateEntry : 1;
+        uint64_t isDuplicateTail  : 1;
+        uint64_t nextIndex        : 61;
         
         bool hasAnyDuplicates() const {
             return isDuplicateHead || isDuplicateEntry || isDuplicateTail;
@@ -293,7 +293,7 @@ class MultiMap {
             return { 0, 0, 1, 0 };
         }
     };
-    static_assert(sizeof(NextNode) == sizeof(size_t), "Invalid size");
+    static_assert(sizeof(NextNode) == sizeof(uint64_t), "Invalid size");
 
     // Use our own struct for the NodeT/NodeEntryT, as std::pair doesn't have the copyable/trivially_construcible traits we need
     struct NodeT {
@@ -308,8 +308,8 @@ class MultiMap {
     typedef NodeEntryT*                              iterator;
     typedef const NodeEntryT*                        const_iterator;
 
-    enum : size_t {
-        SentinelHash        = (size_t)-1
+    enum : uint64_t {
+        SentinelHash        = (uint64_t)-1
     };
 
 public:
@@ -318,7 +318,7 @@ public:
         nextHashBufferGrowth = 768;
         hashBufferUseCount = 0;
         hashBuffer.reserve(1024);
-        for (size_t i = 0; i != 1024; ++i) {
+        for (uint64_t i = 0; i != 1024; ++i) {
             hashBuffer.push_back(SentinelHash);
         }
         nodeBuffer.reserve(1024);
@@ -345,6 +345,13 @@ public:
 
     const Array<NodeEntryT>& array() const {
         return nodeBuffer;
+    }
+
+    void forEachKey(void (^handler)(KeyT& key)) {
+        // Walk the top level nodes, skipping dupes
+        for (NodeEntryT& headNode : nodeBuffer) {
+            handler(headNode.key);
+        }
     }
 
     void forEachEntry(void (^handler)(const KeyT& key, const ValueT** values, uint64_t valuesCount)) const {
@@ -379,13 +386,13 @@ public:
             nextNode = headNode.next;
             valuesCount = 1;
             while (nodeBuffer[nextNode.nextIndex].next.hasMoreDuplicates()) {
-                values[(size_t)valuesCount] = &(nodeBuffer[nextNode.nextIndex].value);
+                values[valuesCount] = &(nodeBuffer[nextNode.nextIndex].value);
                 nextNode = nodeBuffer[nextNode.nextIndex].next;
                 ++valuesCount;
             }
             
             // Add in the last node
-            values[(size_t)valuesCount] = &(nodeBuffer[nextNode.nextIndex].value);
+            values[valuesCount] = &(nodeBuffer[nextNode.nextIndex].value);
             ++valuesCount;
             
             // Finally call the handler with a whole array of values.
@@ -397,9 +404,9 @@ public:
             uint64_t hashIndex = GetHash::hash(key, state) & (hashBuffer.count() - 1);
 
             // Note we'll use a quadratic probe to look past identical hashes until we find our node or a sentinel
-            size_t probeAmount = 1;
+            uint64_t probeAmount = 1;
             while (true) {
-                uint64_t nodeBufferIndex = hashBuffer[(size_t)hashIndex];
+                uint64_t nodeBufferIndex = hashBuffer[hashIndex];
 
                 if (nodeBufferIndex == SentinelHash) {
                     // This node is unused, so we don't have this element
@@ -407,9 +414,9 @@ public:
                 }
 
                 // If that hash is in use, then check if that node is actually the one we are trying to find
-                if (IsEqual::equal(nodeBuffer[(size_t)nodeBufferIndex].key, key, state)) {
+                if (IsEqual::equal(nodeBuffer[nodeBufferIndex].key, key, state)) {
                     // Keys match so we found this element
-                    const NodeEntryT& headNode = nodeBuffer[(size_t)nodeBufferIndex];
+                    const NodeEntryT& headNode = nodeBuffer[nodeBufferIndex];
 
                     NextNode nextNode = headNode.next;
                     if (!nextNode.hasAnyDuplicates()) {
@@ -479,9 +486,9 @@ public:
         uint64_t hashIndex = GetHash::hash(key, state) & (hashBuffer.count() - 1);
 
         // Note we'll use a quadratic probe to look past identical hashes until we find our node or a sentinel
-        size_t probeAmount = 1;
+        uint64_t probeAmount = 1;
         while (true) {
-            uint64_t nodeBufferIndex = hashBuffer[(size_t)hashIndex];
+            uint64_t nodeBufferIndex = hashBuffer[hashIndex];
 
             if (nodeBufferIndex == SentinelHash) {
                 // This node is unused, so we don't have this element
@@ -489,9 +496,9 @@ public:
             }
 
             // If that hash is in use, then check if that node is actually the one we are trying to find
-            if (IsEqual::equal(nodeBuffer[(size_t)nodeBufferIndex].key, key, state)) {
+            if (IsEqual::equal(nodeBuffer[nodeBufferIndex].key, key, state)) {
                 // Keys match so we found this element
-                return &nodeBuffer[(size_t)nodeBufferIndex];
+                return &nodeBuffer[nodeBufferIndex];
             }
 
             // We didn't find this node, so try with a later one
@@ -507,17 +514,17 @@ public:
         // First see if we have enough space.  We don't want the hash buffer to get too full.
         if (hashBufferUseCount == nextHashBufferGrowth) {
             // Grow and rehash everything.
-            size_t newHashTableSize = hashBuffer.count() * 2;
+            uint64_t newHashTableSize = hashBuffer.count() * 2;
             nextHashBufferGrowth *= 2;
 
             dyld3::OverflowSafeArray<uint64_t> newHashBuffer;
             newHashBuffer.reserve(newHashTableSize);
-            for (size_t i = 0; i != newHashTableSize; ++i) {
+            for (uint64_t i = 0; i != newHashTableSize; ++i) {
                 newHashBuffer.push_back(SentinelHash);
             }
 
             // Walk the existing nodes trying to populate the new hash buffer and looking for collisions
-            for (size_t i = 0; i != nodeBuffer.count(); ++i) {
+            for (uint64_t i = 0; i != nodeBuffer.count(); ++i) {
                 // Skip nodes which are not the head of the list
                 // They aren't moving the buffer anyway
                 NextNode nextNode = nodeBuffer[i].next;
@@ -527,13 +534,13 @@ public:
                 uint64_t newHashIndex = GetHash::hash(key, state) & (newHashBuffer.count() - 1);
 
                 // Note we'll use a quadratic probe to look past identical hashes until we find our node or a sentinel
-                size_t probeAmount = 1;
+                uint64_t probeAmount = 1;
                 while (true) {
-                    uint64_t newNodeBufferIndex = newHashBuffer[(size_t)newHashIndex];
+                    uint64_t newNodeBufferIndex = newHashBuffer[newHashIndex];
 
                     if (newNodeBufferIndex == SentinelHash) {
                         // This node is unused, so we don't have this element.  Lets add it
-                        newHashBuffer[(size_t)newHashIndex] = i;
+                        newHashBuffer[newHashIndex] = i;
                         break;
                     }
 
@@ -555,27 +562,27 @@ public:
         uint64_t hashIndex = GetHash::hash(v.first, state) & (hashBuffer.count() - 1);
 
         // Note we'll use a quadratic probe to look past identical hashes until we find our node or a sentinel
-        size_t probeAmount = 1;
+        uint64_t probeAmount = 1;
         while (true) {
-            uint64_t nodeBufferIndex = hashBuffer[(size_t)hashIndex];
+            uint64_t nodeBufferIndex = hashBuffer[hashIndex];
 
             if (nodeBufferIndex == SentinelHash) {
                 // This node is unused, so we don't have this element.  Lets add it
-                hashBuffer[(size_t)hashIndex] = nodeBuffer.count();
+                hashBuffer[hashIndex] = nodeBuffer.count();
                 ++hashBufferUseCount;
                 nodeBuffer.push_back({ v.first, v.second, NextNode::makeNoDuplicates() } );
                 return;
             }
 
             // If that hash is in use, then check if that node is actually the one we are trying to insert
-            if (IsEqual::equal(nodeBuffer[(size_t)nodeBufferIndex].key, v.first, state)) {
+            if (IsEqual::equal(nodeBuffer[nodeBufferIndex].key, v.first, state)) {
                 // Keys match.  We already have this element
                 // But this is a multimap so add the new element too
                 // Walk from this node to find the end of the chain
-                while (nodeBuffer[(size_t)nodeBufferIndex].next.hasMoreDuplicates()) {
-                    nodeBufferIndex = nodeBuffer[(size_t)nodeBufferIndex].next.nextIndex;
+                while (nodeBuffer[nodeBufferIndex].next.hasMoreDuplicates()) {
+                    nodeBufferIndex = nodeBuffer[nodeBufferIndex].next.nextIndex;
                 }
-                NextNode& tailNode = nodeBuffer[(size_t)nodeBufferIndex].next;
+                NextNode& tailNode = nodeBuffer[nodeBufferIndex].next;
                 if (!tailNode.hasAnyDuplicates()) {
                     // If the previous node has no duplicates then its now the new head of a list
                     tailNode.isDuplicateHead = 1;
@@ -607,11 +614,11 @@ public:
 
         uint64_t count = hashBuffer.count();
         allocator.append(&count, sizeof(count));
-        allocator.append(hashBuffer.begin(), (size_t)count * sizeof(uint64_t));
+        allocator.append(hashBuffer.begin(), count * sizeof(uint64_t));
 
         count = nodeBuffer.count();
         allocator.append(&count, sizeof(count));
-        allocator.append(nodeBuffer.begin(), (size_t)count * sizeof(NodeEntryT));
+        allocator.append(nodeBuffer.begin(), count * sizeof(NodeEntryT));
     }
 
 private:
@@ -624,7 +631,7 @@ private:
 
 
 struct HashCString {
-    static size_t hash(const char* v) {
+    static uint64_t hash(const char* v) {
         return std::hash<std::string_view>()(v);
     }
 };

@@ -466,7 +466,7 @@ Error ChainedFixups::importsFormat(std::span<const Fixup::BindTarget> bindTarget
     bool     has64bitAddend  = false;
     stringPoolSize = 1;
     for (const Fixup::BindTarget& bind : bindTargets) {
-        stringPoolSize += (strlen(bind.symbolName) + 1);
+        stringPoolSize += (bind.symbolName.size() + 1);
         if ( bind.libOrdinal < -15 ) {
             // TODO: currently only -1, -2, and -3 have meaning.  Should we error here for < -3 ?
             return Error("special libOrdinal (%d) too small", bind.libOrdinal);
@@ -485,7 +485,7 @@ Error ChainedFixups::importsFormat(std::span<const Fixup::BindTarget> bindTarget
                 has64bitAddend = true;
         }
     }
-    bool hasLargeStringOffsets = (stringPoolSize > 0xFFFFFF);
+    bool hasLargeStringOffsets = dyld_chained_import{.name_offset=(uint32_t)stringPoolSize}.name_offset != stringPoolSize;
 
     if ( hasLargeStringOffsets || has64bitAddend || hasLargeOrdinal )
         importsFormat = DYLD_CHAINED_IMPORT_ADDEND64;
@@ -709,12 +709,12 @@ void ChainedFixups::buildFixups(std::span<const Fixup::BindTarget> bindTargets,
 
         const dyld_chained_starts_in_segment* segInfo = (dyld_chained_starts_in_segment*)(&_bytes[header->starts_offset + segInfoOffset]);
 
-        const MappedSegment& segment = segments[segIndex].mappedSegment;
+        const MappedSegment&         segment   = segments[segIndex].mappedSegment;
         const std::span<const Fixup> segFixups = segments[segIndex].fixups;
-        uint32_t segExtras = segments[segIndex].numPageExtras;
+        uint32_t                     segExtras = segments[segIndex].numPageExtras;
 
         std::span<uint16_t> pageStarts = { (uint16_t*)&segInfo->page_start[0], segInfo->page_count };
-        const uint32_t minNext = pointerFormat.minNext();
+        const uint32_t      minNext    = pointerFormat.minNext();
 
         if ( segExtras != 0 ) {
             // Segment has extras.  Take the slow path
@@ -779,6 +779,10 @@ void ChainedFixups::buildFixups(std::span<const Fixup::BindTarget> bindTargets,
                     }
                 }
                 prevFixup = &fixup;
+            }
+            // if this page required multiple starts, mark last one
+            if ( (pageStarts[curPageIndex] & DYLD_CHAINED_PTR_START_MULTI) != 0 ) {
+                extras[curExtrasIndex] |= DYLD_CHAINED_PTR_START_LAST;
             }
             if ( setDataChains && (prevFixup != nullptr) ) {
                 // set end of chain
@@ -896,10 +900,11 @@ void ChainedFixups::buildFixups(std::span<const Fixup::BindTarget> bindTargets,
 }
 
 
-uint32_t ChainedFixups::addSymbolString(const char* symbolName, std::vector<char>& pool)
+uint32_t ChainedFixups::addSymbolString(CString symbolName, std::vector<char>& pool)
 {
     uint32_t symbolOffset = (uint32_t)pool.size();
-    pool.insert(pool.end(), symbolName, &symbolName[strlen(symbolName)+1]);
+    // end+1 to copy also the null-terminator
+    pool.insert(pool.end(), symbolName.begin(), symbolName.end()+1);
     return symbolOffset;
 }
 
@@ -1270,9 +1275,10 @@ public:
             dyld_chained_ptr_32_rebase*  rebasePtr = (dyld_chained_ptr_32_rebase*)fixup.location;
             rebasePtr->bind     = false;
             rebasePtr->next     = (uint32_t)(delta/4);
-            rebasePtr->target   = (uint32_t)fixup.rebase.targetVmOffset;
+            uint64_t target = fixup.rebase.targetVmOffset+preferedLoadAddress;
+            rebasePtr->target   = (uint32_t)target;
             assert(rebasePtr->next*4 == delta);
-            assert(rebasePtr->target == fixup.rebase.targetVmOffset);
+            assert(rebasePtr->target == target);
         }
     }
 #endif
@@ -1488,7 +1494,7 @@ public:
 
 bool ChainedFixups::PointerFormat::valid(uint16_t pointer_format)
 {
-    return (pointer_format <= DYLD_CHAINED_PTR_ARM64E_USERLAND24);
+    return (pointer_format <= DYLD_CHAINED_PTR_ARM64E_SHARED_CACHE);
 }
 
 

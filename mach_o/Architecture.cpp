@@ -91,33 +91,33 @@ bool Architecture::is64() const
     return (_cputype & CPU_ARCH_ABI64);
 }
 
-Architecture Architecture::byName(const char* name)
+Architecture Architecture::byName(std::string_view name)
 {
-    if ( strcmp(name, "x86_64") == 0 )
+    if ( name == "x86_64" )
         return x86_64;
-    else if ( strcmp(name, "x86_64h") == 0 )
+    else if ( name == "x86_64h" )
         return x86_64h;
-    else if ( strcmp(name, "i386") == 0 )
+    else if ( name == "i386" )
         return i386;
-    else if ( strcmp(name, "arm64") == 0 )
+    else if ( name == "arm64" )
         return arm64;
-    else if ( strcmp(name, "arm64e") == 0 )
+    else if ( name == "arm64e" )
         return arm64e;
-    else if ( strcmp(name, "arm64_32") == 0 )
+    else if ( name == "arm64_32" )
         return arm64_32;
-    else if ( strcmp(name, "armv6m") == 0 )
+    else if ( name == "armv6m" )
         return armv6m;
-    else if ( (strcmp(name, "armv7k") == 0) || (strcmp(name, "thumbv7k") == 0) )
+    else if ( (name == "armv7k")  || (name == "thumbv7k") )
         return armv7k;
-    else if ( (strcmp(name, "armv7m") == 0) || (strcmp(name, "thumbv7m") == 0) )
+    else if ( (name == "armv7m")  || (name == "thumbv7m") )
         return armv7m;
-    else if ( (strcmp(name, "armv7em") == 0) || (strcmp(name, "thumbv7em") == 0) )
+    else if ( (name == "armv7em") || (name == "thumbv7em") )
         return armv7em;
-    else if ( (strcmp(name, "armv7s") == 0) || (strcmp(name, "thumbv7s") == 0) )
+    else if ( (name == "armv7s")  || (name == "thumbv7s") )
         return armv7s;
-    else if ( (strcmp(name, "armv7") == 0) || (strcmp(name, "thumbv7") == 0) )
+    else if ( (name == "armv7")   || (name == "thumbv7") )
         return armv7;
-    else if ( strcmp(name, "ppc") == 0 )
+    else if ( name == "ppc" )
         return ppc;
 
     return invalid;

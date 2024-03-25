@@ -32,7 +32,7 @@
 
 namespace dyld4 {
 
-#if SUPPORT_CREATING_PREBUILTLOADERS || BUILDING_UNIT_TESTS || BUILDING_CACHE_BUILDER_UNIT_TESTS
+#if SUPPORT_PREBUILTLOADERS || BUILDING_UNIT_TESTS || BUILDING_CACHE_BUILDER_UNIT_TESTS
 //
 // PrebuiltSwift computes read-only optimized data structures to store in the PrebuiltLoaderSet
 //
@@ -56,7 +56,7 @@ private:
     bool findProtocolConformances(Diagnostics& diag, PrebuiltObjC& prebuiltObjC, RuntimeState& state);
 
 };
-#endif // SUPPORT_CREATING_PREBUILTLOADERS || BUILDING_UNIT_TESTS || BUILDING_CACHE_BUILDER_UNIT_TESTS
+#endif // SUPPORT_PREBUILTLOADERS || BUILDING_UNIT_TESTS || BUILDING_CACHE_BUILDER_UNIT_TESTS
 } // namespace dyld4
 
 

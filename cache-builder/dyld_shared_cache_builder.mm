@@ -269,8 +269,12 @@ static Platform stringToPlatform(Diagnostics& diags, const std::string& str) {
         return tvOS_simulator;
     if (str == "watchOS_simulator")
         return watchOS_simulator;
-    if ( (str == "driverKit") )
+    if (str == "driverKit")
         return driverKit;
+    if (str == "macOSExclaveKit")
+        return macOSExclaveKit;
+    if (str == "iOSExclaveKit")
+        return iOSExclaveKit;
     if ( std::isdigit(str.front()) ) {
         // Also allow platforms to be specified as an integer
         return (Platform)atoi(str.c_str());
@@ -896,7 +900,9 @@ static void buildCacheFromJSONManifest(Diagnostics& diags, const SharedCacheBuil
             (void)mkpath_np((options.dstRoot + MACOSX_MRM_DYLD_SHARED_CACHE_DIR).c_str(), 0755);
         } else if (buildOptions.platform == driverKit ) {
             (void)mkpath_np((options.dstRoot + DRIVERKIT_DYLD_SHARED_CACHE_DIR).c_str(), 0755);
-        } else {
+        } else if ( dyld3::MachOFile::isExclaveKitPlatform((dyld3::Platform)buildOptions.platform) ) {
+            (void)mkpath_np((options.dstRoot + EXCLAVEKIT_DYLD_SHARED_CACHE_DIR).c_str(), 0755);
+        }else {
             (void)mkpath_np((options.dstRoot + IPHONE_DYLD_SHARED_CACHE_DIR).c_str(), 0755);
         }
     }

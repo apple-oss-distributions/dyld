@@ -25,7 +25,7 @@
 #ifndef mach_o_Fixups_h
 #define mach_o_Fixups_h
 
-#include <string_view>
+#include "CString.h"
 
 #include "Defines.h"
 
@@ -83,10 +83,10 @@ struct Fixup
     
     struct BindTarget
     {
-        const char* symbolName;
-        int         libOrdinal;
-        bool        weakImport;
-        int64_t     addend;
+        CString     symbolName;
+        int         libOrdinal  = 0;
+        bool        weakImport  = false;
+        int64_t     addend      = 0;
     };
 
     // constructor for a non-auth bind

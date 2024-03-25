@@ -494,16 +494,18 @@ const MachOFile::ArchInfo MachOFile::_s_archInfos[] = {
 };
 
 const MachOFile::PlatformInfo MachOFile::_s_platformInfos[] = {
-    { "macOS",       Platform::macOS,             LC_VERSION_MIN_MACOSX   },
-    { "iOS",         Platform::iOS,               LC_VERSION_MIN_IPHONEOS },
-    { "tvOS",        Platform::tvOS,              LC_VERSION_MIN_TVOS     },
-    { "watchOS",     Platform::watchOS,           LC_VERSION_MIN_WATCHOS  },
-    { "bridgeOS",    Platform::bridgeOS,          LC_BUILD_VERSION        },
-    { "MacCatalyst", Platform::iOSMac,            LC_BUILD_VERSION        },
-    { "iOS-sim",     Platform::iOS_simulator,     LC_BUILD_VERSION        },
-    { "tvOS-sim",    Platform::tvOS_simulator,    LC_BUILD_VERSION        },
-    { "watchOS-sim", Platform::watchOS_simulator, LC_BUILD_VERSION        },
-    { "driverKit",   Platform::driverKit,         LC_BUILD_VERSION        },
+    { "macOS",              Platform::macOS,                LC_VERSION_MIN_MACOSX   },
+    { "iOS",                Platform::iOS,                  LC_VERSION_MIN_IPHONEOS },
+    { "tvOS",               Platform::tvOS,                 LC_VERSION_MIN_TVOS     },
+    { "watchOS",            Platform::watchOS,              LC_VERSION_MIN_WATCHOS  },
+    { "bridgeOS",           Platform::bridgeOS,             LC_BUILD_VERSION        },
+    { "MacCatalyst",        Platform::iOSMac,               LC_BUILD_VERSION        },
+    { "iOS-sim",            Platform::iOS_simulator,        LC_BUILD_VERSION        },
+    { "tvOS-sim",           Platform::tvOS_simulator,       LC_BUILD_VERSION        },
+    { "watchOS-sim",        Platform::watchOS_simulator,    LC_BUILD_VERSION        },
+    { "driverKit",          Platform::driverKit,            LC_BUILD_VERSION        },
+    { "xrOS",               Platform::xrOS,                 LC_BUILD_VERSION        },
+    { "xrOS-sim",           Platform::xrOS_simulator,       LC_BUILD_VERSION        },
 };
 
 
@@ -698,7 +700,6 @@ bool MachOFile::loadableIntoProcess(Platform processPlatform, const char* path, 
     if ( (iOSonMac) && this->builtForPlatform(Platform::macOS, true) )
         return true;
 
-
     return false;
 }
 
@@ -787,6 +788,26 @@ const char* MachOFile::currentArchName()
 #else
     #error unknown arch
 #endif
+}
+
+bool MachOFile::isExclaveKitPlatform(Platform platform, Platform* basePlatform)
+{
+    switch ( platform ) {
+        case Platform::macOSExclaveKit:
+            if ( basePlatform )
+                *basePlatform = Platform::macOS;
+            return true;
+        case Platform::iOSExclaveKit:
+            if ( basePlatform )
+                *basePlatform = Platform::iOS;
+            return true;
+        case Platform::tvOSExclaveKit:
+            if ( basePlatform )
+                *basePlatform = Platform::tvOS;
+            return true;
+       default:
+            return false;
+    }
 }
 
 bool MachOFile::isSimulatorPlatform(Platform platform, Platform* basePlatform)
@@ -1138,6 +1159,14 @@ bool MachOFile::hasObjC() const
     return result;
 }
 
+bool MachOFile::hasConstObjCSection() const
+{
+    return hasSection("__DATA_CONST", "__objc_selrefs")
+        || hasSection("__DATA_CONST", "__objc_classrefs")
+        || hasSection("__DATA_CONST", "__objc_protorefs")
+        || hasSection("__DATA_CONST", "__objc_superrefs");
+}
+
 bool MachOFile::hasSection(const char* segName, const char* sectName) const
 {
     __block bool result = false;
@@ -1266,9 +1295,7 @@ void MachOFile::forDyldEnv(void (^callback)(const char* envVar, bool& stop)) con
             if ( (strncmp(keyEqualsValue, "DYLD_", 5) == 0) ) {
                 const char* equals = strchr(keyEqualsValue, '=');
                 if ( equals != NULL ) {
-                    if ( strncmp(&equals[-5], "_PATH", 5) == 0 ) {
-                        callback(keyEqualsValue, stop);
-                    }
+                    callback(keyEqualsValue, stop);
                 }
             }
         }
@@ -1652,7 +1679,9 @@ bool MachOFile::isSharedCacheEligiblePath(const char* dylibName) {
             || (strncmp(dylibName, "/System/Cryptexes/OS/usr/lib/", 29) == 0)
             || (strncmp(dylibName, "/System/Cryptexes/OS/System/Library/", 36) == 0)
             || (strncmp(dylibName, "/System/Cryptexes/OS/System/iOSSupport/usr/lib/", 47) == 0)
-            || (strncmp(dylibName, "/System/Cryptexes/OS/System/iOSSupport/System/Library/", 54) == 0));
+            || (strncmp(dylibName, "/System/Cryptexes/OS/System/iOSSupport/System/Library/", 54) == 0)
+            || (strncmp(dylibName, "/System/ExclaveKit/usr/lib/", 27) == 0)
+            || (strncmp(dylibName, "/System/ExclaveKit/System/Library/", 34) == 0));
 }
 
 static bool startsWith(const char* buffer, const char* valueToFind) {
@@ -1701,43 +1730,16 @@ static bool platformExcludesSharedCache_iOS(const char* installName) {
     return false;
 }
 
-// HACK: Remove this function.  Its only here until we can handle cache overflow
-static bool platformExcludesSharedCache_sim(const char* installName) {
-    if ( startsWith(installName, "/System/Library/PrivateFrameworks/iWorkImport.framework/") )
-        return true;
-    if ( startsWith(installName, "/System/Library/PrivateFrameworks/News") )
-        return true;
-    if ( strcmp(installName, "/System/Library/PrivateFrameworks/StocksUI.framework/StocksUI") == 0 )
-        return true;
-    if ( strcmp(installName, "/System/Library/PrivateFrameworks/NewsUI.framework/NewsUI") == 0 )
-        return true;
-    if ( strcmp(installName, "/System/Library/PrivateFrameworks/CompassUI.framework/CompassUI") == 0 )
-        return true;
-    if ( strcmp(installName, "/System/Library/PrivateFrameworks/WeatherUI.framework/WeatherUI") == 0 )
-        return true;
-    if ( strcmp(installName, "/System/Library/PrivateFrameworks/NewsUI2.framework/NewsUI2") == 0 )
-        return true;
-    if ( strcmp(installName, "/System/Library/PrivateFrameworks/MLCompilerOS.framework/MLCompilerOS") == 0 )
-        return true;
-    if ( strcmp(installName, "/System/Library/PrivateFrameworks/HomeKitDaemon.framework/HomeKitDaemon") == 0 )
-        return true;
-    if ( strcmp(installName, "/System/Library/PrivateFrameworks/HomeKitDaemonLegacy.framework/HomeKitDaemonLegacy") == 0 )
-        return true;
-    return false;
-}
-
 // Returns true if the current platform requires that this install name be excluded from the shared cache
 // Note that this overrides any exclusion from anywhere else.
 static bool platformExcludesSharedCache(Platform platform, const char* installName) {
-    if ( MachOFile::isSimulatorPlatform(platform) )
-        return platformExcludesSharedCache_sim(installName);
     if ( (platform == dyld3::Platform::macOS) || (platform == dyld3::Platform::iOSMac) )
         return platformExcludesSharedCache_macOS(installName);
     // Everything else is based on iOS so just use that value
     return platformExcludesSharedCache_iOS(installName);
 }
 
-bool MachOFile::canBePlacedInDyldCache(const char* path, void (^failureReason)(const char*)) const
+bool MachOFile::canBePlacedInDyldCache(const char* path, void (^failureReason)(const char* format, ...)) const
 {
     if ( !isSharedCacheEligiblePath(path) ) {
         // Dont spam the user with an error about paths when we know these are never eligible.
@@ -1828,18 +1830,19 @@ bool MachOFile::canBePlacedInDyldCache(const char* path, void (^failureReason)(c
     }
 
     // dylib can only depend on other dylibs in the shared cache
-    __block bool allDepPathsAreGood = true;
+    __block const char* badDep = nullptr;
     forEachDependentDylib(^(const char* loadPath, bool isWeak, bool isReExport, bool isUpward, uint32_t compatVersion, uint32_t curVersion, bool& stop) {
         // Skip weak links.  They are allowed to be missing
         if ( isWeak )
             return;
         if ( !isSharedCacheEligiblePath(loadPath) ) {
-            allDepPathsAreGood = false;
+            badDep = loadPath;
             stop = true;
         }
     });
-    if ( !allDepPathsAreGood ) {
-        failureReason("Depends on dylibs ineligable for dyld cache");
+    if ( badDep != nullptr ) {
+        failureReason("Depends on dylibs ineligible for dyld cache '%s'.  (cache dylibs must start /usr/lib or /System/Library or similar)",
+                      badDep);
         return false;
     }
 
@@ -2240,7 +2243,9 @@ bool MachOFile::canBePlacedInKernelCollection(const char* path, void (^failureRe
 
     return true;
 }
+#endif // BUILDING_APP_CACHE_UTIL
 
+#if BUILDING_APP_CACHE_UTIL || BUILDING_DYLDINFO
 bool MachOFile::usesClassicRelocationsInKernelCollection() const {
     // The xnu x86_64 static executable needs to do the i386->x86_64 transition
     // so will be emitted with classic relocations
@@ -2249,7 +2254,7 @@ bool MachOFile::usesClassicRelocationsInKernelCollection() const {
     }
     return false;
 }
-#endif
+#endif // BUILDING_APP_CACHE_UTIL || BUILDING_DYLDINFO
 
 #if BUILDING_CACHE_BUILDER || BUILDING_CACHE_BUILDER_UNIT_TESTS
 static bool platformExcludesPrebuiltClosure_macOS(const char* path) {
@@ -2499,6 +2504,12 @@ bool MachOFile::walkChain(Diagnostics& diag, ChainedFixupPointerOnDisk* chain, u
                         chainEnd = true;
                     else
                         chain = (ChainedFixupPointerOnDisk*)((uint8_t*)chain + chainContent.arm64e.rebase.next*stride);
+                    break;
+                case DYLD_CHAINED_PTR_ARM64E_SHARED_CACHE:
+                    if ( chainContent.cache64e.regular.next == 0 )
+                        chainEnd = true;
+                    else
+                        chain = (ChainedFixupPointerOnDisk*)((uint8_t*)chain + chainContent.cache64e.regular.next*stride);
                     break;
                 case DYLD_CHAINED_PTR_64:
                 case DYLD_CHAINED_PTR_64_OFFSET:
@@ -3061,7 +3072,7 @@ void MachOFile::analyzeSegmentsLayout(uint64_t& vmSpace, bool& hasZeroFill) cons
 
     // The aux KC may have __DATA first, in which case we always want to vm_copy to the right place
     bool hasOutOfOrderSegments = false;
-#if BUILDING_APP_CACHE_UTIL
+#if BUILDING_APP_CACHE_UTIL || BUILDING_DYLDINFO
     uint64_t textSegVMAddr = preferredLoadAddress();
     hasOutOfOrderSegments = textSegVMAddr != lowestVmAddr;
 #endif
@@ -3343,6 +3354,17 @@ MachOFile::PointerMetaData::PointerMetaData(const ChainedFixupPointerOnDisk* fix
             }
             else if ( fixupLoc->arm64e.bind.bind == 0 ) {
                 this->high8             = fixupLoc->arm64e.rebase.high8;
+            }
+            break;
+        case DYLD_CHAINED_PTR_ARM64E_SHARED_CACHE:
+            this->authenticated = fixupLoc->cache64e.auth.auth;
+            if ( this->authenticated ) {
+                this->key               = fixupLoc->cache64e.auth.keyIsData ? 2 : 0; // true -> DA (2), false -> IA (0)
+                this->usesAddrDiversity = fixupLoc->cache64e.auth.addrDiv;
+                this->diversity         = fixupLoc->cache64e.auth.diversity;
+            }
+            else {
+                this->high8 = fixupLoc->cache64e.regular.high8;
             }
             break;
         case DYLD_CHAINED_PTR_64:
@@ -4024,7 +4046,7 @@ bool MachOFile::validSegments(Diagnostics& diag, const char* path, size_t fileLe
                 }
                 else if ( sect->addr+sect->size > seg->vmaddr+seg->vmsize ) {
                     bool ignoreError = !enforceFormat(Malformed::sectionsAddrRangeWithinSegment);
-#if BUILDING_APP_CACHE_UTIL
+#if BUILDING_APP_CACHE_UTIL || BUILDING_DYLDINFO
                     if ( (seg->vmsize == 0) && !strcmp(seg->segname, "__CTF") )
                         ignoreError = true;
 #endif

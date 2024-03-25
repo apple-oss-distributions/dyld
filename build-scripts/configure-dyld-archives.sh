@@ -1,7 +1,6 @@
 if [ "${EXCLAVEKIT}" == 1 ]
 then
-    ls -1 ${SDKROOT}/System/ExclaveKit/usr/local/lib/dyld/libknrheap* > ${DERIVED_SOURCES_DIR}/archives.txt
-    ls -1 ${SDKROOT}/System/ExclaveKit/usr/local/lib/dyld/liblibc* >> ${DERIVED_SOURCES_DIR}/archives.txt
+    ls -1 ${SDKROOT}/System/ExclaveKit/usr/local/lib/dyld/liblibc* > ${DERIVED_SOURCES_DIR}/archives.txt
     if [ -f "${SDKROOT}/AppleInternal/DirtyDataFiles/dyld.dirty" ]
     then
         cp "${SDKROOT}/AppleInternal/DirtyDataFiles/dyld.dirty" "${DERIVED_SOURCES_DIR}/dyld.dirty"

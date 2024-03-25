@@ -127,7 +127,7 @@ Symbol NListSymbolTable::symbolFromNList(const char* symbolName, uint64_t n_valu
         case N_SECT: {
             if ( (n_type & N_EXT) == 0 ) {
                 if ( n_desc & N_ALT_ENTRY )
-                    return Symbol::makeAltEntry(symbolName, n_value - _preferredLoadAddress, n_sect, Symbol::Scope::translationUnit, dontDeadStrip, cold);
+                    return Symbol::makeAltEntry(symbolName, n_value - _preferredLoadAddress, n_sect, Symbol::Scope::translationUnit, dontDeadStrip, cold, (n_desc & N_WEAK_DEF) != 0);
                 else if ( n_type & N_PEXT ) {
                     if ( n_desc & N_WEAK_DEF )
                         return Symbol::makeWeakDefWasPrivateExtern(symbolName, n_value - _preferredLoadAddress, n_sect, dontDeadStrip, cold);
@@ -137,12 +137,16 @@ Symbol NListSymbolTable::symbolFromNList(const char* symbolName, uint64_t n_valu
                     return Symbol::makeRegularLocal(symbolName, n_value - _preferredLoadAddress, n_sect, dontDeadStrip, cold);
             }
             else if ( n_type & N_PEXT ) {
-                if ( n_desc & N_WEAK_DEF )
+                if ( n_desc & N_ALT_ENTRY )
+                    return Symbol::makeAltEntry(symbolName, n_value - _preferredLoadAddress, n_sect, Symbol::Scope::linkageUnit, dontDeadStrip, cold, (n_desc & N_WEAK_DEF) != 0);
+                else if ( n_desc & N_WEAK_DEF )
                     return Symbol::makeWeakDefHidden(symbolName, n_value - _preferredLoadAddress, n_sect, dontDeadStrip, cold);
-                else if ( n_desc & N_ALT_ENTRY )
-                    return Symbol::makeAltEntry(symbolName, n_value - _preferredLoadAddress, n_sect, Symbol::Scope::linkageUnit, dontDeadStrip, cold);
+
                 else
                     return Symbol::makeRegularHidden(symbolName, n_value - _preferredLoadAddress, n_sect, dontDeadStrip, cold);
+            }
+            else if ( n_desc & N_ALT_ENTRY ) {
+                return Symbol::makeAltEntry(symbolName, n_value - _preferredLoadAddress, n_sect, Symbol::Scope::global, dontDeadStrip, cold, (n_desc & N_WEAK_DEF) != 0);
             }
             else if ( (n_desc & (N_WEAK_DEF|N_WEAK_REF)) == (N_WEAK_DEF|N_WEAK_REF) ) {
                 return Symbol::makeWeakDefAutoHide(symbolName, n_value - _preferredLoadAddress, n_sect, dontDeadStrip, cold);
@@ -150,17 +154,12 @@ Symbol NListSymbolTable::symbolFromNList(const char* symbolName, uint64_t n_valu
             else if ( n_desc & N_WEAK_DEF ) {
                 return Symbol::makeWeakDefExport(symbolName, n_value - _preferredLoadAddress, n_sect, dontDeadStrip, cold);
             }
+            else if ( n_desc & N_SYMBOL_RESOLVER ) {
+                return Symbol::makeDynamicResolver(symbolName, n_sect, 0, n_value - _preferredLoadAddress);
+            }
             else {
-                if ( n_desc & N_ALT_ENTRY ) {
-                    return Symbol::makeAltEntry(symbolName, n_value - _preferredLoadAddress, n_sect, Symbol::Scope::global, dontDeadStrip, cold);
-                }
-                else if ( n_desc & N_SYMBOL_RESOLVER ) {
-                    return Symbol::makeDynamicResolver(symbolName, n_sect, 0, n_value - _preferredLoadAddress);
-                }
-                else {
-                    bool neverStrip = (n_desc & REFERENCED_DYNAMICALLY);
-                    return Symbol::makeRegularExport(symbolName, n_value - _preferredLoadAddress, n_sect, dontDeadStrip, cold, neverStrip);
-                }
+                bool neverStrip = (n_desc & REFERENCED_DYNAMICALLY);
+                return Symbol::makeRegularExport(symbolName, n_value - _preferredLoadAddress, n_sect, dontDeadStrip, cold, neverStrip);
             }
         }
     }
@@ -169,10 +168,21 @@ Symbol NListSymbolTable::symbolFromNList(const char* symbolName, uint64_t n_valu
 
 void NListSymbolTable::forEachExportedSymbol(void (^callback)(const Symbol& symbol, uint32_t symbolIndex, bool& stop)) const
 {
-    uint32_t globalsStartIndex = _localsCount;
-    forEachSymbol(globalsStartIndex, _globalsCount, ^(const char* symbolName, uint64_t n_value, uint8_t n_type, uint8_t n_sect, uint16_t n_desc, uint32_t symbolIndex, bool& stop) {
-        callback(symbolFromNList(symbolName, n_value, n_type, n_sect, n_desc), symbolIndex, stop);
-    });
+    if ( (_localsCount == 0) && (_globalsCount == 0) && (_undefsCount == 0) && (_nlistCount != 0) ) {
+        // if no LC_DYSYMTAB, need to scan whole table and selectively find global symbols
+        forEachSymbol(^(const char* symbolName, uint64_t n_value, uint8_t n_type, uint8_t n_sect, uint16_t n_desc, uint32_t symbolIndex, bool& stop) {
+            uint8_t type = n_type & N_TYPE;
+            if ( (n_type & N_EXT) && ((type == N_SECT) || (type == N_ABS) || (type == N_INDR)) && ((n_type & N_STAB) == 0))
+                callback(symbolFromNList(symbolName, n_value, n_type, n_sect, n_desc), symbolIndex, stop);
+        });
+    } else {
+        uint32_t globalsStartIndex = _localsCount;
+        forEachSymbol(globalsStartIndex, _globalsCount, ^(const char* symbolName, uint64_t n_value, uint8_t n_type, uint8_t n_sect, uint16_t n_desc, uint32_t symbolIndex, bool& stop) {
+            uint8_t type = n_type & N_TYPE;
+            if ( (n_type & N_EXT) && ((type == N_SECT) || (type == N_ABS) || (type == N_INDR)) && ((n_type & N_STAB) == 0))
+                callback(symbolFromNList(symbolName, n_value, n_type, n_sect, n_desc), symbolIndex, stop);
+        });
+    }
 }
 
 void NListSymbolTable::forEachDefinedSymbol(void (^callback)(const Symbol& symbol, uint32_t symbolIndex, bool& stop)) const
@@ -683,6 +693,27 @@ static uint8_t ntypeFromSymbol(const Symbol& symbol)
    }
 }
 
+static uint16_t weakDefDesc(const Symbol& symbol)
+{
+    uint16_t desc = 0;
+    if ( symbol.isWeakDef() ) {
+        switch ( symbol.scope() ) {
+            case Symbol::Scope::globalNeverStrip:
+            case Symbol::Scope::global:
+            case Symbol::Scope::linkageUnit:
+            case Symbol::Scope::wasLinkageUnit:
+                desc = N_WEAK_DEF;
+                break;
+            case Symbol::Scope::autoHide:
+                desc = N_WEAK_DEF | N_WEAK_REF;
+                break;
+            case Symbol::Scope::translationUnit:
+                break;
+        }
+    }
+    return desc;
+}
+
 struct nlist_64 NListSymbolTable::nlist64FromSymbol(const Symbol& symbol, uint32_t strx, uint32_t reexportStrx)
 {
     struct nlist_64 result;
@@ -717,22 +748,7 @@ struct nlist_64 NListSymbolTable::nlist64FromSymbol(const Symbol& symbol, uint32
         result.n_value     = absAddress;
     }
     else if ( symbol.isRegular(implOffset) || symbol.isThreadLocal(implOffset) ) {
-        uint16_t desc = 0;
-        if ( symbol.isWeakDef() ) {
-            switch ( symbol.scope() ) {
-                case Symbol::Scope::globalNeverStrip:
-                case Symbol::Scope::global:
-                case Symbol::Scope::linkageUnit:
-                case Symbol::Scope::wasLinkageUnit:
-                    desc = N_WEAK_DEF;
-                    break;
-                case Symbol::Scope::autoHide:
-                    desc = N_WEAK_DEF | N_WEAK_REF;
-                    break;
-                case Symbol::Scope::translationUnit:
-                    break;
-            }
-        }
+        uint16_t desc = weakDefDesc(symbol);
         if ( symbol.dontDeadStrip() )
             desc |= N_NO_DEAD_STRIP;
         if ( symbol.cold() )
@@ -746,7 +762,7 @@ struct nlist_64 NListSymbolTable::nlist64FromSymbol(const Symbol& symbol, uint32
         result.n_value     = _preferredLoadAddress + implOffset;
     }
     else if ( symbol.isAltEntry(implOffset) ) {
-        uint64_t desc = N_ALT_ENTRY;
+        uint64_t desc = N_ALT_ENTRY | weakDefDesc(symbol);
         if ( symbol.dontDeadStrip() )
             desc |= N_NO_DEAD_STRIP;
         result.n_un.n_strx = strx;
@@ -825,44 +841,14 @@ uint32_t NListStringPoolBuffer::add(CString cstr)
 
 const DebugNoteFileInfo* DebugNoteFileInfo::make(CString srcDir, CString srcName, CString objPath, uint32_t objModTime, uint8_t objSubType, CString libPath, CString originLibPath)
 {
-    const size_t srcDirOffset  = sizeof(DebugNoteFileInfo);
-    const size_t srcNameOffset = srcDirOffset  + srcDir.size() + 1;
-    const size_t objPathOffset = srcNameOffset + srcName.size() + 1;
-    size_t lastOffset   = objPathOffset + objPath.size() + 1;
-    const size_t libPathOffset = libPath.size() > 0 ? lastOffset : 0;
-    lastOffset = libPathOffset > 0 ? libPathOffset : lastOffset;
-    const size_t originLibPathOffset = originLibPath.size() > 0 ? lastOffset + libPath.size() + 1 : 0;
-    lastOffset = originLibPathOffset > 0 ? originLibPathOffset : lastOffset + libPath.size() + 1;
-    // Update finalOffset if there is dynamic library information
-    const size_t finalOffset  = originLibPathOffset > 0 ?  lastOffset + originLibPath.size() + 1 : lastOffset;
-    const size_t contentSize   = (finalOffset + 7) & (-8); // 8-byte align
-
-    DebugNoteFileInfo* result = (DebugNoteFileInfo*)calloc(contentSize, sizeof(uint8_t));
-    result->_size          = (uint32_t)contentSize;
-    result->_version       = 1;
-    result->_srcDirOffset  = srcDirOffset;
-    result->_srcDirSize    = (uint32_t)srcDir.size();
-    result->_srcNameOffset = (uint32_t)srcNameOffset;
-    result->_srcNameSize   = (uint32_t)srcName.size();
-    result->_objPathOffset = (uint32_t)objPathOffset;
-    result->_objPathSize   = (uint32_t)objPath.size();
+    DebugNoteFileInfo* result = (DebugNoteFileInfo*)calloc(sizeof(DebugNoteFileInfo), sizeof(uint8_t));
     result->_objModTime    = objModTime;
     result->_objSubType    = objSubType;
-    result->_libPathOffset = (uint32_t)libPathOffset;
-    result->_libPathSize   = (uint32_t)libPath.size();
-    result->_originLibPathOffset = (uint32_t)originLibPathOffset;
-    result->_originLibPathSize   = (uint32_t)originLibPath.size();
-
-    if ( srcDir.size() )
-        memcpy((char*)result + srcDirOffset,  srcDir.c_str(),  srcDir.size());
-    if ( srcName.size() )
-        memcpy((char*)result + srcNameOffset, srcName.c_str(), srcName.size());
-    if ( objPath.size() )
-        memcpy((char*)result + objPathOffset, objPath.c_str(), objPath.size());
-    if ( libPath.size() )
-        memcpy((char*)result + libPathOffset, libPath.c_str(), libPath.size());
-    if ( originLibPath.size() )
-        memcpy((char*)result + originLibPathOffset, originLibPath.c_str(), originLibPath.size());
+    result->_srcDir        = srcDir;
+    result->_srcName       = srcName;
+    result->_objPath       = objPath;
+    result->_libPath       = libPath;
+    result->_originLibPath = originLibPath;
 
     return result;
 }
@@ -874,9 +860,7 @@ Error DebugNoteFileInfo::valid(std::span<const uint8_t> buffer)
 
 const DebugNoteFileInfo* DebugNoteFileInfo::copy() const
 {
-    DebugNoteFileInfo* result = (DebugNoteFileInfo*)malloc(_size);
-    memcpy(result, this, _size);
-    return result;
+    return DebugNoteFileInfo::make(_srcDir, _srcName, _objPath, _objModTime, _objSubType, _libPath, _originLibPath);
 }
 bool DebugNoteFileInfo::shouldbeUpdated(CString libPath) const
 {
@@ -893,7 +877,6 @@ bool DebugNoteFileInfo::shouldbeUpdated(CString libPath) const
 __attribute__((used))
 void DebugNoteFileInfo::dump() const
 {
-    fprintf(stdout, "size:        %u\n", this->_size);
     fprintf(stdout, "scrDir:      %s\n", srcDir().c_str());
     fprintf(stdout, "scrName:     %s\n", srcName().c_str());
     fprintf(stdout, "objPath:     %s\n", objPath().c_str());

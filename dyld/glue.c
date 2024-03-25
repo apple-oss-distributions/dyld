@@ -229,17 +229,13 @@ void __guard_setup(const char* apple[])
   #endif
 #endif
 }
-#endif // !TARGET_OS_EXCLAVEKIT
-
-#if TARGET_OS_EXCLAVEKIT
-  uintptr_t __stack_chk_guard = 0x535441434B475244;
-#endif // TARGET_OS_EXCLAVEKIT
 
 extern void __stack_chk_fail(void);
 void __stack_chk_fail()
 {
     halt("stack buffer overrun", NULL);
 }
+#endif // !TARGET_OS_EXCLAVEKIT
 
 // _pthread_reap_thread calls fprintf(stderr).
 // We map fprint to _simple_vdprintf and ignore FILE* stream, so ok for it to be NULL
@@ -911,4 +907,14 @@ void _dyld_debugger_notification(int mode, unsigned long count, uint64_t machHea
 
 #endif
 
+// We need this for std::find (see <rdar://113594237>)
+extern wchar_t* wmemchr(const wchar_t *s, wchar_t c, size_t n);
+wchar_t* wmemchr(const wchar_t* str, wchar_t c, size_t n) {
+    for (size_t i = 0; i < n; i++) {
+        if (str[i] == c) {
+            return (wchar_t*)&str[i];
+        }
+    }
+    return NULL;
+}
 

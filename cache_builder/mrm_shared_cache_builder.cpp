@@ -413,8 +413,10 @@ static dyld3::json::Node parseObjcOptimizationsFile(Diagnostics& diags, const vo
 
 static cache_builder::CacheKind getCacheKind(const BuildOptions_v1* options)
 {
-    // Work out what kind of cache we are building.  macOS/driverKit are always development
-    if ( (options->platform == macOS) || (options->platform == driverKit) )
+    // Work out what kind of cache we are building.  macOS/driverKit/exclaveKit are always development
+    if (   (options->platform == macOS)
+        || (options->platform == driverKit)
+        || dyld3::MachOFile::isExclaveKitPlatform((dyld3::Platform)options->platform) )
         return cache_builder::CacheKind::development;
 
     // Sims are always development
@@ -501,11 +503,13 @@ static bool createBuilders(struct MRMSharedCacheBuilder* builder)
         if ( strcmp(builder->options->archs[i], "i386") == 0 )
             continue;
 
-        // Add a driverKit suffix.  Note we don't need to add .development suffixes any
+        // Add a driverKit/exclaveKit suffix.  Note we don't need to add .development suffixes any
         // more as the universal caches don't build customer and development seperately
         const char *loggingSuffix = "";
         if ( builder->options->platform == Platform::driverKit )
             loggingSuffix = ".driverKit";
+        if ( dyld3::MachOFile::isExclaveKitPlatform((dyld3::Platform)builder->options->platform) )
+            loggingSuffix = ".exclaveKit";
 
         std::string loggingPrefix = "";
         loggingPrefix += std::string(builder->options->deviceName);
@@ -522,6 +526,8 @@ static bool createBuilders(struct MRMSharedCacheBuilder* builder)
                 runtimePath = MACOSX_MRM_DYLD_SHARED_CACHE_DIR;
             else if ( builder->options->platform == Platform::driverKit )
                 runtimePath = DRIVERKIT_DYLD_SHARED_CACHE_DIR;
+            else if ( dyld3::MachOFile::isExclaveKitPlatform((dyld3::Platform)builder->options->platform) )
+                runtimePath = EXCLAVEKIT_DYLD_SHARED_CACHE_DIR;
             else
                 runtimePath = IPHONE_DYLD_SHARED_CACHE_DIR;
             runtimePath = runtimePath + "dyld_shared_cache_" + builder->options->archs[i];
@@ -864,6 +870,10 @@ static void createBuildResults(struct MRMSharedCacheBuilder* builder)
 
 static void calculateDylibsToDelete(struct MRMSharedCacheBuilder* builder)
 {
+    // Keep ExclaveKit binaries on disk, remove that exception later (rdar://112851136)
+    if ( dyld3::MachOFile::isExclaveKitPlatform((dyld3::Platform)builder->options->platform) )
+        return;
+
     // Add entries to tell us to remove all of the dylibs from disk which are in every cache.
     const size_t numCaches = builder->builders.size();
     for (const auto& dylibAndCount : builder->dylibsInCaches) {

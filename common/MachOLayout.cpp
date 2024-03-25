@@ -1379,8 +1379,8 @@ bool Fixups::forEachRebaseLocation_Relocations(Diagnostics& diag,
 static void sortRelocations(dyld3::Array<relocation_info>& relocs)
 {
     // The kernel linker has malloc, and old-style relocations are extremely common.  So use qsort
-#if BUILDING_APP_CACHE_UTIL
-    ::qsort(&relocs[0], relocs.count(), sizeof(relocation_info),
+#if BUILDING_APP_CACHE_UTIL || BUILDING_DYLDINFO
+    ::qsort(&relocs[0], (size_t)relocs.count(), sizeof(relocation_info),
             [](const void* l, const void* r) -> int {
                 if ( ((relocation_info*)l)->r_address < ((relocation_info*)r)->r_address )
                     return -1;
@@ -1388,10 +1388,10 @@ static void sortRelocations(dyld3::Array<relocation_info>& relocs)
                     return 1;
     });
 #else
-    uintptr_t count = relocs.count();
-    for (uintptr_t i=0; i < count-1; ++i) {
+    uint64_t count = relocs.count();
+    for (uint64_t i=0; i < count-1; ++i) {
         bool done = true;
-        for (uintptr_t j=0; j < count-i-1; ++j) {
+        for (uint64_t j=0; j < count-i-1; ++j) {
             if ( relocs[j].r_address > relocs[j+1].r_address ) {
                 relocation_info temp = relocs[j];
                 relocs[j]   = relocs[j+1];
@@ -1419,7 +1419,7 @@ bool Fixups::forEachRebase_Relocations(Diagnostics& diag, RebaseDetailHandler ha
     for (const relocation_info* reloc=relocsStart; (reloc < relocsEnd) && !stop; ++reloc) {
         if ( reloc->r_length != relocSize ) {
             bool shouldEmitError = true;
-#if BUILDING_APP_CACHE_UTIL
+#if BUILDING_APP_CACHE_UTIL || BUILDING_DYLDINFO
             if ( this->layout.mf->usesClassicRelocationsInKernelCollection() && (reloc->r_length == 2) && (relocSize == 3) )
                 shouldEmitError = false;
 #endif
@@ -1441,7 +1441,7 @@ bool Fixups::forEachRebase_Relocations(Diagnostics& diag, RebaseDetailHandler ha
             uint32_t segIndex  = 0;
             uint64_t segOffset = 0;
             uint64_t addr = 0;
-#if BUILDING_APP_CACHE_UTIL
+#if BUILDING_APP_CACHE_UTIL || BUILDING_DYLDINFO
             // xnu for x86_64 has __HIB mapped before __DATA, so offsets appear to be
             // negative
             if ( this->layout.mf->isStaticExecutable() || this->layout.mf->isFileSet() ) {
@@ -1515,7 +1515,7 @@ bool Fixups::forEachBind_Relocations(Diagnostics& diag, bool supportPrivateExter
     bool                            stop        = false;
     for (const relocation_info* reloc=relocsStart; (reloc < relocsEnd) && !stop; ++reloc) {
         bool isBranch = false;
-#if BUILDING_APP_CACHE_UTIL
+#if BUILDING_APP_CACHE_UTIL || BUILDING_DYLDINFO
         if ( this->layout.mf->isKextBundle() ) {
             // kext's may have other kinds of relocations, eg, branch relocs.  Skip them
             if ( this->layout.mf->isArch("x86_64") || this->layout.mf->isArch("x86_64h") ) {
@@ -1697,7 +1697,7 @@ void Fixups::forEachIndirectPointer(Diagnostics& diag, bool supportPrivateExtern
 uint64_t Fixups::localRelocBaseAddress() const
 {
     if ( this->layout.mf->isArch("x86_64") || this->layout.mf->isArch("x86_64h") ) {
-#if BUILDING_APP_CACHE_UTIL
+#if BUILDING_APP_CACHE_UTIL || BUILDING_DYLDINFO
         if ( this->layout.mf->isKextBundle() ) {
             // for kext bundles the reloc base address starts at __TEXT segment
             return this->layout.segments[0].vmAddr;
@@ -1719,7 +1719,7 @@ uint64_t Fixups::externalRelocBaseAddress() const
         return this->layout.mf->preferredLoadAddress();
     }
 
-#if BUILDING_APP_CACHE_UTIL
+#if BUILDING_APP_CACHE_UTIL || BUILDING_DYLDINFO
     if ( this->layout.mf->isKextBundle() ) {
         // for kext bundles the reloc base address starts at __TEXT segment
         return this->layout.mf->preferredLoadAddress();
@@ -2039,6 +2039,51 @@ const char* ChainedFixupPointerOnDisk::Kernel64::keyName() const
     return names[keyBits];
 }
 
+uint64_t ChainedFixupPointerOnDisk::Cache64e::high8() const
+{
+    assert(this->regular.auth == 0);
+    return ((uint64_t)(this->regular.high8) << 56);
+}
+
+const char* ChainedFixupPointerOnDisk::Cache64e::keyName() const
+{
+    assert(this->auth.auth == 1);
+    static const char* const names[] = {
+        "IA", "DA"
+    };
+    assert(this->auth.keyIsData < 2);
+    return names[this->auth.keyIsData];
+}
+
+uint64_t ChainedFixupPointerOnDisk::Cache64e::signPointer(uint64_t unsignedAddr, void* loc, bool addrDiv, uint16_t diversity, uint8_t keyIsData)
+{
+    // don't sign NULL
+    if ( unsignedAddr == 0 )
+        return 0;
+
+#if __has_feature(ptrauth_calls)
+    uint64_t extendedDiscriminator = diversity;
+    if ( addrDiv )
+        extendedDiscriminator = __builtin_ptrauth_blend_discriminator(loc, extendedDiscriminator);
+    switch ( keyIsData ) {
+        case 0: // IA
+            return (uintptr_t)__builtin_ptrauth_sign_unauthenticated((void*)unsignedAddr, 0, extendedDiscriminator);
+        case 1: // DA
+            return (uintptr_t)__builtin_ptrauth_sign_unauthenticated((void*)unsignedAddr, 2, extendedDiscriminator);
+    }
+    assert(0 && "invalid signing key");
+#else
+    assert(0 && "arm64e signing only arm64e");
+#endif
+}
+
+
+uint64_t ChainedFixupPointerOnDisk::Cache64e::signPointer(void* loc, uint64_t target) const
+{
+    assert(this->auth.auth == 1);
+    return signPointer(target, loc, auth.addrDiv, auth.diversity, auth.keyIsData);
+}
+
 bool ChainedFixupPointerOnDisk::isRebase(uint16_t pointerFormat, uint64_t preferedLoadAddress, uint64_t& targetRuntimeOffset) const
 {
     switch (pointerFormat) {
@@ -2148,6 +2193,7 @@ unsigned ChainedFixupPointerOnDisk::strideSize(uint16_t pointerFormat)
         case DYLD_CHAINED_PTR_ARM64E:
         case DYLD_CHAINED_PTR_ARM64E_USERLAND:
         case DYLD_CHAINED_PTR_ARM64E_USERLAND24:
+        case DYLD_CHAINED_PTR_ARM64E_SHARED_CACHE:
             return 8;
         case DYLD_CHAINED_PTR_ARM64E_KERNEL:
         case DYLD_CHAINED_PTR_ARM64E_FIRMWARE:

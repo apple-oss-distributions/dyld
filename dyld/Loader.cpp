@@ -132,11 +132,11 @@ const char* Loader::path() const
     assert(this->isPremapped);
     return ((PremappedLoader*)this)->path();
 #else
-#if SUPPORT_CREATING_PREBUILTLOADERS
+#if SUPPORT_PREBUILTLOADERS
     if ( this->isPrebuilt )
         return ((PrebuiltLoader*)this)->path();
     else
-#endif // SUPPORT_CREATING_PREBUILTLOADERS
+#endif // SUPPORT_PREBUILTLOADERS
         return ((JustInTimeLoader*)this)->path();
 #endif // SUPPORT_CREATING_PREMAPPEDLOADERS
 }
@@ -148,11 +148,11 @@ const MachOFile* Loader::mf(RuntimeState& state) const
     assert(this->isPremapped);
     return ((PremappedLoader*)this)->mf(state);
 #else
-#if SUPPORT_CREATING_PREBUILTLOADERS
+#if SUPPORT_PREBUILTLOADERS
     if ( this->isPrebuilt )
         return ((PrebuiltLoader*)this)->mf(state);
     else
-#endif // SUPPORT_CREATING_PREBUILTLOADERS
+#endif // SUPPORT_PREBUILTLOADERS
         return ((JustInTimeLoader*)this)->mf(state);
 #endif // SUPPORT_CREATING_PREMAPPEDLOADERS
 }
@@ -165,11 +165,11 @@ const MachOLoaded* Loader::loadAddress(RuntimeState& state) const
     assert(this->isPremapped);
     return ((PremappedLoader*)this)->loadAddress(state);
 #else
-#if SUPPORT_CREATING_PREBUILTLOADERS
+#if SUPPORT_PREBUILTLOADERS
     if ( this->isPrebuilt )
         return ((PrebuiltLoader*)this)->loadAddress(state);
     else
-#endif // SUPPORT_CREATING_PREBUILTLOADERS
+#endif // SUPPORT_PREBUILTLOADERS
         return ((JustInTimeLoader*)this)->loadAddress(state);
 #endif // SUPPORT_CREATING_PREMAPPEDLOADERS
 }
@@ -183,11 +183,11 @@ bool Loader::contains(RuntimeState& state, const void* addr, const void** segAdd
     assert(this->isPremapped);
     return ((PremappedLoader*)this)->contains(state, addr, segAddr, segSize, segPerms);
 #else
-#if SUPPORT_CREATING_PREBUILTLOADERS
+#if SUPPORT_PREBUILTLOADERS
     if ( this->isPrebuilt )
         return ((PrebuiltLoader*)this)->contains(state, addr, segAddr, segSize, segPerms);
     else
-#endif // SUPPORT_CREATING_PREBUILTLOADERS
+#endif // SUPPORT_PREBUILTLOADERS
         return ((JustInTimeLoader*)this)->contains(state, addr, segAddr, segSize, segPerms);
 #endif // SUPPORT_CREATING_PREMAPPEDLOADERS
 }
@@ -200,11 +200,11 @@ bool Loader::matchesPath(const char* path) const
     assert(this->isPremapped);
     return ((PremappedLoader*)this)->matchesPath(path);
 #else
-#if SUPPORT_CREATING_PREBUILTLOADERS
+#if SUPPORT_PREBUILTLOADERS
     if ( this->isPrebuilt )
         return ((PrebuiltLoader*)this)->matchesPath(path);
     else
-#endif // SUPPORT_CREATING_PREBUILTLOADERS
+#endif // SUPPORT_PREBUILTLOADERS
         return ((JustInTimeLoader*)this)->matchesPath(path);
 #endif // SUPPORT_CREATING_PREMAPPEDLOADERS
 }
@@ -213,11 +213,11 @@ bool Loader::matchesPath(const char* path) const
 FileID Loader::fileID(const RuntimeState& state) const
 {
     assert(this->magic == kMagic);
-#if SUPPORT_CREATING_PREBUILTLOADERS
+#if SUPPORT_PREBUILTLOADERS
     if ( this->isPrebuilt )
         return ((PrebuiltLoader*)this)->fileID(state);
     else
-#endif // SUPPORT_CREATING_PREBUILTLOADERS
+#endif // SUPPORT_PREBUILTLOADERS
         return ((JustInTimeLoader*)this)->fileID(state);
 }
 #endif // !SUPPORT_CREATING_PREMAPPEDLOADERS
@@ -229,28 +229,28 @@ uint32_t Loader::dependentCount() const
     assert(this->isPremapped);
     return ((PremappedLoader*)this)->dependentCount();
 #else
-#if SUPPORT_CREATING_PREBUILTLOADERS
+#if SUPPORT_PREBUILTLOADERS
     if ( this->isPrebuilt )
         return ((PrebuiltLoader*)this)->dependentCount();
     else
-#endif // SUPPORT_CREATING_PREBUILTLOADERS
+#endif // SUPPORT_PREBUILTLOADERS
         return ((JustInTimeLoader*)this)->dependentCount();
 #endif // SUPPORT_CREATING_PREMAPPEDLOADERS
 }
 
-Loader* Loader::dependent(const RuntimeState& state, uint32_t depIndex, DependentKind* kind) const
+Loader* Loader::dependent(const RuntimeState& state, uint32_t depIndex, DependentDylibAttributes* depAttr) const
 {
     assert(this->magic == kMagic);
 #if SUPPORT_CREATING_PREMAPPEDLOADERS
     assert(this->isPremapped);
-    return ((PremappedLoader*)this)->dependent(state, depIndex, kind);
+    return ((PremappedLoader*)this)->dependent(state, depIndex, depAttr);
 #else
-#if SUPPORT_CREATING_PREBUILTLOADERS
+#if SUPPORT_PREBUILTLOADERS
     if ( this->isPrebuilt )
-        return ((PrebuiltLoader*)this)->dependent(state, depIndex, kind);
+        return ((PrebuiltLoader*)this)->dependent(state, depIndex, depAttr);
     else
-#endif // SUPPORT_CREATING_PREBUILTLOADERS
-        return ((JustInTimeLoader*)this)->dependent(state, depIndex, kind);
+#endif // SUPPORT_PREBUILTLOADERS
+        return ((JustInTimeLoader*)this)->dependent(state, depIndex, depAttr);
 #endif // SUPPORT_CREATING_PREMAPPEDLOADERS
 }
 
@@ -261,11 +261,11 @@ void Loader::loadDependents(Diagnostics& diag, RuntimeState& state, const LoadOp
     assert(this->isPremapped);
     return ((PremappedLoader*)this)->loadDependents(diag, state, options);
 #else
-#if SUPPORT_CREATING_PREBUILTLOADERS
+#if SUPPORT_PREBUILTLOADERS
     if ( this->isPrebuilt )
         return ((PrebuiltLoader*)this)->loadDependents(diag, state, options);
     else
-#endif // SUPPORT_CREATING_PREBUILTLOADERS
+#endif // SUPPORT_PREBUILTLOADERS
         return ((JustInTimeLoader*)this)->loadDependents(diag, state, options);
 #endif // SUPPORT_CREATING_PREMAPPEDLOADERS
 }
@@ -277,11 +277,11 @@ bool Loader::getExportsTrie(uint64_t& runtimeOffset, uint32_t& size) const
     assert(this->isPremapped);
     return ((PremappedLoader*)this)->getExportsTrie(runtimeOffset, size);
 #else
-#if SUPPORT_CREATING_PREBUILTLOADERS
+#if SUPPORT_PREBUILTLOADERS
     if ( this->isPrebuilt )
         return ((PrebuiltLoader*)this)->getExportsTrie(runtimeOffset, size);
     else
-#endif // SUPPORT_CREATING_PREBUILTLOADERS
+#endif // SUPPORT_PREBUILTLOADERS
         return ((JustInTimeLoader*)this)->getExportsTrie(runtimeOffset, size);
 #endif // SUPPORT_CREATING_PREMAPPEDLOADERS
 }
@@ -293,11 +293,11 @@ bool Loader::hiddenFromFlat(bool forceGlobal) const
     assert(this->isPremapped);
     return ((PremappedLoader*)this)->hiddenFromFlat(forceGlobal);
 #else
-#if SUPPORT_CREATING_PREBUILTLOADERS
+#if SUPPORT_PREBUILTLOADERS
     if ( this->isPrebuilt )
         return ((PrebuiltLoader*)this)->hiddenFromFlat(forceGlobal);
     else
-#endif // SUPPORT_CREATING_PREBUILTLOADERS
+#endif // SUPPORT_PREBUILTLOADERS
         return ((JustInTimeLoader*)this)->hiddenFromFlat(forceGlobal);
 #endif // SUPPORT_CREATING_PREMAPPEDLOADERS
 }
@@ -306,22 +306,22 @@ bool Loader::hiddenFromFlat(bool forceGlobal) const
 bool Loader::representsCachedDylibIndex(uint16_t dylibIndex) const
 {
     assert(this->magic == kMagic);
-#if SUPPORT_CREATING_PREBUILTLOADERS
+#if SUPPORT_PREBUILTLOADERS
     if ( this->isPrebuilt )
         return ((PrebuiltLoader*)this)->representsCachedDylibIndex(dylibIndex);
     else
-#endif // SUPPORT_CREATING_PREBUILTLOADERS
+#endif // SUPPORT_PREBUILTLOADERS
         return ((JustInTimeLoader*)this)->representsCachedDylibIndex(dylibIndex);
 }
 
 bool Loader::overridesDylibInCache(const DylibPatch*& patchTable, uint16_t& cacheDylibOverriddenIndex) const
 {
     assert(this->magic == kMagic);
-#if SUPPORT_CREATING_PREBUILTLOADERS
+#if SUPPORT_PREBUILTLOADERS
     if ( this->isPrebuilt )
         return ((PrebuiltLoader*)this)->overridesDylibInCache(patchTable, cacheDylibOverriddenIndex);
     else
-#endif // SUPPORT_CREATING_PREBUILTLOADERS
+#endif // SUPPORT_PREBUILTLOADERS
         return ((JustInTimeLoader*)this)->overridesDylibInCache(patchTable, cacheDylibOverriddenIndex);
 }
 
@@ -335,11 +335,11 @@ void Loader::applyFixups(Diagnostics& diag, RuntimeState& state, DyldCacheDataCo
     assert(this->isPremapped);
     ((PremappedLoader*)this)->applyFixups(diag, state, dataConst, allowLazyBinds);
 #else
-#if SUPPORT_CREATING_PREBUILTLOADERS
+#if SUPPORT_PREBUILTLOADERS
     if ( this->isPrebuilt )
         ((PrebuiltLoader*)this)->applyFixups(diag, state, dataConst, allowLazyBinds);
     else
-#endif // SUPPORT_CREATING_PREBUILTLOADERS
+#endif // SUPPORT_PREBUILTLOADERS
         ((JustInTimeLoader*)this)->applyFixups(diag, state, dataConst, allowLazyBinds);
 #endif // SUPPORT_CREATING_PREMAPPEDLOADERS
 }
@@ -352,11 +352,11 @@ void Loader::withLayout(Diagnostics &diag, RuntimeState& state, void (^callback)
     assert(this->isPremapped);
     ((PremappedLoader*)this)->withLayout(diag, state, callback);
 #else
-#if SUPPORT_CREATING_PREBUILTLOADERS
+#if SUPPORT_PREBUILTLOADERS
     if ( this->isPrebuilt )
         return ((PrebuiltLoader*)this)->withLayout(diag, state, callback);
     else
-#endif // SUPPORT_CREATING_PREBUILTLOADERS
+#endif // SUPPORT_PREBUILTLOADERS
         return ((JustInTimeLoader*)this)->withLayout(diag, state, callback);
 #endif // SUPPORT_CREATING_PREMAPPEDLOADERS
 }
@@ -368,11 +368,11 @@ bool Loader::dyldDoesObjCFixups() const
     assert(this->isPremapped);
     return ((PremappedLoader*)this)->dyldDoesObjCFixups();
 #else
-#if SUPPORT_CREATING_PREBUILTLOADERS
+#if SUPPORT_PREBUILTLOADERS
     if ( this->isPrebuilt )
         return ((PrebuiltLoader*)this)->dyldDoesObjCFixups();
     else
-#endif // SUPPORT_CREATING_PREBUILTLOADERS
+#endif // SUPPORT_PREBUILTLOADERS
         return ((JustInTimeLoader*)this)->dyldDoesObjCFixups();
 #endif // SUPPORT_CREATING_PREMAPPEDLOADERS
 }
@@ -380,11 +380,11 @@ bool Loader::dyldDoesObjCFixups() const
 const SectionLocations* Loader::getSectionLocations() const
 {
     assert(this->magic == kMagic);
-#if SUPPORT_CREATING_PREBUILTLOADERS
+#if SUPPORT_PREBUILTLOADERS
     if ( this->isPrebuilt )
         return ((PrebuiltLoader*)this)->getSectionLocations();
     else
-#endif // SUPPORT_CREATING_PREBUILTLOADERS
+#endif // SUPPORT_PREBUILTLOADERS
         return ((JustInTimeLoader*)this)->getSectionLocations();
 }
 
@@ -392,11 +392,11 @@ const SectionLocations* Loader::getSectionLocations() const
 void Loader::unmap(RuntimeState& state, bool force) const
 {
     assert(this->magic == kMagic);
-#if SUPPORT_CREATING_PREBUILTLOADERS
+#if SUPPORT_PREBUILTLOADERS
     if ( this->isPrebuilt )
         return ((PrebuiltLoader*)this)->unmap(state, force);
     else
-#endif // SUPPORT_CREATING_PREBUILTLOADERS
+#endif // SUPPORT_PREBUILTLOADERS
         return ((JustInTimeLoader*)this)->unmap(state, force);
 }
 #endif
@@ -409,11 +409,11 @@ bool Loader::hasBeenFixedUp(RuntimeState& state) const
     assert(this->isPremapped);
     return ((PremappedLoader*)this)->hasBeenFixedUp(state);
 #else
-#if SUPPORT_CREATING_PREBUILTLOADERS
+#if SUPPORT_PREBUILTLOADERS
     if ( this->isPrebuilt )
         return ((PrebuiltLoader*)this)->hasBeenFixedUp(state);
     else
-#endif // SUPPORT_CREATING_PREBUILTLOADERS
+#endif // SUPPORT_PREBUILTLOADERS
         return ((JustInTimeLoader*)this)->hasBeenFixedUp(state);
 #endif // SUPPORT_CREATING_PREMAPPEDLOADERS
 }
@@ -426,11 +426,11 @@ bool Loader::beginInitializers(RuntimeState& state)
     assert(this->isPremapped);
     return ((PremappedLoader*)this)->beginInitializers(state);
 #else
-#if SUPPORT_CREATING_PREBUILTLOADERS
+#if SUPPORT_PREBUILTLOADERS
     if ( this->isPrebuilt )
         return ((PrebuiltLoader*)this)->beginInitializers(state);
     else
-#endif // SUPPORT_CREATING_PREBUILTLOADERS
+#endif // SUPPORT_PREBUILTLOADERS
         return ((JustInTimeLoader*)this)->beginInitializers(state);
 #endif // SUPPORT_CREATING_PREMAPPEDLOADERS
 }
@@ -443,15 +443,50 @@ void Loader::runInitializers(RuntimeState& state) const
     assert(this->isPremapped);
     ((PremappedLoader*)this)->runInitializers(state);
 #else
-#if SUPPORT_CREATING_PREBUILTLOADERS
+#if SUPPORT_PREBUILTLOADERS
     if ( this->isPrebuilt )
         ((PrebuiltLoader*)this)->runInitializers(state);
     else
-#endif // SUPPORT_CREATING_PREBUILTLOADERS
+#endif // SUPPORT_PREBUILTLOADERS
         ((JustInTimeLoader*)this)->runInitializers(state);
 #endif // SUPPORT_CREATING_PREMAPPEDLOADERS
 }
 #endif
+
+bool Loader::isDelayInit(RuntimeState& state) const
+{
+    assert(this->magic == kMagic);
+#if SUPPORT_CREATING_PREMAPPEDLOADERS
+    assert(this->isPremapped);
+    return false;
+#else
+  #if SUPPORT_PREBUILTLOADERS
+    if ( this->isPrebuilt )
+        return ((PrebuiltLoader*)this)->isDelayInit(state);
+    else
+  #endif // SUPPORT_PREBUILTLOADERS
+        return ((JustInTimeLoader*)this)->isDelayInit(state);
+#endif
+}
+
+void Loader::setDelayInit(RuntimeState& state, bool value) const
+{
+    assert(this->magic == kMagic);
+#if SUPPORT_CREATING_PREMAPPEDLOADERS
+    assert(this->isPremapped);
+    // do nothing, delay-init not supported in exclaveKit
+#else
+  #if SUPPORT_PREBUILTLOADERS
+    if ( this->isPrebuilt )
+        ((PrebuiltLoader*)this)->setDelayInit(state, value);
+    else
+  #endif // SUPPORT_PREBUILTLOADERS
+        ((JustInTimeLoader*)this)->setDelayInit(state, value);
+#endif
+}
+
+
+
 
 const PrebuiltLoader* Loader::LoaderRef::loader(const RuntimeState& state) const
 {
@@ -562,12 +597,12 @@ const Loader* Loader::makeDiskLoader(Diagnostics& diag, RuntimeState& state, con
         return nullptr;
 
     // don't use PrebuiltLoaders for simulator because the paths will be wrong (missing SIMROOT prefix)
-#if SUPPORT_CREATING_PREBUILTLOADERS
+#if SUPPORT_PREBUILTLOADERS
     // first check for a PrebuiltLoader
     const Loader* result = (Loader*)state.findPrebuiltLoader(path);
     if ( result != nullptr )
         return result;
-#endif // SUPPORT_CREATING_PREBUILTLOADERS
+#endif // SUPPORT_PREBUILTLOADERS
 
     // The dylibIndex for a catalyst root might be wrong. This can happen if the dylib is found via its macOS path (ie from a zippered dylib)
     // but getLoader() found the root in the /System/iOSSupport path
@@ -589,16 +624,16 @@ const Loader* Loader::makeDyldCacheLoader(Diagnostics& diag, RuntimeState& state
     if ( options.rtldNoLoad )
         return nullptr;
 
-#if SUPPORT_CREATING_PREBUILTLOADERS
+#if SUPPORT_PREBUILTLOADERS
     // first check for a PrebuiltLoader with compatible platform
     // rdar://76406035 (simulator cache paths need prefix)
     const PrebuiltLoader* result = state.findPrebuiltLoader(path);
     if ( result != nullptr ) {
-        if ( result->mf(state)->loadableIntoProcess(state.config.process.platform, path, state.config.security.internalInstall) ) {
+        if ( result->mf(state)->loadableIntoProcess(state.config.process.platform, path, state.config.security.isInternalOS) ) {
             return result;
         }
     }
-#endif // SUPPORT_CREATING_PREBUILTLOADERS
+#endif // SUPPORT_PREBUILTLOADERS
 
     // try building a JustInTime Loader
     return JustInTimeLoader::makeJustInTimeLoaderDyldCache(diag, state, path, options, dylibIndex, layout);
@@ -713,11 +748,13 @@ const Loader* Loader::getLoader(Diagnostics& diag, RuntimeState& state, const ch
 
     // for @rpath paths, first check if already loaded as rpath
     if ( loadPathIsRPath ) {
-        for ( const Loader* ldr : state.loaded ) {
-            if ( ldr->matchesPath(loadPath) ) {
-                if ( state.config.log.searching )
-                    state.log("  found: already-loaded-by-rpath: %s\n", ldr->path());
-                return ldr;
+        for (const Vector<ConstAuthLoader>* list : { &state.loaded, &state.delayLoaded } ) {
+            for ( const Loader* ldr : *list ) {
+                if ( ldr->matchesPath(loadPath) ) {
+                    if ( state.config.log.searching )
+                        state.log("  found: already-loaded-by-rpath: %s\n", ldr->path());
+                    return ldr;
+                }
             }
         }
     }
@@ -726,11 +763,13 @@ const Loader* Loader::getLoader(Diagnostics& diag, RuntimeState& state, const ch
         char implicitRPath[strlen(loadPath)+8];
         strlcpy(implicitRPath, "@rpath/", sizeof(implicitRPath));
         strlcat(implicitRPath, loadPath, sizeof(implicitRPath));
-        for ( const Loader* ldr : state.loaded ) {
-            if ( ldr->matchesPath(implicitRPath) ) {
-                if ( state.config.log.searching )
-                    state.log("  found: already-loaded-by-rpath: %s\n", ldr->path());
-                return ldr;
+        for (const Vector<ConstAuthLoader>* list : { &state.loaded, &state.delayLoaded } ) {
+            for ( const Loader* ldr : *list ) {
+                if ( ldr->matchesPath(implicitRPath) ) {
+                    if ( state.config.log.searching )
+                        state.log("  found: already-loaded-by-rpath: %s\n", ldr->path());
+                    return ldr;
+                }
             }
         }
     }
@@ -766,14 +805,16 @@ const Loader* Loader::getLoader(Diagnostics& diag, RuntimeState& state, const ch
                                 state.log("  possible path(%s): \"%s\"\n", ProcessConfig::PathOverrides::typeName(type), possiblePath);
 
                             // check if this path already in use by a Loader
-                            for ( const Loader* ldr : state.loaded ) {
-                                if ( ldr->matchesPath(possiblePath) ) {
-                                    result = ldr;
-                                    stop   = true;
-                                    diag.clearError(); // found dylib, so clear any errors from previous paths tried
-                                    if ( state.config.log.searching )
-                                        state.log("  found: already-loaded-by-path: \"%s\"\n", possiblePath);
-                                    return;
+                            for (const Vector<ConstAuthLoader>* list : { &state.loaded, &state.delayLoaded } ) {
+                                for ( const Loader* ldr : *list ) {
+                                    if ( ldr->matchesPath(possiblePath) ) {
+                                        result = ldr;
+                                        stop   = true;
+                                        diag.clearError(); // found dylib, so clear any errors from previous paths tried
+                                        if ( state.config.log.searching )
+                                            state.log("  found: already-loaded-by-path: \"%s\"\n", possiblePath);
+                                        return;
+                                    }
                                 }
                             }
 
@@ -790,14 +831,16 @@ const Loader* Loader::getLoader(Diagnostics& diag, RuntimeState& state, const ch
                             // check dyld cache trie to see if this is an alias to a cached dylib
                             uint32_t possibleCacheIndex;
                             if ( state.config.dyldCache.indexOfPath(possiblePath, possibleCacheIndex) ) {
-                                for ( const Loader* ldr : state.loaded ) {
-                                    if ( ldr->representsCachedDylibIndex(possibleCacheIndex) ) {
-                                        result = ldr;
-                                        stop   = true;
-                                        diag.clearError(); // found dylib, so clear any errors from previous paths tried
-                                        if ( state.config.log.searching )
-                                            state.log("  found: already-loaded-by-dylib-index: \"%s\" -> %s\n", possiblePath, ldr->path());
-                                        return;
+                                for (const Vector<ConstAuthLoader>* list : { &state.loaded, &state.delayLoaded } ) {
+                                    for ( const Loader* ldr : *list ) {
+                                        if ( ldr->representsCachedDylibIndex(possibleCacheIndex) ) {
+                                            result = ldr;
+                                            stop   = true;
+                                            diag.clearError(); // found dylib, so clear any errors from previous paths tried
+                                            if ( state.config.log.searching )
+                                                state.log("  found: already-loaded-by-dylib-index: \"%s\" -> %s\n", possiblePath, ldr->path());
+                                            return;
+                                        }
                                     }
                                 }
                             }
@@ -811,13 +854,15 @@ const Loader* Loader::getLoader(Diagnostics& diag, RuntimeState& state, const ch
                             if (!state.pseudoDylibs.empty()) {
                                 // FIXME: Should all of this be in its own function?
                                 if ( state.config.log.searching )
-                                    state.log("searching %lu pseudo-dylibs:\n", state.pseudoDylibs.size());
+                                    state.log("searching %llu pseudo-dylibs:\n", state.pseudoDylibs.size());
                                 for (auto &pd : state.pseudoDylibs) {
-                                    if (strcmp(pd->getIdentifier(), possiblePath) == 0) {
+                                    if (auto *canonicalPath = pd->loadableAtPath(possiblePath)) {
                                         if ( state.config.log.searching )
                                             state.log("  found: pseduo-dylib: \"%s\"\n", possiblePath);
                                         Diagnostics possiblePathDiag;
-                                        result = makePseudoDylibLoader(possiblePathDiag, state, possiblePath, options, &*pd);
+                                        result = makePseudoDylibLoader(possiblePathDiag, state, canonicalPath, options, &*pd);
+                                        if (canonicalPath != possiblePath)
+                                          pd->disposeString(canonicalPath);
                                         if ( possiblePathDiag.hasError() ) {
                                           // Report error if pseudo-dylib failed to load.
                                           if ( diag.noError() )
@@ -836,9 +881,8 @@ const Loader* Loader::getLoader(Diagnostics& diag, RuntimeState& state, const ch
                                     }
                                 }
                                 if ( state.config.log.searching && !result)
-                                    state.log("no pseudo-dylibs matched\n");
-                            } else if ( state.config.log.searching )
-                                state.log("no pseudo-dylibs to search\n");
+                                    state.log("   no pseudo-dylibs matched\n");
+                            }
 
                             // see if this path is on disk or in dyld cache
                             int    possiblePathOnDiskErrNo    = 0;
@@ -872,15 +916,17 @@ const Loader* Loader::getLoader(Diagnostics& diag, RuntimeState& state, const ch
 
                             // see if this possible path was already loaded via a symlink or hardlink by checking inode
                             if ( possiblePathHasFileOnDisk && possiblePathFileID.valid() ) {
-                                for ( const Loader* ldr : state.loaded ) {
-                                    FileID ldrFileID = ldr->fileID(state);
-                                    if ( ldrFileID.valid() && (possiblePathFileID == ldrFileID) ) {
-                                        result = ldr;
-                                        stop   = true;
-                                        diag.clearError(); // found dylib, so clear any errors from previous paths tried
-                                        if ( state.config.log.searching )
-                                            state.log("  found: already-loaded-by-inode-mtime: \"%s\"\n", ldr->path());
-                                        return;
+                                for (const Vector<ConstAuthLoader>* list : { &state.loaded, &state.delayLoaded } ) {
+                                    for ( const Loader* ldr : *list ) {
+                                        FileID ldrFileID = ldr->fileID(state);
+                                        if ( ldrFileID.valid() && (possiblePathFileID == ldrFileID) ) {
+                                            result = ldr;
+                                            stop   = true;
+                                            diag.clearError(); // found dylib, so clear any errors from previous paths tried
+                                            if ( state.config.log.searching )
+                                                state.log("  found: already-loaded-by-inode-mtime: \"%s\"\n", ldr->path());
+                                            return;
+                                        }
                                     }
                                 }
                             }
@@ -986,13 +1032,15 @@ const Loader* Loader::getLoader(Diagnostics& diag, RuntimeState& state, const ch
         if ( !state.config.security.allowEnvVarsPath && loadPathIsFileRelativePath ) {
             // don't realpath() relative paths in hardened programs
             // but do check if path matches install name of something already loaded
-            for ( const Loader* ldr : state.loaded ) {
-                if ( ldr->matchesPath(loadPath) ) {
-                    if ( state.config.log.searching )
-                        state.log("  found existing image by install name: \"%s\"\n", ldr->path());
-                    result = ldr;
-                    diag.clearError();
-                    break;
+            for (const Vector<ConstAuthLoader>* list : { &state.loaded, &state.delayLoaded } ) {
+                for ( const Loader* ldr : *list ) {
+                    if ( ldr->matchesPath(loadPath) ) {
+                        if ( state.config.log.searching )
+                            state.log("  found existing image by install name: \"%s\"\n", ldr->path());
+                        result = ldr;
+                        diag.clearError();
+                        break;
+                    }
                 }
             }
         }
@@ -1890,7 +1938,7 @@ int setUpPageInLinkingRegions(RuntimeState& state, const Loader* ldr, uintptr_t 
     }
     uint32_t pointerSize        = (pointer_format == DYLD_CHAINED_PTR_32) ? 4 : 8;
     uint32_t bindsOffset        = (sizeof(mwl_info_hdr) + chainInfoSize + 7) & (-8); // 8-byte align
-    size_t   blobAllocationSize = bindsOffset + pointerSize*bindTargets.count();
+    size_t   blobAllocationSize = (size_t)(bindsOffset + pointerSize*bindTargets.count());
     uint8_t buffer[blobAllocationSize];
     bzero(buffer,blobAllocationSize);
     mwl_info_hdr* blob = (mwl_info_hdr*)buffer;
@@ -2177,9 +2225,22 @@ void Loader::runInitializersBottomUp(RuntimeState& state, Array<const Loader*>& 
     // make sure everything below this image is initialized before running my initializers
     const uint32_t depCount = this->dependentCount();
     for ( uint32_t i = 0; i < depCount; ++i ) {
-        DependentKind childKind;
-        if ( Loader* child = this->dependent(state, i, &childKind) ) {
-            if ( childKind == DependentKind::upward ) {
+        DependentDylibAttributes childAttrs;
+        if ( Loader* child = this->dependent(state, i, &childAttrs) ) {
+            if ( childAttrs.delayInit ) {
+                // Delayed-init images are loaded and bound (which is free for dyld shared cache dylibs).
+                // They are exposed to lldb and crash reporter, but are placed in the state.delayLoaded list.
+                // ObjC runtime is not told about them (because they are not in state.loaded) and initializers
+                // in them are not run, because of this code here.
+                // The way clients "activate" a delayed-init dylib on first-use, is to call dlopen()
+                // on the image.  That will cause this method to be called on the image and its
+                // initialzers will be run (since only dependencies are potentially skipped, the
+                // top level dlopen()ed dylib is not skipped).
+                // Note: A dylib is only delay-inited if all paths to it are delay-init.
+                // If there are any regular links against the dylib, those links will traverse the graph
+                // and keep the image in state.loaded and cause initializers to run here.
+            }
+            else if ( childAttrs.upward ) {
                 // add upwards to list to process later
                 if ( !danglingUpwards.contains(child) )
                     danglingUpwards.push_back(child);
@@ -2204,7 +2265,7 @@ void Loader::runInitializersBottomUpPlusUpwardLinks(RuntimeState& state) const
         // recursively run all initializers
         STACK_ALLOC_ARRAY(const Loader*, danglingUpwards, state.loaded.size());
         this->runInitializersBottomUp(state, danglingUpwards);
-        
+
         //state.log("runInitializersBottomUpPlusUpwardLinks(%s), found %d dangling upwards\n", this->path(), danglingUpwards.count());
 
         // go back over all images that were upward linked, and recheck they were initialized (might be danglers)
@@ -2292,7 +2353,7 @@ void Loader::makeSegmentsReadOnly(RuntimeState& state) const
             size_t         size  = (size_t)segInfo.vmSize;
             state.config.syscall.mprotect((void*)start, size, PROT_READ);
             if ( state.config.log.segments )
-                state.log("mprotect 0x%012lX->0x%012lX to read-only\n", (long)start, (long)start + size);
+                state.log("mprotect 0x%012lX->0x%012lX to read-only (%s)\n", (long)start, (long)start + size, this->leafName());
     #endif
         }
     });
@@ -2312,7 +2373,7 @@ void Loader::makeSegmentsReadWrite(RuntimeState& state) const
             size_t         size  = (size_t)segInfo.vmSize;
             state.config.syscall.mprotect((void*)start, size, PROT_READ | PROT_WRITE);
             if ( state.config.log.segments )
-                state.log("mprotect 0x%012lX->0x%012lX to read-write\n", (long)start, (long)start + size);
+                state.log("mprotect 0x%012lX->0x%012lX to read-write (%s)\n", (long)start, (long)start + size, this->leafName());
     #endif
         }
     });
@@ -2380,7 +2441,7 @@ Loader::ResolvedSymbol Loader::resolveSymbol(Diagnostics& diag, RuntimeState& st
                 // flat lookup can look in self, even if hidden
                 if ( ldr->hiddenFromFlat() && (ldr != this) )
                     continue;
-                if ( ldr->hasExportedSymbol(diag, state, symbolName, Loader::shallow, &result) ) {
+                if ( ldr->hasExportedSymbol(diag, state, symbolName, Loader::shallow, Loader::skipResolver, &result) ) {
                     found = true;
                     return;
                 }
@@ -2427,7 +2488,7 @@ Loader::ResolvedSymbol Loader::resolveSymbol(Diagnostics& diag, RuntimeState& st
             for ( const Loader* ldr : state.loaded ) {
                 ResolvedSymbol libcppResult;
                 if ( ldr->mf(state)->hasWeakDefs() && (strncmp(ldr->path(), "/usr/lib/libc++.", 16) == 0) ) {
-                    if ( ldr->hasExportedSymbol(diag, state, symbolName, Loader::shallow, &libcppResult) ) {
+                    if ( ldr->hasExportedSymbol(diag, state, symbolName, Loader::shallow, Loader::skipResolver, &libcppResult) ) {
                         if ( verboseWeak )
                             state.log("  using %s from libc++.dylib\n", symbolName);
                         return libcppResult;
@@ -2437,7 +2498,7 @@ Loader::ResolvedSymbol Loader::resolveSymbol(Diagnostics& diag, RuntimeState& st
 
             // if not found, try looking in the images itself, most custom weak-def symbols have a copy in the image itself
             ResolvedSymbol selfResult;
-            if ( this->hasExportedSymbol(diag, state, symbolName, Loader::shallow, &selfResult) ) {
+            if ( this->hasExportedSymbol(diag, state, symbolName, Loader::shallow, Loader::skipResolver, &selfResult) ) {
                 if ( verboseWeak )
                     state.log("  using %s from self %s\n", symbolName, this->path());
                 return selfResult;
@@ -2446,11 +2507,11 @@ Loader::ResolvedSymbol Loader::resolveSymbol(Diagnostics& diag, RuntimeState& st
             // if this image directly links with something that also defines this weak-def, use that because we know it will be loaded
             const uint32_t depCount = this->dependentCount();
             for ( uint32_t i = 0; i < depCount; ++i ) {
-                Loader::DependentKind depKind;
-                if ( Loader* depLoader = this->dependent(state, i, &depKind) ) {
-                    if ( depKind != Loader::DependentKind::upward ) {
+                Loader::DependentDylibAttributes depAttrs;
+                if ( Loader* depLoader = this->dependent(state, i, &depAttrs) ) {
+                    if ( !depAttrs.upward ) {
                         ResolvedSymbol depResult;
-                        if ( depLoader->hasExportedSymbol(diag, state, symbolName, Loader::staticLink, &depResult) ) {
+                        if ( depLoader->hasExportedSymbol(diag, state, symbolName, Loader::staticLink, Loader::skipResolver, &depResult) ) {
                             if ( verboseWeak )
                                 state.log("  using %s from dependent %s\n", symbolName, depLoader->path());
                             return depResult;
@@ -2506,7 +2567,7 @@ Loader::ResolvedSymbol Loader::resolveSymbol(Diagnostics& diag, RuntimeState& st
                     // weak coalescing ignores hidden images
                     if ( ldr->hiddenFromFlat() )
                         continue;
-                    if ( ldr->hasExportedSymbol(diag, state, symbolName, Loader::shallow, &thisResult) ) {
+                    if ( ldr->hasExportedSymbol(diag, state, symbolName, Loader::shallow, Loader::skipResolver, &thisResult) ) {
                         if ( weakBindOpcodeClient && !thisResult.isWeakDef && ldr->dylibInDyldCache ) {
                             // rdar://75956202 ignore non-weak symbols in shared cache when opcode based binary is looking for symbols to coalesce
                             continue;
@@ -2536,7 +2597,7 @@ Loader::ResolvedSymbol Loader::resolveSymbol(Diagnostics& diag, RuntimeState& st
                 if ( verboseWeak )
                         state.log("  did not find unhidden %s, trying self (%s)\n", symbolName, this->leafName());
                 ResolvedSymbol thisResult;
-                if ( this->hasExportedSymbol(diag, state, symbolName, Loader::shallow, &thisResult) ) {
+                if ( this->hasExportedSymbol(diag, state, symbolName, Loader::shallow, Loader::skipResolver, &thisResult) ) {
                     foundFirst = true;
                     result     = thisResult;
                 }
@@ -2598,7 +2659,7 @@ Loader::ResolvedSymbol Loader::resolveSymbol(Diagnostics& diag, RuntimeState& st
     }
     if ( result.targetLoader != nullptr ) {
         STACK_ALLOC_ARRAY(const Loader*, alreadySearched, state.loaded.size());
-        if ( result.targetLoader->hasExportedSymbol(diag, state, symbolName, Loader::staticLink, &result, &alreadySearched) ) {
+        if ( result.targetLoader->hasExportedSymbol(diag, state, symbolName, Loader::staticLink, Loader::skipResolver, &result, &alreadySearched) ) {
             return result;
         }
     }
@@ -2665,7 +2726,8 @@ void Loader::tooNewErrorAddendum(Diagnostics& diag, RuntimeState& state) const
     });
 }
 
-bool Loader::hasExportedSymbol(Diagnostics& diag, RuntimeState& state, const char* symbolName, ExportedSymbolMode mode, ResolvedSymbol* result, dyld3::Array<const Loader*>* alreadySearched) const
+bool Loader::hasExportedSymbol(Diagnostics& diag, RuntimeState& state, const char* symbolName, ExportedSymbolMode mode, ResolverMode resolverMode,
+                               ResolvedSymbol* result, dyld3::Array<const Loader*>* alreadySearched) const
 {
     // don't search twice
     if ( alreadySearched != nullptr ) {
@@ -2751,9 +2813,9 @@ bool Loader::hasExportedSymbol(Diagnostics& diag, RuntimeState& state, const cha
                     diag.error("re-export ordinal %lld in %s out of range for %s", ordinal, this->path(), symbolName);
                     return false;
                 }
-                uint32_t      depIndex = (uint32_t)(ordinal - 1);
-                DependentKind depKind;
-                if ( Loader* depLoader = this->dependent(state, depIndex, &depKind) ) {
+                uint32_t                 depIndex = (uint32_t)(ordinal - 1);
+                DependentDylibAttributes depAttrs;
+                if ( Loader* depLoader = this->dependent(state, depIndex, &depAttrs) ) {
                     // <rdar://91326465> Explicitly promote to a ::staticLink
                     // resolution when looking for a reexported symbol in ::shallow mode.
                     // The symbol might be located in one of the reexported libraries
@@ -2767,19 +2829,36 @@ bool Loader::hasExportedSymbol(Diagnostics& diag, RuntimeState& state, const cha
                         // alreadySearched may include loaders we have searched before for the old name, but not the new one,
                         // and we want to check them again
                         STACK_ALLOC_ARRAY(const Loader*, nameChangedAlreadySearched, state.loaded.size());
-                        return depLoader->hasExportedSymbol(diag, state, importedName, mode, result, &nameChangedAlreadySearched);
+                        return depLoader->hasExportedSymbol(diag, state, importedName, mode, resolverMode, result, &nameChangedAlreadySearched);
                     }
-                    return depLoader->hasExportedSymbol(diag, state, importedName, mode, result, alreadySearched);
+                    return depLoader->hasExportedSymbol(diag, state, importedName, mode, resolverMode, result, alreadySearched);
                 }
                 return false; // re-exported symbol from weak-linked dependent which is missing
             }
             else {
                 if ( diag.hasError() )
                     return false;
-                bool isAbsoluteSymbol       = ((flags & EXPORT_SYMBOL_FLAGS_KIND_MASK) == EXPORT_SYMBOL_FLAGS_KIND_ABSOLUTE);
+                bool isAbsoluteSymbol           = ((flags & EXPORT_SYMBOL_FLAGS_KIND_MASK) == EXPORT_SYMBOL_FLAGS_KIND_ABSOLUTE);
+                uintptr_t targetRuntimeOffset   = (uintptr_t)MachOLoaded::read_uleb128(diag, p, trieEnd);
+
+#if BUILDING_DYLD
+                bool isResolver = (flags & EXPORT_SYMBOL_FLAGS_STUB_AND_RESOLVER);
+                if ( isResolver && (resolverMode == runResolver) ) {
+                    uintptr_t resolverFuncRuntimeOffset = (uintptr_t)MachOLoaded::read_uleb128(diag, p, trieEnd);
+                    const uint8_t* dylibLoadAddress = (const uint8_t*)this->loadAddress(state);
+                    typedef void* (*ResolverFunc)(void);
+                    ResolverFunc resolver = (ResolverFunc)(dylibLoadAddress + resolverFuncRuntimeOffset);
+#if __has_feature(ptrauth_calls)
+                    resolver = __builtin_ptrauth_sign_unauthenticated(resolver, ptrauth_key_asia, 0);
+#endif
+                    const void* resolverResult = (*resolver)();
+                    targetRuntimeOffset = (uintptr_t)resolverResult - (uintptr_t)dylibLoadAddress;
+                }
+#endif
+
                 result->targetLoader        = this;
                 result->targetSymbolName    = symbolName;
-                result->targetRuntimeOffset = (uintptr_t)MachOLoaded::read_uleb128(diag, p, trieEnd);
+                result->targetRuntimeOffset = targetRuntimeOffset;
                 result->kind                = isAbsoluteSymbol ? ResolvedSymbol::Kind::bindAbsolute : ResolvedSymbol::Kind::bindToImage;
                 result->isCode              = this->mf(state)->inCodeSection((uint32_t)(result->targetRuntimeOffset));
                 result->isWeakDef           = (flags & EXPORT_SYMBOL_FLAGS_WEAK_DEFINITION);
@@ -2823,7 +2902,7 @@ bool Loader::hasExportedSymbol(Diagnostics& diag, RuntimeState& state, const cha
             _dyld_pseudodylib_symbol_flags flags[1] = { DYLD_PSEUDODYLIB_SYMBOL_FLAGS_NONE };
             if (char *errMsg = pd->lookupSymbols(symbolNames, addrs, flags)) {
                 diag.error("pseudo-dylib lookup error: %s", errMsg);
-                pd->disposeErrorMessage(errMsg);
+                pd->disposeString(errMsg);
                 return false;
             }
             if ( flags[0] & DYLD_PSEUDODYLIB_SYMBOL_FLAGS_FOUND ) {
@@ -2843,11 +2922,11 @@ bool Loader::hasExportedSymbol(Diagnostics& diag, RuntimeState& state, const cha
         // Search re-exported dylibs
         const uint32_t depCount = this->dependentCount();
         for ( uint32_t i = 0; i < depCount; ++i ) {
-            Loader::DependentKind depKind;
-            if ( Loader* depLoader = this->dependent(state, i, &depKind) ) {
+            Loader::DependentDylibAttributes depAttrs;
+            if ( Loader* depLoader = this->dependent(state, i, &depAttrs) ) {
                 //state.log("dep #%d of %p is %d %p (%s %s)\n", i, this, (int)depKind, depLoader, this->path(), depLoader->path());
-                if ( (depKind == Loader::DependentKind::reexport) || (searchNonReExports && (depKind != Loader::DependentKind::upward)) ) {
-                    if ( depLoader->hasExportedSymbol(diag, state, symbolName, depsMode, result, alreadySearched) )
+                if ( depAttrs.reExport || (searchNonReExports && !depAttrs.upward) ) {
+                    if ( depLoader->hasExportedSymbol(diag, state, symbolName, depsMode, resolverMode, result, alreadySearched) )
                         return true;
                 }
             }

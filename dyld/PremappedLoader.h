@@ -52,7 +52,6 @@ public:
     bool                        beginInitializers(RuntimeState&);
 
 
-
     static Loader*      makePremappedLoader(Diagnostics& diag, RuntimeState& state, const char* path, const LoadOptions& options, const mach_o::Layout* layout);
     static Loader*      makeLaunchLoader(Diagnostics& diag, RuntimeState& state, const MachOAnalyzer* mainExec, const char* mainExecPath, const mach_o::Layout* layout);
 

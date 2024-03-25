@@ -493,8 +493,14 @@ void SharedCacheBuilder::categorizeInputs()
 
     for ( InputFile& inputFile : this->allInputFiles ) {
         if ( inputFile.mf->isDylib() || inputFile.mf->isDyld() ) {
-            auto failureHandler = ^(const char* reason) {
-                inputFile.setError(Error("%s", reason));
+            auto failureHandler = ^(const char* format, ...) __attribute__((format(printf, 1, 2))) {
+                char*   output_string;
+                va_list list;
+                va_start(list, format);
+                vasprintf(&output_string, format, list);
+                va_end(list);
+                inputFile.setError(Error("%s", (const char*)output_string));
+                free(output_string);
             };
 
             std::string_view installName = inputFile.mf->installName();
@@ -2310,7 +2316,7 @@ void SharedCacheBuilder::estimateCacheLoadersSize()
             size += cacheDylib.inputFile->path.size() + 1;
             size = alignTo(size, alignof(dyld4::Loader::LoaderRef));
             size += sizeof(dyld4::Loader::LoaderRef) * cacheDylib.dependents.size();
-            size += sizeof(Loader::DependentKind) * cacheDylib.dependents.size();
+            size += sizeof(Loader::DependentDylibAttributes) * cacheDylib.dependents.size();
             size += sizeof(Loader::FileValidationInfo);
             size += sizeof(Loader::Region) * cacheDylib.segments.size();
 
@@ -2425,16 +2431,7 @@ void SharedCacheBuilder::setupStubOptimizer()
 void SharedCacheBuilder::computeSubCaches()
 {
     Timer::Scope timedScope(this->config, "computeSubCaches time");
-
-    // We have 3 different kinds of caches.
-    // - regular: put everything in a single file
-    // - large: A file is (TEXT, DATA, LINKEDIT), and we might have > 1 file
-    // - split: A file is TEXT/DATA/LINKEDIT, and we've have 1 or more TEXT, and exactly 1 DATA and LINKEDIT
-    if ( config.layout.large.has_value() ) {
-        computeLargeSubCache();
-    } else {
-        computeRegularSubCache();
-    }
+    computeLargeSubCache();
 }
 
 // ObjC/Swift optimizations produce arrays, hash tables, string sections, etc.
@@ -2524,30 +2521,6 @@ void SharedCacheBuilder::addFinalChunksToSubCache(SubCache& subCache)
 
     // Finalize the SubCache, by removing any unused regions
     subCache.removeEmptyRegions();
-}
-
-void SharedCacheBuilder::computeRegularSubCache()
-{
-    // Put everything into a single file.
-    SubCache subCache = SubCache::makeMainCache(this->options, true);
-
-    // Add all the objc tables.  This must be done before we add libobjc's __TEXT
-    this->addObjCOptimizationsToSubCache(subCache);
-
-    for ( CacheDylib& cacheDylib : this->cacheDylibs ) {
-        bool addLinkedit = true;
-        subCache.addDylib(cacheDylib, addLinkedit);
-    }
-
-    // Add all the global optimizations
-    this->addGlobalOptimizationsToSubCache(subCache);
-
-    // Reserve space in the last sub cache for dynamic config data
-    subCache.addDynamicConfigChunk();
-
-    this->addFinalChunksToSubCache(subCache);
-
-    this->subCaches.push_back(std::move(subCache));
 }
 
 // Add stubs Chunk's for every stubs section in the given text subCache
@@ -2767,7 +2740,7 @@ void SharedCacheBuilder::makeLargeLayoutSubCaches(SubCache* firstSubCache,
 
         // If we exceed the current limit, then the current subCache is complete and we need
         // to start a new one
-        if ( (subCacheTextSize + textSize) > this->config.layout.large->subCacheTextLimit ) {
+        if ( (subCacheTextSize + textSize) > this->config.layout.subCacheTextLimit ) {
             // Create a new subCache
             otherCaches.push_back(SubCache::makeSubCache(this->options));
             currentSubCache = &otherCaches.back();
@@ -2780,7 +2753,10 @@ void SharedCacheBuilder::makeLargeLayoutSubCaches(SubCache* firstSubCache,
 
         // The subCache with libobjc gets the header info sections
         // Add all the objc tables.  This must be done before we add libobjc's __TEXT
-        if ( cacheDylib.installName == "/usr/lib/libobjc.A.dylib" )
+        std::string_view libObjcInstallName = "/usr/lib/libobjc.A.dylib";
+        if ( dyld3::MachOFile::isExclaveKitPlatform(this->options.platform) )
+            libObjcInstallName = "/System/ExclaveKit/usr/lib/libobjc.A.dylib";
+        if ( cacheDylib.installName == libObjcInstallName )
             this->addObjCOptimizationsToSubCache(*currentSubCache);
 
         // We'll add LINKEDIT at the end.  As the shared region is <= 4GB in size, we can fit
@@ -3911,6 +3887,9 @@ void SharedCacheBuilder::calculateSlideInfoSize()
             case cache_builder::SlideInfo::SlideInfoFormat::v3:
                 slideInfoSize += sizeof(dyld_cache_slide_info3);
                 break;
+            case cache_builder::SlideInfo::SlideInfoFormat::v5:
+                slideInfoSize += sizeof(dyld_cache_slide_info5);
+                break;
         }
         slideInfoSize += pagesToSlide * builderConfig.slideInfo.slideInfoBytesPerDataPage;
 
@@ -4129,101 +4108,6 @@ Error SharedCacheBuilder::computeSubCacheContiguousVMLayout()
         CacheVMSize totalCustomerCacheSize((vmAddress - this->config.layout.cacheBaseAddress).rawValue());
         assert(this->totalVMSize == totalCustomerCacheSize);
     }
-
-    return Error();
-}
-
-// This is the x86_64 sim layout, where each of TEXT/DATA/LINKEDIT has its own fixed address
-Error SharedCacheBuilder::computeSubCacheDiscontiguousSimVMLayout()
-{
-    // Add padding between each region, and set the Region VMAddr's
-    CacheVMAddress maxVMAddress = this->config.layout.cacheBaseAddress;
-    assert(this->subCaches.size() == 1);
-    SubCache& subCache = this->subCaches.front();
-    subCache.subCacheVMAddress = this->config.layout.cacheBaseAddress;
-
-    bool seenText = false;
-    bool seenData = false;
-    bool seenLinkedit = false;
-    bool seenDynamicConfig = false;
-    CacheVMAddress lastDataEnd;
-    CacheVMAddress linkEditEnd;
-    for ( Region& region : subCache.regions ) {
-        switch ( region.kind ) {
-            case Region::Kind::text:
-                assert(!seenText);
-                seenText = true;
-                region.subCacheVMAddress = this->config.layout.discontiguous->simTextBaseAddress;
-
-                // Check for overflow
-                if ( region.subCacheVMSize > this->config.layout.discontiguous->simTextSize ) {
-                    evictLeafDylibs(region.subCacheVMSize - this->config.layout.discontiguous->simTextSize);
-                    return Error("Overflow in text (0x%llx > 0x%llx)",
-                                 region.subCacheVMSize.rawValue(),
-                                 this->config.layout.discontiguous->simTextSize.rawValue());
-                }
-                break;
-            case Region::Kind::dataConst:
-            case Region::Kind::data:
-            case Region::Kind::auth:
-            case Region::Kind::authConst:
-                if ( seenData ) {
-                    // This data follows from the previous one
-                    region.subCacheVMAddress = lastDataEnd;
-                } else {
-                    seenData = true;
-                    region.subCacheVMAddress = this->config.layout.discontiguous->simDataBaseAddress;
-                }
-                lastDataEnd = region.subCacheVMAddress + region.subCacheVMSize;
-                break;
-            case Region::Kind::linkedit:
-                assert(!seenLinkedit);
-                seenLinkedit = true;
-                region.subCacheVMAddress = this->config.layout.discontiguous->simLinkeditBaseAddress;
-
-                // Check for overflow
-                if ( region.subCacheVMSize > this->config.layout.discontiguous->simLinkeditSize ) {
-                    return Error("Overflow in linkedit (0x%llx > 0x%llx)",
-                                 region.subCacheVMSize.rawValue(),
-                                 this->config.layout.discontiguous->simLinkeditSize.rawValue());
-                }
-                linkEditEnd = region.subCacheVMAddress + region.subCacheVMSize;
-                break;
-            case Region::Kind::dynamicConfig:
-                assert(!seenDynamicConfig);
-                seenDynamicConfig = true;
-                // Grab space right after the linkedit
-                region.subCacheVMAddress = linkEditEnd;
-                // Check for overflow
-                if ( region.subCacheVMSize > this->config.layout.discontiguous->simLinkeditSize ) {
-                    return Error("Overflow in dynamicConfig (0x%llx > 0x%llx)",
-                                 region.subCacheVMSize.rawValue(),
-                                 this->config.layout.discontiguous->simLinkeditSize.rawValue());
-                }
-                break;
-            case Region::Kind::unmapped:
-            case Region::Kind::codeSignature:
-                break;
-            case Region::Kind::numKinds:
-                assert(0);
-                break;
-        }
-
-        if ( seenData ) {
-            // Check for overflow
-            CacheVMSize dataSize(lastDataEnd.rawValue() - this->config.layout.discontiguous->simDataBaseAddress.rawValue());
-            if ( dataSize > this->config.layout.discontiguous->simDataSize ) {
-                return Error("Overflow in data (0x%llx > 0x%llx)",
-                             dataSize.rawValue(),
-                             this->config.layout.discontiguous->simDataSize.rawValue());
-            }
-        }
-
-        if ( region.needsSharedCacheReserveAddressSpace() )
-            maxVMAddress = region.subCacheVMAddress + region.subCacheVMSize;
-    }
-
-    this->totalVMSize = CacheVMSize((maxVMAddress - this->config.layout.cacheBaseAddress).rawValue());
 
     return Error();
 }
@@ -4491,13 +4375,8 @@ Error SharedCacheBuilder::computeSubCacheLayout()
         if ( Error error = computeSubCacheContiguousVMLayout(); error.hasError() )
             return error;
     } else {
-        if ( this->options.isSimulator() ) {
-            if ( Error error = computeSubCacheDiscontiguousSimVMLayout(); error.hasError() )
-                return error;
-        } else {
-            if ( Error error = computeSubCacheDiscontiguousVMLayout(); error.hasError() )
-                return error;
-        }
+        if ( Error error = computeSubCacheDiscontiguousVMLayout(); error.hasError() )
+            return error;
     }
     
     if ( this->totalVMSize > this->config.layout.cacheSize ) {
@@ -4966,13 +4845,21 @@ Error SharedCacheBuilder::emitPatchTable()
 // dyld4 needs a fake "main.exe" to set up the state.
 // On macOS this *has* to come from an actual executable, as choosing a zippered
 // dylib may incorrectly lead to setting up the ProcessConfig as iOSMac.
-// Simulators don't have executables yet so choose a dylib there
+// Simulators and ExclaveKit don't have executables yet so choose a dylib there
 static const MachOFile* getFakeMainExecutable(const BuilderOptions& options,
                                               std::span<CacheDylib> cacheDylibs,
                                               std::span<InputFile*> executableFiles)
 {
     if ( options.isSimulator() ) {
         std::string_view installName = "/usr/lib/libSystem.B.dylib";
+        for ( const CacheDylib& cacheDylib : cacheDylibs ) {
+            if ( cacheDylib.installName == installName ) {
+                assert(cacheDylib.cacheMF != nullptr);
+                return cacheDylib.cacheMF;
+            }
+        }
+    } else if (options.isExclaveKit() ) {
+        std::string_view installName = "/System/ExclaveKit/usr/lib/libSystem.dylib";
         for ( const CacheDylib& cacheDylib : cacheDylibs ) {
             if ( cacheDylib.installName == installName ) {
                 assert(cacheDylib.cacheMF != nullptr);
@@ -5343,7 +5230,7 @@ static Error findProtocolClass(const BuilderConfig& config,
                                VMAddress& protocolClassVMAddr, MachOFile::PointerMetaData& protocolClassPMD)
 {
     for ( CacheDylib* cacheDylib : objcDylibs ) {
-        if ( cacheDylib->installName == "/usr/lib/libobjc.A.dylib" ) {
+        if ( cacheDylib->installName.ends_with("/usr/lib/libobjc.A.dylib" )) {
             __block InputDylibVMAddress inputOptPtrsVMAddress;
             __block uint64_t            sectionSize = 0;
             __block bool                found       = false;
@@ -7323,7 +7210,7 @@ Error SharedCacheBuilder::emitSwiftHashTables()
 
     Diagnostics diag;
     auto objcClassOpt = (objc::ClassHashTable*)this->objcClassOptimizer.classHashTableChunk->subCacheBuffer;
-    buildSwiftHashTables(this->config, diag, this->cacheDylibs,
+    buildSwiftHashTables(this->config, diag, this->objcOptimizer.objcDylibs,
                          extraRegions, objcClassOpt,
                          this->objcOptimizer.headerInfoReadOnlyChunk->subCacheBuffer,
                          this->objcOptimizer.headerInfoReadWriteChunk->subCacheBuffer,
@@ -7444,6 +7331,10 @@ uint64_t SharedCacheBuilder::getMaxSlide() const
     uint64_t sizeUpToTextEnd = (endOfText - this->config.layout.cacheBaseAddress).rawValue();
     if ( sizeUpToTextEnd <= twoGB )
         maxSlide = CacheVMSize(twoGB - sizeUpToTextEnd);
+
+    if ( this->config.layout.cacheMaxSlide.has_value() ) {
+        maxSlide = std::min(maxSlide, CacheVMSize(this->config.layout.cacheMaxSlide.value()));
+    }
 
     return maxSlide.rawValue();
 }

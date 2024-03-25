@@ -48,6 +48,11 @@ bool BuilderOptions::isSimulator() const
     return dyld3::MachOFile::isSimulatorPlatform(this->platform);
 }
 
+bool BuilderOptions::isExclaveKit() const
+{
+    return dyld3::MachOFile::isExclaveKitPlatform(this->platform);
+}
+
 //
 // MARK: --- cache_builder::InputFile methods ---
 //

@@ -33,6 +33,7 @@
 #include <TargetConditionals.h>
 #include <mach-o/dyld.h>
 #include <uuid/uuid.h>
+#include <dlfcn.h>
 
 #if __cplusplus
 extern "C" {
@@ -117,6 +118,10 @@ struct _dyld_objc_notify_mapped_info {
 typedef void (*_dyld_objc_notify_mapped2)(unsigned count, const struct _dyld_objc_notify_mapped_info infos[]);
 typedef void (*_dyld_objc_notify_init2)(const struct _dyld_objc_notify_mapped_info* info);
 
+typedef void (^_dyld_objc_mark_image_mutable)(uint32_t objcImageIndex);
+typedef void (*_dyld_objc_notify_mapped3)(unsigned count, const struct _dyld_objc_notify_mapped_info infos[],
+                                          _dyld_objc_mark_image_mutable callback);
+
 //
 // Note: only for use by objc runtime
 // Register handlers to be called when objc images are mapped, unmapped, and initialized.
@@ -137,19 +142,19 @@ struct _dyld_objc_callbacks
     uintptr_t version;
 };
 
-struct _dyld_objc_callbacks_v1
-{
-    uintptr_t                       version; // == 1
-    _dyld_objc_notify_mapped        mapped;
-    _dyld_objc_notify_init          init;
-    _dyld_objc_notify_unmapped      unmapped;
-    _dyld_objc_notify_patch_class   patches;
-};
-
 struct _dyld_objc_callbacks_v2
 {
     uintptr_t                       version; // == 2
     _dyld_objc_notify_mapped2       mapped;
+    _dyld_objc_notify_init2         init;
+    _dyld_objc_notify_unmapped      unmapped;
+    _dyld_objc_notify_patch_class   patches;
+};
+
+struct _dyld_objc_callbacks_v3
+{
+    uintptr_t                       version; // == 3
+    _dyld_objc_notify_mapped3       mapped;
     _dyld_objc_notify_init2         init;
     _dyld_objc_notify_unmapped      unmapped;
     _dyld_objc_notify_patch_class   patches;
@@ -243,9 +248,9 @@ extern dyld_platform_t dyld_get_active_platform(void) __API_AVAILABLE(macos(10.1
 //      Old behaviour
 //  }
 
-// In cases where more precise control is required (such as APIs that were added to varions platforms in different years)
+// In cases where more precise control is required (such as APIs that were added to various platforms in different years)
 // the os specific values may be used instead. Unlike the version set constants, the platform specific ones will only ever
-// return true if the running binary is the platform being testsed, allowing conditions to be built for specific platforms
+// return true if the running binary is the platform being tested, allowing conditions to be built for specific platforms
 // and releases that came out at different times. For example:
 
 //  if (dyld_program_sdk_at_least(dyld_platform_version_iOS_12_0)
@@ -260,8 +265,8 @@ extern dyld_platform_t dyld_get_base_platform(dyld_platform_t platform) __API_AV
 // SPI to ask if a platform is a simulation platform
 extern bool dyld_is_simulator_platform(dyld_platform_t platform) __API_AVAILABLE(macos(10.14), ios(12.0), watchos(5.0), tvos(12.0), bridgeos(3.0));
 
-// Takes a version and returns if the image was built againt that SDK or newer
-// In the case of multi_plaform mach-o's it tests against the active platform
+// Takes a version and returns if the image was built against that SDK or newer
+// In the case of multi_platform mach-o's it tests against the active platform
 extern bool dyld_sdk_at_least(const struct mach_header* mh, dyld_build_version_t version) __API_AVAILABLE(macos(10.14), ios(12.0), watchos(5.0), tvos(12.0), bridgeos(3.0));
 
 // Takes a version and returns if the image was built with that minos version or newer
@@ -277,7 +282,7 @@ extern bool dyld_program_minos_at_least(dyld_build_version_t version) __API_AVAI
 // print our everything for diagnostic reasons
 extern void dyld_get_image_versions(const struct mach_header* mh, void (^callback)(dyld_platform_t platform, uint32_t sdk_version, uint32_t min_version)) __API_AVAILABLE(macos(10.14), ios(12.0), watchos(5.0), tvos(12.0), bridgeos(3.0));
 
-// Convienence constants for dyld version SPIs.
+// Convenience constants for dyld version SPIs.
 
 // Because we now have so many different OSes with different versions these version set values are intended to
 // to provide a more convenient way to version check. They may be used instead of platform specific version in
@@ -304,7 +309,7 @@ extern uint32_t dyld_get_sdk_version(const struct mach_header* mh);
 // Returns zero on error, or if SDK version could not be determined.
 //
 // Note on watchOS, this returns the equivalent iOS SDK version number
-// (i.e an app built against watchOS 2.0 SDK returne 9.0).  To see the
+// (i.e an app built against watchOS 2.0 SDK returns 9.0).  To see the
 // platform specific sdk version use dyld_get_program_sdk_watch_os_version().
 //
 // Exists in Mac OS X 10.8 and later 
@@ -329,7 +334,7 @@ extern uint32_t dyld_get_program_min_watch_os_version(void) __API_AVAILABLE(watc
 #if TARGET_OS_BRIDGE
 // bridgeOS only.
 // This finds the bridgeOS SDK version that the main executable was built against.
-// Exists in bridgeOSOS 2.0 and later
+// Exists in bridgeOS 2.0 and later
 extern uint32_t dyld_get_program_sdk_bridge_os_version(void) __API_AVAILABLE(bridgeos(2.0));
 
 // bridgeOS only.
@@ -810,18 +815,30 @@ typedef uint64_t _dyld_pseudodylib_symbol_flags;
 #define DYLD_PSEUDODYLIB_SYMBOL_FLAGS_WEAK_DEF 2
 #define DYLD_PSEUDODYLIB_SYMBOL_FLAGS_CALLABLE 4
 
-typedef void (*_dyld_pseudodylib_dispose_error_message)(char *err_msg);
+typedef void (*_dyld_pseudodylib_dispose_string)(char *str);
 typedef char* (*_dyld_pseudodylib_initialize)(void* pd_ctx, const void* mh);
 typedef char* (*_dyld_pseudodylib_deinitialize)(void* pd_ctx, const void* mh);
 typedef char* (*_dyld_pseudodylib_lookup_symbols)(void* pd_ctx, const void* mh, const char *names[], size_t num_names,
                                                    void* addrs[], _dyld_pseudodylib_symbol_flags flags[]);
 typedef int (*_dyld_pseudodylib_lookup_address)(void* pd_ctx, const void* mh, const void* addr, struct dl_info* dl);
 typedef char* (*_dyld_pseudodylib_find_unwind_sections)(void* pd_ctx, const void* mh, const void* addr, bool* found, struct dyld_unwind_sections* info);
+typedef char* (*_dyld_pseudodylib_loadable_at_path)(void* pd_ctx, const void* mh, const char* possible_path);
 
 // Versioned struct to hold pseudo-dylib callbacks.
-// See _dyld_pseudodylib_callbacks_v1.
+// See _dyld_pseudodylib_callbacks_v2.
 struct _dyld_pseudodylib_callbacks {
     uintptr_t version;
+};
+
+// Deprecated pseudo-dylib v1 callbacks. See _dyld_pseudodylib_callbacks_v2 below.
+struct _dyld_pseudodylib_callbacks_v1 {
+    uintptr_t version; // == 1
+    _dyld_pseudodylib_dispose_string dispose_error_message;
+    _dyld_pseudodylib_initialize initialize;
+    _dyld_pseudodylib_deinitialize deinitialize;
+    _dyld_pseudodylib_lookup_symbols lookup_symbols;
+    _dyld_pseudodylib_lookup_address lookup_address;
+    _dyld_pseudodylib_find_unwind_sections find_unwind_sections;
 };
 
 // Callbacks to implement pseudo-dylib behavior.
@@ -832,14 +849,18 @@ struct _dyld_pseudodylib_callbacks {
 // lookup_symbols will be called to find the address of symbols defined by the pseudo-dylib (e.g. by dlsym).
 // lookup_address will be called by dladdr to find information about the given address.
 // find_unwind_sections will be called by _dyld_find_unwind_sections.
-struct _dyld_pseudodylib_callbacks_v1 {
-    uintptr_t version; // == 1
-    _dyld_pseudodylib_dispose_error_message dispose_error_message;
+// loadable_at_path will be called to check whether the pseudo-dylib should be loaded for a given candidate path.
+struct _dyld_pseudodylib_callbacks_v2 {
+    uintptr_t version; // == 2
+    // Added in version 1
+    _dyld_pseudodylib_dispose_string dispose_string;
     _dyld_pseudodylib_initialize initialize;
     _dyld_pseudodylib_deinitialize deinitialize;
     _dyld_pseudodylib_lookup_symbols lookup_symbols;
     _dyld_pseudodylib_lookup_address lookup_address;
     _dyld_pseudodylib_find_unwind_sections find_unwind_sections;
+    // Added in version 2
+    _dyld_pseudodylib_loadable_at_path loadable_at_path;
 };
 
 typedef struct _dyld_pseudodylib_callbacks_opaque*
@@ -862,7 +883,7 @@ typedef struct _dyld_pseudodylib_opaque* _dyld_pseudodylib_handle;
 // Registration takes the address range that the pseudo-dylib can occupy, and this range must start with a valid mach
 // header and load commands containing, at minimum, an LC_VERSION_MIN and LC_ID_DYLIB command identifying the pseudo-dylib's
 // install name. The callbacks argument identifies the set of callbacks to use for this pseudo-dylib instance, and the
-// opaque context pointer will be passed to each of these callbacks. Once a pseduo-dylib is no longer needed it should be
+// opaque context pointer will be passed to each of these callbacks. Once a pseudo-dylib is no longer needed it should be
 // deregistered by calling _dyld_pseudodylib_deregister (equivalent to "rm'ing" a dylib on disk).
 //
 // Exists in Mac OS X 14.0 and later

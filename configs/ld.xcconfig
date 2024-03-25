@@ -1,8 +1,7 @@
 #include "ld_base.xcconfig"
 
 INSTALL_PATH = $(TOOLCHAIN_INSTALL_DIR)/usr/bin
-// TODO: Make this ld when we are ready
-PRODUCT_NAME = ld-prime
+PRODUCT_NAME = ld
 
 LD_RUNPATH_SEARCH_PATHS[config=Debug][sdk=*][arch=*]   = $(inherited) @executable_path/../lib/ /var/db/xcode_select_link/Toolchains/OSX14.0.xctoolchain/usr/lib/ /var/db/xcode_select_link/Toolchains/XcodeDefault.xctoolchain/usr/lib/ /Applications/Xcode.app/Contents/Developer/Toolchains/XcodeDefault.xctoolchain/usr/lib
 LD_RUNPATH_SEARCH_PATHS[config=Release][sdk=*][arch=*] = @executable_path/../lib/
@@ -10,3 +9,7 @@ OTHER_CPLUSPLUSFLAGS=$(inherited) -fno-c++-static-destructors
 
 LLVM_LTO = NO
 LLVM_LTO[config=Release][sdk=*][arch=*] = YES
+
+GCC_PREPROCESSOR_DEFINITIONS = $(inherited) BUILDING_LD=1  LD_VERSION=$(RC_ProjectSourceVersion) RC_SUPPORTED_ARCHS="$(RC_SUPPORTED_ARCHS)"
+
+VERSION_INFO_STRING = "@(#)PROGRAM:ld PROJECT:ld-$(CURRENT_PROJECT_VERSION)"

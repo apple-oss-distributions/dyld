@@ -372,6 +372,7 @@ void Adjustor<P>::rebuildLinkEditAndLoadCommands(const CacheBuilder::DylibSectio
             case LC_FUNCTION_STARTS:
                 functionStartsCmd = (linkedit_data_command*)cmd;
                 functionStartsCmd->dataoff = linkeditStartOffset + funcStartsOffset;
+                functionStartsCmd->datasize = funcStartsSize;
                 break;
             case LC_DATA_IN_CODE:
                 dataInCodeCmd = (linkedit_data_command*)cmd;

@@ -298,6 +298,10 @@ public:
                                                       uint32_t initProt, uint32_t maxProt, uint64_t flags,
                                                       bool& stopRegion)) const;
 
+    //
+    // Gets a name for the mapping.
+    //
+    static const char*  mappingName(uint32_t maxProt, uint64_t flags);
 
     //
     // Iterates over each of the mappings in the cache and all subCaches

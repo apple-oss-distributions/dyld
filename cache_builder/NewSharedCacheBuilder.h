@@ -153,7 +153,6 @@ private:
     void            addGlobalOptimizationsToSubCache(SubCache& subCache);
     void            addFinalChunksToSubCache(SubCache& subCache);
     void            computeSubCaches();
-    void            computeRegularSubCache();
     void            computeLargeSubCache();
     void            makeLargeLayoutSubCaches(SubCache* firstSubCache,
                                              std::list<SubCache>& otherCaches);
@@ -164,7 +163,6 @@ private:
     void            calculateSlideInfoSize();
     void            calculateCodeSignatureSize();
     void            printSubCaches() const;
-    error::Error    computeSubCacheDiscontiguousSimVMLayout();
     error::Error    computeSubCacheDiscontiguousVMLayout();
     error::Error    computeSubCacheContiguousVMLayout();
     void            evictLeafDylibs(CacheVMSize reductionTarget);

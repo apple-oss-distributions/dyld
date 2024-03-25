@@ -241,35 +241,27 @@ public:
     static mach_o::Error            valid(std::span<const uint8_t> buffer);
     const DebugNoteFileInfo*        copy() const;
 
-    CString                         srcDir() const     { return CString(((char*)this)+_srcDirOffset,  _srcDirSize); }
-    CString                         srcName() const    { return CString(((char*)this)+_srcNameOffset, _srcNameSize); }
-    CString                         objPath() const    { return CString(((char*)this)+_objPathOffset, _objPathSize); }
-    uint32_t                        objModTime() const { return _objModTime; }
-    uint8_t                         objSubType() const { return _objSubType; }
-    CString                         originLibPath() const    { return CString(((char*)this)+_originLibPathOffset, _originLibPathSize); }
-    CString                         libPath() const    { return CString(((char*)this)+_libPathOffset, _libPathSize); }
+    CString                         srcDir() const          { return _srcDir; }
+    CString                         srcName() const         { return _srcName; }
+    CString                         objPath() const         { return _objPath; }
+    uint32_t                        objModTime() const      { return _objModTime; }
+    uint8_t                         objSubType() const      { return _objSubType; }
+    CString                         originLibPath() const   { return _originLibPath; }
+    CString                         libPath() const         { return _libPath; }
 
-    std::span<const uint8_t>        dataRO() const { return { (uint8_t*)this, _size }; };
-    bool                            hasLibInfo() const { return _libPathOffset != 0;  }
-    bool                            hasOriginLibInfo() const { return _originLibPathOffset != 0;  }
+    bool                            hasLibInfo() const { return !_libPath.empty();  }
+    bool                            hasOriginLibInfo() const { return !_originLibPath.empty();  }
     bool                            shouldbeUpdated(CString LibPath) const;
     void                            dump() const;
 
 private:
-    uint32_t  _size;
-    uint32_t  _version; // 1
-    uint32_t  _srcDirOffset;
-    uint32_t  _srcDirSize;
-    uint32_t  _srcNameOffset;
-    uint32_t  _srcNameSize;
-    uint32_t  _objPathOffset;
-    uint32_t  _objPathSize;
     uint32_t  _objModTime;
     uint32_t  _objSubType;
-    uint32_t  _libPathOffset; // 0 means no library name
-    uint32_t  _libPathSize;
-    uint32_t  _originLibPathOffset; // 0 means no library name
-    uint32_t  _originLibPathSize;
+    CString   _srcDir;
+    CString   _srcName;
+    CString   _objPath;
+    CString   _libPath;
+    CString   _originLibPath;
 };
 
 

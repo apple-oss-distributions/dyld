@@ -31,7 +31,7 @@
 #include "PrebuiltSwift.h"
 #include "SwiftVisitor.h"
 
-#if SUPPORT_CREATING_PREBUILTLOADERS || BUILDING_UNIT_TESTS || BUILDING_CACHE_BUILDER_UNIT_TESTS
+#if SUPPORT_PREBUILTLOADERS || BUILDING_UNIT_TESTS || BUILDING_CACHE_BUILDER_UNIT_TESTS
 
 using metadata_visitor::ResolvedValue;
 using metadata_visitor::SwiftPointer;
@@ -128,7 +128,7 @@ static void getFixupTargets(RuntimeState& state, Diagnostics& diag, const JustIn
                         vmAddrToFixupTargetMap[fixupVMAddr.rawValue()] = targetAndAddend;
                     }
                     else {
-                        diag.error("out of range bind ordinal %d (max %lu)", bindOrdinal, bindTargets.count());
+                        diag.error("out of range bind ordinal %d (max %llu)", bindOrdinal, bindTargets.count());
                         stopChain = true;
                     }
                 } else if ( fixupLocation->isRebase(pointerFormat, loadAddress, targetRuntimeOffset) ) {
@@ -165,7 +165,7 @@ static void getFixupTargets(RuntimeState& state, Diagnostics& diag, const JustIn
                     vmAddrToFixupTargetMap[fixupVMAddr.rawValue()] = targetAndAddend;
                 }
                 else {
-                    diag.error("out of range bind ordinal %d (max %lu)", targetIndex, bindTargets.count());
+                    diag.error("out of range bind ordinal %d (max %llu)", targetIndex, bindTargets.count());
                     fixupsStop = true;
                 }
             }, ^(uint64_t runtimeOffset, uint32_t segmentIndex,
@@ -176,7 +176,7 @@ static void getFixupTargets(RuntimeState& state, Diagnostics& diag, const JustIn
                     vmAddrToFixupTargetMap[fixupVMAddr.rawValue()] = targetAndAddend;
                 }
                 else {
-                    diag.error("out of range bind ordinal %d (max %lu)", overrideBindTargetIndex, overrideBindTargets.count());
+                    diag.error("out of range bind ordinal %d (max %llu)", overrideBindTargetIndex, overrideBindTargets.count());
                     fixupsStop = true;
                 }
             });
@@ -218,7 +218,7 @@ static void getFixupTargets(RuntimeState& state, Diagnostics& diag, const JustIn
                     vmAddrToFixupTargetMap[fixupVMAddr.rawValue()] = targetAndAddend;
                 }
                 else {
-                    diag.error("out of range bind ordinal %d (max %lu)", targetIndex, bindTargets.count());
+                    diag.error("out of range bind ordinal %d (max %llu)", targetIndex, bindTargets.count());
                     fixupsStop = true;
                 }
             });
@@ -681,6 +681,6 @@ void PrebuiltSwift::make(Diagnostics& diag, PrebuiltObjC& prebuiltObjC, RuntimeS
 
 } // namespace dyld4
 
-#endif // SUPPORT_CREATING_PREBUILTLOADERS || BUILDING_UNIT_TESTS || BUILDING_CACHE_BUILDER_UNIT_TESTS
+#endif // SUPPORT_PREBUILTLOADERS || BUILDING_UNIT_TESTS || BUILDING_CACHE_BUILDER_UNIT_TESTS
 
 #endif // !TARGET_OS_EXCLAVEKIT

@@ -1,5 +1,6 @@
-/*
- * Copyright (c) 2022 Apple Inc. All rights reserved.
+/* -*- mode: C++; c-basic-offset: 4; tab-width: 4 -*- vim: ft=cpp et ts=4 sw=4:
+ *
+ * Copyright (c) 2023 Apple Inc. All rights reserved.
  *
  * @APPLE_LICENSE_HEADER_START@
  *
@@ -21,30 +22,14 @@
  * @APPLE_LICENSE_HEADER_END@
  */
 
-#ifndef Utils_h
-#define Utils_h
+#import <Foundation/Foundation.h>
 
-#include <stdio.h>
+//! Project version number for dyld_framework.
+FOUNDATION_EXPORT double Dyld_frameworkVersionNumber;
 
-#include "Defines.h"
+//! Project version string for dyld_framework.
+FOUNDATION_EXPORT const unsigned char Dyld_frameworkVersionString[];
 
-namespace dyld4 {
-
-namespace Utils {
-
-VIS_HIDDEN
-const char* strrstr(const char* str, const char* sub);
-
-VIS_HIDDEN
-size_t concatenatePaths(char *path, const char *suffix, size_t pathsize);
-
-}; /* namespace Utils */
-
-}; /* namespace dyld4 */
+// In this header, you should import all the public headers of your framework using statements like #import <dyld_framework/PublicHeader.h>
 
 
-// escape a cstring literal, output buffer is always null terminated and parameter `end` will point to the null terminator if given
-VIS_HIDDEN
-void escapeCStringLiteral(const char* s, char* b, size_t bufferLength, char**end=nullptr);
-
-#endif /* Utils_h */

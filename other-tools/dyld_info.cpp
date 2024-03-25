@@ -39,6 +39,10 @@
 #include <unordered_set>
 #include <string>
 
+// mach_o
+#include "Header.h"
+#include "Version32.h"
+
 #include "Defines.h"
 #include "Array.h"
 #include "MachOFile.h"
@@ -55,6 +59,9 @@
 #define DYLD_CACHE_ADJ_V2_FORMAT 0x7F
 
 using dyld3::MachOAnalyzer;
+using mach_o::Header;
+using mach_o::DependentDylibAttributes;
+using mach_o::Version32;
 
 typedef  dyld3::MachOLoaded::ChainedFixupPointerOnDisk   ChainedFixupPointerOnDisk;
 typedef  dyld3::MachOLoaded::PointerMetaData             PointerMetaData;
@@ -143,21 +150,23 @@ static void printSegments(const dyld3::MachOAnalyzer* ma, const DyldSharedCache*
  }
 
 
-static void printDependents(const dyld3::MachOAnalyzer* ma)
+static void printDependents(const Header* mh)
 {
-    if ( ma->isPreload() )
+    if ( mh->isPreload() )
         return;
     printf("    -dependents:\n");
     printf("        attributes     load path\n");
-    ma->forEachDependentDylib(^(const char* loadPath, bool isWeak, bool isReExport, bool isUpward, uint32_t compatVersion, uint32_t curVersion, bool &stop) {
-        const char* attribute = "";
-        if ( isWeak )
-            attribute = "weak_import";
-        else if ( isReExport )
-            attribute = "re-export";
-        else if ( isUpward )
-            attribute = "upward";
-        printf("        %-12s   %s\n", attribute, loadPath);
+    mh->forEachDependentDylib(^(const char* loadPath, DependentDylibAttributes depAttrs, Version32 compatVersion, Version32 curVersion, bool& stop) {
+        std::string attributes;
+        if ( depAttrs.upward )
+            attributes += "upward ";
+        if ( depAttrs.delayInit )
+            attributes += "delay-init ";
+        if ( depAttrs.weakLink )
+            attributes += "weak-link ";
+        if ( depAttrs.reExport )
+            attributes += "re-export ";
+        printf("        %-12s   %s\n", attributes.c_str(), loadPath);
     });
 }
 
@@ -546,8 +555,9 @@ struct SymbolicFixupInfo
 
 static const char* ordinalName(const dyld3::MachOAnalyzer* ma, int libraryOrdinal)
 {
+    const Header* mh = (Header*)ma;
     if ( libraryOrdinal > 0 ) {
-        const char* path = ma->dependentDylibLoadPath(libraryOrdinal-1);
+        const char* path = mh->dependentDylibLoadPath(libraryOrdinal-1);
         if ( path == nullptr )
             return "ordinal-too-large";
         const char* leafName = path;
@@ -1787,6 +1797,7 @@ int main(int argc, const char* argv[])
             }
             if ( !validateOnly ) {
                 const dyld3::MachOAnalyzer* ma = (dyld3::MachOAnalyzer*)info.fileContent;
+                const Header*               mh = (Header*)info.fileContent;
                 printf("%s [%s]:\n", path, sliceArch);
 
                 if ( printOptions.platform )
@@ -1796,7 +1807,7 @@ int main(int argc, const char* argv[])
                     printSegments(ma, dyldCache);
 
                 if ( printOptions.dependents )
-                    printDependents(ma);
+                    printDependents(mh);
 
                 if ( printOptions.initializers )
                     printInitializers(ma, dyldCache, cacheLen);

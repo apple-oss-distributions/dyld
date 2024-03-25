@@ -140,6 +140,7 @@ struct output_renderer {
                 case DBG_DYLD_TIMING_APPLY_FIXUPS: enqueueEvent<apply_fixups>(event, false); break;
                 case DBG_DYLD_TIMING_ATTACH_CODESIGNATURE: enqueueEvent<attach_signature>(event, false); break;
                 case DBG_DYLD_TIMING_BUILD_CLOSURE: enqueueEvent<build_closure>(event, false); break;
+                case DBG_DYLD_TIMING_VALIDATE_CLOSURE: enqueueEvent<validate_closure>(event, false); break;
                 case DBG_DYLD_TIMING_DLADDR: enqueueEvent<dladdr>(event, true); break;
                 case DBG_DYLD_TIMING_DLCLOSE: enqueueEvent<dlclose>(event, true); break;
                 case DBG_DYLD_TIMING_FUNC_FOR_ADD_IMAGE: enqueueEvent<add_image_callback>(event, false); break;
@@ -169,7 +170,8 @@ struct output_renderer {
                 case DBG_DYLD_TIMING_ATTACH_CODESIGNATURE: dequeueEvent<attach_signature>(event, [&](attach_signature* endEvent){}); break;
                 case DBG_DYLD_TIMING_BUILD_CLOSURE: dequeueEvent<build_closure>(event, [&](build_closure* endEvent){
                     endEvent->closureBuildState = event->arg2;
-                }); break;
+                });break;
+                case DBG_DYLD_TIMING_VALIDATE_CLOSURE: dequeueEvent<validate_closure>(event, [&](validate_closure* endEvent){}); break;
                 case DBG_DYLD_TIMING_DLCLOSE: dequeueEvent<dlclose>(event, [&](dlclose* endEvent){
                     endEvent->result = (int)event->arg2;
                 }); break;
@@ -312,7 +314,7 @@ public:
         std::ostringstream line;
         bool extended = false;
         if (auto dlopenNode = dynamic_cast<dlopen *>(node.get())) {
-            line << "dlopen(\"" << dlopenNode->path << "\", " << dlopenNode->flagString() << ") -> 0x" << dlopenNode->result;
+            line << "dlopen(\"" << dlopenNode->path << "\", " << dlopenNode->flagString() << ") -> 0x" << std::hex << dlopenNode->result;
         } else if (auto dlopenPreflightNode = dynamic_cast<dlopen_preflight *>(node.get())) {
             line << "dlopen_preflight(\"" << dlopenPreflightNode->path << ") -> 0x" << dlopenPreflightNode->result;
         } else if (auto dlsymNode = dynamic_cast<dlsym *>(node.get())) {
@@ -323,6 +325,8 @@ public:
             line << "attach codesignature";
         } else if (auto buildClosureNode = dynamic_cast<build_closure *>(node.get())) {
             line << "build closure -> " << buildClosureNode->buildStateString();
+        } else if (auto validateClosure = dynamic_cast<validate_closure *>(node.get())) {
+            line << "validate closure";
         } else if (auto launchNode = dynamic_cast<app_launch *>(node.get())) {
             line << "app launch (dyld" << std::dec << launchNode->launchMode << ") -> 0x" << std::hex << launchNode->address;
         } else if (auto initNode  = dynamic_cast<static_init *>(node.get())) {
@@ -623,6 +627,10 @@ private:
                     return "built dlopen closure";
             }
         };
+    };
+
+    struct validate_closure : event_pair {
+        validate_closure(ktrace_event_t E) : event_pair(E) {}
     };
 
     struct add_image_callback : event_pair {

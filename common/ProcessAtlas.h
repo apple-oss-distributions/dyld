@@ -350,7 +350,7 @@ private:
             return result;
         }
         void emitMappedFileInfo(uint64_t rebasedAddress, const UUID& uuid, const FileRecord& file, Vector<std::byte>& data);
-        void readMappedFileInfo(std::span<std::byte>& data, uint64_t& rebasedAddress, UUID& uuid, FileRecord& file);
+        bool readMappedFileInfo(std::span<std::byte>& data, uint64_t& rebasedAddress, UUID& uuid, FileRecord& file);
 
         void emitStringRef(const char* string, Vector<std::byte>& data);
     private:

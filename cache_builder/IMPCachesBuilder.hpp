@@ -120,7 +120,8 @@ private:
     bool isClassInterestingOrTracked(const ObjCClass& theClass) const;
 
     /// Adds a method to a given class's cache.
-    void addMethod(IMPCaches::ClassData* classDataPtr, std::string_view methodName, std::string_view installName, std::string_view className, std::string_view catName, bool inlined, bool fromFlattening);
+    /// Returns true if the method was added, false if it was a duplicate
+    bool addMethod(IMPCaches::ClassData* classDataPtr, std::string_view methodName, std::string_view installName, std::string_view className, std::string_view catName, bool inlined, bool fromFlattening);
 
     /// Inline a method from a parent's cache to a child's cache.
     void inlineMethodIfNeeded(IMPCaches::ClassData* classToInlineIn, std::string_view classToInlineFrom, std::string_view catToInlineFrom, std::string_view installNameToInlineFrom, std::string_view name, std::set<Selector*> & seenSelectors, bool isFlattening);

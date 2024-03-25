@@ -45,6 +45,7 @@ struct SharedCacheOptions {
     bool            preferCustomerCache;
     bool            forceDevCache;
     bool            isTranslated;
+    bool            usePageInLinking;
     Platform        platform;
 };
 

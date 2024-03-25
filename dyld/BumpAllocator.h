@@ -35,10 +35,10 @@ public:
                 BumpAllocator() { }
                 ~BumpAllocator();
 
-    void        append(const void* payload, size_t payloadSize);
-    void        zeroFill(size_t payloadSize);
+    void        append(const void* payload, uint64_t payloadSize);
+    void        zeroFill(uint64_t payloadSize);
     void        align(unsigned multipleOf);
-    size_t      size() const { return _usageEnd - _vmAllocationStart; }
+    uint64_t    size() const { return _usageEnd - _vmAllocationStart; }
     const void* finalize();
 
 private:
@@ -48,7 +48,7 @@ private:
 
 protected:
     uint8_t* _vmAllocationStart = nullptr;
-    size_t   _vmAllocationSize  = 0;
+    uint64_t _vmAllocationSize  = 0;
     uint8_t* _usageEnd          = nullptr;
 };
 
@@ -58,7 +58,7 @@ template <typename T>
 class BumpAllocatorPtr
 {
 public:
-    BumpAllocatorPtr(BumpAllocator& allocator, uintptr_t offset)
+    BumpAllocatorPtr(BumpAllocator& allocator, uint64_t offset)
         : _allocator(allocator)
         , _offset(offset)
     {
@@ -76,7 +76,7 @@ public:
 
 private:
     BumpAllocator& _allocator;
-    uintptr_t      _offset;
+    uint64_t      _offset;
 };
 
 } // namespace dyld4

@@ -26,8 +26,14 @@
 #include "DyldRuntimeState.h"
 #include "JustInTimeLoader.h"
 
+// mach_o
+#include "Header.h"
+#include "Version32.h"
+
 #include "PremappedLoader.h"
 
+using mach_o::Header;
+using mach_o::Version32;
 
 namespace dyld4 {
 
@@ -45,17 +51,12 @@ void PremappedLoader::loadDependents(Diagnostics& diag, RuntimeState& state, con
         return;
 
     // add first level of dependents
-    __block int          depIndex = 0;
-    this->mappedAddress->forEachDependentDylib(^(const char* loadPath, bool isWeak, bool isReExport, bool isUpward, uint32_t compatVersion, uint32_t curVersion, bool& stop) {
-        if ( isUpward )
-            dependentKind(depIndex) = DependentKind::upward;
-        else if ( isReExport )
-            dependentKind(depIndex) = DependentKind::reexport;
-        else if ( isWeak ) {
-            dependentKind(depIndex) = DependentKind::weakLink;
-        }
-        else if ( !this->allDepsAreNormal )
-            dependentKind(depIndex) = DependentKind::normal;
+    __block int                 depIndex = 0;
+    const mach_o::MachOFileRef& mf = this->mappedAddress;
+    const Header*               mh = (Header*)(&mf->magic); // Better way?
+    mh->forEachDependentDylib(^(const char* loadPath, DependentDylibAttributes depAttr, Version32 compatVersion, Version32 curVersion, bool& stop) {
+        if ( !this->allDepsAreNormal )
+            dependentAttrs(depIndex) = depAttr;
         const Loader* depLoader = nullptr;
         // for absolute paths, do a quick check if this is already loaded with exact match
         if ( loadPath[0] == '/' ) {
@@ -72,7 +73,7 @@ void PremappedLoader::loadDependents(Diagnostics& diag, RuntimeState& state, con
             LoadOptions depOptions             = options;
             depOptions.requestorNeedsFallbacks = false;
             depOptions.rpathStack              = &nextChain;
-            depOptions.canBeMissing            = isWeak;
+            depOptions.canBeMissing            = depAttr.weakLink;
             Diagnostics depDiag;
             depLoader               = getLoader(depDiag, state, loadPath, depOptions);
             if ( depDiag.hasError() ) {
@@ -110,7 +111,7 @@ void PremappedLoader::applyFixups(Diagnostics& diag, RuntimeState& state, DyldCa
         const void* targetAddr = (const void*)Loader::interpose(state, Loader::resolvedAddress(state, target), this);
         if ( state.config.log.fixups ) {
             const char* targetLoaderName = target.targetLoader ? target.targetLoader->leafName() : "<none>";
-            state.log("<%s/bind#%lu> -> %p (%s/%s)\n", this->leafName(), bindTargets.count(), targetAddr, targetLoaderName, target.targetSymbolName);
+            state.log("<%s/bind#%llu> -> %p (%s/%s)\n", this->leafName(), bindTargets.count(), targetAddr, targetLoaderName, target.targetSymbolName);
         }
 
         // Record missing flat-namespace lazy symbols
@@ -121,14 +122,14 @@ void PremappedLoader::applyFixups(Diagnostics& diag, RuntimeState& state, DyldCa
         // Missing weak binds need placeholders to make the target indices line up, but we should otherwise ignore them
         if ( (target.kind == Loader::ResolvedSymbol::Kind::bindToImage) && (target.targetLoader == nullptr) ) {
             if ( state.config.log.fixups )
-                state.log("<%s/bind#%lu> -> missing-weak-bind (%s)\n", this->leafName(), overrideTargetAddrs.count(), target.targetSymbolName);
+                state.log("<%s/bind#%llu> -> missing-weak-bind (%s)\n", this->leafName(), overrideTargetAddrs.count(), target.targetSymbolName);
 
             overrideTargetAddrs.push_back((const void*)UINTPTR_MAX);
         } else {
             const void* targetAddr = (const void*)Loader::interpose(state, Loader::resolvedAddress(state, target), this);
             if ( state.config.log.fixups ) {
                 const char* targetLoaderName = target.targetLoader ? target.targetLoader->leafName() : "<none>";
-                state.log("<%s/bind#%lu> -> %p (%s/%s)\n", this->leafName(), overrideTargetAddrs.count(), targetAddr, targetLoaderName, target.targetSymbolName);
+                state.log("<%s/bind#%llu> -> %p (%s/%s)\n", this->leafName(), overrideTargetAddrs.count(), targetAddr, targetLoaderName, target.targetSymbolName);
             }
 
             // Record missing flat-namespace lazy symbols
@@ -238,7 +239,7 @@ PremappedLoader* PremappedLoader::make(RuntimeState& state, const MachOFile* mh,
     for ( unsigned i = 0; i < depCount; ++i ) {
         new (&p->dependents[i]) (AuthLoader) { nullptr };
         if ( !allDepsAreNormal ) {
-            p->dependentKind(i) = DependentKind::normal;
+            p->dependentAttrs(i) = DependentDylibAttributes::regular;
         }
     }
     strlcpy(((char*)p) + p->pathOffset, path, PATH_MAX);
@@ -256,6 +257,7 @@ Loader* PremappedLoader::makePremappedLoader(Diagnostics& diag, RuntimeState& st
     for (auto& mappedFile : state.config.process.preMappedFiles) {
         if ( strcmp(path, mappedFile.path) != 0 )
             continue;
+        xrt_platform_premapped_macho_change_state((mach_header_64*)mappedFile.loadAddress, XRT__PLATFORM_PREMAPPED_MACHO_READWRITE);
         result = PremappedLoader::make(state, ( const MachOAnalyzer*)mappedFile.loadAddress, mappedFile.path, true, layout);
         break;
     }
@@ -268,7 +270,9 @@ Loader* PremappedLoader::makePremappedLoader(Diagnostics& diag, RuntimeState& st
 
 Loader* PremappedLoader::makeLaunchLoader(Diagnostics& diag, RuntimeState& state, const MachOAnalyzer* mainExec, const char* mainExecPath, const mach_o::Layout* layout)
 {
-    return PremappedLoader::make(state, mainExec, mainExecPath, true, layout);
+    xrt_platform_premapped_macho_change_state((mach_header_64 *)mainExec, XRT__PLATFORM_PREMAPPED_MACHO_READWRITE);
+    Loader* result = PremappedLoader::make(state, mainExec, mainExecPath, true, layout);
+    return result;
 }
 
 #endif // SUPPORT_CREATING_PREMAPPEDLOADERS

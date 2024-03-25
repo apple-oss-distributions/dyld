@@ -179,7 +179,7 @@ public:
     bool                        matchesPath(const char* path) const;
     FileID                      fileID(const RuntimeState& state) const;
     uint32_t                    dependentCount() const;
-    Loader*                     dependent(const RuntimeState& state, uint32_t depIndex, DependentKind* kind=nullptr) const;
+    Loader*                     dependent(const RuntimeState& state, uint32_t depIndex, DependentDylibAttributes* kind=nullptr) const;
     bool                        getExportsTrie(uint64_t& runtimeOffset, uint32_t& size) const;
     bool                        hiddenFromFlat(bool forceGlobal) const;
     bool                        representsCachedDylibIndex(uint16_t dylibIndex) const;
@@ -196,6 +196,8 @@ public:
     bool                        hasBeenFixedUp(RuntimeState&) const;
     bool                        beginInitializers(RuntimeState&);
     void                        runInitializers(RuntimeState&) const;
+    bool                        isDelayInit(RuntimeState&) const;
+    void                        setDelayInit(RuntimeState&, bool value) const;
 
 
     size_t                      size() const;
@@ -208,12 +210,12 @@ public:
     void                        withCDHash(void (^callback)(const uint8_t cdHash[20])) const;
 #endif
 
-#if SUPPORT_CREATING_PREBUILTLOADERS || BUILDING_UNIT_TESTS || BUILDING_CACHE_BUILDER_UNIT_TESTS
+#if SUPPORT_PREBUILTLOADERS || BUILDING_UNIT_TESTS || BUILDING_CACHE_BUILDER_UNIT_TESTS
     // creating PrebuiltLoaders
     static void                 serialize(Diagnostics& diag, RuntimeState& state, const JustInTimeLoader& jitLoader,
                                           LoaderRef buildRef, CacheWeakDefOverride patcher, const PrebuiltObjC& prebuiltObjC,
                                           const PrebuiltSwift& prebuiltSwift, BumpAllocator& allocator);
-#endif // SUPPORT_CREATING_PREBUILTLOADERS || BUILDING_UNIT_TESTS || BUILDING_CACHE_BUILDER_UNIT_TESTS
+#endif // SUPPORT_PREBUILTLOADERS || BUILDING_UNIT_TESTS || BUILDING_CACHE_BUILDER_UNIT_TESTS
 
     static PrebuiltLoader*      makeCachedDylib(PrebuiltLoaderSet* dyldCacheLoaders, const MachOLoaded* ml, const char* path, size_t& size);
 
@@ -222,7 +224,7 @@ private:
 
                                 PrebuiltLoader(const Loader& jitLoader);
 
-    enum class State : uint8_t { unknown=0, beingValidated=1, notMapped=2, mapped=3, mappingDependents=4, dependentsMapped=5, fixedUp=6, beingInitialized=7, initialized=8, invalid=255 };
+    enum class State : uint8_t { unknown=0, beingValidated=1, notMapped=2, mapped=3, mappingDependents=4, dependentsMapped=5, fixedUp=6, delayInitPending=7, beingInitialized=8, initialized=9, invalid=255 };
 
     // helper functions
     State&                      loaderState(const RuntimeState& state) const;

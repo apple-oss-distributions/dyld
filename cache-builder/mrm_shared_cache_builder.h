@@ -47,7 +47,9 @@ enum Platform {
     iOS_simulator       = 7,    // PLATFORM_IOSIMULATOR
     tvOS_simulator      = 8,    // PLATFORM_TVOSSIMULATOR
     watchOS_simulator   = 9,    // PLATFORM_WATCHOSSIMULATOR
-    driverKit           = 10    // PLATFORM_DRIVERKIT
+    driverKit           = 10,   // PLATFORM_DRIVERKIT
+    macOSExclaveKit     = 16,   // PLATFORM_MACOS_EXCLAVEKIT
+    iOSExclaveKit       = 18,   // PLATFORM_IOS_EXCLAVEKIT
 };
 
 enum Disposition

@@ -154,12 +154,13 @@ Symbol Symbol::makeWeakDefWasPrivateExtern(CString name, uint64_t imageOffset, u
     return symbol;
 }
 
-Symbol Symbol::makeAltEntry(CString name, uint64_t imageOffset, uint8_t sectOrd, Scope scope, bool dontDeadStrip, bool cold)
+Symbol Symbol::makeAltEntry(CString name, uint64_t imageOffset, uint8_t sectOrd, Scope scope, bool dontDeadStrip, bool cold, bool weakDef)
 {
     Symbol symbol(name);
     symbol._kind        = Kind::altEntry;
     symbol._sectOrdinal = sectOrd;
     symbol._scope       = scope;
+    symbol._weakDef     = weakDef;
     symbol._implOffset  = imageOffset;
     if ( dontDeadStrip )
         symbol.setDontDeadStrip();

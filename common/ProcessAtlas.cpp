@@ -1888,7 +1888,7 @@ void ProcessSnapshot::Serializer::emitMappedFileInfo(uint64_t rebasedAddress, co
     }
 }
 
-void ProcessSnapshot::Serializer::readMappedFileInfo(std::span<std::byte>& data, uint64_t& rebasedAddress, UUID& uuid, FileRecord& file) {
+bool ProcessSnapshot::Serializer::readMappedFileInfo(std::span<std::byte>& data, uint64_t& rebasedAddress, UUID& uuid, FileRecord& file) {
     uint64_t flags = readPVLEUInt64(data);
     rebasedAddress = readPVLEUInt64(data);
     if (flags & kMappedFileFlagsHasUUID) {
@@ -1898,12 +1898,17 @@ void ProcessSnapshot::Serializer::readMappedFileInfo(std::span<std::byte>& data,
     if (flags & kMappedFileFlagsHasFileID) {
         uint64_t volumeIndex = readPVLEUInt64(data);
         uint64_t objectID = readPVLEUInt64(data);
+        if (volumeIndex >= _volumeUUIDs.size() )
+            return false;
         file = _fileManager.fileRecordForVolumeUUIDAndObjID(_volumeUUIDs[(size_t)volumeIndex], objectID);
     }
     if (flags & kMappedFileFlagsHasFilePath) {
         uint64_t pathOffset = readPVLEUInt64(data);
+        if ( pathOffset >= _stringTableBuffer.size() )
+            return false;
         file = _fileManager.fileRecordForPath(_ephemeralAllocator, &_stringTableBuffer[(size_t)pathOffset]);
     }
+    return true;
 }
 
 Vector<std::byte> ProcessSnapshot::Serializer::serialize() {
@@ -2038,7 +2043,8 @@ bool ProcessSnapshot::Serializer::deserialize(const std::span<std::byte> data) {
         uint64_t rebasedAddress;
         UUID uuid;
         FileRecord file;
-        readMappedFileInfo(i, rebasedAddress, uuid, file);
+        if ( !readMappedFileInfo(i, rebasedAddress, uuid, file) )
+            return false;
         rebasedAddress = rebasedAddress * ((_processFlags & kProcessFlagsHas16kPages) ? 16384 : 4096);
         SharedPtr<Mapper> mapper = nullptr;
         if (_processSnapshot._useIdentityMapper) {
@@ -2064,7 +2070,8 @@ bool ProcessSnapshot::Serializer::deserialize(const std::span<std::byte> data) {
         uint64_t rebasedAddress;
         UUID uuid;
         FileRecord file;
-        readMappedFileInfo(i, rebasedAddress, uuid, file);
+        if ( !readMappedFileInfo(i, rebasedAddress, uuid, file) )
+            return false;
         rebasedAddress = (rebasedAddress * ((_processFlags & kProcessFlagsHas16kPages) ? 16384 : 4096)) + lastAddress;
         lastAddress = rebasedAddress;
         SharedPtr<Mapper> mapper = nullptr;

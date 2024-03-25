@@ -132,7 +132,45 @@ struct Options {
 
 
 static void usage() {
-    fprintf(stderr, "Usage: dyld_shared_cache_util -list [ -uuid ] [-vmaddr] | -dependents <dylib-path> [ -versions ] | -linkedit | -map | -slide_info | -verbose_slide_info | -info | -extract <dylib-dir>  [ shared-cache-file ] \n");
+    fprintf(stderr, "Usage: dyld_shared_cache_util <command> [-fs-root] [-inode] [-versions] [-vmaddr] [shared-cache-file]\n"
+        "    Commands:\n"
+        "        -list [-uuid] [-vmaddr]                  list images\n"
+        "        -dependents <dylb-path>                  list dependents of dylib\n"
+        "        -linkedit                                print linkedit contents\n"
+        "        -info                                    print shared cache info\n"
+        "        -stats                                   print size stats\n"
+        "        -slide_info                              print slide info\n"
+        "        -verbose_slide_info                      print verbose slide info\n"
+        "        -fixups_in_dylib <dylib-path>            print fixups in dylib\n"
+        "        -text_info                               print locations of TEXT segments\n"
+        "        -local_symbols                           print local symbols and locations\n"
+        "        -strings                                 print C strings in images\n"
+        "        -sections                                print summary of section sizes\n"
+        "        -exports                                 list exported symbols in images\n"
+        "        -duplicate_exports                       list symbols exported by multiple images\n"
+        "        -duplicate_exports_summary               print number of duplicated symbols per image\n"
+        "        -map                                     print map of segment locations\n"
+        "        -json-map                                print map of segment locations in JSON format\n"
+        "        -verbose-json-map                        print map of segment and section locations in JSON format\n"
+        "        -json-dependents                         print dependents in JSON format\n"
+        "        -size                                    print the size of each image\n"
+        "        -objc-info                               print summary of ObjC content\n"
+        "        -objc-protocols                          list ObjC protocols\n"
+        "        -objc-imp-caches                         print contents of ObjC method caches\n"
+        "        -objc-classes                            print ObjC class names and methods in JSON format\n"
+        "        -objc-class-layout                       print size, start offset, and ivars of ObjC classes\n"
+        "        -objc-class-method-lists                 print methods and properties of ObjC classes\n"
+        "        -objc-class-hash-table                   print the contents of the ObjC class table\n"
+        "        -objc-selectors                          print all ObjC selector names and locations in JSON format\n"
+        "        -swift-proto                             print Swift protocol conformance table\n"
+        "        -extract <directory>                     extract images into the given directory\n"
+        "        -patch_table                             print symbol patch table\n"
+        "        -list_dylibs_with_section <seg> <sect>   list images that contain the given section\n"
+        "        -mach_headers                            summarize mach header of each image\n"
+        "        -load_commands                           summarize load commands of each image\n"
+        "        -cache_header                            print header of each shared cache file\n"
+        "        -dylib_symbols                           print all symbol names and locations\n"
+        "        -function_starts                         print address of beginning of each function\n");
 }
 
 static void checkMode(Mode mode) {
@@ -299,9 +337,6 @@ static void printSlideInfoForDataRegion(const DyldSharedCache* dyldCache, uint64
                 if ( loc->auth.authenticated ) {
                     uint64_t target = authValueAdd + loc->auth.offsetFromSharedCacheBase;
                     uint64_t targetValue = target;
-#if __has_feature(ptrauth_calls)
-                    targetValue = ptr.arm64e.signPointer((void*)loc, target);
-#endif
                     printf("    [% 5d + 0x%04llX]: 0x%016llX (JOP: diversity %d, address %s, %s)\n",
                            i, (uint64_t)((const uint8_t*)loc - pageStart), targetValue,
                            ptr.arm64e.authBind.diversity, ptr.arm64e.authBind.addrDiv ? "true" : "false",
@@ -382,6 +417,48 @@ static void printSlideInfoForDataRegion(const DyldSharedCache* dyldCache, uint64
                     rebaseChainV4(page, pageStartOffset);
                 }
             }
+        }
+    }
+    else if ( slideInfoHeader->version == 5 ) {
+        const dyld_cache_slide_info5* slideInfo = (dyld_cache_slide_info5*)(slideInfoHeader);
+        printf("page_size=%d\n", slideInfo->page_size);
+        printf("page_starts_count=%d\n", slideInfo->page_starts_count);
+        printf("auth_value_add=0x%016llX\n", slideInfo->value_add);
+        const uintptr_t valueAdd = (uintptr_t)(slideInfo->value_add);
+        for (int i=0; i < slideInfo->page_starts_count; ++i) {
+            uint16_t delta = slideInfo->page_starts[i];
+            if ( delta == DYLD_CACHE_SLIDE_V5_PAGE_ATTR_NO_REBASE ) {
+                printf("page[% 5d]: no rebasing\n", i);
+                continue;
+            }
+
+            printf("page[% 5d]: start=0x%04X\n", i, delta);
+            if ( !verboseSlideInfo )
+                continue;
+
+            delta = delta/sizeof(uint64_t); // initial offset is byte based
+            const uint8_t* pageStart = dataPagesStart + (i * slideInfo->page_size);
+            const dyld_cache_slide_pointer5* loc = (dyld_cache_slide_pointer5*)pageStart;
+
+            do {
+                loc += delta;
+                delta = loc->regular.next;
+
+                dyld3::MachOLoaded::ChainedFixupPointerOnDisk ptr;
+                ptr.raw64 = *((uint64_t*)loc);
+                PointerMetaData pmd(&ptr, DYLD_CHAINED_PTR_ARM64E_SHARED_CACHE);
+
+                uint64_t targetValue = valueAdd + loc->regular.runtimeOffset;
+                if ( pmd.authenticated ) {
+                    printf("    [% 5d + 0x%04llX]: 0x%016llX (JOP: diversity %d, address %s, %s)\n",
+                           i, (uint64_t)((const uint8_t*)loc - pageStart), targetValue,
+                           ptr.cache64e.auth.diversity, ptr.cache64e.auth.addrDiv ? "true" : "false",
+                           ptr.cache64e.keyName());
+                } else {
+                    targetValue = targetValue | ptr.cache64e.high8();
+                    printf("    [% 5d + 0x%04llX]: 0x%016llX\n", i, (uint64_t)((const uint8_t*)loc - pageStart), targetValue);
+                }
+            } while (delta != 0);
         }
     }
 }
@@ -566,6 +643,34 @@ static void forEachSlidValue(const DyldSharedCache* dyldCache, uint64_t dataStar
                 uint16_t pageStartOffset = start*4;
                 rebaseChainV4(page, pageStartOffset);
             }
+        }
+    }
+    else if ( slideInfoHeader->version == 5 ) {
+        const dyld_cache_slide_info5* slideInfo = (dyld_cache_slide_info5*)(slideInfoHeader);
+        const uintptr_t valueAdd = (uintptr_t)(slideInfo->value_add);
+        for (int i=0; i < slideInfo->page_starts_count; ++i) {
+            uint16_t delta = slideInfo->page_starts[i];
+            if ( delta == DYLD_CACHE_SLIDE_V5_PAGE_ATTR_NO_REBASE ) {
+                // Nothing to do here
+                continue;
+            }
+
+            delta = delta/sizeof(uint64_t); // initial offset is byte based
+            const uint8_t* pageStart = dataPagesStart + (i * slideInfo->page_size);
+            const dyld_cache_slide_pointer5* loc = (dyld_cache_slide_pointer5*)pageStart;
+            do {
+                loc += delta;
+                delta = loc->regular.next;
+
+                dyld3::MachOLoaded::ChainedFixupPointerOnDisk ptr;
+                ptr.raw64 = *((uint64_t*)loc);
+                PointerMetaData pmd(&ptr, DYLD_CHAINED_PTR_ARM64E_SHARED_CACHE);
+
+                uint64_t offsetInDataRegion = (const uint8_t*)loc - dataPagesStart;
+                uint64_t fixupVMAddr = dataStartAddress + offsetInDataRegion;
+                uint64_t targetVMAddr = valueAdd + loc->auth.runtimeOffset + ((uint64_t)pmd.high8 << 56);
+                callback(fixupVMAddr, targetVMAddr, pmd);
+            } while (delta != 0);
         }
     }
 }
@@ -1189,7 +1294,7 @@ int main (int argc, const char* argv[]) {
     }
 
     if ( options.mode == modeNone ) {
-        fprintf(stderr, "Error: select one of -list, -dependents, -info, -linkedit, or -map\n");
+        fprintf(stderr, "Error: no command selected\n");
         usage();
         exit(1);
     }
@@ -1808,7 +1913,7 @@ int main (int argc, const char* argv[]) {
             }
 
             // class appears in more than one header
-            fprintf(stderr, "[% 5d] -> %lu duplicates = %s\n", bucketIndex, implCacheInfos.count(), protocolName);
+            fprintf(stderr, "[% 5d] -> %llu duplicates = %s\n", bucketIndex, implCacheInfos.count(), protocolName);
             for (const ObjectAndDylibIndex& objectInfo : implCacheInfos) {
                 printf("  - [% 5d] -> (% 8lld, %4d) = %s in (%s)\n",
                        bucketIndex, objectInfo.first, objectInfo.second, protocolName,
@@ -1844,7 +1949,7 @@ int main (int argc, const char* argv[]) {
             }
 
             // class appears in more than one header
-            printf("[% 5d] -> %lu duplicates = %s\n", bucketIndex, implCacheInfos.count(), className);
+            printf("[% 5d] -> %llu duplicates = %s\n", bucketIndex, implCacheInfos.count(), className);
             for (const ObjectAndDylibIndex& objectInfo : implCacheInfos) {
                 printf("  - [% 5d] -> (% 8lld, %4d) = %s\n",
                        bucketIndex, objectInfo.first, objectInfo.second, className);

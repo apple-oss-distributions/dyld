@@ -23,6 +23,11 @@ GCC_PREPROCESSOR_DEFINITIONS_Release = DYLD_VERSION=$(RC_ProjectSourceVersion) B
 GCC_PREPROCESSOR_DEFINITIONS         = $(GCC_PREPROCESSOR_DEFINITIONS_$(CONFIGURATION)) $(GCC_PREPROCESSOR_DEFINITIONS_FEATURES)
 GCC_PREPROCESSOR_DEFINITIONS[sdk=exclavekit*] = $(GCC_PREPROCESSOR_DEFINITIONS_$(CONFIGURATION)) $(GCC_PREPROCESSOR_DEFINITIONS_FEATURES) L4_CONFIG_PLAT_EVP=1
 
+LINK_WITH_STANDARD_LIBRARIES[sdk=exclavekit*] = NO
+
+SYSTEM_HEADER_SEARCH_PATHS[sdk=exclavekit*] = $(SDKROOT)$(SYSTEM_PREFIX)/usr/include/c++/v1 $(SDKROOT)$(SYSTEM_PREFIX)/usr/local/standalone/cL4/include
+OTHER_CFLAGS[sdk=exclavekit*] = -nostdlibinc -idirafter $(SDKROOT)$(SYSTEM_PREFIX)/usr/local/include/dyld -idirafter $(SDKROOT)$(SYSTEM_PREFIX)/usr/include
+
 ENTRY_NAME[sdk=*simulator*] = __dyld_sim_prepare
 ENTRY_NAME[sdk=iphoneos*]   = __dyld_start
 ENTRY_NAME[sdk=macosx*]     = __dyld_start
@@ -30,11 +35,7 @@ ENTRY_NAME[sdk=exclavekit*] = __dyld_start
 
 DIRTY                    = -Wl,-dirty_data_list,$(DERIVED_SOURCES_DIR)/dyld.dirty
 
+LLDB_SUPPORT = -Wl,-exported_symbol,_lldb_image_notifier -Wl,-exported_symbol,__dyld_debugger_notification  -Wl,-exported_symbol,_dyld_all_image_infos
 LLDB_SUPPORT[sdk=*simulator*] =
-LLDB_SUPPORT[sdk=exclavekit*] =
-LLDB_SUPPORT[sdk=iphoneos*]   = -Wl,-exported_symbol,_lldb_image_notifier -Wl,-exported_symbol,__dyld_debugger_notification  -Wl,-exported_symbol,_dyld_all_image_infos
-LLDB_SUPPORT[sdk=macosx*]     = -Wl,-exported_symbol,_lldb_image_notifier -Wl,-exported_symbol,__dyld_debugger_notification  -Wl,-exported_symbol,_dyld_all_image_infos
-
-
 
 OTHER_LDFLAGS = -e $(ENTRY_NAME) -Wl,-exported_symbol,$(ENTRY_NAME) $(LLDB_SUPPORT) -Wl,-no_inits @$(DERIVED_SOURCES_DIR)/archives.txt -nostdlib -Wl,-dylinker -Wl,-dylinker_install_name,/usr/lib/dyld $(ALIGNMENT) -Wl,-fixup_chains -Wl,-data_const -fapple-link-rtlib $(DIRTY)

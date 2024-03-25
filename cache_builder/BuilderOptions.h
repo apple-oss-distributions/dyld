@@ -54,6 +54,7 @@ struct BuilderOptions
                    CacheKind kind, bool forceDevelopmentSubCacheSuffix);
 
     bool isSimulator() const;
+    bool isExclaveKit() const;
 
     // Core fields
     const dyld3::GradedArchs&                   archs;

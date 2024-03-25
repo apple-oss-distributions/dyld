@@ -154,11 +154,23 @@ const char* _dyld_get_image_name(uint32_t index)
 
 void _dyld_register_func_for_add_image(void (*func)(const mach_header* mh, intptr_t vmaddr_slide))
 {
+#if TARGET_OS_DRIVERKIT
+    // DriverKit signs the pointer with a diversity different than dyld expects when calling the pointer.
+#if __has_feature(ptrauth_calls)
+    func = ptrauth_auth_and_resign(func, ptrauth_key_function_pointer, ptrauth_type_discriminator(void (*)(const mach_header*,intptr_t)), ptrauth_key_function_pointer, 0);
+#endif // __has_feature(ptrauth_calls)
+#endif // !TARGET_OS_DRIVERKIT
     gDyld.apis->_dyld_register_func_for_add_image(func);
 }
 
 void _dyld_register_func_for_remove_image(void (*func)(const mach_header* mh, intptr_t vmaddr_slide))
 {
+#if TARGET_OS_DRIVERKIT
+    // DriverKit signs the pointer with a diversity different than dyld expects when calling the pointer.
+#if __has_feature(ptrauth_calls)
+    func = ptrauth_auth_and_resign(func, ptrauth_key_function_pointer, ptrauth_type_discriminator(void (*)(const mach_header*,intptr_t)), ptrauth_key_function_pointer, 0);
+#endif // __has_feature(ptrauth_calls)
+#endif // !TARGET_OS_DRIVERKIT
     gDyld.apis->_dyld_register_func_for_remove_image(func);
 }
 

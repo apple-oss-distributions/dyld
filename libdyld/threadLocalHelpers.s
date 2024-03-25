@@ -237,6 +237,7 @@ _tlv_get_addr:
 #else
 	ldr		w16, [x0, #4]			// get key from descriptor
 #endif
+#if !TARGET_OS_EXCLAVEKIT
 	mrs		x17, TPIDRRO_EL0
 	and		x17, x17, #-8			// clear low 3 bits???
 #if __LP64__
@@ -252,6 +253,7 @@ _tlv_get_addr:
 #endif
 	add		x0, x17, x16			// return allocation+offset
 	ret		lr
+#endif // !TARGET_OS_EXCLAVEKIT
 
 LlazyAllocate:
 #if __has_feature(ptrauth_returns)

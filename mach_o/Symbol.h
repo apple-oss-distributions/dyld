@@ -79,7 +79,7 @@ public:
     static Symbol makeRegularWasPrivateExtern(CString name, uint64_t imageOffset, uint8_t sectNum, bool dontDeadStrip, bool cold);
     static Symbol makeWeakDefAutoHide(CString name, uint64_t imageOffset, uint8_t sectNum, bool dontDeadStrip, bool cold);   // given the current encoding in mach-o, only weak-defs can be auto-hide
     static Symbol makeWeakDefExport(CString name, uint64_t imageOffset, uint8_t sectNum, bool dontDeadStrip, bool cold);
-    static Symbol makeAltEntry(CString name, uint64_t imageOffset, uint8_t sectNum, Scope s, bool dontDeadStrip, bool cold);
+    static Symbol makeAltEntry(CString name, uint64_t imageOffset, uint8_t sectNum, Scope s, bool dontDeadStrip, bool cold, bool weakDef);
     static Symbol makeWeakDefHidden(CString name, uint64_t imageOffset, uint8_t sectNum, bool dontDeadStrip, bool cold);
     static Symbol makeWeakDefWasPrivateExtern(CString name, uint64_t imageOffset, uint8_t sectNum, bool dontDeadStrip, bool cold);
     static Symbol makeDynamicResolver(CString name, uint8_t sectNum, uint64_t stubImageOffset, uint64_t funcImageOffset);

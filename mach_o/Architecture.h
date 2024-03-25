@@ -26,6 +26,8 @@
 #define mach_o_Architecture_h
 
 #include <stdint.h>
+#include <string_view>
+
 #include <mach/machine.h>
 #include <mach-o/loader.h>
 #include <mach-o/fat.h>
@@ -48,8 +50,8 @@ public:
                             Architecture(const mach_header*);
                             Architecture(const fat_arch*);
                             Architecture(const fat_arch_64*);
-                            Architecture() : _cputype(0), _cpusubtype(0) { }
-                            Architecture(const Architecture& other) : _cputype(other._cputype), _cpusubtype(other._cpusubtype) { }
+                  constexpr Architecture() : _cputype(0), _cpusubtype(0) { }
+                  constexpr Architecture(const Architecture& other) : _cputype(other._cputype), _cpusubtype(other._cpusubtype) { }
 
 #if BUILDING_UNIT_TESTS
                             Architecture(const char* name) { *this = byName(name); }
@@ -70,7 +72,7 @@ public:
     bool                    usesx86_64Instructions() const;
 
     static Architecture current();
-    static Architecture byName(const char* name);
+    static Architecture byName(std::string_view name);
 
     // prebuilt values for known architectures
     static constinit const Architecture ppc;

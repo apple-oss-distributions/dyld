@@ -1052,6 +1052,7 @@ void PatchTableBuilder::calculatePatchTable(const std::span<CacheDylib>& cacheDy
                 for (const dyld_cache_patchable_location& use : uses) {
                     dyld_cache_patchable_location_v4_got loc;
                     loc.cacheOffsetOfUse            = (use.cacheVMAddr - cacheBaseAddress).rawValue();
+                    loc.unusedPadding               = 0;
                     if ( use.authenticated ) {
                         loc.auth.high7                = use.high7;
                         loc.auth.isWeakImport         = use.isWeakImport;

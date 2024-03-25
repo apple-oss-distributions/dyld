@@ -245,7 +245,7 @@ private:
         void merge(Allocator* allocator, uint8_t index) {
             assert(!leaf() && "A leaf node does not have children to merge");
             assert(index < size() && "A node must have a successor node to merge with");
-            // We will merge with the left node unless we can't becasue it is the left most node (0)
+            // We will merge with the left node unless we can't because it is the left most node (0)
             Node* left = children()[index];
             Node* right = children()[index+1];
 

@@ -60,7 +60,7 @@ public:
     bool                        matchesPath(const char* path) const;
     FileID                      fileID(const RuntimeState& state) const;
     uint32_t                    dependentCount() const;
-    Loader*                     dependent(const RuntimeState& state, uint32_t depIndex, DependentKind* kind=nullptr) const;
+    Loader*                     dependent(const RuntimeState& state, uint32_t depIndex, DependentDylibAttributes* depAttrs=nullptr) const;
     bool                        getExportsTrie(uint64_t& runtimeOffset, uint32_t& size) const;
     bool                        hiddenFromFlat(bool forceGlobal) const;
     bool                        representsCachedDylibIndex(uint16_t dylibIndex) const;
@@ -77,6 +77,8 @@ public:
     bool                        hasBeenFixedUp(RuntimeState&) const;
     bool                        beginInitializers(RuntimeState&);
     void                        runInitializers(RuntimeState&) const;
+    bool                        isDelayInit(RuntimeState&) const;
+    void                        setDelayInit(RuntimeState&, bool value) const;
 
     bool                shouldLeaveMapped() const { return this->leaveMapped || this->lateLeaveMapped; }
     void                setLateLeaveMapped() { this->lateLeaveMapped = true; }
@@ -153,21 +155,22 @@ protected:
                          allDepsAreNormal   :  1,
                          overrideIndex      : 15,
                          depCount           : 16,
-                         padding            :  9;
-    uint64_t             sliceOffset;
+                         delayInit          :  1,
+                         padding            :  8;
+    uint64_t             sliceOffset                    = 0;
     FileID               fileIdent;
-    const DylibPatch*    overridePatches;
-    const DylibPatch*    overridePatchesCatalystMacTwin;
-    const PseudoDylib*   pd;
-    uint32_t             exportsTrieRuntimeOffset;
-    uint32_t             exportsTrieSize;
+    const DylibPatch*    overridePatches                = nullptr;
+    const DylibPatch*    overridePatchesCatalystMacTwin = nullptr;
+    const PseudoDylib*   pd                             = nullptr;
+    uint32_t             exportsTrieRuntimeOffset       = 0;
+    uint32_t             exportsTrieSize                = 0;
     SectionLocations     sectionLocations;
     AuthLoader           dependents[1];
     // DependentsKind[]: If allDepsAreNormal is false, then we have an array here too, with 1 entry per dependent
 
 
-    DependentKind&      dependentKind(uint32_t depIndex);
-                        JustInTimeLoader(const MachOFile* mh, const Loader::InitialOptions& options, const FileID& fileID, const mach_o::Layout* layout, bool isPremapped);
+    DependentDylibAttributes&   dependentAttrs(uint32_t depIndex);
+                                JustInTimeLoader(const MachOFile* mh, const Loader::InitialOptions& options, const FileID& fileID, const mach_o::Layout* layout, bool isPremapped);
 };
 
 }  // namespace dyld4

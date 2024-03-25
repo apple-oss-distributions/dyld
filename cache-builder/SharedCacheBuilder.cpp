@@ -3728,6 +3728,7 @@ void SharedCacheBuilder::assignReadOnlySegmentAddresses(SubCache& subCache, uint
         slideInfoSize = std::max(slideInfoSize, sizeof(dyld_cache_slide_info2));
         slideInfoSize = std::max(slideInfoSize, sizeof(dyld_cache_slide_info3));
         slideInfoSize = std::max(slideInfoSize, sizeof(dyld_cache_slide_info4));
+        slideInfoSize = std::max(slideInfoSize, sizeof(dyld_cache_slide_info5));
         // We need one slide info header per data region, plus enough space for that regions pages
         // Each region will also be padded to a page-size so that the kernel can wire it.
         for (Region& region : subCache._dataRegions) {

@@ -241,6 +241,9 @@ private:
     static error::Error computeSlideInfoV3(const BuilderConfig& config,
                                            SlideInfoChunk* slideChunk,
                                            Region& region);
+    static error::Error computeSlideInfoV5(const BuilderConfig& config,
+                                           SlideInfoChunk* slideChunk,
+                                           Region& region);
     static error::Error computeSlideInfoForRegion(const BuilderConfig& config,
                                                   SlideInfoChunk* slideChunk,
                                                   Region& region);

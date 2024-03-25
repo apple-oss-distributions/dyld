@@ -202,7 +202,7 @@ static bool segmentSupportsDataConst(Diagnostics& diag, const BuilderConfig& con
                                      const CacheDylib& cacheDylib, std::string_view segmentName,
                                      objc_visitor::Visitor& objcVisitor)
 {
-    // <rdar://problem/66284631> Don't put __objc_const read-only memory as Swift has method lists we can't see
+    // rdar://113642480 (Swift has some mutable data in __objc_const)
     __block bool isBadSwiftLibrary = false;
     cacheDylib.inputMF->withFileLayout(diag, ^(const mach_o::Layout &layout) {
         if ( !layout.isSwiftLibrary() )

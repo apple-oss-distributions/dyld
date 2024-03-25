@@ -44,7 +44,7 @@
 #include "objc-shared-cache.h"
 
 
-#if SUPPORT_CREATING_PREBUILTLOADERS || BUILDING_UNIT_TESTS || BUILDING_CACHE_BUILDER_UNIT_TESTS
+#if SUPPORT_PREBUILTLOADERS || BUILDING_UNIT_TESTS || BUILDING_CACHE_BUILDER_UNIT_TESTS
 using dyld3::OverflowSafeArray;
 typedef dyld4::PrebuiltObjC::ObjCOptimizerImage ObjCOptimizerImage;
 
@@ -377,7 +377,7 @@ void ObjCOptimizerImage::calculateMissingWeakImports(RuntimeState& state)
                                 missingWeakImports.insert(fixupVMAddr);
                         }
                         else {
-                            diag.error("out of range bind ordinal %d (max %lu)", bindOrdinal, bindTargetsAreWeakImports.count());
+                            diag.error("out of range bind ordinal %d (max %llu)", bindOrdinal, bindTargetsAreWeakImports.count());
                             stopChain = true;
                         }
                     }
@@ -409,7 +409,7 @@ void ObjCOptimizerImage::calculateMissingWeakImports(RuntimeState& state)
                         }
                     }
                     else {
-                        diag.error("out of range bind ordinal %d (max %lu)", targetIndex, bindTargetsAreWeakImports.count());
+                        diag.error("out of range bind ordinal %d (max %llu)", targetIndex, bindTargetsAreWeakImports.count());
                         fixupsStop = true;
                     }
                 }, ^(uint64_t runtimeOffset, uint32_t segmentIndex,
@@ -421,7 +421,7 @@ void ObjCOptimizerImage::calculateMissingWeakImports(RuntimeState& state)
                         }
                     }
                     else {
-                        diag.error("out of range bind ordinal %d (max %lu)", overrideBindTargetIndex, overrideBindTargetsAreWeakImports.count());
+                        diag.error("out of range bind ordinal %d (max %llu)", overrideBindTargetIndex, overrideBindTargetsAreWeakImports.count());
                         fixupsStop = true;
                     }
                 });
@@ -438,7 +438,7 @@ void ObjCOptimizerImage::calculateMissingWeakImports(RuntimeState& state)
                         }
                     }
                     else {
-                        diag.error("out of range bind ordinal %d (max %lu)", targetIndex, bindTargetsAreWeakImports.count());
+                        diag.error("out of range bind ordinal %d (max %llu)", targetIndex, bindTargetsAreWeakImports.count());
                         fixupsStop = true;
                     }
                 });
@@ -956,7 +956,7 @@ writeObjCDataStructHashTable(RuntimeState& state, PrebuiltObjC::ObjCStructKind o
     OverflowSafeArray<const char*>                       objectNames;
 
     // Note we walk the images backwards as we want them in load order to match the order they are registered with objc
-    for ( size_t imageIndex = 0, reverseIndex = (objcImages.count() - 1); imageIndex != objcImages.count(); ++imageIndex, --reverseIndex ) {
+    for ( uint64_t imageIndex = 0, reverseIndex = (objcImages.count() - 1); imageIndex != objcImages.count(); ++imageIndex, --reverseIndex ) {
         if ( objcImages[reverseIndex].diag.hasError() )
             continue;
         ObjCOptimizerImage& image = objcImages[reverseIndex];
@@ -1319,7 +1319,7 @@ void PrebuiltObjC::make(Diagnostics& diag, RuntimeState& state)
             uint64_t dylibUnslidVMAddr = mf->preferredLoadAddress();
 
             std::optional<uint16_t> objcIndex;
-            objcIndex = objc::getPreoptimizedHeaderRWIndex(headerInfoRO, headerInfoRW,
+            objcIndex = objc::getPreoptimizedHeaderROIndex(headerInfoRO, headerInfoRW,
                                                            headerInfoROUnslidVMAddr.rawValue(),
                                                            dylibUnslidVMAddr,
                                                            mf->is64());
@@ -1444,7 +1444,7 @@ uint32_t PrebuiltObjC::serializeFixups(const Loader& jitLoader, BumpAllocator& a
         allocator.zeroFill(fixups.protocolISAFixups.count() * sizeof(uint8_t));
         allocator.align(8);
         BumpAllocatorPtr<uint8_t> protocolArray(allocator, serializationStart + protocolArrayOff);
-        memcpy(protocolArray.get(), fixups.protocolISAFixups.begin(), fixups.protocolISAFixups.count() * sizeof(uint8_t));
+        memcpy(protocolArray.get(), fixups.protocolISAFixups.begin(), (size_t)(fixups.protocolISAFixups.count() * sizeof(uint8_t)));
     }
 
     // Selector references
@@ -1454,7 +1454,7 @@ uint32_t PrebuiltObjC::serializeFixups(const Loader& jitLoader, BumpAllocator& a
         fixupInfo->selectorReferencesFixupsCount  = (uint32_t)fixups.selectorReferenceFixups.count();
         allocator.zeroFill(fixups.selectorReferenceFixups.count() * sizeof(PrebuiltLoader::BindTargetRef));
         BumpAllocatorPtr<uint8_t> selectorsArray(allocator, serializationStart + selectorsArrayOff);
-        memcpy(selectorsArray.get(), fixups.selectorReferenceFixups.begin(), fixups.selectorReferenceFixups.count() * sizeof(PrebuiltLoader::BindTargetRef));
+        memcpy(selectorsArray.get(), fixups.selectorReferenceFixups.begin(), (size_t)(fixups.selectorReferenceFixups.count() * sizeof(PrebuiltLoader::BindTargetRef)));
     }
 
     return serializationStart;
@@ -1486,6 +1486,6 @@ const header_info_rw *getPreoptimizedHeaderRW(const struct header_info *const hd
 }
 
 }  // namespace dyld4
-#endif // SUPPORT_CREATING_PREBUILTLOADERS || BUILDING_UNIT_TESTS || BUILDING_CACHE_BUILDER_UNIT_TESTS
+#endif // SUPPORT_PREBUILTLOADERS || BUILDING_UNIT_TESTS || BUILDING_CACHE_BUILDER_UNIT_TESTS
 
 #endif // !TARGET_OS_EXCLAVEKIT

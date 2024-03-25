@@ -110,14 +110,14 @@ EphemeralAllocator::EphemeralAllocator() {
 
 EphemeralAllocator::EphemeralAllocator(MemoryManager& memoryManager) : _memoryManager(&memoryManager) {}
 
-EphemeralAllocator::EphemeralAllocator(void* B, size_t S) : _freeBuffer({B,S}) {
+EphemeralAllocator::EphemeralAllocator(void* B, uint64_t S) : _freeBuffer({B,S}) {
     MemoryManager memoryManager;
     _memoryManager = &memoryManager;
     _memoryManager = new (this->aligned_alloc(alignof(MemoryManager), sizeof(MemoryManager))) MemoryManager(std::move(memoryManager));
     // Don't count the space used by the MemoryManager
     _allocatedBytes = 0;
 }
-EphemeralAllocator::EphemeralAllocator(void* B, size_t S, MemoryManager& memoryManager) : _memoryManager(&memoryManager), _freeBuffer({B,S}){}
+EphemeralAllocator::EphemeralAllocator(void* B, uint64_t S, MemoryManager& memoryManager) : _memoryManager(&memoryManager), _freeBuffer({B,S}){}
 
 EphemeralAllocator::EphemeralAllocator(EphemeralAllocator&& other) {
     swap(other);
@@ -132,11 +132,11 @@ EphemeralAllocator& EphemeralAllocator::operator=(EphemeralAllocator&& other) {
     return *this;
 }
 
-bool MemoryManager::Buffer::align(size_t alignment, size_t targetSize) {
+bool MemoryManager::Buffer::align(uint64_t alignment, uint64_t targetSize) {
     if (targetSize > size) { return false; }
     char* p1 = static_cast<char*>(address);
     char* p2 = reinterpret_cast<char*>(reinterpret_cast<size_t>(p1 + (alignment - 1)) & -alignment);
-    size_t d = static_cast<size_t>(p2 - p1);
+    uint64_t d = static_cast<uint64_t>(p2 - p1);
     if (d > size - targetSize) { return false; }
     address = p2;
     size -= d;
@@ -175,55 +175,55 @@ void EphemeralAllocator::reset() {
     }
 }
 
-[[nodiscard]] Allocator::Buffer EphemeralAllocator::allocate_buffer(std::size_t nbytes, std::size_t alignment, std::size_t prefix) {
+[[nodiscard]] Allocator::Buffer EphemeralAllocator::allocate_buffer(uint64_t nbytes, uint64_t alignment, uint64_t prefix) {
     assert(prefix == 16 || prefix == 0);
     // First space for the prefix
-    *((uintptr_t*)&_freeBuffer.address) += prefix;
+    *((uint64_t*)&_freeBuffer.address) += prefix;
     _freeBuffer.size -= prefix;
     if ((_freeBuffer.size == 0 - prefix) || (!_freeBuffer.align(alignment, nbytes))) {
 #if __LP64__
-        size_t size = std::max<size_t>(4*nbytes, EPHEMERAL_ALLOCATOR_DEFAULT_POOL_SIZE);
+        uint64_t size = std::max<uint64_t>(4*nbytes, EPHEMERAL_ALLOCATOR_DEFAULT_POOL_SIZE);
 #else
-        size_t size = std::max<size_t>(nbytes+65536, EPHEMERAL_ALLOCATOR_DEFAULT_POOL_SIZE);
+        uint64_t size = std::max<uint64_t>(nbytes+65536, EPHEMERAL_ALLOCATOR_DEFAULT_POOL_SIZE);
 #endif
         _freeBuffer = _memoryManager->vm_allocate_bytes(size);
 //        ASAN_UNPOISON_MEMORY_REGION(_freeBuffer.address, sizeof(RegionListEntry));
         _regionList = new (_freeBuffer.address) RegionListEntry({ _freeBuffer, _regionList});
-        size_t roundedSize = prefix + ((sizeof(RegionListEntry) + 15) & (-16));
-        *((uintptr_t*)&_freeBuffer.address) += roundedSize;
+        uint64_t roundedSize = prefix + ((sizeof(RegionListEntry) + 15) & (-16));
+        *((uint64_t*)&_freeBuffer.address) += roundedSize;
         _freeBuffer.size -= roundedSize;
         _freeBuffer.align(alignment, nbytes);
     }
-    assert((uintptr_t)_freeBuffer.address%16 == 0);
+    assert((uint64_t)_freeBuffer.address%16 == 0);
 
-    Allocator::Buffer result = { (void*)((uintptr_t)_freeBuffer.address-prefix), nbytes+prefix };
-    *((uintptr_t*)&_freeBuffer.address) += nbytes;
+    Allocator::Buffer result = { (void*)((uint64_t)_freeBuffer.address-prefix), nbytes+prefix };
+    *((uint64_t*)&_freeBuffer.address) += nbytes;
     _freeBuffer.size -= nbytes;
     _allocatedBytes += (nbytes + prefix);
 
-//    fprintf(stderr, "%llu @ 0x%lx(%llx) Allocated\n", result.size, (uintptr_t)result.address, (uintptr_t)this);
-//    fprintf(stderr, "SPACE: %lu, 0x%lx\n", _freeBuffer.size, (uintptr_t)_freeBuffer.address);
+//    fprintf(stderr, "%llu @ 0x%lx(%llx) Allocated\n", result.size, (uint64_t)result.address, (uint64_t)this);
+//    fprintf(stderr, "SPACE: %lu, 0x%lx\n", _freeBuffer.size, (uint64_t)_freeBuffer.address);
     return result;
 }
 
 void EphemeralAllocator::deallocate_buffer(Buffer buffer) {
-//    fprintf(stderr, "%llu @ 0x%lx(%llx) Deallocated\n", buffer.size, (uintptr_t)buffer.address, (uintptr_t)this);
+//    fprintf(stderr, "%llu @ 0x%lx(%llx) Deallocated\n", buffer.size, (uint64_t)buffer.address, (uint64_t)this);
     _allocatedBytes -= buffer.size;
 }
 
-std::size_t EphemeralAllocator::allocated_bytes() const {
+uint64_t EphemeralAllocator::allocated_bytes() const {
     return _allocatedBytes;
 }
 
-std::size_t EphemeralAllocator::vm_allocated_bytes() const {
-    std::size_t result = 0;
+uint64_t EphemeralAllocator::vm_allocated_bytes() const {
+    std::uint64_t result = 0;
     for (auto i = _regionList; i != nullptr; i = i->next) {
         result += i->buffer.size;
     }
     return result;
 }
 
-bool EphemeralAllocator::owned(const void* p, std::size_t nbytes) const {
+bool EphemeralAllocator::owned(const void* p, uint64_t nbytes) const {
     for (auto i = _regionList; i != nullptr; i = i->next) {
         if (i->buffer.contains({(void*)p,nbytes})) { return true; }
     }
@@ -234,8 +234,8 @@ void EphemeralAllocator::destroy() {
     contract(_allocatedBytes == 0);
 }
 
-AllocationMetadata::AllocationMetadata(Allocator* A, size_t S) : _type(NormalPtr) {
-    _allocator = (uintptr_t)A>>3;
+AllocationMetadata::AllocationMetadata(Allocator* A, uint64_t S) : _type(NormalPtr) {
+    _allocator = (uint64_t)A>>3;
     for (const auto& granule : granules) {
         uint64_t nextGranuleSize = 1ULL<<(granule+11);
         if (S < nextGranuleSize) {
@@ -247,8 +247,8 @@ AllocationMetadata::AllocationMetadata(Allocator* A, size_t S) : _type(NormalPtr
     }
 }
 
-size_t AllocationMetadata::goodSize(size_t S) {
-    size_t sizeClass = 0;
+uint64_t AllocationMetadata::goodSize(uint64_t S) {
+    uint64_t sizeClass = 0;
     for (const auto& granule : granules) {
         uint64_t nextGranuleSize = 1ULL<<(granule+11);
         if (S <= nextGranuleSize) {
@@ -256,18 +256,18 @@ size_t AllocationMetadata::goodSize(size_t S) {
             break;
         }
     }
-    size_t result = (size_t)(S + ((1ULL<<granules[sizeClass])-1)) & (-1*(1ULL<<granules[sizeClass]));
+    uint64_t result = (uint64_t)(S + ((1ULL<<granules[sizeClass])-1)) & (-1*(1ULL<<granules[sizeClass]));
     return result;
 }
 
 Allocator& AllocationMetadata::allocator() const {
     auto result = (Allocator*)(_allocator<<3);
-//    fprintf(stderr, "0x%lx\tgot\t0x%lx\n", (uintptr_t)this, (uintptr_t)result);
+//    fprintf(stderr, "0x%lx\tgot\t0x%lx\n", (uint64_t)this, (uint64_t)result);
     return *result;
 }
 
-size_t AllocationMetadata::size() const {
-    return (size_t)_size<<granules[_sizeClass];
+uint64_t AllocationMetadata::size() const {
+    return _size<<granules[_sizeClass];
 }
 
 AllocationMetadata::Type AllocationMetadata::type() const {
@@ -280,7 +280,7 @@ void AllocationMetadata::setType(Type type) {
 
 AllocationMetadata* AllocationMetadata::getForPointer(void* data) {
     contract(data != nullptr);
-    return (AllocationMetadata*)((uintptr_t)data-Allocator::kGranuleSize);
+    return (AllocationMetadata*)((uint64_t)data-Allocator::kGranuleSize);
 }
 
 void AllocationMetadata::freeObject() {
@@ -325,7 +325,7 @@ bool AllocationMetadata::decrementWeakRefCount() {
 #pragma mark Common Utility functionality for allocators
 
 void* Allocator::Buffer::lastAddress() const {
-    return (void*)((uintptr_t)address + size);
+    return (void*)((uint64_t)address + size);
 }
 
 bool Allocator::Buffer::contains(const Buffer& region) const {
@@ -340,22 +340,22 @@ bool Allocator::Buffer::valid() const {
 
 void Allocator::Buffer::remainders(const Buffer& other, Buffer& prolog, Buffer& epilog) const {
     contract(contains(other));
-    if (((uintptr_t)address) < (uintptr_t)other.address) {
+    if (((uint64_t)address) < (uint64_t)other.address) {
         prolog.address = address;
-        prolog.size = (uintptr_t)other.address - ((uintptr_t)address);
+        prolog.size = (uint64_t)other.address - ((uint64_t)address);
     }
-    if (((uintptr_t)address+size) > (uintptr_t)other.address+other.size) {
-        epilog.address = (void*)((uintptr_t)other.address+other.size);
-        epilog.size = ((uintptr_t)address+size) - ((uintptr_t)other.address+other.size);
+    if (((uint64_t)address+size) > (uint64_t)other.address+other.size) {
+        epilog.address = (void*)((uint64_t)other.address+other.size);
+        epilog.size = ((uint64_t)address+size) - ((uint64_t)other.address+other.size);
     }
 }
 
-Allocator::Buffer Allocator::Buffer::findSpace(size_t targetSize, size_t targetAlignment, size_t prefix) const {
+Allocator::Buffer Allocator::Buffer::findSpace(uint64_t targetSize, uint64_t targetAlignment, uint64_t prefix) const {
     Buffer result = *this;
-    result.address = (void*)((uintptr_t)result.address + prefix);
+    result.address = (void*)((uint64_t)result.address + prefix);
     result.size -= prefix;
     if (result.align(targetAlignment, targetSize)) {
-        result.address = (void*)((uintptr_t)result.address - prefix);
+        result.address = (void*)((uint64_t)result.address - prefix);
         result.size = (targetSize + prefix);
         return result;
     }
@@ -369,14 +369,14 @@ Allocator::Buffer::operator bool() const {
 }
 
 bool Allocator::Buffer::succeeds(const Buffer& other) const {
-    if (((uintptr_t)address + size) == ((uintptr_t)other.address)) { return true; }
-    if (((uintptr_t)other.address + other.size) == ((uintptr_t)address)) { return true; }
+    if (((uint64_t)address + size) == ((uint64_t)other.address)) { return true; }
+    if (((uint64_t)other.address + other.size) == ((uint64_t)address)) { return true; }
     return false;
 }
 
 
 void Allocator::Buffer::dump() const {
-    printf("\t%lu @ 0x%lx - 0x%lx\n", size, (uintptr_t)address, (uintptr_t)address+size);
+    printf("\t%llu @ 0x%llx - 0x%llx\n", size, (uint64_t)address, (uint64_t)address+size);
 }
 
 #pragma mark -
@@ -384,12 +384,12 @@ void Allocator::Buffer::dump() const {
 
 #if TARGET_OS_EXCLAVEKIT
 // ExclaveKit specific page allocator - for now, let's use a fixed-size static arena.
-static char page_alloc_arena[512 * 1024] __attribute__((aligned(PAGE_SIZE)));
-static size_t page_alloc_arena_used = 0;
+static char page_alloc_arena[34 * 0x4000] __attribute__((aligned(PAGE_SIZE)));
+static uint64_t page_alloc_arena_used = 0;
 
-[[nodiscard]] void* MemoryManager::allocate_pages(size_t size) {
+[[nodiscard]] void* MemoryManager::allocate_pages(uint64_t size) {
 
-    size_t targetSize = (size + (PAGE_SIZE-1)) & (-1*PAGE_SIZE);
+    uint64_t targetSize = (size + (PAGE_SIZE-1)) & (-1*PAGE_SIZE);
     if (page_alloc_arena_used + targetSize > sizeof(page_alloc_arena)) {
         return nullptr;
     }
@@ -398,12 +398,16 @@ static size_t page_alloc_arena_used = 0;
     return result;
 }
 
-void MemoryManager::deallocate_pages(void* p, size_t size) {
-    // Don't deallocate, for now.
+void MemoryManager::deallocate_pages(void* p, uint64_t size) {
+    void *last = page_alloc_arena + page_alloc_arena_used - size;
+    if ( p == last ) {
+        bzero(p, size);
+        page_alloc_arena_used -= size;
+    }
 }
 
-[[nodiscard]] MemoryManager::Buffer MemoryManager::vm_allocate_bytes(std::size_t size) {
-    size_t targetSize = (size + (PAGE_SIZE-1)) & (-1*PAGE_SIZE);
+[[nodiscard]] MemoryManager::Buffer MemoryManager::vm_allocate_bytes(uint64_t size) {
+    uint64_t targetSize = (size + (PAGE_SIZE-1)) & (-1*PAGE_SIZE);
     void* result = MemoryManager::allocate_pages(targetSize);
     if ( !result ) {
         return {nullptr, 0};
@@ -411,8 +415,8 @@ void MemoryManager::deallocate_pages(void* p, size_t size) {
     return {result, targetSize};
 }
 
-void MemoryManager::vm_deallocate_bytes(void* p, std::size_t size) {
-    // Don't deallocate, for now.
+void MemoryManager::vm_deallocate_bytes(void* p, uint64_t size) {
+    MemoryManager::deallocate_pages(p, size);
 }
 
 #else
@@ -421,11 +425,11 @@ void MemoryManager::vm_deallocate_bytes(void* p, std::size_t size) {
 }
 
 #if TARGET_OS_OSX && BUILDING_DYLD && __x86_64__
-[[nodiscard]] MemoryManager::Buffer MemoryManager::vm_allocate_bytes(std::size_t size) {
+[[nodiscard]] MemoryManager::Buffer MemoryManager::vm_allocate_bytes(uint64_t size) {
     // Only do this on macOS for now due to qualification issue in embedded simulators
-    static const size_t kMOneMegabyte = 0x0100000;
+    static const uint64_t kMOneMegabyte = 0x0100000;
     // We allocate an extra page to use as a guard page
-    size_t targetSize = ((size + (PAGE_SIZE-1)) & (-1*PAGE_SIZE)) + PAGE_SIZE;
+    uint64_t targetSize = ((size + (PAGE_SIZE-1)) & (-1*PAGE_SIZE)) + PAGE_SIZE;
 #if __LP64__
     mach_vm_address_t result = 0x0100000000;                    // Set to 4GB so that is the first eligible address
 #else
@@ -473,15 +477,15 @@ void MemoryManager::vm_deallocate_bytes(void* p, std::size_t size) {
     (void)vm_protect(mach_task_self(), (vm_address_t)result+targetSize, PAGE_SIZE, true, VM_PROT_NONE);
 
 //    ASAN_POISON_MEMORY_REGION((void*)result, targetSize);
-//    fprintf(stderr, "0x%lx - 0x%lx\t  VM_ALLOCATED\n", (uintptr_t)result, (uintptr_t)result+targetSize);
+//    fprintf(stderr, "0x%lx - 0x%lx\t  VM_ALLOCATED\n", (uint64_t)result, (uint64_t)result+targetSize);
     return {(void*)result, targetSize};
 }
 #else /* TARGET_OS_OSX && BUILDING_DYLD && __x86_64__ */
-[[nodiscard]] MemoryManager::Buffer MemoryManager::vm_allocate_bytes(std::size_t size) {
-    size_t targetSize = ((size + (PAGE_SIZE-1)) & (-1*PAGE_SIZE)) + PAGE_SIZE;
+[[nodiscard]] MemoryManager::Buffer MemoryManager::vm_allocate_bytes(uint64_t size) {
+    uint64_t targetSize = ((size + (PAGE_SIZE-1)) & (-1*PAGE_SIZE)) + PAGE_SIZE;
     vm_address_t    result;
     // We allocate an extra page to use as a guard page
-    kern_return_t kr = vm_allocate(mach_task_self(), &result, targetSize, VM_FLAGS_ANYWHERE | vmFlags());
+    kern_return_t kr = vm_allocate(mach_task_self(), &result, (vm_size_t)targetSize, VM_FLAGS_ANYWHERE | vmFlags());
 #if BUILDING_DYLD && TARGET_OS_OSX && __x86_64__
     // rdar://79214654 support wine games that need low mem.  Move dyld heap out of low mem
     if ( (kr == KERN_SUCCESS) && (result < 0x100000000ULL) ) {
@@ -500,7 +504,7 @@ void MemoryManager::vm_deallocate_bytes(void* p, std::size_t size) {
     if (kr != KERN_SUCCESS) {
         char buffer[1024];
         char intStrBuffer[130];
-        bytesToHex((const uint8_t*)&size, sizeof(std::size_t), intStrBuffer);
+        bytesToHex((const uint8_t*)&size, sizeof(uint64_t ), intStrBuffer);
         strlcpy(&buffer[0], "Could not vm_allocate 0x", 1024);
         strlcat(&buffer[0], intStrBuffer, 1024);
         strlcat(&buffer[0], " bytes (kr: 0x", 1024);
@@ -513,74 +517,73 @@ void MemoryManager::vm_deallocate_bytes(void* p, std::size_t size) {
     }
 
     // Force accesses to the guard page to fault
-    (void)vm_protect(mach_task_self(), result+targetSize, PAGE_SIZE, true, VM_PROT_NONE);
+    (void)vm_protect(mach_task_self(), (vm_address_t)(result+targetSize), PAGE_SIZE, true, VM_PROT_NONE);
 
     ASAN_POISON_MEMORY_REGION((void*)result, targetSize);
-//    fprintf(stderr, "0x%lx - 0x%lx\t  VM_ALLOCATED\n", (uintptr_t)result, (uintptr_t)result+targetSize);
+//    fprintf(stderr, "0x%lx - 0x%lx\t  VM_ALLOCATED\n", (uint64_t)result, (uint64_t)result+targetSize);
     return {(void*)result, targetSize};
 }
 #endif /* TARGET_OS_OSX && BUILDING_DYLD && __x86_64__ */
 
-void MemoryManager::vm_deallocate_bytes(void* p, std::size_t size) {
-//    fprintf(stderr, "0x%lx - 0x%lx\tVM_DEALLOCATED\n", (uintptr_t)p, (uintptr_t)p+size);
+void MemoryManager::vm_deallocate_bytes(void* p, uint64_t size) {
+//    fprintf(stderr, "0x%lx - 0x%lx\tVM_DEALLOCATED\n", (uint64_t)p, (uint64_t)p+size);
     //FIXME: We need to unpoison memory here because the same addresses can be allocated by libraries and passed back to us later
     //FIXME: We can remove this hack if we do somehting like interpose vm_allocate and track allocations there
     ASAN_UNPOISON_MEMORY_REGION(p, size);
-    (void)vm_deallocate(mach_task_self(), (vm_address_t)p, size + PAGE_SIZE);
+    (void)vm_deallocate(mach_task_self(), (vm_address_t)p, (vm_size_t)size + PAGE_SIZE);
 }
 #endif // TARGET_OS_EXCLAVEKIT
 
 
-[[nodiscard]] Allocator::Buffer Allocator::allocate_buffer(std::size_t nbytes, std::size_t alignment) {
-    size_t targetAlignment = std::max<size_t>(16ULL, alignment);
-    size_t targetSize = (std::max<size_t>(nbytes, 16ULL) + (targetAlignment-1)) & (-1*targetAlignment);
+[[nodiscard]] Allocator::Buffer Allocator::allocate_buffer(uint64_t nbytes, uint64_t alignment) {
+    uint64_t targetAlignment = std::max<uint64_t >(16ULL, alignment);
+    uint64_t targetSize = (std::max<uint64_t >(nbytes, 16ULL) + (targetAlignment-1)) & (-1*targetAlignment);
     targetSize = AllocationMetadata::goodSize(targetSize);
     auto result = allocate_buffer(targetSize, targetAlignment, 0);
-//    fprintf(stderr, "0x%lx - 0x%lx\t     ALLOCATED (tid: %u)\n", (uintptr_t)result.address, (uintptr_t)result.address+result.size, mach_thread_self());
+//    fprintf(stderr, "0x%lx - 0x%lx\t     ALLOCATED (tid: %u)\n", (uint64_t)result.address, (uint64_t)result.address+result.size, mach_thread_self());
 //    ASAN_UNPOISON_MEMORY_REGION(result.address, result.size);
     return result;
 }
 
-void Allocator::deallocate_buffer(void* p, std::size_t nbytes, std::size_t alignment) {
-    const size_t targetAlignment = std::max<size_t>(16ULL, alignment);
-    size_t targetSize = (std::max<size_t>(nbytes, 16ULL) + (targetAlignment-1)) & (-1*targetAlignment);
+void Allocator::deallocate_buffer(void* p, uint64_t nbytes, uint64_t alignment) {
+    const uint64_t targetAlignment = std::max<uint64_t >(16ULL, alignment);
+    uint64_t targetSize = (std::max<uint64_t >(nbytes, 16ULL) + (targetAlignment-1)) & (-1*targetAlignment);
 //    ASAN_POISON_MEMORY_REGION(p, targetSize);
-//    fprintf(stderr, "0x%lx - 0x%lx\t   DEALLOCATED (tid: %u)\n", (uintptr_t)p, (uintptr_t)p+targetSize, mach_thread_self());
+//    fprintf(stderr, "0x%lx - 0x%lx\t   DEALLOCATED (tid: %u)\n", (uint64_t)p, (uint64_t)p+targetSize, mach_thread_self());
     deallocate_buffer({p, targetSize});
 }
 
-void* Allocator::malloc(size_t size) {
+void* Allocator::malloc(uint64_t size) {
     void* result = this->aligned_alloc(kGranuleSize, size);
-//    fprintf(stderr, "MALLOC(0x%lx)\n", (uintptr_t)result);
+//    fprintf(stderr, "MALLOC(0x%lx)\n", (uint64_t)result);
     return result;
 }
 
-void* Allocator::aligned_alloc(size_t alignment, size_t size) {
-    static_assert(sizeof(size_t) == sizeof(Allocator*), "Ensure size_t is pointer sized");
-    static_assert(kGranuleSize >= (sizeof(size_t) == sizeof(Allocator*)), "Ensure we can fit all metadata in a granule");
-    const size_t targetAlignment = std::max<size_t>(16ULL, alignment);
-    size_t targetSize = (std::max<size_t>(size, 16ULL) + (targetAlignment-1)) & (-1*targetAlignment);
+void* Allocator::aligned_alloc(uint64_t alignment, uint64_t size) {
+    static_assert(kGranuleSize >= (sizeof(uint64_t) == sizeof(Allocator*)), "Ensure we can fit all metadata in a granule");
+    const uint64_t targetAlignment = std::max<uint64_t>(16ULL, alignment);
+    uint64_t targetSize = (std::max<uint64_t>(size, 16ULL) + (targetAlignment-1)) & (-1*targetAlignment);
     targetSize = AllocationMetadata::goodSize(targetSize);
     
     auto buffer = allocate_buffer(targetSize, targetAlignment, 16);
 //    ASAN_UNPOISON_MEMORY_REGION(buffer.address, buffer.size);
     contract(buffer.address != nullptr);
     // We are guaranteed a 1 granule managed we can use for storage;
-    //    fprintf(stderr, "(tid 0x%lx)\t0x%lx\tstashing\t0x%lx\n", mach_thread_self(), (uintptr_t)buffer.address, (uintptr_t)this);
+    //    fprintf(stderr, "(tid 0x%lx)\t0x%lx\tstashing\t0x%lx\n", mach_thread_self(), (uint64_t)buffer.address, (uint64_t)this);
     (void)new (buffer.address) AllocationMetadata(this, buffer.size-kGranuleSize);
-//    fprintf(stderr, "aligned_alloc\t0x%lx\t%lu\t%lu\n", (uintptr_t)buffer.address+kGranuleSize, size, alignment);
-//    fprintf(stderr, "ALIGNED_ALLOC(0x%lx): %llu\n", (uintptr_t)buffer.address+kGranuleSize, buffer.size-kGranuleSize);
-    return (void*)((uintptr_t)buffer.address+kGranuleSize);
+//    fprintf(stderr, "aligned_alloc\t0x%lx\t%lu\t%lu\n", (uint64_t)buffer.address+kGranuleSize, size, alignment);
+//    fprintf(stderr, "ALIGNED_ALLOC(0x%lx): %llu\n", (uint64_t)buffer.address+kGranuleSize, buffer.size-kGranuleSize);
+    return (void*)((uint64_t)buffer.address+kGranuleSize);
 }
 
 void Allocator::free(void* ptr) {
-//    fprintf(stderr, "FREE(0x%lx)\n", (uintptr_t)ptr);
-    contract((uintptr_t)ptr%16==0);
+//    fprintf(stderr, "FREE(0x%lx)\n", (uint64_t)ptr);
+    contract((uint64_t)ptr%16==0);
     if (!ptr) { return; }
     // We are guaranteed a 1 granule prefix we can use for storage
     auto metadata = AllocationMetadata::getForPointer(ptr);
-//    fprintf(stderr, "free\t0x%lx\t%lu\n", (uintptr_t)ptr, metadata->size());
-    metadata->allocator().deallocate_buffer((void*)((uintptr_t)ptr-kGranuleSize), (uintptr_t)metadata->size()+kGranuleSize, kGranuleSize);
+//    fprintf(stderr, "free\t0x%lx\t%lu\n", (uint64_t)ptr, metadata->size());
+    metadata->allocator().deallocate_buffer((void*)((uint64_t)ptr-kGranuleSize), (uint64_t)metadata->size()+kGranuleSize, kGranuleSize);
 }
 
 char* Allocator::strdup(const char* str)
@@ -596,12 +599,12 @@ char* Allocator::strdup(const char* str)
 
 struct VIS_HIDDEN PersistentAllocator : Allocator {
     PersistentAllocator(const Buffer& B, MemoryManager&& memoryManager);
-    bool            owned(const void* p, std::size_t nbytes) const override;
+    bool            owned(const void* p, uint64_t nbytes) const override;
     void            debugDump() const override;
     void            validate() const override;
     void            destroy() override;
-    size_t          allocated_bytes() const override;
-    size_t          vm_allocated_bytes() const override;
+    uint64_t        allocated_bytes() const override;
+    uint64_t        vm_allocated_bytes() const override;
     MemoryManager*  memoryManager() override;
 
 //    void operator delete  ( void* ptr, std::align_val_t al ) {
@@ -611,7 +614,7 @@ struct VIS_HIDDEN PersistentAllocator : Allocator {
         x.swap(y);
     }
 protected:
-    Buffer  allocate_buffer(std::size_t nbytes, std::size_t alignment, std::size_t prefix) override;
+    Buffer  allocate_buffer(uint64_t nbytes, uint64_t alignment, uint64_t prefix) override;
     void    deallocate_buffer(Buffer buffer) override;
     void    deallocate_buffer_safe(Buffer buffer, bool internal);
 private:
@@ -644,14 +647,14 @@ private:
     template<uint32_t S, uint32_t A>
     struct MagazineAllocator : Allocator {
         MagazineAllocator(PersistentAllocator& allocator) : _persistentAllocator(allocator) {}
-        Buffer allocate_buffer(std::size_t nbytes, std::size_t alignment, std::size_t prefix) override {
+        Buffer allocate_buffer(uint64_t nbytes, uint64_t alignment, uint64_t prefix) override {
             assert(_magazine[0].size != 0);
             contract(nbytes == S);
             contract(alignment == A);
             auto result = _magazine[0];
             result.size = S;
             _magazine[0].size -= S;
-            _magazine[0].address = (void*)((uintptr_t)_magazine[0].address + S);
+            _magazine[0].address = (void*)((uint64_t)_magazine[0].address + S);
             if (_magazine[0].size == 0) {
                 std::copy(&_magazine[1], _magazine.end(), &_magazine[0]);
                 _magazine[3] = {nullptr, 0};
@@ -659,19 +662,19 @@ private:
             }
             return result;
         }
-        bool    owned(const void* p, std::size_t nbytes) const override { return false; }
+        bool    owned(const void* p, uint64_t nbytes) const override { return false; }
         void    deallocate_buffer(Buffer buffer) override {
             _persistentAllocator.deallocate_buffer_safe(buffer, true);
         }
-        size_t  allocated_bytes() const override { return 0; }
-        size_t  vm_allocated_bytes() const override { return 0; }
+        uint64_t  allocated_bytes() const override { return 0; }
+        uint64_t  vm_allocated_bytes() const override { return 0; }
         void    destroy() override {}
 
         void refill(Buffer buffer) {
             assert(buffer.size > 0);
-            assert((uintptr_t)buffer.address > 0);
+            assert((uint64_t)buffer.address > 0);
             contract(buffer.size%S == 0);
-            contract(((uintptr_t)buffer.address)%A == 0);
+            contract(((uint64_t)buffer.address)%A == 0);
             contract(_magazineDepth != 4);
             _magazine[_magazineDepth++] = buffer;
         }
@@ -697,16 +700,16 @@ private:
         PersistentAllocator&    _persistentAllocator;
     };
     struct DeallocationRecord {
-        DeallocationRecord(size_t S) : size(S) {}
-        size_t              size;
+        DeallocationRecord(uint64_t S) : size(S) {}
+        uint64_t            size;
         DeallocationRecord* next;
     };
     BTree<Buffer, RegionAddressCompare>         _regionList             = BTree<Buffer, RegionAddressCompare>(_magazine);
     BTree<Buffer, RegionAddressCompare>         _freeAddressHash        = BTree<Buffer, RegionAddressCompare>(_magazine);
     BTree<Buffer, RegionSizeCompare>            _freeSizeHash           = BTree<Buffer, RegionSizeCompare>(_magazine);
     MagazineAllocator<256,256>                  _magazine               = MagazineAllocator<256,256>(*this);
-    std::atomic<std::size_t>                    _allocatedBytes         = 0;
-    DeallocationRecord*                          _deallocationChian      = nullptr;
+    std::atomic<uint64_t>                       _allocatedBytes         = 0;
+    DeallocationRecord*                         _deallocationChian      = nullptr;
     bool                                        _useHWTPro              = false;
     MemoryManager*                              _memoryManager          = nullptr;
 };
@@ -726,12 +729,12 @@ Allocator& Allocator::defaultAllocator() {
 }
 #endif
 
-size_t PersistentAllocator::allocated_bytes() const {
+uint64_t PersistentAllocator::allocated_bytes() const {
     return _allocatedBytes;
 }
 
-size_t PersistentAllocator::vm_allocated_bytes() const {
-    size_t result = 0;
+uint64_t PersistentAllocator::vm_allocated_bytes() const {
+    uint64_t result = 0;
     for (auto& region : _regionList) {
         result +=  region.size;
     }
@@ -752,9 +755,9 @@ PersistentAllocator::PersistentAllocator(const Buffer& buffer, MemoryManager&& m
     // Round and align the free space appropriate
     auto roundedSize = ((sizeof(PersistentAllocator) + 255) & (-256));
     size_t magazineSize = 12*256;
-    Buffer magazineStorage = { (void*)((uintptr_t)buffer.address + roundedSize), magazineSize};
+    Buffer magazineStorage = { (void*)((uint64_t)buffer.address + roundedSize), magazineSize};
     _magazine.refill(magazineStorage);
-    Buffer freespace = { (void*)((uintptr_t)buffer.address + roundedSize + magazineSize), buffer.size - (roundedSize + magazineSize)};
+    Buffer freespace = { (void*)((uint64_t)buffer.address + roundedSize + magazineSize), buffer.size - (roundedSize + magazineSize)};
 
     // Insert the freesapce into the allocator
     _regionList.insert(buffer);
@@ -773,15 +776,15 @@ PersistentAllocator::PersistentAllocator(const Buffer& buffer, MemoryManager&& m
 void PersistentAllocator::debugDump() const {
     fprintf(stderr, "_regionList\n");
     for (const auto& region : _regionList) {
-        fprintf(stderr, "\t%lu @ 0x%lx\n", region.size, (uintptr_t)region.address);
+        fprintf(stderr, "\t%llu @ 0x%llx\n", region.size, (uint64_t)region.address);
     }
     fprintf(stderr, "_freeSizeHash\n");
     for (const auto& region : _freeSizeHash) {
-        fprintf(stderr, "\t%lu @ 0x%lx\n", region.size, (uintptr_t)region.address);
+        fprintf(stderr, "\t%llu @ 0x%llx\n", region.size, (uint64_t)region.address);
     }
     fprintf(stderr, "_freeAddressHash\n");
     for (const auto& region : _freeAddressHash) {
-        fprintf(stderr, "\t0x%lx: %lu\n", (uintptr_t)region.address, region.size);
+        fprintf(stderr, "\t0x%llx: %llu\n", (uint64_t)region.address, region.size);
     }
 }
 
@@ -792,7 +795,7 @@ void PersistentAllocator::validate() const {
     _freeAddressHash.validate();
     for (const auto& region : _freeSizeHash) {
         if (_freeAddressHash.find(region) == _freeAddressHash.end()) {
-            fprintf(stdout, "REGION MISSING(addr) %lu, 0x%lx\n", region.size, (uintptr_t)region.address);
+            fprintf(stdout, "REGION MISSING(addr) %llu, 0x%llx\n", region.size, (uint64_t)region.address);
             debugDump();
             abort();
         }
@@ -800,15 +803,15 @@ void PersistentAllocator::validate() const {
     Buffer last = { nullptr, 0 };
     for (const auto& region : _freeAddressHash) {
         if (last) {
-            if (((uintptr_t)last.address + last.size) >= (uintptr_t)region.address) {
-                fprintf(stdout, "OVERLAP\t0x%lx-0x%lx\t0x%lx-0x%lx\n", (uintptr_t)last.address, (uintptr_t)last.address + last.size, (uintptr_t)region.address, (uintptr_t)region.address+region.size);
+            if (((uint64_t)last.address + last.size) >= (uint64_t)region.address) {
+                fprintf(stdout, "OVERLAP\t0x%llx-0x%llx\t0x%llx-0x%llx\n", (uint64_t)last.address, (uint64_t)last.address + last.size, (uint64_t)region.address, (uint64_t)region.address+region.size);
                 debugDump();
                 abort();
             }
         }
         last = region;
         if (_freeSizeHash.find(region) == _freeSizeHash.end()) {
-            fprintf(stdout, "REGION MISSING(size) %lu, 0x%lx\n", region.size, (uintptr_t)region.address);
+            fprintf(stdout, "REGION MISSING(size) %llu, 0x%llx\n", region.size, (uint64_t)region.address);
             debugDump();
             abort();
         }
@@ -859,14 +862,14 @@ void PersistentAllocator::reserveRange(BTree<Buffer, RegionSizeCompare>::iterato
     }
 }
 
-Allocator::Buffer PersistentAllocator::allocate_buffer(std::size_t nbytes, std::size_t alignment, std::size_t prefix) {
+Allocator::Buffer PersistentAllocator::allocate_buffer(uint64_t nbytes, uint64_t alignment, uint64_t prefix) {
 #if !TARGET_OS_EXCLAVEKIT
     __unused auto lock = _memoryManager->lockGuard();
 #endif // !TARGET_OS_EXCLAVEKIT
     while (1) {
         contract(_freeSizeHash.size() == _freeAddressHash.size());
-        const size_t targetAlignment = std::max<size_t>(16ULL, alignment);
-        size_t targetSize = (std::max<size_t>(nbytes, 16ULL) + (targetAlignment-1)) & (-1*targetAlignment);
+        const uint64_t targetAlignment = std::max<uint64_t>(16ULL, alignment);
+        uint64_t targetSize = (std::max<uint64_t>(nbytes, 16ULL) + (targetAlignment-1)) & (-1*targetAlignment);
         Buffer result = { nullptr, 0 };
         auto i = _freeSizeHash.lower_bound({ nullptr, targetSize + prefix });
         for(; i != _freeSizeHash.end(); ++i) {
@@ -1015,16 +1018,16 @@ void MemoryManager::writeProtect(bool protect) {
     if (protect) {
         // fprintf(stderr, "writeProtect(true) called 0x%u -> 0x%u\n", _writeableCount, _writeableCount-1);
         for (const auto& region : _allocator->_regionList) {
-            // fprintf(stderr, "0x%lx - 0x%lx\t  PROTECT\n", (uintptr_t)region.address, (uintptr_t)region.address+region.size);
-            if (mprotect(region.address, region.size, PROT_READ) == -1) {
+            // fprintf(stderr, "0x%lx - 0x%lx\t  PROTECT\n", (uint64_t)region.address, (uint64_t)region.address+region.size);
+            if (mprotect(region.address, (size_t)region.size, PROT_READ) == -1) {
                 // printf("FAILED: %d", errno);
             }
         }
     } else {
         // fprintf(stderr, "writeProtect(false) called 0x%u -> 0x%u\n", _writeableCount, _writeableCount+1);
         for (const auto& region : _allocator->_regionList) {
-            // fprintf(stderr, "0x%lx - 0x%lx\t  UNPROTECT\n", (uintptr_t)region.address, (uintptr_t)region.address+region.size);
-            if (mprotect(region.address, region.size, (PROT_READ | PROT_WRITE)) == -1) {
+            // fprintf(stderr, "0x%lx - 0x%lx\t  UNPROTECT\n", (uint64_t)region.address, (uint64_t)region.address+region.size);
+            if (mprotect(region.address, (size_t)region.size, (PROT_READ | PROT_WRITE)) == -1) {
                 // printf("FAILED: %d", errno);
             }
         }
@@ -1058,7 +1061,7 @@ void PersistentAllocator::reloadMagazine() {
     _magazine.refill(space);
     // Safe to call becuase we just refilled and and any misses are guaranteed to be serviced by that
     _regionList.insert(newRegion);
-    newRegion.address = (void*)((uintptr_t)newRegion.address + size);
+    newRegion.address = (void*)((uint64_t)newRegion.address + size);
     newRegion.size -= size;
     _freeSizeHash.insert(newRegion);
     _freeAddressHash.insert(newRegion);
@@ -1075,7 +1078,7 @@ Allocator& Allocator::persistentAllocator() {
     return persistentAllocator(std::move(memoryManager));
 }
 
-bool PersistentAllocator::owned(const void* p, std::size_t nbytes) const {
+bool PersistentAllocator::owned(const void* p, uint64_t nbytes) const {
     Buffer allocation = { (void*)p, nbytes};
     for (const auto& region : _regionList) {
         if (region.contains(allocation)) { return true; }

@@ -147,7 +147,7 @@ private:
                                                         std::span<const SegmentFixupsInfo> segments,
                                                         uint64_t preferredLoadAddress,
                                                         const PointerFormat& pf, uint32_t pageSize, bool setDataChains);
-    static uint32_t                         addSymbolString(const char* symbolName, std::vector<char>& pool);
+    static uint32_t                         addSymbolString(CString symbolName, std::vector<char>& pool);
 #endif
 
     const dyld_chained_fixups_header*          _fixupsHeader = nullptr;

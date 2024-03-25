@@ -128,7 +128,7 @@ bool Image::inferIfZerofillExpanded() const
     return false;
 }
 
-Error Image::validate()
+Error Image::validate() const
 {
     // validate mach_header and load commands
     if ( Error err = _buffer->valid(_bufferSize) )
@@ -144,7 +144,7 @@ Error Image::validate()
     return Error::none();
 }
 
-Error Image::validLinkedit(const Policy& policy)
+Error Image::validLinkedit(const Policy& policy) const
 {
     // validate structure of linkedit
     if ( Error err = validStructureLinkedit(policy) )
@@ -226,7 +226,7 @@ namespace {
 } // anonymous namespace
 
 #if !TARGET_OS_EXCLAVEKIT
-Error Image::validStructureLinkedit(const Policy& policy)
+Error Image::validStructureLinkedit(const Policy& policy) const
 {
     // build vector of all blobs in LINKEDIT
     const uint32_t       ptrSize = _buffer->pointerSize();
@@ -361,7 +361,7 @@ Error Image::validStructureLinkedit(const Policy& policy)
     }
     if ( hasDyldInfo && hasChainedFixups )
         return Error("malformed mach-o contains LC_DYLD_INFO and LC_DYLD_CHAINED_FIXUPS");
-    if ( !hasExternalRelocs && !hasDyldInfo && !hasChainedFixups && (!_buffer->isMainExecutable() || _buffer->isPIE()) && !_buffer->isObjectFile() )
+    if ( !hasExternalRelocs && !hasLocalRelocs && !hasDyldInfo && !hasChainedFixups && (!_buffer->isMainExecutable() || _buffer->isPIE()) && !_buffer->isObjectFile() )
         return Error("malformed mach-o missing relocations, LC_DYLD_INFO, or LC_DYLD_CHAINED_FIXUPS");
 
     // find range of LINKEDIT

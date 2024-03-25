@@ -22,26 +22,36 @@
  */
 
 
+#include <TargetConditionals.h>
 #include "Defines.h"
+
 #if HAS_EXTERNAL_STATE
 
-#include <stdint.h>
+#if !TARGET_OS_EXCLAVEKIT
+  #include <libproc_internal.h>
+  #include <mach/mach_time.h> // mach_absolute_time()
+
+  #include "FileManager.h"
+  #include "ProcessAtlas.h"
+  #include "RemoteNotificationResponder.h"
+#endif // !TARGET_OS_EXCLAVEKIT
+
 #include <mach-o/dyld_images.h>
-#include <TargetConditionals.h>
-#include <mach/mach_time.h> // mach_absolute_time()
-#include <libproc_internal.h>
+#include <stdint.h>
+#include "dyld_process_info.h"
+#include "DyldProcessConfig.h"
+#include "Tracing.h"
 
 #include "ExternallyViewableState.h"
-#include "ProcessAtlas.h"
-#include "FileManager.h"
-#include "dyld_process_info.h"
-#include "RemoteNotificationResponder.h"
 
-using lsl::Allocator;
-using dyld3::Platform;
+#if !TARGET_OS_EXCLAVEKIT
 using dyld4::Atlas::SharedCache;
 using dyld4::Atlas::Image;
 using dyld4::Atlas::ProcessSnapshot;
+#endif // !TARGET_OS_EXCLAVEKIT
+
+using lsl::Allocator;
+using dyld3::Platform;
 
 // lldb sets a break point on this function
 extern "C" void _dyld_debugger_notification(enum dyld_notify_mode mode, unsigned long count, uint64_t machHeaders[]);
@@ -62,7 +72,6 @@ extern struct mach_header __dso_handle;
 
 
 #if !TARGET_OS_SIMULATOR
-
 void lldb_image_notifier(enum dyld_image_mode mode, uint32_t infoCount, const dyld_image_info info[])
 {
 #if BUILDING_DYLD
@@ -84,8 +93,9 @@ void lldb_image_notifier(enum dyld_image_mode mode, uint32_t infoCount, const dy
         default:
             break;
     }
-#endif
+#endif //  BUILDING_DYLD
 }
+
 
 struct dyld_all_image_infos dyld_all_image_infos __attribute__ ((section ("__DATA,__all_image_info")))
                             = {
@@ -98,13 +108,12 @@ struct dyld_all_image_infos dyld_all_image_infos __attribute__ ((section ("__DAT
 // if rare case that we switch to dyld-in-cache but cannot transfer to using dyld_all_image_infos from cache
 static struct dyld_all_image_infos* sProcessInfo = &dyld_all_image_infos;
 
-
 #endif // !TARGET_OS_SIMULATOR
 
 
 namespace dyld4 {
 
-#if !TARGET_OS_SIMULATOR
+#if !TARGET_OS_SIMULATOR && !TARGET_OS_EXCLAVEKIT
 static FileRecord recordFromInfo(lsl::Allocator& ephemeralAllocator, FileManager& fileManager, const ExternallyViewableState::ImageInfo& info)
 {
     FileRecord record;
@@ -115,27 +124,7 @@ static FileRecord recordFromInfo(lsl::Allocator& ephemeralAllocator, FileManager
     }
     return fileManager.fileRecordForPath(ephemeralAllocator, info.path);
 }
-#endif // !TARGET_OS_SIMULATOR
-
-void ExternallyViewableState::addImageInfoOld(const ImageInfo& imageInfo, uint64_t timeStamp, uintptr_t mTime)
-{
-    _allImageInfo->infoArray = nullptr;   // set infoArray to NULL to denote it is in-use
-    _imageInfos->push_back({(mach_header*)(long)imageInfo.loadAddress, imageInfo.path, mTime});
-    _allImageInfo->infoArrayCount           = (uint32_t)_imageInfos->size();
-    _allImageInfo->infoArrayChangeTimestamp = mach_absolute_time();
-    _allImageInfo->infoArray = _imageInfos->begin();
-
-    // add image uuid to list of non-cached images
-    this->addImageUUID((MachOFile*)imageInfo.loadAddress);
-
-    // now if lldb is attached, let it know the image list changed
-    _allImageInfo->notification(dyld_image_adding, 1, &_imageInfos->back());
-}
-
-size_t ExternallyViewableState::imageInfoCount()
-{
-    return _imageInfos->size();
-}
+#endif // !TARGET_OS_SIMULATOR && !TARGET_OS_EXCLAVEKIT
 
 #if TARGET_OS_SIMULATOR
 void ExternallyViewableState::initSim(lsl::Allocator& persistentAllocator, lsl::Allocator& ephemeralAllocator,
@@ -172,6 +161,15 @@ void ExternallyViewableState::initSim(lsl::Allocator& persistentAllocator, lsl::
     _syscallHelpers = syscalls;
 }
 #else
+
+void ExternallyViewableState::initOld(lsl::Allocator& longTermAllocator, Platform platform)
+{
+    _allImageInfo = sProcessInfo;
+    _allImageInfo->platform = (uint32_t)platform;
+    _imageInfos    = lsl::Vector<dyld_image_info>::make(longTermAllocator);
+    _imageUUIDs    = lsl::Vector<dyld_uuid_info>::make(longTermAllocator);
+}
+#if !TARGET_OS_EXCLAVEKIT
 void ExternallyViewableState::init(lsl::Allocator& longTermAllocator, lsl::Allocator& ephemeralAllocator, FileManager& fileManager, Platform platform)
 {
     // make compact info handler
@@ -183,10 +181,7 @@ void ExternallyViewableState::init(lsl::Allocator& longTermAllocator, lsl::Alloc
     _snapshot->setPlatform((uint32_t)platform);
 
     // make old all_image_infos
-    _allImageInfo = sProcessInfo;
-    _allImageInfo->platform = (uint32_t)platform;
-    _imageInfos    = Vector<dyld_image_info>::make(longTermAllocator);
-    _imageUUIDs    = Vector<dyld_uuid_info>::make(longTermAllocator);
+    initOld(longTermAllocator, platform);
 #if SUPPORT_ROSETTA
     _aotImageInfos = Vector<dyld_aot_image_info>::make(longTermAllocator);
 #endif
@@ -208,9 +203,257 @@ void ExternallyViewableState::addImageInfo(Allocator& ephemeralAllocator, const 
         this->notifyMonitorOfImageListChanges(false, 1, &mhs[0], &paths[0]);
     }
 }
-
+#endif // !TARGET_OS_EXCLAVEKIT
 #endif // TARGET_OS_SIMULATOR
 
+void ExternallyViewableState::addImageInfoOld(const ImageInfo& imageInfo, uint64_t timeStamp, uintptr_t mTime)
+{
+    _allImageInfo->infoArray = nullptr;   // set infoArray to NULL to denote it is in-use
+    _imageInfos->push_back({(mach_header*)(long)imageInfo.loadAddress, imageInfo.path, mTime});
+    _allImageInfo->infoArrayCount           = (uint32_t)_imageInfos->size();
+    _allImageInfo->infoArrayChangeTimestamp = timeStamp;
+    _allImageInfo->infoArray = _imageInfos->begin();
+
+    // add image uuid to list of non-cached images
+    this->addImageUUID((MachOFile*)imageInfo.loadAddress);
+
+    // now if lldb is attached, let it know the image list changed
+    _allImageInfo->notification(dyld_image_adding, 1, &_imageInfos->back());
+}
+
+
+void ExternallyViewableState::setDyldOld(const ImageInfo& dyldInfo)
+{
+    _allImageInfo->dyldPath = dyldInfo.path;
+    const dyld3::MachOFile* dyldMF = (const dyld3::MachOFile*)dyldInfo.loadAddress;
+    if ( !dyldMF->inDyldCache() )
+        this->addImageUUID(dyldMF);
+}
+
+#if !TARGET_OS_EXCLAVEKIT
+void ExternallyViewableState::setDyld(Allocator& ephemeralAllocator, const ImageInfo& dyldInfo)
+{
+#if !TARGET_OS_SIMULATOR
+    const MachOFile* dyldMF = (const MachOFile*)dyldInfo.loadAddress;
+    this->ensureSnapshot(ephemeralAllocator);
+    if ( dyldMF->inDyldCache() && _snapshot->sharedCache() ) {
+        _snapshot->addSharedCacheImage(dyldMF);
+    }
+    else {
+        FileRecord dyldFile = recordFromInfo(ephemeralAllocator, *_fileManager, dyldInfo);
+        Image dyldImage(ephemeralAllocator, std::move(dyldFile), _snapshot->identityMapper(), (const mach_header*)dyldInfo.loadAddress);
+        _snapshot->addImage(std::move(dyldImage));
+    }
+#endif /* !TARGET_OS_SIMULATOR */
+    // update dyld info in old all_image_infos
+    setDyldOld(dyldInfo);
+}
+#endif // !TARGET_OS_EXCLAVEKIT
+
+
+void ExternallyViewableState::setLibSystemInitializedOld()
+{
+    _allImageInfo->libSystemInitialized = true;
+}
+#if !TARGET_OS_EXCLAVEKIT
+void ExternallyViewableState::setLibSystemInitialized()
+{
+    if ( _snapshot != nullptr )
+        _snapshot->setDyldState(dyld_process_state_libSystem_initialized);
+
+    // set old all_image_info
+    setLibSystemInitializedOld();
+}
+#endif // !TARGET_OS_EXCLAVEKIT
+
+void ExternallyViewableState::setInitialImageCountOld(uint32_t count)
+{
+    _allImageInfo->initialImageCount = count;
+    _imageInfos->resize(count);
+}
+#if !TARGET_OS_EXCLAVEKIT
+void ExternallyViewableState::setInitialImageCount(uint32_t count)
+{
+#if !TARGET_OS_SIMULATOR
+    _snapshot->setInitialImageCount(count);
+#endif /* !TARGET_OS_SIMULATOR */
+
+    // update old all_image_infos with how many images are loaded before initializers run
+    setInitialImageCountOld(count);
+}
+#endif // !TARGET_OS_EXCLAVEKIT
+
+void ExternallyViewableState::addImageUUID(const dyld3::MachOFile* mf)
+{
+    dyld_uuid_info uuidAndAddr;
+    uuidAndAddr.imageLoadAddress = mf;
+    mf->getUuid(uuidAndAddr.imageUUID);
+    _allImageInfo->uuidArray = nullptr;  // set uuidArray to NULL to denote it is in-use
+        _imageUUIDs->push_back(uuidAndAddr);
+        _allImageInfo->uuidArrayCount = (uintptr_t)_imageUUIDs->size();
+    _allImageInfo->uuidArray = _imageUUIDs->begin();
+}
+
+void ExternallyViewableState::addImagesOld(lsl::Vector<dyld_image_info>& oldStyleAdditions, uint64_t timeStamp)
+{
+    // append old style additions to all image infos array
+    _allImageInfo->infoArray = nullptr;   // set infoArray to NULL to denote it is in-use
+    _imageInfos->insert(_imageInfos->begin(), oldStyleAdditions.begin(), oldStyleAdditions.end());
+    _allImageInfo->infoArrayCount           = (uint32_t)_imageInfos->size();
+    _allImageInfo->infoArrayChangeTimestamp = timeStamp;
+    _allImageInfo->infoArray = _imageInfos->begin();
+
+    // now if lldb is attached, let it know the image list changed
+    _allImageInfo->notification(dyld_image_adding, (uint32_t)oldStyleAdditions.size(), &oldStyleAdditions[0]);
+}
+
+void ExternallyViewableState::addImagesOld(lsl::Allocator& ephemeralAllocator, const std::span<ImageInfo>& imageInfos)
+{
+    lsl::Vector<dyld_image_info> oldStyleAdditions(ephemeralAllocator);
+    for (const ImageInfo& imageInfo : imageInfos) {
+        //const dyld3::MachOFile* mf = (const dyld3::MachOFile*)imageInfo.loadAddress;
+        //fprintf(stderr, "ExternallyViewableState::addImages(): mh=%p, path=%s\n", mf, imageInfo.path);
+
+        oldStyleAdditions.push_back({(mach_header*)imageInfo.loadAddress, imageInfo.path, 0});
+        if ( !imageInfo.inSharedCache ) {
+            this->addImageUUID((dyld3::MachOFile*)imageInfo.loadAddress);
+        }
+    }
+
+    // append old style additions to all image infos array
+    addImagesOld(oldStyleAdditions, 0);
+}
+
+#if !TARGET_OS_EXCLAVEKIT
+void ExternallyViewableState::addImages(lsl::Allocator& persistentAllocator, lsl::Allocator& ephemeralAllocator, const std::span<ImageInfo>& imageInfos)
+{
+    lsl::Vector<dyld_image_info> oldStyleAdditions(ephemeralAllocator);
+#if !TARGET_OS_SIMULATOR
+    os_unfair_lock_lock(&_processSnapshotLock);
+
+    // append each new image to the current snapshot and build an ephemeral vector of old style additions
+    this->ensureSnapshot(ephemeralAllocator);
+#endif // !TARGET_OS_SIMULATOR
+    for (const ImageInfo& imageInfo : imageInfos) {
+        const MachOFile* mf = (const MachOFile*)imageInfo.loadAddress;
+        //fprintf(stderr, "ExternallyViewableState::addImages(): mh=%p, path=%s\n", mf, imageInfo.path);
+        if ( imageInfo.inSharedCache ) {
+            oldStyleAdditions.push_back({(mach_header*)mf, imageInfo.path, 0});
+#if !TARGET_OS_SIMULATOR
+            if ( _snapshot->sharedCache() ) {
+                _snapshot->addSharedCacheImage(mf);
+            }
+#endif // !TARGET_OS_SIMULATOR
+        }
+        else {
+            oldStyleAdditions.push_back({(mach_header*)mf, imageInfo.path, 0});
+            this->addImageUUID(mf);
+#if !TARGET_OS_SIMULATOR
+            FileRecord file = recordFromInfo(ephemeralAllocator, *_fileManager, imageInfo);
+            Image anImage(ephemeralAllocator, std::move(file), _snapshot->identityMapper(), mf);
+            _snapshot->addImage(std::move(anImage));
+#endif // !TARGET_OS_SIMULATOR
+        }
+    }
+#if !TARGET_OS_SIMULATOR
+    this->commit(persistentAllocator, ephemeralAllocator);
+#endif // !TARGET_OS_SIMULATOR
+
+    addImagesOld(oldStyleAdditions, mach_absolute_time());
+
+    // if some other process is monitoring this one, notify it
+    if ( this->notifyMonitorNeeded() ) {
+        // notify any other processing inspecting this one
+        // notify any processes tracking loads in this process
+        STACK_ALLOC_ARRAY(const char*, pathsBuffer, imageInfos.size());
+        STACK_ALLOC_ARRAY(const mach_header*, mhBuffer, imageInfos.size());
+        for ( const ImageInfo& info :  imageInfos ) {
+            pathsBuffer.push_back(info.path);
+            mhBuffer.push_back((mach_header*)info.loadAddress);
+        }
+        this->notifyMonitorOfImageListChanges(false, (unsigned int)imageInfos.size(), &mhBuffer[0], &pathsBuffer[0]);
+    }
+#if !TARGET_OS_SIMULATOR
+    os_unfair_lock_unlock(&_processSnapshotLock);
+#endif // !TARGET_OS_SIMULATOR
+}
+#endif // !TARGET_OS_EXCLAVEKIT
+
+void ExternallyViewableState::removeImagesOld(dyld3::Array<const char*> &pathsBuffer, dyld3::Array<const mach_header*>& unloadedMHs, std::span<const mach_header*>& mhs, uint64_t timeStamp)
+{
+    _allImageInfo->infoArray = nullptr;  // set infoArray to NULL to denote it is in-use
+    _allImageInfo->uuidArray = nullptr;  // set uuidArray to NULL to denote it is in-use
+    for (const mach_header* mh : mhs) {
+        dyld_image_info goingAway;
+
+        // remove image from infoArray
+        for (auto it=_imageInfos->begin(); it != _imageInfos->end(); ++it) {
+            if ( it->imageLoadAddress == mh ) {
+                pathsBuffer.push_back(it->imageFilePath);
+                unloadedMHs.push_back(mh);
+                goingAway = *it;
+                _imageInfos->erase(it);
+                break;
+            }
+        }
+
+        // remove image from uuidArray
+        for (auto it=_imageUUIDs->begin(); it != _imageUUIDs->end(); ++it) {
+            if ( it->imageLoadAddress == mh ) {
+                _imageUUIDs->erase(it);
+                break;
+            }
+        }
+
+        // now if lldb is attached, let it know this image has gone away
+        _allImageInfo->notification(dyld_image_removing, 1, &goingAway);
+    }
+    _allImageInfo->infoArrayCount = (uint32_t)_imageInfos->size();
+    _allImageInfo->infoArray      = _imageInfos->begin();  // set infoArray back to base address of vector
+    _allImageInfo->infoArrayChangeTimestamp = timeStamp;
+    _allImageInfo->uuidArrayCount = (uintptr_t)_imageUUIDs->size();
+    _allImageInfo->uuidArray      = _imageUUIDs->begin();  // set uuidArray back to base address of vector
+}
+
+void ExternallyViewableState::removeImagesOld(std::span<const mach_header*>& mhs)
+{
+    // remove from old style list
+    STACK_ALLOC_ARRAY(const char*, pathsBuffer, mhs.size());
+    STACK_ALLOC_ARRAY(const mach_header*, unloadedMHs, mhs.size());
+    removeImagesOld(pathsBuffer, unloadedMHs, mhs, 0);
+}
+
+#if !TARGET_OS_EXCLAVEKIT
+void ExternallyViewableState::removeImages(lsl::Allocator& persistentAllocator, lsl::Allocator& ephemeralAllocator, std::span<const mach_header*>& mhs)
+{
+#if !TARGET_OS_SIMULATOR
+    os_unfair_lock_lock(&_processSnapshotLock);
+    this->ensureSnapshot(ephemeralAllocator);
+
+    // remove images from snapshot
+    for (const mach_header* mh : mhs) {
+        //fprintf(stderr, "ExternallyViewableState::removeImages(): mh=%p\n", mh);
+        _snapshot->removeImageAtAddress((unsigned long)mh);
+    }
+    this->commit(persistentAllocator, ephemeralAllocator);
+#endif // !TARGET_OS_SIMULATOR
+
+    // remove from old style list
+    STACK_ALLOC_ARRAY(const char*, pathsBuffer, mhs.size());
+    STACK_ALLOC_ARRAY(const mach_header*, unloadedMHs, mhs.size());
+    removeImagesOld(pathsBuffer, unloadedMHs, mhs, mach_absolute_time());
+
+    // if there are any changes and some other process is monitoring this one, notify it
+    if ( this->notifyMonitorNeeded() && !unloadedMHs.empty()) {
+        this->notifyMonitorOfImageListChanges(true, (unsigned int)mhs.size(), &unloadedMHs[0], &pathsBuffer[0]);
+    }
+#if !TARGET_OS_SIMULATOR
+    os_unfair_lock_unlock(&_processSnapshotLock);
+#endif // !TARGET_OS_SIMULATOR
+}
+#endif // !TARGET_OS_EXCLAVEKIT
+
+#if !TARGET_OS_EXCLAVEKIT
 void ExternallyViewableState::setSharedCacheInfo(Allocator& ephemeralAllocator, uint64_t cacheSlide, const ImageInfo& cacheInfo, bool privateCache)
 {
 #if !TARGET_OS_SIMULATOR
@@ -238,26 +481,6 @@ void ExternallyViewableState::detachFromSharedRegion()
     _allImageInfo->sharedCacheSlide                 = 0;
     _allImageInfo->sharedCacheBaseAddress           = 0;
     ::bzero(_allImageInfo->sharedCacheUUID,sizeof(uuid_t));
-}
-
-void ExternallyViewableState::setDyld(Allocator& ephemeralAllocator, const ImageInfo& dyldInfo)
-{
-    const MachOFile* dyldMF = (const MachOFile*)dyldInfo.loadAddress;
-#if !TARGET_OS_SIMULATOR
-    this->ensureSnapshot(ephemeralAllocator);
-    if ( dyldMF->inDyldCache() && _snapshot->sharedCache() ) {
-        _snapshot->addSharedCacheImage(dyldMF);
-    }
-    else {
-        FileRecord dyldFile = recordFromInfo(ephemeralAllocator, *_fileManager, dyldInfo);
-        Image dyldImage(ephemeralAllocator, std::move(dyldFile), _snapshot->identityMapper(), (const mach_header*)dyldInfo.loadAddress);
-        _snapshot->addImage(std::move(dyldImage));
-    }
-#endif /* !TARGET_OS_SIMULATOR */
-    // update dyld info in old all_image_infos
-    _allImageInfo->dyldPath = dyldInfo.path;
-    if ( !dyldMF->inDyldCache() )
-        this->addImageUUID(dyldMF);
 }
 
 void ExternallyViewableState::release(Allocator& ephemeralAllocator)
@@ -290,7 +513,7 @@ void ExternallyViewableState::commit(Atlas::ProcessSnapshot* processSnapshot, Al
     } __attribute__((aligned(16)));
     CompactInfoDescriptor newDescriptor;
     newDescriptor.addr = (uintptr_t)compactInfo;
-    newDescriptor.size = compactInfoData.size();
+    newDescriptor.size = (size_t)compactInfoData.size();
     uintptr_t oldCompactInfo = _allImageInfo->compact_dyld_image_info_addr;
 #if __arm__ || !__LP64__
     // armv32 archs are missing the atomic primitive, but we only need to be guaraantee the write does not sheer, as the only thing
@@ -328,42 +551,15 @@ void ExternallyViewableState::commit(Allocator& persistentAllocator, Allocator& 
     this->release(ephemeralAllocator);
 }
 
+uint64_t ExternallyViewableState::imageInfoCount()
+{
+    return _imageInfos->size();
+}
+
 void ExternallyViewableState::disableCrashReportBacktrace()
 {
     // update old all_image_infos with flag that means termination is by dyld for missing dylib
     _allImageInfo->terminationFlags = 1; // don't show back trace, because nothing interesting
-}
-
-void ExternallyViewableState::setLibSystemInitialized()
-{
-    if ( _snapshot != nullptr )
-        _snapshot->setDyldState(dyld_process_state_libSystem_initialized);
-
-    // set old all_image_info
-    _allImageInfo->libSystemInitialized = true;
-}
-
-void ExternallyViewableState::setInitialImageCount(uint32_t count)
-{
-#if !TARGET_OS_SIMULATOR
-    _snapshot->setInitialImageCount(count);
-#endif /* !TARGET_OS_SIMULATOR */
-
-    // update old all_image_infos with how many images are loaded before initializers run
-    _allImageInfo->initialImageCount = count;
-    _imageInfos->resize(count);
-}
-
-
-void ExternallyViewableState::addImageUUID(const dyld3::MachOFile* mf)
-{
-    dyld_uuid_info uuidAndAddr;
-    uuidAndAddr.imageLoadAddress = mf;
-    mf->getUuid(uuidAndAddr.imageUUID);
-    _allImageInfo->uuidArray = nullptr;  // set uuidArray to NULL to denote it is in-use
-        _imageUUIDs->push_back(uuidAndAddr);
-        _allImageInfo->uuidArrayCount = _imageUUIDs->size();
-    _allImageInfo->uuidArray = _imageUUIDs->begin();
 }
 
 void ExternallyViewableState::ensureSnapshot(lsl::Allocator& ephemeralAllocator)
@@ -376,131 +572,6 @@ void ExternallyViewableState::ensureSnapshot(lsl::Allocator& ephemeralAllocator)
     const std::span<std::byte> comactInfoBytes((std::byte*)_allImageInfo->compact_dyld_image_info_addr, _allImageInfo->compact_dyld_image_info_size);
     _snapshot = ephemeralAllocator.makeUnique<ProcessSnapshot>(ephemeralAllocator, *_fileManager, true, comactInfoBytes).release();
     _snapshot->setDyldState(dyld_process_state_program_running);
-}
-
-void ExternallyViewableState::addImages(lsl::Allocator& persistentAllocator, lsl::Allocator& ephemeralAllocator, const std::span<ImageInfo>& imageInfos)
-{
-    lsl::Vector<dyld_image_info> oldStyleAdditions(ephemeralAllocator);
-#if !TARGET_OS_SIMULATOR
-    os_unfair_lock_lock(&_processSnapshotLock);
-
-    // append each new image to the current snapshot and build an ephemeral vector of old style additions
-    this->ensureSnapshot(ephemeralAllocator);
-#endif // !TARGET_OS_SIMULATOR
-    for (const ImageInfo& imageInfo : imageInfos) {
-        const MachOFile* mf = (const MachOFile*)imageInfo.loadAddress;
-        //fprintf(stderr, "ExternallyViewableState::addImages(): mh=%p, path=%s\n", mf, imageInfo.path);
-        if ( imageInfo.inSharedCache) {
-            oldStyleAdditions.push_back({(mach_header*)mf, imageInfo.path, 0});
-#if !TARGET_OS_SIMULATOR
-            if ( _snapshot->sharedCache() ) {
-                _snapshot->addSharedCacheImage(mf);
-            }
-#endif // !TARGET_OS_SIMULATOR
-        }
-        else {
-            oldStyleAdditions.push_back({(mach_header*)mf, imageInfo.path, 0});
-            this->addImageUUID(mf);
-#if !TARGET_OS_SIMULATOR
-            FileRecord file = recordFromInfo(ephemeralAllocator, *_fileManager, imageInfo);
-            Image anImage(ephemeralAllocator, std::move(file), _snapshot->identityMapper(), mf);
-            _snapshot->addImage(std::move(anImage));
-#endif // !TARGET_OS_SIMULATOR
-        }
-    }
-#if !TARGET_OS_SIMULATOR
-    this->commit(persistentAllocator, ephemeralAllocator);
-#endif // !TARGET_OS_SIMULATOR
-
-    // append old style additions to all image infos array
-    _allImageInfo->infoArray = nullptr;   // set infoArray to NULL to denote it is in-use
-    _imageInfos->insert(_imageInfos->begin(), oldStyleAdditions.begin(), oldStyleAdditions.end());
-    _allImageInfo->infoArrayCount           = (uint32_t)_imageInfos->size();
-    _allImageInfo->infoArrayChangeTimestamp = mach_absolute_time();
-    _allImageInfo->infoArray = _imageInfos->begin();
-
-    // now if lldb is attached, let it know the image list changed
-    _allImageInfo->notification(dyld_image_adding, (uint32_t)oldStyleAdditions.size(), &oldStyleAdditions[0]);
-
-    // if some other process is monitoring this one, notify it
-    if ( this->notifyMonitorNeeded() ) {
-        // notify any other processing inspecting this one
-        // notify any processes tracking loads in this process
-        STACK_ALLOC_ARRAY(const char*, pathsBuffer, imageInfos.size());
-        STACK_ALLOC_ARRAY(const mach_header*, mhBuffer, imageInfos.size());
-        for ( const ImageInfo& info :  imageInfos ) {
-            pathsBuffer.push_back(info.path);
-            mhBuffer.push_back((mach_header*)info.loadAddress);
-        }
-        this->notifyMonitorOfImageListChanges(false, (unsigned int)imageInfos.size(), &mhBuffer[0], &pathsBuffer[0]);
-    }
-#if !TARGET_OS_SIMULATOR
-    os_unfair_lock_unlock(&_processSnapshotLock);
-#endif // !TARGET_OS_SIMULATOR
-}
-
-void ExternallyViewableState::removeImages(lsl::Allocator& persistentAllocator, lsl::Allocator& ephemeralAllocator, std::span<const mach_header*>& mhs)
-{
-#if !TARGET_OS_SIMULATOR
-    os_unfair_lock_lock(&_processSnapshotLock);
-    this->ensureSnapshot(ephemeralAllocator);
-
-    // remove images from snapshot
-    for (const mach_header* mh : mhs) {
-        //fprintf(stderr, "ExternallyViewableState::removeImages(): mh=%p\n", mh);
-        _snapshot->removeImageAtAddress((unsigned long)mh);
-    }
-    this->commit(persistentAllocator, ephemeralAllocator);
-#endif // !TARGET_OS_SIMULATOR
-    // remove from old style list
-    STACK_ALLOC_ARRAY(const char*, pathsBuffer, mhs.size());
-    STACK_ALLOC_ARRAY(const mach_header*, unloadedMHs, mhs.size());
-    _allImageInfo->infoArray = nullptr;  // set infoArray to NULL to denote it is in-use
-    _allImageInfo->uuidArray = nullptr;  // set uuidArray to NULL to denote it is in-use
-    for (const mach_header* mh : mhs) {
-        dyld_image_info goingAway;
-
-        // remove image from infoArray
-        for (auto it=_imageInfos->begin(); it != _imageInfos->end(); ++it) {
-            if ( it->imageLoadAddress == mh ) {
-                pathsBuffer.push_back(it->imageFilePath);
-                unloadedMHs.push_back(mh);
-                goingAway = *it;
-                _imageInfos->erase(it);
-                break;
-            }
-        }
-
-        // remove image from uuidArray
-        for (auto it=_imageUUIDs->begin(); it != _imageUUIDs->end(); ++it) {
-            if ( it->imageLoadAddress == mh ) {
-                _imageUUIDs->erase(it);
-                break;
-            }
-        }
-
-        // now if lldb is attached, let it know this image has gone away
-        _allImageInfo->notification(dyld_image_removing, 1, &goingAway);
-    }
-    _allImageInfo->infoArrayCount = (uint32_t)_imageInfos->size();
-    _allImageInfo->infoArray      = _imageInfos->begin();  // set infoArray back to base address of vector
-    _allImageInfo->infoArrayChangeTimestamp = mach_absolute_time();
-    _allImageInfo->uuidArrayCount = _imageUUIDs->size();
-    _allImageInfo->uuidArray      = _imageUUIDs->begin();  // set uuidArray back to base address of vector
-
-    // if there are any changes and some other process is monitoring this one, notify it
-    if ( this->notifyMonitorNeeded() && !unloadedMHs.empty()) {
-        this->notifyMonitorOfImageListChanges(true, (unsigned int)mhs.size(), &unloadedMHs[0], &pathsBuffer[0]);
-    }
-#if !TARGET_OS_SIMULATOR
-    os_unfair_lock_unlock(&_processSnapshotLock);
-#endif // !TARGET_OS_SIMULATOR
-}
-
-// use at start up to set value in __dyld4 section
-void ExternallyViewableState::storeProcessInfoPointer(struct dyld_all_image_infos** loc)
-{
-    *loc = _allImageInfo;
 }
 
 void ExternallyViewableState::fork_child()
@@ -742,10 +813,10 @@ void ExternallyViewableState::removeRosettaImages(std::span<const mach_header*>&
 
 }
 #endif // SUPPORT_ROSETTA
-
+#endif // !TARGET_OS_EXCLAVEKIT
 
 #if !TARGET_OS_SIMULATOR
-
+#if !TARGET_OS_EXCLAVEKIT
 // Use the older notifiers to tell Instruments that we load or unloaded dyld
 void ExternallyViewableState::notifyMonitoringDyld(bool unloading, unsigned imageCount, const struct mach_header* loadAddresses[], const char* imagePaths[])
 {
@@ -800,14 +871,20 @@ bool ExternallyViewableState::switchToDyldInDyldCache(const dyld3::MachOFile* dy
     }
     return result;
 }
+#endif // !TARGET_OS_EXCLAVEKIT
 
 // used in macOS host dyld to support old dyld_sim that need access to host dyld_all_image_info
 struct dyld_all_image_infos* ExternallyViewableState::getProcessInfo()
 {
     return sProcessInfo;
 }
-
 #endif // !TARGET_OS_SIMULATOR
+
+// use at start up to set value in __dyld4 section
+void ExternallyViewableState::storeProcessInfoPointer(struct dyld_all_image_infos** loc)
+{
+    *loc = _allImageInfo;
+}
 
 
 } // namespace dyld4

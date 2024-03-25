@@ -1049,7 +1049,7 @@ void MachOAnalyzer::forEachRebase(Diagnostics& diag,
         for (const relocation_info* reloc=relocsStart; (reloc < relocsEnd) && !stop; ++reloc) {
             if ( reloc->r_length != relocSize ) {
                 bool shouldEmitError = true;
-#if BUILDING_APP_CACHE_UTIL
+#if BUILDING_APP_CACHE_UTIL || BUILDING_DYLDINFO
                 if ( usesClassicRelocationsInKernelCollection() && (reloc->r_length == 2) && (relocSize == 3) )
                     shouldEmitError = false;
 #endif
@@ -1071,7 +1071,7 @@ void MachOAnalyzer::forEachRebase(Diagnostics& diag,
                 uint32_t segIndex  = 0;
                 uint64_t segOffset = 0;
                 uint64_t addr = 0;
-#if BUILDING_APP_CACHE_UTIL
+#if BUILDING_APP_CACHE_UTIL || BUILDING_DYLDINFO
                 // xnu for x86_64 has __HIB mapped before __DATA, so offsets appear to be
                 // negative
                 if ( isStaticExecutable() || isFileSet() ) {
@@ -1131,7 +1131,7 @@ bool MachOAnalyzer::segIndexAndOffsetForAddress(uint64_t addr, const SegmentInfo
 uint64_t MachOAnalyzer::localRelocBaseAddress(const SegmentInfo segmentsInfos[], uint32_t segCount) const
 {
     if ( isArch("x86_64") || isArch("x86_64h") ) {
-#if BUILDING_APP_CACHE_UTIL
+#if BUILDING_APP_CACHE_UTIL || BUILDING_DYLDINFO
         if ( isKextBundle() ) {
             // for kext bundles the reloc base address starts at __TEXT segment
             return segmentsInfos[0].vmAddr;
@@ -1157,7 +1157,7 @@ uint64_t MachOAnalyzer::externalRelocBaseAddress(const SegmentInfo segmentsInfos
         return preferredLoadAddress();
     }
 
-#if BUILDING_APP_CACHE_UTIL
+#if BUILDING_APP_CACHE_UTIL || BUILDING_DYLDINFO
     if ( isKextBundle() ) {
         // for kext bundles the reloc base address starts at __TEXT segment
         return preferredLoadAddress();
@@ -1356,7 +1356,7 @@ bool MachOAnalyzer::invalidBindState(Diagnostics& diag, const char* opcodeName, 
         case BIND_TYPE_TEXT_PCREL32: {
             // Text relocations are permitted in x86_64 kexts
             bool forceAllowTextRelocs = false;
-#if BUILDING_APP_CACHE_UTIL
+#if BUILDING_APP_CACHE_UTIL || BUILDING_DYLDINFO
             if ( isKextBundle() && (isArch("x86_64") || isArch("x86_64h")) )
                 forceAllowTextRelocs = true;
 #endif
@@ -1721,7 +1721,7 @@ void MachOAnalyzer::forEachBind(Diagnostics& diag,
         uint32_t                        poolSize    = leInfo.symTab->strsize;
         for (const relocation_info* reloc=relocsStart; (reloc < relocsEnd) && !stop; ++reloc) {
             bool isBranch = false;
-#if BUILDING_APP_CACHE_UTIL
+#if BUILDING_APP_CACHE_UTIL || BUILDING_DYLDINFO
             if ( isKextBundle() ) {
                 // kext's may have other kinds of relocations, eg, branch relocs.  Skip them
                 if ( isArch("x86_64") || isArch("x86_64h") ) {
@@ -1905,7 +1905,7 @@ bool MachOAnalyzer::validChainedFixupsInfo(Diagnostics& diag, const char* path) 
             diag.error("chained fixups, page_size not 4KB or 16KB in segment #%d", i);
             return false;
         }
-        if ( segInfo->pointer_format > 12 ) {
+        if ( segInfo->pointer_format > 13 ) {
             diag.error("chained fixups, unknown pointer_format in segment #%d", i);
             return false;
         }
@@ -4788,7 +4788,7 @@ bool MachOAnalyzer::forEachBind_Relocations(Diagnostics& diag, const LinkEditInf
     bool                            stop        = false;
     for (const relocation_info* reloc=relocsStart; (reloc < relocsEnd) && !stop; ++reloc) {
         bool isBranch = false;
-#if BUILDING_APP_CACHE_UTIL
+#if BUILDING_APP_CACHE_UTIL || BUILDING_DYLDINFO
         if ( isKextBundle() ) {
             // kext's may have other kinds of relocations, eg, branch relocs.  Skip them
             if ( isArch("x86_64") || isArch("x86_64h") ) {
@@ -5321,8 +5321,8 @@ bool MachOAnalyzer::forEachRebaseLocation_Relocations(Diagnostics& diag, void (^
 void MachOAnalyzer::sortRelocations(Array<relocation_info>& relocs) const
 {
     // The kernel linker has malloc, and old-style relocations are extremely common.  So use qsort
-#if BUILDING_APP_CACHE_UTIL
-    ::qsort(&relocs[0], relocs.count(), sizeof(relocation_info),
+#if BUILDING_APP_CACHE_UTIL || BUILDING_DYLDINFO
+    ::qsort(&relocs[0], (size_t)relocs.count(), sizeof(relocation_info),
             [](const void* l, const void* r) -> int {
                 if ( ((relocation_info*)l)->r_address < ((relocation_info*)r)->r_address )
                     return -1;
@@ -5330,10 +5330,10 @@ void MachOAnalyzer::sortRelocations(Array<relocation_info>& relocs) const
                     return 1;
     });
 #else
-    uintptr_t count = relocs.count();
-    for (uintptr_t i=0; i < count-1; ++i) {
+    uint64_t count = relocs.count();
+    for (uint64_t i=0; i < count-1; ++i) {
         bool done = true;
-        for (uintptr_t j=0; j < count-i-1; ++j) {
+        for (uint64_t j=0; j < count-i-1; ++j) {
             if ( relocs[j].r_address > relocs[j+1].r_address ) {
                 relocation_info temp = relocs[j];
                 relocs[j]   = relocs[j+1];
@@ -5361,7 +5361,7 @@ bool MachOAnalyzer::forEachRebase_Relocations(Diagnostics& diag, const LinkEditI
     for (const relocation_info* reloc=relocsStart; (reloc < relocsEnd) && !stop; ++reloc) {
         if ( reloc->r_length != relocSize ) {
             bool shouldEmitError = true;
-#if BUILDING_APP_CACHE_UTIL
+#if BUILDING_APP_CACHE_UTIL || BUILDING_DYLDINFO
             if ( usesClassicRelocationsInKernelCollection() && (reloc->r_length == 2) && (relocSize == 3) )
                 shouldEmitError = false;
 #endif
@@ -5383,7 +5383,7 @@ bool MachOAnalyzer::forEachRebase_Relocations(Diagnostics& diag, const LinkEditI
             uint32_t segIndex  = 0;
             uint64_t segOffset = 0;
             uint64_t addr = 0;
-#if BUILDING_APP_CACHE_UTIL
+#if BUILDING_APP_CACHE_UTIL || BUILDING_DYLDINFO
             // xnu for x86_64 has __HIB mapped before __DATA, so offsets appear to be
             // negative
             if ( isStaticExecutable() || isFileSet() ) {

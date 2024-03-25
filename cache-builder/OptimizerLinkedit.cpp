@@ -528,6 +528,7 @@ void LinkeditOptimizer<P>::updateLoadCommands(uint32_t mergedLinkeditStartOffset
         _dynSymTabCmd->set_nmodtab(0);
         _dynSymTabCmd->set_indirectsymoff(mergedLinkeditStartOffset + _newIndirectSymbolTableOffset);
         _dynSymTabCmd->set_extreloff(0);
+        _dynSymTabCmd->set_nextrel(0);
         _dynSymTabCmd->set_locreloff(0);
         _dynSymTabCmd->set_nlocrel(0);
     }

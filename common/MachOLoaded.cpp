@@ -780,7 +780,7 @@ void MachOLoaded::fixupAllChainedFixups(Diagnostics& diag, const dyld_chained_st
                     if ( fixupLoc->arm64e.authBind.bind ) {
                         uint32_t bindOrdinal = (segInfo->pointer_format == DYLD_CHAINED_PTR_ARM64E_USERLAND24) ? fixupLoc->arm64e.authBind24.ordinal : fixupLoc->arm64e.authBind.ordinal;
                         if ( bindOrdinal >= bindTargets.count() ) {
-                            diag.error("out of range bind ordinal %d (max %lu)", bindOrdinal, bindTargets.count());
+                            diag.error("out of range bind ordinal %d (max %llu)", bindOrdinal, bindTargets.count());
                             stop = true;
                             break;
                         }
@@ -800,7 +800,7 @@ void MachOLoaded::fixupAllChainedFixups(Diagnostics& diag, const dyld_chained_st
                     if ( fixupLoc->arm64e.bind.bind ) {
                         uint32_t bindOrdinal = (segInfo->pointer_format == DYLD_CHAINED_PTR_ARM64E_USERLAND24) ? fixupLoc->arm64e.bind24.ordinal : fixupLoc->arm64e.bind.ordinal;
                         if ( bindOrdinal >= bindTargets.count() ) {
-                            diag.error("out of range bind ordinal %d (max %lu)", bindOrdinal, bindTargets.count());
+                            diag.error("out of range bind ordinal %d (max %llu)", bindOrdinal, bindTargets.count());
                             stop = true;
                             break;
                         }
@@ -826,7 +826,7 @@ void MachOLoaded::fixupAllChainedFixups(Diagnostics& diag, const dyld_chained_st
             case DYLD_CHAINED_PTR_64_OFFSET:
                 if ( fixupLoc->generic64.bind.bind ) {
                     if ( fixupLoc->generic64.bind.ordinal >= bindTargets.count() ) {
-                        diag.error("out of range bind ordinal %d (max %lu)", fixupLoc->generic64.bind.ordinal, bindTargets.count());
+                        diag.error("out of range bind ordinal %d (max %llu)", fixupLoc->generic64.bind.ordinal, bindTargets.count());
                         stop = true;
                         break;
                     }
@@ -849,7 +849,7 @@ void MachOLoaded::fixupAllChainedFixups(Diagnostics& diag, const dyld_chained_st
             case DYLD_CHAINED_PTR_32:
                 if ( fixupLoc->generic32.bind.bind ) {
                     if ( fixupLoc->generic32.bind.ordinal >= bindTargets.count() ) {
-                        diag.error("out of range bind ordinal %d (max %lu)", fixupLoc->generic32.bind.ordinal, bindTargets.count());
+                        diag.error("out of range bind ordinal %d (max %llu)", fixupLoc->generic32.bind.ordinal, bindTargets.count());
                         stop = true;
                         break;
                     }

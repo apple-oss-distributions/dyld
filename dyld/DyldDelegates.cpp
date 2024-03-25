@@ -756,7 +756,7 @@ void SyscallDelegate::withReadOnlyMappedFile(Diagnostics& diag, const char* path
 bool SyscallDelegate::getFileAttribute(const char* path, const char* attrName, Array<uint8_t>& attributeBytes) const
 {
 #if BUILDING_DYLD
-    ssize_t attrSize = ::getxattr(path, attrName, attributeBytes.begin(), attributeBytes.maxCount(), 0, 0);
+    ssize_t attrSize = ::getxattr(path, attrName, attributeBytes.begin(), (size_t)attributeBytes.maxCount(), 0, 0);
     if ( attrSize == -1 )
         return false;
     attributeBytes.resize(attrSize);
@@ -773,9 +773,9 @@ bool SyscallDelegate::setFileAttribute(const char* path, const char* attrName, c
     if ( result != 0 )
         return false;
     // try replace first, then fallback to adding attribute
-    result = ::setxattr(path, attrName, attributeBytes.begin(), attributeBytes.count(), 0, XATTR_REPLACE);
+    result = ::setxattr(path, attrName, attributeBytes.begin(), (size_t)attributeBytes.count(), 0, XATTR_REPLACE);
     if ( result != 0 )
-        result = ::setxattr(path, attrName, attributeBytes.begin(), attributeBytes.count(), 0, 0);
+        result = ::setxattr(path, attrName, attributeBytes.begin(), (size_t)attributeBytes.count(), 0, 0);
     int result2 = ::chmod(path, S_IRUSR); // switch back file permissions
     return (result == 0) && (result2 == 0);
 #else
@@ -820,7 +820,7 @@ bool SyscallDelegate::saveFileWithAttribute(Diagnostics& diag, const char* path,
         diag.error("write() failed, errno=%d", errno);
         return false;
     }
-    result = ::fsetxattr(fd, attrName, attributeBytes.begin(), attributeBytes.count(), 0, 0);
+    result = ::fsetxattr(fd, attrName, attributeBytes.begin(), (size_t)attributeBytes.count(), 0, 0);
     if ( result == -1 ) {
         diag.error("fsetxattr(%s) failed, errno=%d", attrName, errno);
         return false;

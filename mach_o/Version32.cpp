@@ -40,11 +40,12 @@ Error Version32::fromString(std::string_view versString, Version32& vers,
     uint32_t x = 0;
     uint32_t y = 0;
     uint32_t z = 0;
-    auto res = std::from_chars(versString.begin(), versString.end(), x);
+    const char* endPtr = versString.data() + versString.size();
+    auto res = std::from_chars(versString.data(), endPtr, x);
     if ( res.ec == std::errc{} && *res.ptr == '.' ) {
-        res = std::from_chars(res.ptr + 1, versString.end(), y);
+        res = std::from_chars(res.ptr + 1, endPtr, y);
         if ( res.ec == std::errc{} && *res.ptr == '.' )
-            res = std::from_chars(res.ptr + 1, versString.end(), z);
+            res = std::from_chars(res.ptr + 1, endPtr, z);
     }
     bool valueOverflow = (x > 0xffff) || (y > 0xff) || (z > 0xff);
     if ( valueOverflow && truncationHandler ) {
@@ -54,8 +55,8 @@ Error Version32::fromString(std::string_view versString, Version32& vers,
         z = std::min(z, 0xFFU);
         valueOverflow = false;
     }
-    if ( res.ptr == nullptr || res.ptr != versString.end() || valueOverflow ) {
-        if ( valueOverflow || (truncationHandler == nullptr) || (res.ptr == versString.begin()) ) {
+    if ( res.ptr == nullptr || res.ptr != endPtr || valueOverflow ) {
+        if ( valueOverflow || (truncationHandler == nullptr) || (res.ptr == versString.data()) ) {
             char errVersString[versString.size() + 1];
             memcpy(errVersString, versString.data(), versString.size());
             errVersString[versString.size()] = 0;

@@ -101,6 +101,7 @@ enum {
     DYLD_CHAINED_PTR_ARM64E_FIRMWARE        = 10,    // stride 4, unauth target is vmaddr
     DYLD_CHAINED_PTR_X86_64_KERNEL_CACHE    = 11,    // stride 1, x86_64 kernel caches
     DYLD_CHAINED_PTR_ARM64E_USERLAND24      = 12,    // stride 8, unauth target is vm offset, 24-bit bind
+    DYLD_CHAINED_PTR_ARM64E_SHARED_CACHE    = 13,    // stride 8, regular/auth targets both vm offsets.  Only A keys supported
 };
 
 
@@ -242,6 +243,27 @@ struct dyld_chained_ptr_32_firmware_rebase
 {
     uint32_t    target   : 26,   // 64MB max firmware TEXT and DATA
                 next     :  6;   // 4-byte stride
+};
+
+// DYLD_CHAINED_PTR_ARM64E_SHARED_CACHE
+struct dyld_chained_ptr_arm64e_shared_cache_rebase
+{
+    uint64_t    runtimeOffset   : 34,   // offset from the start of the shared cache
+                high8           :  8,
+                unused          : 10,
+                next            : 11,   // 8-byte stide
+                auth            :  1;   // == 0
+};
+
+// DYLD_CHAINED_PTR_ARM64E_SHARED_CACHE
+struct dyld_chained_ptr_arm64e_shared_cache_auth_rebase
+{
+    uint64_t    runtimeOffset   : 34,   // offset from the start of the shared cache
+                diversity       : 16,
+                addrDiv         :  1,
+                keyIsData       :  1,   // implicitly always the 'A' key.  0 -> IA.  1 -> DA
+                next            : 11,   // 8-byte stide
+                auth            :  1;   // == 1
 };
 
 

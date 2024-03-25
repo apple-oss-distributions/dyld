@@ -1970,6 +1970,110 @@ Error SubCache::computeSlideInfoV3(const BuilderConfig&           config,
     return Error();
 }
 
+Error SubCache::computeSlideInfoV5(const BuilderConfig&           config,
+                                   cache_builder::SlideInfoChunk* slideChunk,
+                                   Region&                        region)
+{
+    __block Diagnostics diag;
+
+    bool canContainAuthPointers = region.canContainAuthPointers();
+
+    assert((region.subCacheVMSize.rawValue() % config.slideInfo.slideInfoPageSize) == 0);
+    dyld_cache_slide_info5* info    = (dyld_cache_slide_info5*)slideChunk->subCacheBuffer;
+    info->version                   = 5;
+    info->page_size                 = config.slideInfo.slideInfoPageSize;
+    info->page_starts_count         = (uint32_t)region.subCacheVMSize.rawValue() / config.slideInfo.slideInfoPageSize;
+    info->value_add                 = config.layout.cacheBaseAddress.rawValue();
+
+    assert((sizeof(dyld_cache_slide_info5) + (info->page_starts_count * sizeof(uint16_t))) <= slideChunk->cacheVMSize.rawValue());
+
+    std::fill(&info->page_starts[0], &info->page_starts[info->page_starts_count], DYLD_CACHE_SLIDE_V5_PAGE_ATTR_NO_REBASE);
+
+    // Walk each fixup in each segment.  Every time we cross a page, add a page start
+    __block dyld_cache_slide_pointer5* lastFixup     = nullptr;
+    __block uint64_t                   lastPageIndex = ~0ULL;
+    for ( Chunk* chunk : region.chunks ) {
+        SlidChunk* slidChunk = chunk->isSlidChunk();
+
+        slidChunk->tracker.forEachFixup(^(void *loc, bool& stop) {
+            // V5 fixups must be 8-byte aligned
+            assert(((uint64_t)loc % 8) == 0);
+
+            VMOffset       vmOffsetInSegment((uint64_t)loc - (uint64_t)slidChunk->subCacheBuffer);
+            CacheVMAddress fixupVMAddr = slidChunk->cacheVMAddress + vmOffsetInSegment;
+            uint64_t       pageIndex   = (fixupVMAddr - region.subCacheVMAddress).rawValue() / info->page_size;
+
+            // If we are on a new page, then start a new chain
+            if ( pageIndex != lastPageIndex ) {
+                uint64_t vmOffsetInPage      = fixupVMAddr.rawValue() % info->page_size;
+                info->page_starts[pageIndex] = vmOffsetInPage;
+            }
+            else {
+                // Patch the previous fixup on this page to point to this one
+                lastFixup->auth.next = ((uint64_t)loc - (uint64_t)lastFixup) / 8;
+            }
+
+            dyld_cache_slide_pointer5* fixupLocation = (dyld_cache_slide_pointer5*)loc;
+
+            // Convert this fixup from the chained format in the cache builder, to the version we want in the cache file
+            CacheVMAddress vmAddr = Fixup::Cache64::getCacheVMAddressFromLocation(config.layout.cacheBaseAddress,
+                                                                                  loc);
+
+            uint8_t high8 = Fixup::Cache64::getHigh8(loc);
+            VMOffset cacheVMOffset = vmAddr - config.layout.cacheBaseAddress;
+
+            uint16_t    authDiversity  = 0;
+            bool        authIsAddr     = false;
+            uint8_t     authKey        = 0;
+            if ( Fixup::Cache64::hasAuthData(loc, authDiversity, authIsAddr, authKey) ) {
+                // Authenticated value
+                assert(high8 == 0);
+                assert(canContainAuthPointers);
+                assert((authKey == 0) || (authKey == 2)); // IA (0) or DA (2)
+
+                fixupLocation->auth.runtimeOffset       = cacheVMOffset.rawValue();
+                fixupLocation->auth.diversity           = authDiversity;
+                fixupLocation->auth.addrDiv             = authIsAddr ? 1 : 0;
+                fixupLocation->auth.keyIsData           = (authKey == 2) ? 1 : 0;
+                fixupLocation->auth.next                = 0;
+                fixupLocation->auth.auth                = 1;
+
+                if ( fixupLocation->auth.runtimeOffset != cacheVMOffset.rawValue() ) {
+                    diag.error("cache offset 0x%llx exceeds v5 format", cacheVMOffset.rawValue());
+                    stop = true;
+                    return;
+                }
+            } else {
+                // Unauthenticated value
+                fixupLocation->regular.runtimeOffset    = cacheVMOffset.rawValue();
+                fixupLocation->regular.high8            = high8;
+                fixupLocation->regular.next             = 0;
+                fixupLocation->regular.unused           = 0;
+                fixupLocation->regular.auth             = 0;
+
+                if ( fixupLocation->regular.runtimeOffset != cacheVMOffset.rawValue() ) {
+                    diag.error("cache offset 0x%llx exceeds v5 format", cacheVMOffset.rawValue());
+                    stop = true;
+                    return;
+                }
+            }
+
+            lastFixup     = fixupLocation;
+            lastPageIndex = pageIndex;
+        });
+        if ( diag.hasError() )
+            break;
+    }
+
+    if ( diag.hasError() )
+        return Error("could not build slide info because: %s", diag.errorMessageCStr());
+
+    // V5 doesn't deduplicate content like V1, so the used size is the original size too
+    slideChunk->usedFileSize = slideChunk->subCacheFileSize;
+
+    return Error();
+}
+
 Error SubCache::computeSlideInfoForRegion(const BuilderConfig&           config,
                                           cache_builder::SlideInfoChunk* slideChunk,
                                           Region&                        region)
@@ -1981,6 +2085,8 @@ Error SubCache::computeSlideInfoForRegion(const BuilderConfig&           config,
             return computeSlideInfoV2(config, slideChunk, region);
         case cache_builder::SlideInfo::SlideInfoFormat::v3:
             return computeSlideInfoV3(config, slideChunk, region);
+        case cache_builder::SlideInfo::SlideInfoFormat::v5:
+            return computeSlideInfoV5(config, slideChunk, region);
     }
 
     return Error();

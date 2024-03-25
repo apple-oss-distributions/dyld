@@ -91,7 +91,7 @@ struct SwiftTypeProtocolConformanceLocation : SwiftTypeProtocolConformanceLocati
     };
 };
 
-#if SUPPORT_CREATING_PREBUILTLOADERS || BUILDING_UNIT_TESTS || BUILDING_CACHE_BUILDER_UNIT_TESTS
+#if SUPPORT_PREBUILTLOADERS || BUILDING_UNIT_TESTS || BUILDING_CACHE_BUILDER_UNIT_TESTS
 // This is the key to the map from (type descriptor, protocol) to value
 struct SwiftTypeProtocolConformanceDiskLocationKey
 {
@@ -104,7 +104,7 @@ struct SwiftTypeProtocolConformanceDiskLocation
 {
     PrebuiltLoader::BindTargetRef protocolConformance;
 };
-#endif // SUPPORT_CREATING_PREBUILTLOADERS || BUILDING_UNIT_TESTS || BUILDING_CACHE_BUILDER_UNIT_TESTS
+#endif // SUPPORT_PREBUILTLOADERS || BUILDING_UNIT_TESTS || BUILDING_CACHE_BUILDER_UNIT_TESTS
 
 // This is the key to the map from (metadata, protocol) to value
 struct SwiftMetadataProtocolConformanceLocationKey
@@ -147,7 +147,7 @@ struct SwiftMetadataProtocolConformanceLocation : SwiftMetadataProtocolConforman
     };
 };
 
-#if SUPPORT_CREATING_PREBUILTLOADERS || BUILDING_UNIT_TESTS || BUILDING_CACHE_BUILDER_UNIT_TESTS
+#if SUPPORT_PREBUILTLOADERS || BUILDING_UNIT_TESTS || BUILDING_CACHE_BUILDER_UNIT_TESTS
 // This is the key to the map from (metadata, protocol) to value
 struct SwiftMetadataProtocolConformanceDiskLocationKey
 {
@@ -160,7 +160,7 @@ struct SwiftMetadataProtocolConformanceDiskLocation
 {
     PrebuiltLoader::BindTargetRef protocolConformance;
 };
-#endif // SUPPORT_CREATING_PREBUILTLOADERS || BUILDING_UNIT_TESTS || BUILDING_CACHE_BUILDER_UNIT_TESTS
+#endif // SUPPORT_PREBUILTLOADERS || BUILDING_UNIT_TESTS || BUILDING_CACHE_BUILDER_UNIT_TESTS
 
 // This is the key to the map from (foreign type name, protocol) to value
 struct SwiftForeignTypeProtocolConformanceLocationKey
@@ -210,7 +210,7 @@ struct SwiftForeignTypeProtocolConformanceLocation : SwiftForeignTypeProtocolCon
     };
 };
 
-#if SUPPORT_CREATING_PREBUILTLOADERS || BUILDING_UNIT_TESTS || BUILDING_CACHE_BUILDER_UNIT_TESTS
+#if SUPPORT_PREBUILTLOADERS || BUILDING_UNIT_TESTS || BUILDING_CACHE_BUILDER_UNIT_TESTS
 // This is the key to the map from (foreign type name, protocol) to value
 struct SwiftForeignTypeProtocolConformanceDiskLocationKey
 {
@@ -227,7 +227,7 @@ struct SwiftForeignTypeProtocolConformanceDiskLocation
 {
     PrebuiltLoader::BindTargetRef protocolConformance;
 };
-#endif // SUPPORT_CREATING_PREBUILTLOADERS || BUILDING_UNIT_TESTS || BUILDING_CACHE_BUILDER_UNIT_TESTS
+#endif // SUPPORT_PREBUILTLOADERS || BUILDING_UNIT_TESTS || BUILDING_CACHE_BUILDER_UNIT_TESTS
 
 // At runtime, we lookup foreign types with a string instead of an offset.  This is the key which does that lookup
 struct SwiftForeignTypeProtocolConformanceLookupKey
@@ -409,7 +409,7 @@ public:
 
 #if BUILDING_CACHE_BUILDER || BUILDING_CACHE_BUILDER_UNIT_TESTS
 void buildSwiftHashTables(const cache_builder::BuilderConfig& config,
-                          Diagnostics& diag, const std::span<cache_builder::CacheDylib> cacheDylibs,
+                          Diagnostics& diag, const std::span<cache_builder::CacheDylib*> cacheDylibs,
                           std::span<metadata_visitor::Segment> extraRegions,
                           const objc::ClassHashTable* objcClassOpt,
                           const void* headerInfoRO, const void* headerInfoRW,
@@ -417,7 +417,7 @@ void buildSwiftHashTables(const cache_builder::BuilderConfig& config,
                           cache_builder::SwiftProtocolConformanceOptimizer& swiftProtocolConformanceOptimizer);
 #endif // BUILDING_CACHE_BUILDER || BUILDING_CACHE_BUILDER_UNIT_TESTS
 
-std::optional<uint16_t> getPreoptimizedHeaderRWIndex(const void* headerInfoRO, const void* headerInfoRW, const dyld3::MachOAnalyzer* ma);
+std::optional<uint16_t> getPreoptimizedHeaderROIndex(const void* headerInfoRO, const void* headerInfoRW, const dyld3::MachOAnalyzer* ma);
 
 std::string_view getForeignFullIdentity(const char* arrayStart);
 

@@ -32,6 +32,9 @@
 #include "DyldDelegates.h"
 #include "DyldProcessConfig.h"
 
+// mach_o
+#include "Header.h"
+
 // For _dyld_section_location_kind.  Note we want our copy, not the copy in the SDK
 #include "dyld_priv.h"
 
@@ -113,7 +116,8 @@ public:
     LoaderRef           ref;
 
     enum ExportedSymbolMode { staticLink, shallow, dlsymNext, dlsymSelf };
-    
+    enum ResolverMode { runResolver, skipResolver };
+
     struct LoadChain
     {
         const LoadChain*   previous;
@@ -153,7 +157,7 @@ public:
         bool            isMissingFlatLazy;
     };
     struct BindTarget { const Loader* loader; uint64_t runtimeOffset; };
-    enum class DependentKind : uint8_t { normal=0, weakLink=1, reexport=2, upward=3 };
+    typedef mach_o::DependentDylibAttributes   DependentDylibAttributes;
 
     // stored in PrebuiltLoader when it references a file on disk
     struct FileValidationInfo
@@ -209,7 +213,7 @@ public:
     FileID                  fileID(const RuntimeState& state) const;
 #endif
     uint32_t                dependentCount() const;
-    Loader*                 dependent(const RuntimeState& state, uint32_t depIndex, DependentKind* kind=nullptr) const;
+    Loader*                 dependent(const RuntimeState& state, uint32_t depIndex, DependentDylibAttributes* depAttrs=nullptr) const;
     bool                    hiddenFromFlat(bool forceGlobal=false) const;
     bool                    representsCachedDylibIndex(uint16_t dylibIndex) const;
     bool                    getExportsTrie(uint64_t& runtimeOffset, uint32_t& size) const;
@@ -227,6 +231,8 @@ public:
     bool                    hasBeenFixedUp(RuntimeState&) const;
     bool                    beginInitializers(RuntimeState&);
     void                    runInitializers(RuntimeState&) const;
+    bool                    isDelayInit(RuntimeState&) const;
+    void                    setDelayInit(RuntimeState&, bool value) const;
 
     typedef void (^FixUpHandler)(uint64_t fixupLocRuntimeOffset, uint64_t addend, PointerMetaData pmd, const ResolvedSymbol& target, bool& stop);
     typedef void (^CacheWeakDefOverride)(uint32_t cachedDylibIndex, uint32_t cachedDylibVMOffset, const ResolvedSymbol& target);
@@ -236,7 +242,9 @@ public:
 #if SUPPORT_VM_LAYOUT
     const MachOAnalyzer*    analyzer(RuntimeState& state) const;
 #endif
-    bool                    hasExportedSymbol(Diagnostics& diag, RuntimeState&, const char* symbolName, ExportedSymbolMode mode, ResolvedSymbol* result, dyld3::Array<const Loader*>* searched=nullptr) const;
+    bool                    hasExportedSymbol(Diagnostics& diag, RuntimeState&, const char* symbolName, ExportedSymbolMode mode,
+                                              ResolverMode resolverMode, ResolvedSymbol* result,
+                                              dyld3::Array<const Loader*>* searched=nullptr) const;
     void                    logSegmentsFromSharedCache(RuntimeState& state) const;
     bool                    hasConstantSegmentsToProtect() const;
     void                    makeSegmentsReadOnly(RuntimeState& state) const;

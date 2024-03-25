@@ -74,8 +74,8 @@ This is a colon separated list of directories that contain frameworks.
 If a framework is not found at its install path, dyld uses this
 as a list of directories to search for the framework.
 
-By default, it is set to
-/Library/Frameworks:/System/Library/Frameworks
+For new binaries (Fall 2023 or later) there is no default fallback.  For older binaries,
+their is a default fallback search path of: /Library/Frameworks:/System/Library/Frameworks
 .TP
 .B DYLD_VERSIONED_FRAMEWORK_PATH
 This is a colon separated list of directories that contain potential override frameworks. 
@@ -109,8 +109,9 @@ is linked against.
 This is a colon separated list of directories that contain libraries.
 If a dylib is not found at its install  path,
 dyld uses this as a list of directories to search for the dylib.
-By default, it is set
-to /usr/local/lib:/usr/lib.
+
+For new binaries (Fall 2023 or later) there is no default.  For older binaries,
+their is a default fallback search path of: /usr/local/lib:/usr/lib.
 .TP
 .B DYLD_VERSIONED_LIBRARY_PATH
 This is a colon separated list of directories that contain potential override libraries. 

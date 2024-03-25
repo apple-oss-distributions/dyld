@@ -371,7 +371,10 @@ dyld_process_info_ptr dyld_process_info_base::make(task_t task, const T1& allIma
         // figure out how many path strings will need to be copied and their size
         T2* imageArray = (T2 *)buffer;
         const dyld_all_image_infos* myInfo = (const dyld_all_image_infos*)dyld4::gDyld.allImageInfos;   // FIXME: should not need dyld_all_image_info
-        bool sameCacheAsThisProcess = !allImageInfo.processDetachedFromSharedRegion
+        const bool sameCacheAsThisProcess = true
+            && (allImageInfo.sharedCacheBaseAddress != 0)
+            && (myInfo->sharedCacheBaseAddress != 0)
+            && !allImageInfo.processDetachedFromSharedRegion
             && !myInfo->processDetachedFromSharedRegion
             && ((memcmp(myInfo->sharedCacheUUID, &allImageInfo.sharedCacheUUID[0], 16) == 0)
             && (myInfo->sharedCacheSlide == allImageInfo.sharedCacheSlide));
@@ -382,8 +385,8 @@ dyld_process_info_ptr dyld_process_info_base::make(task_t task, const T1& allIma
         // forces it to build the code, which results in the case from imageArray[i].imageFilePath to a (void*) to generate a warning.
         // By using the constexpr check here we can elide compiling that case and the warning, which prevents -Werror failues.
         if constexpr(sizeof(T2().imageFilePath) == sizeof(void*)) {
-            if ( sameCacheAsThisProcess ) {
-                const DyldSharedCache* dyldCacheHeader = (DyldSharedCache*)sharedCacheStart;
+            const DyldSharedCache* dyldCacheHeader = (DyldSharedCache*)sharedCacheStart;
+            if ( sameCacheAsThisProcess && dyldCacheHeader != nullptr) {
                 bool readOnly = false;
                 for (uint32_t i=0; i < imageCount; ++i) {
                     if ( !dyldCacheHeader->inCache((void*)imageArray[i].imageFilePath, 1, readOnly) )
@@ -671,7 +674,7 @@ kern_return_t dyld_process_info_base::addImage(task_t task, bool sameCacheAsThis
     _curImage->segmentStartIndex = _curSegmentIndex;
     if ( imagePathLocal != NULL ) {
         _curImage->path = addString(imagePathLocal, PATH_MAX);
-    } else if ( sameCacheAsThisProcess &&  dyldCacheHeader->inCache((void*)imagePath, 1, readOnly) ) {
+    } else if ( sameCacheAsThisProcess && dyldCacheHeader != nullptr && dyldCacheHeader->inCache((void*)imagePath, 1, readOnly) ) {
         _curImage->path = (const char*)imagePath;
     } else if (imagePath) {
         _curImage->path = copyPath(task, imagePath);
@@ -679,7 +682,7 @@ kern_return_t dyld_process_info_base::addImage(task_t task, bool sameCacheAsThis
         _curImage->path = "";
     }
 
-    if ( sameCacheAsThisProcess &&  dyldCacheHeader->inCache((void*)imageAddress, 32*1024, readOnly) ) {
+    if ( sameCacheAsThisProcess && dyldCacheHeader != nullptr && dyldCacheHeader->inCache((void*)imageAddress, 32*1024, readOnly) ) {
         addInfoFromLoadCommands((mach_header*)imageAddress, imageAddress, 32*1024);
     } else {
         auto kr = addInfoFromRemoteLoadCommands(task, imageAddress);

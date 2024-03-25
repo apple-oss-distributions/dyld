@@ -94,6 +94,7 @@ constinit const Platform::Epoch Platform::Epoch::fall2021(2021);
 constinit const Platform::Epoch Platform::Epoch::spring2021(2021, true);
 constinit const Platform::Epoch Platform::Epoch::fall2022(2022);
 constinit const Platform::Epoch Platform::Epoch::fall2023(2023);
+constinit const Platform::Epoch Platform::Epoch::spring2024(2024, true);
 constinit const Platform::Epoch Platform::Epoch::fall2024(2024);
 
 
@@ -140,6 +141,10 @@ public:
     virtual void yearForVersion(Version32 vers, uint16_t& year, bool& spring) const {
         yearForMajorVersion(vers, year, spring);
     }
+    virtual uint16_t minorVersionForSpring(uint16_t major) const {
+        // most spring releses are X.4
+        return 4;
+    }
 
 
 protected:
@@ -152,7 +157,7 @@ protected:
         uint16_t minor = 0;
         if ( spring ) {
             --major;
-            minor = 4;
+            minor = minorVersionForSpring(major);
         }
         return Version32(major, minor);
     }
@@ -171,16 +176,18 @@ protected:
 
     void yearForMajorVersion(Version32 vers, uint16_t& year, bool& spring) const {
         // version is >= 11.0
-        year = baseYear + (vers.value() >> 16);
-        spring = ((vers.value() & 0x000000FF) >= 0x00000300);
+        year = baseYear + vers.major();
+        spring = (vers.minor() >= minorVersionForSpring(vers.major()));
+        // Say the 2023 fall release has the year 2023, then we want the following spring release,
+        // what availability calls 2023(e) to actually be in calendar year 2024
         if ( spring )
-            --year;
+            ++year;
     }
 
     void yearForTenMinorVersion(Version32 vers, uint16_t tenBaseYear, uint16_t& year, bool& spring) const {
         // version is 10.x
         year = tenBaseYear + ((vers.value() - 0x000A0000) >> 8);
-        spring = ((vers.value() & 0x000000FF) >= 0x00000300);
+        spring = ((vers.value() & 0x000000FF) >= 0x04);
         if ( spring )
             --year;
     }
@@ -204,6 +211,16 @@ public:
             yearForMajorVersion(vers, year, spring);             // 11.0 -> 2020
         else
             yearForTenMinorVersion(vers, 2004, year, spring);    // 10.15 -> 2019
+    }
+
+    uint16_t minorVersionForSpring(uint16_t major) const override {
+        // The past releases have been 11.3, 12.3, 13.3, so assume that pattern for those releases.
+        if ( major <= 13 )
+            return 3;
+
+        // 14.4 needs a 4
+        // also assume that later releases are .4, just to be conservative
+        return 4;
     }
 
     static const PlatformInfo_macOS singleton;
@@ -309,6 +326,16 @@ class PlatformInfo_bridgeOS : public PlatformInfo
 {
 public:
     consteval PlatformInfo_bridgeOS() : PlatformInfo(PLATFORM_BRIDGEOS, "bridgeOS", false, false, 2015) { }
+
+    uint16_t minorVersionForSpring(uint16_t major) const override {
+        // The past 2 releases have been 7.3 and 8.3, so assume that pattern for those releases.
+        if ( major <= 8 )
+            return 3;
+
+        // use .4 for future just in case it changes.  We'd rather be conservative for future
+        // than accidentally opt in something we shouldn't
+        return 4;
+    }
 
     static const PlatformInfo_bridgeOS singleton;
 };
@@ -420,8 +447,9 @@ Platform Platform::byName(std::string_view name) {
 
     // check if this is a raw platform number
     uint32_t num = 0;
-    if ( std::from_chars_result res = std::from_chars(name.begin(), name.end(), num);
-            res.ec == std::errc() && res.ptr == name.end()
+    const char* end = name.data() + name.size();
+    if ( std::from_chars_result res = std::from_chars(name.data(), end, num);
+            res.ec == std::errc() && res.ptr == end
             && Platform(num).valid().noError() )
         return Platform(num);
 
@@ -484,14 +512,6 @@ bool Platform::canLoad(Platform other) const
 uint32_t Platform::value() const
 {
     return _info ? _info->value : 0;
-}
-
-Version32 Platform::version(Platform::Epoch e) const
-{
-    if ( _info != nullptr )
-        return _info->versionForEpoch(e);
-    else
-        return Version32(0,0);
 }
 
 Platform::Epoch Platform::epoch(Version32 v) const

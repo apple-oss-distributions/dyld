@@ -29,6 +29,7 @@
 #include <mach-o/dyld_images.h>
 #include <TargetConditionals.h>
 
+#include "Array.h"
 #include "Defines.h"
 #include "Allocator.h"
 #include "MachOFile.h"
@@ -115,32 +116,42 @@ class ExternallyViewableState
 {
 public:
     struct ImageInfo { uint64_t fsID=0; uint64_t fsObjID=0; const char* path=nullptr; const void* loadAddress=nullptr; bool inSharedCache=false; };
-    void addImageInfoOld(const ImageInfo& imageInfo, uint64_t timeStamp, uintptr_t mTime);
-    size_t imageInfoCount();
 #if TARGET_OS_SIMULATOR
     void initSim(lsl::Allocator& persistentAllocator, lsl::Allocator& ephemeralAllocator, dyld3::Platform,
                  dyld_all_image_infos* hostAllImage, const dyld::SyscallHelpers* syscalls);
 #else
+    void initOld(lsl::Allocator& persistentAllocator, dyld3::Platform);
+#if !TARGET_OS_EXCLAVEKIT
     void init(lsl::Allocator& persistentAllocator, lsl::Allocator& ephemeralAllocator, FileManager& fileManager, dyld3::Platform);
     void addImageInfo(lsl::Allocator& ephemeralAllocator, const ImageInfo& imageInfo);
-#endif
+#endif // !TARGET_OS_EXCLAVEKIT
+#endif // TARGET_OS_SIMULATOR
+    void addImageInfoOld(const ImageInfo& imageInfo, uint64_t timeStamp, uintptr_t mTime);
+    void setDyldOld(const ImageInfo& dyldInfo);
+    void setLibSystemInitializedOld();
+    void setInitialImageCountOld(uint32_t);
+    void addImagesOld(lsl::Vector<dyld_image_info>& oldStyleAdditions, uint64_t timeStamp);
+    void addImagesOld(lsl::Allocator& ephemeralAllocator, const std::span<ImageInfo>& images);
+    void removeImagesOld(dyld3::Array<const char*> &pathsBuffer, dyld3::Array<const mach_header*>& unloadedMHs, std::span<const mach_header*>& mhs, uint64_t timeStamp);
+    void removeImagesOld(std::span<const mach_header*>& mhs);
+#if !TARGET_OS_EXCLAVEKIT
+    void setDyld(lsl::Allocator& ephemeralAllocator, const ImageInfo& dyldInfo);
+    void setLibSystemInitialized();
+    void setInitialImageCount(uint32_t);
+    void addImages(lsl::Allocator& persistentAllocator, lsl::Allocator& ephemeralAllocator, const std::span<ImageInfo>& images);
+    void removeImages(lsl::Allocator& persistentAllocator, lsl::Allocator& ephemeralAllocator, std::span<const mach_header*>& mhs);
     void setSharedCacheInfo(lsl::Allocator& ephemeralAllocator, uint64_t cacheSlide, const ImageInfo& cacheInfo, bool privateCache);
     void detachFromSharedRegion();
-    void setDyld(lsl::Allocator& ephemeralAllocator, const ImageInfo& dyldInfo);
     void commit(Atlas::ProcessSnapshot* processSnapshot, lsl::Allocator& persistentAllocator, lsl::Allocator& ephemeralAllocator);
     void commit(lsl::Allocator& persistentAllocator, lsl::Allocator& ephemeralAllocator);
     void release(lsl::Allocator& ephemeralAllocator);
     void disableCrashReportBacktrace();
-    void setInitialImageCount(uint32_t);
-    void setLibSystemInitialized();
-    void addImages(lsl::Allocator& persistentAllocator, lsl::Allocator& ephemeralAllocator, const std::span<ImageInfo>& images);
-    void removeImages(lsl::Allocator& persistentAllocator, lsl::Allocator& ephemeralAllocator, std::span<const mach_header*>& mhs);
-    void storeProcessInfoPointer(dyld_all_image_infos**); // sets value in __dyld4 section
 #if SUPPORT_ROSETTA
     void setRosettaSharedCacheInfo(uint64_t aotCacheLoadAddress, const uuid_t aotCacheUUID);
     void addRosettaImages(std::span<const dyld_aot_image_info>&, std::span<const dyld_image_info>&);
     void removeRosettaImages(std::span<const mach_header*>& mhs);
 #endif
+    uint64_t     imageInfoCount();
     unsigned int notifyPortValue();
     void        fork_child();
     uint64_t    lastImageListUpdateTime();
@@ -148,7 +159,7 @@ public:
 
     void        notifyMonitorOfImageListChangesSim(bool unloading, unsigned imageCount, const struct mach_header* loadAddresses[], const char* imagePaths[]);
     void        coresymbolication_load_notifier(void* connection, uint64_t timestamp, const char* path, const struct mach_header* mh);
-    void       coresymbolication_unload_notifier(void* connection, uint64_t timestamp, const char* path, const struct mach_header* mh);
+    void        coresymbolication_unload_notifier(void* connection, uint64_t timestamp, const char* path, const struct mach_header* mh);
 
     bool        notifyMonitorNeeded();
     void        notifyMonitorOfImageListChanges(bool unloading, unsigned imageCount, const struct mach_header* loadAddresses[], const char* imagePaths[]);
@@ -158,19 +169,23 @@ public:
     static void notifyMonitoringDyld(bool unloading, unsigned imageCount, const struct mach_header* loadAddresses[], const char* imagePaths[]);
     static void switchDyldLoadAddress(const dyld3::MachOFile* dyldInCacheMF);
     static bool switchToDyldInDyldCache(const dyld3::MachOFile* dyldInCacheMF);
+#endif // !TARGET_OS_EXCLAVEKIT
 
     static dyld_all_image_infos* getProcessInfo();
+    void storeProcessInfoPointer(dyld_all_image_infos**); // sets value in __dyld4 section
 
 private:
     void addImageUUID(const dyld3::MachOFile*);
     void ensureSnapshot(lsl::Allocator& ephemeralAllocator);
 
+#if !TARGET_OS_EXCLAVEKIT
     // compact info fields
     Atlas::ProcessSnapshot*             _snapshot       = nullptr;
     FileManager*                        _fileManager    = nullptr;
 #if !TARGET_OS_SIMULATOR
     os_unfair_lock_s                    _processSnapshotLock    = OS_UNFAIR_LOCK_INIT;
-#endif
+#endif // !TARGET_OS_SIMULATOR
+#endif // !TARGET_OS_EXCLAVEKIT
 
     // old style all_image_info fields
     dyld_all_image_infos*               _allImageInfo   = nullptr;

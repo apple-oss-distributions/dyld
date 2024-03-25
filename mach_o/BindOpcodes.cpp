@@ -490,6 +490,23 @@ static void sortBindOpcodes(std::span<BindOpcodes::LocAndTarget> binds)
     });
 }
 
+
+// to work with dyld2's algorithm, all weak-bind opcodes need to be sorted by symbol name
+static void sortWeakBindOpcodes(std::span<BindOpcodes::LocAndTarget> binds)
+{
+    std::sort(binds.begin(), binds.end(), [](const BindOpcodes::LocAndTarget& a, const BindOpcodes::LocAndTarget& b) {
+        // sort by symbol name then address
+        if ( a.target != b.target ) {
+            if ( a.target->symbolName != b.target->symbolName )
+                return ( strcmp(a.target->symbolName, b.target->symbolName) < 0 );
+        }
+        // Sort by seg index and seg offset, which gives us address
+        if ( a.segIndex != b.segIndex )
+            return (a.segIndex < b.segIndex );
+        return (a.segOffset < b.segOffset );
+    });
+}
+
 BindOpcodes::BindOpcodes(std::span<LocAndTarget> binds, bool is64, BuilderKind kind, LazyStartRecorder lazyStartsRecorder)
   : _opcodesStart(nullptr), _opcodesEnd(nullptr), _pointerSize(is64 ? 8 : 4)
 {
@@ -537,7 +554,10 @@ BindOpcodes::BindOpcodes(std::span<LocAndTarget> binds, bool is64, BuilderKind k
     }
     else {
         // sort by library, symbol, type, then address
-        sortBindOpcodes(binds);
+        if ( kind == BuilderKind::weak )
+            sortWeakBindOpcodes(binds);
+        else
+            sortBindOpcodes(binds);
         for (const LocAndTarget& bind : binds) {
             // weak binds don't have ordinals
             if ( kind != BuilderKind::weak ) {

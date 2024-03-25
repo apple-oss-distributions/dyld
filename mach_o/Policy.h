@@ -71,13 +71,17 @@ public:
     // features
     Usage       useBuildVersionLoadCommand() const;
     Usage       useDataConst() const;
+    Usage       useConstClassRefs() const;
+    Usage       useGOTforClassRefs() const;
     Usage       useChainedFixups() const;
     Usage       useOpcodeFixups() const;
     Usage       useRelativeMethodLists() const;
     Usage       useAuthStubsInKexts() const;
     Usage       useDataConstForSelRefs() const;
     Usage       useSourceVersionLoadCommand() const;
+    Usage       useLegacyLinkedit() const;
     bool        use4KBLoadCommandsPadding() const;
+    bool        canUseDelayInit() const;
 
     // restrictions
     bool        enforceReadOnlyLinkedit() const;

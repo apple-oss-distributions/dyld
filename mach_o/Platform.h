@@ -129,6 +129,7 @@ private:
         static constinit const Epoch      fall2021;
         static constinit const Epoch      fall2022;
         static constinit const Epoch      fall2023;
+        static constinit const Epoch    spring2024;
         static constinit const Epoch      fall2024;
 
     private:
@@ -144,9 +145,6 @@ private:
 
     // returns which Epoch a particular platform version corresponds to
     Epoch               epoch(Version32) const;
-
-    // returns the version of the platform OS for a specific Epoch
-    Version32           version(Epoch) const;
 
     explicit constexpr  Platform(const PlatformInfo& info) : _info(&info) { }
     const PlatformInfo*  _info;

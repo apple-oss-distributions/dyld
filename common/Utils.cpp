@@ -46,3 +46,32 @@ size_t Utils::concatenatePaths(char *path, const char *suffix, size_t pathsize)
         return strlcat(path, suffix, pathsize);
 }
 }; /* namespace dyld4 */
+
+void escapeCStringLiteral(const char* s, char* b, size_t bufferLength, char** end)
+{
+    char* e = b + bufferLength - 1; // reserve one character for null terminator
+    while (b < e) {
+        char c = *s++;
+        if ( c == '\n' ) {
+            *b++ = '\\';
+            *b++ = 'n';
+        }
+        else if ( c == '\t' ) {
+            *b++ = '\\';
+            *b++ = 't';
+        }
+        else if ( c == '\"' ) {
+            *b++ = '\\';
+            *b++ = '\"';
+        }
+        else if ( c == '\0' ) {
+            break;
+        }
+        else {
+            *b++ = c;
+        }
+    }
+    *b = '\0';
+    if ( end )
+        *end = b;
+}

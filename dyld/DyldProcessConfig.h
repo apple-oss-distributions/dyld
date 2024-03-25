@@ -25,49 +25,16 @@
 #ifndef DyldProcessConfig_h
 #define DyldProcessConfig_h
 
+#include <TargetConditionals.h>
+
 #include <stdarg.h>
 #include <stdint.h>
 #include <dlfcn.h>
-#include <TargetConditionals.h>
+
 #if TARGET_OS_EXCLAVEKIT
-
-//#include <platform/platform.h>
-//TODO: remove structs and include platform/platform.h when rdar://102210941 is fixed
-typedef struct {
-    bool launched_roottask;
-    uint64_t platform_id;
-    uintptr_t bootinfo_virt;
-    uintptr_t plat_bootinfo_virt;
-    struct {
-        uint64_t words[2];
-        size_t count;
-    } entropy;
-    struct {
-        uintptr_t phys;
-        size_t size;
-    } global_der;
-    struct {
-        uintptr_t metadata_virt;
-        uintptr_t assets_virt;
-    } bundle;
-    uintptr_t init_endpoint;
-    uintptr_t dyld_mapping_descriptor;
-    uintptr_t tbplc_mapping_descriptor;
-    uintptr_t device_tree_virt;
-    size_t device_tree_size;
-    struct {
-        uintptr_t initdata_virt;
-        uintptr_t initdata_size;
-        uintptr_t cnodes_virt;
-        uintptr_t cnodes_size;
-    } tightbeam;
-} xrt__entry_args_t;
-
-typedef struct {
-    uintptr_t kind;
-    uintptr_t value;
-} xrt__entry_vec_t;
+#include <platform/platform.h>
 #endif
+
 #include "Defines.h"
 #include "Array.h"
 #include "DyldSharedCache.h"
@@ -265,6 +232,7 @@ public:
         const char*                     getMainUnrealPath(SyscallDelegate& syscall, Allocator& allocator);
         dyld3::Platform                 getMainPlatform();
         const GradedArchs*              getMainArchs(SyscallDelegate& osDelegate);
+        bool                            isInternalSimulator(SyscallDelegate& syscall) const;
         bool                            usesCatalyst();
         bool                            defaultDataConst();
         bool                            defaultTproDataConst();
@@ -279,7 +247,10 @@ public:
     public:
                                     Security(Process& process, SyscallDelegate&);
 
-        bool                        internalInstall;
+        bool                        isInternalOS; // works with device and simulator
+        bool                        internalInstall; // always returns false for simulator
+        bool                        dlsymBlocked;
+        bool                        dlsymAbort;
 #if !TARGET_OS_EXCLAVEKIT
         bool                        allowAtPaths;
         bool                        allowEnvVarsPrint;
@@ -290,6 +261,7 @@ public:
         bool                        allowInterposing;
         bool                        allowEmbeddedVars;
         bool                        skipMain;
+        bool                        justBuildClosure;
 
      private:
         uint64_t                    getAMFI(const Process& process, SyscallDelegate& syscall);

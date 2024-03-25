@@ -876,7 +876,7 @@ static void *getPreoptimizedHeaderRW(const void* headerInfoRO, const void* heade
     }
 }
 
-static std::optional<uint16_t> getPreoptimizedHeaderRWIndex(const void* headerInfoRO, const void* headerInfoRW,
+static std::optional<uint16_t> getPreoptimizedHeaderROIndex(const void* headerInfoRO, const void* headerInfoRW,
                                                             uint64_t headerInfoROVMAddr, uint64_t machoVMAddr,
                                                             bool is64)
 {

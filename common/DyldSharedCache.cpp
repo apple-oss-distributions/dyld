@@ -282,6 +282,40 @@ void DyldSharedCache::forEachRegion(void (^handler)(const void* content, uint64_
     }
 }
 
+const char* DyldSharedCache::mappingName(uint32_t maxProt, uint64_t flags)
+{
+    const char* mappingName = "";
+    if ( maxProt & VM_PROT_EXECUTE ) {
+        if ( flags & DYLD_CACHE_MAPPING_TEXT_STUBS ) {
+            mappingName = "__TEXT_STUBS";
+        } else {
+            mappingName = "__TEXT";
+        }
+    } else if ( maxProt & VM_PROT_WRITE ) {
+        if ( flags & DYLD_CACHE_MAPPING_AUTH_DATA ) {
+            if ( flags & DYLD_CACHE_MAPPING_DIRTY_DATA )
+                mappingName = "__AUTH_DIRTY";
+            else if ( flags & DYLD_CACHE_MAPPING_CONST_DATA )
+                mappingName = "__AUTH_CONST";
+            else
+                mappingName = "__AUTH";
+        } else {
+            if ( flags & DYLD_CACHE_MAPPING_DIRTY_DATA )
+                mappingName = "__DATA_DIRTY";
+            else if ( flags & DYLD_CACHE_MAPPING_CONST_DATA )
+                mappingName = "__DATA_CONST";
+            else
+                mappingName = "__DATA";
+        }
+    }
+    else if ( maxProt & VM_PROT_READ ) {
+        mappingName = "__LINKEDIT";
+    } else {
+        mappingName = "*unknown*";
+    }
+    return mappingName;
+}
+
 void DyldSharedCache::forEachRange(void (^handler)(const char* mappingName,
                                                    uint64_t unslidVMAddr, uint64_t vmSize,
                                                    uint32_t cacheFileIndex, uint64_t fileOffset,
@@ -293,35 +327,7 @@ void DyldSharedCache::forEachRange(void (^handler)(const char* mappingName,
     forEachCache(^(const DyldSharedCache *cache, bool& stopCache) {
         cache->forEachRegion(^(const void *content, uint64_t unslidVMAddr, uint64_t size,
                         uint32_t initProt, uint32_t maxProt, uint64_t flags, bool& stopRegion) {
-            const char* mappingName = "";
-            if ( maxProt & VM_PROT_EXECUTE ) {
-                if ( flags & DYLD_CACHE_MAPPING_TEXT_STUBS ) {
-                    mappingName = "__TEXT_STUBS";
-                } else {
-                    mappingName = "__TEXT";
-                }
-            } else if ( maxProt & VM_PROT_WRITE ) {
-                if ( flags & DYLD_CACHE_MAPPING_AUTH_DATA ) {
-                    if ( flags & DYLD_CACHE_MAPPING_DIRTY_DATA )
-                        mappingName = "__AUTH_DIRTY";
-                    else if ( flags & DYLD_CACHE_MAPPING_CONST_DATA )
-                        mappingName = "__AUTH_CONST";
-                    else
-                        mappingName = "__AUTH";
-                } else {
-                    if ( flags & DYLD_CACHE_MAPPING_DIRTY_DATA )
-                        mappingName = "__DATA_DIRTY";
-                    else if ( flags & DYLD_CACHE_MAPPING_CONST_DATA )
-                        mappingName = "__DATA_CONST";
-                    else
-                        mappingName = "__DATA";
-                }
-            }
-            else if ( maxProt & VM_PROT_READ ) {
-                mappingName = "__LINKEDIT";
-            } else {
-                mappingName = "*unknown*";
-            }
+            const char* mappingName = DyldSharedCache::mappingName(maxProt, flags);
             uint64_t fileOffset = (uint8_t*)content - (uint8_t*)cache;
             bool stop = false;
             handler(mappingName, unslidVMAddr, size, cacheFileIndex, fileOffset, initProt, maxProt, stop);

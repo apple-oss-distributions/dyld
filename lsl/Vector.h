@@ -48,7 +48,7 @@ struct TRIVIAL_ABI Vector {
 #pragma mark -
 #pragma mark Typedefs
     using value_type        = T;
-    using size_type         = std::size_t;
+    using size_type         = uint64_t;
     using difference_type   = std::ptrdiff_t;
     using reference         = value_type&;
     using const_reference   = const value_type&;
@@ -216,7 +216,7 @@ struct TRIVIAL_ABI Vector {
         if (newCapacity < 16) {
             newCapacity = 16;
         } else {
-            newCapacity = (size_t)lsl::bit_ceil(newCapacity);
+            newCapacity = (uint64_t)lsl::bit_ceil(newCapacity);
         }
         reserveExact(newCapacity);
     }
@@ -326,8 +326,8 @@ private:
     }
     Allocator*  _allocator      = nullptr;
     value_type* _buffer         = nullptr;
-    size_t      _size           = 0;
-    size_t      _allocationSize = 0;
+    uint64_t    _size           = 0;
+    uint64_t    _allocationSize = 0;
 };
 
 } // namespace lsl

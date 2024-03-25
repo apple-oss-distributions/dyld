@@ -110,16 +110,16 @@ struct VIS_HIDDEN MemoryManager {
     // a tuple of an allocated <pointer, size>
     struct Buffer {
         void*   address;
-        size_t  size;
+        uint64_t  size;
         [[gnu::pure]] void*     lastAddress() const;                // end() ??
-        bool                    align(size_t alignment, size_t size);
+        bool                    align(uint64_t alignment, uint64_t size);
 
         bool                    contains(const Buffer&) const;
         bool                    valid() const;
         void                    dump() const;
         bool                    succeeds(const Buffer&) const;
         void                    remainders(const Buffer& other, Buffer& prefix, Buffer& postfix) const;
-        Buffer                  findSpace(size_t targetSize, size_t targetAlignment, size_t prefix) const;
+        Buffer                  findSpace(uint64_t targetSize, uint64_t targetAlignment, uint64_t prefix) const;
         explicit                operator bool() const;
         auto                    operator<=>(const Buffer&) const = default;
     };
@@ -154,10 +154,10 @@ struct VIS_HIDDEN MemoryManager {
     }
 #endif // !TARGET_OS_EXCLAVEKIT
 
-    [[nodiscard]] static void*      allocate_pages(size_t size);
-    static void                     deallocate_pages(void* p, size_t size);
-    [[nodiscard]] Buffer            vm_allocate_bytes(std::size_t size);
-    void static                     vm_deallocate_bytes(void* p, std::size_t size);
+    [[nodiscard]] static void*      allocate_pages(uint64_t size);
+    static void                     deallocate_pages(void* p, uint64_t size);
+    [[nodiscard]] Buffer            vm_allocate_bytes(uint64_t size);
+    void static                     vm_deallocate_bytes(void* p, uint64_t size);
     template<typename F>
     ALWAYS_INLINE void          withWritableMemory(F work) {
 #if BUILDING_DYLD && !TARGET_OS_EXCLAVEKIT
@@ -350,10 +350,10 @@ struct VIS_HIDDEN AllocationMetadata {
         UniquePtr   = 1,
         SharedPtr   = 2
     };
-    AllocationMetadata(Allocator* allocator, size_t size);
+    AllocationMetadata(Allocator* allocator, uint64_t size);
     static AllocationMetadata*  getForPointer(void*);
     Allocator&                  allocator() const; // allocator offset 24 bit
-    size_t                      size() const; // 1 bit granule size : 21 granule count
+    uint64_t                    size() const; // 1 bit granule size : 21 granule count
     Type                        type() const;
     void                        setType(Type type);
     void freeObject();
@@ -361,8 +361,8 @@ struct VIS_HIDDEN AllocationMetadata {
     bool decrementRefCount();
     void incrementWeakRefCount();
     bool decrementWeakRefCount();
-    static size_t goodSize(size_t);
-    template<typename T> static size_t goodSize() {
+    static uint64_t goodSize(uint64_t);
+    template<typename T> static uint64_t goodSize() {
         return goodSize(sizeof(T));
     }
 //private:
@@ -577,7 +577,7 @@ private:
 struct VIS_HIDDEN Allocator {
     using Buffer = MemoryManager::Buffer;
 
-    static const std::size_t    kGranuleSize                    = (16);
+    static const uint64_t    kGranuleSize                    = (16);
 
     // smart pointers
     template< class T, class... Args >
@@ -595,11 +595,11 @@ struct VIS_HIDDEN Allocator {
     // Simple interfaces
     //   These present an interface similiar to normal malloc, and return managed pointers than can be used
     //   with the SharedPtr and UniquePtr classes
-    void*                   malloc(size_t size);
-    void*                   aligned_alloc(size_t alignment, size_t size);
+    void*                   malloc(uint64_t size);
+    void*                   aligned_alloc(uint64_t alignment, uint64_t size);
     void                    free(void* ptr);
     char*                   strdup(const char*);
-    virtual bool            owned(const void* p, std::size_t nbytes) const = 0;
+    virtual bool            owned(const void* p, uint64_t nbytes) const = 0;
     virtual void            destroy() = 0;
     virtual MemoryManager*  memoryManager() { return nullptr; }
     static Allocator&       persistentAllocator(MemoryManager&& memoryManager);
@@ -608,11 +608,11 @@ struct VIS_HIDDEN Allocator {
     // Returns a shared persistent allocator
     static Allocator&       defaultAllocator();
 #endif
-    static void* align(size_t alignment, size_t size, void*& ptr, size_t& space);
+    static void* align(uint64_t alignment, uint64_t size, void*& ptr, uint64_t& space);
 #pragma mark Primitive methods to be provided by subclasses
 public:
-    virtual size_t      allocated_bytes() const = 0;
-    virtual size_t      vm_allocated_bytes() const = 0;
+    virtual uint64_t      allocated_bytes() const = 0;
+    virtual uint64_t      vm_allocated_bytes() const = 0;
     // For debugging
     virtual void        validate() const {};
     virtual void        debugDump() const {};
@@ -620,14 +620,14 @@ protected:
     template<typename T> friend struct UniquePtr;
     template<typename T> friend struct Vector;
     template<typename T, class C, bool M> friend struct BTree;
-    [[nodiscard]] virtual Buffer    allocate_buffer(std::size_t nbytes, std::size_t alignment, std::size_t prefix) = 0;
+    [[nodiscard]] virtual Buffer    allocate_buffer(uint64_t nbytes, uint64_t alignment, uint64_t prefix) = 0;
     // Deallocates a buffer returned from allocate_bytes
     virtual void                    deallocate_buffer(Buffer buffer) = 0;
 #pragma mark Common functions for subclasses
-    [[nodiscard]] Buffer            allocate_buffer(std::size_t nbytes, std::size_t alignment);
-    void                            deallocate_buffer(void* p, std::size_t nbytes, std::size_t alignment);
-    [[nodiscard]] static Buffer     vm_allocate_bytes(std::size_t size, int flags);
-    static void                     vm_deallocate_bytes(void* p, std::size_t size);
+    [[nodiscard]] Buffer            allocate_buffer(uint64_t nbytes, uint64_t alignment);
+    void                            deallocate_buffer(void* p, uint64_t nbytes, uint64_t alignment);
+    [[nodiscard]] static Buffer     vm_allocate_bytes(uint64_t size, int flags);
+    static void                     vm_deallocate_bytes(void* p, uint64_t size);
     Allocator() = default;
     static_assert(sizeof(AllocationMetadata) <= kGranuleSize, "Granule must be large enough to hold AllocationMetadata");
     static_assert(alignof(AllocationMetadata) <= kGranuleSize, "AllocationMetadata must be naturally aligned ona granule");
@@ -636,24 +636,24 @@ protected:
 struct __attribute__((aligned(16))) VIS_HIDDEN EphemeralAllocator : Allocator {
                         EphemeralAllocator();
                         EphemeralAllocator(MemoryManager&);
-                        EphemeralAllocator(void* buffer, size_t size);
-                        EphemeralAllocator(void* buffer, size_t size, MemoryManager&);
+                        EphemeralAllocator(void* buffer, uint64_t size);
+                        EphemeralAllocator(void* buffer, uint64_t size, MemoryManager&);
                         EphemeralAllocator(const EphemeralAllocator& other);
                         EphemeralAllocator(EphemeralAllocator&& other);
                         ~EphemeralAllocator();
     EphemeralAllocator& operator=(const EphemeralAllocator& other)          = delete;
     EphemeralAllocator& operator=(EphemeralAllocator&& other);
 
-    size_t              allocated_bytes() const override;
-    size_t              vm_allocated_bytes() const override; // Only for testing, should be private but no way to make an ObjC friend
-    bool                owned(const void* p, std::size_t nbytes) const override;
+    uint64_t              allocated_bytes() const override;
+    uint64_t              vm_allocated_bytes() const override; // Only for testing, should be private but no way to make an ObjC friend
+    bool                owned(const void* p, uint64_t nbytes) const override;
     void                destroy() override;
     void                reset();
     friend              void swap(EphemeralAllocator& x, EphemeralAllocator& y) {
         x.swap(y);
     }
 protected:
-    [[nodiscard]] Buffer    allocate_buffer(std::size_t nbytes, std::size_t alignment, std::size_t prefix) override;
+    [[nodiscard]] Buffer    allocate_buffer(uint64_t nbytes, uint64_t alignment, uint64_t prefix) override;
     void                    deallocate_buffer(Buffer buffer) override;
 private:
     void                    swap(EphemeralAllocator& other);
@@ -665,7 +665,7 @@ private:
     MemoryManager*      _memoryManager  = nullptr;
     Buffer              _freeBuffer     = { nullptr, 0 };
     RegionListEntry*    _regionList     = nullptr;
-    size_t              _allocatedBytes = 0;
+    uint64_t            _allocatedBytes = 0;
 };
 
 } // namespace lsl

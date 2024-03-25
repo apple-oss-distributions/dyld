@@ -481,7 +481,7 @@ static void findProtocolConformances(Diagnostics& diags,
         typedef SwiftConformance::TypeContextDescriptor TypeContextDescriptor;
 
         std::optional<uint16_t> objcIndex;
-        objcIndex = objc::getPreoptimizedHeaderRWIndex(headerInfoRO, headerInfoRW,
+        objcIndex = objc::getPreoptimizedHeaderROIndex(headerInfoRO, headerInfoRW,
                                                        headerInfoROUnslidVMAddr.rawValue(),
                                                        dylibCacheAddress.rawValue(),
                                                        is64);
@@ -918,7 +918,7 @@ static void checkHashTables()
 }
 
 void buildSwiftHashTables(const BuilderConfig& config,
-                          Diagnostics& diag, const std::span<CacheDylib> cacheDylibs,
+                          Diagnostics& diag, const std::span<CacheDylib*> cacheDylibs,
                           std::span<metadata_visitor::Segment> extraRegions,
                           const objc::ClassHashTable* objcClassOpt,
                           const void* headerInfoRO, const void* headerInfoRW,
@@ -932,14 +932,14 @@ void buildSwiftHashTables(const BuilderConfig& config,
 
     std::unordered_map<std::string_view, uint64_t> canonicalForeignNameOffsets;
     std::unordered_map<uint64_t, std::string_view> foundForeignNames;
-    for ( const CacheDylib& cacheDylib : cacheDylibs ) {
-        SwiftVisitor swiftVisitor = cacheDylib.makeCacheSwiftVisitor(config, extraRegions);
+    for ( const CacheDylib* cacheDylib : cacheDylibs ) {
+        SwiftVisitor swiftVisitor = cacheDylib->makeCacheSwiftVisitor(config, extraRegions);
         findProtocolConformances(diag, VMAddress(config.layout.cacheBaseAddress.rawValue()),
                                  objcClassOpt,
                                  headerInfoRO, headerInfoRW,
                                  VMAddress(headerInfoROUnslidVMAddr.rawValue()),
                                  swiftVisitor,
-                                 cacheDylib.cacheLoadAddress, cacheDylib.installName,
+                                 cacheDylib->cacheLoadAddress, cacheDylib->installName,
                                  canonicalForeignNameOffsets,
                                  foundForeignNames,
                                  foundTypeProtocolConformances,

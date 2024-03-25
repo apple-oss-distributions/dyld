@@ -50,6 +50,7 @@
 #include <optional>
 #include <Availability.h>
 #include <TargetConditionals.h>
+#include <System/mach/dyld_pager.h>
 
 #include "Defines.h"
 #include "dyld_cache_format.h"
@@ -238,7 +239,6 @@ static int openMainSharedCacheFile(const SharedCacheOptions& options,
     return -1;
 }
 
-#if !TARGET_OS_SIMULATOR
 static int openSubSharedCacheFile(int cacheDirFD, char basePath[SHARED_CACHE_PATH_MAX],
                                   char* suffix)
 {
@@ -247,7 +247,6 @@ static int openSubSharedCacheFile(int cacheDirFD, char basePath[SHARED_CACHE_PAT
     strlcat(path, suffix, SHARED_CACHE_PATH_MAX);
     return openat(cacheDirFD, path);
 }
-#endif // !TARGET_OS_SIMULATOR
 
 static bool validMagic(const SharedCacheOptions& options, const DyldSharedCache* cache)
 {
@@ -619,7 +618,6 @@ static void rebaseChainV4(uint8_t* pageContent, uint16_t startOffset, uintptr_t 
 }
 #endif
 
-#if !TARGET_OS_SIMULATOR
 static bool preflightSubCacheFile(const SharedCacheOptions& options, SharedCacheLoadInfo* results,
                                   CacheInfo* info, char basePath[SHARED_CACHE_PATH_MAX], char* suffix)
 {
@@ -639,7 +637,6 @@ static bool preflightSubCacheFile(const SharedCacheOptions& options, SharedCache
 
     return preflightCacheFile(options, results, info, fd);
 }
-#endif // !TARGET_OS_SIMULATOR
 
 static void configureDynamicData(void* address, SharedCacheLoadInfo* results) {
     dyld_cache_dynamic_data_header* dynamicData = (dyld_cache_dynamic_data_header*)address;
@@ -648,7 +645,6 @@ static void configureDynamicData(void* address, SharedCacheLoadInfo* results) {
     dynamicData->fsObjId = results->FSObjID;
 }
 
-#if !TARGET_OS_SIMULATOR
 
 static void closeSplitCacheFiles(CacheInfo infoArray[16], uint32_t numFiles) {
     for ( unsigned i = 0; i < numFiles; ++i ) {
@@ -658,6 +654,7 @@ static void closeSplitCacheFiles(CacheInfo infoArray[16], uint32_t numFiles) {
     }
 }
 
+#if !TARGET_OS_SIMULATOR
 
 // update all __DATA pages with slide info
 static bool rebaseDataPages(bool isVerbose, const dyld_cache_slide_info* slideInfo, const uint8_t *dataPagesStart,
@@ -728,6 +725,39 @@ static bool rebaseDataPages(bool isVerbose, const dyld_cache_slide_info* slideIn
                      }
                 } while (delta != 0);
             }
+        }
+        else if ( slideInfoHeader->version == 5 ) {
+#if __has_feature(ptrauth_calls)
+             const dyld_cache_slide_info5* slideHeader = (dyld_cache_slide_info5*)slideInfo;
+             const uint32_t                pageSize    = slideHeader->page_size;
+             for (int i=0; i < slideHeader->page_starts_count; ++i) {
+                 uint8_t* page = (uint8_t*)(dataPagesStart + (pageSize*i));
+                 uint64_t delta = slideHeader->page_starts[i];
+                 //dyld::log("page[%d]: page_starts[i]=0x%04X\n", i, delta);
+                 if ( delta == DYLD_CACHE_SLIDE_V5_PAGE_ATTR_NO_REBASE )
+                     continue;
+                 delta = delta/sizeof(uint64_t); // initial offset is byte based
+                 dyld_cache_slide_pointer5* loc = (dyld_cache_slide_pointer5*)page;
+                 do {
+                     loc += delta;
+                     delta = loc->regular.next;
+
+                     MachOLoaded::ChainedFixupPointerOnDisk ptr;
+                     ptr.raw64 = *((uint64_t*)loc);
+
+                     uint64_t target = slideHeader->value_add + loc->regular.runtimeOffset + results->slide;
+                     if ( loc->auth.auth ) {
+                         loc->raw = ptr.cache64e.signPointer(loc, target);
+                     }
+                     else {
+                         loc->raw = target | ptr.cache64e.high8();
+                     }
+                } while (delta != 0);
+            }
+#else
+            results->errorMessage = "invalid pointer kind in cache file";
+            return false;
+#endif
         }
 #else
         else if ( slideInfoHeader->version == 1 ) {
@@ -942,9 +972,9 @@ static bool mapSplitCacheSystemWide(const SharedCacheOptions& options, SharedCac
 
 #endif // TARGET_OS_SIMULATOR
 
-#if !TARGET_OS_SIMULATOR
 // this has a large stack frame size, so don't inline into loadDyldCache()
-__attribute__((noinline))
+// Note: disable tail call optimization, otherwise tailcall may remove stack allocated blob
+[[clang::disable_tail_calls, clang::noinline]]
 static bool mapSplitCachePrivate(const SharedCacheOptions& options, SharedCacheLoadInfo* results) {
     CacheInfo firstFileInfo;
     // Try to map the first file to see how many other files we need to map.
@@ -991,8 +1021,13 @@ static bool mapSplitCachePrivate(const SharedCacheOptions& options, SharedCacheL
     // deallocate any existing system wide shared cache
     deallocateExistingSharedCache();
 
+#if TARGET_OS_SIMULATOR
+    // The simulator never slides
+    results->slide = (long)0;
+#else
     // TODO: implement real ASLR. For now just use 0
     results->slide = (long)0;
+#endif
 
     for (unsigned i = 0; i < numFiles; ++i) {
         CacheInfo& subcache = infoArray[i];
@@ -1034,7 +1069,6 @@ static bool mapSplitCachePrivate(const SharedCacheOptions& options, SharedCacheL
             }
         }
     }
-    closeSplitCacheFiles(infoArray, numFiles);
 
     void*   dynamicConfigData   = (void*)(firstFileInfo.dynamicConfigAddress + results->slide);
     size_t  dynamicConfigSize   = ((sizeof(dyld_cache_dynamic_data_header)+PAGE_SIZE-1) & (-PAGE_SIZE));
@@ -1055,19 +1089,145 @@ static bool mapSplitCachePrivate(const SharedCacheOptions& options, SharedCacheL
     }
 
     bool success = true;
-    for (unsigned i = 0; i < numFiles; ++i) {
-            CacheInfo subcache = infoArray[i];
 
-            // Change __DATA_CONST to read-write while fixup chains are applied
-            if ( options.enableReadOnlyDataConst ) {
-                const DyldSharedCache* subCache = (const DyldSharedCache*)(subcache.mappings[0].sms_address);
-                subCache->forEachRegion(^(const void*, uint64_t vmAddr, uint64_t size, uint32_t initProt, uint32_t maxProt, uint64_t flags, bool& stopRegion) {
-                    if ( flags & DYLD_CACHE_MAPPING_CONST_DATA ) {
-                        ::vm_protect(mach_task_self(), (vm_address_t)vmAddr + results->slide, (vm_size_t)size, false, VM_PROT_WRITE | VM_PROT_READ | VM_PROT_COPY);
-                    }
-                });
+#if !TARGET_OS_SIMULATOR
+    for (unsigned i = 0; i < numFiles; ++i) {
+        CacheInfo subcache = infoArray[i];
+
+        // Change __DATA_CONST to read-write while fixup chains are applied
+        if ( options.enableReadOnlyDataConst ) {
+            const DyldSharedCache* subCache = (const DyldSharedCache*)(subcache.mappings[0].sms_address);
+            subCache->forEachRegion(^(const void*, uint64_t vmAddr, uint64_t size, uint32_t initProt, uint32_t maxProt, uint64_t flags, bool& stopRegion) {
+                if ( flags & DYLD_CACHE_MAPPING_CONST_DATA ) {
+                    ::vm_protect(mach_task_self(), (vm_address_t)vmAddr + results->slide, (vm_size_t)size, false, VM_PROT_WRITE | VM_PROT_READ | VM_PROT_COPY);
+                }
+            });
+        }
+
+        // work out if this subcache can use page-in linking
+        bool canUsePageInLinking = options.usePageInLinking;
+        if ( canUsePageInLinking ) {
+            uint32_t numSlidMappings = 0;
+            for (unsigned j = 0; j < subcache.mappingsCount; ++j) {
+                if ( subcache.mappings[j].sms_slide_size == 0 )
+                    continue;
+                ++numSlidMappings;
+                const dyld_cache_slide_info* slideInfoHeader = (const dyld_cache_slide_info*)subcache.mappings[j].sms_slide_start;
+                if ( slideInfoHeader->version != 5 ) {
+                    canUsePageInLinking = false;
+                }
+            }
+            // the kernel only supports 5 regions per syscall, so any segments past that are fixed up by dyld
+            // for now we'll just do all or nothing as its simpler, and this shouldn't come up in practice
+            if ( numSlidMappings > 5 )
+                canUsePageInLinking = false;
+        }
+
+        if ( canUsePageInLinking ) {
+            const shared_file_mapping_slide_np* mappings = (shared_file_mapping_slide_np*)subcache.mappings;
+
+            struct PageInLinkingRange
+            {
+                mwl_region region;
+                const char* segName;
+                const dyld_cache_slide_info* slideInfo;
+            };
+            STACK_ALLOC_OVERFLOW_SAFE_ARRAY(PageInLinkingRange, ranges, 8);
+
+            for (unsigned j = 0; j < subcache.mappingsCount; ++j) {
+                if ( subcache.mappings[j].sms_slide_size == 0 )
+                    continue;
+                const dyld_cache_slide_info* slideInfoHeader = (const dyld_cache_slide_info*)subcache.mappings[j].sms_slide_start;
+                assert(slideInfoHeader->version == 5);
+                const dyld_cache_slide_info5* slideInfo = (dyld_cache_slide_info5*)slideInfoHeader;
+
+                int protection = 0;
+                if ( mappings[j].sms_init_prot & VM_PROT_EXECUTE )
+                    protection   |= PROT_EXEC;
+                if ( mappings[j].sms_init_prot & VM_PROT_READ )
+                    protection   |= PROT_READ;
+                if ( mappings[j].sms_init_prot & VM_PROT_WRITE )
+                    protection   |= PROT_WRITE;
+
+                PageInLinkingRange rangeInfo;
+                rangeInfo.region.mwlr_fd          = infoArray[i].fd;
+                rangeInfo.region.mwlr_protections = protection;
+                rangeInfo.region.mwlr_file_offset = subcache.mappings[j].sms_file_offset;
+                rangeInfo.region.mwlr_address     = subcache.mappings[j].sms_address + results->slide;
+                rangeInfo.region.mwlr_size        = slideInfo->page_size * slideInfo->page_starts_count;
+                rangeInfo.segName                 = DyldSharedCache::mappingName(mappings[i].sms_max_prot, 0);
+                rangeInfo.slideInfo               = slideInfoHeader;
+
+                ranges.push_back(rangeInfo);
             }
 
+            // create blob on the stack
+            uint32_t chainInfoSize = (uint32_t)offsetof(dyld_chained_starts_in_image, seg_info_offset[ranges.count()]);
+            for (const PageInLinkingRange& range : ranges) {
+                const dyld_cache_slide_info* slideInfoHeader = (const dyld_cache_slide_info*)range.slideInfo;
+                assert(slideInfoHeader->version == 5);
+                const dyld_cache_slide_info5* slideInfo = (dyld_cache_slide_info5*)slideInfoHeader;
+
+                chainInfoSize += (uint32_t)offsetof(dyld_chained_starts_in_segment, page_start[slideInfo->page_starts_count]);
+                chainInfoSize = (chainInfoSize + 3) & (-4); // size should always be 4-byte aligned
+            }
+            uint32_t bindsOffset        = (sizeof(mwl_info_hdr) + chainInfoSize + 7) & (-8); // 8-byte align
+            size_t   blobAllocationSize = bindsOffset;
+            uint8_t  blobBuffer[blobAllocationSize];
+            bzero(blobBuffer, blobAllocationSize);
+            mwl_info_hdr* blob = (mwl_info_hdr*)blobBuffer;
+            blob->mwli_version          = 7;
+            blob->mwli_page_size        = 0x4000;
+            blob->mwli_pointer_format   = DYLD_CHAINED_PTR_ARM64E_SHARED_CACHE;
+            blob->mwli_binds_offset     = bindsOffset;
+            blob->mwli_binds_count      = 0;
+            blob->mwli_chains_offset    = sizeof(mwl_info_hdr);
+            blob->mwli_chains_size      = chainInfoSize;
+            blob->mwli_slide            = results->slide;
+            blob->mwli_image_address    = (uintptr_t)baseCacheUnslidAddress;
+            uint32_t                        offsetInChainInfo = (uint32_t)offsetof(dyld_chained_starts_in_image, seg_info_offset[ranges.count()]);
+            uint32_t                        rangeIndex        = 0;
+            dyld_chained_starts_in_image*   starts            = (dyld_chained_starts_in_image*)((uint8_t*)blob + blob->mwli_chains_offset);
+            starts->seg_count = (uint32_t)ranges.count();
+            for (const PageInLinkingRange& range : ranges) {
+                const dyld_cache_slide_info* slideInfoHeader = (const dyld_cache_slide_info*)range.slideInfo;
+                assert(slideInfoHeader->version == 5);
+                const dyld_cache_slide_info5* slideInfo = (dyld_cache_slide_info5*)slideInfoHeader;
+
+                starts->seg_info_offset[rangeIndex] = offsetInChainInfo;
+
+                dyld_chained_starts_in_segment* startsInSegment = (dyld_chained_starts_in_segment*)&blobBuffer[blob->mwli_chains_offset + offsetInChainInfo];
+                startsInSegment->size = (uint32_t)offsetof(dyld_chained_starts_in_segment, page_start[slideInfo->page_starts_count]);
+                startsInSegment->page_size = 0x4000;
+                startsInSegment->pointer_format = DYLD_CHAINED_PTR_ARM64E_SHARED_CACHE;
+                startsInSegment->segment_offset = range.region.mwlr_address - (blob->mwli_image_address + blob->mwli_slide);
+                startsInSegment->max_valid_pointer = 0;
+                startsInSegment->page_count = slideInfo->page_starts_count;
+
+                for ( uint32_t pageIndex = 0; pageIndex != slideInfo->page_starts_count; ++pageIndex )
+                    startsInSegment->page_start[pageIndex] = slideInfo->page_starts[pageIndex];
+
+                ++rangeIndex;
+                offsetInChainInfo += startsInSegment->size;
+                offsetInChainInfo = (offsetInChainInfo + 3) & (-4); // size should always be 4-byte aligned
+            }
+            STACK_ALLOC_ARRAY(mwl_region, regions, ranges.count());
+            for (const PageInLinkingRange& range : ranges) {
+                regions.push_back(range.region);
+            }
+
+            if ( options.verbose )
+                dyld4::console("Setting up kernel page-in linking for subcache %d\n", i);
+
+            int result = __map_with_linking_np(regions.begin(), (uint32_t)regions.count(), blob, (uint32_t)blobAllocationSize);
+            if ( result != 0 ) {
+                if ( options.verbose )
+                    dyld4::console("__map_with_linking_np(subcache %d) failed, falling back to linking in-process\n", i);
+                canUsePageInLinking = false;
+            }
+        }
+
+        if ( !canUsePageInLinking ) {
             for (unsigned j = 0; j < subcache.mappingsCount; ++j) {
                 if ( subcache.mappings[j].sms_slide_size == 0 )
                     continue;
@@ -1075,104 +1235,25 @@ static bool mapSplitCachePrivate(const SharedCacheOptions& options, SharedCacheL
                 const uint8_t* mappingPagesStart = (const uint8_t*)subcache.mappings[j].sms_address;
                 success &= rebaseDataPages(options.verbose, slideInfoHeader, mappingPagesStart, results);
             }
+        }
 
-            // Change __DATA_CONST back to read-only
-            if ( options.enableReadOnlyDataConst ) {
-                const DyldSharedCache* subCache = (const DyldSharedCache*)(subcache.mappings[0].sms_address);
-                subCache->forEachRegion(^(const void*, uint64_t vmAddr, uint64_t size, uint32_t initProt, uint32_t maxProt, uint64_t flags, bool& stopRegion) {
-                    if ( flags & DYLD_CACHE_MAPPING_CONST_DATA ) {
-                        ::vm_protect(mach_task_self(), (vm_address_t)vmAddr + results->slide, (vm_size_t)size, false, VM_PROT_READ);
-                    }
-                });
-            }
+        // Change __DATA_CONST back to read-only
+        if ( options.enableReadOnlyDataConst ) {
+            const DyldSharedCache* subCache = (const DyldSharedCache*)(subcache.mappings[0].sms_address);
+            subCache->forEachRegion(^(const void*, uint64_t vmAddr, uint64_t size, uint32_t initProt, uint32_t maxProt, uint64_t flags, bool& stopRegion) {
+                if ( flags & DYLD_CACHE_MAPPING_CONST_DATA ) {
+                    ::vm_protect(mach_task_self(), (vm_address_t)vmAddr + results->slide, (vm_size_t)size, false, VM_PROT_READ);
+                }
+            });
+        }
     }
+#endif
+
+    // Put this at the end so that we still have the fd's open for the above rebase loop
+    closeSplitCacheFiles(infoArray, numFiles);
 
     return success;
 }
-#endif // !TARGET_OS_SIMULATOR
-
-#if TARGET_OS_SIMULATOR
-static bool mapCachePrivate(const SharedCacheOptions& options, SharedCacheLoadInfo* results)
-{
-    // open and validate cache file
-    CacheInfo info;
-    char baseSharedCachePath[SHARED_CACHE_PATH_MAX] = { 0 };
-    if ( !preflightMainCacheFile(options, results, &info, baseSharedCachePath) )
-        return false;
-
-    // compute ALSR slide
-    results->slide = 0;
-
-    // update mappings
-    for (uint32_t i=0; i < info.mappingsCount; ++i) {
-        info.mappings[i].sms_address += (uint32_t)results->slide;
-        if ( info.mappings[i].sms_slide_size != 0 )
-            info.mappings[i].sms_slide_start += (uint32_t)results->slide;
-    }
-    results->loadAddress = (const DyldSharedCache*)(info.mappings[0].sms_address);
-    // deallocate any existing system wide shared cache
-    deallocateExistingSharedCache();
-
-#if TARGET_OS_SIMULATOR && TARGET_OS_WATCH
-    // <rdar://problem/50887685> watchOS 32-bit cache does not overlap macOS dyld cache address range
-    // mmap() of a file needs a vm_allocation behind it, so make one
-    vm_address_t loadAddress = 0x40000000;
-    ::vm_allocate(mach_task_self(), &loadAddress, 0x40000000, VM_FLAGS_FIXED);
-#endif
-
-    // map cache just for this process with mmap()
-    for (int i=0; i < info.mappingsCount; ++i) {
-        void* mmapAddress = (void*)(uintptr_t)(info.mappings[i].sms_address);
-        size_t size = (size_t)(info.mappings[i].sms_size);
-        //dyld::log("dyld: mapping address %p with size 0x%08lX\n", mmapAddress, size);
-        int protection = 0;
-        if ( info.mappings[i].sms_init_prot & VM_PROT_EXECUTE )
-            protection   |= PROT_EXEC;
-        if ( info.mappings[i].sms_init_prot & VM_PROT_READ )
-            protection   |= PROT_READ;
-        if ( info.mappings[i].sms_init_prot & VM_PROT_WRITE )
-            protection   |= PROT_WRITE;
-        off_t offset = info.mappings[i].sms_file_offset;
-//        dyld4::console("mapped dyld cache file private to process (%s):\n", pathBuffer);
-        if ( ::mmap(mmapAddress, size, protection, MAP_FIXED | MAP_PRIVATE, info.fd, offset) != mmapAddress ) {
-            // failed to map some chunk of this shared cache file
-            // clear shared region
-            ::mmap((void*)((long)SHARED_REGION_BASE), SHARED_REGION_SIZE, PROT_NONE, MAP_FIXED | MAP_PRIVATE| MAP_ANON, 0, 0);
-            // return failure
-            results->loadAddress        = nullptr;
-            results->errorMessage       = "could not mmap() part of dyld cache";
-            ::close(info.fd);
-            return false;
-        }
-    }
-
-    if ( options.verbose ) {
-        char cachePath[PATH_MAX];
-        if ( fcntl(options.cacheDirFD, F_GETPATH, cachePath) == 0 )
-            dyld4::Utils::concatenatePaths(cachePath, baseSharedCachePath, PATH_MAX);
-        else
-            strcpy(cachePath, baseSharedCachePath);
-        dyld4::console("mapped dyld sim cache file private to process (%s):\n", cachePath);
-        verboseSharedCacheMappings(results->loadAddress);
-    }
-    ::close(info.fd);
-
-    void*   dynamicConfigData   = (void*)(info.dynamicConfigAddress + results->slide);
-    size_t  dynamicConfigSize   = ((sizeof(dyld_cache_dynamic_data_header)+PAGE_SIZE-1) & (-PAGE_SIZE));
-    if (::mmap(dynamicConfigData, dynamicConfigSize, VM_PROT_READ | VM_PROT_WRITE, MAP_ANON | MAP_FIXED | MAP_PRIVATE, -1, 0) != dynamicConfigData) {
-        // clear shared region
-        ::mmap((void*)((long)SHARED_REGION_BASE), SHARED_REGION_SIZE, PROT_NONE, MAP_FIXED | MAP_PRIVATE| MAP_ANON, 0, 0);
-        // return failure
-        results->loadAddress        = nullptr;
-        results->errorMessage       = "could not mmap() dynamic config memory";
-        return false;
-    }
-    configureDynamicData(dynamicConfigData, results);
-    ::mprotect(dynamicConfigData, dynamicConfigSize, VM_PROT_READ);
-
-    return true;
-}
-#endif // TARGET_OS_SIMULATOR
 
 
 bool loadDyldCache(const SharedCacheOptions& options, SharedCacheLoadInfo* results)
@@ -1181,16 +1262,13 @@ bool loadDyldCache(const SharedCacheOptions& options, SharedCacheLoadInfo* resul
     results->loadAddress        = 0;
     results->slide              = 0;
     results->errorMessage       = nullptr;
-#if TARGET_OS_SIMULATOR
-    // simulator only supports mmap()ing cache privately into process
-    result = mapCachePrivate(options, results);
-#else
+
     if ( options.forcePrivate ) {
         // mmap cache into this process only
         result = mapSplitCachePrivate(options, results);
-        //return mapCachePrivate(options, results);
     }
     else {
+#if !TARGET_OS_SIMULATOR
         // fast path: when cache is already mapped into shared region
         bool hasError = false;
         if ( reuseExistingCache(options, results) ) {
@@ -1200,9 +1278,8 @@ bool loadDyldCache(const SharedCacheOptions& options, SharedCacheLoadInfo* resul
             hasError = mapSplitCacheSystemWide(options, results);
         }
         result = hasError;
-    }
-    //TODO: This does not require simulator support for now since this is only being used for ordering
 #endif
+    }
     return result;
 }
 

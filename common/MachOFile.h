@@ -214,6 +214,7 @@ struct VIS_HIDDEN MachOFile : mach_header
     static Platform         basePlatform(dyld3::Platform reqPlatform);
     static uint64_t         read_uleb128(Diagnostics& diag, const uint8_t*& p, const uint8_t* end);
     static int64_t          read_sleb128(Diagnostics& diag, const uint8_t*& p, const uint8_t* end);
+    static bool             isExclaveKitPlatform(Platform platform, Platform* basePlatform=nullptr);
     static bool             isSimulatorPlatform(Platform platform, Platform* basePlatform=nullptr);
     static bool             isSharedCacheEligiblePath(const char* path);
     static const MachOFile* compatibleSlice(Diagnostics& diag, const void* content, size_t size, const char* path, Platform, bool isOSBinary, const GradedArchs&, bool internalInstall=false);
@@ -256,12 +257,14 @@ struct VIS_HIDDEN MachOFile : mach_header
     void            forEachDependentDylib(void (^callback)(const char* loadPath, bool isWeak, bool isReExport, bool isUpward, uint32_t compatVersion, uint32_t curVersion, bool& stop)) const;
     void            forEachInterposingSection(Diagnostics& diag, void (^handler)(uint64_t vmOffset, uint64_t vmSize, bool& stop)) const;
 #if BUILDING_CACHE_BUILDER || BUILDING_CACHE_BUILDER_UNIT_TESTS
-    bool            canBePlacedInDyldCache(const char* path, void (^failureReason)(const char*)) const;
+    bool            canBePlacedInDyldCache(const char* path, void (^failureReason)(const char* format, ...)) const;
     bool            canHavePrebuiltExecutableLoader(dyld3::Platform platform, const std::string_view& path,
                                                     void (^failureReason)(const char*)) const;
 #endif
 #if BUILDING_APP_CACHE_UTIL
     bool            canBePlacedInKernelCollection(const char* path, void (^failureReason)(const char*)) const;
+#endif
+#if BUILDING_APP_CACHE_UTIL || BUILDING_DYLDINFO
     bool            usesClassicRelocationsInKernelCollection() const;
 #endif
     bool            canHavePrecomputedDlopenClosure(const char* path, void (^failureReason)(const char*)) const;
@@ -287,6 +290,7 @@ struct VIS_HIDDEN MachOFile : mach_header
     bool            hasCodeSignature() const;
     bool            hasCodeSignature(uint32_t& fileOffset, uint32_t& size) const;
     bool            hasObjC() const;
+    bool            hasConstObjCSection() const;
     uint64_t        mappedSize() const;
     uint32_t        segmentCount() const;
     void            forEachDOFSection(Diagnostics& diag, void (^callback)(uint32_t offset)) const;

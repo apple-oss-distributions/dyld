@@ -70,15 +70,6 @@ struct Layout
         // For the host OS, regions should be 1GB aligned
         // If this has a value, then we use it.  Otherwise we fall back to the sim fixed addresses
         std::optional<uint64_t> regionAlignment;
-
-        // For the sim, each region has fixed addresses
-        CacheVMAddress simTextBaseAddress;
-        CacheVMAddress simDataBaseAddress;
-        CacheVMAddress simLinkeditBaseAddress;
-
-        CacheVMSize simTextSize;
-        CacheVMSize simDataSize;
-        CacheVMSize simLinkeditSize;
     };
 
     // Used only for arm64
@@ -91,19 +82,17 @@ struct Layout
         CacheVMSize subCacheStubsLimit;
     };
 
-    struct Large
-    {
-        // How much __TEXT in each subCache before we split to a new file
-        CacheVMSize subCacheTextLimit;
-    };
-
     // Fields for all layouts
     CacheVMAddress          cacheBaseAddress;
     CacheVMSize             cacheSize;
+    std::optional<uint64_t> cacheMaxSlide;
     const bool              is64;
     const bool              hasAuthRegion;
     const uint32_t          pageSize;
     const uint32_t          machHeaderAlignment = 4096;
+
+    // How much __TEXT in each subCache before we split to a new file
+    CacheVMSize subCacheTextLimit;
 
     // Whether to put the LINKEDIT in the last subCache
     // Only possible if the total cache limit is <= 4GB
@@ -114,9 +103,6 @@ struct Layout
 
     // Fields only used for contiguous layouts, ie, arm64*
     std::optional<Contiguous>       contiguous;
-
-    // Fields only used for large layouts, ie, on device, not simulators
-    std::optional<Large>            large;
 };
 
 struct SlideInfo
@@ -129,11 +115,12 @@ struct SlideInfo
         v2,
         v3,
         // v4 (deprecated.  arm64_32 uses v1 instead)
+        v5,
     };
 
     std::optional<SlideInfoFormat>  slideInfoFormat;
     uint32_t                        slideInfoBytesPerDataPage;
-    const uint32_t                  slideInfoPageSize           = 4096;
+    uint32_t                        slideInfoPageSize           = 4096; // 16384 for v5
     CacheVMAddress                  slideInfoValueAdd;
     uint64_t                        slideInfoDeltaMask          = 0;
 };

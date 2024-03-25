@@ -68,8 +68,8 @@ struct VIS_HIDDEN CString: public std::string_view
         return CString(str, UnsafeSVCastTag());
     }
 
-    constexpr const char* c_str() const { return begin(); }
-    explicit constexpr operator const char*() const { return begin(); }
+    constexpr const char* c_str() const { return std::string_view::data(); }
+    explicit constexpr operator const char*() const { return c_str(); }
 
     static CString dup(std::string_view str)
     {
@@ -110,7 +110,7 @@ struct VIS_HIDDEN CString: public std::string_view
     CString dupSubstr(size_type pos, size_type n) const { return dup(substr(pos, n)); }
 
     // string_view::contains() was added in c++23, but we still build with c++20
-    bool contains(std::string_view str) const {
+    constexpr bool contains(std::string_view str) const {
         return (this->find(str) != std::string_view::npos);
     }
 
@@ -134,6 +134,14 @@ struct VIS_HIDDEN CString: public std::string_view
     }
 
     const char* data() const = delete;
+
+    const CString leafName() const
+    {
+        size_t pos = this->rfind('/');
+        if ( pos == npos )
+            return *this;
+        return substr(pos+1);
+    }
 
 private:
     // Dummy type to support a private std::string_view -> CString constructor.

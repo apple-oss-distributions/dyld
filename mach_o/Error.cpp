@@ -53,6 +53,14 @@ Error& Error::operator=(Error&& other)
     return *this;
 }
 
+
+Error Error::copy(const Error& other)
+{
+    if ( other.noError() )
+        return Error::none();
+    return Error("%s", other.message());
+}
+
 Error::~Error()
 {
 #if TARGET_OS_EXCLAVEKIT
@@ -108,5 +116,24 @@ bool Error::messageContains(const char* subString) const
     return (strstr(_simple_string(_buffer), subString) != nullptr);
 #endif
 }
+
+void Error::append(const char* format, ...)
+{
+#if TARGET_OS_EXCLAVEKIT
+   size_t len = strlen(_strBuf);
+   va_list list;
+   va_start(list, format);
+   vsnprintf(&_strBuf[len], sizeof(_strBuf)-len, format, list);
+   va_end(list);
+#else
+    assert(_buffer != nullptr);
+    _simple_sresize(_buffer);   // move insertion point to end of existing string in buffer
+    va_list list;
+    va_start(list, format);
+    _simple_vsprintf(_buffer, format, list);
+    va_end(list);
+#endif
+}
+
 
 } // namespace mach_o

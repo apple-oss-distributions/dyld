@@ -57,7 +57,7 @@ public:
                     Image(const Image&& other);
                     Image(const Image& other) = default;
 
-    Error                 validate();
+    Error                 validate() const;
 
     const Header*         header() const         { return _buffer; }
     uint32_t              pageSize() const;
@@ -112,8 +112,8 @@ public:
 
 private:
     bool                inferIfZerofillExpanded() const;
-    Error               validLinkedit(const Policy& policy);
-    Error               validStructureLinkedit(const Policy& policy);
+    Error               validLinkedit(const Policy& policy) const;
+    Error               validStructureLinkedit(const Policy& policy) const;
     
     void                makeExportsTrie();
     void                makeSymbolTable();

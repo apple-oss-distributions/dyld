@@ -371,8 +371,8 @@ ProcessConfig::Process::Process(const KernelArgs* kernArgs, SyscallDelegate& sys
     this->entry_vec              = kernArgs->entry_vec;
     uint32_t* startupPtr         = (uint32_t*)kernArgs->mappingDescriptor;
     this->startupContractVersion = *startupPtr;
-    startupPtr++;
     assert(this->startupContractVersion == 1);
+    startupPtr++;
     this->preMappedFiles      = parseExclaveMappingDescriptor((const char*)startupPtr);
     this->mainExecutable      = (MachOAnalyzer*)this->preMappedFiles[0].loadAddress;
     this->mainExecutablePath  = this->preMappedFiles[0].path;
@@ -714,16 +714,6 @@ const GradedArchs* ProcessConfig::Process::getMainArchs(SyscallDelegate& sys)
             keysOff = true;
     }
   #endif
-  #if TARGET_OS_OSX
-    // on Apple Silicon macOS, only Apple signed ("platform binary") arm64e dylibs can be loaded
-    osBinariesOnly = true;
-
-    // But, on Internal builds, or if boot-arg is set, then non-platform-binary arm64e slices can be run
-    if ( const char* abiMode = this->appleParam("arm64e_abi") ) {
-        if ( strcmp(abiMode, "all") == 0 )
-            osBinariesOnly = false;
-    }
-  #endif
 #else
     if ( const char* disableStr = this->appleParam("ptrauth_disabled") ) {
         // Check and see if kernel disabled JOP pointer signing for some other reason
@@ -733,6 +723,20 @@ const GradedArchs* ProcessConfig::Process::getMainArchs(SyscallDelegate& sys)
 #endif
     return &sys.getGradedArchs(mainExecutable->archName(), keysOff, osBinariesOnly);
 #endif
+}
+
+bool ProcessConfig::Process::isInternalSimulator(SyscallDelegate& sys) const
+{
+#if TARGET_OS_SIMULATOR
+    if ( const char* simulator_root = environ("SIMULATOR_ROOT") ) {
+        char buf[PATH_MAX];
+        strlcpy(buf, simulator_root, sizeof(buf));
+        strlcat(buf, "/AppleInternal", sizeof(buf));
+        if ( sys.dirExists(buf) )
+           return true;
+     }
+#endif
+     return false;
 }
 
 
@@ -745,8 +749,11 @@ ProcessConfig::Security::Security(Process& process, SyscallDelegate& syscall)
 #if TARGET_OS_EXCLAVEKIT
     this->internalInstall           = false; // FIXME
 #else
-    this->internalInstall           = syscall.internalInstall();  // Note: must be set up before calling getAMFI()
+    // TODO: audit usage of internalInstall and replace usage with isInternalOS which covers both device and simulator.
+    this->internalInstall           = syscall.internalInstall(); // Note: internalInstall must be set before calling getAMFI()
+    this->isInternalOS              = this->internalInstall || process.isInternalSimulator(syscall);
     this->skipMain                  = this->internalInstall && process.environ("DYLD_SKIP_MAIN");
+    this->justBuildClosure          = process.environ("DYLD_JUST_BUILD_CLOSURE");
 
     // just on internal installs in launchd, dyld_flags= will alter the CommPage
     if ( (process.pid == 1) && this->internalInstall  ) {
@@ -767,6 +774,22 @@ ProcessConfig::Security::Security(Process& process, SyscallDelegate& syscall)
 #if TARGET_OS_SIMULATOR
     this->allowInsertFailures       = true; // FIXME: amfi is returning the wrong value for simulators <rdar://74025454>
 #endif
+
+    // DYLD_DLSYM_RESULT can be set by any main executable
+    this->dlsymBlocked = false;
+    this->dlsymAbort   = false;
+    process.mainExecutable->forDyldEnv(^(const char* keyEqualValue, bool& stop) {
+        if ( strncmp(keyEqualValue, "DYLD_DLSYM_RESULT=", 18) == 0 ) {
+            if ( strcmp(&keyEqualValue[18], "null") == 0 ) {
+                this->dlsymBlocked = true;
+                this->dlsymAbort   = false;
+            }
+            else if ( strcmp(&keyEqualValue[18], "abort") == 0 ) {
+                this->dlsymBlocked = true;
+                this->dlsymAbort   = true;
+            }
+        }
+    });
 
     // env vars are only pruned on macOS
     switch ( process.platform ) {
@@ -1108,7 +1131,11 @@ ProcessConfig::DyldCache::DyldCache(Process& process, const Security& security, 
 
     dyld3::SharedCacheOptions opts;
     opts.cacheDirFD               = cacheFinder.cacheDirFD;
+#if TARGET_OS_SIMULATOR
+    opts.forcePrivate             = true;
+#else
     opts.forcePrivate             = security.allowEnvVarsSharedCache && (cacheMode != nullptr) && (strcmp(cacheMode, "private") == 0);
+#endif
     opts.useHaswell               = syscall.onHaswell();
     opts.verbose                  = log.segments;
 #if TARGET_OS_OSX && BUILDING_DYLD
@@ -1121,6 +1148,7 @@ ProcessConfig::DyldCache::DyldCache(Process& process, const Security& security, 
     opts.preferCustomerCache      = forceCustomerCache;
     opts.forceDevCache            = forceDevCache;
     opts.isTranslated             = process.isTranslated;
+    opts.usePageInLinking         = (process.pageInLinkingMode >= 2) && !syscall.sandboxBlockedPageInLinking();
     opts.platform                 = process.platform;
     this->addr                    = nullptr;
 #if SUPPORT_VM_LAYOUT
@@ -1129,11 +1157,7 @@ ProcessConfig::DyldCache::DyldCache(Process& process, const Security& security, 
     this->unslidLoadAddress       = 0;
     this->development             = false;
     this->dylibsExpectedOnDisk    = false;
-#if TARGET_OS_SIMULATOR
-    this->privateCache            = true;
-#else
     this->privateCache            = opts.forcePrivate;
-#endif
     this->path                    = nullptr;
     this->objcHeaderInfoRO        = nullptr;
     this->objcHeaderInfoRW        = nullptr;
@@ -1427,8 +1451,10 @@ bool ProcessConfig::DyldCache::findMachHeaderImageIndex(const mach_header* mh, u
     assert(!cacheBuilderDylibs->empty());
     for ( uint32_t i = 0; i != cacheBuilderDylibs->size(); ++i ) {
         const CacheDylib& cacheDylib = (*cacheBuilderDylibs)[i];
-        if ( cacheDylib.mf == mh )
-            return i;
+        if ( cacheDylib.mf == mh ) {
+            imageIndex = i;
+            return true;
+        }
     }
     assert("Unknown dylib");
     return false;
@@ -1546,12 +1572,30 @@ ProcessConfig::PathOverrides::PathOverrides(const Process& process, const Securi
             CRSetCrashLogMessage2(allocator.strdup(crashMsg));
         }
     }
+    else if ( log.searching ) {
+        bool hasDyldEnvVars = false;
+        for (const char* const* p = process.envp; *p != nullptr; ++p) {
+            if ( strncmp(*p, "DYLD_", 5) == 0 )
+                hasDyldEnvVars = true;
+        }
+        if ( hasDyldEnvVars )
+            console("Note: DYLD_*_PATH env vars disabled by AMFI\n");
+    }
 
     // process LC_DYLD_ENVIRONMENT variables if allowed
     if ( security.allowEmbeddedVars ) {
         process.mainExecutable->forDyldEnv(^(const char* keyEqualValue, bool& stop) {
             this->addEnvVar(process, security, allocator, keyEqualValue, true, nullptr);
         });
+    }
+    else if ( log.searching ) {
+        __block bool hasDyldEnvVars = false;
+        process.mainExecutable->forDyldEnv(^(const char* keyEqualValue, bool& stop) {
+            if ( strncmp(keyEqualValue, "DYLD_", 5) == 0 )
+                hasDyldEnvVars = true;
+        });
+        if ( hasDyldEnvVars )
+            console("Note: LC_DYLD_ENVIRONMENT env vars disabled by AMFI\n");
     }
 
     if ( !cache.cryptexOSPath.empty() )
@@ -1747,8 +1791,9 @@ void ProcessConfig::PathOverrides::addEnvVar(const Process& proc, const Security
     if ( const char* equals = ::strchr(keyEqualsValue, '=') ) {
         const char* value = equals+1;
         if ( isLC_DYLD_ENV && (strchr(value, '@') != nullptr) ) {
-            char buffer[PATH_MAX];
-            char* expandedPaths = buffer;
+            const size_t bufferSize = PATH_MAX+strlen(keyEqualsValue); // value may contain multiple paths
+            char         buffer[bufferSize];
+            char*        expandedPaths = buffer; // compiler does not let you use arrays inside blocks ;-(
             __block bool needColon = false;
             buffer[0] = '\0';
             __block bool stop = false;
@@ -1756,23 +1801,25 @@ void ProcessConfig::PathOverrides::addEnvVar(const Process& proc, const Security
                 if ( !sec.allowAtPaths && (aValue[0] == '@') )
                     return;
                 if ( needColon )
-                    ::strlcat(expandedPaths, ":", PATH_MAX);
+                    ::strlcat(expandedPaths, ":", bufferSize);
                 if ( strncmp(aValue, "@executable_path/", 17) == 0 ) {
-                    ::strlcat(expandedPaths, proc.mainExecutablePath, PATH_MAX);
+                    ::strlcat(expandedPaths, proc.mainExecutablePath, bufferSize);
                     if ( char* lastSlash = ::strrchr(expandedPaths, '/') ) {
-                        ::strcpy(lastSlash+1, &aValue[17]);
+                        size_t offset = lastSlash+1-expandedPaths;
+                        ::strlcpy(&expandedPaths[offset], &aValue[17], bufferSize-offset);
                         needColon = true;
                     }
                 }
                 else if ( strncmp(aValue, "@loader_path/", 13) == 0 ) {
-                    ::strlcat(expandedPaths, proc.mainExecutablePath, PATH_MAX);
+                    ::strlcat(expandedPaths, proc.mainExecutablePath, bufferSize);
                     if ( char* lastSlash = ::strrchr(expandedPaths, '/') ) {
-                        ::strcpy(lastSlash+1, &aValue[13]);
+                        size_t offset = lastSlash+1-expandedPaths;
+                        ::strlcpy(&expandedPaths[offset], &aValue[13], bufferSize-offset);
                          needColon = true;
                    }
                 }
                 else {
-                    ::strlcpy(expandedPaths, proc.mainExecutablePath, PATH_MAX);
+                    ::strlcpy(expandedPaths, proc.mainExecutablePath, bufferSize);
                     needColon = true;
                 }
             });

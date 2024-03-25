@@ -49,9 +49,53 @@
 #define LC_ATOM_INFO      0x36
 #endif
 
+#ifndef DYLIB_USE_WEAK_LINK
+    struct dylib_use_command {
+        uint32_t    cmd;                     /* LC_LOAD_DYLIB or LC_LOAD_WEAK_DYLIB */
+        uint32_t    cmdsize;                 /* overall size, including path */
+        uint32_t    nameoff;                 /* == 16, dylibs's path offset */
+        uint32_t    marker;                  /* == 0x1a741800 */
+        uint32_t    current_version;         /* dylib's current version number */
+        uint32_t    compat_version;          /* == 0x00010000 */
+        uint32_t    flags;                   /* DYLIB_USE_... flags */
+    };
+    #define DYLIB_USE_WEAK_LINK      0x01
+    #define DYLIB_USE_REEXPORT       0x02
+    #define DYLIB_USE_UPWARD         0x04
+    #define DYLIB_USE_DELAYED_INIT   0x08
+#endif
+
 namespace mach_o {
 
+/*!
+ * @union DependentDylibAttributes
+ *
+ * @abstract
+ *      Attributes of how a dylib can be linked
+ */
+union DependentDylibAttributes
+{
+    constexpr   DependentDylibAttributes() : raw(0) {}
+    struct {
+        bool    weakLink  : 1 = false;
+        bool    reExport  : 1 = false;
+        bool    upward    : 1 = false;
+        bool    delayInit : 1 = false;
+        uint8_t padding   : 4 = 0;
+    };
+    uint8_t     raw;
 
+    static const DependentDylibAttributes regular;
+    static const DependentDylibAttributes justWeakLink;
+    static const DependentDylibAttributes justUpward;
+    static const DependentDylibAttributes justReExport;
+    static const DependentDylibAttributes justDelayInit;
+private:
+    constexpr   DependentDylibAttributes(uint8_t v) : raw(v) {}
+};
+static_assert(sizeof(DependentDylibAttributes) == 1);
+
+inline bool operator==(const DependentDylibAttributes& a, DependentDylibAttributes b) { return (a.raw == b.raw); }
 
 /*!
  * @class Header
@@ -112,9 +156,9 @@ struct VIS_HIDDEN Header
     bool                getDylibInstallName(const char** installName, Version32* compatVersion, Version32* currentVersion) const;
     const char*         installName() const;  // returns nullptr is no install name
     const char*         umbrellaName() const; // returns nullptr if dylib is not in an umbrella
-    void                forEachDependentDylib(void (^callback)(const char* loadPath, bool isWeak, bool isReExport, bool isUpward, Version32 compatVersion, Version32 curVersion, bool& stop)) const;
+    void                forEachDependentDylib(void (^callback)(const char* loadPath, DependentDylibAttributes kind, Version32 compatVersion, Version32 curVersion, bool& stop)) const;
     const char*         dependentDylibLoadPath(uint32_t depIndex) const;
-    uint32_t            dependentDylibCount(bool* allDepsAreNormal = nullptr) const;
+    uint32_t            dependentDylibCount(bool* allDepsAreRegular = nullptr) const;
     bool                canBeFairPlayEncrypted() const;
     bool                hasEncryptionInfo(uint32_t& cryptId, uint32_t& textOffset, uint32_t& size) const;
     bool                isFairPlayEncrypted(uint32_t& textOffset, uint32_t& size) const;
@@ -169,7 +213,7 @@ struct VIS_HIDDEN Header
     void            addNullUUID();
     void            updateUUID(uuid_t);
     void            addInstallName(const char* path, Version32 compatVers, Version32 currentVersion);
-    void            addDependentDylib(const char* path, bool isWeak=false, bool isUpward=false, bool isReexport=false, Version32 compatVers=Version32(1,0), Version32 currentVersion=Version32(1,0));
+    void            addDependentDylib(const char* path, DependentDylibAttributes kind=DependentDylibAttributes::regular, Version32 compatVers=Version32(1,0), Version32 currentVersion=Version32(1,0));
     void            addLibSystem();
     void            addDylibId(CString name, Version32 compatVers, Version32 currentVersion);
     void            addDyldID();
@@ -254,8 +298,9 @@ private:
     template <typename SG, typename SC>
     Error           validSegment(const Policy& policy, uint64_t wholeFileSize, const SG* seg) const;
 
-
     const encryption_info_command* findFairPlayEncryptionLoadCommand() const;
+
+    static DependentDylibAttributes   loadCommandToDylibKind(const dylib_command* dylibCmd);
 
     mach_header  mh;
 };

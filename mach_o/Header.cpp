@@ -47,6 +47,18 @@ using mach_o::Policy;
 
 namespace mach_o {
 
+
+//
+// MARK: --- DependentDylibAttributes ---
+//
+
+constinit const DependentDylibAttributes DependentDylibAttributes::regular;
+constinit const DependentDylibAttributes DependentDylibAttributes::justWeakLink(DYLIB_USE_WEAK_LINK);
+constinit const DependentDylibAttributes DependentDylibAttributes::justUpward(DYLIB_USE_UPWARD);
+constinit const DependentDylibAttributes DependentDylibAttributes::justReExport(DYLIB_USE_REEXPORT);
+constinit const DependentDylibAttributes DependentDylibAttributes::justDelayInit(DYLIB_USE_DELAYED_INIT);
+
+
 //
 // MARK: --- methods that read mach_header ---
 //
@@ -606,10 +618,24 @@ Error Header::validSemanticsDependents(const Policy& policy) const
     // all new binaries must link with something
     if ( this->isDyldManaged() && policy.enforceHasLinkedDylibs() && (depCount == 0) ) {
         // except for dylibs in libSystem.dylib which are ok to link with nothing (they are on bottom)
-        const char* libSystemDir   = this->builtForPlatform(Platform::driverKit, true) ? "/System/DriverKit/usr/lib/system/" : "/usr/lib/system/";
-        const char* installName    = this->installName();
-        bool        isNotLibSystem = (installName == nullptr) || (strncmp(installName, libSystemDir, strlen(libSystemDir)) != 0);
-        if ( isNotLibSystem )
+        const char* installName = this->installName();
+        bool isLibSystem = false;
+        if (installName != nullptr) {
+            if ( this->builtForPlatform(Platform::driverKit, true) ) {
+                const char* libSystemDir = "/System/DriverKit/usr/lib/system/";
+                if ( strncmp(installName, libSystemDir, strlen(libSystemDir)) != 0 )
+                    isLibSystem = true;
+            } else if ( this->platformAndVersions().platform.isExclaveKit() ) {
+                const char* libSystemDir = "/System/ExclaveKit/usr/lib/system/";
+                if ( strncmp(installName, libSystemDir, strlen(libSystemDir)) != 0 )
+                    isLibSystem = true;
+            } else {
+                const char* libSystemDir = "/usr/lib/system/";
+                if ( strncmp(installName, libSystemDir, strlen(libSystemDir)) != 0 )
+                    isLibSystem = true;
+            }
+        }
+        if ( !isLibSystem )
             return Error("missing LC_LOAD_DYLIB (must link with at least libSystem.dylib)");
     }
     return Error::none();
@@ -629,11 +655,13 @@ Error Header::validSemanticsRPath(const Policy& policy) const
         if ( rpathCount < 64 ) {
             for ( int i = 0; i < rpathCount; ++i ) {
                 if ( strcmp(rPath, rpaths[i]) == 0 ) {
+                    // rdar://115775065 (ld-prime warns about duplicate LC_RPATH in external libraries)
+                    // there's no need to warn here, only error when the policy should be enforced
+                    // it's because ld now filters out and warns about duplicate -rpath options when linking
                     if ( enforceNoDupRPath ) {
                         dupRPathError = Error("duplicate LC_RPATH '%s'", rPath);
                         stop          = true;
-                    } else
-                        warning(this, "duplicate LC_RPATH are deprecated ('%s')", rPath);
+                    }
                 }
             }
             rpaths[rpathCount] = rPath;
@@ -733,8 +761,8 @@ Error Header::validSemanticsSegments(const Policy& policy, uint64_t fileSize) co
     __block Error     lcError;
     __block bool      hasTEXT              = false;
     __block bool      hasLINKEDIT          = false;
-    __block uintptr_t segmentIndexText     = 0;
-    __block uintptr_t segmentIndexLinkedit = 0;
+    __block uint64_t segmentIndexText     = 0;
+    __block uint64_t segmentIndexLinkedit = 0;
     forEachLoadCommandSafe(^(const load_command* cmd, bool& stop) {
         if ( cmd->cmd == LC_SEGMENT_64 ) {
             const segment_command_64* seg64 = (segment_command_64*)cmd;
@@ -1007,7 +1035,13 @@ void Header::forEachPlatformLoadCommand(void (^handler)(Platform platform, Versi
                 break;
         }
     });
-#ifndef BUILDING_MACHO_WRITER // no implicit platforms in static linker
+#ifdef BUILDING_MACHO_WRITER
+    // no implicit platforms in static linker
+    // but for object files only, we need to support linking against old macos dylibs
+    if ( isObjectFile() )
+        return;
+#endif
+
     if ( !foundPlatform ) {
         // old binary with no explicit platform
 #if TARGET_OS_OSX
@@ -1019,7 +1053,6 @@ void Header::forEachPlatformLoadCommand(void (^handler)(Platform platform, Versi
             handler(Platform::macOS, Version32(11, 0), Version32(11, 0)); // guess it is a macOS 11.0 binary
 #endif
     }
-#endif
 }
 
 bool Header::builtForPlatform(Platform reqPlatform, bool onlyOnePlatform) const
@@ -1125,24 +1158,41 @@ uint32_t Header::dependentDylibCount(bool* allDepsAreNormal) const
     if ( allDepsAreNormal != nullptr )
         *allDepsAreNormal = true;
     __block unsigned count   = 0;
-    forEachLoadCommandSafe(^(const load_command* cmd, bool& stop) {
-        switch ( cmd->cmd ) {
-            case LC_LOAD_WEAK_DYLIB:
-            case LC_REEXPORT_DYLIB:
-            case LC_LOAD_UPWARD_DYLIB:
-                if ( allDepsAreNormal != nullptr )
-                    *allDepsAreNormal = false;  // record if any linkages were weak, re-export, or upward
-                ++count;
-                break;
-            case LC_LOAD_DYLIB:
-                ++count;
-                break;
+    this->forEachDependentDylib(^(const char* loadPath, DependentDylibAttributes kind, Version32 , Version32 , bool& stop) {
+        if ( allDepsAreNormal != nullptr ) {
+            if ( kind != DependentDylibAttributes::regular )
+                *allDepsAreNormal = false;  // record if any linkages were weak, re-export, upward, or delay-init
         }
+        ++count;
     });
     return count;
 }
 
-void Header::forEachDependentDylib(void (^callback)(const char* loadPath, bool isWeak, bool isReExport, bool isUpward,
+DependentDylibAttributes Header::loadCommandToDylibKind(const dylib_command* dylibCmd)
+{
+    DependentDylibAttributes attr;
+    const dylib_use_command* dylib2Cmd = (dylib_use_command*)dylibCmd;
+    if ( (dylib2Cmd->marker == 0x1a741800) && (dylib2Cmd->nameoff == sizeof(dylib_use_command)) ) {
+        attr.raw = (uint8_t)dylib2Cmd->flags;
+        return attr;
+    }
+    switch ( dylibCmd->cmd ) {
+        case LC_LOAD_DYLIB:
+            return attr;
+        case LC_LOAD_WEAK_DYLIB:
+            attr.weakLink = true;
+            return attr;
+        case LC_REEXPORT_DYLIB:
+            attr.reExport = true;
+            return attr;
+        case LC_LOAD_UPWARD_DYLIB:
+            attr.upward = true;
+            return attr;
+    }
+    assert(0 && "not a dylib load command");
+}
+
+void Header::forEachDependentDylib(void (^callback)(const char* loadPath, DependentDylibAttributes kind,
                                                     Version32 compatVersion, Version32 curVersion, bool& stop)) const
 {
     __block unsigned count   = 0;
@@ -1155,27 +1205,32 @@ void Header::forEachDependentDylib(void (^callback)(const char* loadPath, bool i
             case LC_LOAD_UPWARD_DYLIB: {
                 const dylib_command* dylibCmd = (dylib_command*)cmd;
                 const char*          loadPath = (char*)dylibCmd + dylibCmd->dylib.name.offset;
-                callback(loadPath, (cmd->cmd == LC_LOAD_WEAK_DYLIB), (cmd->cmd == LC_REEXPORT_DYLIB), (cmd->cmd == LC_LOAD_UPWARD_DYLIB),
-                         Version32(dylibCmd->dylib.compatibility_version), Version32(dylibCmd->dylib.current_version), stop);
+                callback(loadPath, loadCommandToDylibKind(dylibCmd), Version32(dylibCmd->dylib.compatibility_version), Version32(dylibCmd->dylib.current_version), stop);
                 ++count;
                 if ( stop )
                     stopped = true;
-            } break;
+                break;
+            }
         }
     });
+#if BUILDING_DYLD
     // everything must link with something
     if ( (count == 0) && !stopped ) {
         // The dylibs that make up libSystem can link with nothing
         // except for dylibs in libSystem.dylib which are ok to link with nothing (they are on bottom)
         if ( this->builtForPlatform(Platform::driverKit, true) ) {
             if ( !this->isDylib() || (strncmp(this->installName(), "/System/DriverKit/usr/lib/system/", 33) != 0) )
-                callback("/System/DriverKit/usr/lib/libSystem.B.dylib", false, false, false, Version32(1, 0), Version32(1, 0), stopped);
+                callback("/System/DriverKit/usr/lib/libSystem.B.dylib", DependentDylibAttributes::regular, Version32(1, 0), Version32(1, 0), stopped);
+        } else if ( this->platformAndVersions().platform.isExclaveKit() ) {
+            if ( !this->isDylib() || (strncmp(this->installName(), "/System/ExclaveKit/usr/lib/system/", 34) != 0) )
+                callback("/System/ExclaveKit/usr/lib/libSystem.dylib", DependentDylibAttributes::regular, Version32(1, 0), Version32(1, 0), stopped);
         }
         else {
             if ( !this->isDylib() || (strncmp(this->installName(), "/usr/lib/system/", 16) != 0) )
-                callback("/usr/lib/libSystem.B.dylib", false, false, false, Version32(1, 0), Version32(1, 0), stopped);
+                callback("/usr/lib/libSystem.B.dylib", DependentDylibAttributes::regular, Version32(1, 0), Version32(1, 0), stopped);
         }
     }
+#endif
 }
 
 void Header::forDyldEnv(void (^callback)(const char* envVar, bool& stop)) const
@@ -1804,11 +1859,11 @@ void Header::addMinVersion(Platform platform, Version32 minOS, Version32 sdk)
     vc.sdk     = sdk.value();
     if ( platform == Platform::macOS )
         vc.cmd = LC_VERSION_MIN_MACOSX;
-    else if ( platform == Platform::iOS )
+    else if ( (platform == Platform::iOS) || (platform == Platform::iOS_simulator) )
         vc.cmd = LC_VERSION_MIN_IPHONEOS;
-    else if ( platform == Platform::watchOS )
+    else if ( (platform == Platform::watchOS) || (platform == Platform::watchOS_simulator) )
         vc.cmd = LC_VERSION_MIN_WATCHOS;
-    else if ( platform == Platform::tvOS )
+    else if ( (platform == Platform::tvOS) || (platform == Platform::tvOS_simulator) )
         vc.cmd = LC_VERSION_MIN_TVOS;
     else
         assert(0 && "unknown platform");
@@ -2042,21 +2097,43 @@ void Header::addInstallName(const char* name, Version32 compatVers, Version32 cu
     strcpy((char*)ic + ic->dylib.name.offset, name);
 }
 
-void Header::addDependentDylib(const char* path, bool isWeak, bool isUpward, bool isReexport, Version32 compatVers, Version32 currentVersion)
+void Header::addDependentDylib(const char* path, DependentDylibAttributes depAttrs, Version32 compatVers, Version32 currentVersion)
 {
-    uint32_t       alignedSize = pointerAligned((uint32_t)(sizeof(dylib_command) + strlen(path) + 1));
-    dylib_command* dc          = (dylib_command*)appendLoadCommand(LC_LOAD_DYLIB, alignedSize);
-    if ( isReexport )
-        dc->cmd = LC_REEXPORT_DYLIB;
-    else if ( isUpward )
-        dc->cmd = LC_LOAD_UPWARD_DYLIB;
-    else if ( isWeak )
-        dc->cmd = LC_LOAD_WEAK_DYLIB;
-    dc->dylib.name.offset           = sizeof(dylib_command);
-    dc->dylib.current_version       = currentVersion.value();
-    dc->dylib.compatibility_version = compatVers.value();
-    dc->dylib.timestamp             = 2; // needs to be some constant value that is different than dylib id load command
-    strcpy((char*)dc + dc->dylib.name.offset, path);
+    uint32_t cmd = 0;
+    if (      depAttrs == DependentDylibAttributes::regular )
+        cmd = LC_LOAD_DYLIB;
+    else if ( depAttrs == DependentDylibAttributes::justWeakLink )
+        cmd = LC_LOAD_WEAK_DYLIB;
+    else if ( depAttrs == DependentDylibAttributes::justUpward )
+        cmd = LC_LOAD_UPWARD_DYLIB;
+    else if ( depAttrs == DependentDylibAttributes::justReExport )
+        cmd = LC_REEXPORT_DYLIB;
+
+    if ( cmd ) {
+        // make traditional load command
+        uint32_t       alignedSize = pointerAligned((uint32_t)(sizeof(dylib_command) + strlen(path) + 1));
+        dylib_command* dc          = (dylib_command*)appendLoadCommand(cmd, alignedSize);
+        dc->dylib.name.offset           = sizeof(dylib_command);
+        dc->dylib.current_version       = currentVersion.value();
+        dc->dylib.compatibility_version = compatVers.value();
+        dc->dylib.timestamp             = 2; // needs to be some constant value that is different than dylib id load command;
+        strcpy((char*)dc + dc->dylib.name.offset, path);
+    }
+    else {
+        // make new style load command with extra flags field
+        if ( depAttrs.weakLink )
+            cmd = LC_LOAD_WEAK_DYLIB;
+        else
+            cmd = LC_LOAD_DYLIB;
+        uint32_t        alignedSize = pointerAligned((uint32_t)(sizeof(dylib_use_command) + strlen(path) + 1));
+        dylib_use_command* dc          = (dylib_use_command*)appendLoadCommand(cmd, alignedSize);
+        dc->nameoff               = sizeof(dylib_use_command);
+        dc->current_version       = currentVersion.value();
+        dc->compat_version        = 0x00010000; // unused, but looks like 1.0 to old tools
+        dc->marker                = 0x1a741800; // magic value that means dylib_use_command
+        dc->flags                 = depAttrs.raw;
+        strcpy((char*)dc + dc->nameoff, path);
+    }
 }
 
 void Header::addLibSystem()

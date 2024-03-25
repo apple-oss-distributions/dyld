@@ -68,12 +68,19 @@ Policy::Usage Policy::useDataConst() const
     return (_featureEpoch >= Platform::Epoch::fall2019) ? Policy::preferUse : Policy::mustNotUse;
 }
 
+Policy::Usage Policy::useConstClassRefs() const
+{
+    return (_featureEpoch >= Platform::Epoch::spring2024) ? Policy::preferUse : Policy::mustNotUse;
+}
+
+Policy::Usage Policy::useGOTforClassRefs() const
+{
+    return (_featureEpoch >= Platform::Epoch::fall2024) ? Policy::preferUse : Policy::mustNotUse;
+}
+
+
 Policy::Usage Policy::useChainedFixups() const
 {
-    // all arm64e binaries must use chained fixups
-    if ( dyldLoadsOutput() && (_arch == Architecture::arm64e) )
-        return Policy::mustUse;
-
     // fixups are for userland binaries
     if ( !dyldLoadsOutput() )
         return Policy::preferDontUse;
@@ -83,7 +90,7 @@ Policy::Usage Policy::useChainedFixups() const
         return Policy::mustNotUse;
     }
 
-    // in general Fall2020 OSs supportet chained fixups
+    // in general Fall2020 OSs supported chained fixups
     Platform::Epoch chainedFixupsEpoch = Platform::Epoch::fall2020;
 
     // simulators support is later than OS support
@@ -91,8 +98,14 @@ Policy::Usage Policy::useChainedFixups() const
         chainedFixupsEpoch = Platform::Epoch::fall2021;
 
     // macOS support was delayed a year for builders to update OS
-    if ( _pvs.platform == Platform::macOS )
+    if ( _pvs.platform == Platform::macOS ) {
         chainedFixupsEpoch = Platform::Epoch::fall2021;
+
+        // x86 main executables might be tools and might need to run on older builders
+        if ( _arch.usesx86_64Instructions() && (_filetype == MH_EXECUTE) ) {
+            chainedFixupsEpoch = Platform::Epoch::fall2022;
+        }
+    }
 
     // use chained fixups for newer OS releases
     if ( _featureEpoch >= chainedFixupsEpoch )
@@ -169,11 +182,30 @@ Policy::Usage Policy::useSourceVersionLoadCommand() const
     return Policy::preferDontUse;
 }
 
+Policy::Usage Policy::useLegacyLinkedit() const
+{
+    if ( dyldLoadsOutput() ) {
+        // older releases didn't have a regular year-based version bump, so check the exact versions
+        if ( _pvs.platform == Platform::macOS && _pvs.minOS < Version32(10, 6) )
+            return Policy::mustUse;
+        if ( _pvs.platform == Platform::iOS && _pvs.minOS < Version32(3, 1) )
+            return Policy::mustUse;
+    }
+
+    return Policy::preferDontUse;
+}
+
 bool Policy::use4KBLoadCommandsPadding() const
 {
     if ( _filetype == MH_DYLIB && _pathMayBeInSharedCache )
         return true;
     return false;
+}
+
+bool Policy::canUseDelayInit() const
+{
+    // runtime support added in Fall 2024
+    return ( _featureEpoch >= Platform::Epoch::fall2024 );
 }
 
 

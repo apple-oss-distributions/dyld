@@ -53,7 +53,9 @@ const Universal* Universal::isUniversal(std::span<const uint8_t> fileContent)
         return nullptr;
 
     const Universal* fileStartAsFat = (Universal*)fileContent.data();
-    if ( (fileStartAsFat->fh.magic == OSSwapBigToHostInt32(FAT_MAGIC)) || (fileStartAsFat->fh.magic == OSSwapBigToHostInt32(FAT_MAGIC_64)) )
+    uint32_t headerFirstFourBytes;
+    memcpy(&headerFirstFourBytes, fileStartAsFat, 4); // use memcpy to avoid UB if content (such as in static lib) is not aligned
+    if ( (headerFirstFourBytes == OSSwapBigToHostInt32(FAT_MAGIC)) || (headerFirstFourBytes == OSSwapBigToHostInt32(FAT_MAGIC_64)) )
         return fileStartAsFat;
     else
         return nullptr;

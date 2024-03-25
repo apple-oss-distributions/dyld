@@ -276,11 +276,11 @@ public:
 
 private:
 
-#if SUPPORT_CREATING_PREBUILTLOADERS || BUILDING_UNIT_TESTS
+#if SUPPORT_PREBUILTLOADERS || BUILDING_UNIT_TESTS
     typedef SwiftTypeProtocolConformanceDiskLocationKey          TypeKey;
     typedef SwiftMetadataProtocolConformanceDiskLocationKey      MetadataKey;
     typedef SwiftForeignTypeProtocolConformanceDiskLocationKey   ForeignKey;
-#endif // SUPPORT_CREATING_PREBUILTLOADERS || BUILDING_UNIT_TESTS
+#endif // SUPPORT_PREBUILTLOADERS || BUILDING_UNIT_TESTS
 
     // internal helpers
     uint32_t                getSdkVersion(const mach_header* mh);
