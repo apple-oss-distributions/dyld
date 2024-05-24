@@ -46,6 +46,8 @@
 #include "Tracing.h"
 #include "DyldProcessConfig.h"
 
+#define BLEND_KERN_RETURN_LOCATION(kr, loc) (kr) = ((kr & 0x00ffffff) | loc<<24);
+
 #define IMAGE_COUNT_MAX 8192
 RemoteBuffer& RemoteBuffer::operator=(RemoteBuffer&& other) {
     std::swap(_localAddress, other._localAddress);
@@ -240,7 +242,7 @@ private:
     kern_return_t               addDyldImage(task_t task, uint64_t dyldAddress, uint64_t dyldPathAddress, const char* localPath);
 
     bool                        invalid() { return ((char*)_stringRevBumpPtr < (char*)_curSegment); }
-    const char*                 copyPath(task_t task, uint64_t pathAddr);
+    const char*                 copyPath(task_t task, kern_return_t* kr, uint64_t pathAddr);
     const char*                 addString(const char*, size_t);
     const char*                 copySegmentName(const char*);
 
@@ -411,6 +413,10 @@ dyld_process_info_ptr dyld_process_info_base::make(task_t task, const T1& allIma
                                     + sizeof(dyld_aot_image_info_64)*(aotImageCount) // add the size necessary for aot info to this buffer
                                     + sizeof(SegmentInfo)*imageCountWithDyld*10
                                     + countOfPathsNeedingCopying*PATH_MAX;
+
+        // Add 32KB of padding just in case there's some kind of overflow/corruption in building the buffer
+        allocationSize += 0x8000;
+
         void* storage = malloc(allocationSize);
         if (storage == nullptr) {
             *kr = KERN_NO_SPACE;
@@ -457,7 +463,6 @@ dyld_process_info_ptr dyld_process_info_base::make(task_t task, const T1& allIma
         // fill in info for dyld
         if ( allImageInfo.dyldPath != 0 ) {
             if ((*kr = info->addDyldImage(task, allImageInfo.dyldImageLoadAddress, allImageInfo.dyldPath, NULL))) {
-                *kr = KERN_FAILURE;
                 result = nullptr;
                 return;
             }
@@ -657,10 +662,10 @@ const char* dyld_process_info_base::addString(const char* str, size_t maxlen)
     return _stringRevBumpPtr;
 }
 
-const char* dyld_process_info_base::copyPath(task_t task, uint64_t stringAddressInTask)
+const char* dyld_process_info_base::copyPath(task_t task, kern_return_t *kr, uint64_t stringAddressInTask)
 {
     __block const char* retval = "";
-    withRemoteBuffer(task, stringAddressInTask, PATH_MAX, true, nullptr, ^(void *buffer, size_t size) {
+    withRemoteBuffer(task, stringAddressInTask, PATH_MAX, true, kr, ^(void *buffer, size_t size) {
         retval = addString(static_cast<const char *>(buffer), size);
     });
     return retval;
@@ -668,6 +673,8 @@ const char* dyld_process_info_base::copyPath(task_t task, uint64_t stringAddress
 
 kern_return_t dyld_process_info_base::addImage(task_t task, bool sameCacheAsThisProcess, uint64_t sharedCacheStart, uint64_t sharedCacheEnd, uint64_t imageAddress, uint64_t imagePath, const char* imagePathLocal)
 {
+    kern_return_t kr = KERN_SUCCESS;
+
     const DyldSharedCache* dyldCacheHeader = (DyldSharedCache*)sharedCacheStart;
     bool readOnly = false;
     _curImage->loadAddress = imageAddress;
@@ -677,7 +684,13 @@ kern_return_t dyld_process_info_base::addImage(task_t task, bool sameCacheAsThis
     } else if ( sameCacheAsThisProcess && dyldCacheHeader != nullptr && dyldCacheHeader->inCache((void*)imagePath, 1, readOnly) ) {
         _curImage->path = (const char*)imagePath;
     } else if (imagePath) {
-        _curImage->path = copyPath(task, imagePath);
+        _curImage->path = copyPath(task, &kr, imagePath);
+        if ( kr != KERN_SUCCESS ) {
+            // Could not copy path, return early
+            _curImage->path = "";
+            BLEND_KERN_RETURN_LOCATION(kr, 0xe9);
+            return kr;
+        }
     } else {
         _curImage->path = "";
     }
@@ -685,7 +698,7 @@ kern_return_t dyld_process_info_base::addImage(task_t task, bool sameCacheAsThis
     if ( sameCacheAsThisProcess && dyldCacheHeader != nullptr && dyldCacheHeader->inCache((void*)imageAddress, 32*1024, readOnly) ) {
         addInfoFromLoadCommands((mach_header*)imageAddress, imageAddress, 32*1024);
     } else {
-        auto kr = addInfoFromRemoteLoadCommands(task, imageAddress);
+        kr = addInfoFromRemoteLoadCommands(task, imageAddress);
         if (kr != KERN_SUCCESS) {
             // The image is not here, return early
             return kr;
@@ -693,7 +706,7 @@ kern_return_t dyld_process_info_base::addImage(task_t task, bool sameCacheAsThis
     }
     _curImage->segmentsCount = _curSegmentIndex - _curImage->segmentStartIndex;
     _curImage++;
-    return KERN_SUCCESS;
+    return kr;
 }
 
 kern_return_t dyld_process_info_base::addAotImage(dyld_aot_image_info_64 aotImageInfo) {
@@ -748,9 +761,12 @@ kern_return_t dyld_process_info_base::addDyldImage(task_t task, uint64_t dyldAdd
         _curImage->path = addString(localPath, PATH_MAX);
     }
     else {
-        _curImage->path = copyPath(task, dyldPathAddress);
-        if ( kr != KERN_SUCCESS)
+        _curImage->path = copyPath(task, &kr, dyldPathAddress);
+        if ( kr != KERN_SUCCESS) {
+            _curImage->path = "";
+            BLEND_KERN_RETURN_LOCATION(kr, 0xea);
             return kr;
+        }
     }
 
     kr = addInfoFromRemoteLoadCommands(task, dyldAddress);
@@ -759,7 +775,7 @@ kern_return_t dyld_process_info_base::addDyldImage(task_t task, uint64_t dyldAdd
 
     _curImage->segmentsCount = _curSegmentIndex - _curImage->segmentStartIndex;
     _curImage++;
-    return KERN_SUCCESS;
+    return kr;
 }
 
 

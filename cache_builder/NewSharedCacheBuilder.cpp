@@ -957,14 +957,16 @@ static FoundSymbol findTargetClass(Diagnostics diag,
 
 void SharedCacheBuilder::estimateIMPCaches()
 {
+    // Only LP64 is supported by the runtime
     if ( !this->config.layout.is64 )
         return;
 
     if ( this->config.layout.cacheSize.rawValue() > 0x100000000 )
         return;
 
-    // Only iOS for now
-    if ( this->options.platform != dyld3::Platform::iOS )
+    // Only arm64* are is supported by the runtime
+    std::string_view archName = this->options.archs.name();
+    if ( archName != "arm64e" && archName != "arm64")
         return;
 
     // Skip everything if the JSON file is empty
