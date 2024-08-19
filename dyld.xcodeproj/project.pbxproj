@@ -1345,6 +1345,7 @@
 		C176F67126CD7CDB0034C1DA /* NewAdjustDylibSegments.cpp */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.cpp.cpp; path = NewAdjustDylibSegments.cpp; sourceTree = "<group>"; };
 		C176F67226CD7CDB0034C1DA /* NewAdjustDylibSegments.h */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.c.h; path = NewAdjustDylibSegments.h; sourceTree = "<group>"; };
 		C17E3A8128DE8BE200DE7807 /* Test_ObjC_32.mm */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.cpp.objcpp; path = Test_ObjC_32.mm; sourceTree = "<group>"; };
+		C17F2D082BE975DA0062756A /* AuthenticatedValue.h */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.c.h; path = AuthenticatedValue.h; sourceTree = "<group>"; };
 		C18A62BA2992D2D300E4A91E /* DependencyInfo.cpp */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.cpp.cpp; path = DependencyInfo.cpp; sourceTree = "<group>"; };
 		C18A62BB2992D2D300E4A91E /* DependencyInfo.h */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.c.h; path = DependencyInfo.h; sourceTree = "<group>"; };
 		C18A62BE2992D67F00E4A91E /* Test_DependencyInfo.mm */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.cpp.objcpp; path = Test_DependencyInfo.mm; sourceTree = "<group>"; };
@@ -2004,6 +2005,7 @@
 				37744EB02708E8D4005FAC96 /* README.md */,
 				37C1488325D1258B00E00E7E /* Allocator.h */,
 				37C1488525D1258B00E00E7E /* Allocator.cpp */,
+				C17F2D082BE975DA0062756A /* AuthenticatedValue.h */,
 				379EF49926D373B000703900 /* BTree.h */,
 				37B3E698274640C800EF3C96 /* BitUtils.h */,
 				37FF66D326F7E83B008EFAFE /* OrderedSet.h */,

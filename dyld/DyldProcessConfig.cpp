@@ -316,7 +316,7 @@ bool ProcessConfig::Process::defaultDataConst()
 
 bool ProcessConfig::Process::defaultTproDataConst()
 {
-#if TARGET_OS_EXCLAVEKIT
+#if TARGET_OS_EXCLAVEKIT || TARGET_OS_SIMULATOR
     return false;
 #else
    return (this->appleParam("dyld_hw_tpro_pagers") != nullptr);

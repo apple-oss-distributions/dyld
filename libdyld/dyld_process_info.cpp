@@ -545,7 +545,10 @@ dyld_process_info_ptr dyld_process_info_base::makeSuspended(task_t task, const T
     __block char *          dyldPath = &dyldPathBuffer[0];
     __block char *          mainExecutablePath = &mainExecutablePathBuffer[0];
     __block dyld3::Platform platformID = dyld3::Platform::unknown;
-    mach_vm_size_t      size;
+    mach_vm_size_t          size;
+    dyldPathBuffer[0]           = '\0';
+    mainExecutablePathBuffer[0] = '\0';
+
     for (mach_vm_address_t address = 0; ; address += size) {
         vm_region_basic_info_data_64_t  info;
         mach_port_t                     objectName;
@@ -564,16 +567,18 @@ dyld_process_info_ptr dyld_process_info_base::makeSuspended(task_t task, const T
                 if ( mhBuffer.filetype == MH_EXECUTE ) {
                     mainExecutableAddress = address;
                     int len = proc_regionfilename(pid, mainExecutableAddress, mainExecutablePath, PATH_MAX);
-                    if ( len != 0 ) {
-                        mainExecutablePath[len] = '\0';
+                    // explicitly clear the path if call failed
+                    if ( len <= 0 ) {
+                        strlcpy(mainExecutablePath, "/main_executable_path_missing", PATH_MAX);
                     }
                     ++imageCount;
                 }
                 else if ( mhBuffer.filetype == MH_DYLINKER ) {
                     dyldAddress = address;
                     int len = proc_regionfilename(pid, dyldAddress, dyldPath, PATH_MAX);
-                    if ( len != 0 ) {
-                        dyldPath[len] = '\0';
+                    // explicitly clear the path if call failed
+                    if ( len <= 0 ) {
+                        strlcpy(dyldPath, "/dyld_path_missing", PATH_MAX);
                     }
                     ++imageCount;
                 }

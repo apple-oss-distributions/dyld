@@ -27,6 +27,7 @@
 
 #include <TargetConditionals.h>
 #include "Defines.h"
+#include "AuthenticatedValue.h"
 
 #include <limits>
 #include <cassert>
@@ -102,10 +103,20 @@ private:
 #pragma mark -
 #pragma mark Memory Manager
 
+#if __has_feature(ptrauth_calls)
+    typedef AuthenticatedValue<void*> WriteProtectionStateData;
+#else
+    typedef void* WriteProtectionStateData;
+#endif
+
 struct VIS_HIDDEN MemoryManager {
     struct WriteProtectionState {
-        uintptr_t   signature;
-        intptr_t    data;
+        uintptr_t                   signature;
+        WriteProtectionStateData    data;
+
+        static constexpr uintptr_t readwrite = 1;
+        static constexpr uintptr_t readonly = 0;
+        static constexpr uintptr_t invalid = 0x00000000FFFFFFFFULL;
     };
     // a tuple of an allocated <pointer, size>
     struct Buffer {
@@ -138,12 +149,12 @@ struct VIS_HIDDEN MemoryManager {
     MemoryManager(const char** apple) {
         // Eventually we will use this to parse parameters for controlling comapct info mlock()
         // We need to do this before allocator is created
-#if BUILDING_DYLD && !TARGET_OS_EXCLAVEKIT
+#if ENABLE_HW_TPRO_SUPPORT
         if (_simple_getenv(apple, "dyld_hw_tpro") != nullptr) {
             // Start in a writable state to allow bootstrap
             _tproEnable = true;
         }
-#endif //  BUILDING_DYLD && !TARGET_OS_EXCLAVEKIT
+#endif //  ENABLE_HW_TPRO_SUPPORT
     }
 
 #if !TARGET_OS_EXCLAVEKIT
@@ -167,11 +178,11 @@ struct VIS_HIDDEN MemoryManager {
         // Barrier to prevent optimizing away memoryManager-> to this->
         os_compiler_barrier();
         memoryManager->makeWriteable(previousState);
-#endif // BUILD_DYLD && !TARGET_OS_EXCLAVEKIT
+#endif // BUILDING_DYLD && !TARGET_OS_EXCLAVEKIT
         work();
 #if BUILDING_DYLD && !TARGET_OS_EXCLAVEKIT
         memoryManager->restorePreviousState(previousState);
-#endif // BUILD_DYLD && !TARGET_OS_EXCLAVEKIT
+#endif // BUILDING_DYLD && !TARGET_OS_EXCLAVEKIT
     }
 
     template<typename F>
@@ -183,11 +194,11 @@ struct VIS_HIDDEN MemoryManager {
         // Barrier to prevent optimizing away memoryManager-> to this->
         os_compiler_barrier();
         memoryManager->makeReadOnly(previousState);
-#endif // BUILD_DYLD && !TARGET_OS_EXCLAVEKIT
+#endif // BUILDING_DYLD && !TARGET_OS_EXCLAVEKIT
         work();
 #if BUILDING_DYLD && !TARGET_OS_EXCLAVEKIT
         memoryManager->restorePreviousState(previousState);
-#endif // BUILD_DYLD && !TARGET_OS_EXCLAVEKIT
+#endif // BUILDING_DYLD && !TARGET_OS_EXCLAVEKIT
     }
 private:
     friend struct PersistentAllocator;
@@ -199,25 +210,26 @@ private:
 
     __attribute__((always_inline))
     void makeWriteable(WriteProtectionState& previousState) {
-#if BUILDING_DYLD && !TARGET_OS_EXCLAVEKIT
+#if ENABLE_HW_TPRO_SUPPORT
         if (_tproEnable) {
             os_compiler_barrier();
             // Stacks are in  memory, so it is possible to attack tpro via writing the stack vars in another thread. To protect
             // against this we create a signature that mixes the value of writable and its address then validate it later. If the
             // barriers work the state will never spill to the stack between varification and usage.
-            previousState.data      = os_thread_self_restrict_tpro_is_writable();
-  #if __has_feature(ptrauth_calls)
-            previousState.signature = ptrauth_sign_generic_data(previousState.data, (uintptr_t)&previousState.data | (uintptr_t)this);
-#endif /* __has_feature(ptrauth_calls) */
-            if (!previousState.data) {
+            previousState.data      = os_thread_self_restrict_tpro_is_writable() ? (void*)WriteProtectionState::readwrite : (void*)WriteProtectionState::readonly;
+            previousState.signature = ptrauth_sign_generic_data((void*)previousState.data, (uintptr_t)&previousState.data | (uintptr_t)this);
+            if ( previousState.data == (void*)WriteProtectionState::readonly ) {
                 os_thread_self_restrict_tpro_to_rw();
             }
             os_compiler_barrier();
             return;
         }
-        previousState.data      = 1;
+#endif // ENABLE_HW_TPRO_SUPPORT
+
+#if BUILDING_DYLD && !TARGET_OS_EXCLAVEKIT
+        previousState.data = (void*)WriteProtectionState::readwrite;
 #if __has_feature(ptrauth_calls)
-        previousState.signature = ptrauth_sign_generic_data(previousState.data, (uintptr_t)&previousState.data | (uintptr_t)this);
+        previousState.signature = ptrauth_sign_generic_data((void*)previousState.data, (uintptr_t)&previousState.data | (uintptr_t)this);
 #endif /* __has_feature(ptrauth_calls) */
         {
             __unused auto lock = lockGuard();
@@ -226,29 +238,30 @@ private:
             }
             ++_writeableCount;
         }
-#endif // BUILD_DYLD && !TARGET_OS_EXCLAVEKIT
+#endif // BUILDING_DYLD && !TARGET_OS_EXCLAVEKIT
     }
     __attribute__((always_inline))
     void makeReadOnly(WriteProtectionState& previousState) {
-#if BUILDING_DYLD && !TARGET_OS_EXCLAVEKIT
+#if ENABLE_HW_TPRO_SUPPORT
         if (_tproEnable) {
             os_compiler_barrier();
             // Stacks are in  memory, so it is possible to attack tpro via writing the stack vars in another thread. To protect
             // against this we create a signature that mixes the value of writable and its address then validate it later. If the
             // barriers work the state will never spill to the stack between varification and usage.
-            previousState.data      = os_thread_self_restrict_tpro_is_writable();
-#if __has_feature(ptrauth_calls)
-            previousState.signature = ptrauth_sign_generic_data(previousState.data, (uintptr_t)&previousState.data | (uintptr_t)this);
-#endif /* __has_feature(ptrauth_calls) */
-            if (previousState.data) {
+            previousState.data      = os_thread_self_restrict_tpro_is_writable() ? (void*)WriteProtectionState::readwrite : (void*)WriteProtectionState::readonly;
+            previousState.signature = ptrauth_sign_generic_data((void*)previousState.data, (uintptr_t)&previousState.data | (uintptr_t)this);
+            if (previousState.data == (void*)WriteProtectionState::readwrite) {
                 os_thread_self_restrict_tpro_to_ro();
             }
             os_compiler_barrier();
             return;
         }
-        previousState.data      = -1;
+#endif // ENABLE_HW_TPRO_SUPPORT
+
+#if BUILDING_DYLD && !TARGET_OS_EXCLAVEKIT
+        previousState.data = (void*)WriteProtectionState::invalid;
 #if __has_feature(ptrauth_calls)
-        previousState.signature = ptrauth_sign_generic_data(previousState.data, (uintptr_t)&previousState.data | (uintptr_t)this);
+        previousState.signature = ptrauth_sign_generic_data((void*)previousState.data, (uintptr_t)&previousState.data | (uintptr_t)this);
 #endif /* __has_feature(ptrauth_calls) */
         {
             __unused auto lock = lockGuard();
@@ -257,24 +270,22 @@ private:
                 writeProtect(true);
             }
         }
-#endif // BUILD_DYLD && !TARGET_OS_EXCLAVEKIT
+#endif // BUILDING_DYLD && !TARGET_OS_EXCLAVEKIT
     }
     __attribute__((always_inline))
     void restorePreviousState(WriteProtectionState& previousState) {
-#if BUILDING_DYLD && !TARGET_OS_EXCLAVEKIT
+#if ENABLE_HW_TPRO_SUPPORT
         if (_tproEnable) {
             os_compiler_barrier();
-#if __has_feature(ptrauth_calls)
-            uintptr_t signedWritableState = ptrauth_sign_generic_data(previousState.data, (uintptr_t)&previousState.data | (uintptr_t)this);
+            uintptr_t signedWritableState = ptrauth_sign_generic_data((void*)previousState.data, (uintptr_t)&previousState.data | (uintptr_t)this);
             if (previousState.signature != signedWritableState) {
                 // Someone tampered with writableState. Process is under attack, we need to abort();
                 abort();
             }
-#endif /* __has_feature(ptrauth_calls) */
 
-            uintptr_t state = os_thread_self_restrict_tpro_is_writable();
-            if (state != previousState.data) {
-                if (previousState.data) {
+            uintptr_t state = os_thread_self_restrict_tpro_is_writable() ? WriteProtectionState::readwrite : WriteProtectionState::readonly;
+            if ((void*)state != previousState.data) {
+                if ( previousState.data == (void*)WriteProtectionState::readwrite ) {
                     os_thread_self_restrict_tpro_to_rw();
                 } else {
                     os_thread_self_restrict_tpro_to_ro();
@@ -283,8 +294,11 @@ private:
             os_compiler_barrier();
             return;
         }
+#endif // ENABLE_HW_TPRO_SUPPORT
+
+#if BUILDING_DYLD && !TARGET_OS_EXCLAVEKIT
 #if __has_feature(ptrauth_calls)
-        uintptr_t signedWritableState = ptrauth_sign_generic_data(previousState.data, (uintptr_t)&previousState.data | (uintptr_t)this);
+        uintptr_t signedWritableState = ptrauth_sign_generic_data((uintptr_t)(void*)previousState.data, (uintptr_t)&previousState.data | (uintptr_t)this);
         if (previousState.signature != signedWritableState) {
             // Someone tampered with writable state. Process is under attack, we need to abort();
             abort();
@@ -292,19 +306,19 @@ private:
 #endif /* __has_feature(ptrauth_calls) */
         {
             __unused auto lock = lockGuard();
-            if (previousState.data == -1) {
+            if ( previousState.data == (void*)WriteProtectionState::invalid ) {
                 if (_writeableCount == 0) {
                     writeProtect(false);
                 }
                 _writeableCount += 1;
-            } else if (previousState.data == 1) {
+            } else if ( previousState.data == (void*)WriteProtectionState::readwrite ) {
                 _writeableCount -= 1;
                 if (_writeableCount == 0) {
                     writeProtect(true);
                 }
             }
         }
-#endif // BUILD_DYLD && !TARGET_OS_EXCLAVEKIT
+#endif // BUILDING_DYLD && !TARGET_OS_EXCLAVEKIT
     }
     void swap(MemoryManager& other) {
         using std::swap;
@@ -314,21 +328,23 @@ private:
         swap(_allocator,                other._allocator);
         swap(_writeableCount,           other._writeableCount);
 
+#if ENABLE_HW_TPRO_SUPPORT
         // We don't actually swap this because it is a process wide setting, and we may need it to be set correctly
         // even in the bootstrapMemoryProtector adfter move construction
         _tproEnable = other._tproEnable;
+#endif // ENABLE_HW_TPRO_SUPPORT
     }
 
     int vmFlags() const {
         int result = 0;
-#if BUILDING_DYLD && !TARGET_OS_EXCLAVEKIT
+#if ENABLE_HW_TPRO_SUPPORT
         if (_tproEnable) {
             // add tpro for memory protection on platform that support it
             result |= VM_FLAGS_TPRO;
         }
         // Only include the dyld tag for allocations made by dyld
         result |= VM_MAKE_TAG(VM_MEMORY_DYLD);
-#endif // BUILDING_DYLD && !TARGET_OS_EXCLAVEKIT
+#endif // ENABLE_HW_TPRO_SUPPORT
         return result;
     }
 
@@ -337,7 +353,10 @@ private:
 #endif // !TARGET_OS_EXCLAVEKIT
     PersistentAllocator*    _allocator                  = nullptr;
     uint64_t                _writeableCount             = 0;
+
+#if ENABLE_HW_TPRO_SUPPORT
     bool                    _tproEnable                 = false;
+#endif // ENABLE_HW_TPRO_SUPPORT
 };
 
 // C++ does not (generally speaking) support destructive moves. In the case of heap allocated (allocator backed objects) where the
