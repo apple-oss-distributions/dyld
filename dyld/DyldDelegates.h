@@ -134,7 +134,10 @@ public:
                   useSystemCache            :  1,     // dyld_flags=0x00000010
                   useSystemDriverKitCache   :  1,     // dyld_flags=0x00000020
                   logRoots                  :  1,     // dyld_flags=0x00000040
-                  unusedFlagsLow            : 11,
+                  disablePageInLinking      :  1,     // dyld_flags=0x00000080
+                  // TODO: rdar://124408076 (Remove `enableSwiftPrespecData` boot-arg) remove once qualified
+                  disableSwiftPrespecData   :  1,     // dyld_flags=0x00000100
+                  unusedFlagsLow            :  9,
                   enableCompactInfo         :  1,     // dyld_flags=0x00040000
                   disableCompactInfo        :  1,     // dyld_flags=0x00080000
                   forceRODataConst          :  1,     // dyld_flags=0x00100000
@@ -199,15 +202,12 @@ public:
     typedef std::map<std::string_view, MappingInfo> PathToMapping;
 #endif
 
-    uint64_t                _amfiFlags       = -1;
-    DyldCommPage            _commPageFlags;
-    bool                    _internalInstall = false;
-    int                     _pid             = 100;
-    const char*             _cwd             = nullptr;
+#if !BUILDING_DYLD
     PathToPathList          _dirMap;
     const DyldSharedCache*  _dyldCache       = nullptr;
     PathToDylibInfo         _dylibInfoMap;
     FileIDsToPath           _fileIDsToPath;
+#endif
 #if BUILDING_CACHE_BUILDER || BUILDING_CACHE_BUILDER_UNIT_TESTS
     PathToMapping           _mappedOtherDylibs;
     const GradedArchs*      _gradedArchs    = nullptr;
@@ -223,12 +223,21 @@ public:
 #endif // !TARGET_OS_EXCLAVEKIT
 
 #if BUILDING_UNIT_TESTS
+    uint64_t                _amfiFlags       = -1;
+    DyldCommPage            _commPageFlags;
+    bool                    _internalInstall = false;
+    int                     _pid             = 100;
+    const char*             _cwd             = nullptr;
     bool                    _bypassMockFS   = false;
 #endif
 
 #endif // !BUILDING_DYLD
 };
-
+#if BUILDING_DYLD
+    // SyscallDelegate should have no ivars when being built as part of dyld. Unfortunately C++ requires types have a minimum size
+    // of 1 for various reasons, which means if someone accidentally adds a uint8_t sized field it could slip past this check.
+    static_assert(sizeof(SyscallDelegate) == 1);
+#endif
 
 } // namespace
 

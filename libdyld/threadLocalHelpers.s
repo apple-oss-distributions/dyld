@@ -183,46 +183,7 @@ _features_hi32:		.long 0
 _bufferSize32:		.long 0
 _hasXSave:			.long 0
 
-#endif
-
-
-
-#if __i386__
-	// returns address of TLV in %eax, all other registers (except %ecx) preserved
-	.globl _tlv_get_addr
-	.private_extern _tlv_get_addr
-_tlv_get_addr:
-	movl	4(%eax),%ecx			// get key from descriptor
-	movl	%gs:0x0(,%ecx,4),%ecx	// get thread value
-	testl	%ecx,%ecx				// if NULL, lazily allocate
-	je		LlazyAllocate
-	movl	8(%eax),%eax			// add offset from descriptor
-	addl	%ecx,%eax
-	ret
-LlazyAllocate:
-	pushl	%ebp
-	movl	%esp,%ebp
-	pushl	%edx					// save edx
-	subl	$548,%esp
-	movl	%eax,-8(%ebp)		    // save descriptor
-	lea		-528(%ebp),%ecx		    // get 512 byte buffer in frame
-	and		$-16, %ecx			    // 16-byte align buffer for fxsave
-	fxsave  (%ecx)
-	movl	-8(%ebp),%eax			// get descriptor
-	movl	4(%eax),%ecx			// get key from descriptor
-	movl	%ecx,(%esp)	            // push key parameter, also leaves stack aligned properly
-	call	_instantiateTLVs_thunk  // instantiateTLVs(key)
-	movl	-8(%ebp),%ecx			// get descriptor
-	movl	8(%ecx),%ecx			// get offset from descriptor
-	addl	%ecx,%eax				// add offset to buffer
-	lea 	-528(%ebp),%ecx
-	and 	$-16, %ecx              // 16-byte align buffer for fxrstor
-	fxrstor (%ecx)
-	addl	$548,%esp
-	popl	%edx	                // restore edx
-	popl	%ebp
-	ret
-#endif
+#endif // __x86_64__
 
 #if __arm64__
 	// Parameters: X0 = descriptor
@@ -307,40 +268,7 @@ LlazyAllocate:
 	ret
 #endif
 
-#endif
-
-#if __arm__
-	// returns address of TLV in r0, all other registers preserved
-	.align 2
-	.globl _tlv_get_addr
-	.private_extern _tlv_get_addr
-_tlv_get_addr:
-	push	{r1,r2,r3,r7,lr}
-#if __ARM_ARCH_7K__
-	sub		sp, sp, #12						// align stack to 16 bytes
-#endif
-	mov		r7, r0							// save descriptor in r7
-	ldr		r0, [r7, #4]					// get key from descriptor
-	bl		_pthread_getspecific			// get thread value
-	cmp		r0, #0
-	bne		L2								// if NULL, lazily allocate
-#if __ARM_ARCH_7K__
-	vpush	{d0, d1, d2, d3, d4, d5, d6, d7}
-#endif
-	ldr		r0, [r7, #4]					// get key from descriptor
- 	bl		_instantiateTLVs_thunk          // instantiateTLVs(key)
-#if __ARM_ARCH_7K__
-	vpop	{d0, d1, d2, d3, d4, d5, d6, d7}
-#endif
-L2:	ldr		r1, [r7, #8]					// get offset from descriptor
-	add		r0, r1, r0						// add offset into allocation block
-#if __ARM_ARCH_7K__
-	add		sp, sp, #12
-#endif
-	pop		{r1,r2,r3,r7,pc}
-
-
-#endif // __arm__
+#endif // __arm64__
 
 
 
@@ -348,7 +276,7 @@ L2:	ldr		r1, [r7, #8]					// get offset from descriptor
     .align 4
     .globl dyld_stub_binder
 dyld_stub_binder:
-#if __x86_64__ || __i386__
+#if __x86_64__
     jmp __dyld_missing_symbol_abort
 #else
     b   __dyld_missing_symbol_abort

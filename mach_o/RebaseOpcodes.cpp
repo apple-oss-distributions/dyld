@@ -212,7 +212,16 @@ void RebaseOpcodes::forEachRebaseLocation(std::span<const MappedSegment> segment
     const bool is64 = (_pointerSize == 8);
     (void)forEachRebase(^(const char* opcodeName, int type, bool segIndexSet, uint8_t segIndex, uint64_t segOffset, bool& stop) {
         uint8_t* loc = (uint8_t*)(segments[segIndex].content) + segOffset;
-        uint64_t targetVmOffset = (is64 ? *((uint64_t*)loc) : *((uint32_t*)loc)) - prefLoadAdder;
+        uint64_t targetVmOffset;
+        if ( is64 ) {
+            targetVmOffset = *((uint64_t*)loc) - prefLoadAdder;
+        }
+        else {
+            // for i386, there may be "text relocations" which are not 4-byte aligned
+            uint32_t value;
+            memcpy(&value, loc, 4);
+            targetVmOffset = (uint64_t)value - prefLoadAdder;
+        }
         Fixup fixup(loc, &segments[segIndex], targetVmOffset);
         callback(fixup, stop);
     });

@@ -69,6 +69,7 @@ enum amfi_dyld_policy_output_flag_set
     AMFI_DYLD_OUTPUT_ALLOW_FAILED_LIBRARY_INSERTION = (1 << 5),
     AMFI_DYLD_OUTPUT_ALLOW_LIBRARY_INTERPOSING      = (1 << 6),
     AMFI_DYLD_OUTPUT_ALLOW_EMBEDDED_VARS            = (1 << 7),
+    AMFI_DYLD_OUTPUT_ALLOW_DEVELOPMENT_VARS         = (1 << 8),
 };
 extern "C" int amfi_check_dyld_policy_self(uint64_t input_flags, uint64_t* output_flags);
     #include "dyldSyscallInterface.h"
@@ -209,6 +210,12 @@ ProcessConfig::ProcessConfig(const KernelArgs* kernArgs, SyscallDelegate& syscal
     if ( (this->dyldCache.addr == nullptr) || (this->dyldCache.addr->header.mappingOffset <= __offsetof(dyld_cache_header, cacheSubType)) )
         this->process.pageInLinkingMode = 0;
 #endif // TARGET_OS_OSX && !TARGET_OS_EXCLAVEKIT
+
+#if !TARGET_OS_EXCLAVEKIT
+    // env vars maybe override the "roots state" for the shared cache.  Do that now if we have env vars that matter
+    if ( pathOverrides.dontUsePrebuiltForApp() )
+        dyldCache.adjustRootsSupportForEnvVars();
+#endif // TARGET_OS_EXCLAVEKIT
 }
 
 #if !BUILDING_DYLD
@@ -314,12 +321,28 @@ bool ProcessConfig::Process::defaultDataConst()
 #endif
 }
 
+// This returns true if the process is using TPRO for DATA_CONST.
+// This is independent of whether the process is using TPRO for the allocator (ie TPRO_CONST segment)
 bool ProcessConfig::Process::defaultTproDataConst()
 {
 #if TARGET_OS_EXCLAVEKIT || TARGET_OS_SIMULATOR
     return false;
 #else
-   return (this->appleParam("dyld_hw_tpro_pagers") != nullptr);
+    // Note TPRO doesn't seem to work with 4k pages, so we disable it there
+    // It also doesn't work with private caches, although that is handled elsewhere in DyldCache::DyldCache()
+    return (this->appleParam("dyld_hw_tpro_pagers") != nullptr) && (vm_page_size == 0x4000);;
+#endif
+}
+
+// This returns true if the HW supports TPRO.  If this is true, then the allocator's TPRO_CONST segment
+// will use TPRO not mprotect.
+// This is independent of whether the process is using TPRO for DATA_CONST, see defaultTproDataConst() above.
+bool ProcessConfig::Process::defaultTproHW()
+{
+#if TARGET_OS_EXCLAVEKIT || TARGET_OS_SIMULATOR
+    return false;
+#else
+    return (this->appleParam("dyld_hw_tpro") != nullptr) && (vm_page_size == 0x4000);;
 #endif
 }
 
@@ -424,7 +447,9 @@ ProcessConfig::Process::Process(const KernelArgs* kernArgs, SyscallDelegate& sys
 #endif // TARGET_OS_OSX
     this->pageInLinkingMode  = 2;
     if ( syscall.internalInstall() ) {
-        if ( const char* mode = environ("DYLD_PAGEIN_LINKING") ) {
+        if ( this->commPage.disablePageInLinking ) {
+            this->pageInLinkingMode = 0;    // no page-in-linking
+        } else if ( const char* mode = environ("DYLD_PAGEIN_LINKING") ) {
             if (strcmp(mode, "0") == 0 )
                 this->pageInLinkingMode = 0;    // no page-in-linking
             else if (strcmp(mode, "1") == 0 )
@@ -456,10 +481,8 @@ ProcessConfig::Process::Process(const KernelArgs* kernArgs, SyscallDelegate& sys
 #endif // TARGET_OS_OSX
 #endif // __has_feature(ptrauth_calls)
 
-#if TARGET_OS_TV && __arm64__
-    // rdar://88514639 disable page-in-linking for tvOS
-    this->pageInLinkingMode = 0;
-#endif // TARGET_OS_TV && __arm64__
+#if TARGET_OS_TV && !TARGET_OS_SIMULATOR && BUILDING_DYLD
+#endif // TARGET_OS_TV && !TARGET_OS_SIMULATOR
 #if TARGET_OS_OSX
     // don't use page-in-linking when running under rosetta
     if ( this->isTranslated )
@@ -607,6 +630,9 @@ uint32_t ProcessConfig::Process::findVersionSetEquivalent(dyld3::Platform versio
             case dyld3::Platform::watchOS:  newVersionSetVersion = i.watchos; break;
             case dyld3::Platform::tvOS:     newVersionSetVersion = i.tvos; break;
             case dyld3::Platform::bridgeOS: newVersionSetVersion = i.bridgeos; break;
+#if BUILDING_DYLD || BUILDING_UNIT_TESTS // cache builder builds with old SDK that does not support visionOS
+            case dyld3::Platform::visionOS: newVersionSetVersion = i.visionos; break;
+#endif
             default: newVersionSetVersion = 0xffffffff; // If we do not know about the platform it is newer than everything
         }
         if (newVersionSetVersion > version) { break; }
@@ -771,13 +797,15 @@ ProcessConfig::Security::Security(Process& process, SyscallDelegate& syscall)
     this->allowInsertFailures       = (amfiFlags & AMFI_DYLD_OUTPUT_ALLOW_FAILED_LIBRARY_INSERTION);
     this->allowInterposing          = (amfiFlags & AMFI_DYLD_OUTPUT_ALLOW_LIBRARY_INTERPOSING);
     this->allowEmbeddedVars         = (amfiFlags & AMFI_DYLD_OUTPUT_ALLOW_EMBEDDED_VARS);
+    this->allowDevelopmentVars      = (amfiFlags & AMFI_DYLD_OUTPUT_ALLOW_DEVELOPMENT_VARS);
 #if TARGET_OS_SIMULATOR
     this->allowInsertFailures       = true; // FIXME: amfi is returning the wrong value for simulators <rdar://74025454>
 #endif
 
     // DYLD_DLSYM_RESULT can be set by any main executable
-    this->dlsymBlocked = false;
-    this->dlsymAbort   = false;
+    this->dlsymBlocked   = false;
+    this->dlsymAbort     = false;
+    this->dlsymAllowList = nullptr;
     process.mainExecutable->forDyldEnv(^(const char* keyEqualValue, bool& stop) {
         if ( strncmp(keyEqualValue, "DYLD_DLSYM_RESULT=", 18) == 0 ) {
             if ( strcmp(&keyEqualValue[18], "null") == 0 ) {
@@ -787,6 +815,22 @@ ProcessConfig::Security::Security(Process& process, SyscallDelegate& syscall)
             else if ( strcmp(&keyEqualValue[18], "abort") == 0 ) {
                 this->dlsymBlocked = true;
                 this->dlsymAbort   = true;
+            }
+            else if ( strncmp(&keyEqualValue[18], "null-allow:", 11) == 0 ) {
+                this->dlsymBlocked   = true;
+                this->dlsymAbort     = false;
+                this->dlsymAllowList = &keyEqualValue[29];
+            }
+            else if ( strncmp(&keyEqualValue[18], "abort-allow:", 12) == 0 ) {
+                this->dlsymBlocked   = true;
+                this->dlsymAbort     = true;
+                this->dlsymAllowList = &keyEqualValue[30];
+            }
+            else if ( strncmp(&keyEqualValue[18], "allow:", 6) == 0 ) {
+                // for logging of non-allowed symbols, yet nothing blocked
+                this->dlsymBlocked   = false;
+                this->dlsymAbort     = false;
+                this->dlsymAllowList = &keyEqualValue[24];
             }
         }
     });
@@ -894,6 +938,10 @@ ProcessConfig::Logging::Logging(const Process& process, const Security& security
                 this->descriptor = fd;
             }
         }
+    }
+    if ( security.allowEnvVarsPrint ) {
+        if (const char* str = process.environ("DYLD_PRINT_LINKS_WITH") )
+            this->linksWith = str;
     }
 #else
     this->segments       = true;
@@ -1156,6 +1204,7 @@ ProcessConfig::DyldCache::DyldCache(Process& process, const Security& security, 
 #endif
     this->unslidLoadAddress       = 0;
     this->development             = false;
+    this->rootsAreSupported       = true;
     this->dylibsExpectedOnDisk    = false;
     this->privateCache            = opts.forcePrivate;
     this->path                    = nullptr;
@@ -1170,7 +1219,10 @@ ProcessConfig::DyldCache::DyldCache(Process& process, const Security& security, 
     this->platform                = Platform::unknown;
     this->osVersion               = 0;
     this->dylibCount              = 0;
+#if TARGET_OS_SIMULATOR
+    // only support DYLD_SHARED_REGION=avoid on simulator
     if ( (cacheMode == nullptr) || (strcmp(cacheMode, "avoid") != 0) ) {
+#endif
         dyld3::SharedCacheLoadInfo loadInfo;
         bool isSimHost = false;
 #if TARGET_OS_OSX && BUILDING_DYLD
@@ -1218,21 +1270,46 @@ ProcessConfig::DyldCache::DyldCache(Process& process, const Security& security, 
             // process might need RW
             if ( !opts.enableReadOnlyDataConst )
                 makeDataConstWritable(log, syscall, true);
+
+            // If 'dyld_hw_tpro' is not set, then the shared cache for this process needs to use
+            // mprotect and not TPRO, when changing its state for the TPRO_CONST segment specifically.
+            // As ProcessConfig is constructed inside a withWriteableMemory block, we need to now make
+            // the cache TPRO_CONST writable to match the expectations of the caller with that block
+            // It also doesn't work with private caches, so we mprotect here for private caches too
+            if ( !process.defaultTproHW() || this->privateCache ) {
+                this->addr->forEachTPRORegion(^(const void *content, uint64_t unslidVMAddr, uint64_t vmSize, bool &stopRegion) {
+                    void* regionBaseAddr = (void*)(unslidVMAddr + this->slide);
+                    kern_return_t kr = ::vm_protect(mach_task_self(), (vm_address_t)regionBaseAddr, (vm_size_t)vmSize, false, VM_PROT_WRITE | VM_PROT_READ | VM_PROT_COPY);
+                    if (kr != KERN_SUCCESS) {
+                         // fprintf(stderr, "FAILED: %d", kr);
+                    }
+                });
+            }
 #endif // SUPPORT_VM_LAYOUT
 
-#if TARGET_OS_OSX && BUILDING_DYLD
+#if BUILDING_DYLD
+#if TARGET_OS_OSX
             // On macOS, we scan for roots at boot.  This is only done in PID 1, so we can only use
             // this result on the shared cache mapped at that point, not driverKit/Rosetta
             if ( !process.commPage.bootVolumeWritable
                 && !process.commPage.foundRoot
                 && !process.isTranslated ) {
                 if ( (process.platform == dyld3::Platform::macOS) || (process.platform == dyld3::Platform::iOSMac) ) {
+                    // FIXME: Remove the development hack here and rely just on the roots variable
                     this->development = false;
+
+                    this->rootsAreSupported = false;
                 }
             }
+#else
+            // On embedded, assume no roots are supported on customer caches.  We'll later override this if
+            // we detect env vars which force roots support
+            if ( !this->development )
+                this->rootsAreSupported = false;
 #endif // TARGET_OS_OSX
+#endif // BUILDING_DYLD
 
-#if BUILDING_CACHE_BUILDER || BUILDING_CLOSURE_UTIL || BUILDING_SHARED_CACHE_UTIL
+#if BUILDING_CACHE_BUILDER || BUILDING_CLOSURE_UTIL || BUILDING_SHARED_CACHE_UTIL || BUILDING_CACHE_BUILDER_UNIT_TESTS
             this->path = allocator.strdup(getSystemCacheDir(process.platform));
 #else
             if (loadInfo.FSID && loadInfo.FSObjID) {
@@ -1264,7 +1341,9 @@ ProcessConfig::DyldCache::DyldCache(Process& process, const Security& security, 
             }
 #endif
         }
+#if TARGET_OS_SIMULATOR
     }
+#endif
 
 #if BUILDING_DYLD && SUPPORT_IGNITION
     if ( cacheFinder.ignitionRootFD != -1 ) {
@@ -1308,7 +1387,8 @@ bool ProcessConfig::DyldCache::uuidOfFileMatchesDyldCache(const Process& proc, c
         __block bool        diskUuidFound = false;
         __block Diagnostics diag;
         sys.withReadOnlyMappedFile(diag, dylibPath, false, ^(const void* mapping, size_t mappedSize, bool isOSBinary, const FileID& fileID, const char* canonicalPath) {
-            if ( const MachOFile* diskMF = MachOFile::compatibleSlice(diag, mapping, mappedSize, dylibPath, proc.platform, isOSBinary, *proc.archs) ) {
+            uint64_t sliceSize = 0;
+            if ( const MachOFile* diskMF = MachOFile::compatibleSlice(diag, sliceSize, mapping, mappedSize, dylibPath, proc.platform, isOSBinary, *proc.archs) ) {
                 diskUuidFound = diskMF->getUuid(diskUUIDPtr);
             }
         });
@@ -1472,6 +1552,11 @@ void ProcessConfig::DyldCache::makeDataConstWritable(const Logging& lg, const Sy
     const uint32_t perms = (writable ? VM_PROT_WRITE | VM_PROT_READ | VM_PROT_COPY : VM_PROT_READ);
     addr->forEachCache(^(const DyldSharedCache *cache, bool& stopCache) {
         cache->forEachRegion(^(const void*, uint64_t vmAddr, uint64_t size, uint32_t initProt, uint32_t maxProt, uint64_t flags, bool& stopRegion) {
+            // Skip TPRO const until we can move this in to the MemoryManager to share state there
+            // FIXME: Move to MemoryManager if needed, or make sure we never have weak-defs or binds to patch in __TPRO_CONST.
+            if ( flags & DYLD_CACHE_MAPPING_CONST_TPRO_DATA )
+                return;
+
             void* content = (void*)(vmAddr + slide);
             if ( flags & DYLD_CACHE_MAPPING_CONST_DATA ) {
                 if ( lg.segments )
@@ -1539,14 +1624,17 @@ const dyld3::MachOFile* ProcessConfig::DyldCache::getIndexedImageEntry(uint32_t 
 #endif
 }
 
-void ProcessConfig::DyldCache::adjustDevelopmentMode() const
+void ProcessConfig::DyldCache::adjustRootsSupportForEnvVars()
 {
-    // On macOS, we always ship a development cache, but we can force it to behave as
-    // if its a customer cache, ie, don't stat for roots.
-    // This forces it back to a development cache, eg, when overriding the cache using env vars
 #if TARGET_OS_OSX && BUILDING_DYLD
-    (const_cast<DyldCache*>(this))->development = true;
+    // FIXME: Remove the development hack here and rely just on the roots variable
+    this->development = true;
 #endif
+
+#if BUILDING_DYLD
+    // Env vars imply that we need to look for roots. The kind of cache will determine which paths can be roots
+    this->rootsAreSupported = true;
+#endif //BUILDING_DYLD
 }
 
 //
@@ -1603,9 +1691,6 @@ ProcessConfig::PathOverrides::PathOverrides(const Process& process, const Securi
 
     // process DYLD_VERSIONED_* env vars
     this->processVersionedPaths(process, syscall, cache, process.platform, *process.archs, allocator);
-
-    if ( dontUsePrebuiltForApp() )
-        cache.adjustDevelopmentMode();
 #endif // !TARGET_OS_EXCLAVEKIT
 }
 
@@ -1919,6 +2004,7 @@ void ProcessConfig::PathOverrides::forEachDylibFallback(Platform platform, bool 
                         break;
                 }
                 break;
+            case Platform::visionOS:
             case Platform::iOS:
             case Platform::watchOS:
             case Platform::tvOS:
@@ -1935,12 +2021,20 @@ void ProcessConfig::PathOverrides::forEachDylibFallback(Platform platform, bool 
             case Platform::iOS_simulator:
             case Platform::watchOS_simulator:
             case Platform::tvOS_simulator:
+            case Platform::visionOS_simulator:
                 if ( _fallbackPathMode != FallbackPathMode::none )
                     handler("/usr/lib", Type::standardFallback, stop);
                 break;
+            case Platform::macOSExclaveCore:
+            case Platform::macOSExclaveKit:
+            case Platform::iOSExclaveCore:
+            case Platform::iOSExclaveKit:
+            case Platform::tvOSExclaveCore:
+            case Platform::tvOSExclaveKit:
             case Platform::driverKit:
                 // no fallback searching for driverkit
                 break;
+
         }
     }
 }
@@ -1974,6 +2068,8 @@ void ProcessConfig::PathOverrides::forEachFrameworkFallback(Platform platform, b
                         break;
                 }
                 break;
+            case Platform::visionOS:
+            case Platform::visionOS_simulator:
             case Platform::iOS:
             case Platform::watchOS:
             case Platform::tvOS:
@@ -1987,8 +2083,15 @@ void ProcessConfig::PathOverrides::forEachFrameworkFallback(Platform platform, b
                     handler("/System/Library/Frameworks", Type::standardFallback, stop);
                 break;
             case Platform::driverKit:
+            case Platform::macOSExclaveCore:
+            case Platform::macOSExclaveKit:
+            case Platform::iOSExclaveCore:
+            case Platform::iOSExclaveKit:
+            case Platform::tvOSExclaveCore:
+            case Platform::tvOSExclaveKit:
                 // no fallback searching for driverkit
                 break;
+
         }
     }
 }
@@ -2456,14 +2559,14 @@ const char* ProcessConfig::canonicalDylibPathInCache(const char* dylibPath) cons
 // MARK: --- global functions ---
 //
 
-#if BUILDING_DYLD
-#if !TARGET_OS_EXCLAVEKIT
+#if BUILDING_DYLD || BUILDING_UNIT_TESTS
+#if BUILDING_DYLD && !TARGET_OS_EXCLAVEKIT
 static char error_string[1024]; // FIXME: check if anything still needs the error_string global symbol, or if abort_with_payload superceeds it
 #endif // !TARGET_OS_EXCLAVEKIT
 
 void halt(const char* message, const StructuredError* errorInfo)
 {
-#if TARGET_OS_EXCLAVEKIT
+#if TARGET_OS_EXCLAVEKIT || BUILDING_UNIT_TESTS
     console("%s\n", message);
     abort();
 #else
@@ -2527,7 +2630,7 @@ void halt(const char* message, const StructuredError* errorInfo)
     abort_with_payload(OS_REASON_DYLD, kind, payloadBuffer, payloadSize, truncMessage, 0);
 #endif // TARGET_OS_EXCLAVEKIT
 }
-#endif // BUILDING_DYLD
+#endif // BUILDING_DYLD || BUILDING_UNIT_TESTS
 
 void console(const char* format, ...)
 {

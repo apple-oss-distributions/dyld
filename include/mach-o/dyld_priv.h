@@ -24,7 +24,7 @@
 #ifndef _MACH_O_DYLD_PRIV_H_
 #define _MACH_O_DYLD_PRIV_H_
 
-#include <assert.h>
+#include <assert.h> // Remove when <rdar://121635350> is fixed
 #include <stdbool.h>
 #if __has_include(<unistd.h>)
 #include <unistd.h>
@@ -276,6 +276,15 @@ extern bool dyld_minos_at_least(const struct mach_header* mh, dyld_build_version
 // Convenience versions of the previous two functions that run against the the main executable
 extern bool dyld_program_sdk_at_least(dyld_build_version_t version) __API_AVAILABLE(macos(10.14), ios(12.0), watchos(5.0), tvos(12.0), bridgeos(3.0));
 extern bool dyld_program_minos_at_least(dyld_build_version_t version) __API_AVAILABLE(macos(10.14), ios(12.0), watchos(5.0), tvos(12.0), bridgeos(3.0));
+
+// Returns a token that can be used for version compares. This is intend to be used by frameworks that
+// must send the information over to a daemon which performs the compare. These values should not be stored and
+// are not guaranteed to be stable between OS releases.
+
+extern uint64_t dyld_get_program_sdk_version_token()  __SPI_AVAILABLE(macos(15.0), ios(18.0), watchos(11.0), tvos(18.0), bridgeos(9.0));
+extern uint64_t dyld_get_program_minos_version_token()  __SPI_AVAILABLE(macos(15.0), ios(18.0), watchos(11.0), tvos(18.0), bridgeos(9.0));
+extern dyld_platform_t dyld_version_token_get_platform(uint64_t token) __SPI_AVAILABLE(macos(15.0), ios(18.0), watchos(11.0), tvos(18.0), bridgeos(9.0));
+extern bool dyld_version_token_at_least(uint64_t token, dyld_build_version_t version) __SPI_AVAILABLE(macos(15.0), ios(18.0), watchos(11.0), tvos(18.0), bridgeos(9.0));
 
 // Function that walks through the load commands and calls the internal block for every version found
 // Intended as a fallback for very complex (and rare) version checks, or for tools that need to
@@ -612,6 +621,7 @@ extern uint32_t _dyld_launch_mode(void);
 #define DYLD_EXIT_REASON_FILE_SYSTEM_SANDBOX    6
 #define DYLD_EXIT_REASON_MALFORMED_MACHO        7
 #define DYLD_EXIT_REASON_OTHER                  9
+#define DYLD_EXIT_REASON_DLSYM_BLOCKED          10
 
 //
 // When it has more information about the termination, dyld will use abort_with_payload().
@@ -814,6 +824,7 @@ typedef uint64_t _dyld_pseudodylib_symbol_flags;
 #define DYLD_PSEUDODYLIB_SYMBOL_FLAGS_FOUND 1
 #define DYLD_PSEUDODYLIB_SYMBOL_FLAGS_WEAK_DEF 2
 #define DYLD_PSEUDODYLIB_SYMBOL_FLAGS_CALLABLE 4
+#define DYLD_PSEUDODYLIB_SYMBOL_FLAGS_MATERIALIZING 8
 
 typedef void (*_dyld_pseudodylib_dispose_string)(char *str);
 typedef char* (*_dyld_pseudodylib_initialize)(void* pd_ctx, const void* mh);
@@ -823,6 +834,7 @@ typedef char* (*_dyld_pseudodylib_lookup_symbols)(void* pd_ctx, const void* mh, 
 typedef int (*_dyld_pseudodylib_lookup_address)(void* pd_ctx, const void* mh, const void* addr, struct dl_info* dl);
 typedef char* (*_dyld_pseudodylib_find_unwind_sections)(void* pd_ctx, const void* mh, const void* addr, bool* found, struct dyld_unwind_sections* info);
 typedef char* (*_dyld_pseudodylib_loadable_at_path)(void* pd_ctx, const void* mh, const char* possible_path);
+typedef char* (*_dyld_pseudodylib_finalize_requested_symbols)(void* pd_ctx, const void* mh, const char *names[], size_t num_names);
 
 // Versioned struct to hold pseudo-dylib callbacks.
 // See _dyld_pseudodylib_callbacks_v2.
@@ -861,6 +873,30 @@ struct _dyld_pseudodylib_callbacks_v2 {
     _dyld_pseudodylib_find_unwind_sections find_unwind_sections;
     // Added in version 2
     _dyld_pseudodylib_loadable_at_path loadable_at_path;
+};
+
+// Callbacks to implement pseudo-dylib behavior.
+//
+// dispose_error_message will be called to destroy error messages returned by the other callbacks.
+// initialize will be called by dlopen to run initializers in the pseudo-dylib.
+// deinitialize will be called by dlclose to run deinitializers.
+// lookup_symbols will be called to find the address of symbols defined by the pseudo-dylib (e.g. by dlsym).
+// lookup_address will be called by dladdr to find information about the given address.
+// find_unwind_sections will be called by _dyld_find_unwind_sections.
+// loadable_at_path will be called to check whether the pseudo-dylib should be loaded for a given candidate path.
+struct _dyld_pseudodylib_callbacks_v3 {
+    uintptr_t version; // == 3
+    // Added in version 1
+    _dyld_pseudodylib_dispose_string dispose_string;
+    _dyld_pseudodylib_initialize initialize;
+    _dyld_pseudodylib_deinitialize deinitialize;
+    _dyld_pseudodylib_lookup_symbols lookup_symbols;
+    _dyld_pseudodylib_lookup_address lookup_address;
+    _dyld_pseudodylib_find_unwind_sections find_unwind_sections;
+    // Added in version 2
+    _dyld_pseudodylib_loadable_at_path loadable_at_path;
+    // Added in version 3
+    _dyld_pseudodylib_finalize_requested_symbols finalize_requested_symbols;
 };
 
 typedef struct _dyld_pseudodylib_callbacks_opaque*
@@ -910,6 +946,41 @@ extern void* _dyld_for_objc_header_opt_rw();
 // Exists in Mac OS X 14.0 and later
 // Exists in iOS 17.0 and later
 extern const void* _dyld_for_objc_header_opt_ro();
+
+
+// Called by frameworks to see if dlsym() has been blocked by main executable
+// Exists in macOS 15.0 and later
+// Exists in iOS 18.0 and later
+extern bool _dyld_dlsym_blocked(void);
+
+
+// Called only by processes that want to block dlsym()
+// If dlsym() is called, this callback will be called with the symbol name.
+// The caller can then log the unexpected use of dlsym().
+// Exists in macOS 15.0 and later
+// Exists in iOS 18.0 and later
+extern void _dyld_register_dlsym_notifier(void (*callback)(const char* symbolName));
+
+// Called only by Swift runtime to access top level symbol with prespecialized metadata.
+extern const void* _dyld_get_swift_prespecialized_data(void) __API_AVAILABLE(macos(15.0), ios(18.0), watchos(11.0), tvos(18.0));
+
+// Swift uses this define to guard for the above symbol being available at build time
+#define DYLD_GET_SWIFT_PRESPECIALIZED_DATA_DEFINED 1
+
+// Returns true if the handle (returned by a prior call to dlopen()) points to a pseudo dylib
+// Exists in macOS 15.0 and later
+// Exists in iOS 18.0 and later
+extern bool _dyld_is_pseudodylib(void* handle) __API_AVAILABLE(macos(15.0), ios(18.0), watchos(11.0), tvos(18.0));
+
+// Called by Swift runtime to query pointer hash tables.
+extern const void *_dyld_find_pointer_hash_table_entry(const void *table,
+                                                       const void *key1,
+                                                       size_t restKeysCount,
+                                                       const void **restKeys) __API_AVAILABLE(macos(15.0), ios(18.0), watchos(11.0), tvos(18.0));
+
+// Swift uses this define to guard for the above symbol being available at build time
+#define DYLD_FIND_POINTER_HASH_TABLE_ENTRY_DEFINED 1
+
 #if __cplusplus
 }
 #endif /* __cplusplus */

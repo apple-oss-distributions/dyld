@@ -25,6 +25,7 @@
 #include <TargetConditionals.h>
 
 #if !TARGET_OS_EXCLAVEKIT
+#include <assert.h>
 #include <stdlib.h>
 #include <string.h>
 #include <limits.h>

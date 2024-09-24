@@ -76,6 +76,10 @@ struct Node
         os << u64;
         value = os.str();
     }
+
+    // remove node* initializers to avoid implicit conversion to value types
+    inline Node(const Node*) = delete;
+    inline Node(Node*) = delete;
 };
 
 static inline Node makeNode(std::string value) {

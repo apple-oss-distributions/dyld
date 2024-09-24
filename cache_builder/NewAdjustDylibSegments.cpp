@@ -533,6 +533,8 @@ void Adjustor<P>::rebuildLinkEditAndLoadCommands(const DylibSectionCoalescer* se
             case LC_DYLIB_CODE_SIGN_DRS:
             case LC_DYLD_CHAINED_FIXUPS:
             case LC_SEGMENT_SPLIT_INFO:
+            case LC_ENCRYPTION_INFO:
+            case LC_ENCRYPTION_INFO_64:
                 remove = true;
                 break;
             default:

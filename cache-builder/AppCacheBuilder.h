@@ -195,6 +195,7 @@ private:
     Region                              branchStubsRegion;
     Region                              textBootExecRegion;
     Region                              dataConstRegion;
+    Region                              lateConstRegion;
     Region                              dataSptmRegion;
     Region                              branchGOTsRegion;
     Region                              readWriteRegion;

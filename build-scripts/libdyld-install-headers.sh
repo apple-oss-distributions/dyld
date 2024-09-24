@@ -12,14 +12,12 @@ dlfcnUnifdef()
     fi
 }
 
-PLATFORM_SDK="macosx.internal"
-
 # Check that a header can be parsed as C, not C++
 checkHeader()
 {
     for ARCH in $ARCHS
     do
-        xcrun -sdk ${PLATFORM_SDK} clang -x c "$1" -fsyntax-only -Wno-visibility -arch ${ARCH} -I${DSTROOT}${SYSTEM_PREFIX}${PUBLIC_HEADERS_FOLDER_PATH}  -I${DSTROOT}${SYSTEM_PREFIX}${PRIVATE_HEADERS_FOLDER_PATH} -I${DSTROOT}${SYSTEM_PREFIX}/usr/include/ -I${DSTROOT}${SYSTEM_PREFIX}/usr/local/include/
+        xcrun -log -sdk ${SDK_NAME} clang -x c "$1" -fsyntax-only -Wno-visibility -target "${ARCH}-apple-${LLVM_TARGET_TRIPLE_OS_VERSION}" -I${DSTROOT}${SYSTEM_PREFIX}${PUBLIC_HEADERS_FOLDER_PATH}  -I${DSTROOT}${SYSTEM_PREFIX}${PRIVATE_HEADERS_FOLDER_PATH} -I${DSTROOT}${SYSTEM_PREFIX}/usr/include/ -I${DSTROOT}${SYSTEM_PREFIX}/usr/local/include/
     done
 }
 
@@ -45,7 +43,6 @@ elif [ -n "${SYSTEM_PREFIX}" ]; then # ExclaveKit
     cp ${SRCROOT}/include/mach-o/dyld_exclavekit.modulemap  ${DSTROOT}${SYSTEM_PREFIX}${PUBLIC_HEADERS_FOLDER_PATH}/dyld.modulemap
     cp ${SRCROOT}/include/mach-o/dyld_exclavekit.private.modulemap  ${DSTROOT}${SYSTEM_PREFIX}${PRIVATE_HEADERS_FOLDER_PATH}/dyld.private.modulemap
 
-    checkHeader ${DSTROOT}${SYSTEM_PREFIX}${PRIVATE_HEADERS_FOLDER_PATH}/dyld_priv.h
 else
     mkdir -p ${DSTROOT}${PUBLIC_HEADERS_FOLDER_PATH}
     mkdir -p ${DSTROOT}${PRIVATE_HEADERS_FOLDER_PATH}

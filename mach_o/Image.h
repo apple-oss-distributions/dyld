@@ -50,10 +50,11 @@ namespace mach_o {
 class VIS_HIDDEN Image
 {
 public:
-    enum class MappingKind { wholeSliceMapped, dyldLoadedPreFixups, dyldLoadedPostFixups, unknown };
+    enum class MappingKind : uint8_t { wholeSliceMapped, dyldLoadedPreFixups, dyldLoadedPostFixups, unknown };
 
                     Image() = delete;
                     Image(const void* buffer, size_t bufferSize, MappingKind kind);
+                    Image(const mach_header* mh);  // for dyld loaded images only
                     Image(const Image&& other);
                     Image(const Image& other) = default;
 
@@ -76,6 +77,7 @@ public:
     bool                    hasFunctionStarts() const  { return (_functionStarts != nullptr); }
     bool                    hasCompactUnwind() const   { return (_compactUnwind != nullptr); }
     bool                    hasSplitSegInfo() const    { return (_splitSegInfo != nullptr); }
+    bool                    hasFirmwareFixups() const  { return _buffer->hasFirmwareChainStarts(); }
     const ExportsTrie&      exportsTrie() const        { return *_exportsTrie; }
     const NListSymbolTable& symbolTable() const        { return *_symbolTable; }
     const RebaseOpcodes&    rebaseOpcodes() const      { return *_rebaseOpcodes; }
@@ -89,8 +91,10 @@ public:
     std::span<const uint32_t> indirectSymbolTable() const;
     std::span<uint8_t>      atomInfo() const;
 
-    uint32_t              segmentCount() const;
-    MappedSegment         segment(uint32_t segIndex) const;
+    uint32_t                segmentCount() const;
+    MappedSegment           segment(uint32_t segIndex) const;
+    void                    forEachInitializer(void (^callback)(uint32_t offset)) const;
+    void                    forEachClassicTerminator(void (^callback)(uint32_t offset)) const;
 
 
 #if BUILDING_MACHO_WRITER
@@ -114,7 +118,8 @@ private:
     bool                inferIfZerofillExpanded() const;
     Error               validLinkedit(const Policy& policy) const;
     Error               validStructureLinkedit(const Policy& policy) const;
-    
+    Error               validInitializers(const Policy& policy) const;
+
     void                makeExportsTrie();
     void                makeSymbolTable();
     void                makeRebaseOpcodes();
@@ -130,6 +135,7 @@ private:
     const Header*       _buffer;
     size_t              _bufferSize;
     const uint8_t*      _linkeditBias    = nullptr; // add LC file-offset to this to get linkedit content
+    MappingKind         _mappingKind;
     bool                _hasZerofillExpansion;
 
     const ExportsTrie*      _exportsTrie     = nullptr;

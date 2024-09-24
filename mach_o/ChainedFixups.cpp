@@ -185,8 +185,8 @@ void ChainedFixups::forEachFixupChainStartLocation(std::span<const MappedSegment
                     bool chainEnd = false;
                     while ( !chainEnd ) {
                         chainEnd = (segStarts->page_start[overflowIndex] & DYLD_CHAINED_PTR_START_LAST);
-                        uint16_t  startOffset = (segStarts->page_start[overflowIndex] & ~DYLD_CHAINED_PTR_START_LAST);
-                        uint32_t* chainStart  = (uint32_t*)((uint8_t*)(segments[segIndex].content) + startOffset);
+                        uint16_t       startOffset = (segStarts->page_start[overflowIndex] & ~DYLD_CHAINED_PTR_START_LAST);
+                        const uint8_t* chainStart  = (uint8_t*)(segments[segIndex].content) + pageIndex * segStarts->page_size + startOffset;
                         callback(chainStart, segIndex, pf, stop);
                         ++overflowIndex;
                     }
@@ -203,7 +203,7 @@ void ChainedFixups::forEachFixupChainStartLocation(std::span<const MappedSegment
 }
 
 
-Error ChainedFixups::valid(std::span<const MappedSegment> segments) const
+Error ChainedFixups::valid(uint64_t preferredLoadAddress, std::span<const MappedSegment> segments) const
 {
 #if BUILDING_MACHO_WRITER
     if ( _buildError.hasError() )
@@ -324,12 +324,14 @@ Error ChainedFixups::valid(std::span<const MappedSegment> segments) const
         return Error("chained fixups, imports_count (%d) exceeds max of %d", _fixupsHeader->imports_count, maxBindOrdinal);
 
     // validate max_valid_pointer is larger than last segment
-    //if ( maxValidPointerSeen != 0 ) {
-    //    uint64_t lastSegmentLastVMAddr = segmentsInfo[leInfo.layout.linkeditSegIndex-1].vmAddr + segmentsInfo[leInfo.layout.linkeditSegIndex-1].vmSize;
-    //    if ( maxValidPointerSeen < lastSegmentLastVMAddr ) {
-    //        return Error("chained fixups, max_valid_pointer too small for image");
-    //    }
-    //}
+    if ( maxValidPointerSeen != 0 ) {
+        size_t lastDataSegmentIndex = segments.size() - (segments.back().segName == "__LINKEDIT" ? 2 : 1);
+        const MappedSegment& lastDataSegment = segments[lastDataSegmentIndex];
+        // note: runtime offset is relative to the load address but max valid pointer encodes an 'absolute' valid pointer
+        uint64_t lastDataSegmentLastVMAddr = preferredLoadAddress + lastDataSegment.runtimeOffset + lastDataSegment.runtimeSize;
+        if ( maxValidPointerSeen < lastDataSegmentLastVMAddr )
+            return Error("chained fixups, max_valid_pointer (0x%x) too small for image last vm address 0x%llx", maxValidPointerSeen, lastDataSegmentLastVMAddr);
+    }
     return Error::none();
 }
 
@@ -508,7 +510,7 @@ ChainedFixups::ChainedFixups(std::span<const Fixup::BindTarget> bindTargets,
                              const PointerFormat& pointerFormat, uint32_t pageSize, bool setDataChains)
 {
     std::vector<std::vector<Fixup>> fixupsInSegments;
-    fixupsInSegments.reserve(segments.size());
+    fixupsInSegments.resize(segments.size());
 
     {
         // unify and sort fixups to make chains
@@ -628,18 +630,14 @@ void ChainedFixups::buildFixups(std::span<const Fixup::BindTarget> bindTargets,
             importsTableStart = &imports[0];
     }
 
-    // for 32-bit archs, compute maxRebaseAddress value
-    uint64_t maxRebaseAddress = 0;
+    // for 32-bit archs, compute max valid pointer value
+    uint64_t maxValidPointer = 0;
     if ( !pointerFormat.is64() ) {
-        for ( const SegmentFixupsInfo& segment : segments ) {
-            const MappedSegment& seg = segment.mappedSegment;
-            if ( seg.segName == "__LINKEDIT" ) {
-                uint64_t baseAddress = preferredLoadAddress;
-                if ( baseAddress == 0x4000 )
-                    baseAddress = 0; // 32-bit main executables have rebase targets that are zero based
-                maxRebaseAddress = (seg.runtimeOffset + 0x00100000-1) & -0x00100000; // align to 1MB
-            }
-        }
+        uint64_t lastDataSegmentIndex = segments.size() - (segments.back().mappedSegment.segName == "__LINKEDIT" ? 2 : 1);
+        const MappedSegment& lastDataSegment = segments[lastDataSegmentIndex].mappedSegment;
+        // for 32-bit binaries rebase targets are 0 based, so load address needs to be included in max pointer computation
+        uint64_t lastDataSegmentLastVMAddr = preferredLoadAddress + lastDataSegment.runtimeOffset + lastDataSegment.runtimeSize;
+        maxValidPointer = (lastDataSegmentLastVMAddr + 0x00100000-1) & -0x00100000; // align to 1MB
     }
 
     // allocate space in _bytes for full dyld_chained_fixups data structure
@@ -677,7 +675,7 @@ void ChainedFixups::buildFixups(std::span<const Fixup::BindTarget> bindTargets,
             segInfo->page_size          = pageSize;
             segInfo->pointer_format     = pointerFormat.value();
             segInfo->segment_offset     = segment.runtimeOffset;
-            segInfo->max_valid_pointer  = (uint32_t)maxRebaseAddress;
+            segInfo->max_valid_pointer  = (uint32_t)maxValidPointer;
             segInfo->page_count         = 0; // fill in later, may be trailing pages with no fixups
             segInfo->page_start[0]      = DYLD_CHAINED_PTR_START_NONE;
 
@@ -912,6 +910,29 @@ uint32_t ChainedFixups::addSymbolString(CString symbolName, std::vector<char>& p
 #endif
 
 
+// copy of dyld_chained_ptr_arm64e_rebase that allows 4-byte strides
+struct __attribute__((packed)) unaligned_dyld_chained_ptr_arm64e_rebase
+{
+    uint64_t    target   : 43,
+                high8    :  8,
+                next     : 11,    // 4 or 8-byte stide
+                bind     :  1,    // == 0
+                auth     :  1;    // == 0
+};
+
+// copy of dyld_chained_ptr_arm64e_auth_rebase that allows 4-byte strides
+struct __attribute__((packed)) unaligned_dyld_chained_ptr_arm64e_auth_rebase
+{
+    uint64_t    target    : 32,   // runtimeOffset
+                diversity : 16,
+                addrDiv   :  1,
+                key       :  2,
+                next      : 11,    // 4 or 8-byte stide
+                bind      :  1,    // == 0
+                auth      :  1;    // == 1
+};
+
+
 //
 // MARK: --- PointerFormat_Generic_arm64e ---
 //
@@ -929,14 +950,14 @@ public:
     int32_t          bindMinEmbeddableAddend(bool authenticated) const override  { return (authenticated ? 0 : -0x3FFFF); }
     
     const void*      nextLocation(const void* loc) const override {
-        const dyld_chained_ptr_arm64e_rebase* ptr = (dyld_chained_ptr_arm64e_rebase*)loc;
+        const unaligned_dyld_chained_ptr_arm64e_rebase* ptr = (unaligned_dyld_chained_ptr_arm64e_rebase*)loc;
         if ( ptr->next == 0 )
             return nullptr;
         return (void*)((uint8_t*)loc + ptr->next * stride());
     }
     
     Fixup            parseChainEntry(const void* loc, const MappedSegment* seg, uint64_t preferedLoadAddress=0) const override {
-       if ( ((dyld_chained_ptr_arm64e_rebase*)loc)->bind ) {
+       if ( ((unaligned_dyld_chained_ptr_arm64e_rebase*)loc)->bind ) {
             if ( bindBitCount() == 24 ) {
                 const dyld_chained_ptr_arm64e_auth_bind24* authBind24Ptr = (dyld_chained_ptr_arm64e_auth_bind24*)loc;
                 const dyld_chained_ptr_arm64e_bind24*      bind24Ptr     = (dyld_chained_ptr_arm64e_bind24*)loc;
@@ -955,8 +976,8 @@ public:
             }
         }
         else {
-            const dyld_chained_ptr_arm64e_auth_rebase* authRebasePtr = (dyld_chained_ptr_arm64e_auth_rebase*)loc;
-            const dyld_chained_ptr_arm64e_rebase*      rebasePtr     = (dyld_chained_ptr_arm64e_rebase*)loc;
+            const unaligned_dyld_chained_ptr_arm64e_auth_rebase* authRebasePtr = (unaligned_dyld_chained_ptr_arm64e_auth_rebase*)loc;
+            const dyld_chained_ptr_arm64e_rebase*                rebasePtr     = (dyld_chained_ptr_arm64e_rebase*)loc;
             if ( authRebasePtr->auth )
                return Fixup(loc, seg, authRebasePtr->target, authRebasePtr->key, authRebasePtr->addrDiv, authRebasePtr->diversity);
             else if ( unauthRebaseIsVmAddr() )
@@ -966,6 +987,24 @@ public:
         }
     }
 #if BUILDING_MACHO_WRITER
+    static int64_t   signExtendedAddend(dyld_chained_ptr_arm64e_bind24* bind)
+    {
+        uint64_t addend19 = bind->addend;
+        if ( addend19 & 0x40000 )
+            return addend19 | 0xFFFFFFFFFFFC0000ULL;
+        else
+            return addend19;
+    }
+
+    static int64_t   signExtendedAddend(dyld_chained_ptr_arm64e_bind* bind)
+    {
+        uint64_t addend27     = bind->addend;
+        uint64_t top8Bits     = addend27 & 0x00007F80000ULL;
+        uint64_t bottom19Bits = addend27 & 0x0000007FFFFULL;
+        uint64_t newValue     = (top8Bits << 13) | (((uint64_t)(bottom19Bits << 37) >> 37) & 0x00FFFFFFFFFFFFFF);
+        return newValue;
+    }
+
     void             writeChainEntry(const Fixup& fixup, const void* nextLoc, uint64_t preferedLoadAddress) const override {
         intptr_t delta = (nextLoc == nullptr) ? 0 : ((uint8_t*)nextLoc - (uint8_t*)fixup.location);
         if ( fixup.isBind ) {
@@ -992,7 +1031,7 @@ public:
                     bind24Ptr->addend   = fixup.bind.embeddedAddend;
                     bind24Ptr->zero     = 0;
                     bind24Ptr->ordinal  = fixup.bind.bindOrdinal;
-                    assert(bind24Ptr->addend == fixup.bind.embeddedAddend);
+                    assert(signExtendedAddend(bind24Ptr) == fixup.bind.embeddedAddend);
                     assert(bind24Ptr->next*stride() == delta);
                     assert(bind24Ptr->ordinal == fixup.bind.bindOrdinal);
                 }
@@ -1020,7 +1059,7 @@ public:
                     bindPtr->addend   = fixup.bind.embeddedAddend;
                     bindPtr->zero     = 0;
                     bindPtr->ordinal  = fixup.bind.bindOrdinal;
-                    assert(bindPtr->addend == fixup.bind.embeddedAddend);
+                    assert(signExtendedAddend(bindPtr) == fixup.bind.embeddedAddend);
                     assert(bindPtr->next*stride() == delta);
                     assert(bindPtr->ordinal == fixup.bind.bindOrdinal);
                 }
@@ -1080,7 +1119,7 @@ protected:
 //
 // MARK: --- PointerFormat_DYLD_CHAINED_PTR_ARM64E_KERNEL ---
 //
-class VIS_HIDDEN PointerFormat_DYLD_CHAINED_PTR_ARM64E_KERNEL : public PointerFormat_Generic_arm64e
+class VIS_HIDDEN  __attribute__((__packed__)) PointerFormat_DYLD_CHAINED_PTR_ARM64E_KERNEL : public PointerFormat_Generic_arm64e
 {
 public:
     uint16_t        value() const override                 { return DYLD_CHAINED_PTR_ARM64E_KERNEL; }
@@ -1134,7 +1173,7 @@ class VIS_HIDDEN PointerFormat_DYLD_CHAINED_PTR_ARM64E_FIRMWARE : public Pointer
 public:
     uint16_t         value() const override                { return DYLD_CHAINED_PTR_ARM64E_FIRMWARE; }
     const char*      name() const override                 { return "DYLD_CHAINED_PTR_ARM64E_FIRMWARE"; }
-    const char*      description() const override          { return "authenticated arm64e, 4-byte stride, target vmoffset"; }
+    const char*      description() const override          { return "authenticated arm64e, 4-byte stride, target vmaddr"; }
     bool             is64() const override                 { return true; }
 protected:
     uint32_t        bindBitCount() const override          { return 16; }
@@ -1357,7 +1396,7 @@ public:
     
     Fixup            parseChainEntry(const void* loc, const MappedSegment* seg, uint64_t preferedLoadAddress=0) const override {
         const dyld_chained_ptr_32_firmware_rebase*  rebasePtr = (dyld_chained_ptr_32_firmware_rebase*)loc;
-        return Fixup(loc, seg, rebasePtr->target);
+        return Fixup(loc, seg, rebasePtr->target - preferedLoadAddress);
     }
 #if BUILDING_MACHO_WRITER
     void             writeChainEntry(const Fixup& fixup, const void* nextLoc, uint64_t preferedLoadAddress) const override {
@@ -1497,22 +1536,22 @@ bool ChainedFixups::PointerFormat::valid(uint16_t pointer_format)
     return (pointer_format <= DYLD_CHAINED_PTR_ARM64E_SHARED_CACHE);
 }
 
+static const constinit PointerFormat_DYLD_CHAINED_PTR_ARM64E              p1;
+static const constinit PointerFormat_DYLD_CHAINED_PTR_64                  p2;
+static const constinit PointerFormat_DYLD_CHAINED_PTR_32                  p3;
+static const constinit PointerFormat_DYLD_CHAINED_PTR_32_CACHE            p4;
+static const constinit PointerFormat_DYLD_CHAINED_PTR_32_FIRMWARE         p5;
+static const constinit PointerFormat_DYLD_CHAINED_PTR_64_OFFSET           p6;
+static const constinit PointerFormat_DYLD_CHAINED_PTR_ARM64E_KERNEL       p7;
+static const constinit PointerFormat_DYLD_CHAINED_PTR_64_KERNEL_CACHE     p8;
+static const constinit PointerFormat_DYLD_CHAINED_PTR_ARM64E_USERLAND     p9;
+static const constinit PointerFormat_DYLD_CHAINED_PTR_ARM64E_FIRMWARE     p10;
+static const constinit PointerFormat_DYLD_CHAINED_PTR_X86_64_KERNEL_CACHE p11;
+static const constinit PointerFormat_DYLD_CHAINED_PTR_ARM64E_USERLAND24   p12;
+
 
 const ChainedFixups::PointerFormat& ChainedFixups::PointerFormat::make(uint16_t pointer_format)
 {
-    static const PointerFormat_DYLD_CHAINED_PTR_ARM64E              p1;
-    static const PointerFormat_DYLD_CHAINED_PTR_64                  p2;
-    static const PointerFormat_DYLD_CHAINED_PTR_32                  p3;
-    static const PointerFormat_DYLD_CHAINED_PTR_32_CACHE            p4;
-    static const PointerFormat_DYLD_CHAINED_PTR_32_FIRMWARE         p5;
-    static const PointerFormat_DYLD_CHAINED_PTR_64_OFFSET           p6;
-    static const PointerFormat_DYLD_CHAINED_PTR_ARM64E_KERNEL       p7;
-    static const PointerFormat_DYLD_CHAINED_PTR_64_KERNEL_CACHE     p8;
-    static const PointerFormat_DYLD_CHAINED_PTR_ARM64E_USERLAND     p9;
-    static const PointerFormat_DYLD_CHAINED_PTR_ARM64E_FIRMWARE     p10;
-    static const PointerFormat_DYLD_CHAINED_PTR_X86_64_KERNEL_CACHE p11;
-    static const PointerFormat_DYLD_CHAINED_PTR_ARM64E_USERLAND24   p12;
-
     switch (pointer_format) {
         case DYLD_CHAINED_PTR_ARM64E:
             return p1;
@@ -1542,6 +1581,5 @@ const ChainedFixups::PointerFormat& ChainedFixups::PointerFormat::make(uint16_t 
     assert("unknown pointer format");
     return p1;
 }
-
 
 } // namespace mach_o

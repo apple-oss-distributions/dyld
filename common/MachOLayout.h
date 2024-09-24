@@ -227,6 +227,7 @@ struct VIS_HIDDEN Layout
 
     // FIXME: Should we have a SectionContent or similar class?
     bool isSwiftLibrary() const;
+    std::optional<uint32_t> getObjcInfoFlags() const;
     bool hasSection(std::string_view segmentName, std::string_view sectionName) const;
 
     // This used to live in MachOAnalyzer, but we can validate everything based on the above struct
@@ -436,6 +437,7 @@ struct VIS_HIDDEN SplitSeg
 {
     SplitSeg(const Layout& layout);
 
+    bool hasMarker() const;
     bool isV1() const;
     bool isV2() const;
     bool hasValue() const;

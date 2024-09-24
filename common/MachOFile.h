@@ -85,6 +85,10 @@
     #define MH_FILESET              0xc     /* set of mach-o's */
 #endif
 
+namespace objc_visitor {
+struct Visitor;
+}
+
 namespace dyld3 {
 
 using lsl::UUID;
@@ -121,6 +125,15 @@ enum class Platform {
     tvOS_simulator      = 8,    // PLATFORM_TVOSSIMULATOR
     watchOS_simulator   = 9,    // PLATFORM_WATCHOSSIMULATOR
     driverKit           = 10,   // PLATFORM_DRIVERKIT
+    visionOS            = 11,   // PLATFORM_VISIONOS
+    visionOS_simulator  = 12,   // PLATFORM_VISIONOSSIMULATOR
+    macOSExclaveCore    = 15,
+    macOSExclaveKit     = 16,
+    iOSExclaveCore      = 17,
+    iOSExclaveKit       = 18,
+    tvOSExclaveCore     = 19,
+    tvOSExclaveKit      = 20,
+
 };
 
 // A prioritized list of architectures
@@ -133,7 +146,7 @@ public:
     constexpr GradedArchs(const CpuGrade& cg0, const CpuGrade& cg1 = {0,0,false,0} , const CpuGrade& cg2 = {0,0,false,0}) : _orderedCpuTypes({cg0, cg1, cg2, CpuGrade()}) {}
 
 #if BUILDING_LIBDYLD || BUILDING_UNIT_TESTS
-    static const GradedArchs&  launchCurrentOS(const char* simArches); // for emulating how the kernel chooses which slice to exec()
+    static const GradedArchs&  launchCurrentOS(const char* simArches=""); // for emulating how the kernel chooses which slice to exec()
 #endif
     static const GradedArchs&  forCurrentOS(bool keysOff, bool platformBinariesOnly);
     static const GradedArchs&  forName(const char* archName, bool keysOff = false);
@@ -170,6 +183,7 @@ public:
 #if SUPPORT_ARCH_arm64_32
     static const GradedArchs arm64_32;        // watch series 4 and later
 #endif
+
 #if BUILDING_LIBDYLD || BUILDING_UNIT_TESTS
     static const GradedArchs launch_AS;       // Apple Silicon macs
     static const GradedArchs launch_AS_Sim;   // iOS simulator for Apple Silicon macs
@@ -217,7 +231,7 @@ struct VIS_HIDDEN MachOFile : mach_header
     static bool             isExclaveKitPlatform(Platform platform, Platform* basePlatform=nullptr);
     static bool             isSimulatorPlatform(Platform platform, Platform* basePlatform=nullptr);
     static bool             isSharedCacheEligiblePath(const char* path);
-    static const MachOFile* compatibleSlice(Diagnostics& diag, const void* content, size_t size, const char* path, Platform, bool isOSBinary, const GradedArchs&, bool internalInstall=false);
+    static const MachOFile* compatibleSlice(Diagnostics& diag, uint64_t& sliceLenOut, const void* content, size_t size, const char* path, Platform, bool isOSBinary, const GradedArchs&, bool internalInstall=false);
     static const MachOFile* isMachO(const void* content);
 
     bool            hasMachOMagic() const;
@@ -256,11 +270,18 @@ struct VIS_HIDDEN MachOFile : mach_header
     const char*     installName() const;  // returns nullptr is no install name
     void            forEachDependentDylib(void (^callback)(const char* loadPath, bool isWeak, bool isReExport, bool isUpward, uint32_t compatVersion, uint32_t curVersion, bool& stop)) const;
     void            forEachInterposingSection(Diagnostics& diag, void (^handler)(uint64_t vmOffset, uint64_t vmSize, bool& stop)) const;
-#if BUILDING_CACHE_BUILDER || BUILDING_CACHE_BUILDER_UNIT_TESTS
+#if BUILDING_CACHE_BUILDER || BUILDING_CACHE_BUILDER_UNIT_TESTS || BUILDING_UNIT_TESTS || BUILDING_DYLD_SYMBOLS_CACHE
+    bool            addendsExceedPatchTableLimit(Diagnostics& diag, mach_o::Fixups fixups) const;
     bool            canBePlacedInDyldCache(const char* path, void (^failureReason)(const char* format, ...)) const;
     bool            canHavePrebuiltExecutableLoader(dyld3::Platform platform, const std::string_view& path,
                                                     void (^failureReason)(const char*)) const;
 #endif
+
+#if BUILDING_CACHE_BUILDER || BUILDING_CACHE_BUILDER_UNIT_TESTS
+    // Note this is only for binaries in file layout, so can only be used by the cache builder
+    objc_visitor::Visitor makeObjCVisitor(Diagnostics& diag) const;
+#endif
+
 #if BUILDING_APP_CACHE_UTIL
     bool            canBePlacedInKernelCollection(const char* path, void (^failureReason)(const char*)) const;
 #endif
@@ -329,7 +350,7 @@ struct VIS_HIDDEN MachOFile : mach_header
     // used by DyldSharedCache to find closure
     static const uint8_t*   trieWalk(Diagnostics& diag, const uint8_t* start, const uint8_t* end, const char* symbol);
 
-#if !SUPPORT_VM_LAYOUT
+#if !SUPPORT_VM_LAYOUT || BUILDING_UNIT_TESTS || BUILDING_DYLD_SYMBOLS_CACHE
     // Get the layout information for this MachOFile.  Requires that the file is in file layout, not VM layout.
     // If you have a MachOLoaded/MachOAnalyzer, do not use this method
     bool                    getLinkeditLayout(Diagnostics& diag, mach_o::LinkeditLayout& layout) const;

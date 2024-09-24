@@ -93,7 +93,7 @@ struct VIS_HIDDEN  [[clang::ptrauth_vtable_pointer(process_independent, address_
     virtual void            os_unfair_recursive_lock_lock_with_options(dyld_recursive_mutex_t lock, os_unfair_lock_options_t options) const;
     virtual void            os_unfair_recursive_lock_unlock(dyld_recursive_mutex_t lock) const;
 #pragma clang diagnostic pop
-    virtual void            exit(int result) const  __attribute__((noreturn));
+    virtual void            exit(int result) const  __attribute__((__noreturn__));
     virtual const char*     getenv(const char* key) const;
     virtual int             mkstemp(char* templatePath) const;
     virtual TLVGetAddrFunc  getTLVGetAddrFunc() const;

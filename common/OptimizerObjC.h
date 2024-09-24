@@ -233,10 +233,6 @@ public:
     using StringHashTable::size;
 #endif
 
-    const char* getEntryForIndex(uint32_t index) const {
-        return (const char *)this + offsets()[index];
-    }
-
     const char* get(const char *key) const
     {
         if ( std::optional<uint32_t> index = tryGetIndex(key) )
@@ -259,6 +255,11 @@ public:
 #endif
     }
 #endif
+
+private:
+    const char* getEntryForIndex(uint32_t index) const {
+        return (const char *)this + offsets()[index];
+    }
 };
 
 // This is used for classes, protocols and categories

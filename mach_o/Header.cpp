@@ -33,12 +33,28 @@
   #include <unistd.h>
 #endif
 
+#include <mach-o/fixup-chains.h>
+
 #include "Array.h"
 #include "Header.h"
 #include "Architecture.h"
 #include "Misc.h"
 #include "Policy.h"
 #include "LoggingStub.h"
+
+#if TARGET_OS_EXCLAVEKIT
+#ifndef VM_PROT_READ
+    #define VM_PROT_READ    1
+#endif
+
+#ifndef VM_PROT_WRITE
+    #define VM_PROT_WRITE   2
+#endif
+
+#ifndef VM_PROT_EXECUTE
+    #define VM_PROT_EXECUTE 4
+#endif
+#endif // TARGET_OS_EXCLAVEKIT
 
 using mach_o::Architecture;
 using mach_o::Platform;
@@ -48,20 +64,44 @@ using mach_o::Policy;
 namespace mach_o {
 
 
+
 //
-// MARK: --- DependentDylibAttributes ---
+// MARK: --- LinkedDylibAttributes ---
 //
 
-constinit const DependentDylibAttributes DependentDylibAttributes::regular;
-constinit const DependentDylibAttributes DependentDylibAttributes::justWeakLink(DYLIB_USE_WEAK_LINK);
-constinit const DependentDylibAttributes DependentDylibAttributes::justUpward(DYLIB_USE_UPWARD);
-constinit const DependentDylibAttributes DependentDylibAttributes::justReExport(DYLIB_USE_REEXPORT);
-constinit const DependentDylibAttributes DependentDylibAttributes::justDelayInit(DYLIB_USE_DELAYED_INIT);
+constinit const LinkedDylibAttributes LinkedDylibAttributes::regular;
+constinit const LinkedDylibAttributes LinkedDylibAttributes::justWeakLink(DYLIB_USE_WEAK_LINK);
+constinit const LinkedDylibAttributes LinkedDylibAttributes::justUpward(DYLIB_USE_UPWARD);
+constinit const LinkedDylibAttributes LinkedDylibAttributes::justReExport(DYLIB_USE_REEXPORT);
+constinit const LinkedDylibAttributes LinkedDylibAttributes::justDelayInit(DYLIB_USE_DELAYED_INIT);
+
+void LinkedDylibAttributes::toString(char buf[64]) const
+{
+    buf[0] = '\0';
+    if ( weakLink )
+        strlcpy(buf, "weak-link", 64);
+    if ( upward ) {
+        if ( buf[0] != '\0' )
+            strlcat(buf, ",", 64);
+        strlcat(buf, "upward", 64);
+    }
+    if ( delayInit ) {
+        if ( buf[0] != '\0' )
+            strlcat(buf, ",", 64);
+        strlcat(buf, "delay-init", 64);
+    }
+    if ( reExport ) {
+        if ( buf[0] != '\0' )
+            strlcat(buf, ",", 64);
+        strlcat(buf, "re-export", 64);
+    }
+}
 
 
 //
 // MARK: --- methods that read mach_header ---
 //
+
 
 bool Header::hasMachOMagic() const
 {
@@ -89,6 +129,11 @@ uint32_t Header::pointerSize() const
         return 8;
     else
         return 4;
+}
+
+uint32_t Header::ncmds() const
+{
+    return mh.ncmds;
 }
 
 bool Header::uses16KPages() const
@@ -141,6 +186,16 @@ bool Header::isDyldManaged() const
 bool Header::isDylib() const
 {
     return (mh.filetype == MH_DYLIB);
+}
+
+bool Header::isDylibOrStub() const
+{
+    return (mh.filetype == MH_DYLIB) || (mh.filetype == MH_DYLIB_STUB);
+}
+
+bool Header::isDylibStub() const
+{
+    return (mh.filetype == MH_DYLIB_STUB);
 }
 
 bool Header::isBundle() const
@@ -244,7 +299,6 @@ bool Header::isSimSupport() const
     return (this->mh.flags & MH_SIM_SUPPORT) != 0;
 }
 
-
 //
 // MARK: --- methods for validating mach-o content ---
 //
@@ -282,6 +336,10 @@ Error Header::validSemanticsPlatform() const
         return Error::none(); // allow empty platform in static linker
 #endif
 
+    // preloads usually don't have a platform
+    if ( isPreload() )
+        return Error::none();
+
     return pvs.platform.valid();
 }
 
@@ -308,7 +366,7 @@ Error Header::valid(uint64_t fileSize) const
     if ( Error err = validSemanticsInstallName(policy) )
         return err;
 
-    if ( Error err = validSemanticsDependents(policy) )
+    if ( Error err = validSemanticsLinkedDylibs(policy) )
         return err;
 
     if ( Error err = validSemanticsRPath(policy) )
@@ -355,6 +413,7 @@ Error Header::validStructureLoadCommands(uint64_t fileSize) const
     switch ( mh.filetype ) {
         case MH_EXECUTE:
         case MH_DYLIB:
+        case MH_DYLIB_STUB:
         case MH_DYLINKER:
         case MH_BUNDLE:
         case MH_KEXT_BUNDLE:
@@ -550,7 +609,7 @@ Error Header::validSemanticsInstallName(const Policy& policy) const
     if ( foundCount > 1 )
         return Error("multiple LC_ID_DYLIB found");
 
-    if ( this->isDylib() ) {
+    if ( this->isDylibOrStub() ) {
         if ( installName == nullptr )
             return Error("MH_DYLIB is missing LC_ID_DYLIB");
 #if 0 // FIXME: need path plumbed down
@@ -578,7 +637,7 @@ Error Header::validSemanticsInstallName(const Policy& policy) const
     return Error::none();
 }
 
-Error Header::validSemanticsDependents(const Policy& policy) const
+Error Header::validSemanticsLinkedDylibs(const Policy& policy) const
 {
     // gather info
     __block Error dupDepError;
@@ -587,7 +646,7 @@ Error Header::validSemanticsDependents(const Policy& policy) const
     const char**  depPaths = depPathsBuffer;
     const bool    enforceNoDupDylibs = policy.enforceNoDuplicateDylibs();
     const bool    hasWarningHandler = mach_o::hasWarningHandler();
-    // don't use forEachDependentDylib, because it synthesizes libSystem.dylib
+    // don't use forEachLinkedDylib, because it synthesizes libSystem.dylib
     forEachLoadCommandSafe(^(const load_command* cmd, bool& stop) {
         switch ( cmd->cmd ) {
             case LC_LOAD_DYLIB:
@@ -600,10 +659,10 @@ Error Header::validSemanticsDependents(const Policy& policy) const
                     for ( int i = 0; i < depCount; ++i ) {
                         if ( strcmp(loadPath, depPaths[i]) == 0 ) {
                             if ( enforceNoDupDylibs ) {
-                                dupDepError = Error("duplicate dependent dylib '%s'", loadPath);
+                                dupDepError = Error("duplicate linked dylib '%s'", loadPath);
                                 stop        = true;
                             } else
-                                warning(this, "duplicate dependent dylib are deprecated ('%s')", loadPath);
+                                warning(this, "duplicate linked dylib are deprecated ('%s')", loadPath);
                         }
                     }
                     depPaths[depCount] = loadPath;
@@ -623,15 +682,16 @@ Error Header::validSemanticsDependents(const Policy& policy) const
         if (installName != nullptr) {
             if ( this->builtForPlatform(Platform::driverKit, true) ) {
                 const char* libSystemDir = "/System/DriverKit/usr/lib/system/";
-                if ( strncmp(installName, libSystemDir, strlen(libSystemDir)) != 0 )
+                if ( strncmp(installName, libSystemDir, strlen(libSystemDir)) == 0 )
                     isLibSystem = true;
+
             } else if ( this->platformAndVersions().platform.isExclaveKit() ) {
                 const char* libSystemDir = "/System/ExclaveKit/usr/lib/system/";
-                if ( strncmp(installName, libSystemDir, strlen(libSystemDir)) != 0 )
+                if ( strncmp(installName, libSystemDir, strlen(libSystemDir)) == 0 )
                     isLibSystem = true;
-            } else {
+           } else {
                 const char* libSystemDir = "/usr/lib/system/";
-                if ( strncmp(installName, libSystemDir, strlen(libSystemDir)) != 0 )
+                if ( strncmp(installName, libSystemDir, strlen(libSystemDir)) == 0 )
                     isLibSystem = true;
             }
         }
@@ -688,7 +748,7 @@ Error Header::validSegment(const Policy& policy, uint64_t wholeFileSize, const S
     if ( (seg->initprot & 0xFFFFFFF8) != 0 ) {
         return Error("%s segment permissions has invalid bits set (0x%08X)", seg->segname, seg->initprot);
     }
-    if ( policy.enforceTextSegmentPermissions() ) {
+    if ( this->isDyldManaged() && policy.enforceTextSegmentPermissions() ) {
         if ( (strcmp(seg->segname, "__TEXT") == 0) && (seg->initprot != (VM_PROT_READ | VM_PROT_EXECUTE)) )
             return Error("__TEXT segment permissions is not 'r-x'");
     }
@@ -696,14 +756,20 @@ Error Header::validSegment(const Policy& policy, uint64_t wholeFileSize, const S
         if ( (strcmp(seg->segname, "__LINKEDIT") == 0) && (seg->initprot != VM_PROT_READ) )
             return Error("__LINKEDIT segment permissions is not 'r--'");
     }
-    if ( policy.enforceDataSegmentPermissions() ) {
+    // dylib stubs don't have LC_SEGMENT_SPLIT_INFO, so they trip on SG_READ_ONLY check because
+    // the split seg info exception can't be applied
+    if ( !isDylibStub() && policy.enforceDataSegmentPermissions() ) {
         if ( (strcmp(seg->segname, "__DATA") == 0) && (seg->initprot != (VM_PROT_READ | VM_PROT_WRITE)) )
             return Error("__DATA segment permissions is not 'rw-'");
         if ( strcmp(seg->segname, "__DATA_CONST") == 0 ) {
             if ( seg->initprot != (VM_PROT_READ | VM_PROT_WRITE) )
                 return Error("__DATA_CONST segment permissions is not 'rw-'");
             if ( (seg->flags & SG_READ_ONLY) == 0 ) {
-                if ( this->isDylib() && this->hasSplitSegInfo() ) {
+                bool isSplitSegMarker = false;
+                if ( this->isDylibOrStub() && this->hasSplitSegInfo(isSplitSegMarker) && !isSplitSegMarker ) {
+                    // dylibs intended for dyld cache are allowed to not have SG_READ_ONLY set
+                }
+                else if ( this->inDyldCache() ) {
                     // dylibs in dyld cache are allowed to not have SG_READ_ONLY set
                 }
                 else {
@@ -717,26 +783,29 @@ Error Header::validSegment(const Policy& policy, uint64_t wholeFileSize, const S
     if ( (seg->vmaddr + seg->vmsize) < seg->vmaddr )
         return Error("'%s' segment vm range wraps", seg->segname);
 
-    // check sections are within its segment
-    const SC* const sectionsStart = (SC*)((char*)seg + sizeof(SG));
-    const SC* const sectionsEnd   = &sectionsStart[seg->nsects];
-    for ( const SC* sect = sectionsStart; (sect < sectionsEnd); ++sect ) {
-        if ( (int64_t)(sect->size) < 0 ) {
-            return Error("section '%s' size too large 0x%lX", sect->sectname, (size_t)sect->size);
-        }
-        else if ( sect->addr < seg->vmaddr ) {
-            return Error("section '%s' start address 0x%lX is before containing segment's address 0x%0lX", sect->sectname, (size_t)sect->addr, (size_t)seg->vmaddr);
-        }
-        else if ( policy.enforceSectionsInSegment() && (sect->addr + sect->size > seg->vmaddr + seg->vmsize) ) {
-            return Error("section '%s' end address 0x%lX is beyond containing segment's end address 0x%0lX", sect->sectname, (size_t)(sect->addr + sect->size), (size_t)(seg->vmaddr + seg->vmsize));
+    // dylib stubs have no section data
+    if ( !isDylibStub() ) {
+        // check sections are within its segment
+        const SC* const sectionsStart = (SC*)((char*)seg + sizeof(SG));
+        const SC* const sectionsEnd   = &sectionsStart[seg->nsects];
+        for ( const SC* sect = sectionsStart; (sect < sectionsEnd); ++sect ) {
+            if ( (int64_t)(sect->size) < 0 ) {
+                return Error("section '%s' size too large 0x%lX", sect->sectname, (size_t)sect->size);
+            }
+            else if ( sect->addr < seg->vmaddr ) {
+                return Error("section '%s' start address 0x%lX is before containing segment's address 0x%0lX", sect->sectname, (size_t)sect->addr, (size_t)seg->vmaddr);
+            }
+            else if ( policy.enforceSectionsInSegment() && (sect->addr + sect->size > seg->vmaddr + seg->vmsize) ) {
+                return Error("section '%s' end address 0x%lX is beyond containing segment's end address 0x%0lX", sect->sectname, (size_t)(sect->addr + sect->size), (size_t)(seg->vmaddr + seg->vmsize));
+            }
         }
     }
 
     return Error::none();
 }
-
 #endif // !TARGET_OS_EXCLAVEKIT
-struct Interval
+
+struct VIS_HIDDEN Interval
 {
     bool     overlaps(const Interval& other) const;
     uint64_t start;
@@ -762,7 +831,6 @@ Error Header::validSemanticsSegments(const Policy& policy, uint64_t fileSize) co
     __block bool      hasTEXT              = false;
     __block bool      hasLINKEDIT          = false;
     __block uint64_t segmentIndexText     = 0;
-    __block uint64_t segmentIndexLinkedit = 0;
     forEachLoadCommandSafe(^(const load_command* cmd, bool& stop) {
         if ( cmd->cmd == LC_SEGMENT_64 ) {
             const segment_command_64* seg64 = (segment_command_64*)cmd;
@@ -772,7 +840,6 @@ Error Header::validSemanticsSegments(const Policy& policy, uint64_t fileSize) co
             }
             else if ( strcmp(seg64->segname, "__LINKEDIT") == 0 ) {
                 hasLINKEDIT          = true;
-                segmentIndexLinkedit = ranges.count();
             }
             lcError = validSegment<segment_command_64, section_64>(policy, fileSize, seg64);
             ranges.push_back({ { seg64->vmaddr, seg64->vmaddr + seg64->vmsize }, { seg64->fileoff, seg64->fileoff + seg64->filesize }, seg64->segname });
@@ -785,7 +852,6 @@ Error Header::validSemanticsSegments(const Policy& policy, uint64_t fileSize) co
             }
             else if ( strcmp(seg32->segname, "__LINKEDIT") == 0 ) {
                 hasLINKEDIT          = true;
-                segmentIndexLinkedit = ranges.count();
             }
             lcError = validSegment<segment_command, section>(policy, fileSize, seg32);
             ranges.push_back({ { seg32->vmaddr, seg32->vmaddr + seg32->vmsize }, { seg32->fileoff, seg32->fileoff + seg32->filesize }, seg32->segname });
@@ -799,7 +865,7 @@ Error Header::validSemanticsSegments(const Policy& policy, uint64_t fileSize) co
     // dynamic binaries have further restrictions
     if ( isDyldManaged() ) {
         if ( hasTEXT ) {
-            if ( ranges[segmentIndexText].file.start != 0 )
+            if ( !this->inDyldCache() && (ranges[segmentIndexText].file.start != 0) )
                 return Error("__TEXT segment fileoffset is not zero");
             const uint32_t headerAndLCSize = machHeaderSize() + mh.sizeofcmds;
             if ( ranges[segmentIndexText].file.end < headerAndLCSize )
@@ -808,6 +874,7 @@ Error Header::validSemanticsSegments(const Policy& policy, uint64_t fileSize) co
         else {
             return Error("missing __TEXT segment");
         }
+        (void)hasLINKEDIT;
         // FIXME: LINKEDIT checks need to move to Analyzer
         //if ( !hasLINKEDIT )
         //    return Error("missing __LINKEDIT segment");
@@ -820,7 +887,8 @@ Error Header::validSemanticsSegments(const Policy& policy, uint64_t fileSize) co
                 continue;
             if ( r1.vm.overlaps(r2.vm) )
                 return Error("vm range of segment '%s' overlaps segment '%s'", r1.name, r2.name);
-            if ( r1.file.overlaps(r2.file) )
+            // can't compare file offsets for segments in dyld cache because they may be offsets into different files
+            if ( !this->inDyldCache() && r1.file.overlaps(r2.file) )
                 return Error("file range of segment '%s' overlaps segment '%s'", r1.name, r2.name);
         }
     }
@@ -1037,8 +1105,8 @@ void Header::forEachPlatformLoadCommand(void (^handler)(Platform platform, Versi
     });
 #ifdef BUILDING_MACHO_WRITER
     // no implicit platforms in static linker
-    // but for object files only, we need to support linking against old macos dylibs
-    if ( isObjectFile() )
+    // but for object files and -preload files only, we need to support linking against old macos dylibs
+    if ( isObjectFile() || isPreload() )
         return;
 #endif
 
@@ -1133,7 +1201,7 @@ bool Header::getUuid(uuid_t uuid) const
 }
 
 
-const char* Header::dependentDylibLoadPath(uint32_t depIndex) const
+const char* Header::linkedDylibLoadPath(uint32_t depIndex) const
 {
     __block uint32_t     curIndex  = 0;
     __block const char*  result    = nullptr;
@@ -1153,14 +1221,14 @@ const char* Header::dependentDylibLoadPath(uint32_t depIndex) const
     return result;
 }
 
-uint32_t Header::dependentDylibCount(bool* allDepsAreNormal) const
+uint32_t Header::linkedDylibCount(bool* allDepsAreNormal) const
 {
     if ( allDepsAreNormal != nullptr )
         *allDepsAreNormal = true;
     __block unsigned count   = 0;
-    this->forEachDependentDylib(^(const char* loadPath, DependentDylibAttributes kind, Version32 , Version32 , bool& stop) {
+    this->forEachLinkedDylib(^(const char* loadPath, LinkedDylibAttributes kind, Version32 , Version32 , bool& stop) {
         if ( allDepsAreNormal != nullptr ) {
-            if ( kind != DependentDylibAttributes::regular )
+            if ( kind != LinkedDylibAttributes::regular )
                 *allDepsAreNormal = false;  // record if any linkages were weak, re-export, upward, or delay-init
         }
         ++count;
@@ -1168,9 +1236,9 @@ uint32_t Header::dependentDylibCount(bool* allDepsAreNormal) const
     return count;
 }
 
-DependentDylibAttributes Header::loadCommandToDylibKind(const dylib_command* dylibCmd)
+LinkedDylibAttributes Header::loadCommandToDylibKind(const dylib_command* dylibCmd)
 {
-    DependentDylibAttributes attr;
+    LinkedDylibAttributes attr;
     const dylib_use_command* dylib2Cmd = (dylib_use_command*)dylibCmd;
     if ( (dylib2Cmd->marker == 0x1a741800) && (dylib2Cmd->nameoff == sizeof(dylib_use_command)) ) {
         attr.raw = (uint8_t)dylib2Cmd->flags;
@@ -1192,7 +1260,7 @@ DependentDylibAttributes Header::loadCommandToDylibKind(const dylib_command* dyl
     assert(0 && "not a dylib load command");
 }
 
-void Header::forEachDependentDylib(void (^callback)(const char* loadPath, DependentDylibAttributes kind,
+void Header::forEachLinkedDylib(void (^callback)(const char* loadPath, LinkedDylibAttributes kind,
                                                     Version32 compatVersion, Version32 curVersion, bool& stop)) const
 {
     __block unsigned count   = 0;
@@ -1213,21 +1281,23 @@ void Header::forEachDependentDylib(void (^callback)(const char* loadPath, Depend
             }
         }
     });
-#if BUILDING_DYLD
+    (void)count;
+    (void)stopped;
+#if BUILDING_DYLD || BUILDING_UNIT_TESTS
     // everything must link with something
     if ( (count == 0) && !stopped ) {
         // The dylibs that make up libSystem can link with nothing
         // except for dylibs in libSystem.dylib which are ok to link with nothing (they are on bottom)
         if ( this->builtForPlatform(Platform::driverKit, true) ) {
             if ( !this->isDylib() || (strncmp(this->installName(), "/System/DriverKit/usr/lib/system/", 33) != 0) )
-                callback("/System/DriverKit/usr/lib/libSystem.B.dylib", DependentDylibAttributes::regular, Version32(1, 0), Version32(1, 0), stopped);
+                callback("/System/DriverKit/usr/lib/libSystem.B.dylib", LinkedDylibAttributes::regular, Version32(1, 0), Version32(1, 0), stopped);
         } else if ( this->platformAndVersions().platform.isExclaveKit() ) {
             if ( !this->isDylib() || (strncmp(this->installName(), "/System/ExclaveKit/usr/lib/system/", 34) != 0) )
-                callback("/System/ExclaveKit/usr/lib/libSystem.dylib", DependentDylibAttributes::regular, Version32(1, 0), Version32(1, 0), stopped);
+                callback("/System/ExclaveKit/usr/lib/libSystem.dylib", LinkedDylibAttributes::regular, Version32(1, 0), Version32(1, 0), stopped);
         }
         else {
             if ( !this->isDylib() || (strncmp(this->installName(), "/usr/lib/system/", 16) != 0) )
-                callback("/usr/lib/libSystem.B.dylib", DependentDylibAttributes::regular, Version32(1, 0), Version32(1, 0), stopped);
+                callback("/usr/lib/libSystem.B.dylib", LinkedDylibAttributes::regular, Version32(1, 0), Version32(1, 0), stopped);
         }
     }
 #endif
@@ -1342,11 +1412,13 @@ bool Header::hasIndirectSymbolTable(uint32_t& fileOffset, uint32_t& count) const
     return result;
 }
 
-bool Header::hasSplitSegInfo() const
+bool Header::hasSplitSegInfo(bool& isSplitSegMarker) const
 {
     __block bool result = false;
     forEachLoadCommandSafe(^(const load_command* cmd, bool& stop) {
         if ( cmd->cmd == LC_SEGMENT_SPLIT_INFO) {
+            linkedit_data_command* sigCmd = (linkedit_data_command*)cmd;
+            isSplitSegMarker = (sigCmd->datasize == 0);
             result      = true;
             stop        = true;
         }
@@ -1370,6 +1442,86 @@ bool Header::hasAtomInfo(uint32_t& fileOffset, uint32_t& size) const
 }
 
 
+CString Header::libOrdinalName(int libOrdinal) const
+{
+    switch ( libOrdinal) {
+        case BIND_SPECIAL_DYLIB_SELF:
+            return "<this-image>";
+        case BIND_SPECIAL_DYLIB_MAIN_EXECUTABLE:
+            return "<main-executable>";
+        case BIND_SPECIAL_DYLIB_FLAT_LOOKUP:
+            return "<flat-namespace>";
+        case BIND_SPECIAL_DYLIB_WEAK_LOOKUP:
+            return "<weak-def-coalesce>";
+        default:
+            if ( (libOrdinal > 0) && (libOrdinal <= this->linkedDylibCount()) )
+                return this->linkedDylibLoadPath(libOrdinal-1);
+            break;
+    }
+    return "<invalid-lib-ordinal>";
+}
+
+const load_command* Header::findLoadCommand(uint32_t& index, bool (^predicate)(const load_command* lc)) const
+{
+    index = 0;
+    __block const load_command* lc = nullptr;
+    __block uint32_t currentIndex = 0;
+    forEachLoadCommandSafe(^(const load_command *cmd, bool &stop) {
+        if ( predicate(cmd) ) {
+            index = currentIndex;
+            lc = cmd;
+            stop = true;
+        }
+
+        ++currentIndex;
+    });
+
+    return lc;
+}
+
+void Header::findLoadCommandRange(uint32_t& index, uint32_t& endIndex, bool (^predicate)(const load_command* lc)) const
+{
+    index = UINT32_MAX;
+    endIndex = UINT32_MAX;
+    __block uint32_t currentIndex = 0;
+    forEachLoadCommandSafe(^(const load_command *cmd, bool &stop) {
+        if ( predicate(cmd) ) {
+            if ( index == UINT32_MAX ) { // first match, set indices
+                index    = currentIndex;
+                endIndex = index+1;
+            } else {
+                assert(endIndex == currentIndex); // range must be contiguous
+                ++endIndex;
+            }
+        } else if (index != UINT32_MAX) {
+            // not a match, so stop looking if the first match had already been found
+            stop = true;
+        }
+
+        ++currentIndex;
+    });
+
+    // clear index if none matched
+    if ( index == UINT32_MAX ) {
+        index = 0;
+        endIndex = 0;
+    }
+}
+
+
+const dylib_command* Header::isDylibLoadCommand(const load_command* lc)
+{
+    switch (lc->cmd) {
+        case LC_LOAD_DYLIB:
+        case LC_LOAD_WEAK_DYLIB:
+        case LC_LOAD_UPWARD_DYLIB:
+        case LC_REEXPORT_DYLIB:
+            return (dylib_command*)lc;
+        default:
+            return nullptr;
+    }
+}
+
 uint32_t Header::segmentCount() const
 {
     __block uint32_t count = 0;
@@ -1382,6 +1534,25 @@ uint32_t Header::segmentCount() const
         }
     });
     return count;
+}
+
+uint32_t Header::loadCommandsFreeSpace() const
+{
+    __block uint32_t firstSectionFileOffset = UINT32_MAX;
+    __block uint32_t firstSegmentFileOffset = UINT32_MAX;
+    forEachSection(^(const SectionInfo& sectInfo, bool &stop) {
+        firstSectionFileOffset = sectInfo.fileOffset;
+        firstSegmentFileOffset = segmentFileOffset(sectInfo.segIndex);
+        stop = true;
+    });
+
+    // no segment load commands yet, so explicit size limit
+    if ( firstSegmentFileOffset == UINT32_MAX )
+        return UINT32_MAX;
+
+    uint32_t headerSize = (mh.magic == MH_MAGIC_64) ? sizeof(mach_header_64) : sizeof(mach_header);
+    uint32_t existSpaceUsed = mh.sizeofcmds + headerSize;
+    return firstSectionFileOffset - firstSegmentFileOffset - existSpaceUsed;
 }
 
 uint64_t Header::preferredLoadAddress() const
@@ -1429,10 +1600,10 @@ bool Header::hasDataConst() const
     return result;
 }
 
-std::string_view Header::segmentName(uint32_t segIndex) const
+CString Header::segmentName(uint32_t segIndex) const
 {
-    __block std::string_view result;
-    __block uint32_t    segCount = 0;
+    __block CString    result;
+    __block uint32_t   segCount = 0;
     this->forEachSegment(^(const SegmentInfo& info, bool& stop) {
         if ( segIndex == segCount ) {
             result = info.segmentName;
@@ -1443,11 +1614,80 @@ std::string_view Header::segmentName(uint32_t segIndex) const
     return result;
 }
 
-// LC_SEGMENT stores names as char[16] potentially without a null terminator.  This returns a string_view for the given name
-static std::string_view name16(const char name[16])
+uint64_t Header::segmentVmSize(uint32_t segIndex) const
+{
+    __block uint64_t  result   = 0;
+    __block uint32_t  segCount = 0;
+    this->forEachSegment(^(const SegmentInfo& info, bool& stop) {
+        if ( segIndex == segCount ) {
+            result = info.vmsize;
+            stop   = true;
+        }
+        ++segCount;
+    });
+    return result;
+}
+
+uint64_t Header::segmentVmAddr(uint32_t segIndex) const
+{
+    __block uint64_t  result   = 0;
+    __block uint32_t  segCount = 0;
+    this->forEachSegment(^(const SegmentInfo& info, bool& stop) {
+        if ( segIndex == segCount ) {
+            result = info.vmaddr;
+            stop   = true;
+        }
+        ++segCount;
+    });
+    return result;
+}
+
+uint32_t Header::segmentFileOffset(uint32_t segIndex) const
+{
+    __block uint32_t  result   = 0;
+    __block uint32_t  segCount = 0;
+    this->forEachSegment(^(const SegmentInfo& info, bool& stop) {
+        if ( segIndex == segCount ) {
+            result = info.fileOffset;
+            stop   = true;
+        }
+        ++segCount;
+    });
+    return result;
+}
+
+// LC_SEGMENT stores names as char[16] potentially without a null terminator.  
+// This method returns a CString for the given name, and
+// it will allocate and leak a copy if the length is 16.
+CString Header::name16(const char name[16])
 {
     size_t length = strnlen(name, 16);
-    return std::string_view(name, length);
+    if ( length < 16 )
+        return CString(name, length);
+
+    static const char* const knownName16s[] = { "__objc_arraydata", "__objc_classlist", "__objc_classname", "__objc_classrefs",
+                                                "__objc_databytes", "__objc_doubleobj", "__objc_imageinfo", "__objc_init_offs",
+                                                "__objc_nlcatlist", "__objc_nlclslist",
+                                                "__objc_protolist", "__objc_protorefs", "__objc_superrefs",
+                                                "__compact_unwind", "__gcc_except_tab", "__os_assumes_log",
+                                                "__swift5_acfuncs", "__swift5_assocty", "__swift5_builtin", "__swift5_capture",
+                                                "__swift5_fieldmd", "__swift5_reflstr", "__swift5_typeref", "swift5_backtrace"
+                                              };
+    for ( const char* stdName : knownName16s ) {
+        if ( memcmp(name, stdName, 16) == 0 )
+            return CString(stdName, 16);
+    }
+#if BUILDING_DYLD
+    // In dyld, so no way to allocate and no way to return a zero terminated string.
+    // Take the next best thing and return a CString that is a correct std::string_view
+    // but is not zero terminated, so c_str() will return a c-string that is too long.
+    return CString(name, 16);
+#else
+    char* str = (char*)::malloc(17);
+    memcpy(str, name, 16);
+    str[16] = '\0';
+    return CString(str, 16);
+#endif
 }
 
 void Header::forEachSegment(void (^callback)(const SegmentInfo& infos, bool& stop)) const
@@ -1470,36 +1710,29 @@ void Header::forEachSegment(void (^callback)(const SegmentInfo& infos, bool& sto
 
 void Header::forEachSection(void (^callback)(const SectionInfo&, bool& stop)) const
 {
-    __block uint64_t prefLoadAddr = 0;
+    __block uint32_t segIndex     = 0;
     forEachLoadCommandSafe(^(const load_command* cmd, bool& stop) {
         if ( cmd->cmd == LC_SEGMENT_64 ) {
             const segment_command_64* segCmd        = (segment_command_64*)cmd;
-            if ( strcmp(segCmd->segname, "__TEXT") == 0 )
-                prefLoadAddr = segCmd->vmaddr;
             const section_64* const   sectionsStart = (section_64*)((char*)segCmd + sizeof(struct segment_command_64));
             const section_64* const   sectionsEnd   = &sectionsStart[segCmd->nsects];
-
             for ( const section_64* sect = sectionsStart; !stop && (sect < sectionsEnd); ++sect ) {
-                std::string_view sectName = name16(sect->sectname);
-                std::string_view segName = name16(sect->segname);
-                SectionInfo info = { segName, sectName, (uint32_t)segCmd->initprot, sect->flags, sect->align, sect->addr - prefLoadAddr, sect->size, sect->offset,
-                                     sect->reloff, sect->nreloc, sect->reserved1, sect->reserved2};
+                SectionInfo info = { name16(sect->sectname), name16(sect->segname), segIndex, (uint32_t)segCmd->initprot, sect->flags, sect->align, sect->addr,
+                                     sect->size, sect->offset, sect->reloff, sect->nreloc, sect->reserved1, sect->reserved2};
                 callback(info, stop);
             }
+            ++segIndex;
         }
         else if ( cmd->cmd == LC_SEGMENT ) {
             const segment_command* segCmd        = (segment_command*)cmd;
-            if ( strcmp(segCmd->segname, "__TEXT") == 0 )
-                prefLoadAddr = segCmd->vmaddr;
             const section* const   sectionsStart = (section*)((char*)segCmd + sizeof(struct segment_command));
             const section* const   sectionsEnd   = &sectionsStart[segCmd->nsects];
             for ( const section* sect = sectionsStart; !stop && (sect < sectionsEnd); ++sect ) {
-                std::string_view sectName = name16(sect->sectname);
-                std::string_view segName = name16(sect->segname);
-                SectionInfo info = { segName, sectName, (uint32_t)segCmd->initprot, sect->flags, sect->align, sect->addr - prefLoadAddr, sect->size, sect->offset,
-                                     sect->reloff, sect->nreloc, sect->reserved1, sect->reserved2};
+                SectionInfo info = { name16(sect->sectname), name16(sect->segname), segIndex, (uint32_t)segCmd->initprot, sect->flags, sect->align, sect->addr,
+                                     sect->size, sect->offset, sect->reloff, sect->nreloc, sect->reserved1, sect->reserved2};
                 callback(info, stop);
             }
+            ++segIndex;
         }
     });
 }
@@ -1586,13 +1819,20 @@ bool Header::isRestricted() const
 bool Header::hasInterposingTuples() const
 {
     __block bool hasInterposing = false;
-    this->forEachSection(^(const SectionInfo& info, bool& stop) {
-        if ( ((info.flags & SECTION_TYPE) == S_INTERPOSING) || ((info.sectionName == "__interpose") && (info.segmentName.starts_with("__DATA") || info.segmentName.starts_with("__AUTH"))) ) {
-            hasInterposing = true;
-            stop           = true;
-        }
+    this->forEachInterposingSection(^(const SectionInfo& info, bool& stop) {
+        hasInterposing = true;
+        stop           = true;
     });
     return hasInterposing;
+}
+
+void Header::forEachInterposingSection(void (^callback)(const SectionInfo&, bool& stop)) const
+{
+    this->forEachSection(^(const SectionInfo& info, bool& stop) {
+        if ( ((info.flags & SECTION_TYPE) == S_INTERPOSING) || ((info.sectionName == "__interpose") && (info.segmentName.starts_with("__DATA") || info.segmentName.starts_with("__AUTH"))) ) {
+            callback(info, stop);
+        }
+    });
 }
 
 bool Header::hasObjC() const
@@ -1710,10 +1950,30 @@ const char* Header::umbrellaName() const
     return result;
 }
 
+uint32_t Header::threadLoadCommandsSize() const
+{
+    uint32_t cmdSize = sizeof(thread_command);
+    if ( mh.cputype == CPU_TYPE_ARM64 || mh.cputype == CPU_TYPE_ARM64_32 )
+        cmdSize = this->pointerAligned(16 + 34 * 8); // base size + ARM_EXCEPTION_STATE64_COUNT * 8
+    else if ( mh.cputype == CPU_TYPE_X86_64 )
+        cmdSize = this->pointerAligned(16 + 42 * 4); // base size + x86_THREAD_STATE64_COUNT * 4
+    else
+        assert(0 && "unsupported arch for thread load command");
+    return cmdSize;
+}
 
 uint32_t Header::headerAndLoadCommandsSize() const
 {
     return machHeaderSize() + mh.sizeofcmds;
+}
+
+uint32_t Header::pointerAligned(uint32_t value) const
+{
+    // mach-o requires all load command sizes to be a multiple the pointer size
+    if ( is64() )
+        return ((value + 7) & (-8));
+    else
+        return ((value + 3) & (-4));
 }
 
 uint32_t Header::fileSize() const
@@ -1750,6 +2010,135 @@ uint32_t Header::fileSize() const
 
     return size;
 }
+
+struct OldThreadsStartSection
+{
+    uint32_t        padding : 31,
+                    stride8 : 1;
+    uint32_t        chain_starts[1];
+};
+
+// ld64 can't sometimes determine the size of __thread_starts accurately,
+// because these sections have to be given a size before everything is laid out,
+// and you don't know the actual size of the chains until everything is
+// laid out. In order to account for this, the linker puts trailing 0xFFFFFFFF at
+// the end of the section, that must be ignored when walking the chains. This
+// patch adjust the section size accordingly.
+static uint32_t adjustStartsCount(uint32_t startsCount, const uint32_t* starts) {
+    for ( int i = startsCount; i > 0; --i )
+    {
+        if ( starts[i - 1] == 0xFFFFFFFF )
+            startsCount--;
+        else
+            break;
+    }
+    return startsCount;
+}
+
+bool Header::hasFirmwareChainStarts(uint16_t* pointerFormat, uint32_t* startsCount, const uint32_t** starts) const
+{
+    if ( !this->isPreload() && !this->isStaticExecutable() )
+        return false;
+
+    __block bool result = false;
+    this->forEachSection(^(const SectionInfo& info, bool& stop) {
+        if ( (info.sectionName == "__chain_starts") && (info.segmentName == "__TEXT") ) {
+            const dyld_chained_starts_offsets* startsSect = (dyld_chained_starts_offsets*)((uint8_t*)this + info.fileOffset);
+            if ( pointerFormat != nullptr )
+                *pointerFormat = startsSect->pointer_format;
+            if ( startsCount != nullptr )
+                *startsCount   = (info.size >= 4) ? startsSect->starts_count : 0;
+            if ( starts != nullptr )
+                *starts        = &startsSect->chain_starts[0];
+            result             = true;
+            stop               = true;
+        }
+        else if ( (info.sectionName == "__thread_starts") && (info.segmentName == "__TEXT") ) {
+            const OldThreadsStartSection* sect = (OldThreadsStartSection*)((uint8_t*)this + info.fileOffset);
+            if ( pointerFormat != nullptr )
+                *pointerFormat = sect->stride8 ? DYLD_CHAINED_PTR_ARM64E : DYLD_CHAINED_PTR_ARM64E_FIRMWARE;
+            if ( startsCount != nullptr )
+                *startsCount   = adjustStartsCount((uint32_t)(info.size/4) - 1, sect->chain_starts);
+            if ( starts != nullptr )
+                *starts        = sect->chain_starts;
+            result             = true;
+            stop               = true;
+        }
+    });
+    return result;
+}
+
+
+bool Header::hasFirmwareRebaseRuns() const
+{
+    return forEachFirmwareRebaseRuns(nullptr);
+}
+
+// content of __TEXT,__rebase_info section
+struct RebaseInfo
+{
+    uint32_t  startAddress;
+    uint8_t   runs[];   // value of even indexes is how many pointers in a row are rebases, value of odd indexes times 4 is memory to skip over
+                        // two zero values in a row signals the end of the run
+};
+
+
+bool Header::forEachFirmwareRebaseRuns(void (^handler)(uint32_t offset, bool& stop)) const
+{
+    if ( !this->isPreload() && !this->isStaticExecutable() )
+        return false;
+
+    __block const RebaseInfo* rr  = nullptr;
+    __block const RebaseInfo* end = nullptr;
+    this->forEachSection(^(const SectionInfo& info, bool& sectStop) {
+        if ( (info.sectionName == "__rebase_info") && (info.segmentName == "__TEXT") ) {
+            sectStop = true;
+            rr       = (RebaseInfo*)((uint8_t*)this + info.fileOffset);
+            end      = (RebaseInfo*)((uint8_t*)rr + info.size);
+        }
+    });
+    if ( rr == nullptr )
+        return false;
+
+    if ( handler != nullptr ) {
+        bool stop = false;
+        while ( (rr < end) && !stop ) {
+            uint32_t address = rr->startAddress;
+            int      index   = 0;
+            bool     done    = false;
+            while ( !done && !stop ) {
+                uint8_t count = rr->runs[index];
+                if ( count == 0 ) {
+                    // two 0x00 in a row mean the run is complete
+                    if ( rr->runs[index+1] == 0 ) {
+                        ++index;
+                        done = true;
+                    }
+                }
+                else {
+                    if ( index & 1 ) {
+                        // odd runs index => how much to jump forward
+                        address += ((count-1) * 4);
+                    }
+                    else {
+                        // even runs index => how many pointers in a row that need rebasing
+                        for (int i=0; i < count; ++i) {
+                            handler(address, stop);
+                            address += 4;
+                        }
+                    }
+                }
+                ++index;
+            }
+            // 4-byte align for next run
+            index = (index+3) & (-4);
+            rr  = (RebaseInfo*)(&rr->runs[index]);
+        }
+    }
+
+    return true;
+}
+
 
 //
 // MARK: --- methods that create and modify ---
@@ -1798,15 +2187,6 @@ void Header::save(char savedPath[PATH_MAX]) const
         ::pwrite(fd, this, sizeof(Header), 0);
         ::close(fd);
     }
-}
-
-uint32_t Header::pointerAligned(uint32_t value) const
-{
-    // mach-o requires all load command sizes to be a multiple the pointer size
-    if ( is64() )
-        return ((value + 7) & (-8));
-    else
-        return ((value + 3) & (-4));
 }
 
 load_command* Header::firstLoadCommand()
@@ -1890,19 +2270,19 @@ void Header::setUsesWeakDefs()
 
 void Header::setAppExtensionSafe()
 {
-    assert(mh.filetype == MH_DYLIB);
+    assert(mh.filetype == MH_DYLIB || mh.filetype == MH_DYLIB_STUB);
     mh.flags |= MH_APP_EXTENSION_SAFE;
 }
 
 void Header::setSimSupport()
 {
-    assert(mh.filetype == MH_DYLIB);
+    assert(mh.filetype == MH_DYLIB || mh.filetype == MH_DYLIB_STUB);
     mh.flags |= MH_SIM_SUPPORT;
 }
 
 void Header::setNoReExportedDylibs()
 {
-    assert(mh.filetype == MH_DYLIB);
+    assert(mh.filetype == MH_DYLIB || mh.filetype == MH_DYLIB_STUB);
     mh.flags |= MH_NO_REEXPORTED_DYLIBS;
 }
 
@@ -1964,7 +2344,7 @@ void Header::addSegment(const SegmentInfo& info, std::span<const char* const> se
     if ( is64() ) {
         uint32_t            lcSize = (uint32_t)(sizeof(segment_command_64) + sectionNames.size() * sizeof(section_64));
         segment_command_64* sc     = (segment_command_64*)appendLoadCommand(LC_SEGMENT_64, lcSize);
-        strncpy(sc->segname, info.segmentName.data(), 16);
+        strncpy(sc->segname, info.segmentName.begin(), 16);
         sc->vmaddr             = info.vmaddr;
         sc->vmsize             = info.vmsize;
         sc->fileoff            = info.fileOffset;
@@ -1976,7 +2356,7 @@ void Header::addSegment(const SegmentInfo& info, std::span<const char* const> se
         section_64* const sect = (section_64*)((uint8_t*)sc + sizeof(struct segment_command_64));
         uint32_t sectionIndex  = 0;
         for ( const char* sectName : sectionNames ) {
-            strncpy(sect[sectionIndex].segname, info.segmentName.data(), 16);
+            strncpy(sect[sectionIndex].segname, info.segmentName.begin(), 16);
             strncpy(sect[sectionIndex].sectname, sectName, 16);
             ++sectionIndex;
         }
@@ -1984,7 +2364,7 @@ void Header::addSegment(const SegmentInfo& info, std::span<const char* const> se
     else {
         uint32_t         lcSize = (uint32_t)(sizeof(segment_command) + sectionNames.size() * sizeof(section));
         segment_command* sc     = (segment_command*)appendLoadCommand(LC_SEGMENT, lcSize);
-        strncpy(sc->segname, info.segmentName.data(), 16);
+        strncpy(sc->segname, info.segmentName.begin(), 16);
         sc->vmaddr             = (uint32_t)info.vmaddr;
         sc->vmsize             = (uint32_t)info.vmsize;
         sc->fileoff            = info.fileOffset;
@@ -1996,7 +2376,7 @@ void Header::addSegment(const SegmentInfo& info, std::span<const char* const> se
         section* const sect = (section*)((uint8_t*)sc + sizeof(struct segment_command));
         uint32_t sectionIndex  = 0;
         for ( const char* sectName : sectionNames ) {
-            strncpy(sect[sectionIndex].segname, info.segmentName.data(), 16);
+            strncpy(sect[sectionIndex].segname, info.segmentName.begin(), 16);
             strncpy(sect[sectionIndex].sectname, sectName, 16);
             ++sectionIndex;
         }
@@ -2012,7 +2392,7 @@ void Header::updateSection(const SectionInfo& info)
                 section_64* const  sectionsStart = (section_64*)((char*)segCmd + sizeof(struct segment_command_64));
                 section_64* const  sectionsEnd   = &sectionsStart[segCmd->nsects];
                 for ( section_64* sect=sectionsStart; sect < sectionsEnd; ++sect ) {
-                    if ( strncmp(info.sectionName.data(), sect->sectname, 16) == 0 ) {
+                    if ( strncmp(info.sectionName.begin(), sect->sectname, 16) == 0 ) {
                         sect->addr      = info.address;
                         sect->size      = info.size;
                         sect->offset    = info.fileOffset;
@@ -2035,7 +2415,7 @@ void Header::updateSection(const SectionInfo& info)
                 section* const  sectionsStart = (section*)((char*)segCmd + sizeof(struct segment_command));
                 section* const  sectionsEnd   = &sectionsStart[segCmd->nsects];
                 for ( section* sect=sectionsStart; sect < sectionsEnd; ++sect ) {
-                    if ( strncmp(info.sectionName.data(), sect->sectname, 16) == 0 ) {
+                    if ( strncmp(info.sectionName.begin(), sect->sectname, 16) == 0 ) {
                         sect->addr      = (uint32_t)info.address;
                         sect->size      = (uint32_t)info.size;
                         sect->offset    = info.fileOffset;
@@ -2086,6 +2466,83 @@ void Header::updateSegment(const SegmentInfo& info)
     });
 }
 
+Error Header::removeLoadCommands(uint32_t index, uint32_t endIndex)
+{
+    if ( index == endIndex )
+        return Error::none();
+
+    __block uint8_t* lcStart = nullptr;
+    __block uint8_t* lcRemoveStart = nullptr;
+    __block uint8_t* lcRemoveEnd = nullptr;
+
+    __block uint32_t currentIndex = 0;
+    forEachLoadCommandSafe(^(const load_command *cmd, bool &stop) {
+        if ( lcStart == nullptr )
+            lcStart = (uint8_t*)cmd;
+
+        if ( currentIndex == index ) {
+            lcRemoveStart = (uint8_t*)cmd;
+        } else if ( currentIndex == endIndex ) {
+            lcRemoveEnd = (uint8_t*)cmd;
+        }
+
+        ++currentIndex;
+        stop = lcRemoveStart != nullptr && lcRemoveEnd != nullptr;
+    });
+
+    if ( lcRemoveStart == nullptr || lcRemoveEnd == nullptr )
+        return Error("invalid load command range to remove");
+
+    uint8_t* lcEnd = lcStart+mh.sizeofcmds;
+    assert(lcRemoveStart >= lcStart && lcRemoveStart <= lcEnd);
+    assert(lcRemoveEnd >= lcStart && lcRemoveEnd <= lcEnd);
+    memmove(lcRemoveStart, lcRemoveEnd, (lcEnd-lcRemoveEnd));
+
+    mh.ncmds = mh.ncmds - (endIndex - index);
+    mh.sizeofcmds = mh.sizeofcmds - (uint32_t)(lcRemoveEnd-lcRemoveStart);
+    return Error::none();
+}
+
+load_command* Header::insertLoadCommand(uint32_t atIndex, uint32_t cmdSize)
+{
+    if ( loadCommandsFreeSpace() < cmdSize )
+        return nullptr;
+
+    if ( pointerAligned(cmdSize) != cmdSize ) // command size needs to be pointer aligned
+        return nullptr;
+
+    uint8_t* lcStart = (uint8_t*)firstLoadCommand();
+    __block uint8_t* insertLocation = nullptr;
+    if ( atIndex == 0 ) {
+        insertLocation = lcStart;
+    } else if ( atIndex == mh.ncmds ) {
+        insertLocation = lcStart+mh.sizeofcmds;
+    } else {
+        __block uint32_t current = 0;
+        forEachLoadCommandSafe(^(const load_command *cmd, bool &stop) {
+            if ( current == atIndex ) {
+                insertLocation = (uint8_t*)cmd;
+                stop = true;
+            }
+            ++current;
+        });
+        if ( insertLocation == nullptr ) // invalid insert index
+            return nullptr;
+    }
+
+    // move existing load commands after the new location
+    memmove(insertLocation+cmdSize, insertLocation, (lcStart+mh.sizeofcmds)-insertLocation);
+
+    // update header
+    mh.ncmds += 1;
+    mh.sizeofcmds += cmdSize;
+
+    // set initial size
+    load_command* lcOut = (load_command*)insertLocation;
+    bzero(lcOut, cmdSize);
+    lcOut->cmdsize = cmdSize;
+    return lcOut;
+}
 
 void Header::addInstallName(const char* name, Version32 compatVers, Version32 currentVersion)
 {
@@ -2097,22 +2554,44 @@ void Header::addInstallName(const char* name, Version32 compatVers, Version32 cu
     strcpy((char*)ic + ic->dylib.name.offset, name);
 }
 
-void Header::addDependentDylib(const char* path, DependentDylibAttributes depAttrs, Version32 compatVers, Version32 currentVersion)
+uint32_t Header::sizeForLinkedDylibCommand(const char *path, LinkedDylibAttributes depAttrs, uint32_t& traditionalCmd) const
+{
+    traditionalCmd = 0;
+    if (      depAttrs == LinkedDylibAttributes::regular )
+        traditionalCmd = LC_LOAD_DYLIB;
+    else if ( depAttrs == LinkedDylibAttributes::justWeakLink )
+        traditionalCmd = LC_LOAD_WEAK_DYLIB;
+    else if ( depAttrs == LinkedDylibAttributes::justUpward )
+        traditionalCmd = LC_LOAD_UPWARD_DYLIB;
+    else if ( depAttrs == LinkedDylibAttributes::justReExport )
+        traditionalCmd = LC_REEXPORT_DYLIB;
+
+    if ( traditionalCmd )
+        return pointerAligned((uint32_t)(sizeof(dylib_command) + strlen(path) + 1));
+
+    // use new style load command
+    return pointerAligned((uint32_t)(sizeof(dylib_use_command) + strlen(path) + 1));
+}
+
+void Header::addLinkedDylib(const char* path, LinkedDylibAttributes depAttrs, Version32 compatVers, Version32 currentVersion)
+{
+    uint32_t cmd  = 0;
+    uint32_t size = sizeForLinkedDylibCommand(path, depAttrs, cmd);
+
+    load_command* lc = appendLoadCommand(0, size);
+    setLinkedDylib(lc, path, depAttrs, compatVers, currentVersion);
+}
+
+void Header::setLinkedDylib(load_command* lc, const char* path, LinkedDylibAttributes depAttrs, Version32 compatVers, Version32 currentVersion)
 {
     uint32_t cmd = 0;
-    if (      depAttrs == DependentDylibAttributes::regular )
-        cmd = LC_LOAD_DYLIB;
-    else if ( depAttrs == DependentDylibAttributes::justWeakLink )
-        cmd = LC_LOAD_WEAK_DYLIB;
-    else if ( depAttrs == DependentDylibAttributes::justUpward )
-        cmd = LC_LOAD_UPWARD_DYLIB;
-    else if ( depAttrs == DependentDylibAttributes::justReExport )
-        cmd = LC_REEXPORT_DYLIB;
+    uint32_t size = sizeForLinkedDylibCommand(path, depAttrs, cmd);
+    assert(lc->cmdsize == size);
 
     if ( cmd ) {
         // make traditional load command
-        uint32_t       alignedSize = pointerAligned((uint32_t)(sizeof(dylib_command) + strlen(path) + 1));
-        dylib_command* dc          = (dylib_command*)appendLoadCommand(cmd, alignedSize);
+        dylib_command* dc               = (dylib_command*)lc;
+        dc->cmd                         = cmd;
         dc->dylib.name.offset           = sizeof(dylib_command);
         dc->dylib.current_version       = currentVersion.value();
         dc->dylib.compatibility_version = compatVers.value();
@@ -2125,8 +2604,8 @@ void Header::addDependentDylib(const char* path, DependentDylibAttributes depAtt
             cmd = LC_LOAD_WEAK_DYLIB;
         else
             cmd = LC_LOAD_DYLIB;
-        uint32_t        alignedSize = pointerAligned((uint32_t)(sizeof(dylib_use_command) + strlen(path) + 1));
-        dylib_use_command* dc          = (dylib_use_command*)appendLoadCommand(cmd, alignedSize);
+        dylib_use_command* dc     = (dylib_use_command*)lc;
+        dc->cmd                   = cmd;
         dc->nameoff               = sizeof(dylib_use_command);
         dc->current_version       = currentVersion.value();
         dc->compat_version        = 0x00010000; // unused, but looks like 1.0 to old tools
@@ -2138,7 +2617,7 @@ void Header::addDependentDylib(const char* path, DependentDylibAttributes depAtt
 
 void Header::addLibSystem()
 {
-    addDependentDylib("/usr/lib/libSystem.B.dylib");
+    addLinkedDylib("/usr/lib/libSystem.B.dylib");
 }
 
 void Header::addDylibId(CString name, Version32 compatVers, Version32 currentVersion)
@@ -2146,7 +2625,7 @@ void Header::addDylibId(CString name, Version32 compatVers, Version32 currentVer
     uint32_t       alignedSize          = pointerAligned((uint32_t)(sizeof(dylib_command) + name.size() + 1));
     dylib_command* dc                   = (dylib_command*)appendLoadCommand(LC_ID_DYLIB, alignedSize);
     dc->dylib.name.offset               = sizeof(dylib_command);
-    dc->dylib.timestamp                 = 1; // needs to be some constant value that is different than dependent dylib
+    dc->dylib.timestamp                 = 1; // needs to be some constant value that is different than linked dylib
     dc->dylib.current_version           = currentVersion.value();
     dc->dylib.compatibility_version     = compatVers.value();
     strcpy((char*)dc + dc->dylib.name.offset, name.c_str());
@@ -2261,15 +2740,15 @@ void Header::setUnixEntry(uint64_t startAddr)
 {
     // FIXME: support other archs
     if ( (mh.cputype == CPU_TYPE_ARM64) || (mh.cputype == CPU_TYPE_ARM64_32) ) {
-        uint32_t   lcSize = 288;
+        uint32_t   lcSize = threadLoadCommandsSize();
         uint32_t*  words     = (uint32_t*)appendLoadCommand(LC_UNIXTHREAD, lcSize);
         words[2] = 6;   // flavor = ARM_THREAD_STATE64
-        words[3] = 68;  // count  = ARM_EXCEPTION_STATE64_COUNT
+        words[3] = 68;  // count  = ARM_EXCEPTION_STATE64_COUNT * 2 <=> 34 uint64_t's
         bzero(&words[4], lcSize-16);
         *(uint64_t*)(&words[68]) = startAddr;  // register pc = startAddr
     }
     else if ( mh.cputype == CPU_TYPE_X86_64 ) {
-        uint32_t   lcSize = 184;
+        uint32_t   lcSize = threadLoadCommandsSize();
         uint32_t*  words     = (uint32_t*)appendLoadCommand(LC_UNIXTHREAD, lcSize);
         words[2] = 4;   // flavor = x86_THREAD_STATE64
         words[3] = 42;  // count  = x86_THREAD_STATE64_COUNT
@@ -2374,7 +2853,7 @@ void Header::setAtomInfo(uint32_t offset, uint32_t size)
 }
 
 void Header::setSymbolTable(uint32_t nlistOffset, uint32_t nlistCount, uint32_t stringPoolOffset, uint32_t stringPoolSize,
-                            uint32_t localsCount, uint32_t globalsCount, uint32_t undefCount, uint32_t indOffset, uint32_t indCount)
+                            uint32_t localsCount, uint32_t globalsCount, uint32_t undefCount, uint32_t indOffset, uint32_t indCount, bool dynSymtab)
 {
     symtab_command stc;
     stc.cmd       = LC_SYMTAB;
@@ -2385,19 +2864,21 @@ void Header::setSymbolTable(uint32_t nlistOffset, uint32_t nlistCount, uint32_t 
     stc.strsize   = stringPoolSize;
     appendLoadCommand((load_command*)&stc);
 
-    dysymtab_command dstc;
-    bzero(&dstc, sizeof(dstc));
-    dstc.cmd            = LC_DYSYMTAB;
-    dstc.cmdsize        = sizeof(dysymtab_command);
-    dstc.ilocalsym      = 0;
-    dstc.nlocalsym      = localsCount;
-    dstc.iextdefsym     = localsCount;
-    dstc.nextdefsym     = globalsCount;
-    dstc.iundefsym      = localsCount+globalsCount;
-    dstc.nundefsym      = undefCount;
-    dstc.indirectsymoff = indOffset;
-    dstc.nindirectsyms  = indCount;
-    appendLoadCommand((load_command*)&dstc);
+    if ( dynSymtab ) {
+        dysymtab_command dstc;
+        bzero(&dstc, sizeof(dstc));
+        dstc.cmd            = LC_DYSYMTAB;
+        dstc.cmdsize        = sizeof(dysymtab_command);
+        dstc.ilocalsym      = 0;
+        dstc.nlocalsym      = localsCount;
+        dstc.iextdefsym     = localsCount;
+        dstc.nextdefsym     = globalsCount;
+        dstc.iundefsym      = localsCount+globalsCount;
+        dstc.nundefsym      = undefCount;
+        dstc.indirectsymoff = indOffset;
+        dstc.nindirectsyms  = indCount;
+        appendLoadCommand((load_command*)&dstc);
+    }
 }
 
 void Header::addLinkerOption(std::span<uint8_t> buffer, uint32_t count)

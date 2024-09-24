@@ -25,6 +25,9 @@
 #ifndef SwiftVisitor_hpp
 #define SwiftVisitor_hpp
 
+#include <span>
+
+#include "Diagnostics.h"
 #include "MetadataVisitor.h"
 
 namespace metadata_visitor
@@ -247,6 +250,15 @@ struct SwiftVisitor : metadata_visitor::Visitor
     void forEachProtocolConformance(void (^callback)(const SwiftConformance& swiftConformance,
                                                      bool& stopConformance)) const;
 
+#if BUILDING_CACHE_BUILDER || BUILDING_CACHE_BUILDER_UNIT_TESTS
+    size_t                       numPointerHashTables(Diagnostics& diag) const;
+    void                         forEachPointerHashTable(Diagnostics& diag,
+                                                         void(^callback)(ResolvedValue sectionBase, size_t tableIndex, uint8_t* tableStart, size_t numEntries)) const;
+    std::optional<ResolvedValue> forEachPointerHashTableRelativeEntry(Diagnostics& diag, uint8_t* tableStart,
+                                                                      VMAddress sharedCacheBaseAddr,
+                                                                      void(^callback)(size_t index, std::span<uint64_t> cacheOffsetKeys, uint64_t cacheOffsetValue)) const;
+#endif
+
 private:
 
     struct SectionContent
@@ -257,7 +269,9 @@ private:
         uint64_t                        sectSize       = 0;
     };
 
-    std::optional<SectionContent> findTextSection(const char *sectionName) const;
+    std::optional<SectionContent> findSection(const char* segmentName, const char *sectionName) const;
+    std::optional<SectionContent> findTextSection(const char *sectionName) const { return findSection("__TEXT", sectionName); }
+    std::optional<SectionContent> findPointerHashTableSection() const { return findSection("__DATA_CONST", "__ptrhashtab"); }
 
     SwiftConformanceList getSwiftConformances() const;
 };

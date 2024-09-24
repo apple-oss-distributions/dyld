@@ -69,6 +69,9 @@ public:
 
     // returns if this is a simulator platform
     bool                isSimulator() const;
+    bool                isExclaveCore() const;
+    bool                isExclaveKit() const;
+    bool                isExclave() const { return isExclaveCore() || isExclaveKit(); }
 
 
     // return PLATFORM_ number
@@ -99,8 +102,21 @@ public:
     static constinit const Platform     tvOS_simulator;
     static constinit const Platform     watchOS_simulator;
     static constinit const Platform     driverKit;
+    static constinit const Platform     visionOS;
+    static constinit const Platform     visionOS_simulator;
     static constinit const Platform     firmware;
     static constinit const Platform     sepOS;
+    static constinit const Platform     macOS_exclaveCore;
+    static constinit const Platform     macOS_exclaveKit;
+    static constinit const Platform     iOS_exclaveCore;
+    static constinit const Platform     iOS_exclaveKit;
+    static constinit const Platform     tvOS_exclaveCore;
+    static constinit const Platform     tvOS_exclaveKit;
+    static constinit const Platform     watchOS_exclaveCore;
+    static constinit const Platform     watchOS_exclaveKit;
+    static constinit const Platform     visionOS_exclaveCore;
+    static constinit const Platform     visionOS_exclaveKit;
+
 
 private:
 
@@ -123,10 +139,11 @@ private:
         static constinit const Epoch      fall2016;
         static constinit const Epoch      fall2017;
         static constinit const Epoch      fall2018;
-        static constinit const Epoch      fall2019;
-        static constinit const Epoch      fall2020;
-        static constinit const Epoch    spring2021;
-        static constinit const Epoch      fall2021;
+        static constinit const Epoch      fall2019; // macOS 10.15, iOS 13.0, watchOS 6.0, tvOS 13.0, bridgeOS 4.0
+        static constinit const Epoch    spring2020; // iOS 13.4...
+        static constinit const Epoch      fall2020; // macOS 11, iOS 14, watchOS 7, tvOS 14, bridgeOS 5.0
+        static constinit const Epoch    spring2021; // iOS 14.4...
+        static constinit const Epoch      fall2021; // macOS 12, iOS 15, watchOS 8, tvOS 15, bridgeOS 6.0
         static constinit const Epoch      fall2022;
         static constinit const Epoch      fall2023;
         static constinit const Epoch    spring2024;
@@ -151,7 +168,7 @@ private:
 };
 
 
-struct PlatformAndVersions
+struct VIS_HIDDEN PlatformAndVersions
 {
 
     mach_o::Platform  platform;

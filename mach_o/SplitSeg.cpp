@@ -47,6 +47,11 @@ Error SplitSegInfo::valid() const
     return Error::none();
 }
 
+bool SplitSegInfo::hasMarker() const
+{
+    return (_infoStart == _infoEnd);
+}
+
 bool SplitSegInfo::isV1() const
 {
     return !this->isV2();
@@ -111,7 +116,7 @@ Error SplitSegInfo::forEachReferenceV2(void (^callback)(const Entry& entry, bool
                         return Error("malformed uleb128");
                     fromSectionOffset += delta;
                     bool stop = false;
-                    callback(Entry { (uint8_t)kind, fromSectionIndex, fromSectionOffset, toSectionIndex, toSectionOffset }, stop);
+                    callback(Entry { (uint8_t)kind, (uint8_t)fromSectionIndex, (uint8_t)toSectionIndex, fromSectionOffset, toSectionOffset }, stop);
                     if ( stop )
                         return Error::none();
                 }
@@ -141,21 +146,20 @@ SplitSegInfo::SplitSegInfo(std::span<const Entry> entries)
 {
     // Whole         :== <count> FromToSection+
     // FromToSection :== <from-sect-index> <to-sect-index> <count> ToOffset+
-    // ToOffset         :== <to-sect-offset-delta> <count> FromOffset+
-    // FromOffset     :== <kind> <count> <from-sect-offset-delta>
+    // ToOffset      :== <to-sect-offset-delta> <count> FromOffset+
+    // FromOffset    :== <kind> <count> <from-sect-offset-delta>
 
-    typedef uint32_t SectionIndexes;
+    typedef uint32_t                                  SectionIndexes;
     typedef std::map<uint8_t, std::vector<uint64_t> > FromOffsetMap;
-    typedef std::map<uint64_t, FromOffsetMap> ToOffsetMap;
-    typedef std::map<SectionIndexes, ToOffsetMap> WholeMap;
+    typedef std::map<uint64_t, FromOffsetMap>         ToOffsetMap;
+    typedef std::map<SectionIndexes, ToOffsetMap>     WholeMap;
 
     // sort into group by adjustment kind
-    //fprintf(stderr, "_splitSegV2Infos.size=%lu\n", this->_writer._splitSegV2Infos.size());
+    //fprintf(stderr, "_splitSegV2Infos.size=%lu\n", entries.size());
     WholeMap whole;
     for ( const Entry& entry : entries ) {
-        //fprintf(stderr, "from=%d, to=%d\n", entry.fromSectionIndex, entry.toSectionIndex);
-        SectionIndexes index = (uint32_t)entry.fromSectionIndex << 16 | (uint32_t)entry.toSectionIndex;
-        ToOffsetMap& toOffsets = whole[index];
+        SectionIndexes comboIndex  = (uint32_t)entry.fromSectionIndex << 16 | (uint32_t)entry.toSectionIndex;
+        ToOffsetMap&   toOffsets   = whole[comboIndex];
         FromOffsetMap& fromOffsets = toOffsets[entry.toSectionOffset];
         fromOffsets[entry.kind].push_back(entry.fromSectionOffset);
     }
@@ -178,10 +182,11 @@ SplitSegInfo::SplitSegInfo(std::span<const Entry> entries)
         //fprintf(stderr, "from sect=%d, to sect=%d, count=%lu\n", fromSectionIndex, toSectionIndex, toOffsets.size());
         uint64_t lastToOffset = 0;
         for (auto& fromToOffsets : toOffsets) {
-            uint64_t toSectionOffset = fromToOffsets.first;
-            FromOffsetMap& fromOffsets = fromToOffsets.second;
+            uint64_t       toSectionOffset   = fromToOffsets.first;
+            FromOffsetMap& fromOffsets       = fromToOffsets.second;
             // ToOffset    :== <to-sect-offset-delta> <count> FromOffset+
-            append_uleb128(toSectionOffset - lastToOffset, this->_bytes);
+            uint64_t toSectionDelta = toSectionOffset - lastToOffset;
+            append_uleb128(toSectionDelta, this->_bytes);
             append_uleb128(fromOffsets.size(), this->_bytes);
             for (auto& kindAndOffsets : fromOffsets) {
                 uint8_t kind = kindAndOffsets.first;

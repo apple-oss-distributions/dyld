@@ -134,6 +134,9 @@ Visitor::Visitor(const DyldSharedCache* dyldCache, const dyld3::MachOAnalyzer* d
                     assert(slideInfo->delta_mask == 0x00000000C0000000);
                     this->sharedCacheChainedPointerFormat       = SharedCacheFormat::v4;
                     this->onDiskDylibChainedPointerBaseAddress  = VMAddress(slideInfo->value_add);
+                } else if ( slideInfoHeader->version == 5 ) {
+                    this->sharedCacheChainedPointerFormat       = SharedCacheFormat::v5;
+                    this->onDiskDylibChainedPointerBaseAddress  = VMAddress(dyldCache->unslidLoadAddress());
                 } else {
                     assert(false);
                 }
@@ -301,6 +304,14 @@ ResolvedValue Visitor::resolveRebase(const ResolvedValue& value) const
                 rawValue = (rawValue & valueMask);
                 // Already a runtime offset, so no need to do anything with valueAdd
                 runtimeOffset = rawValue;
+                break;
+            }
+            case SharedCacheFormat::v5: {
+                // Just use the chained pointer format for arm64/arm64e shared caches
+                auto* chainedValue = (dyld3::MachOFile::ChainedFixupPointerOnDisk*)value.value();
+                chainedValue->isRebase(DYLD_CHAINED_PTR_ARM64E_SHARED_CACHE,
+                                       onDiskDylibChainedPointerBaseAddress.rawValue(),
+                                       runtimeOffset);
                 break;
             }
         }
@@ -475,6 +486,17 @@ std::optional<ResolvedValue> Visitor::resolveOptionalRebase(const ResolvedValue&
                 runtimeOffset = rawValue;
                 break;
             }
+            case SharedCacheFormat::v5: {
+                // Just use the chained pointer format for arm64/arm64e shared caches
+                auto* chainedValue = (dyld3::MachOFile::ChainedFixupPointerOnDisk*)value.value();
+                if ( chainedValue->raw64 == 0 )
+                    return { };
+
+                chainedValue->isRebase(DYLD_CHAINED_PTR_ARM64E_SHARED_CACHE,
+                                       onDiskDylibChainedPointerBaseAddress.rawValue(),
+                                       runtimeOffset);
+                break;
+            }
         }
     } else {
         const auto* fixup = (dyld3::MachOFile::ChainedFixupPointerOnDisk*)value.value();
@@ -585,7 +607,109 @@ std::optional<ResolvedValue> Visitor::resolveOptionalRebase(const ResolvedValue&
 
 std::optional<VMAddress> Visitor::resolveOptionalRebaseToVMAddress(const ResolvedValue& value) const
 {
-#if SUPPORT_VM_LAYOUT
+#if POINTERS_ARE_UNSLID
+    const void* targetValue = (const void*)*(uintptr_t*)value.value();
+
+    // FIXME: We didn't expect a null here.  Should we find a way to error out, or just let the parser
+    // crash with a nullptr dereference.
+    if ( targetValue == nullptr )
+        return std::nullopt;
+
+    uint64_t runtimeOffset = 0;
+
+    if ( this->sharedCacheChainedPointerFormat != SharedCacheFormat::none ) {
+        // Crack the shared cache slide format
+        switch ( this->sharedCacheChainedPointerFormat ) {
+            case SharedCacheFormat::none:
+                assert(false);
+            case SharedCacheFormat::v1: {
+                uint64_t rawvalue = *(uint32_t*)value.value();
+                if ( rawvalue == 0 )
+                    return { };
+                runtimeOffset = rawvalue - onDiskDylibChainedPointerBaseAddress.rawValue();
+                break;
+            }
+            case SharedCacheFormat::v2_x86_64_tbi: {
+                const auto* fixup = (dyld3::MachOFile::ChainedFixupPointerOnDisk*)value.value();
+                uint64_t rawValue = fixup->raw64;
+                if ( rawValue == 0 )
+                    return { };
+
+                const uint64_t   deltaMask    = 0x00FFFF0000000000;
+                const uint64_t   valueMask    = ~deltaMask;
+                rawValue = (rawValue & valueMask);
+                // Already a runtime offset, so no need to do anything with valueAdd
+                runtimeOffset = rawValue;
+                break;
+            }
+            case SharedCacheFormat::v3: {
+                // Just use the chained pointer format for arm64e
+                auto* chainedValue = (dyld3::MachOFile::ChainedFixupPointerOnDisk*)value.value();
+                if ( chainedValue->raw64 == 0 )
+                    return { };
+
+                chainedValue->isRebase(DYLD_CHAINED_PTR_ARM64E,
+                                       onDiskDylibChainedPointerBaseAddress.rawValue(),
+                                       runtimeOffset);
+                break;
+            }
+            case SharedCacheFormat::v4: {
+                const auto* fixup = (dyld3::MachOFile::ChainedFixupPointerOnDisk*)value.value();
+                uint64_t rawValue = fixup->raw32;
+                if ( rawValue == 0 )
+                    return { };
+
+                const uint64_t   deltaMask    = 0x00000000C0000000;
+                const uint64_t   valueMask    = ~deltaMask;
+                rawValue = (rawValue & valueMask);
+                // Already a runtime offset, so no need to do anything with valueAdd
+                runtimeOffset = rawValue;
+                break;
+            }
+            case SharedCacheFormat::v5: {
+                // Just use the chained pointer format for arm64/arm64e shared caches
+                auto* chainedValue = (dyld3::MachOFile::ChainedFixupPointerOnDisk*)value.value();
+                if ( chainedValue->raw64 == 0 )
+                    return { };
+
+                chainedValue->isRebase(DYLD_CHAINED_PTR_ARM64E_SHARED_CACHE,
+                                       onDiskDylibChainedPointerBaseAddress.rawValue(),
+                                       runtimeOffset);
+                break;
+            }
+        }
+    } else {
+        const auto* fixup = (dyld3::MachOFile::ChainedFixupPointerOnDisk*)value.value();
+        if ( this->chainedPointerFormat == 0 ) {
+            // HACK: 32-bit cache dylibs don't have enough bits to have real chains, so we pretend they
+            // have no chains, just raw VMAddr's
+            assert(dylibMA->hasOpcodeFixups());
+
+            // HACK: This is a binary without chained fixups.  Is it safe to assume this is a rebase?
+            uint64_t rebaseVMAddr = (pointerSize == 8) ? fixup->raw64 : fixup->raw32;
+            if ( rebaseVMAddr == 0 )
+                return { };
+
+            runtimeOffset = rebaseVMAddr - this->onDiskDylibChainedPointerBaseAddress.rawValue();
+        } else {
+            if ( pointerSize == 8 ) {
+                if ( fixup->raw64 == 0 )
+                    return { };
+            } else {
+                if ( fixup->raw32 == 0 )
+                    return { };
+            }
+
+            bool isRebase = fixup->isRebase(this->chainedPointerFormat,
+                                            onDiskDylibChainedPointerBaseAddress.rawValue(),
+                                            runtimeOffset);
+            assert(isRebase);
+        }
+    }
+
+    VMAddress targetVMAddress = onDiskDylibChainedPointerBaseAddress + VMOffset(runtimeOffset);
+    return targetVMAddress;
+#elif SUPPORT_VM_LAYOUT
     // In dyld, we just use raw pointers for everything, and don't need to indirect via segment+offset like
     // in the cache builder
     const void* targetValue = (const void*)*(uintptr_t*)value.value();

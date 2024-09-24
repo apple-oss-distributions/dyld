@@ -142,6 +142,8 @@ not want to export anything from that static library.
 .It Fl weak-l Ns Ar x
 This is the same as the -lx but forces the library and all references to it to be marked as weak imports.
 That is, the library is allowed to be missing at runtime.
+.It Fl assert-weak-l Ns Ar x
+This is the same as the -weak-l but verifies that all references were marked as weak imports, instead of forcing it.
 .It Fl delay-l Ns Ar x
 This is the same as the -lx but specifies that the dylib should be delay initialized.
 .It Fl needed_library Ar path_to_dylib
@@ -157,6 +159,8 @@ the dylib as an upward dependency.
 .It Fl weak_library Ar path_to_library
 This is the same as listing a file name path to a library on the link line except that it forces the
 library and all references to it to be marked as weak imports.
+.It Fl assert_weak_library Ar path_to_library
+This is the same as the -weak_library but verifies that all references were marked as weak imports, instead of forcing it.
 .It Fl delay_library Ar path_to_library
 This is the same as listing a file name path to a library on the link line except that will mark
 the dylib to be delay initialized.
@@ -194,6 +198,9 @@ symbols are used from it.  Thus, it can be used suppress warnings about unused d
 This is the same as the -framework name[,suffix] but forces the framework and all
 references to it to be marked as weak imports.  Note: due to a clang optimizations, if functions
 are not marked weak, the compiler will optimize out any checks if the function address is NULL.
+.It Fl assert_weak_framework Ar name[,suffix]
+This is the same as the -weak_framework but verifies that all references were marked as weak imports,
+instead of forcing it.
 .It Fl reexport_framework Ar name[,suffix]
 This is the same as the -framework name[,suffix] but also specifies that the
 all symbols in that framework should be available to clients linking to the library being created.
@@ -362,10 +369,6 @@ by ignoring certain input properties or using alternative algorithms.
 Sets an internal "install path" (LC_ID_DYLIB) in a dynamic library. Any clients linked against the library
 will record that path as the way dyld should locate this library.  If this option is not specified, then
 the -o path will be used.  This option is also called -dylib_install_name for compatibility.
-.It Fl mark_dead_strippable_dylib
-Specifies that the dylib being built can be dead strip by any client.  That is, the dylib has
-no initialization side effects.  So if a client links against the dylib, but never uses
-any symbol from it, the linker can optimize away the use of the dylib.
 .It Fl compatibility_version Ar number
 Specifies the compatibility version number of the library.  When a library is loaded by dyld, the
 compatibility version is checked and if the program's version is greater that the library's version, it is an error.
@@ -516,10 +519,9 @@ to the runpath search path list for image being created.  At runtime, dyld uses 
 for dylibs whose load path begins with @rpath/.
 .It Fl commons Ar treatment
 Specifies how commons (aka tentative definitions) are resolved with respect to dylibs.  Options are:
-ignore_dylibs, use_dylibs, error.  The default is ignore_dylibs which means the linker will turn a tentative
-definition in an object file into a real definition and not even check dylibs for conflicts.  The dylibs
-option means the linker should check linked dylibs for definitions and use them to replace tentative definitions
-from object files.  The error option means the linker should issue an error whenever a tentative definition in an
+ignore_dylibs, error.  The default is ignore_dylibs which means the linker will turn a tentative
+definition in an object file into a real definition and not even check dylibs for conflicts.
+The error option means the linker should issue an error whenever a tentative definition in an
 object file conflicts with an external symbol in a linked dylib.  See also -warn_commons.
 .El
 .Ss Options for introspecting the linker
@@ -1029,20 +1031,12 @@ Replaced by more general -order_file option.
 .It Fl sectorder_detail
 Produced extra logging about which entries from a sectorder entries were used.  Replaced by -order_file_statistics.
 This option is obsolete.
-.It Fl lazy_framework Ar name[,suffix]
-This is the same as the -framework name[,suffix] except that the linker will
-construct glue code so that the framework is not
-loaded until the first function in it is called.  You cannot directly access
-data or Objective-C classes in a framework linked this way. This option
-is deprecated.
-.It Fl lazy-l Ns Ar x
-This is the same as the -lx but it is only for shared libraries and the linker
-will construct glue code so that the shared library is not loaded until
-the first function in it is called. This option is deprecated.
-.It Fl lazy_library Ar path_to_library
-This is the same as listing a file name path to a shared library on the link line
-except that the linker will construct glue code so that the shared library is not
-loaded until the first function in it is called. This option is deprecated.
+.It Fl poison_symbol Ar symbolName
+Causes any use of the named symbol to be an error.  Useful to make sure you are not using some API.
+.It Fl poison_symbols_list Ar filePath
+The specified
+.Ar filePath
+contains a list of symbol names that are to be poisoned.
 .El
 .Sh SEE ALSO
 ld-classic(1), as(1), ar(1), cc(1), dyld_info(1), nm(1), otool(1) lipo(1),

@@ -241,6 +241,8 @@ static Disposition stringToDisposition(Diagnostics& diags, const std::string& st
         return Customer;
     if (str == "InternalMinDevelopment")
         return InternalMinDevelopment;
+    if (str == "SymbolsCache")
+        return SymbolsCache;
     return Unknown;
 }
 
@@ -307,6 +309,8 @@ static FileFlags stringToFileFlags(Diagnostics& diags, const std::string& str) {
         return DirtyDataOrderFile;
     if (str == "ObjCOptimizationsFile")
         return ObjCOptimizationsFile;
+    if (str == "SwiftGenericMetadataFile")
+        return SwiftGenericMetadataFile;
     return NoFlags;
 }
 
@@ -337,16 +341,19 @@ struct SharedCacheBuilderOptions {
     std::set<std::string>       cmdLineArchs;
 };
 
+typedef std::tuple<std::string, std::string, FileFlags, std::string> InputFile;
+
 static void loadMRMFiles(Diagnostics& diags,
                          MRMSharedCacheBuilder* sharedCacheBuilder,
-                         const std::vector<std::tuple<std::string, std::string, FileFlags>>& inputFiles,
+                         const std::vector<InputFile>& inputFiles,
                          std::vector<std::pair<const void*, size_t>>& mappedFiles,
                          const std::set<std::string>& baselineCacheFiles) {
 
-    for (const std::tuple<std::string, std::string, FileFlags>& inputFile : inputFiles) {
+    for (const InputFile& inputFile : inputFiles) {
         const std::string& buildPath   = std::get<0>(inputFile);
         const std::string& runtimePath = std::get<1>(inputFile);
-        FileFlags   fileFlags   = std::get<2>(inputFile);
+        FileFlags          fileFlags   = std::get<2>(inputFile);
+        const std::string& projectName = std::get<3>(inputFile);
 
         struct stat stat_buf;
         int fd = ::open(buildPath.c_str(), O_RDONLY, 0);
@@ -384,7 +391,7 @@ static void loadMRMFiles(Diagnostics& diags,
 
         mappedFiles.emplace_back(buffer, (size_t)stat_buf.st_size);
 
-        addFile(sharedCacheBuilder, runtimePath.c_str(), (uint8_t*)buffer, (size_t)stat_buf.st_size, fileFlags);
+        addFile_v2(sharedCacheBuilder, runtimePath.c_str(), (uint8_t*)buffer, (size_t)stat_buf.st_size, fileFlags, projectName.c_str());
     }
 }
 
@@ -745,6 +752,8 @@ static void buildCacheFromJSONManifest(Diagnostics& diags, const SharedCacheBuil
                 diags.error("Cannot request no dev cache for InternalMinDevelopment as that is already only a dev cache\n");
             }
             break;
+        case SymbolsCache:
+            break;
     }
 
     if (diags.hasError())
@@ -758,11 +767,15 @@ static void buildCacheFromJSONManifest(Diagnostics& diags, const SharedCacheBuil
         return;
     }
 
-    std::vector<std::tuple<std::string, std::string, FileFlags>> inputFiles;
+    std::vector<InputFile> inputFiles;
     std::set<std::string> dylibsFoundInRoots;
     for (const dyld3::json::Node& fileNode : filesNode.array) {
         std::string path = dyld3::json::parseRequiredString(diags, dyld3::json::getRequiredValue(diags, fileNode, "path")).c_str();
         FileFlags fileFlags     = stringToFileFlags(diags, dyld3::json::parseRequiredString(diags, dyld3::json::getRequiredValue(diags, fileNode, "flags")));
+
+        std::string_view projectName;
+        if ( const dyld3::json::Node* projectNode = dyld3::json::getOptionalValue(diags, fileNode, "project") )
+            projectName = projectNode->value;
 
         // We can optionally have a sourcePath entry which is the path to get the source content from instead of the install path
         std::string sourcePath;
@@ -791,7 +804,7 @@ static void buildCacheFromJSONManifest(Diagnostics& diags, const SharedCacheBuil
             if (!stat(filePath.c_str(), &sb)) {
                 foundInOverlay = true;
                 diags.verbose("Taking '%s' from overlay '%s' instead of dylib cache\n", path.c_str(), overlay.c_str());
-                inputFiles.push_back({ filePath, path, fileFlags });
+                inputFiles.push_back({ filePath, path, fileFlags, "" });
                 dylibsFoundInRoots.insert(path);
                 break;
             }
@@ -809,10 +822,11 @@ static void buildCacheFromJSONManifest(Diagnostics& diags, const SharedCacheBuil
             case DylibOrderFile:
             case DirtyDataOrderFile:
             case ObjCOptimizationsFile:
+            case SwiftGenericMetadataFile:
                 buildPath = "." + buildPath;
                 break;
         }
-        inputFiles.push_back({ buildPath, path, fileFlags });
+        inputFiles.push_back({ buildPath, path, fileFlags, std::string(projectName) });
     }
 
     if (diags.hasError())
@@ -902,7 +916,10 @@ static void buildCacheFromJSONManifest(Diagnostics& diags, const SharedCacheBuil
             (void)mkpath_np((options.dstRoot + DRIVERKIT_DYLD_SHARED_CACHE_DIR).c_str(), 0755);
         } else if ( dyld3::MachOFile::isExclaveKitPlatform((dyld3::Platform)buildOptions.platform) ) {
             (void)mkpath_np((options.dstRoot + EXCLAVEKIT_DYLD_SHARED_CACHE_DIR).c_str(), 0755);
-        }else {
+        } else if ( buildOptions.disposition == SymbolsCache ) {
+            // symbols cache always uses /System/Library/dyld, even on iOS
+            (void)mkpath_np((options.dstRoot + MACOSX_MRM_DYLD_SHARED_CACHE_DIR).c_str(), 0755);
+        } else {
             (void)mkpath_np((options.dstRoot + IPHONE_DYLD_SHARED_CACHE_DIR).c_str(), 0755);
         }
     }
@@ -1285,7 +1302,10 @@ int main(int argc, const char* argv[])
     }
 
     //Move into the dir so we can use relative path manifests
-    chdir(options.dylibCacheDir.c_str());
+    if ( int result = chdir(options.dylibCacheDir.c_str()); result == -1 ) {
+        fprintf(stderr, "Couldn't cd in to dylib cache directory of '%s' because: %s\n",
+                options.dylibCacheDir.c_str(), strerror(errno));
+    }
 
     if (!options.buildAllPath.empty()) {
         bool requiresConcurrencyLimit = false;

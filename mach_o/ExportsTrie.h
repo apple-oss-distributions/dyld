@@ -40,6 +40,8 @@
 #include "ChunkBumpAllocator.h"
 #endif
 
+#include "Array.h"
+
 #include "Error.h"
 
 
@@ -78,7 +80,7 @@ protected:
     void            buildNodes(std::span<const GenericTrieWriterEntry> entries);
 #endif
     void            dump() const;
-    Error           recurseTrie(const uint8_t* p, char* cummulativeString,
+    Error           recurseTrie(const uint8_t* p, dyld3::OverflowSafeArray<char>& cummulativeString,
                                 int curStrOffset, bool& stop, void (^callback)(const char* name, std::span<const uint8_t> nodePayload, bool& stop)) const;
 
 #if BUILDING_MACHO_WRITER

@@ -59,13 +59,13 @@ uint64_t murmurHash(const void* key, int len, uint64_t seed)
 
   switch(len & 7)
   {
-      case 7: hash ^= uint64_t(data2[6]) << 48; break;
-      case 6: hash ^= uint64_t(data2[5]) << 40; break;
-      case 5: hash ^= uint64_t(data2[4]) << 32; break;
-      case 4: hash ^= uint64_t(data2[3]) << 24; break;
-      case 3: hash ^= uint64_t(data2[2]) << 16; break;
-      case 2: hash ^= uint64_t(data2[1]) << 8; break;
-      case 1: hash ^= uint64_t(data2[0]); break;
+      case 7: hash ^= uint64_t(data2[6]) << 48; [[fallthrough]];
+      case 6: hash ^= uint64_t(data2[5]) << 40; [[fallthrough]];
+      case 5: hash ^= uint64_t(data2[4]) << 32; [[fallthrough]];
+      case 4: hash ^= uint64_t(data2[3]) << 24; [[fallthrough]];
+      case 3: hash ^= uint64_t(data2[2]) << 16; [[fallthrough]];
+      case 2: hash ^= uint64_t(data2[1]) << 8; [[fallthrough]];
+      case 1: hash ^= uint64_t(data2[0]);
   };
     hash *= magic;
 

@@ -1,4 +1,33 @@
 #include "base.xcconfig"
 
-MAN_INSTALL_PATH              = /usr/local/share/man/man1/
-MAN_INSTALL_PATH[sdk=macosx*] = /usr/share/man/man1/
+
+INTERNAL_BUILD_       = 0
+INTERNAL_BUILD_0      = 0
+INTERNAL_BUILD_1      = 1
+INTERNAL_BUILD_VALUE  = $(INTERNAL_BUILD_$(INTERNAL_BUILD))
+
+// when building 'ld' in B&I, dyld_info is built into toolchain
+BUILDING_FOR_TOOLCHAIN_                 = 0
+BUILDING_FOR_TOOLCHAIN_ld               = 1
+BUILDING_FOR_TOOLCHAIN_dyld_executables = 0
+BUILDING_FOR_TOOLCHAIN_VALUE            = $(BUILDING_FOR_TOOLCHAIN_$(RC_ProjectName))
+
+GCC_PREPROCESSOR_DEFINITIONS_Release    = BUILDING_DYLDINFO=1         INTERNAL_BUILD=$(INTERNAL_BUILD_VALUE) BUILDING_FOR_TOOLCHAIN=$(BUILDING_FOR_TOOLCHAIN_VALUE)
+GCC_PREPROCESSOR_DEFINITIONS_Debug      = BUILDING_DYLDINFO=1 DEBUG=1 INTERNAL_BUILD=1                       BUILDING_FOR_TOOLCHAIN=$(BUILDING_FOR_TOOLCHAIN_VALUE)
+GCC_PREPROCESSOR_DEFINITIONS            = $(GCC_PREPROCESSOR_DEFINITIONS_$(CONFIGURATION))
+
+
+// dyld_info as part of RC_ProjectName=ld, builds into toolchain and links with libLTO.dylib
+// other dyld_info builds do not use libLTO.dylib and installs into /usr/local/bin/
+DYLD_INFO_INSTALL_PATH_                 = /usr/local/bin
+DYLD_INFO_INSTALL_PATH_ld               = $(TOOLCHAIN_INSTALL_DIR)/usr/bin
+DYLD_INFO_INSTALL_PATH_dyld_executables = /usr/local/bin
+DYLD_INFO_INSTALL_PATH_VALUE            = $(DYLD_INFO_INSTALL_PATH_$(RC_ProjectName))
+INSTALL_PATH                            = $(DYLD_INFO_INSTALL_PATH_VALUE)
+
+MAN_INSTALL_PATH                     = /usr/local/share/man/man1/
+MAN_INSTALL_PATH[sdk=macosx*]        = $(TOOLCHAIN_INSTALL_DIR)/usr/share/man/man1/
+
+LD_RUNPATH_SEARCH_PATHS                              =
+LD_RUNPATH_SEARCH_PATHS[sdk=macosx*]                 = @executable_path/../lib/
+LD_RUNPATH_SEARCH_PATHS[config=Debug][sdk=macosx*]   = @executable_path/../lib/ /var/select/developer_dir/Toolchains/XcodeDefault.xctoolchain/usr/lib/

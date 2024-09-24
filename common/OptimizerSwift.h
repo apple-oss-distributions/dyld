@@ -48,6 +48,17 @@ struct SwiftOptimizationHeader {
     uint64_t typeConformanceHashTableCacheOffset;
     uint64_t metadataConformanceHashTableCacheOffset;
     uint64_t foreignTypeConformanceHashTableCacheOffset;
+
+    uint64_t prespecializationDataCacheOffset; // added in version 2
+
+    // TODO: should this be variable size?
+    constexpr static size_t MAX_PRESPECIALIZED_METADATA_TABLES = 8;
+
+    // limited space reserved for table offsets, they're not accessed directly
+    // used for debugging only
+    uint64_t prespecializedMetadataHashTableCacheOffsets[MAX_PRESPECIALIZED_METADATA_TABLES]; // added in version 3
+
+    constexpr static uint32_t currentVersion = 3;
 };
 
 // This is the key to the map from (type descriptor, protocol) to value
@@ -129,6 +140,51 @@ struct SwiftMetadataProtocolConformanceLocationKey
     const uint32_t key2Size() const {
         return sizeof(protocolCacheOffset);
     }
+};
+
+// A fixed limit for the number of pointers a single hash table key may consist of.
+// This allows to reserve a fixed space in dyld's stack and avoid dynamic allocations.
+constexpr size_t PointerHashTableKeyMaxPointers = 64;
+
+// In-memory representation of a pointer hash table key.
+// A hash table key consists of a variable number of pointer keys, so they're accessed indirectly.
+struct PointerHashTableBuilderKey
+{
+    uint64_t* cacheOffsets = nullptr;
+    uint32_t  numOffsets;
+
+    const uint8_t* key1Buffer() const {
+        return (const uint8_t*)&numOffsets;
+    }
+
+    const uint32_t key1Size() const {
+        return sizeof(numOffsets);
+    }
+
+    const uint8_t* key2Buffer() const {
+        return (const uint8_t*)cacheOffsets;
+    }
+
+    const uint32_t key2Size() const {
+        return sizeof(uint64_t) * numOffsets;
+    }
+};
+
+// On disk representation of a pointer hash table key.
+struct PointerHashTableOnDiskKey
+{
+    // The offset is from the start of the values buffer to the start of shared cache offsets for this key.
+    uint32_t offsetToCacheOffsets;
+    uint32_t numOffsets;
+};
+
+// Value entry of the pointer hash table.
+struct PointerHashTableValue: public PointerHashTableOnDiskKey
+{
+    typedef PointerHashTableOnDiskKey KeyType;
+
+    uint64_t cacheOffset: 63,
+             nextIsDuplicate: 1;
 };
 
 // The start of this struct, the SwiftMetadataProtocolConformanceLocationKey, is the key
@@ -372,9 +428,14 @@ public:
         return nullptr;
     }
 
+    const uint64_t* getCacheOffsets(const PointerHashTableOnDiskKey& value) const
+    {
+        return (uint64_t*)((uint8_t*)this + value.offsetToCacheOffsets);
+    }
+
 #if BUILDING_CACHE_BUILDER || BUILDING_CACHE_BUILDER_UNIT_TESTS
     template<typename PerfectHashT, typename KeyT, typename TargetT>
-    void write(const PerfectHashT& phash, const lsl::Vector<KeyT>& keyValues,
+    void write(PerfectHashT& phash, const lsl::Vector<KeyT>& keyValues,
                const lsl::Vector<TargetT>& targets, const uint8_t* targetValuesBufferBaseAddress);
 #endif
 
@@ -414,6 +475,7 @@ void buildSwiftHashTables(const cache_builder::BuilderConfig& config,
                           const objc::ClassHashTable* objcClassOpt,
                           const void* headerInfoRO, const void* headerInfoRW,
                           CacheVMAddress headerInfoROUnslidVMAddr,
+                          cache_builder::CacheDylib* prespecializedDylib,
                           cache_builder::SwiftProtocolConformanceOptimizer& swiftProtocolConformanceOptimizer);
 #endif // BUILDING_CACHE_BUILDER || BUILDING_CACHE_BUILDER_UNIT_TESTS
 

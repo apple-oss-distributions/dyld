@@ -208,16 +208,14 @@ public:
     virtual     const char*                 _dyld_shared_cache_real_path(const char* path);
     virtual     bool                        _dyld_shared_cache_contains_path(const char* path);
     virtual     void*                       dlopen_from(const char* path, int mode, void* addressInCaller);
-#if !__i386__
     virtual     void *                      dlopen_audited(const char * path, int mode);
-#endif
     virtual     const struct mach_header*   _dyld_get_prog_image_header();
 
 
     //
     // Added iOS 15, macOS 12
     //
-    virtual     void                                obsolete() __attribute__((noreturn));
+    virtual     void                                obsolete() __attribute__((__noreturn__));
     virtual     void                                _dyld_visit_objc_classes(void (^callback)(const void* classPtr));
     virtual     uint32_t                            _dyld_objc_class_count(void);
     virtual     bool                                _dyld_objc_uses_large_shared_cache(void);
@@ -264,15 +262,29 @@ public:
                                                                               _dyld_section_location_info_t locationHandle,
                                                                               _dyld_section_location_kind kind);
 
-    virtual _dyld_pseudodylib_callbacks_handle      _dyld_pseudodylib_register_callbacks(const struct _dyld_pseudodylib_callbacks* callbacks);
-    virtual void                                    _dyld_pseudodylib_deregister_callbacks(_dyld_pseudodylib_callbacks_handle callbacks);
-    virtual _dyld_pseudodylib_handle                _dyld_pseudodylib_register(void* addr, size_t size, _dyld_pseudodylib_callbacks_handle callbacks_handle, void* context);
-    virtual void                                    _dyld_pseudodylib_deregister(_dyld_pseudodylib_handle pd_handle);
-
+    virtual     _dyld_pseudodylib_callbacks_handle  _dyld_pseudodylib_register_callbacks(const struct _dyld_pseudodylib_callbacks* callbacks);
+    virtual     void                                _dyld_pseudodylib_deregister_callbacks(_dyld_pseudodylib_callbacks_handle callbacks);
+    virtual     _dyld_pseudodylib_handle            _dyld_pseudodylib_register(void* addr, size_t size, _dyld_pseudodylib_callbacks_handle callbacks_handle, void* context);
+    virtual     void                                _dyld_pseudodylib_deregister(_dyld_pseudodylib_handle pd_handle);
     virtual     bool                                _dyld_is_preoptimized_objc_image_loaded(uint16_t imageID);
-
     virtual     void*                               _dyld_for_objc_header_opt_rw();
     virtual     const void*                         _dyld_for_objc_header_opt_ro();
+
+
+    //
+    // Added iOS 18, macOS 15
+    //
+    virtual bool                                    _dyld_dlsym_blocked();
+    virtual void                                    _dyld_register_dlsym_notifier(void (*callback)(const char* symbolName));
+    virtual const void*                             _dyld_get_swift_prespecialized_data();
+    virtual const void*                             _dyld_find_pointer_hash_table_entry(const void *table, const void *key1,
+                                                                                        size_t restKeysCount, const void **restKeys);
+    virtual uint64_t                                dyld_get_program_sdk_version_token();
+    virtual uint64_t                                dyld_get_program_minos_version_token();
+    virtual dyld_platform_t                         dyld_version_token_get_platform(uint64_t token);
+    virtual bool                                    dyld_version_token_at_least(uint64_t token, dyld_build_version_t version);
+    virtual bool                                    _dyld_is_pseudodylib(void* handle);
+
 
 private:
 
@@ -284,7 +296,7 @@ private:
 
     // internal helpers
     uint32_t                getSdkVersion(const mach_header* mh);
-    dyld_build_version_t    mapFromVersionSet(dyld_build_version_t version);
+    dyld_build_version_t    mapFromVersionSet(dyld_build_version_t version, dyld3::Platform platform);
     uint32_t                linkedDylibVersion(const dyld3::MachOFile* mf, const char* installname);
     uint32_t                deriveVersionFromDylibs(const dyld3::MachOFile* mf);
     void                    forEachPlatform(const dyld3::MachOFile* mf, void (^callback)(dyld_platform_t platform, uint32_t sdk_version, uint32_t min_version));
@@ -296,6 +308,7 @@ private:
     bool                    flatFindSymbol(const char* symbolName, void** symbolAddress, const mach_header** foundInImageAtLoadAddress);
     bool                    validLoader(const Loader* maybeLoader);
     void                    forEachImageVersion(const mach_header* mh, void (^callback)(dyld_platform_t platform, uint32_t sdk_version, uint32_t min_version));
+    bool                    addressLookupsDisabled(const char* symbolName=nullptr) const;
 };
 
 } // namespace dyld4

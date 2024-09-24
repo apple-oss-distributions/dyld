@@ -57,7 +57,8 @@ enum Disposition
     Unknown                 = 0,
     InternalDevelopment     = 1,
     Customer                = 2,
-    InternalMinDevelopment  = 3
+    InternalMinDevelopment  = 3,
+    SymbolsCache            = 4
 };
 
 enum FileFlags
@@ -72,6 +73,7 @@ enum FileFlags
     DylibOrderFile                              = 100,
     DirtyDataOrderFile                          = 101,
     ObjCOptimizationsFile                       = 102,
+    SwiftGenericMetadataFile                    = 103,
 };
 
 struct BuildOptions_v1
@@ -186,6 +188,11 @@ struct MRMSharedCacheBuilder* createSharedCacheBuilder(const struct BuildOptions
 // Add a file.  Returns true on success.
 __API_AVAILABLE(macos(10.12))
 bool addFile(struct MRMSharedCacheBuilder* builder, const char* path, uint8_t* data, uint64_t size, enum FileFlags fileFlags);
+
+// Add a file.  Returns true on success.
+// Available in API version 1.6 and later
+__API_AVAILABLE(macos(10.12))
+bool addFile_v2(struct MRMSharedCacheBuilder* builder, const char* path, uint8_t* data, uint64_t size, enum FileFlags fileFlags, const char* projectName);
 
 // Add an on-disk file (ie, a file which won't be removed by MRM).  Returns true on success.
 __API_AVAILABLE(macos(10.12))

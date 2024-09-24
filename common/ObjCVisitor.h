@@ -80,6 +80,10 @@ struct Visitor : metadata_visitor::Visitor
     void forEachSelectorReference(void (^callback)(VMAddress selRefVMAddr, VMAddress selRefTargetVMAddr,
                                                    const char* selectorString)) const;
 
+#if BUILDING_CACHE_BUILDER || BUILDING_CACHE_BUILDER_UNIT_TESTS
+    void forEachMethodList(void (^callback)(MethodList& objcMethodList, std::optional<metadata_visitor::ResolvedValue> extendedMethodTypes));
+#endif
+
     void withImageInfo(void (^callback)(const uint32_t version, const uint32_t flags)) const;
 
 #if BUILDING_CACHE_BUILDER_UNIT_TESTS
@@ -89,10 +93,9 @@ public:
 private:
 #endif
 
-    struct DataSection
+    struct Section
     {
-        DataSection(metadata_visitor::ResolvedValue baseAddress,
-                    uint64_t sectSize)
+        Section(metadata_visitor::ResolvedValue baseAddress, uint64_t sectSize)
             : sectionBase(baseAddress), sectSize(sectSize)
         {
         }
@@ -101,9 +104,12 @@ private:
         uint64_t                        sectSize;
     };
 
-    std::optional<Visitor::DataSection> findObjCDataSection(const char *sectionName) const;
+    std::optional<Visitor::Section> findSection(std::span<const char*> altSegNames,
+                                                const char *sectionName) const;
+    std::optional<Visitor::Section> findObjCDataSection(const char *sectionName) const;
+    std::optional<Visitor::Section> findObjCTextSection(const char *sectionName) const;
 
-    void forEachClass(bool visitMetaClasses, const Visitor::DataSection& classListSection,
+    void forEachClass(bool visitMetaClasses, const Visitor::Section& classListSection,
                       void (^callback)(Class& objcClass, bool isMetaClass, bool& stopClass));
 };
 
@@ -258,6 +264,10 @@ struct MethodList
     static_assert(sizeof(method_list_t) == 8, "makeEmptyMethodList expects a buffer without the method array");
 
     uint32_t numMethods() const;
+
+    // size of this entire method list
+    uint32_t listSize() const;
+    uint32_t methodSize() const;
 
     bool usesOffsetsFromSelectorBuffer() const;
     bool usesRelativeOffsets() const;
@@ -651,7 +661,8 @@ private:
 // to find the other fields of the category.
 struct Category
 {
-    Category(metadata_visitor::ResolvedValue categoryPos) : categoryPos(categoryPos) { }
+    Category(metadata_visitor::ResolvedValue categoryPos, bool isCatlist2)
+        : categoryPos(categoryPos), isCatlist2(isCatlist2) { }
 
     const char*         getName(const Visitor& objcVisitor) const;
     const void*         getLocation() const;
@@ -663,9 +674,17 @@ struct Category
     PropertyList        getInstanceProperties(const Visitor& objcVisitor) const;
     PropertyList        getClassProperties(const Visitor& objcVisitor) const;
 
+#if BUILDING_SHARED_CACHE_UTIL
+    std::optional<VMAddress> getClassVMAddr(const Visitor& objcVisitor) const;
+#endif
+
     // Gets the raw fixup and chained pointer format for the class fixup
     void withClass(const Visitor& objcVisitor,
                    void (^handler)(const dyld3::MachOFile::ChainedFixupPointerOnDisk* fixup, uint16_t pointerFormat)) const;
+
+    // catlist are for objc classes and @objc Swift classes.
+    // catlist2 are for Swift stub classes, which is what we check for here.
+    bool isForSwiftStubClass() const { return this->isCatlist2; }
 
     static uint32_t getSize(bool is64);
 
@@ -700,6 +719,9 @@ private:
     const void* getFieldPos(const Visitor& objcVisitor, Field field) const;
 
     const metadata_visitor::ResolvedValue categoryPos;
+
+    // Does this category come from the __objc_catlist2 section, not __objc_catlist
+    bool isCatlist2 = false;
 };
 
 // A wrapper around a Protocol.  Points to the protocol in the mach-o buffer, and can be used

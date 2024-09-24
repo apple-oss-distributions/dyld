@@ -45,7 +45,8 @@ class PremappedLoader : public JustInTimeLoader
 public:
     // these are the "virtual" methods that override Loader
     void                        loadDependents(Diagnostics& diag, RuntimeState& state, const LoadOptions& options);
-    void                        applyFixups(Diagnostics&, RuntimeState& state, DyldCacheDataConstLazyScopedWriter&, bool allowLazyBinds) const;
+    void                        applyFixups(Diagnostics&, RuntimeState& state, DyldCacheDataConstLazyScopedWriter&, bool allowLazyBinds,
+                                            lsl::Vector<PseudoDylibSymbolToMaterialize>* materializingSymbols) const;
     bool                        dyldDoesObjCFixups() const;
     void                        withLayout(Diagnostics &diag, RuntimeState& state, void (^callback)(const mach_o::Layout &layout)) const;
     bool                        hasBeenFixedUp(RuntimeState&) const;

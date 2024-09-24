@@ -183,6 +183,8 @@ uint64_t lookup8(const uint8_t *k, size_t length, uint64_t level)
   return c;
 }
 
+#if BUILDING_CACHE_BUILDER || BUILDING_UNIT_TESTS || BUILDING_CACHE_BUILDER_UNIT_TESTS
+
 /*
 ------------------------------------------------------------------------------
 This generates a minimal perfect hash function.  That means, given a
@@ -378,7 +380,6 @@ static void initnorm(dyld3::OverflowSafeArray<key>& keys, ub4 alen, ub4 blen, ub
 // gencode  *final;                          /* output, code for the final hash */
 {
   ub4 loga = log2u(alen);                            /* log based 2 of blen */
-#if BUILDING_CACHE_BUILDER || BUILDING_UNIT_TESTS || BUILDING_CACHE_BUILDER_UNIT_TESTS
   dispatch_apply(keys.count(), DISPATCH_APPLY_AUTO, ^(size_t index) {
     ub4 i = (ub4)index;
     key *mykey = &keys[i];
@@ -390,15 +391,6 @@ static void initnorm(dyld3::OverflowSafeArray<key>& keys, ub4 alen, ub4 blen, ub
     mykey->a_k = (loga > 0) ? (ub4)(hash >> (UB8BITS-loga)) : 0;
     mykey->b_k = (blen > 1) ? (hash & (blen-1)) : 0;
   });
-#else
-  for (size_t index = 0; index != keys.count(); ++index) {
-    ub4 i = (ub4)index;
-    key *mykey = &keys[i];
-    ub8 hash = lookup8(mykey->name_k, mykey->len_k, salt);
-    mykey->a_k = (loga > 0) ? (ub4)(hash >> (UB8BITS-loga)) : 0;
-    mykey->b_k = (blen > 1) ? (hash & (blen-1)) : 0;
-  };
-#endif
 }
 
 
@@ -789,8 +781,6 @@ void objc::PerfectHash::make_perfect(dyld3::OverflowSafeArray<key>& keys, Perfec
     }
 }
 
-#if BUILDING_CACHE_BUILDER || BUILDING_UNIT_TESTS || BUILDING_CACHE_BUILDER_UNIT_TESTS
-
 void PerfectHash::make_perfect(const std::vector<ObjCString>& strings, objc::PerfectHash& phash)
 {
     dyld3::OverflowSafeArray<key> keys;
@@ -811,30 +801,7 @@ void PerfectHash::make_perfect(const std::vector<ObjCString>& strings, objc::Per
     make_perfect(keys, phash);
 }
 
-#endif
-
-void PerfectHash::make_perfect(const dyld3::OverflowSafeArray<const char*>& strings, objc::PerfectHash& phash)
-{
-    dyld3::OverflowSafeArray<key> keys;
-
-    /* read in the list of keywords */
-    keys.reserve(strings.count());
-    for (const char* s : strings) {
-        key mykey;
-#if BUILDING_CACHE_BUILDER || BUILDING_UNIT_TESTS || BUILDING_CACHE_BUILDER_UNIT_TESTS
-        mykey.name1_k = (ub1 *)s;
-        mykey.len1_k  = (ub4)strlen(s);
-        mykey.name2_k = (ub1 *)nullptr;
-        mykey.len2_k  = (ub4)0;
-#else
-        mykey.name_k = (ub1 *)s;
-        mykey.len_k  = (ub4)strlen(s);
-#endif
-        keys.push_back(mykey);
-    }
-
-    make_perfect(keys, phash);
-}
+#endif // BUILDING_CACHE_BUILDER || BUILDING_UNIT_TESTS || BUILDING_CACHE_BUILDER_UNIT_TESTS
 
 } // namespace objc
 

@@ -52,7 +52,7 @@ struct HashString {
         return std::hash<std::string_view>{}(v);
     }
 
-    static size_t hash(const std::string_view& v) {
+    static size_t hash(const std::string_view& v, void* state) {
         return std::hash<std::string_view>{}(v);
     }
 };
@@ -62,7 +62,7 @@ struct EqualString {
         return s1 == s2;
     }
 
-    static bool equal(std::string_view s1, std::string_view s2) {
+    static bool equal(std::string_view s1, std::string_view s2, void* state) {
         return s1 == s2;
     }
 };
@@ -345,6 +345,15 @@ struct ObjCCategoryOptimizer
 
 };
 
+// The Chunk and precomputed size information about a pointer hash table.
+struct PointerHashTableOptimizerInfo
+{
+    PointerHashTableChunk* chunk = nullptr;
+    uint64_t               size = 0;
+    uint32_t               numEntries = 0;
+    uint32_t               numPointerKeys = 0;
+};
+
 struct SwiftProtocolConformanceOptimizer
 {
     // How much space we need for the Swift optimization header
@@ -370,6 +379,12 @@ struct SwiftProtocolConformanceOptimizer
 
     // The Chunk in a SubCache which will contain the foreignType conformances hash table
     SwiftProtocolConformancesHashTableChunk*    foreignTypeConformancesHashTable = nullptr;
+
+    // Prespecialized metadata pointer tables.
+    std::vector<PointerHashTableOptimizerInfo>  prespecializedMetadataHashTables;
+
+    // Offset to the Swift prespecialized data.
+    VMOffset                                    prespecializedDataOffset = VMOffset(0ull);
 };
 
 struct DylibTrieOptimizer
@@ -426,10 +441,7 @@ struct UniquedGOTsOptimizer
 {
     CoalescedGOTSection         regularGOTs;
     CoalescedGOTSection         authGOTs;
-
-    // The Chunk in a SubCache which will contain the uniqued GOTs
-    UniquedGOTsChunk*     regularGOTsChunk = nullptr;
-    UniquedGOTsChunk*     authGOTsChunk = nullptr;
+    CoalescedGOTSection         authPtrs;
 };
 
 struct StubOptimizer

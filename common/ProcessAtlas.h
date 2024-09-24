@@ -81,7 +81,7 @@ struct VIS_HIDDEN Mapper {
         Pointer(const Pointer&) = delete;
         Pointer& operator=(const Pointer&) = delete;
 
-        Pointer(SharedPtr<Mapper>&& mapper, const void* address, uint64_t size) : _mapper(std::move(mapper)), _size(size) {
+        Pointer(Mapper* mapper, const void* address, uint64_t size) : _mapper(mapper), _size(size) {
             auto [pointer, mmaped] = _mapper->map(address,_size);
             _pointer = pointer;
             _mmapped = mmaped;
@@ -126,7 +126,7 @@ struct VIS_HIDDEN Mapper {
             swap(_pointer, other._pointer);
             swap(_mmapped, other._mmapped);
         }
-        SharedPtr<Mapper>   _mapper     = nullptr;
+        Mapper*              _mapper     = nullptr;
         uint64_t            _size       = 0;
         void*               _pointer    = nullptr;
         bool                _mmapped    = false;
@@ -134,9 +134,8 @@ struct VIS_HIDDEN Mapper {
 
     ~Mapper();
     template<typename T>
-    Pointer<T>  map(const void* addr, uint64_t size) const {
-        auto mapper = SharedPtr<Mapper>((Mapper*)this);
-        return Pointer<T>(std::move(mapper), addr, size);
+    Pointer<T>  map(const void* addr, uint64_t size) {
+        return Pointer<T>(this, addr, size);
     }
     struct Mapping {
         uint64_t    offset;

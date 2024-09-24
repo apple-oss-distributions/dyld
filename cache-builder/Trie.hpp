@@ -63,6 +63,8 @@
 #include <iterator>
 
 #include <mach-o/loader.h>
+
+#include "Array.h"
 #include "Defines.h"
 
 #if __cplusplus <= 201103L
@@ -176,7 +178,7 @@ struct VIS_HIDDEN Trie {
 		// empty trie has no entries
 		if ( start == end )
 			return false;
-		char cummulativeString[32768];
+        STACK_ALLOC_OVERFLOW_SAFE_ARRAY(char, cummulativeString, 4096);
 		std::vector<EntryWithOffset> entries;
 		if ( !processExportNode(start, start, end, cummulativeString, 0, entries) )
 			return false;
@@ -337,7 +339,7 @@ private:
 #endif
 
 	static inline bool processExportNode(const uint8_t* const start, const uint8_t* p, const uint8_t* const end,
-										 char* cummulativeString, int curStrOffset,
+                                         dyld3::OverflowSafeArray<char>& cummulativeString, int curStrOffset,
 										 std::vector<EntryWithOffset>& output)
 	{
 		if ( p >= end )
@@ -351,7 +353,7 @@ private:
 		if ( terminalSize != 0 ) {
 			EntryWithOffset e;
 			e.nodeOffset = p-start;
-			e.entry.name = cummulativeString;
+            e.entry.name = cummulativeString.begin();
 			e.entry.info.loadData(p,end);
 			output.push_back(e);
 		}

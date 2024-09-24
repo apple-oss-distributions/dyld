@@ -37,11 +37,26 @@
 #include "FileUtils.h"
 #include "DyldDelegates.h"
 
+// mach_o
+#include "Header.h"
+#include "Image.h"
+#include "Error.h"
+#include "Version32.h"
+#include "Fixup.h"
+#include "Symbol.h"
+
 using dyld3::MachOFile;
 using dyld3::FatFile;
 using dyld3::GradedArchs;
 using dyld3::Platform;
 
+using mach_o::Header;
+using mach_o::Image;
+using mach_o::Error;
+using mach_o::Version32;
+using mach_o::LinkedDylibAttributes;
+using mach_o::Fixup;
+using mach_o::Symbol;
 
 // used by unit tests
 __attribute__((visibility("hidden")))
@@ -221,12 +236,29 @@ int macho_best_slice_fd_internal(int fd, Platform platform, const GradedArchs& l
     return result;
 }
 
+#if __arm64e__
+static const void* stripPointer(const void* ptr)
+{
+#if __has_feature(ptrauth_calls)
+    return __builtin_ptrauth_strip(ptr, ptrauth_key_asia);
+#else
+    return ptr;
+#endif
+}
+#endif
 
 int macho_best_slice_in_fd(int fd, void (^bestSlice)(const struct mach_header* slice, uint64_t sliceFileOffset, size_t sliceSize)__MACHO_NOESCAPE)
 {
+    bool keysOff = true;
+#if __arm64e__
+    // Test if PAC is enabled
+    const void* p = (const void*)&macho_best_slice;
+    if ( stripPointer(p) != p )
+       keysOff = false;
+#endif
     const Platform     platform    = MachOFile::currentPlatform();
-    const GradedArchs* launchArchs = &GradedArchs::forCurrentOS(false, false);
-    const GradedArchs* dylibArchs  = &GradedArchs::forCurrentOS(false, false);
+    const GradedArchs* launchArchs = &GradedArchs::launchCurrentOS();
+    const GradedArchs* dylibArchs  = &GradedArchs::forCurrentOS(keysOff, false);
 #if TARGET_OS_SIMULATOR
     const char* simArchNames = getenv("SIMULATOR_ARCHS");
     if ( simArchNames == nullptr )
@@ -249,4 +281,153 @@ const char* _Nullable macho_dylib_install_name(const struct mach_header* _Nonnul
     return nullptr;
 }
 
+static void iterateDependencies(const Image& image, void (^_Nonnull callback)(const char* _Nonnull loadPath, const char* _Nonnull attributes, bool* _Nonnull stop) )
+{
+    image.header()->forEachLinkedDylib(^(const char* loadPath, LinkedDylibAttributes kind, Version32 compatVersion, Version32 curVersion, bool& stop) {
+        char attrBuf[64];
+        kind.toString(attrBuf);
+        callback(loadPath, attrBuf, &stop);
+    });
+}
+
+int macho_for_each_dependent_dylib(const struct mach_header* _Nonnull mh, size_t mappedSize,
+                                   void (^ _Nonnull callback)(const char* _Nonnull loadPath, const char* _Nonnull attributes, bool* _Nonnull stop))
+{
+    if ( mappedSize == 0 ) {
+        // Image loaded by dyld
+        Image image(mh);
+        iterateDependencies(image, callback);
+    }
+    else {
+        // raw mach-o file/slice in memory
+        Image image(mh, mappedSize, Image::MappingKind::wholeSliceMapped);
+        if ( !image.header()->hasMachOMagic() )
+            return EFTYPE;
+        if ( Error err = image.validate() )
+            return EBADMACHO;
+        iterateDependencies(image, callback);
+    }
+    return 0;
+}
+
+static void iterateImportedSymbols(const Image& image, void (^_Nonnull callback)(const char* _Nonnull symbolName, const char* _Nonnull libraryPath, bool weakImport, bool* _Nonnull stop) )
+{
+    if ( image.hasChainedFixups() ) {
+        image.chainedFixups().forEachBindTarget(^(const Fixup::BindTarget& bindTarget, bool& stop) {
+            callback(bindTarget.symbolName.c_str(), image.header()->libOrdinalName(bindTarget.libOrdinal).c_str(), bindTarget.weakImport, &stop);
+        });
+    }
+    else {
+        // old opcode based fixups
+        if ( image.hasBindOpcodes() ) {
+            image.bindOpcodes().forEachBindTarget(^(const Fixup::BindTarget& bindTarget, bool& stop) {
+                callback(bindTarget.symbolName.c_str(), image.header()->libOrdinalName(bindTarget.libOrdinal).c_str(), bindTarget.weakImport, &stop);
+            }, ^(const char* symbolName) {
+            });
+        }
+        if ( image.hasLazyBindOpcodes() ) {
+            image.lazyBindOpcodes().forEachBindTarget(^(const Fixup::BindTarget& bindTarget, bool& stop) {
+                callback(bindTarget.symbolName.c_str(), image.header()->libOrdinalName(bindTarget.libOrdinal).c_str(), bindTarget.weakImport, &stop);
+            }, ^(const char *symbolName) {
+            });
+        }
+    }
+}
+
+int macho_for_each_imported_symbol(const struct mach_header* _Nonnull mh, size_t mappedSize,
+                                   void (^ _Nonnull callback)(const char* _Nonnull symbolName, const char* _Nonnull libraryPath, bool weakImport, bool* _Nonnull stop))
+{
+    if ( mappedSize == 0 ) {
+        // Image loaded by dyld, but sanity check
+        if ( !((Header*)mh)->hasMachOMagic() )
+            return EFTYPE;
+        Image image(mh);
+        iterateImportedSymbols(image, callback);
+    }
+    else {
+        // raw mach-o file/slice in memory
+        Image image(mh, mappedSize, Image::MappingKind::wholeSliceMapped);
+        if ( !image.header()->hasMachOMagic() )
+            return EFTYPE;
+        if ( Error err = image.validate() )
+            return EBADMACHO;
+        iterateImportedSymbols(image, callback);
+    }
+    return 0;
+}
+
+static const char* exportSymbolAttrString(const Symbol& symbol)
+{
+    uint64_t other;
+    if ( symbol.isWeakDef() )
+        return "weak-def";
+    else if ( symbol.isThreadLocal() )
+        return "thread-local";
+    else if ( symbol.isDynamicResolver(other) )
+        return "dynamic-resolver";
+    else if ( symbol.isAbsolute(other) )
+        return "absolute";
+    return "";
+}
+
+static void iterateExportedSymbols(const Image& image, void (^_Nonnull callback)(const char* _Nonnull symbolName, const char* _Nonnull attributes, bool* _Nonnull stop) )
+{
+    if ( image.hasExportsTrie() ) {
+        image.exportsTrie().forEachExportedSymbol(^(const Symbol& symbol, bool& stop) {
+            callback(symbol.name().c_str(), exportSymbolAttrString(symbol), &stop);
+        });
+    }
+    else if ( image.hasSymbolTable() ) {
+        image.symbolTable().forEachExportedSymbol(^(const Symbol& symbol, uint32_t symbolIndex, bool& stop) {
+            callback(symbol.name().c_str(), exportSymbolAttrString(symbol), &stop);
+        });
+    }
+}
+
+int macho_for_each_exported_symbol(const struct mach_header* _Nonnull mh, size_t mappedSize,
+                                   void (^ _Nonnull callback)(const char* _Nonnull symbolName, const char* _Nonnull attributes, bool* _Nonnull stop))
+{
+    if ( mappedSize == 0 ) {
+        // Image loaded by dyld, but sanity check
+        if ( !((Header*)mh)->hasMachOMagic() )
+            return EFTYPE;
+        Image image(mh);
+        iterateExportedSymbols(image, callback);
+    }
+    else {
+        // raw mach-o file/slice in memory
+        Image image(mh, mappedSize, Image::MappingKind::wholeSliceMapped);
+        if ( !image.header()->hasMachOMagic() )
+            return EFTYPE;
+        if ( Error err = image.validate() )
+            return EBADMACHO;
+        iterateExportedSymbols(image, callback);
+    }
+    return 0;
+}
+
+
+int macho_for_each_defined_rpath(const struct mach_header* _Nonnull mh, size_t mappedSize,
+                                 void (^ _Nonnull callback)(const char* _Nonnull rpath, bool* _Nonnull stop))
+{
+    if ( mappedSize == 0 ) {
+        // Image loaded by dyld
+        Image image(mh);
+        image.header()->forEachRPath(^(const char* _Nonnull rpath, bool& stop) {
+            callback(rpath, &stop);
+        });
+    }
+    else {
+        // raw mach-o file/slice in memory
+        Image image(mh, mappedSize, Image::MappingKind::wholeSliceMapped);
+        if ( !image.header()->hasMachOMagic() )
+            return EFTYPE;
+        if ( Error err = image.validate() )
+            return EBADMACHO;
+        image.header()->forEachRPath(^(const char* _Nonnull rpath, bool& stop) {
+            callback(rpath, &stop);
+        });
+    }
+    return 0;
+}
 #endif // !TARGET_OS_EXCLAVEKIT

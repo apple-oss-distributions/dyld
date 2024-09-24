@@ -95,6 +95,7 @@ void FileManager::reloadFSInfos() const {
     } __attribute__((aligned(4), packed));
     typedef struct VolAttrBuf VolAttrBuf;
 
+    STACK_ALLOCATOR(ephemeralAllocator, 0);
     while (1) {
         int fsCount = getfsstat(nullptr, 0, MNT_NOWAIT);
         if (fsCount == -1) {
@@ -102,10 +103,10 @@ void FileManager::reloadFSInfos() const {
             break;
         }
         int fsInfoSize = fsCount*sizeof(struct statfs);
-        auto fsInfos = (struct statfs *)_allocator->malloc(fsInfoSize);
+        auto fsInfos = (struct statfs *)ephemeralAllocator.malloc(fsInfoSize);
         if (this->getfsstat(fsInfos, fsInfoSize, MNT_NOWAIT) != fsCount) {
             // Retry
-            _allocator->free((void*)fsInfos);
+            ephemeralAllocator.free((void*)fsInfos);
             continue;
         }
         for (auto i = 0; i < fsCount; ++i) {
@@ -138,7 +139,7 @@ void FileManager::reloadFSInfos() const {
                 _fsUUIDMap->insert({f_fsid, UUID()});
             }
         }
-        _allocator->free((void*)fsInfos);
+        ephemeralAllocator.free((void*)fsInfos);
         break;
     }
 }

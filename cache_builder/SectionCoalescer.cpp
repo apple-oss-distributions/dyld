@@ -71,6 +71,8 @@ DylibSectionCoalescer::OptimizedSection* DylibSectionCoalescer::getSection(std::
     } else if ( segmentName == "__AUTH_CONST" ) {
         if ( sectionName == "__auth_got" )
             return &this->auth_gots;
+        if ( sectionName == "__auth_ptr" )
+            return &this->auth_ptrs;
     }
 
     return nullptr;

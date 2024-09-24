@@ -6,8 +6,6 @@ source $SRCROOT/build-scripts/include.sh
 
 # Exit on failure
 
-OBJROOT_DYLD_APP_CACHE_UTIL="${TARGET_TEMP_DIR}/Objects_Dyld_App_Cache_Util"
-OBJROOT_RUN_STATIC="${TARGET_TEMP_DIR}/Objects_Run_Static"
 OBJROOT_DRIVERKIT="${TARGET_TEMP_DIR}/driverkit"
 
 SYMROOT=${BUILD_DIR}/${CONFIGURATION}${EFFECTIVE_PLATFORM_NAME}/dyld_tests
@@ -96,16 +94,6 @@ echo "DK_LDFLAGS = $DK_LDFLAGS" >> $TMPFILE
 
 /usr/bin/rsync -vc $TMPFILE ${DERIVED_FILES_DIR}/config.ninja
 /bin/rm -f $TMPFILE
-
-xcodebuild install -target run-static SDKROOT="${SDKROOT}" MACOSX_DEPLOYMENT_TARGET=${MACOSX_DEPLOYMENT_TARGET} OBJROOT="${OBJROOT_RUN_STATIC}" SRCROOT="${SRCROOT}" DSTROOT="${DSTROOT}" SYMROOT="${SYMROOT}" RC_ProjectSourceVersion="${RC_ProjectSourceVersion}" DISABLE_SDK_METADATA_PARSING=YES
-
-if [ "${PLATFORM_NAME}" == "watchos" ]
-then
-    echo "watchOS does not need native dyld_app_cache_util"
-else
-    mkdir -p "${BUILT_PRODUCTS_DIR}"
-    xcodebuild install -target dyld_app_cache_util -sdk macosx.internal -configuration ${CONFIGURATION} MACOSX_DEPLOYMENT_TARGET=${MACOSX_DEPLOYMENT_TARGET} OBJROOT="${OBJROOT_DYLD_APP_CACHE_UTIL}" SRCROOT="${SRCROOT}" DSTROOT="${BUILT_PRODUCTS_DIR}" SYMROOT="${SYMROOT}" RC_ProjectSourceVersion="${RC_ProjectSourceVersion}" INSTALL_PATH="/host_tools" RC_ARCHS="${NATIVE_ARCH_ACTUAL}" DISABLE_SDK_METADATA_PARSING=YES
-fi
 
 ${SRCROOT}/testing/build_ninja.py ${DERIVED_FILES_DIR}/config.ninja || exit_if_error $? "Generating build.ninja failed"
 ${NINJA} -k 0 -C ${DERIVED_FILES_DIR} ${BUILD_TARGET} || exit_if_error $? "Ninja build failed"

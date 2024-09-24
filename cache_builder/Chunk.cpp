@@ -112,6 +112,11 @@ SlidChunk* Chunk::isSlidChunk()
     return nullptr;
 }
 
+const AlignChunk* Chunk::isAlignChunk() const
+{
+    return nullptr;
+}
+
 const DylibSegmentChunk* Chunk::isDylibSegmentChunk() const
 {
     return nullptr;
@@ -128,6 +133,11 @@ StubsChunk* Chunk::isStubsChunk()
 }
 
 UniquedGOTsChunk* Chunk::isUniquedGOTsChunk()
+{
+    return nullptr;
+}
+
+const DylibSegmentChunk* Chunk::isTPROChunk() const
 {
     return nullptr;
 }
@@ -455,6 +465,30 @@ const char* SwiftProtocolConformancesHashTableChunk::name() const
 }
 
 //
+// MARK: --- PointerHashTableChunk methods ---
+//
+
+PointerHashTableChunk::PointerHashTableChunk()
+    : Chunk(Kind::pointerHashTable, Alignment::struct64)
+{
+}
+
+PointerHashTableChunk::~PointerHashTableChunk()
+{
+
+}
+
+void PointerHashTableChunk::dump() const
+{
+    printf("PointerHashTableChunk\n");
+}
+
+const char* PointerHashTableChunk::name() const
+{
+    return "pointer hash table";
+}
+
+//
 // MARK: --- ObjCProtocolHashTableChunk methods ---
 //
 
@@ -675,6 +709,13 @@ const DylibSegmentChunk* DylibSegmentChunk::isDylibSegmentChunk() const
     return this;
 }
 
+const DylibSegmentChunk* DylibSegmentChunk::isTPROChunk() const
+{
+    if ( this->kind == Kind::tproDataConst )
+        return this;
+    return nullptr;
+}
+
 //
 // MARK: --- LinkeditDataChunk methods ---
 //
@@ -878,4 +919,35 @@ const char* DynamicConfigChunk::name() const
 bool DynamicConfigChunk::isZeroFill() const
 {
     return true;
+}
+
+//
+// MARK: --- AlignChunk methods ---
+//
+
+AlignChunk::AlignChunk()
+    : Chunk(Kind::align, Alignment::page)
+{
+    // This never has a size so just set it now
+    this->cacheVMSize = CacheVMSize(0ULL);
+    this->subCacheFileSize = CacheFileSize(0ULL);
+}
+
+AlignChunk::~AlignChunk()
+{
+
+}
+
+void AlignChunk::dump() const
+{
+    printf("AlignChunk\n");
+}
+
+const char* AlignChunk::name() const
+{
+    return "align";
+}
+
+const AlignChunk* AlignChunk::isAlignChunk() const {
+    return this;
 }

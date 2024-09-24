@@ -355,8 +355,8 @@ bool FileSystemMRM::fileExists(const char* path, uint64_t* inode, uint64_t* mtim
 }
 
 bool FileSystemMRM::addFile(const char* path, uint8_t* data, uint64_t size, Diagnostics& diag,
-                            FileFlags fileFlags,
-             uint64_t inode, uint64_t modTime) {
+                            FileFlags fileFlags, uint64_t inode, uint64_t modTime,
+                            const char* projectName) {
     auto iteratorAndInserted = fileMap.insert(std::make_pair(path, files.size()));
     if (!iteratorAndInserted.second) {
         diag.error("Already have content for path: '%s'", path);
@@ -375,7 +375,7 @@ bool FileSystemMRM::addFile(const char* path, uint8_t* data, uint64_t size, Diag
         modTime = 0;
     }
 
-    files.push_back((FileInfo){ path, data, size, fileFlags, modTime, inode });
+    files.push_back((FileInfo){ path, data, size, fileFlags, modTime, inode, projectName });
     return true;
 }
 
@@ -386,11 +386,12 @@ bool FileSystemMRM::addSymlink(const char* fromPath, const char* toPath, Diagnos
 }
 
 void FileSystemMRM::forEachFileInfo(std::function<void(const char* path, const void* buffer, size_t bufferSize,
-                                        FileFlags fileFlags, uint64_t inode, uint64_t modTime)> lambda)
+                                                       FileFlags fileFlags, uint64_t inode, uint64_t modTime,
+                                                       const char* projectName)> lambda)
 {
     for (const FileInfo& fileInfo : files)
         lambda(fileInfo.path.c_str(), fileInfo.data, fileInfo.length, fileInfo.flags,
-               fileInfo.inode, fileInfo.mtime);
+               fileInfo.inode, fileInfo.mtime, fileInfo.projectName.c_str());
 }
 
 size_t FileSystemMRM::fileCount() const

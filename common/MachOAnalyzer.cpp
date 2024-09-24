@@ -290,18 +290,8 @@ bool MachOAnalyzer::validMachOForArchAndPlatform(Diagnostics& diag, size_t slice
             return false;
         }
     } else if ( reqPlatform == Platform::unknown ) {
-        // Unfortunately the static kernel has a platform, but kext's don't, so we can't
-        // verify the platform of the kernel.
-        if ( !isStaticExecutable() ) {
-            __block bool foundPlatform = false;
-            forEachSupportedPlatform(^(Platform platform, uint32_t minOS, uint32_t sdk) {
-                foundPlatform = true;
-            });
-            if (foundPlatform) {
-                diag.error("could not use '%s' because we expected it to have no platform", path);
-                return false;
-            }
-        }
+        // This is handled elsewhere in the kernel collection builder, where we have access
+        // to the kernel binary and can infer its platform
     } else
 #endif
     if ( !this->loadableIntoProcess(reqPlatform, path, internalInstall) ) {
@@ -601,6 +591,16 @@ bool MachOAnalyzer::validEmbeddedPaths(Diagnostics& diag, Platform platform, con
         // except for dylibs in libSystem.dylib which are ok to link with nothing (they are on bottom)
         bool isNotLibSystem = (installName == nullptr) || (strncmp(installName, libSystemDir, strlen(libSystemDir)) != 0);
 
+        if ( internalInstall && (this->builtForPlatform(Platform::macOSExclaveKit, true)
+                                 || this->builtForPlatform(Platform::iOSExclaveKit, true)
+                                 || this->builtForPlatform(Platform::tvOSExclaveKit, true)) ) {
+            // The path of ExclaveKit libSystem libraries starts with /System/ExclaveKit
+            const size_t prefixLength = 18;
+            isNotLibSystem = true;
+            if ( installName != nullptr && strlen(installName) > prefixLength )
+                if ( strncmp(installName + prefixLength, "/usr/lib/system/", 16) == 0 )
+                    isNotLibSystem = false;
+        }
         if ( this->isDyldManaged() && isNotLibSystem ) {
             diag.error("in '%s' missing LC_LOAD_DYLIB (must link with at least libSystem.dylib)", path);
             return false;
@@ -683,7 +683,6 @@ bool MachOAnalyzer::validMain(Diagnostics& diag, const char* path) const
 
     if ( mainCount+threadCount == 1 )
         return true;
-
     if ( mainCount + threadCount == 0 )
         diag.error("missing LC_MAIN or LC_UNIXTHREAD");
     else
@@ -2315,6 +2314,18 @@ uint64_t MachOAnalyzer::VMAddrConverter::convertToVMAddr(uint64_t value, const A
                 value = (value & valueMask);
                 if ( value != 0 ) {
                     value += valueAdd;
+                }
+                break;
+            }
+            case VMAddrConverter::SharedCacheFormat::v5: {
+                // Just use the chained pointer format for arm64e
+                if ( value == 0 )
+                    return 0;
+                auto* chainedValue = (MachOAnalyzer::ChainedFixupPointerOnDisk*)&value;
+                uint64_t targetRuntimeOffset;
+                if ( chainedValue->isRebase(DYLD_CHAINED_PTR_ARM64E_SHARED_CACHE, preferredLoadAddress,
+                                            targetRuntimeOffset) ) {
+                    value = preferredLoadAddress + targetRuntimeOffset;
                 }
                 break;
             }

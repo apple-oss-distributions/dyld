@@ -66,8 +66,10 @@ public:
     void            pop_back()                   { assert(_usedCount > 0); _usedCount--; }
     T*              begin()                      { return &_elements[0]; }
     T*              end()                        { return &_elements[_usedCount]; }
+    T*              data()                       { return &_elements[0]; }
     const T*        begin() const                { return &_elements[0]; }
     const T*        end() const                  { return &_elements[_usedCount]; }
+    const T*        data() const                 { return &_elements[0]; }
     const Array<T>  subArray(uint64_t start, uint64_t size) const { assert(start+size <= _usedCount);
                                                                       return Array<T>(&_elements[start], size, size); }
     bool            contains(const T& targ) const { for (const T& a : *this) { if ( a == targ ) return true; } return false; }
@@ -133,6 +135,12 @@ public:
         }
         reserve(n);
         this->_usedCount = n;
+    }
+
+    T& operator[](uint64_t idx) {
+        if ( idx >= this->_usedCount )
+            resize(idx + 1);
+        return this->_elements[idx];
     }
 
 protected:

@@ -167,7 +167,7 @@ static std::string verboseSymbolFlags(const Entry& sym, const std::vector<Sectio
     if ( sym.type & N_EXT ) {
         if ( sym.type & N_PEXT ) {
             if ( sym.desc & N_WEAK_DEF )
-                flags = "weak private external ";
+                flags = "weak private external ";  // weak-def
             else
                 flags = "private external ";
         }
@@ -176,10 +176,14 @@ static std::string verboseSymbolFlags(const Entry& sym, const std::vector<Sectio
                 if ( sym.desc & N_WEAK_REF )
                     flags = "weak external automatically hidden ";
                 else
-                    flags = "weak external ";
+                    flags = "weak external ";   // weak-def
             }
-            else
+            else if ( sym.desc & N_WEAK_REF ) {
+                flags = "weak external ";       // weak-import
+            }
+            else {
                 flags = "external ";
+            }
         }
     }
     else {
@@ -208,20 +212,18 @@ static std::string verboseSymbolFlags(const Entry& sym, const std::vector<Sectio
 static std::string verboseTwoLevelImport(const Entry& sym, const std::vector<std::string>& imports)
 {
     uint8_t libOrdinal = GET_LIBRARY_ORDINAL(sym.desc);
+    switch ( libOrdinal) {
+        case EXECUTABLE_ORDINAL:
+            return "main-executable";
+        case DYNAMIC_LOOKUP_ORDINAL:
+            return "flat-namespace";
+        case SELF_LIBRARY_ORDINAL:
+            return "this-image";
+    }
     if ( libOrdinal < MAX_LIBRARY_ORDINAL ) {
         if ( libOrdinal > imports.size() )
             return "ordinal-too-large";
         return imports[libOrdinal-1];
-    }
-    else {
-        switch ( libOrdinal) {
-            case EXECUTABLE_ORDINAL:
-                return "main-executable";
-            case DYNAMIC_LOOKUP_ORDINAL:
-                return "flat-namespace";
-            case SELF_LIBRARY_ORDINAL:
-                return "this-image";
-        }
     }
     return "unknown-ordinal";
 }
@@ -343,7 +345,9 @@ int main(int argc, const char* argv[])
         return 0;
     }
 
+    __block bool sliceFound = false;
     mach_o::forSelectedSliceInPaths(files, cmdLineArchs, ^(const char* path, const Header* header, size_t sliceLen) {
+        sliceFound = true;
         printf("%s [%s]:\n", path, header->archName());
         Image image((void*)header, sliceLen, (header->inDyldCache() ? Image::MappingKind::dyldLoadedPostFixups : Image::MappingKind::wholeSliceMapped));
         if ( image.hasSymbolTable() ) {
@@ -365,7 +369,7 @@ int main(int argc, const char* argv[])
 
             // build table of info about each imported dylib
             __block std::vector<std::string> imports;
-            header->forEachDependentDylib(^(const char* loadPath, bool, bool, bool, mach_o::Version32, mach_o::Version32, bool& stop) {
+            header->forEachLinkedDylib(^(const char* loadPath, mach_o::LinkedDylibAttributes, mach_o::Version32, mach_o::Version32, bool& stop) {
                 std::string leafName = loadPath;
                 if ( const char* lastSlash = strrchr(loadPath, '/') )
                     leafName = lastSlash+1;
@@ -411,4 +415,13 @@ int main(int argc, const char* argv[])
         }
     });
 
+    if ( !sliceFound && (files.size() == 1) ) {
+        if ( cmdLineArchs.empty() )
+            fprintf(stderr, "dyld_nm: '%s' file not found\n", files[0]);
+        else
+            fprintf(stderr, "dyld_nm: '%s' does not contain specified arch(s)\n", files[0]);
+        return 1;
+    }
+
+    return 0;
 }

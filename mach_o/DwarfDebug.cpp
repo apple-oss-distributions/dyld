@@ -55,7 +55,9 @@ void DwarfDebug::parseCompilationUnit()
 
     while ((uint64_t)(next_cu - debug_info) < _debugInfo.size() ) {
         const uint8_t* di = next_cu;
-        uint64_t       sz = *(uint32_t*)di;
+        uint32_t       sz32;
+        memcpy(&sz32, di, 4);    // support unaligned loads
+        uint64_t       sz = sz32;
         di += 4;
         const bool     dwarf64 = (sz == 0xffffffff);
         if (dwarf64) {
@@ -69,7 +71,8 @@ void DwarfDebug::parseCompilationUnit()
 
         next_cu = di + sz;
 
-        uint16_t vers = *(uint16_t*)di;
+        uint16_t vers;
+        memcpy(&vers, di, 2);    // support unaligned loads
         if (vers < 2 || vers > 5) {
             // DWARF version wrong for this code.
             // Chances are we could continue anyway, but we don't know for sure.
@@ -104,8 +107,17 @@ void DwarfDebug::parseCompilationUnit()
         } else // zero-initialize address_size to silence uninitialized variable warning
             address_size = 0;
         // Find the debug_abbrev section
-        uint64_t abbrev_base = dwarf64 ? *(uint64_t*)di : *(uint32_t*)di;
-        di += dwarf64 ? 8 : 4;
+        uint64_t abbrev_base;
+        if ( dwarf64 ) {
+            memcpy(&abbrev_base, di, 8);
+            di += 8;
+        }
+        else {
+            uint32_t base32;
+            memcpy(&base32, di, 4);
+            di += 4;
+            abbrev_base = base32;
+        }
 
         if (abbrev_base > _debugInfo.size())
             return;
@@ -310,6 +322,7 @@ bool DwarfDebug::skip_form(const uint8_t*& offset, const uint8_t* end, uint64_t 
 const char* DwarfDebug::getDwarfString(uint64_t form, const uint8_t*& di, bool dwarf64)
 {
     uint32_t offset;
+    uint16_t off16;
     const char* dwarfStrings;
     const char* result = NULL;
     switch (form) {
@@ -323,17 +336,18 @@ const char* DwarfDebug::getDwarfString(uint64_t form, const uint8_t*& di, bool d
             result = getStrxString(offset, dwarf64);
             break;
         case DW_FORM_strx2:
-            offset = *((uint16_t*)di);
+            memcpy(&off16, di, 2);
+            offset = off16;
             di += 2;
             result = getStrxString(offset, dwarf64);
             break;
         case DW_FORM_strx4:
-            offset = *((uint32_t*)di);
+            memcpy(&offset, di, 4);
             di += 4;
             result = getStrxString(offset, dwarf64);
             break;
         case DW_FORM_strp:
-            offset = *((uint32_t*)di);
+            memcpy(&offset, di, 4);
             dwarfStrings = (char*)_strings.data();
             if ( offset < _strings.size() )
                 result = &dwarfStrings[offset];

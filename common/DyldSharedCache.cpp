@@ -39,13 +39,14 @@
 #include <unistd.h>
 #include <dlfcn.h>
 
+#include "OptimizerSwift.h"
+
 #if BUILDING_CACHE_BUILDER
 #include <set>
 #include <string>
 #include <vector>
 #include <unordered_map>
 #include <unordered_set>
-// #include "SharedCacheBuilder.h"
 #include "FileUtils.h"
 #endif
 
@@ -282,6 +283,25 @@ void DyldSharedCache::forEachRegion(void (^handler)(const void* content, uint64_
     }
 }
 
+void DyldSharedCache::forEachTPRORegion(void (^handler)(const void* content, uint64_t unslidVMAddr, uint64_t vmSize,
+                                                        bool& stopRegion)) const
+{
+    if ( header.mappingOffset <= __offsetof(dyld_cache_header, tproMappingsCount) )
+        return;
+
+    uint64_t baseAddress = this->unslidLoadAddress();
+
+    const dyld_cache_tpro_mapping_info* mappings = (const dyld_cache_tpro_mapping_info*)((char*)this + header.tproMappingsOffset);
+    const dyld_cache_tpro_mapping_info* mappingsEnd = &mappings[header.tproMappingsCount];
+    for (const dyld_cache_tpro_mapping_info* m = mappings; m < mappingsEnd; ++m) {
+        bool stop = false;
+        uint64_t offsetInCache = m->unslidAddress - baseAddress;
+        handler((char*)this + (long)offsetInCache, m->unslidAddress, m->size, stop);
+        if ( stop )
+            return;
+    }
+}
+
 const char* DyldSharedCache::mappingName(uint32_t maxProt, uint64_t flags)
 {
     const char* mappingName = "";
@@ -295,6 +315,8 @@ const char* DyldSharedCache::mappingName(uint32_t maxProt, uint64_t flags)
         if ( flags & DYLD_CACHE_MAPPING_AUTH_DATA ) {
             if ( flags & DYLD_CACHE_MAPPING_DIRTY_DATA )
                 mappingName = "__AUTH_DIRTY";
+            else if ( flags & DYLD_CACHE_MAPPING_CONST_TPRO_DATA )
+                mappingName = "__AUTH_TPRO_CONST";
             else if ( flags & DYLD_CACHE_MAPPING_CONST_DATA )
                 mappingName = "__AUTH_CONST";
             else
@@ -302,6 +324,8 @@ const char* DyldSharedCache::mappingName(uint32_t maxProt, uint64_t flags)
         } else {
             if ( flags & DYLD_CACHE_MAPPING_DIRTY_DATA )
                 mappingName = "__DATA_DIRTY";
+            else if ( flags & DYLD_CACHE_MAPPING_CONST_TPRO_DATA )
+                mappingName = "__TPRO_CONST";
             else if ( flags & DYLD_CACHE_MAPPING_CONST_DATA )
                 mappingName = "__DATA_CONST";
             else
@@ -309,7 +333,10 @@ const char* DyldSharedCache::mappingName(uint32_t maxProt, uint64_t flags)
         }
     }
     else if ( maxProt & VM_PROT_READ ) {
-        mappingName = "__LINKEDIT";
+        if ( flags & DYLD_CACHE_READ_ONLY_DATA )
+            mappingName = "__READ_ONLY";
+        else
+            mappingName = "__LINKEDIT";
     } else {
         mappingName = "*unknown*";
     }
@@ -1602,6 +1629,9 @@ dyld3::MachOAnalyzer::VMAddrConverter DyldSharedCache::makeVMAddrConverter(bool 
                 assert(slideInfo->delta_mask == 0x00000000C0000000);
                 pointerFormat   = VMAddrConverter::SharedCacheFormat::v4;
                 pointerValueAdd = slideInfo->value_add;
+            } else if ( slideInfoHeader->version == 5 ) {
+                pointerFormat   = VMAddrConverter::SharedCacheFormat::v5;
+                pointerValueAdd = unslidLoadAddress();
             } else {
                 assert(false);
             }
@@ -2063,7 +2093,8 @@ const SwiftOptimizationHeader* DyldSharedCache::swiftOpt() const {
     if ( header.swiftOptsOffset == 0 )
         return nullptr;
 
-    return (SwiftOptimizationHeader*)((char*)this + header.swiftOptsOffset);
+    SwiftOptimizationHeader* optHeader = (SwiftOptimizationHeader*)((char*)this + header.swiftOptsOffset);
+    return optHeader;
 }
 
 std::pair<const void*, uint64_t> DyldSharedCache::getObjCConstantRange() const

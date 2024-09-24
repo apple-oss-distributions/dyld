@@ -299,3 +299,21 @@ void TimeRecorder::logTimings() {
 
 #endif
 
+#if BUILDING_LD || BUILDING_UNIT_TESTS || BUILDING_SHARED_CACHE_LINKER || BUILDING_CACHE_BUILDER || BUILDING_CACHE_BUILDER_UNIT_TESTS
+
+mach_o::Error Diagnostics::toError() const
+{
+    if ( hasError() )
+        return mach_o::Error("%s", errorMessageCStr());
+    return mach_o::Error::none();
+}
+
+void Diagnostics::error(const mach_o::Error& err)
+{
+    if ( err.noError() )
+        return;
+
+    error("%s", err.message());
+}
+
+#endif

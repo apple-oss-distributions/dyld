@@ -298,6 +298,13 @@ public:
                                                       uint32_t initProt, uint32_t maxProt, uint64_t flags,
                                                       bool& stopRegion)) const;
 
+
+    //
+    // Iterates over each of the TPRO regions in the cache
+    //
+    void                forEachTPRORegion(void (^handler)(const void* content, uint64_t unslidVMAddr, uint64_t vmSize,
+                                                          bool& stopRegion)) const;
+
     //
     // Gets a name for the mapping.
     //

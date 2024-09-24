@@ -37,8 +37,6 @@
 #include <sys/mman.h>
 #include <dispatch/dispatch.h>
 #include <mach-o/dyld.h>
-#include <System/sys/csr.h>
-#include <rootless.h>
 
 #include <string>
 #include <fstream>

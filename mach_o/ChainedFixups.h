@@ -62,7 +62,7 @@ public:
                                      PointerFormat(const PointerFormat&) = default;
         static bool                  valid(uint16_t pointer_format);
         static const PointerFormat&  make(uint16_t pointer_format);
-        
+
         virtual uint16_t         value() const = 0;
         virtual const char*      name() const = 0;
         virtual const char*      description() const = 0;
@@ -84,7 +84,7 @@ public:
 #endif
 
     protected:
-                                 PointerFormat() { }
+        constexpr                PointerFormat() { }
     };
 
 #if BUILDING_MACHO_WRITER
@@ -124,7 +124,7 @@ public:
 
 #endif
 
-    Error                   valid(std::span<const MappedSegment> segments) const;
+    Error                   valid(uint64_t preferredLoadAddress, std::span<const MappedSegment> segments) const;
     uint32_t                pageSize() const;
     const PointerFormat&    pointerFormat() const;
     void                    forEachFixupChainStartLocation(std::span<const MappedSegment> segments,
@@ -137,7 +137,10 @@ public:
     const char*             importsFormatName() const;
 
 
+#if !BUILDING_UNIT_TESTS
 private:
+#endif
+
     Error                                   forEachBindTarget(void (^callback)(int libOrdinal, const char* symbolName, int64_t addend, bool weakImport, bool& stop)) const;
     const dyld_chained_starts_in_segment*   startsForSegment(uint32_t segIndex) const;
     static Error                            importsFormat(std::span<const Fixup::BindTarget> bindTargets, uint16_t& importsFormat, size_t& stringPoolSize);

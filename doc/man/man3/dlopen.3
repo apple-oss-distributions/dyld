@@ -1,4 +1,4 @@
-.Dd Jan 20, 2022
+.Dd Feb 8, 2024
 .Os
 .Dt DLOPEN 3
 .Sh NAME
@@ -26,11 +26,7 @@ and
 A second call to 
 .Fn dlopen
 with the same path will return the same handle, but the internal reference
-count for the handle will be incremented.  Therefore all 
-.Fn dlopen
-calls should be balanced with a 
-.Fn dlclose
-call.
+count for the handle will be incremented.
 .Pp
 If a null pointer is passed in 
 .Fa path ,
@@ -59,6 +55,9 @@ call to
 .Fn dlopen .
 If neither 
 RTLD_LAZY nor RTLD_NOW is specified, the default is RTLD_LAZY.
+.Pp
+Note: With chained-fixups (the default mach-o format since macOS 12 and iOS 15)
+using RTLD_LAZY or RTLD_NOW has no effect, as all symbols are immediately bound.
 .Pp
 One of the following flags may be ORed into the
 .Fa mode
@@ -105,7 +104,7 @@ Additionally, the following may be ORed into the
 argument:
 .Bl -tag -width RTLD_FIRSTX
 .It Dv RTLD_FIRST
-The retuned    
+The returned
 .Fa handle
 is tagged so that any 
 .Fn dlsym

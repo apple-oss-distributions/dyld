@@ -142,6 +142,7 @@ struct DylibSectionCoalescer
     OptimizedSection objcMethTypes  = { true, "objc method types" };
     OptimizedSection gots           = { false, "gots" };
     OptimizedSection auth_gots      = { false, "auth gots" };
+    OptimizedSection auth_ptrs      = { false, "auth ptrs" };
 };
 
 #endif /* SectionCoalescer_h */

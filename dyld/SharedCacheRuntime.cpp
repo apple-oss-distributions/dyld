@@ -59,7 +59,7 @@
 #include "Utils.h"
 
 #define ENABLE_DYLIBS_TO_OVERRIDE_CACHE_SIZE 1024
-#define MAX_SUBCACHES 64
+#define MAX_SUBCACHES 128
 #define SHARED_CACHE_PATH_MAX 256
 
 // should be in mach/shared_region.h
@@ -83,38 +83,24 @@ struct CacheInfo
     shared_file_mapping_slide_np            mappings[DyldSharedCache::MaxMappings];
     uint32_t                                mappingsCount;
     bool                                    isTranslated;
-    bool                                    hasCacheSuffixes = false;
+    bool                                    hasSubCacheSuffixes = false;
     // All mappings come from the same file
     int                                     fd               = 0;
     uint64_t                                sharedRegionStart;
     uint64_t                                sharedRegionSize;
     uint64_t                                maxSlide;
     uint32_t                                cacheFileCount;
-    uint32_t                                suffixIndexes[MAX_SUBCACHES];
-    char                                    cacheSuffixes[MAX_SUBCACHES * 32];
     uint64_t                                dynamicConfigAddress;
     uint64_t                                dynamicConfigMaxSize;
 };
 
 
 
-#if __i386__
-    #define ARCH_NAME            "i386"
-    #define ARCH_CACHE_MAGIC     "dyld_v1    i386"
-#elif __x86_64__
+#if __x86_64__
     #define ARCH_NAME            "x86_64"
     #define ARCH_CACHE_MAGIC     "dyld_v1  x86_64"
     #define ARCH_NAME_H          "x86_64h"
     #define ARCH_CACHE_MAGIC_H   "dyld_v1 x86_64h"
-#elif __ARM_ARCH_7K__
-    #define ARCH_NAME            "armv7k"
-    #define ARCH_CACHE_MAGIC     "dyld_v1  armv7k"
-#elif __ARM_ARCH_7A__
-    #define ARCH_NAME            "armv7"
-    #define ARCH_CACHE_MAGIC     "dyld_v1   armv7"
-#elif __ARM_ARCH_7S__
-    #define ARCH_NAME            "armv7s"
-    #define ARCH_CACHE_MAGIC     "dyld_v1  armv7s"
 #elif __arm64e__
     #define ARCH_NAME            "arm64e"
     #define ARCH_CACHE_MAGIC     "dyld_v1  arm64e"
@@ -240,7 +226,7 @@ static int openMainSharedCacheFile(const SharedCacheOptions& options,
 }
 
 static int openSubSharedCacheFile(int cacheDirFD, char basePath[SHARED_CACHE_PATH_MAX],
-                                  char* suffix)
+                                  const char* suffix)
 {
     char path[SHARED_CACHE_PATH_MAX];
     strlcpy(path, basePath, SHARED_CACHE_PATH_MAX);
@@ -304,7 +290,8 @@ static void verboseSharedCacheMappings(const DyldSharedCache* dyldCache)
 
 
 static bool preflightCacheFile(const SharedCacheOptions& options, SharedCacheLoadInfo* results,
-                               CacheInfo* info, int fd)
+                               CacheInfo* info, int fd,
+                               std::array<char[32], MAX_SUBCACHES>* subCacheSuffixes)
 {
     struct stat cacheStatBuf;
     if ( ::fstat(fd, &cacheStatBuf) != 0 ) {
@@ -341,18 +328,10 @@ static bool preflightCacheFile(const SharedCacheOptions& options, SharedCacheLoa
     }
     const dyld_cache_mapping_info* const fileMappings = (dyld_cache_mapping_info*)&firstPage[cache->header.mappingOffset];
     const dyld_cache_mapping_info* textMapping = &fileMappings[0];
-    std::optional<const dyld_cache_mapping_info*> firstDataMapping;
     std::optional<const dyld_cache_mapping_info*> linkeditMapping;
 
     // Split caches may not have __DATA/__LINKEDIT
     if ( cache->header.mappingCount > 1 ) {
-        if ( fileMappings[1].maxProt == (VM_PROT_READ|VM_PROT_WRITE) ) {
-            firstDataMapping = &fileMappings[1];
-        } else if ( cache->header.mappingCount > 2 ) {
-            // We have even more than __TEXT and __LINKEDIT, so mapping[1] should have been __DATA
-            results->errorMessage = "shared cache data mapping was expected";
-        }
-
         // The last mapping should be __LINKEDIT, so long as we have > 1 mapping in total
         linkeditMapping = &fileMappings[cache->header.mappingCount - 1];
     }
@@ -394,16 +373,6 @@ static bool preflightCacheFile(const SharedCacheOptions& options, SharedCacheLoa
     if ( results->errorMessage != nullptr ) {
         ::close(fd);
         return false;
-    }
-
-    // Check the __DATA mappings
-    if ( firstDataMapping.has_value() ) {
-        for (unsigned i = 1; i != (cache->header.mappingCount - 1); ++i) {
-            if ( fileMappings[i].maxProt != (VM_PROT_READ|VM_PROT_WRITE) ) {
-                results->errorMessage = "shared cache data mappings have wrong permissions";
-                break;
-            }
-        }
     }
 
     if ( results->errorMessage != nullptr ) {
@@ -508,8 +477,20 @@ static bool preflightCacheFile(const SharedCacheOptions& options, SharedCacheLoa
         }
     }
 
-    info->hasCacheSuffixes = (cache->header.mappingOffset > __offsetof(dyld_cache_header, cacheSubType));
-    if ( info->hasCacheSuffixes ) {
+    if ( cache->header.subCacheArrayCount >= MAX_SUBCACHES ) {
+        results->errorMessage = "shared cache file subcache count exceeds limit";
+        ::close(fd);
+        return false;
+    }
+
+    if ( (cache->header.subCacheArrayCount != 0) && (subCacheSuffixes == nullptr) ) {
+        results->errorMessage = "no shared cache subcache indices";
+        ::close(fd);
+        return false;
+    }
+
+    info->hasSubCacheSuffixes = (cache->header.mappingOffset > __offsetof(dyld_cache_header, cacheSubType));
+    if ( info->hasSubCacheSuffixes ) {
         uint8_t subCacheArray[MAX_SUBCACHES*sizeof(dyld_subcache_entry)];
         if ( ::pread(fd, subCacheArray, sizeof(subCacheArray), cache->header.subCacheArrayOffset) != sizeof(subCacheArray) ) {
             results->errorMessage = "shared cache file pread() failed, could not read subcache entries";
@@ -517,11 +498,8 @@ static bool preflightCacheFile(const SharedCacheOptions& options, SharedCacheLoa
             return false;
         }
         const dyld_subcache_entry* subCacheEntries = (dyld_subcache_entry*)subCacheArray;
-        uint32_t suffixIndex = 0;
         for (uint32_t i = 0; i != cache->header.subCacheArrayCount; ++i) {
-            info->suffixIndexes[i] = suffixIndex;
-            memcpy(&(info->cacheSuffixes[suffixIndex]), subCacheEntries[i].fileSuffix, 32);
-            suffixIndex += 32;
+            memcpy(&((*subCacheSuffixes)[i]), subCacheEntries[i].fileSuffix, 32);
         }
     }
 
@@ -541,7 +519,8 @@ static bool preflightCacheFile(const SharedCacheOptions& options, SharedCacheLoa
 }
 
 static bool preflightMainCacheFile(const SharedCacheOptions& options, SharedCacheLoadInfo* results,
-                                   CacheInfo* info, char basePath[SHARED_CACHE_PATH_MAX])
+                                   CacheInfo* info, char basePath[SHARED_CACHE_PATH_MAX],
+                                   std::array<char[32], MAX_SUBCACHES>* subCacheSuffixes)
 {
     // find and open shared cache file
     int fd = openMainSharedCacheFile(options, basePath);
@@ -556,7 +535,7 @@ static bool preflightMainCacheFile(const SharedCacheOptions& options, SharedCach
     }
     results->cacheFileFound = true;
 
-    return preflightCacheFile(options, results, info, fd);
+    return preflightCacheFile(options, results, info, fd, subCacheSuffixes);
 }
 
 #if !TARGET_OS_SIMULATOR
@@ -619,7 +598,7 @@ static void rebaseChainV4(uint8_t* pageContent, uint16_t startOffset, uintptr_t 
 #endif
 
 static bool preflightSubCacheFile(const SharedCacheOptions& options, SharedCacheLoadInfo* results,
-                                  CacheInfo* info, char basePath[SHARED_CACHE_PATH_MAX], char* suffix)
+                                  CacheInfo* info, char basePath[SHARED_CACHE_PATH_MAX], const char* suffix)
 {
 
     // find and open shared cache file
@@ -635,7 +614,7 @@ static bool preflightSubCacheFile(const SharedCacheOptions& options, SharedCache
     }
     results->cacheFileFound = true;
 
-    return preflightCacheFile(options, results, info, fd);
+    return preflightCacheFile(options, results, info, fd, nullptr);
 }
 
 static void configureDynamicData(void* address, SharedCacheLoadInfo* results) {
@@ -823,14 +802,7 @@ static bool rebaseDataPages(bool isVerbose, const dyld_cache_slide_info* slideIn
 static bool reuseExistingCache(const SharedCacheOptions& options, SharedCacheLoadInfo* results)
 {
     uint64_t cacheBaseAddress;
-#if __i386__
-#pragma clang diagnostic push
-#pragma clang diagnostic ignored "-Wdeprecated-declarations"
-    if ( syscall(294, &cacheBaseAddress) == 0 ) {
-#pragma clang diagnostic pop
-#else
     if ( __shared_region_check_np(&cacheBaseAddress) == 0 ) {
-#endif
         const DyldSharedCache* existingCache = (DyldSharedCache*)cacheBaseAddress;
         if ( validMagic(options, existingCache) ) {
             results->loadAddress = existingCache;
@@ -869,20 +841,21 @@ static bool mapSplitCacheSystemWide(const SharedCacheOptions& options, SharedCac
     CacheInfo firstFileInfo;
     // Try to map the first file to see how many other files we need to map.
     char baseSharedCachePath[SHARED_CACHE_PATH_MAX] = { 0 };
-    if ( !preflightMainCacheFile(options, results, &firstFileInfo, baseSharedCachePath) )
+    std::array<char[32], MAX_SUBCACHES> subCacheSuffixes;
+    if ( !preflightMainCacheFile(options, results, &firstFileInfo, baseSharedCachePath, &subCacheSuffixes) )
         return false;
 
     uint32_t numFiles = firstFileInfo.cacheFileCount;
 
-    if ( (numFiles != 0) && !firstFileInfo.hasCacheSuffixes ) {
-        results->errorMessage = "shared cache is too old, missing cache suffixes";
+    if ( (numFiles != 0) && !firstFileInfo.hasSubCacheSuffixes ) {
+        results->errorMessage = "shared cache is too old, missing subcache suffixes";
         return false;
     }
 
     CacheInfo infoArray[MAX_SUBCACHES];
     for (unsigned i = 1; i < numFiles; ++i) {
         SharedCacheLoadInfo subCacheResults;
-        char* suffix = &(firstFileInfo.cacheSuffixes[firstFileInfo.suffixIndexes[i-1]]);
+        const char* suffix = subCacheSuffixes[i-1];
         if ( !preflightSubCacheFile(options, &subCacheResults, &infoArray[i],
                                     baseSharedCachePath, suffix) ) {
             return false;
@@ -979,7 +952,8 @@ static bool mapSplitCachePrivate(const SharedCacheOptions& options, SharedCacheL
     CacheInfo firstFileInfo;
     // Try to map the first file to see how many other files we need to map.
     char baseSharedCachePath[SHARED_CACHE_PATH_MAX] = { 0 };
-    if ( !preflightMainCacheFile(options, results, &firstFileInfo, baseSharedCachePath) )
+    std::array<char[32], MAX_SUBCACHES> subCacheSuffixes;
+    if ( !preflightMainCacheFile(options, results, &firstFileInfo, baseSharedCachePath, &subCacheSuffixes) )
         return false;
 
     if (options.verbose) {
@@ -991,15 +965,15 @@ static bool mapSplitCachePrivate(const SharedCacheOptions& options, SharedCacheL
 
     uint32_t numFiles = firstFileInfo.cacheFileCount;
 
-    if ( (numFiles != 0) && !firstFileInfo.hasCacheSuffixes ) {
-        results->errorMessage = "shared cache is too old, missing cache suffixes";
+    if ( (numFiles != 0) && !firstFileInfo.hasSubCacheSuffixes ) {
+        results->errorMessage = "shared cache is too old, missing subcache suffixes";
         return false;
     }
 
     CacheInfo infoArray[MAX_SUBCACHES];
     for (unsigned i = 1; i < numFiles; ++i) {
         SharedCacheLoadInfo subCacheResults;
-        char* suffix = &(firstFileInfo.cacheSuffixes[firstFileInfo.suffixIndexes[i-1]]);
+        char* suffix = subCacheSuffixes[i-1];
         if ( !preflightSubCacheFile(options, &subCacheResults, &infoArray[i],
                                     baseSharedCachePath, suffix) ) {
             return false;
@@ -1219,7 +1193,7 @@ static bool mapSplitCachePrivate(const SharedCacheOptions& options, SharedCacheL
             if ( options.verbose )
                 dyld4::console("Setting up kernel page-in linking for subcache %d\n", i);
 
-            int result = __map_with_linking_np(regions.begin(), (uint32_t)regions.count(), blob, (uint32_t)blobAllocationSize);
+            int result = __map_with_linking_np(regions.data(), (uint32_t)regions.count(), blob, (uint32_t)blobAllocationSize);
             if ( result != 0 ) {
                 if ( options.verbose )
                     dyld4::console("__map_with_linking_np(subcache %d) failed, falling back to linking in-process\n", i);
@@ -1258,29 +1232,29 @@ static bool mapSplitCachePrivate(const SharedCacheOptions& options, SharedCacheL
 
 bool loadDyldCache(const SharedCacheOptions& options, SharedCacheLoadInfo* results)
 {
-    bool result                 = false;
+    bool success                = false;
     results->loadAddress        = 0;
     results->slide              = 0;
     results->errorMessage       = nullptr;
 
     if ( options.forcePrivate ) {
         // mmap cache into this process only
-        result = mapSplitCachePrivate(options, results);
+        success = mapSplitCachePrivate(options, results);
     }
     else {
 #if !TARGET_OS_SIMULATOR
         // fast path: when cache is already mapped into shared region
-        bool hasError = false;
         if ( reuseExistingCache(options, results) ) {
-            hasError = (results->errorMessage != nullptr);
+            bool hasError = (results->errorMessage != nullptr);
+            success = !hasError;
         } else {
             // slow path: this is first process to load cache
-            hasError = mapSplitCacheSystemWide(options, results);
+            success = mapSplitCacheSystemWide(options, results);
         }
-        result = hasError;
 #endif
     }
-    return result;
+
+    return success;
 }
 
 /*

@@ -707,14 +707,7 @@ bool MachOLoaded::findClosestSymbol(uint64_t address, const char** symbolName, u
             }
         }
         if ( bestSymbol != nullptr ) {
-#if __arm__
-            if ( bestSymbol->n_desc & N_ARM_THUMB_DEF )
-                *symbolAddr = (bestSymbol->n_value | 1) + leInfo.layout.slide;
-            else
-                *symbolAddr = bestSymbol->n_value + leInfo.layout.slide;
-#else
             *symbolAddr = bestSymbol->n_value + leInfo.layout.slide;
-#endif
             if ( bestSymbol->n_un.n_strx < maxStringOffset )
                 *symbolName = &stringPool[bestSymbol->n_un.n_strx];
             return true;
@@ -724,22 +717,15 @@ bool MachOLoaded::findClosestSymbol(uint64_t address, const char** symbolName, u
     return false;
 }
 
-const void* MachOLoaded::findSectionContent(const char* segName, const char* sectName, uint64_t& size,
-                                            bool matchSegNameAsPrefix) const
+const void* MachOLoaded::findSectionContent(const char* segName, const char* sectName, uint64_t& size) const
 {
     __block const void* result = nullptr;
     forEachSection(^(const SectionInfo& sectInfo, bool malformedSectionRange, bool& stop) {
         if ( strcmp(sectInfo.sectName, sectName) != 0 )
             return;
 
-        // Segment name is either matched exactly or by prefix
-        if ( matchSegNameAsPrefix ) {
-            if ( strstr(sectInfo.segInfo.segName, segName) != sectInfo.segInfo.segName )
-                return;
-        } else {
-            if ( strcmp(sectInfo.segInfo.segName, segName) != 0 )
-                return;
-        }
+        if ( strcmp(sectInfo.segInfo.segName, segName) != 0 )
+            return;
 
         size = sectInfo.sectSize;
         if ( this->isPreload() )

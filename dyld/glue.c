@@ -101,11 +101,11 @@
 extern void _ZN5dyld43logEPKcz(const char*, ...);
 
 // dyld::halt(const char* msg, const StructuredError*);
-extern void halt(const char* msg, void* extra) __attribute__((noreturn)) __asm("__ZN5dyld44haltEPKcPKNS_15StructuredErrorE");
+extern void halt(const char* msg, void* extra) __attribute__((__noreturn__)) __asm("__ZN5dyld44haltEPKcPKNS_15StructuredErrorE");
 
-extern void dyld_fatal_error(const char* errString) __attribute__((noreturn));
+extern void dyld_fatal_error(const char* errString) __attribute__((__noreturn__));
 
-__attribute__((noreturn))
+__attribute__((__noreturn__))
 void _libcpp_verbose_abort(const char* msg, ...) __asm("__ZNSt3__122__libcpp_verbose_abortEPKcz");
 void _libcpp_verbose_abort(const char* msg, ...)
 {
@@ -197,6 +197,7 @@ int snprintf(char* str, size_t size, const char* format, ...)
 // The stack protector routines in lib.c bring in too much stuff, so
 // make our own custom ones.
 //
+__attribute__((section("__TPRO_CONST,__data")))
 long __stack_chk_guard = 0;
 
 extern void __guard_setup(const char* apple[]);
@@ -377,13 +378,8 @@ void _ZN5dyld43logEPKcz(const char* format, ...) {
 	va_end(list);
 }
 
-#if __i386__
-extern void _ZN4dyld4vlogEPKcPc(const char* format, va_list list);
-void _ZN4dyld4vlogEPKcPc(const char* format, va_list list)
-#else
 extern void _ZN4dyld4vlogEPKcP13__va_list_tag(const char* format, va_list list);
 void _ZN4dyld4vlogEPKcP13__va_list_tag(const char* format, va_list list)
-#endif
 {
 	gSyscallHelpers->vlog(format, list);
 }
@@ -917,4 +913,3 @@ wchar_t* wmemchr(const wchar_t* str, wchar_t c, size_t n) {
     }
     return NULL;
 }
-

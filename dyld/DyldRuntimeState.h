@@ -42,6 +42,7 @@
 #include "Loader.h"
 #include "MurmurHash.h"
 #include "OptimizerSwift.h"
+#include "PrebuiltObjC.h"
 #include "Vector.h"
 #include "Map.h"
 #include "UUID.h"
@@ -55,6 +56,15 @@
 #endif
 #include "Tracing.h"
 
+#if __has_feature(ptrauth_calls)
+    #include <ptrauth.h>
+    #define __ptrauth_dyld_pd_callback __ptrauth(ptrauth_key_process_dependent_code, 1, ptrauth_string_discriminator("jit-callback"))
+    #define __ptrauth_dyld_pd_callback_ptr __ptrauth(ptrauth_key_process_dependent_code, 1, ptrauth_string_discriminator("jit-callback-ptr"))
+#else
+    #define __ptrauth_dyld_pd_callback
+    #define __ptrauth_dyld_pd_callback_ptr
+#endif // __has_feature(ptrauth_calls)
+
 namespace dyld4 {
 
 using lsl::UUID;
@@ -62,7 +72,6 @@ using lsl::UniquePtr;
 using lsl::OrderedMap;
 using lsl::Vector;
 using lsl::Allocator;
-using lsl::EphemeralAllocator;
 using lsl::MemoryManager;
 using dyld3::MachOLoaded;
 using dyld3::MachOAnalyzer;
@@ -107,7 +116,8 @@ struct ObjCClassReplacement
 typedef void                (*NotifyFunc)(const mach_header* mh, intptr_t slide);
 typedef void                (*LoadNotifyFunc)(const mach_header* mh, const char* path, bool unloadable);
 typedef void                (*BulkLoadNotifier)(unsigned count, const mach_header* mhs[], const char* paths[]);
-    typedef int             (*MainFunc)(int argc, const char* const argv[], const char* const envp[], const char* const apple[]);
+typedef int                 (*MainFunc)(int argc, const char* const argv[], const char* const envp[], const char* const apple[]);
+typedef void                (*DlsymNotify)(const char* symbolName);
 
 struct RuntimeLocks
 {
@@ -221,28 +231,28 @@ const uint64_t twelveBitsMask = 0xFFF;
 
 struct EqualTypeConformanceKey {
     static bool equal(const SwiftTypeProtocolConformanceDiskLocationKey& a, const SwiftTypeProtocolConformanceDiskLocationKey& b, void* state) {
-        return ((a.typeDescriptor.offset() & twelveBitsMask) == (b.typeDescriptor.offset() & twelveBitsMask)) && ((a.protocol.offset()&twelveBitsMask) == (b.protocol.offset()&twelveBitsMask));
+        return ((a.typeDescriptor.absValueOrOffset() & twelveBitsMask) == (b.typeDescriptor.absValueOrOffset() & twelveBitsMask)) && ((a.protocol.absValueOrOffset()&twelveBitsMask) == (b.protocol.absValueOrOffset()&twelveBitsMask));
     }
 };
 
 struct HashTypeConformanceKey {
     static uint64_t hash(const SwiftTypeProtocolConformanceDiskLocationKey& v, void* state) {
-        uint64_t keyA = v.typeDescriptor.offset() & twelveBitsMask;
-        uint64_t keyB = v.protocol.offset() & twelveBitsMask;
+        uint64_t keyA = v.typeDescriptor.absValueOrOffset() & twelveBitsMask;
+        uint64_t keyB = v.protocol.absValueOrOffset() & twelveBitsMask;
         return murmurHash(&keyA, sizeof(uint64_t), 0) ^ murmurHash(&keyB, sizeof(uint64_t), 0);
     }
 };
 
 struct EqualMetadataConformanceKey {
     static bool equal(const SwiftMetadataProtocolConformanceDiskLocationKey& a, const SwiftMetadataProtocolConformanceDiskLocationKey& b, void* state) {
-        return ((a.metadataDescriptor.offset()&twelveBitsMask) == (b.metadataDescriptor.offset()&twelveBitsMask)) && ((a.protocol.offset()&twelveBitsMask) == (b.protocol.offset()&twelveBitsMask));
+        return ((a.metadataDescriptor.absValueOrOffset()&twelveBitsMask) == (b.metadataDescriptor.absValueOrOffset()&twelveBitsMask)) && ((a.protocol.absValueOrOffset()&twelveBitsMask) == (b.protocol.absValueOrOffset()&twelveBitsMask));
     }
 };
 
 struct HashMetadataConformanceKey {
     static uint64_t hash(const SwiftMetadataProtocolConformanceDiskLocationKey& v, void* state) {
-        uint64_t keyA = v.metadataDescriptor.offset() & twelveBitsMask;
-        uint64_t keyB = v.protocol.offset() & twelveBitsMask;
+        uint64_t keyA = v.metadataDescriptor.absValueOrOffset() & twelveBitsMask;
+        uint64_t keyB = v.protocol.absValueOrOffset() & twelveBitsMask;
         return murmurHash(&keyA, sizeof(uint64_t), 0) ^ murmurHash(&keyB, sizeof(uint64_t), 0);
     }
 };
@@ -267,7 +277,7 @@ struct EqualForeignConformanceKey {
         strB = (char*)b.originalPointer;
 #endif
 
-        return (strncmp(strA, strB, (size_t)a.foreignDescriptorNameLength) == 0) && (a.foreignDescriptorNameLength == b.foreignDescriptorNameLength) && ((a.protocol.offset()&twelveBitsMask) == (b.protocol.offset()&twelveBitsMask));
+        return (strncmp(strA, strB, (size_t)a.foreignDescriptorNameLength) == 0) && (a.foreignDescriptorNameLength == b.foreignDescriptorNameLength) && ((a.protocol.absValueOrOffset()&twelveBitsMask) == (b.protocol.absValueOrOffset()&twelveBitsMask));
     }
 };
 
@@ -287,7 +297,7 @@ struct HashForeignConformanceKey {
         str = (char*)v.originalPointer;
 #endif
 
-        uint64_t keyPart = v.protocol.offset() & twelveBitsMask;
+        uint64_t keyPart = v.protocol.absValueOrOffset() & twelveBitsMask;
         return murmurHash(str, (int)v.foreignDescriptorNameLength, 0) ^ murmurHash(&keyPart, sizeof(uint64_t), 0);
     }
 };
@@ -298,19 +308,21 @@ typedef dyld3::MultiMap<SwiftForeignTypeProtocolConformanceDiskLocationKey, Swif
 #endif // SUPPORT_PREBUILTLOADERS || BUILDING_UNIT_TESTS || BUILDING_CACHE_BUILDER_UNIT_TESTS
 
 struct PseudoDylibCallbacks {
-    _dyld_pseudodylib_dispose_string dispose_string = nullptr;
-    _dyld_pseudodylib_initialize initialize = nullptr;
-    _dyld_pseudodylib_deinitialize deinitialize = nullptr;
-    _dyld_pseudodylib_lookup_symbols lookupSymbols = nullptr;
-    _dyld_pseudodylib_lookup_address lookupAddress = nullptr;
-    _dyld_pseudodylib_find_unwind_sections findUnwindSections = nullptr;
-    _dyld_pseudodylib_loadable_at_path loadableAtPath = nullptr;
+    _dyld_pseudodylib_dispose_string __ptrauth_dyld_pd_callback dispose_string = nullptr;
+    _dyld_pseudodylib_initialize __ptrauth_dyld_pd_callback initialize = nullptr;
+    _dyld_pseudodylib_deinitialize __ptrauth_dyld_pd_callback deinitialize = nullptr;
+    _dyld_pseudodylib_lookup_symbols __ptrauth_dyld_pd_callback lookupSymbols = nullptr;
+    _dyld_pseudodylib_lookup_address __ptrauth_dyld_pd_callback lookupAddress = nullptr;
+    _dyld_pseudodylib_find_unwind_sections __ptrauth_dyld_pd_callback findUnwindSections = nullptr;
+    _dyld_pseudodylib_loadable_at_path __ptrauth_dyld_pd_callback loadableAtPath = nullptr;
+    _dyld_pseudodylib_finalize_requested_symbols __ptrauth_dyld_pd_callback finalizeRequestedSymbols = nullptr;
 };
 
 // Describes a named, opaque, in-memory data structure that supports dylib-like
 // operations via the given callbacks.
 class PseudoDylib {
 public:
+
     static PseudoDylib* create(Allocator& A, const char* identifier, void* addr, size_t size, PseudoDylibCallbacks* callbacks, void* context);
 
     void* getAddress() const { return base; }
@@ -319,7 +331,7 @@ public:
         return p >= base && p < ((char*)base + size);
     }
     const char* getIdentifier() const { return identifier; }
-    char* loadableAtPath(const char* possible_path);
+    char* loadableAtPath(const char* possible_path) const;
 
     void disposeString(char* str) const;
     char* initialize() const;
@@ -327,16 +339,18 @@ public:
     char* lookupSymbols(std::span<const char*> names,
                         std::span<void*> addrs,
                         std::span<_dyld_pseudodylib_symbol_flags> flags) const;
+    char* finalizeRequestedSymbols(std::span<const char*> names) const;
     int lookupAddress(const void* addr, Dl_info* info) const;
     char* findUnwindSections(const void* addr, bool* found, dyld_unwind_sections* info) const;
+
 private:
     PseudoDylib() = default;
 
-    void*                           base = nullptr;          // base of PseudoDylib address range.
-    size_t                          size = 0;                // size of PseudoDylib address range.
-    PseudoDylibCallbacks*           callbacks = nullptr;     // Callbacks for this PseudoDylib.
-    void*                           context = nullptr;       // Context pointer for callbacks.
-    const char*                     identifier = nullptr;    // PseudeDylib name from LC_ID_DYLIB.
+    void*                                                   base = nullptr;          // base of PseudoDylib address range.
+    size_t                                                  size = 0;                // size of PseudoDylib address range.
+    PseudoDylibCallbacks* __ptrauth_dyld_pd_callback_ptr    callbacks = nullptr;     // Callbacks for this PseudoDylib.
+    void*                                                   context = nullptr;       // Context pointer for callbacks.
+    const char*                                             identifier = nullptr;    // PseudeDylib name from LC_ID_DYLIB.
 };
 
 //
@@ -365,10 +379,17 @@ public:
     Vector<InterposeTupleAll>       patchedObjCClasses;
     Vector<ObjCClassReplacement>    objcReplacementClasses;
     Vector<InterposeTupleAll>       patchedSingletons;
+    Vector<const char*>             prebuiltLoaderSetRealPaths;
     size_t                          numSingletonObjectsPatched = 0;
     uint64_t                        weakDefResolveSymbolCount = 0;
     WeakDefMap*                     weakDefMap                = nullptr;
 #if SUPPORT_PREBUILTLOADERS || BUILD_FOR_UNIT_TESTS
+    // ObjC maps in the closure
+    prebuilt_objc::ObjCSelectorMapOnDisk    objcSelectorMap;
+    prebuilt_objc::ObjCClassMapOnDisk       objcClassMap;
+    prebuilt_objc::ObjCProtocolMapOnDisk    objcProtocolMap;
+
+    // Swift maps in the closure
     TypeProtocolMap*                typeProtocolMap     = nullptr;
     MetadataProtocolMap*            metadataProtocolMap = nullptr;
     ForeignProtocolMap*             foreignProtocolMap  = nullptr;
@@ -379,19 +400,19 @@ public:
 #if HAS_EXTERNAL_STATE
     ExternallyViewableState         externallyViewable;
 #endif
-    Vector<PseudoDylib*>            pseudoDylibs;
+    Vector<AuthPseudoDylib>         pseudoDylibs;
 
 #if BUILDING_DYLD
     StructuredError                 structuredError;
 #endif
-
-                                RuntimeState(const ProcessConfig& c, RuntimeLocks& locks, Allocator& alloc = Allocator::persistentAllocator())
+    bool                            shouldProtectInitializers = false;
+                                RuntimeState(const ProcessConfig& c, RuntimeLocks& locks, Allocator& alloc)
                                     : config(c), persistentAllocator(alloc),
                                     loaded(alloc), delayLoaded(alloc), memoryManager(*alloc.memoryManager()),
                                     locks(locks),
                                     interposingTuplesAll(alloc), interposingTuplesSpecific(alloc),
                                     patchedObjCClasses(alloc), objcReplacementClasses(alloc),
-                                    patchedSingletons(alloc),
+                                    patchedSingletons(alloc), prebuiltLoaderSetRealPaths(alloc),
 #if !TARGET_OS_EXCLAVEKIT
                                     fileManager(persistentAllocator, &config.syscall),
 #endif
@@ -414,14 +435,14 @@ public:
     uint8_t*                    appState(uint16_t index);
     uint8_t*                    cachedDylibState(uint16_t index);
 #if BUILDING_CACHE_BUILDER || BUILDING_CACHE_BUILDER_UNIT_TESTS
-    const MachOFile*            appMF(uint16_t index);
+    const MachOFile*            appMF(uint16_t index) const;
     void                        setAppMF(uint16_t index, const MachOFile* mf);
-    const MachOFile*            cachedDylibMF(uint16_t index);
+    const MachOFile*            cachedDylibMF(uint16_t index) const;
     const mach_o::Layout*       cachedDylibLayout(uint16_t index);
 #else
-    const MachOLoaded*          appLoadAddress(uint16_t index);
+    const MachOLoaded*          appLoadAddress(uint16_t index) const;
     void                        setAppLoadAddress(uint16_t index, const MachOLoaded* ml);
-    const MachOLoaded*          cachedDylibLoadAddress(uint16_t index);
+    const MachOLoaded*          cachedDylibLoadAddress(uint16_t index) const;
 #endif
 
     void                        log(const char* format, ...) const __attribute__((format(printf, 2, 3))) ;
@@ -434,6 +455,8 @@ public:
     void                        addNotifyRemoveFunc(const Loader* callbackLoader, NotifyFunc);
     void                        addNotifyLoadImage(const Loader* callbackLoader, LoadNotifyFunc);
     void                        addNotifyBulkLoadImage(const Loader* callbackLoader, BulkLoadNotifier);
+    void                        setDlsymNotifier(DlsymNotify callback) { _dlsymNotify = callback; }
+    DlsymNotify                 dlsymNotifier() const { return _dlsymNotify; }
 
 #if BUILDING_DYLD || BUILDING_UNIT_TESTS
     void                        notifyObjCInit(const Loader* ldr);
@@ -453,7 +476,7 @@ public:
     void                        notifyDebuggerUnload(const std::span<const Loader*>& removingLoaders);
     void                        notifyDtrace(const std::span<const Loader*>& newLoaders);
     bool                        libSystemInitialized() const { return (libSystemHelpers != nullptr); }
-    void                        partitionDelayLoads(std::span<const Loader*> newLoaders, std::span<const Loader*> rootLoaders, Vector<const Loader*>& undelayedLoaders);
+    void                        partitionDelayLoads(std::span<const Loader*> newLoaders, std::span<const Loader*> rootLoaders, Vector<const Loader*>* newAndNotDelayed=nullptr);
 
     void                        incDlRefCount(const Loader* ldr);  // used by dlopen
     void                        decDlRefCount(const Loader* ldr);  // used by dlclose
@@ -509,6 +532,9 @@ public:
     void                        setProcessPrebuiltLoaderSet(const PrebuiltLoaderSet* appPBLS);
     void                        resetCachedDylibsArrays(const PrebuiltLoaderSet* cachedDylibsPBLS);
 #endif
+
+    void                        printLinkageChain(const Loader::LinksWithChain* start, const char* msgPrefix);
+
 
     // this need to be virtual to be callable from libdyld.dylb
     virtual void                _finalizeListTLV(void* l);
@@ -633,7 +659,7 @@ private:
     void                        checkHiddenCacheAddr(const Loader* t, const void* targetAddr, const char* symbolName, dyld3::OverflowSafeArray<HiddenCacheAddr>& hiddenCacheAddrs) const;
     void                        setDyldPatchedObjCClasses() const;
     void                        reloadFSInfos();
-    void                        recursiveMarkNonDelayed(const Loader* ldr);
+    void                        recursiveMarkNonDelayed(const Loader* ldr, Loader::LinksWithChain* start, Loader::LinksWithChain* prev);
 
     _dyld_objc_notify_unmapped      _notifyObjCUnmapped     = nullptr;
     _dyld_objc_notify_patch_class   _notifyObjCPatchClass   = nullptr;
@@ -648,6 +674,7 @@ private:
     Vector<RegisteredDOF>           _loadersNeedingDOFUnregistration;
     Vector<MissingFlatSymbol>       _missingFlatLazySymbols;
     Vector<DynamicReference>        _dynamicReferences;
+    DlsymNotify                     _dlsymNotify                    = nullptr;
     const PrebuiltLoaderSet*        _cachedDylibsPrebuiltLoaderSet  = nullptr;
     uint8_t*                        _cachedDylibsStateArray         = nullptr;
     const char*                     _processPrebuiltLoaderSetPath   = nullptr;

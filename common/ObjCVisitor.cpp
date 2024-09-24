@@ -34,6 +34,7 @@
 
 #if BUILDING_CACHE_BUILDER || BUILDING_CACHE_BUILDER_UNIT_TESTS
 #include "ASLRTracker.h"
+#include <unordered_set>
 #endif
 
 using namespace objc_visitor;
@@ -154,16 +155,19 @@ void Class::setMethodCachePropertiesVMAddr(const Visitor& objcVisitor, VMAddress
 }
 #endif
 
-#if BUILDING_CACHE_BUILDER || BUILDING_CACHE_BUILDER_UNIT_TESTS
+#if BUILDING_CACHE_BUILDER || BUILDING_CACHE_BUILDER_UNIT_TESTS || BUILDING_SHARED_CACHE_UTIL
 void Class::withSuperclass(const Visitor& objcVisitor,
                            void (^handler)(const dyld3::MachOFile::ChainedFixupPointerOnDisk* fixup, uint16_t pointerFormat)) const
 {
-    assert(objcVisitor.pointerSize == 8);
-
-    assert(objcVisitor.isOnDiskBinary());
+    // HACK: The visitor classes need to be refactored to handle cache util. For now just force the caller of this method in
+    // cache util to have the chain format
+#if BUILDING_SHARED_CACHE_UTIL
+    uint16_t chainedPointerFormat = 0;
+#else
     uint16_t chainedPointerFormat = this->classPos.chainedPointerFormat().value();
+#endif
 
-    const void* fieldPos = &((const class64_t*)this->classPos.value())->superclassVMAddr;
+    const void* fieldPos = this->getFieldPos(objcVisitor, Field::superclass);
     dyld3::MachOFile::ChainedFixupPointerOnDisk* fieldFixup = (dyld3::MachOFile::ChainedFixupPointerOnDisk*)fieldPos;
     handler(fieldFixup, chainedPointerFormat);
 }
@@ -543,12 +547,18 @@ PropertyList Category::getClassProperties(const Visitor& objcVisitor) const
     return objcVisitor.resolveOptionalRebase(field);
 }
 
-#if BUILDING_CACHE_BUILDER || BUILDING_CACHE_BUILDER_UNIT_TESTS
+#if BUILDING_CACHE_BUILDER || BUILDING_CACHE_BUILDER_UNIT_TESTS || BUILDING_SHARED_CACHE_UTIL
 void Category::withClass(const Visitor& objcVisitor,
                          void (^handler)(const dyld3::MachOFile::ChainedFixupPointerOnDisk* fixup, uint16_t pointerFormat)) const
 {
+    // HACK: The visitor classes need to be refactored to handle cache util. For now just force the caller of this method in
+    // cache util to have the chain format
+#if BUILDING_SHARED_CACHE_UTIL
+    uint16_t chainedPointerFormat = 0;
+#else
     assert(objcVisitor.isOnDiskBinary());
     uint16_t chainedPointerFormat = this->categoryPos.chainedPointerFormat().value();
+#endif
 
     const void* fieldPos = nullptr;
     if ( objcVisitor.pointerSize == 8 ) {
@@ -567,6 +577,19 @@ uint32_t Category::getSize(bool is64)
 {
     return is64 ? sizeof(category64_t) : sizeof(category32_t);
 }
+
+
+#if BUILDING_SHARED_CACHE_UTIL
+std::optional<VMAddress> Category::getClassVMAddr(const Visitor& objcVisitor) const
+{
+    ResolvedValue field = objcVisitor.getField(this->categoryPos, this->getFieldPos(objcVisitor, Field::cls));
+    std::optional<ResolvedValue> targetValue = objcVisitor.resolveOptionalRebase(field);
+    if ( targetValue )
+        return targetValue->vmAddress();
+
+    return { };
+}
+#endif
 
 //
 // MARK: --- Protocol methods ---
@@ -883,6 +906,34 @@ uint32_t MethodList::numMethods() const
     return methodList->getMethodCount();
 }
 
+uint32_t MethodList::listSize() const
+{
+    if ( !methodListPos.has_value() )
+        return 0;
+
+    const ResolvedValue& methodListValue = this->methodListPos.value();
+
+    const method_list_t* methodList = (const method_list_t*)methodListValue.value();
+    assert(methodList != nullptr);
+
+    uint32_t size = sizeof(uint32_t) * 2;
+    size += methodList->getMethodCount() * methodList->getMethodSize();
+    return size;
+}
+
+uint32_t MethodList::methodSize() const
+{
+    if ( !methodListPos.has_value() )
+        return 0;
+
+    const ResolvedValue& methodListValue = this->methodListPos.value();
+
+    const method_list_t* methodList = (const method_list_t*)methodListValue.value();
+    assert(methodList != nullptr);
+
+    return methodList->getMethodSize();
+}
+
 bool MethodList::usesRelativeOffsets() const
 {
     if ( !methodListPos.has_value() )
@@ -1184,7 +1235,7 @@ VMAddress Method::getNameVMAddr(const Visitor& objcVisitor) const
             return objcVisitor.resolveRebase(nameSelRefValue).vmAddress();
         }
         case Kind::relativeDirect: {
-#if BUILDING_DYLD || BUILDING_CLOSURE_UTIL || BUILDING_SHARED_CACHE_UTIL || BUILDING_UNIT_TESTS
+#if BUILDING_DYLD || BUILDING_CLOSURE_UTIL || BUILDING_UNIT_TESTS
             // dyld should never walk direct methods as the objc closure optimizations skip cache dylibs
             assert(0);
 #else
@@ -1685,10 +1736,10 @@ const char* Property::getAttributes(const Visitor& objcVisitor) const
 }
 
 //
-// MARK: --- Visitor::DataSection methods ---
+// MARK: --- Visitor::Section methods ---
 //
 
-std::optional<Visitor::DataSection> Visitor::findObjCDataSection(const char *sectionName) const
+std::optional<Visitor::Section> Visitor::findSection(std::span<const char*> altSegNames, const char *sectionName) const
 {
 #if SUPPORT_VM_LAYOUT
     const dyld3::MachOFile* mf = this->dylibMA;
@@ -1696,13 +1747,14 @@ std::optional<Visitor::DataSection> Visitor::findObjCDataSection(const char *sec
     const dyld3::MachOFile* mf = this->dylibMF;
 #endif
 
-    __block std::optional<Visitor::DataSection> objcDataSection;
+    __block std::optional<Visitor::Section> objcDataSection;
     mf->forEachSection(^(const dyld3::MachOFile::SectionInfo& sectInfo, bool malformedSectionRange, bool& stop) {
-        if ( (strcmp(sectInfo.segInfo.segName, "__DATA") != 0) &&
-             (strcmp(sectInfo.segInfo.segName, "__DATA_CONST") != 0) &&
-             (strcmp(sectInfo.segInfo.segName, "__DATA_DIRTY") != 0) )
+        bool segMatch = std::any_of(altSegNames.begin(), altSegNames.end(), [&sectInfo](const char* segName) {
+            return strncmp(sectInfo.segInfo.segName, segName, 16) == 0;
+        });
+        if ( !segMatch )
             return;
-        if ( strcmp(sectInfo.sectName, sectionName) != 0 )
+        if ( strncmp(sectInfo.sectName, sectionName, 16) != 0 )
             return;
 
 #if SUPPORT_VM_LAYOUT
@@ -1719,11 +1771,27 @@ std::optional<Visitor::DataSection> Visitor::findObjCDataSection(const char *sec
     return objcDataSection;
 }
 
+std::optional<Visitor::Section> Visitor::findObjCDataSection(const char *sectionName) const
+{
+    static const char* objcDataSegments[] = {
+        "__DATA", "__DATA_CONST", "__DATA_DIRTY"
+    };
+    return findSection(objcDataSegments, sectionName);
+}
+
+std::optional<Visitor::Section> Visitor::findObjCTextSection(const char *sectionName) const
+{
+    static const char* objcTextSegments[] = {
+        "__TEXT"
+    };
+    return findSection(objcTextSegments, sectionName);
+}
+
 //
 // MARK: --- Visitor methods ---
 //
 
-void Visitor::forEachClass(bool visitMetaClasses, const Visitor::DataSection& classListSection,
+void Visitor::forEachClass(bool visitMetaClasses, const Visitor::Section& classListSection,
                            void (^callback)(Class& objcClass, bool isMetaClass, bool& stopClass))
 {
     assert((classListSection.sectSize % pointerSize) == 0);
@@ -1761,7 +1829,7 @@ void Visitor::forEachClass(bool visitMetaClasses, const Visitor::DataSection& cl
 
 void Visitor::forEachClass(bool visitMetaClasses, void (^callback)(Class& objcClass, bool isMetaClass, bool& stopClass))
 {
-    std::optional<DataSection> classListSection = this->findObjCDataSection("__objc_classlist");
+    std::optional<Section> classListSection = this->findObjCDataSection("__objc_classlist");
     if ( !classListSection.has_value() )
         return;
 
@@ -1802,32 +1870,35 @@ void Visitor::forEachClassAndMetaClass(void (^callback)(Class& objcClass, bool& 
 
 void Visitor::forEachCategory(void (^callback)(const Category& objcCategory, bool& stopCategory))
 {
-    std::optional<DataSection> categoryListSection = findObjCDataSection("__objc_catlist");
-    if ( !categoryListSection.has_value() )
-        return;
+    for ( bool isCatlist2 : { false, true }) {
+        const char* listSection = isCatlist2 ? "__objc_catlist2" : "__objc_catlist";
+        std::optional<Section> categoryListSection = findObjCDataSection(listSection);
+        if ( !categoryListSection.has_value() )
+            continue;
 
-    assert((categoryListSection->sectSize % pointerSize) == 0);
-    uint64_t numCategories = categoryListSection->sectSize / pointerSize;
+        assert((categoryListSection->sectSize % pointerSize) == 0);
+        uint64_t numCategories = categoryListSection->sectSize / pointerSize;
 
-    const ResolvedValue& sectionValue = categoryListSection->sectionBase;
-    const uint8_t* sectionBase = (const uint8_t*)sectionValue.value();
-    for ( uint64_t categoryIndex = 0; categoryIndex != numCategories; ++categoryIndex ) {
-        const uint8_t* categoryRefPos = sectionBase + (categoryIndex * pointerSize);
-        ResolvedValue categoryRefValue = this->getField(sectionValue, categoryRefPos);
+        const ResolvedValue& sectionValue = categoryListSection->sectionBase;
+        const uint8_t* sectionBase = (const uint8_t*)sectionValue.value();
+        for ( uint64_t categoryIndex = 0; categoryIndex != numCategories; ++categoryIndex ) {
+            const uint8_t* categoryRefPos = sectionBase + (categoryIndex * pointerSize);
+            ResolvedValue categoryRefValue = this->getField(sectionValue, categoryRefPos);
 
-        // Follow the category reference to get to the actual category
-        ResolvedValue categoryPos = resolveRebase(categoryRefValue);
-        Category objcCategory(categoryPos);
-        bool stopCategory = false;
-        callback(objcCategory, stopCategory);
-        if ( stopCategory )
-            break;
+            // Follow the category reference to get to the actual category
+            ResolvedValue categoryPos = resolveRebase(categoryRefValue);
+            Category objcCategory(categoryPos, isCatlist2);
+            bool stopCategory = false;
+            callback(objcCategory, stopCategory);
+            if ( stopCategory )
+                break;
+        }
     }
 }
 
 void Visitor::forEachProtocol(void (^callback)(const Protocol& objcProtocol, bool& stopProtocol))
 {
-    std::optional<DataSection> protocolListSection = findObjCDataSection("__objc_protolist");
+    std::optional<Section> protocolListSection = findObjCDataSection("__objc_protolist");
     if ( !protocolListSection.has_value() )
         return;
 
@@ -1852,7 +1923,7 @@ void Visitor::forEachProtocol(void (^callback)(const Protocol& objcProtocol, boo
 
 void Visitor::forEachSelectorReference(void (^callback)(ResolvedValue& value)) const
 {
-    std::optional<DataSection> selRefsSection = findObjCDataSection("__objc_selrefs");
+    std::optional<Section> selRefsSection = findObjCDataSection("__objc_selrefs");
     if ( !selRefsSection.has_value() )
         return;
 
@@ -1885,7 +1956,7 @@ void Visitor::forEachSelectorReference(void (^callback)(VMAddress selRefVMAddr, 
 
 void Visitor::forEachProtocolReference(void (^callback)(ResolvedValue& value))
 {
-    std::optional<DataSection> protocolRefsSection = findObjCDataSection("__objc_protorefs");
+    std::optional<Section> protocolRefsSection = findObjCDataSection("__objc_protorefs");
     if ( !protocolRefsSection.has_value() )
         return;
 
@@ -1902,9 +1973,114 @@ void Visitor::forEachProtocolReference(void (^callback)(ResolvedValue& value))
     }
 }
 
+#if BUILDING_CACHE_BUILDER || BUILDING_CACHE_BUILDER_UNIT_TESTS
+void Visitor::forEachMethodList(void (^callback)(MethodList& objcMethodList, std::optional<metadata_visitor::ResolvedValue> extendedMethodTypes))
+{
+    __block std::unordered_set<const void*> visitedLists;
+
+    forEachClassAndMetaClass(^(const objc_visitor::Class& objcClass, bool&) {
+        objc_visitor::MethodList objcMethodList = objcClass.getBaseMethods(*this);
+
+        callback(objcMethodList, std::nullopt);
+        visitedLists.insert(objcMethodList.getLocation());
+    });
+
+    forEachCategory(^(const objc_visitor::Category& objcCategory, bool&) {
+        objc_visitor::MethodList instanceMethodList = objcCategory.getInstanceMethods(*this);
+        objc_visitor::MethodList classMethodList    = objcCategory.getClassMethods(*this);
+
+        callback(instanceMethodList, std::nullopt);
+        visitedLists.insert(instanceMethodList.getLocation());
+
+        callback(classMethodList, std::nullopt);
+        visitedLists.insert(classMethodList.getLocation());
+    });
+
+    forEachProtocol(^(const objc_visitor::Protocol& objcProtocol, bool&) {
+        objc_visitor::MethodList instanceMethodList         = objcProtocol.getInstanceMethods(*this);
+        objc_visitor::MethodList classMethodList            = objcProtocol.getClassMethods(*this);
+        objc_visitor::MethodList optionalInstanceMethodList = objcProtocol.getOptionalInstanceMethods(*this);
+        objc_visitor::MethodList optionalClassMethodList    = objcProtocol.getOptionalClassMethods(*this);
+
+        // This is an optional flat array with entries for all method lists.
+        // Each method list of length N has N char* entries in this list, if its present
+        std::optional<metadata_visitor::ResolvedValue> extendedMethodTypes = objcProtocol.getExtendedMethodTypes(*this);
+        const uint8_t* currentMethodTypes = extendedMethodTypes.has_value() ? (const uint8_t*)extendedMethodTypes->value() : nullptr;
+
+        callback(instanceMethodList, extendedMethodTypes);
+        visitedLists.insert(instanceMethodList.getLocation());
+        if ( extendedMethodTypes.has_value() ) {
+            currentMethodTypes += (instanceMethodList.numMethods() * pointerSize);
+            extendedMethodTypes.emplace(metadata_visitor::ResolvedValue(extendedMethodTypes.value(), currentMethodTypes));
+        }
+
+        callback(classMethodList, extendedMethodTypes);
+        visitedLists.insert(classMethodList.getLocation());
+        if ( extendedMethodTypes.has_value() ) {
+            currentMethodTypes += (classMethodList.numMethods() * pointerSize);
+            extendedMethodTypes.emplace(metadata_visitor::ResolvedValue(extendedMethodTypes.value(), currentMethodTypes));
+        }
+
+        callback(optionalInstanceMethodList, extendedMethodTypes);
+        visitedLists.insert(optionalInstanceMethodList.getLocation());
+        if ( extendedMethodTypes.has_value() ) {
+            currentMethodTypes += (optionalInstanceMethodList.numMethods() * pointerSize);
+            extendedMethodTypes.emplace(metadata_visitor::ResolvedValue(extendedMethodTypes.value(), currentMethodTypes));
+        }
+
+        callback(optionalClassMethodList, extendedMethodTypes);
+        visitedLists.insert(optionalClassMethodList.getLocation());
+        if ( extendedMethodTypes.has_value() ) {
+            currentMethodTypes += (optionalClassMethodList.numMethods() * pointerSize);
+            extendedMethodTypes.emplace(metadata_visitor::ResolvedValue(extendedMethodTypes.value(), currentMethodTypes));
+        }
+    });
+
+    // rdar://129304028 (dyld cache builder support for relative method lists in Swift generic classes)
+    // Also scan the entire __objc_methlist section looking for other method lists that
+    // aren't referenced through the regular ObjC metadata.
+    std::optional<Section> methodListSection = findObjCTextSection("__objc_methlist");
+    if ( !methodListSection.has_value() )
+        return;
+    assert((methodListSection->sectSize % 4) == 0);
+
+    const ResolvedValue& sectionValue = methodListSection->sectionBase;
+    const uint8_t* sectionPos = (const uint8_t*)sectionValue.value();
+    const uint8_t* sectionEnd = (const uint8_t*)sectionValue.value() + methodListSection->sectSize;
+
+    while ( sectionPos < sectionEnd ) {
+        ResolvedValue methodListValue = this->getField(sectionValue, sectionPos);
+
+        // method lists are 8-byte alligned, a valid method list can never start
+        // with a 0 because that's where the method size entry and flags are encoded
+        if ( *(uint32_t*)methodListValue.value() == 0 ) {
+            sectionPos += sizeof(uint32_t);
+            continue;
+        }
+
+        MethodList methodList(methodListValue);
+
+        // sanity check entry - all lists in __objc_methlist are relative and
+        // a relative method list entry is 12 bytes large
+        assert(methodList.usesRelativeOffsets() && methodList.methodSize() == 12
+                && "not a relative method list");
+
+        // skip method lists that were visited through classes etc.
+        if ( !visitedLists.contains(methodList.getLocation()) ) {
+            callback(methodList, std::nullopt);
+        }
+
+        uint32_t size = methodList.listSize();
+        assert(size != 0 && "method list can't be empty");
+        sectionPos += size;
+    }
+    assert(sectionPos == sectionEnd && "malformed __objc_methlist section");
+}
+#endif
+
 void Visitor::withImageInfo(void (^callback)(const uint32_t version, const uint32_t flags)) const
 {
-    std::optional<DataSection> imageInfoSection = findObjCDataSection("__objc_imageinfo");
+    std::optional<Section> imageInfoSection = findObjCDataSection("__objc_imageinfo");
     if ( !imageInfoSection.has_value() )
         return;
 

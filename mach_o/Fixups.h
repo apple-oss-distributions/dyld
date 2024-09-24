@@ -37,6 +37,7 @@ struct MappedSegment
 {
     uint64_t            runtimeOffset;
     uint64_t            runtimeSize;
+    uint64_t            fileOffset;
     void*               content;
     std::string_view    segName;
     bool                readable;
@@ -54,7 +55,7 @@ struct MappedSegment
  *
  *
  */
-struct Fixup
+struct VIS_HIDDEN Fixup
 {
     const void*             location;
     const MappedSegment*    segment;

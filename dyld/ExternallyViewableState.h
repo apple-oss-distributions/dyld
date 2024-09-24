@@ -117,39 +117,41 @@ class ExternallyViewableState
 public:
     struct ImageInfo { uint64_t fsID=0; uint64_t fsObjID=0; const char* path=nullptr; const void* loadAddress=nullptr; bool inSharedCache=false; };
 #if TARGET_OS_SIMULATOR
-    void initSim(lsl::Allocator& persistentAllocator, lsl::Allocator& ephemeralAllocator, dyld3::Platform,
+    void        initSim(lsl::Allocator& persistentAllocator, lsl::Allocator& ephemeralAllocator, dyld3::Platform,
                  dyld_all_image_infos* hostAllImage, const dyld::SyscallHelpers* syscalls);
 #else
-    void initOld(lsl::Allocator& persistentAllocator, dyld3::Platform);
+    void        initOld(lsl::Allocator& persistentAllocator, dyld3::Platform);
 #if !TARGET_OS_EXCLAVEKIT
-    void init(lsl::Allocator& persistentAllocator, lsl::Allocator& ephemeralAllocator, FileManager& fileManager, dyld3::Platform);
-    void addImageInfo(lsl::Allocator& ephemeralAllocator, const ImageInfo& imageInfo);
+    void        init(lsl::Allocator& persistentAllocator, lsl::Allocator& ephemeralAllocator, FileManager& fileManager, dyld3::Platform);
+    void        addImageInfo(lsl::Allocator& ephemeralAllocator, const ImageInfo& imageInfo);
 #endif // !TARGET_OS_EXCLAVEKIT
 #endif // TARGET_OS_SIMULATOR
-    void addImageInfoOld(const ImageInfo& imageInfo, uint64_t timeStamp, uintptr_t mTime);
-    void setDyldOld(const ImageInfo& dyldInfo);
-    void setLibSystemInitializedOld();
-    void setInitialImageCountOld(uint32_t);
-    void addImagesOld(lsl::Vector<dyld_image_info>& oldStyleAdditions, uint64_t timeStamp);
-    void addImagesOld(lsl::Allocator& ephemeralAllocator, const std::span<ImageInfo>& images);
-    void removeImagesOld(dyld3::Array<const char*> &pathsBuffer, dyld3::Array<const mach_header*>& unloadedMHs, std::span<const mach_header*>& mhs, uint64_t timeStamp);
-    void removeImagesOld(std::span<const mach_header*>& mhs);
+    void        addImageInfoOld(const ImageInfo& imageInfo, uint64_t timeStamp, uintptr_t mTime);
+    void        setDyldOld(const ImageInfo& dyldInfo);
+    void        setLibSystemInitializedOld();
+    void        setInitialImageCountOld(uint32_t);
+    void        addImagesOld(lsl::Vector<dyld_image_info>& oldStyleAdditions, uint64_t timeStamp);
+    void        addImagesOld(lsl::Allocator& ephemeralAllocator, const std::span<ImageInfo>& images);
+    void        removeImagesOld(dyld3::Array<const char*> &pathsBuffer, dyld3::Array<const mach_header*>& unloadedMHs, std::span<const mach_header*>& mhs, uint64_t timeStamp);
+    void        removeImagesOld(std::span<const mach_header*>& mhs);
 #if !TARGET_OS_EXCLAVEKIT
-    void setDyld(lsl::Allocator& ephemeralAllocator, const ImageInfo& dyldInfo);
-    void setLibSystemInitialized();
-    void setInitialImageCount(uint32_t);
-    void addImages(lsl::Allocator& persistentAllocator, lsl::Allocator& ephemeralAllocator, const std::span<ImageInfo>& images);
-    void removeImages(lsl::Allocator& persistentAllocator, lsl::Allocator& ephemeralAllocator, std::span<const mach_header*>& mhs);
-    void setSharedCacheInfo(lsl::Allocator& ephemeralAllocator, uint64_t cacheSlide, const ImageInfo& cacheInfo, bool privateCache);
-    void detachFromSharedRegion();
-    void commit(Atlas::ProcessSnapshot* processSnapshot, lsl::Allocator& persistentAllocator, lsl::Allocator& ephemeralAllocator);
-    void commit(lsl::Allocator& persistentAllocator, lsl::Allocator& ephemeralAllocator);
-    void release(lsl::Allocator& ephemeralAllocator);
-    void disableCrashReportBacktrace();
+    void        setDyld(lsl::Allocator& ephemeralAllocator, const ImageInfo& dyldInfo);
+    void        setLibSystemInitialized();
+    void        setInitialImageCount(uint32_t);
+    void        addImages(lsl::Allocator& persistentAllocator, lsl::Allocator& ephemeralAllocator, const std::span<ImageInfo>& images);
+    void        removeImages(lsl::Allocator& persistentAllocator, lsl::Allocator& ephemeralAllocator, std::span<const mach_header*>& mhs);
+    void        setSharedCacheInfo(lsl::Allocator& ephemeralAllocator, uint64_t cacheSlide, const ImageInfo& cacheInfo, bool privateCache);
+    void        detachFromSharedRegion();
+    std::byte*   swapActiveSnapshot(std::byte* begin, std::byte* end);
+
+    void        commit(Atlas::ProcessSnapshot* processSnapshot, lsl::Allocator& persistentAllocator, lsl::Allocator& ephemeralAllocator);
+    void        commit(lsl::Allocator& persistentAllocator, lsl::Allocator& ephemeralAllocator);
+    void        release(lsl::Allocator& ephemeralAllocator);
+    void        disableCrashReportBacktrace();
 #if SUPPORT_ROSETTA
-    void setRosettaSharedCacheInfo(uint64_t aotCacheLoadAddress, const uuid_t aotCacheUUID);
-    void addRosettaImages(std::span<const dyld_aot_image_info>&, std::span<const dyld_image_info>&);
-    void removeRosettaImages(std::span<const mach_header*>& mhs);
+    void        setRosettaSharedCacheInfo(uint64_t aotCacheLoadAddress, const uuid_t aotCacheUUID);
+    void        addRosettaImages(std::span<const dyld_aot_image_info>&, std::span<const dyld_image_info>&);
+    void        removeRosettaImages(std::span<const mach_header*>& mhs);
 #endif
     uint64_t     imageInfoCount();
     unsigned int notifyPortValue();

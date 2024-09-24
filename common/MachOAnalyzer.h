@@ -99,6 +99,7 @@ struct VIS_HIDDEN MachOAnalyzer : public MachOLoaded
             v2_x86_64_tbi   = 2,
             v3              = 3,
             v4              = 4,
+            v5              = 5,
         };
         SharedCacheFormat sharedCacheChainedPointerFormat   = SharedCacheFormat::none;
 #endif

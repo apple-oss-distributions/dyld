@@ -171,7 +171,8 @@ private:
 #if !TARGET_OS_EXCLAVEKIT
 VIS_HIDDEN
 void kdebug_trace_dyld_image(const uint32_t code, const char* path, const uuid_t* uuid_bytes,
-                             const fsobj_id_t fsobjid, const fsid_t fsid, const mach_header* load_addr);
+                             const fsobj_id_t fsobjid, const fsid_t fsid, const void* load_addr,
+                             uint32_t cpusubtype);
 #endif
 
 VIS_HIDDEN

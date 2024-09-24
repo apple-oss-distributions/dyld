@@ -1,0 +1,15 @@
+#include "ld_base.xcconfig"
+
+PRODUCT_NAME = SharedCacheLinker
+DYLIB_INSTALL_NAME_BASE = @rpath
+
+OTHER_CPLUSPLUSFLAGS=$(inherited) -fno-c++-static-destructors
+
+GCC_PREPROCESSOR_DEFINITIONS = $(inherited) BUILDING_SHARED_CACHE_LINKER=1 LD_VERSION=$(RC_ProjectSourceVersion) RC_SUPPORTED_ARCHS="$(RC_SUPPORTED_ARCHS:default=x86_64 x86_64h arm64 arm64e arm64_32)"
+GCC_SYMBOLS_PRIVATE_EXTERN = YES
+
+
+VERSION_INFO_STRING = "@(#)PROGRAM:SharedCacheLinker PROJECT:ld-$(CURRENT_PROJECT_VERSION)"
+
+// silence -r warnings until mergeable can be enabled
+OTHER_LDFLAGS = "-nostdlib"

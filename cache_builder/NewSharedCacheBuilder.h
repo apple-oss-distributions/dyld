@@ -87,6 +87,7 @@ public:
     SharedCacheBuilder(BuilderOptions& options, const dyld3::closure::FileSystem& fileSystem);
 
     void            forEachWarning(void (^callback)(const std::string_view& str)) const;
+    void            forEachError(void (^callback)(const std::string_view& str)) const;
     void            forEachCacheDylib(void (^callback)(const std::string_view& path)) const;
     void            forEachCacheSymlink(void (^callback)(const std::string_view& path)) const;
     void            addFile(const void* buffer, size_t bufferSize, std::string_view path,
@@ -99,6 +100,7 @@ public:
     std::span<const std::string_view>   getEvictedDylibs() const;
     void                                getResults(std::vector<CacheBuffer>& results) const;
     std::string                         getMapFileBuffer() const;
+    std::string_view                    getSwiftPrespecializedDylibBuildError() const;
 
     // All caches have a logging prefix, UUID and JSON map which represents the development cache.
     // Universal caches may also have customer versions of these
@@ -130,6 +132,11 @@ private:
     void            verifySelfContained();
     void            calculateDylibAliases();
     void            sortDylibs();
+
+    bool            shouldBuildSwiftPrespecializedDylib();
+    bool            reserveSwiftPrespecializedInputFile();
+    error::Error    buildSwiftPrespecializedDylibJSON();
+    error::Error    createSwiftPrespecializedDylib();
     error::Error    calculateDylibDependents();
     void            categorizeDylibSegments();
     void            categorizeDylibLinkedit();
@@ -160,6 +167,7 @@ private:
     error::Error    calculateSubCacheSymbolStrings();
     error::Error    calculateUniqueGOTs();
     void            sortSubCacheSegments();
+    void            addAlignmentChunks();
     void            calculateSlideInfoSize();
     void            calculateCodeSignatureSize();
     void            printSubCaches() const;
@@ -198,6 +206,7 @@ private:
     void            writeSubCacheHeader(SubCache& subCache);
     uint64_t        getMaxSlide() const;
     void            addObjcSegments();
+    error::Error    patchLinkedDylibs(CacheDylib& dylib);
     void            computeCacheHeaders();
     static bool     regionIsSharedCacheMapping(const Region& region);
     void            codeSign();
@@ -255,6 +264,10 @@ private:
     std::unordered_map<std::string, CacheDylib*>    dylibAliases;
     bool                                            dylibHasMissingDependency = false;
     std::vector<std::string>                        warnings;
+    std::vector<std::string>                        errors;
+    std::string                                     swiftPrespecializedDylibJSON;
+    CacheDylib*                                     swiftPrespecializedDylib = nullptr;
+    std::string                                     swiftPrespecializedDylibBuildError;
 
     // Some optimizers are run just once per cache, so live at the top level here
     ObjCOptimizer                        objcOptimizer;

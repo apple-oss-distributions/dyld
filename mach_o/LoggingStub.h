@@ -26,15 +26,17 @@
 
 #include <cstdarg>
 
+#include "Defines.h"
+
 namespace mach_o
 {
 
 using WarningHandler = void(*)(const void* context, const char* format, va_list);
-void setWarningHandler(WarningHandler);
-bool hasWarningHandler();
+void setWarningHandler(WarningHandler) VIS_HIDDEN;
+bool hasWarningHandler() VIS_HIDDEN;
 
 __attribute__((format(printf, 2, 3)))
-void warning(const void* context, const char* format, ...);
+void warning(const void* context, const char* format, ...) VIS_HIDDEN;
 }
 
 #endif // mach_o_LoggingStub_h

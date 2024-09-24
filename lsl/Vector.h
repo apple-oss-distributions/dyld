@@ -89,8 +89,8 @@ struct TRIVIAL_ABI Vector {
     Vector(Vector&& other, Allocator& allocator) : _allocator(&allocator) {
         std::swap(_size,        other._size);
         if (_allocator == other._allocator) {
-            std::swap(_allocationSize,  other._allocationSize);
-            std::swap(_buffer,          other._buffer);
+            std::swap(_capacity,    other._capacity);
+            std::swap(_buffer,      other._buffer);
         } else {
             reserve(_size);
             for(auto&& i : other) {
@@ -153,7 +153,7 @@ struct TRIVIAL_ABI Vector {
     
     [[nodiscard]] constexpr bool empty() const      { return (_size == 0); }
     size_type size() const                          { return _size; }
-    size_type capacity() const                      { return _allocationSize/sizeof(T); }
+    size_type capacity() const                      { return _capacity; }
     void clear() {
         if constexpr(!std::is_trivially_destructible<value_type>::value) {
             for (auto i = begin(); i != end(); ++i) {
@@ -172,31 +172,32 @@ struct TRIVIAL_ABI Vector {
                 }
             }
             if (_buffer) {
-                _allocator->deallocate_buffer((void*)_buffer, _allocationSize, std::max(16UL, alignof(T)));
+                _allocator->free((void*)_buffer);
             }
             _buffer = nullptr;
             _size = 0;
-            _allocationSize = 0;
+            _capacity = 0;
         } else {
-            auto [newBuffer, newBufferSize] = _allocator->allocate_buffer(sizeof(T)*newCapacity, std::max(16UL, alignof(T)));
-            std::move(&_buffer[0], &_buffer[newCapacity], (value_type *)newBuffer);
-            for (auto i = &_buffer[newCapacity]; i != &_buffer[_size]; ++i) {
-                i->~value_type();
+            if constexpr(!std::is_trivially_destructible<value_type>::value) {
+                for (auto i = &_buffer[newCapacity]; i != &_buffer[_size]; ++i) {
+                    i->~value_type();
+                }
             }
-            if (_buffer) {
-                _allocator->deallocate_buffer((void*)_buffer, _allocationSize, std::max(16UL, alignof(T)));
-            }
-            _buffer = (value_type *)newBuffer;
             _size = newCapacity;
-            _allocationSize = newBufferSize;
+            _capacity = newCapacity;
+            (void)_allocator->realloc((void*)_buffer, sizeof(T)*newCapacity);
         }
     }
     // This function exists purely to support stack allocated arrays
     void reserveExact(size_type newCapacity) {
         if (newCapacity <= capacity()) { return; }
-        auto buffer = _allocator->allocate_buffer(sizeof(T)*newCapacity, std::max(16UL, alignof(T)));
+        if (_allocator->realloc((void*)_buffer, sizeof(T)*newCapacity)) {
+            _capacity = newCapacity;
+            return;
+        }
+        auto buffer = _allocator->aligned_alloc(std::max(16UL, alignof(T)), sizeof(T)*newCapacity);
         for (auto i = 0; i < _size; ++i) {
-            (void)new ((void*)((uintptr_t)buffer.address+(i*sizeof(T)))) T(std::move(_buffer[i]));
+            (void)new ((void*)((uintptr_t)buffer+(i*sizeof(T)))) T(std::move(_buffer[i]));
         }
         if constexpr(!std::is_trivially_destructible<value_type>::value) {
             for (auto i = &_buffer[0]; i != &_buffer[_size]; ++i) {
@@ -204,11 +205,11 @@ struct TRIVIAL_ABI Vector {
             }
         }
         if (_buffer) {
-            _allocator->deallocate_buffer((void*)_buffer, _allocationSize, std::max(16UL, alignof(T)));
+            _allocator->free((void*)_buffer);
         }
-        _buffer = (value_type *)buffer.address;
+        _buffer = (value_type *)buffer;
         _size = std::min(newCapacity, _size);
-        _allocationSize = buffer.size;
+        _capacity = newCapacity;
         assert(capacity() >= newCapacity);
     }
     void reserve(size_type newCapacity) {
@@ -319,26 +320,21 @@ private:
         using std::swap;
 
         if (this == &other) { return; }
-        swap(_allocator,        other._allocator);
-        swap(_size,             other._size);
-        swap(_allocationSize,   other._allocationSize);
-        swap(_buffer,           other._buffer);
+        swap(_allocator,    other._allocator);
+        swap(_size,         other._size);
+        swap(_capacity,     other._capacity);
+        swap(_buffer,       other._buffer);
     }
     Allocator*  _allocator      = nullptr;
     value_type* _buffer         = nullptr;
     uint64_t    _size           = 0;
-    uint64_t    _allocationSize = 0;
+    uint64_t    _capacity       = 0;
 };
 
 } // namespace lsl
 
 #define STACK_ALLOC_VECTOR_BYTE_SIZE(_type, _count) (16UL   + alignof(_type)              + sizeof(_type)*_count        \
-                                                            + alignof(EphemeralAllocator) + sizeof(EphemeralAllocator)  \
-                                                            + alignof(MemoryManager)      + sizeof(MemoryManager))
-
-#define STACK_ALLOCATOR(_name, _count)                      \
-    void*  __##_name##_storage = alloca(_count);            \
-    EphemeralAllocator _name(__##_name##_storage, _count);
+                                                            + alignof(lsl::Vector<_type>) + sizeof(lsl::Vector<_type>))
 
 #define STACK_ALLOC_VECTOR(_type, _name, _count)                                        \
     STACK_ALLOCATOR(__##_name##_allocator, STACK_ALLOC_VECTOR_BYTE_SIZE(_type,_count))  \

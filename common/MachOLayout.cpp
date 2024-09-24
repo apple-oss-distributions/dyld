@@ -59,23 +59,30 @@ uint64_t Layout::textUnslidVMAddr() const
 
 bool Layout::isSwiftLibrary() const
 {
+    if ( std::optional<uint32_t> flags = this->getObjcInfoFlags(); flags.has_value() ) {
+        uint32_t swiftVersion = ((flags.value() >> 8) & 0xFF);
+        return (swiftVersion != 0);
+    }
+    return false;
+}
+
+std::optional<uint32_t> Layout::getObjcInfoFlags() const
+{
     struct objc_image_info {
         int32_t version;
         uint32_t flags;
     };
 
-    __block bool result = false;
+    __block std::optional<uint32_t> flags;
     this->mf->forEachSection(^(const dyld3::MachOFile::SectionInfo& sectInfo, bool malformedSectionRange, bool& stop) {
         if ( (strncmp(sectInfo.sectName, "__objc_imageinfo", 16) == 0) && (strncmp(sectInfo.segInfo.segName, "__DATA", 6) == 0) ) {
             uint64_t segmentOffset = sectInfo.sectFileOffset - sectInfo.segInfo.fileOffset;
             objc_image_info* info =  (objc_image_info*)(this->segments[sectInfo.segInfo.segIndex].buffer + segmentOffset);
-            uint32_t swiftVersion = ((info->flags >> 8) & 0xFF);
-            if ( swiftVersion )
-                result = true;
+            flags = info->flags;
             stop = true;
         }
     });
-    return result;
+    return flags;
 }
 
 bool Layout::hasSection(std::string_view segmentName, std::string_view sectionName) const
@@ -1779,6 +1786,14 @@ SplitSeg::SplitSeg(const Layout& layout)
 {
 }
 
+bool SplitSeg::hasMarker() const
+{
+    if ( !this->layout.linkedit.splitSegInfo.hasValue() )
+        return false;
+
+    return this->layout.linkedit.splitSegInfo.bufferSize == 0;
+}
+
 bool SplitSeg::isV1() const
 {
     if ( !this->layout.linkedit.splitSegInfo.hasValue() )
@@ -2130,6 +2145,16 @@ bool ChainedFixupPointerOnDisk::isRebase(uint16_t pointerFormat, uint64_t prefer
             targetRuntimeOffset = this->firmware32.target - preferedLoadAddress;
             return true;
             break;
+        case DYLD_CHAINED_PTR_ARM64E_SHARED_CACHE:
+             if ( this->cache64e.regular.auth ) {
+                 targetRuntimeOffset = this->cache64e.auth.runtimeOffset;
+                 return true;
+             }
+             else {
+                 targetRuntimeOffset = this->cache64e.regular.runtimeOffset;
+                 return true;
+             }
+             break;
         default:
             break;
     }

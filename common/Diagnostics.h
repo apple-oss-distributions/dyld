@@ -35,6 +35,10 @@
   #include <vector>
 #endif
 
+#if BUILDING_LD || BUILDING_UNIT_TESTS || BUILDING_SHARED_CACHE_LINKER || BUILDING_CACHE_BUILDER || BUILDING_CACHE_BUILDER_UNIT_TESTS
+  #include "Error.h"
+#endif
+
 #include "Defines.h"
 
 
@@ -70,6 +74,11 @@ public:
 #else
     const char*                     errorMessage() const;
     const char*                     errorMessageCStr() const { return errorMessage(); }
+#endif
+
+#if BUILDING_LD || BUILDING_UNIT_TESTS || BUILDING_SHARED_CACHE_LINKER || BUILDING_CACHE_BUILDER || BUILDING_CACHE_BUILDER_UNIT_TESTS
+    mach_o::Error                   toError() const;
+    void                            error(const mach_o::Error& err);
 #endif
 
 private:

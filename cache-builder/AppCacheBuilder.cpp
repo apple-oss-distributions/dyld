@@ -159,6 +159,10 @@ void AppCacheBuilder::forEachRegion(void (^callback)(const Region& region)) cons
     // readOnlyTextRegion
     callback(readOnlyTextRegion);
 
+    // -sectcreate
+    for (const Region& region : customDataRegions)
+        callback(region);
+
     // readExecuteRegion
     if ( readExecuteRegion.sizeInUse != 0 )
         callback(readExecuteRegion);
@@ -175,6 +179,10 @@ void AppCacheBuilder::forEachRegion(void (^callback)(const Region& region)) cons
     if ( dataConstRegion.sizeInUse != 0 )
         callback(dataConstRegion);
 
+    // lateConstRegion
+    if ( lateConstRegion.sizeInUse != 0 )
+        callback(lateConstRegion);
+
     // dataSptmRegion
     if ( dataSptmRegion.sizeInUse != 0 )
         callback(dataSptmRegion);
@@ -190,10 +198,6 @@ void AppCacheBuilder::forEachRegion(void (^callback)(const Region& region)) cons
     // hibernateRegion
     if ( hibernateRegion.sizeInUse != 0 )
         callback(hibernateRegion);
-
-    // -sectcreate
-    for (const Region& region : customDataRegions)
-        callback(region);
 
     // prelinkInfoRegion
     if ( prelinkInfoDict != nullptr )
@@ -416,7 +420,8 @@ void AppCacheBuilder::assignSegmentRegionsAndOffsets()
                     return;
                 if ( (strcmp(segInfo.segName, "__DATA_CONST") == 0)
                     || (strcmp(segInfo.segName, "__PPLDATA_CONST") == 0)
-                    || (strcmp(segInfo.segName, "__LASTDATA_CONST") == 0) )
+                    || (strcmp(segInfo.segName, "__LASTDATA_CONST") == 0)
+                    || (strcmp(segInfo.segName, "__LATE_CONST") == 0) )
                     return;
                 if ( strcmp(segInfo.segName, "__LINKEDIT") == 0 )
                     return;
@@ -621,7 +626,9 @@ void AppCacheBuilder::assignSegmentRegionsAndOffsets()
                     return;
                 if ( (strcmp(segInfo.segName, "__DATA_CONST") != 0)
                     && (strcmp(segInfo.segName, "__PPLDATA_CONST") != 0)
-                    && (strcmp(segInfo.segName, "__LASTDATA_CONST") != 0)  )
+                    && (strcmp(segInfo.segName, "__LASTDATA_CONST") != 0) )
+                    return;
+                if ( strcmp(segInfo.segName, "__LATE_CONST") == 0 )
                     return;
                 // kxld packs __DATA_CONST so we will do
                 uint32_t minAlignmentP2 = getMinAlignment(dylib.input->mappedFile.mh);
@@ -651,6 +658,51 @@ void AppCacheBuilder::assignSegmentRegionsAndOffsets()
         dataConstRegion.initProt    = VM_PROT_READ;
         dataConstRegion.maxProt     = VM_PROT_READ;
         dataConstRegion.name        = "__DATA_CONST";
+    }
+
+    // __LATE_CONST segments
+    {
+        __block uint64_t offsetInRegion = 0;
+        for (DylibInfo& dylib : sortedDylibs) {
+            if (!dylib.input->mappedFile.mh->hasSplitSeg())
+                continue;
+
+            __block uint64_t textSegVmAddr = 0;
+            dylib.input->mappedFile.mh->forEachSegment(^(const dyld3::MachOFile::SegmentInfo& segInfo, bool& stop) {
+                if ( strcmp(segInfo.segName, "__TEXT") == 0 )
+                    textSegVmAddr = segInfo.vmAddr;
+                if ( (segInfo.protections & VM_PROT_EXECUTE) != 0 )
+                    return;
+                if ( (strcmp(segInfo.segName, "__LATE_CONST") != 0) )
+                    return;
+                // pack __LATE_CONST
+                uint32_t minAlignmentP2 = getMinAlignment(dylib.input->mappedFile.mh);
+                offsetInRegion = align(offsetInRegion, segInfo.p2align);
+                offsetInRegion = align(offsetInRegion, minAlignmentP2);
+                size_t copySize = std::min((size_t)segInfo.fileSize, (size_t)segInfo.sizeOfSections);
+                uint64_t dstCacheSegmentSize = align(segInfo.sizeOfSections, minAlignmentP2);
+                SegmentMappingInfo loc;
+                loc.srcSegment             = (uint8_t*)dylib.input->mappedFile.mh + segInfo.vmAddr - textSegVmAddr;
+                loc.segName                = segInfo.segName;
+                loc.dstSegment             = nullptr;
+                loc.dstCacheUnslidAddress  = offsetInRegion; // This will be updated later once we've assigned addresses
+                loc.dstCacheFileOffset     = (uint32_t)offsetInRegion;
+                loc.dstCacheSegmentSize    = (uint32_t)dstCacheSegmentSize;
+                loc.dstCacheFileSize       = (uint32_t)copySize;
+                loc.copySegmentSize        = (uint32_t)copySize;
+                loc.srcSegmentIndex        = segInfo.segIndex;
+                loc.parentRegion           = &lateConstRegion;
+                dylib.cacheLocation[segInfo.segIndex] = loc;
+                offsetInRegion += loc.dstCacheSegmentSize;
+            });
+        }
+
+        // align r/o region end
+        lateConstRegion.bufferSize  = align(offsetInRegion, 14);
+        lateConstRegion.sizeInUse   = lateConstRegion.bufferSize;
+        lateConstRegion.initProt    = VM_PROT_READ;
+        lateConstRegion.maxProt     = VM_PROT_READ;
+        lateConstRegion.name        = "__LATE_CONST";
     }
 
     // __DATA_SPTM segments
@@ -723,7 +775,8 @@ void AppCacheBuilder::assignSegmentRegionsAndOffsets()
                     return;
                 if ( (strcmp(segInfo.segName, "__DATA_CONST") == 0)
                     || (strcmp(segInfo.segName, "__PPLDATA_CONST") == 0)
-                    || (strcmp(segInfo.segName, "__LASTDATA_CONST") == 0) )
+                    || (strcmp(segInfo.segName, "__LASTDATA_CONST") == 0)
+                    || (strcmp(segInfo.segName, "__LATE_CONST") == 0) )
                     return;
                 if ( segInfo.protections != (VM_PROT_READ | VM_PROT_WRITE) )
                     return;
@@ -1168,6 +1221,8 @@ void AppCacheBuilder::assignSegmentRegionsAndOffsets()
         uint64_t numBytesForPageStarts = 0;
         if ( dataConstRegion.sizeInUse != 0 )
             numBytesForPageStarts += sizeof(dyld_chained_starts_in_segment) + (sizeof(uint16_t) * numWritablePagesToFixup(dataConstRegion.bufferSize));
+        if ( lateConstRegion.sizeInUse != 0 )
+            numBytesForPageStarts += sizeof(dyld_chained_starts_in_segment) + (sizeof(uint16_t) * numWritablePagesToFixup(lateConstRegion.bufferSize));
         if ( dataSptmRegion.sizeInUse != 0 )
             numBytesForPageStarts += sizeof(dyld_chained_starts_in_segment) + (sizeof(uint16_t) * numWritablePagesToFixup(dataSptmRegion.bufferSize));
         if ( branchGOTsRegion.bufferSize != 0 )
@@ -4274,6 +4329,8 @@ void AppCacheBuilder::writeFixups()
 
         if ( dataConstRegion.sizeInUse != 0 )
             addSegmentStarts(dataConstRegion);
+        if ( lateConstRegion.sizeInUse != 0 )
+            addSegmentStarts(lateConstRegion);
         if ( dataSptmRegion.sizeInUse != 0 )
             addSegmentStarts(dataSptmRegion);
         if ( branchGOTsRegion.sizeInUse != 0 )
@@ -4366,10 +4423,43 @@ void AppCacheBuilder::getRegionOrder(bool dataRegionFirstInVMOrder,
         sectionsToAddToRegions[&readOnlyTextRegion] = 1;
     }
 
+    // -sectcreate
+    // Align to 16k before we lay out all contiguous regions
+    if ( !customSegments.empty() ) {
+        uint32_t alignFileBefore = 14;
+        for (CustomSegment& customSegment : customSegments) {
+            Region& region = *customSegment.parentRegion;
+            vmOrder.emplace_back(&region, 0, 0);
+            fileOrder.emplace_back(&region, alignFileBefore, 0);
+            alignFileBefore = 0;
+
+            // Maybe add sections too
+            uint32_t sectionsToAdd = 0;
+            if ( customSegment.sections.size() > 1 ) {
+                // More than one section, so they all need names
+                sectionsToAdd = (uint32_t)customSegment.sections.size();
+            } else if ( !customSegment.sections.front().sectionName.empty() ) {
+                // Only one section, but it has a name
+                sectionsToAdd = 1;
+            }
+            sectionsToAddToRegions[&region] = sectionsToAdd;
+        }
+
+        // Align the last region after
+        vmOrder.back().alignmentAfter = 14;
+        fileOrder.back().alignmentAfter = 14;
+    }
+
     // __DATA_CONST
     if ( dataConstRegion.sizeInUse != 0 ) {
         vmOrder.emplace_back(&dataConstRegion, 14, 14);
         fileOrder.emplace_back(&dataConstRegion, 14, 14);
+    }
+
+    // __LATE_CONST
+    if ( lateConstRegion.sizeInUse != 0 ) {
+        vmOrder.emplace_back(&lateConstRegion, 14, 14);
+        fileOrder.emplace_back(&lateConstRegion, 14, 14);
     }
 
     // __DATA_SPTM
@@ -4400,33 +4490,6 @@ void AppCacheBuilder::getRegionOrder(bool dataRegionFirstInVMOrder,
     if ( branchGOTsRegion.bufferSize != 0 ) {
         vmOrder.emplace_back(&branchGOTsRegion, 14, 14);
         fileOrder.emplace_back(&branchGOTsRegion, 14, 14);
-    }
-
-    // -sectcreate
-    // Align to 16k before we lay out all contiguous regions
-    if ( !customSegments.empty() ) {
-        uint32_t alignFileBefore = 14;
-        for (CustomSegment& customSegment : customSegments) {
-            Region& region = *customSegment.parentRegion;
-            vmOrder.emplace_back(&region, 0, 0);
-            fileOrder.emplace_back(&region, alignFileBefore, 0);
-            alignFileBefore = 0;
-
-            // Maybe add sections too
-            uint32_t sectionsToAdd = 0;
-            if ( customSegment.sections.size() > 1 ) {
-                // More than one section, so they all need names
-                sectionsToAdd = (uint32_t)customSegment.sections.size();
-            } else if ( !customSegment.sections.front().sectionName.empty() ) {
-                // Only one section, but it has a name
-                sectionsToAdd = 1;
-            }
-            sectionsToAddToRegions[&region] = sectionsToAdd;
-        }
-
-        // Align the last region after
-        vmOrder.back().alignmentAfter = 14;
-        fileOrder.back().alignmentAfter = 14;
     }
 
     // __PRELINK_INFO
@@ -5266,6 +5329,13 @@ void AppCacheBuilder::buildAppCache(const std::vector<InputDylib>& dylibs)
                 firstDataRegion = &dataConstRegion;
             if ( (lastDataRegion == nullptr) || (dataConstRegion.buffer > lastDataRegion->buffer) )
                 lastDataRegion = &dataConstRegion;
+        }
+
+        if ( lateConstRegion.sizeInUse != 0 ) {
+            if ( firstDataRegion == nullptr )
+                firstDataRegion = &lateConstRegion;
+            if ( (lastDataRegion == nullptr) || (lateConstRegion.buffer > lastDataRegion->buffer) )
+                lastDataRegion = &lateConstRegion;
         }
 
         if ( dataSptmRegion.sizeInUse != 0 ) {

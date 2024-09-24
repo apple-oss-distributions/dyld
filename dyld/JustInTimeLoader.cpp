@@ -52,7 +52,7 @@ namespace dyld4 {
 
 //////////////////////// "virtual" functions /////////////////////////////////
 
-const dyld3::MachOFile* JustInTimeLoader::mf(RuntimeState&) const
+const dyld3::MachOFile* JustInTimeLoader::mf(const RuntimeState&) const
 {
 #if SUPPORT_VM_LAYOUT
     return this->mappedAddress;
@@ -62,15 +62,23 @@ const dyld3::MachOFile* JustInTimeLoader::mf(RuntimeState&) const
 }
 
 #if SUPPORT_VM_LAYOUT
-const MachOLoaded* JustInTimeLoader::loadAddress(RuntimeState&) const
+const MachOLoaded* JustInTimeLoader::loadAddress(const RuntimeState&) const
 {
     return mappedAddress;
 }
 #endif // SUPPORT_VM_LAYOUT
 
-const char* JustInTimeLoader::path() const
+const char* JustInTimeLoader::path(const RuntimeState& state) const
 {
     return this->pathOffset ? ((char*)this + this->pathOffset) : nullptr;
+}
+
+const char* JustInTimeLoader::installName(const RuntimeState& state) const
+{
+    mach_o::Header* mh = (mach_o::Header*)this->mf(state);
+    if ( mh->isDylib() )
+        return mh->installName();
+    return nullptr;
 }
 
 #if BUILDING_DYLD || BUILDING_CLOSURE_UTIL || BUILDING_UNIT_TESTS
@@ -111,14 +119,24 @@ bool JustInTimeLoader::contains(RuntimeState& state, const void* addr, const voi
 }
 #endif // BUILDING_DYLD || BUILDING_CLOSURE_UTIL || BUILDING_UNIT_TESTS
 
-bool JustInTimeLoader::matchesPath(const char* path) const
+bool JustInTimeLoader::matchesPath(const RuntimeState& state, const char* path) const
 {
-    if ( strcmp(path, this->path()) == 0 )
+    if ( strcmp(path, this->path(state)) == 0 )
         return true;
     if ( this->altInstallName ) {
         if ( strcmp(path, this->mappedAddress->installName()) == 0 )
             return true;
     }
+    if ( pd ) {
+      if ( auto *canonicalPath = pd->loadableAtPath(path) ) {
+        // Dispose of canonicalPath if it is different from path
+        // (loadableAtPath is allowed to return its argument, which should not be freed).
+        if ( canonicalPath != path )
+          pd->disposeString(canonicalPath);
+        return true;
+      }
+    }
+
     return false;
 }
 
@@ -128,13 +146,13 @@ FileID JustInTimeLoader::fileID(const RuntimeState& state) const
 }
 
 struct HashPointer {
-    static size_t hash(const void* v) {
+    static size_t hash(const void* v, void* state) {
         return std::hash<uintptr_t>{}((uintptr_t)v);
     }
 };
 
 struct EqualPointer {
-    static bool equal(const void* s1, const void* s2) {
+    static bool equal(const void* s1, const void* s2, void* state) {
         return s1 == s2;
     }
 };
@@ -321,7 +339,7 @@ const Loader::DylibPatch* JustInTimeLoader::makePatchTable(RuntimeState& state, 
     //assert(dyldCache != nullptr);
 
     if ( extra )
-        state.log("Found %s overrides dyld cache index 0x%04X\n", this->path(), indexOfOverriddenCachedDylib);
+        state.log("Found %s overrides dyld cache index 0x%04X\n", this->path(state), indexOfOverriddenCachedDylib);
     uint32_t patchCount = patchTable.patchableExportCount(indexOfOverriddenCachedDylib);
     if ( patchCount != 0 ) {
         DylibPatch*     table       = (DylibPatch*)state.persistentAllocator.malloc(sizeof(DylibPatch) * (patchCount + 1));;
@@ -457,7 +475,7 @@ void JustInTimeLoader::loadDependents(Diagnostics& diag, RuntimeState& state, co
     __block int                 depIndex = 0;
     const mach_o::MachOFileRef& mf = this->mappedAddress;
     const Header*               mh = (Header*)(&mf->magic); // Better way?
-    mh->forEachDependentDylib(^(const char* loadPath, DependentDylibAttributes depAttrs, Version32 compatVersion, Version32 curVersion, bool& stop) {
+    mh->forEachLinkedDylib(^(const char* loadPath, LinkedDylibAttributes depAttrs, Version32 compatVersion, Version32 curVersion, bool& stop) {
         // fix illegal combinations of dylib attributes
         if ( depAttrs.reExport && depAttrs.delayInit )
             depAttrs.delayInit = false;
@@ -465,11 +483,29 @@ void JustInTimeLoader::loadDependents(Diagnostics& diag, RuntimeState& state, co
             depAttrs.weakLink = false;
         if ( !this->allDepsAreNormal )
             dependentAttrs(depIndex) = depAttrs;
+
+        // If this is a shared cache JITLoader then there's likely a root installed and we
+        // had to invalidate the prebuilt loaders.  This shared cache dylib may have weakly linked
+        // something outside the cache, and the cache builder would break that weak edge.  We
+        // want to mimic that behaviour to ensure consistency
+        if ( this->dylibInDyldCache && depAttrs.weakLink ) {
+            // FIXME: Could we ever not have a cache here, given that we aren't an app loader?
+            const DyldSharedCache* cache = state.config.dyldCache.addr;
+            __block uint32_t unusedDylibInCacheIndex;
+            if ( (cache != nullptr) && !state.config.dyldCache.indexOfPath(loadPath, unusedDylibInCacheIndex) ) {
+                if ( state.config.log.loaders )
+                    state.log("Skipping shared cache weak-linked dylib '%s' from '%s'\n", loadPath, this->path(state));
+                dependents[depIndex] = nullptr;
+                depIndex++;
+                return;
+            }
+        }
+
         const Loader* depLoader = nullptr;
         // for absolute paths, do a quick check if this is already loaded with exact match
         if ( loadPath[0] == '/' ) {
             for ( const Loader* ldr : state.loaded ) {
-                if ( ldr->matchesPath(loadPath) ) {
+                if ( ldr->matchesPath(state, loadPath) ) {
                     depLoader = ldr;
                     break;
                 }
@@ -486,15 +522,15 @@ void JustInTimeLoader::loadDependents(Diagnostics& diag, RuntimeState& state, co
             depLoader               = options.finder ? options.finder(depDiag, state.config.process.platform, loadPath, depOptions) : getLoader(depDiag, state, loadPath, depOptions);
             if ( depDiag.hasError() ) {
                 char  fromUuidStr[64];
-                this->getUuidStr(state, fromUuidStr);
+                this->getUuidStr(fromUuidStr);
                 // rdar://15648948 (On fatal errors, check binary's min-OS version and note if from the future)
                 Diagnostics tooNewBinaryDiag;
                 this->tooNewErrorAddendum(tooNewBinaryDiag, state);
                 diag.error("Library not loaded: %s\n  Referenced from: <%s> %s%s\n  Reason: %s",
-                           loadPath, fromUuidStr, this->path(), tooNewBinaryDiag.errorMessageCStr(), depDiag.errorMessageCStr());
+                           loadPath, fromUuidStr, this->path(state), tooNewBinaryDiag.errorMessageCStr(), depDiag.errorMessageCStr());
 #if BUILDING_DYLD
                 if ( options.launching )
-                    state.setLaunchMissingDylib(loadPath, this->path());
+                    state.setLaunchMissingDylib(loadPath, this->path(state));
 #endif
                 stop = true;
             }
@@ -538,22 +574,22 @@ uint32_t JustInTimeLoader::dependentCount() const
     return this->depCount;
 }
 
-JustInTimeLoader::DependentDylibAttributes& JustInTimeLoader::dependentAttrs(uint32_t depIndex)
+JustInTimeLoader::LinkedDylibAttributes& JustInTimeLoader::dependentAttrs(uint32_t depIndex)
 {
     assert(depIndex < this->depCount);
     assert(!this->allDepsAreNormal);
 
     // Dependent kinds are after the dependent loaders
     uint8_t* firstDepKind = (uint8_t*)&dependents[this->depCount];
-    return ((JustInTimeLoader::DependentDylibAttributes*)firstDepKind)[depIndex];
+    return ((JustInTimeLoader::LinkedDylibAttributes*)firstDepKind)[depIndex];
 }
 
-Loader* JustInTimeLoader::dependent(const RuntimeState& state, uint32_t depIndex, DependentDylibAttributes* depAttrs) const
+Loader* JustInTimeLoader::dependent(const RuntimeState& state, uint32_t depIndex, LinkedDylibAttributes* depAttrs) const
 {
     assert(depIndex < this->depCount);
     if ( depAttrs != nullptr ) {
         if ( this->allDepsAreNormal )
-            *depAttrs = DependentDylibAttributes::regular;
+            *depAttrs = LinkedDylibAttributes::regular;
         else
             *depAttrs = ((JustInTimeLoader*)this)->dependentAttrs(depIndex);
     }
@@ -602,14 +638,14 @@ void JustInTimeLoader::logFixup(RuntimeState& state, uint64_t fixupLocRuntimeOff
             if ( pmd.authenticated )
                 state.log("rebase: *0x%012lX = 0x%012lX (*%s+0x%012lX = 0x%012lX+0x%012lX) (JOP: diversity=0x%04X, addr-div=%d, key=%s)\n",
                           (long)fixupLoc, newValue,
-                          this->leafName(), (long)fixupLocRuntimeOffset,
+                          this->leafName(state), (long)fixupLocRuntimeOffset,
                           (uintptr_t)ma, (long)target.targetRuntimeOffset,
                           pmd.diversity, pmd.usesAddrDiversity, MachOLoaded::ChainedFixupPointerOnDisk::Arm64e::keyName(pmd.key));
             else
 #endif // BUILDING_DYLD && __has_feature(ptrauth_calls)
                 state.log("rebase: *0x%012lX = 0x%012lX (*%s+0x%012lX = 0x%012lX+0x%012lX)\n",
                           (long)fixupLoc, newValue,
-                          this->leafName(), (long)fixupLocRuntimeOffset,
+                          this->leafName(state), (long)fixupLocRuntimeOffset,
                           (uintptr_t)ma, (long)target.targetRuntimeOffset);
             break;
         case Loader::ResolvedSymbol::Kind::bindToImage:
@@ -617,20 +653,20 @@ void JustInTimeLoader::logFixup(RuntimeState& state, uint64_t fixupLocRuntimeOff
             if ( pmd.authenticated )
                 state.log("bind:   *0x%012lX = 0x%012lX (*%s+0x%012lX = %s/%s) (JOP: diversity=0x%04X, addr-div=%d, key=%s)\n",
                           (long)fixupLoc, newValue,
-                          this->leafName(), (long)fixupLocRuntimeOffset,
-                          target.targetLoader->leafName(), target.targetSymbolName,
+                          this->leafName(state), (long)fixupLocRuntimeOffset,
+                          target.targetLoader->leafName(state), target.targetSymbolName,
                           pmd.diversity, pmd.usesAddrDiversity, MachOLoaded::ChainedFixupPointerOnDisk::Arm64e::keyName(pmd.key));
             else
 #endif // BUILDING_DYLD && __has_feature(ptrauth_calls)
                 state.log("bind:   *0x%012lX = 0x%012lX (*%s+0x%012lX = %s/%s)\n",
                           (long)fixupLoc, newValue,
-                          this->leafName(), (long)fixupLocRuntimeOffset,
-                          target.targetLoader->leafName(), target.targetSymbolName);
+                          this->leafName(state), (long)fixupLocRuntimeOffset,
+                          target.targetLoader->leafName(state), target.targetSymbolName);
             break;
         case Loader::ResolvedSymbol::Kind::bindAbsolute:
             state.log("bind:   *0x%012lX = 0x%012lX (*%s+0x%012lX = 0x%012lX(%s))\n",
                       (long)fixupLoc, newValue,
-                      this->leafName(), (long)fixupLocRuntimeOffset,
+                      this->leafName(state), (long)fixupLocRuntimeOffset,
                       (long)target.targetRuntimeOffset, target.targetSymbolName);
             break;
     }
@@ -687,7 +723,7 @@ void JustInTimeLoader::handleStrongWeakDefOverrides(RuntimeState& state, DyldCac
     // Find an on-disk dylib with weak-defs, if one exists.  If we find one, look for strong overrides of all the special weak symbols
     // On all platforms we look in the main executable for strong symbols
     const Loader* weakDefLoader = nullptr;
-    if ( state.mainExecutableLoader->analyzer(state)->hasWeakDefs() )
+    if ( state.mainExecutableLoader->hasWeakDefs )
         weakDefLoader = state.mainExecutableLoader;
 
     // On macOS, we also allow check on-disk dylibs for strong symbols
@@ -696,7 +732,7 @@ void JustInTimeLoader::handleStrongWeakDefOverrides(RuntimeState& state, DyldCac
         for (const Loader* loader : state.loaded) {
             if ( !loader->dylibInDyldCache ) {
                 const dyld3::MachOAnalyzer *ma = loader->analyzer(state);
-                if ( ma->hasWeakDefs() && ma->hasOpcodeFixups() ) {
+                if ( loader->hasWeakDefs && ma->hasOpcodeFixups() ) {
                     weakDefLoader = loader;
                     break;
                 }
@@ -738,7 +774,8 @@ void JustInTimeLoader::cacheWeakDefFixup(RuntimeState& state, DyldCacheDataConst
     });
 }
 
-void JustInTimeLoader::applyFixups(Diagnostics& diag, RuntimeState& state, DyldCacheDataConstLazyScopedWriter& cacheDataConst, bool allowLazyBinds) const
+void JustInTimeLoader::applyFixups(Diagnostics& diag, RuntimeState& state, DyldCacheDataConstLazyScopedWriter& cacheDataConst, bool allowLazyBinds,
+                                   lsl::Vector<PseudoDylibSymbolToMaterialize>* materializingSymbols) const
 {
     //state.log("applyFixups: %s\n", this->path());
     // if this is in the dyld cache there is normally no fixups need
@@ -774,26 +811,30 @@ void JustInTimeLoader::applyFixups(Diagnostics& diag, RuntimeState& state, DyldC
     this->forEachBindTarget(diag, state, cacheWeakDefFixup, allowLazyBinds, ^(const ResolvedSymbol& target, bool& stop) {
         const void* targetAddr = (const void*)Loader::interpose(state, Loader::resolvedAddress(state, target), this);
         if ( state.config.log.fixups ) {
-            const char* targetLoaderName = target.targetLoader ? target.targetLoader->leafName() : "<none>";
-            state.log("<%s/bind#%llu> -> %p (%s/%s)\n", this->leafName(), bindTargets.count(), targetAddr, targetLoaderName, target.targetSymbolName);
+            const char* targetLoaderName = target.targetLoader ? target.targetLoader->leafName(state) : "<none>";
+            state.log("<%s/bind#%llu> -> %p (%s/%s)\n", this->leafName(state), bindTargets.count(), targetAddr, targetLoaderName, target.targetSymbolName);
         }
 
         // Record missing flat-namespace lazy symbols
         if ( target.isMissingFlatLazy )
             missingFlatLazySymbols.push_back({ target.targetSymbolName, (uint32_t)bindTargets.count() });
+        // Record pseudo dylib symbols we need to materialize
+        if ( target.isMaterializing && materializingSymbols )
+            materializingSymbols->push_back({ target.targetLoader, target.targetSymbolName });
+
         bindTargets.push_back(targetAddr);
     }, ^(const ResolvedSymbol& target, bool& stop) {
         // Missing weak binds need placeholders to make the target indices line up, but we should otherwise ignore them
         if ( (target.kind == Loader::ResolvedSymbol::Kind::bindToImage) && (target.targetLoader == nullptr) ) {
             if ( state.config.log.fixups )
-                state.log("<%s/bind#%llu> -> missing-weak-bind (%s)\n", this->leafName(), overrideTargetAddrs.count(), target.targetSymbolName);
+                state.log("<%s/bind#%llu> -> missing-weak-bind (%s)\n", this->leafName(state), overrideTargetAddrs.count(), target.targetSymbolName);
 
             overrideTargetAddrs.push_back((const void*)UINTPTR_MAX);
         } else {
             const void* targetAddr = (const void*)Loader::interpose(state, Loader::resolvedAddress(state, target), this);
             if ( state.config.log.fixups ) {
-                const char* targetLoaderName = target.targetLoader ? target.targetLoader->leafName() : "<none>";
-                state.log("<%s/bind#%llu> -> %p (%s/%s)\n", this->leafName(), overrideTargetAddrs.count(), targetAddr, targetLoaderName, target.targetSymbolName);
+                const char* targetLoaderName = target.targetLoader ? target.targetLoader->leafName(state) : "<none>";
+                state.log("<%s/bind#%llu> -> %p (%s/%s)\n", this->leafName(state), overrideTargetAddrs.count(), targetAddr, targetLoaderName, target.targetSymbolName);
             }
 
             // Record missing flat-namespace lazy symbols
@@ -821,9 +862,9 @@ void JustInTimeLoader::applyFixups(Diagnostics& diag, RuntimeState& state, DyldC
                         //state.log("found __dyld section in %s\n", this->path());
                         uint64_t           dyld4SectSize;
                         const MachOLoaded* libdyldML = state.libdyldLoader->loadAddress(state);
-                        if ( LibdyldDyld4Section* libdyld4Section = (LibdyldDyld4Section*)libdyldML->findSectionContent("__DATA", "__dyld4", dyld4SectSize, true) ) {
+                        if ( LibdyldDyld4Section* libdyld4Section = (LibdyldDyld4Section*)libdyldML->findSectionContent("__TPRO_CONST", "__dyld4", dyld4SectSize) ) {
                             dyldSect->dyldLazyBinder = nullptr;
-                            dyldSect->dyldFuncLookup = libdyld4Section->dyldLookupFuncAddr;
+                            dyldSect->dyldFuncLookup = (dyld3::DyldLookFunc)libdyld4Section->dyldLookupFuncAddr;
                         }
                     }
                 }
@@ -847,13 +888,13 @@ void JustInTimeLoader::unmap(RuntimeState& state, bool force) const
     if ( this->pd )
         return;
     if ( !force && this->neverUnload )
-        state.log("trying to unmap %s\n", this->path());
+        state.log("trying to unmap %s\n", this->path(state));
     assert(force || !this->neverUnload);
     size_t vmSize  = (size_t)this->analyzer()->mappedSize();
     void*  vmStart = (void*)(this->loadAddress(state));
     state.config.syscall.munmap(vmStart, vmSize);
     if ( state.config.log.segments )
-        state.log("unmapped 0x%012lX->0x%012lX for %s\n", (long)vmStart, (long)vmStart + (long)vmSize, this->path());
+        state.log("unmapped 0x%012lX->0x%012lX for %s\n", (long)vmStart, (long)vmStart + (long)vmSize, this->path(state));
 }
 #endif // SUPPORT_IMAGE_UNLOADING
 
@@ -943,10 +984,12 @@ JustInTimeLoader* JustInTimeLoader::make(RuntimeState& state, const MachOFile* m
     //state.log("JustInTimeLoader::make(%s) willNeverUnload=%d\n", path, willNeverUnload);
     // use malloc and placement new to create object big enough for all info
     bool                   allDepsAreNormal     = true;
-    uint32_t               depCount             = ((Header*)mh)->dependentDylibCount(&allDepsAreNormal);
+    uint32_t               depCount             = ((Header*)mh)->linkedDylibCount(&allDepsAreNormal);
     uint32_t               minDepCount          = (depCount ? depCount - 1 : 1);
     size_t                 sizeNeeded           = sizeof(JustInTimeLoader) + (minDepCount * sizeof(AuthLoader)) + (allDepsAreNormal ? 0 : depCount) + strlen(path) + 1;
     void*                  storage              = state.persistentAllocator.malloc(sizeNeeded);
+    uuid_t                 uuid;
+
     Loader::InitialOptions options;
 #if BUILDING_CACHE_BUILDER || BUILDING_CACHE_BUILDER_UNIT_TESTS
     options.inDyldCache     = mh->inDyldCache();
@@ -960,6 +1003,10 @@ JustInTimeLoader* JustInTimeLoader::make(RuntimeState& state, const MachOFile* m
     options.leaveMapped     = leaveMapped;
     options.roObjC          = options.hasObjc && mh->hasConstObjCSection();
     options.pre2022Binary   = !mh->enforceFormat(MachOAnalyzer::Malformed::sdkOnOrAfter2022);
+    options.hasUUID         = mh->getUuid(uuid);
+    options.hasWeakDefs     = mh->hasWeakDefs();
+    options.hasTLVs         = mh->hasThreadLocalVariables();
+    options.belowLibSystem  = mh->isDylib() && (strncmp(mh->installName(), "/usr/lib/system/lib", 19) == 0);
     JustInTimeLoader* p     = new (storage) JustInTimeLoader(mh, options, fileID, layout, false);
 
 #if BUILDING_CACHE_BUILDER || BUILDING_CACHE_BUILDER_UNIT_TESTS
@@ -978,6 +1025,15 @@ JustInTimeLoader* JustInTimeLoader::make(RuntimeState& state, const MachOFile* m
     p->padding              = 0;
     p->sliceOffset          = sliceOffset;
 
+    if ( options.hasUUID ) {
+        memcpy(p->uuid, uuid, sizeof(uuid_t));
+    } else {
+        // for reproducibility
+        bzero(p->uuid, sizeof(uuid_t));
+    }
+
+    p->cpusubtype   = mh->cpusubtype;
+
     parseSectionLocations(mh, p->sectionLocations);
 
     if ( !mh->hasExportTrie(p->exportsTrieRuntimeOffset, p->exportsTrieSize) ) {
@@ -992,7 +1048,7 @@ JustInTimeLoader* JustInTimeLoader::make(RuntimeState& state, const MachOFile* m
     for ( unsigned i = 0; i < depCount; ++i ) {
         new (&p->dependents[i]) (AuthLoader) { nullptr };
         if ( !allDepsAreNormal )
-            p->dependentAttrs(i) = DependentDylibAttributes::regular; // will be set to correct kind in loadDependents()
+            p->dependentAttrs(i) = LinkedDylibAttributes::regular; // will be set to correct kind in loadDependents()
     }
     strlcpy(((char*)p) + p->pathOffset, path, PATH_MAX);
     //state.log("JustInTimeLoader::make(%p, %s) => %p\n", ma, path, p);
@@ -1235,7 +1291,8 @@ Loader* JustInTimeLoader::makeJustInTimeLoaderDisk(Diagnostics& diag, RuntimeSta
     __block Loader* result          = nullptr;
     bool            checkIfOSBinary = state.config.process.archs->checksOSBinary();
     state.config.syscall.withReadOnlyMappedFile(diag, loadPath, checkIfOSBinary, ^(const void* mapping, size_t mappedSize, bool isOSBinary, const FileID& fileID, const char* canonicalPath) {
-        if ( const MachOFile* mf = MachOFile::compatibleSlice(diag, mapping, mappedSize, loadPath, state.config.process.platform, isOSBinary, *state.config.process.archs, state.config.security.internalInstall) ) {
+        uint64_t sliceSize = 0;
+        if ( const MachOFile* mf = MachOFile::compatibleSlice(diag, sliceSize, mapping, mappedSize, loadPath, state.config.process.platform, isOSBinary, *state.config.process.archs, state.config.security.internalInstall) ) {
             // verify the filetype is loadable in this context
             if ( mf->isDylib() ) {
                 if ( !options.canBeDylib ) {

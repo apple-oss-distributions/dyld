@@ -26,7 +26,8 @@
 namespace mach_o
 {
 
-WarningHandler sHandler = nullptr;
+static WarningHandler sHandler = nullptr;
+
 void setWarningHandler(WarningHandler handler)
 {
     sHandler = handler;

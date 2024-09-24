@@ -1,5 +1,8 @@
 #include "<DEVELOPER_DIR>/AppleInternal/XcodeConfig/PlatformSupportHost.xcconfig"
 #include "base.xcconfig"
 
+ARCHS                     = arm64 x86_64
+MACOSX_DEPLOYMENT_TARGET  = 11.0
+
 INSTALL_PATH = $(SIMULATOR_RUNTIME_BUNDLE_INSTALL_DIR)/Contents/Resources
 

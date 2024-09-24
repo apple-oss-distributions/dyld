@@ -6,9 +6,6 @@ LIBSYSTEM_LIBS[sdk=macosx*]         = -Wl,-no_warn_unused_dylibs -Wl,-upward-lsy
 LIBSYSTEM_LIBS[sdk=driverkit*]      = -Wl,-no_warn_unused_dylibs -Wl,-upward-lsystem_platform     -Wl,-upward-lsystem_malloc -Wl,-upward-lsystem_c -Wl,-upward-lsystem_pthread                                                 -Wl,-upward-lsystem_kernel
 LIBSYSTEM_LIBS[sdk=exclavekit*]     = -Wl,-no_warn_unused_dylibs -Wl,-upward-llibc -Wl,-upward-lsystem_malloc
 
-EXTRA_SECTIONS                      = 
-EXTRA_SECTIONS[arch=arm64e]         = -Wl,-sectcreate,__SHARED_CACHE,__cfstring,/dev/null
-
 INSTALL_PATH = $(SYSTEM_PREFIX)/usr/lib/system
 
 // Disable building the _asan variant for dyld on ExclaveKit
@@ -22,9 +19,13 @@ GCC_PREPROCESSOR_DEFINITIONS[sdk=exclavekit*] = $(GCC_PREPROCESSOR_DEFINITIONS_$
 SYSTEM_HEADER_SEARCH_PATHS                  =
 SYSTEM_HEADER_SEARCH_PATHS[sdk=exclavekit*] = $(SDKROOT)$(SYSTEM_PREFIX)/usr/local/standalone/cL4/include
 
+// We don't have many symbols in libdyld.dylib, so mark them up manually with __attribute__((section())) and avoid the SDK dirty data file
+// FIXME: We force DATA_CONST for now to ensure ld64 generates split seg v2 on x86_64
+DIRTY = -Wl,-dirty_data_list,${SRCROOT}/configs/libdyld.dirty -Wl,-data_const
+
 // FIXME: -Wl,-unexported_symbol is a hack to deal with C++20 comparison visbility, we can probably fix it better
-OTHER_LDFLAGS = -Wl,-no_inits -nostdlib -lCrashReporterClient $(LIBSYSTEM_LIBS) -umbrella System -L$(SDKROOT)/$(DRIVERKITROOT)/usr/lib/system $(EXTRA_SECTIONS) -Wl,-unexported_symbol,__ZNSt3*
-OTHER_LDFLAGS[sdk=exclavekit*] = -Wl,-no_inits -nostdlib $(LIBSYSTEM_LIBS) -umbrella System -L$(SDKROOT)/$(SYSTEM_PREFIX)/usr/lib/system $(EXTRA_SECTIONS) -Wl,-unexported_symbol,__ZNSt3__115strong_ordering*
+OTHER_LDFLAGS = -Wl,-no_inits -nostdlib -lCrashReporterClient $(LIBSYSTEM_LIBS) -umbrella System -L$(SDKROOT)/$(DRIVERKITROOT)/usr/lib/system $(EXTRA_SECTIONS) -Wl,-unexported_symbol,__ZNSt3* $(DIRTY)
+OTHER_LDFLAGS[sdk=exclavekit*] = -Wl,-no_inits -nostdlib $(LIBSYSTEM_LIBS) -umbrella System -L$(SDKROOT)/$(SYSTEM_PREFIX)/usr/lib/system $(EXTRA_SECTIONS) -Wl,-unexported_symbol,__ZNSt3* $(DIRTY)
 
 PRIVATE_TAPI_FLAGS                  = -extra-private-header ${SRCROOT}/include/mach-o/dyld_priv.h -extra-private-header ./include/mach-o/dyld_introspection.h -extra-private-header ./include/mach-o/dyld_process_info.h  -extra-private-header ./include/mach-o/utils_priv.h
 PRIVATE_TAPI_FLAGS[sdk=*simulator*] = -extra-private-header ./include/dlfcn_private.h -extra-private-header ${SRCROOT}/include/mach-o/dyld_priv.h -extra-private-header ./include/mach-o/dyld_process_info.h -extra-private-header ./include/mach-o/dyld_introspection.h  -extra-private-header ./include/mach-o/utils_priv.h

@@ -59,9 +59,9 @@ inline bool greaterThanAddOrOverflow(uint64_t addLHS, uint64_t addRHS, T b) {
 }
 
 
-uint64_t    read_uleb128(const uint8_t*& p, const uint8_t* end, bool& malformed);
-int64_t     read_sleb128(const uint8_t*& p, const uint8_t* end, bool& malformed);
-uint32_t	uleb128_size(uint64_t value);
+uint64_t    read_uleb128(const uint8_t*& p, const uint8_t* end, bool& malformed) VIS_HIDDEN;
+int64_t     read_sleb128(const uint8_t*& p, const uint8_t* end, bool& malformed) VIS_HIDDEN;
+uint32_t	uleb128_size(uint64_t value) VIS_HIDDEN;
 
 inline void pageAlign4K(uint64_t& value)
 {
@@ -73,13 +73,15 @@ inline void pageAlign16K(uint64_t& value)
     value = ((value + 0x3FFF) & (-0x4000));
 }
 
-bool withReadOnlyMappedFile(const char* path, void (^handler)(std::span<const uint8_t>));
+bool withReadOnlyMappedFile(const char* path, void (^handler)(std::span<const uint8_t>)) VIS_HIDDEN;
 
 // used by command line tools to process files that may be on disk or in dyld cache
 void forSelectedSliceInPaths(std::span<const char*> paths, std::span<const char*> archFilter,
-                             void (^callback)(const char* slicePath, const Header* sliceHeader, size_t sliceLength));
+                             void (^callback)(const char* slicePath, const Header* sliceHeader, size_t sliceLength)) VIS_HIDDEN;
 
-
+// used to walk fat/thin files and get all mach-o headers
+Error forEachHeader(std::span<const uint8_t> buffer, std::string_view path,
+                    void (^callback)(const Header* sliceHeader, size_t sliceLength, bool& stop)) VIS_HIDDEN;
 
 } // namespace mach_o
 

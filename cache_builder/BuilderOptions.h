@@ -75,6 +75,7 @@ struct BuilderOptions
     std::unordered_map<std::string, unsigned>   dylibOrdering;
     std::unordered_map<std::string, unsigned>   dirtyDataSegmentOrdering;
     dyld3::json::Node                           objcOptimizations;
+    std::string                                 swiftGenericMetadataFile;
 };
 
 // Inputs to the builder can be dylibs, executables, bundles, etc.
@@ -83,6 +84,7 @@ struct InputFile
     const dyld3::MachOFile* mf      = nullptr;
     uint64_t                inode   = 0;
     uint64_t                mtime   = 0;
+    uint64_t                size    = 0;
     std::string             path;
     bool                    forceNotCacheEligible = false;
 

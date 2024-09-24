@@ -500,6 +500,43 @@ bool runKernelCollectionBuilder(struct KernelCollectionBuilder* builder) {
             return false;
     }
 
+    // Make sure we have an xnu binary, from this collection or an existing one
+    __block const dyld3::MachOAnalyzer* kernelMA = nullptr;
+    if ( builder->options.collectionKind == baseKC ) {
+        for (const AppCacheBuilder::InputDylib& input : builder->inputFiles) {
+            const dyld3::MachOAnalyzer* ma = (const dyld3::MachOAnalyzer*)input.dylib.loadedFileInfo.fileContent;
+
+            // Skip codeless kexts
+            if ( ma == nullptr )
+                continue;
+
+            if ( ma->isStaticExecutable() ) {
+                kernelMA = ma;
+            }
+        }
+        if ( !kernelMA ) {
+            builder->error("Cannot build bootKC without xnu binary");
+            return false;
+        }
+    } else {
+        // auxKC/pageableKC
+        Diagnostics diag;
+
+        const dyld3::MachOAppCache* kernelCacheMA = (const dyld3::MachOAppCache*)builder->kernelCollectionFileInfo.fileContent;
+        kernelCacheMA->forEachDylib(diag, ^(const dyld3::MachOAnalyzer *ma, const char *name, bool &stop) {
+            if ( ma->isStaticExecutable() ) {
+                kernelMA = ma;
+                stop = true;
+            }
+        });
+
+        if ( !kernelMA ) {
+            builder->error("Cannot build pageableKC/auxKC without xnu binary from bootKC");
+            return false;
+        }
+    }
+
+
     dispatch_apply(builder->inputFiles.size(), DISPATCH_APPLY_AUTO, ^(size_t index) {
         const AppCacheBuilder::InputDylib& input = builder->inputFiles[index];
         auto errorHandler = ^(const char* msg) {
@@ -511,7 +548,9 @@ bool runKernelCollectionBuilder(struct KernelCollectionBuilder* builder) {
             return;
         if (!ma->canBePlacedInKernelCollection(input.dylib.loadedFileInfo.path, errorHandler)) {
             assert(input.errors->hasError());
+            return;
         }
+
     });
     for (const AppCacheBuilder::InputDylib& input : builder->inputFiles) {
         if ( input.errors->hasError() ) {

@@ -48,277 +48,99 @@
 using dyld3::OverflowSafeArray;
 typedef dyld4::PrebuiltObjC::ObjCOptimizerImage ObjCOptimizerImage;
 
-namespace dyld4 {
-
-////////////////////////////  ObjCStringTable ////////////////////////////////////////
-
-uint32_t ObjCStringTable::hash(const char* key, size_t keylen) const
-{
-    uint64_t val   = objc::lookup8((uint8_t*)key, keylen, salt);
-    uint32_t index = (uint32_t)((shift == 64) ? 0 : (val >> shift)) ^ scramble[tab[val & mask]];
-    return index;
-}
-
-#if BUILDING_DYLD || BUILDING_UNIT_TESTS
-const char* ObjCStringTable::getString(const char* selName, RuntimeState& state) const
-{
-    std::optional<PrebuiltLoader::BindTargetRef> target = getPotentialTarget(selName);
-    if ( !target.has_value() )
-        return nullptr;
-
-    const PrebuiltLoader::BindTargetRef& nameTarget = *target;
-    const PrebuiltLoader::BindTargetRef  sentinel   = getSentinel();
-
-    if ( memcmp(&nameTarget, &sentinel, sizeof(PrebuiltLoader::BindTargetRef)) == 0 )
-        return nullptr;
-
-    const char* stringValue = (const char*)target->value(state);
-    if ( !strcmp(selName, stringValue) )
-        return stringValue;
-    return nullptr;
-}
-#endif
-
-size_t ObjCStringTable::size(const objc::PerfectHash& phash)
-{
-    // Round tab[] to at least 8 in length to ensure the BindTarget's after are aligned
-    uint32_t roundedTabSize        = std::max(phash.mask + 1, 8U);
-    uint32_t roundedCheckBytesSize = std::max(phash.capacity, 8U);
-    size_t   tableSize             = 0;
-    tableSize += sizeof(ObjCStringTable);
-    tableSize += roundedTabSize * sizeof(uint8_t);
-    tableSize += roundedCheckBytesSize * sizeof(uint8_t);
-    tableSize += phash.capacity * sizeof(PrebuiltLoader::BindTargetRef);
-    return (size_t)align(tableSize, 3);
-}
-
-void ObjCStringTable::write(const objc::PerfectHash& phash, const Array<StringToTargetMapNodeT>& strings)
-{
-    // Set header
-    capacity              = phash.capacity;
-    occupied              = phash.occupied;
-    shift                 = phash.shift;
-    mask                  = phash.mask;
-    roundedTabSize        = std::max(phash.mask + 1, 8U);
-    roundedCheckBytesSize = std::max(phash.capacity, 8U);
-    salt                  = phash.salt;
-
-    // Set hash data
-    for ( uint32_t i = 0; i < 256; i++ ) {
-        scramble[i] = phash.scramble[i];
-    }
-    for ( uint32_t i = 0; i < phash.mask + 1; i++ ) {
-        tab[i] = phash.tab[i];
-    }
-
-    dyld3::Array<PrebuiltLoader::BindTargetRef> targetsArray    = targets();
-    dyld3::Array<uint8_t>                       checkBytesArray = checkBytes();
-
-    const PrebuiltLoader::BindTargetRef sentinel = getSentinel();
-
-    // Set offsets to the sentinel
-    for ( uint32_t i = 0; i < phash.capacity; i++ ) {
-        targetsArray[i] = sentinel;
-    }
-    // Set checkbytes to 0
-    for ( uint32_t i = 0; i < phash.capacity; i++ ) {
-        checkBytesArray[i] = 0;
-    }
-
-    // Set real string offsets and checkbytes
-    for ( const auto& s : strings ) {
-        assert(memcmp(&s.second, &sentinel, sizeof(PrebuiltLoader::BindTargetRef)) != 0);
-        uint32_t h         = hash(s.first);
-        targetsArray[h]    = s.second;
-        checkBytesArray[h] = checkbyte(s.first);
-    }
-}
-
-////////////////////////////  ObjCSelectorOpt ////////////////////////////////////////
-#if BUILDING_DYLD || BUILDING_UNIT_TESTS
-const char* ObjCSelectorOpt::getStringAtIndex(uint32_t index, RuntimeState& state) const
-{
-    if ( index >= capacity )
-        return nullptr;
-
-    PrebuiltLoader::BindTargetRef       target   = targets()[index];
-    const PrebuiltLoader::BindTargetRef sentinel = getSentinel();
-    if ( memcmp(&target, &sentinel, sizeof(PrebuiltLoader::BindTargetRef)) == 0 )
-        return nullptr;
-
-    const char* stringValue = (const char*)target.value(state);
-    return stringValue;
-}
-#endif
-
-void ObjCSelectorOpt::forEachString(void (^callback)(const PrebuiltLoader::BindTargetRef& target)) const
-{
-    const PrebuiltLoader::BindTargetRef sentinel = getSentinel();
-
-    dyld3::Array<PrebuiltLoader::BindTargetRef> stringTargets = targets();
-    for ( const PrebuiltLoader::BindTargetRef& target : stringTargets ) {
-        if ( memcmp(&target, &sentinel, sizeof(PrebuiltLoader::BindTargetRef)) == 0 )
-            continue;
-        callback(target);
-    }
-}
-
-////////////////////////////  ObjCDataStructOpt ////////////////////////////////////////
-
-// Returns true if the class was found and the callback said to stop
-#if BUILDING_DYLD || BUILDING_UNIT_TESTS
-bool ObjCDataStructOpt::forEachDataStruct(const char* dataStructName, RuntimeState& state,
-                                void (^callback)(void* dataStructPtr, bool isLoaded, bool* stop)) const
-{
-    uint32_t index = getIndex(dataStructName);
-    if ( index == ObjCStringTable::indexNotFound )
-        return false;
-
-    const PrebuiltLoader::BindTargetRef sentinel = getSentinel();
-
-    const PrebuiltLoader::BindTargetRef& nameTarget = targets()[index];
-    if ( memcmp(&nameTarget, &sentinel, sizeof(PrebuiltLoader::BindTargetRef)) == 0 )
-        return false;
-
-    const char* nameStringValue = (const char*)nameTarget.value(state);
-    if ( strcmp(dataStructName, nameStringValue) != 0 )
-        return false;
-
-    // The name matched so now call the handler on all the classes for this name
-    const Array<PrebuiltLoader::BindTargetRef> structs    = dataStructTargets();
-    const Array<PrebuiltLoader::BindTargetRef> duplicates = duplicateTargets();
-
-    const PrebuiltLoader::BindTargetRef& structTarget = structs[index];
-    if ( !structTarget.isAbsolute() ) {
-        // A regular target points to the single data structure implementation
-        // This data structure has a single implementation
-        void* structImpl = (void*)structTarget.value(state);
-        bool  stop      = false;
-        callback(structImpl, true, &stop);
-        return stop;
-    }
-    else {
-        // This data structure has mulitple implementations.
-        // The absolute value of the data structure target is the index in to the duplicates table
-        // The first entry we point to is the count of duplicates for this data structure
-        size_t                              duplicateStartIndex  = (size_t)structTarget.value(state);
-        const PrebuiltLoader::BindTargetRef duplicateCountTarget = duplicates[duplicateStartIndex];
-        ++duplicateStartIndex;
-        assert(duplicateCountTarget.isAbsolute());
-        uint64_t duplicateCount = duplicateCountTarget.value(state);
-
-        for ( size_t dupeIndex = 0; dupeIndex != duplicateCount; ++dupeIndex ) {
-            const PrebuiltLoader::BindTargetRef& duplicateTarget = duplicates[duplicateStartIndex + dupeIndex];
-
-            void* structImpl = (void*)duplicateTarget.value(state);
-            bool  stop      = false;
-            callback(structImpl, true, &stop);
-            if ( stop )
-                return true;
-        }
-    }
-    return false;
-}
-#endif
-
-void ObjCDataStructOpt::forEachDataStruct(RuntimeState& state,
-                                          void (^callback)(const PrebuiltLoader::BindTargetRef&        nameTarget,
-                                                           const Array<PrebuiltLoader::BindTargetRef>& implTargets)) const
+// This holds all the maps we are going to serialize.
+namespace prebuilt_objc
 {
 
-    const PrebuiltLoader::BindTargetRef sentinel = getSentinel();
-
-    Array<PrebuiltLoader::BindTargetRef> stringTargets = targets();
-    Array<PrebuiltLoader::BindTargetRef> dataStructs   = dataStructTargets();
-    Array<PrebuiltLoader::BindTargetRef> duplicates    = duplicateTargets();
-    for ( unsigned i = 0; i != capacity; ++i ) {
-        const PrebuiltLoader::BindTargetRef& nameTarget = stringTargets[i];
-        if ( memcmp(&nameTarget, &sentinel, sizeof(PrebuiltLoader::BindTargetRef)) == 0 )
-            continue;
-
-        // Walk each data struct for this key
-        PrebuiltLoader::BindTargetRef dataStructTarget = dataStructs[i];
-        if ( !dataStructTarget.isAbsolute() ) {
-            // A regular target points to the single class/protocol implementation
-            // This data structure has a single implementation
-            const Array<PrebuiltLoader::BindTargetRef> implTarget(&dataStructTarget, 1, 1);
-            callback(nameTarget, implTarget);
-        }
-        else {
-            // This data structure has mulitple implementations.
-            // The absolute value of the data structure target is the index in to the duplicates table
-            // The first entry we point to is the count of duplicates for this data structure
-            uintptr_t                           duplicateStartIndex  = (uintptr_t)dataStructTarget.absValue();
-            const PrebuiltLoader::BindTargetRef duplicateCountTarget = duplicates[duplicateStartIndex];
-            ++duplicateStartIndex;
-            assert(duplicateCountTarget.isAbsolute());
-            uintptr_t duplicateCount = (uintptr_t)duplicateCountTarget.absValue();
-
-            callback(nameTarget, duplicates.subArray(duplicateStartIndex, duplicateCount));
-        }
-    }
-}
-
-size_t ObjCDataStructOpt::size(const objc::PerfectHash& phash, uint32_t numClassesWithDuplicates,
-                               uint32_t totalDuplicates)
+void forEachSelectorStringEntry(const void* selMap, void (^handler)(const PrebuiltLoader::BindTargetRef& target))
 {
-    size_t tableSize = 0;
-    tableSize += ObjCStringTable::size(phash);
-    tableSize += phash.capacity * sizeof(PrebuiltLoader::BindTargetRef);                               // classTargets
-    tableSize += sizeof(uint32_t);                                                                     // duplicateCount
-    tableSize += (numClassesWithDuplicates + totalDuplicates) * sizeof(PrebuiltLoader::BindTargetRef); // duplicateTargets
-    return (size_t)align(tableSize, 3);
-}
-
-void ObjCDataStructOpt::write(const objc::PerfectHash& phash, const Array<StringToTargetMapNodeT>& strings,
-                              const dyld3::CStringMultiMapTo<PrebuiltLoader::BindTarget>& dataStructs,
-                              uint32_t numClassesWithDuplicates, uint32_t totalDuplicates)
-{
-    ObjCStringTable::write(phash, strings);
-    duplicateCount() = numClassesWithDuplicates + totalDuplicates;
-
-    __block dyld3::Array<PrebuiltLoader::BindTargetRef> dataStructTargets = this->dataStructTargets();
-    __block dyld3::Array<PrebuiltLoader::BindTargetRef> duplicateTargets   = this->duplicateTargets();
-
-    const PrebuiltLoader::BindTargetRef sentinel = getSentinel();
-
-    // Set class offsets to 0
-    for ( uint32_t i = 0; i < capacity; i++ ) {
-        dataStructTargets[i] = sentinel;
-    }
-
-    // Empty the duplicate targets array so that we can push elements in to it.  It already has the correct capacity
-    duplicateTargets.resize(0);
-
-    dataStructs.forEachEntry(^(const char* const& key, const PrebuiltLoader::BindTarget** values, uint64_t valuesCount) {
-        uint32_t keyIndex = getIndex(key);
-        assert(keyIndex != indexNotFound);
-        assert(memcmp(&dataStructTargets[keyIndex], &sentinel, sizeof(PrebuiltLoader::BindTargetRef)) == 0);
-
-        if ( valuesCount == 1 ) {
-            // Only one entry so write it in to the class offsets directly
-            const PrebuiltLoader::BindTarget& dataStructTarget = *(values[0]);
-            dataStructTargets[keyIndex] = PrebuiltLoader::BindTargetRef(dataStructTarget);
-            return;
-        }
-
-        // We have more than one value.  We add a placeholder to the class/protocol offsets which tells us the head
-        // of the linked list of classes in the duplicates array
-
-        PrebuiltLoader::BindTargetRef dataStructTargetPlaceholder = PrebuiltLoader::BindTargetRef::makeAbsolute(duplicateTargets.count());
-        dataStructTargets[keyIndex] = dataStructTargetPlaceholder;
-
-        // The first value we push in to the duplicates array for this class is the count
-        // of how many duplicates for this class we have
-        duplicateTargets.push_back(PrebuiltLoader::BindTargetRef::makeAbsolute(valuesCount));
-        for ( size_t i = 0; i != valuesCount; ++i ) {
-            PrebuiltLoader::BindTarget dataStructTarget = *(values[i]);
-            duplicateTargets.push_back(PrebuiltLoader::BindTargetRef(dataStructTarget));
-        }
+    // The on-disk map is really an ObjCSelectorMapOnDisk
+    const ObjCSelectorMapOnDisk map(selMap);
+    map.forEachEntry(^(const ObjCSelectorMapOnDisk::NodeT& node) {
+        handler(node.first.stringTarget);
     });
-
-    assert(duplicateTargets.count() == duplicateCount());
 }
+
+#if SUPPORT_VM_LAYOUT
+
+const char* findSelector(dyld4::RuntimeState* state, const ObjCSelectorMapOnDisk& map,
+                         const char* selectorName)
+{
+    auto it = map.find((void*)state, selectorName);
+    if ( it == map.end() )
+        return nullptr;
+
+    return (const char*)it->first.stringTarget.value(*state);
+}
+
+void forEachClass(dyld4::RuntimeState* state, const ObjCClassMapOnDisk& classMap, const char* className,
+                  void (^handler)(const dyld3::Array<const PrebuiltLoader::BindTargetRef*>& values))
+{
+    classMap.forEachEntry(state, className, ^(const dyld3::Array<const ObjCObjectOnDiskLocation*>& values) {
+        if ( values.empty() )
+            return;
+
+        STACK_ALLOC_ARRAY(const PrebuiltLoader::BindTargetRef*, newValues, values.count());
+        for ( const ObjCObjectOnDiskLocation* value : values )
+            newValues.push_back(&value->objectLocation);
+
+        handler(newValues);
+    });
+}
+
+void forEachProtocol(dyld4::RuntimeState* state, const ObjCProtocolMapOnDisk& protocolMap, const char* protocolName,
+                     void (^handler)(const dyld3::Array<const PrebuiltLoader::BindTargetRef*>& values))
+{
+    protocolMap.forEachEntry(state, protocolName, ^(const dyld3::Array<const ObjCObjectOnDiskLocation*>& values) {
+        if ( values.empty() )
+            return;
+
+        STACK_ALLOC_ARRAY(const PrebuiltLoader::BindTargetRef*, newValues, values.count());
+        for ( const ObjCObjectOnDiskLocation* value : values )
+            newValues.push_back(&value->objectLocation);
+
+        handler(newValues);
+    });
+}
+
+#endif // SUPPORT_VM_LAYOUT
+
+void forEachClass(const void* classMap,
+                  void (^handler)(const PrebuiltLoader::BindTargetRef& nameTarget,
+                                  const dyld3::Array<const PrebuiltLoader::BindTargetRef*>& values))
+{
+    // The on-disk map is really an ObjCClassMapOnDisk
+    const ObjCClassMapOnDisk map(classMap);
+    map.forEachEntry(^(const ObjCStringKeyOnDisk& key, const dyld3::Array<const ObjCObjectOnDiskLocation*>& values) {
+        STACK_ALLOC_ARRAY(const PrebuiltLoader::BindTargetRef*, newValues, values.count());
+        for ( const ObjCObjectOnDiskLocation* value : values )
+            newValues.push_back(&value->objectLocation);
+        handler(key.stringTarget, newValues);
+    });
+}
+
+void forEachProtocol(const void* protocolMap,
+                     void (^handler)(const PrebuiltLoader::BindTargetRef& nameTarget,
+                                     const dyld3::Array<const PrebuiltLoader::BindTargetRef*>& values))
+{
+    // The on-disk map is really an ObjCProtocolMapOnDisk
+    const ObjCProtocolMapOnDisk map(protocolMap);
+    map.forEachEntry(^(const ObjCStringKeyOnDisk& key, const dyld3::Array<const ObjCObjectOnDiskLocation*>& values) {
+        STACK_ALLOC_ARRAY(const PrebuiltLoader::BindTargetRef*, newValues, values.count());
+        for ( const ObjCObjectOnDiskLocation* value : values )
+            newValues.push_back(&value->objectLocation);
+        handler(key.stringTarget, newValues);
+    });
+}
+
+uint64_t hashStringKey(const std::string_view& str)
+{
+    return murmurHash(str.data(), (int)str.size(), 0);
+}
+
+} // namespace prebuilt_objc
+
+namespace dyld4 {
 
 //////////////////////// ObjCOptimizerImage /////////////////////////////////
 
@@ -466,16 +288,17 @@ bool ObjCOptimizerImage::isNull(InputDylibVMAddress vmAddr, const void* address)
 }
 
 void ObjCOptimizerImage::visitReferenceToObjCSelector(const objc::SelectorHashTable* objcSelOpt,
-                                                      const PrebuiltObjC::SelectorMapTy& appSelectorMap,
+                                                      PrebuiltObjC::SelectorMapTy& appSelectorMap,
                                                       VMOffset selectorReferenceRuntimeOffset, VMOffset selectorStringRuntimeOffset,
                                                       const char* selectorString)
 {
 
     // fprintf(stderr, "selector: %p -> %p %s\n", (void*)selectorReferenceRuntimeOffset, (void*)selectorStringRuntimeOffset, selectorString);
-    if ( std::optional<uint32_t> cacheSelectorIndex = objcSelOpt->tryGetIndex(selectorString) ) {
+    if ( const char* sharedCacheSelector = objcSelOpt->get(selectorString) ) {
         // We got the selector from the cache so add a fixup to point there.
-        // We use an absolute bind here, to reference the index in to the shared cache table
-        PrebuiltLoader::BindTargetRef bindTarget = PrebuiltLoader::BindTargetRef::makeAbsolute(*cacheSelectorIndex);
+        // We use an absolute bind here, to reference the offset from the shared cache selector table base
+        uint64_t sharedCacheOffset = (uint64_t)sharedCacheSelector - (uint64_t)objcSelOpt;
+        PrebuiltLoader::BindTargetRef bindTarget = PrebuiltLoader::BindTargetRef::makeAbsolute(sharedCacheOffset);
 
         //printf("Overriding fixup at 0x%08llX to cache offset 0x%08llX\n", selectorUseImageOffset, (uint64_t)objcSelOpt->getEntryForIndex(cacheSelectorIndex) - (uint64_t)state.config.dyldCache());
         selectorFixups.push_back(bindTarget);
@@ -483,23 +306,25 @@ void ObjCOptimizerImage::visitReferenceToObjCSelector(const objc::SelectorHashTa
     }
 
     // See if this selector is already in the app map from a previous image
-    auto appSelectorIt = appSelectorMap.find(selectorString);
+    prebuilt_objc::ObjCStringKey selectorMapKey { selectorString };
+    auto appSelectorIt = appSelectorMap.find(selectorMapKey);
     if ( appSelectorIt != appSelectorMap.end() ) {
         // This selector was found in a previous image, so use it here.
 
         //printf("Overriding fixup at 0x%08llX to other image\n", selectorUseImageOffset);
-        selectorFixups.push_back(PrebuiltLoader::BindTargetRef(appSelectorIt->second));
+        selectorFixups.push_back(PrebuiltLoader::BindTargetRef(appSelectorIt->second.nameLocation));
         return;
     }
 
     // See if this selector is already in the map for this image
-    auto itAndInserted = selectorMap.insert({ selectorString, Loader::BindTarget() });
+    prebuilt_objc::ObjCSelectorLocation selectorMapValue = { Loader::BindTarget() };
+    auto itAndInserted = selectorMap.insert({ selectorMapKey, selectorMapValue });
     if ( itAndInserted.second ) {
         // We added the selector so its pointing in to our own image.
         Loader::BindTarget target;
         target.loader               = jitLoader;
         target.runtimeOffset        = selectorStringRuntimeOffset.rawValue();
-        itAndInserted.first->second = target;
+        itAndInserted.first->second.nameLocation = target;
 
         // We'll add a fixup anyway as we want a sel ref fixup for every entry in the sel refs section
 
@@ -510,7 +335,7 @@ void ObjCOptimizerImage::visitReferenceToObjCSelector(const objc::SelectorHashTa
 
     // This selector was found elsewhere in our image.  As we want a fixup for every selref, we'll
     // add one here too
-    Loader::BindTarget& target = itAndInserted.first->second;
+    Loader::BindTarget& target = itAndInserted.first->second.nameLocation;
 
     //printf("Overriding fixup at 0x%08llX to '%s' offset 0x%08llX\n", selectorUseImageOffset, findLoadedImage(target.image.imageNum).path(), target.image.offset);
     selectorFixups.push_back(PrebuiltLoader::BindTargetRef(target));
@@ -520,8 +345,8 @@ void ObjCOptimizerImage::visitReferenceToObjCSelector(const objc::SelectorHashTa
 // If so, add the class to the duplicate map
 static void checkForDuplicateClass(const VMAddress dyldCacheBaseAddress,
                                    const char* className, const objc::ClassHashTable* objcClassOpt,
-                                   const PrebuiltObjC::SharedCacheImagesMapTy& sharedCacheImagesMap,
-                                   const PrebuiltObjC::DuplicateClassesMapTy& duplicateSharedCacheClasses,
+                                   PrebuiltObjC::SharedCacheImagesMapTy& sharedCacheImagesMap,
+                                   PrebuiltObjC::DuplicateClassesMapTy& duplicateSharedCacheClasses,
                                    ObjCOptimizerImage& image)
 {
     objcClassOpt->forEachClass(className,
@@ -547,8 +372,8 @@ static void checkForDuplicateClass(const VMAddress dyldCacheBaseAddress,
 
 void ObjCOptimizerImage::visitClass(const VMAddress dyldCacheBaseAddress,
                                     const objc::ClassHashTable* objcClassOpt,
-                                    const SharedCacheImagesMapTy& sharedCacheImagesMap,
-                                    const DuplicateClassesMapTy& duplicateSharedCacheClasses,
+                                    SharedCacheImagesMapTy& sharedCacheImagesMap,
+                                    DuplicateClassesMapTy& duplicateSharedCacheClasses,
                                     InputDylibVMAddress classVMAddr, InputDylibVMAddress classNameVMAddr, const char* className)
 {
 
@@ -565,7 +390,7 @@ void ObjCOptimizerImage::visitClass(const VMAddress dyldCacheBaseAddress,
 
 static bool protocolIsInSharedCache(const char* protocolName,
                                     const objc::ProtocolHashTable* objcProtocolOpt,
-                                    const PrebuiltObjC::SharedCacheImagesMapTy& sharedCacheImagesMap)
+                                    PrebuiltObjC::SharedCacheImagesMapTy& sharedCacheImagesMap)
 {
     __block bool foundProtocol = false;
     objcProtocolOpt->forEachProtocol(protocolName,
@@ -580,7 +405,7 @@ static bool protocolIsInSharedCache(const char* protocolName,
 }
 
 void ObjCOptimizerImage::visitProtocol(const objc::ProtocolHashTable* objcProtocolOpt,
-                                       const SharedCacheImagesMapTy& sharedCacheImagesMap,
+                                       SharedCacheImagesMapTy& sharedCacheImagesMap,
                                        InputDylibVMAddress protocolVMAddr, InputDylibVMAddress protocolNameVMAddr,
                                        const char* protocolName)
 {
@@ -640,75 +465,13 @@ static objc_visitor::Visitor makeObjCVisitor(Diagnostics& diag, RuntimeState& st
     return objcVisitor;
 #else
     const dyld3::MachOFile* dylibMF = ldr->mf(state);
-    VMAddress dylibBaseAddress(dylibMF->preferredLoadAddress());
-
-    __block std::vector<metadata_visitor::Segment> segments;
-    __block std::vector<uint64_t> bindTargets;
-    ldr->withLayout(diag, state, ^(const mach_o::Layout &layout) {
-        for ( uint32_t segIndex = 0; segIndex != layout.segments.size(); ++segIndex ) {
-            const auto& layoutSegment = layout.segments[segIndex];
-            metadata_visitor::Segment segment {
-                .startVMAddr = VMAddress(layoutSegment.vmAddr),
-                .endVMAddr = VMAddress(layoutSegment.vmAddr + layoutSegment.vmSize),
-                .bufferStart = (uint8_t*)layoutSegment.buffer,
-                .onDiskDylibChainedPointerFormat = 0,
-                .segIndex = segIndex
-            };
-            segments.push_back(std::move(segment));
-        }
-
-        // Add chained fixup info to each segment, if we have it
-        if ( dylibMF->hasChainedFixups() ) {
-            mach_o::Fixups fixups(layout);
-            fixups.withChainStarts(diag, ^(const dyld_chained_starts_in_image* starts) {
-                mach_o::Fixups::forEachFixupChainSegment(diag, starts,
-                                                         ^(const dyld_chained_starts_in_segment *segInfo, uint32_t segIndex, bool &stop) {
-                    segments[segIndex].onDiskDylibChainedPointerFormat = segInfo->pointer_format;
-                });
-            });
-        }
-
-        // ObjC patching needs the bind targets for interposable references to the classes
-        // build targets table
-        if ( dylibMF->hasChainedFixupsLoadCommand() ) {
-            mach_o::Fixups fixups(layout);
-            fixups.forEachBindTarget_ChainedFixups(diag, ^(const mach_o::Fixups::BindTargetInfo &info, bool &stop) {
-                if ( info.libOrdinal != BIND_SPECIAL_DYLIB_SELF ) {
-                    bindTargets.push_back(0);
-                    return;
-                }
-
-                mach_o::Layout::FoundSymbol foundInfo;
-                if ( !layout.findExportedSymbol(diag, info.symbolName, info.weakImport, foundInfo) ) {
-                    bindTargets.push_back(0);
-                    return;
-                }
-
-                // We only support header offsets in this dylib, as we are looking for self binds
-                // which are likely only to classes
-                if ( (foundInfo.kind != mach_o::Layout::FoundSymbol::Kind::headerOffset)
-                    || (foundInfo.foundInDylib.value() != dylibMF) ) {
-                    bindTargets.push_back(0);
-                    return;
-                }
-
-                uint64_t vmAddr = layout.textUnslidVMAddr() + foundInfo.value;
-                bindTargets.push_back(vmAddr);
-            });
-        }
-    });
-
-    std::optional<VMAddress> selectorStringsBaseAddress;
-    objc_visitor::Visitor objcVisitor(dylibBaseAddress, dylibMF,
-                                      std::move(segments), selectorStringsBaseAddress,
-                                      std::move(bindTargets));
-    return objcVisitor;
+    return dylibMF->makeObjCVisitor(diag);
 #endif
 }
 
 static void optimizeObjCSelectors(RuntimeState& state,
                                   const objc::SelectorHashTable* objcSelOpt,
-                                  const PrebuiltObjC::SelectorMapTy& appSelectorMap,
+                                  PrebuiltObjC::SelectorMapTy& appSelectorMap,
                                   ObjCOptimizerImage&                image)
 {
 
@@ -812,8 +575,8 @@ static void optimizeObjCSelectors(RuntimeState& state,
 
             visitMethodList(classMethodList, hasPointerBasedMethodList, stopCategory);
         });
-        image.binaryInfo.hasClassMethodListsToUnique     = hasPointerBasedMethodList;
-        image.binaryInfo.hasClassMethodListsToSetUniqued = hasPointerBasedMethodList;
+        image.binaryInfo.hasCategoryMethodListsToUnique     = hasPointerBasedMethodList;
+        image.binaryInfo.hasCategoryMethodListsToSetUniqued = hasPointerBasedMethodList;
     }
 
     if ( image.binaryInfo.protocolListCount != 0 ) {
@@ -838,8 +601,8 @@ static void optimizeObjCSelectors(RuntimeState& state,
 
             visitMethodList(optionalClassMethodList, hasPointerBasedMethodList, stopProtocol);
         });
-        image.binaryInfo.hasClassMethodListsToUnique     = hasPointerBasedMethodList;
-        image.binaryInfo.hasClassMethodListsToSetUniqued = hasPointerBasedMethodList;
+        image.binaryInfo.hasProtocolMethodListsToUnique     = hasPointerBasedMethodList;
+        image.binaryInfo.hasProtocolMethodListsToSetUniqued = hasPointerBasedMethodList;
     }
 
     auto visitSelRef = ^(uint64_t selectorReferenceRuntimeOffset, uint64_t selectorStringRuntimeOffset,
@@ -856,8 +619,8 @@ static void optimizeObjCSelectors(RuntimeState& state,
 
 static void optimizeObjCClasses(RuntimeState& state,
                                 const objc::ClassHashTable* objcClassOpt,
-                                const PrebuiltObjC::SharedCacheImagesMapTy& sharedCacheImagesMap,
-                                const PrebuiltObjC::DuplicateClassesMapTy& duplicateSharedCacheClasses,
+                                PrebuiltObjC::SharedCacheImagesMapTy& sharedCacheImagesMap,
+                                PrebuiltObjC::DuplicateClassesMapTy& duplicateSharedCacheClasses,
                                 ObjCOptimizerImage& image)
 {
     if ( image.binaryInfo.classListCount == 0 )
@@ -884,7 +647,7 @@ static void optimizeObjCClasses(RuntimeState& state,
             InputDylibVMAddress superclassFieldVMAddr(classSuperclassField.vmAddress().rawValue());
             if ( image.isNull(superclassFieldVMAddr, classSuperclassField.value()) ) {
                 const char* className = objcClass.getName(objcVisitor);
-                image.diag.error("Missing weak superclass of class %s in %s", className, image.jitLoader->path());
+                image.diag.error("Missing weak superclass of class %s in %s", className, image.jitLoader->path(state));
                 return;
             }
         }
@@ -910,7 +673,7 @@ static void optimizeObjCClasses(RuntimeState& state,
 
 static void optimizeObjCProtocols(RuntimeState& state,
                                   const objc::ProtocolHashTable* objcProtocolOpt,
-                                  const PrebuiltObjC::SharedCacheImagesMapTy& sharedCacheImagesMap,
+                                  PrebuiltObjC::SharedCacheImagesMapTy& sharedCacheImagesMap,
                                   ObjCOptimizerImage& image)
 {
     if ( image.binaryInfo.protocolListCount == 0 )
@@ -945,16 +708,11 @@ static void optimizeObjCProtocols(RuntimeState& state,
 
 
 static void
-writeObjCDataStructHashTable(RuntimeState& state, PrebuiltObjC::ObjCStructKind objcKind,
-                             Array<ObjCOptimizerImage>& objcImages,
-                             OverflowSafeArray<uint8_t>& hashTable,
-                             const PrebuiltObjC::DuplicateClassesMapTy& duplicateSharedCacheClassMap,
-                             PrebuiltObjC::ClassMapTy& seenObjectsMap)
+generateClassOrProtocolHashTable(PrebuiltObjC::ObjCStructKind objcKind,
+                                 Array<ObjCOptimizerImage>& objcImages,
+                                 const PrebuiltObjC::DuplicateClassesMapTy& duplicateSharedCacheClassMap,
+                                 PrebuiltObjC::ObjectMapTy& objectMap, bool& hasDuplicates)
 {
-
-    dyld3::CStringMapTo<PrebuiltLoader::BindTarget>      objectNameMap;
-    OverflowSafeArray<const char*>                       objectNames;
-
     // Note we walk the images backwards as we want them in load order to match the order they are registered with objc
     for ( uint64_t imageIndex = 0, reverseIndex = (objcImages.count() - 1); imageIndex != objcImages.count(); ++imageIndex, --reverseIndex ) {
         if ( objcImages[reverseIndex].diag.hasError() )
@@ -967,68 +725,56 @@ writeObjCDataStructHashTable(RuntimeState& state, PrebuiltObjC::ObjCStructKind o
                 //printf("%s: 0x%08llx = '%s'\n", li.path(), nameVMAddr, className);
 
                 // Also track the name
-                PrebuiltLoader::BindTarget nameTarget    = { image.jitLoader, classLocation.nameRuntimeOffset.rawValue() };
-                auto                       itAndInserted = objectNameMap.insert({ classLocation.name, nameTarget });
-                if ( itAndInserted.second ) {
-                    // We inserted the class name so we need to add it to the strings for the closure hash table
-                    objectNames.push_back(classLocation.name);
-
+                PrebuiltLoader::BindTarget nameTarget  = { image.jitLoader, classLocation.nameRuntimeOffset.rawValue() };
+                PrebuiltLoader::BindTarget valueTarget = { image.jitLoader, classLocation.valueRuntimeOffset.rawValue() };
+                prebuilt_objc::ObjCStringKey key = { classLocation.name };
+                prebuilt_objc::ObjCObjectLocation value = {
+                    nameTarget,
+                    valueTarget
+                };
+                bool alreadyHaveNodeWithKey = false;
+                auto objectIt = objectMap.insert({ key, value }, alreadyHaveNodeWithKey);
+                if ( !alreadyHaveNodeWithKey ) {
                     // Check if we have a duplicate.  If we do, it will be on the last image which had a duplicate class name,
                     // but as we walk images backwards, we'll see this before all other images with duplicates.
                     // Note we only check for duplicates when we know we just inserted the object name in to the map, as this
                     // ensure's that we only insert each duplicate once
-                        auto duplicateClassIt = duplicateSharedCacheClassMap.find(classLocation.name);
-                        if ( duplicateClassIt != duplicateSharedCacheClassMap.end() ) {
-                            seenObjectsMap.insert({ classLocation.name, duplicateClassIt->second });
-                        }
-                }
+                    auto duplicateClassIt = duplicateSharedCacheClassMap.find(classLocation.name);
+                    if ( duplicateClassIt != duplicateSharedCacheClassMap.end() ) {
+                        // This is gross.  Change this entry to the duplicate, and add a new one
+                        objectIt->value = { nameTarget, duplicateClassIt->second };
 
-                PrebuiltLoader::BindTarget valueTarget = { image.jitLoader, classLocation.valueRuntimeOffset.rawValue() };
-                seenObjectsMap.insert({ classLocation.name, valueTarget });
+                        bool unusedAlreadyHaveNodeWithKey;
+                        objectMap.insert({ key, value }, unusedAlreadyHaveNodeWithKey);
+                        hasDuplicates = true;
+                    }
+                } else {
+                    // We didn't add the node, so we have duplicates
+                    hasDuplicates = true;
+                }
             }
         }
 
         if ( objcKind == PrebuiltObjC::ObjCStructKind::protocols ) {
             for ( const ObjCOptimizerImage::ObjCObject& protocolLocation : image.protocolLocations ) {
                 // Also track the name
-                PrebuiltLoader::BindTarget nameTarget    = { image.jitLoader, protocolLocation.nameRuntimeOffset.rawValue() };
-                auto                       itAndInserted = objectNameMap.insert({ protocolLocation.name, nameTarget });
-                if ( itAndInserted.second ) {
-                    // We inserted the protocol name so we need to add it to the strings for the closure hash table
-                    objectNames.push_back(protocolLocation.name);
-
-                    // If we are processing protocols, and this is the first one we've seen, then track its ISA to be fixed up
+                PrebuiltLoader::BindTarget nameTarget  = { image.jitLoader, protocolLocation.nameRuntimeOffset.rawValue() };
+                PrebuiltLoader::BindTarget valueTarget = { image.jitLoader, protocolLocation.valueRuntimeOffset.rawValue() };
+                prebuilt_objc::ObjCStringKey key = { protocolLocation.name };
+                prebuilt_objc::ObjCObjectLocation value = {
+                    nameTarget,
+                    valueTarget
+                };
+                bool alreadyHaveNodeWithKey = false;
+                objectMap.insert({ key, value }, alreadyHaveNodeWithKey);
+                if ( !alreadyHaveNodeWithKey ) {
+                    // We are processing protocols, and this is the first one we've seen, so track its ISA to be fixed up
                     auto protocolIndexIt = image.protocolIndexMap.find(protocolLocation.valueRuntimeOffset);
                     assert(protocolIndexIt != image.protocolIndexMap.end());
                     image.protocolISAFixups[protocolIndexIt->second] = true;
                 }
-
-                PrebuiltLoader::BindTarget valueTarget = { image.jitLoader, protocolLocation.valueRuntimeOffset.rawValue() };
-                seenObjectsMap.insert({ protocolLocation.name, valueTarget });
             }
         }
-    }
-
-    __block uint32_t numClassesWithDuplicates = 0;
-    __block uint32_t totalDuplicates          = 0;
-    seenObjectsMap.forEachEntry(^(const char* const& key, const PrebuiltLoader::BindTarget** values,
-                                  uint64_t valuesCount) {
-        if ( valuesCount != 1 ) {
-            ++numClassesWithDuplicates;
-            totalDuplicates += valuesCount;
-        }
-    });
-
-    // If we have closure class names, we need to make a hash table for them.
-    if ( !objectNames.empty() ) {
-        objc::PerfectHash phash;
-        objc::PerfectHash::make_perfect(objectNames, phash);
-        size_t size = ObjCDataStructOpt::size(phash, numClassesWithDuplicates, totalDuplicates);
-        hashTable.resize(size);
-        //printf("Class table size: %lld\n", size);
-        ObjCDataStructOpt* resultHashTable = (ObjCDataStructOpt*)hashTable.begin();
-        resultHashTable->write(phash, objectNameMap.array(), seenObjectsMap,
-                               numClassesWithDuplicates, totalDuplicates);
     }
 }
 
@@ -1047,29 +793,75 @@ void PrebuiltObjC::commitImage(const ObjCOptimizerImage& image)
     // Selector results
     // Note we don't need to add the selector binds here.  Its easier just to process them later from each image
     for ( const auto& stringAndTarget : image.selectorMap ) {
-        closureSelectorMap[stringAndTarget.first] = stringAndTarget.second;
-        closureSelectorStrings.push_back(stringAndTarget.first);
+        this->selectorMap[stringAndTarget.first] = stringAndTarget.second;
     }
 }
 
-void PrebuiltObjC::generateHashTables(RuntimeState& state)
+uint32_t PrebuiltObjC::serializeSelectorMap(dyld4::BumpAllocator& alloc) const
 {
-    // Write out the class table
-    writeObjCDataStructHashTable(state, PrebuiltObjC::ObjCStructKind::classes, objcImages, classesHashTable, duplicateSharedCacheClassMap, classMap);
+    // The key on the new map is the name bind target
+    typedef prebuilt_objc::ObjCSelectorMapOnDisk::KeyType (^KeyFuncTy)(const SelectorMapTy::KeyType&, const SelectorMapTy::ValueType&);
+    KeyFuncTy convertKey = ^(const SelectorMapTy::KeyType& key, const SelectorMapTy::ValueType& value) {
+        return (prebuilt_objc::ObjCSelectorMapOnDisk::KeyType){ PrebuiltLoader::BindTargetRef(value.nameLocation) };
+    };
 
-    // Write out the protocol table
-    writeObjCDataStructHashTable(state, PrebuiltObjC::ObjCStructKind::protocols, objcImages, protocolsHashTable, duplicateSharedCacheClassMap, protocolMap);
+    // The value on the new map is unused
+    typedef prebuilt_objc::ObjCSelectorMapOnDisk::ValueType (^ValueFuncTy)(const SelectorMapTy::KeyType&, const SelectorMapTy::ValueType&);
+    ValueFuncTy convertValue = ^(const SelectorMapTy::KeyType& key, const SelectorMapTy::ValueType& value) {
+        return (prebuilt_objc::ObjCSelectorMapOnDisk::ValueType)0;
+    };
 
-    // If we have closure selectors, we need to make a hash table for them.
-    if ( !closureSelectorStrings.empty() ) {
-        objc::PerfectHash phash;
-        objc::PerfectHash::make_perfect(closureSelectorStrings, phash);
-        size_t size = ObjCStringTable::size(phash);
-        selectorsHashTable.resize(size);
-        //printf("Selector table size: %lld\n", size);
-        selectorStringTable = (ObjCStringTable*)selectorsHashTable.begin();
-        selectorStringTable->write(phash, closureSelectorMap.array());
-    }
+    uint32_t offset = (uint32_t)alloc.size();
+    this->selectorMap.serialize(alloc, convertKey, convertValue);
+    return offset;
+}
+
+uint32_t PrebuiltObjC::serializeClassMap(dyld4::BumpAllocator& alloc) const
+{
+    // The key on the new map is the name bind taret
+    typedef prebuilt_objc::ObjCClassMapOnDisk::KeyType (^KeyFuncTy)(const ClassMapTy::KeyType&, const ClassMapTy::ValueType&);
+    KeyFuncTy convertKey = ^(const ClassMapTy::KeyType& key, const ClassMapTy::ValueType& value) {
+        return (prebuilt_objc::ObjCClassMapOnDisk::KeyType){ PrebuiltLoader::BindTargetRef(value.nameLocation) };
+    };
+
+    // The value on the new map is just the class impl
+    typedef prebuilt_objc::ObjCClassMapOnDisk::ValueType (^ValueFuncTy)(const ClassMapTy::KeyType&, const ClassMapTy::ValueType&);
+    ValueFuncTy convertValue = ^(const ClassMapTy::KeyType& key, const ClassMapTy::ValueType& value) {
+        return (prebuilt_objc::ObjCClassMapOnDisk::ValueType){ PrebuiltLoader::BindTargetRef(value.objectLocation) };
+    };
+
+    uint32_t offset = (uint32_t)alloc.size();
+    this->classMap.serialize(alloc, convertKey, convertValue);
+    return offset;
+}
+
+uint32_t PrebuiltObjC::serializeProtocolMap(dyld4::BumpAllocator& alloc) const
+{
+    // The key on the new map is the name bind taret
+    typedef prebuilt_objc::ObjCProtocolMapOnDisk::KeyType (^KeyFuncTy)(const ProtocolMapTy::KeyType&, const ProtocolMapTy::ValueType&);
+    KeyFuncTy convertKey = ^(const ProtocolMapTy::KeyType& key, const ProtocolMapTy::ValueType& value) {
+        return (prebuilt_objc::ObjCProtocolMapOnDisk::KeyType){ PrebuiltLoader::BindTargetRef(value.nameLocation) };
+    };
+
+    // The value on the new map is just the protocol impl
+    typedef prebuilt_objc::ObjCProtocolMapOnDisk::ValueType (^ValueFuncTy)(const ProtocolMapTy::KeyType&, const ProtocolMapTy::ValueType&);
+    ValueFuncTy convertValue = ^(const ProtocolMapTy::KeyType& key, const ProtocolMapTy::ValueType& value) {
+        return (prebuilt_objc::ObjCProtocolMapOnDisk::ValueType){ PrebuiltLoader::BindTargetRef(value.objectLocation) };
+    };
+
+    uint32_t offset = (uint32_t)alloc.size();
+    this->protocolMap.serialize(alloc, convertKey, convertValue);
+    return offset;
+}
+
+void PrebuiltObjC::generateHashTables()
+{
+    generateClassOrProtocolHashTable(PrebuiltObjC::ObjCStructKind::classes, objcImages, 
+                                     duplicateSharedCacheClassMap, classMap, this->hasClassDuplicates);
+
+    bool unusedHasProtocolDuplicates = false;
+    generateClassOrProtocolHashTable(PrebuiltObjC::ObjCStructKind::protocols, objcImages, 
+                                     duplicateSharedCacheClassMap, protocolMap, unusedHasProtocolDuplicates);
 }
 
 void PrebuiltObjC::generatePerImageFixups(RuntimeState& state, uint32_t pointerSize)
@@ -1120,22 +912,14 @@ void PrebuiltObjC::generatePerImageFixups(RuntimeState& state, uint32_t pointerS
     }
 }
 
-// Visits each selector reference once, in order.  Note the order this visits selector references has to
-// match for serializing/deserializing the PrebuiltLoader.
-void PrebuiltObjC::forEachSelectorReferenceToUnique(RuntimeState&           state,
-                                                    const Loader*           ldr,
-                                                    uint64_t                loadAddress,
-                                                    const ObjCBinaryInfo&   binaryInfo,
-                                                    void (^callback)(uint64_t selectorReferenceRuntimeOffset,
-                                                                     uint64_t selectorStringRuntimeOffset,
-                                                                     const char* selectorString))
-
+__attribute__((noinline))
+static void forEachSelectorReferenceToUnique(objc_visitor::Visitor& objcVisitor,
+                                             uint64_t                loadAddress,
+                                             const ObjCBinaryInfo&   binaryInfo,
+                                             void (^callback)(uint64_t selectorReferenceRuntimeOffset,
+                                                              uint64_t selectorStringRuntimeOffset,
+                                                              const char* selectorString))
 {
-    // FIXME: Don't make a duplicate one of these if we can pass one in instead
-    Diagnostics diag;
-    __block objc_visitor::Visitor objcVisitor = makeObjCVisitor(diag, state, ldr);
-    assert(!diag.hasError());
-
     if ( binaryInfo.selRefsCount != 0 ) {
         objcVisitor.forEachSelectorReference(^(VMAddress selRefVMAddr, VMAddress selRefTargetVMAddr,
                                                const char* selectorString) {
@@ -1145,6 +929,16 @@ void PrebuiltObjC::forEachSelectorReferenceToUnique(RuntimeState&           stat
                      selectorString);
         });
     }
+}
+
+__attribute__((noinline))
+static void forEachClassSelectorReferenceToUnique(objc_visitor::Visitor& objcVisitor,
+                                                  uint64_t                loadAddress,
+                                                  const ObjCBinaryInfo&   binaryInfo,
+                                                  void (^callback)(uint64_t selectorReferenceRuntimeOffset,
+                                                                   uint64_t selectorStringRuntimeOffset,
+                                                                   const char* selectorString))
+{
 
     // We only make the callback for method list selrefs which are not already covered by the __objc_selrefs section.
     // For pointer based method lists, this is all sel ref pointers.
@@ -1181,6 +975,43 @@ void PrebuiltObjC::forEachSelectorReferenceToUnique(RuntimeState&           stat
             visitMethodList(methodList);
         });
     }
+}
+
+__attribute__((noinline))
+static void forEachCategorySelectorReferenceToUnique(objc_visitor::Visitor& objcVisitor,
+                                                     uint64_t                loadAddress,
+                                                     const ObjCBinaryInfo&   binaryInfo,
+                                                     void (^callback)(uint64_t selectorReferenceRuntimeOffset,
+                                                                      uint64_t selectorStringRuntimeOffset,
+                                                                      const char* selectorString))
+{
+    // We only make the callback for method list selrefs which are not already covered by the __objc_selrefs section.
+    // For pointer based method lists, this is all sel ref pointers.
+    // For relative method lists, we should always point to the __objc_selrefs section.  This was checked earlier, so
+    // we skip this callback on relative method lists as we know here they must point to the (already uniqied) __objc_selrefs.
+    auto visitPointerBasedMethod = ^(const objc_visitor::Method& method) {
+        VMAddress nameVMAddr = method.getNameVMAddr(objcVisitor);
+        VMAddress nameLocationVMAddr = method.getNameField(objcVisitor).vmAddress();
+        const char* selectorString = method.getName(objcVisitor);
+
+        VMOffset selectorStringRuntimeOffset    = nameVMAddr - VMAddress(loadAddress);
+        VMOffset selectorReferenceRuntimeOffset = nameLocationVMAddr - VMAddress(loadAddress);
+        callback(selectorReferenceRuntimeOffset.rawValue(), selectorStringRuntimeOffset.rawValue(), selectorString);
+    };
+
+    auto visitMethodList = ^(const objc_visitor::MethodList& methodList) {
+        if ( methodList.numMethods() == 0 )
+            return;
+        if ( methodList.usesRelativeOffsets() )
+            return;
+
+        // Check pointer based method lists
+        uint32_t numMethods = methodList.numMethods();
+        for ( uint32_t i = 0; i != numMethods; ++i ) {
+            const objc_visitor::Method& method = methodList.getMethod(objcVisitor, i);
+            visitPointerBasedMethod(method);
+        }
+    };
 
     if ( binaryInfo.hasCategoryMethodListsToUnique && (binaryInfo.categoryCount != 0) ) {
         // FIXME: Use binaryInfo.categoryListRuntimeOffset and binaryInfo.categoryCount
@@ -1192,6 +1023,43 @@ void PrebuiltObjC::forEachSelectorReferenceToUnique(RuntimeState&           stat
             visitMethodList(classMethodList);
         });
     }
+}
+
+__attribute__((noinline))
+static void forEachProtocolSelectorReferenceToUnique(objc_visitor::Visitor& objcVisitor,
+                                                     uint64_t                loadAddress,
+                                                     const ObjCBinaryInfo&   binaryInfo,
+                                                     void (^callback)(uint64_t selectorReferenceRuntimeOffset,
+                                                                      uint64_t selectorStringRuntimeOffset,
+                                                                      const char* selectorString))
+{
+    // We only make the callback for method list selrefs which are not already covered by the __objc_selrefs section.
+    // For pointer based method lists, this is all sel ref pointers.
+    // For relative method lists, we should always point to the __objc_selrefs section.  This was checked earlier, so
+    // we skip this callback on relative method lists as we know here they must point to the (already uniqied) __objc_selrefs.
+    auto visitPointerBasedMethod = ^(const objc_visitor::Method& method) {
+        VMAddress nameVMAddr = method.getNameVMAddr(objcVisitor);
+        VMAddress nameLocationVMAddr = method.getNameField(objcVisitor).vmAddress();
+        const char* selectorString = method.getName(objcVisitor);
+
+        VMOffset selectorStringRuntimeOffset    = nameVMAddr - VMAddress(loadAddress);
+        VMOffset selectorReferenceRuntimeOffset = nameLocationVMAddr - VMAddress(loadAddress);
+        callback(selectorReferenceRuntimeOffset.rawValue(), selectorStringRuntimeOffset.rawValue(), selectorString);
+    };
+
+    auto visitMethodList = ^(const objc_visitor::MethodList& methodList) {
+        if ( methodList.numMethods() == 0 )
+            return;
+        if ( methodList.usesRelativeOffsets() )
+            return;
+
+        // Check pointer based method lists
+        uint32_t numMethods = methodList.numMethods();
+        for ( uint32_t i = 0; i != numMethods; ++i ) {
+            const objc_visitor::Method& method = methodList.getMethod(objcVisitor, i);
+            visitPointerBasedMethod(method);
+        }
+    };
 
     if ( binaryInfo.hasProtocolMethodListsToUnique && (binaryInfo.protocolListCount != 0) ) {
         // FIXME: Use binaryInfo.protocolListRuntimeOffset and binaryInfo.protocolListCount
@@ -1207,6 +1075,28 @@ void PrebuiltObjC::forEachSelectorReferenceToUnique(RuntimeState&           stat
             visitMethodList(optionalClassMethodList);
         });
     }
+}
+
+// Visits each selector reference once, in order.  Note the order this visits selector references has to
+// match for serializing/deserializing the PrebuiltLoader.
+void PrebuiltObjC::forEachSelectorReferenceToUnique(RuntimeState&           state,
+                                                    const Loader*           ldr,
+                                                    uint64_t                loadAddress,
+                                                    const ObjCBinaryInfo&   binaryInfo,
+                                                    void (^callback)(uint64_t selectorReferenceRuntimeOffset,
+                                                                     uint64_t selectorStringRuntimeOffset,
+                                                                     const char* selectorString))
+
+{
+    // FIXME: Don't make a duplicate one of these if we can pass one in instead
+    Diagnostics diag;
+    __block objc_visitor::Visitor objcVisitor = makeObjCVisitor(diag, state, ldr);
+    assert(!diag.hasError());
+
+    dyld4::forEachSelectorReferenceToUnique(objcVisitor, loadAddress, binaryInfo, callback);
+    dyld4::forEachClassSelectorReferenceToUnique(objcVisitor, loadAddress, binaryInfo, callback);
+    dyld4::forEachCategorySelectorReferenceToUnique(objcVisitor, loadAddress, binaryInfo, callback);
+    dyld4::forEachProtocolSelectorReferenceToUnique(objcVisitor, loadAddress, binaryInfo, callback);
 }
 
 static std::optional<VMOffset> getImageInfo(Diagnostics& diag, RuntimeState& state,
@@ -1299,13 +1189,23 @@ void PrebuiltObjC::make(Diagnostics& diag, RuntimeState& state)
     if ( std::optional<VMOffset> offset = getProtocolClassCacheOffset(state); offset.has_value() )
         objcProtocolClassCacheOffset = offset.value();
 
-    STACK_ALLOC_ARRAY(const Loader*, jitLoaders, state.loaded.size());
-    for (const Loader* ldr : state.loaded)
-        jitLoaders.push_back(ldr);
+    for ( const Loader* ldr : state.delayLoaded ) {
+        if ( ldr->isJustInTimeLoader() ) {
+            // TODO: Handle apps which delay-init on-disk dylibs
+            // This will lead to the closure not optimizing the objc, and libobjc will do it instead
+            // in map_images().  This is safe as we tell objc (via dyldDoesObjCFixups()) whether we optimized or not
+            return;
+        }
+    }
 
     // Find all the images with valid objc info
     SharedCacheImagesMapTy sharedCacheImagesMap;
-    for ( const Loader* ldr : jitLoaders ) {
+
+    // Note we have done the delay-init partitioning by this point, so state.loaded is just the loaders
+    // we known we need at launch.  This is important for the shared cache in particular as the shared cache
+    // classes/protocols are always preferred over the app ones, so a shared cache image being delayed or not
+    // impacts the choice of classes/protocols.  See protocolIsInSharedCache() for example.
+    for ( const Loader* ldr : state.loaded ) {
         const mach_o::MachOFileRef mf = ldr->mf(state);
         uint32_t pointerSize = mf->pointerSize();
 
@@ -1330,7 +1230,7 @@ void PrebuiltObjC::make(Diagnostics& diag, RuntimeState& state)
         }
 
         // If we have a root of libobjc, just give up for now
-        if ( ldr->matchesPath("/usr/lib/libobjc.A.dylib") )
+        if ( ldr->matchesPath(state, "/usr/lib/libobjc.A.dylib") )
             return;
 
         // dyld can see the strings in Fairplay binaries and protected segments, but other tools cannot.
@@ -1398,15 +1298,15 @@ void PrebuiltObjC::make(Diagnostics& diag, RuntimeState& state)
         if ( image.diag.hasError() )
             continue;
 
-        optimizeObjCSelectors(state, objcSelOpt, closureSelectorMap, image);
+        optimizeObjCSelectors(state, objcSelOpt, selectorMap, image);
         if ( image.diag.hasError() )
             continue;
 
         commitImage(image);
     }
 
-    // If we successfully analyzed the classes and selectors, we can now emit their data
-    generateHashTables(state);
+    // If we successfully analyzed the classes and selectors, we can now make the maps
+    generateHashTables();
 
     uint32_t pointerSize = state.mainExecutableLoader->mf(state)->pointerSize();
     generatePerImageFixups(state, pointerSize);
@@ -1414,7 +1314,7 @@ void PrebuiltObjC::make(Diagnostics& diag, RuntimeState& state)
     builtObjC = true;
 }
 
-uint32_t PrebuiltObjC::serializeFixups(const Loader& jitLoader, BumpAllocator& allocator) const
+uint32_t PrebuiltObjC::serializeFixups(const Loader& jitLoader, BumpAllocator& allocator)
 {
     if ( !builtObjC )
         return 0;
@@ -1444,7 +1344,7 @@ uint32_t PrebuiltObjC::serializeFixups(const Loader& jitLoader, BumpAllocator& a
         allocator.zeroFill(fixups.protocolISAFixups.count() * sizeof(uint8_t));
         allocator.align(8);
         BumpAllocatorPtr<uint8_t> protocolArray(allocator, serializationStart + protocolArrayOff);
-        memcpy(protocolArray.get(), fixups.protocolISAFixups.begin(), (size_t)(fixups.protocolISAFixups.count() * sizeof(uint8_t)));
+        memcpy(protocolArray.get(), fixups.protocolISAFixups.data(), (size_t)(fixups.protocolISAFixups.count() * sizeof(uint8_t)));
     }
 
     // Selector references
@@ -1454,38 +1354,14 @@ uint32_t PrebuiltObjC::serializeFixups(const Loader& jitLoader, BumpAllocator& a
         fixupInfo->selectorReferencesFixupsCount  = (uint32_t)fixups.selectorReferenceFixups.count();
         allocator.zeroFill(fixups.selectorReferenceFixups.count() * sizeof(PrebuiltLoader::BindTargetRef));
         BumpAllocatorPtr<uint8_t> selectorsArray(allocator, serializationStart + selectorsArrayOff);
-        memcpy(selectorsArray.get(), fixups.selectorReferenceFixups.begin(), (size_t)(fixups.selectorReferenceFixups.count() * sizeof(PrebuiltLoader::BindTargetRef)));
+        memcpy(selectorsArray.get(), fixups.selectorReferenceFixups.data(), (size_t)(fixups.selectorReferenceFixups.count() * sizeof(PrebuiltLoader::BindTargetRef)));
     }
 
     return serializationStart;
 }
 
 } // namespace dyld4
-
-
-// Temporary copy of the old hash tables, to let the split cache branch load old hash tables
-namespace legacy_objc_opt
-{
-
-uint32_t objc_stringhash_t::hash(const char *key, size_t keylen) const
-{
-    uint64_t val = objc::lookup8((uint8_t*)key, keylen, salt);
-    uint32_t index = (uint32_t)(val>>shift) ^ scramble[tab[val&mask]];
-    return index;
-}
-
-
-const header_info_rw *getPreoptimizedHeaderRW(const struct header_info *const hdr,
-                                              void* headerInfoRO, void* headerInfoRW)
-{
-    const objc_headeropt_ro_t* hinfoRO = (const objc_headeropt_ro_t*)headerInfoRO;
-    const objc_headeropt_rw_t* hinfoRW = (const objc_headeropt_rw_t*)headerInfoRW;
-    int32_t index = hinfoRO->index(hdr);
-    assert(hinfoRW->entsize == sizeof(header_info_rw));
-    return &hinfoRW->headers[index];
-}
-
-}  // namespace dyld4
 #endif // SUPPORT_PREBUILTLOADERS || BUILDING_UNIT_TESTS || BUILDING_CACHE_BUILDER_UNIT_TESTS
 
 #endif // !TARGET_OS_EXCLAVEKIT
+

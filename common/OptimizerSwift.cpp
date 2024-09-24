@@ -313,6 +313,35 @@ SwiftHashTable::CheckByteType SwiftHashTable::checkbyte(const SwiftForeignTypePr
     return ((keyBytes[0] & 0x7) << 5) | ((uint8_t)name.size() & 0x1f);
 }
 
+template<>
+uint32_t SwiftHashTable::hash(const PointerHashTableBuilderKey& key,
+                              const uint8_t* stringBaseAddress) const
+{
+    uint64_t val1 = objc::lookup8(key.key1Buffer(), key.key1Size(), salt);
+    uint64_t val2 = objc::lookup8(key.key2Buffer(), key.key2Size(), salt);
+    uint64_t val = val1 ^ val2;
+    uint32_t index = (uint32_t)((shift == 64) ? 0 : (val>>shift)) ^ scramble[tab[val&mask]];
+    return index;
+}
+
+template<>
+bool SwiftHashTable::equal(const PointerHashTableOnDiskKey& key,
+                           const PointerHashTableBuilderKey& value,
+                           const uint8_t* stringBaseAddress) const
+{
+    if ( key.numOffsets != value.numOffsets )
+        return false;
+    return memcmp(getCacheOffsets(key), value.key2Buffer(), value.key2Size()) == 0;
+}
+
+template<>
+SwiftHashTable::CheckByteType SwiftHashTable::checkbyte(const PointerHashTableBuilderKey& key,
+                                                        const uint8_t* stringBaseAddress) const
+{
+    const uint64_t* keyBytes = (const uint64_t*)key.key2Buffer();
+    return ((keyBytes[0] & 0x7) << 5) | ((uint8_t)key.numOffsets & 0x1f);
+}
+
 // Foreign metadata names might not be a regular C string.  Instead they might be
 // a NULL-separated array of C strings.  The "full identity" is the result including any
 // intermidiate NULL characters.  Eg, "NNSFoo\0St" would be a legitimate result
@@ -362,7 +391,7 @@ std::string_view getForeignFullIdentity(const char* arrayStart)
 #if BUILDING_CACHE_BUILDER || BUILDING_CACHE_BUILDER_UNIT_TESTS
 
 template<typename PerfectHashT, typename KeyT, typename TargetT>
-void SwiftHashTable::write(const PerfectHashT& phash, const lsl::Vector<KeyT>& keyValues,
+void SwiftHashTable::write(PerfectHashT& phash, const lsl::Vector<KeyT>& keyValues,
                            const lsl::Vector<TargetT>& targetValues,
                            const uint8_t* targetValuesBufferBaseAddress)
 {
@@ -799,6 +828,133 @@ static void emitForeignTypeHashTable(Diagnostics& diag, lsl::Allocator& allocato
     memcpy(valuesBuffer, conformances.data(), conformanceBufferSize);
 }
 
+static void make_perfect(const lsl::Vector<PointerHashTableBuilderKey>& targets,
+                         objc::PerfectHash& phash)
+{
+    dyld3::OverflowSafeArray<objc::PerfectHash::key> keys;
+
+    /* read in the list of keywords */
+    keys.reserve(targets.size());
+    for (const PointerHashTableBuilderKey& target : targets) {
+        objc::PerfectHash::key mykey;
+        mykey.name1_k = (uint8_t*)target.key1Buffer();
+        mykey.len1_k  = target.key1Size();
+        mykey.name2_k = (uint8_t*)target.key2Buffer();
+        mykey.len2_k  = target.key2Size();
+        keys.push_back(mykey);
+    }
+
+    objc::PerfectHash::make_perfect(keys, phash);
+}
+
+static void emitPrespecializedMetadataHashTables(Diagnostics& diag, lsl::Allocator& allocator, CacheVMAddress cacheBaseAddr,
+                                                 std::span<const cache_builder::PointerHashTableOptimizerInfo> tableInfos,
+                                                 CacheDylib& prespecializedDylib,
+                                                 const SwiftVisitor& swiftVisitor)
+
+{
+    if ( tableInfos.size() > SwiftOptimizationHeader::MAX_PRESPECIALIZED_METADATA_TABLES ) {
+        diag.error("Too many prespecialized metadata pointer tables %lu, up to %lu are allowed",
+                tableInfos.size(), SwiftOptimizationHeader::MAX_PRESPECIALIZED_METADATA_TABLES);
+        return;
+    }
+
+    __block std::unordered_map<uint64_t, CacheVMAddress> tableDescriptorToHashTable;
+    swiftVisitor.forEachPointerHashTable(diag, ^(ResolvedValue sectionBase, size_t tableIndex, uint8_t *tableStart, size_t numEntries) {
+        assert(tableIndex < tableInfos.size() && "pointer table slot not reserved during estimation");
+
+        __block lsl::Vector<PointerHashTableBuilderKey> builderKeys(allocator);
+        __block lsl::Vector<PointerHashTableValue>      values(allocator);
+        __block lsl::Vector<uint64_t>                   cacheOffsets(allocator);
+
+        const cache_builder::PointerHashTableOptimizerInfo& tableInfo = tableInfos[tableIndex];
+        builderKeys.reserve(tableInfo.numEntries);
+        values.reserve(tableInfo.numEntries);
+        cacheOffsets.reserve(tableInfo.numPointerKeys);
+        uint64_t* const offsetsBufferStartAddr = cacheOffsets.data();
+
+        const size_t valuesSize = (tableInfo.numEntries * sizeof(*values.data()));
+
+        std::optional<ResolvedValue> ptrRoot = swiftVisitor.forEachPointerHashTableRelativeEntry(diag, tableStart, VMAddress(cacheBaseAddr.rawValue()), ^(size_t index, std::span<uint64_t> cacheOffsetKeys, uint64_t cacheOffsetValue) {
+            assert(!cacheOffsetKeys.empty() && "pointer table entry keys can't be empty");
+
+            size_t currentOffsetsStart = cacheOffsets.size();
+            std::copy(cacheOffsetKeys.begin(), cacheOffsetKeys.end(), std::back_inserter(cacheOffsets));
+            assert(cacheOffsets.data() == offsetsBufferStartAddr && "bad pointer offsets estimate");
+
+            std::span<uint64_t> currentKeys(offsetsBufferStartAddr + currentOffsetsStart, cacheOffsetKeys.size());
+            builderKeys.push_back(PointerHashTableBuilderKey{ currentKeys.data(), (uint32_t)currentKeys.size() });
+
+            PointerHashTableValue& tableValue = values.emplace_back();
+            tableValue.cacheOffset = cacheOffsetValue;
+            tableValue.numOffsets = (uint32_t)currentKeys.size();
+            tableValue.offsetToCacheOffsets = (uint32_t)(currentOffsetsStart*sizeof(uint64_t));
+        });
+        if ( diag.hasError() || !ptrRoot.has_value() )
+            return;
+
+        // sanity check estimates were right
+        assert(builderKeys.size() == values.size() );
+        assert(values.size() == tableInfo.numEntries);
+        assert(cacheOffsets.size() == tableInfo.numPointerKeys);
+
+        // Build the perfect hash table
+        objc::PerfectHash perfectHash;
+        make_perfect(builderKeys, perfectHash);
+        size_t hashTableSize = SwiftHashTable::size(perfectHash);
+
+        size_t cacheOffsetsSize = cacheOffsets.size() * sizeof(*cacheOffsets.data());
+        size_t totalBufferSize = hashTableSize + valuesSize + cacheOffsetsSize;
+        if ( totalBufferSize > tableInfo.chunk->subCacheFileSize.rawValue() ) {
+            diag.error("Swift pointer hash table exceeds buffer size (%lld > %lld)",
+                       (uint64_t)totalBufferSize, tableInfo.chunk->subCacheFileSize.rawValue());
+            return;
+        }
+
+        // now that the size of the hash table is known update the key offsets
+        for ( PointerHashTableValue& value : values )
+            value.offsetToCacheOffsets += hashTableSize + valuesSize;
+
+        // Emit the table
+        uint8_t* hashTableBuffer = tableInfo.chunk->subCacheBuffer;
+        uint8_t* valuesBuffer = hashTableBuffer + hashTableSize;
+        uint8_t* cacheOffsetsBuffer = valuesBuffer + valuesSize;
+
+        ((SwiftHashTable*)hashTableBuffer)->write(perfectHash, builderKeys,
+                                                  values, valuesBuffer);
+        memcpy(valuesBuffer, values.data(), valuesSize);
+        memcpy(cacheOffsetsBuffer, cacheOffsets.data(), cacheOffsetsSize);
+        tableDescriptorToHashTable[ptrRoot->vmAddress().rawValue()] = tableInfo.chunk->cacheVMAddress;
+    });
+
+    // redirect references pointing from the table descriptor to the built tables
+    for ( cache_builder::DylibSegmentChunk& chunk : prespecializedDylib.segments ) {
+        chunk.tracker.forEachFixup(^(void *loc, bool &stop) {
+            CacheVMAddress vmAddr;
+            if ( swiftVisitor.pointerSize == 4 )
+                vmAddr = cache_builder::Fixup::Cache32::getCacheVMAddressFromLocation(cacheBaseAddr, loc);
+            else
+                vmAddr = cache_builder::Fixup::Cache64::getCacheVMAddressFromLocation(cacheBaseAddr, loc);
+
+            if ( auto it = tableDescriptorToHashTable.find(vmAddr.rawValue()); it != tableDescriptorToHashTable.end() ) {
+                if ( swiftVisitor.pointerSize == 4 ) {
+                    chunk.tracker.setRebaseTarget32(loc, (uint32_t)it->second.rawValue());
+                    cache_builder::Fixup::Cache32::setLocation(cacheBaseAddr,
+                                                loc, it->second);
+                } else {
+                    // note: auth pointers to the table descriptors aren't supported
+                    dyld3::MachOFile::PointerMetaData pmd;
+                    chunk.tracker.setRebaseTarget64(loc, it->second.rawValue());
+                    cache_builder::Fixup::Cache64::setLocation(cacheBaseAddr,
+                                                loc, it->second,
+                                                pmd.high8, pmd.diversity,
+                                                pmd.usesAddrDiversity, pmd.key, pmd.authenticated);
+                }
+            }
+        });
+    }
+}
+
 static void emitHeader(const BuilderConfig& config, SwiftProtocolConformanceOptimizer& opt)
 {
     CacheVMAddress cacheBaseAddress = config.layout.cacheBaseAddress;
@@ -807,11 +963,17 @@ static void emitHeader(const BuilderConfig& config, SwiftProtocolConformanceOpti
     VMOffset foreignOffset = opt.foreignTypeConformancesHashTable->cacheVMAddress - cacheBaseAddress;
 
     auto* swiftOptimizationHeader = (SwiftOptimizationHeader*)opt.optsHeaderChunk->subCacheBuffer;
-    swiftOptimizationHeader->version = 1;
+    swiftOptimizationHeader->version = SwiftOptimizationHeader::currentVersion;
     swiftOptimizationHeader->padding = 0;
     swiftOptimizationHeader->typeConformanceHashTableCacheOffset = typeOffset.rawValue();
     swiftOptimizationHeader->metadataConformanceHashTableCacheOffset = metadataOffset.rawValue();
     swiftOptimizationHeader->foreignTypeConformanceHashTableCacheOffset = foreignOffset.rawValue();
+    swiftOptimizationHeader->prespecializationDataCacheOffset = opt.prespecializedDataOffset.rawValue();
+
+    size_t maxNumTableOffsets = std::min(SwiftOptimizationHeader::MAX_PRESPECIALIZED_METADATA_TABLES,
+                                      opt.prespecializedMetadataHashTables.size());
+    for ( size_t i = 0; i < maxNumTableOffsets; ++i )
+        swiftOptimizationHeader->prespecializedMetadataHashTableCacheOffsets[i] = (opt.prespecializedMetadataHashTables[i].chunk->cacheVMAddress - cacheBaseAddress).rawValue();
 }
 
 static void checkHashTables()
@@ -917,15 +1079,81 @@ static void checkHashTables()
 #endif
 }
 
+static void checkPointerHashTables(const SwiftVisitor& visitor, std::span<const cache_builder::PointerHashTableOptimizerInfo> pointerHashTables, const BuilderConfig& config)
+{
+    __block Diagnostics diag;
+    __block size_t totalTables = 0;
+    __block size_t totalEntries = 0;
+    __block size_t numMismatches = 0;
+    __block size_t maxNumKeyPointers = 0;
+    visitor.forEachPointerHashTable(diag, ^(ResolvedValue sectionBase, size_t tableIndex, uint8_t *tableStart, size_t numEntries) {
+        assert(pointerHashTables.size() > tableIndex);
+        const SwiftHashTable* hashTable = (const SwiftHashTable*)pointerHashTables[tableIndex].chunk->subCacheBuffer;
+        ++totalTables;
+
+        visitor.forEachPointerHashTableRelativeEntry(diag, tableStart, VMAddress(config.layout.cacheBaseAddress.rawValue()), ^(size_t index, std::span<uint64_t> cacheOffsetKeys, uint64_t cacheOffsetValue) {
+            if ( cacheOffsetKeys.size() > PointerHashTableKeyMaxPointers ) {
+                config.log.log("pointer hash table key exceeded the maximum number of pointers - %lu, maximum is: %lu\n", cacheOffsetKeys.size(), PointerHashTableKeyMaxPointers);
+                if ( config.log.printDebug )
+                    assert(false && "pointer hash table key too large");
+            }
+            maxNumKeyPointers = std::max(maxNumKeyPointers, cacheOffsetKeys.size());
+
+            PointerHashTableBuilderKey key;
+            key.cacheOffsets = cacheOffsetKeys.data();
+            key.numOffsets = (uint32_t)cacheOffsetKeys.size();
+            const PointerHashTableValue* value = hashTable->getValue<PointerHashTableBuilderKey, PointerHashTableValue>(key, nullptr);
+            ++totalEntries;
+            if ( !value || value->cacheOffset != cacheOffsetValue ) {
+                ++numMismatches;
+                if ( config.log.printDebug ) {
+                    config.log.log("value missmatch in table: %lu, index: %lu - 0x%llx != 0x%llx\n", tableIndex, index, value ? value->cacheOffset : 0, cacheOffsetValue);
+                }
+            }
+        });
+    });
+    if ( numMismatches )
+        assert(false && "malformed pointer hash tables");
+    if ( config.log.printDebug ) {
+        config.log.log("built %lu pointer hash tables with a total of %lu entries\n", totalTables, totalEntries);
+        config.log.log(" max number of pointers in a key: %lu\n", maxNumKeyPointers);
+    }
+}
+
+static VMOffset findPrespecializedDataOffset(const BuilderConfig& config, Diagnostics& diag, const CacheDylib* prespecializedDylib)
+{
+    if ( !prespecializedDylib )
+        return VMOffset(0ull);
+
+    std::optional<CacheDylib::BindTargetAndName> bindTarget;
+    bindTarget = prespecializedDylib->hasExportedSymbol(diag, "__swift_prespecializationsData", CacheDylib::SearchMode::onlySelf);
+
+    if ( diag.hasError() )
+        return VMOffset(0ull);
+
+    if ( !bindTarget.has_value() ) {
+        diag.error("__swift_prespecializationsData symbol not found in %s", prespecializedDylib->inputMF->installName());
+        return VMOffset(0ull);
+    }
+
+    assert(bindTarget->first.kind == CacheDylib::BindTarget::Kind::inputImage);
+
+    CacheDylib::BindTarget::InputImage inputImage   = bindTarget->first.inputImage;
+    InputDylibVMAddress    targetInputVMAddr        = inputImage.targetDylib->inputLoadAddress + inputImage.targetRuntimeOffset;
+    CacheVMAddress         targetCacheVMAddr        = inputImage.targetDylib->adjustor->adjustVMAddr(targetInputVMAddr);
+    return targetCacheVMAddr - config.layout.cacheBaseAddress;
+}
+
 void buildSwiftHashTables(const BuilderConfig& config,
                           Diagnostics& diag, const std::span<CacheDylib*> cacheDylibs,
                           std::span<metadata_visitor::Segment> extraRegions,
                           const objc::ClassHashTable* objcClassOpt,
                           const void* headerInfoRO, const void* headerInfoRW,
                           CacheVMAddress headerInfoROUnslidVMAddr,
+                          cache_builder::CacheDylib* prespecializedDylib,
                           SwiftProtocolConformanceOptimizer& swiftProtocolConformanceOptimizer)
 {
-    lsl::EphemeralAllocator allocator;
+    STACK_ALLOCATOR(allocator, 0);
     lsl::Vector<SwiftTypeProtocolConformanceLocation> foundTypeProtocolConformances(allocator);
     lsl::Vector<SwiftMetadataProtocolConformanceLocation> foundMetadataProtocolConformances(allocator);
     lsl::Vector<SwiftForeignTypeProtocolConformanceLocation> foundForeignTypeProtocolConformances(allocator);
@@ -967,8 +1195,24 @@ void buildSwiftHashTables(const BuilderConfig& config,
     if ( diag.hasError() )
         return;
 
+    if ( prespecializedDylib && !swiftProtocolConformanceOptimizer.prespecializedMetadataHashTables.empty() ) {
+        emitPrespecializedMetadataHashTables(diag, allocator, config.layout.cacheBaseAddress,
+                                            swiftProtocolConformanceOptimizer.prespecializedMetadataHashTables,
+                                            *prespecializedDylib,
+                                            prespecializedDylib->makeCacheSwiftVisitor(config, extraRegions));
+        if ( diag.hasError() )
+            return;
+    }
+
+    swiftProtocolConformanceOptimizer.prespecializedDataOffset =
+        findPrespecializedDataOffset(config, diag, prespecializedDylib);
+    if ( diag.hasError() )
+        return;
+
     // Make sure the hash tables work
     checkHashTables();
+    if ( prespecializedDylib )
+        checkPointerHashTables(prespecializedDylib->makeCacheSwiftVisitor(config, extraRegions), swiftProtocolConformanceOptimizer.prespecializedMetadataHashTables, config);
 
     // Emit the header to point to everything else
     emitHeader(config, swiftProtocolConformanceOptimizer);

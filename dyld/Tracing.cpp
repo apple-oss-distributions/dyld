@@ -45,27 +45,17 @@ os_fault_with_payload(uint32_t reason_namespace, uint64_t reason_code,
                       uint64_t reason_flags) __attribute__((cold));
 
 #if BUILDING_DYLD
-extern const dyld3::MachOAnalyzer __dso_handle;
+extern struct dyld3::MachOAnalyzer __dso_handle;
 #endif
 
 namespace dyld3 {
 
+#if BUILDING_DYLD
 static
 void kdebug_trace_dyld_region(const uint32_t code, cpu_type_t cputype, cpu_subtype_t cpuSubtype, const char* imagePath,
                              const uuid_t* uuid_bytes, const fsobj_id_t fsobjid, const fsid_t fsid, const void* load_addr)
 {
-#if BUILDING_DYLD
     uint64_t id = kdebug_trace_string(KDBG_CODE(DBG_DYLD, DBG_DYLD_UUID, code), 0, imagePath);
-#if __ARM_ARCH_7K__
-    uint32_t *uuid = (uint32_t *)uuid_bytes;
-    kdebug_trace(KDBG_CODE(DBG_DYLD, DBG_DYLD_UUID, code + 2), uuid[0],
-                 uuid[1], uuid[2], uuid[3]);
-    kdebug_trace(KDBG_CODE(DBG_DYLD, DBG_DYLD_UUID, code + 3),
-                 (uint32_t)load_addr, fsid.val[0], fsid.val[1],
-                 fsobjid.fid_objno);
-    kdebug_trace(KDBG_CODE(DBG_DYLD, DBG_DYLD_UUID, code + 4),
-                 fsobjid.fid_generation, id, cputype, cpuSubtype);
-#else /* __ARM_ARCH_7K__ */
     uint64_t *uuid = (uint64_t *)uuid_bytes;
     kdebug_trace(KDBG_CODE(DBG_DYLD, DBG_DYLD_UUID, code), uuid[0],
                  uuid[1], (uint64_t)load_addr,
@@ -74,20 +64,23 @@ void kdebug_trace_dyld_region(const uint32_t code, cpu_type_t cputype, cpu_subty
                  (uint64_t)fsobjid.fid_objno |
                  ((uint64_t)fsobjid.fid_generation << 32),
                  id, ((uint64_t)cputype << 32) | cpuSubtype, 0);
-#endif /* !__ARM_ARCH_7K__ */
     kdebug_trace_string(KDBG_CODE(DBG_DYLD, DBG_DYLD_UUID, code), id, nullptr);
-#endif // BUILDING_DYLD
 }
+#endif // BUILDING_DYLD
 
 VIS_HIDDEN
 void kdebug_trace_dyld_image(const uint32_t code,
-                       const char* imagePath,
-                       const uuid_t* uuid_bytes,
-                       const fsobj_id_t fsobjid,
-                       const fsid_t fsid,
-                       const mach_header* load_addr)
+                             const char* imagePath,
+                             const uuid_t* uuid_bytes,
+                             const fsobj_id_t fsobjid,
+                             const fsid_t fsid,
+                             const void* load_addr,
+                             uint32_t cpusubtype)
 {
-    kdebug_trace_dyld_region(code, load_addr->cputype, load_addr->cpusubtype, imagePath, uuid_bytes, fsobjid, fsid, (const void*)load_addr);
+#if BUILDING_DYLD
+    // note, assumes image cputype must match dyld
+    kdebug_trace_dyld_region(code, __dso_handle.cputype, cpusubtype, imagePath, uuid_bytes, fsobjid, fsid, (const void*)load_addr);
+#endif
 }
 
 void kdebug_trace_dyld_cache(uint64_t rawFSObjID, uint64_t rawFSID, uint64_t sharedCacheBaseAddress,

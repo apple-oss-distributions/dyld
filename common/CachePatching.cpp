@@ -746,6 +746,9 @@ void PatchTableBuilder::mergePatchInfos(const std::span<CacheDylib>& cacheDylibs
                                         const std::span<PatchInfo>& patchInfos)
 {
     for ( const CacheDylib& cacheDylib : cacheDylibs ) {
+        if ( !cacheDylib.needsPatchTable )
+            continue;
+
         const PatchInfo& dylibPatchInfo = patchInfos[cacheDylib.cacheIndex];
         assert(cacheDylib.bindTargets.size() == dylibPatchInfo.bindUses.size());
         assert(cacheDylib.bindTargets.size() == dylibPatchInfo.bindTargetNames.size());
@@ -764,6 +767,7 @@ void PatchTableBuilder::mergePatchInfos(const std::span<CacheDylib>& cacheDylibs
             assert(bindTarget.kind == CacheDylib::BindTarget::Kind::cacheImage);
             const CacheDylib::BindTarget::CacheImage& cacheImageTarget = bindTarget.cacheImage;
             CacheVMAddress                            bindTargetVMAddr = cacheImageTarget.targetDylib->cacheLoadAddress + cacheImageTarget.targetRuntimeOffset;
+            assert(cacheImageTarget.targetDylib->needsPatchTable && "target dylibs must be patchable");
 
             // Find the target dylib.  We need to add this dylib as a client of the target
             DylibClients& targetDylibClients = dylibClients[cacheImageTarget.targetDylib->cacheIndex];
@@ -787,8 +791,20 @@ void PatchTableBuilder::mergePatchInfos(const std::span<CacheDylib>& cacheDylibs
         }
 
         // GOTs
-        for ( bool auth : { false, true } ) {
-            const auto& bindGOTUses = auth ? dylibPatchInfo.bindAuthGOTUses : dylibPatchInfo.bindGOTUses;
+        for ( UniquedGOTKind sectionKind : { UniquedGOTKind::regular, UniquedGOTKind::authGot, UniquedGOTKind::authPtr } ) {
+            std::span<const std::vector<PatchInfo::GOTInfo>> bindGOTUses;
+            switch ( sectionKind ) {
+                case UniquedGOTKind::regular:
+                    bindGOTUses = dylibPatchInfo.bindGOTUses;
+                    break;
+                case UniquedGOTKind::authGot:
+                    bindGOTUses = dylibPatchInfo.bindAuthGOTUses;
+                    break;
+                case UniquedGOTKind::authPtr:
+                    bindGOTUses = dylibPatchInfo.bindAuthPtrUses;
+                    break;
+            }
+
             assert(cacheDylib.bindTargets.size() == bindGOTUses.size());
             for ( uint32_t bindIndex = 0; bindIndex != cacheDylib.bindTargets.size(); ++bindIndex ) {
                 const CacheDylib::BindTarget& bindTarget = cacheDylib.bindTargets[bindIndex];
@@ -952,6 +968,19 @@ void PatchTableBuilder::calculatePatchTable(const std::span<CacheDylib>& cacheDy
         patchImage.patchClientsCount      = 0;
         patchImage.patchExportsStartIndex = (uint32_t)imageExports.size();
         patchImage.patchExportsCount      = (uint32_t)dylibClientData.getUsedExports().size();
+
+        if ( !cacheDylibs[dylibIndex].needsPatchTable ) {
+            assert(patchImage.patchExportsCount == 0);
+            assert(dylibClientData.clients.empty());
+            patchImages.push_back(patchImage);
+
+            // got clients entry needed even if unused
+            dyld_cache_image_got_clients_v3 gotClient;
+            gotClient.patchExportsStartIndex   = (uint32_t)gotClientExports.size();
+            gotClient.patchExportsCount        = 0;
+            gotClients.push_back(gotClient);
+            continue;
+        }
 
         // Add regular clients
         for ( const DylibClient& clientDylib : dylibClientData.clients ) {
@@ -1181,19 +1210,28 @@ Error PatchTableBuilder::write(uint8_t* buffer, uint64_t bufferSize,
 
     // (dylib, client) patch table
     ::memcpy(buffer + patchInfoAddr - patchInfoAddr, &patchInfo, sizeof(dyld_cache_patch_info_v3));
-    ::memcpy(buffer + patchInfo.patchTableArrayAddr - patchInfoAddr, &patchImages[0], sizeof(patchImages[0]) * patchImages.size());
-    ::memcpy(buffer + patchInfo.patchImageExportsArrayAddr - patchInfoAddr, &imageExports[0], sizeof(imageExports[0]) * imageExports.size());
-    ::memcpy(buffer + patchInfo.patchClientsArrayAddr - patchInfoAddr, &patchClients[0], sizeof(patchClients[0]) * patchClients.size());
-    ::memcpy(buffer + patchInfo.patchClientExportsArrayAddr - patchInfoAddr, &clientExports[0], sizeof(clientExports[0]) * clientExports.size());
-    ::memcpy(buffer + patchInfo.patchLocationArrayAddr - patchInfoAddr, &patchLocations[0], sizeof(patchLocations[0]) * patchLocations.size());
+    if ( !patchImages.empty() )
+        ::memcpy(buffer + patchInfo.patchTableArrayAddr - patchInfoAddr, &patchImages[0], sizeof(patchImages[0]) * patchImages.size());
+    if ( !imageExports.empty() )
+        ::memcpy(buffer + patchInfo.patchImageExportsArrayAddr - patchInfoAddr, &imageExports[0], sizeof(imageExports[0]) * imageExports.size());
+    if ( !patchClients.empty() )
+        ::memcpy(buffer + patchInfo.patchClientsArrayAddr - patchInfoAddr, &patchClients[0], sizeof(patchClients[0]) * patchClients.size());
+    if ( !clientExports.empty() )
+        ::memcpy(buffer + patchInfo.patchClientExportsArrayAddr - patchInfoAddr, &clientExports[0], sizeof(clientExports[0]) * clientExports.size());
+    if ( !patchLocations.empty() )
+        ::memcpy(buffer + patchInfo.patchLocationArrayAddr - patchInfoAddr, &patchLocations[0], sizeof(patchLocations[0]) * patchLocations.size());
 
     // GOT patch table
-    ::memcpy(buffer + patchInfo.gotClientsArrayAddr - patchInfoAddr, &gotClients[0], sizeof(gotClients[0]) * gotClients.size());
-    ::memcpy(buffer + patchInfo.gotClientExportsArrayAddr - patchInfoAddr, &gotClientExports[0], sizeof(gotClientExports[0]) * gotClientExports.size());
-    ::memcpy(buffer + patchInfo.gotLocationArrayAddr - patchInfoAddr, &gotPatchLocations[0], sizeof(gotPatchLocations[0]) * gotPatchLocations.size());
+    if ( !gotClients.empty() )
+        ::memcpy(buffer + patchInfo.gotClientsArrayAddr - patchInfoAddr, &gotClients[0], sizeof(gotClients[0]) * gotClients.size());
+    if ( !gotClientExports.empty() )
+        ::memcpy(buffer + patchInfo.gotClientExportsArrayAddr - patchInfoAddr, &gotClientExports[0], sizeof(gotClientExports[0]) * gotClientExports.size());
+    if ( !gotPatchLocations.empty() )
+        ::memcpy(buffer + patchInfo.gotLocationArrayAddr - patchInfoAddr, &gotPatchLocations[0], sizeof(gotPatchLocations[0]) * gotPatchLocations.size());
 
     // Shared export names
-    ::memcpy(buffer + patchInfo.patchExportNamesAddr - patchInfoAddr, &patchExportNames[0], patchExportNames.size());
+    if ( !patchExportNames.empty() )
+        ::memcpy(buffer + patchInfo.patchExportNamesAddr - patchInfoAddr, &patchExportNames[0], patchExportNames.size());
     
     return Error();
 }

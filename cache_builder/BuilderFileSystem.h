@@ -64,6 +64,7 @@ struct FileInfo {
     FileFlags       flags;
     uint64_t        mtime;
     uint64_t        inode;
+    std::string     projectName;
 };
 
 class FileSystemMRM : public dyld3::closure::FileSystem
@@ -86,12 +87,13 @@ public:
 
     // MRM file APIs
     bool addFile(const char* path, uint8_t* data, uint64_t size, Diagnostics& diag, FileFlags fileFlags,
-                 uint64_t inode, uint64_t modTime);
+                 uint64_t inode, uint64_t modTime, const char* projectName);
 
     bool addSymlink(const char* fromPath, const char* toPath, Diagnostics& diag);
 
     void forEachFileInfo(std::function<void(const char* path, const void* buffer, size_t bufferSize,
-                                            FileFlags fileFlags, uint64_t inode, uint64_t modTime)> lambda);
+                                            FileFlags fileFlags, uint64_t inode, uint64_t modTime,
+                                            const char* projectName)> lambda);
 
     size_t fileCount() const;
 

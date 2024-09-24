@@ -140,9 +140,10 @@ public:
     uint32_t        localsCount() const  { return _localsCount; }
     uint32_t        globalsCount() const { return _globalsCount; }
     uint32_t        undefsCount() const  { return _undefsCount; }
-    uint32_t        totalCount() const   { return _localsCount+_globalsCount+_undefsCount; }
+    uint32_t        totalCount() const   { return _nlistCount; }
     uint32_t        nlistSize() const    { return _nlist32 ? (totalCount() * sizeof(struct nlist)) : (totalCount() * sizeof(struct nlist_64)); }
     uint32_t        undefsStartIndex() const;
+    bool            symbolAtIndex(uint32_t symbolIndex, Symbol& symbol) const;
 
 private:
     int             libOrdinalFromDesc(uint16_t n_desc) const;
@@ -229,7 +230,7 @@ private:
  * @abstract
  *      A position and read-only blob, encapsulating debug file info.
  */
-struct DebugNoteFileInfo
+struct VIS_HIDDEN DebugNoteFileInfo
 {
 public:
                                     DebugNoteFileInfo(const DebugNoteFileInfo&) = delete;

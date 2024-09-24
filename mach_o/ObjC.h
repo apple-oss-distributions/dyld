@@ -239,6 +239,24 @@ struct VIS_HIDDEN ObjCPropertyList
     uint32_t getPropertyCount() const;
 };
 
+/*!
+ * @class ObjCImageInfo
+ *
+ * @abstract
+ *      Class to encapsulate accessing (and one day building) objc image info
+ */
+struct VIS_HIDDEN ObjCImageInfo
+{
+    // struct objc_image_info  {
+    //     uint32_t    version;
+    //     uint32_t    flags;
+    // };
+
+    // FIXME: Get all the other values and perhaps make these an enum
+    static constexpr uint64_t OBJC_IMAGE_SIGNED_CLASS_RO               = (1<<4);
+    static constexpr uint64_t OBJC_IMAGE_HAS_CATEGORY_CLASS_PROPERTIES = (1<<6);
+};
+
 } // namespace mach_o
 
 #endif /* mach_o_ObjC_h */

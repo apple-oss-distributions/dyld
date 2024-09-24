@@ -45,7 +45,9 @@
   #include <subsystem.h>
 #endif // BUILDING_DYLD && !TARGET_OS_EXCLAVEKIT
 
+#if BUILDING_NM || BUILDING_DYLDINFO
 #include "DyldSharedCache.h"
+#endif
 
 #include "Misc.h"
 #include "SupportedArchs.h"
@@ -212,7 +214,8 @@ void forSelectedSliceInPaths(std::span<const char*> paths, std::span<const char*
                 });
             }
             else if ( const Header* mh = Header::isMachO(buffer) ) {
-                handler(path, (Header*)buffer.data(), buffer.size());
+                if ( archFilter.empty() || inStringVector(archFilter, mh->archName()) )
+                    handler(path, (Header*)buffer.data(), buffer.size());
             }
             else if ( std::optional<Archive> ar = Archive::isArchive(buffer) ) {
                 handleArchive(path, *ar);
@@ -270,6 +273,24 @@ void forSelectedSliceInPaths(std::span<const char*> paths, std::span<const char*
     }
 }
 #endif
+
+Error forEachHeader(std::span<const uint8_t> buffer, std::string_view path,
+                    void (^callback)(const Header* sliceHeader, size_t sliceLength, bool& stop)) {
+    if ( const mach_o::Universal* universal = mach_o::Universal::isUniversal(buffer) ) {
+        if ( mach_o::Error err = universal->valid(buffer.size()) )
+            return Error("error in file '%s': %s", path.data(), err.message());
+        universal->forEachSlice(^(mach_o::Universal::Slice slice, bool &stop) {
+            if ( const mach_o::Header* mh = mach_o::Header::isMachO(slice.buffer) ) {
+                callback(mh, slice.buffer.size(), stop);
+            }
+        });
+    } else if ( const mach_o::Header* mh = mach_o::Header::isMachO(buffer) ) {
+        bool stop = false;
+        callback(mh, buffer.size(), stop);
+    }
+
+    return Error::none();
+}
 
 
 } // namespace mach_o

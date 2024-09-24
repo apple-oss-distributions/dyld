@@ -43,7 +43,7 @@ using dyld4::gDyld;
 using lsl::Allocator;
 using lsl::UniquePtr;
 using dyld4::FileManager;
-using dyld4::EphemeralAllocator;
+using dyld4::Allocator;
 using dyld4::Atlas::SharedCache;
 using dyld4::Atlas::Image;
 using dyld4::Atlas::ProcessSnapshot;
@@ -120,7 +120,7 @@ dyld_process_snapshot_t dyld_process_snapshot_create_from_data(void* buffer, siz
     // Make sure no one uses the reserved parameters
     assert(reserved1 == nullptr);
     assert(reserved2 == 0);
-    EphemeralAllocator ephemeralAllocator;
+    STACK_ALLOCATOR(ephemeralAllocator, 0);
     auto bytes = std::span((std::byte*)buffer, size);
     return (dyld_process_snapshot_t)Allocator::defaultAllocator()
                                 .makeUnique<ProcessSnapshot>(ephemeralAllocator, defaultFileManager(), false, bytes).release();
@@ -197,21 +197,21 @@ void dyld_shared_cache_for_each_image(dyld_shared_cache_t cache, void (^block)(d
 }
 
 void dyld_for_each_installed_shared_cache_with_system_path(const char* root_path, void (^block)(dyld_shared_cache_t atlas)) {
-    EphemeralAllocator ephemeralAllocator;
+    STACK_ALLOCATOR(ephemeralAllocator, 0);
     dyld4::Atlas::SharedCache::forEachInstalledCacheWithSystemPath(ephemeralAllocator, defaultFileManager(), root_path, ^(dyld4::Atlas::SharedCache* cache){
         block((dyld_shared_cache_t)cache);
     });
 }
 
 void dyld_for_each_installed_shared_cache(void (^block)(dyld_shared_cache_t cache)) {
-    EphemeralAllocator ephemeralAllocator;
+    STACK_ALLOCATOR(ephemeralAllocator, 0);
     dyld4::Atlas::SharedCache::forEachInstalledCacheWithSystemPath(ephemeralAllocator, defaultFileManager(), "/", ^(dyld4::Atlas::SharedCache* cache){
         block((dyld_shared_cache_t)cache);
     });
 }
 
 bool dyld_shared_cache_for_file(const char* filePath, void (^block)(dyld_shared_cache_t cache)) {
-    EphemeralAllocator ephemeralAllocator;
+    STACK_ALLOCATOR(ephemeralAllocator, 0);
     auto cacheFile = defaultFileManager().fileRecordForPath(ephemeralAllocator, filePath);
     auto cache = SharedCache::createForFileRecord(ephemeralAllocator, std::move(cacheFile));
     if (cache) {

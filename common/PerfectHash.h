@@ -74,9 +74,6 @@ typedef std::unordered_multimap<const char *, std::pair<uint64_t, uint16_t>, has
 // class name => (class vmaddress, dylib objc index)
 typedef std::unordered_multimap<const char *, std::pair<uint64_t, uint16_t>, hashstr, eqstr> class_map;
 
-
-#endif // #if BUILDING_CACHE_BUILDER
-
 struct VIS_HIDDEN PerfectHash {
     uint32_t capacity   = 0;
     uint32_t occupied   = 0;
@@ -90,15 +87,10 @@ struct VIS_HIDDEN PerfectHash {
     /* representation of a key */
     struct key
     {
-#if BUILDING_CACHE_BUILDER || BUILDING_UNIT_TESTS || BUILDING_CACHE_BUILDER_UNIT_TESTS
         uint8_t        *name1_k;        /* the actual key */
         uint32_t         len1_k;        /* the length of the actual key */
         uint8_t        *name2_k;        /* the actual key */
         uint32_t         len2_k;        /* the length of the actual key */
-#else
-        uint8_t        *name_k;         /* the actual key */
-        uint32_t         len_k;         /* the length of the actual key */
-#endif
         uint32_t         hash_k;        /* the initial hash value for this key */
         /* beyond this point is mapping-dependent */
         uint32_t         a_k;           /* a, of the key maps to (a,b) */
@@ -106,16 +98,14 @@ struct VIS_HIDDEN PerfectHash {
         struct key *nextb_k;            /* next key with this b */
     };
 
+    // For the shared cache builder swift maps
     static void make_perfect(dyld3::OverflowSafeArray<key>& keys, PerfectHash& result);
 
-    // For dyld at runtime to create perfect hash tables in the PrebuiltObjC
-    static void make_perfect(const dyld3::OverflowSafeArray<const char*>& strings, objc::PerfectHash& phash);
-
-#if BUILDING_CACHE_BUILDER || BUILDING_UNIT_TESTS || BUILDING_CACHE_BUILDER_UNIT_TESTS
     // For the shared cache builder selector/class/protocol maps
     static void make_perfect(const std::vector<ObjCString>& strings, objc::PerfectHash& phash);
-#endif
 };
+
+#endif // BUILDING_CACHE_BUILDER || BUILDING_UNIT_TESTS || BUILDING_CACHE_BUILDER_UNIT_TESTS
 
 } // namespace objc
 

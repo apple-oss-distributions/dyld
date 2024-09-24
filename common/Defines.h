@@ -39,6 +39,13 @@
 #define NO_DEBUG        [[gnu::nodebug]]
 #define ALWAYS_INLINE   __attribute__((always_inline))
 
+#if __x86_64__
+    #define DYLD_PAGE_SIZE (4096)
+#else
+    #define DYLD_PAGE_SIZE (16384)
+#endif
+#define DYLD_PAGE_MASK  (DYLD_PAGE_SIZE-1)
+
 #define SUPPORT_IMAGE_UNLOADING (BUILDING_DYLD && !TARGET_OS_EXCLAVEKIT)
 
 // Rosetta support is defined by whether or not a platform has librosetta_trap
@@ -125,14 +132,20 @@
   #define CRSetCrashLogMessage2(x)
 #endif
 
+#define ALLOCATOR_USE_SYSTEM_MALLOC (BUILDING_LIBDYLD && !TARGET_OS_EXCLAVEKIT && !TARGET_OS_DRIVERKIT)
+
+#define ALLOCATOR_LOGGING_ENABLED (0)
+#define ALLOCATOR_MAKE_TRACE (0)
+
+
 #if defined(DEBUG) && DEBUG
 #define contract assert
-#define PERSISTENT_ALLOCATOR_VALIDATION (1)
-#define BTREE_VALIDATION                (1)
+#define ALLOCATOR_VALIDATION    (1)
+#define BTREE_VALIDATION        (1)
 #else
 #define contract __builtin_assume
-#define PERSISTENT_ALLOCATOR_VALIDATION (0)
-#define BTREE_VALIDATION                (0)
+#define ALLOCATOR_VALIDATION    (0)
+#define BTREE_VALIDATION        (0)
 #endif
 
 
@@ -146,5 +159,12 @@
    #define round_page(x)   trunc_page((x) + (PAGE_SIZE - 1))
    #define bzero(p, s) memset(p, 0, s)
 #endif
+
+// INTERNAL_BUILD is set on command line building ld or dyld_info for OS toolchains
+#ifndef INTERNAL_BUILD
+    #define INTERNAL_BUILD DEBUG
+#endif
+
+
 
 #endif /* DYLD_DEFINES_H */

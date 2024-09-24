@@ -54,19 +54,13 @@ class DyldSharedCache;
 //   1) in dyld cache
 //   2) in third party launch closure
 
-
-
 namespace dyld4 {
 
 struct ObjCBinaryInfo;
 struct PrebuiltLoaderSet;
 class ProcessConfig;
-class ObjCSelectorOpt;
-class ObjCDataStructOpt;
 struct PrebuiltObjC;
 struct PrebuiltSwift;
-
-
 
 
 // Used to build must-be-missing paths during launch
@@ -100,12 +94,18 @@ public:
         // counts and offsets
         uint64_t    absValue() const;
 
+        // This is a hack for the Swift hash tables.  As with absValue(), the cache builder can't
+        // use value(), and yet we need to be able to hash BindTargetRef to put them in the tables
+        uint64_t    absValueOrOffset() const;
+
         // To support ObjC, which wants to create pointers to values without symbols,
         // we need to allow creating references to arbitrary locations in the binaries
         static BindTargetRef makeAbsolute(uint64_t value);
     private:
         // To support the make* functions, we allow private constructors for values
         BindTargetRef(uint64_t absoluteValue);
+        uint64_t unpackAbsoluteValue() const;
+
 
         struct LoaderAndOffset {
             uint64_t    loaderRef   : 16,
@@ -114,7 +114,8 @@ public:
                         kind        :  1;
         };
         struct Absolute {
-            uint64_t    value       : 63,
+            uint64_t    high8       :  8,
+                        low55       : 55,   // signed
                         kind        :  1;
         };
         LoaderAndOffset _regular;
@@ -169,17 +170,18 @@ public:
     //
 
     // these are the "virtual" methods that override Loader
-    const dyld3::MachOFile*     mf(RuntimeState& state) const;
+    const dyld3::MachOFile*     mf(const RuntimeState& state) const;
 #if SUPPORT_VM_LAYOUT
-    const MachOLoaded*          loadAddress(RuntimeState& state) const;
+    const MachOLoaded*          loadAddress(const RuntimeState& state) const;
 #endif
-    const char*                 path() const;
+    const char*                 path(const RuntimeState& state) const;
+    const char*                 installName(const RuntimeState& state) const;
     uint32_t                    flags() const;
     bool                        contains(RuntimeState& state, const void* addr, const void** segAddr, uint64_t* segSize, uint8_t* segPerms) const;
-    bool                        matchesPath(const char* path) const;
+    bool                        matchesPath(const RuntimeState& state, const char* path) const;
     FileID                      fileID(const RuntimeState& state) const;
     uint32_t                    dependentCount() const;
-    Loader*                     dependent(const RuntimeState& state, uint32_t depIndex, DependentDylibAttributes* kind=nullptr) const;
+    Loader*                     dependent(const RuntimeState& state, uint32_t depIndex, LinkedDylibAttributes* kind=nullptr) const;
     bool                        getExportsTrie(uint64_t& runtimeOffset, uint32_t& size) const;
     bool                        hiddenFromFlat(bool forceGlobal) const;
     bool                        representsCachedDylibIndex(uint16_t dylibIndex) const;
@@ -187,7 +189,8 @@ public:
 #if SUPPORT_IMAGE_UNLOADING
     void                        unmap(RuntimeState& state, bool force=false) const;
 #endif
-    void                        applyFixups(Diagnostics&, RuntimeState& state, DyldCacheDataConstLazyScopedWriter&, bool allowLazyBinds) const;
+    void                        applyFixups(Diagnostics&, RuntimeState& state, DyldCacheDataConstLazyScopedWriter&, bool allowLazyBinds,
+                                            lsl::Vector<PseudoDylibSymbolToMaterialize>* materializingSymbols) const;
     bool                        overridesDylibInCache(const DylibPatch*& patchTable, uint16_t& cacheDylibOverriddenIndex) const;
     bool                        dyldDoesObjCFixups() const;
     const SectionLocations*     getSectionLocations() const;
@@ -205,6 +208,7 @@ public:
     bool                        recordedCdHashIs(const uint8_t cdHash[20]) const;
     bool                        isValid(const RuntimeState& state) const;
     bool                        isInitialized(const RuntimeState& state) const;
+    void                        setFixedUp(const RuntimeState& state) const;
 
 #if BUILDING_CACHE_BUILDER || BUILDING_CACHE_BUILDER_UNIT_TESTS
     void                        withCDHash(void (^callback)(const uint8_t cdHash[20])) const;
@@ -213,7 +217,7 @@ public:
 #if SUPPORT_PREBUILTLOADERS || BUILDING_UNIT_TESTS || BUILDING_CACHE_BUILDER_UNIT_TESTS
     // creating PrebuiltLoaders
     static void                 serialize(Diagnostics& diag, RuntimeState& state, const JustInTimeLoader& jitLoader,
-                                          LoaderRef buildRef, CacheWeakDefOverride patcher, const PrebuiltObjC& prebuiltObjC,
+                                          LoaderRef buildRef, CacheWeakDefOverride patcher, PrebuiltObjC& prebuiltObjC,
                                           const PrebuiltSwift& prebuiltSwift, BumpAllocator& allocator);
 #endif // SUPPORT_PREBUILTLOADERS || BUILDING_UNIT_TESTS || BUILDING_CACHE_BUILDER_UNIT_TESTS
 
@@ -243,7 +247,7 @@ private:
     void                        printObjCFixups(RuntimeState& state, FILE* out) const;
     void                        invalidateInIsolation(const RuntimeState& state) const;
     void                        invalidateShallow(const RuntimeState& state) const;
-    void                        recursiveMarkBeingValidated(const RuntimeState& state) const;
+    void                        recursiveMarkBeingValidated(const RuntimeState& state, bool sharedCacheLoadersAreAlwaysValid) const;
 };
 
 
@@ -259,16 +263,16 @@ struct PrebuiltLoaderSet
     size_t                  size() const { return length; }
     size_t                  loaderCount() const { return loadersArrayCount; }
     void                    print(RuntimeState& state, FILE*, bool printComments) const;
-    const PrebuiltLoader*   findLoader(const char* path) const;
+    const PrebuiltLoader*   findLoader(const RuntimeState& state, const char* path) const;
     const PrebuiltLoader*   atIndex(uint16_t) const;
-    bool                    findIndex(const char* path, uint16_t& index) const;
+    bool                    findIndex(const RuntimeState& state, const char* path, uint16_t& index) const;
     bool                    hasCacheUUID(uint8_t uuid[20]) const;
-    const ObjCSelectorOpt*    objcSelectorOpt() const;
-    const ObjCDataStructOpt*  objcClassOpt() const;
-    const ObjCDataStructOpt*  objcProtocolOpt() const;
-    const uint64_t*           swiftTypeProtocolTable() const;
-    const uint64_t*           swiftMetadataProtocolTable() const;
-    const uint64_t*           swiftForeignTypeProtocolTable() const;
+    const void*             objcSelectorMap() const;
+    const void*             objcClassMap() const;
+    const void*             objcProtocolMap() const;
+    const uint64_t*         swiftTypeProtocolTable() const;
+    const uint64_t*         swiftMetadataProtocolTable() const;
+    const uint64_t*         swiftForeignTypeProtocolTable() const;
     bool                    hasOptimizedSwift() const;
     void                    logDuplicateObjCClasses(RuntimeState& state) const;
     void                    save() const;
@@ -304,7 +308,7 @@ private:
     uint32_t    objcSelectorHashTableOffset;
     uint32_t    objcClassHashTableOffset;
     uint32_t    objcProtocolHashTableOffset;
-    uint32_t    reserved;
+    uint32_t    objcFlags;
     uint64_t    objcProtocolClassCacheOffset;
     // Swift prebuilt data
     uint32_t    swiftTypeConformanceTableOffset;
@@ -320,6 +324,11 @@ private:
     void                 forEachMustBeMissingPath(void (^)(const char* path, bool& stop)) const;
 
     static const uint32_t kMagic = 'sp4d';
+
+    enum ObjCFlags : uint32_t {
+        noObjCFlags         = 0,
+        hasDuplicateClasses = 1 << 0,
+    };
 };
 
 inline const PrebuiltLoader* PrebuiltLoaderSet::atIndex(uint16_t loaderIndex) const

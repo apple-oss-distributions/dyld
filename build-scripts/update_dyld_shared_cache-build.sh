@@ -1,17 +1,23 @@
 set -e # exit when any command fails
 set -v # verbose
 
+# override min macOS deployment target
+MACOSX_DEPLOYMENT_TARGET=11.0
+
 if [ "${RC_PURPLE}" = "" ]
 then
     # macOS platform
     OBJROOT_BDR="${TARGET_TEMP_DIR}/Objects_builder"
-    xcodebuild ${ACTION} -target dyld_shared_cache_builder     OBJROOT="${OBJROOT_BDR}" SDKROOT="${SDKROOT}" MACOSX_DEPLOYMENT_TARGET=${MACOSX_DEPLOYMENT_TARGET} SRCROOT="${SRCROOT}" DSTROOT="${DSTROOT}" SYMROOT="${SYMROOT}" RC_ProjectSourceVersion="${RC_ProjectSourceVersion}"  DISABLE_SDK_METADATA_PARSING=YES  RC_PLATFORM_INSTALL_PATH=/Applications/Xcode.app/Contents/Developer/Platforms/MacOSX.platform
+    xcodebuild ${ACTION} -target dyld_shared_cache_builder     OBJROOT="${OBJROOT_BDR}" SDKROOT="${SDKROOT}" MACOSX_DEPLOYMENT_TARGET=${MACOSX_DEPLOYMENT_TARGET} SRCROOT="${SRCROOT}" DSTROOT="${DSTROOT}" SYMROOT="${SYMROOT}" RC_ProjectSourceVersion="${RC_ProjectSourceVersion}"  DISABLE_SDK_METADATA_PARSING=YES  RC_PLATFORM_INSTALL_PATH=/Applications/Xcode.app/Contents/Developer/Platforms/MacOSX.platform RC_ARCHS="arm64 x86_64"
 
     OBJROOT_MAC="${TARGET_TEMP_DIR}/Objects_mac"
-    xcodebuild ${ACTION} -target update_dyld_shared_cache_tool OBJROOT="${OBJROOT_MAC}" SDKROOT="${SDKROOT}" MACOSX_DEPLOYMENT_TARGET=${MACOSX_DEPLOYMENT_TARGET} SRCROOT="${SRCROOT}" DSTROOT="${DSTROOT}" SYMROOT="${SYMROOT}" RC_ProjectSourceVersion="${RC_ProjectSourceVersion}" DISABLE_SDK_METADATA_PARSING=YES
+    xcodebuild ${ACTION} -target update_dyld_shared_cache_tool OBJROOT="${OBJROOT_MAC}" SDKROOT="${SDKROOT}" MACOSX_DEPLOYMENT_TARGET=${MACOSX_DEPLOYMENT_TARGET} SRCROOT="${SRCROOT}" DSTROOT="${DSTROOT}" SYMROOT="${SYMROOT}" RC_ProjectSourceVersion="${RC_ProjectSourceVersion}" DISABLE_SDK_METADATA_PARSING=YES RC_ARCHS="arm64 x86_64"
 
     OBJROOT_SLC="${TARGET_TEMP_DIR}/Objects_slc"
-    xcodebuild ${ACTION} -target libslc_builder.dylib          OBJROOT="${OBJROOT_SLC}" SDKROOT="${SDKROOT}" MACOSX_DEPLOYMENT_TARGET=${MACOSX_DEPLOYMENT_TARGET} SRCROOT="${SRCROOT}" DSTROOT="${DSTROOT}" SYMROOT="${SYMROOT}" RC_ProjectSourceVersion="${RC_ProjectSourceVersion}" DISABLE_SDK_METADATA_PARSING=YES
+    xcodebuild ${ACTION} -target libslc_builder.dylib          OBJROOT="${OBJROOT_SLC}" SDKROOT="${SDKROOT}" MACOSX_DEPLOYMENT_TARGET=${MACOSX_DEPLOYMENT_TARGET} SRCROOT="${SRCROOT}" DSTROOT="${DSTROOT}" SYMROOT="${SYMROOT}" RC_ProjectSourceVersion="${RC_ProjectSourceVersion}" DISABLE_SDK_METADATA_PARSING=YES RC_ARCHS="arm64 x86_64"
+
+    OBJROOT_SYMBOLS_CACHE="${TARGET_TEMP_DIR}/Objects_symbols_cache"
+    xcodebuild ${ACTION} -target dyld_symbols_cache          OBJROOT="${OBJROOT_SYMBOLS_CACHE}" SDKROOT="${SDKROOT}" MACOSX_DEPLOYMENT_TARGET=${MACOSX_DEPLOYMENT_TARGET} SRCROOT="${SRCROOT}" DSTROOT="${DSTROOT}" SYMROOT="${SYMROOT}" RC_ProjectSourceVersion="${RC_ProjectSourceVersion}" DISABLE_SDK_METADATA_PARSING=YES RC_PLATFORM_INSTALL_PATH=/Applications/Xcode.app/Contents/Developer/Platforms/MacOSX.platform RC_ARCHS="arm64 x86_64"
 
     # Rosetta needs the dsc_extractor on macOS.  They extract the cache of the host OS.
     OBJROOT_XTR="${TARGET_TEMP_DIR}/Objects_extractor"
@@ -25,10 +31,6 @@ then
         OBJROOT_KBO="${TARGET_TEMP_DIR}/Objects_kb_os"
         xcodebuild ${ACTION} -target libKernelCollectionBuilder OBJROOT="${OBJROOT_KBO}" LD_DYLIB_INSTALL_NAME="/usr/lib/libKernelCollectionBuilder.dylib" INSTALL_PATH="/usr/lib"                     SYMROOT="${SYMROOT}/os"  SDKROOT="${SDKROOT}" MACOSX_DEPLOYMENT_TARGET=${MACOSX_DEPLOYMENT_TARGET} SRCROOT="${SRCROOT}" DSTROOT="${DSTROOT}" RC_ProjectSourceVersion="${RC_ProjectSourceVersion}"
     fi
-
-    # Build dyld_info for the toolchain
-    OBJROOT_INFO_TOOLCHAIN="${TARGET_TEMP_DIR}/Objects_dyld_info_macToolchain"
-    xcodebuild ${ACTION} -target dyld_info OBJROOT="${OBJROOT_INFO_TOOLCHAIN}" INSTALL_PATH="${DT_TOOLCHAIN_DIR}/usr/local/bin/" MAN_INSTALL_PATH="${DT_TOOLCHAIN_DIR}/usr/local/share/man/man1/" SYMROOT="${SYMROOT}"     SDKROOT="${SDKROOT}" MACOSX_DEPLOYMENT_TARGET=${MACOSX_DEPLOYMENT_TARGET} SRCROOT="${SRCROOT}" DSTROOT="${DSTROOT}" RC_ProjectSourceVersion="${RC_ProjectSourceVersion}"
 
     # move build results to host locations
     if [ "${ACTION}" == "install" ]
@@ -52,13 +54,16 @@ then
 else
     # for iOS/tvOS/watchOS/bridgeOS platform, build "host" tools
     OBJROOT_BDR="${TARGET_TEMP_DIR}/Objects_builder"
-    xcodebuild ${ACTION} -target dyld_shared_cache_builder OBJROOT="${OBJROOT_BDR}" SDKROOT="${SDKROOT}" MACOSX_DEPLOYMENT_TARGET=${MACOSX_DEPLOYMENT_TARGET} SRCROOT="${SRCROOT}" DSTROOT="${DSTROOT}" SYMROOT="${SYMROOT}" RC_ProjectSourceVersion="${RC_ProjectSourceVersion}"  DISABLE_SDK_METADATA_PARSING=YES
+    xcodebuild ${ACTION} -target dyld_shared_cache_builder OBJROOT="${OBJROOT_BDR}" SDKROOT="${SDKROOT}" MACOSX_DEPLOYMENT_TARGET=${MACOSX_DEPLOYMENT_TARGET} SRCROOT="${SRCROOT}" DSTROOT="${DSTROOT}" SYMROOT="${SYMROOT}" RC_ProjectSourceVersion="${RC_ProjectSourceVersion}"  DISABLE_SDK_METADATA_PARSING=YES RC_ARCHS="arm64 x86_64"
 
     OBJROOT_SLC="${TARGET_TEMP_DIR}/Objects_slc"
-    xcodebuild ${ACTION} -target libslc_builder.dylib      OBJROOT="${OBJROOT_SLC}" SDKROOT="${SDKROOT}" MACOSX_DEPLOYMENT_TARGET=${MACOSX_DEPLOYMENT_TARGET} SRCROOT="${SRCROOT}" DSTROOT="${DSTROOT}" SYMROOT="${SYMROOT}" RC_ProjectSourceVersion="${RC_ProjectSourceVersion}" DISABLE_SDK_METADATA_PARSING=YES
+    xcodebuild ${ACTION} -target libslc_builder.dylib      OBJROOT="${OBJROOT_SLC}" SDKROOT="${SDKROOT}" MACOSX_DEPLOYMENT_TARGET=${MACOSX_DEPLOYMENT_TARGET} SRCROOT="${SRCROOT}" DSTROOT="${DSTROOT}" SYMROOT="${SYMROOT}" RC_ProjectSourceVersion="${RC_ProjectSourceVersion}" DISABLE_SDK_METADATA_PARSING=YES RC_ARCHS="arm64 x86_64"
+
+    OBJROOT_SYMBOLS_CACHE="${TARGET_TEMP_DIR}/Objects_symbols_cache"
+    xcodebuild ${ACTION} -target dyld_symbols_cache      OBJROOT="${OBJROOT_SYMBOLS_CACHE}" SDKROOT="${SDKROOT}" MACOSX_DEPLOYMENT_TARGET=${MACOSX_DEPLOYMENT_TARGET} SRCROOT="${SRCROOT}" DSTROOT="${DSTROOT}" SYMROOT="${SYMROOT}" RC_ProjectSourceVersion="${RC_ProjectSourceVersion}" DISABLE_SDK_METADATA_PARSING=YES RC_ARCHS="arm64 x86_64"
 
     OBJROOT_UTL="${TARGET_TEMP_DIR}/Objects_utils"
-    xcodebuild ${ACTION} -target dyld_shared_cache_util    OBJROOT="${OBJROOT_UTL}" SDKROOT="${SDKROOT}" MACOSX_DEPLOYMENT_TARGET=${MACOSX_DEPLOYMENT_TARGET}  SRCROOT="${SRCROOT}" DSTROOT="${DSTROOT}" SYMROOT="${SYMROOT}" RC_ProjectSourceVersion="${RC_ProjectSourceVersion}"  DISABLE_SDK_METADATA_PARSING=YES
+    xcodebuild ${ACTION} -target dyld_shared_cache_util    OBJROOT="${OBJROOT_UTL}" SDKROOT="${SDKROOT}" MACOSX_DEPLOYMENT_TARGET=${MACOSX_DEPLOYMENT_TARGET}  SRCROOT="${SRCROOT}" DSTROOT="${DSTROOT}" SYMROOT="${SYMROOT}" RC_ProjectSourceVersion="${RC_ProjectSourceVersion}"  DISABLE_SDK_METADATA_PARSING=YES RC_ARCHS="arm64 x86_64"
 
     OBJROOT_DSC="${TARGET_TEMP_DIR}/Objects_libdsc"
     xcodebuild ${ACTION} -target libdsc                    OBJROOT="${OBJROOT_DSC}" SDKROOT="${SDKROOT}" MACOSX_DEPLOYMENT_TARGET=${MACOSX_DEPLOYMENT_TARGET}  SRCROOT="${SRCROOT}" DSTROOT="${DSTROOT}" SYMROOT="${SYMROOT}" RC_ProjectSourceVersion="${RC_ProjectSourceVersion}"  DISABLE_SDK_METADATA_PARSING=YES
@@ -72,15 +77,11 @@ else
     OBJROOT_KBT="${TARGET_TEMP_DIR}/Objects_kcb"
     xcodebuild ${ACTION} -target libKernelCollectionBuilder OBJROOT="${OBJROOT_KBT}" LD_DYLIB_INSTALL_NAME="@rpath/libKernelCollectionBuilder.dylib"   INSTALL_PATH="${CANON_TOOLCHAIN_DIR}/usr/lib/" SYMROOT="${SYMROOT}"     SDKROOT="${SDKROOT}" MACOSX_DEPLOYMENT_TARGET=${MACOSX_DEPLOYMENT_TARGET} SRCROOT="${SRCROOT}" DSTROOT="${DSTROOT}" RC_ProjectSourceVersion="${RC_ProjectSourceVersion}"
 
-    # Build dyld_info for the toolchain
-    OBJROOT_INFO_TOOLCHAIN="${TARGET_TEMP_DIR}/Objects_dyld_info"
-    xcodebuild ${ACTION} -target dyld_info OBJROOT="${OBJROOT_INFO_TOOLCHAIN}" INSTALL_PATH="${CANON_TOOLCHAIN_DIR}/usr/local/bin/" MAN_INSTALL_PATH="${CANON_TOOLCHAIN_DIR}/usr/local/share/man/man1/" SYMROOT="${SYMROOT}"     SDKROOT="${SDKROOT}" MACOSX_DEPLOYMENT_TARGET=${MACOSX_DEPLOYMENT_TARGET} SRCROOT="${SRCROOT}" DSTROOT="${DSTROOT}" RC_ProjectSourceVersion="${RC_ProjectSourceVersion}"
-
     # no simulator for bridgeOS
     if [ "${RC_BRIDGE}" != "YES" ]
     then
         OBJROOT_SIM="${TARGET_TEMP_DIR}/Objects_Sim"
-        xcodebuild ${ACTION} -target update_dyld_sim_shared_cache OBJROOT="${OBJROOT_SIM}" SDKROOT="${SDKROOT}" MACOSX_DEPLOYMENT_TARGET=${MACOSX_DEPLOYMENT_TARGET} SRCROOT="${SRCROOT}" DSTROOT="${DSTROOT}" SYMROOT="${SYMROOT}" RC_ProjectSourceVersion="${RC_ProjectSourceVersion}" DISABLE_SDK_METADATA_PARSING=YES
+        xcodebuild ${ACTION} -target update_dyld_sim_shared_cache OBJROOT="${OBJROOT_SIM}" SDKROOT="${SDKROOT}" MACOSX_DEPLOYMENT_TARGET=${MACOSX_DEPLOYMENT_TARGET} SRCROOT="${SRCROOT}" DSTROOT="${DSTROOT}" SYMROOT="${SYMROOT}" RC_ProjectSourceVersion="${RC_ProjectSourceVersion}" DISABLE_SDK_METADATA_PARSING=YES RC_ARCHS="arm64 x86_64"
     fi
 
     # move roots to platform dir

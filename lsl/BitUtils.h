@@ -50,6 +50,20 @@ __attribute__ ((__const__))
 uint64_t bit_width(uint64_t value) {
     return std::numeric_limits<uint64_t>::digits - std::countl_zero(value);
 }
+
+template<uint64_t SIZE>
+inline
+__attribute__((__const__))
+uint64_t roundToNextAligned(uint64_t value) {
+    static_assert(std::popcount(SIZE) == 1);
+    return (value+(SIZE-1) & (-1*SIZE));
+}
+
+inline
+uint64_t roundToNextAligned(uint64_t alignment, uint64_t value) {
+    return (value+(alignment-1) & (-1*alignment));
+}
+
 };
 
 #endif /* BitUtils_h */

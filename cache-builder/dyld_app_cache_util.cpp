@@ -52,7 +52,7 @@ using dyld3::MachOAppCache;
 using dyld3::Platform;
 using dyld3::json::Node;
 
-__attribute__((noreturn))
+__attribute__((__noreturn__))
 static void exit_usage(const char* missingOption = nullptr) {
     if ( missingOption != nullptr ) {
         fprintf(stderr, "Missing option '%s'\n", missingOption);

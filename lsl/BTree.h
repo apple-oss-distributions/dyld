@@ -104,10 +104,10 @@ private:
             // If keys need destructros called call them
             if constexpr(!std::is_trivially_destructible<value_type>::value) {
                 for (auto i = 0; i < node->capacity(); ++i) {
-                    node->keys()[i].~T();
+                    node->allKeySlots()[i].~T();
                 }
             }
-            allocator->deallocate_buffer((void*)node, sizeof(Node), alignof(Node));
+            allocator->free((void*)node);
         }
         bool full() const {
             return (size() == capacity());
@@ -127,6 +127,13 @@ private:
                 return std::span<value_type>((value_type*)&_data.leaf.keys[0], size());
             } else {
                 return std::span<value_type>((value_type*)&_data.internal.keys[0], size());
+            }
+        }
+        std::span<value_type> allKeySlots() const {
+            if (leaf()) {
+                return std::span<value_type>((value_type*)&_data.leaf.keys[0], capacity());
+            } else {
+                return std::span<value_type>((value_type*)&_data.internal.keys[0], capacity());
             }
         }
         std::span<NodeCore*> children() const {
@@ -175,8 +182,8 @@ private:
             keys()[index] =  std::move(child->keys()[pivot]);
 
             // Create and insert the new child
-            auto childStorage = allocator.allocate_buffer(sizeof(Node), alignof(Node));
-            auto newChild = new (childStorage.address) NodeCore(child->leaf());
+            auto childStorage = allocator.aligned_alloc(alignof(Node), sizeof(Node));
+            auto newChild = new (childStorage) NodeCore(child->leaf());
             children()[index+1] = newChild;
 
             // Move keys into the new mode
@@ -250,7 +257,7 @@ private:
             Node* right = children()[index+1];
 
             // Move the key from the index down into the merged child and shift eleements
-            left->keys()[left->size()] = std::move(keys()[index]);
+            left->allKeySlots()[left->size()] = std::move(keys()[index]);
             std::move(keys().begin()+index+1, keys().end(), keys().begin()+index);
             std::move(children().begin()+index+2, children().end(), children().begin()+index+1);
 
@@ -265,7 +272,7 @@ private:
             --_metadata;
 
             // deallocate empty node
-            allocator->deallocate_buffer((void*)right, sizeof(Node), alignof(Node));
+            allocator->free((void*)right);
         }
 
         uint8_t lower_bound_index(const T& key, value_compare comp) const {
@@ -585,8 +592,8 @@ private:
             }
             // If the root is full. Create a new root with the old root as its only child and no keys, and then split the old root
             if (splitStart == 0 && _nodes[0]->full()) {
-                auto rootStorage = _btree->_allocator->allocate_buffer(sizeof(Node), alignof(Node));
-                _btree->_root = new (rootStorage.address) Node(_btree->_root);
+                void* rootStorage = _btree->_allocator->aligned_alloc(alignof(Node), sizeof(Node));
+                _btree->_root = new (rootStorage) Node(_btree->_root);
                 std::move_backward(_indexes.begin(), _indexes.begin() + _depth,  _indexes.begin() + _depth + 1);
                 std::move_backward(_nodes.begin(), _nodes.begin() + _depth ,  _nodes.begin() + _depth + 1);
                 _indexes[0] = 0;
@@ -652,7 +659,7 @@ private:
                 std::move(_indexes.begin() + 1, _indexes.begin() + _depth, _indexes.begin());
                 std::move(_nodes.begin() + 1, _nodes.begin() + _depth, _nodes.begin());
                 --_depth;
-                _btree->_allocator->deallocate_buffer((void*)_btree->_root, sizeof(Node), alignof(Node));
+                _btree->_allocator->free((void*)_btree->_root);
                 --_btree->_depth;
                 if (_depth) {
                     _btree->_root = _nodes[0];
@@ -746,8 +753,8 @@ private:
     std::pair<iterator, bool> insert_internal(iterator&& i, value_type&& key) {
         i.checkGeneration();
         if (!_root) {
-            auto rootStorage = _allocator->allocate_buffer(sizeof(Node), alignof(Node));
-            _root = new (rootStorage.address) Node(true);
+            void* rootStorage = _allocator->aligned_alloc(alignof(Node), sizeof(Node));
+            _root = new (rootStorage) Node(true);
             _depth = 1;
             i.nodes()[0] = _root;
             i._depth = 1;

@@ -36,6 +36,8 @@ DYLD_PRINT_SEGMENTS
 .br
 DYLD_PRINT_ENV
 .br
+DYLD_PRINT_LINKS_WITH
+.br
 DYLD_SHARED_REGION
 .br
 DYLD_SHARED_CACHE_DIR
@@ -75,7 +77,7 @@ If a framework is not found at its install path, dyld uses this
 as a list of directories to search for the framework.
 
 For new binaries (Fall 2023 or later) there is no default fallback.  For older binaries,
-their is a default fallback search path of: /Library/Frameworks:/System/Library/Frameworks
+there is a default fallback search path of: /Library/Frameworks:/System/Library/Frameworks
 .TP
 .B DYLD_VERSIONED_FRAMEWORK_PATH
 This is a colon separated list of directories that contain potential override frameworks. 
@@ -111,7 +113,7 @@ If a dylib is not found at its install  path,
 dyld uses this as a list of directories to search for the dylib.
 
 For new binaries (Fall 2023 or later) there is no default.  For older binaries,
-their is a default fallback search path of: /usr/local/lib:/usr/lib.
+there is a default fallback search path of: /usr/local/lib:/usr/lib.
 .TP
 .B DYLD_VERSIONED_LIBRARY_PATH
 This is a colon separated list of directories that contain potential override libraries. 
@@ -145,7 +147,7 @@ logging output (triggered by DYLD_PRINT_* settings) to file descriptor 2
 write logging output to the specified file.
 .TP
 .B DYLD_PRINT_ENV
-If set, causes dyld to print a line of key=valule for each enviroment variable in the process.
+If set, causes dyld to print a line of key=value for each environment variable in the process.
 .TP
 .B DYLD_PRINT_LIBRARIES
 If set, causes dyld to print a line for each mach-o image loaded into a process.
@@ -178,6 +180,13 @@ shared cache.
 .TP
 .B DYLD_PRINT_BINDINGS 
 If set, causes dyld to print a line each time a symbolic name is bound.
+.TP
+.B DYLD_PRINT_LINKS_WITH
+If set to the leaf name of a mach-o image, dyld prints why that image was loaded, including the chain
+of links from the main executable or dlopen()ed image to the request image name. The leaf name needs
+to be the actual leaf file/install name (e.g. "libz.1.dylib" and not one of the aliases such as "libz.dylib").
+When reporting the chain of links the --> may contain a letter (-w-> is a weak link, -r-> is a re-export,
+-u-> is an upward link, -d-> is a delay-init link).
 .TP
 .B DYLD_SHARED_REGION
 This can be "use" (the default) or "private".  Setting it to "private" tells
@@ -239,4 +248,4 @@ with -rpath @loader_path/zzz, where zzz is the path from the executable to the a
 At runtime dyld sets it run path to be the anchor point, then each dylib is found relative
 to the anchor point.  
 .SH "SEE ALSO"
-dyldinfo(1), ld(1), otool(1)
+dyld_info(1), ld(1), otool(1)

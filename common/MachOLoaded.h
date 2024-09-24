@@ -55,8 +55,7 @@ struct VIS_HIDDEN MachOLoaded : public MachOFile
     bool                findClosestSymbol(uint64_t unSlidAddr, const char** symbolName, uint64_t* symbolUnslidAddr) const;
 
     // for _dyld_find_unwind_sections()
-    const void*         findSectionContent(const char* segName, const char* sectName, uint64_t& size,
-                                           bool matchSegNameAsPrefix = false) const;
+    const void*         findSectionContent(const char* segName, const char* sectName, uint64_t& size) const;
 
     // used by cache builder during error handling in chain bind processing
     const char*             dependentDylibLoadPath(uint32_t depIndex) const;

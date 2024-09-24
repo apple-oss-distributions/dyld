@@ -27,6 +27,8 @@
 #include "Architecture.h"
 #include "Version32.h"
 #include "Policy.h"
+#include <mach-o/fixup-chains.h>
+#include <mach-o/loader.h>
 
 
 namespace mach_o {
@@ -36,17 +38,21 @@ namespace mach_o {
 // MARK: --- Policy methods ---
 //
 
-Policy::Policy(Architecture arch, PlatformAndVersions pvs, uint32_t filetype, bool pathMayBeInSharedCache)
+Policy::Policy(Architecture arch, PlatformAndVersions pvs, uint32_t filetype, bool pathMayBeInSharedCache, bool kernel)
  : _featureEpoch(pvs.platform.epoch(pvs.minOS)), _enforcementEpoch(pvs.platform.epoch(pvs.sdk)),
-   _arch(arch), _pvs(pvs), _filetype(filetype), _pathMayBeInSharedCache(pathMayBeInSharedCache)
+   _arch(arch), _pvs(pvs), _filetype(filetype), _pathMayBeInSharedCache(pathMayBeInSharedCache), _kernel(kernel)
 {
 }
 
 bool Policy::dyldLoadsOutput() const
 {
+    if ( _kernel )
+        return false;
+
     switch (_filetype) {
         case MH_EXECUTE:
         case MH_DYLIB:
+        case MH_DYLIB_STUB:
         case MH_BUNDLE:
         case MH_DYLINKER:
             return true;
@@ -54,6 +60,12 @@ bool Policy::dyldLoadsOutput() const
     return false;
 }
 
+bool Policy::kernelOrKext() const
+{
+    if ( _kernel )
+        return true;
+    return _filetype == MH_KEXT_BUNDLE;
+}
 
 // features
 Policy::Usage Policy::useBuildVersionLoadCommand() const
@@ -65,6 +77,8 @@ Policy::Usage Policy::useBuildVersionLoadCommand() const
 
 Policy::Usage Policy::useDataConst() const
 {
+    if ( _pvs.platform == Platform::firmware )
+        return Policy::preferDontUse;
     return (_featureEpoch >= Platform::Epoch::fall2019) ? Policy::preferUse : Policy::mustNotUse;
 }
 
@@ -81,7 +95,11 @@ Policy::Usage Policy::useGOTforClassRefs() const
 
 Policy::Usage Policy::useChainedFixups() const
 {
-    // fixups are for userland binaries
+    // arm64e kernel/kext use chained fixups
+    if ( kernelOrKext() && _arch.usesArm64AuthPointers() )
+        return Policy::mustUse;
+
+    // firmware may use chained fixups, but has to opt-in
     if ( !dyldLoadsOutput() )
         return Policy::preferDontUse;
 
@@ -92,6 +110,9 @@ Policy::Usage Policy::useChainedFixups() const
 
     // in general Fall2020 OSs supported chained fixups
     Platform::Epoch chainedFixupsEpoch = Platform::Epoch::fall2020;
+
+    if ( _pvs.platform == Platform::iOS ) // chained fixups on iOS since 13.4
+        chainedFixupsEpoch = Platform::Epoch::spring2020;
 
     // simulators support is later than OS support
     if ( _pvs.platform.isSimulator() )
@@ -105,6 +126,11 @@ Policy::Usage Policy::useChainedFixups() const
         if ( _arch.usesx86_64Instructions() && (_filetype == MH_EXECUTE) ) {
             chainedFixupsEpoch = Platform::Epoch::fall2022;
         }
+
+        // builders run on x86, for arm64e we allow chained fixups on 11.0 for the software update stack
+        // rdar://118859281 (arm64e: Libraries need support for 11.0 deployment targets)
+        if ( _arch.usesArm64AuthPointers() )
+            chainedFixupsEpoch = Platform::Epoch::fall2020;
     }
 
     // use chained fixups for newer OS releases
@@ -112,6 +138,32 @@ Policy::Usage Policy::useChainedFixups() const
         return Policy::preferUse;
 
     return Policy::mustNotUse;
+}
+
+uint16_t Policy::chainedFixupsFormat() const
+{
+    if ( _arch.usesArm64AuthPointers() ) {
+        if ( !dyldLoadsOutput() )
+            return DYLD_CHAINED_PTR_ARM64E_KERNEL;
+
+        // 24-bit binds supported since iOS 15.0 and aligned releases
+        if ( _featureEpoch >= Platform::Epoch::fall2021 )
+            return DYLD_CHAINED_PTR_ARM64E_USERLAND24;
+
+        return DYLD_CHAINED_PTR_ARM64E;
+    } else if ( _arch.is64() ) {
+        if ( !dyldLoadsOutput() )
+            return DYLD_CHAINED_PTR_64_OFFSET;
+
+        if ( _featureEpoch >= Platform::Epoch::fall2021 )
+            return DYLD_CHAINED_PTR_64_OFFSET;
+
+        return DYLD_CHAINED_PTR_64;
+    } else {
+        if ( dyldLoadsOutput() )
+            return DYLD_CHAINED_PTR_32;
+        return DYLD_CHAINED_PTR_32_FIRMWARE;
+    }
 }
 
 Policy::Usage Policy::useOpcodeFixups() const
@@ -145,6 +197,28 @@ Policy::Usage Policy::useRelativeMethodLists() const
 
     // use chained fixups for newer OS releases
     if ( _featureEpoch >= Platform::Epoch::fall2020 )
+        return Policy::preferUse;
+
+    return Policy::mustNotUse;
+}
+
+Policy::Usage Policy::optimizeClassPatching() const
+{
+    if ( _filetype != MH_DYLIB )
+        return Policy::mustNotUse;
+
+    if ( _featureEpoch >= Platform::Epoch::fall2022 )
+        return Policy::preferUse;
+
+    return Policy::mustNotUse;
+}
+
+Policy::Usage Policy::optimizeSingletonPatching() const
+{
+    if ( _filetype != MH_DYLIB )
+        return Policy::mustNotUse;
+
+    if ( _featureEpoch >= Platform::Epoch::fall2022 )
         return Policy::preferUse;
 
     return Policy::mustNotUse;
@@ -197,7 +271,7 @@ Policy::Usage Policy::useLegacyLinkedit() const
 
 bool Policy::use4KBLoadCommandsPadding() const
 {
-    if ( _filetype == MH_DYLIB && _pathMayBeInSharedCache )
+    if ( (_filetype == MH_DYLIB || _filetype == MH_DYLIB_STUB) && _pathMayBeInSharedCache )
         return true;
     return false;
 }

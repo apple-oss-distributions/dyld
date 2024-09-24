@@ -79,6 +79,8 @@ using dyld3::MachOFile;
 #define _transactionalAllocator Allocator::defaultAllocator()
 #endif
 
+#define BLEND_KERN_RETURN_LOCATION(kr, loc) (kr) = ((kr & 0x00ffffff) | loc<<24);
+
 namespace {
 static const size_t kCachePeekSize = 0x4000;
 
@@ -126,7 +128,13 @@ Bitmap::Bitmap(Allocator& allocator, size_t size)
     : _size(size), _bitmap(UniquePtr<std::byte>((std::byte*)allocator.malloc((size+7)/8))) {}
 
 Bitmap::Bitmap(Allocator& allocator, std::span<std::byte>& data) {
-    _size = (size_t)readPVLEUInt64(data);
+    uint64_t encodedSize = 0;
+    if (!readPVLEUInt64(data, encodedSize)) {
+        _size = 0;
+        _bitmap = nullptr;
+        return;
+    }
+    _size = (size_t)encodedSize;
     const size_t byteSize = (_size+7)/8;
     _bitmap = UniquePtr<std::byte>((std::byte*)allocator.malloc(byteSize));
     _bitmap.withUnsafe([&](std::byte* bitmap) {
@@ -421,7 +429,7 @@ SharedPtr<Mapper> Mapper::mapperForMachO(Allocator& _ephemeralAllocator, FileRec
     }
 
     // mmap whole file temporarily
-    void* tempMapping = ::mmap(nullptr, (size_t)sb.st_size, PROT_READ, MAP_FILE | MAP_PRIVATE, fd, 0);
+    void* tempMapping = ::mmap(nullptr, (size_t)sb.st_size, PROT_READ, MAP_FILE | MAP_PRIVATE | MAP_RESILIENT_CODESIGN, fd, 0);
     if ( tempMapping == MAP_FAILED ) {
         ::close(fd);
         return nullptr;
@@ -594,10 +602,10 @@ Image::Image(RuntimeState* state, Allocator& ephemeralAllocator, SharedPtr<Mappe
         if (fileID.inode() &&  fileID.device()) {
             _file = state->fileManager.fileRecordForFileID(ldr->fileID(*state));
             if ( _file.volume().empty() ) {
-                _file = state->fileManager.fileRecordForPath(ephemeralAllocator, ldr->path());
+                _file = state->fileManager.fileRecordForPath(ephemeralAllocator, ldr->path(*state));
             }
         } else {
-            _file = state->fileManager.fileRecordForPath(ephemeralAllocator, ldr->path());
+            _file = state->fileManager.fileRecordForPath(ephemeralAllocator, ldr->path(*state));
         }
     }
 #endif
@@ -654,6 +662,10 @@ const MachOLoaded* Image::ml() const {
             return nullptr;
         }
         _ml = _mapper->map<MachOLoaded>(slidML, 4096);
+        if (!_ml) {
+           _mapperFailed = true;
+           return nullptr;
+        }
         size_t size = _ml->sizeofcmds;
         if ( _ml->magic == MH_MAGIC_64 ) {
             size += sizeof(mach_header_64);
@@ -662,6 +674,10 @@ const MachOLoaded* Image::ml() const {
         }
         if (size > 4096) {
             _ml = _mapper->map<MachOLoaded>(slidML, size);
+            if (!_ml) {
+               _mapperFailed = true;
+               return nullptr;
+            }
         }
     }
     // This is a bit of a mess. With compact info this will be unified, but for now we use a lot of hacky abstactions here to deal with
@@ -1229,6 +1245,8 @@ UniquePtr<ProcessSnapshot> Process::synthesizeSnapshot(kern_return_t *kr) {
     pid_t   pid;
     *kr = pid_for_task(_task, &pid);
     if ( *kr != KERN_SUCCESS ) {
+        BLEND_KERN_RETURN_LOCATION(*kr, 0xea);
+        *kr |= 0xeb000000UL;
         return nullptr;
     }
 
@@ -1236,6 +1254,7 @@ UniquePtr<ProcessSnapshot> Process::synthesizeSnapshot(kern_return_t *kr) {
     mach_msg_type_number_t count = MACH_TASK_BASIC_INFO_COUNT;
     *kr = task_info(_task, MACH_TASK_BASIC_INFO, (task_info_t)&ti, &count);
     if ( *kr != KERN_SUCCESS ) {
+        BLEND_KERN_RETURN_LOCATION(*kr, 0xe9);
         return nullptr;
     }
 
@@ -1259,6 +1278,7 @@ UniquePtr<ProcessSnapshot> Process::synthesizeSnapshot(kern_return_t *kr) {
             mach_vm_size_t readSize = 0;
             *kr = mach_vm_read_overwrite(_task, address, size, (mach_vm_address_t)&unsafeBytes[0], &readSize);
             if ( *kr != KERN_SUCCESS ) {
+                BLEND_KERN_RETURN_LOCATION(*kr, 0xe8);
                 return;
             }
             auto mf = MachOFile::isMachO((const void*)unsafeBytes);
@@ -1319,10 +1339,12 @@ UniquePtr<ProcessSnapshot> Process::getSnapshot(kern_return_t *kr) {
     task_dyld_info_data_t task_dyld_info;
     *kr = task_info(_task, TASK_DYLD_INFO, (task_info_t)&task_dyld_info, &count);
     if ( *kr != KERN_SUCCESS ) {
+        BLEND_KERN_RETURN_LOCATION(*kr, 0xef);
         return nullptr;
     }
     //The kernel will return MACH_VM_MIN_ADDRESS for an executable that has not had dyld loaded
     if (task_dyld_info.all_image_info_addr == MACH_VM_MIN_ADDRESS) {
+        BLEND_KERN_RETURN_LOCATION(*kr, 0xee);
         return nullptr;
     }
     uint8_t remoteBuffer[16*1024];
@@ -1333,6 +1355,7 @@ UniquePtr<ProcessSnapshot> Process::getSnapshot(kern_return_t *kr) {
         *kr = mach_vm_read_overwrite(_task, task_dyld_info.all_image_info_addr, task_dyld_info.all_image_info_size,
                                      (mach_vm_address_t)&remoteBuffer[0], &readSize);
         if (*kr != KERN_SUCCESS) {
+            BLEND_KERN_RETURN_LOCATION(*kr, 0xed);
             // If we cannot read the all image info this is game over
             return nullptr;
         }
@@ -1353,6 +1376,7 @@ UniquePtr<ProcessSnapshot> Process::getSnapshot(kern_return_t *kr) {
         auto compactInfo = UniquePtr<std::byte>((std::byte*)_transactionalAllocator.malloc((size_t)compactInfoSize));
         *kr = mach_vm_read_overwrite(_task, compactInfoAddress, compactInfoSize, (mach_vm_address_t)&*compactInfo, &readSize);
         if (*kr != KERN_SUCCESS) {
+            BLEND_KERN_RETURN_LOCATION(*kr, 0xec);
             // The read failed, chances are the process mutated the compact info, retry
             continue;
         }
@@ -1361,6 +1385,7 @@ UniquePtr<ProcessSnapshot> Process::getSnapshot(kern_return_t *kr) {
         if (!result->valid()) {
             // Something blew up we don't know what
             *kr = KERN_FAILURE;
+            BLEND_KERN_RETURN_LOCATION(*kr, 0xeb);
             return nullptr;
         }
         return result;
@@ -1719,8 +1744,8 @@ void ProcessSnapshot::addSharedCache(SharedCache&& sharedCache) {
     _bitmap = _transactionalAllocator.makeUnique<Bitmap>(_transactionalAllocator, _sharedCache->imageCount());
 }
 
+/// Assumes the mach_header parameter is in the range of the shared cache. Otherwise asserts
 void ProcessSnapshot::addSharedCacheImage(const struct mach_header* mh) {
-    assert(mh->flags & MH_DYLIB_IN_CACHE);
     auto header = (dyld_cache_header*)_sharedCache->rebasedAddress();
     auto headerBytes = (uint8_t*)header;
     auto slide = (uint64_t)header - header->sharedRegionStart;
@@ -1889,23 +1914,33 @@ void ProcessSnapshot::Serializer::emitMappedFileInfo(uint64_t rebasedAddress, co
 }
 
 bool ProcessSnapshot::Serializer::readMappedFileInfo(std::span<std::byte>& data, uint64_t& rebasedAddress, UUID& uuid, FileRecord& file) {
-    uint64_t flags = readPVLEUInt64(data);
-    rebasedAddress = readPVLEUInt64(data);
+    uint64_t flags = 0;
+    if (!readPVLEUInt64(data, flags)
+        || !readPVLEUInt64(data, rebasedAddress)) {
+        return false;
+    }
     if (flags & kMappedFileFlagsHasUUID) {
+        if (data.size() < 16) {
+            return false;
+        }
         uuid = UUID(&data[0]);
         data = data.last(data.size()-16);
     }
     if (flags & kMappedFileFlagsHasFileID) {
-        uint64_t volumeIndex = readPVLEUInt64(data);
-        uint64_t objectID = readPVLEUInt64(data);
-        if (volumeIndex >= _volumeUUIDs.size() )
+        uint64_t volumeIndex = 0;
+        uint64_t objectID = 0;
+        if (!readPVLEUInt64(data, volumeIndex)
+            || !readPVLEUInt64(data, objectID)
+            || volumeIndex >= _volumeUUIDs.size()) {
             return false;
+        }
         file = _fileManager.fileRecordForVolumeUUIDAndObjID(_volumeUUIDs[(size_t)volumeIndex], objectID);
     }
     if (flags & kMappedFileFlagsHasFilePath) {
-        uint64_t pathOffset = readPVLEUInt64(data);
-        if ( pathOffset >= _stringTableBuffer.size() )
+        uint64_t pathOffset = 0;
+        if (!readPVLEUInt64(data, pathOffset) || pathOffset >= _stringTableBuffer.size()) {
             return false;
+        }
         file = _fileManager.fileRecordForPath(_ephemeralAllocator, &_stringTableBuffer[(size_t)pathOffset]);
     }
     return true;
@@ -2003,6 +2038,10 @@ Vector<std::byte> ProcessSnapshot::Serializer::serialize() {
 
 bool ProcessSnapshot::Serializer::deserialize(const std::span<std::byte> data) {
     auto i = data;
+    if (i.size() < 36) {
+        // Ensure data is at least large enough to read the header
+        return false;
+    }
     // Confirm magic
     _magic              = read<uint32_t>(i);
     _version            = read<uint32_t>(i);
@@ -2024,17 +2063,27 @@ bool ProcessSnapshot::Serializer::deserialize(const std::span<std::byte> data) {
     if (_crc32c != checksumer) {
         return false;
     }
-    _processFlags           = readPVLEUInt64(i);
-    _platform               = readPVLEUInt64(i);
-    _initialImageCount      = readPVLEUInt64(i);
-    _dyldState              = readPVLEUInt64(i);
-    auto volumeUUIDCount    = readPVLEUInt64(i);
+    uint64_t volumeUUIDCount = 0;
+    if (!readPVLEUInt64(i, _processFlags)
+        || !readPVLEUInt64(i, _platform)
+        || !readPVLEUInt64(i, _initialImageCount)
+        || !readPVLEUInt64(i, _dyldState)
+        || !readPVLEUInt64(i, volumeUUIDCount)) {
+        return false;
+    }
+    if (i.size() < volumeUUIDCount*16) {
+        return false;
+    }
     for (auto j = 0; j < volumeUUIDCount; ++j) {
         UUID volumeUUID(&i[j*16]);
         _volumeUUIDs.push_back(volumeUUID);
     }
     i = i.last((size_t)(i.size()-(16*volumeUUIDCount)));
-    auto stringTableSize    = readPVLEUInt64(i);
+    uint64_t stringTableSize = 0;
+    if (!readPVLEUInt64(i, stringTableSize)
+        || i.size() < stringTableSize) {
+        return false;
+    }
     _stringTableBuffer.reserve((size_t)stringTableSize);
     std::copy((uint8_t*)&i[0], (uint8_t*)&i[(size_t)stringTableSize], std::back_inserter(_stringTableBuffer));
     i = i.last((size_t)(i.size()-stringTableSize));
@@ -2063,8 +2112,14 @@ bool ProcessSnapshot::Serializer::deserialize(const std::span<std::byte> data) {
         _sharedCache = _transactionalAllocator.makeUnique<SharedCache>(_ephemeralAllocator, std::move(file), mapper,
                                                                        rebasedAddress, _processFlags & kProcessFlagsHasPrivateCache);
         _bitmap = _transactionalAllocator.makeUnique<Bitmap>(_transactionalAllocator, i);
+        if (_bitmap->size() == 0) {
+            return false;
+        }
     }
-    auto imageCount = readPVLEUInt64(i);
+    uint64_t imageCount = 0;
+    if (!readPVLEUInt64(i, imageCount)) {
+        return false;
+    }
     uint64_t lastAddress = 0;
     for (auto j = 0; j < imageCount; ++j) {
         uint64_t rebasedAddress;

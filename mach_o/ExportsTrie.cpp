@@ -137,7 +137,7 @@ uint32_t GenericTrie::entryCount() const
         return 0;
     __block uint32_t result = 0;
     bool             stop = false;
-    char             cummulativeString[0x8000]; // FIXME: make overflow safe
+    STACK_ALLOC_OVERFLOW_SAFE_ARRAY(char, cummulativeString, 4096);
     (void)this->recurseTrie(_trieStart, cummulativeString, 0, stop, ^(const char* name, std::span<const uint8_t> nodePayload, bool& innerStop) {
         ++result;
     });
@@ -151,14 +151,14 @@ void GenericTrie::forEachEntry(void (^callback)(const Entry& entry, bool& stop))
     if ( _trieStart == _trieEnd )
         return;
     bool stop = false;
-    char cummulativeString[0x8000]; // FIXME: make overflow safe
+    STACK_ALLOC_OVERFLOW_SAFE_ARRAY(char, cummulativeString, 4096);
     (void)this->recurseTrie(_trieStart, cummulativeString, 0, stop, ^(const char* name, std::span<const uint8_t> nodePayload, bool& innerStop) {
         Entry entry { name, nodePayload };
         callback(entry, innerStop);
     });
 }
 
-Error GenericTrie::recurseTrie(const uint8_t* p, char* cummulativeString, int curStrOffset, bool& stop,
+Error GenericTrie::recurseTrie(const uint8_t* p, dyld3::OverflowSafeArray<char>& cummulativeString, int curStrOffset, bool& stop,
                                   void (^callback)(const char* name, std::span<const uint8_t> nodePayload, bool& stop)) const
 {
     if ( p >= _trieEnd ) {
@@ -174,7 +174,7 @@ Error GenericTrie::recurseTrie(const uint8_t* p, char* cummulativeString, int cu
 
     if ( terminalSize != 0 ) {
         if ( callback )
-            callback(cummulativeString, std::span<const uint8_t>(p, p+terminalSize), stop);
+            callback(cummulativeString.data(), std::span<const uint8_t>(p, p+terminalSize), stop);
         if ( stop )
             return Error::none();
     }
@@ -183,13 +183,13 @@ Error GenericTrie::recurseTrie(const uint8_t* p, char* cummulativeString, int cu
     for ( uint8_t i = 0; (i < childrenCount) && !stop; ++i ) {
         int edgeStrLen = 0;
         while ( *s != '\0' ) {
-            // cummulativeString.resize(curStrOffset + edgeStrLen + 1);
+            cummulativeString.resize(curStrOffset + edgeStrLen + 1);
             cummulativeString[curStrOffset + edgeStrLen] = *s++;
             ++edgeStrLen;
             if ( s > _trieEnd )
                 return Error("malformed trie node, child node name extends beyond trie data");
         }
-        // cummulativeString.resize(curStrOffset + edgeStrLen + 1);
+        cummulativeString.resize(curStrOffset + edgeStrLen + 1);
         cummulativeString[curStrOffset + edgeStrLen] = *s++;
         uint64_t childNodeOffset                     = read_uleb128(s, _trieEnd, malformed);
         if ( malformed )
@@ -208,7 +208,7 @@ void GenericTrie::dump() const
     fprintf(stderr, "trie terminal nodes:\n");
     if ( _trieStart == _trieEnd )
         return;
-    char cummulativeString[0x8000]; // FIXME: make overflow safe
+    STACK_ALLOC_OVERFLOW_SAFE_ARRAY(char, cummulativeString, 4096);
     bool stop = false;
     (void)this->recurseTrie(_trieStart, cummulativeString, 0, stop, ^(const char* name, std::span<const uint8_t> nodePayload, bool& trieStop) {
         fprintf(stderr, "  0x%04lX: ", (long)(nodePayload.data()-_trieStart - uleb128_size(nodePayload.size())));
@@ -221,9 +221,8 @@ void GenericTrie::dump() const
 
 bool GenericTrie::hasEntry(const char* name, std::span<const uint8_t>& terminalPayload) const
 {
-    uint32_t  visitedNodeOffsets[256]; // FIXME: overflow
-    uint32_t* visitedNodeOffsetsPtr = visitedNodeOffsets;
-    *visitedNodeOffsetsPtr++        = 0;
+    STACK_ALLOC_OVERFLOW_SAFE_ARRAY(uint32_t, visitedNodeOffsets, 256);
+    visitedNodeOffsets.push_back(0);
     const uint8_t* p                = _trieStart;
     while ( p < _trieEnd ) {
         bool     malformed;
@@ -290,12 +289,12 @@ bool GenericTrie::hasEntry(const char* name, std::span<const uint8_t>& terminalP
             if ( nodeOffset > (uint64_t)(_trieEnd - _trieStart) )
                 return false;
             // check for cycles
-            for ( uint32_t* nodePtr = visitedNodeOffsets; nodePtr < visitedNodeOffsetsPtr; ++nodePtr ) {
-                if ( *nodePtr == nodeOffset )
+            for ( uint32_t visitedOffset : visitedNodeOffsets ) {
+                if ( visitedOffset == nodeOffset )
                     return false;
             }
-            *visitedNodeOffsetsPtr++ = (uint32_t)nodeOffset;
-            p                        = &_trieStart[nodeOffset];
+            visitedNodeOffsets.push_back((uint32_t)nodeOffset);
+            p = &_trieStart[nodeOffset];
         }
         else {
             p = _trieEnd;
@@ -856,7 +855,7 @@ Error ExportsTrie::valid(uint64_t maxVmOffset) const
 #endif
     if ( _trieStart == _trieEnd )
         return Error::none();
-    char cummulativeString[0x8000]; // FIXME: make overflow safe
+    STACK_ALLOC_OVERFLOW_SAFE_ARRAY(char, cummulativeString, 4096);
     bool stop = false;
     __block Error contentErr;
     Error recurseErr = this->recurseTrie(_trieStart, cummulativeString, 0, stop, ^(const char* name, std::span<const uint8_t> nodePayload, bool& trieStop) {

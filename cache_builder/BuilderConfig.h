@@ -86,17 +86,15 @@ struct Layout
     CacheVMAddress          cacheBaseAddress;
     CacheVMSize             cacheSize;
     std::optional<uint64_t> cacheMaxSlide;
+    std::optional<uint64_t> cacheFixedSlide;
     const bool              is64;
     const bool              hasAuthRegion;
+    const bool              tproIsInData;
     const uint32_t          pageSize;
     const uint32_t          machHeaderAlignment = 4096;
 
     // How much __TEXT in each subCache before we split to a new file
     CacheVMSize subCacheTextLimit;
-
-    // Whether to put the LINKEDIT in the last subCache
-    // Only possible if the total cache limit is <= 4GB
-    bool                    allLinkeditInLastSubCache = false;
 
     // Fields only used for discontiguous layouts, ie, x86_64
     std::optional<Discontiguous>    discontiguous;

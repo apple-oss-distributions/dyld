@@ -276,30 +276,32 @@ Error BindOpcodes::forEachBind(void (^handler)(const char* opcodeName, int type,
 
 void BindOpcodes::forEachBindLocation(void (^callback)(const LocAndTarget&, bool& stop)) const
 {
-    __block uint32_t bindOrdinal = 0;
     (void)forEachBind(^(const char* opcodeName, int type, bool segIndexSet, uint8_t segIndex, uint64_t segOffset, bool libraryOrdinalSet,
                   int libOrdinal, const char* symbolName, bool weakImport, int64_t addend, bool targetOrAddendChanged, bool& stop) {
         BindTarget target = {symbolName, libOrdinal, weakImport, false, addend};
         LocAndTarget info = { segIndex, segOffset, &target };
         callback(info, stop);
-        if ( targetOrAddendChanged )
-            ++bindOrdinal;
     }, ^(const char* symbolName){ });
 }
 
 void BindOpcodes::forEachBindTarget(void (^callback)(const Fixup::BindTarget& target, bool& stop),
                                     void (^strongHandler)(const char* symbolName)) const
 {
+    __block const char* lastSymbolName = nullptr;
     (void)forEachBind(^(const char* opcodeName, int type, bool segIndexSet, uint8_t segIndex, uint64_t segOffset, bool libraryOrdinalSet,
                   int libOrdinal, const char* symbolName, bool weakImport, int64_t addend, bool targetOrAddendChanged, bool& stop) {
-        Fixup::BindTarget target = {symbolName, libOrdinal, weakImport, addend};
-        callback(target, stop);
+        // in Bind Opocdes the symbol name string remains the same, while the update location (segOffset) changes, so we can to pointer comparison
+        if ( symbolName != lastSymbolName ) {
+            Fixup::BindTarget target = {symbolName, libOrdinal, weakImport, addend};
+            callback(target, stop);
+            lastSymbolName = symbolName;
+        }
     }, strongHandler);
 }
 
-void BindOpcodes::forEachBindLocation(std::span<const MappedSegment> segments, void (^callback)(const Fixup& fixup, bool& stop)) const
+uint32_t BindOpcodes::forEachBindLocation(std::span<const MappedSegment> segments, uint32_t startBindOrdinal, void (^callback)(const Fixup& fixup, bool& stop)) const
 {
-    __block uint32_t bindOrdinal = 0;
+    __block uint32_t bindOrdinal = startBindOrdinal;
     (void)forEachBind(^(const char* opcodeName, int type, bool segIndexSet, uint8_t segIndex, uint64_t segOffset, bool libraryOrdinalSet,
                   int libOrdinal, const char* symbolName, bool weakImport, int64_t addend, bool targetOrAddendChanged, bool& stop) {
         uint8_t* loc = (uint8_t*)(segments[segIndex].content) + segOffset;
@@ -308,6 +310,7 @@ void BindOpcodes::forEachBindLocation(std::span<const MappedSegment> segments, v
         if ( targetOrAddendChanged )
             ++bindOrdinal;
     }, ^(const char* symbolName){ });
+    return bindOrdinal;
 }
 
 void BindOpcodes::printOpcodes(FILE* output, int indentCount) const

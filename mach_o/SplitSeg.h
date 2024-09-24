@@ -66,9 +66,10 @@ public:
                         // construct from a chunk of LINKEDIT
                         SplitSegInfo(const uint8_t* start, size_t size);
 
-    struct Entry { uint8_t kind; uint64_t fromSectionIndex; uint64_t fromSectionOffset; uint64_t toSectionIndex; uint64_t toSectionOffset; };
+    struct Entry   { uint8_t kind; uint8_t fromSectionIndex; uint8_t toSectionIndex; uint64_t fromSectionOffset; uint64_t toSectionOffset; };
 
     Error   valid() const;
+    bool    hasMarker() const;
     bool    isV1() const;
     bool    isV2() const;
 
@@ -78,6 +79,7 @@ public:
                         // used build split seg info
                         // Note: entries so not need to be sorted
                         SplitSegInfo(std::span<const Entry> entries);
+
     static size_t       estimateSplitSegInfoSize(std::span<const Entry> entries);
 
     std::span<const uint8_t>  bytes() const { return _bytes; }

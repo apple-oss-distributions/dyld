@@ -41,6 +41,7 @@
 #include "SharedCacheRuntime.h"
 #include "DyldDelegates.h"
 #include "Allocator.h"
+#include "CString.h"
 
 #if BUILDING_CACHE_BUILDER
 #include "MachOFile.h"
@@ -63,15 +64,15 @@ using dyld3::GradedArchs;
 
 class APIs;
 
-#if BUILDING_DYLD
+#if BUILDING_DYLD || BUILDING_UNIT_TESTS
 struct StructuredError {
     uintptr_t     kind              = 0;
     const char*   clientOfDylibPath = nullptr;
     const char*   targetDylibPath   = nullptr;
     const char*   symbolName        = nullptr;
  };
-void halt(const char* message, const StructuredError* errInfo=nullptr)  __attribute__((noreturn));
-#endif
+void halt(const char* message, const StructuredError* errInfo=nullptr)  __attribute__((__noreturn__));
+#endif // BUILDING_DYLD || BUILDING_UNIT_TESTS
 void console(const char* format, ...) __attribute__((format(printf, 1, 2)));
 
 struct ProgramVars
@@ -101,10 +102,10 @@ struct ProgramVars
 //
 struct LibdyldDyld4Section {
     APIs*               apis;
-    void*               allImageInfos;  // set by dyld to point to the dyld_all_image_infos struct
-	dyld4::ProgramVars  defaultVars;    // set by libdyld to have addresses of default crt globals in libdyld.dylib
-    dyld3::DyldLookFunc dyldLookupFuncAddr;
-    void* (*tlv_get_addrAddr)(dyld3::MachOAnalyzer::TLV_Thunk*);
+    void*               allImageInfos;      // set by dyld to point to the dyld_all_image_infos struct
+	dyld4::ProgramVars  defaultVars;        // set by libdyld to have addresses of default crt globals in libdyld.dylib
+    uintptr_t           dyldLookupFuncAddr; // only used on x86_64 so never signed
+    uintptr_t           tlv_get_addrAddr;   // only used by the cache builder so doens't need to be typed/signed
 };
 
 extern volatile LibdyldDyld4Section gDyld;
@@ -236,6 +237,7 @@ public:
         bool                            usesCatalyst();
         bool                            defaultDataConst();
         bool                            defaultTproDataConst();
+        bool                            defaultTproHW();
         bool                            defaultCompactInfo();
     };
 
@@ -251,6 +253,7 @@ public:
         bool                        internalInstall; // always returns false for simulator
         bool                        dlsymBlocked;
         bool                        dlsymAbort;
+        const char*                 dlsymAllowList;
 #if !TARGET_OS_EXCLAVEKIT
         bool                        allowAtPaths;
         bool                        allowEnvVarsPrint;
@@ -260,6 +263,7 @@ public:
         bool                        allowInsertFailures;
         bool                        allowInterposing;
         bool                        allowEmbeddedVars;
+        bool                        allowDevelopmentVars;
         bool                        skipMain;
         bool                        justBuildClosure;
 
@@ -290,6 +294,7 @@ public:
         int                         descriptor;
         bool                        useStderr;
         bool                        useFile;
+        CString                     linksWith;
 
      private:
     };
@@ -327,6 +332,11 @@ public:
         bool                            dylibsExpectedOnDisk;
         bool                            privateCache;
 
+        // This is used to track the cases where the shared cache supports roots, and which roots are eligible.
+        // This is a combination of the kind of shared cache (customer vs development) but also whether
+        // other circumstances such as boot-time/env-var checks mean that we know for sure roots are or are not supported
+        bool                            rootsAreSupported;
+
 #if BUILDING_CACHE_BUILDER || BUILDING_CACHE_BUILDER_UNIT_TESTS
         // In the cache builder, the dylibs might not be mapped in their runtime layout,
         // so use the layout the builder gives us
@@ -355,7 +365,11 @@ public:
         const dyld3::MachOFile*     getIndexedImageEntry(uint32_t index,
                                                          uint64_t& mTime, uint64_t& inode) const;
 
-        void                        adjustDevelopmentMode() const;
+        // There are env vars which can change the default search paths, eg, DYLD_LIBRARY_PATH.
+        // Adjust whether roots are supported, given that these are set.
+        void                        adjustRootsSupportForEnvVars();
+
+        bool                        sharedCacheLoadersAreAlwaysValid() const { return !rootsAreSupported; }
 
     private:
         friend class ProcessConfig;

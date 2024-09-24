@@ -67,7 +67,7 @@ SwiftConformanceList SwiftVisitor::getSwiftConformances() const
     return SwiftConformanceList(sectionValue, (uint32_t)numElements);
 }
 
-std::optional<SwiftVisitor::SectionContent> SwiftVisitor::findTextSection(const char *sectionName) const
+std::optional<SwiftVisitor::SectionContent> SwiftVisitor::findSection(const char* segmentName, const char *sectionName) const
 {
 #if SUPPORT_VM_LAYOUT
     const dyld3::MachOFile* mf = this->dylibMA;
@@ -77,7 +77,7 @@ std::optional<SwiftVisitor::SectionContent> SwiftVisitor::findTextSection(const 
 
     __block std::optional<SwiftVisitor::SectionContent> sectionContent;
     mf->forEachSection(^(const dyld3::MachOFile::SectionInfo& sectInfo, bool malformedSectionRange, bool& stop) {
-        if ( (strcmp(sectInfo.segInfo.segName, "__TEXT") != 0) )
+        if ( (strcmp(sectInfo.segInfo.segName, segmentName) != 0) )
             return;
         if ( strcmp(sectInfo.sectName, sectionName) != 0 )
             return;
@@ -96,6 +96,135 @@ std::optional<SwiftVisitor::SectionContent> SwiftVisitor::findTextSection(const 
     });
     return sectionContent;
 }
+
+#if BUILDING_CACHE_BUILDER || BUILDING_CACHE_BUILDER_UNIT_TESTS
+void SwiftVisitor::forEachPointerHashTable(Diagnostics &diag, void(^callback)(ResolvedValue sectionBase, size_t tableIndex, uint8_t* tableStart, size_t numEntries)) const
+{
+    std::optional<SectionContent> sect = findPointerHashTableSection();
+    if ( !sect )
+        return;
+
+    if ( sect->sectSize < sizeof(uint64_t) )
+        return;
+
+    // Pointer hash table section consists of:
+    // struct PointerHashTable {
+    //   size_t count;
+    //   struct PointerHashTableEntry entries[];
+    // };
+    // struct PointerHashTableEntry {
+    //   struct PointerHashTableKey *key;
+    //   void *value;
+    // };
+
+    const size_t sizeTySize = this->pointerSize;
+    uint8_t* const sectBase = (uint8_t*)sect->sectionBase.value();
+    uint8_t* const sectEnd = (uint8_t*)sectBase + sect->sectSize;
+    uint8_t* pos = sectBase;
+    size_t   tableIndex = 0;
+    while ( pos < sectEnd ) {
+        if ( (sectEnd-pos) < sizeof(sizeTySize) ) {
+            diag.error("Bad hash table section, missing count");
+            return;
+        }
+
+        const uint64_t count = sizeTySize == 4 ? *(uint32_t*)pos : *(uint64_t*)pos;
+        const size_t headerSize = sizeTySize;
+        const size_t entrySize = this->pointerSize * 2;
+        const size_t minSize = (entrySize * count) + headerSize;
+        if ( (sectEnd-pos) < minSize ) {
+            diag.error("Bad hash table section, found count: %llu, expected section size: %lu, actual size: %llu", count, minSize, sect->sectSize);
+            return;
+        }
+
+        callback(sect->sectionBase, tableIndex, pos, count);
+        pos = pos + minSize;
+        ++tableIndex;
+    }
+}
+
+size_t SwiftVisitor::numPointerHashTables(Diagnostics& diag) const
+{
+    __block size_t res = 0;
+    forEachPointerHashTable(diag, ^(ResolvedValue sectionBase, size_t tableIndex, uint8_t *tableStart, size_t numEntries) {
+        ++res;
+    });
+    return res;
+}
+
+std::optional<ResolvedValue> SwiftVisitor::forEachPointerHashTableRelativeEntry(Diagnostics& diag, uint8_t* tableStart,
+                                                                                VMAddress sharedCacheBaseAddr,
+                                                                                void(^callback)(size_t index, std::span<uint64_t> cacheOffsetKeys, uint64_t cacheOffsetValue)) const
+{
+    std::optional<SectionContent> sect = findPointerHashTableSection();
+    if ( !sect )
+        return {};
+
+    if ( sect->sectSize < sizeof(uint64_t) )
+        return {};
+
+    std::vector<ResolvedValue> res;
+    uint8_t* const sectBase = (uint8_t*)sect->sectionBase.value();
+    uint8_t* const sectEnd = (uint8_t*)sectBase + sect->sectSize;
+    if ( tableStart < sectBase || tableStart >= sectEnd ) {
+        assert(false && "invalid pointer table addr");
+        return std::nullopt;
+    }
+
+    const size_t sizeTySize = pointerSize;
+    if ( (sectEnd-tableStart) < sizeTySize ) {
+        diag.error("Bad hash table section, missing count");
+        return {};
+    }
+
+    const uint64_t count = sizeTySize == 4 ? *(uint32_t*)tableStart : *(uint64_t*)tableStart;
+    const size_t headerSize = sizeTySize;
+    const size_t ptrSize = this->pointerSize;
+    const size_t entrySize = ptrSize * 2;
+    const size_t minSize = (entrySize * count) + headerSize;
+    if ( (sectEnd-tableStart) < minSize ) {
+        diag.error("Bad hash table section, found count: %llu, expected section size: %lu, actual size: %llu", count, minSize, sect->sectSize);
+        return {};
+    }
+
+    // Entry and key layout are:
+    //
+    // struct PointerHashTableEntry {
+    //     struct PointerHashTableKey *key;
+    //     void *value;
+    // };
+    // struct PointerHashTableKey {
+    //     size_t  count;
+    //     void *pointers[];
+    // };
+    uint8_t* entry = (uint8_t*)(tableStart + headerSize);
+    std::vector<uint64_t> keysBuffer;
+    for ( size_t i = 0; i < count; ++i ) {
+        ResolvedValue keyPtrResolved = resolveRebase(getField(sect->sectionBase, entry));
+        entry += ptrSize;
+
+        bool wasBind;
+        ResolvedValue valueResolved = resolveBindOrRebase(getField(sect->sectionBase, entry), wasBind);
+        entry += ptrSize;
+
+        uint8_t* keyPtr = (uint8_t*)keyPtrResolved.value();
+        const uint64_t numKeys = sizeTySize == 4 ? *(uint32_t*)keyPtr : *(uint64_t*)keyPtr;
+        keyPtr += sizeTySize;
+
+        keysBuffer.clear();
+        for ( uint64_t k = 0; k < numKeys; ++k ) {
+            ResolvedValue key = resolveBindOrRebase(getField(keyPtrResolved, keyPtr), wasBind);
+            keyPtr += ptrSize;
+
+            keysBuffer.push_back((key.vmAddress()-sharedCacheBaseAddr).rawValue());
+        }
+
+        callback(i, keysBuffer, (valueResolved.vmAddress()-sharedCacheBaseAddr).rawValue());
+    }
+    assert((uint8_t*)entry == (tableStart+minSize));
+    return getField(sect->sectionBase, tableStart);
+}
+#endif
 
 //
 // MARK: --- SwiftConformanceList methods ---

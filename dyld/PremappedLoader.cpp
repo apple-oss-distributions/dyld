@@ -54,14 +54,14 @@ void PremappedLoader::loadDependents(Diagnostics& diag, RuntimeState& state, con
     __block int                 depIndex = 0;
     const mach_o::MachOFileRef& mf = this->mappedAddress;
     const Header*               mh = (Header*)(&mf->magic); // Better way?
-    mh->forEachDependentDylib(^(const char* loadPath, DependentDylibAttributes depAttr, Version32 compatVersion, Version32 curVersion, bool& stop) {
+    mh->forEachLinkedDylib(^(const char* loadPath, LinkedDylibAttributes depAttr, Version32 compatVersion, Version32 curVersion, bool& stop) {
         if ( !this->allDepsAreNormal )
             dependentAttrs(depIndex) = depAttr;
         const Loader* depLoader = nullptr;
         // for absolute paths, do a quick check if this is already loaded with exact match
         if ( loadPath[0] == '/' ) {
             for ( const Loader* ldr : state.loaded ) {
-                if ( ldr->matchesPath(loadPath) ) {
+                if ( ldr->matchesPath(state, loadPath) ) {
                     depLoader = ldr;
                     break;
                 }
@@ -78,8 +78,8 @@ void PremappedLoader::loadDependents(Diagnostics& diag, RuntimeState& state, con
             depLoader               = getLoader(depDiag, state, loadPath, depOptions);
             if ( depDiag.hasError() ) {
                 char  fromUuidStr[64];
-                this->getUuidStr(state, fromUuidStr);
-                diag.error("Library not loaded: %s\n  Referenced from:  <%s> %s\n  Reason: %s\n", loadPath, fromUuidStr, this->path(), depDiag.errorMessage());
+                this->getUuidStr(fromUuidStr);
+                diag.error("Library not loaded: %s\n  Referenced from:  <%s> %s\n  Reason: %s\n", loadPath, fromUuidStr, this->path(state), depDiag.errorMessage());
                 stop = true;
             }
         }
@@ -101,7 +101,8 @@ void PremappedLoader::loadDependents(Diagnostics& diag, RuntimeState& state, con
     }
 }
 
-void PremappedLoader::applyFixups(Diagnostics& diag, RuntimeState& state, DyldCacheDataConstLazyScopedWriter&, bool allowLazyBinds) const
+void PremappedLoader::applyFixups(Diagnostics& diag, RuntimeState& state, DyldCacheDataConstLazyScopedWriter&, bool allowLazyBinds,
+                                  lsl::Vector<PseudoDylibSymbolToMaterialize>* materializingSymbols) const
 {
     // build targets table
     STACK_ALLOC_OVERFLOW_SAFE_ARRAY(const void*, bindTargets, 512);
@@ -110,8 +111,8 @@ void PremappedLoader::applyFixups(Diagnostics& diag, RuntimeState& state, DyldCa
     this->forEachBindTarget(diag, state, nullptr, allowLazyBinds, ^(const ResolvedSymbol& target, bool& stop) {
         const void* targetAddr = (const void*)Loader::interpose(state, Loader::resolvedAddress(state, target), this);
         if ( state.config.log.fixups ) {
-            const char* targetLoaderName = target.targetLoader ? target.targetLoader->leafName() : "<none>";
-            state.log("<%s/bind#%llu> -> %p (%s/%s)\n", this->leafName(), bindTargets.count(), targetAddr, targetLoaderName, target.targetSymbolName);
+            const char* targetLoaderName = target.targetLoader ? target.targetLoader->leafName(state) : "<none>";
+            state.log("<%s/bind#%llu> -> %p (%s/%s)\n", this->leafName(state), bindTargets.count(), targetAddr, targetLoaderName, target.targetSymbolName);
         }
 
         // Record missing flat-namespace lazy symbols
@@ -122,14 +123,14 @@ void PremappedLoader::applyFixups(Diagnostics& diag, RuntimeState& state, DyldCa
         // Missing weak binds need placeholders to make the target indices line up, but we should otherwise ignore them
         if ( (target.kind == Loader::ResolvedSymbol::Kind::bindToImage) && (target.targetLoader == nullptr) ) {
             if ( state.config.log.fixups )
-                state.log("<%s/bind#%llu> -> missing-weak-bind (%s)\n", this->leafName(), overrideTargetAddrs.count(), target.targetSymbolName);
+                state.log("<%s/bind#%llu> -> missing-weak-bind (%s)\n", this->leafName(state), overrideTargetAddrs.count(), target.targetSymbolName);
 
             overrideTargetAddrs.push_back((const void*)UINTPTR_MAX);
         } else {
             const void* targetAddr = (const void*)Loader::interpose(state, Loader::resolvedAddress(state, target), this);
             if ( state.config.log.fixups ) {
-                const char* targetLoaderName = target.targetLoader ? target.targetLoader->leafName() : "<none>";
-                state.log("<%s/bind#%llu> -> %p (%s/%s)\n", this->leafName(), overrideTargetAddrs.count(), targetAddr, targetLoaderName, target.targetSymbolName);
+                const char* targetLoaderName = target.targetLoader ? target.targetLoader->leafName(state) : "<none>";
+                state.log("<%s/bind#%llu> -> %p (%s/%s)\n", this->leafName(state), overrideTargetAddrs.count(), targetAddr, targetLoaderName, target.targetSymbolName);
             }
 
             // Record missing flat-namespace lazy symbols
@@ -206,6 +207,8 @@ PremappedLoader* PremappedLoader::make(RuntimeState& state, const MachOFile* mh,
     size_t sizeNeeded      = loaderSize + strlen(path) + 1;
     void* storage          = state.persistentAllocator.malloc(sizeNeeded);
 
+    uuid_t uuid;
+
     Loader::InitialOptions options;
     options.inDyldCache     = false;
     options.hasObjc         = mh->hasObjC();
@@ -215,6 +218,10 @@ PremappedLoader* PremappedLoader::make(RuntimeState& state, const MachOFile* mh,
     options.leaveMapped     = true;
     options.roObjC          = options.hasObjc && mh->hasSection("__DATA_CONST", "__objc_selrefs");
     options.pre2022Binary   = true;
+    options.hasUUID         = mh->getUuid(uuid);
+    options.hasWeakDefs     = mh->hasWeakDefs();
+    options.hasTLVs         = mh->hasThreadLocalVariables();
+    options.belowLibSystem  = mh->isDylib() && (strncmp(mh->installName(), "/usr/lib/system/lib", 19) == 0);
 
     PremappedLoader* p = new (storage) PremappedLoader(mh, options, layout);
 
@@ -229,6 +236,15 @@ PremappedLoader* PremappedLoader::make(RuntimeState& state, const MachOFile* mh,
     p->allDepsAreNormal = allDepsAreNormal;
     p->padding          = 0;
 
+    if ( options.hasUUID ) {
+        memcpy(p->uuid, uuid, sizeof(uuid_t));
+    } else {
+        // for reproducibility
+        bzero(p->uuid, sizeof(uuid_t));
+    }
+
+    p->cpusubtype   = mh->cpusubtype;
+
     parseSectionLocations(mh, p->sectionLocations);
 
     if ( !mh->hasExportTrie(p->exportsTrieRuntimeOffset, p->exportsTrieSize) ) {
@@ -239,7 +255,7 @@ PremappedLoader* PremappedLoader::make(RuntimeState& state, const MachOFile* mh,
     for ( unsigned i = 0; i < depCount; ++i ) {
         new (&p->dependents[i]) (AuthLoader) { nullptr };
         if ( !allDepsAreNormal ) {
-            p->dependentAttrs(i) = DependentDylibAttributes::regular;
+            p->dependentAttrs(i) = LinkedDylibAttributes::regular;
         }
     }
     strlcpy(((char*)p) + p->pathOffset, path, PATH_MAX);

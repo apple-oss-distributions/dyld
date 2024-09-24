@@ -90,7 +90,7 @@ size_t Entry::write(std::span<uint8_t> buffer, bool extendedFormatNames, std::st
     const uint64_t totalSize            = headerSize + alignedContentSize;
     assert(totalSize == entrySize(extendedFormatNames, name, content.size()));
     assert(buffer.size() >= (totalSize));
-    bzero(buffer.data(), headerSize);
+    bzero(buffer.data(), (size_t)headerSize);
 
     snprintf(entry->ar_date, sizeof(Entry::ar_date), "%llu", mktime);
     memcpy(entry->ar_fmag, ARFMAG, sizeof(Entry::ar_fmag));
@@ -114,9 +114,9 @@ size_t Entry::write(std::span<uint8_t> buffer, bool extendedFormatNames, std::st
     memcpy(contentStart, content.data(), content.size());
     // Pad content alignment with \n characters
     if ( content.size() != alignedContentSize )
-        memset(contentStart + content.size(), '\n', alignedContentSize - content.size());
+        memset(contentStart + content.size(), '\n', (size_t)alignedContentSize - content.size());
 
-    return totalSize;
+    return (size_t)totalSize;
 }
 
 bool Entry::hasLongName() const
@@ -135,7 +135,7 @@ void Entry::getName(char *buf, int bufsz) const
   if ( hasLongName() ) {
       uint64_t len = getLongNameSpace();
       assert(bufsz >= len+1);
-      strncpy(buf, ((char*)this)+sizeof(ar_hdr), len);
+      strncpy(buf, ((char*)this)+sizeof(ar_hdr), (size_t)len);
       buf[len] = '\0';
   } else {
       assert(bufsz >= 16+1);
@@ -177,7 +177,7 @@ Error Entry::content(std::span<const uint8_t>& content) const
         data = ((const uint8_t*)this) + sizeof(ar_hdr);
     }
 
-    content = std::span(data, size);
+    content = std::span(data, (size_t)size);
     return Error::none();
 }
 

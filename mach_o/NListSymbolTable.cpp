@@ -240,6 +240,30 @@ bool NListSymbolTable::forEachSymbol(uint32_t startSymbolIndex, uint32_t symbolC
     return stop;
 }
 
+bool NListSymbolTable::symbolAtIndex(uint32_t symbolIndex, Symbol& symbol) const
+{
+    if ( symbolIndex >= _nlistCount )
+        return false;
+
+    if ( _nlist64 ) {
+        const struct nlist_64& sym = _nlist64[symbolIndex];
+        if ( sym.n_un.n_strx > _stringPoolSize )
+            return false;
+        symbol = symbolFromNList(&_stringPool[sym.n_un.n_strx], sym.n_value, sym.n_type, sym.n_sect, sym.n_desc);
+        return true;
+    }
+
+    if ( _nlist32 ) {
+        const struct nlist& sym = _nlist32[symbolIndex];
+        if ( sym.n_un.n_strx > _stringPoolSize )
+            return false;
+        symbol = symbolFromNList(&_stringPool[sym.n_un.n_strx], sym.n_value, sym.n_type, sym.n_sect, sym.n_desc);
+        return true;
+    }
+
+    return false;
+}
+
 bool NListSymbolTable::findClosestDefinedSymbol(uint64_t unslidAddr, Symbol& sym) const
 {
     __block uint64_t    bestNValue   = 0;

@@ -39,15 +39,7 @@ extern "C" {
  * Internal interface for dlopen; intended to help audit internal use of
  * dlopen.
  */
-#if __i386__
-/*
- * i386 makes tail calls difficult, and RTLD_NEXT requires that dlopen_audited
- * tail call dlopen.  Just directly call dlopen on i386.
- */
-#define dlopen_audited(__path, __mode) dlopen(__path, __mode)
-#else
 extern void * dlopen_audited(const char * __path, int __mode) __DYLDDL_DRIVERKIT_UNAVAILABLE;
-#endif
 
 
 /*

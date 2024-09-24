@@ -75,9 +75,15 @@ static bool hasAuthRegion(std::string_view archName)
     return archName == "arm64e";
 }
 
+static uint32_t supportsTPROMapping(std::string_view archName)
+{
+    return (archName != "x86_64") && (archName != "x86_64h");
+}
+
 cache_builder::Layout::Layout(const BuilderOptions& options)
     : is64(options.archs.supports64())
     , hasAuthRegion(::hasAuthRegion(options.archs.name()))
+    , tproIsInData(!::supportsTPROMapping(options.archs.name()))
     , pageSize(defaultPageSize(options.archs.name()))
 {
     std::string_view archName = options.archs.name();
@@ -116,11 +122,8 @@ cache_builder::Layout::Layout(const BuilderOptions& options)
         if ( options.isSimulator() ) {
             // Limit to 4GB to support back deployment to older hosts with 4GB shared regions
             layout.cacheSize = 4_GB;
-        } else if ( options.platform == dyld3::Platform::macOS ) {
-            layout.cacheSize = ARM64_SHARED_REGION_SIZE;
         } else {
-            // Temporarily limit embedded/driverKit to 4GB
-            layout.cacheSize = 4_GB;
+            layout.cacheSize = ARM64_SHARED_REGION_SIZE;
         }
 
         // Limit the max slide for arm64 based caches to 512MB.  Combined with large
@@ -129,14 +132,18 @@ cache_builder::Layout::Layout(const BuilderOptions& options)
         cacheMaxSlide = 512_MB;
     } else if ( archName == "arm64_32" ) {
         layout.baseAddress = ARM64_32_SHARED_REGION_START;
-        layout.cacheSize = ARM64_32_SHARED_REGION_SIZE;
+        layout.cacheSize = 2_GB;
+
+        // The cache contents can't exceed 2GB, but use the space above it for the slide
+        if ( ARM64_32_SHARED_REGION_SIZE >= layout.cacheSize ) {
+            this->cacheFixedSlide = ARM64_32_SHARED_REGION_SIZE - layout.cacheSize;
+        }
     } else {
         assert("Unknown arch");
     }
 
     this->cacheBaseAddress          = CacheVMAddress(layout.baseAddress);
     this->cacheSize                 = CacheVMSize(layout.cacheSize);
-    this->allLinkeditInLastSubCache = this->cacheSize <= CacheVMSize(4_GB);
 }
 
 //

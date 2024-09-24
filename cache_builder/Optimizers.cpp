@@ -31,7 +31,7 @@ using namespace cache_builder;
 // MARK: --- StubOptimizer methods ---
 //
 
-// These are functions that are interposed by Instruments.app or ASan
+// These are functions that are interposed by Instruments.app or ASan or libRPAC.dylib
 const char* const neverStubEliminateSymbols[] = {
     "___bzero",
     "___cxa_atexit",
@@ -71,6 +71,7 @@ const char* const neverStubEliminateSymbols[] = {
     "_dispatch_sync_f",
     "_dlclose",
     "_dlopen",
+    "_dlsym",
     "_dup",
     "_dup2",
     "_endgrent",
@@ -249,6 +250,25 @@ const char* const neverStubEliminateSymbols[] = {
     "_sigwait",
     "_snprintf",
     "_sprintf",
+    "_sqlite3_close",
+    "_sqlite3_close_v2",
+    "_sqlite3_exec",
+    "_sqlite3_exec_b",
+    "_sqlite3_finalize",
+    "_sqlite3_open",
+    "_sqlite3_open16",
+    "_sqlite3_open_v2",
+    "_sqlite3_prepare",
+    "_sqlite3_prepare16",
+    "_sqlite3_prepare16_v2",
+    "_sqlite3_prepare16_v3",
+    "_sqlite3_prepare_v2",
+    "_sqlite3_prepare_v3",
+    "_sqlite3_step",
+    "_sqlite3_wal_autocheckpoint",
+    "_sqlite3_wal_checkpoint",
+    "_sqlite3_wal_checkpoint_v2",
+    "_sqlite3_wal_hook",
     "_sscanf",
     "_stat",
     "_statfs",
@@ -311,6 +331,8 @@ const char* const neverStubEliminateSymbols[] = {
     "_write$NOCANCEL",
     "_writev$NOCANCEL",
     "_xpc_connection_send_message_with_reply_sync",
+    "__dyld_register_func_for_add_image",
+    "__dyld_register_func_for_remove_image",
     // <rdar://problem/22050956> always use stubs for C++ symbols that can be overridden
     "__ZdaPv",
     "__ZdlPv",

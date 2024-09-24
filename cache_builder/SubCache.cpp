@@ -25,6 +25,7 @@
 #include "BuilderConfig.h"
 #include "BuilderOptions.h"
 #include "CacheDylib.h"
+#include "Chunk.h"
 #include "CodeSigningTypes.h"
 #include "DyldSharedCache.h"
 #include "SubCache.h"
@@ -55,33 +56,32 @@ static inline uint64_t alignPage(uint64_t value)
 
 uint32_t Region::initProt() const
 {
-    uint32_t maxProt = 0;
+    uint32_t initProt = 0;
     switch ( this->kind ) {
         case Region::Kind::text:
-            maxProt = VM_PROT_READ | VM_PROT_EXECUTE;
+            initProt = VM_PROT_READ | VM_PROT_EXECUTE;
             break;
         case Region::Kind::data:
-            maxProt = VM_PROT_READ | VM_PROT_WRITE;
+        case Region::Kind::auth:
+            initProt = VM_PROT_READ | VM_PROT_WRITE;
             break;
         case Region::Kind::dataConst:
-            maxProt = VM_PROT_READ;
-            break;
-        case Region::Kind::auth:
-            maxProt = VM_PROT_READ | VM_PROT_WRITE;
-            break;
         case Region::Kind::authConst:
-            maxProt = VM_PROT_READ;
+        case Region::Kind::tproConst:
+        case Region::Kind::tproAuthConst:
+            initProt = VM_PROT_READ;
             break;
+        case Region::Kind::readOnly:
         case Region::Kind::linkedit:
-            maxProt = VM_PROT_READ;
+            initProt = VM_PROT_READ;
             break;
         case Region::Kind::dynamicConfig:
             // HACK: This is not actually mapped, but it is used in vm calculations
-            maxProt = VM_PROT_READ;
+            initProt = VM_PROT_READ;
             break;
         case Region::Kind::unmapped:
         case Region::Kind::codeSignature:
-            // This isn't mapped, so we should never ask for its maxprot
+            // This isn't mapped, so we should never ask for its initProt
             assert(0);
             break;
         case Region::Kind::numKinds:
@@ -89,7 +89,7 @@ uint32_t Region::initProt() const
             break;
     }
 
-    return maxProt;
+    return initProt;
 }
 
 uint32_t Region::maxProt() const
@@ -99,18 +99,15 @@ uint32_t Region::maxProt() const
         case Region::Kind::text:
             maxProt = VM_PROT_READ | VM_PROT_EXECUTE;
             break;
+        case Region::Kind::tproConst:
         case Region::Kind::data:
-            maxProt = VM_PROT_READ | VM_PROT_WRITE;
-            break;
         case Region::Kind::dataConst:
-            maxProt = VM_PROT_READ | VM_PROT_WRITE;
-            break;
+        case Region::Kind::tproAuthConst:
         case Region::Kind::auth:
-            maxProt = VM_PROT_READ | VM_PROT_WRITE;
-            break;
         case Region::Kind::authConst:
             maxProt = VM_PROT_READ | VM_PROT_WRITE;
             break;
+        case Region::Kind::readOnly:
         case Region::Kind::linkedit:
             maxProt = VM_PROT_READ;
             break;
@@ -139,14 +136,19 @@ bool Region::canContainAuthPointers() const
             // We should never ask this region if it has auth content
             assert(0);
             break;
+        case Region::Kind::tproConst:
+        case Region::Kind::tproAuthConst:
         case Region::Kind::data:
         case Region::Kind::dataConst:
+            // Note TPRO never contains authenticated fixups, so its name is wrong
+            // but its really there to be placed next to the AUTH regions
             result = false;
             break;
         case Region::Kind::auth:
         case Region::Kind::authConst:
             result = true;
             break;
+        case Region::Kind::readOnly:
         case Region::Kind::linkedit:
         case Region::Kind::dynamicConfig:
             // We should never ask this region if it has auth content
@@ -170,10 +172,13 @@ bool Region::needsSharedCacheMapping() const
 {
     switch ( this->kind ) {
         case Region::Kind::text:
+        case Region::Kind::tproConst:
         case Region::Kind::data:
         case Region::Kind::dataConst:
+        case Region::Kind::tproAuthConst:
         case Region::Kind::auth:
         case Region::Kind::authConst:
+        case Region::Kind::readOnly:
         case Region::Kind::linkedit:
             return true;
         case Region::Kind::unmapped:
@@ -190,10 +195,13 @@ bool Region::needsSharedCacheReserveAddressSpace() const
 {
     switch ( this->kind ) {
         case Region::Kind::text:
+        case Region::Kind::tproConst:
         case Region::Kind::data:
         case Region::Kind::dataConst:
+        case Region::Kind::tproAuthConst:
         case Region::Kind::auth:
         case Region::Kind::authConst:
+        case Region::Kind::readOnly:
         case Region::Kind::linkedit:
         case Region::Kind::dynamicConfig:
             return true;
@@ -221,10 +229,16 @@ bool Region::needsRegionPadding(const Region& next) const
             bool nextIsRW = (next.initProt() & VM_PROT_WRITE) != 0;
             return nextIsRW;
         }
+        case Region::Kind::tproConst:
+        case Region::Kind::tproAuthConst:
         case Region::Kind::data:
         case Region::Kind::auth: {
             // HACK: Remove once we have rdar://96315050
             if ( (this->kind == Region::Kind::auth) && (next.kind == Region::Kind::authConst) )
+                return false;
+
+            // Don't add adding from data to tproConst as we didn't have padding from data to auth before
+            if ( (next.kind == Kind::tproConst) || (next.kind == Kind::tproAuthConst) )
                 return false;
 
             // Add padding if DATA is adjacent to something immutable, eg TEXT/DATA_CONST
@@ -233,12 +247,17 @@ bool Region::needsRegionPadding(const Region& next) const
         }
         case Region::Kind::dataConst:
         case Region::Kind::authConst: {
+            // Always add padding from DATA_CONST to TPRO_CONST as TPRO_CONST will actually be dirtied
+            if ( (next.kind == Kind::tproConst) || (next.kind == Kind::tproAuthConst) )
+                return true;
+
             // Don't add padding if *_CONST is next to *_CONST, otherwise add padding
             bool nextInitIsRO = (next.initProt() & VM_PROT_WRITE) == 0;
             bool nextMaxIsRW = (next.maxProt() & VM_PROT_WRITE) != 0;
             bool nextIsDataConst = nextInitIsRO & nextMaxIsRW;
             return !nextIsDataConst;
         }
+        case Region::Kind::readOnly:
         case Region::Kind::linkedit:
         case Region::Kind::dynamicConfig: {
             // Add padding if LINKEDIT is adjacent to something that is mutable,
@@ -321,11 +340,14 @@ static bool hasDataRegion(std::span<Region> regions)
         switch ( region.kind ) {
             case cache_builder::Region::Kind::text:
                 break;
+            case cache_builder::Region::Kind::tproConst:
+            case cache_builder::Region::Kind::tproAuthConst:
             case cache_builder::Region::Kind::dataConst:
             case cache_builder::Region::Kind::data:
             case cache_builder::Region::Kind::auth:
             case cache_builder::Region::Kind::authConst:
                 return true;
+            case Region::Kind::readOnly:
             case cache_builder::Region::Kind::linkedit:
             case cache_builder::Region::Kind::unmapped:
             case cache_builder::Region::Kind::dynamicConfig:
@@ -344,11 +366,14 @@ static bool hasLinkeditRegion(std::span<Region> regions)
             continue;
         switch ( region.kind ) {
             case cache_builder::Region::Kind::text:
+            case cache_builder::Region::Kind::tproConst:
+            case cache_builder::Region::Kind::tproAuthConst:
             case cache_builder::Region::Kind::dataConst:
             case cache_builder::Region::Kind::data:
             case cache_builder::Region::Kind::auth:
             case cache_builder::Region::Kind::authConst:
                 break;
+            case Region::Kind::readOnly:
             case cache_builder::Region::Kind::linkedit:
                 return true;
             case cache_builder::Region::Kind::unmapped:
@@ -700,6 +725,20 @@ void SubCache::addTextChunk(Chunk* chunk)
     this->regions[(uint32_t)Region::Kind::text].chunks.push_back(chunk);
 }
 
+void SubCache::addTPROConstChunk(const BuilderConfig& config, Chunk* chunk)
+{
+    // Rosetta can't handle an extra shared cache mapping, so use DATA instead
+    // We use DATA instead of DATA_CONST because we don't want the MemoryManager
+    // and DataConstWriter to both mprotect the same pages.  But the DataConstWriter
+    // will ignore everything in DATA while the MemoryManager will find TPRO there
+    if ( config.layout.discontiguous.has_value() )
+        this->addDataChunk(chunk);
+    else if ( config.layout.hasAuthRegion )
+        this->regions[(uint32_t)Region::Kind::tproAuthConst].chunks.push_back(chunk);
+    else
+        this->regions[(uint32_t)Region::Kind::tproConst].chunks.push_back(chunk);
+}
+
 void SubCache::addDataChunk(Chunk* chunk)
 {
     this->regions[(uint32_t)Region::Kind::data].chunks.push_back(chunk);
@@ -720,6 +759,15 @@ void SubCache::addAuthConstChunk(Chunk* chunk)
     this->regions[(uint32_t)Region::Kind::authConst].chunks.push_back(chunk);
 }
 
+void SubCache::addReadOnlyChunk(const BuilderConfig& config, Chunk* chunk)
+{
+    // Rosetta can't handle an extra shared cache mapping, so use __TEXT instead
+    if ( config.layout.discontiguous.has_value() )
+        this->addTextChunk(chunk);
+    else
+        this->regions[(uint32_t)Region::Kind::readOnly].chunks.push_back(chunk);
+}
+
 void SubCache::addLinkeditChunk(Chunk* chunk)
 {
     this->regions[(uint32_t)Region::Kind::linkedit].chunks.push_back(chunk);
@@ -735,22 +783,6 @@ void SubCache::addCodeSignatureChunk(Chunk* chunk)
     this->regions[(uint32_t)Region::Kind::codeSignature].chunks.push_back(chunk);
 }
 
-// HACK: We need to insert the libobjc __TEXT first so that its before all the other OBJC_RO chunks
-void SubCache::addObjCTextChunk(Chunk* chunk)
-{
-    std::vector<Chunk*>& chunks = this->regions[(uint32_t)Region::Kind::text].chunks;
-    chunks.insert(chunks.begin(), chunk);
-}
-
-// ObjC optimizations need to add read-only chunks.  For now these are added to the start
-// of TEXT, so that they are in the same subCache when split by One Cache.  In future we want to
-// move these to LINKEDIT
-void SubCache::addObjCReadOnlyChunk(Chunk* chunk)
-{
-    std::vector<Chunk*>& chunks = this->regions[(uint32_t)Region::Kind::text].chunks;
-    chunks.insert(chunks.begin(), chunk);
-}
-
 // All objc optimizations need to be contiguous, but that means if any need AUTH then all do
 void SubCache::addObjCReadWriteChunk(const BuilderConfig& config, Chunk* chunk)
 {
@@ -762,18 +794,17 @@ void SubCache::addObjCReadWriteChunk(const BuilderConfig& config, Chunk* chunk)
     }
 }
 
-void SubCache::addDylib(CacheDylib& cacheDylib, bool addLinkedit)
+void SubCache::addDylib(const BuilderConfig& config, CacheDylib& cacheDylib)
 {
     for ( DylibSegmentChunk& segmentInfo : cacheDylib.segments ) {
         switch ( segmentInfo.kind ) {
             case Chunk::Kind::dylibText:
-                if ( cacheDylib.installName == "/usr/lib/libobjc.A.dylib" )
-                    this->addObjCTextChunk(&segmentInfo);
-                else
-                    this->addTextChunk(&segmentInfo);
+                this->addTextChunk(&segmentInfo);
+                break;
+            case Chunk::Kind::tproDataConst:
+                this->addTPROConstChunk(config, &segmentInfo);
                 break;
             case Chunk::Kind::dylibData:
-            case Chunk::Kind::dylibDataConstWorkaround:
                 this->addDataChunk(&segmentInfo);
                 break;
             case Chunk::Kind::dylibDataConst:
@@ -787,15 +818,13 @@ void SubCache::addDylib(CacheDylib& cacheDylib, bool addLinkedit)
                     this->addDataChunk(&segmentInfo);
                 break;
             case Chunk::Kind::dylibAuth:
-            case Chunk::Kind::dylibAuthConstWorkaround:
                 this->addAuthChunk(&segmentInfo);
                 break;
             case Chunk::Kind::dylibAuthConst:
                 this->addAuthConstChunk(&segmentInfo);
                 break;
             case Chunk::Kind::dylibReadOnly:
-                // FIXME: Read-only data should really be in a read-only mapping.
-                this->addTextChunk(&segmentInfo);
+                this->addReadOnlyChunk(config, &segmentInfo);
                 break;
             case Chunk::Kind::dylibLinkedit:
                 // Skip adding here.  We'll do this in addLinkeditFromDylib()
@@ -806,8 +835,7 @@ void SubCache::addDylib(CacheDylib& cacheDylib, bool addLinkedit)
         }
     }
 
-    if ( addLinkedit )
-        this->addLinkeditFromDylib(cacheDylib);
+    this->addLinkeditFromDylib(cacheDylib);
 }
 
 // Linkedit is stored in Chunks in its own array on the dylib.  This adds it to the subCache.
@@ -821,16 +849,98 @@ void SubCache::addLinkeditFromDylib(CacheDylib& cacheDylib)
         this->addLinkeditChunk(&chunk);
 }
 
-void SubCache::addCacheHeaderChunk(const std::span<CacheDylib> cacheDylibs)
+void SubCache::forEachTPRORegionInData(SubCache* mainSubCache, std::span<SubCache*> subCaches,
+                                       void (^callback)(Region& region, const Chunk* firstChunk, const Chunk* lastChunk))
+{
+    // Find all subcaches with TPRO regions, or on x86_64 its those with DATA in them
+    auto runOnSubCache = ^(SubCache* subCache) {
+        for ( Region& region : subCache->regions ) {
+            if ( region.kind != Region::Kind::data )
+                continue;
+
+            const Chunk* firstTPROChunk = nullptr;
+            const Chunk* lastTPROChunk = nullptr;
+            for ( const Chunk* chunk : region.chunks ) {
+                if ( chunk->isTPROChunk() ) {
+                    if ( !firstTPROChunk ) {
+                        firstTPROChunk = chunk;
+                        lastTPROChunk = chunk;
+                    } else {
+                        lastTPROChunk = chunk;
+                    }
+                } else if ( firstTPROChunk ) {
+                    // HACK: If we find an alignment chunk then add it as-if its a TPRO chunk. This is to
+                    // make sure callers can get page-aligned TPRO regions
+                    if ( const AlignChunk* alignChunk = chunk->isAlignChunk() ) {
+                        if ( alignChunk->alignment() >= 4_KB ) {
+                            lastTPROChunk = chunk;
+                            continue;
+                        }
+                    }
+
+                    // Found a non-tpro chunk.  Break here and do the callback outside the chunk loop
+                    // We don't need to continue the loop as we sorted all the TPRO to be adjacent
+                    break;
+                }
+            }
+
+            if ( firstTPROChunk ) {
+                // Ended with a tpro chunk.  Make the callback for it
+                callback(region, firstTPROChunk, lastTPROChunk);
+            }
+        }
+    };
+
+    runOnSubCache(mainSubCache);
+    for ( SubCache* subCache : subCaches )
+        runOnSubCache(subCache);
+}
+
+static void forEachTPRORegion(const BuilderConfig& config, SubCache* mainSubCache,
+                              std::span<SubCache*> subCaches,
+                              void (^callback)(CacheVMAddress firstChunkAddress, CacheVMAddress lastChunkAddress, CacheVMSize lastChunkSize))
+{
+    // Find all subcaches with TPRO regions, or on x86_64 its those with DATA in them
+    if ( config.layout.tproIsInData ) {
+        SubCache::forEachTPRORegionInData(mainSubCache, subCaches, ^(Region& region, const Chunk *firstChunk, const Chunk *lastChunk) {
+            callback(firstChunk->cacheVMAddress, lastChunk->cacheVMAddress, lastChunk->cacheVMSize);
+        });
+        return;
+    }
+
+    auto runOnSubCache = ^(const SubCache* subCache) {
+        for ( const Region& region : subCache->regions ) {
+            if ( (region.kind == Region::Kind::tproConst) || (region.kind == Region::Kind::tproAuthConst) )
+                callback(region.subCacheVMAddress, region.subCacheVMAddress, region.subCacheVMSize);
+        }
+    };
+
+    runOnSubCache(mainSubCache);
+    for ( const SubCache* subCache : subCaches )
+        runOnSubCache(subCache);
+}
+
+static uint32_t numTPRORegions(const BuilderConfig& config, SubCache* mainSubCache,
+                               std::span<SubCache*> subCaches)
+{
+    __block uint32_t count = 0;
+    forEachTPRORegion(config, mainSubCache, subCaches, ^(CacheVMAddress, CacheVMAddress, CacheVMSize) {
+        ++count;
+    });
+    return count;
+}
+
+void SubCache::addCacheHeaderChunk(const BuilderConfig& config, const std::span<CacheDylib> cacheDylibs)
 {
     // calculate size of header info and where first dylib's mach_header should start
     uint64_t numMappings = this->regions.size();
     uint64_t startOffset = sizeof(dyld_cache_header) + (numMappings * sizeof(dyld_cache_mapping_info));
     startOffset += numMappings * sizeof(dyld_cache_mapping_and_slide_info);
 
-    // Only the main cache has a list of subCaches to write
+    // Only the main cache has a list of subCaches and TPRO mappings to write
     if ( this->isMainCache() ) {
         startOffset += sizeof(dyld_subcache_entry) * this->subCaches.size();
+        startOffset += sizeof(dyld_cache_tpro_mapping_info) * numTPRORegions(config, this, this->subCaches);
     }
 
     if ( this->needsCacheHeaderImageList() ) {
@@ -869,6 +979,12 @@ void SubCache::addSlideInfoChunks()
     // we sort the Chunk's.  For now just add placeholder(s) and we'll update the
     // size in calculateSlideInfoSize()
 
+    // TPRO_CONST
+    if ( !this->regions[(uint32_t)Region::Kind::tproConst].chunks.empty() ) {
+        this->tproConstSlideInfo = std::make_unique<SlideInfoChunk>();
+        addLinkeditChunk(this->tproConstSlideInfo.get());
+    }
+
     // DATA
     if ( !this->regions[(uint32_t)Region::Kind::data].chunks.empty() ) {
         this->dataSlideInfo = std::make_unique<SlideInfoChunk>();
@@ -879,6 +995,12 @@ void SubCache::addSlideInfoChunks()
     if ( !this->regions[(uint32_t)Region::Kind::dataConst].chunks.empty() ) {
         this->dataConstSlideInfo = std::make_unique<SlideInfoChunk>();
         addLinkeditChunk(this->dataConstSlideInfo.get());
+    }
+
+    // TPRO_CONST (on arm64e)
+    if ( !this->regions[(uint32_t)Region::Kind::tproAuthConst].chunks.empty() ) {
+        this->tproAuthConstSlideInfo = std::make_unique<SlideInfoChunk>();
+        addLinkeditChunk(this->tproAuthConstSlideInfo.get());
     }
 
     // AUTH
@@ -914,7 +1036,7 @@ void SubCache::addObjCOptsHeaderChunk(ObjCOptimizer& objcOptimizer)
     this->addLinkeditChunk(this->objcOptsHeader.get());
 }
 
-void SubCache::addObjCHeaderInfoReadOnlyChunk(ObjCOptimizer& objcOptimizer)
+void SubCache::addObjCHeaderInfoReadOnlyChunk(const BuilderConfig& config, ObjCOptimizer& objcOptimizer)
 {
     this->objcHeaderInfoRO = std::make_unique<ObjCHeaderInfoReadOnlyChunk>();
     this->objcHeaderInfoRO->cacheVMSize         = CacheVMSize(objcOptimizer.headerInfoReadOnlyByteSize);
@@ -922,10 +1044,10 @@ void SubCache::addObjCHeaderInfoReadOnlyChunk(ObjCOptimizer& objcOptimizer)
 
     objcOptimizer.headerInfoReadOnlyChunk = this->objcHeaderInfoRO.get();
 
-    this->addObjCReadOnlyChunk(this->objcHeaderInfoRO.get());
+    this->addReadOnlyChunk(config, this->objcHeaderInfoRO.get());
 }
 
-void SubCache::addObjCImageInfoChunk(ObjCOptimizer& objcOptimizer)
+void SubCache::addObjCImageInfoChunk(const BuilderConfig& config, ObjCOptimizer& objcOptimizer)
 {
     this->objcImageInfo = std::make_unique<ObjCImageInfoChunk>();
     this->objcImageInfo->cacheVMSize         = CacheVMSize(objcOptimizer.imageInfoSize);
@@ -933,10 +1055,10 @@ void SubCache::addObjCImageInfoChunk(ObjCOptimizer& objcOptimizer)
 
     objcOptimizer.imageInfoChunk = this->objcImageInfo.get();
 
-    this->addObjCReadOnlyChunk(this->objcImageInfo.get());
+    this->addReadOnlyChunk(config, this->objcImageInfo.get());
 }
 
-void SubCache::addObjCSelectorStringsChunk(ObjCSelectorOptimizer& objCSelectorOptimizer)
+void SubCache::addObjCSelectorStringsChunk(const BuilderConfig& config, ObjCSelectorOptimizer& objCSelectorOptimizer)
 {
     this->objcSelectorStrings = std::make_unique<ObjCStringsChunk>();
     this->objcSelectorStrings->cacheVMSize      = CacheVMSize(objCSelectorOptimizer.selectorStringsTotalByteSize);
@@ -944,10 +1066,10 @@ void SubCache::addObjCSelectorStringsChunk(ObjCSelectorOptimizer& objCSelectorOp
 
     objCSelectorOptimizer.selectorStringsChunk = this->objcSelectorStrings.get();
 
-    this->addObjCReadOnlyChunk(this->objcSelectorStrings.get());
+    this->addReadOnlyChunk(config, this->objcSelectorStrings.get());
 }
 
-void SubCache::addObjCSelectorHashTableChunk(ObjCSelectorOptimizer& objCSelectorOptimizer)
+void SubCache::addObjCSelectorHashTableChunk(const BuilderConfig& config, ObjCSelectorOptimizer& objCSelectorOptimizer)
 {
     this->objcSelectorsHashTable = std::make_unique<ObjCSelectorHashTableChunk>();
     this->objcSelectorsHashTable->cacheVMSize       = CacheVMSize(objCSelectorOptimizer.selectorHashTableTotalByteSize);
@@ -955,10 +1077,10 @@ void SubCache::addObjCSelectorHashTableChunk(ObjCSelectorOptimizer& objCSelector
 
     objCSelectorOptimizer.selectorHashTableChunk = this->objcSelectorsHashTable.get();
 
-    this->addObjCReadOnlyChunk(this->objcSelectorsHashTable.get());
+    this->addReadOnlyChunk(config, this->objcSelectorsHashTable.get());
 }
 
-void SubCache::addObjCClassNameStringsChunk(ObjCClassOptimizer& objcClassOptimizer)
+void SubCache::addObjCClassNameStringsChunk(const BuilderConfig& config, ObjCClassOptimizer& objcClassOptimizer)
 {
     this->objcClassNameStrings = std::make_unique<ObjCStringsChunk>();
     this->objcClassNameStrings->cacheVMSize         = CacheVMSize(objcClassOptimizer.nameStringsTotalByteSize);
@@ -966,10 +1088,10 @@ void SubCache::addObjCClassNameStringsChunk(ObjCClassOptimizer& objcClassOptimiz
 
     objcClassOptimizer.classNameStringsChunk = this->objcClassNameStrings.get();
 
-    this->addObjCReadOnlyChunk(this->objcClassNameStrings.get());
+    this->addReadOnlyChunk(config, this->objcClassNameStrings.get());
 }
 
-void SubCache::addObjCClassHashTableChunk(ObjCClassOptimizer& objcClassOptimizer)
+void SubCache::addObjCClassHashTableChunk(const BuilderConfig& config, ObjCClassOptimizer& objcClassOptimizer)
 {
     this->objcClassesHashTable = std::make_unique<ObjCClassHashTableChunk>();
     this->objcClassesHashTable->cacheVMSize         = CacheVMSize(objcClassOptimizer.classHashTableTotalByteSize);
@@ -977,10 +1099,10 @@ void SubCache::addObjCClassHashTableChunk(ObjCClassOptimizer& objcClassOptimizer
 
     objcClassOptimizer.classHashTableChunk = this->objcClassesHashTable.get();
 
-    this->addObjCReadOnlyChunk(this->objcClassesHashTable.get());
+    this->addReadOnlyChunk(config, this->objcClassesHashTable.get());
 }
 
-void SubCache::addObjCProtocolNameStringsChunk(ObjCProtocolOptimizer& objcProtocolOptimizer)
+void SubCache::addObjCProtocolNameStringsChunk(const BuilderConfig& config, ObjCProtocolOptimizer& objcProtocolOptimizer)
 {
     this->objcProtocolNameStrings = std::make_unique<ObjCStringsChunk>();
     this->objcProtocolNameStrings->cacheVMSize      = CacheVMSize(objcProtocolOptimizer.nameStringsTotalByteSize);
@@ -988,10 +1110,10 @@ void SubCache::addObjCProtocolNameStringsChunk(ObjCProtocolOptimizer& objcProtoc
 
     objcProtocolOptimizer.protocolNameStringsChunk = this->objcProtocolNameStrings.get();
 
-    this->addObjCReadOnlyChunk(this->objcProtocolNameStrings.get());
+    this->addReadOnlyChunk(config, this->objcProtocolNameStrings.get());
 }
 
-void SubCache::addObjCProtocolHashTableChunk(ObjCProtocolOptimizer& objcProtocolOptimizer)
+void SubCache::addObjCProtocolHashTableChunk(const BuilderConfig& config, ObjCProtocolOptimizer& objcProtocolOptimizer)
 {
     this->objcProtocolsHashTable = std::make_unique<ObjCProtocolHashTableChunk>();
     this->objcProtocolsHashTable->cacheVMSize       = CacheVMSize(objcProtocolOptimizer.protocolHashTableTotalByteSize);
@@ -999,10 +1121,10 @@ void SubCache::addObjCProtocolHashTableChunk(ObjCProtocolOptimizer& objcProtocol
 
     objcProtocolOptimizer.protocolHashTableChunk = this->objcProtocolsHashTable.get();
 
-    this->addObjCReadOnlyChunk(this->objcProtocolsHashTable.get());
+    this->addReadOnlyChunk(config, this->objcProtocolsHashTable.get());
 }
 
-void SubCache::addObjCProtocolSwiftDemangledNamesChunk(ObjCProtocolOptimizer& objcProtocolOptimizer)
+void SubCache::addObjCProtocolSwiftDemangledNamesChunk(const BuilderConfig& config, ObjCProtocolOptimizer& objcProtocolOptimizer)
 {
     this->objcSwiftDemangledNameStrings = std::make_unique<ObjCStringsChunk>();
     this->objcSwiftDemangledNameStrings->cacheVMSize        = CacheVMSize(objcProtocolOptimizer.swiftDemangledNameStringsTotalByteSize);
@@ -1010,7 +1132,7 @@ void SubCache::addObjCProtocolSwiftDemangledNamesChunk(ObjCProtocolOptimizer& ob
 
     objcProtocolOptimizer.swiftDemangledNameStringsChunk = this->objcSwiftDemangledNameStrings.get();
 
-    this->addObjCReadOnlyChunk(this->objcSwiftDemangledNameStrings.get());
+    this->addReadOnlyChunk(config, this->objcSwiftDemangledNameStrings.get());
 }
 
 void SubCache::addObjCCanonicalProtocolsChunk(const BuilderConfig& config,
@@ -1047,7 +1169,7 @@ void SubCache::addObjCCategoriesChunk(const BuilderConfig& config,
     objcCategoryOptimizer.categoriesChunk = this->objcCategories.get();
 
     // Add objc categories
-    addObjCReadOnlyChunk(this->objcCategories.get());
+    addReadOnlyChunk(config, this->objcCategories.get());
 }
 
 void SubCache::addCacheTrieChunk(DylibTrieOptimizer& dylibTrieOptimizer)
@@ -1158,6 +1280,18 @@ void SubCache::addSwiftForeignHashTableChunk(SwiftProtocolConformanceOptimizer& 
     this->addLinkeditChunk(this->swiftForeignTypeHashTable.get());
 }
 
+void SubCache::addSwiftPrespecializedMetadataPointerTableChunks(SwiftProtocolConformanceOptimizer& opt)
+{
+    for ( PointerHashTableOptimizerInfo& tableInfo : opt.prespecializedMetadataHashTables ) {
+        PointerHashTableChunk* chunk = this->pointerHashTables.emplace_back(std::make_unique<PointerHashTableChunk>()).get();
+        chunk->cacheVMSize       = CacheVMSize(tableInfo.size);
+        chunk->subCacheFileSize  = CacheFileSize(tableInfo.size);
+
+        tableInfo.chunk = chunk;
+        this->addLinkeditChunk(chunk);
+    }
+}
+
 void SubCache::addUnmappedSymbols(const BuilderConfig& config, UnmappedSymbolsOptimizer& opt)
 {
     assert(this->kind == Kind::symbols);
@@ -1255,6 +1389,26 @@ void SubCache::writeCacheHeaderMappings()
             case Region::Kind::text:
                 flags    = this->isStubsCache() ? DYLD_CACHE_MAPPING_TEXT_STUBS : 0;
                 break;
+            case Region::Kind::tproConst:
+                flags    = DYLD_CACHE_MAPPING_CONST_DATA | DYLD_CACHE_MAPPING_CONST_TPRO_DATA;
+
+                // Get the slide info
+                if ( this->tproConstSlideInfo ) {
+                    slideInfoFileOffset = this->tproConstSlideInfo->subCacheFileOffset;
+                    slideInfoFileSize   = this->tproConstSlideInfo->usedFileSize;
+                }
+                break;
+            case Region::Kind::tproAuthConst:
+                // Note, we don't set AUTH here.  TPRO_CONST doesn't actually contain authenticated fixups, ie, is just data
+                // but we still give it its own Region so that we can place it adjacent to dirty data
+                flags    = DYLD_CACHE_MAPPING_CONST_DATA | DYLD_CACHE_MAPPING_CONST_TPRO_DATA;
+
+                // Get the slide info
+                if ( this->tproAuthConstSlideInfo ) {
+                    slideInfoFileOffset = this->tproAuthConstSlideInfo->subCacheFileOffset;
+                    slideInfoFileSize   = this->tproAuthConstSlideInfo->usedFileSize;
+                }
+                break;
             case Region::Kind::data:
                 flags    = 0;
 
@@ -1290,6 +1444,9 @@ void SubCache::writeCacheHeaderMappings()
                     slideInfoFileOffset = this->authConstSlideInfo->subCacheFileOffset;
                     slideInfoFileSize   = this->authConstSlideInfo->usedFileSize;
                 }
+                break;
+            case Region::Kind::readOnly:
+                flags    = DYLD_CACHE_READ_ONLY_DATA;
                 break;
             case Region::Kind::linkedit:
                 flags    = 0;
@@ -1424,12 +1581,14 @@ void SubCache::writeCacheHeader(const BuilderOptions& options, const BuilderConf
     dyldCacheHeader->cacheAtlasSize                = 0; // set later only on the main cache file
     dyldCacheHeader->dynamicDataOffset             = 0; // set later only on the main cache file
     dyldCacheHeader->dynamicDataMaxSize            = 0; // set later only on the main cache file
+    dyldCacheHeader->tproMappingsOffset            = 0; // set later only on the main cache file
+    dyldCacheHeader->tproMappingsCount             = 0; // set later only on the main cache file
 
     // Fill in old mappings
     // And new mappings which also have slide info
     this->writeCacheHeaderMappings();
 
-    this->addCacheHeaderImageInfo(options, cacheDylibs);
+    this->addCacheHeaderImageInfo(options, config, cacheDylibs);
 }
 
 void SubCache::addMainCacheHeaderInfo(const BuilderOptions& options, const BuilderConfig& config,
@@ -1463,7 +1622,7 @@ void SubCache::addMainCacheHeaderInfo(const BuilderOptions& options, const Build
     if ( !objcOptimizer.objcDylibs.empty() ) {
         const auto& opt = swiftProtocolConformanceOpt;
         dyldCacheHeader->swiftOptsOffset = (opt.optsHeaderChunk->cacheVMAddress - cacheBaseAddress).rawValue();
-        dyldCacheHeader->objcOptsSize    = opt.optsHeaderChunk->subCacheFileSize.rawValue();
+        dyldCacheHeader->swiftOptsSize   = opt.optsHeaderChunk->subCacheFileSize.rawValue();
     }
 
     dyldCacheHeader->patchInfoAddr = patchTableOptimizer.patchTableChunk->cacheVMAddress.rawValue();
@@ -1508,6 +1667,25 @@ void SubCache::addMainCacheHeaderInfo(const BuilderOptions& options, const Build
         dyldCacheHeader->dynamicDataOffset  = (dynamicConfig->cacheVMAddress - cacheBaseAddress).rawValue();
         dyldCacheHeader->dynamicDataMaxSize = dynamicConfig->cacheVMSize.rawValue();
     }
+
+    // Find all the TPRO regions
+    if ( dyldCacheHeader->tproMappingsCount != 0 ) {
+        assert(cacheHeaderChunk.subCacheFileOffset.rawValue() == 0);
+        auto* mappings = (dyld_cache_tpro_mapping_info*)((uint8_t*)dyldCacheHeader + dyldCacheHeader->tproMappingsOffset);
+        __block uint32_t index = 0;
+        forEachTPRORegion(config, this, this->subCaches, ^(CacheVMAddress firstChunkAddress, CacheVMAddress lastChunkAddress, CacheVMSize lastChunkSize) {
+            assert(index < dyldCacheHeader->tproMappingsCount);
+
+            CacheVMAddress vmAddr = firstChunkAddress;
+            CacheVMSize vmSize = (lastChunkAddress - firstChunkAddress) + lastChunkSize;
+
+            dyld_cache_tpro_mapping_info* mapping = & mappings[index];
+            mapping->unslidAddress = vmAddr.rawValue();
+            mapping->size = vmSize.rawValue();
+
+            ++index;
+        });
+    }
 }
 
 void SubCache::addSymbolsCacheHeaderInfo(const UnmappedSymbolsOptimizer& optimizer)
@@ -1531,6 +1709,7 @@ void SubCache::addSymbolsCacheHeaderInfo(const UnmappedSymbolsOptimizer& optimiz
 }
 
 void SubCache::addCacheHeaderImageInfo(const BuilderOptions& options,
+                                       const BuilderConfig& config,
                                        const std::span<CacheDylib> cacheDylibs)
 {
     if ( !this->needsCacheHeaderImageList() )
@@ -1548,9 +1727,14 @@ void SubCache::addCacheHeaderImageInfo(const BuilderOptions& options,
     dyldCacheHeader->subCacheArrayOffset = (uint32_t)(dyldCacheHeader->imagesTextOffset + sizeof(dyld_cache_image_text_info) * cacheDylibs.size());
     dyldCacheHeader->subCacheArrayCount  = (uint32_t)this->subCaches.size();
 
+    // Always set the TPRO offset, but the count will only be set in the main cache
+    dyldCacheHeader->tproMappingsOffset = (uint32_t)(dyldCacheHeader->subCacheArrayOffset + sizeof(dyld_subcache_entry) * dyldCacheHeader->subCacheArrayCount);
+    if ( this->isMainCache() )
+        dyldCacheHeader->tproMappingsCount = numTPRORegions(config, this, this->subCaches);
+
     // calculate start of text image array and trailing string pool
     auto*    textImages   = (dyld_cache_image_text_info*)((uint8_t*)dyldCacheHeader + dyldCacheHeader->imagesTextOffset);
-    uint32_t stringOffset = (uint32_t)(dyldCacheHeader->subCacheArrayOffset + sizeof(dyld_subcache_entry) * dyldCacheHeader->subCacheArrayCount);
+    uint32_t stringOffset = (uint32_t)(dyldCacheHeader->tproMappingsOffset + sizeof(dyld_cache_tpro_mapping_info) * dyldCacheHeader->tproMappingsCount);
 
     // write text image array and image names pool at same time
     for ( const CacheDylib& cacheDylib : cacheDylibs ) {
@@ -1794,6 +1978,9 @@ Error SubCache::computeSlideInfoV2(const BuilderConfig&           config,
     __block MachOFile::ChainedFixupPointerOnDisk* lastFixup = nullptr;
     __block uint64_t lastPageIndex = ~0ULL;
     for ( Chunk* chunk : region.chunks ) {
+        if ( chunk->isAlignChunk() )
+            continue;
+
         SlidChunk* slidChunk = chunk->isSlidChunk();
 
         slidChunk->tracker.forEachFixup(^(void *loc, bool& stop) {
@@ -2097,8 +2284,10 @@ Error SubCache::convertChainsToVMAddresses(const BuilderConfig& config, Region& 
     Diagnostics diag;
 
     for ( Chunk* chunk : region.chunks ) {
-        SlidChunk* slidChunk = chunk->isSlidChunk();
+        if ( chunk->isAlignChunk() )
+            continue;
 
+        SlidChunk* slidChunk = chunk->isSlidChunk();
         slidChunk->tracker.forEachFixup(^(void *loc, bool& stop) {
             if ( config.layout.is64 ) {
                 CacheVMAddress vmAddr = Fixup::Cache64::getCacheVMAddressFromLocation(config.layout.cacheBaseAddress, loc);
@@ -2125,6 +2314,12 @@ Error SubCache::computeSlideInfo(const BuilderConfig& config)
             case Region::Kind::text:
                 // No slide info for text
                 break;
+            case Region::Kind::tproConst:
+                if ( config.slideInfo.slideInfoFormat.has_value() )
+                    err = computeSlideInfoForRegion(config, this->tproConstSlideInfo.get(), region);
+                else
+                    err = convertChainsToVMAddresses(config, region);
+                break;
             case Region::Kind::data:
                 if ( config.slideInfo.slideInfoFormat.has_value() )
                     err = computeSlideInfoForRegion(config, this->dataSlideInfo.get(), region);
@@ -2134,6 +2329,12 @@ Error SubCache::computeSlideInfo(const BuilderConfig& config)
             case Region::Kind::dataConst:
                 if ( config.slideInfo.slideInfoFormat.has_value() )
                     err = computeSlideInfoForRegion(config, this->dataConstSlideInfo.get(), region);
+                else
+                    err = convertChainsToVMAddresses(config, region);
+                break;
+            case Region::Kind::tproAuthConst:
+                if ( config.slideInfo.slideInfoFormat.has_value() )
+                    err = computeSlideInfoForRegion(config, this->tproAuthConstSlideInfo.get(), region);
                 else
                     err = convertChainsToVMAddresses(config, region);
                 break;
@@ -2149,8 +2350,9 @@ Error SubCache::computeSlideInfo(const BuilderConfig& config)
                 else
                     err = convertChainsToVMAddresses(config, region);
                 break;
+            case Region::Kind::readOnly:
             case Region::Kind::linkedit:
-                // No slide info for text
+                // No slide info for linkedit
                 break;
             case Region::Kind::unmapped:
             case Region::Kind::dynamicConfig:

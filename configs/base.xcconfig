@@ -19,6 +19,10 @@ GCC_WARN_UNINITIALIZED_AUTOS = YES
 ENABLE_ATP_WERROR_9999099099000000 = -Werror // Hack to enable -Werror in ATP
 WARNING_CFLAGS = $(ENABLE_ATP_WERROR_$(RC_ProjectCanonicalSourceVersion)) -Wmost -Wimplicit-fallthrough -Wno-unknown-pragmas -Wno-assume -Wformat-nonliteral -Wno-vla-extension -Wundef-prefix=SUPPORT_
 
+// #ifndef __OPEN_SOURCE__
+//OTHER_CFLAGS[arch=arm64e]="-march=armv8.5-a+memtag"
+// #endif
+
 // clang optimization level
 GCC_OPTIMIZATION_LEVEL_Release = s
 GCC_OPTIMIZATION_LEVEL_Debug   = 0

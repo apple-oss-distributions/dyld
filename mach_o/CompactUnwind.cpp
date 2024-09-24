@@ -730,7 +730,7 @@ void CompactUnwind::makeCompressedSecondLevelPage(const std::vector<WriterUnwind
         // compute function offset
         assert(info.funcOffset >= uniqueInfos[curInfosIndex].funcOffset);
         uint32_t funcOffsetWithInPage = info.funcOffset - uniqueInfos[curInfosIndex].funcOffset;
-        if ( funcOffsetWithInPage > 0x00FFFF00 ) {
+        if ( funcOffsetWithInPage > 0x00FF0000 ) {
             // don't use 0x00FFFFFF because addresses may vary after atoms are laid out again
             break; // 2) the file offset delta from the first to last function > 24 bits
         }

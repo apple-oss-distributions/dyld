@@ -52,17 +52,30 @@ extern "C" {
 }
 #endif
 
+
+
+
 #include "Defines.h"
 
 #include <mach-o/nlist.h>
+
+#if !BUILDING_DYLD
+  #include <vector>
+#endif // !BUILDING_DYLD
 
 #include "Array.h"
 #include "MachOFile.h"
 #include "SupportedArchs.h"
 #include "CodeSigningTypes.h"
 
+#include "ObjC.h"
+
 #if (BUILDING_DYLD || BUILDING_LIBDYLD) && !TARGET_OS_EXCLAVEKIT
     #include <subsystem.h>
+#endif
+
+#if !BUILDING_DYLD
+#include "ObjCVisitor.h"
 #endif
 
 namespace dyld3 {
@@ -295,7 +308,6 @@ bool FatFile::isFatFileWithSlice(Diagnostics& diag, uint64_t fileLen, const Grad
 #define GRADE_arm64e      CPU_TYPE_ARM64,      CPU_SUBTYPE_ARM64E,      false
 #define GRADE_arm64e_pb   CPU_TYPE_ARM64,      CPU_SUBTYPE_ARM64E,      true
 #define GRADE_arm64_32    CPU_TYPE_ARM64_32,   CPU_SUBTYPE_ARM64_32_V8, false
-
 const GradedArchs GradedArchs::i386              = GradedArchs({GRADE_i386,    1});
 const GradedArchs GradedArchs::x86_64            = GradedArchs({GRADE_x86_64,  1});
 const GradedArchs GradedArchs::x86_64h           = GradedArchs({GRADE_x86_64h, 2}, {GRADE_x86_64, 1});
@@ -316,6 +328,7 @@ const GradedArchs GradedArchs::armv7em           = GradedArchs({GRADE_armv7em,  
 #if SUPPORT_ARCH_arm64_32
 const GradedArchs GradedArchs::arm64_32          = GradedArchs({GRADE_arm64_32, 1});
 #endif
+
 #if BUILDING_LIBDYLD || BUILDING_UNIT_TESTS
 const GradedArchs GradedArchs::launch_AS         = GradedArchs({GRADE_arm64e,  3}, {GRADE_arm64,  2}, {GRADE_x86_64, 1});
 const GradedArchs GradedArchs::launch_AS_Sim     = GradedArchs({GRADE_arm64,   2}, {GRADE_x86_64, 1});
@@ -395,20 +408,12 @@ const GradedArchs& GradedArchs::forCurrentOS(bool keysOff, bool osBinariesOnly)
     return arm64_32;
 #elif __arm64__
     return arm64;
-#elif __ARM_ARCH_7K__
-    return armv7k;
-#elif __ARM_ARCH_7S__
-    return armv7s;
-#elif __ARM_ARCH_7A__
-    return armv7;
 #elif __x86_64__
  #if TARGET_OS_SIMULATOR
     return x86_64;
   #else
     return isHaswell() ? x86_64h : x86_64;
   #endif
-#elif __i386__
-    return i386;
 #else
     #error unknown platform
 #endif
@@ -504,8 +509,15 @@ const MachOFile::PlatformInfo MachOFile::_s_platformInfos[] = {
     { "tvOS-sim",           Platform::tvOS_simulator,       LC_BUILD_VERSION        },
     { "watchOS-sim",        Platform::watchOS_simulator,    LC_BUILD_VERSION        },
     { "driverKit",          Platform::driverKit,            LC_BUILD_VERSION        },
-    { "xrOS",               Platform::xrOS,                 LC_BUILD_VERSION        },
-    { "xrOS-sim",           Platform::xrOS_simulator,       LC_BUILD_VERSION        },
+    { "visionOS",           Platform::visionOS,             LC_BUILD_VERSION        },
+    { "visionOS-sim",       Platform::visionOS_simulator,   LC_BUILD_VERSION        },
+    { "macOSExclaveCore",   Platform::macOSExclaveCore,     LC_BUILD_VERSION        },
+    { "macOSExclaveKit",    Platform::macOSExclaveKit,      LC_BUILD_VERSION        },
+    { "iOSExclaveCore",     Platform::iOSExclaveCore,       LC_BUILD_VERSION        },
+    { "iOSExclaveKit",      Platform::iOSExclaveKit,        LC_BUILD_VERSION        },
+    { "tvOSExclaveCore",    Platform::tvOSExclaveCore,      LC_BUILD_VERSION        },
+    { "tvOSExclaveKit",     Platform::tvOSExclaveKit,       LC_BUILD_VERSION        },
+
 };
 
 
@@ -685,6 +697,14 @@ bool MachOFile::loadableIntoProcess(Platform processPlatform, const char* path, 
         return true;
 #endif
 
+    // allow iOS executables to use visionOS dylibs
+    if ( (processPlatform == Platform::iOS) && this->builtForPlatform(Platform::visionOS, true) )
+        return true;
+
+    // allow iOS_Sim executables to use visionOS_Sim dylibs
+    if ( (processPlatform == Platform::iOS_simulator) && this->builtForPlatform(Platform::visionOS_simulator, true) )
+        return true;
+
 
     bool iOSonMac = (processPlatform == Platform::iOSMac);
 #if (TARGET_OS_OSX && TARGET_CPU_ARM64)
@@ -727,7 +747,9 @@ Platform MachOFile::currentPlatform()
     return Platform::watchOS_simulator;
   #elif TARGET_OS_TV
     return Platform::tvOS_simulator;
-  #else
+  #elif TARGET_OS_VISION
+    return Platform::visionOS_simulator;
+  #elif TARGET_OS_IOS
     return Platform::iOS_simulator;
   #endif
 #elif TARGET_OS_BRIDGE
@@ -742,8 +764,32 @@ Platform MachOFile::currentPlatform()
     return Platform::macOS;
 #elif TARGET_OS_DRIVERKIT
     return Platform::driverKit;
+#elif TARGET_OS_VISION
+  return Platform::visionOS;
 #else
-    #error unknown platform
+    #if TARGET_OS_EXCLAVECORE
+      #if __is_target_os(macos)
+        return Platform::macOSExclaveCore
+      #elif __is_target_os(ios)
+        return Platform::iOSExclaveCore;
+      #elif __is_target_os(tvos)
+        return Platform::tvOSExclaveCore;
+      #else
+        #error unknown platform
+      #endif
+    #elif TARGET_OS_EXCLAVEKIT
+      #if __is_target_os(macos)
+        return Platform::macOSExclaveKit;
+      #elif __is_target_os(ios)
+        return Platform::iOSExclaveKit;
+      #elif __is_target_os(tvos)
+        return Platform::tvOSExclaveKit;
+      #else
+        #error unknown platform
+      #endif
+    #else
+      #error unknown platform
+    #endif
 #endif
 }
 
@@ -760,20 +806,24 @@ Platform MachOFile::basePlatform(dyld3::Platform reqPlatform) {
         case Platform::tvOS_simulator:        return Platform::tvOS;
         case Platform::watchOS_simulator:     return Platform::watchOS;
         case Platform::driverKit:             return Platform::driverKit;
-        default:                              return Platform::unknown;
+        case Platform::visionOS:              return Platform::visionOS;
+        case Platform::visionOS_simulator:    return Platform::visionOS;
+        case Platform::macOSExclaveCore:      return Platform::macOSExclaveCore;
+        case Platform::macOSExclaveKit:       return Platform::macOSExclaveKit;
+        case Platform::iOSExclaveCore:        return Platform::iOSExclaveCore;
+        case Platform::iOSExclaveKit:         return Platform::iOSExclaveKit;
+        case Platform::tvOSExclaveCore:       return Platform::tvOSExclaveCore;
+        case Platform::tvOSExclaveKit:        return Platform::tvOSExclaveKit;
+
+
+        default:                              return reqPlatform;
     }
 }
 
 
 const char* MachOFile::currentArchName()
 {
-#if __ARM_ARCH_7K__
-    return "armv7k";
-#elif __ARM_ARCH_7A__
-    return "armv7";
-#elif __ARM_ARCH_7S__
-    return "armv7s";
-#elif __arm64e__
+#if __arm64e__
     return "arm64e";
 #elif __arm64__
 #if __LP64__
@@ -783,8 +833,6 @@ const char* MachOFile::currentArchName()
 #endif
 #elif __x86_64__
     return isHaswell() ? "x86_64h" : "x86_64";
-#elif __i386__
-    return "i386";
 #else
     #error unknown arch
 #endif
@@ -825,6 +873,10 @@ bool MachOFile::isSimulatorPlatform(Platform platform, Platform* basePlatform)
             if ( basePlatform )
                 *basePlatform = Platform::tvOS;
             return true;
+        case Platform::visionOS_simulator:
+            if ( basePlatform )
+                *basePlatform = Platform::visionOS;
+            return true;
        default:
             return false;
     }
@@ -838,6 +890,7 @@ bool MachOFile::isBuiltForSimulator() const
             case Platform::iOS_simulator:
             case Platform::watchOS_simulator:
             case Platform::tvOS_simulator:
+            case Platform::visionOS_simulator:
                 result = true;
                 break;
            default:
@@ -1261,6 +1314,8 @@ void MachOFile::forEachDependentDylib(void (^callback)(const char* loadPath, boo
             break;
         }
     });
+    (void)count;
+    (void)stopped;
 #if !BUILDING_SHARED_CACHE_UTIL && !BUILDING_DYLDINFO && !BUILDING_UNIT_TESTS
     // everything must link with something
     if ( (count == 0) && !stopped ) {
@@ -1273,6 +1328,12 @@ void MachOFile::forEachDependentDylib(void (^callback)(const char* loadPath, boo
         if ( this->builtForPlatform(Platform::driverKit, true) ) {
             if ( !this->isDylib() || (strncmp(this->installName(), "/System/DriverKit/usr/lib/system/", 33) != 0) )
                 callback("/System/DriverKit/usr/lib/libSystem.B.dylib", false, false, false, 0x00010000, 0x00010000, stopped);
+        }
+        else if ( this->builtForPlatform(Platform::macOSExclaveKit, true)
+                 || this->builtForPlatform(Platform::iOSExclaveKit, true)
+                 || this->builtForPlatform(Platform::tvOSExclaveKit, true) ) {
+            // do nothing for ExclaveKit dylibs
+            // FIXME: only allow this behavior on internal builds
         }
         else {
             if ( !this->isDylib() || (strncmp(this->installName(), "/usr/lib/system/", 16) != 0) )
@@ -1291,7 +1352,7 @@ void MachOFile::forDyldEnv(void (^callback)(const char* envVar, bool& stop)) con
          if ( cmd->cmd == LC_DYLD_ENVIRONMENT ) {
             const dylinker_command* envCmd = (dylinker_command*)cmd;
             const char* keyEqualsValue = (char*)envCmd + envCmd->name.offset;
-            // only process variables that start with DYLD_ and end in _PATH
+            // only process variables that start with DYLD_
             if ( (strncmp(keyEqualsValue, "DYLD_", 5) == 0) ) {
                 const char* equals = strchr(keyEqualsValue, '=');
                 if ( equals != NULL ) {
@@ -1332,6 +1393,20 @@ bool MachOFile::enforceCompatVersion() const
             case Platform::iOSMac:
                 result = false;
                 break;
+            case Platform::visionOS:
+            case Platform::visionOS_simulator:
+                result = false;
+                break;
+            case Platform::macOSExclaveCore:
+            case Platform::macOSExclaveKit:
+            case Platform::iOSExclaveCore:
+            case Platform::iOSExclaveKit:
+            case Platform::tvOSExclaveCore:
+            case Platform::tvOSExclaveKit:
+                result = false;
+                break;
+
+
             case Platform::unknown:
                 break;
         }
@@ -1658,7 +1733,7 @@ bool MachOFile::hasThreadLocalVariables() const
     return (this->flags & MH_HAS_TLV_DESCRIPTORS);
 }
 
-#if BUILDING_CACHE_BUILDER || BUILDING_CACHE_BUILDER_UNIT_TESTS
+#if BUILDING_CACHE_BUILDER || BUILDING_CACHE_BUILDER_UNIT_TESTS || BUILDING_UNIT_TESTS || BUILDING_DYLD_SYMBOLS_CACHE
 static bool endsWith(const char* str, const char* suffix)
 {
     size_t strLen    = strlen(str);
@@ -1739,6 +1814,113 @@ static bool platformExcludesSharedCache(Platform platform, const char* installNa
     return platformExcludesSharedCache_iOS(installName);
 }
 
+#if !BUILDING_DYLD
+
+bool MachOFile::addendsExceedPatchTableLimit(Diagnostics& diag, mach_o::Fixups fixups) const
+{
+    // rdar://122906481 (Shared cache builder - explicitly model dylibs without a need for a patch table)
+    if ( strcmp(installName(), "/usr/lib/libswiftPrespecialized.dylib") == 0 )
+        return false;
+
+    const bool     is64bit = is64();
+    const uint64_t tooLargeRegularAddend = 1 << 23;
+    const uint64_t tooLargeAuthAddend = 1 << 5;
+    __block bool addendTooLarge = false;
+    if ( this->hasChainedFixups() ) {
+
+        // with chained fixups, addends can be in the import table or embedded in a bind pointer
+        __block std::vector<uint64_t> targetAddends;
+        fixups.forEachChainedFixupTarget(diag, ^(int libOrdinal, const char* symbolName, uint64_t addend, bool weakImport, bool& stop) {
+            if ( is64bit )
+                addend &= 0x00FFFFFFFFFFFFFF; // ignore TBI
+            targetAddends.push_back(addend);
+        });
+        // check each pointer for embedded addend
+        fixups.withChainStarts(diag, ^(const dyld_chained_starts_in_image* starts) {
+            fixups.forEachFixupInAllChains(diag, starts, false, ^(mach_o::ChainedFixupPointerOnDisk* fixupLoc, uint64_t fixupSegmentOffset, const dyld_chained_starts_in_segment* segInfo, bool& stop) {
+                switch (segInfo->pointer_format) {
+                    case DYLD_CHAINED_PTR_ARM64E:
+                    case DYLD_CHAINED_PTR_ARM64E_USERLAND:
+                        if ( fixupLoc->arm64e.bind.bind ) {
+                            uint64_t ordinal = fixupLoc->arm64e.bind.ordinal;
+                            uint64_t addend = (ordinal < targetAddends.size()) ? targetAddends[ordinal] : 0;
+                            if ( fixupLoc->arm64e.bind.auth ) {
+                                if ( addend >= tooLargeAuthAddend ) {
+                                    addendTooLarge = true;
+                                    stop = true;
+                                }
+                            } else {
+                                addend += fixupLoc->arm64e.signExtendedAddend();
+                                if ( addend >= tooLargeRegularAddend ) {
+                                    addendTooLarge = true;
+                                    stop = true;
+                                }
+                            }
+                        }
+                        break;
+                    case DYLD_CHAINED_PTR_ARM64E_USERLAND24:
+                        if ( fixupLoc->arm64e.bind24.bind ) {
+                            uint64_t ordinal = fixupLoc->arm64e.bind24.ordinal;
+                            uint64_t addend = (ordinal < targetAddends.size()) ? targetAddends[ordinal] : 0;
+                            if ( fixupLoc->arm64e.bind24.auth ) {
+                                if ( addend >= tooLargeAuthAddend ) {
+                                    addendTooLarge = true;
+                                    stop = true;
+                                }
+                            } else {
+                                addend += fixupLoc->arm64e.signExtendedAddend();
+                                if ( addend >= tooLargeRegularAddend ) {
+                                    addendTooLarge = true;
+                                    stop = true;
+                                }
+                            }
+                        }
+                        break;
+                    case DYLD_CHAINED_PTR_64:
+                    case DYLD_CHAINED_PTR_64_OFFSET: {
+                        if ( fixupLoc->generic64.rebase.bind ) {
+                            uint64_t ordinal = fixupLoc->generic64.bind.ordinal;
+                            uint64_t addend = (ordinal < targetAddends.size()) ? targetAddends[ordinal] : 0;
+                            addend += fixupLoc->generic64.bind.addend;
+                            if ( addend >= tooLargeRegularAddend ) {
+                                addendTooLarge = true;
+                                stop = true;
+                            }
+                        }
+                        break;
+                    }
+                    case DYLD_CHAINED_PTR_32:
+                        if ( fixupLoc->generic32.bind.bind ) {
+                            uint64_t ordinal = fixupLoc->generic32.bind.ordinal;
+                            uint64_t addend = (ordinal < targetAddends.size()) ? targetAddends[ordinal] : 0;
+                            addend += fixupLoc->generic32.bind.addend;
+                            if ( addend >= tooLargeRegularAddend ) {
+                                addendTooLarge = true;
+                                stop = true;
+                            }
+                        }
+                        break;
+                }
+            });
+        });
+    }
+    else {
+        // scan bind opcodes for large addend
+        auto handler = ^(const mach_o::Fixups::BindTargetInfo &info, bool &stop) {
+            uint64_t addend = info.addend;
+            if ( is64bit )
+                addend &= 0x00FFFFFFFFFFFFFF; // ignore TBI
+            if ( addend >= tooLargeRegularAddend ) {
+                addendTooLarge = true;
+                stop = true;
+            }
+        };
+        fixups.forEachBindTarget_Opcodes(diag, true, handler, handler);
+    }
+
+    return addendTooLarge;
+}
+
 bool MachOFile::canBePlacedInDyldCache(const char* path, void (^failureReason)(const char* format, ...)) const
 {
     if ( !isSharedCacheEligiblePath(path) ) {
@@ -1801,12 +1983,18 @@ bool MachOFile::canBePlacedInDyldCache(const char* path, void (^failureReason)(c
 
     // dylib must have extra info for moving DATA and TEXT segments apart
     __block bool hasExtraInfo = false;
+    __block bool hasSplitSegMarker = false;
     __block bool hasDyldInfo = false;
     __block bool hasExportTrie = false;
     __block Diagnostics diag;
     forEachLoadCommand(diag, ^(const load_command* cmd, bool& stop) {
-        if ( cmd->cmd == LC_SEGMENT_SPLIT_INFO )
-            hasExtraInfo = true;
+        if ( cmd->cmd == LC_SEGMENT_SPLIT_INFO ) {
+            const linkedit_data_command* sigCmd = (linkedit_data_command*)cmd;
+            if ( sigCmd->datasize == 0 )
+                hasSplitSegMarker = true;
+            else
+                hasExtraInfo = true;
+        }
         if ( cmd->cmd == LC_DYLD_INFO_ONLY )
             hasDyldInfo = true;
         if ( cmd->cmd == LC_DYLD_EXPORTS_TRIE )
@@ -1821,7 +2009,10 @@ bool MachOFile::canBePlacedInDyldCache(const char* path, void (^failureReason)(c
             if ( ignorePath == path )
                 return false;
         }
-        failureReason("Missing split seg info");
+        if ( hasSplitSegMarker )
+            failureReason("Dylib explicitly linked with '-not_for_dyld_shared_cache'");
+        else
+            failureReason("Missing split seg info");
         return false;
     }
     if ( !hasDyldInfo && !hasExportTrie ) {
@@ -1879,6 +2070,16 @@ bool MachOFile::canBePlacedInDyldCache(const char* path, void (^failureReason)(c
         if ( layout.isSwiftLibrary() && splitSeg.isV1() )
             return;
 
+        // arm64e requires signed class ROs
+        if ( isArch("arm64e") ) {
+            if ( std::optional<uint32_t> flags = layout.getObjcInfoFlags(); flags.has_value() ) {
+                if ( (flags.value() & mach_o::ObjCImageInfo::OBJC_IMAGE_SIGNED_CLASS_RO) == 0 ) {
+                    failureReason("arm64e binaries must have signed Objective-C class_ro_t pointers");
+                    return;
+                }
+            }
+        }
+
         if ( splitSeg.isV1() ) {
             // Split seg v1 can only support 1 __DATA, and no other writable segments
             __block bool foundBadSegment = false;
@@ -1899,101 +2100,7 @@ bool MachOFile::canBePlacedInDyldCache(const char* path, void (^failureReason)(c
 
         // <rdar://problem/57769033> dyld_cache_patchable_location only supports addend in range 0..31
         // rdar://96164956 (dyld needs to support arbitrary addends in cache patch table)
-        const bool is64bit = is64();
-        __block bool addendTooLarge = false;
-        const uint64_t tooLargeRegularAddend = 1 << 23;
-        const uint64_t tooLargeAuthAddend = 1 << 5;
-        if ( this->hasChainedFixups() ) {
-
-            // with chained fixups, addends can be in the import table or embedded in a bind pointer
-            __block std::vector<uint64_t> targetAddends;
-            fixups.forEachChainedFixupTarget(diag, ^(int libOrdinal, const char* symbolName, uint64_t addend, bool weakImport, bool& stop) {
-                if ( is64bit )
-                    addend &= 0x00FFFFFFFFFFFFFF; // ignore TBI
-                targetAddends.push_back(addend);
-            });
-            // check each pointer for embedded addend
-            fixups.withChainStarts(diag, ^(const dyld_chained_starts_in_image* starts) {
-                fixups.forEachFixupInAllChains(diag, starts, false, ^(mach_o::ChainedFixupPointerOnDisk* fixupLoc, uint64_t fixupSegmentOffset, const dyld_chained_starts_in_segment* segInfo, bool& stop) {
-                    switch (segInfo->pointer_format) {
-                        case DYLD_CHAINED_PTR_ARM64E:
-                        case DYLD_CHAINED_PTR_ARM64E_USERLAND:
-                            if ( fixupLoc->arm64e.bind.bind ) {
-                                uint64_t ordinal = fixupLoc->arm64e.bind.ordinal;
-                                uint64_t addend = (ordinal < targetAddends.size()) ? targetAddends[ordinal] : 0;
-                                if ( fixupLoc->arm64e.bind.auth ) {
-                                    if ( addend >= tooLargeAuthAddend ) {
-                                        addendTooLarge = true;
-                                        stop = true;
-                                    }
-                                } else {
-                                    addend += fixupLoc->arm64e.signExtendedAddend();
-                                    if ( addend >= tooLargeRegularAddend ) {
-                                        addendTooLarge = true;
-                                        stop = true;
-                                    }
-                                }
-                            }
-                            break;
-                        case DYLD_CHAINED_PTR_ARM64E_USERLAND24:
-                            if ( fixupLoc->arm64e.bind24.bind ) {
-                                uint64_t ordinal = fixupLoc->arm64e.bind24.ordinal;
-                                uint64_t addend = (ordinal < targetAddends.size()) ? targetAddends[ordinal] : 0;
-                                if ( fixupLoc->arm64e.bind24.auth ) {
-                                    if ( addend >= tooLargeAuthAddend ) {
-                                        addendTooLarge = true;
-                                        stop = true;
-                                    }
-                                } else {
-                                    addend += fixupLoc->arm64e.signExtendedAddend();
-                                    if ( addend >= tooLargeRegularAddend ) {
-                                        addendTooLarge = true;
-                                        stop = true;
-                                    }
-                                }
-                            }
-                            break;
-                        case DYLD_CHAINED_PTR_64:
-                        case DYLD_CHAINED_PTR_64_OFFSET: {
-                            if ( fixupLoc->generic64.rebase.bind ) {
-                                uint64_t ordinal = fixupLoc->generic64.bind.ordinal;
-                                uint64_t addend = (ordinal < targetAddends.size()) ? targetAddends[ordinal] : 0;
-                                addend += fixupLoc->generic64.bind.addend;
-                                if ( addend >= tooLargeRegularAddend ) {
-                                    addendTooLarge = true;
-                                    stop = true;
-                                }
-                            }
-                            break;
-                        }
-                        case DYLD_CHAINED_PTR_32:
-                            if ( fixupLoc->generic32.bind.bind ) {
-                                uint64_t ordinal = fixupLoc->generic32.bind.ordinal;
-                                uint64_t addend = (ordinal < targetAddends.size()) ? targetAddends[ordinal] : 0;
-                                addend += fixupLoc->generic32.bind.addend;
-                                if ( addend >= tooLargeRegularAddend ) {
-                                    addendTooLarge = true;
-                                    stop = true;
-                                }
-                            }
-                            break;
-                    }
-                });
-            });
-        }
-        else {
-            // scan bind opcodes for large addend
-            auto handler = ^(const mach_o::Fixups::BindTargetInfo &info, bool &stop) {
-                uint64_t addend = info.addend;
-                if ( is64bit )
-                    addend &= 0x00FFFFFFFFFFFFFF; // ignore TBI
-                if ( addend >= tooLargeRegularAddend ) {
-                    addendTooLarge = true;
-                    stop = true;
-                }
-            };
-            fixups.forEachBindTarget_Opcodes(diag, true, handler, handler);
-        }
+        bool addendTooLarge = addendsExceedPatchTableLimit(diag, fixups);
         if ( addendTooLarge ) {
             failureReason("bind addend too large");
             return;
@@ -2081,8 +2188,144 @@ bool MachOFile::canBePlacedInDyldCache(const char* path, void (^failureReason)(c
         passedLinkeditChecks = true;
     });
 
-    return passedLinkeditChecks;
+    if ( !passedLinkeditChecks )
+        return false;
+
+    // Check there are no pointer based objc method lists in CONST segments
+#if BUILDING_CACHE_BUILDER || BUILDING_CACHE_BUILDER_UNIT_TESTS
+    {
+        typedef std::pair<VMAddress, VMAddress> Range;
+        __block std::vector<Range> constRanges;
+        this->forEachSegment(^(const SegmentInfo& info, bool& stop) {
+            if ( info.vmSize == 0 )
+                return;
+            if ( !strcmp(info.segName, "__DATA_CONST") || !strcmp(info.segName, "__AUTH_CONST") )
+                constRanges.push_back({ VMAddress(info.vmAddr), VMAddress(info.vmAddr + info.vmSize) });
+        });
+
+        if ( !constRanges.empty() ) {
+            __block objc_visitor::Visitor objcVisitor = this->makeObjCVisitor(diag);
+            if ( diag.hasError() )
+                return false;
+
+            // Returns true if the method list is bad, ie, a pointer based method list in _CONST segment
+            auto isConstPointerBasedMethodList = ^(const objc_visitor::MethodList& methodList) {
+                if ( (methodList.numMethods() == 0) || methodList.usesRelativeOffsets() )
+                    return false;
+
+                VMAddress methodListVMAddr = methodList.getVMAddress().value();
+                for ( const Range& range : constRanges ) {
+                    if ( (methodListVMAddr >= range.first) && (methodListVMAddr < range.second) )
+                        return true;
+                }
+
+                return false;
+            };
+
+            __block bool hasPointerMethodList = false;
+            objcVisitor.forEachClassAndMetaClass(^(const objc_visitor::Class& objcClass, bool& stopClass) {
+                if ( isConstPointerBasedMethodList(objcClass.getBaseMethods(objcVisitor)) ) {
+                    failureReason("has pointer based objc class method list in _CONST segment");
+                    hasPointerMethodList = true;
+                    stopClass = true;
+                }
+            });
+            if ( hasPointerMethodList )
+                return false;
+
+            objcVisitor.forEachCategory(^(const objc_visitor::Category& objcCategory, bool& stopCategory) {
+                if ( isConstPointerBasedMethodList(objcCategory.getInstanceMethods(objcVisitor)) ) {
+                    failureReason("has pointer based objc category instance method list in _CONST segment");
+                    hasPointerMethodList = true;
+                    stopCategory = true;
+                }
+                if ( isConstPointerBasedMethodList(objcCategory.getClassMethods(objcVisitor)) ) {
+                    failureReason("has pointer based objc category class method list in _CONST segment");
+                    hasPointerMethodList = true;
+                    stopCategory = true;
+                }
+            });
+            if ( hasPointerMethodList )
+                return false;
+        }
+    }
+#endif // BUILDING_CACHE_BUILDER || BUILDING_CACHE_BUILDER_UNIT_TESTS
+
+    return true;
 }
+
+#if BUILDING_CACHE_BUILDER || BUILDING_CACHE_BUILDER_UNIT_TESTS
+objc_visitor::Visitor MachOFile::makeObjCVisitor(Diagnostics& diag) const
+{
+    VMAddress dylibBaseAddress(this->preferredLoadAddress());
+
+    __block std::vector<metadata_visitor::Segment> segments;
+    __block std::vector<uint64_t> bindTargets;
+    this->withFileLayout(diag, ^(const mach_o::Layout &layout) {
+        for ( uint32_t segIndex = 0; segIndex != layout.segments.size(); ++segIndex ) {
+            const auto& layoutSegment = layout.segments[segIndex];
+            metadata_visitor::Segment segment {
+                .startVMAddr = VMAddress(layoutSegment.vmAddr),
+                .endVMAddr = VMAddress(layoutSegment.vmAddr + layoutSegment.vmSize),
+                .bufferStart = (uint8_t*)layoutSegment.buffer,
+                .onDiskDylibChainedPointerFormat = 0,
+                .segIndex = segIndex
+            };
+            segments.push_back(std::move(segment));
+        }
+
+        // Add chained fixup info to each segment, if we have it
+        if ( this->hasChainedFixups() ) {
+            mach_o::Fixups fixups(layout);
+            fixups.withChainStarts(diag, ^(const dyld_chained_starts_in_image* starts) {
+                mach_o::Fixups::forEachFixupChainSegment(diag, starts,
+                                                         ^(const dyld_chained_starts_in_segment *segInfo, uint32_t segIndex, bool &stop) {
+                    segments[segIndex].onDiskDylibChainedPointerFormat = segInfo->pointer_format;
+                });
+            });
+        }
+
+        // ObjC patching needs the bind targets for interposable references to the classes
+        // build targets table
+        if ( this->hasChainedFixupsLoadCommand() ) {
+            mach_o::Fixups fixups(layout);
+            fixups.forEachBindTarget_ChainedFixups(diag, ^(const mach_o::Fixups::BindTargetInfo &info, bool &stop) {
+                if ( info.libOrdinal != BIND_SPECIAL_DYLIB_SELF ) {
+                    bindTargets.push_back(0);
+                    return;
+                }
+
+                mach_o::Layout::FoundSymbol foundInfo;
+                if ( !layout.findExportedSymbol(diag, info.symbolName, info.weakImport, foundInfo) ) {
+                    bindTargets.push_back(0);
+                    return;
+                }
+
+                // We only support header offsets in this dylib, as we are looking for self binds
+                // which are likely only to classes
+                if ( (foundInfo.kind != mach_o::Layout::FoundSymbol::Kind::headerOffset)
+                    || (foundInfo.foundInDylib.value() != this) ) {
+                    bindTargets.push_back(0);
+                    return;
+                }
+
+                uint64_t vmAddr = layout.textUnslidVMAddr() + foundInfo.value;
+                bindTargets.push_back(vmAddr);
+            });
+        }
+    });
+
+    std::optional<VMAddress> selectorStringsBaseAddress;
+    objc_visitor::Visitor objcVisitor(dylibBaseAddress, this,
+                                      std::move(segments), selectorStringsBaseAddress,
+                                      std::move(bindTargets));
+
+    return objcVisitor;
+}
+#endif // BUILDING_CACHE_BUILDER || BUILDING_CACHE_BUILDER_UNIT_TESTS
+
+#endif // !BUILDING_DYLD
+
 
 // Returns true if the executable path is eligible for a PrebuiltLoader on the given platform.
 bool MachOFile::canHavePrebuiltExecutableLoader(dyld3::Platform platform, const std::string_view& path,
@@ -2122,12 +2365,6 @@ bool MachOFile::canHavePrebuiltExecutableLoader(dyld3::Platform platform, const 
 
         if ( !inSearchDir ) {
             failureReason("path not eligible");
-            return false;
-        }
-    } else {
-        // On embedded, only staged apps are excluded.  They will run from a different location at runtime
-        if ( path.find("/staged_system_apps/") != std::string::npos ) {
-            // Dont spam the user with an error about paths when we know these are never eligible.
             return false;
         }
     }
@@ -2717,7 +2954,7 @@ static void getArchNames(const GradedArchs& archs, bool isOSBinary, char buffer[
     });
 }
 
-const MachOFile* MachOFile::compatibleSlice(Diagnostics& diag, const void* fileContent, size_t contentSize, const char* path, Platform platform, bool isOSBinary, const GradedArchs& archs, bool internalInstall)
+const MachOFile* MachOFile::compatibleSlice(Diagnostics& diag, uint64_t& sliceLenOut, const void* fileContent, size_t contentSize, const char* path, Platform platform, bool isOSBinary, const GradedArchs& archs, bool internalInstall)
 {
     const MachOFile* mf = nullptr;
     if ( const dyld3::FatFile* ff = dyld3::FatFile::isFatFile(fileContent) ) {
@@ -2726,6 +2963,7 @@ const MachOFile* MachOFile::compatibleSlice(Diagnostics& diag, const void* fileC
         bool      missingSlice;
         if ( ff->isFatFileWithSlice(diag, contentSize, archs, isOSBinary, sliceOffset, sliceLen, missingSlice) ) {
             mf = (MachOFile*)((long)fileContent + sliceOffset);
+            sliceLenOut = sliceLen;
         }
         else {
             BLOCK_ACCCESSIBLE_ARRAY(char, gradedArchsBuf, 256);
@@ -2738,6 +2976,7 @@ const MachOFile* MachOFile::compatibleSlice(Diagnostics& diag, const void* fileC
     }
     else {
         mf = (MachOFile*)fileContent;
+        sliceLenOut = contentSize;
     }
 
     if ( !mf->hasMachOMagic() || !mf->isMachO(diag, contentSize) ) {
@@ -3384,7 +3623,7 @@ bool MachOFile::PointerMetaData::operator==(const PointerMetaData& other) const
         && (this->usesAddrDiversity == other.usesAddrDiversity);
 }
 
-#if !SUPPORT_VM_LAYOUT
+#if !SUPPORT_VM_LAYOUT || BUILDING_UNIT_TESTS || BUILDING_DYLD_SYMBOLS_CACHE
 bool MachOFile::getLinkeditLayout(Diagnostics& diag, mach_o::LinkeditLayout& layout) const
 {
     // Note, in file layout all linkedit offsets are just file offsets.
@@ -3850,6 +4089,16 @@ bool MachOFile::enforceFormat(Malformed kind) const
         case Platform::driverKit:
             result = true;
             break;
+        case Platform::visionOS:
+        case Platform::visionOS_simulator:
+            result = true; // do all checks by default
+            if ( kind == Malformed::sdkOnOrAfter2022 ) {
+                if (sdk < 0x00020000) // visionOS 2.0 FIXME
+                    result = false;
+            }
+            break;
+
+
         default:
             result = true;
             break;

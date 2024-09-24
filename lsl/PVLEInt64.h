@@ -31,9 +31,7 @@
 
 namespace lsl {
 VIS_HIDDEN void emitPVLEUInt64(uint64_t value, Vector<std::byte>& data);
-VIS_HIDDEN uint64_t readPVLEUInt64(std::span<std::byte>& data);
-VIS_HIDDEN void emitPVLEInt64(int64_t value, Vector<std::byte>& data);
-VIS_HIDDEN int64_t readPVLEInt64(std::span<std::byte>& data);
+VIS_HIDDEN bool readPVLEUInt64(std::span<std::byte>& data, uint64_t& result);
 };
 
 

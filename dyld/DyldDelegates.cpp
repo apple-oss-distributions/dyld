@@ -34,7 +34,7 @@
     #include <sys/syslog.h>
     #include <sys/uio.h>
     #include <sys/un.h>
-    #if __arm64__ || __arm__
+    #if __arm64__
         #include <System/sys/mman.h>
     #else
         #include <sys/mman.h>
@@ -150,8 +150,10 @@ uint64_t SyscallDelegate::amfiFlags(bool restricted, bool fairPlayEncryted) cons
         amfiOutputFlags = 0;
     }
     return amfiOutputFlags;
-#else
+#elif BUILDING_UNIT_TESTS
     return _amfiFlags;
+#else
+    return -1;
 #endif
 }
 
@@ -164,8 +166,10 @@ bool SyscallDelegate::internalInstall() const
     return ((devFlags & 1) == 1);
 #elif BUILDING_DYLD && TARGET_OS_OSX
     return (::csr_check(CSR_ALLOW_APPLE_INTERNAL) == 0);
-#else
+#elif BUILDING_UNIT_TESTS
     return _internalInstall;
+#else
+    return false;
 #endif
 }
 
@@ -184,7 +188,7 @@ bool SyscallDelegate::isTranslated() const
 
 bool SyscallDelegate::getCWD(char path[PATH_MAX]) const
 {
-#if BUILDING_DYLD
+#if !BUILDING_UNIT_TESTS
     // note: don't use getcwd() because it calls malloc()
     int fd = ::open(".", O_RDONLY|O_DIRECTORY, 0);
     if ( fd != -1 ) {
@@ -632,7 +636,7 @@ bool SyscallDelegate::realpathdir(const char* dirPath, char output[1024]) const
 
 const void* SyscallDelegate::mapFileReadOnly(Diagnostics& diag, const char* path, size_t* size, FileID* fileID, bool* isOSBinary, char* realerPath) const
 {
-#if BUILDING_DYLD || BUILDING_CLOSURE_UTIL
+#if BUILDING_DYLD || BUILDING_CLOSURE_UTIL || BUILDING_SHARED_CACHE_UTIL
 //    this->getattrlist(path, &attrList, &attrBuf, sizeof(attrBuf), 0);
     //            err = config.syscall.getattrlist(fsInfos[i].f_mntonname, &attrList, &attrBuf, sizeof(attrBuf), 0);
 
@@ -727,7 +731,7 @@ void SyscallDelegate::unmapFile(const void* buffer, size_t size) const
 void SyscallDelegate::withReadOnlyMappedFile(Diagnostics& diag, const char* path, bool checkIfOSBinary,
                                              void (^handler)(const void* mapping, size_t mappedSize, bool isOSBinary, const FileID& fileID, const char* realPath)) const
 {
-#if BUILDING_DYLD || BUILDING_CLOSURE_UTIL
+#if BUILDING_DYLD || BUILDING_CLOSURE_UTIL || BUILDING_SHARED_CACHE_UTIL
     size_t   mappedSize;
     FileID   fileID = FileID::none();
     bool     isOSBinary = false;
@@ -756,7 +760,7 @@ void SyscallDelegate::withReadOnlyMappedFile(Diagnostics& diag, const char* path
 bool SyscallDelegate::getFileAttribute(const char* path, const char* attrName, Array<uint8_t>& attributeBytes) const
 {
 #if BUILDING_DYLD
-    ssize_t attrSize = ::getxattr(path, attrName, attributeBytes.begin(), (size_t)attributeBytes.maxCount(), 0, 0);
+    ssize_t attrSize = ::getxattr(path, attrName, attributeBytes.data(), (size_t)attributeBytes.maxCount(), 0, 0);
     if ( attrSize == -1 )
         return false;
     attributeBytes.resize(attrSize);
@@ -773,9 +777,9 @@ bool SyscallDelegate::setFileAttribute(const char* path, const char* attrName, c
     if ( result != 0 )
         return false;
     // try replace first, then fallback to adding attribute
-    result = ::setxattr(path, attrName, attributeBytes.begin(), (size_t)attributeBytes.count(), 0, XATTR_REPLACE);
+    result = ::setxattr(path, attrName, attributeBytes.data(), (size_t)attributeBytes.count(), 0, XATTR_REPLACE);
     if ( result != 0 )
-        result = ::setxattr(path, attrName, attributeBytes.begin(), (size_t)attributeBytes.count(), 0, 0);
+        result = ::setxattr(path, attrName, attributeBytes.data(), (size_t)attributeBytes.count(), 0, 0);
     int result2 = ::chmod(path, S_IRUSR); // switch back file permissions
     return (result == 0) && (result2 == 0);
 #else
@@ -820,7 +824,7 @@ bool SyscallDelegate::saveFileWithAttribute(Diagnostics& diag, const char* path,
         diag.error("write() failed, errno=%d", errno);
         return false;
     }
-    result = ::fsetxattr(fd, attrName, attributeBytes.begin(), (size_t)attributeBytes.count(), 0, 0);
+    result = ::fsetxattr(fd, attrName, attributeBytes.data(), (size_t)attributeBytes.count(), 0, 0);
     if ( result == -1 ) {
         diag.error("fsetxattr(%s) failed, errno=%d", attrName, errno);
         return false;
@@ -889,7 +893,7 @@ bool SyscallDelegate::getpath(int fd, char realerPath[]) const
 
 int SyscallDelegate::getpid() const
 {
-#if BUILDING_DYLD
+#if !BUILDING_UNIT_TESTS
     return ::getpid();
 #else
     return _pid;
@@ -945,8 +949,10 @@ SyscallDelegate::DyldCommPage SyscallDelegate::dyldCommPageFlags() const
 {
 #if BUILDING_DYLD
     return *((DyldCommPage*)_COMM_PAGE_DYLD_FLAGS);
-#else
+#elif BUILDING_UNIT_TESTS
     return _commPageFlags;
+#else
+    return SyscallDelegate::DyldCommPage{};
 #endif
 }
 
@@ -955,7 +961,7 @@ void SyscallDelegate::setDyldCommPageFlags(DyldCommPage value) const
 #if BUILDING_DYLD && !TARGET_OS_SIMULATOR
     ::sysctlbyname("kern.dyld_flags", nullptr, 0, &value, sizeof(value));
 #endif
-#if !BUILDING_DYLD
+#if BUILDING_UNIT_TESTS
     *((uint64_t*)&_commPageFlags) = *((uint64_t*)&value);
 #endif
 }
@@ -1063,7 +1069,7 @@ int SyscallDelegate::unlink(const char* path) const
 
 int SyscallDelegate::fcntl(int fd, int cmd, void* param) const
 {
-#if BUILDING_DYLD || BUILDING_CLOSURE_UTIL
+#if BUILDING_DYLD || BUILDING_CLOSURE_UTIL || BUILDING_SHARED_CACHE_UTIL
     return ::fcntl(fd, cmd, param);
 #else
     abort();
@@ -1166,7 +1172,7 @@ kern_return_t SyscallDelegate::vm_protect(task_port_t task, vm_address_t addr, v
 
 int SyscallDelegate::mremap_encrypted(void* p, size_t len, uint32_t id, uint32_t cpuType, uint32_t cpuSubtype) const
 {
-#if BUILDING_DYLD && !TARGET_OS_SIMULATOR && (__arm64__ || __arm__)
+#if BUILDING_DYLD && !TARGET_OS_SIMULATOR && __arm64__
     return ::mremap_encrypted(p, len, id, cpuType, cpuSubtype);
 #else
     abort();

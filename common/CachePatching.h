@@ -497,6 +497,8 @@ private:
 namespace cache_builder
 {
 
+enum class UniquedGOTKind { regular, authGot, authPtr };
+
 struct CacheDylib;
 
 struct dyld_cache_patchable_location
@@ -534,6 +536,7 @@ struct PatchInfo
     std::vector<std::vector<dyld_cache_patchable_location>> bindUses;
     std::vector<std::vector<GOTInfo>>                       bindGOTUses;
     std::vector<std::vector<GOTInfo>>                       bindAuthGOTUses;
+    std::vector<std::vector<GOTInfo>>                       bindAuthPtrUses;
     std::vector<std::string>                                bindTargetNames;
 };
 

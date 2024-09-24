@@ -1,4 +1,4 @@
-.Dd Nov 6, 2006
+.Dd Feb 8, 2024
 .Dt DLCLOSE 3
 .Sh NAME
 .Nm dlclose
@@ -20,12 +20,11 @@ termination routines in it are called.
 .Fa handle
 is the value returned by a previous call to dlopen.
 .Pp
-Prior to Mac OS X 10.5, only bundles could be unloaded.  Starting in Mac OS X 10.5, 
-dynamic libraries may also be unloaded.  There are a couple of cases in which a
-dynamic library will never be unloaded: 1) the main executable links against it, 
-2) an API that does not support unloading (e.g. NSAddImage()) was used to load
-it or some other dynamic library that depends on it, 3) the dynamic library
-is in dyld's shared cache.
+Note: there are a couple of cases in which a dynamic library will never be unloaded:
+1) the main executable directly or indirectly links against it,
+2) the dynamic library is in dyld's shared cache,
+3) the dynamic library has thread-local variables, or
+4) the dynamic library contains Objective-C classes.
 .Sh RETURN VALUES
 If
 .Fn dlclose

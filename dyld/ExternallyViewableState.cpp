@@ -144,7 +144,7 @@ void ExternallyViewableState::initSim(lsl::Allocator& persistentAllocator, lsl::
     }
     _allImageInfo->infoArrayCount           = (uint32_t)_imageInfos->size();
     _allImageInfo->infoArrayChangeTimestamp = mach_absolute_time();
-    _allImageInfo->infoArray                = _imageInfos->begin();
+    _allImageInfo->infoArray                = _imageInfos->data();
 
     // Copy uuids from host
     for (uint32_t i = 0; i < _allImageInfo->uuidArrayCount; i++) {
@@ -154,7 +154,7 @@ void ExternallyViewableState::initSim(lsl::Allocator& persistentAllocator, lsl::
         _imageUUIDs->push_back(uuidInfo);
     }
     _allImageInfo->uuidArrayCount = (uint32_t)_imageUUIDs->size();
-    _allImageInfo->uuidArray      = _imageUUIDs->begin();
+    _allImageInfo->uuidArray      = _imageUUIDs->data();
 
     // We are leaking the host's _imageInfos and _imageUUIDs from ExternallyViewableState::init
 
@@ -298,10 +298,10 @@ void ExternallyViewableState::addImagesOld(lsl::Vector<dyld_image_info>& oldStyl
 {
     // append old style additions to all image infos array
     _allImageInfo->infoArray = nullptr;   // set infoArray to NULL to denote it is in-use
-    _imageInfos->insert(_imageInfos->begin(), oldStyleAdditions.begin(), oldStyleAdditions.end());
+    _imageInfos->insert(_imageInfos->end(), oldStyleAdditions.begin(), oldStyleAdditions.end());
     _allImageInfo->infoArrayCount           = (uint32_t)_imageInfos->size();
     _allImageInfo->infoArrayChangeTimestamp = timeStamp;
-    _allImageInfo->infoArray = _imageInfos->begin();
+    _allImageInfo->infoArray = _imageInfos->data();
 
     // now if lldb is attached, let it know the image list changed
     _allImageInfo->notification(dyld_image_adding, (uint32_t)oldStyleAdditions.size(), &oldStyleAdditions[0]);
@@ -409,10 +409,10 @@ void ExternallyViewableState::removeImagesOld(dyld3::Array<const char*> &pathsBu
         _allImageInfo->notification(dyld_image_removing, 1, &goingAway);
     }
     _allImageInfo->infoArrayCount = (uint32_t)_imageInfos->size();
-    _allImageInfo->infoArray      = _imageInfos->begin();  // set infoArray back to base address of vector
+    _allImageInfo->infoArray      = _imageInfos->data();  // set infoArray back to base address of vector
     _allImageInfo->infoArrayChangeTimestamp = timeStamp;
     _allImageInfo->uuidArrayCount = (uintptr_t)_imageUUIDs->size();
-    _allImageInfo->uuidArray      = _imageUUIDs->begin();  // set uuidArray back to base address of vector
+    _allImageInfo->uuidArray      = _imageUUIDs->data();  // set uuidArray back to base address of vector
 }
 
 void ExternallyViewableState::removeImagesOld(std::span<const mach_header*>& mhs)
@@ -485,7 +485,7 @@ void ExternallyViewableState::detachFromSharedRegion()
 
 void ExternallyViewableState::release(Allocator& ephemeralAllocator)
 {
-#if BUILDING_DYLD && !__i386__
+#if BUILDING_DYLD
     // release ProcessSnapshot object
     if (_snapshot) {
         _snapshot->~ProcessSnapshot();
@@ -495,27 +495,17 @@ void ExternallyViewableState::release(Allocator& ephemeralAllocator)
 #endif
 }
 
-
-void ExternallyViewableState::commit(Atlas::ProcessSnapshot* processSnapshot, Allocator& persistentAllocator, Allocator& ephemeralAllocator)
-{
-#if BUILDING_DYLD && !TARGET_OS_SIMULATOR && !__i386__
-    if ( !processSnapshot )
-        return;
-    // serialize compact info info a chunk in the persistentAllocator
-    Vector<std::byte> compactInfoData = processSnapshot->serialize();
-    std::byte*        compactInfo     = (std::byte*)persistentAllocator.malloc(compactInfoData.size());
-    std::copy(compactInfoData.begin(), compactInfoData.end(), &compactInfo[0]);
-
+std::byte* ExternallyViewableState::swapActiveSnapshot(std::byte* begin, std::byte* end) {
     // atomically update compactInfo addr/size in all_image_infos
     struct CompactInfoDescriptor {
         uintptr_t   addr;
         size_t      size;
     } __attribute__((aligned(16)));
     CompactInfoDescriptor newDescriptor;
-    newDescriptor.addr = (uintptr_t)compactInfo;
-    newDescriptor.size = (size_t)compactInfoData.size();
+    newDescriptor.addr = (uintptr_t)begin;
+    newDescriptor.size = (size_t)(end-begin);
     uintptr_t oldCompactInfo = _allImageInfo->compact_dyld_image_info_addr;
-#if __arm__ || !__LP64__
+#if !__LP64__
     // armv32 archs are missing the atomic primitive, but we only need to be guaraantee the write does not sheer, as the only thing
     // accessing this outside of a lock is the kernel or a remote process
     uint64_t* currentDescriptor = (uint64_t*)&_allImageInfo->compact_dyld_image_info_addr;
@@ -525,14 +515,40 @@ void ExternallyViewableState::commit(Atlas::ProcessSnapshot* processSnapshot, Al
     std::atomic<CompactInfoDescriptor>* currentDescriptor = (std::atomic<CompactInfoDescriptor>*)&_allImageInfo->compact_dyld_image_info_addr;
     currentDescriptor->store(newDescriptor, std::memory_order_relaxed);
 #endif
-    if ( oldCompactInfo != 0 ) {
+    return (std::byte*)oldCompactInfo;
+}
+
+
+void ExternallyViewableState::commit(Atlas::ProcessSnapshot* processSnapshot, Allocator& persistentAllocator, Allocator& ephemeralAllocator)
+{
+#if BUILDING_DYLD && !TARGET_OS_SIMULATOR
+    if ( !processSnapshot )
+        return;
+    // serialize compact info info a chunk in the persistentAllocator
+    Vector<std::byte> compactInfoData = processSnapshot->serialize();
+    // Swap the activeSnapshot to the one we just created on the ephemeralAllocator
+    std::byte* oldCompactInfo = swapActiveSnapshot(compactInfoData.begin(), compactInfoData.end());
+    if (oldCompactInfo && persistentAllocator.owned((void*)oldCompactInfo, 8)) {
+        // We swapped the info, if there is space update the old one in place and swap back
+        if (persistentAllocator.size((const void *)oldCompactInfo) >= compactInfoData.size()) {
+            std::copy(compactInfoData.begin(), compactInfoData.end(), oldCompactInfo);
+            swapActiveSnapshot(oldCompactInfo, oldCompactInfo+compactInfoData.size());
+            // If there is not enough space, can we realloc() to get enough space?
+        } else if (persistentAllocator.realloc((void *)oldCompactInfo, compactInfoData.size())) {
+            std::copy(compactInfoData.begin(), compactInfoData.end(), oldCompactInfo);
+            swapActiveSnapshot(oldCompactInfo, oldCompactInfo+compactInfoData.size());
+        } else {
+            persistentAllocator.free((void*)oldCompactInfo);
+            std::byte* compactInfo = (std::byte*)persistentAllocator.malloc(compactInfoData.size());
+            std::copy(compactInfoData.begin(), compactInfoData.end(), &compactInfo[0]);
+            (void)swapActiveSnapshot(compactInfo, compactInfo+compactInfoData.size());
+        }
+    } else {
         // This might be info setup by the dyld runtime state, and if so we don't know the tpro state.
         // If the oldCompactInfo is not owned by the persistentAllocator then purposefully leak it.
-        auto allocationMetadata = lsl::AllocationMetadata::getForPointer((void*)oldCompactInfo);
-        auto oldAllocator = &allocationMetadata->allocator();
-        if (oldAllocator == &persistentAllocator) {
-            persistentAllocator.free((void*)oldCompactInfo);
-        }
+        std::byte* compactInfo = (std::byte*)persistentAllocator.malloc(compactInfoData.size());
+        std::copy(compactInfoData.begin(), compactInfoData.end(), &compactInfo[0]);
+        (void)swapActiveSnapshot(compactInfo, compactInfo+compactInfoData.size());
     }
 
     {
@@ -612,9 +628,9 @@ void ExternallyViewableState::notifyMonitorOfImageListChangesSim(bool unloading,
   #elif TARGET_OS_OSX
     static Allocator* glueAllocator = nullptr;
     if (!glueAllocator) {
-        glueAllocator = &Allocator::persistentAllocator();
+        glueAllocator = &Allocator::createAllocator();
     }
-    EphemeralAllocator ephemeralAllocator;
+    STACK_ALLOCATOR(ephemeralAllocator, 0);
     SyscallDelegate syscall;
     FileManager fileManager(ephemeralAllocator, &syscall);
     auto* gProcessInfo = ExternallyViewableState::getProcessInfo();
@@ -779,7 +795,7 @@ void ExternallyViewableState::addRosettaImages(std::span<const dyld_aot_image_in
             _aotImageInfos->insert(_aotImageInfos->begin(), aot_infos.begin(), aot_infos.end());
             _allImageInfo->aotInfoCount = (uint32_t)_aotImageInfos->size();
             _allImageInfo->aotInfoArrayChangeTimestamp = mach_absolute_time();
-        _allImageInfo->aotInfoArray = _aotImageInfos->begin();   // set aotInfoArray back to base address of vector (other process can now read)
+        _allImageInfo->aotInfoArray = _aotImageInfos->data();   // set aotInfoArray back to base address of vector (other process can now read)
     }
 
     if ( image_infos.size() != 0 ) {
@@ -788,7 +804,7 @@ void ExternallyViewableState::addRosettaImages(std::span<const dyld_aot_image_in
             _imageInfos->insert(_imageInfos->begin(), image_infos.begin(), image_infos.end());
             _allImageInfo->infoArrayCount = (uint32_t)_imageInfos->size();
             _allImageInfo->infoArrayChangeTimestamp = mach_absolute_time();
-        _allImageInfo->infoArray = _imageInfos->begin();   // set infoArray back to base address of vector (other process can now read)
+        _allImageInfo->infoArray = _imageInfos->data();   // set infoArray back to base address of vector (other process can now read)
     }
 }
 
@@ -809,7 +825,7 @@ void ExternallyViewableState::removeRosettaImages(std::span<const mach_header*>&
     _allImageInfo->aotInfoCount = (uint32_t)_aotImageInfos->size();
     _allImageInfo->aotInfoArrayChangeTimestamp  = mach_absolute_time();
     // set aotInfoArray back to base address of vector
-    _allImageInfo->aotInfoArray = _aotImageInfos->begin();
+    _allImageInfo->aotInfoArray = _aotImageInfos->data();
 
 }
 #endif // SUPPORT_ROSETTA

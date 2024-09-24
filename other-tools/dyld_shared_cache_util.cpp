@@ -49,6 +49,7 @@
 #include <iostream>
 #include <optional>
 
+#include "ClosureFileSystemPhysical.h"
 #include "DyldSharedCache.h"
 #include "JSONWriter.h"
 #include "Trie.hpp"
@@ -93,6 +94,7 @@ enum Mode {
     modeSectionSizes,
     modeStrings,
     modeInfo,
+    modeTPROInfo,
     modeStats,
     modeSize,
     modeObjCInfo,
@@ -106,6 +108,7 @@ enum Mode {
     modeSwiftProtocolConformances,
     modeExtract,
     modePatchTable,
+    modeRootsCost,
     modeListDylibsWithSection,
     modeDuplicates,
     modeDuplicatesSummary,
@@ -124,6 +127,7 @@ struct Options {
     const char*     sectionName;
     const char*     rootPath            = nullptr;
     const char*     fixupsInDylib;
+    const char*     rootsCostOfDylib    = nullptr;
     bool            printUUIDs;
     bool            printVMAddrs;
     bool            printDylibVersions;
@@ -738,6 +742,37 @@ static void dumpObjCClassLayout(const DyldSharedCache* dyldCache)
     });
 }
 
+template<typename ListTy>
+static ListTy skipListsOfLists(ListTy&& list, const objc_visitor::Visitor& visitor)
+{
+    // we only want the class list. Ignore all ther other lists of lists
+    if ( list.isListOfLists() ) {
+        const ListOfListsEntry* listHeader = (ListOfListsEntry*)((uint8_t*) ((uint64_t)list.getLocation() & ~1));
+        VMAddress methodListVMAddr = list.getVMAddress().value() - VMOffset(1ULL);
+
+        if ( listHeader->count != 0 ) {
+            uint32_t classListIndex = listHeader->count - 1;
+
+            const ListOfListsEntry& listEntry = (listHeader + 1)[classListIndex];
+
+            // The list entry is a relative offset to the target
+            // Work out the VMAddress of that target
+            VMOffset listEntryVMOffset{(uint64_t)&listEntry - (uint64_t)listHeader};
+            VMAddress listEntryVMAddr = methodListVMAddr + listEntryVMOffset;
+            VMAddress targetVMAddr = listEntryVMAddr + VMOffset((uint64_t)listEntry.offset);
+
+            metadata_visitor::ResolvedValue classMethodListValue = visitor.getValueFor(targetVMAddr);
+            ListTy classMethodList(classMethodListValue);
+
+            return classMethodList;
+        } else {
+            return { std::nullopt };
+        }
+    }
+
+    return list;
+}
+
 static void dumpObjCClassMethodLists(const DyldSharedCache* dyldCache)
 {
     // Map from vmAddr to the category name for that address
@@ -1117,6 +1152,10 @@ int main (int argc, const char* argv[]) {
                 checkMode(options.mode);
                 options.mode = modeInfo;
             }
+            else if (strcmp(opt, "-tpro") == 0) {
+                checkMode(options.mode);
+                options.mode = modeTPROInfo;
+            }
             else if (strcmp(opt, "-stats") == 0) {
                 checkMode(options.mode);
                 options.mode = modeStats;
@@ -1252,6 +1291,16 @@ int main (int argc, const char* argv[]) {
             }
             else if (strcmp(opt, "-patch_table") == 0) {
                 options.mode = modePatchTable;
+            }
+            else if (strcmp(opt, "-roots_cost") == 0) {
+                checkMode(options.mode);
+                options.mode = modeRootsCost;
+                options.rootsCostOfDylib = argv[++i];
+                if ( i >= argc ) {
+                    fprintf(stderr, "Error: option -roots_cost requires a path argument\n");
+                    usage();
+                    exit(1);
+                }
             }
             else if (strcmp(opt, "-list_dylibs_with_section") == 0) {
                 options.mode = modeListDylibsWithSection;
@@ -1482,8 +1531,19 @@ int main (int argc, const char* argv[]) {
         printf("mappings:\n");
         dyldCache->forEachRange(^(const char *mappingName, uint64_t unslidVMAddr, uint64_t vmSize,
                                   uint32_t cacheFileIndex, uint64_t fileOffset, uint32_t initProt, uint32_t maxProt, bool& stopRange) {
-            printf("%16s %4lluMB,  file offset: #%u/0x%08llX -> 0x%08llX,  address: 0x%08llX -> 0x%08llX\n",
-                   mappingName, vmSize / (1024*1024), cacheFileIndex, fileOffset, fileOffset + vmSize, unslidVMAddr, unslidVMAddr + vmSize);
+            std::string initProtString;
+            initProtString += (initProt & VM_PROT_READ) ? "r" : "-";
+            initProtString += (initProt & VM_PROT_WRITE) ? "w" : "-";
+            initProtString += (initProt & VM_PROT_EXECUTE) ? "x" : "-";
+
+            std::string maxProtString;
+            maxProtString += (maxProt & VM_PROT_READ) ? "r" : "-";
+            maxProtString += (maxProt & VM_PROT_WRITE) ? "w" : "-";
+            maxProtString += (maxProt & VM_PROT_EXECUTE) ? "x" : "-";
+
+            printf("%20s %4lluMB,  file offset: #%u/0x%08llX -> 0x%08llX,  address: 0x%08llX -> 0x%08llX, %s -> %s\n",
+                   mappingName, vmSize / (1024*1024), cacheFileIndex, fileOffset, fileOffset + vmSize,
+                   unslidVMAddr, unslidVMAddr + vmSize, initProtString.c_str(), maxProtString.c_str());
             if (header->mappingOffset >=  __offsetof(dyld_cache_header, dynamicDataOffset)) {
                 if ( (unslidVMAddr + vmSize) == (header->sharedRegionStart + header->dynamicDataOffset) ) {
                     printf("  dynamic config %4lluKB,                                             address: 0x%08llX -> 0x%08llX\n",
@@ -1495,7 +1555,7 @@ int main (int argc, const char* argv[]) {
             const dyld_cache_header* subCacheHeader = &subCache->header;
 
             if ( subCacheHeader->codeSignatureSize != 0) {
-                    printf("%16s %4lluMB,  file offset: #%u/0x%08llX -> 0x%08llX\n",
+                    printf("%20s %4lluMB,  file offset: #%u/0x%08llX -> 0x%08llX\n",
                            "code sign", subCacheHeader->codeSignatureSize/(1024*1024), cacheFileIndex,
                            subCacheHeader->codeSignatureOffset, subCacheHeader->codeSignatureOffset + subCacheHeader->codeSignatureSize);
             }
@@ -1524,6 +1584,16 @@ int main (int argc, const char* argv[]) {
                        subCacheHeader->localSymbolsSize/(1024*1024), cacheFileIndex,
                        subCacheHeader->localSymbolsOffset, subCacheHeader->localSymbolsOffset + subCacheHeader->localSymbolsSize);
         });
+    }
+    else if ( options.mode == modeTPROInfo ) {
+        printf("TPRO mappings:\n");
+        __block bool foundMapping = false;
+        dyldCache->forEachTPRORegion(^(const void *content, uint64_t unslidVMAddr, uint64_t vmSize, bool &stopRegion) {
+            printf("    %4lluKB, address: 0x%08llX -> 0x%08llX\n", vmSize / 1024, unslidVMAddr, unslidVMAddr + vmSize);
+            foundMapping = true;
+        });
+        if ( !foundMapping )
+            printf("    none found\n");
     }
     else if ( options.mode == modeStats ) {
         __block std::map<std::string_view, uint64_t> mappingSizes;
@@ -1766,7 +1836,10 @@ int main (int argc, const char* argv[]) {
                     }
 
                     for (const ExportInfoTrie::Entry& entry: exports) {
-                        printf("%s: %s\n", installName, entry.name.c_str());
+                        const char* resolver = "";
+                        if ( entry.info.flags & EXPORT_SYMBOL_FLAGS_STUB_AND_RESOLVER )
+                            resolver = " (resolver)";
+                        printf("%s: %s%s\n", installName, entry.name.c_str(), resolver);
                     }
                 }
             });
@@ -1847,7 +1920,35 @@ int main (int argc, const char* argv[]) {
         printf("num objc dylibs:                      %lu\n", objcDylibs.size());
         for ( uint32_t i = 0; i != objcDylibs.size(); ++i ) {
             const std::pair<std::string_view, const objc::objc_image_info*> objcDylib = objcDylibs[i];
-            printf("dylib[%d]: { 0x%x, 0x%08x } %s\n", i, objcDylib.second->version, objcDylib.second->flags, objcDylib.first.data());
+
+            // Try work out which flags we have
+            std::string flagsStr;
+            uint32_t flags = objcDylib.second->flags;
+            std::pair<uint32_t, const char*> flagComponents[] = {
+                { 1 << 0,       "dyldCategories" },
+                { 1 << 1,       "supportsGC" },
+                { 1 << 2,       "requiresGC" },
+                { 1 << 3,       "optimizedByDyld" },
+                { 1 << 4,       "signedClassRO" },
+                { 1 << 5,       "isSimulated" },
+                { 1 << 6,       "hasCategoryClassProperties" },
+                { 1 << 7,       "optimizedByDyldClosure" },
+                { 0xFF << 8,    "swiftUnstableVersion" },
+                { 0xFFFF << 16, "swiftVersion" },
+            };
+            bool needsSeparator = false;
+            for ( auto [mask, name] : flagComponents ) {
+                if ( (flags & mask) != 0 ) {
+                    if ( needsSeparator )
+                        flagsStr += " | ";
+                    needsSeparator = true;
+
+                    flagsStr += name;
+                }
+            }
+            printf("dylib[%d]: { 0x%x, 0x%08x } (%s) %s\n",
+                   i, objcDylib.second->version, objcDylib.second->flags,
+                   flagsStr.c_str(), objcDylib.first.data());
         }
     }
     else if ( options.mode == modeObjCProtocols ) {
@@ -1968,16 +2069,13 @@ int main (int argc, const char* argv[]) {
 
         dyldCache->applyCacheRebases();
 
-        auto getString = ^const char *(const dyld3::MachOAnalyzer* ma, uint64_t nameVMAddr){
+        auto getString = ^const char *(const dyld3::MachOAnalyzer* ma, VMAddress nameVMAddr){
             dyld3::MachOAnalyzer::PrintableStringResult result;
-            const char* name = ma->getPrintableString(nameVMAddr, result);
+            const char* name = ma->getPrintableString(nameVMAddr.rawValue(), result);
             if (result == dyld3::MachOAnalyzer::PrintableStringResult::CanPrint)
                 return name;
             return nullptr;
         };
-
-        // We don't actually slide the cache.  It still contains unslid VMAddr's
-        const bool rebased = false;
 
         uint64_t sharedCacheRelativeSelectorBaseVMAddress = dyldCache->sharedCacheRelativeSelectorBaseVMAddress();
 
@@ -1993,24 +2091,21 @@ int main (int argc, const char* argv[]) {
         __block std::unordered_map<uint64_t, const char*> metaclassVMAddrToName;
         dyldCache->forEachImage(^(const mach_header *mh, const char *installName) {
             const dyld3::MachOAnalyzer* ma = (const dyld3::MachOAnalyzer*)mh;
-            const uint32_t pointerSize = ma->pointerSize();
 
-            auto visitClass = ^(uint64_t classVMAddr,
-                                uint64_t classSuperclassVMAddr, uint64_t classDataVMAddr,
-                                const dyld3::MachOAnalyzer::ObjCClassInfo& objcClass, bool isMetaClass,
-                                bool& stop) {
-                if (auto className = getString(ma, objcClass.nameVMAddr(pointerSize))) {
-                    if (isMetaClass)
-                        metaclassVMAddrToName[classVMAddr] = className;
+            __block objc_visitor::Visitor visitor(dyldCache, ma, VMAddress(sharedCacheRelativeSelectorBaseVMAddress));
+
+            auto visitClass = ^(const objc_visitor::Class& objcClass, bool& stopClass) {
+                VMAddress classVMAddr = objcClass.getVMAddress();
+                VMAddress nameVMAddr = objcClass.getNameVMAddr(visitor);
+                if ( auto className = getString(ma, nameVMAddr) ) {
+                    if ( objcClass.isMetaClass )
+                        metaclassVMAddrToName[classVMAddr.rawValue()] = className;
                     else
-                        classVMAddrToName[classVMAddr] = className;
+                        classVMAddrToName[classVMAddr.rawValue()] = className;
                 }
             };
 
-            Diagnostics diag;
-
-            dyld3::MachOAnalyzer::VMAddrConverter vmAddrConverter = dyldCache->makeVMAddrConverter(rebased);
-            ma->forEachObjCClass(diag, vmAddrConverter, visitClass);
+            visitor.forEachClassAndMetaClass(visitClass);
         });
 
         // These are used only for the on-disk binaries we analyze
@@ -2018,116 +2113,110 @@ int main (int argc, const char* argv[]) {
         __block std::unordered_map<uint64_t, const char*> onDiskClassVMAddrToName;
         __block std::unordered_map<uint64_t, const char*> onDiskMetaclassVMAddrToName;
 
-        auto getProperties = ^(const dyld3::MachOAnalyzer* ma, uint64_t propertiesVMAddr,
-                               const dyld3::MachOAnalyzer::VMAddrConverter& vmAddrConverter) {
-            __block Node propertiesNode;
-            auto visitProperty = ^(uint64_t propertyVMAddr, const dyld3::MachOAnalyzer::ObjCProperty& property) {
-                // Get the name && attributes
-                auto propertyName = getString(ma, property.nameVMAddr);
-                auto propertyAttributes = getString(ma, property.attributesVMAddr);
+        auto getProperties = ^(const dyld3::MachOAnalyzer* ma, const objc_visitor::PropertyList& propertyList,
+                               objc_visitor::Visitor& visitor) {
+            Node propertiesNode;
 
-                if (!propertyName || !propertyAttributes)
-                    return;
+            for ( uint32_t i = 0, numProperties = propertyList.numProperties(); i != numProperties; ++i ) {
+                objc_visitor::Property property = propertyList.getProperty(visitor, i);
+
+                // Get the name && attributes
+                const char* propertyName = property.getName(visitor);
+                const char* propertyAttributes = property.getAttributes(visitor);
 
                 Node propertyNode;
                 propertyNode.map["name"] = Node{propertyName};
                 propertyNode.map["attributes"] = Node{propertyAttributes};
                 propertiesNode.array.push_back(propertyNode);
-            };
-            ma->forEachObjCProperty(propertiesVMAddr, vmAddrConverter, visitProperty);
+            }
+
             return propertiesNode.array.empty() ? std::optional<Node>() : propertiesNode;
         };
 
-        auto getClassProtocols = ^(const dyld3::MachOAnalyzer* ma, uint64_t protocolsVMAddr,
-                                   const dyld3::MachOAnalyzer::VMAddrConverter& vmAddrConverter) {
-            __block Node protocolsNode;
+        auto getClassProtocols = ^(const dyld3::MachOAnalyzer* ma, const objc_visitor::ProtocolList& protocolList,
+                                   objc_visitor::Visitor& visitor) {
+            Node protocolsNode;
 
-            auto visitProtocol = ^(uint64_t protocolVMAddr, const dyld3::MachOAnalyzer::ObjCProtocol& protocol) {
-                if (const char *name = getString(ma, protocol.nameVMAddr)) {
+            for ( uint64_t i = 0, numProtocols = protocolList.numProtocols(visitor); i != numProtocols; ++i ) {
+                objc_visitor::Protocol protocol = protocolList.getProtocol(visitor, i);
+
+                if ( const char *name = getString(ma, protocol.getNameVMAddr(visitor)) ) {
                     protocolsNode.array.push_back(Node{name});
                 }
-            };
-
-            ma->forEachObjCProtocol(protocolsVMAddr, vmAddrConverter, visitProtocol);
+            }
 
             return protocolsNode.array.empty() ? std::optional<Node>() : protocolsNode;
         };
 
         auto getProtocols = ^(const dyld3::MachOAnalyzer* ma,
-                              const dyld3::MachOAnalyzer::VMAddrConverter& vmAddrConverter) {
-            __block Node protocols;
+                              objc_visitor::Visitor& visitor) {
+            auto getMethods = ^(const dyld3::MachOAnalyzer* mh, objc_visitor::MethodList methodList,
+                                const std::string &prefix, Node &node){
+                for ( uint32_t i = 0, numMethods = methodList.numMethods(); i != numMethods; ++i ) {
+                    objc_visitor::Method objcMethod = methodList.getMethod(visitor, i);
 
-            auto getMethods = ^(const dyld3::MachOAnalyzer* mh, uint64_t methodListVMAddr, const std::string &prefix, Node &node){
-                auto visitMethod = ^(uint64_t methodVMAddr, const dyld3::MachOAnalyzer::ObjCMethod& method,
-                                     bool& stopMethod) {
-                    if (auto name = getString(mh, method.nameVMAddr)) {
+                    if ( auto name = getString(mh, objcMethod.getNameVMAddr(visitor)) ) {
                         node.array.push_back(Node{prefix + name});
                     }
-                };
-
-                ma->forEachObjCMethod(methodListVMAddr, vmAddrConverter, sharedCacheRelativeSelectorBaseVMAddress, visitMethod);
+                }
             };
 
-            auto visitProtocol = ^(uint64_t protoVMAddr,
-                                   const dyld3::MachOAnalyzer::ObjCProtocol& objcProto,
-                                   bool& stopProtocol) {
-                const char* protoName = getString(ma, objcProto.nameVMAddr);
-                if (!protoName)
+            __block Node protocolsNode;
+            auto visitProtocol = ^(const objc_visitor::Protocol& objcProtocol, bool& stopProtocol) {
+                const char* protoName = getString(ma, objcProtocol.getNameVMAddr(visitor));
+                if ( !protoName )
                     return;
 
                 Node entry;
                 entry.map["protocolName"] = Node{protoName};
 
-                if ( objcProto.protocolsVMAddr != 0 ) {
-                    __block Node visitedProtocols;
+                objc_visitor::ProtocolList protocolList = objcProtocol.getProtocols(visitor);
+                if ( uint64_t numProtocols = protocolList.numProtocols(visitor); numProtocols != 0 ) {
+                    Node visitedProtocols;
 
-                    auto visitProtocolInner = ^(uint64_t protocolRefVMAddr, const dyld3::MachOAnalyzer::ObjCProtocol& protocol) {
-                        if (auto name = getString(ma, protocol.nameVMAddr)) {
+                    for ( uint32_t i = 0; i != numProtocols; ++i ) {
+                        objc_visitor::Protocol innerProtocol = protocolList.getProtocol(visitor, i);
+
+                        if ( const char* name = getString(ma, innerProtocol.getNameVMAddr(visitor)) )
                             visitedProtocols.array.push_back(Node{name});
-                        }
-                    };
+                    }
 
-                    ma->forEachObjCProtocol(objcProto.protocolsVMAddr, vmAddrConverter, visitProtocolInner);
                     if (!visitedProtocols.array.empty()) {
                         entry.map["protocols"] = visitedProtocols;
                     }
                 }
 
                 Node methods;
-                getMethods(ma, objcProto.instanceMethodsVMAddr, instancePrefix, methods);
-                getMethods(ma, objcProto.classMethodsVMAddr, classPrefix, methods);
+                getMethods(ma, objcProtocol.getInstanceMethods(visitor), instancePrefix, methods);
+                getMethods(ma, objcProtocol.getClassMethods(visitor), classPrefix, methods);
                 if (!methods.array.empty()) {
                     entry.map["methods"] = methods;
                 }
 
                 Node optMethods;
-                getMethods(ma, objcProto.optionalInstanceMethodsVMAddr, instancePrefix, optMethods);
-                getMethods(ma, objcProto.optionalClassMethodsVMAddr, classPrefix, optMethods);
+                getMethods(ma, objcProtocol.getOptionalInstanceMethods(visitor), instancePrefix, optMethods);
+                getMethods(ma, objcProtocol.getOptionalClassMethods(visitor), classPrefix, optMethods);
                 if (!optMethods.array.empty()) {
                     entry.map["optionalMethods"] = optMethods;
                 }
 
-                protocols.array.push_back(entry);
+                protocolsNode.array.push_back(entry);
             };
 
-            Diagnostics diag;
-            ma->forEachObjCProtocol(diag, vmAddrConverter, visitProtocol);
+            visitor.forEachProtocol(visitProtocol);
 
-            return protocols.array.empty() ? std::optional<Node>() : protocols;
+            return protocolsNode.array.empty() ? std::optional<Node>() : protocolsNode;
         };
 
         auto getSelRefs = ^(const dyld3::MachOAnalyzer* ma,
-                            const dyld3::MachOAnalyzer::VMAddrConverter& vmAddrConverter) {
+                            objc_visitor::Visitor& visitor) {
             __block std::vector<const char *> selNames;
 
-            auto visitSelRef = ^(uint64_t selRefVMAddr, uint64_t selRefTargetVMAddr, bool& stop) {
-                if (auto selValue = getString(ma, selRefTargetVMAddr)) {
+            visitor.forEachSelectorReference(^(VMAddress selRefVMAddr, VMAddress selRefTargetVMAddr, const char *selectorString) {
+                if ( auto selValue = getString(ma, selRefTargetVMAddr) ) {
                     selNames.push_back(selValue);
                 }
-            };
-
-            Diagnostics diag;
-            ma->forEachObjCSelectorReference(diag, vmAddrConverter, visitSelRef);
+            });
 
             std::sort(selNames.begin(), selNames.end(),
                       [](const char* a, const char* b) {
@@ -2143,9 +2232,9 @@ int main (int argc, const char* argv[]) {
         };
 
         auto getClasses = ^(const dyld3::MachOAnalyzer* ma,
-                            const dyld3::MachOAnalyzer::VMAddrConverter& vmAddrConverter) {
-            Diagnostics diag;
+                            objc_visitor::Visitor& visitor) {
             const uint32_t pointerSize = ma->pointerSize();
+            const uint16_t chainedPointerFormat = ma->hasChainedFixups() ? ma->chainedPointerFormat() : 0;
 
             // Get the vmAddrs for all exported symbols as we want to know if classes
             // are exported
@@ -2169,11 +2258,8 @@ int main (int argc, const char* argv[]) {
 
             __block Node classesNode;
             __block bool skippedPreviousClass = false;
-            auto visitClass = ^(uint64_t classVMAddr,
-                                uint64_t classSuperclassVMAddr, uint64_t classDataVMAddr,
-                                const dyld3::MachOAnalyzer::ObjCClassInfo& objcClass, bool isMetaClass,
-                                bool& stopClass) {
-                if (isMetaClass) {
+            auto visitClass = ^(const objc_visitor::Class& objcClass, bool& stopClass) {
+                if ( objcClass.isMetaClass ) {
                     if (skippedPreviousClass) {
                         // If the class was bad, then skip the meta class too
                         skippedPreviousClass = false;
@@ -2184,93 +2270,111 @@ int main (int argc, const char* argv[]) {
                 }
 
                 std::string classType = "-";
-                if (isMetaClass)
+                if ( objcClass.isMetaClass )
                     classType = "+";
+
+                VMAddress classVMAddr = objcClass.getVMAddress();
+                VMAddress nameVMAddr = objcClass.getNameVMAddr(visitor);
+
                 dyld3::MachOAnalyzer::PrintableStringResult classNameResult;
-                const char* className = ma->getPrintableString(objcClass.nameVMAddr(pointerSize), classNameResult);
-                if (classNameResult != dyld3::MachOAnalyzer::PrintableStringResult::CanPrint) {
+                const char* className = ma->getPrintableString(nameVMAddr.rawValue(), classNameResult);
+                if ( classNameResult != dyld3::MachOAnalyzer::PrintableStringResult::CanPrint ) {
                     return;
                 }
 
-                const char* superClassName = nullptr;
+                __block const char* superClassName = nullptr;
                 if ( DyldSharedCache::inDyldCache(dyldCache, ma) ) {
-                    if ( objcClass.superclassVMAddr != 0 ) {
-                        if (isMetaClass) {
+                    std::optional<VMAddress> superclassVMAddr = objcClass.getSuperclassVMAddr(visitor);
+                    if ( superclassVMAddr.has_value() ) {
+                        if ( objcClass.isMetaClass ) {
                             // If we are root class, then our superclass should actually point to our own class
-                            const uint32_t RO_ROOT = (1<<1);
-                            if ( objcClass.flags(pointerSize) & RO_ROOT ) {
-                                auto it = classVMAddrToName.find(objcClass.superclassVMAddr);
+                            if ( objcClass.isRootClass(visitor) ) {
+                                auto it = classVMAddrToName.find(superclassVMAddr.value().rawValue());
                                 assert(it != classVMAddrToName.end());
                                 superClassName = it->second;
                             } else {
-                                auto it = metaclassVMAddrToName.find(objcClass.superclassVMAddr);
+                                auto it = metaclassVMAddrToName.find(superclassVMAddr.value().rawValue());
                                 assert(it != metaclassVMAddrToName.end());
                                 superClassName = it->second;
                             }
                         } else {
-                            auto it = classVMAddrToName.find(objcClass.superclassVMAddr);
+                            auto it = classVMAddrToName.find(superclassVMAddr.value().rawValue());
                             assert(it != classVMAddrToName.end());
                             superClassName = it->second;
                         }
                     }
                 } else {
                     // On-disk binary.  Lets crack the chain to work out what we are pointing at
-                    dyld3::MachOAnalyzer::ChainedFixupPointerOnDisk fixup;
-                    if ( pointerSize == 8 )
-                        fixup.raw64 = objcClass.superclassVMAddr;
-                    else
-                        fixup.raw32 = (uint32_t)objcClass.superclassVMAddr;
-                    uint32_t  bindOrdinal;
-                    int64_t   embeddedAddend;
-                    if (fixup.isBind(vmAddrConverter.chainedPointerFormat, bindOrdinal, embeddedAddend)) {
-                        // Bind to another image.  Use the bind table to work out which name to bind to
-                        const char* symbolName = onDiskChainedFixupBindTargets[(size_t)bindOrdinal];
-                        if (isMetaClass) {
-                            if ( strstr(symbolName, "_OBJC_METACLASS_$_") == symbolName ) {
-                                superClassName = symbolName + strlen("_OBJC_METACLASS_$_");
+                    objcClass.withSuperclass(visitor, ^(const dyld3::MachOFile::ChainedFixupPointerOnDisk* fixup, uint16_t) {
+                        if ( (pointerSize == 8) && (fixup->raw64 == 0) )
+                            return;
+                        else if ( (pointerSize == 4) && (fixup->raw32 == 0) )
+                            return;
+
+                        uint32_t  bindOrdinal;
+                        int64_t   embeddedAddend;
+                        if ( fixup->isBind(chainedPointerFormat, bindOrdinal, embeddedAddend) ) {
+                            // Bind to another image.  Use the bind table to work out which name to bind to
+                            const char* symbolName = onDiskChainedFixupBindTargets[(size_t)bindOrdinal];
+                            if ( objcClass.isMetaClass ) {
+                                if ( strstr(symbolName, "_OBJC_METACLASS_$_") == symbolName ) {
+                                    superClassName = symbolName + strlen("_OBJC_METACLASS_$_");
+                                } else {
+                                    // Swift classes don't start with these prefixes so just skip them
+                                    if ( objcClass.isSwiftLegacy(visitor) || objcClass.isSwiftStable(visitor) )
+                                        return;
+                                }
                             } else {
-                                // Swift classes don't start with these prefixes so just skip them
-                                if (objcClass.isSwiftLegacy || objcClass.isSwiftStable)
-                                    return;
+                                if ( strstr(symbolName, "_OBJC_CLASS_$_") == symbolName ) {
+                                    superClassName = symbolName + strlen("_OBJC_CLASS_$_");
+                                } else {
+                                    // Swift classes don't start with these prefixes so just skip them
+                                    if ( objcClass.isSwiftLegacy(visitor) || objcClass.isSwiftStable(visitor) )
+                                        return;
+                                }
                             }
                         } else {
-                            if ( strstr(symbolName, "_OBJC_CLASS_$_") == symbolName ) {
-                                superClassName = symbolName + strlen("_OBJC_CLASS_$_");
+                            // Rebase within this image.
+                            std::optional<VMAddress> superclassVMAddr = objcClass.getSuperclassVMAddr(visitor);
+                            if ( objcClass.isMetaClass ) {
+                                auto it = onDiskMetaclassVMAddrToName.find(superclassVMAddr.value().rawValue());
+                                assert(it != onDiskMetaclassVMAddrToName.end());
+                                superClassName = it->second;
                             } else {
-                                // Swift classes don't start with these prefixes so just skip them
-                                if (objcClass.isSwiftLegacy || objcClass.isSwiftStable)
-                                    return;
+                                auto it = onDiskClassVMAddrToName.find(superclassVMAddr.value().rawValue());
+                                assert(it != onDiskClassVMAddrToName.end());
+                                superClassName = it->second;
                             }
                         }
-                    } else {
-                        // Rebase within this image.
-                        if (isMetaClass) {
-                            auto it = onDiskMetaclassVMAddrToName.find(objcClass.superclassVMAddr);
-                            assert(it != onDiskMetaclassVMAddrToName.end());
-                            superClassName = it->second;
-                        } else {
-                            auto it = onDiskClassVMAddrToName.find(objcClass.superclassVMAddr);
-                            assert(it != onDiskClassVMAddrToName.end());
-                            superClassName = it->second;
-                        }
+                    });
+
+                    if ( !superClassName ) {
+                        // Probably a swift class we want to skip
+                        return;
                     }
                 }
 
                 // Print the methods on this class
-                __block Node methodsNode;
-                auto visitMethod = ^(uint64_t methodVMAddr, const dyld3::MachOAnalyzer::ObjCMethod& method, bool& stopMethod) {
+                Node methodsNode;
+
+                objc_visitor::MethodList objcMethodList = skipListsOfLists(objcClass.getBaseMethods(visitor), visitor);
+
+                for ( uint32_t i = 0, numMethods = objcMethodList.numMethods(); i != numMethods; ++i ) {
+                    objc_visitor::Method objcMethod = objcMethodList.getMethod(visitor, i);
+
                     dyld3::MachOAnalyzer::PrintableStringResult methodNameResult;
-                    const char* methodName = ma->getPrintableString(method.nameVMAddr, methodNameResult);
+                    const char* methodName = ma->getPrintableString(objcMethod.getNameVMAddr(visitor).rawValue(),
+                                                                    methodNameResult);
                     if (methodNameResult != dyld3::MachOAnalyzer::PrintableStringResult::CanPrint)
-                        return;
+                        continue;
+
                     methodsNode.array.push_back(Node{classType + methodName});
-                };
-                ma->forEachObjCMethod(objcClass.baseMethodsVMAddr(pointerSize), vmAddrConverter,
-                                      sharedCacheRelativeSelectorBaseVMAddress, visitMethod);
+                }
 
-                std::optional<Node> properties = getProperties(ma, objcClass.basePropertiesVMAddr(pointerSize), vmAddrConverter);
+                objc_visitor::PropertyList propertyList = skipListsOfLists(objcClass.getBaseProperties(visitor), visitor);
+                std::optional<Node> properties = getProperties(ma, propertyList, visitor);
 
-                if (isMetaClass) {
+                if ( objcClass.isMetaClass ) {
                     assert(!classesNode.array.empty());
                     Node& currentClassNode = classesNode.array.back();
                     assert(currentClassNode.map["className"].value == className);
@@ -2289,6 +2393,8 @@ int main (int argc, const char* argv[]) {
                     return;
                 }
 
+                objc_visitor::ProtocolList protocolList = skipListsOfLists(objcClass.getBaseProtocols(visitor), visitor);
+
                 Node currentClassNode;
                 currentClassNode.map["className"] = Node{className};
                 if ( superClassName != nullptr )
@@ -2297,10 +2403,10 @@ int main (int argc, const char* argv[]) {
                     currentClassNode.map["methods"] = methodsNode;
                 if (properties.has_value())
                     currentClassNode.map["properties"] = properties.value();
-                if (std::optional<Node> protocols = getClassProtocols(ma, objcClass.baseProtocolsVMAddr(pointerSize), vmAddrConverter))
+                if (std::optional<Node> protocols = getClassProtocols(ma, protocolList, visitor))
                     currentClassNode.map["protocols"] = protocols.value();
 
-                currentClassNode.map["exported"] = Node{exportedSymbolVMAddrs.count(classVMAddr) != 0};
+                currentClassNode.map["exported"] = Node{exportedSymbolVMAddrs.count(classVMAddr.rawValue()) != 0};
 
                 // We didn't skip this class so mark it as such
                 skippedPreviousClass = false;
@@ -2308,32 +2414,37 @@ int main (int argc, const char* argv[]) {
                 classesNode.array.push_back(currentClassNode);
             };
 
-            ma->forEachObjCClass(diag, vmAddrConverter, visitClass);
+            visitor.forEachClassAndMetaClass(visitClass);
+
             return classesNode.array.empty() ? std::optional<Node>() : classesNode;
         };
 
         auto getCategories = ^(const dyld3::MachOAnalyzer* ma,
-                               const dyld3::MachOAnalyzer::VMAddrConverter& vmAddrConverter) {
-            Diagnostics diag;
-
+                               objc_visitor::Visitor& visitor) {
             const uint32_t pointerSize = ma->pointerSize();
+            const uint16_t chainedPointerFormat = ma->hasChainedFixups() ? ma->chainedPointerFormat() : 0;
 
             __block Node categoriesNode;
-            auto visitCategory = ^(uint64_t categoryVMAddr,
-                                   const dyld3::MachOAnalyzer::ObjCCategory& objcCategory,
-                                   bool& stopCategory) {
+            auto visitCategory = ^(const objc_visitor::Category& objcCategory, bool& stopCategory) {
+                VMAddress nameVMAddr = objcCategory.getNameVMAddr(visitor);
+
                 dyld3::MachOAnalyzer::PrintableStringResult categoryNameResult;
-                const char* categoryName = ma->getPrintableString(objcCategory.nameVMAddr, categoryNameResult);
+                const char* categoryName = ma->getPrintableString(nameVMAddr.rawValue(), categoryNameResult);
                 if (categoryNameResult != dyld3::MachOAnalyzer::PrintableStringResult::CanPrint)
                     return;
 
-                    const char* className = nullptr;
-                    if ( DyldSharedCache::inDyldCache(dyldCache, ma) ) {
-                        // The class might be missing if the target is not in the shared cache.  So just skip these ones
-                        if ( objcCategory.clsVMAddr == 0 )
-                            return;
+                __block const char* className = nullptr;
+                if ( DyldSharedCache::inDyldCache(dyldCache, ma) ) {
+                    // The class might be missing if the target is not in the shared cache.  So just skip these ones
+                    std::optional<VMAddress> clsVMAddr = objcCategory.getClassVMAddr(visitor);
+                    if ( !clsVMAddr.has_value() )
+                        return;
 
-                        auto it = classVMAddrToName.find(objcCategory.clsVMAddr);
+                    if ( objcCategory.isForSwiftStubClass() ) {
+                        // We don't have a class for stub classes, so just use a marker
+                        className = "unknown swift stub class";
+                    } else {
+                        auto it = classVMAddrToName.find(clsVMAddr.value().rawValue());
                         if (it == classVMAddrToName.end()) {
                             // This is an odd binary with perhaps a Swift class.  Just skip this entry
                             // Specifically, categories can be attached to "stub classes" which are not in the
@@ -2342,17 +2453,19 @@ int main (int argc, const char* argv[]) {
                             return;
                         }
                         className = it->second;
-                    } else {
-                        // On-disk binary.  Lets crack the chain to work out what we are pointing at
-                        dyld3::MachOAnalyzer::ChainedFixupPointerOnDisk fixup;
-                        fixup.raw64 = objcCategory.clsVMAddr;
-                        if ( pointerSize == 8 )
-                            fixup.raw64 = objcCategory.clsVMAddr;
-                        else
-                            fixup.raw32 = (uint32_t)objcCategory.clsVMAddr;
+                    }
+                } else {
+                    // On-disk binary.  Lets crack the chain to work out what we are pointing at
+                    objcCategory.withClass(visitor,
+                                           ^(const dyld3::MachOFile::ChainedFixupPointerOnDisk* fixup, uint16_t) {
+                        if ( (pointerSize == 8) && (fixup->raw64 == 0) )
+                            return;
+                        else if ( (pointerSize == 4) && (fixup->raw32 == 0) )
+                            return;
+
                         uint32_t  bindOrdinal;
                         int64_t   embeddedAddend;
-                        if (fixup.isBind(vmAddrConverter.chainedPointerFormat, bindOrdinal, embeddedAddend)) {
+                        if ( fixup->isBind(chainedPointerFormat, bindOrdinal, embeddedAddend) ) {
                             // Bind to another image.  Use the bind table to work out which name to bind to
                             const char* symbolName = onDiskChainedFixupBindTargets[(size_t)bindOrdinal];
                             if ( strstr(symbolName, "_OBJC_CLASS_$_") == symbolName ) {
@@ -2363,47 +2476,59 @@ int main (int argc, const char* argv[]) {
                                 return;
                             }
                         } else {
-                            auto it = onDiskClassVMAddrToName.find(objcCategory.clsVMAddr);
+                            std::optional<VMAddress> clsVMAddr = objcCategory.getClassVMAddr(visitor);
+                            auto it = onDiskClassVMAddrToName.find(clsVMAddr.value().rawValue());
                             if (it == onDiskClassVMAddrToName.end()) {
                                 // This is an odd binary with perhaps a Swift class.  Just skip this entry
                                 return;
                             }
                             className = it->second;
                         }
+                    });
+
+                    if ( !className ) {
+                        // Probably a swift class we want to skip
+                        return;
                     }
+                }
 
                 // Print the instance methods on this category
                 __block Node methodsNode;
-                auto visitInstanceMethod = ^(uint64_t methodVMAddr, const dyld3::MachOAnalyzer::ObjCMethod& method, bool& stopMethod) {
-                    if (auto methodName = getString(ma, method.nameVMAddr))
-                        methodsNode.array.push_back(Node{instancePrefix + methodName});
-                };
-                ma->forEachObjCMethod(objcCategory.instanceMethodsVMAddr, vmAddrConverter,
-                                      sharedCacheRelativeSelectorBaseVMAddress, visitInstanceMethod);
+                {
+                    objc_visitor::MethodList objcMethodList = objcCategory.getInstanceMethods(visitor);
+                    for ( uint32_t i = 0, numMethods = objcMethodList.numMethods(); i != numMethods; ++i ) {
+                        objc_visitor::Method objcMethod = objcMethodList.getMethod(visitor, i);
 
-                // Print the instance methods on this category
-                __block Node classMethodsNode;
-                auto visitClassMethod = ^(uint64_t methodVMAddr, const dyld3::MachOAnalyzer::ObjCMethod& method, bool& stopMethod) {
-                    if (auto methodName = getString(ma, method.nameVMAddr))
-                        methodsNode.array.push_back(Node{classPrefix + methodName});
-                };
-                ma->forEachObjCMethod(objcCategory.classMethodsVMAddr, vmAddrConverter,
-                                      sharedCacheRelativeSelectorBaseVMAddress, visitClassMethod);
+                        if ( auto methodName = getString(ma, objcMethod.getNameVMAddr(visitor)) )
+                            methodsNode.array.push_back(Node{instancePrefix + methodName});
+                    }
+                }
+
+                // Print the class methods on this category
+                {
+                    objc_visitor::MethodList objcMethodList = objcCategory.getClassMethods(visitor);
+                    for ( uint32_t i = 0, numMethods = objcMethodList.numMethods(); i != numMethods; ++i ) {
+                        objc_visitor::Method objcMethod = objcMethodList.getMethod(visitor, i);
+
+                        if ( auto methodName = getString(ma, objcMethod.getNameVMAddr(visitor)) )
+                            methodsNode.array.push_back(Node{classPrefix + methodName});
+                    }
+                }
 
                 Node currentCategoryNode;
                 currentCategoryNode.map["categoryName"] = Node{categoryName};
                 currentCategoryNode.map["className"] = Node{className};
                 if (!methodsNode.array.empty())
                     currentCategoryNode.map["methods"] = methodsNode;
-                if (std::optional<Node> properties = getProperties(ma, objcCategory.instancePropertiesVMAddr, vmAddrConverter))
+                if (std::optional<Node> properties = getProperties(ma, objcCategory.getInstanceProperties(visitor), visitor))
                     currentCategoryNode.map["properties"] = properties.value();
-                if (std::optional<Node> protocols = getClassProtocols(ma, objcCategory.protocolsVMAddr, vmAddrConverter))
+                if (std::optional<Node> protocols = getClassProtocols(ma, objcCategory.getProtocols(visitor), visitor))
                     currentCategoryNode.map["protocols"] = protocols.value();
 
                 categoriesNode.array.push_back(currentCategoryNode);
             };
 
-            ma->forEachObjCCategory(diag, vmAddrConverter, visitCategory);
+            visitor.forEachCategory(visitCategory);
             return categoriesNode.array.empty() ? std::optional<Node>() : categoriesNode;
         };
 
@@ -2412,16 +2537,17 @@ int main (int argc, const char* argv[]) {
         dyld3::json::streamArrayBegin(needsComma);
 
         dyldCache->forEachImage(^(const mach_header *mh, const char *installName) {
-            dyld3::MachOAnalyzer::VMAddrConverter vmAddrConverter = dyldCache->makeVMAddrConverter(rebased);
             const dyld3::MachOAnalyzer* ma = (const dyld3::MachOAnalyzer*)mh;
+
+            objc_visitor::Visitor visitor(dyldCache, ma, VMAddress(sharedCacheRelativeSelectorBaseVMAddress));
 
             Node imageRecord;
             imageRecord.map["imagePath"] = Node{installName};
             imageRecord.map["imageType"] = Node{"cache-dylib"};
-            std::optional<Node> classes = getClasses(ma, vmAddrConverter);
-            std::optional<Node> categories = getCategories(ma, vmAddrConverter);
-            std::optional<Node> protocols = getProtocols(ma, vmAddrConverter);
-            std::optional<Node> selrefs = getSelRefs(ma, vmAddrConverter);
+            std::optional<Node> classes = getClasses(ma, visitor);
+            std::optional<Node> categories = getCategories(ma, visitor);
+            std::optional<Node> protocols = getProtocols(ma, visitor);
+            std::optional<Node> selrefs = getSelRefs(ma, visitor);
 
             // Skip emitting images with no objc data
             if (!classes.has_value() && !categories.has_value() && !protocols.has_value() && !selrefs.has_value())
@@ -2470,9 +2596,21 @@ int main (int argc, const char* argv[]) {
             __block Diagnostics diag;
             bool                checkIfOSBinary = state.config.process.archs->checksOSBinary();
             state.config.syscall.withReadOnlyMappedFile(diag, executableRuntimePath, checkIfOSBinary, ^(const void* mapping, size_t mappedSize, bool isOSBinary, const FileID& fileID, const char* canonicalPath) {
-                if ( const dyld3::MachOFile* mf = dyld3::MachOFile::compatibleSlice(diag, mapping, mappedSize, executableRuntimePath, state.config.process.platform, isOSBinary, *state.config.process.archs) ) {
-                    const dyld3::MachOAnalyzer* ma = (const dyld3::MachOAnalyzer*)mf;
-                    uint32_t pointerSize = ma->pointerSize();
+                uint64_t sliceSize;
+                if ( const dyld3::MachOFile* mf = dyld3::MachOFile::compatibleSlice(diag, sliceSize, mapping, mappedSize, executableRuntimePath, state.config.process.platform, isOSBinary, *state.config.process.archs) ) {
+                    dyld3::closure::FileSystemPhysical fileSystem;
+                    dyld3::closure::LoadedFileInfo fileInfo = {
+                        .fileContent        = (void*)mf,
+                        .fileContentLen     = sliceSize,
+                        .sliceOffset        = 0,
+                        .sliceLen           = sliceSize,
+                        .isOSBinary         = false,
+                        .inode              = 0,
+                        .mtime              = 0,
+                        .unload             = nullptr,
+                        .path = executableRuntimePath
+                    };
+                    const dyld3::MachOAnalyzer* ma = ((const dyld3::MachOAnalyzer*)mf)->remapIfZeroFill(diag, fileSystem, fileInfo);
 
                     // Populate the bind targets for classes from other images
                     onDiskChainedFixupBindTargets.clear();
@@ -2485,30 +2623,29 @@ int main (int argc, const char* argv[]) {
                     // Populate the rebase targets for class names
                     onDiskMetaclassVMAddrToName.clear();
                     onDiskClassVMAddrToName.clear();
-                    auto visitClass = ^(uint64_t classVMAddr,
-                                        uint64_t classSuperclassVMAddr, uint64_t classDataVMAddr,
-                                        const dyld3::MachOAnalyzer::ObjCClassInfo& objcClass, bool isMetaClass,
-                                        bool& stopClass) {
-                        if (auto className = getString(ma, objcClass.nameVMAddr(pointerSize))) {
-                            if (isMetaClass)
-                                onDiskMetaclassVMAddrToName[classVMAddr] = className;
+
+                    __block objc_visitor::Visitor visitor(dyldCache, ma, std::nullopt);
+
+                    auto visitClass = ^(const objc_visitor::Class& objcClass, bool& stopClass) {
+                        VMAddress classVMAddr = objcClass.getVMAddress();
+                        VMAddress nameVMAddr = objcClass.getNameVMAddr(visitor);
+                        if ( auto className = getString(ma, nameVMAddr) ) {
+                            if ( objcClass.isMetaClass )
+                                onDiskMetaclassVMAddrToName[classVMAddr.rawValue()] = className;
                             else
-                                onDiskClassVMAddrToName[classVMAddr] = className;
+                                onDiskClassVMAddrToName[classVMAddr.rawValue()] = className;
                         }
                     };
 
-                    // Get a vmAddrConverter for this on-disk binary.  We can't use the shared cache one
-                    dyld3::MachOAnalyzer::VMAddrConverter onDiskVMAddrConverter = ma->makeVMAddrConverter(rebased);
-
-                    ma->forEachObjCClass(diag, onDiskVMAddrConverter, visitClass);
+                    visitor.forEachClassAndMetaClass(visitClass);
 
                     Node imageRecord;
                     imageRecord.map["imagePath"] = Node{executableRuntimePath};
                     imageRecord.map["imageType"] = Node{"executable"};
-                    std::optional<Node> classes = getClasses(ma, onDiskVMAddrConverter);
-                    std::optional<Node> categories = getCategories(ma, onDiskVMAddrConverter);
+                    std::optional<Node> classes = getClasses(ma, visitor);
+                    std::optional<Node> categories = getCategories(ma, visitor);
                     // TODO: protocols
-                    std::optional<Node> selrefs = getSelRefs(ma, onDiskVMAddrConverter);
+                    std::optional<Node> selrefs = getSelRefs(ma, visitor);
 
                     // Skip emitting images with no objc data
                     if (!classes.has_value() && !categories.has_value() && !selrefs.has_value())
@@ -2683,7 +2820,7 @@ int main (int argc, const char* argv[]) {
             return 0;
         }
         printf("Swift optimization version: %d\n", swiftOptHeader->version);
-        if ( swiftOptHeader->version == 1 ) {
+        if ( swiftOptHeader->version == 1 || swiftOptHeader->version == 2 ) {
             printf("Type hash table\n");
             const SwiftHashTable* typeHashTable = (const SwiftHashTable*)((uint8_t*)dyldCache + swiftOptHeader->typeConformanceHashTableCacheOffset);
             typeHashTable->forEachValue(^(uint32_t bucketIndex, const dyld3::Array<SwiftTypeProtocolConformanceLocation>& impls) {
@@ -2836,6 +2973,9 @@ int main (int argc, const char* argv[]) {
                            conformance.data(), protoLoc.protocolConformanceCacheOffset, conformanceDylib.data());
                 }
             });
+
+            if ( swiftOptHeader->version >= 2 )
+                printf("Swift prespecialization data offset: 0x%llx\n", swiftOptHeader->prespecializationDataCacheOffset);
         } else {
             printf("Unhandled version\n");
         }
@@ -3348,6 +3488,97 @@ int main (int argc, const char* argv[]) {
                 });
                 break;
             }
+            case modeRootsCost: {
+                std::vector<SegmentInfo> segInfos;
+                buildSegmentInfo(dyldCache, segInfos);
+
+                __block std::optional<uint32_t> rootImageIndex;
+                {
+                    __block uint32_t imageIndex = 0;
+                    dyldCache->forEachImage(^(const mach_header* mh, const char* installName) {
+                        if ( strcmp(installName, options.rootsCostOfDylib) == 0 )
+                            rootImageIndex = imageIndex;
+                        ++imageIndex;
+                    });
+                }
+
+                if ( !rootImageIndex.has_value() ) {
+                    fprintf(stderr, "Could not find image '%s' in shared cache\n", options.rootsCostOfDylib);
+                    return 1;
+                }
+
+                // For each page of the cache, we record if it was dirtied by patching, and by which dylibs
+                typedef std::pair<const char*, const char*> InstallNameAndSegment;
+                __block std::map<uint64_t, std::set<InstallNameAndSegment>> pages;
+
+                uint64_t cacheBaseAddress = dyldCache->unslidLoadAddress();
+                dyldCache->forEachPatchableExport(rootImageIndex.value(),
+                                                  ^(uint32_t dylibVMOffsetOfImpl, const char* exportName,
+                                                    PatchKind patchKind) {
+                    if ( (patchKind == PatchKind::cfObj2) || (patchKind == PatchKind::objcClass) )
+                        return;
+                    dyldCache->forEachPatchableUseOfExport(rootImageIndex.value(), dylibVMOffsetOfImpl,
+                                                           ^(uint32_t userImageIndex, uint32_t userVMOffset,
+                                                             dyld3::MachOLoaded::PointerMetaData pmd, uint64_t addend,
+                                                             bool isWeakImport) {
+                        // Get the image so that we can convert from dylib offset to cache offset
+                        uint64_t mTime;
+                        uint64_t inode;
+                        const dyld3::MachOAnalyzer* imageMA = (dyld3::MachOAnalyzer*)(dyldCache->getIndexedImageEntry(userImageIndex, mTime, inode));
+                        if ( imageMA == nullptr )
+                            return;
+
+                        SegmentInfo usageAt;
+                        const uint64_t patchLocVmAddr = imageMA->preferredLoadAddress() + userVMOffset;
+                        const uint64_t patchLocCacheOffset = patchLocVmAddr - cacheBaseAddress;
+                        findImageAndSegment(dyldCache, segInfos, patchLocCacheOffset, &usageAt);
+
+                        // Round to the 16KB page we dirty
+                        //clientUsedPages[userImageIndex].insert(usageAt.vmAddr & ~0x3FFF);
+                        uint64_t pageAddr = usageAt.vmAddr & ~0x3FFF;
+                        pages[pageAddr].insert({ usageAt.installName, usageAt.segName });
+                    });
+
+                    // Print GOT uses
+                    dyldCache->forEachPatchableGOTUseOfExport(rootImageIndex.value(), dylibVMOffsetOfImpl,
+                                                              ^(uint64_t cacheVMOffset,
+                                                                dyld3::MachOLoaded::PointerMetaData pmd, uint64_t addend,
+                                                                bool isWeakImport) {
+                        // Round to the 16KB page we dirty
+                        //gotUsedPages.insert((cacheBaseAddress + cacheVMOffset) & ~0x3FFF);
+                        uint64_t pageAddr = (cacheBaseAddress + cacheVMOffset) & ~0x3FFF;
+                        pages[pageAddr].insert({ "GOT", nullptr });
+                    });
+                });
+
+                // Print the results
+                printf("Cost of root of '%s' is %lld pages:\n", options.rootsCostOfDylib, (uint64_t)pages.size());
+
+                for ( const auto& page : pages ) {
+                    printf("0x%08llx ", page.first);
+
+                    bool needsComma = false;
+                    for ( const InstallNameAndSegment& installNameAndSegment : page.second ) {
+                        if ( needsComma )
+                            printf(", ");
+                        needsComma = true;
+
+                        const char* leafName = strrchr(installNameAndSegment.first, '/');
+                        if ( leafName == NULL )
+                            leafName = installNameAndSegment.first;
+                        else
+                            leafName++;
+
+                        if ( installNameAndSegment.second )
+                            printf("%s(%s)", leafName, installNameAndSegment.second);
+                        else
+                            printf("%s", leafName);
+                    }
+                    printf("\n");
+                }
+
+                break;
+            }
             case modeMachHeaders: {
                 auto printRow = [](const char* magic, const char* arch, const char* filetype,
                                    const char* ncmds, const char* sizeofcmds , const char* flags,
@@ -3765,6 +3996,7 @@ int main (int argc, const char* argv[]) {
 
             case modeNone:
             case modeInfo:
+            case modeTPROInfo:
             case modeStats:
             case modeSlideInfo:
             case modeVerboseSlideInfo:

@@ -76,42 +76,27 @@
     .align    4
     .globl __dyld_start
 __dyld_start:
-#ifdef __i386__
-    movl    %esp,%eax       # save pointer to KernelArgs
-    pushl   $0              # push a zero for debugger end of frames marker
-    movl    %esp,%ebp       # pointer to base of kernel frame
-    andl    $-16,%esp       # force SSE alignment
-    subl    $4,%esp         # room for outgoing parameters
-    mov     %eax,4(%esp)    # param1 = &KernelArgs
-    jmp     start
-#elif __x86_64__
+#if __x86_64__
     movq    %rsp,%rdi       # save pointer to KernelArgs
     andq    $-16,%rsp       # force SSE alignment
     movq    $0,%rbp         # terminate frame pointer chain
     pushq   $0              # simulate a call with a return address of zero
     jmp     start
-#elif __arm__
-    .syntax unified
-    // Note, kernel always starts dyld in arm mode
-    mov    r0, sp           // get pointer to KernelArgs into parameter register
-    sub    sp, #16
-    bic    sp, sp, #15      // 16-byte alignment stack
-    mov    r7, #0           // first frame
-    mov    lr, #0           // no return address
-    b      start
 #elif __arm64__
     mov    x0, sp               // get pointer to KernelArgs into parameter register
     and    sp, x0, #~15         // force 16-byte alignment of stack
     mov    fp, #0               // first frame
     mov    lr, #0               // no return address
     b      start
+#else
+#error "Unknown architecture"
 #endif
 
 // support for old macOS x86_64 binaries (pre LC_MAIN)
 #if __x86_64__
     .globl __ZN5dyld412gotoAppStartEmPKNS_10KernelArgsE
 __ZN5dyld412gotoAppStartEmPKNS_10KernelArgsE:
-    // extern void gotoAppStart(uintptr_t start, const KernelArgs* kernArgs) __attribute__((noreturn));
+    // extern void gotoAppStart(uintptr_t start, const KernelArgs* kernArgs) __attribute__((__noreturn__));
     movq    %rsi, %rsp      # reset stack to what it was on entry from kernel
     addq    $8,%rsp         # remove mach_header of main executable (dyld expects it but app does not)
     jmp     *%rdi           # jump to app's start
@@ -120,19 +105,17 @@ __ZN5dyld412gotoAppStartEmPKNS_10KernelArgsE:
 // switch to dyld in the dyld cache
 // Note: all archs pass parameters in registers.  dyldOnDisk is in second param register and flows through to start()
     .text
-    .globl __ZN5dyld422restartWithDyldInCacheEPKNS_10KernelArgsEPKN5dyld39MachOFileEPv
-__ZN5dyld422restartWithDyldInCacheEPKNS_10KernelArgsEPKN5dyld39MachOFileEPv:
+    .globl __ZN5dyld422restartWithDyldInCacheEPKNS_10KernelArgsEPKN5dyld39MachOFileEPK15DyldSharedCachePv
+__ZN5dyld422restartWithDyldInCacheEPKNS_10KernelArgsEPKN5dyld39MachOFileEPK15DyldSharedCachePv:
     // void restartWithDyldInCache(const KernelArgs* kernArgs, const MachOFile* dyldOnDisk, void* dyldStart);
 #if __x86_64__
     movq    %rdi, %rsp      # reset SP to original kernel args
-    jmp     *%rdx           # jump into dyld in cache
+    jmp     *%rcx           # jump into dyld in cache
 #elif __arm64__
     mov     sp, x0          // reset SP to original kernel args
-    br      x2
-#elif __arm__
-    .syntax unified
-    mov     sp, r0          // reset SP to original kernel args
-    bx      r2
+    br      x3
+#else
+#error "Unknown architecture"
 #endif
 
 

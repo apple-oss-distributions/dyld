@@ -56,6 +56,10 @@ void escapeCStringLiteral(const char* s, char* b, size_t bufferLength, char** en
             *b++ = '\\';
             *b++ = 'n';
         }
+        else if ( c == '\r' ) {
+            *b++ = '\\';
+            *b++ = 'r';
+        }
         else if ( c == '\t' ) {
             *b++ = '\\';
             *b++ = 't';

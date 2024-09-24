@@ -77,7 +77,10 @@ static void _dyld_make_delayed_module_initializer_calls()
 #endif
 
 // Used to support legacy binaries that have __DATA,__dyld sections
-static int legacyDyldLookup4OldBinaries(const char* name, void** address)
+int legacyDyldLookup4OldBinaries(const char* name, void** address);
+
+VIS_HIDDEN
+int legacyDyldLookup4OldBinaries(const char* name, void** address)
 {
 #if SUPPPORT_PRE_LC_MAIN
     if (strcmp(name, "__dyld_dlopen") == 0) {
@@ -109,13 +112,16 @@ static int legacyDyldLookup4OldBinaries(const char* name, void** address)
 
 // this is the magic __DATA,__dyld4 section that dyld and libdyld.dylib use to rendezvous
 namespace dyld4 {
-    volatile LibdyldDyld4Section gDyld __attribute__((used, visibility("hidden"), section ("__DATA,__dyld4")))
-        = { nullptr, nullptr, { nullptr, &NXArgc, &NXArgv, (const char***)&environ, &__progname}, &legacyDyldLookup4OldBinaries, tlv_get_addr
+    // HACK: We want TPRO to only have DATA not AUTH.  There are a couple of function pointers which aren't actually used
+    // at runtime on arm64e anyway, so just make them unauthenticated
+    extern void* lookupFuncPtr __asm("__Z28legacyDyldLookup4OldBinariesPKcPPv");
+    extern void* tlvGetAddrPtr __asm("_tlv_get_addr");
+    volatile LibdyldDyld4Section gDyld __attribute__((used, visibility("hidden"), section ("__TPRO_CONST,__dyld4")))
+        = { nullptr, nullptr, { nullptr, &NXArgc, &NXArgv, (const char***)&environ, &__progname}, (uintptr_t)&lookupFuncPtr, (uintptr_t)&tlvGetAddrPtr
         };
 }
 
 using dyld4::gDyld;
-
 
 static const dyld4::LibSystemHelpers sHelpers;
 
@@ -653,8 +659,6 @@ void _dyld_register_for_image_loads(void (*func)(const mach_header* mh, const ch
     gDyld.apis->_dyld_register_for_image_loads(func);
 }
 
-
-
 //
 // MARK: --- APIs added iOS 13, macOS 10.15 ---
 //
@@ -753,12 +757,10 @@ void* dlopen_from(const char* path, int mode, void* addressInCaller)
     return gDyld.apis->dlopen_from(path, mode, addressInCaller);
 }
 
-#if !__i386__
 void* dlopen_audited(const char* path, int mode)
 {
     return gDyld.apis->dlopen_audited(path, mode);
 }
-#endif // !__i386__
 #endif // !TARGET_OS_DRIVERKIT
 
 const struct mach_header* _dyld_get_prog_image_header()
@@ -905,6 +907,56 @@ const void* _dyld_for_objc_header_opt_ro()
 {
     return gDyld.apis->_dyld_for_objc_header_opt_ro();
 }
+
+//
+// MARK: --- APIs added iOS 18.x, macOS 15.x ---
+//
+bool _dyld_dlsym_blocked()
+{
+    return gDyld.apis->_dyld_dlsym_blocked();
+}
+
+void _dyld_register_dlsym_notifier(void (*callback)(const char* symbolName))
+{
+     gDyld.apis->_dyld_register_dlsym_notifier(callback);
+}
+
+const void* _dyld_get_swift_prespecialized_data()
+{
+    return gDyld.apis->_dyld_get_swift_prespecialized_data();
+}
+
+bool _dyld_is_pseudodylib(void* handle)
+{
+    return gDyld.apis->_dyld_is_pseudodylib(handle);
+}
+
+const void *_dyld_find_pointer_hash_table_entry(const void *table,
+                                               const void *key1,
+                                               size_t restKeysCount,
+                                               const void **restKeys)
+{
+    return gDyld.apis->_dyld_find_pointer_hash_table_entry(table, key1, restKeysCount, restKeys);
+}
+
+uint64_t dyld_get_program_sdk_version_token(void)
+{
+    return gDyld.apis->dyld_get_program_sdk_version_token();
+}
+
+uint64_t dyld_get_program_minos_version_token(void) {
+    return gDyld.apis->dyld_get_program_minos_version_token();
+}
+
+dyld_platform_t dyld_version_token_get_platform(uint64_t token) {
+    return gDyld.apis->dyld_version_token_get_platform(token);
+}
+
+bool dyld_version_token_at_least(uint64_t token, dyld_build_version_t version)
+{
+    return gDyld.apis->dyld_version_token_at_least(token, version);
+}
+
 //
 // MARK: --- crt data symbols ---
 //

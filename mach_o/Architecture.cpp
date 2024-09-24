@@ -23,12 +23,13 @@
 
 #include <stdint.h>
 #include <string.h>
+#include <mach/machine.h>
 #if __x86_64__
   #include <mach/mach.h>
   #include <mach/host_info.h>
-  #include <mach/machine.h>
   #include <mach/mach_host.h>
 #endif
+
 
 #include "Architecture.h"
 
@@ -119,7 +120,6 @@ Architecture Architecture::byName(std::string_view name)
         return armv7;
     else if ( name == "ppc" )
         return ppc;
-
     return invalid;
 }
 
@@ -218,19 +218,7 @@ static bool isHaswell()
 
 Architecture Architecture::current()
 {
-#if __ARM_ARCH_6m__
-    return armv6m;
-#elif __ARM_ARCH_7K__
-    return armv7k;
-#elif __ARM_ARCH_7M__
-    return armv7m;
-#elif __ARM_ARCH_7EM__
-    return armv7em;
-#elif __ARM_ARCH_7A__
-    return armv7;
-#elif __ARM_ARCH_7S__
-    return armv7s;
-#elif __arm64e__
+#if __arm64e__
     return arm64e;
 #elif __arm64__
 #if __LP64__
@@ -240,8 +228,6 @@ Architecture Architecture::current()
 #endif
 #elif __x86_64__
     return isHaswell() ? x86_64h : x86_64;
-#elif __i386__
-    return i386;
 #else
 #error unknown arch
 #endif

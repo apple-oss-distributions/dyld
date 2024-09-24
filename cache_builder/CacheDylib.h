@@ -57,6 +57,8 @@ struct CacheDylib
     CacheDylib() = delete;
 #endif
     CacheDylib(InputFile& inputFile);
+    // create a CacheDylib *placeholder* with an install name only and no input mach-o
+    CacheDylib(std::string_view installName);
     ~CacheDylib() = default;
 
     CacheDylib(const CacheDylib&) = delete;
@@ -76,13 +78,13 @@ struct CacheDylib
                            const BuilderConfig& config, Timer::AggregateTimer& timer,
                            UnmappedSymbolsOptimizer& unmappedSymbolsOptimizer);
     void updateSymbolTables(Diagnostics& diag, const BuilderConfig& config, Timer::AggregateTimer& timer);
-    void calculateBindTargets(Diagnostics& diag, const BuilderConfig& config, Timer::AggregateTimer& timer,
-                              const std::vector<const CacheDylib *>& cacheDylibs,
-                              PatchInfo& dylibPatchInfo);
+    std::vector<error::Error> calculateBindTargets(Diagnostics& diag, const BuilderConfig& config, Timer::AggregateTimer& timer,
+                                                   const std::vector<const CacheDylib *>& cacheDylibs,
+                                                   PatchInfo& dylibPatchInfo);
     void bind(Diagnostics& diag, const BuilderConfig& config, Timer::AggregateTimer& timer,
               PatchInfo& dylibPatchInfo);
     void updateObjCSelectorReferences(Diagnostics& diag, const BuilderConfig& config, Timer::AggregateTimer& timer,
-                                      const ObjCSelectorOptimizer& objcSelectorOptimizer);
+                                      ObjCSelectorOptimizer& objcSelectorOptimizer);
     void convertObjCMethodListsToOffsets(Diagnostics& diag, const BuilderConfig& config, Timer::AggregateTimer& timer,
                                          const Chunk* selectorStringsChunk);
     void sortObjCMethodLists(Diagnostics& diag, const BuilderConfig& config, Timer::AggregateTimer& timer,
@@ -103,6 +105,9 @@ struct CacheDylib
                          const ObjCPreAttachedCategoriesChunk* preAttachedCategoriesChunk,
                          const ObjCHeaderInfoReadWriteChunk* headerInfoReadWriteChunk,
                          const ObjCCanonicalProtocolsChunk* canonicalProtocolsChunk);
+    // remove all dylib link load commands, except libSystem
+    void removeLinkedDylibs(Diagnostics& diag);
+    void addLinkedDylib(Diagnostics& diag, const CacheDylib& dylib);
 
     void forEachCacheSection(void (^callback)(std::string_view segmentName,
                                               std::string_view sectionName,
@@ -191,6 +196,7 @@ private:
     // Helper method for calculateBindTargets()
     BindTargetAndName                   resolveSymbol(Diagnostics& diag, int libOrdinal, const char* symbolName, bool weakImport,
                                                       const std::vector<const CacheDylib*>& cacheDylibs) const;
+    std::optional<BindTargetAndName>    findDyldMagicSymbolAddress(const char* fullSymbolName, std::string_view name) const;
 
     // Map from where the GOT is located in the dylib to where its located in the coalesced section
     typedef std::unordered_map<const CacheVMAddress, CacheVMAddress, CacheVMAddressHash, CacheVMAddressEqual> CoalescedGOTMap;
@@ -201,13 +207,13 @@ private:
                       dyld3::MachOFile::ChainedFixupPointerOnDisk* fixupLoc,
                       CacheVMAddress fixupVMAddr, dyld3::MachOFile::PointerMetaData pmd,
                       CoalescedGOTMap& coalescedGOTs, CoalescedGOTMap& coalescedAuthGOTs,
-                      PatchInfo& dylibPatchInfo);
+                      CoalescedGOTMap& coalescedAuthPtrs, PatchInfo& dylibPatchInfo);
     void bindWithChainedFixups(Diagnostics& diag, const BuilderConfig& config,
                                CoalescedGOTMap& coalescedGOTs, CoalescedGOTMap& coalescedAuthGOTs,
-                               PatchInfo& dylibPatchInfo);
+                               CoalescedGOTMap& coalescedAuthPtrs, PatchInfo& dylibPatchInfo);
     void bindWithOpcodeFixups(Diagnostics& diag, const BuilderConfig& config,
                               CoalescedGOTMap& coalescedGOTs, CoalescedGOTMap& coalescedAuthGOTs,
-                              PatchInfo& dylibPatchInfo);
+                              CoalescedGOTMap& coalescedAuthPtrs, PatchInfo& dylibPatchInfo);
 
     void forEachReferenceToASelRef(Diagnostics &diags,
                                    void (^handler)(uint64_t kind, uint32_t* instrPtr, uint64_t selRefVMAddr)) const;
@@ -245,6 +251,7 @@ public:
     InputDylibVMAddress                     inputLoadAddress;
     std::string_view                        installName;
     uint32_t                                cacheIndex;
+    bool                                    needsPatchTable         = true;
     dyld3::MachOFile*                       cacheMF                 = nullptr;
     CacheVMAddress                          cacheLoadAddress;
     std::vector<DylibSegmentChunk>          segments;
@@ -252,6 +259,8 @@ public:
     // elements and Region holds pointers to them
     std::list<LinkeditDataChunk>            linkeditChunks;
     std::vector<DependentDylib>             dependents;
+    // an unmodified list of linked libraries, used for symbol resolution
+    std::vector<DependentDylib>             inputDependents;
     std::vector<BindTarget>                 bindTargets;
     std::optional<uint32_t>                 weakBindTargetsStartIndex;
     std::unique_ptr<DylibSegmentsAdjustor>  adjustor;

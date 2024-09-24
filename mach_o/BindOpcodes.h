@@ -82,7 +82,7 @@ public:
     Error           valid(std::span<const MappedSegment> segments, uint32_t dylibCount, bool allowTextFixups=false, bool onlyFixupsInWritableSegments=true) const;
     void            forEachBindLocation(void (^callback)(const LocAndTarget&, bool& stop)) const;
     void            forEachBindTarget(void (^callback)(const Fixup::BindTarget& target, bool& stop), void (^strongHandler)(const char* symbolName)) const;
-    void            forEachBindLocation(std::span<const MappedSegment> segments, void (^callback)(const Fixup& fixup, bool& stop)) const;
+    uint32_t        forEachBindLocation(std::span<const MappedSegment> segments, uint32_t startBindOrdinal, void (^callback)(const Fixup& fixup, bool& stop)) const;
     void            printOpcodes(FILE* output, int indent=0) const;
     const uint8_t*  bytes(size_t& size) const;
 
