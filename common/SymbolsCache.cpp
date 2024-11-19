@@ -1053,6 +1053,14 @@ static Error getSlicesToAdd(const SymbolsCache::ArchPlatforms& archPlatforms,
     return Error::none();
 }
 
+static std::string_view leafName(std::string_view str)
+{
+    size_t pos = str.rfind('/');
+    if ( pos == std::string_view::npos )
+        return str;
+    return str.substr(pos+1);
+}
+
 static mach_o::Error makeBinaryFromJSON(const SymbolsCache::ArchPlatforms& archPlatforms,
                                         const dyld3::json::Node& rootNode, std::string_view path,
                                         std::string_view projectName,
@@ -1257,7 +1265,7 @@ static mach_o::Error makeBinaryFromJSON(const SymbolsCache::ArchPlatforms& archP
     binary.exportedSymbols = std::move(exportedSymbols);
     binary.importedSymbols = std::move(importedSymbols);
     binary.reexportedLibraries = std::move(reexports);
-    binary.fromJSON = true;
+    binary.inputFileName = leafName(path);
 
     binaries.push_back(std::move(binary));
     return Error::none();
@@ -2178,12 +2186,21 @@ Error SymbolsCache::checkNewBinaries(bool warnOnRemovedSymbols,
 
         // HACK!: A few B&I projects build multiple copies of the same binary, and those are confused for each other
         // For now skip errors from these projects until we can handle them.  They'll still be caught when using a mach-o, just not JSON
-        if ( binary.fromJSON ) {
+        if ( binary.inputFileName.ends_with(".json") ) {
             if ( binary.installName == "/System/Library/Frameworks/AudioToolbox.framework/AudioToolbox" )
                 continue;
             if ( binary.installName == "/usr/lib/libNFC_HAL.dylib" )
                 continue;
             if ( binary.installName == "/System/Library/PrivateFrameworks/WiFiPeerToPeer.framework/WiFiPeerToPeer" )
+                continue;
+            if ( binary.installName == "/usr/lib/libz.1.dylib" )
+                continue;
+
+            // Filter out LAR and _tests projects
+            // Note project name looks something like: dyld_tests-version.json
+            if ( binary.inputFileName.find("_tests-") != std::string_view::npos )
+                continue;
+            if ( binary.inputFileName.find("_lar-") != std::string_view::npos )
                 continue;
         }
 

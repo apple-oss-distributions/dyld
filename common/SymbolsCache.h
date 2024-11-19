@@ -74,8 +74,8 @@ struct VIS_HIDDEN SymbolsCacheBinary
     // Cache for binaryID once we have it in the database
     std::optional<int64_t>              binaryID;
 
-    // Was this built from JSON
-    bool                                fromJSON = false;
+    // This is used for JSON input files, to see whether to emit errors or not
+    std::string                         inputFileName;
 };
 
 // Represents a binary for which we found errors in checkBinaries

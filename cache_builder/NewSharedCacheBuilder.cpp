@@ -310,11 +310,14 @@ Error SharedCacheBuilder::buildSwiftPrespecializedDylibJSON()
     if ( !builder )
         return Error("swift_externalMetadataBuilder_create failed");
 
-    for ( const CacheDylib* dylib : this->objcOptimizer.objcDylibs ) {
-        if ( dylib->inputMF == nullptr ) continue;
+    for ( const CacheDylib& dylib : this->cacheDylibs ) {
+        if ( dylib.inputMF == nullptr ) continue;
 
-        if ( const char* err = swift_externalMetadataBuilder_addDylib(builder, dylib->inputMF->installName(),
-                (const struct mach_header*)dylib->inputMF, dylib->inputFile->size) )
+        // TODO: rdar://132262275 (dyld shared cache builder should tell Swift Metadata builder also about dyld)
+        if ( dylib.inputMF->isDyld() ) continue;
+
+        if ( const char* err = swift_externalMetadataBuilder_addDylib(builder, dylib.inputMF->installName(),
+                (const struct mach_header*)dylib.inputMF, dylib.inputFile->size) )
             return Error("swift_externalMetadataBuilder_addDylib failed: %s", err);
     }
 

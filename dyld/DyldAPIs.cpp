@@ -938,6 +938,10 @@ void APIs::_dyld_objc_register_callbacks(const _dyld_objc_callbacks* callbacks)
         const _dyld_objc_callbacks_v3* v3 = (const _dyld_objc_callbacks_v3*)callbacks;
         setObjCNotifiers(v3->unmapped, v3->patches, nullptr, v3->init, v3->mapped);
     }
+    else if ( callbacks->version == 4 ) {
+        const _dyld_objc_callbacks_v4* v4 = (const _dyld_objc_callbacks_v4*)callbacks;
+        setObjCNotifiers(v4->unmapped, v4->patches, nullptr, v4->init, v4->mapped);
+    }
     else {
 #if BUILDING_DYLD
         halt("_dyld_objc_register_callbacks unknown version");

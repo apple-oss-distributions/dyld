@@ -35,11 +35,22 @@
 #include <uuid/uuid.h>
 #include <dlfcn.h>
 
+#if __has_feature(ptrauth_calls)
+    #include <ptrauth.h>
+    #define __ptrauth_dyld_objc_notify_init2 __ptrauth(ptrauth_key_process_dependent_code, 1, ptrauth_string_discriminator("_dyld_objc_notify_init3"))
+    #define __ptrauth_dyld_objc_notify_mapped3 __ptrauth(ptrauth_key_process_dependent_code, 1, ptrauth_string_discriminator("_dyld_objc_notify_mapped4"))
+    #define __ptrauth_dyld_objc_notify_unmapped __ptrauth(ptrauth_key_process_dependent_code, 1, ptrauth_string_discriminator("_dyld_objc_notify_unmapped2"))
+    #define __ptrauth_dyld_dyld_objc_notify_patch_class __ptrauth(ptrauth_key_process_dependent_code, 1, ptrauth_string_discriminator("_dyld_objc_notify_patch_class2"))
+#else
+    #define __ptrauth_dyld_objc_notify_init2
+    #define __ptrauth_dyld_objc_notify_mapped3
+    #define __ptrauth_dyld_objc_notify_unmapped
+    #define __ptrauth_dyld_dyld_objc_notify_patch_class
+#endif // __has_feature(ptrauth_calls)
+
 #if __cplusplus
 extern "C" {
 #endif /* __cplusplus */
-
-
 
 //
 // private interface between libSystem.dylib and dyld
@@ -158,6 +169,15 @@ struct _dyld_objc_callbacks_v3
     _dyld_objc_notify_init2         init;
     _dyld_objc_notify_unmapped      unmapped;
     _dyld_objc_notify_patch_class   patches;
+};
+
+struct _dyld_objc_callbacks_v4
+{
+    uintptr_t                                   version; // == 4
+    __ptrauth_dyld_objc_notify_mapped3          _dyld_objc_notify_mapped3       mapped;
+    __ptrauth_dyld_objc_notify_init2            _dyld_objc_notify_init2         init;
+    __ptrauth_dyld_objc_notify_unmapped         _dyld_objc_notify_unmapped     unmapped;
+    __ptrauth_dyld_dyld_objc_notify_patch_class _dyld_objc_notify_patch_class  patches;
 };
 
 
