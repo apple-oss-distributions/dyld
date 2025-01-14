@@ -315,6 +315,7 @@ struct VIS_HIDDEN SharedPtr;
 
 struct __attribute__((aligned(16))) VIS_HIDDEN Allocator {
     using Buffer = MemoryManager::Buffer;
+
     static const uint64_t    kGranuleSize                    = (16);
 
     // smart pointers
@@ -347,7 +348,6 @@ struct __attribute__((aligned(16))) VIS_HIDDEN Allocator {
 #if !BUILDING_DYLD && !TARGET_OS_EXCLAVEKIT
     static Allocator&       defaultAllocator();
 #endif
-#if !ALLOCATOR_USE_SYSTEM_MALLOC
     static Allocator&       stackAllocatorInternal(void* buffer, uint64_t);
 
 public:
@@ -437,19 +437,17 @@ public:
         Buffer              _poolBuffer;
     };
     void swap(Allocator& other);
+    MemoryManager*      _memoryManager  = nullptr;
     Pool*               _firstPool      = nullptr;
     Pool*               _currentPool    = nullptr;
     uint64_t            _allocatedBytes = 0;
     uint64_t            _logID          = 0;
     bool                _bestFit        = false;
-#endif /* !ALLOCATOR_USE_SYSTEM_MALLOC */
-    MemoryManager*      _memoryManager  = nullptr;
 private:
     friend struct AllocatorLayout;
     Allocator() = default;
 };
 
-#if !ALLOCATOR_USE_SYSTEM_MALLOC
 struct VIS_HIDDEN AllocatorGuard {
     AllocatorGuard(Allocator& allocator) : _allocator(allocator) {}
     ~AllocatorGuard() {
@@ -487,7 +485,6 @@ struct PreallocatedAllocatorLayout {
 private:
     uint8_t _poolBytes[SIZE];
 } __attribute__((aligned(16)));
-#endif /* !ALLOCATOR_USE_SYSTEM_MALLOC */
 
 template<typename T>
 struct VIS_HIDDEN UniquePtr {
@@ -599,13 +596,9 @@ struct VIS_HIDDEN SharedPtr {
     SharedPtr() = default;
     constexpr SharedPtr(std::nullptr_t) : _ctrl(nullptr) {}
     explicit SharedPtr(T* data) : _ctrl(nullptr) {
-#if ALLOCATOR_USE_SYSTEM_MALLOC
-        void* ctrlData = ::aligned_alloc(alignof(Ctrl),sizeof(Ctrl));
-#else
         auto metadata = Allocator::AllocationMetadata::forPtr((void*)data);
         auto allocator = metadata->pool()->allocator();
         void* ctrlData = allocator->aligned_alloc(alignof(Ctrl),sizeof(Ctrl));
-#endif
         _ctrl = new (ctrlData) Ctrl(data);
     }
 
@@ -703,15 +696,15 @@ private:
 
 } // namespace lsl
 
-#if ALLOCATOR_USE_SYSTEM_MALLOC
-#define STACK_ALLOCATOR(_name, _count) \
-    lsl::Allocator& _name = lsl::Allocator::defaultAllocator();
-#else
 #define STACK_ALLOCATOR(_name, _count)                                                                                          \
     void* __##_name##_storage = alloca((size_t)(_count+lsl::AllocatorLayout::minSize()));                                       \
     lsl::Allocator& _name = lsl::Allocator::stackAllocatorInternal(__##_name##_storage,_count+lsl::AllocatorLayout::minSize()); \
     lsl::AllocatorGuard __##_name##_gaurd(_name);
-#endif
+
+
+
+
+
 // These are should never be used. To prevent accidental usage, the prototypes exist, but using will cause a link error
 VIS_HIDDEN void* operator new(std::size_t count, lsl::Allocator* allocator);
 VIS_HIDDEN void* operator new(std::size_t count, std::align_val_t al, lsl::Allocator* allocator);

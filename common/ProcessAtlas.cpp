@@ -128,13 +128,7 @@ Bitmap::Bitmap(Allocator& allocator, size_t size)
     : _size(size), _bitmap(UniquePtr<std::byte>((std::byte*)allocator.malloc((size+7)/8))) {}
 
 Bitmap::Bitmap(Allocator& allocator, std::span<std::byte>& data) {
-    uint64_t encodedSize = 0;
-    if (!readPVLEUInt64(data, encodedSize)) {
-        _size = 0;
-        _bitmap = nullptr;
-        return;
-    }
-    _size = (size_t)encodedSize;
+    _size = (size_t)readPVLEUInt64(data);
     const size_t byteSize = (_size+7)/8;
     _bitmap = UniquePtr<std::byte>((std::byte*)allocator.malloc(byteSize));
     _bitmap.withUnsafe([&](std::byte* bitmap) {
@@ -532,14 +526,14 @@ std::pair<void*,bool> Mapper::map(const void* addr, uint64_t size) const {
             off_t roundedOffset = offset & (-1*PAGE_SIZE);
             extraBytes = (size_t)offset - (size_t)roundedOffset;
             newMapping = mmap(nullptr, (size_t)size+extraBytes, PROT_READ, MAP_FILE | MAP_PRIVATE, mapping.fd, roundedOffset);
-            if (newMapping == (void*)-1) {
+            if (newMapping == MAP_FAILED) {
 //                fprintf(stderr, "mmap failed: %s (%d)\n", strerror(errno), errno);
-                return {(void*)1, false};
+                return {nullptr, false};
             }
             return {(void*)((uintptr_t)newMapping+extraBytes),true};
         }
     }
-    return {(void*)-1, false};
+    return {nullptr, false};
 }
 
 void Mapper::unmap(const void* addr, uint64_t size) const {
@@ -1914,33 +1908,23 @@ void ProcessSnapshot::Serializer::emitMappedFileInfo(uint64_t rebasedAddress, co
 }
 
 bool ProcessSnapshot::Serializer::readMappedFileInfo(std::span<std::byte>& data, uint64_t& rebasedAddress, UUID& uuid, FileRecord& file) {
-    uint64_t flags = 0;
-    if (!readPVLEUInt64(data, flags)
-        || !readPVLEUInt64(data, rebasedAddress)) {
-        return false;
-    }
+    uint64_t flags = readPVLEUInt64(data);
+    rebasedAddress = readPVLEUInt64(data);
     if (flags & kMappedFileFlagsHasUUID) {
-        if (data.size() < 16) {
-            return false;
-        }
         uuid = UUID(&data[0]);
         data = data.last(data.size()-16);
     }
     if (flags & kMappedFileFlagsHasFileID) {
-        uint64_t volumeIndex = 0;
-        uint64_t objectID = 0;
-        if (!readPVLEUInt64(data, volumeIndex)
-            || !readPVLEUInt64(data, objectID)
-            || volumeIndex >= _volumeUUIDs.size()) {
+        uint64_t volumeIndex = readPVLEUInt64(data);
+        uint64_t objectID = readPVLEUInt64(data);
+        if (volumeIndex >= _volumeUUIDs.size() )
             return false;
-        }
         file = _fileManager.fileRecordForVolumeUUIDAndObjID(_volumeUUIDs[(size_t)volumeIndex], objectID);
     }
     if (flags & kMappedFileFlagsHasFilePath) {
-        uint64_t pathOffset = 0;
-        if (!readPVLEUInt64(data, pathOffset) || pathOffset >= _stringTableBuffer.size()) {
+        uint64_t pathOffset = readPVLEUInt64(data);
+        if ( pathOffset >= _stringTableBuffer.size() )
             return false;
-        }
         file = _fileManager.fileRecordForPath(_ephemeralAllocator, &_stringTableBuffer[(size_t)pathOffset]);
     }
     return true;
@@ -2038,10 +2022,6 @@ Vector<std::byte> ProcessSnapshot::Serializer::serialize() {
 
 bool ProcessSnapshot::Serializer::deserialize(const std::span<std::byte> data) {
     auto i = data;
-    if (i.size() < 36) {
-        // Ensure data is at least large enough to read the header
-        return false;
-    }
     // Confirm magic
     _magic              = read<uint32_t>(i);
     _version            = read<uint32_t>(i);
@@ -2063,27 +2043,17 @@ bool ProcessSnapshot::Serializer::deserialize(const std::span<std::byte> data) {
     if (_crc32c != checksumer) {
         return false;
     }
-    uint64_t volumeUUIDCount = 0;
-    if (!readPVLEUInt64(i, _processFlags)
-        || !readPVLEUInt64(i, _platform)
-        || !readPVLEUInt64(i, _initialImageCount)
-        || !readPVLEUInt64(i, _dyldState)
-        || !readPVLEUInt64(i, volumeUUIDCount)) {
-        return false;
-    }
-    if (i.size() < volumeUUIDCount*16) {
-        return false;
-    }
+    _processFlags           = readPVLEUInt64(i);
+    _platform               = readPVLEUInt64(i);
+    _initialImageCount      = readPVLEUInt64(i);
+    _dyldState              = readPVLEUInt64(i);
+    auto volumeUUIDCount    = readPVLEUInt64(i);
     for (auto j = 0; j < volumeUUIDCount; ++j) {
         UUID volumeUUID(&i[j*16]);
         _volumeUUIDs.push_back(volumeUUID);
     }
     i = i.last((size_t)(i.size()-(16*volumeUUIDCount)));
-    uint64_t stringTableSize = 0;
-    if (!readPVLEUInt64(i, stringTableSize)
-        || i.size() < stringTableSize) {
-        return false;
-    }
+    auto stringTableSize    = readPVLEUInt64(i);
     _stringTableBuffer.reserve((size_t)stringTableSize);
     std::copy((uint8_t*)&i[0], (uint8_t*)&i[(size_t)stringTableSize], std::back_inserter(_stringTableBuffer));
     i = i.last((size_t)(i.size()-stringTableSize));
@@ -2112,14 +2082,8 @@ bool ProcessSnapshot::Serializer::deserialize(const std::span<std::byte> data) {
         _sharedCache = _transactionalAllocator.makeUnique<SharedCache>(_ephemeralAllocator, std::move(file), mapper,
                                                                        rebasedAddress, _processFlags & kProcessFlagsHasPrivateCache);
         _bitmap = _transactionalAllocator.makeUnique<Bitmap>(_transactionalAllocator, i);
-        if (_bitmap->size() == 0) {
-            return false;
-        }
     }
-    uint64_t imageCount = 0;
-    if (!readPVLEUInt64(i, imageCount)) {
-        return false;
-    }
+    auto imageCount = readPVLEUInt64(i);
     uint64_t lastAddress = 0;
     for (auto j = 0; j < imageCount; ++j) {
         uint64_t rebasedAddress;

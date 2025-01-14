@@ -53,17 +53,11 @@
 #include <dispatch/dispatch.h>
 #endif
 
-#if ALLOCATOR_USE_SYSTEM_MALLOC
-#include <malloc/malloc.h>
-#endif
-
 #if ALLOCATOR_LOGGING_ENABLED
 #define ALLOCATOR_LOG(...) fprintf(stderr, __VA_ARGS__)
 #else
 #define ALLOCATOR_LOG(...)
 #endif
-
-
 
 #if ALLOCATOR_MAKE_TRACE
 #define ALLOCATOR_TRACE(...) fprintf(stderr, __VA_ARGS__)
@@ -417,7 +411,6 @@ void Allocator::Buffer::dump() const {
 #pragma mark -
 #pragma mark Allocator
 
-#if !ALLOCATOR_USE_SYSTEM_MALLOC
 void Allocator::swap(Allocator& other) {
     using std::swap;
     if (this == &other) { return; }
@@ -426,6 +419,14 @@ void Allocator::swap(Allocator& other) {
     swap(_currentPool,      other._currentPool);
     swap(_allocatedBytes,   other._allocatedBytes);
     swap(_bestFit,          other._bestFit);
+}
+
+Allocator& Allocator::createAllocator() {
+    MemoryManager memoryManager;
+    Buffer buffer = memoryManager.vm_allocate_bytes(256*1024);
+    AllocatorLayout* layout = new (buffer.address) AllocatorLayout();
+    layout->init(256*1024);
+    return layout->allocator();
 }
 
 Allocator& Allocator::stackAllocatorInternal(void* buffer, uint64_t size) {
@@ -449,73 +450,17 @@ Allocator& Allocator::operator=(Allocator&& other) {
     return *this;
 }
 
-void Allocator::dump() const {
-    for (auto pool = _firstPool;; pool = pool->nextPool()) {
-        ALLOCATOR_LOG("DUMP:\t\tPOOL(0x%llx)\n", (uint64_t)pool);
-        pool->dump();
-        if (pool == _currentPool) { break; }
-    }
-}
-
-bool Allocator::owned(const void* p, uint64_t nbytes) const {
-    for (auto pool = _currentPool; pool != nullptr; pool = pool->prevPool()) {
-        Buffer objectBuffer{ (void*)p, nbytes };
-        if (pool->poolBuffer().contains(objectBuffer)) {
-            return true;
-        }
-    }
-    return false;
-}
-
-uint64_t Allocator::allocated_bytes() const {
-    return _allocatedBytes;
-}
-
-Allocator::Allocator(MemoryManager& memoryManager, Pool& pool) :
-    _firstPool(&pool), _currentPool(&pool), _allocatedBytes(0), _memoryManager(&memoryManager) {}
-
-Allocator::~Allocator() {
-    forEachVMAllocatedBuffer(^(const Buffer& buffer) {
-        memoryManager()->vm_deallocate_bytes((void*)buffer.address, buffer.size);
-    });
-}
-
-void Allocator::forEachVMAllocatedBuffer(void (^callback)(const Buffer&)) {
-    for (auto pool = _currentPool; pool != nullptr; pool = pool->prevPool()) {
-        Buffer poolObjectBuffer{ (void*)pool, sizeof(Pool) };
-        if (!pool->poolBuffer().contains(poolObjectBuffer)) {
-            callback({(void*)pool->poolBuffer().address, pool->poolBuffer().size});
-        }
-    }
-}
-
-void Allocator::validate() const {
-#if ALLOCATOR_VALIDATION
-    for (auto pool = _firstPool; pool != _currentPool->nextPool(); pool = pool->nextPool()) {
-        pool->validate();
-    }
-#endif
-}
-#endif /* ALLOCATOR_USE_SYSTEM_MALLOC */
-
-MemoryManager* Allocator::memoryManager() const {
-    return _memoryManager;
-}
-
 void* Allocator::malloc(uint64_t size) {
     return this->aligned_alloc(kGranuleSize, size);
 }
 
 void* Allocator::aligned_alloc(uint64_t alignment, uint64_t size) {
-    assert(std::popcount(alignment) == 1); // Power of 2
-    const uint64_t targetAlignment  = std::max<uint64_t>(16ULL, alignment);
-    const uint64_t targetSize       = roundToNextAligned(targetAlignment, std::max<uint64_t>(size, 16ULL));
-#if ALLOCATOR_USE_SYSTEM_MALLOC
-    return ::aligned_alloc((size_t)targetAlignment, (size_t)targetSize);
-#else
 #if !TARGET_OS_EXCLAVEKIT
     __unused auto lock = _memoryManager->lockGuard();
 #endif
+    assert(std::popcount(alignment) == 1); // Power of 2
+    const uint64_t targetAlignment  = std::max<uint64_t>(16ULL, alignment);
+    const uint64_t targetSize       = roundToNextAligned(targetAlignment, std::max<uint64_t>(size, 16ULL));
     void* result = nullptr;
     _memoryManager->requestedSize               = size;
     _memoryManager->requestedAlignment          = alignment;
@@ -543,26 +488,15 @@ void* Allocator::aligned_alloc(uint64_t alignment, uint64_t size) {
     ALLOCATOR_TRACE("void* alloc%llu = allocator.aligned_alloc(%llu, %llu);\n", (uint64_t)result, targetAlignment, targetSize);
     validate();
     return result;
-#endif /* ALLOCATOR_USE_SYSTEM_MALLOC */
 }
 
 void Allocator::freeObject(void* ptr) {
-    if ( !ptr )
-        return;
-#if ALLOCATOR_USE_SYSTEM_MALLOC
-    ::free(ptr);
-#else
+    if (!ptr) { return; }
     AllocationMetadata* metadata = AllocationMetadata::forPtr(ptr);
     metadata->pool()->allocator()->free(ptr);
-#endif /* ALLOCATOR_USE_SYSTEM_MALLOC */
 }
 
 void Allocator::free(void* ptr) {
-#if ALLOCATOR_USE_SYSTEM_MALLOC
-    if ( !ptr )
-        return;
-    ::free(ptr);
-#else
 #if !TARGET_OS_EXCLAVEKIT
     __unused auto lock = _memoryManager->lockGuard();
 #endif
@@ -573,13 +507,17 @@ void Allocator::free(void* ptr) {
     _allocatedBytes -= metadata->size();
     metadata->deallocate();
     validate();
-#endif /* ALLOCATOR_USE_SYSTEM_MALLOC */
+}
+
+void Allocator::dump() const {
+    for (auto pool = _firstPool;; pool = pool->nextPool()) {
+        ALLOCATOR_LOG("DUMP:\t\tPOOL(0x%llx)\n", (uint64_t)pool);
+        pool->dump();
+        if (pool == _currentPool) { break; }
+    }
 }
 
 bool Allocator::realloc(void* ptr, uint64_t size) {
-#if ALLOCATOR_USE_SYSTEM_MALLOC
-    return false;
-#else
 #if !TARGET_OS_EXCLAVEKIT
     __unused auto lock = _memoryManager->lockGuard();
 #endif
@@ -601,7 +539,6 @@ bool Allocator::realloc(void* ptr, uint64_t size) {
     ALLOCATOR_TRACE("allocator.realloc(alloc%llu, %llu);\n", (uint64_t)ptr, targetSize);
     validate();
     return result;
-#endif /* ALLOCATOR_USE_SYSTEM_MALLOC */
 }
 
 char* Allocator::strdup(const char* str)
@@ -612,48 +549,67 @@ char* Allocator::strdup(const char* str)
     return result;
 }
 
+bool Allocator::owned(const void* p, uint64_t nbytes) const {
+    for (auto pool = _currentPool; pool != nullptr; pool = pool->prevPool()) {
+        Buffer objectBuffer{ (void*)p, nbytes };
+        if (pool->poolBuffer().contains(objectBuffer)) {
+            return true;
+        }
+    }
+    return false;
+}
+
 uint64_t Allocator::size(const void* ptr) const {
-#if ALLOCATOR_USE_SYSTEM_MALLOC
-    return ::malloc_size(ptr);
-#else
     if (!ptr) { return 0; }
     AllocationMetadata* metadata = AllocationMetadata::forPtr((void*)ptr);
     return metadata->size();
-#endif /* ALLOCATOR_USE_SYSTEM_MALLOC */
-}
-
-Allocator& Allocator::createAllocator() {
-#if ALLOCATOR_USE_SYSTEM_MALLOC
-    static MemoryManager memoryManager;
-    void* buffer = ::malloc(sizeof(Allocator));
-    Allocator* allocator = new (buffer) Allocator();
-    allocator->_memoryManager = &memoryManager;
-    return *allocator;
-#else
-    MemoryManager memoryManager;
-    Buffer buffer = memoryManager.vm_allocate_bytes(256*1024);
-    AllocatorLayout* layout = new (buffer.address) AllocatorLayout();
-    layout->init(256*1024);
-    return layout->allocator();
-#endif
 }
 
 
 #if !BUILDING_DYLD && !TARGET_OS_EXCLAVEKIT
 Allocator& Allocator::defaultAllocator() {
-    static Allocator* allocator;
+    static os_unfair_lock_s unfairLock = OS_UNFAIR_LOCK_INIT;
+    static Allocator* allocator = nullptr;
     static dispatch_once_t onceToken;
+
     dispatch_once(&onceToken, ^{
-        allocator = &createAllocator();
+        Lock lock(nullptr, &unfairLock);
+        allocator = &Allocator::createAllocator();
+        allocator->memoryManager()->adoptLock(std::move(lock));
     });
     return *allocator;
 }
 #endif
 
+uint64_t Allocator::allocated_bytes() const {
+    return _allocatedBytes;
+}
+
+Allocator::Allocator(MemoryManager& memoryManager, Pool& pool) :
+    _memoryManager(&memoryManager), _firstPool(&pool), _currentPool(&pool), _allocatedBytes(0) {}
+
+Allocator::~Allocator() {
+    forEachVMAllocatedBuffer(^(const Buffer& buffer) {
+        memoryManager()->vm_deallocate_bytes((void*)buffer.address, buffer.size);
+    });
+}
+
+void Allocator::forEachVMAllocatedBuffer(void (^callback)(const Buffer&)) {
+    for (auto pool = _currentPool; pool != nullptr; pool = pool->prevPool()) {
+        Buffer poolObjectBuffer{ (void*)pool, sizeof(Pool) };
+        if (!pool->poolBuffer().contains(poolObjectBuffer)) {
+            callback({(void*)pool->poolBuffer().address, pool->poolBuffer().size});
+        }
+    }
+}
+
+MemoryManager* Allocator::memoryManager() const {
+    return _memoryManager;
+}
+
 #pragma mark -
 #pragma mark Allocator Pool
 
-#if !ALLOCATOR_USE_SYSTEM_MALLOC
 Allocator::Pool::Pool(Allocator* allocator, Pool* prevPool, uint64_t size)
 : Pool(allocator, prevPool, allocator->memoryManager()->vm_allocate_bytes(size)) {}
 Allocator::Pool::Pool(Allocator* allocator, Pool* prevPool, Buffer region) : Pool(allocator, prevPool, region, region) {}
@@ -784,6 +740,15 @@ Allocator::Pool* Allocator::Pool::forPtr(void* ptr) {
 
 void Allocator::setBestFit(bool bestFit) {
     _bestFit = bestFit;
+}
+
+
+void Allocator::validate() const {
+#if ALLOCATOR_VALIDATION
+    for (auto pool = _firstPool; pool != _currentPool->nextPool(); pool = pool->nextPool()) {
+        pool->validate();
+    }
+#endif
 }
 
 void Allocator::Pool::validate() const {
@@ -1053,6 +1018,7 @@ void Allocator::AllocationMetadata::logAddressSpace(const char* prefix) const {
     } else {
         ALLOCATOR_LOG("\n");
     }
+
 }
 
 #pragma mark -
@@ -1090,7 +1056,6 @@ uint64_t lsl::AllocatorLayout::minSize() {
     return sizeof(lsl::AllocatorLayout) + alignof(lsl::AllocatorLayout)
                 + sizeof(Allocator::Pool) + sizeof(Allocator::AllocationMetadata);
 }
-#endif /*  ALLOCATOR_USE_SYSTEM_MALLOC */
 
 };
 

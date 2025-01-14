@@ -379,7 +379,6 @@ public:
     Vector<InterposeTupleAll>       patchedObjCClasses;
     Vector<ObjCClassReplacement>    objcReplacementClasses;
     Vector<InterposeTupleAll>       patchedSingletons;
-    Vector<const char*>             prebuiltLoaderSetRealPaths;
     size_t                          numSingletonObjectsPatched = 0;
     uint64_t                        weakDefResolveSymbolCount = 0;
     WeakDefMap*                     weakDefMap                = nullptr;
@@ -412,7 +411,7 @@ public:
                                     locks(locks),
                                     interposingTuplesAll(alloc), interposingTuplesSpecific(alloc),
                                     patchedObjCClasses(alloc), objcReplacementClasses(alloc),
-                                    patchedSingletons(alloc), prebuiltLoaderSetRealPaths(alloc),
+                                    patchedSingletons(alloc),
 #if !TARGET_OS_EXCLAVEKIT
                                     fileManager(persistentAllocator, &config.syscall),
 #endif

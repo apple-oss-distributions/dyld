@@ -103,7 +103,14 @@ cache_builder::Layout::Layout(const BuilderOptions& options)
     if ( (archName == "x86_64") || (archName == "x86_64h") ) {
         this->subCacheTextLimit = CacheVMSize(512_MB);
     } else {
-        this->subCacheTextLimit = CacheVMSize(1.5_GB);
+        // Note the 64MB is to give us just a little more space before making another
+        // sub cache file.  We want to make as few files as possible for things like page-tables
+        // The real constraint here is that TEXT+DATA must stay within 2GB for int32_t relative
+        // offsets in objc/swift metadata and in unwind info.  But also the __objc_opt section
+        // in libobjc needs to reach the __OBJC_RO in the read-only subcache.  That comes after
+        // data and as of writing leaves 150MB from its end until the 2GB mark.  So take 64MB from
+        // that 150MB and hope its ok for now.
+        this->subCacheTextLimit = CacheVMSize(1.5_GB + 64_MB);
     }
 
     struct CacheLayout
@@ -133,11 +140,6 @@ cache_builder::Layout::Layout(const BuilderOptions& options)
     } else if ( archName == "arm64_32" ) {
         layout.baseAddress = ARM64_32_SHARED_REGION_START;
         layout.cacheSize = 2_GB;
-
-        // The cache contents can't exceed 2GB, but use the space above it for the slide
-        if ( ARM64_32_SHARED_REGION_SIZE >= layout.cacheSize ) {
-            this->cacheFixedSlide = ARM64_32_SHARED_REGION_SIZE - layout.cacheSize;
-        }
     } else {
         assert("Unknown arch");
     }

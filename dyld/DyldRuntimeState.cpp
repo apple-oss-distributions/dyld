@@ -90,8 +90,6 @@ extern "C" int amfi_check_dyld_policy_self(uint64_t input_flags, uint64_t* outpu
     #include "dyldSyscallInterface.h"
 #endif
 
-#define STAGED_APPS_DIR   "/private/var/staged_system_apps/"
-#define INSTALL_APPS_DIR  "/private/var/containers/Bundle/Application/"
 
 #if !TARGET_OS_EXCLAVEKIT
 using lsl::Lock;
@@ -2136,9 +2134,7 @@ void RuntimeState::notifyObjCInit(const Loader* ldr)
         _dyld_objc_notify_mapped_info info = {
             ml, pth, (_dyld_section_location_info_t)ldr, ldr->dyldDoesObjCFixups(), 0
         };
-        memoryManager.withReadOnlyMemory([&]{
-            _notifyObjCInit2(&info);
-        });
+        _notifyObjCInit2(&info);
     }
 }
 
@@ -2821,41 +2817,6 @@ void RuntimeState::initializeClosureMode()
                 // if leaf name matches then this is some OS progam that got moved after being built
                 if ( strcmp(progLeafName, aLeafName) == 0 )
                     cachePBLS = aPBLS;
-            }
-        }
-        else if ( (cachePBLS == nullptr) && (strncmp(config.process.mainExecutablePath, INSTALL_APPS_DIR, strlen(INSTALL_APPS_DIR)) == 0) ) {
-            // perhaps this is removable app with closure built for /var/staged_system_apps/
-            if ( const dyld4::PrebuiltLoaderSet* aPBLS = config.dyldCache.addr->findLaunchLoaderSetWithCDHash(config.process.appleParam("executable_cdhash")) ) {
-                const char* closureAppPath = aPBLS->atIndex(0)->path(*this);
-                const size_t stagedAppsDirLen = strlen(STAGED_APPS_DIR);
-                if ( strncmp(closureAppPath, STAGED_APPS_DIR, stagedAppsDirLen) == 0 ) {
-                    // example closure path:  /private/var/staged_system_apps/Foo.app/Foo
-                    // example actual path:   /var/containers/Bundle/Application/34A646B9-3E3F-415F-B1A8-80858F5FC869/Foo.app/Foo
-                    const char* endClosureAppPath = &closureAppPath[stagedAppsDirLen];
-                    const char* endActualAppPath  = strchr(&config.process.mainExecutablePath[strlen(INSTALL_APPS_DIR)+1], '/')+1;
-                    if ( strcmp(endClosureAppPath, endActualAppPath) == 0 ) {
-                        // looks like a match for a relocated staged app. We now need to build a table of path translations
-                        // from paths in the closure like "/private/var/staged_system_apps/Foo.app/Foo") to actual runtime
-                        // paths like "/var/containers/Bundle/Application/34A646B9-3E3F-415F-B1A8-80858F5FC869/Foo.app/Foo"
-                        size_t realPrefix = endActualAppPath - config.process.mainExecutablePath;
-                        for (uint32_t i=0; i < aPBLS->loaderCount(); ++i) {
-                            const char* aPath = aPBLS->atIndex(i)->path(*this);
-                            const char* realerPath = aPath;
-                            if ( strncmp(aPath, STAGED_APPS_DIR, stagedAppsDirLen) == 0 ) {
-                                // transform: /private/var/staged_system_apps/Foo.app/Frameworks/Bar.framework/Bar
-                                //        to: /var/containers/Bundle/Application/34A646B9-3E3F-415F-B1A8-80858F5FC869/Foo.app/Frameworks/Bar.framework/Bar
-                                char betterPath[PATH_MAX];
-                                strlcpy(betterPath, config.process.mainExecutablePath, PATH_MAX);
-                                betterPath[realPrefix] = '\0';
-                                strlcat(betterPath, &aPath[stagedAppsDirLen], PATH_MAX);
-                                realerPath = this->persistentAllocator.strdup(betterPath);
-                                //log("%s -> %s\n", aPath, realerPath);
-                            }
-                            this->prebuiltLoaderSetRealPaths.push_back(realerPath);
-                        }
-                        cachePBLS = aPBLS;
-                    }
-                }
             }
         }
         isOsProgram              = (cachePBLS != nullptr) || config.dyldCache.addr->hasLaunchLoaderSetWithCDHash(config.process.appleParam("executable_cdhash"));

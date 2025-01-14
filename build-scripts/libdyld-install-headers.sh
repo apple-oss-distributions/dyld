@@ -40,9 +40,6 @@ elif [ -n "${SYSTEM_PREFIX}" ]; then # ExclaveKit
 
     cp ${SRCROOT}/include/dlfcn.h  ${DSTROOT}${SYSTEM_PREFIX}/usr/include/dlfcn.h
 
-    cp ${SRCROOT}/include/mach-o/dyld_exclavekit.modulemap  ${DSTROOT}${SYSTEM_PREFIX}${PUBLIC_HEADERS_FOLDER_PATH}/dyld.modulemap
-    cp ${SRCROOT}/include/mach-o/dyld_exclavekit.private.modulemap  ${DSTROOT}${SYSTEM_PREFIX}${PRIVATE_HEADERS_FOLDER_PATH}/dyld.private.modulemap
-
 else
     mkdir -p ${DSTROOT}${PUBLIC_HEADERS_FOLDER_PATH}
     mkdir -p ${DSTROOT}${PRIVATE_HEADERS_FOLDER_PATH}
@@ -65,10 +62,6 @@ else
     # dlfcn
     dlfcnUnifdef -U ${DSTROOT}/usr/include/dlfcn.h
     cp ${SRCROOT}/include/dlfcn_private.h  ${DSTROOT}/usr/local/include
-
-    #  manual install of modulemap
-    cp ${SRCROOT}/include/mach-o/dyld.modulemap  ${DSTROOT}${PUBLIC_HEADERS_FOLDER_PATH}
-    cp ${SRCROOT}/include/mach-o/dyld.private.modulemap  ${DSTROOT}${PRIVATE_HEADERS_FOLDER_PATH}
 
     # dyld_priv.h is generated in libdyld-generation-headers
     checkHeader ${DSTROOT}${PRIVATE_HEADERS_FOLDER_PATH}/dyld_priv.h

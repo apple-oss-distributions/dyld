@@ -86,7 +86,6 @@ struct Layout
     CacheVMAddress          cacheBaseAddress;
     CacheVMSize             cacheSize;
     std::optional<uint64_t> cacheMaxSlide;
-    std::optional<uint64_t> cacheFixedSlide;
     const bool              is64;
     const bool              hasAuthRegion;
     const bool              tproIsInData;

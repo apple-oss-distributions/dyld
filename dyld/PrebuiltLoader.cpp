@@ -218,13 +218,7 @@ const dyld3::MachOFile* PrebuiltLoader::mf(const RuntimeState& state) const
 
 const char* PrebuiltLoader::path(const RuntimeState& state) const
 {
-    // note: there is a trick here when prebuiltLoaderSetRealPaths is built,
-    // we need this to return the initial path, and we know the override paths are built in order,
-    // so we only return the override path if the index is in the vector.
-    if ( !this->dylibInDyldCache && (this->ref.index < state.prebuiltLoaderSetRealPaths.size()) )
-        return state.prebuiltLoaderSetRealPaths[this->ref.index];
-    else
-        return this->pathOffset ? ((char*)this + this->pathOffset) : nullptr;
+    return this->pathOffset ? ((char*)this + this->pathOffset) : nullptr;
 }
 
 const char* PrebuiltLoader::installName(const RuntimeState& state) const

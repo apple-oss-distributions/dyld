@@ -655,6 +655,7 @@
 		DE3DCD44290882A400D54FBE /* Symbol.cpp in Sources */ = {isa = PBXBuildFile; fileRef = F9301CF926FAC17000746273 /* Symbol.cpp */; };
 		DE48189D278FB82200C1EAF7 /* PrebuiltSwift.cpp in Sources */ = {isa = PBXBuildFile; fileRef = DE48189B278FB82200C1EAF7 /* PrebuiltSwift.cpp */; };
 		DE515318293E8A8B0011F396 /* Error.cpp in Sources */ = {isa = PBXBuildFile; fileRef = F94F279028E7862C002C5047 /* Error.cpp */; };
+		DE552AEF2BB4C3F70044843F /* SharedCacheRuntime.swift in Sources */ = {isa = PBXBuildFile; fileRef = DE8C1D7F2BACEB76004CA071 /* SharedCacheRuntime.swift */; };
 		DE56DBE128DBCAA300CF5166 /* PremappedLoader.cpp in Sources */ = {isa = PBXBuildFile; fileRef = DE56DBDF28DBCAA300CF5166 /* PremappedLoader.cpp */; };
 		DE66520D27D98FD0007AC13C /* MurmurHash.cpp in Sources */ = {isa = PBXBuildFile; fileRef = DE10EA3027D6A4340027519D /* MurmurHash.cpp */; };
 		DE66520E27D98FD1007AC13C /* MurmurHash.cpp in Sources */ = {isa = PBXBuildFile; fileRef = DE10EA3027D6A4340027519D /* MurmurHash.cpp */; };
@@ -671,6 +672,8 @@
 		DE8643A127FCCD5B008F714A /* DyldSharedCache.cpp in Sources */ = {isa = PBXBuildFile; fileRef = F98B351F24EB7CA400DE738B /* DyldSharedCache.cpp */; };
 		DE8643A227FCCD5D008F714A /* DyldSharedCache.cpp in Sources */ = {isa = PBXBuildFile; fileRef = F98B351F24EB7CA400DE738B /* DyldSharedCache.cpp */; };
 		DE8643A327FCCD6F008F714A /* DyldSharedCache.cpp in Sources */ = {isa = PBXBuildFile; fileRef = F98B351F24EB7CA400DE738B /* DyldSharedCache.cpp */; };
+		DE99BECE2BFECC0300338639 /* SharedCacheRuntime.swift in Sources */ = {isa = PBXBuildFile; fileRef = DE8C1D7F2BACEB76004CA071 /* SharedCacheRuntime.swift */; };
+		DEBE886D2BAE57A600ED8C28 /* Test_SharedCacheRuntime.swift in Sources */ = {isa = PBXBuildFile; fileRef = DEBE886B2BAE57A600ED8C28 /* Test_SharedCacheRuntime.swift */; };
 		DEE3B59727D6C1D6002982BE /* MurmurHash.cpp in Sources */ = {isa = PBXBuildFile; fileRef = DE10EA3027D6A4340027519D /* MurmurHash.cpp */; };
 		DEFA74D027BB1DF7005FD9E5 /* PreBuiltSwiftTests.mm in Sources */ = {isa = PBXBuildFile; fileRef = DE149EBE27BB182B003B73C9 /* PreBuiltSwiftTests.mm */; };
 		F901502A2969171000011696 /* Aliases.cpp in Sources */ = {isa = PBXBuildFile; fileRef = F90150292969171000011696 /* Aliases.cpp */; };
@@ -1662,7 +1665,7 @@
 		C1B4DB142B1BFE6800473685 /* Test_MakeCache.mm */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.cpp.objcpp; path = Test_MakeCache.mm; sourceTree = "<group>"; };
 		C1BE1D022B58C5B7001F472B /* dyld_symbols_cache.xcconfig */ = {isa = PBXFileReference; lastKnownFileType = text.xcconfig; path = dyld_symbols_cache.xcconfig; sourceTree = "<group>"; };
 		C1C3C9472A058DEB000A60C1 /* Test_AtomFileFormat.mm */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.cpp.objcpp; path = Test_AtomFileFormat.mm; sourceTree = "<group>"; };
-		C1C420B32771111700BF6075 /* dyldinfo.xcconfig */ = {isa = PBXFileReference; lastKnownFileType = text.xcconfig; path = dyldinfo.xcconfig; sourceTree = "<group>"; };
+		C1C420B32771111700BF6075 /* dyld_info.xcconfig */ = {isa = PBXFileReference; lastKnownFileType = text.xcconfig; path = dyld_info.xcconfig; sourceTree = "<group>"; };
 		C1CBFCDA2A1ED7F00083ACF2 /* AtomFileReaderWriter.cpp */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.cpp.cpp; path = AtomFileReaderWriter.cpp; sourceTree = "<group>"; };
 		C1D1651C298C746D003EE60F /* BundleForClass.cpp */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.cpp.cpp; path = BundleForClass.cpp; sourceTree = "<group>"; };
 		C1D1651F298C74ED003EE60F /* BundleForClassHook.mm */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.cpp.objcpp; path = BundleForClassHook.mm; sourceTree = "<group>"; };
@@ -1688,12 +1691,12 @@
 		C1F96B4529035C6900D9EDE1 /* Test_Fixups.mm */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.cpp.objcpp; path = Test_Fixups.mm; sourceTree = "<group>"; };
 		C1F98A2928D93FD70081A6EB /* Test_ObjC_64.mm */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.cpp.objcpp; path = Test_ObjC_64.mm; sourceTree = "<group>"; };
 		C1F98A2B28D9404E0081A6EB /* ObjC.cpp */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.cpp.cpp; path = ObjC.cpp; sourceTree = "<group>"; };
-		DE0CF9FE29B26DF900795EA9 /* dyld_exclavekit.modulemap */ = {isa = PBXFileReference; lastKnownFileType = "sourcecode.module-map"; name = dyld_exclavekit.modulemap; path = "include/mach-o/dyld_exclavekit.modulemap"; sourceTree = "<group>"; };
-		DE0CF9FF29B26E0500795EA9 /* dyld_exclavekit.private.modulemap */ = {isa = PBXFileReference; lastKnownFileType = "sourcecode.module-map"; name = dyld_exclavekit.private.modulemap; path = "include/mach-o/dyld_exclavekit.private.modulemap"; sourceTree = "<group>"; };
 		DE10EA3027D6A4340027519D /* MurmurHash.cpp */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.cpp.cpp; path = MurmurHash.cpp; sourceTree = "<group>"; };
 		DE10EA3127D6A4340027519D /* MurmurHash.h */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.c.h; path = MurmurHash.h; sourceTree = "<group>"; };
 		DE149EBE27BB182B003B73C9 /* PreBuiltSwiftTests.mm */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.cpp.objcpp; path = PreBuiltSwiftTests.mm; sourceTree = "<group>"; };
 		DE17F79526CEE359007214C9 /* libdyld-install-headers.sh */ = {isa = PBXFileReference; lastKnownFileType = text.script.sh; path = "libdyld-install-headers.sh"; sourceTree = "<group>"; };
+		DE1A82072BDAE6D000F113F9 /* TestToolchain.h */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.c.h; path = TestToolchain.h; sourceTree = "<group>"; };
+		DE1A82092BDAE71D00F113F9 /* TestToolchain.mm */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.cpp.objcpp; path = TestToolchain.mm; sourceTree = "<group>"; };
 		DE48189B278FB82200C1EAF7 /* PrebuiltSwift.cpp */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.cpp.cpp; path = PrebuiltSwift.cpp; sourceTree = "<group>"; };
 		DE48189C278FB82200C1EAF7 /* PrebuiltSwift.h */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.c.h; path = PrebuiltSwift.h; sourceTree = "<group>"; };
 		DE5447BD291316A400A68FC4 /* dyld-bats.sh */ = {isa = PBXFileReference; lastKnownFileType = text.script.sh; path = "dyld-bats.sh"; sourceTree = "<group>"; };
@@ -1705,10 +1708,14 @@
 		DE728E52210CD6B700EB5409 /* dyld_usage.1 */ = {isa = PBXFileReference; fileEncoding = 4; lastKnownFileType = text.man; path = dyld_usage.1; sourceTree = "<group>"; };
 		DE86439327F7BD9E008F714A /* Utils.cpp */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.cpp.cpp; path = Utils.cpp; sourceTree = "<group>"; };
 		DE86439427F7BD9E008F714A /* Utils.h */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.c.h; path = Utils.h; sourceTree = "<group>"; };
+		DE8C1D6F2BACE171004CA071 /* UnitTests-shared_cache_runtime.xctest */ = {isa = PBXFileReference; explicitFileType = wrapper.cfbundle; includeInIndex = 0; path = "UnitTests-shared_cache_runtime.xctest"; sourceTree = BUILT_PRODUCTS_DIR; };
+		DE8C1D7F2BACEB76004CA071 /* SharedCacheRuntime.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SharedCacheRuntime.swift; sourceTree = "<group>"; };
 		DEA5E0F62953CB150056E740 /* libdsc-install-headers.sh */ = {isa = PBXFileReference; lastKnownFileType = text.script.sh; path = "libdsc-install-headers.sh"; sourceTree = "<group>"; };
+		DEA85B322BAE6837002A4205 /* shared_cache_runtime.xcconfig */ = {isa = PBXFileReference; lastKnownFileType = text.xcconfig; path = shared_cache_runtime.xcconfig; sourceTree = "<group>"; };
 		DEBBC5772953AEC100F014B7 /* libdyld-install-ktrace-codes.sh */ = {isa = PBXFileReference; lastKnownFileType = text.script.sh; path = "libdyld-install-ktrace-codes.sh"; sourceTree = "<group>"; };
 		DEBBC57A2953BE9E00F014B7 /* libdyld-install-docs.sh */ = {isa = PBXFileReference; lastKnownFileType = text.script.sh; path = "libdyld-install-docs.sh"; sourceTree = "<group>"; };
 		DEBBC57B2953C2FD00F014B7 /* libdsc.xcconfig */ = {isa = PBXFileReference; lastKnownFileType = text.xcconfig; path = libdsc.xcconfig; sourceTree = "<group>"; };
+		DEBE886B2BAE57A600ED8C28 /* Test_SharedCacheRuntime.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = Test_SharedCacheRuntime.swift; sourceTree = "<group>"; };
 		EF799FE9070D27BB00F78484 /* dyld.1 */ = {isa = PBXFileReference; fileEncoding = 30; lastKnownFileType = text.man; name = dyld.1; path = doc/man/man1/dyld.1; sourceTree = SOURCE_ROOT; };
 		EF799FEB070D27BB00F78484 /* dladdr.3 */ = {isa = PBXFileReference; explicitFileType = text.man; fileEncoding = 30; name = dladdr.3; path = doc/man/man3/dladdr.3; sourceTree = SOURCE_ROOT; };
 		EF799FEC070D27BB00F78484 /* dlclose.3 */ = {isa = PBXFileReference; explicitFileType = text.man; fileEncoding = 30; name = dlclose.3; path = doc/man/man3/dlclose.3; sourceTree = SOURCE_ROOT; };
@@ -1716,7 +1723,8 @@
 		EF799FEE070D27BB00F78484 /* dlopen.3 */ = {isa = PBXFileReference; explicitFileType = text.man; fileEncoding = 30; name = dlopen.3; path = doc/man/man3/dlopen.3; sourceTree = SOURCE_ROOT; };
 		EF799FEF070D27BB00F78484 /* dlsym.3 */ = {isa = PBXFileReference; explicitFileType = text.man; fileEncoding = 30; name = dlsym.3; path = doc/man/man3/dlsym.3; sourceTree = SOURCE_ROOT; };
 		EF799FF0070D27BB00F78484 /* dyld.3 */ = {isa = PBXFileReference; explicitFileType = text.man; fileEncoding = 30; name = dyld.3; path = doc/man/man3/dyld.3; sourceTree = SOURCE_ROOT; };
-		F311780925BA0E080034A857 /* dyld.private.modulemap */ = {isa = PBXFileReference; lastKnownFileType = "sourcecode.module-map"; name = dyld.private.modulemap; path = "include/mach-o/dyld.private.modulemap"; sourceTree = "<group>"; };
+		F22ED0CA2BFDA98000069479 /* dyld_cache_module.h */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.c.h; path = dyld_cache_module.h; sourceTree = "<group>"; };
+		F22ED0CB2BFDA98B00069479 /* module.modulemap */ = {isa = PBXFileReference; lastKnownFileType = "sourcecode.module-map"; path = module.modulemap; sourceTree = "<group>"; };
 		F90150292969171000011696 /* Aliases.cpp */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.cpp.cpp; path = Aliases.cpp; sourceTree = "<group>"; };
 		F90A527627E3018200562B02 /* utils_priv.h */ = {isa = PBXFileReference; fileEncoding = 4; lastKnownFileType = sourcecode.c.h; name = utils_priv.h; path = "include/mach-o/utils_priv.h"; sourceTree = "<group>"; };
 		F90B1C3A28BD4264000FB3C8 /* ObjCStubs.cpp */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.cpp.cpp; path = ObjCStubs.cpp; sourceTree = "<group>"; };
@@ -1779,7 +1787,6 @@
 		F96BFA4A27D97C4B00EEB659 /* Fixups.cpp */ = {isa = PBXFileReference; fileEncoding = 4; lastKnownFileType = sourcecode.cpp.cpp; path = Fixups.cpp; sourceTree = "<group>"; };
 		F97A9762284A915600B887C3 /* ExternallyViewableState.h */ = {isa = PBXFileReference; fileEncoding = 4; lastKnownFileType = sourcecode.c.h; path = ExternallyViewableState.h; sourceTree = "<group>"; };
 		F97A9763284AAF6600B887C3 /* ExternallyViewableState.cpp */ = {isa = PBXFileReference; fileEncoding = 4; lastKnownFileType = sourcecode.cpp.cpp; path = ExternallyViewableState.cpp; sourceTree = "<group>"; };
-		F97D394E23A08B5500BD3B5A /* dyld.modulemap */ = {isa = PBXFileReference; fileEncoding = 4; lastKnownFileType = "sourcecode.module-map"; name = dyld.modulemap; path = "include/mach-o/dyld.modulemap"; sourceTree = "<group>"; };
 		F97FF3631C237F5C000ACDD2 /* nocr.1 */ = {isa = PBXFileReference; fileEncoding = 4; lastKnownFileType = text.man; name = nocr.1; path = ../../../testing/nocr/nocr.1; sourceTree = "<group>"; };
 		F9858D4A28CD9A1C00775E0D /* File.cpp */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.cpp.cpp; path = File.cpp; sourceTree = "<group>"; };
 		F9858D4B28CD9A1C00775E0D /* File.h */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.c.h; path = File.h; sourceTree = "<group>"; };
@@ -2137,6 +2144,20 @@
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};
+		DE3989E72BAE5CB3006DCFAB /* Frameworks */ = {
+			isa = PBXFrameworksBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
+		DE8C1D6C2BACE171004CA071 /* Frameworks */ = {
+			isa = PBXFrameworksBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
 		F91B35B82794F1F5006DB55F /* Frameworks */ = {
 			isa = PBXFrameworksBuildPhase;
 			buildActionMask = 2147483647;
@@ -2458,6 +2479,23 @@
 			path = _build;
 			sourceTree = "<group>";
 		};
+		DE8C1D802BACEB76004CA071 /* shared_cache_runtime */ = {
+			isa = PBXGroup;
+			children = (
+				F22ED0C82BFDA96A00069479 /* Modules */,
+				DE8C1D7F2BACEB76004CA071 /* SharedCacheRuntime.swift */,
+			);
+			path = shared_cache_runtime;
+			sourceTree = "<group>";
+		};
+		DEBE886C2BAE57A600ED8C28 /* shared-cache-runtime-unit-tests */ = {
+			isa = PBXGroup;
+			children = (
+				DEBE886B2BAE57A600ED8C28 /* Test_SharedCacheRuntime.swift */,
+			);
+			path = "shared-cache-runtime-unit-tests";
+			sourceTree = "<group>";
+		};
 		EF799FE7070D27BB00F78484 /* man */ = {
 			isa = PBXGroup;
 			children = (
@@ -2497,13 +2535,26 @@
 			path = doc/man/man3;
 			sourceTree = SOURCE_ROOT;
 		};
+		F22ED0C82BFDA96A00069479 /* Modules */ = {
+			isa = PBXGroup;
+			children = (
+				F22ED0C92BFDA97200069479 /* dyld_cache_module */,
+			);
+			path = Modules;
+			sourceTree = "<group>";
+		};
+		F22ED0C92BFDA97200069479 /* dyld_cache_module */ = {
+			isa = PBXGroup;
+			children = (
+				F22ED0CB2BFDA98B00069479 /* module.modulemap */,
+				F22ED0CA2BFDA98000069479 /* dyld_cache_module.h */,
+			);
+			path = dyld_cache_module;
+			sourceTree = "<group>";
+		};
 		F91BFAC52166CED7007F10AB /* mach-o */ = {
 			isa = PBXGroup;
 			children = (
-				F97D394E23A08B5500BD3B5A /* dyld.modulemap */,
-				DE0CF9FE29B26DF900795EA9 /* dyld_exclavekit.modulemap */,
-				F311780925BA0E080034A857 /* dyld.private.modulemap */,
-				DE0CF9FF29B26E0500795EA9 /* dyld_exclavekit.private.modulemap */,
 				F9ED4CEA0630A80600DF4E74 /* dyld.h */,
 				374DD36225C312E0003E339D /* dyld_introspection.h */,
 				F98D274C0AA79D7400416316 /* dyld_images.h */,
@@ -2760,7 +2811,7 @@
 			children = (
 				F98B35A324ED748E00DE738B /* base.xcconfig */,
 				F98B359F24ED748E00DE738B /* dyld.xcconfig */,
-				C1C420B32771111700BF6075 /* dyldinfo.xcconfig */,
+				C1C420B32771111700BF6075 /* dyld_info.xcconfig */,
 				C12657F1286FB94100048F94 /* dyld_inspect.xcconfig */,
 				C12D46B22817AFC3009036F6 /* dyld_shared_cache_util.xcconfig */,
 				C1BE1D022B58C5B7001F472B /* dyld_symbols_cache.xcconfig */,
@@ -2774,6 +2825,7 @@
 				F9D7EF8924F44DEB002930F3 /* update_dyld_sim_shared_cache.xcconfig */,
 				C1949B452B1954D60056CD72 /* unittests.xcconfig */,
 				2D400B642B51CD3700C0606E /* shared_cache_builder_base.xcconfig */,
+				DEA85B322BAE6837002A4205 /* shared_cache_runtime.xcconfig */,
 				C12657F0286FB78500048F94 /* dext_spawn_entitlement.plist */,
 				C12657EF286FB77E00048F94 /* get_task_allow_entitlement.plist */,
 				C12D46B12817AE3B009036F6 /* jumbo_address_space_entitlement.plist */,
@@ -2791,6 +2843,7 @@
 				F9301D2426FAFA2D00746273 /* mach_o */,
 				C1A0DFA0278BEE8300A5E21C /* builder-unit-tests */,
 				37888B7C2A425A46005024BA /* framework-unit-tests */,
+				DEBE886C2BAE57A600ED8C28 /* shared-cache-runtime-unit-tests */,
 				C1949B412B1950000056CD72 /* symbols_cache */,
 				F98B369424F0BDE900DE738B /* unit-tests */,
 				F98B360224ED91EB00DE738B /* test-cases */,
@@ -2908,50 +2961,50 @@
 		F9A2C1F628946113006FE9A0 /* ld */ = {
 			isa = PBXGroup;
 			children = (
+				C1A4F39A29A566F20062298A /* Test_Alias.mm */,
+				2DE6C0B728D0B4330018D8FD /* Test_ArgVector.mm */,
 				F9A2C1F728946114006FE9A0 /* Test_Atom.mm */,
 				F9A2C20E28982EB0006FE9A0 /* Test_AtomFileConsolidator.mm */,
-				2DC285022B239B4800637293 /* Test_LTO.mm */,
-				2DC285042B239C3300637293 /* Test_LinkerConstraints.mm */,
 				C1C3C9472A058DEB000A60C1 /* Test_AtomFileFormat.mm */,
-				C19576B228E8AE64006B6012 /* Test_CompactUnwind.mm */,
+				F9ACFB752908D40E00909B83 /* Test_AtomPlacement.mm */,
+				2D3F9056290C031F00C6E637 /* Test_AtomSymbolTable.mm */,
+				C138A022290206080082CFB3 /* Test_Boundary.mm */,
+				2DEAECE429DFFA55005DD362 /* Test_ChunkBumpAllocator.mm */,
 				C1107A7229F30B4D000E9B05 /* Test_CompactUnwind.h */,
+				C19576B228E8AE64006B6012 /* Test_CompactUnwind.mm */,
+				F92F3CC72A5DF342000B9DC8 /* Test_DelayInit.mm */,
+				C18A62BE2992D67F00E4A91E /* Test_DependencyInfo.mm */,
+				C1DFA7912943D385006BA8DE /* Test_DTrace.mm */,
+				F9FB884E29E62A450051729D /* Test_File.mm */,
 				C1F96B4529035C6900D9EDE1 /* Test_Fixups.mm */,
 				F9B53F69289B213D00CEB2C0 /* Test_Fixups_arm64.mm */,
 				F90B1C3F28C507FD000FB3C8 /* Test_InputFiles.mm */,
 				F98753E228A83058005821ED /* Test_Layout.mm */,
 				2DD37EF02935FBE300A37F10 /* Test_LibrarySearch.mm */,
-				F9ACFB752908D40E00909B83 /* Test_AtomPlacement.mm */,
+				2DC285042B239C3300637293 /* Test_LinkerConstraints.mm */,
+				2DC285022B239B4800637293 /* Test_LTO.mm */,
+				C1619D43294A4A420050CC73 /* Test_ModFuncs.mm */,
+				C19831D828EBAD160011803B /* Test_ObjC.h */,
+				C17E3A8128DE8BE200DE7807 /* Test_ObjC_32.mm */,
+				C1F98A2928D93FD70081A6EB /* Test_ObjC_64.mm */,
+				F90B1C3C28BD70A6000FB3C8 /* Test_ObjCStubs.mm */,
+				2DC6AB6429AF7AFD002C06A3 /* Test_ParallelSort.mm */,
+				C173993A29245BC600384E0E /* Test_RelinkableLibraries.mm */,
 				F98753DF28A4B80E005821ED /* Test_Relocations_arm64.mm */,
 				C13DEBD928CC1C9900AB32D1 /* Test_Relocations_arm64e.mm */,
 				C150220E28D1962700ECEC3D /* Test_Relocations_arm64_32.mm */,
 				F9D9D88A28ECD0AA00A3BBA5 /* Test_Relocations_x86_64.mm */,
 				C138A01D29008C600082CFB3 /* Test_Sections.mm */,
-				F9B53F5C289A1C0500CEB2C0 /* Test_Stubs.mm */,
-				2DEA10132AFAD208000687DE /* Test_Softlinking.mm */,
-				C1A4F39A29A566F20062298A /* Test_Alias.mm */,
-				2D3F9056290C031F00C6E637 /* Test_AtomSymbolTable.mm */,
 				2D7540482915732E00436215 /* Test_ShardHashtable.mm */,
-				C17E3A8128DE8BE200DE7807 /* Test_ObjC_32.mm */,
-				C1F98A2928D93FD70081A6EB /* Test_ObjC_64.mm */,
-				C19831D828EBAD160011803B /* Test_ObjC.h */,
-				F90B1C3C28BD70A6000FB3C8 /* Test_ObjCStubs.mm */,
-				2DE6C0B728D0B4330018D8FD /* Test_ArgVector.mm */,
-				C138A022290206080082CFB3 /* Test_Boundary.mm */,
-				F9FB884E29E62A450051729D /* Test_File.mm */,
-				C1DFA7912943D385006BA8DE /* Test_DTrace.mm */,
-				C149027A2915A2C000067BFD /* Test_ThreadLocals.mm */,
-				F92F3CC72A5DF342000B9DC8 /* Test_DelayInit.mm */,
-				C1739936291DC01E00384E0E /* Test_SplitSegInfo.mm */,
-				C1619D43294A4A420050CC73 /* Test_ModFuncs.mm */,
-				C173993A29245BC600384E0E /* Test_RelinkableLibraries.mm */,
-				C18A62BE2992D67F00E4A91E /* Test_DependencyInfo.mm */,
-				2DC6AB6429AF7AFD002C06A3 /* Test_ParallelSort.mm */,
-				2DEAECE429DFFA55005DD362 /* Test_ChunkBumpAllocator.mm */,
 				2DC4C9D22B33A1D800746DC4 /* Test_SharedCacheLinker.mm */,
-				F9B9E34228C8165A005B5987 /* TempFile.mm */,
+				2DEA10132AFAD208000687DE /* Test_Softlinking.mm */,
+				C1739936291DC01E00384E0E /* Test_SplitSegInfo.mm */,
+				F9B53F5C289A1C0500CEB2C0 /* Test_Stubs.mm */,
+				C149027A2915A2C000067BFD /* Test_ThreadLocals.mm */,
 				F9B9E34328C8165A005B5987 /* TempFile.h */,
-				F9337C5D2A0D8C5200B1EF11 /* TestLinker.mm */,
+				F9B9E34228C8165A005B5987 /* TempFile.mm */,
 				F9337C5E2A0D8C5200B1EF11 /* TestLinker.h */,
+				F9337C5D2A0D8C5200B1EF11 /* TestLinker.mm */,
 				2DC285012B23952700637293 /* TestBlobs.h */,
 				2D64BC1428D4BAB1005CF4B4 /* options */,
 			);
@@ -3059,12 +3112,13 @@
 				F98B354A24ED744200DE738B /* dyld */,
 				374338D525C30A32000FA265 /* libdyld_introspection */,
 				F98B356624ED744D00DE738B /* libdyld */,
+				F98B344E24EB729C00DE738B /* common */,
+				37744EAF2708E7E6005FAC96 /* lsl */,
 				37888B702A425A46005024BA /* framework */,
 				F9301CF426FAC17000746273 /* mach_o */,
-				37744EAF2708E7E6005FAC96 /* lsl */,
-				F98B344E24EB729C00DE738B /* common */,
 				C1E1AAB527C80A530049D700 /* cache_builder */,
 				F98B356E24ED745800DE738B /* cache-builder */,
+				DE8C1D802BACEB76004CA071 /* shared_cache_runtime */,
 				F9D7EF3124F41194002930F3 /* other-tools */,
 				F9A2C1F92894612A006FE9A0 /* ld */,
 				2D7F1DA32B33889800886295 /* shared_cache_linker */,
@@ -3116,6 +3170,9 @@
 				C1949B3B2B194D3F0056CD72 /* UnitTests-symbols_cache.xctest */,
 				C1A6059D2B1E93BC007E22DA /* dyld_symbols_cache */,
 				2D7F1DA22B33889800886295 /* SharedCacheLinker.framework */,
+				DE8C1D6F2BACE171004CA071 /* UnitTests-shared_cache_runtime.xctest */,
+				DE3989E92BAE5CB3006DCFAB /* SharedCacheRuntime.framework,
+				C128FF932BE213E600214E43 /* UnitTests-kernel_linker.xctest */,
 			);
 			name = Products;
 			sourceTree = "<group>";
@@ -3169,6 +3226,13 @@
 			runOnlyForDeploymentPostprocessing = 0;
 		};
 		37AA489B25D292A7004EA7F9 /* Headers */ = {
+			isa = PBXHeadersBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
+		DE3989E52BAE5CB3006DCFAB /* Headers */ = {
 			isa = PBXHeadersBuildPhase;
 			buildActionMask = 2147483647;
 			files = (
@@ -3526,6 +3590,40 @@
 			productReference = F98B354524EC445F00DE738B /* libKernelCollectionBuilder.dylib */;
 			productType = "com.apple.product-type.library.dynamic";
 		};
+		DE3989E82BAE5CB3006DCFAB /* SharedCacheRuntime */ = {
+			isa = PBXNativeTarget;
+			buildConfigurationList = DE3989F12BAE5CB3006DCFAB /* Build configuration list for PBXNativeTarget "SharedCacheRuntime" */;
+			buildPhases = (
+				DE3989E52BAE5CB3006DCFAB /* Headers */,
+				DE3989E62BAE5CB3006DCFAB /* Sources */,
+				DE3989E72BAE5CB3006DCFAB /* Frameworks */,
+			);
+			buildRules = (
+			);
+			dependencies = (
+			);
+			name = SharedCacheRuntime;
+			productName = libSharedCacheRuntime;
+			productReference = DE3989E92BAE5CB3006DCFAB /* SharedCacheRuntime.framework */;
+			productType = "com.apple.product-type.framework.static";
+		};
+		DE8C1D6E2BACE171004CA071 /* UnitTests-shared_cache_runtime */ = {
+			isa = PBXNativeTarget;
+			buildConfigurationList = DE8C1D7C2BACE171004CA071 /* Build configuration list for PBXNativeTarget "UnitTests-shared_cache_runtime" */;
+			buildPhases = (
+				DE8C1D6B2BACE171004CA071 /* Sources */,
+				DE8C1D6C2BACE171004CA071 /* Frameworks */,
+				DE8C1D6D2BACE171004CA071 /* Resources */,
+			);
+			buildRules = (
+			);
+			dependencies = (
+			);
+			name = "UnitTests-shared_cache_runtime";
+			productName = SharedCacheRuntimeTests;
+			productReference = DE8C1D6F2BACE171004CA071 /* UnitTests-shared_cache_runtime.xctest */;
+			productType = "com.apple.product-type.bundle.unit-test";
+		};
 		F91B35BA2794F1F5006DB55F /* dyld_nm */ = {
 			isa = PBXNativeTarget;
 			buildConfigurationList = F91B35C12794F1F5006DB55F /* Build configuration list for PBXNativeTarget "dyld_nm" */;
@@ -3800,7 +3898,7 @@
 			attributes = {
 				BuildIndependentTargetsInParallel = YES;
 				DefaultBuildSystemTypeForWorkspace = Latest;
-				LastSwiftUpdateCheck = 1500;
+				LastSwiftUpdateCheck = 1600;
 				LastUpgradeCheck = 1400;
 				TargetAttributes = {
 					2D26357128F4533D00CCF6E6 = {
@@ -3862,6 +3960,12 @@
 					C1BF4DAF2359254500B0F1AE = {
 						CreatedOnToolsVersion = 11.2;
 						ProvisioningStyle = Automatic;
+					};
+					DE3989E82BAE5CB3006DCFAB = {
+						CreatedOnToolsVersion = 16.0;
+					};
+					DE8C1D6E2BACE171004CA071 = {
+						CreatedOnToolsVersion = 16.0;
 					};
 					F91B35BA2794F1F5006DB55F = {
 						CreatedOnToolsVersion = 14.0;
@@ -3934,6 +4038,7 @@
 				F9D1001114D8D0BA00099D91 /* dsc_extractor */,
 				3721A634230CABAF00594066 /* test_support */,
 				C187B8FF1FE063A40042D3B7 /* libslc_builder.dylib */,
+				DE3989E82BAE5CB3006DCFAB /* SharedCacheRuntime */,
 				C1BF4DAF2359254500B0F1AE /* libKernelCollectionBuilder */,
 				37AA489E25D292A7004EA7F9 /* libdyld_introspection_static */,
 				F98B369224F0BDE900DE738B /* UnitTests-dyld */,
@@ -3944,6 +4049,7 @@
 				C1A0DFA4278BF9D500A5E21C /* UnitTests-cache_builder */,
 				37888B772A425A46005024BA /* UnitTests-framework */,
 				C1949AC22B194D3F0056CD72 /* UnitTests-symbols_cache */,
+				DE8C1D6E2BACE171004CA071 /* UnitTests-shared_cache_runtime */,
 			);
 		};
 /* End PBXProject section */
@@ -3993,6 +4099,13 @@
 			runOnlyForDeploymentPostprocessing = 0;
 		};
 		C1A0DFA3278BF9D500A5E21C /* Resources */ = {
+			isa = PBXResourcesBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
+		DE8C1D6D2BACE171004CA071 /* Resources */ = {
 			isa = PBXResourcesBuildPhase;
 			buildActionMask = 2147483647;
 			files = (
@@ -5030,6 +5143,23 @@
 				F9D7EF9224F57024002930F3 /* MachOAnalyzer.cpp in Sources */,
 				F9D7EF9424F57024002930F3 /* MachOAppCache.cpp in Sources */,
 				C1D635A727A37AC00053A2F7 /* ASLRTracker.cpp in Sources */,
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
+		DE3989E62BAE5CB3006DCFAB /* Sources */ = {
+			isa = PBXSourcesBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+				DE552AEF2BB4C3F70044843F /* SharedCacheRuntime.swift in Sources */,
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
+		DE8C1D6B2BACE171004CA071 /* Sources */ = {
+			isa = PBXSourcesBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+				DE99BECE2BFECC0300338639 /* SharedCacheRuntime.swift in Sources */,
+				DEBE886D2BAE57A600ED8C28 /* Test_SharedCacheRuntime.swift in Sources */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};
@@ -6519,7 +6649,7 @@
 		};
 		37F597D12061EB4200F9B6F9 /* Debug */ = {
 			isa = XCBuildConfiguration;
-			baseConfigurationReference = C1C420B32771111700BF6075 /* dyldinfo.xcconfig */;
+			baseConfigurationReference = C1C420B32771111700BF6075 /* dyld_info.xcconfig */;
 			buildSettings = {
 				GCC_ENABLE_CPP_EXCEPTIONS = YES;
 				GCC_ENABLE_CPP_RTTI = YES;
@@ -6537,7 +6667,7 @@
 		};
 		37F597D22061EB4200F9B6F9 /* Release */ = {
 			isa = XCBuildConfiguration;
-			baseConfigurationReference = C1C420B32771111700BF6075 /* dyldinfo.xcconfig */;
+			baseConfigurationReference = C1C420B32771111700BF6075 /* dyld_info.xcconfig */;
 			buildSettings = {
 				CODE_SIGN_IDENTITY = "-";
 				GCC_ENABLE_CPP_EXCEPTIONS = YES;
@@ -6929,6 +7059,187 @@
 			};
 			name = Release;
 		};
+		DE3989EF2BAE5CB3006DCFAB /* Debug */ = {
+			isa = XCBuildConfiguration;
+			baseConfigurationReference = DEA85B322BAE6837002A4205 /* shared_cache_runtime.xcconfig */;
+			buildSettings = {
+				ALWAYS_SEARCH_USER_PATHS = NO;
+				ASSETCATALOG_COMPILER_GENERATE_SWIFT_ASSET_SYMBOL_EXTENSIONS = YES;
+				CLANG_ANALYZER_NONNULL = YES;
+				CLANG_ANALYZER_NUMBER_OBJECT_CONVERSION = YES_AGGRESSIVE;
+				CLANG_CXX_LANGUAGE_STANDARD = "gnu++20";
+				CLANG_ENABLE_MODULES = YES;
+				CLANG_ENABLE_OBJC_ARC = YES;
+				CLANG_ENABLE_OBJC_WEAK = YES;
+				CLANG_WARN_DIRECT_OBJC_ISA_USAGE = YES_ERROR;
+				CLANG_WARN_DOCUMENTATION_COMMENTS = YES;
+				CLANG_WARN_OBJC_ROOT_CLASS = YES_ERROR;
+				CLANG_WARN_UNGUARDED_AVAILABILITY = YES_AGGRESSIVE;
+				CODE_SIGN_STYLE = Automatic;
+				COPY_PHASE_STRIP = NO;
+				DEBUG_INFORMATION_FORMAT = dwarf;
+				ENABLE_TESTABILITY = YES;
+				ENABLE_USER_SCRIPT_SANDBOXING = YES;
+				GCC_C_LANGUAGE_STANDARD = gnu17;
+				GCC_DYNAMIC_NO_PIC = NO;
+				GCC_OPTIMIZATION_LEVEL = 0;
+				GCC_PREPROCESSOR_DEFINITIONS = (
+					"DEBUG=1",
+					"$(inherited)",
+				);
+				GCC_WARN_ABOUT_RETURN_TYPE = YES_ERROR;
+				GCC_WARN_UNINITIALIZED_AUTOS = YES_AGGRESSIVE;
+				LOCALIZATION_PREFERS_STRING_CATALOGS = YES;
+				MACOSX_DEPLOYMENT_TARGET = 15.0;
+				MTL_ENABLE_DEBUG_INFO = INCLUDE_SOURCE;
+				MTL_FAST_MATH = YES;
+				PRODUCT_NAME = "$(TARGET_NAME)";
+				SDKROOT = macosx;
+				SWIFT_OPTIMIZATION_LEVEL = "-Onone";
+				SWIFT_VERSION = 5.0;
+			};
+			name = Debug;
+		};
+		DE3989F02BAE5CB3006DCFAB /* Release */ = {
+			isa = XCBuildConfiguration;
+			baseConfigurationReference = DEA85B322BAE6837002A4205 /* shared_cache_runtime.xcconfig */;
+			buildSettings = {
+				ALWAYS_SEARCH_USER_PATHS = NO;
+				ASSETCATALOG_COMPILER_GENERATE_SWIFT_ASSET_SYMBOL_EXTENSIONS = YES;
+				CLANG_ANALYZER_NONNULL = YES;
+				CLANG_ANALYZER_NUMBER_OBJECT_CONVERSION = YES_AGGRESSIVE;
+				CLANG_CXX_LANGUAGE_STANDARD = "gnu++20";
+				CLANG_ENABLE_MODULES = YES;
+				CLANG_ENABLE_OBJC_ARC = YES;
+				CLANG_ENABLE_OBJC_WEAK = YES;
+				CLANG_WARN_DIRECT_OBJC_ISA_USAGE = YES_ERROR;
+				CLANG_WARN_DOCUMENTATION_COMMENTS = YES;
+				CLANG_WARN_OBJC_ROOT_CLASS = YES_ERROR;
+				CLANG_WARN_UNGUARDED_AVAILABILITY = YES_AGGRESSIVE;
+				CODE_SIGN_STYLE = Automatic;
+				COPY_PHASE_STRIP = NO;
+				DEBUG_INFORMATION_FORMAT = "dwarf-with-dsym";
+				ENABLE_NS_ASSERTIONS = NO;
+				ENABLE_USER_SCRIPT_SANDBOXING = YES;
+				GCC_C_LANGUAGE_STANDARD = gnu17;
+				GCC_WARN_ABOUT_RETURN_TYPE = YES_ERROR;
+				GCC_WARN_UNINITIALIZED_AUTOS = YES_AGGRESSIVE;
+				LOCALIZATION_PREFERS_STRING_CATALOGS = YES;
+				MACOSX_DEPLOYMENT_TARGET = 15.0;
+				MTL_ENABLE_DEBUG_INFO = NO;
+				MTL_FAST_MATH = YES;
+				PRODUCT_NAME = "$(TARGET_NAME)";
+				SDKROOT = macosx;
+				SWIFT_OPTIMIZATION_LEVEL = "-Onone";
+				SWIFT_VERSION = 5.0;
+			};
+			name = Release;
+		};
+		DE8C1D792BACE171004CA071 /* Debug */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				ALLOW_TARGET_PLATFORM_SPECIALIZATION = YES;
+				ALWAYS_EMBED_SWIFT_STANDARD_LIBRARIES = YES;
+				ALWAYS_SEARCH_USER_PATHS = NO;
+				ASSETCATALOG_COMPILER_GENERATE_SWIFT_ASSET_SYMBOL_EXTENSIONS = YES;
+				CLANG_ANALYZER_NONNULL = YES;
+				CLANG_ANALYZER_NUMBER_OBJECT_CONVERSION = YES_AGGRESSIVE;
+				CLANG_CXX_LANGUAGE_STANDARD = "gnu++20";
+				CLANG_ENABLE_MODULES = YES;
+				CLANG_ENABLE_OBJC_ARC = YES;
+				CLANG_ENABLE_OBJC_WEAK = YES;
+				CLANG_WARN_DIRECT_OBJC_ISA_USAGE = YES_ERROR;
+				CLANG_WARN_DOCUMENTATION_COMMENTS = YES;
+				CLANG_WARN_OBJC_ROOT_CLASS = YES_ERROR;
+				CLANG_WARN_UNGUARDED_AVAILABILITY = YES_AGGRESSIVE;
+				CODE_SIGN_STYLE = Automatic;
+				COPY_PHASE_STRIP = NO;
+				CURRENT_PROJECT_VERSION = 1;
+				DEBUG_INFORMATION_FORMAT = dwarf;
+				ENABLE_TESTABILITY = YES;
+				ENABLE_USER_SCRIPT_SANDBOXING = YES;
+				GCC_C_LANGUAGE_STANDARD = gnu17;
+				GCC_DYNAMIC_NO_PIC = NO;
+				GCC_OPTIMIZATION_LEVEL = 0;
+				GCC_PREPROCESSOR_DEFINITIONS = (
+					"DEBUG=1",
+					"$(inherited)",
+				);
+				GCC_WARN_ABOUT_RETURN_TYPE = YES_ERROR;
+				GCC_WARN_UNINITIALIZED_AUTOS = YES_AGGRESSIVE;
+				GENERATE_INFOPLIST_FILE = YES;
+				HEADER_SEARCH_PATHS = (
+					./include,
+					./ld,
+					"${PROJECT_DIR}/shared_cache_runtime/Modules",
+				);
+				IPHONEOS_DEPLOYMENT_TARGET = 18.0;
+				LOCALIZATION_PREFERS_STRING_CATALOGS = YES;
+				MACOSX_DEPLOYMENT_TARGET = 15.0;
+				MARKETING_VERSION = 1.0;
+				MTL_ENABLE_DEBUG_INFO = INCLUDE_SOURCE;
+				MTL_FAST_MATH = YES;
+				PRODUCT_BUNDLE_IDENTIFIER = com.apple.SharedCacheRuntimeTests;
+				PRODUCT_NAME = "$(TARGET_NAME)";
+				SDKROOT = auto;
+				SUPPORTED_PLATFORMS = macosx;
+				SUPPORTS_MACCATALYST = NO;
+				SWIFT_ACTIVE_COMPILATION_CONDITIONS = "DEBUG $(inherited)";
+				SWIFT_EMIT_LOC_STRINGS = NO;
+				SWIFT_OPTIMIZATION_LEVEL = "-Onone";
+				SWIFT_VERSION = 5.0;
+			};
+			name = Debug;
+		};
+		DE8C1D7A2BACE171004CA071 /* Release */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				ALLOW_TARGET_PLATFORM_SPECIALIZATION = YES;
+				ALWAYS_EMBED_SWIFT_STANDARD_LIBRARIES = YES;
+				ALWAYS_SEARCH_USER_PATHS = NO;
+				ASSETCATALOG_COMPILER_GENERATE_SWIFT_ASSET_SYMBOL_EXTENSIONS = YES;
+				CLANG_ANALYZER_NONNULL = YES;
+				CLANG_ANALYZER_NUMBER_OBJECT_CONVERSION = YES_AGGRESSIVE;
+				CLANG_CXX_LANGUAGE_STANDARD = "gnu++20";
+				CLANG_ENABLE_MODULES = YES;
+				CLANG_ENABLE_OBJC_ARC = YES;
+				CLANG_ENABLE_OBJC_WEAK = YES;
+				CLANG_WARN_DIRECT_OBJC_ISA_USAGE = YES_ERROR;
+				CLANG_WARN_DOCUMENTATION_COMMENTS = YES;
+				CLANG_WARN_OBJC_ROOT_CLASS = YES_ERROR;
+				CLANG_WARN_UNGUARDED_AVAILABILITY = YES_AGGRESSIVE;
+				CODE_SIGN_STYLE = Automatic;
+				COPY_PHASE_STRIP = NO;
+				CURRENT_PROJECT_VERSION = 1;
+				DEBUG_INFORMATION_FORMAT = "dwarf-with-dsym";
+				ENABLE_NS_ASSERTIONS = NO;
+				ENABLE_USER_SCRIPT_SANDBOXING = YES;
+				GCC_C_LANGUAGE_STANDARD = gnu17;
+				GCC_WARN_ABOUT_RETURN_TYPE = YES_ERROR;
+				GCC_WARN_UNINITIALIZED_AUTOS = YES_AGGRESSIVE;
+				GENERATE_INFOPLIST_FILE = YES;
+				HEADER_SEARCH_PATHS = (
+					./include,
+					./ld,
+					"${PROJECT_DIR}/shared_cache_runtime/Modules",
+				);
+				IPHONEOS_DEPLOYMENT_TARGET = 18.0;
+				LOCALIZATION_PREFERS_STRING_CATALOGS = YES;
+				MACOSX_DEPLOYMENT_TARGET = 15.0;
+				MARKETING_VERSION = 1.0;
+				MTL_ENABLE_DEBUG_INFO = NO;
+				MTL_FAST_MATH = YES;
+				PRODUCT_BUNDLE_IDENTIFIER = com.apple.SharedCacheRuntimeTests;
+				PRODUCT_NAME = "$(TARGET_NAME)";
+				SDKROOT = auto;
+				SUPPORTED_PLATFORMS = macosx;
+				SUPPORTS_MACCATALYST = NO;
+				SWIFT_COMPILATION_MODE = wholemodule;
+				SWIFT_EMIT_LOC_STRINGS = NO;
+				SWIFT_VERSION = 5.0;
+			};
+			name = Release;
+		};
 		F908134311D3ED0C00626CC1 /* Debug */ = {
 			isa = XCBuildConfiguration;
 			baseConfigurationReference = F98B35A324ED748E00DE738B /* base.xcconfig */;
@@ -7165,7 +7476,7 @@
 		};
 		F9556D3D20C1F896004DF62A /* Debug */ = {
 			isa = XCBuildConfiguration;
-			baseConfigurationReference = C1C420B32771111700BF6075 /* dyldinfo.xcconfig */;
+			baseConfigurationReference = C1C420B32771111700BF6075 /* dyld_info.xcconfig */;
 			buildSettings = {
 				"ARCHS[sdk=macosx*]" = (
 					x86_64,
@@ -7182,7 +7493,7 @@
 		};
 		F9556D3E20C1F896004DF62A /* Release */ = {
 			isa = XCBuildConfiguration;
-			baseConfigurationReference = C1C420B32771111700BF6075 /* dyldinfo.xcconfig */;
+			baseConfigurationReference = C1C420B32771111700BF6075 /* dyld_info.xcconfig */;
 			buildSettings = {
 				"ARCHS[sdk=macosx*]" = (
 					arm64,
@@ -8144,6 +8455,24 @@
 			buildConfigurations = (
 				C1BF4DB22359254500B0F1AE /* Debug */,
 				C1BF4DB32359254500B0F1AE /* Release */,
+			);
+			defaultConfigurationIsVisible = 0;
+			defaultConfigurationName = Release;
+		};
+		DE3989F12BAE5CB3006DCFAB /* Build configuration list for PBXNativeTarget "SharedCacheRuntime" */ = {
+			isa = XCConfigurationList;
+			buildConfigurations = (
+				DE3989EF2BAE5CB3006DCFAB /* Debug */,
+				DE3989F02BAE5CB3006DCFAB /* Release */,
+			);
+			defaultConfigurationIsVisible = 0;
+			defaultConfigurationName = Release;
+		};
+		DE8C1D7C2BACE171004CA071 /* Build configuration list for PBXNativeTarget "UnitTests-shared_cache_runtime" */ = {
+			isa = XCConfigurationList;
+			buildConfigurations = (
+				DE8C1D792BACE171004CA071 /* Debug */,
+				DE8C1D7A2BACE171004CA071 /* Release */,
 			);
 			defaultConfigurationIsVisible = 0;
 			defaultConfigurationName = Release;

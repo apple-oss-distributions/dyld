@@ -7830,11 +7830,6 @@ uint64_t SharedCacheBuilder::getMaxSlide() const
     // We must be a largeContiguous cache. Others were dealt with above in the x86_64 and/or sim cases
     assert(this->config.layout.contiguous.has_value());
 
-    // Some caches have a fixed max slide
-    if ( this->config.layout.cacheFixedSlide.has_value() ) {
-        return this->config.layout.cacheFixedSlide.value();
-    }
-
     // Start off making sure we can't slide past the end of the cache
     CacheVMAddress maxVMAddress(0ULL);
     for ( const Region& region : this->subCaches.back().regions ) {

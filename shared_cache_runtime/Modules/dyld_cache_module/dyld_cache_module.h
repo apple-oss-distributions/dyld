@@ -1,6 +1,6 @@
-/* -*- mode: C++; c-basic-offset: 4; tab-width: 4 -*-
+/* -*- mode: C++; c-basic-offset: 4; tab-width: 4 -*- vim: ft=cpp et ts=4 sw=4:
  *
- * Copyright (c) 2021 Apple Inc. All rights reserved.
+ * Copyright (c) 2024 Apple Inc. All rights reserved.
  *
  * @APPLE_LICENSE_HEADER_START@
  *
@@ -21,20 +21,9 @@
  *
  * @APPLE_LICENSE_HEADER_END@
  */
+#ifndef SharedCacheRuntimeBridge_h
+#define SharedCacheRuntimeBridge_h
 
-#ifndef PVLEInt64_h
-#define PVLEInt64_h
+#include "dyld_cache_format.h"
 
-#include <cstdint>
-
-#include "Vector.h"
-
-namespace lsl {
-VIS_HIDDEN void emitPVLEUInt64(uint64_t value, Vector<std::byte>& data);
-VIS_HIDDEN uint64_t readPVLEUInt64(std::span<std::byte>& data);
-VIS_HIDDEN void emitPVLEInt64(int64_t value, Vector<std::byte>& data);
-VIS_HIDDEN int64_t readPVLEInt64(std::span<std::byte>& data);
-};
-
-
-#endif /* PVLEInt64_h */
+#endif

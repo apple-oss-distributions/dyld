@@ -2367,6 +2367,12 @@ bool MachOFile::canHavePrebuiltExecutableLoader(dyld3::Platform platform, const 
             failureReason("path not eligible");
             return false;
         }
+    } else {
+        // On embedded, only staged apps are excluded.  They will run from a different location at runtime
+        if ( path.find("/staged_system_apps/") != std::string::npos ) {
+            // Dont spam the user with an error about paths when we know these are never eligible.
+            return false;
+        }
     }
 
     if ( !hasCodeSignature() ) {

@@ -94,6 +94,7 @@ using lsl::Allocator;
   extern "C" void bootinfo_init(uintptr_t bootinfo);
   extern "C" void plat_common_parse_entry_vec(xrt__entry_vec_t vec[10], xrt__entry_args_t *args);
   extern "C" void _liblibc_stack_guard_init(void);
+  extern "C" void _secure_runtime_init(void);
 #else
   extern "C" void mach_init();
   extern "C" void __guard_setup(const char* apple[]);
@@ -356,7 +357,7 @@ __attribute__((noinline)) static MainFunc prepareSim(RuntimeState& state, const 
         uintptr_t requestedLoadAddress = (uintptr_t)(info.vmAddr - dyldSimPreferredLoadAddress + dyldSimLoadAddress);
         void*     segAddress           = ::mmap((void*)requestedLoadAddress, (size_t)info.fileSize, info.protections, MAP_FIXED | MAP_PRIVATE, fd, fileOffset + info.fileOffset);
         //state.log("dyld_sim %s mapped at %p\n", seg->segname, segAddress);
-        if ( segAddress == (void*)(-1) ) {
+        if ( segAddress == MAP_FAILED ) {
             mappingStr = "dyld_sim mmap() of segment failed";
             stop       = true;
         }
@@ -1141,6 +1142,9 @@ static void initializeLibc(KernelArgs* kernArgs, void* dyldSharedCache) __attrib
 
     // set up stack canary
     _liblibc_stack_guard_init();
+
+    // initialize secure runtime bits
+    _secure_runtime_init();
 #else
     mach_init();
 

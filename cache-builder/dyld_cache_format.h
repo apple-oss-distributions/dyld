@@ -25,7 +25,6 @@
 #define __DYLD_CACHE_FORMAT__
 
 #include <stdint.h>
-#include <uuid/uuid.h>
 
 #include <mach-o/fixup-chains.h>
 
@@ -213,7 +212,7 @@ struct dyld_cache_accelerator_dof
 
 struct dyld_cache_image_text_info
 {
-    uuid_t      uuid;
+    uint8_t     uuid[16];
     uint64_t    loadAddress;            // unslid address of start of __TEXT
     uint32_t    textSegmentSize;
     uint32_t    pathOffset;             // offset from start of cache file
