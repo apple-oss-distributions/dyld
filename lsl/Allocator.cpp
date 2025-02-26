@@ -130,7 +130,7 @@ MemoryManager::MemoryManager(const char** envp, const char** apple, void* dyldSh
     // Note this is the "does the HW support TPRO bit" not the "is this process using TPRO for DATA_CONST bit".
     // We want the HW bit here as the kernel keeps the TPRO flag enabled in the TPRO_CONST mapping, even
     // if it the process doesn't support TPRO for DATA_CONST
-    if ( (_simple_getenv(apple, "dyld_hw_tpro") != nullptr) && (vm_page_size == 0x4000)) {
+    if ( _simple_getenv(apple, "dyld_hw_tpro") != nullptr ) {
         bool isPrivateCache = false;
         if ( const char* privateCache = _simple_getenv(envp, "DYLD_SHARED_REGION") )
             isPrivateCache = !strcmp(privateCache, "private");

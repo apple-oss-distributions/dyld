@@ -359,7 +359,7 @@ static bool hasDataRegion(std::span<Region> regions)
     return false;
 }
 
-static bool hasLinkeditRegion(std::span<Region> regions)
+static bool hasReadOnlyRegion(std::span<Region> regions)
 {
     for ( const Region& region : regions ) {
         if ( region.chunks.empty() )
@@ -374,6 +374,33 @@ static bool hasLinkeditRegion(std::span<Region> regions)
             case cache_builder::Region::Kind::authConst:
                 break;
             case Region::Kind::readOnly:
+                return true;
+            case cache_builder::Region::Kind::linkedit:
+            case cache_builder::Region::Kind::unmapped:
+            case cache_builder::Region::Kind::dynamicConfig:
+            case cache_builder::Region::Kind::codeSignature:
+            case cache_builder::Region::Kind::numKinds:
+                break;
+        }
+    }
+    return false;
+}
+
+static bool hasLinkeditRegion(std::span<Region> regions)
+{
+    for ( const Region& region : regions ) {
+        if ( region.chunks.empty() )
+            continue;
+        switch ( region.kind ) {
+            case cache_builder::Region::Kind::text:
+            case cache_builder::Region::Kind::tproConst:
+            case cache_builder::Region::Kind::tproAuthConst:
+            case cache_builder::Region::Kind::dataConst:
+            case cache_builder::Region::Kind::data:
+            case cache_builder::Region::Kind::auth:
+            case cache_builder::Region::Kind::authConst:
+            case Region::Kind::readOnly:
+                break;
             case cache_builder::Region::Kind::linkedit:
                 return true;
             case cache_builder::Region::Kind::unmapped:
@@ -394,6 +421,7 @@ void SubCache::setSuffix(dyld3::Platform platform, bool forceDevelopmentSubCache
 
     const char* dataSuffix = forceDevelopmentSubCacheSuffix ? ".development.dylddata" : ".dylddata";
     const char* linkeditSuffix = forceDevelopmentSubCacheSuffix ? ".development.dyldlinkedit" : ".dyldlinkedit";
+    const char* readonlySuffix = forceDevelopmentSubCacheSuffix ? ".development.dyldreadonly" : ".dyldreadonly";
     const char* subCacheSuffix = forceDevelopmentSubCacheSuffix ? ".development" : "";
 
     if ( platform == dyld3::Platform::macOS ) {
@@ -411,6 +439,9 @@ void SubCache::setSuffix(dyld3::Platform platform, bool forceDevelopmentSubCache
     } else if ( hasDataRegion(this->regions) ) {
         // Data only subcaches have their own suffix
         this->fileSuffix = "." + dyld3::json::decimal(subCacheIndex) + dataSuffix;
+    } else if ( hasReadOnlyRegion(this->regions) ) {
+        // read-only only subcaches have their own suffix
+        this->fileSuffix = "." + dyld3::json::decimal(subCacheIndex) + readonlySuffix;
     } else if ( hasLinkeditRegion(this->regions) ) {
         // Linkedit only subcaches have their own suffix
         this->fileSuffix = "." + dyld3::json::decimal(subCacheIndex) + linkeditSuffix;

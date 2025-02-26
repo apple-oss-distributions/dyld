@@ -328,9 +328,8 @@ bool ProcessConfig::Process::defaultTproDataConst()
 #if TARGET_OS_EXCLAVEKIT || TARGET_OS_SIMULATOR
     return false;
 #else
-    // Note TPRO doesn't seem to work with 4k pages, so we disable it there
-    // It also doesn't work with private caches, although that is handled elsewhere in DyldCache::DyldCache()
-    return (this->appleParam("dyld_hw_tpro_pagers") != nullptr) && (vm_page_size == 0x4000);;
+    // TPRO doesn't work with private caches, although that is handled elsewhere in DyldCache::DyldCache()
+    return (this->appleParam("dyld_hw_tpro_pagers") != nullptr);
 #endif
 }
 
@@ -342,7 +341,7 @@ bool ProcessConfig::Process::defaultTproHW()
 #if TARGET_OS_EXCLAVEKIT || TARGET_OS_SIMULATOR
     return false;
 #else
-    return (this->appleParam("dyld_hw_tpro") != nullptr) && (vm_page_size == 0x4000);;
+    return (this->appleParam("dyld_hw_tpro") != nullptr);
 #endif
 }
 

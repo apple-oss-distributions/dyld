@@ -3062,6 +3062,43 @@ static void splitSubCachesWithStubs(const BuilderOptions& options,
             }
         }
 
+        // Also split the current file so that read-only are in their own files
+        {
+            // Create a new subCache
+            newSubCaches.push_back(SubCache::makeSubCache(options));
+            SubCache& newSubCache = newSubCaches.back();
+
+            // Move all data to the new subCache
+            for ( Region& oldRegion : subCache.regions ) {
+                if ( oldRegion.chunks.empty() )
+                    continue;
+
+                // Move all the data regions, leave the rest
+                switch ( oldRegion.kind ) {
+                    case cache_builder::Region::Kind::text:
+                    case cache_builder::Region::Kind::dataConst:
+                    case cache_builder::Region::Kind::tproConst:
+                    case cache_builder::Region::Kind::data:
+                    case cache_builder::Region::Kind::auth:
+                    case cache_builder::Region::Kind::authConst:
+                    case cache_builder::Region::Kind::tproAuthConst:
+                        // Nothing to do here
+                        break;
+                    case cache_builder::Region::Kind::readOnly:{
+                        Region& newRegion = newSubCache.regions[(uint32_t)oldRegion.kind];
+                        newRegion.chunks = std::move(oldRegion.chunks);
+                        break;
+                    }
+                    case cache_builder::Region::Kind::linkedit:
+                    case cache_builder::Region::Kind::unmapped:
+                    case cache_builder::Region::Kind::dynamicConfig:
+                    case cache_builder::Region::Kind::codeSignature:
+                    case cache_builder::Region::Kind::numKinds:
+                        break;
+                }
+            }
+        }
+
         // Done splitting the current subCache, so move it from the source list to the new list
         newSubCaches.push_back(std::move(subCache));
     }
