@@ -39,7 +39,7 @@ extern "C" {
  * Internal interface for dlopen; intended to help audit internal use of
  * dlopen.
  */
-extern void * dlopen_audited(const char * __path, int __mode) __DYLDDL_DRIVERKIT_UNAVAILABLE;
+extern void * dlopen_audited(const char * __path, int __mode) __DYLDDL_UNAVAILABLE;
 
 
 /*
@@ -47,7 +47,7 @@ extern void * dlopen_audited(const char * __path, int __mode) __DYLDDL_DRIVERKIT
  * This SPI allows you to simulate dlopen() being called by other code.
  * Available in macOS 11.0 and iOS 14.0 and later.
  */
-extern void* dlopen_from(const char* __path, int __mode, void* __addressInCaller) __DYLDDL_DRIVERKIT_UNAVAILABLE;
+extern void* dlopen_from(const char* __path, int __mode, void* __addressInCaller) __DYLDDL_UNAVAILABLE;
 
 
 #ifdef __cplusplus

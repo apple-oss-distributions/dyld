@@ -47,6 +47,7 @@ struct ObjCSelectorOptimizer;
 struct ObjCCategoryOptimizer;
 struct StubOptimizer;
 struct UnmappedSymbolsOptimizer;
+struct FunctionVariantsOptimizer;
 
 // A dylib which will be included in the cache
 struct CacheDylib
@@ -82,7 +83,7 @@ struct CacheDylib
                                                    const std::vector<const CacheDylib *>& cacheDylibs,
                                                    PatchInfo& dylibPatchInfo);
     void bind(Diagnostics& diag, const BuilderConfig& config, Timer::AggregateTimer& timer,
-              PatchInfo& dylibPatchInfo);
+              PatchInfo& dylibPatchInfo, FunctionVariantsOptimizer& functionVariantsOptimizer);
     void updateObjCSelectorReferences(Diagnostics& diag, const BuilderConfig& config, Timer::AggregateTimer& timer,
                                       ObjCSelectorOptimizer& objcSelectorOptimizer);
     void convertObjCMethodListsToOffsets(Diagnostics& diag, const BuilderConfig& config, Timer::AggregateTimer& timer,
@@ -149,6 +150,8 @@ struct CacheDylib
             VMOffset            targetRuntimeOffset;
             const CacheDylib*   targetDylib;
             bool                isWeakDef;
+            bool                isFunctionVariant;
+            uint16_t            functionVariantTableIndex;
         };
 
         struct CacheImage
@@ -156,6 +159,8 @@ struct CacheDylib
             VMOffset            targetRuntimeOffset;
             const CacheDylib*   targetDylib;
             bool                isWeakDef;
+            bool                isFunctionVariant;
+            uint16_t            functionVariantTableIndex;
         };
 
         Kind        kind    = Kind::absolute;
@@ -170,6 +175,9 @@ struct CacheDylib
         };
         uint64_t    addend  = 0;
         bool        isWeakImport;
+#if DEBUG
+        CString     name;
+#endif
     };
 
     typedef std::pair<BindTarget, std::string> BindTargetAndName;
@@ -207,13 +215,16 @@ private:
                       dyld3::MachOFile::ChainedFixupPointerOnDisk* fixupLoc,
                       CacheVMAddress fixupVMAddr, dyld3::MachOFile::PointerMetaData pmd,
                       CoalescedGOTMap& coalescedGOTs, CoalescedGOTMap& coalescedAuthGOTs,
-                      CoalescedGOTMap& coalescedAuthPtrs, PatchInfo& dylibPatchInfo);
+                      CoalescedGOTMap& coalescedAuthPtrs, PatchInfo& dylibPatchInfo,
+                      FunctionVariantsOptimizer& functionVariantsOptimizer);
     void bindWithChainedFixups(Diagnostics& diag, const BuilderConfig& config,
                                CoalescedGOTMap& coalescedGOTs, CoalescedGOTMap& coalescedAuthGOTs,
-                               CoalescedGOTMap& coalescedAuthPtrs, PatchInfo& dylibPatchInfo);
+                               CoalescedGOTMap& coalescedAuthPtrs, PatchInfo& dylibPatchInfo,
+                               FunctionVariantsOptimizer& functionVariantsOptimizer);
     void bindWithOpcodeFixups(Diagnostics& diag, const BuilderConfig& config,
                               CoalescedGOTMap& coalescedGOTs, CoalescedGOTMap& coalescedAuthGOTs,
-                              CoalescedGOTMap& coalescedAuthPtrs, PatchInfo& dylibPatchInfo);
+                              CoalescedGOTMap& coalescedAuthPtrs, PatchInfo& dylibPatchInfo,
+                              FunctionVariantsOptimizer& functionVariantsOptimizer);
 
     void forEachReferenceToASelRef(Diagnostics &diags,
                                    void (^handler)(uint64_t kind, uint32_t* instrPtr, uint64_t selRefVMAddr)) const;
@@ -248,11 +259,13 @@ private:
 public:
     InputFile*                              inputFile               = nullptr;
     const dyld3::MachOFile*                 inputMF                 = nullptr;
+    const mach_o::Header*                   inputHdr                = nullptr;
     InputDylibVMAddress                     inputLoadAddress;
     std::string_view                        installName;
     uint32_t                                cacheIndex;
     bool                                    needsPatchTable         = true;
     dyld3::MachOFile*                       cacheMF                 = nullptr;
+    const mach_o::Header*                   cacheHdr                = nullptr;
     CacheVMAddress                          cacheLoadAddress;
     std::vector<DylibSegmentChunk>          segments;
     // This is a list due to iterator invalidation, ie, calculateSubCacheSymbolStrings() deletes

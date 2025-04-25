@@ -28,17 +28,6 @@
 
 #include <span>
 #include <string_view>
-#if BUILDING_MACHO_WRITER
-  #include <vector>
-  #include <list>
-#include <mach/mach_vm.h>
-#include <mach/vm_map.h>
-#include <mach/task.h>
-#include <mach/mach_types.h>
-#include <mach/vm_task.h>
-#include <mach/mach_init.h>
-#include "ChunkBumpAllocator.h"
-#endif
 
 #include "Array.h"
 
@@ -69,34 +58,12 @@ protected:
     void            forEachEntry(void (^callback)(const Entry& entry, bool& stop)) const;
     uint32_t        entryCount() const;
 
-#if BUILDING_MACHO_WRITER
-public:
-    const uint8_t*  bytes(size_t& size);
-    size_t          size() { return _trieSize; }
-    Error&          buildError() { return _buildError; }
-    void            writeTrieBytes(std::span<uint8_t> bytes);
-
-protected:
-    void            buildNodes(std::span<const GenericTrieWriterEntry> entries);
-#endif
     void            dump() const;
     Error           recurseTrie(const uint8_t* p, dyld3::OverflowSafeArray<char>& cummulativeString,
                                 int curStrOffset, bool& stop, void (^callback)(const char* name, std::span<const uint8_t> nodePayload, bool& stop)) const;
 
-#if BUILDING_MACHO_WRITER
-protected:
-#endif
-
     const uint8_t*       _trieStart;
     const uint8_t*       _trieEnd;
-#if BUILDING_MACHO_WRITER
-    Error                _buildError;
-    std::vector<uint8_t> _trieBytes;
-    GenericTrieNode*     _rootNode=nullptr;
-    size_t               _trieSize;
-
-    ChunkBumpAllocatorZone _allocatorZone;
-#endif
 };
 
 
@@ -113,9 +80,6 @@ public:
                     // encapsulates exports trie in a final linked image
                     ExportsTrie(const uint8_t* start, size_t size) : GenericTrie(start, size) { }
 
-#if BUILDING_MACHO_WRITER
-                    ExportsTrie(std::span<const Symbol> exports, bool writeBytes=true, bool needsSort=true);
-#endif
     Error           valid(uint64_t maxVmOffset) const;
     bool            hasExportedSymbol(const char* symbolName, Symbol& symbol) const;
     void            forEachExportedSymbol(void (^callback)(const Symbol& symbol, bool& stop)) const;
@@ -141,9 +105,6 @@ public:
 
                     struct DylibAndIndex { std::string_view path=""; uint32_t index=0; };
     
-#if BUILDING_MACHO_WRITER
-                    DylibsPathTrie(std::span<const DylibAndIndex> dylibs, bool needsSort=true);
-#endif
     bool            hasPath(const char* path, uint32_t& dylibIndex) const;
     void            forEachDylibPath(void (^callback)(const DylibAndIndex& info, bool& stop)) const;
 

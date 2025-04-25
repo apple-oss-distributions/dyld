@@ -66,10 +66,8 @@ static const Architecture* archs_arm64e[]               = { &Architecture::arm64
 static const Architecture* archs_arm64e_keysOff[]       = { &Architecture::arm64e, &Architecture::arm64e_v1, &Architecture::arm64, &Architecture::arm64_alt };
 static const Architecture* archs_watchSeries3[]         = { &Architecture::armv7k };
 static const Architecture* archs_watchSeries4[]         = { &Architecture::arm64_32 };
-#if BUILDING_LIBDYLD || BUILDING_UNIT_TESTS
 static const Architecture* archs_AppleSilicon[]         = { &Architecture::arm64e, &Architecture::arm64, &Architecture::x86_64 };
 static const Architecture* archs_iOS[]                  = { &Architecture::arm64e, &Architecture::arm64e_v1, &Architecture::arm64, &Architecture::arm64_alt};
-#endif
 
 constinit const GradedArchitectures GradedArchitectures::load_mac(                archs_mac,            sizeof(archs_mac));
 constinit const GradedArchitectures GradedArchitectures::load_macHaswell(         archs_macHaswell,     sizeof(archs_macHaswell));
@@ -80,8 +78,6 @@ constinit const GradedArchitectures GradedArchitectures::load_arm64e_osBinaryOnl
 constinit const GradedArchitectures GradedArchitectures::load_watchSeries3(       archs_watchSeries3,   sizeof(archs_watchSeries3));
 constinit const GradedArchitectures GradedArchitectures::load_watchSeries4(       archs_watchSeries4,   sizeof(archs_watchSeries4));
 
-
-#if BUILDING_LIBDYLD || BUILDING_UNIT_TESTS
 // pre-built objects for use to see if a program is launchable
 constinit const GradedArchitectures GradedArchitectures::launch_iOS(            archs_iOS,          sizeof(archs_iOS));
 constinit const GradedArchitectures GradedArchitectures::launch_mac(            archs_mac,          sizeof(archs_mac));
@@ -89,7 +85,6 @@ constinit const GradedArchitectures GradedArchitectures::launch_macHaswell(     
 constinit const GradedArchitectures GradedArchitectures::launch_macAppleSilicon(archs_AppleSilicon, sizeof(archs_AppleSilicon));
 constinit const GradedArchitectures GradedArchitectures::launch_sim(            archs_mac,          sizeof(archs_mac));
 constinit const GradedArchitectures GradedArchitectures::launch_simAppleSilicon(archs_arm64,        sizeof(archs_arm64));
-#endif
 
 
 } // namespace mach_o

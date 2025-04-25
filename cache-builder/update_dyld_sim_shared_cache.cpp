@@ -409,33 +409,31 @@ static bool writeMRMResults(bool cacheBuildSuccess, MRMSharedCacheBuilder* share
     return true;
 }
 
-static dyld3::Platform getPlatform(Diagnostics& diags, std::string_view rootPath)
+static mach_o::Platform getPlatform(Diagnostics& diags, std::string_view rootPath)
 {
     // Infer the platform from dyld_sim
     std::string dyldSimPath = std::string(rootPath) + "/usr/lib/dyld_sim";
 
     std::optional<MappedFile> mappedFile = loadFile(diags, dyldSimPath.c_str());
     if ( !mappedFile.has_value() )
-        return dyld3::Platform::unknown;
+        return mach_o::Platform();
 
-    __block dyld3::Platform platform = dyld3::Platform::unknown;
+    __block mach_o::Platform platform = mach_o::Platform();
     if ( dyld3::FatFile::isFatFile(mappedFile->buffer) ) {
         const dyld3::FatFile* ff = (dyld3::FatFile*)mappedFile->buffer;
         ff->forEachSlice(diags, mappedFile->bufferSize,
                          ^(uint32_t sliceCpuType, uint32_t sliceCpuSubType, const void* sliceStart, uint64_t sliceSize, bool& stop) {
-            const dyld3::MachOFile* mf = (dyld3::MachOFile*)sliceStart;
-            mf->forEachSupportedPlatform(^(dyld3::Platform plat, uint32_t minOS, uint32_t sdk) {
-                if ( platform == dyld3::Platform::unknown)
-                    platform = plat;
-            });
+            const mach_o::Header* mh = (mach_o::Header*)sliceStart;
+            mach_o::PlatformAndVersions pvs = mh->platformAndVersions();
+            if ( platform.empty() )
+                platform = pvs.platform;
         });
     } else {
-        const dyld3::MachOFile* mf = (dyld3::MachOFile*)mappedFile->buffer;
-        if ( mf->isMachO(diags, mappedFile->bufferSize) ) {
-            mf->forEachSupportedPlatform(^(dyld3::Platform plat, uint32_t minOS, uint32_t sdk) {
-                if ( platform == dyld3::Platform::unknown)
-                    platform = plat;
-            });
+        const mach_o::Header* mh = (mach_o::Header*)mappedFile->buffer;
+        if ( mh->valid(mappedFile->bufferSize) ) {
+            mach_o::PlatformAndVersions pvs = mh->platformAndVersions();
+            if ( platform.empty() )
+                platform = pvs.platform;
         }
     }
 
@@ -570,7 +568,7 @@ int main(int argc, const char* argv[], const char* envp[])
 
     // The platform comes from dyld_sim now
     Diagnostics diags;
-    dyld3::Platform platform = getPlatform(diags, rootPath);
+    mach_o::Platform platform = getPlatform(diags, rootPath);
     if ( diags.hasError() ) {
         fprintf(stderr, "update_dyld_sim_shared_cache: error: could not find sim platform because: %s\n",
                 diags.errorMessageCStr());
@@ -583,7 +581,7 @@ int main(int argc, const char* argv[], const char* envp[])
     buildOptions.updateName                         = "sim";
     buildOptions.deviceName                         = "sim";
     buildOptions.disposition                        = InternalMinDevelopment;
-    buildOptions.platform                           = (Platform)platform;
+    buildOptions.platform                           = (Platform)platform.value();
     buildOptions.archs                              = buildArchs.data();
     buildOptions.numArchs                           = buildArchs.size();
     buildOptions.verboseDiagnostics                 = verbose;

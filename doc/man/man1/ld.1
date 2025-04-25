@@ -221,7 +221,7 @@ the -F and directory.
 .It Fl all_load
 Loads all members of static archive libraries.
 .It Fl ObjC
-Loads all members of static archive libraries that implement an Objective-C class or category.
+Loads all members of static archive libraries that implement an Objective-C class, category or a Swift struct, class or an extesion.
 .It Fl force_load Ar path_to_archive
 Loads all members of the specified static archive library.  Note: -all_load forces all members of all
 archives to be loaded.  This option allows you to target a specific archive.
@@ -307,6 +307,8 @@ is a numeric value as defined in <mach-o/loader.h>, or it may be one of the foll
 .It \(bu visionos-simulator
 .It \(bu xros-simulator
 .It \(bu driverkit
+.It \(bu firmware
+.It \(bu sepOS
 .El
 Specifying a newer min or SDK version enables the linker to assume features of that OS or SDK in the
 output file. The format of
@@ -673,12 +675,17 @@ This option prints out a line show where and why each symbol was moved.
 Note: These options do chain.  For each symbol, the linker first checks
 -move_to_ro_segment and -move_to_rw_segment. Next it applies any -rename_section options,
 and lastly and -rename_segment options.
+.It Fl trace_symbol_layout_file Ar symbol_layout_file_path
+This is the same as -trace_symbol_layout, but accepts a
+.Ar symbol_layout_file_path
+to write the trace data to.
 .It Fl section_order Ar segname Ar colon_separated_section_list
-Only for use with -preload.  Specifies the order that sections with the specified segment should be layout out.
+Only for use with -preload, -dylinker, -static, or with -platform_version "firmware"/"sepOS".  Specifies the order in which the linker should lay out the sections for the specified segment.
 For example: "-section_order __ROM __text:__const:__cstring".
+The specified sections are the placed first in the segment. The remaining unspecified sections are ordered as they would have been if -section_order was not specified.
 .It Fl segment_order Ar colon_separated_segment_list
-Only for use with -preload.  Specifies the order segments should be layout out.
-For example: "-segment_order __ROM:__ROM2:__RAM".
+Only for use with -preload, -static, or with -platform_version "firmware". Specifies the order in which the linker should lay out the segments.
+For example: "-segment_order __ROM:__ROM2:__RAM". All segments should be specified.
 .It Fl allow_heap_execute
 Normally i386 main executables will be marked so that the Mac OS X 10.7 and later kernel
 will only allow pages with the x-bit to execute instructions. This option overrides that
@@ -774,6 +781,7 @@ Specifies the initial address of the stack pointer value, where value is a hexad
 .It Fl segprot Ar segname Ar max_prot Ar init_prot
 Specifies the maximum and initial virtual memory protection of the named segment, name, to be max and init ,respectively.
 The values for max and init are any combination of the characters `r' (for read), `w' (for write), `x' (for execute) and `-' (no access).
+Except for x86_64 architecture, max_prot will always be set to the same value as init_prot.
 .It Fl seg_addr_table Ar filename
 Specifies a file containing base addresses for dynamic libraries.  Each line of the file is a hexadecimal base address
 followed by whitespace then the install name of the corresponding dylib. The # character denotes a comment.
@@ -802,8 +810,8 @@ The created output file will be in the prebound format.  This was used in Mac OS
 Specifies what to do if a symbol is weak-imported in one object file but not weak-imported in another.  The valid
 treatments are: error, weak, or non-weak.  The default is non-weak.
 .It Fl read_only_relocs Ar treatment
-Enables the use of relocations which will cause dyld to modify (copy-on-write) read-only pages.  The compiler will
-normally never generate such code.
+Enables the use of relocations in read-only segments.  Options are: 'warning', 'error', or 'suppress'.  The default and only supported
+option for dynamic binaries is 'error'.  Other treatments are reserved for use with firmware or embedded targets.
 .It Fl force_cpusubtype_ALL
 The is only applicable with -arch ppc.  It tells the linker to ignore the PowerPC cpu requirements (e.g. G3, G4 or G5) encoded
 in the object files and mark the resulting binary as runnable on any PowerPC cpu.
@@ -891,16 +899,12 @@ When performing Incremental Link Time Optimization (LTO), the cache will be prun
 of the free space. I.e. a value of 100 would indicate that the cache may fill the disk, and a value of 50 would
 indicate that the cache size will be kept under the free disk space.
 .It Fl fixup_chains_section
-For use with -static or -preload when -pie is used.  Tells the linker to add a __TEXT,__chain_starts
+For use with -static or -preload when -pie is used. Tells the linker to add a __TEXT,__chain_starts
 section which starts with a dyld_chained_starts_offsets struct which specifies the pointer format
-and the offsets to the start of every fixup chain.
+and the file offsets to the start of every fixup chain. The rebase targets in the chains are vm offsets.
 .It Fl fixup_chains_section_vm
-Same as -fixup_chains_section but fixes a bug.  The offsets in the __chain_starts section are vm-offsets
-from the __TEXT segment, and the rebase targets in the chains are vm-offsets.
-.It Fl threaded_starts_section
-For arm64e only.  For use with -static or -preload when -pie is used.  Tells the linker to add a __TEXT,__thread_starts
-section which starts with a 32-bit flag field, followed by an array 32-bit values.  Each value is
-the offset to the start of a fixup chain. This option is deprecated.
+Same as -fixup_chains_section, but fixes a bug.  The offsets in the __chain_starts section are vm offsets
+from the __TEXT segment, and the rebase targets in the chains are vm offsets.
 .It Fl page_align_data_atoms
 During development, this option can be used to space out all global variables so each is on a separate page.
 This is useful when analyzing dirty and resident pages.  The information can then be used to create an
@@ -913,6 +917,11 @@ tells the linker to not add that extra info.
 For use when linking against versioned frameworks that do not have a normal variant.
 By default when -framework Foo,_suffix is used, the linker will follow Foo.framework/Foo if it is a symbolic link, append _suffix and search for a file with that path.
 When this option is used, the linker will also search for Foo.framework/Versions/Current/Foo_suffix.
+.\".It Fl -memory_layout_file Ar layout_file_path
+.\"Specifies a file that describes how the linker should lay out the memory.
+.\"See
+.\".Xr ld-layout-file 1
+.\"for format reference.
 .It Fl ld_classic
 Override the choice of linker, and force the use of
 .Nm ld-classic
@@ -1004,7 +1013,7 @@ Display each file in which
 .Ar symbol
 is used.  This was previously used to debug where an undefined symbol was used, but the linker now
 automatically prints out all usages.  The -why_live option can also be used to display what kept
-a symbol from being dead striped.  This option is obsolete.
+a symbol from being dead stripped.  This option is obsolete.
 .It Fl Y Ar number
 Used to control how many occurrences of each symbol specified with -y would be shown.  This option is obsolete.
 .It Fl nomultidefs
@@ -1039,5 +1048,5 @@ The specified
 contains a list of symbol names that are to be poisoned.
 .El
 .Sh SEE ALSO
-ld-classic(1), as(1), ar(1), cc(1), dyld_info(1), nm(1), otool(1) lipo(1),
+ld-classic(1), ld-layout-file(1), as(1), ar(1), cc(1), dyld_info(1), nm(1), otool(1) lipo(1),
 arch(3), dyld(3), Mach-O(5), strip(1), rebase(1)

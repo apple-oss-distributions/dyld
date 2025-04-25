@@ -24,12 +24,4 @@
 
 #import <Foundation/Foundation.h>
 
-//! Project version number for dyld_framework.
-FOUNDATION_EXPORT double Dyld_frameworkVersionNumber;
-
-//! Project version string for dyld_framework.
-FOUNDATION_EXPORT const unsigned char Dyld_frameworkVersionString[];
-
-// In this header, you should import all the public headers of your framework using statements like #import <dyld_framework/PublicHeader.h>
-
-
+//TODO: Add includes to the ObjC interface

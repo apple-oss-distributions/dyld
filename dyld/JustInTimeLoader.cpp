@@ -46,6 +46,7 @@ using dyld3::MachOAnalyzer;
 using dyld3::MachOFile;
 using dyld3::FatFile;
 using mach_o::Header;
+using mach_o::Platform;
 using mach_o::Version32;
 
 namespace dyld4 {
@@ -102,15 +103,15 @@ bool JustInTimeLoader::contains(RuntimeState& state, const void* addr, const voi
     }
 
     __block bool         result     = false;
-    const MachOAnalyzer* ma         = (const MachOAnalyzer*)this->mappedAddress;
-    uint64_t             vmTextAddr = ma->preferredLoadAddress();
-    uint64_t             slide      = (uintptr_t)ma - vmTextAddr;
+    const Header*        hdr         = (const Header*)this->mappedAddress;
+    uint64_t             vmTextAddr = hdr->preferredLoadAddress();
+    uint64_t             slide      = (uintptr_t)hdr - vmTextAddr;
     uint64_t             targetAddr = (uint64_t)addr;
-    ma->forEachSegment(^(const MachOAnalyzer::SegmentInfo& info, bool& stop) {
-        if ( ((info.vmAddr + slide) <= targetAddr) && (targetAddr < (info.vmAddr + slide + info.vmSize)) ) {
-            *segAddr  = (void*)(info.vmAddr + slide);
-            *segSize  = info.vmSize;
-            *segPerms = info.protections;
+    hdr->forEachSegment(^(const Header::SegmentInfo& info, bool& stop) {
+        if ( ((info.vmaddr + slide) <= targetAddr) && (targetAddr < (info.vmaddr + slide + info.vmsize)) ) {
+            *segAddr  = (void*)(info.vmaddr + slide);
+            *segSize  = info.vmsize;
+            *segPerms = info.initProt;
             result    = true;
             stop      = true;
         }
@@ -124,7 +125,7 @@ bool JustInTimeLoader::matchesPath(const RuntimeState& state, const char* path) 
     if ( strcmp(path, this->path(state)) == 0 )
         return true;
     if ( this->altInstallName ) {
-        if ( strcmp(path, this->mappedAddress->installName()) == 0 )
+        if ( strcmp(path, ((const Header*)this->mappedAddress)->installName()) == 0 )
             return true;
     }
     if ( pd ) {
@@ -196,7 +197,7 @@ static void getObjCPatchClasses(const dyld3::MachOAnalyzer* ma, PointerSet& clas
     // Find the classlist and see which entries are binds to self
     uint64_t classListRuntimeOffset;
     uint64_t classListSize;
-    bool foundSection = ma->findObjCDataSection("__objc_classlist", classListRuntimeOffset, classListSize);
+    bool foundSection = ((const Header*)ma)->findObjCDataSection("__objc_classlist", classListRuntimeOffset, classListSize);
     if ( !foundSection )
         return;
 
@@ -289,15 +290,10 @@ static void getObjCPatchClasses(const dyld3::MachOAnalyzer* ma, PointerSet& clas
 
 // A singleton object can only be patched if it matches the layout/authentication expected by the patcher
 // This finds all eligible singleton classes
-static void getSingletonPatches(const dyld3::MachOAnalyzer* ma, PointerSet& objectPointers)
+static void getSingletonPatches(const Header* hdr, PointerSet& objectPointers)
 {
-    Diagnostics diag;
-    ma->forEachSingletonPatch(diag, ^(dyld3::MachOAnalyzer::SingletonPatchKind kind, uint64_t runtimeOffset) {
-        // We only handle a single kind of singleton object for now
-        if ( kind != dyld3::MachOAnalyzer::SingletonPatchKind::cfObj2 )
-            return;
-
-        void* value = (uint8_t*)ma + runtimeOffset;
+    hdr->forEachSingletonPatch(^(uint64_t runtimeOffset) {
+        void* value = (uint8_t*)hdr + runtimeOffset;
         objectPointers.insert({ value, true });
     });
 }
@@ -356,7 +352,7 @@ const Loader::DylibPatch* JustInTimeLoader::makePatchTable(RuntimeState& state, 
             getObjCPatchClasses(this->analyzer(), eligibleClasses);
 
         __block PointerSet eligibleSingletons;
-        getSingletonPatches(this->analyzer(), eligibleSingletons);
+        getSingletonPatches(((const Header*)this->analyzer()), eligibleSingletons);
 
         patchTable.forEachPatchableExport(indexOfOverriddenCachedDylib, ^(uint32_t dylibVMOffsetOfImpl, const char* exportName,
                                                                           PatchKind patchKind) {
@@ -433,7 +429,7 @@ const Loader::DylibPatch* JustInTimeLoader::makePatchTable(RuntimeState& state, 
         // record in Loader
         return table;
 #else
-        CacheVMAddress thisVMAddr(this->mf(state)->preferredLoadAddress());
+        CacheVMAddress thisVMAddr(((const Header*)this->mf(state))->preferredLoadAddress());
 
         // The cache builder doesn't lay out dylibs in VM layout, so we need to use VMAddr/VMOffset everywhere
         patchTable.forEachPatchableExport(indexOfOverriddenCachedDylib, ^(uint32_t dylibVMOffsetOfImpl, const char* exportName,
@@ -443,7 +439,7 @@ const Loader::DylibPatch* JustInTimeLoader::makePatchTable(RuntimeState& state, 
             if ( this->hasExportedSymbol(exportDiag, state, exportName, staticLink, skipResolver, &foundSymbolInfo) ) {
                 if ( extra )
                     state.log("   will patch cache uses of '%s' %s\n", exportName, PatchTable::patchKindName(patchKind));
-                CacheVMAddress implBaseVMAddr(foundSymbolInfo.targetLoader->mf(state)->preferredLoadAddress());
+                CacheVMAddress implBaseVMAddr(((const Header*)foundSymbolInfo.targetLoader->mf(state))->preferredLoadAddress());
                 CacheVMAddress newImplVMAddr = implBaseVMAddr + VMOffset(foundSymbolInfo.targetRuntimeOffset);
 
                 // note: we are saving a signed 64-bit offset to the impl.  This is to support re-exported symbols
@@ -473,9 +469,9 @@ void JustInTimeLoader::loadDependents(Diagnostics& diag, RuntimeState& state, co
 
     // add first level of dependents
     __block int                 depIndex = 0;
-    const mach_o::MachOFileRef& mf = this->mappedAddress;
-    const Header*               mh = (Header*)(&mf->magic); // Better way?
-    mh->forEachLinkedDylib(^(const char* loadPath, LinkedDylibAttributes depAttrs, Version32 compatVersion, Version32 curVersion, bool& stop) {
+    const mach_o::MachOFileRef& mf  = this->mappedAddress;
+    const Header*               hdr = (const Header*)(mf); // Better way?
+    hdr->forEachLinkedDylib(^(const char* loadPath, LinkedDylibAttributes depAttrs, Version32 compatVersion, Version32 curVersion, bool synthesizedLink, bool& stop) {
         // fix illegal combinations of dylib attributes
         if ( depAttrs.reExport && depAttrs.delayInit )
             depAttrs.delayInit = false;
@@ -529,8 +525,9 @@ void JustInTimeLoader::loadDependents(Diagnostics& diag, RuntimeState& state, co
                 diag.error("Library not loaded: %s\n  Referenced from: <%s> %s%s\n  Reason: %s",
                            loadPath, fromUuidStr, this->path(state), tooNewBinaryDiag.errorMessageCStr(), depDiag.errorMessageCStr());
 #if BUILDING_DYLD
-                if ( options.launching )
+                if ( options.launching ) {
                     state.setLaunchMissingDylib(loadPath, this->path(state));
+                }
 #endif
                 stop = true;
             }
@@ -683,7 +680,7 @@ bool JustInTimeLoader::overridesDylibInCache(const DylibPatch*& patchTable, uint
     return true;
 }
 
-void JustInTimeLoader::withLayout(Diagnostics &diag, RuntimeState& state,
+void JustInTimeLoader::withLayout(Diagnostics &diag, const RuntimeState& state,
                         void (^callback)(const mach_o::Layout &layout)) const
 {
 #if SUPPORT_VM_LAYOUT
@@ -777,21 +774,23 @@ void JustInTimeLoader::cacheWeakDefFixup(RuntimeState& state, DyldCacheDataConst
 void JustInTimeLoader::applyFixups(Diagnostics& diag, RuntimeState& state, DyldCacheDataConstLazyScopedWriter& cacheDataConst, bool allowLazyBinds,
                                    lsl::Vector<PseudoDylibSymbolToMaterialize>* materializingSymbols) const
 {
-    //state.log("applyFixups: %s\n", this->path());
-    // if this is in the dyld cache there is normally no fixups need
-    if ( this->dylibInDyldCache ) {
-        // But if some lower level cached dylib has a root, we
-        // need to patch this image's uses of that rooted dylib.
-        if ( state.hasOverriddenCachedDylib() ) {
-            // have each other image apply to me any cache patching it has
-            for ( const Loader* ldr : state.loaded ) {
-                ldr->applyCachePatchesTo(state, this, cacheDataConst);
-            }
-        }
+    //state.log("applyFixups: %s\n", this->path(state));
 
-        // images in shared cache don't need any more fixups
-        this->fixUpsApplied = true;
-        return;
+    // check if we need to patch the cache
+    this->applyFixupsCheckCachePatching(state, cacheDataConst);
+
+    // images in shared cache don't need any more fixups
+    if ( this->dylibInDyldCache ) {
+        // update any internal pointers to function variants
+        this->applyFunctionVariantFixups(diag, state);
+#if TARGET_OS_EXCLAVEKIT
+        // exclavekit is special in that page-in linking for for the dyld cache can be disabled
+        if ( state.config.process.sharedCachePageInLinking )
+#endif
+        {
+            this->fixUpsApplied = true;
+            return;
+        }
     }
 
     if ( this->pd ) {
@@ -849,28 +848,40 @@ void JustInTimeLoader::applyFixups(Diagnostics& diag, RuntimeState& state, DyldC
     // do fixups using bind targets table
     this->applyFixupsGeneric(diag, state, this->sliceOffset, bindTargets, overrideTargetAddrs, true, missingFlatLazySymbols);
 
-    // some old macOS games need __dyld section set up
-    if ( (state.config.process.platform == dyld3::Platform::macOS) && (state.libdyldLoader != nullptr) ) {
+#if SUPPPORT_PRE_LC_MAIN
+    // some old macOS games need __dyld section set up in dylibs too.  Main executable with __dyld section set up in prepare()
+    if ( (state.config.process.platform == Platform::macOS) && (state.libdyldLoader != nullptr) && (this != state.mainExecutableLoader) ) {
         const MachOAnalyzer* ma = this->analyzer();
         if ( !ma->inDyldCache() ) {
-            ma->forEachSupportedPlatform(^(dyld3::Platform platform, uint32_t minOS, uint32_t sdk) {
+            ((mach_o::Header*)ma)->platformAndVersions().unzip(^(mach_o::PlatformAndVersions pvs) {
                 // rdar://84760053 (SEED: Web: Crash in libobjc.A.dylib's load_images when loading certain bundles in Monterey)
-                if ( (platform == dyld3::Platform::macOS) && (minOS <= 0x000A0900) ) {
-                    struct DATAdyld { void* dyldLazyBinder; dyld3::DyldLookFunc dyldFuncLookup; };
+                if ( (pvs.platform == Platform::macOS) && (pvs.minOS <= Version32(0x000A0900)) ) {
+                    struct DATAdyld { void* dyldLazyBinder; FuncLookup dyldFuncLookup; };
                     uint64_t  sectSize;
                     if ( DATAdyld* dyldSect = (DATAdyld*)ma->findSectionContent("__DATA", "__dyld", sectSize) ) {
                         //state.log("found __dyld section in %s\n", this->path());
-                        uint64_t           dyld4SectSize;
-                        const MachOLoaded* libdyldML = state.libdyldLoader->loadAddress(state);
-                        if ( LibdyldDyld4Section* libdyld4Section = (LibdyldDyld4Section*)libdyldML->findSectionContent("__TPRO_CONST", "__dyld4", dyld4SectSize) ) {
-                            dyldSect->dyldLazyBinder = nullptr;
-                            dyldSect->dyldFuncLookup = (dyld3::DyldLookFunc)libdyld4Section->dyldLookupFuncAddr;
+                        // dyld and libdyld have not been wired together yet, so peek into libdyld
+                        // if libdyld.dylib is a root, it may not have been rebased yet
+                        if ( state.libdyldLoader->hasBeenFixedUp(state) ) {
+                            const Header*               libdyldHdr    = state.libdyldLoader->header(state);
+                            std::span<const uint8_t>    helperSection = libdyldHdr->findSectionContent("__DATA_CONST", "__helper", true/*vm layout*/);
+                            if ( helperSection.size() == sizeof(void*) ) {
+                                const LibdyldHelperSection* section = (LibdyldHelperSection*)helperSection.data();
+                                LibSystemHelpersWrapper  myLibSystemHelpers;
+                                myLibSystemHelpers = { &section->helper, &lsl::MemoryManager::memoryManager() };
+                                dyldSect->dyldLazyBinder = nullptr;
+                                dyldSect->dyldFuncLookup = myLibSystemHelpers.legacyDyldFuncLookup();
+                            }
                         }
                     }
                 }
             });
         }
     }
+#endif
+
+    // update any internal pointers to function variants
+    this->applyFunctionVariantFixups(diag, state);
 
     // mark any __DATA_CONST segments read-only
     if ( this->hasConstantSegmentsToProtect() )
@@ -955,17 +966,11 @@ void JustInTimeLoader::setDelayInit(RuntimeState&, bool value) const
 
 ////////////////////////  other functions /////////////////////////////////
 
-static bool hasPlusLoad(const MachOFile* mh)
-{
-    Diagnostics diag;
-    return mh->hasPlusLoadMethod(diag);
-}
-
-static bool hasDataConst(const MachOFile* mh)
+static bool hasDataConst(const Header* hdr)
 {
     __block bool result = false;
-    mh->forEachSegment(^(const MachOAnalyzer::SegmentInfo& info, bool& stop) {
-        if ( info.readOnlyData )
+    hdr->forEachSegment(^(const Header::SegmentInfo& info, bool& stop) {
+        if ( info.readOnlyData() )
             result = true;
     });
     return result;
@@ -983,8 +988,9 @@ JustInTimeLoader* JustInTimeLoader::make(RuntimeState& state, const MachOFile* m
 {
     //state.log("JustInTimeLoader::make(%s) willNeverUnload=%d\n", path, willNeverUnload);
     // use malloc and placement new to create object big enough for all info
+    const Header*          hdr                  = (Header*)mh;
     bool                   allDepsAreNormal     = true;
-    uint32_t               depCount             = ((Header*)mh)->linkedDylibCount(&allDepsAreNormal);
+    uint32_t               depCount             = hdr->linkedDylibCount(&allDepsAreNormal);
     uint32_t               minDepCount          = (depCount ? depCount - 1 : 1);
     size_t                 sizeNeeded           = sizeof(JustInTimeLoader) + (minDepCount * sizeof(AuthLoader)) + (allDepsAreNormal ? 0 : depCount) + strlen(path) + 1;
     void*                  storage              = state.persistentAllocator.malloc(sizeNeeded);
@@ -997,16 +1003,17 @@ JustInTimeLoader* JustInTimeLoader::make(RuntimeState& state, const MachOFile* m
     options.inDyldCache     = DyldSharedCache::inDyldCache(state.config.dyldCache.addr, mh);
 #endif
     options.hasObjc         = mh->hasObjC();
-    options.mayHavePlusLoad = hasPlusLoad(mh);
-    options.roData          = hasDataConst(mh);
+    options.mayHavePlusLoad = hdr->hasPlusLoadMethod();
+    options.roData          = hasDataConst(hdr);
     options.neverUnloaded   = willNeverUnload || overridesCache; // dylibs in cache never unload, be consistent and don't unload roots either
     options.leaveMapped     = leaveMapped;
     options.roObjC          = options.hasObjc && mh->hasConstObjCSection();
     options.pre2022Binary   = !mh->enforceFormat(MachOAnalyzer::Malformed::sdkOnOrAfter2022);
-    options.hasUUID         = mh->getUuid(uuid);
+    options.hasUUID         = hdr->getUuid(uuid);
     options.hasWeakDefs     = mh->hasWeakDefs();
-    options.hasTLVs         = mh->hasThreadLocalVariables();
-    options.belowLibSystem  = mh->isDylib() && (strncmp(mh->installName(), "/usr/lib/system/lib", 19) == 0);
+    options.hasTLVs         = hdr->hasThreadLocalVariables();
+    options.belowLibSystem  = hdr->isDylib() && (strncmp(hdr->installName(), "/usr/lib/system/lib", 19) == 0);
+    options.hasFuncVarFixups= hdr->hasFunctionVariantFixups();
     JustInTimeLoader* p     = new (storage) JustInTimeLoader(mh, options, fileID, layout, false);
 
 #if BUILDING_CACHE_BUILDER || BUILDING_CACHE_BUILDER_UNIT_TESTS
@@ -1019,7 +1026,7 @@ JustInTimeLoader* JustInTimeLoader::make(RuntimeState& state, const MachOFile* m
     p->fixUpsApplied        = false;
     p->inited               = false;
     p->hidden               = false;
-    p->altInstallName       = mh->isDylib() && (strcmp(mh->installName(), path) != 0);
+    p->altInstallName       = ((Header*)mh)->isDylib() && (strcmp(((Header*)mh)->installName(), path) != 0);
     p->lateLeaveMapped      = false;
     p->allDepsAreNormal     = allDepsAreNormal;
     p->padding              = 0;
@@ -1034,7 +1041,7 @@ JustInTimeLoader* JustInTimeLoader::make(RuntimeState& state, const MachOFile* m
 
     p->cpusubtype   = mh->cpusubtype;
 
-    parseSectionLocations(mh, p->sectionLocations);
+    parseSectionLocations((const Header*)mh, p->sectionLocations);
 
     if ( !mh->hasExportTrie(p->exportsTrieRuntimeOffset, p->exportsTrieSize) ) {
         p->exportsTrieRuntimeOffset = 0;
@@ -1072,67 +1079,67 @@ JustInTimeLoader* JustInTimeLoader::make(RuntimeState& state, const MachOFile* m
     return p;
 }
 
-void JustInTimeLoader::parseSectionLocations(const dyld3::MachOFile* mf, SectionLocations& metadata)
+void JustInTimeLoader::parseSectionLocations(const Header* hdr, SectionLocations& metadata)
 {
     for ( uint32_t i = 0; i < SectionLocations::count; ++i ) {
         metadata.offsets[i] = 0;
         metadata.sizes[i] = 0;
     }
 
-    uint64_t baseAddress = mf->preferredLoadAddress();
-    auto setSectionOffset = ^(uint32_t sectionKind, const dyld3::MachOFile::SectionInfo& sectInfo) {
-        uint64_t sectionOffset = sectInfo.sectAddr - baseAddress;
+    uint64_t baseAddress = hdr->preferredLoadAddress();
+    auto setSectionOffset = ^(uint32_t sectionKind, const Header::SectionInfo& sectInfo) {
+        uint64_t sectionOffset = sectInfo.address - baseAddress;
         metadata.offsets[sectionKind] = sectionOffset;
-        metadata.sizes[sectionKind] = sectInfo.sectSize;
+        metadata.sizes[sectionKind] = sectInfo.size;
     };
 
-    mf->forEachSection(^(const dyld3::MachOFile::SectionInfo& sectInfo, bool malformedSectionRange, bool& stop) {
-        if ( !strcmp(sectInfo.segInfo.segName, "__TEXT") ) {
-            if ( !strcmp(sectInfo.sectName, "__swift5_protos") )
+    hdr->forEachSection(^(const Header::SectionInfo& sectInfo, bool& stop) {
+        if ( sectInfo.segmentName == "__TEXT" ) {
+            if ( sectInfo.sectionName == "__swift5_protos" )
                 setSectionOffset(_dyld_section_location_text_swift5_protos, sectInfo);
-            else if ( !strcmp(sectInfo.sectName, "__swift5_proto") )
+            else if ( sectInfo.sectionName == "__swift5_proto" )
                 setSectionOffset(_dyld_section_location_text_swift5_proto, sectInfo);
-            else if ( !strcmp(sectInfo.sectName, "__swift5_types") )
+            else if ( sectInfo.sectionName == "__swift5_types" )
                 setSectionOffset(_dyld_section_location_text_swift5_types, sectInfo);
-            else if ( !strcmp(sectInfo.sectName, "__swift5_replace") )
+            else if ( sectInfo.sectionName == "__swift5_replace" )
                 setSectionOffset(_dyld_section_location_text_swift5_replace, sectInfo);
-            else if ( !strcmp(sectInfo.sectName, "__swift5_replac2") )
+            else if ( sectInfo.sectionName == "__swift5_replac2" )
                 setSectionOffset(_dyld_section_location_text_swift5_replace2, sectInfo);
-            else if ( !strcmp(sectInfo.sectName, "__swift5_acfuncs") )
+            else if ( sectInfo.sectionName == "__swift5_acfuncs" )
                 setSectionOffset(_dyld_section_location_text_swift5_ac_funcs, sectInfo);
             return;
         }
 
-        if ( !strncmp(sectInfo.segInfo.segName, "__DATA", 6) ) {
-            if ( !strcmp(sectInfo.sectName, "__objc_imageinfo") )
+        if ( sectInfo.segmentName.starts_with("__DATA") ) {
+            if ( sectInfo.sectionName == "__objc_imageinfo" )
                 setSectionOffset(_dyld_section_location_objc_image_info, sectInfo);
-            else if ( !strcmp(sectInfo.sectName, "__objc_selrefs") )
+            else if ( sectInfo.sectionName == "__objc_selrefs" )
                 setSectionOffset(_dyld_section_location_data_sel_refs, sectInfo);
-            else if ( !strcmp(sectInfo.sectName, "__objc_msgrefs") )
+            else if ( sectInfo.sectionName == "__objc_msgrefs" )
                 setSectionOffset(_dyld_section_location_data_msg_refs, sectInfo);
-            else if ( !strcmp(sectInfo.sectName, "__objc_classrefs") )
+            else if ( sectInfo.sectionName == "__objc_classrefs" )
                 setSectionOffset(_dyld_section_location_data_class_refs, sectInfo);
-            else if ( !strcmp(sectInfo.sectName, "__objc_superrefs") )
+            else if ( sectInfo.sectionName == "__objc_superrefs" )
                 setSectionOffset(_dyld_section_location_data_super_refs, sectInfo);
-            else if ( !strcmp(sectInfo.sectName, "__objc_protorefs") )
+            else if ( sectInfo.sectionName == "__objc_protorefs" )
                 setSectionOffset(_dyld_section_location_data_protocol_refs, sectInfo);
-            else if ( !strcmp(sectInfo.sectName, "__objc_classlist") )
+            else if ( sectInfo.sectionName == "__objc_classlist" )
                 setSectionOffset(_dyld_section_location_data_class_list, sectInfo);
-            else if ( !strcmp(sectInfo.sectName, "__objc_stublist") )
+            else if ( sectInfo.sectionName == "__objc_stublist" )
                 setSectionOffset(_dyld_section_location_data_stub_list, sectInfo);
-            else if ( !strcmp(sectInfo.sectName, "__objc_nlclslist") )
+            else if ( sectInfo.sectionName == "__objc_nlclslist" )
                 setSectionOffset(_dyld_section_location_data_non_lazy_class_list, sectInfo);
-            else if ( !strcmp(sectInfo.sectName, "__objc_catlist") )
+            else if ( sectInfo.sectionName == "__objc_catlist" )
                 setSectionOffset(_dyld_section_location_data_category_list, sectInfo);
-            else if ( !strcmp(sectInfo.sectName, "__objc_catlist2") )
+            else if ( sectInfo.sectionName == "__objc_catlist2" )
                 setSectionOffset(_dyld_section_location_data_category_list2, sectInfo);
-            else if ( !strcmp(sectInfo.sectName, "__objc_nlcatlist") )
+            else if ( sectInfo.sectionName == "__objc_nlcatlist" )
                 setSectionOffset(_dyld_section_location_data_non_lazy_category_list, sectInfo);
-            else if ( !strcmp(sectInfo.sectName, "__objc_protolist") )
+            else if ( sectInfo.sectionName == "__objc_protolist" )
                 setSectionOffset(_dyld_section_location_data_protocol_list, sectInfo);
-            else if ( !strcmp(sectInfo.sectName, "__objc_fork_ok") )
+            else if ( sectInfo.sectionName == "__objc_fork_ok" )
                 setSectionOffset(_dyld_section_location_data_objc_fork_ok, sectInfo);
-            else if ( !strcmp(sectInfo.sectName, "__objc_rawisa") )
+            else if ( sectInfo.sectionName == "__objc_rawisa" )
                 setSectionOffset(_dyld_section_location_data_raw_isa, sectInfo);
             return;
         }
@@ -1161,7 +1168,7 @@ Loader::FileValidationInfo JustInTimeLoader::getFileValidationInfo(RuntimeState&
         uint32_t codeSignFileOffset = 0;
         uint32_t codeSignFileSize   = 0;
         const mach_o::MachOFileRef& ref = this->mappedAddress;
-        if ( ref->hasCodeSignature(codeSignFileOffset, codeSignFileSize) ) {
+        if ( ((const Header*)ref)->hasCodeSignature(codeSignFileOffset, codeSignFileSize) ) {
             ref->forEachCDHashOfCodeSignature(ref.getOffsetInToFile(codeSignFileOffset), codeSignFileSize,
                                               ^(const uint8_t aCdHash[20]) {
                 result.checkCdHash = true;
@@ -1184,34 +1191,35 @@ const Loader::DylibPatch* JustInTimeLoader::getCatalystMacTwinPatches() const
 
 void JustInTimeLoader::withRegions(const MachOFile* mf, void (^callback)(const Array<Region>& regions))
 {
-    uint32_t segCount   = mf->segmentCount();
-    uint64_t vmTextAddr = mf->preferredLoadAddress();
+    const Header* hdr   = (const Header*)mf;
+    uint64_t vmTextAddr = hdr->preferredLoadAddress();
+    uint32_t segCount   = hdr->segmentCount();
     STACK_ALLOC_ARRAY(Region, regions, segCount * 2);
-    mf->forEachSegment(^(const MachOAnalyzer::SegmentInfo& segInfo, bool& stop) {
+    hdr->forEachSegment(^(const Header::SegmentInfo& segInfo, bool& stop) {
         Region region;
-        if ( !segInfo.hasZeroFill || (segInfo.fileSize != 0) ) {
+        if ( !segInfo.hasZeroFill() || (segInfo.fileSize != 0) ) {
             // add region for content that is not wholely zerofill
-            region.vmOffset     = segInfo.vmAddr - vmTextAddr;
-            region.perms        = segInfo.protections;
-            region.readOnlyData = segInfo.readOnlyData;
+            region.vmOffset     = segInfo.vmaddr - vmTextAddr;
+            region.perms        = segInfo.initProt;
+            region.readOnlyData = segInfo.readOnlyData();
             region.isZeroFill   = false;
             region.fileOffset   = (uint32_t)segInfo.fileOffset;
             region.fileSize     = (uint32_t)segInfo.fileSize;
             // special case LINKEDIT, the vmsize is often larger than the filesize
             // but we need to mmap off end of file, otherwise we may have r/w pages at end
-            if ( (segInfo.segIndex == segCount - 1) && (segInfo.protections == 1) ) {
-                region.fileSize = (uint32_t)segInfo.vmSize;
+            if ( (segInfo.segmentIndex == segCount - 1) && (segInfo.initProt == VM_PROT_READ) ) {
+                region.fileSize = (uint32_t)segInfo.vmsize;
             }
             regions.push_back(region);
         }
-        if ( segInfo.hasZeroFill ) {
+        if ( segInfo.hasZeroFill() ) {
             Region fill;
-            fill.vmOffset     = segInfo.vmAddr - vmTextAddr + segInfo.fileSize;
-            fill.perms        = segInfo.protections;
+            fill.vmOffset     = segInfo.vmaddr - vmTextAddr + segInfo.fileSize;
+            fill.perms        = segInfo.initProt;
             fill.readOnlyData = false;
             fill.isZeroFill   = true;
             fill.fileOffset   = 0;
-            fill.fileSize     = (uint32_t)(segInfo.vmSize - segInfo.fileSize);
+            fill.fileSize     = (uint32_t)(segInfo.vmsize - segInfo.fileSize);
             regions.push_back(fill);
         }
     });
@@ -1245,7 +1253,7 @@ Loader* JustInTimeLoader::makeJustInTimeLoaderDyldCache(Diagnostics& diag, Runti
 {
     uint64_t mtime = 0;
     uint64_t inode = 0;
-    const MachOFile* cacheMF = (MachOFile*)state.config.dyldCache.getIndexedImageEntry(dylibCacheIndex, mtime, inode);
+    const Header* cacheMH = (const Header*)state.config.dyldCache.getIndexedImageEntry(dylibCacheIndex, mtime, inode);
 
     bool fileIDValid = state.config.dyldCache.dylibsExpectedOnDisk;
     uint64_t device = 0;
@@ -1259,7 +1267,7 @@ Loader* JustInTimeLoader::makeJustInTimeLoaderDyldCache(Diagnostics& diag, Runti
 
     UUID fsUUID;
     FileID fileID(inode, device, mtime, fileIDValid);
-    if ( !cacheMF->loadableIntoProcess(state.config.process.platform, loadPath, state.config.security.isInternalOS) ) {
+    if ( !cacheMH->loadableIntoProcess(state.config.process.platform, loadPath, state.config.security.isInternalOS) ) {
         diag.error("wrong platform to load into process");
         return nullptr;
     }
@@ -1272,7 +1280,8 @@ Loader* JustInTimeLoader::makeJustInTimeLoaderDyldCache(Diagnostics& diag, Runti
             catalystOverideDylibIndex = macIndex;
         }
     }
-    JustInTimeLoader* result = JustInTimeLoader::make(state, cacheMF, loadPath, fileID, 0, true, false, catalystOverrideOfMacSide, catalystOverideDylibIndex, layout);
+    JustInTimeLoader* result =
+        JustInTimeLoader::make(state, (const MachOFile*)cacheMH, loadPath, fileID, 0, true, false, catalystOverrideOfMacSide, catalystOverideDylibIndex, layout);
     result->ref.index = dylibCacheIndex;
 #if BUILDING_DYLD
     if ( state.config.log.segments )
@@ -1290,20 +1299,25 @@ Loader* JustInTimeLoader::makeJustInTimeLoaderDisk(Diagnostics& diag, RuntimeSta
 {
     __block Loader* result          = nullptr;
     bool            checkIfOSBinary = state.config.process.archs->checksOSBinary();
-    state.config.syscall.withReadOnlyMappedFile(diag, loadPath, checkIfOSBinary, ^(const void* mapping, size_t mappedSize, bool isOSBinary, const FileID& fileID, const char* canonicalPath) {
+
+    int      fileDescriptor = -1;
+    size_t   mappedSize;
+    FileID   fileID = FileID::none();
+    bool     isOSBinary = false;
+    char realerPath[PATH_MAX];
+    if (const void* mapping = state.config.syscall.mapFileReadOnly(diag, loadPath, &fileDescriptor, &mappedSize, &fileID, (checkIfOSBinary ? &isOSBinary : nullptr), realerPath)) {
+        uint64_t mhSliceOffset = 0;
         uint64_t sliceSize = 0;
-        if ( const MachOFile* mf = MachOFile::compatibleSlice(diag, sliceSize, mapping, mappedSize, loadPath, state.config.process.platform, isOSBinary, *state.config.process.archs, state.config.security.internalInstall) ) {
+        if ( const MachOFile* mf = MachOFile::compatibleSlice(diag, mhSliceOffset, sliceSize, mapping, mappedSize, loadPath, state.config.process.platform, isOSBinary, *state.config.process.archs, state.config.security.internalInstall) ) {
             // verify the filetype is loadable in this context
             if ( mf->isDylib() ) {
                 if ( !options.canBeDylib ) {
                     diag.error("cannot load dylib '%s'", loadPath);
-                    return;
                 }
             }
             else if ( mf->isBundle() ) {
                 if ( !options.canBeBundle ) {
                     diag.error("cannot link against bundle '%s'", loadPath);
-                    return;
                 }
             }
             else if ( mf->isMainExecutable() ) {
@@ -1312,21 +1326,29 @@ Loader* JustInTimeLoader::makeJustInTimeLoaderDisk(Diagnostics& diag, RuntimeSta
                         diag.error("cannot link against a main executable '%s'", loadPath);
                     else
                         diag.error("cannot dlopen a main executable '%s'", loadPath);
-                    return;
                 }
             }
             else {
                 diag.error("unloadable mach-o file type %d '%s'", mf->filetype, loadPath);
-                return;
             }
-            const MachOAnalyzer* ma          = (MachOAnalyzer*)mf;
+
+            if ( diag.hasError() ) {
 #if !BUILDING_CACHE_BUILDER
-#if 0
-            if ( !ma->validMachOForArchAndPlatform(diag, mappedSize, loadPath, *state.config.process.archs, state.config.process.platform, isOSBinary, state.config.security.internalInstall) && ma->enforceFormat(dyld3::MachOAnalyzer::Malformed::sdkOnOrAfter2021)) {
-                return;
+                state.config.syscall.unmapFile(mapping, mappedSize);
+                ::close(fileDescriptor);
+#endif
+                return result;
+            }
+#if !BUILDING_CACHE_BUILDER
+            // do a deep inspection of the binary, looking for invalid mach-o constructs
+            if ( mach_o::Error err = ((Header*)mf)->valid(mappedSize) ) {
+                diag.error("%s", err.message());
+                state.config.syscall.unmapFile(mapping, mappedSize);
+                ::close(fileDescriptor);
+                return result;
             }
 #endif
-#endif
+            const MachOAnalyzer* ma          = (MachOAnalyzer*)mf;
             bool                 leaveMapped = options.rtldNoDelete;
             bool                 neverUnload;
 #if BUILDING_CACHE_BUILDER || BUILDING_CACHE_BUILDER_UNIT_TESTS
@@ -1344,15 +1366,48 @@ Loader* JustInTimeLoader::makeJustInTimeLoaderDisk(Diagnostics& diag, RuntimeSta
                 fileValidation.mtime = fileID.mtime();
             }
             fileValidation.sliceOffset     = (uint8_t*)mf - (uint8_t*)mapping;
+
+            // Check code signature
+            CodeSignatureInFile  codeSignature;
+            bool hasCodeSignature = ((const Header*)ma)->hasCodeSignature(codeSignature.fileOffset, codeSignature.size);
+#if BUILDING_DYLD
+            if ( hasCodeSignature && codeSignature.size != 0 ) {
+                uuid_t uuid;
+                ((Header*)ma)->getUuid(uuid);
+                char uuidStr[64];
+                uuidToStr(uuid, uuidStr);
+                if ( !state.config.syscall.registerSignature(diag, realerPath, uuidStr, fileDescriptor, fileValidation.sliceOffset, codeSignature.fileOffset, codeSignature.size) ) {
+                    state.config.syscall.unmapFile(mapping, mappedSize);
+                    ::close(fileDescriptor);
+                    return result;
+                }
+
+                // Map file again after code signature registration
+                state.config.syscall.unmapFile(mapping, mappedSize);
+                mapping = state.config.syscall.mmap(nullptr, mappedSize, PROT_READ, MAP_PRIVATE, fileDescriptor, 0);
+                if ( mapping == MAP_FAILED ) {
+                    diag.error("mmap for %s (size=0x%0lX) failed with errno=%d", loadPath, mappedSize, errno);
+                    ::close(fileDescriptor);
+                    return result;
+                }
+                ma = (const MachOAnalyzer*)((uint64_t)mapping + mhSliceOffset);
+                if ( ma == nullptr ) {
+                    state.config.syscall.unmapFile(mapping, mappedSize);
+                    ::close(fileDescriptor);
+                    return result;
+                }
+            }
+#endif
+
+            char* canonicalPath = realerPath;
             JustInTimeLoader::withRegions(ma, ^(const Array<Region>& regions) {
 #if BUILDING_CACHE_BUILDER || BUILDING_CACHE_BUILDER_UNIT_TESTS
                 // in cache builder, files are already mapped
                 (void)vmSpace;
+                (void)hasCodeSignature;
                 result = JustInTimeLoader::make(state, ma, canonicalPath, FileID::none(), fileValidation.sliceOffset, neverUnload, leaveMapped, overridesCache, overridesCacheIndex, layout);
 #else
-                CodeSignatureInFile  codeSignature;
-                bool hasCodeSignature = ma->hasCodeSignature(codeSignature.fileOffset, codeSignature.size);
-                if ( const MachOAnalyzer* realMA = Loader::mapSegments(diag, state, canonicalPath, vmSpace, codeSignature, hasCodeSignature, regions, neverUnload, false, fileValidation) ) {
+                if ( const MachOAnalyzer* realMA = Loader::mapSegments(diag, state, canonicalPath, fileDescriptor, vmSpace, codeSignature, hasCodeSignature, regions, neverUnload, false, fileValidation) ) {
                     result = JustInTimeLoader::make(state, realMA, canonicalPath, fileID, fileValidation.sliceOffset, neverUnload, leaveMapped, overridesCache, overridesCacheIndex, layout);
 #if BUILDING_DYLD
                     if ( state.config.log.libraries )
@@ -1364,7 +1419,11 @@ Loader* JustInTimeLoader::makeJustInTimeLoaderDisk(Diagnostics& diag, RuntimeSta
 #endif
             });
         }
-    });
+#if !BUILDING_CACHE_BUILDER
+        state.config.syscall.unmapFile(mapping, mappedSize);
+        ::close(fileDescriptor);
+#endif
+    }
     return result;
 }
 
@@ -1392,14 +1451,14 @@ Loader* JustInTimeLoader::makeLaunchLoader(Diagnostics& diag, RuntimeState& stat
 #endif // !SUPPORT_CREATING_PREMAPPEDLOADERS
 
 const Loader* JustInTimeLoader::makePseudoDylibLoader(Diagnostics& diag, RuntimeState &state, const char* path, const LoadOptions& options, const PseudoDylib* pd) {
-    const MachOFile* pseudoDylibMF = (const MachOFile*)pd->getAddress();
+    const Header* pseudoDylibMH = (const Header*)pd->getAddress();
     FileID fileID = FileID::none();
-    if (!pseudoDylibMF->loadableIntoProcess(state.config.process.platform, path)) {
+    if (!pseudoDylibMH->loadableIntoProcess(state.config.process.platform, path)) {
         diag.error("wrong platform to load into process");
         return nullptr;
     }
     JustInTimeLoader* result =
-        JustInTimeLoader::make(state, pseudoDylibMF, path, fileID, 0, false, false, false, 0, nullptr);
+        JustInTimeLoader::make(state, (const MachOFile*)pseudoDylibMH, path, fileID, 0, false, false, false, 0, nullptr);
     result->pd = pd;
     return result;
 }

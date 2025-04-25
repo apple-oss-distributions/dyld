@@ -156,9 +156,7 @@ struct output_renderer {
                 case DBG_DYLD_TIMING_DLOPEN_PREFLIGHT: dequeueEvent<dlopen_preflight>(event, [&](dlopen_preflight* endEvent){
                     endEvent->result = event->arg2;
                 }); break;
-                case DBG_DYLD_TIMING_LAUNCH_EXECUTABLE: dequeueEvent<app_launch>(event, [&](app_launch* endEvent){
-                    endEvent->launchMode = event->arg4;
-                }); break;
+                case DBG_DYLD_TIMING_LAUNCH_EXECUTABLE: dequeueEvent<app_launch>(event, [&](app_launch* endEvent) {}); break;
                 case DBG_DYLD_TIMING_DLSYM: dequeueEvent<dlsym>(event, [&](dlsym* endEvent){
                     endEvent->result = event->arg2;
                 }); break;
@@ -328,7 +326,7 @@ public:
         } else if (auto validateClosure = dynamic_cast<validate_closure *>(node.get())) {
             line << "validate closure";
         } else if (auto launchNode = dynamic_cast<app_launch *>(node.get())) {
-            line << "app launch (dyld" << std::dec << launchNode->launchMode << ") -> 0x" << std::hex << launchNode->address;
+            line << "app launch " + launchNode->flagsString() + "-> 0x" << std::hex << launchNode->address;
         } else if (auto initNode  = dynamic_cast<static_init *>(node.get())) {
             line << "run static initializer 0x" << std::hex << initNode->funcAddress;
         } else if (auto fixupNode  = dynamic_cast<apply_fixups *>(node.get())) {
@@ -393,7 +391,7 @@ public:
         } else if (auto launchNode = dynamic_cast<app_launch *>(node.get())) {
             sstr << std::hex;
             sstr << "{\"type\":\"app_launch\",\"address\":\"0x";
-            sstr << launchNode->address << "\",\"mode\":" << launchNode->launchMode << "";
+            sstr << launchNode->address << "\",\"mode\":" << launchNode->flags << "";
         } else if (auto initNode  = dynamic_cast<static_init *>(node.get())) {
             sstr << std::hex;
             sstr << "{\"type\":\"static_init\",\"image_address\":\"0x"  << initNode->libraryAddress;
@@ -581,10 +579,32 @@ private:
     };
 
     struct app_launch : event_pair {
-        app_launch(ktrace_event_t E) : event_pair(E), address(E->arg2) {}
+        app_launch(ktrace_event_t E) : event_pair(E), address(E->arg2), flags(E->arg3) {}
         uint64_t address;
-        uint64_t launchMode;
+        uint64_t flags;
         std::vector<event_pair *> _children;
+
+        std::string flagsString() const {
+            if ( flags == (uint64_t)dyld3::DyldLaunchExecutableFlags::None )
+                return "";
+            std::string v;
+            if ( flags & (uint64_t)dyld3::DyldLaunchExecutableFlags::HasTPROHeap ) {
+                if ( !v.empty() )
+                    v += ", ";
+                v += "tpro-heap";
+            }
+            if ( flags & (uint64_t)dyld3::DyldLaunchExecutableFlags::HasTPRODataConst ) {
+                if ( !v.empty() )
+                    v += ", ";
+                v += "tpro-data-const";
+            }
+            if ( flags & (uint64_t)dyld3::DyldLaunchExecutableFlags::HasTPROStacks ) {
+                if ( !v.empty() )
+                    v += ", ";
+                v += "tpro-stacks";
+            }
+            return "(" + v + ") ";
+        }
     };
 
     struct static_init : event_pair {

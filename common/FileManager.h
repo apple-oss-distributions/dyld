@@ -97,6 +97,7 @@ struct VIS_HIDDEN FileManager {
     FileManager&    operator=(const FileManager& O)     = delete;
     FileManager&    operator=(FileManager&& O)          = delete;
     FileManager(Allocator& allocator, const SyscallDelegate* syscall);
+    FileManager(Allocator& allocator);
 
     FileRecord      fileRecordForPath(Allocator& allocator, const char* filePath);
     FileRecord      fileRecordForStat(const struct stat& sb);

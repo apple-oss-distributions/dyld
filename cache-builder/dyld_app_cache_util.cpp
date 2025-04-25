@@ -39,18 +39,21 @@
 #include "kernel_collection_builder.h"
 #include "ClosureFileSystemPhysical.h"
 #include "FileUtils.h"
+#include "Header.h"
 #include "JSONWriter.h"
 #include "MachOAppCache.h"
 
-using namespace dyld3::json;
+using namespace json;
 
 using dyld3::closure::FileSystemPhysical;
 using dyld3::closure::LoadedFileInfo;
 using dyld3::GradedArchs;
 using dyld3::MachOAnalyzer;
 using dyld3::MachOAppCache;
-using dyld3::Platform;
-using dyld3::json::Node;
+using json::Node;
+
+using mach_o::Header;
+using mach_o::Platform;
 
 __attribute__((__noreturn__))
 static void exit_usage(const char* missingOption = nullptr) {
@@ -325,32 +328,6 @@ static bool parseArgs(int argc, const char* argv[], OptionsVariants& options) {
     return true;
 }
 
-static Platform stringToPlatform(const std::string& str) {
-    if (str == "unknown")
-        return Platform::unknown;
-    if (str == "macOS")
-        return Platform::macOS;
-    if (str == "iOS")
-        return Platform::iOS;
-    if (str == "tvOS")
-        return Platform::tvOS;
-    if (str == "watchOS")
-        return Platform::watchOS;
-    if (str == "bridgeOS")
-        return Platform::bridgeOS;
-    if (str == "iOSMac")
-        return Platform::iOSMac;
-    if (str == "UIKitForMac")
-        return Platform::iOSMac;
-    if (str == "iOS_simulator")
-        return Platform::iOS_simulator;
-    if (str == "tvOS_simulator")
-        return Platform::tvOS_simulator;
-    if (str == "watchOS_simulator")
-        return Platform::watchOS_simulator;
-    return Platform::unknown;
-}
-
 static int dumpAppCache(const DumpOptions& options) {
     // Verify any required options
     if (gOpts.archs.size() != 1)
@@ -368,12 +345,12 @@ static int dumpAppCache(const DumpOptions& options) {
     }
 
     const GradedArchs& archs = GradedArchs::forName(gOpts.archs[0]);
-    Platform platform = Platform::unknown;
+    Platform platform = Platform();
 
     // HACK: Pass a real option for building a kernel app cache
     if (strcmp(gOpts.platform, "kernel") != 0) {
-        platform = stringToPlatform(gOpts.platform);
-        if (platform == Platform::unknown) {
+        platform = Platform::byName(gOpts.platform);
+        if ( platform.empty() ) {
             fprintf(stderr, "Could not create app cache because: unknown platform '%s'\n", gOpts.platform);
             return 1;
         }
@@ -399,13 +376,13 @@ static int dumpAppCache(const DumpOptions& options) {
         // Add the segments for the app cache
         __block Node appCacheSegmentsNode;
         __block bool hasError = false;
-        appCacheMA->forEachSegment(^(const dyld3::MachOFile::SegmentInfo &info, bool &stopSegment) {
+        ((const Header*)appCacheMA)->forEachSegment(^(const Header::SegmentInfo &info, bool &stopSegment) {
             Node segmentNode;
-            segmentNode.map["name"] = makeNode(info.segName);
-            segmentNode.map["vmAddr"] = makeNode(hex(info.vmAddr));
-            segmentNode.map["vmSize"] = makeNode(hex(info.vmSize));
-            segmentNode.map["vmEnd"] = makeNode(hex(info.vmAddr + info.vmSize));
-            switch (info.protections) {
+            segmentNode.map["name"] = makeNode(info.segmentName.data());
+            segmentNode.map["vmAddr"] = makeNode(hex(info.vmaddr));
+            segmentNode.map["vmSize"] = makeNode(hex(info.vmsize));
+            segmentNode.map["vmEnd"] = makeNode(hex(info.vmaddr + info.vmsize));
+            switch (info.initProt) {
                 case VM_PROT_READ:
                     segmentNode.map["permissions"] = makeNode("r--");
                     break;
@@ -425,21 +402,21 @@ static int dumpAppCache(const DumpOptions& options) {
                     segmentNode.map["permissions"] = makeNode("rwx");
                     break;
                 default:
-                    fprintf(stderr, "Unknown permissions on segment '%s'\n", info.segName);
+                    fprintf(stderr, "Unknown permissions on segment '%.*s'\n", (int)info.segmentName.size(), info.segmentName.data());
                     hasError = true;
                     stopSegment = true;
             }
 
             __block Node sectionsNode;
-            appCacheMA->forEachSection(^(const dyld3::MachOAnalyzer::SectionInfo &sectInfo, bool malformedSectionRange, bool &stopSection) {
-                if ( strncmp(sectInfo.segInfo.segName, info.segName, 16) != 0 )
+            ((const Header*)appCacheMA)->forEachSection(^(const Header::SectionInfo &sectInfo, bool &stopSection) {
+                if ( sectInfo.segmentName != info.segmentName )
                     return;
 
                 Node sectionNode;
-                sectionNode.map["name"] = makeNode(sectInfo.sectName);
-                sectionNode.map["vmAddr"] = makeNode(hex(sectInfo.sectAddr));
-                sectionNode.map["vmSize"] = makeNode(hex(sectInfo.sectSize));
-                sectionNode.map["vmEnd"] = makeNode(hex(sectInfo.sectAddr + sectInfo.sectSize));
+                sectionNode.map["name"] = makeNode(std::string(sectInfo.sectionName));
+                sectionNode.map["vmAddr"] = makeNode(hex(sectInfo.address));
+                sectionNode.map["vmSize"] = makeNode(hex(sectInfo.size));
+                sectionNode.map["vmEnd"] = makeNode(hex(sectInfo.address + sectInfo.size));
 
                 sectionsNode.array.push_back(sectionNode);
             });
@@ -467,14 +444,14 @@ static int dumpAppCache(const DumpOptions& options) {
         __block Node dylibsNode;
         appCacheMA->forEachDylib(diag, ^(const MachOAnalyzer *ma, const char *name, bool &stop) {
             __block Node segmentsNode;
-            ma->forEachSegment(^(const dyld3::MachOFile::SegmentInfo &info, bool &stopSegment) {
+            ((const Header*)ma)->forEachSegment(^(const Header::SegmentInfo &info, bool &stopSegment) {
                 Node segmentNode;
-                segmentNode.map["name"] = makeNode(info.segName);
-                segmentNode.map["vmAddr"] = makeNode(hex(info.vmAddr));
-                segmentNode.map["vmSize"] = makeNode(hex(info.vmSize));
-                segmentNode.map["vmEnd"] = makeNode(hex(info.vmAddr + info.vmSize));
+                segmentNode.map["name"] = makeNode(info.segmentName.data());
+                segmentNode.map["vmAddr"] = makeNode(hex(info.vmaddr));
+                segmentNode.map["vmSize"] = makeNode(hex(info.vmsize));
+                segmentNode.map["vmEnd"] = makeNode(hex(info.vmaddr + info.vmsize));
 
-                switch (info.protections) {
+                switch (info.initProt) {
                     case VM_PROT_READ:
                         segmentNode.map["permissions"] = makeNode("r--");
                         break;
@@ -491,21 +468,21 @@ static int dumpAppCache(const DumpOptions& options) {
                         segmentNode.map["permissions"] = makeNode("r-x");
                         break;
                     default:
-                        fprintf(stderr, "Unknown permissions on segment '%s'\n", info.segName);
+                        fprintf(stderr, "Unknown permissions on segment '%.*s'\n", (int)info.segmentName.size(), info.segmentName.data());
                         hasError = true;
                         stop = true;
                 }
 
                 __block Node sectionsNode;
-                ma->forEachSection(^(const dyld3::MachOAnalyzer::SectionInfo &sectInfo, bool malformedSectionRange, bool &stopSection) {
-                    if ( strncmp(sectInfo.segInfo.segName, info.segName, 16) != 0 )
+                ((const Header*)ma)->forEachSection(^(const Header::SectionInfo &sectInfo, bool &stopSection) {
+                    if ( sectInfo.segmentName != info.segmentName )
                         return;
 
                     Node sectionNode;
-                    sectionNode.map["name"] = makeNode(sectInfo.sectName);
-                    sectionNode.map["vmAddr"] = makeNode(hex(sectInfo.sectAddr));
-                    sectionNode.map["vmSize"] = makeNode(hex(sectInfo.sectSize));
-                    sectionNode.map["vmEnd"] = makeNode(hex(sectInfo.sectAddr + sectInfo.sectSize));
+                    sectionNode.map["name"] = makeNode(std::string(sectInfo.sectionName));
+                    sectionNode.map["vmAddr"] = makeNode(hex(sectInfo.address));
+                    sectionNode.map["vmSize"] = makeNode(hex(sectInfo.size));
+                    sectionNode.map["vmEnd"] = makeNode(hex(sectInfo.address + sectInfo.size));
 
                     sectionsNode.array.push_back(sectionNode);
                 });
@@ -540,8 +517,8 @@ static int dumpAppCache(const DumpOptions& options) {
         uint64_t    entryOffset;
         bool        usesCRT;
         Node        entryPointNode;
-        if ( appCacheMA->getEntry(entryOffset, usesCRT) ) {
-            entryPointNode.value = hex(appCacheMA->preferredLoadAddress() + entryOffset);
+        if ( ((const Header*)appCacheMA)->getEntry(entryOffset, usesCRT) ) {
+            entryPointNode.value = hex(((const Header*)appCacheMA)->preferredLoadAddress() + entryOffset);
         }
 
         topNode.map["entrypoint"] = entryPointNode;
@@ -553,11 +530,11 @@ static int dumpAppCache(const DumpOptions& options) {
         __block Node topNode;
 
         __block uint64_t baseAddress = ~0ULL;
-        appCacheMA->forEachSegment(^(const dyld3::MachOAnalyzer::SegmentInfo& info, bool& stop) {
-            baseAddress = std::min(baseAddress, info.vmAddr);
+        ((const Header*)appCacheMA)->forEachSegment(^(const Header::SegmentInfo& info, bool& stop) {
+            baseAddress = std::min(baseAddress, info.vmaddr);
         });
         uint64_t cacheBaseAddress = baseAddress;
-        uint64_t textSegVMAddr = appCacheMA->preferredLoadAddress();
+        uint64_t textSegVMAddr = ((const Header*)appCacheMA)->preferredLoadAddress();
 
         auto getFixupsNode = [cacheBaseAddress, textSegVMAddr](const dyld3::MachOAnalyzer* ma) {
             __block Node fixupsNode;
@@ -609,10 +586,10 @@ static int dumpAppCache(const DumpOptions& options) {
             diag.assertNoError();
 
             ma->forEachRebase(diag, ^(const char *opcodeName, const dyld3::MachOAnalyzer::LinkEditInfo &leInfo,
-                                      const dyld3::MachOAnalyzer::SegmentInfo *segments,
+                                      const Header::SegmentInfo *segments,
                                       bool segIndexSet, uint32_t pointerSize, uint8_t segmentIndex,
                                       uint64_t segmentOffset, dyld3::MachOAnalyzer::Rebase kind, bool &stop) {
-                uint64_t rebaseVmAddr  = segments[segmentIndex].vmAddr + segmentOffset;
+                uint64_t rebaseVmAddr  = segments[segmentIndex].vmaddr + segmentOffset;
                 uint64_t runtimeOffset = rebaseVmAddr - textSegVMAddr;
                 const uint8_t* fixupLoc = (const uint8_t*)ma + runtimeOffset;
 
@@ -712,7 +689,7 @@ static int dumpAppCache(const DumpOptions& options) {
         // add uuid
         Node appUUIDNode;
         uuid_t appUUID = {};
-        if ( appCacheMA->getUuid(appUUID) ) {
+        if ( ((Header*)appCacheMA)->getUuid(appUUID) ) {
             uuid_string_t uuidString;
             uuid_unparse_upper(appUUID, uuidString);
             appUUIDNode.value = uuidString;
@@ -804,8 +781,8 @@ static int dumpAppCache(const DumpOptions& options) {
                     CFNumberGetValue(executableSizeRef, CFNumberGetType(executableSizeRef), &execSize);
 
                     Node kextNode;
-                    kextNode.map["bundle-id"] = dyld3::json::makeNode(bundleName);
-                    kextNode.map["executable-size"] = dyld3::json::hex(execSize);
+                    kextNode.map["bundle-id"] = json::makeNode(bundleName);
+                    kextNode.map["executable-size"] = json::hex(execSize);
                     topNode.array.push_back(std::move(kextNode));
                 }
             }
@@ -838,7 +815,7 @@ static int dumpAppCache(const DumpOptions& options) {
                 ma->forEachLocalSymbol(diag, ^(const char* aSymbolName, uint64_t n_value, uint8_t n_type,
                                                uint8_t n_sect, uint16_t n_desc, bool& stopSymbols) {
                     if ( strcmp(aSymbolName, "_kmod_info") == 0 ) {
-                        kmodInfoVMOffset = n_value - ma->preferredLoadAddress();
+                        kmodInfoVMOffset = n_value - ((const Header*)ma)->preferredLoadAddress();
                         found = true;
                         stopSymbols = true;
                     }
@@ -909,7 +886,7 @@ static int dumpAppCache(const DumpOptions& options) {
         auto getStartsNode = [](const dyld3::MachOAnalyzer* ma) {
             __block Node functionStartsNode;
 
-            uint64_t loadAddress = ma->preferredLoadAddress();
+            uint64_t loadAddress = ((const Header*)ma)->preferredLoadAddress();
             ma->forEachFunctionStart(^(uint64_t runtimeOffset) {
                 Node functionStart = makeNode(hex(loadAddress + runtimeOffset));
                 functionStartsNode.array.push_back(functionStart);
@@ -947,7 +924,7 @@ static int validateFile(const ValidateOptions& options) {
         exit_usage();
 
     const GradedArchs& archs = GradedArchs::forName(gOpts.archs[0]);
-    Platform platform = Platform::unknown;
+    Platform platform = Platform();
 
     // HACK: Pass a real option for building a kernel app cache
     if (strcmp(gOpts.platform, "kernel")) {
@@ -1037,7 +1014,7 @@ static CFDataRef
 createKernelCollectionForArch(const CreateKernelCollectionOptions& options, const char* arch,
                               Diagnostics& diag) {
     const GradedArchs& archs = GradedArchs::forName(arch);
-    Platform platform = Platform::unknown;
+    Platform platform = Platform();
 
 
     KernelCollectionBuilder* kcb = nullptr;
@@ -1061,7 +1038,7 @@ createKernelCollectionForArch(const CreateKernelCollectionOptions& options, cons
         = ^(const char *format, ...) __printflike(1, 2) {
             va_list list;
             va_start(list, format);
-            diag.error(format, list);
+            diag.error(format, va_list_wrap(list));
             va_end(list);
         };
         bool loadedFile = fileSystem.loadFile(kernelCollectionPath, info, realerPath, fileErrorLog);
@@ -1093,7 +1070,7 @@ createKernelCollectionForArch(const CreateKernelCollectionOptions& options, cons
             = ^(const char *format, ...) __printflike(1, 2) {
                 va_list list;
                 va_start(list, format);
-                diag.error(format, list);
+                diag.error(format, va_list_wrap(list));
                 va_end(list);
             };
             bool loadedFile = fileSystem.loadFile(options.kernelPath, info, realerPath, fileErrorLog);
@@ -1451,7 +1428,7 @@ createKernelCollectionForArch(const CreateKernelCollectionOptions& options, cons
                 = ^(const char *format, ...) __printflike(1, 2) {
                     va_list list;
                     va_start(list, format);
-                    diag.error(format, list);
+                    diag.error(format, va_list_wrap(list));
                     va_end(list);
                 };
                 bool loadedFile = fileSystem.loadFile(bundleData.executablePath.c_str(), info, realerPath, fileErrorLog);

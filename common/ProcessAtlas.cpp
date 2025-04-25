@@ -26,6 +26,7 @@
 
 #if !TARGET_OS_EXCLAVEKIT
 
+#include <span>
 #include <atomic>
 #include <cstring>
 #include <Block.h>
@@ -49,24 +50,26 @@
 #include "dyld_process_info_internal.h" // For dyld_all_image_infos_{32,64}
 
 #include "Defines.h"
+#include "Header.h"
 #include "DyldSharedCache.h"
-#include "MachOFile.h"
 #include "PVLEInt64.h"
-#include "MachOFile.h"
 #include "MachOLoaded.h"
 #include "ProcessAtlas.h"
-#include "Utils.h"
+#include "Utilities.h"
 
 #include "CRC32c.h"
 #include "UUID.h"
+#include "Bitmap.h"
 
 using lsl::CRC32c;
 using lsl::Allocator;
 using lsl::emitPVLEUInt64;
 using lsl::readPVLEUInt64;
+using lsl::Bitmap;
 
 using dyld3::FatFile;
-using dyld3::MachOFile;
+
+using mach_o::Header;
 // TODO: forEach shared cache needs to filter out subcaches and skip them
 
 // The allocations made by a snapshot need to last for the life of a spanshot. In libdyld that is under the caller control
@@ -76,7 +79,7 @@ using dyld3::MachOFile;
 #if BUILDING_DYLD
 #define _transactionalAllocator _ephemeralAllocator
 #else
-#define _transactionalAllocator Allocator::defaultAllocator()
+#define _transactionalAllocator MemoryManager::memoryManager().defaultAllocator()
 #endif
 
 #define BLEND_KERN_RETURN_LOCATION(kr, loc) (kr) = ((kr & 0x00ffffff) | loc<<24);
@@ -98,7 +101,7 @@ static const dyld_cache_header* cacheFilePeek(int fd, uint8_t* firstPage) {
 
 static void getCacheInfo(const dyld_cache_header *cache, uint64_t &headerSize, bool& splitCache) {
     // If we have sub caches, then the cache header itself tells us how much space we need to cover all caches
-    if ( cache->mappingOffset >= __offsetof(dyld_cache_header, subCacheArrayCount) ) {
+    if ( cache->mappingOffset >= offsetof(dyld_cache_header, subCacheArrayCount) ) {
         // New style cache
         headerSize = cache->subCacheArrayOffset + (sizeof(dyld_subcache_entry)*cache->subCacheArrayCount);
         splitCache = true;
@@ -123,56 +126,6 @@ static void getBaseCachePath(const char* mainPath, char basePathBuffer[]) {
 
 namespace dyld4 {
 namespace Atlas {
-
-Bitmap::Bitmap(Allocator& allocator, size_t size)
-    : _size(size), _bitmap(UniquePtr<std::byte>((std::byte*)allocator.malloc((size+7)/8))) {}
-
-Bitmap::Bitmap(Allocator& allocator, std::span<std::byte>& data) {
-    _size = (size_t)readPVLEUInt64(data);
-    const size_t byteSize = (_size+7)/8;
-    _bitmap = UniquePtr<std::byte>((std::byte*)allocator.malloc(byteSize));
-    _bitmap.withUnsafe([&](std::byte* bitmap) {
-        std::copy(&data[0], &data[byteSize], &bitmap[0]);
-    });
-    data = data.last(data.size()-byteSize);
-}
-
-Bitmap::Bitmap(Bitmap&& other) {
-    swap(other);
-}
-
-Bitmap& Bitmap::operator=(Bitmap&& other) {
-    swap(other);
-    return *this;
-}
-
-void Bitmap::setBit(size_t bit) {
-    contract(bit < _size);
-    _bitmap.withUnsafe([&](std::byte* bitmap) {
-        std::byte* byte = &bitmap[bit/8];
-        (*byte) |= (std::byte)(1<<(bit%8));
-    });
-}
-
-void Bitmap::emit(Vector<std::byte>& data) const {
-    emitPVLEUInt64(_size, data);
-    const size_t byteSize = (_size+7)/8;
-    _bitmap.withUnsafe([&](std::byte* bitmap) {
-        std::copy(&bitmap[0], &bitmap[byteSize], std::back_inserter(data));
-    });
-}
-
-size_t Bitmap::size() const {
-    return _size;
-}
-
-bool Bitmap::checkBit(size_t bit) const {
-    contract(bit < _size);
-    return ((std::byte)0 != _bitmap.withUnsafe([&](std::byte* bitmap) {
-        std::byte* byte = &bitmap[bit/8];
-        return ((*byte) & (std::byte)(1<<(bit%8)));
-    }));
-}
 
 #pragma mark -
 #pragma mark Mappers
@@ -211,7 +164,7 @@ void printMapping(dyld_cache_mapping_and_slide_info* mapping, uint8_t index, uin
 #endif
 }
 
-SharedPtr<Mapper> Mapper::mapperForSharedCache(Allocator& _ephemeralAllocator, FileRecord& file, const void* baseAddress) {
+SharedPtr<Mapper> Mapper::mapperForSharedCache(Allocator& _ephemeralAllocator, FileRecord& file, SafePointer baseAddress) {
     bool        useLocalCache   = false;
     size_t      length          = 0;
     uint64_t    slide     = 0;
@@ -249,7 +202,7 @@ SharedPtr<Mapper> Mapper::mapperForSharedCache(Allocator& _ephemeralAllocator, F
     }
     if (!baseAddress) {
         // No base address passed in, treat as unslid
-        baseAddress = (void*)onDiskCacheHeader->sharedRegionStart;
+        baseAddress = onDiskCacheHeader->sharedRegionStart;
     }
     slide = (uint64_t)baseAddress-(uint64_t)onDiskCacheHeader->sharedRegionStart;
     uint64_t headerSize = 0;
@@ -297,7 +250,7 @@ SharedPtr<Mapper> Mapper::mapperForSharedCache(Allocator& _ephemeralAllocator, F
         auto subCaches = (dyld_subcache_entry*)&onDiskHeaderBytes[onDiskCacheHeader->subCacheArrayOffset];
         for (auto i = 0; i < onDiskCacheHeader->subCacheArrayCount; ++i) {
             char subCachePath[PATH_MAX];
-            if (onDiskCacheHeader->mappingOffset <= __offsetof(dyld_cache_header, cacheSubType)) {
+            if (onDiskCacheHeader->mappingOffset <= offsetof(dyld_cache_header, cacheSubType)) {
                 snprintf(&subCachePath[0], sizeof(subCachePath), "%s.%u", file.getPath(), i+1);
             } else {
                 char basePath[PATH_MAX];
@@ -323,7 +276,7 @@ SharedPtr<Mapper> Mapper::mapperForSharedCache(Allocator& _ephemeralAllocator, F
 
             auto onDiskSubcacheUUID = UUID(subCache->uuid);
             uint8_t uuidBuf[16];
-            if (onDiskCacheHeader->mappingOffset <= __offsetof(dyld_cache_header, cacheSubType))  {
+            if (onDiskCacheHeader->mappingOffset <= offsetof(dyld_cache_header, cacheSubType))  {
                 auto subCacheArray = (dyld_subcache_entry_v1*)&onDiskHeaderBytes[onDiskCacheHeader->subCacheArrayOffset];
                 memcpy(uuidBuf, subCacheArray[i].uuid, 16);
             } else {
@@ -407,7 +360,7 @@ std::pair<SharedPtr<Mapper>,uint64_t> Mapper::mapperForSharedCacheLocals(Allocat
     return { _transactionalAllocator.makeShared<Mapper>(_transactionalAllocator, mappings), baseAddress };
 }
 
-SharedPtr<Mapper> Mapper::mapperForMachO(Allocator& _ephemeralAllocator, FileRecord& file, const UUID& uuid, const void* baseAddress) {
+SharedPtr<Mapper> Mapper::mapperForMachO(Allocator& _ephemeralAllocator, FileRecord& file, const UUID& uuid, const SafePointer baseAddress) {
     const char* filePath = file.getPath();
     // open filePath
     int fd = dyld3::open(filePath, O_RDONLY, 0);
@@ -430,14 +383,14 @@ SharedPtr<Mapper> Mapper::mapperForMachO(Allocator& _ephemeralAllocator, FileRec
     }
 
     // if fat file, pick matching slice
-    __block const MachOFile*    mf         = nullptr;
+    __block const Header*    mf         = nullptr;
     const FatFile*              ff         = FatFile::isFatFile(tempMapping);
     __block uint64_t            fileOffset = 0;
     if (ff) {
         uint64_t                fileLength = sb.st_size;
         Diagnostics             diag;
         ff->forEachSlice(diag, fileLength, ^(uint32_t sliceCpuType, uint32_t sliceCpuSubType, const void *sliceStart, uint64_t sliceSize, bool &stop) {
-            auto slice = (MachOFile*)sliceStart;
+            auto slice = (Header*)sliceStart;
             uuid_t sliceUUIDRaw;
             slice->getUuid(sliceUUIDRaw);
             auto sliceUUID = UUID(sliceUUIDRaw);
@@ -451,7 +404,7 @@ SharedPtr<Mapper> Mapper::mapperForMachO(Allocator& _ephemeralAllocator, FileRec
         diag.clearError();
     }
     if (!mf) {
-        auto slice =  MachOFile::isMachO(tempMapping);
+        auto slice =  Header::isMachO({(uint8_t*)tempMapping, (size_t)sb.st_size});
         if (slice) {
             uuid_t sliceUUID;
             slice->getUuid(sliceUUID);
@@ -467,16 +420,16 @@ SharedPtr<Mapper> Mapper::mapperForMachO(Allocator& _ephemeralAllocator, FileRec
     }
     __block Vector<Mapper::Mapping> mappings(_transactionalAllocator);
     __block uint64_t slide = 0;
-    mf->forEachSegment(^(const MachOFile::SegmentInfo &info, bool &stop) {
-        if (strncmp(info.segName, "__TEXT", 16) == 0) {
-            slide = (uint64_t)baseAddress - info.vmAddr;
+    mf->forEachSegment(^(const Header::SegmentInfo &info, bool &stop) {
+        if ( info.segmentName == "__TEXT" ) {
+            slide = (uint64_t)baseAddress - info.vmaddr;
         }
 //        fprintf(stderr, "Mapping\n");
 //        fprintf(stderr, "fd\tAddress\tFile Offset\tSize\n");
 //        fprintf(stderr, "%u\t0x%llx\t0x%llx\t%llu\n", fd, info.vmAddr + slide, info.fileOffset + fileOffset, info.vmSize);
         mappings.emplace_back((Mapper::Mapping) {
-            .address = info.vmAddr + slide,
-            .size = info.vmSize,
+            .address = info.vmaddr + slide,
+            .size = info.vmsize,
             .offset = info.fileOffset + fileOffset,
             .fd = fd
         });
@@ -504,46 +457,46 @@ Mapper::~Mapper() {
     }
 }
 
-std::pair<void*,bool> Mapper::map(const void* addr, uint64_t size) const {
+std::pair<SafePointer,bool> Mapper::map(const SafePointer addr, uint64_t size) const {
     if (_flatMapping) {
         uint64_t offset = (uint64_t)addr-(uint64_t)baseAddress();
-        return {(void*)((uintptr_t)_flatMapping+offset),false};
+        return {(uint64_t)((uintptr_t)_flatMapping+offset),false};
     }
     if (_mappings.size() == 0) {
         // No mappings means we are an identity mapper
-        return { (void*)addr, false };
+        return { addr, false };
     }
     for (const auto& mapping : _mappings) {
         if (((uint64_t)addr >= mapping.address) && ((uint64_t)addr < (mapping.address + mapping.size))) {
             if (mapping.fd == -1) {
-                return {(void*)(((uint64_t)addr-mapping.address)+mapping.offset), false};
+                return {(((uint64_t)addr-mapping.address)+mapping.offset), false};
             }
             assert(((uint64_t)addr + size) <= mapping.address + mapping.size);
-            off_t offset = (off_t)addr - mapping.address + mapping.offset;
+            uint64_t offset = (uint64_t)addr - mapping.address + mapping.offset;
             // Handle unaligned mmap
             void* newMapping = nullptr;
             size_t extraBytes = 0;
-            off_t roundedOffset = offset & (-1*PAGE_SIZE);
+            uint64_t roundedOffset = offset & (-1*PAGE_SIZE);
             extraBytes = (size_t)offset - (size_t)roundedOffset;
             newMapping = mmap(nullptr, (size_t)size+extraBytes, PROT_READ, MAP_FILE | MAP_PRIVATE, mapping.fd, roundedOffset);
             if (newMapping == MAP_FAILED) {
 //                fprintf(stderr, "mmap failed: %s (%d)\n", strerror(errno), errno);
-                return {nullptr, false};
+                return { SafePointer(), false};
             }
-            return {(void*)((uintptr_t)newMapping+extraBytes),true};
+            return {(uint64_t)((uintptr_t)newMapping+extraBytes),true};
         }
     }
-    return {nullptr, false};
+    return {SafePointer(), false};
 }
 
-void Mapper::unmap(const void* addr, uint64_t size) const {
-    void* roundedAddr = (void*)((intptr_t)addr & (-1*PAGE_SIZE));
-    size_t extraBytes = (uintptr_t)addr - (uintptr_t)roundedAddr;
+void Mapper::unmap(const SafePointer addr, uint64_t size) const {
+    void* roundedAddr = (void*)((intptr_t)(uint64_t)addr & (-1*PAGE_SIZE));
+    size_t extraBytes = (uintptr_t)(uint64_t)addr - (uintptr_t)roundedAddr;
     munmap(roundedAddr, (size_t)size+extraBytes);
 }
 
-const void* Mapper::baseAddress() const {
-    return (const void*)_mappings[0].address;
+const SafePointer Mapper::baseAddress() const {
+    return _mappings[0].address;
 }
 
 const uint64_t Mapper::size() const {
@@ -591,7 +544,7 @@ void Mapper::dump() const {
 
 #if BUILDING_DYLD
 Image::Image(RuntimeState* state, Allocator& ephemeralAllocator, SharedPtr<Mapper>& mapper, const Loader* ldr)
-    :   _ephemeralAllocator(ephemeralAllocator), _mapper(mapper), _rebasedAddress((void*)ldr->loadAddress(*state)) {
+    :   _ephemeralAllocator(ephemeralAllocator), _mapper(mapper), _rebasedAddress((uint64_t)ldr->loadAddress(*state)) {
         auto fileID = ldr->fileID(*state);
         if (fileID.inode() &&  fileID.device()) {
             _file = state->fileManager.fileRecordForFileID(ldr->fileID(*state));
@@ -603,13 +556,13 @@ Image::Image(RuntimeState* state, Allocator& ephemeralAllocator, SharedPtr<Mappe
         }
     }
 #endif
-Image::Image(Allocator& ephemeralAllocator, FileRecord&& file, SharedPtr<Mapper>& mapper, const struct mach_header* mh)
-    : _ephemeralAllocator(ephemeralAllocator), _file(std::move(file)), _mapper(mapper), _rebasedAddress((void*)mh) {}
-Image::Image(Allocator& ephemeralAllocator, FileRecord&& file, SharedPtr<Mapper>& mapper, const struct mach_header* mh, const UUID& uuid)
-    :  _ephemeralAllocator(ephemeralAllocator), _file(std::move(file)), _mapper(mapper), _uuid(uuid), _rebasedAddress((void*)mh) {}
+Image::Image(Allocator& ephemeralAllocator, FileRecord&& file, SharedPtr<Mapper>& mapper, const SafePointer mh)
+    : _ephemeralAllocator(ephemeralAllocator), _file(std::move(file)), _mapper(mapper), _rebasedAddress(mh) {}
+Image::Image(Allocator& ephemeralAllocator, FileRecord&& file, SharedPtr<Mapper>& mapper, const SafePointer mh, const UUID& uuid)
+    :  _ephemeralAllocator(ephemeralAllocator), _file(std::move(file)), _mapper(mapper), _uuid(uuid), _rebasedAddress(mh) {}
 
-Image::Image(Allocator& ephemeralAllocator, SharedPtr<Mapper>& mapper, void* baseAddress, uint64_t cacheSlide, SharedCache* sharedCache)
-    : _ephemeralAllocator(ephemeralAllocator), _mapper(mapper), _sharedCacheSlide(cacheSlide), _rebasedAddress((void*)((uint64_t)baseAddress+cacheSlide)), _sharedCache(sharedCache) {}
+Image::Image(Allocator& ephemeralAllocator, SharedPtr<Mapper>& mapper, SafePointer baseAddress, uint64_t cacheSlide, SharedCache* sharedCache)
+    : _ephemeralAllocator(ephemeralAllocator), _mapper(mapper), _sharedCacheSlide(cacheSlide), _rebasedAddress(((uint64_t)baseAddress+cacheSlide)), _sharedCache(sharedCache) {}
 
 Image::Image(Image&& other) : _ephemeralAllocator(other._ephemeralAllocator) {
     swap(other);
@@ -646,7 +599,7 @@ const MachOLoaded* Image::ml() const {
         return nullptr;
     }
     if (!_ml) {
-        void* slidML = (void*)rebasedAddress();
+        SafePointer slidML = rebasedAddress();
         // Note, using 4k here as we might be an arm64e process inspecting an x86_64 image, which uses 4k pages
         if (!_mapper && !_mapperFailed) {
             _mapper = Mapper::mapperForMachO(_transactionalAllocator, _file, _uuid, _rebasedAddress);
@@ -682,7 +635,7 @@ const MachOLoaded* Image::ml() const {
 const UUID& Image::uuid() const {
     if (!_uuidLoaded) {
         uuid_t fileUUID;
-        const MachOLoaded* mh = ml();
+        const Header* mh = (Header*)ml();
         if (mh && mh->hasMachOMagic()) {
             if (mh->getUuid(fileUUID))
                 _uuid = UUID(fileUUID);
@@ -692,7 +645,7 @@ const UUID& Image::uuid() const {
     return _uuid;
 }
 
-uint64_t Image::rebasedAddress() const {
+SafePointer Image::rebasedAddress() const {
     return (uint64_t)_rebasedAddress;
 }
 
@@ -700,7 +653,7 @@ uint64_t Image::rebasedAddress() const {
 const char* Image::installname() const {
     if (!_installnameLoaded) {
         if (ml()) {
-            _installname = ml()->installName();
+            _installname = ((const Header*)ml())->installName();
         }
         _installnameLoaded = true;
     }
@@ -720,7 +673,7 @@ const SharedCache* Image::sharedCache() const {
 }
 
 uint64_t Image::sharedCacheVMOffset() const {
-    return (uint64_t)_rebasedAddress - sharedCache()->rebasedAddress();
+    return (uint64_t)_rebasedAddress - (uint64_t)sharedCache()->rebasedAddress();
 }
 
 uint32_t Image::pointerSize() {
@@ -730,34 +683,34 @@ uint32_t Image::pointerSize() {
 
 bool Image::forEachSegment(void (^block)(const char* segmentName, uint64_t vmAddr, uint64_t vmSize, int perm)) {
     if (!ml()) { return false; }
-    __block uint64_t slide = (uint64_t)_rebasedAddress - ml()->preferredLoadAddress();
-    ml()->forEachSegment(^(const MachOLoaded::SegmentInfo &info, bool &stop) {
+    __block uint64_t slide = (uint64_t)_rebasedAddress - ((const Header*)ml())->preferredLoadAddress();
+    ((const Header*)ml())->forEachSegment(^(const Header::SegmentInfo &info, bool &stop) {
         uint64_t vmAddr = 0x0;
         if ( _sharedCacheSlide.has_value() ) {
-            vmAddr = info.vmAddr + _sharedCacheSlide.value();
+            vmAddr = info.vmaddr + _sharedCacheSlide.value();
         } else {
             if ( ml()->isMainExecutable() ) {
-                if ( strncmp(info.segName, "__PAGEZERO", 10) == 0 )
+                if ( info.segmentName.starts_with("__PAGEZERO") )
                     return;
             }
-            vmAddr = info.vmAddr + slide;
+            vmAddr = info.vmaddr + slide;
         }
-        block(info.segName, vmAddr, info.vmSize, info.protections);
+        block(info.segmentName.data(), vmAddr, info.vmsize, info.initProt);
     });
     return true;
 }
 
 bool Image::forEachSection(void (^block)(const char* segmentName, const char* sectionName, uint64_t vmAddr, uint64_t vmSize)) {
     if (!ml()) { return false; }
-    __block uint64_t slide = (uint64_t)_rebasedAddress - ml()->preferredLoadAddress();
-    ml()->forEachSection(^(const MachOLoaded::SectionInfo &info, bool malformedSectionRange, bool &stop) {
+    __block uint64_t slide = (uint64_t)_rebasedAddress - ((const Header*)ml())->preferredLoadAddress();
+    ((const Header*)ml())->forEachSection(^(const Header::SectionInfo &info, bool &stop) {
         uint64_t sectAddr = 0x0;
         if ( _sharedCacheSlide.has_value() ) {
-            sectAddr = info.sectAddr + _sharedCacheSlide.value();
+            sectAddr = info.address + _sharedCacheSlide.value();
         } else {
-            sectAddr = info.sectAddr + slide;
+            sectAddr = info.address + slide;
         }
-        block(info.segInfo.segName, info.sectName, sectAddr, info.sectSize);
+        block(info.segmentName.data(), info.sectionName.data(), sectAddr, info.size);
     });
     return true;
 }
@@ -765,23 +718,23 @@ bool Image::forEachSection(void (^block)(const char* segmentName, const char* se
 bool Image::contentForSegment(const char* segmentName, void (^contentReader)(const void* content, uint64_t vmAddr, uint64_t vmSize)) {
     if (!ml()) { return false; }
     __block bool result = false;
-    __block uint64_t slide = (uint64_t)_rebasedAddress - ml()->preferredLoadAddress();
-    ml()->forEachSegment(^(const MachOLoaded::SegmentInfo &info, bool &stop) {
-        if (strcmp(segmentName, info.segName) != 0) { return; }
+    __block uint64_t slide = (uint64_t)_rebasedAddress - ((const Header*)ml())->preferredLoadAddress();
+    ((const Header*)ml())->forEachSegment(^(const Header::SegmentInfo &info, bool &stop) {
+        if ( segmentName != info.segmentName ) { return; }
         uint64_t vmAddr = 0;
         if ( _sharedCacheSlide.has_value() ) {
-            vmAddr = info.vmAddr + _sharedCacheSlide.value();
+            vmAddr = info.vmaddr + _sharedCacheSlide.value();
         } else {
             if ( ml()->isMainExecutable() ) {
-                if ( strncmp(info.segName, "__PAGEZERO", 10) == 0 )
+                if ( info.segmentName.starts_with("__PAGEZERO") )
                     return;
             }
-            vmAddr = info.vmAddr + slide;
+            vmAddr = info.vmaddr + slide;
         }
 
-        if (info.vmSize) {
-            auto content = _mapper->map<uint8_t>((void*)(vmAddr), info.vmSize);
-            contentReader((void*)&*content, vmAddr, info.vmSize);
+        if (info.vmsize) {
+            auto content = _mapper->map<uint8_t>(vmAddr, info.vmsize);
+            contentReader((void*)&*content, vmAddr, info.vmsize);
         } else {
             contentReader(nullptr, vmAddr, 0);
         }
@@ -794,19 +747,19 @@ bool Image::contentForSegment(const char* segmentName, void (^contentReader)(con
 bool Image::contentForSection(const char* segmentName, const char* sectionName,
                               void (^contentReader)(const void* content, uint64_t vmAddr, uint64_t vmSize)) {
     __block bool result = false;
-    __block uint64_t slide = (uint64_t)_rebasedAddress - ml()->preferredLoadAddress();
-    ml()->forEachSection(^(const MachOLoaded::SectionInfo &info, bool malformedRange, bool &stop) {
-        if (strcmp(segmentName, info.segInfo.segName) != 0) { return; }
-        if (strcmp(sectionName, info.sectName) != 0) { return; }
+    __block uint64_t slide = (uint64_t)_rebasedAddress - ((const Header*)ml())->preferredLoadAddress();
+    ((const Header*)ml())->forEachSection(^(const Header::SectionInfo &info, bool &stop) {
+        if ( segmentName != info.segmentName ) { return; }
+        if ( sectionName != info.sectionName ) { return; }
         uint64_t sectAddr = 0;
         if ( _sharedCacheSlide.has_value() ) {
-            sectAddr = info.sectAddr + _sharedCacheSlide.value();
+            sectAddr = info.address + _sharedCacheSlide.value();
         } else {
-            sectAddr = info.sectAddr + slide;
+            sectAddr = info.address + slide;
         }
-        if (info.sectSize) {
-            auto content = _mapper->map<uint8_t>((void*)(sectAddr), info.sectSize);
-            contentReader((void*)&*content, sectAddr, info.sectSize);
+        if (info.size) {
+            auto content = _mapper->map<uint8_t>(sectAddr, info.size);
+            contentReader((void*)&*content, sectAddr, info.size);
         } else {
             contentReader(nullptr, sectAddr, 0);
         }
@@ -821,12 +774,12 @@ bool Image::contentForSection(const char* segmentName, const char* sectionName,
 
 SharedCacheLocals::SharedCacheLocals(SharedPtr<Mapper>& M, bool use64BitDylibOffsets)
     : _mapper(M), _use64BitDylibOffsets(use64BitDylibOffsets) {
-    auto header = _mapper->map<dyld_cache_header>((void*)0, sizeof(dyld_cache_header));
+    auto header = _mapper->map<dyld_cache_header>(0ULL, sizeof(dyld_cache_header));
 
     // Map in the whole locals buffer.
     // TODO: Once we have the symbols in their own file, simplify this to just map the whole file
     // and not do the header and locals separately
-    _locals = _mapper->map<uint8_t>((void*)header->localSymbolsOffset, header->localSymbolsSize);
+    _locals = _mapper->map<uint8_t>(header->localSymbolsOffset, header->localSymbolsSize);
 }
 
 const dyld_cache_local_symbols_info* SharedCacheLocals::localInfo() const {
@@ -845,7 +798,7 @@ static uint64_t cacheMappedSize(Mapper::Pointer<dyld_cache_header>& header, Shar
                                 uint64_t rebasedAddress, bool splitCache)
 {
     // If we have sub caches, then the cache header itself tells us how much space we need to cover all caches
-    if (header->mappingOffset >= __offsetof(dyld_cache_header, subCacheArrayCount) ) {
+    if (header->mappingOffset >= offsetof(dyld_cache_header, subCacheArrayCount) ) {
         return header->sharedRegionSize;
     } else {
         auto headerBytes = (uint8_t*)&*header;
@@ -859,19 +812,19 @@ static uint64_t cacheMappedSize(Mapper::Pointer<dyld_cache_header>& header, Shar
         if (splitCache) {
             for (auto i = 0; i < header->subCacheArrayCount; ++i) {
                 uint64_t subCacheOffset = 0;
-                if (header->mappingOffset <= __offsetof(dyld_cache_header, cacheSubType) ) {
+                if (header->mappingOffset <= offsetof(dyld_cache_header, cacheSubType) ) {
                     auto subCaches = (dyld_subcache_entry_v1*)&headerBytes[header->subCacheArrayOffset];
                     subCacheOffset = subCaches[i].cacheVMOffset;
                 } else {
                     auto subCaches = (dyld_subcache_entry*)&headerBytes[header->subCacheArrayOffset];
                     subCacheOffset = subCaches[i].cacheVMOffset;
                 }
-                auto subCacheHeader = mapper->map<dyld_cache_header>((void*)(subCacheOffset + rebasedAddress), PAGE_SIZE);
+                auto subCacheHeader = mapper->map<dyld_cache_header>(subCacheOffset + rebasedAddress, PAGE_SIZE);
                 uint64_t subCacheHeaderSize = 0;
                 bool splitCacheUnused;
                 getCacheInfo(&*subCacheHeader, subCacheHeaderSize, splitCacheUnused);
                 if (subCacheHeaderSize > PAGE_SIZE) {
-                    subCacheHeader = mapper->map<dyld_cache_header>((void*)(subCacheOffset + rebasedAddress), subCacheHeaderSize);
+                    subCacheHeader = mapper->map<dyld_cache_header>(subCacheOffset + rebasedAddress, subCacheHeaderSize);
                 }
                 auto subCacheHeaderBytes = (uint8_t*)&*subCacheHeader;
                 auto subCacheMappings = (dyld_cache_mapping_and_slide_info*)&subCacheHeaderBytes[subCacheHeader->mappingWithSlideOffset];
@@ -886,20 +839,20 @@ static uint64_t cacheMappedSize(Mapper::Pointer<dyld_cache_header>& header, Shar
     }
 }
 
-SharedCache::SharedCache(Allocator& ephemeralAllocator, FileRecord&& file, SharedPtr<Mapper>& mapper, uint64_t rebasedAddress, bool P)
+SharedCache::SharedCache(Allocator& ephemeralAllocator, FileRecord&& file, SharedPtr<Mapper>& mapper, SafePointer rebasedAddress, bool P)
     : _ephemeralAllocator(ephemeralAllocator), _file(std::move(file)), _mapper(mapper),  _rebasedAddress(rebasedAddress), _private(P)
 {
     assert(_mapper);
-    _header = _mapper->map<dyld_cache_header>((void*)_rebasedAddress, PAGE_SIZE);
+    _header = _mapper->map<dyld_cache_header>(_rebasedAddress, PAGE_SIZE);
     uint64_t headerSize = 0;
     bool splitCache = false;
     getCacheInfo(&*_header, headerSize, splitCache);
     if (headerSize > PAGE_SIZE) {
-        _header = _mapper->map<dyld_cache_header>((void*)_rebasedAddress, headerSize);
+        _header = _mapper->map<dyld_cache_header>(_rebasedAddress, headerSize);
     }
     _uuid = UUID(&_header->uuid[0]);
-    _slide = _rebasedAddress -  _header->sharedRegionStart;
-    _size = cacheMappedSize(_header, _mapper, rebasedAddress, splitCache);
+    _slide = (uint64_t)_rebasedAddress -  _header->sharedRegionStart;
+    _size = cacheMappedSize(_header, _mapper, (uint64_t)rebasedAddress, splitCache);
 }
 
 
@@ -913,6 +866,7 @@ void SharedCache::forEachInstalledCacheWithSystemPath(Allocator& _ephemeralAlloc
         "/private/preboot/Cryptexes/OS/System/DriverKit/System/Library/dyld/",
         "/System/Cryptexes/OS/System/Library/Caches/com.apple.dyld/",
         "/System/Cryptexes/OS/System/Library/dyld/",
+        "/System/Cryptexes/ExclaveOS/System/ExclaveKit/System/Library/dyld/",
         "/System/Volumes/Preboot/Cryptexes/Incoming/OS/System/Library/dyld/",
         "/System/Volumes/Preboot/Cryptexes/Incoming/OS/System/DriverKit/System/Library/dyld/",
         "/private/preboot/Cryptexes/Incoming/OS/System/Library/Caches/com.apple.dyld/",
@@ -921,6 +875,7 @@ void SharedCache::forEachInstalledCacheWithSystemPath(Allocator& _ephemeralAlloc
         "/System/Cryptexes/Incoming/OS/System/Library/dyld/",
         "/System/Library/Caches/com.apple.dyld/",
         "/System/DriverKit/System/Library/dyld/",
+        "/System/ExclaveKit/System/Library/dyld/",
         "/System/Library/dyld/"
     };
 
@@ -987,7 +942,7 @@ void SharedCache::forEachInstalledCacheWithSystemPath(Allocator& _ephemeralAlloc
 
 UniquePtr<SharedCache> SharedCache::createForFileRecord(Allocator& _ephemeralAllocator, FileRecord&& file) {
     auto uuid = UUID();
-    auto fileMapper = Mapper::mapperForSharedCache(_ephemeralAllocator, file, 0);
+    auto fileMapper = Mapper::mapperForSharedCache(_ephemeralAllocator, file, 0ULL);
     if (!fileMapper) { return nullptr; }
     return _transactionalAllocator.makeUnique<SharedCache>(_ephemeralAllocator, std::move(file), fileMapper, (uint64_t)fileMapper->baseAddress(), true);
 }
@@ -997,7 +952,7 @@ const UUID& SharedCache::uuid() const {
     return _uuid;
 }
 
-uint64_t SharedCache::rebasedAddress() const {
+SafePointer SharedCache::rebasedAddress() const {
     return _rebasedAddress;
 }
 
@@ -1020,7 +975,7 @@ void SharedCache::forEachFilePath(void (^block)(const char* file_path)) const {
     if (splitCache) {
         auto headerBytes = (std::byte*)&*_header;
         char subCachePath[PATH_MAX];
-        if (_header->mappingOffset <= __offsetof(dyld_cache_header, cacheSubType)) {
+        if (_header->mappingOffset <= offsetof(dyld_cache_header, cacheSubType)) {
             for (auto i = 0; i < _header->subCacheArrayCount; ++i) {
                 snprintf(&subCachePath[0], sizeof(subCachePath), "%s.%u", _file.getPath(), i+1);
                 block(subCachePath);
@@ -1032,7 +987,7 @@ void SharedCache::forEachFilePath(void (^block)(const char* file_path)) const {
                 block(subCachePath);
             }
         }
-        if ( (_header->mappingOffset >= __offsetof(dyld_cache_header, symbolFileUUID)) && !uuid_is_null(_header->symbolFileUUID) ) {
+        if ( (_header->mappingOffset >= offsetof(dyld_cache_header, symbolFileUUID)) && !uuid_is_null(_header->symbolFileUUID) ) {
             strlcpy(&subCachePath[0], _file.getPath(), PATH_MAX);
             // On new caches, the locals come from a new subCache file
             if (strstr(subCachePath, ".development") != nullptr) {
@@ -1056,7 +1011,7 @@ void SharedCache::forEachImage(void (^block)(Image* image)) {
     auto headerBytes = (uint8_t*)&*_header;
     auto images = std::span((const dyld_cache_image_text_info*)&headerBytes[_header->imagesTextOffset], (size_t)_header->imagesTextCount);
     for (auto i : images) {
-        auto image = Image(_ephemeralAllocator, _mapper,  (void*)(i.loadAddress), _slide, this);
+        auto image = Image(_ephemeralAllocator, _mapper, i.loadAddress, _slide, this);
         block(&image);
     }
 }
@@ -1064,7 +1019,7 @@ void SharedCache::forEachImage(void (^block)(Image* image)) {
 void SharedCache::withImageForIndex(uint32_t idx, void (^block)(Image* image)) {
     auto headerBytes = (uint8_t*)&*_header;
     auto images = std::span((const dyld_cache_image_text_info*)&headerBytes[_header->imagesTextOffset], (size_t)_header->imagesTextCount);
-    auto image = Image(_ephemeralAllocator, _mapper,  (void*)(images[idx].loadAddress), _slide, this);
+    auto image = Image(_ephemeralAllocator, _mapper, images[idx].loadAddress, _slide, this);
     block(&image);
 }
 
@@ -1075,7 +1030,7 @@ UniquePtr<SharedCacheLocals> SharedCache::localSymbols() const {
     // Where it is depends on the cache header
     char localSymbolsCachePath[PATH_MAX];
     strlcpy(&localSymbolsCachePath[0], _file.getPath(), PATH_MAX);
-    bool useSymbolsFile = (_header->mappingOffset >= __offsetof(dyld_cache_header, symbolFileUUID));
+    bool useSymbolsFile = (_header->mappingOffset >= offsetof(dyld_cache_header, symbolFileUUID));
     if ( useSymbolsFile ) {
         if ( uuid_is_null(_header->symbolFileUUID) )
             return nullptr;
@@ -1126,7 +1081,7 @@ bool SharedCache::mapSubCacheAndInvokeBlock(const dyld_cache_header* subCacheHea
     for(auto i = 0; i < _header->mappingCount; ++i) {
         //    _slide = _baseAddress -  _header->sharedRegionStart;
         auto mapping = (dyld_cache_mapping_info*)&subCacheHeaderBytes[subCacheHeader->mappingOffset+(i*sizeof(dyld_cache_mapping_info))];
-        auto mappingBytes = _mapper->map<uint8_t>((void*)(mapping->address - _slide), mapping->size);
+        auto mappingBytes = _mapper->map<uint8_t>(mapping->address - _slide, mapping->size);
         kern_return_t r = vm_copy(mach_task_self(), (vm_address_t)&*mappingBytes, (vm_size_t)mapping->size, (vm_address_t)(mappedSubCache+mapping->fileOffset));
         if ( r != KERN_SUCCESS ) {
             result = false;
@@ -1152,18 +1107,18 @@ bool SharedCache::forEachSubcache4Rosetta(void (^block)(const void* cacheBuffer,
     if (splitCache) {
         for (auto i = 0; i < _header->subCacheArrayCount; ++i) {
             uint64_t subCacheOffset = 0;
-            if (_header->mappingOffset <= __offsetof(dyld_cache_header, cacheSubType) ) {
+            if (_header->mappingOffset <= offsetof(dyld_cache_header, cacheSubType) ) {
                 auto subCaches = (dyld_subcache_entry_v1*)&headerBytes[_header->subCacheArrayOffset];
                 subCacheOffset = subCaches[i].cacheVMOffset;
             } else {
                 auto subCaches = (dyld_subcache_entry*)&headerBytes[_header->subCacheArrayOffset];
                 subCacheOffset = subCaches[i].cacheVMOffset;
             }
-            auto subCacheHeader = _mapper->map<dyld_cache_header>((void*)(rebasedAddress() + subCacheOffset), PAGE_SIZE);
+            auto subCacheHeader = _mapper->map<dyld_cache_header>((uint64_t)rebasedAddress() + subCacheOffset, PAGE_SIZE);
             uint64_t subCacheHeaderSize = subCacheHeader->mappingOffset+subCacheHeader->mappingCount*sizeof(dyld_cache_mapping_info);
             getCacheInfo(&*_header, headerSize, splitCache);
             if (subCacheHeaderSize > PAGE_SIZE) {
-                subCacheHeader = _mapper->map<dyld_cache_header>((void*)(rebasedAddress() + subCacheOffset), subCacheHeaderSize);
+                subCacheHeader = _mapper->map<dyld_cache_header>((uint64_t)rebasedAddress() + subCacheOffset, subCacheHeaderSize);
             }
 //            printf("Subcache Offset: %lx\n", (uintptr_t)&headerBytes[subCacheOffset]);
 //            printf("subCacheHeader: %lx\n", (uintptr_t)&*subCacheHeader);
@@ -1275,11 +1230,11 @@ UniquePtr<ProcessSnapshot> Process::synthesizeSnapshot(kern_return_t *kr) {
                 BLEND_KERN_RETURN_LOCATION(*kr, 0xe8);
                 return;
             }
-            auto mf = MachOFile::isMachO((const void*)unsafeBytes);
-            if (!mf) {
+            auto mh = Header::isMachO({(const uint8_t*)unsafeBytes, (size_t)readSize});
+            if (!mh) {
                 return;
             }
-            if ( mf->filetype == MH_EXECUTE ) {
+            if ( mh->isMainExecutable() ) {
                 int len = proc_regionfilename(pid, address, executablePath, PATH_MAX);
                 if ( len != 0 ) {
                     executablePath[len] = '\0';
@@ -1287,11 +1242,11 @@ UniquePtr<ProcessSnapshot> Process::synthesizeSnapshot(kern_return_t *kr) {
                 SharedPtr<Mapper> mapper = nullptr;
                 auto file = _fileManager.fileRecordForPath(_transactionalAllocator, executablePath);
                 uuid_t rawUUID;
-                mf->getUuid(rawUUID);
+                mh->getUuid(rawUUID);
                 auto uuid = UUID(rawUUID);
-                result->addImage(Image(_transactionalAllocator, std::move(file), mapper, (const mach_header*)address, uuid));
+                result->addImage(Image(_transactionalAllocator, std::move(file), mapper, (uint64_t)address, uuid));
                 foundMainExecutable = true;
-            } else if ( mf->filetype == MH_DYLINKER ) {
+            } else if ( mh->isDylinker() ) {
                 int len = proc_regionfilename(pid, address, executablePath, PATH_MAX);
                 if ( len != 0 ) {
                     executablePath[len] = '\0';
@@ -1299,9 +1254,9 @@ UniquePtr<ProcessSnapshot> Process::synthesizeSnapshot(kern_return_t *kr) {
                 SharedPtr<Mapper> mapper = nullptr;
                 auto file = _fileManager.fileRecordForPath(_transactionalAllocator, executablePath);
                 uuid_t rawUUID;
-                mf->getUuid(rawUUID);
+                mh->getUuid(rawUUID);
                 auto uuid = UUID(rawUUID);
-                result->addImage(Image(_transactionalAllocator, std::move(file), mapper, (const mach_header*)address, uuid));
+                result->addImage(Image(_transactionalAllocator, std::move(file), mapper, (uint64_t)address, uuid));
                 foundDyld = true;
             }
         });
@@ -1343,6 +1298,7 @@ UniquePtr<ProcessSnapshot> Process::getSnapshot(kern_return_t *kr) {
     }
     uint8_t remoteBuffer[16*1024];
     mach_vm_size_t readSize = 0;
+    uint64_t failedAddress = 0;
     while (1) {
         // Using mach_vm_read_overwrite because this is part of dyld. If the file is removed or the codesignature is invalid
         // then the system is broken beyond recovery anyway
@@ -1361,7 +1317,8 @@ UniquePtr<ProcessSnapshot> Process::getSnapshot(kern_return_t *kr) {
             compactInfoSize                 = info->compact_dyld_image_info_size;
         } else {
             const dyld_all_image_infos_64* info = (const dyld_all_image_infos_64*)&remoteBuffer[0];
-            compactInfoAddress              = info->compact_dyld_image_info_addr;
+            // Mask of TBI bits
+            compactInfoAddress              = (info->compact_dyld_image_info_addr & 0x00ff'ffff'ffff'ffff);
             compactInfoSize                 = info->compact_dyld_image_info_size;
         }
         if (compactInfoSize == 0) {
@@ -1371,6 +1328,11 @@ UniquePtr<ProcessSnapshot> Process::getSnapshot(kern_return_t *kr) {
         *kr = mach_vm_read_overwrite(_task, compactInfoAddress, compactInfoSize, (mach_vm_address_t)&*compactInfo, &readSize);
         if (*kr != KERN_SUCCESS) {
             BLEND_KERN_RETURN_LOCATION(*kr, 0xec);
+            if (compactInfoAddress == failedAddress) {
+                // We tried the same address twice and it failed both times, this is not a simple mutation issue, give up and reutrn an error
+                return nullptr;
+            }
+            failedAddress = compactInfoAddress;
             // The read failed, chances are the process mutated the compact info, retry
             continue;
         }
@@ -1617,14 +1579,46 @@ ProcessSnapshot::ProcessSnapshot(Allocator& ephemeralAllocator, FileManager& fil
     :   _ephemeralAllocator(ephemeralAllocator), _fileManager(fileManager), _images(_transactionalAllocator),
         _identityMapper(_transactionalAllocator.makeShared<Mapper>(_transactionalAllocator)), _useIdentityMapper(useIdentityMapper) {}
 
+#if BUILDING_LIBDYLD && !TARGET_OS_DRIVERKIT && !TARGET_OS_EXCLAVEKIT
+// This function is a private interface between libdyld and Dyld.framework and implemented in Swift
+// there is no header
+extern "C" const bool unwrapCompactInfo(void* _Nonnull buffer, uint64_t* _Nonnull size);
+#endif /* BUILDING_LIBDYLD && !TARGET_OS_DRIVERKIT && !TARGET_OS_EXCLAVEKIT */
+
 ProcessSnapshot::ProcessSnapshot(Allocator& ephemeralAllocator, FileManager& fileManager, bool useIdentityMapper, const std::span<std::byte> data)
     :   _ephemeralAllocator(ephemeralAllocator), _fileManager(fileManager), _images(_transactionalAllocator),
         _identityMapper(_transactionalAllocator.makeShared<Mapper>(_transactionalAllocator)), _useIdentityMapper(useIdentityMapper) {
         Serializer serializer(*this);
-        if (!serializer.deserialize(data)) {
+        bool deserializedSucceeed = serializer.deserialize(data);
+#if BUILDING_LIBDYLD && !TARGET_OS_DRIVERKIT && !TARGET_OS_EXCLAVEKIT
+        static dispatch_once_t onceToken;
+        static __typeof__(unwrapCompactInfo) *unwrapCompactInfoPtr = nullptr;
+        if (!deserializedSucceeed) {
+            // If we failed we try to load the unwrap function
+            dispatch_once(&onceToken, ^{
+                // We attempt a dlopen() here since the unwrapCompactInfo is not in the build yet, and this is a temporary compatibility hack
+                void* dyldFrameworkHandle = dlopen("/System/Library/PrivateFrameworks/Dyld.framework/Dyld", RTLD_NOW);
+                unwrapCompactInfoPtr = (__typeof__(unwrapCompactInfo)*)dlsym(dyldFrameworkHandle, "unwrapCompactInfo");
+            });
+        }
+        // Only try the fallback if we managed to load the unwrap function
+        if (unwrapCompactInfoPtr && !deserializedSucceeed) {
+            std::byte* unwrappedData = (std::byte*)_transactionalAllocator.malloc(data.size());
+            std::copy(data.begin(), data.end(), unwrappedData);
+            uint64_t unwrappedSize = data.size();
+            if (unwrapCompactInfoPtr((void*)unwrappedData, &unwrappedSize)) {
+                std::span<std::byte> unwrappedSpan = std::span<std::byte>(unwrappedData, (size_t)unwrappedSize);
+                deserializedSucceeed = serializer.deserialize(unwrappedSpan);
+            }
+            free((void*)unwrappedData);
+        }
+#endif /* BUILDING_LIBDYLD && !TARGET_OS_DRIVERKIT && !TARGET_OS_EXCLAVEKIT */
+        if (!deserializedSucceeed) {
             // Deerialization failed, reset the snapshot and mark invalid
             _images.clear();
-            _bitmap             = nullptr;
+            if (_bitmap) {
+                _bitmap->clear();
+            }
             _sharedCache        = nullptr;
             _platform           = 0;
             _initialImageCount  = 0;
@@ -1681,7 +1675,7 @@ void ProcessSnapshot::forEachImageNotIn(const ProcessSnapshot& other, void (^blo
     uint64_t address    = ~0ULL;
     auto i              = other._images.begin();
     if (i != other._images.end()) {
-        address = (*i)->rebasedAddress();
+        address = (uint64_t)(*i)->rebasedAddress();
     }
 
     for (auto& image : _images) {
@@ -1693,7 +1687,7 @@ void ProcessSnapshot::forEachImageNotIn(const ProcessSnapshot& other, void (^blo
                 address = ~0ULL;
                 break;
             }
-            address = (*i)->rebasedAddress();
+            address = (uint64_t)(*i)->rebasedAddress();
         }
         if (image->rebasedAddress() != address) {
             block(&*image);
@@ -1710,7 +1704,7 @@ UniquePtr<SharedCache>& ProcessSnapshot::sharedCache() {
 }
 
 #if BUILDING_DYLD
-void ProcessSnapshot::addImages(RuntimeState* state, const std::span<const Loader*>& loaders) {
+void ProcessSnapshot::addImages(RuntimeState* state, Vector<ConstAuthLoader>& loaders) {
     for (auto& ldr : loaders) {
         if (_sharedCache && ldr->dylibInDyldCache) {
             _bitmap->setBit(ldr->ref.index);
@@ -1738,9 +1732,9 @@ void ProcessSnapshot::addSharedCache(SharedCache&& sharedCache) {
     _bitmap = _transactionalAllocator.makeUnique<Bitmap>(_transactionalAllocator, _sharedCache->imageCount());
 }
 
-/// Assumes the mach_header parameter is in the range of the shared cache. Otherwise asserts
 void ProcessSnapshot::addSharedCacheImage(const struct mach_header* mh) {
-    auto header = (dyld_cache_header*)_sharedCache->rebasedAddress();
+    assert(mh->flags & MH_DYLIB_IN_CACHE);
+    auto header = (dyld_cache_header*)(uint64_t)_sharedCache->rebasedAddress();
     auto headerBytes = (uint8_t*)header;
     auto slide = (uint64_t)header - header->sharedRegionStart;
     auto images = std::span((const dyld_cache_image_text_info*)&headerBytes[header->imagesTextOffset], (size_t)header->imagesTextCount);
@@ -1794,7 +1788,7 @@ void ProcessSnapshot::dump() {
         if (!name) {
             name = "<unknown>";
         }
-        fprintf(stderr, "0x%llx %s %s\n",  image->rebasedAddress(), uuidStr, name);
+        fprintf(stderr, "0x%llx %s %s\n",  (uint64_t)image->rebasedAddress(), uuidStr, name);
     });
 }
 
@@ -1908,23 +1902,33 @@ void ProcessSnapshot::Serializer::emitMappedFileInfo(uint64_t rebasedAddress, co
 }
 
 bool ProcessSnapshot::Serializer::readMappedFileInfo(std::span<std::byte>& data, uint64_t& rebasedAddress, UUID& uuid, FileRecord& file) {
-    uint64_t flags = readPVLEUInt64(data);
-    rebasedAddress = readPVLEUInt64(data);
+    uint64_t flags = 0;
+    if (!readPVLEUInt64(data, flags)
+        || !readPVLEUInt64(data, rebasedAddress)) {
+        return false;
+    }
     if (flags & kMappedFileFlagsHasUUID) {
+        if (data.size() < 16) {
+            return false;
+        }
         uuid = UUID(&data[0]);
         data = data.last(data.size()-16);
     }
     if (flags & kMappedFileFlagsHasFileID) {
-        uint64_t volumeIndex = readPVLEUInt64(data);
-        uint64_t objectID = readPVLEUInt64(data);
-        if (volumeIndex >= _volumeUUIDs.size() )
+        uint64_t volumeIndex = 0;
+        uint64_t objectID = 0;
+        if (!readPVLEUInt64(data, volumeIndex)
+            || !readPVLEUInt64(data, objectID)
+            || volumeIndex >= _volumeUUIDs.size()) {
             return false;
+        }
         file = _fileManager.fileRecordForVolumeUUIDAndObjID(_volumeUUIDs[(size_t)volumeIndex], objectID);
     }
     if (flags & kMappedFileFlagsHasFilePath) {
-        uint64_t pathOffset = readPVLEUInt64(data);
-        if ( pathOffset >= _stringTableBuffer.size() )
+        uint64_t pathOffset = 0;
+        if (!readPVLEUInt64(data, pathOffset) || pathOffset >= _stringTableBuffer.size()) {
             return false;
+        }
         file = _fileManager.fileRecordForPath(_ephemeralAllocator, &_stringTableBuffer[(size_t)pathOffset]);
     }
     return true;
@@ -1999,16 +2003,18 @@ Vector<std::byte> ProcessSnapshot::Serializer::serialize() {
     emitPVLEUInt64(_stringTableBuffer.size(), result);
     std::copy((std::byte*)_stringTableBuffer.begin(), (std::byte*)_stringTableBuffer.end(), std::back_inserter(result));
     if (_processFlags & kProcessFlagsHasSharedCache) {
-        uint64_t address = _sharedCache->rebasedAddress()/((_processFlags & kProcessFlagsHas16kPages) ? 16384 : 4096);
+        uint64_t address = (uint64_t)_sharedCache->rebasedAddress()/((_processFlags & kProcessFlagsHas16kPages) ? 16384 : 4096);
         emitMappedFileInfo(address, _sharedCache->uuid(), _sharedCache->file(), result);
-        _bitmap->emit(result);
+        emitPVLEUInt64(_bitmap->size(), result);
+        if (_bitmap->size() > 0)
+            emit(_bitmap->bytes(), result);
     }
 
     emitPVLEUInt64(_images.size(), result);
     uint64_t lastAddress = 0;
     for (const auto& image : _images) {
-        uint64_t address = (image->rebasedAddress()-lastAddress)/((_processFlags & kProcessFlagsHas16kPages) ? 16384 : 4096);
-        lastAddress = image->rebasedAddress();
+        uint64_t address = ((uint64_t)image->rebasedAddress()-lastAddress)/((_processFlags & kProcessFlagsHas16kPages) ? 16384 : 4096);
+        lastAddress = (uint64_t)image->rebasedAddress();
         emitMappedFileInfo(address, image->uuid(), image->file(), result);
     }
     while(result.size()%16 != 0) {
@@ -2022,6 +2028,10 @@ Vector<std::byte> ProcessSnapshot::Serializer::serialize() {
 
 bool ProcessSnapshot::Serializer::deserialize(const std::span<std::byte> data) {
     auto i = data;
+    if (i.size() < 36) {
+        // Ensure data is at least large enough to read the header
+        return false;
+    }
     // Confirm magic
     _magic              = read<uint32_t>(i);
     _version            = read<uint32_t>(i);
@@ -2043,17 +2053,27 @@ bool ProcessSnapshot::Serializer::deserialize(const std::span<std::byte> data) {
     if (_crc32c != checksumer) {
         return false;
     }
-    _processFlags           = readPVLEUInt64(i);
-    _platform               = readPVLEUInt64(i);
-    _initialImageCount      = readPVLEUInt64(i);
-    _dyldState              = readPVLEUInt64(i);
-    auto volumeUUIDCount    = readPVLEUInt64(i);
+    uint64_t volumeUUIDCount = 0;
+    if (!readPVLEUInt64(i, _processFlags)
+        || !readPVLEUInt64(i, _platform)
+        || !readPVLEUInt64(i, _initialImageCount)
+        || !readPVLEUInt64(i, _dyldState)
+        || !readPVLEUInt64(i, volumeUUIDCount)) {
+        return false;
+    }
+    if (i.size() < volumeUUIDCount*16) {
+        return false;
+    }
     for (auto j = 0; j < volumeUUIDCount; ++j) {
         UUID volumeUUID(&i[j*16]);
         _volumeUUIDs.push_back(volumeUUID);
     }
     i = i.last((size_t)(i.size()-(16*volumeUUIDCount)));
-    auto stringTableSize    = readPVLEUInt64(i);
+    uint64_t stringTableSize = 0;
+    if (!readPVLEUInt64(i, stringTableSize)
+        || i.size() < stringTableSize) {
+        return false;
+    }
     _stringTableBuffer.reserve((size_t)stringTableSize);
     std::copy((uint8_t*)&i[0], (uint8_t*)&i[(size_t)stringTableSize], std::back_inserter(_stringTableBuffer));
     i = i.last((size_t)(i.size()-stringTableSize));
@@ -2064,7 +2084,7 @@ bool ProcessSnapshot::Serializer::deserialize(const std::span<std::byte> data) {
         FileRecord file;
         if ( !readMappedFileInfo(i, rebasedAddress, uuid, file) )
             return false;
-        rebasedAddress = rebasedAddress * ((_processFlags & kProcessFlagsHas16kPages) ? 16384 : 4096);
+        rebasedAddress = rebasedAddress * ((_processFlags & kProcessFlagsHas16kPages) ? kPageSize16K : kPageSize4K);
         SharedPtr<Mapper> mapper = nullptr;
         if (_processSnapshot._useIdentityMapper) {
             mapper = _processSnapshot.identityMapper();
@@ -2072,18 +2092,27 @@ bool ProcessSnapshot::Serializer::deserialize(const std::span<std::byte> data) {
 #if BUILDING_DYLD || BUILDING_UNIT_TESTS
             mapper = _transactionalAllocator.makeShared<Mapper>(_transactionalAllocator);
 #else
-            mapper = Mapper::mapperForSharedCache(_transactionalAllocator, file, (void*)rebasedAddress);
+            mapper = Mapper::mapperForSharedCache(_transactionalAllocator, file, rebasedAddress);
 #endif
         }
         if (!mapper) {
             return false;
         }
-
-        _sharedCache = _transactionalAllocator.makeUnique<SharedCache>(_ephemeralAllocator, std::move(file), mapper,
+        _sharedCache = _transactionalAllocator.makeUnique<SharedCache>(_transactionalAllocator, std::move(file), mapper,
                                                                        rebasedAddress, _processFlags & kProcessFlagsHasPrivateCache);
-        _bitmap = _transactionalAllocator.makeUnique<Bitmap>(_transactionalAllocator, i);
+        uint64_t encodedSize = 0;
+        if (!readPVLEUInt64(i, encodedSize)) {
+            return false;
+        }
+        _bitmap = _transactionalAllocator.makeUnique<Bitmap>(_transactionalAllocator, (size_t)encodedSize, i);
+        if (_bitmap->size() == 0) {
+            return false;
+        }
     }
-    auto imageCount = readPVLEUInt64(i);
+    uint64_t imageCount = 0;
+    if (!readPVLEUInt64(i, imageCount)) {
+        return false;
+    }
     uint64_t lastAddress = 0;
     for (auto j = 0; j < imageCount; ++j) {
         uint64_t rebasedAddress;
@@ -2102,7 +2131,7 @@ bool ProcessSnapshot::Serializer::deserialize(const std::span<std::byte> data) {
             mapper = _transactionalAllocator.makeShared<Mapper>(_transactionalAllocator);
         }
 #endif
-        auto image = Image(_ephemeralAllocator, std::move(file), mapper, (const struct mach_header*)rebasedAddress, uuid);
+        auto image = Image(_transactionalAllocator, std::move(file), mapper, (uint64_t)rebasedAddress, uuid);
         _images.insert(_transactionalAllocator.makeUnique<Image>(std::move(image)));
     }
     return true;
@@ -2111,3 +2140,4 @@ bool ProcessSnapshot::Serializer::deserialize(const std::span<std::byte> data) {
 };
 };
 #endif // !TARGET_OS_EXCLAVEKIT
+

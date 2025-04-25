@@ -28,14 +28,17 @@
 #include <compare>
 #include <TargetConditionals.h>
 #include "Defines.h"
+
 #if !TARGET_OS_EXCLAVEKIT
+
+
   #include <sys/mman.h>
   #include <mach/mach.h>
   #include <mach/mach_vm.h>
+  #include <mach/vm_statistics.h>
   #include <malloc/malloc.h>
 #endif //  !TARGET_OS_EXCLAVEKIT
 #include <sanitizer/asan_interface.h>
-
 
 #include "Allocator.h"
 #include "BTree.h"
@@ -49,8 +52,16 @@
 #endif // BUILDING_DYLD
 #endif // !TARGET_OS_EXCLAVEKIT
 
+#if SUPPORT_ROSETTA
+#include <Rosetta/Dyld/Traps.h>
+#endif
+
 #if !BUILDING_DYLD && !TARGET_OS_EXCLAVEKIT
 #include <dispatch/dispatch.h>
+#endif
+
+#if !DYLD_FEATURE_USE_INTERNAL_ALLOCATOR
+#include <malloc/malloc.h>
 #endif
 
 #if ALLOCATOR_LOGGING_ENABLED
@@ -58,6 +69,8 @@
 #else
 #define ALLOCATOR_LOG(...)
 #endif
+
+
 
 #if ALLOCATOR_MAKE_TRACE
 #define ALLOCATOR_TRACE(...) fprintf(stderr, __VA_ARGS__)
@@ -75,14 +88,13 @@ extern "C" void* __dso_handle;
 static const uint64_t kPageSize = 16384;
 
 namespace lsl {
-
 #if !TARGET_OS_EXCLAVEKIT
 void Lock::lock() {
     if (!_lock) { return; }
     assertNotOwner();
 #if BUILDING_DYLD
     assert(_runtimeState != nullptr);
-    _runtimeState->libSystemHelpers->os_unfair_lock_lock_with_options(_lock, OS_UNFAIR_LOCK_NONE);
+    _runtimeState->libSystemHelpers.os_unfair_lock_lock_with_options(_lock, OS_UNFAIR_LOCK_NONE);
 #else /* BUILDING_DYLD */
     os_unfair_lock_lock_with_options(_lock, OS_UNFAIR_LOCK_NONE);
 #endif /* BUILDING_DYLD */
@@ -92,7 +104,7 @@ void Lock::unlock() {
     assertOwner();
 #if BUILDING_DYLD
     assert(_runtimeState != nullptr);
-    _runtimeState->libSystemHelpers->os_unfair_lock_unlock(_lock);
+    _runtimeState->libSystemHelpers.os_unfair_lock_unlock(_lock);
 #else /* BUILDING_DYLD */
     os_unfair_lock_unlock(_lock);
 #endif /* BUILDING_DYLD */
@@ -112,44 +124,103 @@ void Lock::assertOwner() {
 #pragma mark -
 #pragma mark MemoryManager
 
-MemoryManager::MemoryManager(MemoryManager&& other) {
-    swap(other);
-}
-
-MemoryManager& MemoryManager::operator=(MemoryManager&& other) {
-    swap(other);
-    return *this;
-}
-
 MemoryManager::MemoryManager(const char** envp, const char** apple, void* dyldSharedCache) {
     // Eventually we will use this to parse parameters for controlling comapct info mlock()
     // We need to do this before allocator is created
-#if BUILDING_DYLD && !TARGET_OS_EXCLAVEKIT
-
-#if ENABLE_HW_TPRO_SUPPORT
+#if DYLD_FEATURE_USE_INTERNAL_ALLOCATOR
+#if DYLD_FEATURE_USE_HW_TPRO
     // Note this is the "does the HW support TPRO bit" not the "is this process using TPRO for DATA_CONST bit".
     // We want the HW bit here as the kernel keeps the TPRO flag enabled in the TPRO_CONST mapping, even
     // if it the process doesn't support TPRO for DATA_CONST
     if ( _simple_getenv(apple, "dyld_hw_tpro") != nullptr ) {
-        bool isPrivateCache = false;
-        if ( const char* privateCache = _simple_getenv(envp, "DYLD_SHARED_REGION") )
-            isPrivateCache = !strcmp(privateCache, "private");
-
-        if ( !isPrivateCache ) {
-            // Start in a writable state to allow bootstrap
-            _tproEnable = true;
-        }
+        _tproEnable = true;
     }
 #endif
 
+#if SUPPORT_ROSETTA && !BUILDING_ALLOCATOR_UNIT_TESTS
+    bool is_translated = false;
+    if (rosetta_dyld_is_translated(&is_translated) == KERN_SUCCESS) {
+        _translated = is_translated;
+    }
+#endif
+
+#if BUILDING_DYLD && !TARGET_OS_EXCLAVEKIT
+
     _sharedCache = dyldSharedCache;
 #endif //  BUILDING_DYLD && !TARGET_OS_EXCLAVEKIT
+#endif /* DYLD_FEATURE_USE_INTERNAL_ALLOCATOR */
+}
+
+// We want the storage for this in __TPRO, but we don't want a working default initializer, so allocator the memory and call placement new
+TPRO_SEGMENT(__alignof(MemoryManager)) std::byte sMemoryManagerBuffer[sizeof(MemoryManager)];
+TPRO_SEGMENT(__alignof(Allocator)) std::byte sAllocatorBuffer[sizeof(Allocator)];
+#if DYLD_FEATURE_USE_INTERNAL_ALLOCATOR
+TPRO_SEGMENT(__alignof(Allocator::Pool)) std::byte sPoolBuffer[sizeof(Allocator::Pool)];
+TPRO_SECTION(__allocator, 16) std::byte sPoolBytes[ALLOCATOR_DEFAULT_POOL_SIZE];
+#endif /* DYLD_FEATURE_USE_INTERNAL_ALLOCATOR */
+TPRO_SEGMENT(__alignof(bool)) bool sMemoryManagerInitialized = false;
+
+void MemoryManager::init(const char** envp, const char** apple, void* dyldSharedCache) {
+    assert(!sMemoryManagerInitialized);
+#if DYLD_FEATURE_USE_INTERNAL_ALLOCATOR
+    // We need to correcttly manipualte the memory here since the memory manager lives in protected memory
+    // Since that is a fairly complex process the best thing is to create a bootstrap manager on the stack
+    // and use it
+    MemoryManager bootStrapMemoryManager(envp, apple,  dyldSharedCache);
+    bootStrapMemoryManager.withWritableMemoryInternal([&] {
+        // Figure out the size of the default allocator
+        MemoryManager::Buffer buffer{(void*)&sPoolBytes[0], ALLOCATOR_DEFAULT_POOL_SIZE};
+        // Create a memory manager, a pool, and an allocator
+        auto memoryManager = new (sMemoryManagerBuffer) MemoryManager(envp, apple,  dyldSharedCache);
+        bool tproEnabledOnPool = false;
+#if DYLD_FEATURE_USE_HW_TPRO
+        tproEnabledOnPool = bootStrapMemoryManager.tproEnabled();
+#endif
+        auto pool = new (sPoolBuffer) Allocator::Pool((Allocator*)sAllocatorBuffer, nullptr, buffer, buffer, tproEnabledOnPool);
+        memoryManager->_defaultAllocator = new (sAllocatorBuffer) Allocator(*memoryManager, *pool);
+        sMemoryManagerInitialized = true;
+    });
+#else
+    auto memoryManager = new (sMemoryManagerBuffer) MemoryManager(envp, apple,  dyldSharedCache);
+    memoryManager->_defaultAllocator = new (sAllocatorBuffer) Allocator();
+    sMemoryManagerInitialized = true;
+#endif /* DYLD_FEATURE_USE_INTERNAL_ALLOCATOR */
+}
+
+MemoryManager& MemoryManager::memoryManager() {
+#if DYLD_FEATURE_USE_INTERNAL_ALLOCATOR || BUILDING_LIBDYLD
+
+    // Users of the internal allocator must initialize it themselves.
+    // Libdyld does not use the internal allocator, but it can't use dispatch once some platforms, so it
+    // also explicitly initializes it
+    assert(sMemoryManagerInitialized);
+#elif BUILDING_LIBDYLD_INTROSPECTION_STATIC
+    // the static introspection library uses a pass through allocator if necessary, but does not build in an
+    // environmwent where it can use dispatch once. It should be single threeaded, so just access the static
+    // directly.
+    if (sMemoryManagerInitialized) {
+        MemoryManager::init();
+    }
+#else
+    // All of other targets use a pass through allocator and can be initialized lazily
+    static dispatch_once_t onceToken;
+    dispatch_once(&onceToken, ^{
+        MemoryManager::init();
+    });
+#endif /* DYLD_FEATURE_USE_INTERNAL_ALLOCATOR || BUILDING_LIBDYLD */
+    return *((MemoryManager*)&sMemoryManagerBuffer);
 }
 
 void MemoryManager::setDyldCacheAddr(void* sharedCache) {
 #if BUILDING_DYLD && !TARGET_OS_EXCLAVEKIT
     _sharedCache = (dyld_cache_header*)sharedCache;
 #endif /* BUILDING_DYLD && !TARGET_OS_EXCLAVEKIT */
+}
+
+void MemoryManager::setProtectedStack(ProtectedStack& protectedStack) {
+#if DYLD_FEATURE_USE_HW_TPRO
+    _protectedStack = &protectedStack;
+#endif /* DYLD_FEATURE_USE_HW_TPRO */
 }
 
 #if !TARGET_OS_EXCLAVEKIT
@@ -161,33 +232,15 @@ void MemoryManager::adoptLock(Lock&& lock) {
 #endif // !TARGET_OS_EXCLAVEKIT
 
 
-void MemoryManager::swap(MemoryManager& other) {
-    using std::swap;
-#if !TARGET_OS_EXCLAVEKIT
-    swap(_lock,                     other._lock);
-#endif // !TARGET_OS_EXCLAVEKIT
-    swap(_allocator,                other._allocator);
-    swap(_writeableCount,           other._writeableCount);
-#if BUILDING_DYLD
-    swap(_sharedCache,              other._sharedCache);
-#endif // BUILDING_DYLD
-
-    // We don't actually swap this because it is a process wide setting, and we may need it to be set correctly
-    // even in the bootstrapMemoryProtector adfter move construction
-#if ENABLE_HW_TPRO_SUPPORT
-    _tproEnable = other._tproEnable;
-#endif // ENABLE_HW_TPRO_SUPPORT
-}
-
-int MemoryManager::vmFlags() const {
+int MemoryManager::vmFlags(bool tproEnabled) const {
     int result = 0;
 
-#if ENABLE_HW_TPRO_SUPPORT
-    if (_tproEnable) {
+#if DYLD_FEATURE_USE_HW_TPRO
+    if (tproEnabled) {
         // add tpro for memory protection on platform that support it
         result |= VM_FLAGS_TPRO;
     }
-#endif // ENABLE_HW_TPRO_SUPPORT
+#endif // DYLD_FEATURE_USE_HW_TPRO
 
 #if BUILDING_DYLD && !TARGET_OS_EXCLAVEKIT
     // Only include the dyld tag for allocations made by dyld
@@ -208,30 +261,38 @@ bool MemoryManager::Buffer::align(uint64_t alignment, uint64_t targetSize) {
     return true;
 }
 
-#if TARGET_OS_EXCLAVEKIT
-// ExclaveKit specific page allocator - for now, let's use a fixed-size static arena.
-static char page_alloc_arena[34 * 0x4000] __attribute__((aligned(kPageSize)));
-static uint64_t page_alloc_arena_used = 0;
+#if DYLD_FEATURE_EMBEDDED_PAGE_ALLOCATOR
+static_assert((DYLD_FEATURE_EMBEDDED_PAGE_ALLOCATOR_PAGE_COUNT <= 64) && "Bitmap max size is 64 bits");
+// ExclaveKit specific page allocator
+// This is a simple bitmap allocator that supports a maximum of 64 slots
+// Previously it was a bump arena, but that would leak if two users interlaced allocations (such as two stack allocated arrays
+// Since we already had a maximum size of 34 it was trivial to switch this to look for a contiguous set of bits in a single integer
+static char page_alloc_arena[DYLD_FEATURE_EMBEDDED_PAGE_ALLOCATOR_PAGE_COUNT * kPageSize] __attribute__((aligned(kPageSize)));
+static uint64_t page_alloc_bitmap = 0;
 
 [[nodiscard]] void* MemoryManager::allocate_pages(uint64_t size) {
     uint64_t targetSize = roundToNextAligned<kPageSize>(size);
-    if (page_alloc_arena_used + targetSize > sizeof(page_alloc_arena)) {
-        return nullptr;
+    uint64_t bitCount = targetSize/kPageSize;
+    uint64_t bitmask = (1ULL<<bitCount) - 1;
+    for (uint64_t i = 0; i < DYLD_FEATURE_EMBEDDED_PAGE_ALLOCATOR_PAGE_COUNT - bitCount; ++i) {
+        uint64_t shiftedMask = (bitmask << i);
+        if ((shiftedMask & page_alloc_bitmap) == 0) {
+            page_alloc_bitmap |= shiftedMask;
+            return (void*)&page_alloc_arena[i * kPageSize];
+        }
     }
-    void *result = page_alloc_arena + page_alloc_arena_used;
-    page_alloc_arena_used += targetSize;
-    return result;
+    return nullptr;
 }
 
 void MemoryManager::deallocate_pages(void* p, uint64_t size) {
-    void *last = page_alloc_arena + page_alloc_arena_used - size;
-    if ( p == last ) {
-        bzero(p, size);
-        page_alloc_arena_used -= size;
-    }
+    bzero(p, size);
+    uint64_t bitCount = size/kPageSize;
+    uint64_t bitmask = (1ULL<<bitCount) - 1;
+    uint64_t shift = ((uint64_t)p - (uint64_t)&page_alloc_arena[0])/kPageSize;
+    page_alloc_bitmap &= ~(bitmask<<shift);
 }
 
-[[nodiscard]] MemoryManager::Buffer MemoryManager::vm_allocate_bytes(uint64_t size) {
+[[nodiscard]] MemoryManager::Buffer MemoryManager::vm_allocate_bytes(uint64_t size, bool tproEnabled) {
     uint64_t targetSize = roundToNextAligned<kPageSize>(size);
     void* result = MemoryManager::allocate_pages(targetSize);
     if ( !result ) {
@@ -245,9 +306,6 @@ void MemoryManager::vm_deallocate_bytes(void* p, uint64_t size) {
 }
 
 #else
-[[nodiscard]] Lock::Guard MemoryManager::lockGuard() {
-    return Lock::Guard(_lock);
-}
 
 template<typename T>
 static void appendHexToString(char *dst, T value, uint64_t size) {
@@ -256,7 +314,7 @@ static void appendHexToString(char *dst, T value, uint64_t size) {
     strlcat(dst, buffer, (size_t)size);
 }
 
-[[nodiscard]] MemoryManager::Buffer MemoryManager::vm_allocate_bytes(uint64_t size) {
+[[nodiscard]] MemoryManager::Buffer MemoryManager::vm_allocate_bytes(uint64_t size, bool tproEnabled) {
     kern_return_t kr = KERN_FAILURE;
     uint64_t targetSize = roundToNextAligned<kPageSize>(size);
 #if __LP64__
@@ -270,7 +328,7 @@ static void appendHexToString(char *dst, T value, uint64_t size) {
                                    &result,
                                    targetSize,
                                    PAGE_MASK,                       // Page alignment
-                                   VM_FLAGS_ANYWHERE | vmFlags(),
+                                   VM_FLAGS_ANYWHERE | vmFlags(tproEnabled),
                                    MEMORY_OBJECT_NULL,              // Allocate memory instead of using an existing object
                                    0,
                                    FALSE,
@@ -283,7 +341,7 @@ static void appendHexToString(char *dst, T value, uint64_t size) {
         // on an older host. Technically this is not guaranteed to be above 4GB, but since it requires manually configuring a zero
         // page to be below 4GB it is safe to assume processes that need it will also setup their sandbox properly so that
         // mach_vm_map() works.
-        kr = vm_allocate(mach_task_self(), (vm_address_t*)&result, (vm_size_t)targetSize, VM_FLAGS_ANYWHERE | vmFlags());
+        kr = vm_allocate(mach_task_self(), (vm_address_t*)&result, (vm_size_t)targetSize, VM_FLAGS_ANYWHERE | vmFlags(tproEnabled));
     }
 
     if (kr != KERN_SUCCESS) {
@@ -312,7 +370,13 @@ void MemoryManager::vm_deallocate_bytes(void* p, uint64_t size) {
     ALLOCATOR_LOG("vm_deallocate_bytes: 0x%llx-0x%llx (%llu bytes)\n", (uint64_t)p, (uint64_t)p+size, size);
     (void)vm_deallocate(mach_task_self(), (vm_address_t)p, (vm_size_t)size);
 }
-#endif // TARGET_OS_EXCLAVEKIT
+#endif // DYLD_FEATURE_EMBEDDED_PAGE_ALLOCATOR
+
+#if !TARGET_OS_EXCLAVEKIT
+[[nodiscard]] Lock::Guard MemoryManager::lockGuard() {
+    return Lock::Guard(_lock);
+}
+#endif
 
 extern void* tproConstStart   __asm("segment$start$__TPRO_CONST");
 extern void* tproConstEnd     __asm("segment$end$__TPRO_CONST");
@@ -330,7 +394,7 @@ void MemoryManager::writeProtect(bool protect) {
         }
     }
     // Next if there is a configured shared cache (un)lock it's __TPRO_CONST segment
-    if (_sharedCache && ((dyld_cache_header*)_sharedCache)->mappingOffset > __offsetof(dyld_cache_header, tproMappingsCount)) {
+    if (_sharedCache && ((dyld_cache_header*)_sharedCache)->mappingOffset > offsetof(dyld_cache_header, tproMappingsCount)) {
         uint8_t* cacheBuffer = (uint8_t*)_sharedCache;
         dyld_cache_header* cacheHeader = (dyld_cache_header*)_sharedCache;
         dyld_cache_tpro_mapping_info* mappings = (dyld_cache_tpro_mapping_info*)&cacheBuffer[cacheHeader->tproMappingsOffset];
@@ -345,14 +409,15 @@ void MemoryManager::writeProtect(bool protect) {
         }
     }
     // Finally if there are any vm_allocated tpro protected regions (un)lock them
-    if (!_allocator) { return; }
-    _allocator->forEachVMAllocatedBuffer(^(const Buffer& buffer) {
-        kern_return_t kr = ::vm_protect(mach_task_self(), (vm_address_t)buffer.address, (vm_size_t)buffer.size, false,
-                                        VM_PROT_READ | (protect ? 0 : VM_PROT_WRITE ));
-        if (kr != KERN_SUCCESS) {
-            // fprintf(stderr, "FAILED: %d", kr);
-        }
-    });
+    if (_defaultAllocator) {
+        _defaultAllocator->forEachVMAllocatedBuffer(^(const Buffer& buffer) {
+            kern_return_t kr = ::vm_protect(mach_task_self(), (vm_address_t)buffer.address, (vm_size_t)buffer.size, false,
+                                            VM_PROT_READ | (protect ? 0 : VM_PROT_WRITE ));
+            if (kr != KERN_SUCCESS) {
+                // fprintf(stderr, "FAILED: %d", kr);
+            }
+        });
+    }
 #endif // !TARGET_OS_EXCLAVEKIT && BUILDING_DYLD
 }
 
@@ -411,38 +476,8 @@ void Allocator::Buffer::dump() const {
 #pragma mark -
 #pragma mark Allocator
 
-void Allocator::swap(Allocator& other) {
-    using std::swap;
-    if (this == &other) { return; }
-    swap(_memoryManager,    other._memoryManager);
-    swap(_firstPool,        other._firstPool);
-    swap(_currentPool,      other._currentPool);
-    swap(_allocatedBytes,   other._allocatedBytes);
-    swap(_bestFit,          other._bestFit);
-}
-
-Allocator& Allocator::createAllocator() {
-    MemoryManager memoryManager;
-    Buffer buffer = memoryManager.vm_allocate_bytes(256*1024);
-    AllocatorLayout* layout = new (buffer.address) AllocatorLayout();
-    layout->init(256*1024);
-    return layout->allocator();
-}
-
-Allocator& Allocator::stackAllocatorInternal(void* buffer, uint64_t size) {
-    assert(buffer != nullptr);
-    assert(size != 0);
-    Buffer stackPool{ buffer, size };
-    if (!stackPool.align(alignof(AllocatorLayout), sizeof(AllocatorLayout))) {
-        assert(0);
-    }
-    AllocatorLayout* layout = new (stackPool.address) AllocatorLayout();
-    layout->init(stackPool.size);
-    return layout->allocator();
-}
-
+#if DYLD_FEATURE_USE_INTERNAL_ALLOCATOR
 Allocator& Allocator::operator=(Allocator&& other) {
-    _memoryManager  =   other._memoryManager;
     _firstPool      =   other._firstPool;
     _currentPool    =   other._currentPool;
     _allocatedBytes =   other._allocatedBytes;
@@ -450,22 +485,98 @@ Allocator& Allocator::operator=(Allocator&& other) {
     return *this;
 }
 
+void Allocator::dump() const {
+    for (auto pool = _firstPool;; pool = pool->nextPool()) {
+        ALLOCATOR_LOG("DUMP:\t\tPOOL(0x%llx)\n", (uint64_t)pool);
+        pool->dump();
+        if (pool == _currentPool) { break; }
+    }
+}
+
+bool Allocator::owned(const void* p, uint64_t nbytes) const {
+    for (auto pool = _currentPool; pool != nullptr; pool = pool->prevPool()) {
+        Buffer objectBuffer{ (void*)p, nbytes };
+        if (pool->poolBuffer().contains(objectBuffer)) {
+            return true;
+        }
+    }
+    return false;
+}
+
+uint64_t Allocator::allocated_bytes() const {
+    return _allocatedBytes;
+}
+
+Allocator::Allocator(MemoryManager& memoryManager, Pool& pool) :
+    _firstPool(&pool), _currentPool(&pool), _allocatedBytes(0) {}
+
+Allocator::Allocator(MemoryManager& memoryManager) : _firstPool(nullptr), _currentPool(nullptr),  _allocatedBytes(0) {}
+
+Allocator::~Allocator() {
+    forEachPool(^(const Pool& pool) {
+        void* poolBaseAddr = pool.poolBuffer().address;
+        uint64_t poolSize = pool.poolBuffer().size;
+        if (pool.vmAllocated()) {
+            MemoryManager::memoryManager().vm_deallocate_bytes(poolBaseAddr, poolSize);
+        }
+    });
+}
+
+void Allocator::setInitialPool(Pool& pool) {
+    assert(_firstPool == nullptr);
+    assert(_currentPool == nullptr);
+    _firstPool = &pool;
+    _currentPool = &pool;
+}
+
+void Allocator::forEachPool(void (^callback)(const Pool&)) {
+    for (auto pool = _currentPool; pool != nullptr; pool = pool->prevPool()) {
+        callback(*pool);
+    }
+}
+
+void Allocator::forEachVMAllocatedBuffer(void (^callback)(const Buffer&)) {
+    forEachPool(^(const Pool& pool){
+        if (!pool.vmAllocated()) { return; }
+        callback({(void*)pool.poolBuffer().address, pool.poolBuffer().size});
+    });
+}
+
+void Allocator::validate() const {
+#if ALLOCATOR_VALIDATION
+    for (auto pool = _firstPool; pool != _currentPool->nextPool(); pool = pool->nextPool()) {
+        pool->validate();
+    }
+#endif
+}
+#endif /* !DYLD_FEATURE_USE_INTERNAL_ALLOCATOR */
+
 void* Allocator::malloc(uint64_t size) {
     return this->aligned_alloc(kGranuleSize, size);
 }
 
-void* Allocator::aligned_alloc(uint64_t alignment, uint64_t size) {
-#if !TARGET_OS_EXCLAVEKIT
-    __unused auto lock = _memoryManager->lockGuard();
+#if !DYLD_FEATURE_USE_INTERNAL_ALLOCATOR
+bool Allocator::owned(const void* p, uint64_t nbytes) const {
+    return (malloc_zone_from_ptr(p) != nullptr);
+}
 #endif
+
+void* Allocator::aligned_alloc(uint64_t alignment, uint64_t size) {
     assert(std::popcount(alignment) == 1); // Power of 2
     const uint64_t targetAlignment  = std::max<uint64_t>(16ULL, alignment);
     const uint64_t targetSize       = roundToNextAligned(targetAlignment, std::max<uint64_t>(size, 16ULL));
+#if !DYLD_FEATURE_USE_INTERNAL_ALLOCATOR
+    return ::aligned_alloc((size_t)targetAlignment, (size_t)targetSize);
+#else
+    auto& memoryManager =  MemoryManager::memoryManager();
+#if !TARGET_OS_EXCLAVEKIT
+    __unused auto lock = memoryManager.lockGuard();
+#endif
     void* result = nullptr;
-    _memoryManager->requestedSize               = size;
-    _memoryManager->requestedAlignment          = alignment;
-    _memoryManager->requestedTargetSize         = targetSize;
-    _memoryManager->requestedTargetAlignment    = targetAlignment;
+    memoryManager.requestedSize               = size;
+    memoryManager.requestedAlignment          = alignment;
+    memoryManager.requestedTargetSize         = targetSize;
+    memoryManager.requestedTargetAlignment    = targetAlignment;
 
     if (_bestFit) {
         result = _currentPool->aligned_alloc_best_fit(targetAlignment, targetSize);
@@ -476,7 +587,7 @@ void* Allocator::aligned_alloc(uint64_t alignment, uint64_t size) {
     // No pools had enough space, allocate another pool
     if (!result) {
         uint64_t minPoolSize = roundToNextAligned<kPageSize>(2*sizeof(AllocationMetadata) + sizeof(Pool) + targetSize + targetAlignment);
-        _currentPool->makeNextPool(this, std::max<uint64_t>(minPoolSize, 256*1024));
+        _currentPool->makeNextPool(this, std::max<uint64_t>(minPoolSize, ALLOCATOR_DEFAULT_POOL_SIZE));
         _currentPool->nextPool()->validate();
         _currentPool = _currentPool->nextPool();
         result = _currentPool->aligned_alloc(targetAlignment, targetSize);
@@ -488,39 +599,38 @@ void* Allocator::aligned_alloc(uint64_t alignment, uint64_t size) {
     ALLOCATOR_TRACE("void* alloc%llu = allocator.aligned_alloc(%llu, %llu);\n", (uint64_t)result, targetAlignment, targetSize);
     validate();
     return result;
+#endif /* !DYLD_FEATURE_USE_INTERNAL_ALLOCATOR */
 }
 
 void Allocator::freeObject(void* ptr) {
-    if (!ptr) { return; }
+    if ( !ptr )
+        return;
+#if !DYLD_FEATURE_USE_INTERNAL_ALLOCATOR
+    ::free(ptr);
+#else
     AllocationMetadata* metadata = AllocationMetadata::forPtr(ptr);
     metadata->pool()->allocator()->free(ptr);
+#endif /* !DYLD_FEATURE_USE_INTERNAL_ALLOCATOR */
 }
 
 void Allocator::free(void* ptr) {
-#if !TARGET_OS_EXCLAVEKIT
-    __unused auto lock = _memoryManager->lockGuard();
-#endif
-    if (!ptr) { return; }
+    if ( !ptr ) { return; }
+#if !DYLD_FEATURE_USE_INTERNAL_ALLOCATOR
+    ::free(ptr);
+#else
     ALLOCATOR_LOG("ALLOCATOR(0x%llx/%llu)\tfree:          (0x%llx)\n", (uint64_t)this, +_logID++, (uint64_t)ptr);
     ALLOCATOR_TRACE("allocator.free(alloc%llu);\n", (uint64_t)ptr);
     AllocationMetadata* metadata = AllocationMetadata::forPtr(ptr);
     _allocatedBytes -= metadata->size();
     metadata->deallocate();
     validate();
-}
-
-void Allocator::dump() const {
-    for (auto pool = _firstPool;; pool = pool->nextPool()) {
-        ALLOCATOR_LOG("DUMP:\t\tPOOL(0x%llx)\n", (uint64_t)pool);
-        pool->dump();
-        if (pool == _currentPool) { break; }
-    }
+#endif /* !DYLD_FEATURE_USE_INTERNAL_ALLOCATOR */
 }
 
 bool Allocator::realloc(void* ptr, uint64_t size) {
-#if !TARGET_OS_EXCLAVEKIT
-    __unused auto lock = _memoryManager->lockGuard();
-#endif
+#if !DYLD_FEATURE_USE_INTERNAL_ALLOCATOR
+    return false;
+#else
     if (!ptr) { return false; }
     AllocationMetadata* metadata = AllocationMetadata::forPtr(ptr);
     const uint64_t targetSize = (std::max<uint64_t>(size, 16ULL) + (15ULL) & -16ULL);
@@ -539,6 +649,7 @@ bool Allocator::realloc(void* ptr, uint64_t size) {
     ALLOCATOR_TRACE("allocator.realloc(alloc%llu, %llu);\n", (uint64_t)ptr, targetSize);
     validate();
     return result;
+#endif /* !DYLD_FEATURE_USE_INTERNAL_ALLOCATOR */
 }
 
 char* Allocator::strdup(const char* str)
@@ -549,74 +660,41 @@ char* Allocator::strdup(const char* str)
     return result;
 }
 
-bool Allocator::owned(const void* p, uint64_t nbytes) const {
-    for (auto pool = _currentPool; pool != nullptr; pool = pool->prevPool()) {
-        Buffer objectBuffer{ (void*)p, nbytes };
-        if (pool->poolBuffer().contains(objectBuffer)) {
-            return true;
-        }
-    }
-    return false;
-}
-
-uint64_t Allocator::size(const void* ptr) const {
+uint64_t Allocator::size(const void* ptr) {
+#if !DYLD_FEATURE_USE_INTERNAL_ALLOCATOR
+    return ::malloc_size(ptr);
+#else
     if (!ptr) { return 0; }
     AllocationMetadata* metadata = AllocationMetadata::forPtr((void*)ptr);
     return metadata->size();
+#endif /* !DYLD_FEATURE_USE_INTERNAL_ALLOCATOR */
 }
 
-
-#if !BUILDING_DYLD && !TARGET_OS_EXCLAVEKIT
-Allocator& Allocator::defaultAllocator() {
-    static os_unfair_lock_s unfairLock = OS_UNFAIR_LOCK_INIT;
-    static Allocator* allocator = nullptr;
-    static dispatch_once_t onceToken;
-
-    dispatch_once(&onceToken, ^{
-        Lock lock(nullptr, &unfairLock);
-        allocator = &Allocator::createAllocator();
-        allocator->memoryManager()->adoptLock(std::move(lock));
-    });
-    return *allocator;
-}
-#endif
-
-uint64_t Allocator::allocated_bytes() const {
-    return _allocatedBytes;
-}
-
-Allocator::Allocator(MemoryManager& memoryManager, Pool& pool) :
-    _memoryManager(&memoryManager), _firstPool(&pool), _currentPool(&pool), _allocatedBytes(0) {}
-
-Allocator::~Allocator() {
-    forEachVMAllocatedBuffer(^(const Buffer& buffer) {
-        memoryManager()->vm_deallocate_bytes((void*)buffer.address, buffer.size);
-    });
-}
-
-void Allocator::forEachVMAllocatedBuffer(void (^callback)(const Buffer&)) {
-    for (auto pool = _currentPool; pool != nullptr; pool = pool->prevPool()) {
-        Buffer poolObjectBuffer{ (void*)pool, sizeof(Pool) };
-        if (!pool->poolBuffer().contains(poolObjectBuffer)) {
-            callback({(void*)pool->poolBuffer().address, pool->poolBuffer().size});
-        }
-    }
-}
-
-MemoryManager* Allocator::memoryManager() const {
-    return _memoryManager;
+Allocator& MemoryManager::defaultAllocator() {
+    return *memoryManager()._defaultAllocator;
 }
 
 #pragma mark -
 #pragma mark Allocator Pool
 
-Allocator::Pool::Pool(Allocator* allocator, Pool* prevPool, uint64_t size)
-: Pool(allocator, prevPool, allocator->memoryManager()->vm_allocate_bytes(size)) {}
-Allocator::Pool::Pool(Allocator* allocator, Pool* prevPool, Buffer region) : Pool(allocator, prevPool, region, region) {}
-Allocator::Pool::Pool(Allocator* allocator, Pool* prevPool, Buffer region, Buffer freeRegion)
+#if DYLD_FEATURE_USE_INTERNAL_ALLOCATOR
+Allocator::Pool::Pool(Allocator* allocator, Pool* prevPool, uint64_t size, bool tproEnabled)
+: Pool(allocator, prevPool, MemoryManager::memoryManager().vm_allocate_bytes(size, tproEnabled), tproEnabled) {
+    _vmAllocated = true;
+}
+
+Allocator::Pool::Pool(Allocator* allocator, Pool* prevPool, Buffer region, bool tproEnabled)
+    : Pool(allocator, prevPool, region, region, tproEnabled) {}
+
+Allocator::Pool::Pool(Allocator* allocator, Pool* prevPool, Buffer region, Buffer freeRegion, bool tproEnabled)
 : _allocator(allocator), _prevPool(prevPool), _poolBuffer(region) {
     assert(region.contains(freeRegion));
     freeRegion.size = freeRegion.size & ~0x0fUL;
+
+#if DYLD_FEATURE_USE_HW_TPRO
+    _tproEnabled = tproEnabled;
+#endif // DYLD_FEATURE_USE_HW_TPRO
+
     // Setup the metadata for the pool
     _lastFreeMetadata = new (freeRegion.address) AllocationMetadata(this, freeRegion.size);
     // Preallocate space for the next pool. This won't fail because the pool is new and large enough
@@ -625,15 +703,15 @@ Allocator::Pool::Pool(Allocator* allocator, Pool* prevPool, Buffer region, Buffe
 
 void* Allocator::Pool::aligned_alloc(uint64_t alignment, uint64_t size) {
     assert(_lastFreeMetadata->pool() == this);
-    // ALLOCATOR_LOG("aligned_alloc:\t\tPOOL(0x%llx) (%llu %% %llu)\n", (uint64_t)this, size, alignment);
+     ALLOCATOR_LOG("aligned_alloc:\t\tPOOL(0x%llx) (%llu %% %llu)\n", (uint64_t)this, size, alignment);
     static_assert(sizeof(AllocationMetadata) <= kGranuleSize, "Ensure we can fit all metadata in a granule");
     Buffer freeBuffer = Buffer{ _lastFreeMetadata->firstAddress(), _lastFreeMetadata->size() };
     _lastFreeMetadata->validate();
-    // _lastFreeMetadata->logAddressSpace("aligned_alloc");
-    //ALLOCATOR_LOG("aligned_alloc:\t\t\t====================================================\n");
+     _lastFreeMetadata->logAddressSpace("aligned_alloc");
+    ALLOCATOR_LOG("aligned_alloc:\t\t\t====================================================\n");
     // See if there is enough align the allocation and store a new metadata entry after it
     if (!freeBuffer.align(alignment, size+sizeof(AllocationMetadata))) {
-        //ALLOCATOR_LOG("aligned_alloc:\t\t\t\tRETURN nullptr\n");
+        ALLOCATOR_LOG("aligned_alloc:\t\t\t\tRETURN nullptr\n");
         return nullptr;
     }
 
@@ -641,22 +719,31 @@ void* Allocator::Pool::aligned_alloc(uint64_t alignment, uint64_t size) {
     if (_lastFreeMetadata->firstAddress() != freeBuffer.address) {
         uint16_t alignmentSize = (uint64_t)freeBuffer.address - (uint64_t)_lastFreeMetadata->firstAddress() - kGranuleSize;
         _lastFreeMetadata->reserve(alignmentSize, false);
-        // _lastFreeMetadata->logAddressSpace("aligned_alloc");
+         _lastFreeMetadata->logAddressSpace("aligned_alloc");
     }
 
     AllocationMetadata* reservedMetadata = _lastFreeMetadata;
-    void* result = reservedMetadata->firstAddress();
-
-    // Reserve the space
     _lastFreeMetadata->reserve(size, true);
+
+    void* result = reservedMetadata->firstAddress();
+    // Reserve the space
     _lastFreeMetadata->validate();
+    if (_lastFreeMetadata->firstAddress() > _highWaterMark) {
+        // Find first free address and mask out TBI bits
+        uint64_t newHighWaterMark = (uint64_t)_lastFreeMetadata->firstAddress() & 0x00ff'ffff'ffff'ffff;
+        if (_lastFreeMetadata->size() >= kGranuleSize) {
+            // Account for potential pool hint
+            newHighWaterMark += kGranuleSize;
+        }
+        _highWaterMark = (void*)newHighWaterMark;
+    }
 
     // Move the free space pointer to the new freespace's metadata
-    //reservedMetadata->logAddressSpace("aligned_alloc");
-    //_lastFreeMetadata->logAddressSpace("aligned_alloc");
+//    reservedMetadata->logAddressSpace("aligned_alloc");
+    _lastFreeMetadata->logAddressSpace("aligned_alloc");
 
     assert((uint64_t)result != (uint64_t)this);
-    // ALLOCATOR_LOG("aligned_alloc:\t\t\t\tRETURN 0x%llx\n", (uint64_t)result);
+     ALLOCATOR_LOG("aligned_alloc:\t\t\t\tRETURN 0x%llx\n", (uint64_t)result);
     return result;
 }
 
@@ -715,7 +802,11 @@ void Allocator::Pool::free(void* ptr) {
 }
 
 void Allocator::Pool::makeNextPool(Allocator* allocator, uint64_t newPoolSize) {
-    _nextPool = new (_nextPool) Pool(allocator, this, newPoolSize);
+    bool tproEnabled = false;
+#if DYLD_FEATURE_USE_HW_TPRO
+    tproEnabled = this->_tproEnabled;
+#endif
+    _nextPool = new (_nextPool) Pool(allocator, this, newPoolSize, tproEnabled);
 }
 
 Allocator::Pool* Allocator::Pool::nextPool() const {
@@ -740,15 +831,6 @@ Allocator::Pool* Allocator::Pool::forPtr(void* ptr) {
 
 void Allocator::setBestFit(bool bestFit) {
     _bestFit = bestFit;
-}
-
-
-void Allocator::validate() const {
-#if ALLOCATOR_VALIDATION
-    for (auto pool = _firstPool; pool != _currentPool->nextPool(); pool = pool->nextPool()) {
-        pool->validate();
-    }
-#endif
 }
 
 void Allocator::Pool::validate() const {
@@ -858,6 +940,7 @@ void Allocator::AllocationMetadata::reserve(uint64_t size, bool allocated) {
     assert(free());
     uint64_t nextSize = (this->size()-(size+sizeof(AllocationMetadata)));
     void*   nextAddr = (void*)((uint64_t)this+sizeof(AllocationMetadata)+size);
+
     new (nextAddr) AllocationMetadata(this, nextSize, kNextBlockLastBlockFlag, (allocated ? kNextBlockAllocatedFlag : 0));
 }
 
@@ -974,6 +1057,7 @@ bool Allocator::AllocationMetadata::consumeFromNext(uint64_t size) {
         // If the size we need is less than the size of the next block we can realloc() by moving the next metadata within the
         // the block.
         void* nextAddr = (void*)((uint64_t)this+sizeof(AllocationMetadata)+size);
+
         new (nextAddr) AllocationMetadata(this, nextSize-requiredSize, next()->_next & ~kNextBlockAddressMask, _next & ~kNextBlockAddressMask);
         return true;
     } else if (!next()->last() && (requiredSize == nextSize + sizeof(AllocationMetadata))) {
@@ -983,7 +1067,6 @@ bool Allocator::AllocationMetadata::consumeFromNext(uint64_t size) {
         next()->_prev = (uint64_t)this;
         return true;
     }
-    
 
     // TODO: handle the case where there is exactly enough space
     return false;
@@ -1018,44 +1101,201 @@ void Allocator::AllocationMetadata::logAddressSpace(const char* prefix) const {
     } else {
         ALLOCATOR_LOG("\n");
     }
-
 }
 
-#pragma mark -
-#pragma mark Allocator Layout
+#endif /*  !DYLD_FEATURE_USE_INTERNAL_ALLOCATOR */
 
-void lsl::AllocatorLayout::init(uint64_t size, const char** envp, const char** apple, void* dyldSharedCache) {
-    MemoryManager::Buffer buffer{(void*)this, size};
-    MemoryManager::Buffer freeSpace = buffer;
-    freeSpace.consumeSpace(sizeof(AllocatorLayout));
-    configure(envp, apple, dyldSharedCache);
-    new ((void*)&_pool) Allocator::Pool(&_allocator, nullptr, buffer, freeSpace);
-    new ((void*)&_allocator) Allocator(_memoryManager, _pool);
+//
+// MARK: --- ProtectedStack methods ---
+//
+
+ProtectedStack::ProtectedStack(bool isEnabledInProcess)
+{
+#if DYLD_FEATURE_USE_HW_TPRO
+    if ( !isEnabledInProcess )
+        return;
+
+    allocateStack();
+#endif
 }
 
-void lsl::AllocatorLayout::configure(const char** envp, const char** apple, void* dyldSharedCache) {
-    if (envp && apple) {
-        new (&_memoryManager) MemoryManager(envp, apple, dyldSharedCache);
-    } else {
-        const char* emptyApple[1];
-        emptyApple[0] = nullptr;
-        new ((void*)&_memoryManager) MemoryManager(emptyApple, emptyApple, dyldSharedCache);
+void ProtectedStack::allocateStack()
+{
+#if DYLD_FEATURE_USE_HW_TPRO
+    // Allocate space for the stack plus a guard page
+    vm_size_t vmSize = (vm_size_t)this->stackSize + (vm_size_t)this->guardPageSize;
+    mach_vm_address_t bufferResult = 0;
+    kern_return_t kr = vm_allocate(mach_task_self(), (vm_address_t*)&bufferResult, vmSize, VM_FLAGS_ANYWHERE | VM_MAKE_TAG(VM_MEMORY_DYLD));
+    if ( kr != KERN_SUCCESS ) {
+#if BUILDING_ALLOCATOR_UNIT_TESTS
+        assert(0 && "failed to allocate stack");
+#else
+        dyld4::halt("failed to allocate stack");
+#endif /* BUILDING_ALLOCATOR_UNIT_TESTS */
     }
+
+    void* guardPageStart = (void*)bufferResult;
+    void* guardPageResult = ::mmap(guardPageStart, this->guardPageSize, VM_PROT_NONE, MAP_ANON | MAP_FIXED | MAP_PRIVATE, -1, 0);
+    if ( guardPageResult == MAP_FAILED ) {
+#if BUILDING_ALLOCATOR_UNIT_TESTS
+        assert(0 && "failed to protect guard page");
+#else
+        dyld4::halt("failed to protect guard page");
+#endif /* BUILDING_ALLOCATOR_UNIT_TESTS */
+    }
+
+    void* stackPageStart = (void*)(bufferResult + this->guardPageSize);
+    void* stackPageResult = ::mmap(stackPageStart, this->stackSize, VM_PROT_READ | VM_PROT_WRITE, MAP_ANON | MAP_FIXED | MAP_PRIVATE | MAP_TPRO, -1, 0);
+    if ( stackPageResult == MAP_FAILED ) {
+#if BUILDING_ALLOCATOR_UNIT_TESTS
+        assert(0 && "failed to mmap ");
+#else
+        dyld4::halt("failed to mmap ");
+#endif /* BUILDING_ALLOCATOR_UNIT_TESTS */
+    }
+
+    this->bottomOfStack         = stackPageStart;
+    this->topOfStack            = (void*)((uint64_t)this->bottomOfStack + this->stackSize);
+    this->stackBuffer           = (void*)bufferResult;
+    this->nextTPROStackAddr     = topOfStack;
+    this->nextRegularStackAddr  = nullptr;
+
+    //fprintf(stderr, "Stack: %p -> %p\n", stackPageStart, this->topOfStack);
+    //fprintf(stderr, "Guard: %p -> %p\n", guardPageStart, (void*)((uint64_t)guardPageStart + this->guardPageSize));
+#endif
 }
 
-Allocator& lsl::AllocatorLayout::allocator() {
-    return _allocator;
+void ProtectedStack::reset()
+{
+#if DYLD_FEATURE_USE_HW_TPRO
+    if ( !enabled() )
+        return;
+
+    // FIXME: Find a way to reset the whole stack back to zero, without dirtying all the pages
+    // For now zero just the first page, in the hope that most TPRO stacks only used 1 page
+    // This page of zeroes will compress very well
+    bzero((uint8_t*)topOfStack - 0x4000, 0x4000);
+#endif
 }
 
-uint64_t lsl::AllocatorLayout::minSize() {
-    // Returns the minimum size necessary to alloca for this struct. Includes:
-    // 1 the struct
-    // 2 the alignment padding
-    // 3 Space for the initial overflow pool
-    // 4 Space for the metadata to trace the allocation for that pool
-    return sizeof(lsl::AllocatorLayout) + alignof(lsl::AllocatorLayout)
-                + sizeof(Allocator::Pool) + sizeof(Allocator::AllocationMetadata);
+bool ProtectedStack::enabled() const
+{
+#if DYLD_FEATURE_USE_HW_TPRO
+    return this->topOfStack != nullptr;
+#else
+    return false;
+#endif
 }
 
-};
+bool ProtectedStack::onStackInCurrentFrame() const
+{
+#if DYLD_FEATURE_USE_HW_TPRO
+    void* sp = __builtin_sponentry();
+    return (sp >= this->bottomOfStack) && (sp < this->topOfStack);
+#else
+    return false;
+#endif
+}
+
+bool ProtectedStack::onStackInFrame(const void* frameAddr) const
+{
+#if DYLD_FEATURE_USE_HW_TPRO
+    return (frameAddr >= this->bottomOfStack) && (frameAddr < this->topOfStack);
+#else
+    return false;
+#endif
+}
+
+bool ProtectedStack::onStackInAnyFrameInThisThread() const
+{
+#if DYLD_FEATURE_USE_HW_TPRO
+    return (this->topOfStack != this->nextTPROStackAddr) && (getCurrentThreadId() == this->threadId);
+#else
+    return false;
+#endif
+}
+
+void ProtectedStack::getRange(const void*& stackBottom, const void*& stackTop) const
+{
+#if DYLD_FEATURE_USE_HW_TPRO
+    stackBottom = this->bottomOfStack;
+    stackTop    = this->topOfStack;
+#else
+    stackBottom = nullptr;
+    stackTop    = nullptr;
+#endif
+}
+
+const void* ProtectedStack::getCurrentThreadId()
+{
+#if DYLD_FEATURE_USE_HW_TPRO
+    return _os_tsd_get_direct(_PTHREAD_TSD_SLOT_MACH_THREAD_SELF);
+#else
+    return nullptr;
+#endif
+}
+
+#if DYLD_FEATURE_USE_HW_TPRO
+
+// Moves from the current (non-TPRO) stack, to the TPRO-stack given by 'nextStackPtr'.
+// Saves the current stack pointer to 'prevStackPtr' so that it can be used later if we need to
+// transition back to the regular stack in some nested withReadableMemory block
+// Finally calls the callback function once we are on the TPRO stack.
+void callWithProtectedStack(void* nextStackPtr, void* __ptrauth_dyld_tpro_stack* prevStackPtr, void (^callback)(void)) __asm("_callWithProtectedStack");
+
+// Moves from the current (TPRO) stack, to the non-TPRO-stack given by 'nextStackPtr'.
+// Saves the current stack pointer to 'prevStackPtr' so that it can be used later if we need to
+// transition back to the regular stack in some nested withWritableMemory block.
+// Note the 'prevStackPtr' is saved on the current (TPRO) stack to ensure it cannot be tampered with.
+// Finally calls the callback function once we are on the TPRO stack.
+ProtectedStackReturnType callWithRegularStack(void* nextStackPtr, void* __ptrauth_dyld_tpro_stack* prevStackPtr, ProtectedStackReturnType (^callback)(void)) __asm("_callWithRegularStack");
+
+#endif // DYLD_FEATURE_USE_HW_TPRO
+
+void ProtectedStack::withProtectedStack(void (^work)(void))
+{
+    if ( !enabled() ) {
+        work();
+        return;
+    }
+
+#if DYLD_FEATURE_USE_HW_TPRO
+    assert(this->nextTPROStackAddr == this->topOfStack);
+    assert(this->nextRegularStackAddr == nullptr);
+    assert(this->threadId == nullptr);
+
+    this->threadId = getCurrentThreadId();
+
+    callWithProtectedStack(this->nextTPROStackAddr, &this->nextRegularStackAddr, work);
+
+    this->threadId = nullptr;
+
+    assert(this->nextTPROStackAddr == this->topOfStack);
+    assert(this->nextRegularStackAddr == nullptr);
+#endif
+}
+
+void ProtectedStack::withNestedProtectedStack(void (^work)(void))
+{
+    assert(enabled());
+    assert(!onStackInCurrentFrame());
+
+#if DYLD_FEATURE_USE_HW_TPRO
+    callWithProtectedStack(this->nextTPROStackAddr, &this->nextRegularStackAddr, work);
+#endif
+}
+
+ProtectedStackReturnType ProtectedStack::withNestedRegularStack(ProtectedStackReturnType (^work)(void))
+{
+    assert(enabled());
+    assert(onStackInCurrentFrame());
+
+#if DYLD_FEATURE_USE_HW_TPRO
+    return callWithRegularStack(this->nextRegularStackAddr, &this->nextTPROStackAddr, work);
+#else
+    return ProtectedStackReturnType();
+#endif
+}
+
+}; // namespace lsl
 

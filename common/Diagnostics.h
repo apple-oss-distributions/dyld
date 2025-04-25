@@ -40,7 +40,7 @@
 #endif
 
 #include "Defines.h"
-
+#include "va_list_wrap.h"
 
 class VIS_HIDDEN Diagnostics
 {
@@ -49,7 +49,7 @@ public:
                     ~Diagnostics();
 
     void            error(const char* format, ...)  __attribute__((format(printf, 2, 3)));
-    void            error(const char* format, va_list list) __attribute__((format(printf, 2, 0)));
+    void            error(const char* format, va_list_wrap vaWrap) __attribute__((format(printf, 2, 0)));
     void            appendError(const char* format, ...)  __attribute__((format(printf, 2, 3)));
 #if BUILDING_CACHE_BUILDER || BUILDING_UNIT_TESTS || BUILDING_CACHE_BUILDER_UNIT_TESTS
                     Diagnostics(const std::string& prefix, bool verbose=false);

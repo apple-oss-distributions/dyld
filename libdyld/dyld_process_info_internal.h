@@ -38,12 +38,11 @@
   #include <mach/task.h>
 #endif
 
-#include <array>
 
 struct dyld_all_image_infos_32 {
     uint32_t                        version;
     uint32_t                        infoArrayCount;
-    std::atomic<uint32_t>           infoArray;
+    uint32_t                        infoArray;
     uint32_t                        notification;
     bool                            processDetachedFromSharedRegion;
     bool                            libSystemInitialized;
@@ -63,9 +62,9 @@ struct dyld_all_image_infos_32 {
     uint32_t                        errorTargetDylibPath;
     uint32_t                        errorSymbol;
     uint32_t                        sharedCacheSlide;
-    std::array<uint8_t, 16>         sharedCacheUUID;
+    uint8_t                         sharedCacheUUID[16];
     uint32_t                        sharedCacheBaseAddress;
-    std::atomic<uint64_t>           infoArrayChangeTimestamp;
+    uint64_t                        infoArrayChangeTimestamp;
     uint32_t                        dyldPath;
     uint32_t                        notifyMachPorts[8];
     uint32_t                        reserved;
@@ -76,16 +75,16 @@ struct dyld_all_image_infos_32 {
     uint32_t                        platform;
     // the aot fields below will not be set in the 32 bit case
     uint32_t                        aotInfoCount;
-    std::atomic<uint64_t>           aotInfoArray;
+    uint64_t                        aotInfoArray;
     uint64_t                        aotInfoArrayChangeTimestamp;
     uint64_t                        aotSharedCacheBaseAddress;
-    std::array<uint8_t, 16>         aotSharedCacheUUID[16];
+    uint8_t                         aotSharedCacheUUID[16];
 };
 
 struct dyld_all_image_infos_64 {
     uint32_t                version;
     uint32_t                infoArrayCount;
-    std::atomic<uint64_t>   infoArray;
+    uint64_t                infoArray;
     uint64_t                notification;
     bool                    processDetachedFromSharedRegion;
     bool                    libSystemInitialized;
@@ -106,9 +105,9 @@ struct dyld_all_image_infos_64 {
     uint64_t                errorTargetDylibPath;
     uint64_t                errorSymbol;
     uint64_t                sharedCacheSlide;
-    std::array<uint8_t, 16> sharedCacheUUID;
+    uint8_t                 sharedCacheUUID[16];
     uint64_t                sharedCacheBaseAddress;
-    std::atomic<uint64_t>   infoArrayChangeTimestamp;
+    uint64_t                infoArrayChangeTimestamp;
     uint64_t                dyldPath;
     uint32_t                notifyMachPorts[8];
     uint64_t                reserved[7];
@@ -118,10 +117,10 @@ struct dyld_all_image_infos_64 {
     uint64_t                compact_dyld_image_info_size;
     uint32_t                platform;
     uint32_t                aotInfoCount;
-    std::atomic<uint64_t>   aotInfoArray;
+    uint64_t                aotInfoArray;
     uint64_t                aotInfoArrayChangeTimestamp;
     uint64_t                aotSharedCacheBaseAddress;
-    std::array<uint8_t, 16> aotSharedCacheUUID[16];
+    uint8_t                 aotSharedCacheUUID[16];
 };
 
 struct dyld_image_info_32 {
@@ -177,6 +176,8 @@ struct dyld_process_info_notify_header {
     uint64_t                    timestamp;
 };
 
+#if __cplusplus
+#include <tuple>
 //FIXME: Refactor this out into a seperate file
 struct VIS_HIDDEN RemoteBuffer {
     RemoteBuffer();
@@ -214,7 +215,7 @@ VIS_HIDDEN void withRemoteObject(task_t task, mach_vm_address_t remote_address, 
         block(*reinterpret_cast<T *>(buffer));
     });
 }
-
+#endif /* __cplusplus */
 
 #endif // _DYLD_PROCESS_INFO_INTERNAL_H_
 

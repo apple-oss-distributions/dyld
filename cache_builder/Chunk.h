@@ -91,7 +91,10 @@ struct Chunk
         // A buffer to hold the patch table for the cache dylibs
         cachePatchTable,
 
-        // A buffer to hold the PrebuiltLoaderSet for the cache dylibs
+        // A buffer to hold the list of function variants to patch at launch
+        cacheFunctionVariantsPatchTable,
+
+         // A buffer to hold the PrebuiltLoaderSet for the cache dylibs
         dylibPrebuiltLoaders,
 
         // A buffer to hold the PrebuiltLoaderSet for the executables
@@ -99,6 +102,9 @@ struct Chunk
 
         // A buffer to hold the trie for the cache dylib names
         cacheExecutablesTrie,
+
+        // A buffer to hold the prewarming pages
+        prewarmingData,
 
         // In the .symbols file, this is the payload
         unmappedSymbols,
@@ -152,6 +158,7 @@ struct Chunk
         linkeditFunctionStarts,
         linkeditDataInCode,
         linkeditExportTrie,
+        linkeditFunctionVariants,
 
         // Optimized symbols nlist/strings.
         // Note this must be sorted after the above LINKEDIT entries so that
@@ -615,6 +622,26 @@ private:
     virtual void dump() const override final;
 };
 
+
+struct FunctionVariantsPatchTableChunk : Chunk
+{
+public:
+    FunctionVariantsPatchTableChunk();
+    virtual ~FunctionVariantsPatchTableChunk();
+    FunctionVariantsPatchTableChunk(const FunctionVariantsPatchTableChunk&) = delete;
+    FunctionVariantsPatchTableChunk(FunctionVariantsPatchTableChunk&&) = delete;
+    FunctionVariantsPatchTableChunk& operator=(const FunctionVariantsPatchTableChunk&) = delete;
+    FunctionVariantsPatchTableChunk& operator=(FunctionVariantsPatchTableChunk&&) = delete;
+
+    // Virtual methods
+    const char* name() const override final;
+
+private:
+    __attribute__((used))
+    virtual void dump() const override final;
+};
+
+
 struct PrebuiltLoaderChunk : Chunk
 {
 public:
@@ -712,6 +739,7 @@ public:
     bool isIndirectSymbols() const;
     bool isNList() const;
     bool isNSymbolStrings() const;
+    bool isFunctionVariantsTable() const;
 
     // FIXME: We really don't want to make kind public
     using Chunk::kind;
@@ -854,6 +882,24 @@ public:
     const char* name() const override final;
 
     const AlignChunk* isAlignChunk() const override final;
+
+private:
+    __attribute__((used))
+    virtual void dump() const override final;
+};
+
+struct PrewarmingChunk : Chunk
+{
+public:
+    PrewarmingChunk(Kind kind);
+    virtual ~PrewarmingChunk();
+    PrewarmingChunk(const PrewarmingChunk&) = delete;
+    PrewarmingChunk(PrewarmingChunk&&) = delete;
+    PrewarmingChunk& operator=(const PrewarmingChunk&) = delete;
+    PrewarmingChunk& operator=(PrewarmingChunk&&) = delete;
+
+    // Virtual methods
+    const char* name() const override final;
 
 private:
     __attribute__((used))

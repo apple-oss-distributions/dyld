@@ -25,6 +25,7 @@
 #include "BuilderConfig.h"
 #include "BuilderOptions.h"
 #include "CodeSigningTypes.h"
+#include "Platform.h"
 
 #include "dyld_cache_config.h"
 
@@ -32,6 +33,8 @@
 
 using namespace cache_builder;
 using dyld3::GradedArchs;
+
+using mach_o::Platform;
 
 //
 // MARK: --- cache_builder::Logger methods ---
@@ -93,24 +96,17 @@ cache_builder::Layout::Layout(const BuilderOptions& options)
         this->discontiguous.emplace();
 
         this->discontiguous->regionAlignment = 1_GB;
+        this->discontiguous->subCacheTextLimit = CacheVMSize(512_MB);
     } else {
         // Everyone else uses contiguous mappings
         this->contiguous.emplace();
         this->contiguous->regionPadding = CacheVMSize(32_MB);
+        this->contiguous->subCacheTextDataLimit = CacheVMSize(2_GB);
         this->contiguous->subCacheStubsLimit = CacheVMSize(110_MB);
-    }
 
-    if ( (archName == "x86_64") || (archName == "x86_64h") ) {
-        this->subCacheTextLimit = CacheVMSize(512_MB);
-    } else {
-        // Note the 64MB is to give us just a little more space before making another
-        // sub cache file.  We want to make as few files as possible for things like page-tables
-        // The real constraint here is that TEXT+DATA must stay within 2GB for int32_t relative
-        // offsets in objc/swift metadata and in unwind info.  But also the __objc_opt section
-        // in libobjc needs to reach the __OBJC_RO in the read-only subcache.  That comes after
-        // data and as of writing leaves 150MB from its end until the 2GB mark.  So take 64MB from
-        // that 150MB and hope its ok for now.
-        this->subCacheTextLimit = CacheVMSize(1.5_GB + 64_MB);
+        // Note we have 2 padding regions in total in a given TEXT/DATA/AUTH/... region
+        // 1 between TEXT/DATA_CONST and DATA, then another from DATA to LINKEDIT.
+        this->contiguous->subCachePadding = this->contiguous->regionPadding + this->contiguous->regionPadding;
     }
 
     struct CacheLayout
@@ -140,6 +136,11 @@ cache_builder::Layout::Layout(const BuilderOptions& options)
     } else if ( archName == "arm64_32" ) {
         layout.baseAddress = ARM64_32_SHARED_REGION_START;
         layout.cacheSize = 2_GB;
+
+        // The cache contents can't exceed 2GB, but use the space above it for the slide
+        if ( ARM64_32_SHARED_REGION_SIZE >= layout.cacheSize ) {
+            this->cacheFixedSlide = ARM64_32_SHARED_REGION_SIZE - layout.cacheSize;
+        }
     } else {
         assert("Unknown arch");
     }
@@ -205,14 +206,14 @@ SlideInfo::SlideInfo(const BuilderOptions& options, const Layout& layout)
 // MARK: --- cache_builder::CodeSign methods ---
 //
 
-static cache_builder::CodeSign::Mode platformCodeSigningDigestMode(dyld3::Platform platform)
+static cache_builder::CodeSign::Mode platformCodeSigningDigestMode(Platform platform)
 {
-    if ( platform == dyld3::Platform::watchOS )
+    if ( platform == Platform::watchOS )
         return cache_builder::CodeSign::Mode::agile;
     return cache_builder::CodeSign::Mode::onlySHA256;
 }
 
-static uint32_t codeSigningPageSize(dyld3::Platform platform, const GradedArchs& arch)
+static uint32_t codeSigningPageSize(Platform platform, const GradedArchs& arch)
 {
     std::string_view archName = arch.name();
     if ( (archName == "arm64e") || (archName == "arm64_32") )
@@ -220,7 +221,7 @@ static uint32_t codeSigningPageSize(dyld3::Platform platform, const GradedArchs&
 
     // arm64 on iOS is new enough for 16k pages, as is arm64 on macOS (ie the simulator)
     if ( archName == "arm64") {
-        if ( dyld3::MachOFile::isSimulatorPlatform(platform) || (platform == dyld3::Platform::iOS) )
+        if ( platform.isSimulator() || (platform == Platform::iOS) )
             return CS_PAGE_SIZE_16K;
         return CS_PAGE_SIZE_4K;
     }

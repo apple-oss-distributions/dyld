@@ -28,6 +28,7 @@
 #include "Chunk.h"
 #include "CodeSigningTypes.h"
 #include "DyldSharedCache.h"
+#include "Header.h"
 #include "SubCache.h"
 #include "JSONWriter.h"
 
@@ -39,6 +40,9 @@
 
 using dyld3::GradedArchs;
 using dyld3::MachOFile;
+
+using mach_o::Header;
+using mach_o::Platform;
 
 using error::Error;
 
@@ -413,8 +417,7 @@ static bool hasLinkeditRegion(std::span<Region> regions)
     return false;
 }
 
-void SubCache::setSuffix(dyld3::Platform platform, bool forceDevelopmentSubCacheSuffix,
-                         size_t subCacheIndex)
+void SubCache::setSuffix(Platform platform, bool forceDevelopmentSubCacheSuffix, size_t subCacheIndex)
 {
     assert(this->isSubCache() || this->isStubsCache());
     assert(subCacheIndex > 0);
@@ -424,29 +427,29 @@ void SubCache::setSuffix(dyld3::Platform platform, bool forceDevelopmentSubCache
     const char* readonlySuffix = forceDevelopmentSubCacheSuffix ? ".development.dyldreadonly" : ".dyldreadonly";
     const char* subCacheSuffix = forceDevelopmentSubCacheSuffix ? ".development" : "";
 
-    if ( platform == dyld3::Platform::macOS ) {
+    if ( platform == Platform::macOS ) {
         // macOS never has a .development suffix
-        this->fileSuffix = "." + dyld3::json::decimal(subCacheIndex);
-    } else if ( platform == dyld3::Platform::driverKit ) {
+        this->fileSuffix = "." + json::decimal(subCacheIndex);
+    } else if ( platform == Platform::driverKit ) {
         // driverKit never has a .development suffix
-        this->fileSuffix = "." + dyld3::json::decimal(subCacheIndex);
+        this->fileSuffix = "." + json::decimal(subCacheIndex);
     } else if ( this->isStubsDevelopmentCache() ) {
         // Dev stubs always have a suffix
-        this->fileSuffix = "." + dyld3::json::decimal(subCacheIndex) + ".development";
+        this->fileSuffix = "." + json::decimal(subCacheIndex) + ".development";
     } else if ( this->isStubsCustomerCache() ) {
         // Customer stubs never have a suffix
-        this->fileSuffix = "." + dyld3::json::decimal(subCacheIndex);
+        this->fileSuffix = "." + json::decimal(subCacheIndex);
     } else if ( hasDataRegion(this->regions) ) {
         // Data only subcaches have their own suffix
-        this->fileSuffix = "." + dyld3::json::decimal(subCacheIndex) + dataSuffix;
+        this->fileSuffix = "." + json::decimal(subCacheIndex) + dataSuffix;
     } else if ( hasReadOnlyRegion(this->regions) ) {
         // read-only only subcaches have their own suffix
-        this->fileSuffix = "." + dyld3::json::decimal(subCacheIndex) + readonlySuffix;
+        this->fileSuffix = "." + json::decimal(subCacheIndex) + readonlySuffix;
     } else if ( hasLinkeditRegion(this->regions) ) {
         // Linkedit only subcaches have their own suffix
-        this->fileSuffix = "." + dyld3::json::decimal(subCacheIndex) + linkeditSuffix;
+        this->fileSuffix = "." + json::decimal(subCacheIndex) + linkeditSuffix;
     } else {
-        this->fileSuffix = "." + dyld3::json::decimal(subCacheIndex) + subCacheSuffix;
+        this->fileSuffix = "." + json::decimal(subCacheIndex) + subCacheSuffix;
     }
 }
 
@@ -843,7 +846,7 @@ void SubCache::addDylib(const BuilderConfig& config, CacheDylib& cacheDylib)
                 break;
             case Chunk::Kind::dylibDataDirty:
                 // On arm64e, dataDirty goes in to auth
-                if ( cacheDylib.inputMF->isArch("arm64e") )
+                if ( cacheDylib.inputHdr->isArch("arm64e") )
                     this->addAuthChunk(&segmentInfo);
                 else
                     this->addDataChunk(&segmentInfo);
@@ -865,8 +868,6 @@ void SubCache::addDylib(const BuilderConfig& config, CacheDylib& cacheDylib)
                 break;
         }
     }
-
-    this->addLinkeditFromDylib(cacheDylib);
 }
 
 // Linkedit is stored in Chunks in its own array on the dylib.  This adds it to the subCache.
@@ -1056,7 +1057,7 @@ void SubCache::addCodeSignatureChunk()
     addCodeSignatureChunk(this->codeSignature.get());
 }
 
-void SubCache::addObjCOptsHeaderChunk(ObjCOptimizer& objcOptimizer)
+void SubCache::addObjCOptsHeaderChunk(const BuilderConfig& config, ObjCOptimizer& objcOptimizer)
 {
     this->objcOptsHeader = std::make_unique<ObjCOptsHeaderChunk>();
     this->objcOptsHeader->cacheVMSize       = CacheVMSize(objcOptimizer.optsHeaderByteSize);
@@ -1064,7 +1065,7 @@ void SubCache::addObjCOptsHeaderChunk(ObjCOptimizer& objcOptimizer)
 
     objcOptimizer.optsHeaderChunk = this->objcOptsHeader.get();
 
-    this->addLinkeditChunk(this->objcOptsHeader.get());
+    this->addReadOnlyChunk(config, this->objcOptsHeader.get());
 }
 
 void SubCache::addObjCHeaderInfoReadOnlyChunk(const BuilderConfig& config, ObjCOptimizer& objcOptimizer)
@@ -1179,7 +1180,7 @@ void SubCache::addObjCCanonicalProtocolsChunk(const BuilderConfig& config,
     addObjCReadWriteChunk(config, this->objcCanonicalProtocols.get());
 }
 
-void SubCache::addObjCIMPCachesChunk(ObjCIMPCachesOptimizer& objcIMPCachesOptimizer)
+void SubCache::addObjCIMPCachesChunk(const BuilderConfig& config, ObjCIMPCachesOptimizer& objcIMPCachesOptimizer)
 {
     this->objcIMPCaches = std::make_unique<ObjCIMPCachesChunk>();
     this->objcIMPCaches->cacheVMSize                        = CacheVMSize(objcIMPCachesOptimizer.impCachesTotalByteSize);
@@ -1187,7 +1188,7 @@ void SubCache::addObjCIMPCachesChunk(ObjCIMPCachesOptimizer& objcIMPCachesOptimi
 
     objcIMPCachesOptimizer.impCachesChunk = this->objcIMPCaches.get();
 
-    this->addLinkeditChunk(this->objcIMPCaches.get());
+    this->addReadOnlyChunk(config, this->objcIMPCaches.get());
 }
 
 void SubCache::addObjCCategoriesChunk(const BuilderConfig& config,
@@ -1226,6 +1227,17 @@ void SubCache::addPatchTableChunk(PatchTableOptimizer& patchTableOptimizer)
     patchTableOptimizer.patchTableChunk = this->patchTable.get();
 
     this->addLinkeditChunk(this->patchTable.get());
+}
+
+void SubCache::addFunctionVariantsChunk(FunctionVariantsOptimizer& optimizer)
+{
+    this->functionVariants                    = std::make_unique<FunctionVariantsPatchTableChunk>();
+    this->functionVariants->cacheVMSize       = CacheVMSize(optimizer.fvInfoTotalByteSize);
+    this->functionVariants->subCacheFileSize  = CacheFileSize(optimizer.fvInfoTotalByteSize);
+
+    optimizer.chunk = this->functionVariants.get();
+
+    this->addLinkeditChunk(this->functionVariants.get());
 }
 
 void SubCache::addCacheDylibsLoaderChunk(PrebuiltLoaderBuilder& builder)
@@ -1267,7 +1279,21 @@ void SubCache::addExecutablesTrieChunk(PrebuiltLoaderBuilder& builder)
     this->addLinkeditChunk(this->executablesTrie.get());
 }
 
-void SubCache::addSwiftOptsHeaderChunk(SwiftProtocolConformanceOptimizer& opt)
+void SubCache::addPrewarmingDataChunk(const BuilderConfig& config, PrewarmingOptimizer& opt)
+{
+    if ( opt.prewarmingByteSize == 0 )
+        return;
+
+    this->prewarmingChunk = std::make_unique<PrewarmingChunk>(Chunk::Kind::prewarmingData);
+    this->prewarmingChunk->cacheVMSize      = CacheVMSize(opt.prewarmingByteSize);
+    this->prewarmingChunk->subCacheFileSize = CacheFileSize(opt.prewarmingByteSize);
+
+    opt.prewarmingChunk = this->prewarmingChunk.get();
+
+    this->addReadOnlyChunk(config, this->prewarmingChunk.get());
+}
+
+void SubCache::addSwiftOptsHeaderChunk(const BuilderConfig& config, SwiftOptimizer& opt)
 {
     this->swiftOptsHeader = std::make_unique<SwiftOptsHeaderChunk>();
     this->swiftOptsHeader->cacheVMSize      = CacheVMSize(opt.optsHeaderByteSize);
@@ -1275,10 +1301,10 @@ void SubCache::addSwiftOptsHeaderChunk(SwiftProtocolConformanceOptimizer& opt)
 
     opt.optsHeaderChunk = this->swiftOptsHeader.get();
 
-    this->addLinkeditChunk(this->swiftOptsHeader.get());
+    this->addReadOnlyChunk(config, this->swiftOptsHeader.get());
 }
 
-void SubCache::addSwiftTypeHashTableChunk(SwiftProtocolConformanceOptimizer& opt)
+void SubCache::addSwiftTypeHashTableChunk(const BuilderConfig& config, SwiftOptimizer& opt)
 {
     this->swiftTypeHashTable = std::make_unique<SwiftProtocolConformancesHashTableChunk>();
     this->swiftTypeHashTable->cacheVMSize       = CacheVMSize(opt.typeConformancesHashTableSize);
@@ -1286,10 +1312,10 @@ void SubCache::addSwiftTypeHashTableChunk(SwiftProtocolConformanceOptimizer& opt
 
     opt.typeConformancesHashTable = this->swiftTypeHashTable.get();
 
-    this->addLinkeditChunk(this->swiftTypeHashTable.get());
+    this->addReadOnlyChunk(config, this->swiftTypeHashTable.get());
 }
 
-void SubCache::addSwiftMetadataHashTableChunk(SwiftProtocolConformanceOptimizer& opt)
+void SubCache::addSwiftMetadataHashTableChunk(const BuilderConfig& config, SwiftOptimizer& opt)
 {
     this->swiftMetadataHashTable = std::make_unique<SwiftProtocolConformancesHashTableChunk>();
     this->swiftMetadataHashTable->cacheVMSize       = CacheVMSize(opt.metadataConformancesHashTableSize);
@@ -1297,10 +1323,10 @@ void SubCache::addSwiftMetadataHashTableChunk(SwiftProtocolConformanceOptimizer&
 
     opt.metadataConformancesHashTable = this->swiftMetadataHashTable.get();
 
-    this->addLinkeditChunk(this->swiftMetadataHashTable.get());
+    this->addReadOnlyChunk(config, this->swiftMetadataHashTable.get());
 }
 
-void SubCache::addSwiftForeignHashTableChunk(SwiftProtocolConformanceOptimizer& opt)
+void SubCache::addSwiftForeignHashTableChunk(const BuilderConfig& config, SwiftOptimizer& opt)
 {
     this->swiftForeignTypeHashTable = std::make_unique<SwiftProtocolConformancesHashTableChunk>();
     this->swiftForeignTypeHashTable->cacheVMSize        = CacheVMSize(opt.foreignTypeConformancesHashTableSize);
@@ -1308,10 +1334,10 @@ void SubCache::addSwiftForeignHashTableChunk(SwiftProtocolConformanceOptimizer& 
 
     opt.foreignTypeConformancesHashTable = this->swiftForeignTypeHashTable.get();
 
-    this->addLinkeditChunk(this->swiftForeignTypeHashTable.get());
+    this->addReadOnlyChunk(config, this->swiftForeignTypeHashTable.get());
 }
 
-void SubCache::addSwiftPrespecializedMetadataPointerTableChunks(SwiftProtocolConformanceOptimizer& opt)
+void SubCache::addSwiftPrespecializedMetadataPointerTableChunks(const BuilderConfig& config, SwiftOptimizer& opt)
 {
     for ( PointerHashTableOptimizerInfo& tableInfo : opt.prespecializedMetadataHashTables ) {
         PointerHashTableChunk* chunk = this->pointerHashTables.emplace_back(std::make_unique<PointerHashTableChunk>()).get();
@@ -1319,7 +1345,7 @@ void SubCache::addSwiftPrespecializedMetadataPointerTableChunks(SwiftProtocolCon
         chunk->subCacheFileSize  = CacheFileSize(tableInfo.size);
 
         tableInfo.chunk = chunk;
-        this->addLinkeditChunk(chunk);
+        this->addReadOnlyChunk(config, chunk);
     }
 }
 
@@ -1570,12 +1596,14 @@ void SubCache::writeCacheHeader(const BuilderOptions& options, const BuilderConf
     dyldCacheHeader->progClosuresSize              = 0; // no longer used
     dyldCacheHeader->progClosuresTrieAddr          = 0; // no longer used
     dyldCacheHeader->progClosuresTrieSize          = 0; // no longer used
-    dyldCacheHeader->platform                      = (uint8_t)options.platform;
+    dyldCacheHeader->platform                      = options.platform.value();
     dyldCacheHeader->formatVersion                 = 0; //dyld3::closure::kFormatVersion;
     dyldCacheHeader->dylibsExpectedOnDisk          = !options.dylibsRemovedFromDisk;
     dyldCacheHeader->simulator                     = options.isSimulator();
     dyldCacheHeader->locallyBuiltCache             = options.isLocallyBuiltCache;
     dyldCacheHeader->builtFromChainedFixups        = false; // no longer used
+    dyldCacheHeader->newFormatTLVs                 = true;
+    dyldCacheHeader->padding                       = 0;
     dyldCacheHeader->sharedRegionStart             = this->subCacheVMAddress.rawValue();
     dyldCacheHeader->sharedRegionSize              = 0;
     dyldCacheHeader->maxSlide                      = 0; // overwritten later in build if the cache supports ASLR
@@ -1614,6 +1642,8 @@ void SubCache::writeCacheHeader(const BuilderOptions& options, const BuilderConf
     dyldCacheHeader->dynamicDataMaxSize            = 0; // set later only on the main cache file
     dyldCacheHeader->tproMappingsOffset            = 0; // set later only on the main cache file
     dyldCacheHeader->tproMappingsCount             = 0; // set later only on the main cache file
+    dyldCacheHeader->prewarmingDataOffset          = 0; // set later only on the main cache file
+    dyldCacheHeader->prewarmingDataSize            = 0; // set later only on the main cache file
 
     // Fill in old mappings
     // And new mappings which also have slide info
@@ -1630,9 +1660,11 @@ void SubCache::addMainCacheHeaderInfo(const BuilderOptions& options, const Build
                                       CacheVMAddress dyldInCacheEntryUnslidAddr,
                                       const DylibTrieOptimizer& dylibTrieOptimizer,
                                       const ObjCOptimizer& objcOptimizer,
-                                      const SwiftProtocolConformanceOptimizer& swiftProtocolConformanceOpt,
+                                      const SwiftOptimizer& swiftOpt,
                                       const PatchTableOptimizer& patchTableOptimizer,
-                                      const PrebuiltLoaderBuilder& prebuiltLoaderBuilder)
+                                      const FunctionVariantsOptimizer& functionVariantOptimizer,
+                                      const PrebuiltLoaderBuilder& prebuiltLoaderBuilder,
+                                      const PrewarmingOptimizer& prewarmingOptimizer)
 {
     const CacheVMAddress cacheBaseAddress = config.layout.cacheBaseAddress;
 
@@ -1645,13 +1677,13 @@ void SubCache::addMainCacheHeaderInfo(const BuilderOptions& options, const Build
     dyldCacheHeader->dylibsTrieAddr = dylibTrieOptimizer.dylibsTrieChunk->cacheVMAddress.rawValue();
     dyldCacheHeader->dylibsTrieSize = dylibTrieOptimizer.dylibsTrieChunk->subCacheFileSize.rawValue();
 
-    if ( !objcOptimizer.objcDylibs.empty() ) {
+    // Disable objc optimizations from EK shared cache
+    bool emitObjcOpts = !options.platform.isExclaveKit();
+    if ( !objcOptimizer.objcDylibs.empty() && emitObjcOpts ) {
         dyldCacheHeader->objcOptsOffset = (objcOptimizer.optsHeaderChunk->cacheVMAddress - cacheBaseAddress).rawValue();
         dyldCacheHeader->objcOptsSize   = objcOptimizer.optsHeaderChunk->subCacheFileSize.rawValue();
-    }
 
-    if ( !objcOptimizer.objcDylibs.empty() ) {
-        const auto& opt = swiftProtocolConformanceOpt;
+        const auto& opt = swiftOpt;
         dyldCacheHeader->swiftOptsOffset = (opt.optsHeaderChunk->cacheVMAddress - cacheBaseAddress).rawValue();
         dyldCacheHeader->swiftOptsSize   = opt.optsHeaderChunk->subCacheFileSize.rawValue();
     }
@@ -1678,6 +1710,9 @@ void SubCache::addMainCacheHeaderInfo(const BuilderOptions& options, const Build
     // TODO: Build the atlas
     dyldCacheHeader->cacheAtlasOffset              = 0; // set later only on the main cache file
     dyldCacheHeader->cacheAtlasSize                = 0; // set later only on the main cache file
+
+    dyldCacheHeader->functionVariantInfoAddr = functionVariantOptimizer.chunk->cacheVMAddress.rawValue();
+    dyldCacheHeader->functionVariantInfoSize = functionVariantOptimizer.fvInfoTotalByteSize;
 
     // The main cache has offsets to all the caches
     if ( !this->subCaches.empty() ) {
@@ -1716,6 +1751,11 @@ void SubCache::addMainCacheHeaderInfo(const BuilderOptions& options, const Build
 
             ++index;
         });
+    }
+
+    if ( prewarmingOptimizer.prewarmingChunk != nullptr ) {
+        dyldCacheHeader->prewarmingDataOffset = (prewarmingOptimizer.prewarmingChunk->cacheVMAddress - cacheBaseAddress).rawValue();
+        dyldCacheHeader->prewarmingDataSize   = prewarmingOptimizer.prewarmingChunk->subCacheFileSize.rawValue();
     }
 }
 
@@ -1769,7 +1809,7 @@ void SubCache::addCacheHeaderImageInfo(const BuilderOptions& options,
 
     // write text image array and image names pool at same time
     for ( const CacheDylib& cacheDylib : cacheDylibs ) {
-        cacheDylib.inputMF->getUuid(textImages->uuid);
+        cacheDylib.inputHdr->getUuid(textImages->uuid);
         textImages->loadAddress     = cacheDylib.cacheLoadAddress.rawValue();
         textImages->textSegmentSize = (uint32_t)cacheDylib.segments.front().cacheVMSize.rawValue();
         textImages->pathOffset      = stringOffset;

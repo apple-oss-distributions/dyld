@@ -77,6 +77,11 @@ namespace std {
 }
 #endif
 
+#ifndef EXPORT_SYMBOL_FLAGS_FUNCTION_VARIANT
+  #define EXPORT_SYMBOL_FLAGS_FUNCTION_VARIANT  0x20
+#endif
+
+
 namespace TrieUtils {
 
 static void append_uleb128(uint64_t value, std::vector<uint8_t>& out) {
@@ -403,6 +408,8 @@ struct ExportInfo {
 			size = TrieUtils::uleb128_size(flags) + TrieUtils::uleb128_size(address);
 			if ( flags & EXPORT_SYMBOL_FLAGS_STUB_AND_RESOLVER )
 				size += TrieUtils::uleb128_size(other);
+            if ( flags & EXPORT_SYMBOL_FLAGS_FUNCTION_VARIANT )
+                size += TrieUtils::uleb128_size(other);
 		}
 		return size;
 	}
@@ -434,6 +441,14 @@ struct ExportInfo {
 			TrieUtils::append_uleb128(address, out);
 			TrieUtils::append_uleb128(other, out);
 		}
+        else if ( flags & EXPORT_SYMBOL_FLAGS_FUNCTION_VARIANT ) {
+            // nodes with export info: size, flags, address, other
+            uint32_t nodeSize = TrieUtils::uleb128_size(flags) + TrieUtils::uleb128_size(address) + TrieUtils::uleb128_size(other);
+            out.push_back(nodeSize);
+            TrieUtils::append_uleb128(flags, out);
+            TrieUtils::append_uleb128(address, out);
+            TrieUtils::append_uleb128(other, out);
+        }
 		else {
 			// nodes with export info: size, flags, address
 			uint32_t nodeSize = TrieUtils::uleb128_size(flags) + TrieUtils::uleb128_size(address);
@@ -453,6 +468,8 @@ struct ExportInfo {
 			TrieUtils::parse_uleb128(p, end, address);
 			if ( flags & EXPORT_SYMBOL_FLAGS_STUB_AND_RESOLVER )
 				TrieUtils::parse_uleb128(p, end, other);
+            else if ( flags & EXPORT_SYMBOL_FLAGS_FUNCTION_VARIANT )
+                TrieUtils::parse_uleb128(p, end, other);
 		}
 	}
 

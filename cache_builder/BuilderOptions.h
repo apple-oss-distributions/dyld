@@ -28,6 +28,7 @@
 #include "Error.h"
 #include "JSON.h"
 #include "MachOFile.h"
+#include "Platform.h"
 
 #include <string>
 #include <unordered_map>
@@ -49,7 +50,7 @@ enum class CacheKind
 
 struct BuilderOptions
 {
-    BuilderOptions(std::string_view archName, dyld3::Platform platform,
+    BuilderOptions(std::string_view archName, mach_o::Platform platform,
                    bool dylibsRemovedFromDisk, bool isLocallyBuiltCache,
                    CacheKind kind, bool forceDevelopmentSubCacheSuffix);
 
@@ -58,7 +59,8 @@ struct BuilderOptions
 
     // Core fields
     const dyld3::GradedArchs&                   archs;
-    dyld3::Platform                             platform;
+    std::string                                 mainCacheFileName;
+    mach_o::Platform                            platform;
     bool                                        dylibsRemovedFromDisk;
     bool                                        isLocallyBuiltCache;
     bool                                        forceDevelopmentSubCacheSuffix;
@@ -74,8 +76,9 @@ struct BuilderOptions
     // Other
     std::unordered_map<std::string, unsigned>   dylibOrdering;
     std::unordered_map<std::string, unsigned>   dirtyDataSegmentOrdering;
-    dyld3::json::Node                           objcOptimizations;
+    json::Node                                  objcOptimizations;
     std::string                                 swiftGenericMetadataFile;
+    std::string                                 prewarmingOptimizations;
 };
 
 // Inputs to the builder can be dylibs, executables, bundles, etc.
@@ -88,12 +91,18 @@ struct InputFile
     std::string             path;
     bool                    forceNotCacheEligible = false;
 
-    bool hasError() const;
-    const error::Error& getError() const;
-    void setError(error::Error&& err);
+    bool                            hasError() const;
+    std::span<const error::Error>   getErrors() const;
+    void                            addError(error::Error&& err);
 
 private:
-    error::Error            error;
+    // These are reason(s) this input file can't be used.  If its a dylib then
+    // its likely reasons the dylib is ineligible to be in the cache.  If its
+    // an executable then likely the reason the executable can't get a prebuilt closure.
+    // Despite the name, these may not be surfaced as errors to the user, as these
+    // might not be fatal errors, but at the very least they'll be warnings the user
+    // can choose to be fatal or not
+    std::vector<error::Error> errors;
 };
 
 // Alias for an input file

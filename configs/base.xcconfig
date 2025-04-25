@@ -1,7 +1,6 @@
 
 // settings shared by all projects
 
-
 // language versions
 GCC_C_LANGUAGE_STANDARD = c2x
 CLANG_CXX_LANGUAGE_STANDARD = c++20
@@ -20,7 +19,7 @@ ENABLE_ATP_WERROR_9999099099000000 = -Werror // Hack to enable -Werror in ATP
 WARNING_CFLAGS = $(ENABLE_ATP_WERROR_$(RC_ProjectCanonicalSourceVersion)) -Wmost -Wimplicit-fallthrough -Wno-unknown-pragmas -Wno-assume -Wformat-nonliteral -Wno-vla-extension -Wundef-prefix=SUPPORT_
 
 // #ifndef __OPEN_SOURCE__
-//OTHER_CFLAGS[arch=arm64e]="-march=armv8.5-a+memtag"
+OTHER_CFLAGS[arch=arm64e] = -Xclang -target-feature -Xclang +mte $(inherited)
 // #endif
 
 // clang optimization level
@@ -49,3 +48,29 @@ STRIP_INSTALLED_PRODUCT_Release  = YES
 STRIP_INSTALLED_PRODUCT_Debug    = NO
 STRIP_INSTALLED_PRODUCT          = $(STRIP_INSTALLED_PRODUCT_$(CONFIGURATION))
 STRIPFLAGS                       = -S
+
+// #ifndef __OPEN_SOURCE__
+// Xcode provides an undocumented way for a user to add a personal xcconfig for all builds, which is used in Xcode development itself:
+//    defaults write com.apple.dt.Xcode OverridingXCConfigPath /path/to/Overrides.xcconfig
+//
+// We can use that to add the necessary configs to setup AMFITrustedKeys. The simple thing to do would be to globally override CODE_SIGN_IDENTITY,
+// but then it would not be possible to anything without using that signature. Instead can limit the custom signing operations to just dyld
+// by defining a new variable DYLD_USE_AMFI_TRUSTED_KEYS which can be set in the override. This xcconfig then derives CODE_SIGN_IDENTITY from
+// DYLD_USE_AMFI_TRUSTED_KEYS, limiting the effect to just dyld.
+//
+// In order to make this work you need to:
+// 1. Configure AMFI trusted keys: https://confluence.sd.apple.com/display/TrustedExecution/How+To%3A+Use+AMFI+Trusted+Keys+for+Code+Signing
+// 2. Create an ovveride xcconfig and add the line: "DYLD_USE_AMFI_TRUSTED_KEYS = YES" to it
+// 3. Set the default to use the override: defaults write com.apple.dt.Xcode OverridingXCConfigPath /path/to/Overrides.xcconfig
+//
+// You will need to restart Xcode for the default to take effect, or device for the AMFI key to take effect
+//
+// AMFITrustedKeys existence is exposed through a number of other open source projects, but OverridingXCConfigPath is not publicly defined anywher, so
+// this comment needs to be excluded, but the actually variables set below are fine to publish.
+// #endif
+
+DYLD_SIGNING_IDENTITY_ = -
+DYLD_SIGNING_IDENTITY_NO = -
+DYLD_SIGNING_IDENTITY_YES[sdk=macos*] = Apple Engineer:
+DYLD_SIGNING_IDENTITY_YES[sdk=*] = -
+TRUSTED_CODE_SIGN_IDENTITY = $(DYLD_SIGNING_IDENTITY_$(DYLD_USE_AMFI_TRUSTED_KEYS))

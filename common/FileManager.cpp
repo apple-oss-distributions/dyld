@@ -47,13 +47,15 @@ using lsl::OrderedMap;
 FileManager::FileManager(Allocator& allocator, const SyscallDelegate* syscall)
 : _syscall(syscall), _allocator(&allocator), _fsUUIDMap(_allocator->makeUnique<OrderedMap<uint64_t,UUID>>(*_allocator)) {}
 
+FileManager::FileManager(Allocator& allocator)
+    : _syscall(nullptr), _allocator(&allocator), _fsUUIDMap(_allocator->makeUnique<OrderedMap<uint64_t,UUID>>(*_allocator)) {}
+
 void FileManager::swap(FileManager& other) {
     using std::swap;
 
     std::swap(_allocator,   other._allocator);
     std::swap(_fsUUIDMap,   other._fsUUIDMap);
 }
-
 
 FileRecord FileManager::fileRecordForPath(Allocator& allocator, const char* filePath) {
     const char* str = nullptr;

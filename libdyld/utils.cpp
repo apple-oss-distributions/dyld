@@ -38,6 +38,7 @@
 #include "DyldDelegates.h"
 
 // mach_o
+#include "Architecture.h"
 #include "Header.h"
 #include "Image.h"
 #include "Error.h"
@@ -48,15 +49,16 @@
 using dyld3::MachOFile;
 using dyld3::FatFile;
 using dyld3::GradedArchs;
-using dyld3::Platform;
 
 using mach_o::Header;
 using mach_o::Image;
 using mach_o::Error;
 using mach_o::Version32;
+using mach_o::Version64;
 using mach_o::LinkedDylibAttributes;
 using mach_o::Fixup;
 using mach_o::Symbol;
+using mach_o::Platform;
 
 // used by unit tests
 __attribute__((visibility("hidden")))
@@ -70,14 +72,23 @@ int macho_best_slice_fd_internal(int fd, Platform platform, const GradedArchs& l
 
 bool macho_cpu_type_for_arch_name(const char* archName, cpu_type_t* type, cpu_subtype_t* subtype)
 {
-    return MachOFile::cpuTypeFromArchName(archName, type, subtype);
+    mach_o::Architecture arch = mach_o::Architecture::byName(archName);
+    if ( arch == mach_o::Architecture::invalid )
+        return false;
+    
+    *type = arch.cpuType();
+    *subtype = arch.cpuSubtype();
+    return true;
 }
 
 const char* macho_arch_name_for_cpu_type(cpu_type_t type, cpu_subtype_t subtype)
 {
-    const char* result = MachOFile::archName(type, subtype);
+    const char* result = mach_o::Architecture(type, subtype).name();
     if ( strcmp(result, "unknown") == 0 )
         return nullptr;
+    // Strip any suffix that further specifies the exact arm64e type (.old, .kernel, etc).
+    if ( std::string_view(result).starts_with("arm64e") )
+        return "arm64e";
     return result;
 }
 
@@ -153,13 +164,13 @@ int macho_best_slice(const char* path, void (^bestSlice)(const struct mach_heade
     return result;
 }
 
-static bool launchableOnCurrentPlatform(const MachOFile* mf)
+static bool launchableOnCurrentPlatform(const Header* mh)
 {
 #if TARGET_OS_OSX
     // macOS is special and can launch macOS, catalyst, and iOS apps
-    return ( mf->builtForPlatform(Platform::macOS) || mf->builtForPlatform(Platform::iOSMac) || mf->builtForPlatform(Platform::iOS) );
+    return ( mh->builtForPlatform(Platform::macOS) || mh->builtForPlatform(Platform::macCatalyst) || mh->builtForPlatform(Platform::iOS) );
 #else
-    return mf->builtForPlatform(MachOFile::currentPlatform());
+    return mh->builtForPlatform(Platform::current());
 #endif
 }
 
@@ -183,18 +194,18 @@ int macho_best_slice_fd_internal(int fd, Platform platform, const GradedArchs& l
         __block uint64_t sliceOffset = 0;
         __block uint64_t sliceLen    = 0;
         ff->forEachSlice(diag, statbuf.st_size, ^(uint32_t sliceCpuType, uint32_t sliceCpuSubType, const void* sliceStart, uint64_t sliceSize, bool& stop) {
-            if ( const MachOFile* mf = MachOFile::isMachO(sliceStart) ) {
-                if ( mf->filetype == MH_EXECUTE ) {
-                    int sliceGrade = launchArchs.grade(mf->cputype, mf->cpusubtype, isOSBinary);
-                    if ( (sliceGrade > bestGrade) && launchableOnCurrentPlatform(mf) ) {
+            if ( const Header* mh = Header::isMachO({(const uint8_t*)sliceStart, (size_t)sliceSize}) ) {
+                if ( mh->isMainExecutable() ) {
+                    int sliceGrade = launchArchs.grade(mh->arch().cpuType(), mh->arch().cpuSubtype(), isOSBinary);
+                    if ( (sliceGrade > bestGrade) && launchableOnCurrentPlatform(mh) ) {
                         sliceOffset = (char*)sliceStart - (char*)mappedFile;
                         sliceLen    = sliceSize;
                         bestGrade   = sliceGrade;
                     }
                 }
                 else {
-                    int sliceGrade = dylibArchs.grade(mf->cputype, mf->cpusubtype, isOSBinary);
-                    if ( (sliceGrade > bestGrade) && mf->loadableIntoProcess(platform, "") ) {
+                    int sliceGrade = dylibArchs.grade(mh->arch().cpuType(), mh->arch().cpuSubtype(), isOSBinary);
+                    if ( (sliceGrade > bestGrade) && mh->loadableIntoProcess(platform, "") ) {
                         sliceOffset = (char*)sliceStart - (char*)mappedFile;
                         sliceLen    = sliceSize;
                         bestGrade   = sliceGrade;
@@ -212,16 +223,16 @@ int macho_best_slice_fd_internal(int fd, Platform platform, const GradedArchs& l
         else
             result = EBADARCH;
     }
-    else if ( const MachOFile* mf = MachOFile::isMachO(mappedFile) ) {
-        if ( (mf->filetype == MH_EXECUTE) && (launchArchs.grade(mf->cputype, mf->cpusubtype, isOSBinary) != 0) && launchableOnCurrentPlatform(mf) )  {
+    else if ( const Header* mh = Header::isMachO({(const uint8_t*)mappedFile, (size_t)statbuf.st_size}) ) {
+        if ( mh->isMainExecutable() && (launchArchs.grade(mh->arch().cpuType(), mh->arch().cpuSubtype(), isOSBinary) != 0) && launchableOnCurrentPlatform(mh) )  {
             // the "best" of a main executable must pass grading and be a launchable
             if ( bestSlice )
-                bestSlice(mf, 0, (size_t)statbuf.st_size);
+                bestSlice((const mach_header*)mh, 0, (size_t)statbuf.st_size);
         }
-        else if ( (dylibArchs.grade(mf->cputype, mf->cpusubtype, isOSBinary) != 0) && mf->loadableIntoProcess(platform, "") ) {
+        else if ( (dylibArchs.grade(mh->arch().cpuType(), mh->arch().cpuSubtype(), isOSBinary) != 0) && mh->loadableIntoProcess(platform, "") ) {
             // the "best" of a dylib/bundle must pass grading and match the platform of the current process
             if ( bestSlice )
-                bestSlice(mf, 0, (size_t)statbuf.st_size);
+                bestSlice((const mach_header*)mh, 0, (size_t)statbuf.st_size);
         }
         else {
             result = EBADARCH;
@@ -256,7 +267,7 @@ int macho_best_slice_in_fd(int fd, void (^bestSlice)(const struct mach_header* s
     if ( stripPointer(p) != p )
        keysOff = false;
 #endif
-    const Platform     platform    = MachOFile::currentPlatform();
+    const Platform     platform    = Platform::current();
     const GradedArchs* launchArchs = &GradedArchs::launchCurrentOS();
     const GradedArchs* dylibArchs  = &GradedArchs::forCurrentOS(keysOff, false);
 #if TARGET_OS_SIMULATOR
@@ -275,15 +286,17 @@ int macho_best_slice_in_fd(int fd, void (^bestSlice)(const struct mach_header* s
 ///
 const char* _Nullable macho_dylib_install_name(const struct mach_header* _Nonnull mh) DYLD_EXCLAVEKIT_UNAVAILABLE
 {
-    if ( const MachOFile* mf = MachOFile::isMachO(mh) )
-        return mf->installName();
+    const Header* hdr = (const Header*)mh;
+    if ( hdr->hasMachOMagic() )
+        return hdr->installName();
 
     return nullptr;
 }
 
 static void iterateDependencies(const Image& image, void (^_Nonnull callback)(const char* _Nonnull loadPath, const char* _Nonnull attributes, bool* _Nonnull stop) )
 {
-    image.header()->forEachLinkedDylib(^(const char* loadPath, LinkedDylibAttributes kind, Version32 compatVersion, Version32 curVersion, bool& stop) {
+    image.header()->forEachLinkedDylib(^(const char* loadPath, LinkedDylibAttributes kind, Version32 compatVersion, Version32 curVersion, 
+                                         bool synthesizedLink, bool& stop) {
         char attrBuf[64];
         kind.toString(attrBuf);
         callback(loadPath, attrBuf, &stop);
@@ -430,4 +443,19 @@ int macho_for_each_defined_rpath(const struct mach_header* _Nonnull mh, size_t m
     }
     return 0;
 }
+
+bool macho_source_version(const struct mach_header* _Nonnull mh, uint64_t* _Nonnull version)
+{
+    Header* header = (Header*)mh;
+    if ( !header->hasMachOMagic() )
+        return false;
+    
+    Version64 v;
+    if ( !header->sourceVersion(v) )
+        return false;
+    
+    *version = v.value();
+    return true;
+}
+
 #endif // !TARGET_OS_EXCLAVEKIT

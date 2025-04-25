@@ -1,0 +1,21 @@
+#include "base.xcconfig"
+#include "test_base.xcconfig"
+
+SUPPORTED_PLATFORMS = macosx iphoneos appltevos iphonesimulator
+GCC_PREPROCESSOR_DEFINITIONS    = $(inherited) BUILDING_UNIT_TESTS=1
+
+USER_HEADER_SEARCH_PATHS = $(SRCROOT)/testing/framework-unit-tests $(inherited)
+
+// Swift and modules
+SWIFT_VERSION                   = 5.0
+SWIFT_INSTALL_OBJC_HEADER       = NO
+SWIFT_OBJC_INTEROP_MODE         = objc
+CLANG_ENABLE_MODULES            = YES
+_EXPERIMENTAL_SWIFT_EXPLICIT_MODULES = YES
+
+CODE_SIGN_IDENTITY = $(TRUSTED_CODE_SIGN_IDENTITY)
+
+DYLD_FRAMEWORK_TEST_EXECUTABLE_PATH = ${BUILT_PRODUCTS_DIR}/${BUNDLE_EXECUTABLE_FOLDER_PATH}
+
+//XCTRUNNER_LAUNCH_AS_TOOL        = YES
+//CODE_SIGN_ENTITLEMENTS      = testing/framework-unit-tests/framework_tests_entitlements.plist

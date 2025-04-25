@@ -22,6 +22,7 @@
  */
 
 #include "Array.h"
+#include "Header.h"
 #include "MachOLayout.h"
 #include "MachOFile.h"
 
@@ -74,10 +75,10 @@ std::optional<uint32_t> Layout::getObjcInfoFlags() const
     };
 
     __block std::optional<uint32_t> flags;
-    this->mf->forEachSection(^(const dyld3::MachOFile::SectionInfo& sectInfo, bool malformedSectionRange, bool& stop) {
-        if ( (strncmp(sectInfo.sectName, "__objc_imageinfo", 16) == 0) && (strncmp(sectInfo.segInfo.segName, "__DATA", 6) == 0) ) {
-            uint64_t segmentOffset = sectInfo.sectFileOffset - sectInfo.segInfo.fileOffset;
-            objc_image_info* info =  (objc_image_info*)(this->segments[sectInfo.segInfo.segIndex].buffer + segmentOffset);
+    ((const Header*)this->mf)->forEachSection(^(const Header::SegmentInfo& segInfo, const Header::SectionInfo& sectInfo, bool& stop) {
+        if ( (sectInfo.sectionName.starts_with("__objc_imageinfo")) && sectInfo.segmentName.starts_with("__DATA") ) {
+            uint64_t segmentOffset = sectInfo.fileOffset - segInfo.fileOffset;
+            objc_image_info* info =  (objc_image_info*)(this->segments[sectInfo.segIndex].buffer + segmentOffset);
             flags = info->flags;
             stop = true;
         }
@@ -88,8 +89,8 @@ std::optional<uint32_t> Layout::getObjcInfoFlags() const
 bool Layout::hasSection(std::string_view segmentName, std::string_view sectionName) const
 {
     __block bool result = false;
-    this->mf->forEachSection(^(const dyld3::MachOFile::SectionInfo& sectInfo, bool malformedSectionRange, bool& stop) {
-        if ( (sectInfo.segInfo.segName == segmentName) && (sectInfo.sectName == sectionName) ) {
+    ((const Header*)this->mf)->forEachSection(^(const Header::SectionInfo& sectInfo, bool& stop) {
+        if ( (sectInfo.segmentName == segmentName) && (sectInfo.sectionName == sectionName) ) {
             result = true;
             stop = true;
         }
@@ -642,7 +643,7 @@ void Fixups::withThreadedRebaseAsChainStarts(Diagnostics& diag, void (^callback)
 #if SUPPORT_OLD_ARM64E_FORMAT
     // don't want this code in non-arm64e dyld because it causes a stack protector which dereferences a GOT pointer before GOT is set up
     // old arm64e binary, create a dyld_chained_starts_in_image for caller
-    uint64_t baseAddress = this->layout.mf->preferredLoadAddress();
+    uint64_t baseAddress = ((const Header*)this->layout.mf)->preferredLoadAddress();
     uint64_t imagePageCount = this->layout.mf->mappedSize()/0x4000;
     size_t bufferSize = this->layout.linkedit.regularBindOpcodes.bufferSize + (size_t)imagePageCount*sizeof(uint16_t) + 512;
     BLOCK_ACCCESSIBLE_ARRAY(uint8_t, buffer, bufferSize);
@@ -1633,20 +1634,20 @@ void Fixups::forEachIndirectPointer(Diagnostics& diag, bool supportPrivateExtern
     if ( (indirectSymbolTableCount == 0) && this->layout.mf->isKextBundle() )
         return;
 
-    this->layout.mf->forEachSection(^(const dyld3::MachOFile::SectionInfo& sectInfo, bool malformedSectionRange, bool& sectionStop) {
-        uint8_t  sectionType  = (sectInfo.sectFlags & SECTION_TYPE);
-        bool selfModifyingStub = (sectionType == S_SYMBOL_STUBS) && (sectInfo.sectFlags & S_ATTR_SELF_MODIFYING_CODE) && (sectInfo.reserved2 == 5) && (this->layout.mf->cputype == CPU_TYPE_I386);
+    ((const Header*)this->layout.mf)->forEachSection(^(const Header::SectionInfo& sectInfo, bool& sectionStop) {
+        uint8_t  sectionType  = (sectInfo.flags & SECTION_TYPE);
+        bool selfModifyingStub = (sectionType == S_SYMBOL_STUBS) && (sectInfo.flags & S_ATTR_SELF_MODIFYING_CODE) && (sectInfo.reserved2 == 5) && (this->layout.mf->cputype == CPU_TYPE_I386);
         if ( (sectionType != S_LAZY_SYMBOL_POINTERS) && (sectionType != S_NON_LAZY_SYMBOL_POINTERS) && !selfModifyingStub )
             return;
-        if ( (sectInfo.sectFlags & S_ATTR_SELF_MODIFYING_CODE) && !selfModifyingStub ) {
+        if ( (sectInfo.flags & S_ATTR_SELF_MODIFYING_CODE) && !selfModifyingStub ) {
             diag.error("S_ATTR_SELF_MODIFYING_CODE section type only valid in old i386 binaries");
             sectionStop = true;
             return;
         }
         uint32_t elementSize = selfModifyingStub ? sectInfo.reserved2 : ptrSize;
-        uint32_t elementCount = (uint32_t)(sectInfo.sectSize/elementSize);
+        uint32_t elementCount = (uint32_t)(sectInfo.size/elementSize);
         if ( dyld3::greaterThanAddOrOverflow(sectInfo.reserved1, elementCount, indirectSymbolTableCount) ) {
-            diag.error("section %s overflows indirect symbol table", sectInfo.sectName);
+            diag.error("section %.*s overflows indirect symbol table", (int)sectInfo.sectionName.size(), sectInfo.sectionName.data());
             sectionStop = true;
             return;
         }
@@ -1656,7 +1657,7 @@ void Fixups::forEachIndirectPointer(Diagnostics& diag, bool supportPrivateExtern
             if ( symNum == INDIRECT_SYMBOL_ABS )
                 continue;
             if ( symNum == INDIRECT_SYMBOL_LOCAL ) {
-                handler(sectInfo.sectAddr+i*elementSize, false, 0, "", false, false, false, stop);
+                handler(sectInfo.address+i*elementSize, false, 0, "", false, false, false, stop);
                 continue;
             }
             if ( symNum > symCount ) {
@@ -1685,7 +1686,7 @@ void Fixups::forEachIndirectPointer(Diagnostics& diag, bool supportPrivateExtern
                 // Note we only want to change the value in memory once, before rebases are applied.  We don't want to accidentally
                 // change it again later.
                 if ( supportPrivateExternsWorkaround ) {
-                    uintptr_t* ptr = (uintptr_t*)((uint8_t*)(sectInfo.sectAddr+i*elementSize) + slide);
+                    uintptr_t* ptr = (uintptr_t*)((uint8_t*)(sectInfo.address+i*elementSize) + slide);
                     uint64_t n_value = is64Bit ? symbols64[symNum].n_value : symbols32[symNum].n_value;
                     *ptr = (uintptr_t)n_value;
                 }
@@ -1695,7 +1696,7 @@ void Fixups::forEachIndirectPointer(Diagnostics& diag, bool supportPrivateExtern
             // Handle defined weak def symbols which need to get a special ordinal
             if ( ((n_type & N_TYPE) == N_SECT) && ((n_type & N_EXT) != 0) && ((n_desc & N_WEAK_DEF) != 0) )
                 libOrdinal = BIND_SPECIAL_DYLIB_WEAK_LOOKUP;
-            handler(sectInfo.sectAddr+i*elementSize, true, libOrdinal, symbolName, weakImport, lazy, selfModifyingStub, stop);
+            handler(sectInfo.address+i*elementSize, true, libOrdinal, symbolName, weakImport, lazy, selfModifyingStub, stop);
         }
         sectionStop = stop;
     });
@@ -1723,13 +1724,13 @@ uint64_t Fixups::externalRelocBaseAddress() const
 {
     // Dyld caches are too large for a raw r_address, so everything is an offset from the base address
     if ( this->layout.mf->inDyldCache() ) {
-        return this->layout.mf->preferredLoadAddress();
+        return ((const Header*)this->layout.mf)->preferredLoadAddress();
     }
 
 #if BUILDING_APP_CACHE_UTIL || BUILDING_DYLDINFO
     if ( this->layout.mf->isKextBundle() ) {
         // for kext bundles the reloc base address starts at __TEXT segment
-        return this->layout.mf->preferredLoadAddress();
+        return ((const Header*)this->layout.mf)->preferredLoadAddress();
     }
 #endif
 
@@ -1844,7 +1845,7 @@ void SplitSeg::forEachReferenceV2(Diagnostics& diag, ReferenceCallbackV2 callbac
             for (uint64_t k=0; k < fromOffsetCount; ++k) {
                 uint64_t kind = dyld3::MachOFile::read_uleb128(diag, p, infoEnd);
                 if ( kind > 13 ) {
-                    diag.error("bad kind (%llu) value in %s\n", kind, this->layout.mf->installName());
+                    diag.error("bad kind (%llu) value in %s\n", kind, ((const Header*)this->layout.mf)->installName());
                 }
                 uint64_t fromSectDeltaCount = dyld3::MachOFile::read_uleb128(diag, p, infoEnd);
                 uint64_t fromSectionOffset = 0;
@@ -1867,11 +1868,8 @@ void SplitSeg::forEachSplitSegSection(void (^callback)(std::string_view segmentN
                                                        uint64_t sectionVMAddr)) const
 {
     callback("mach header", "", 0);
-    this->layout.mf->forEachSection(^(const dyld3::MachOFile::SectionInfo &sectInfo,
-                                      bool malformedSectionRange, bool &stop) {
-        std::string_view segmentName(sectInfo.segInfo.segName, strnlen(sectInfo.segInfo.segName, 16));
-        std::string_view sectionName(sectInfo.sectName, strnlen(sectInfo.sectName, 16));
-        callback(segmentName, sectionName, sectInfo.sectAddr);
+    ((const Header*)this->layout.mf)->forEachSection(^(const Header::SectionInfo &sectInfo, bool &stop) {
+        callback(sectInfo.segmentName, sectInfo.sectionName, sectInfo.address);
     });
 }
 

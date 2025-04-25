@@ -28,25 +28,40 @@
 
 #include <string.h>
 #include <stdint.h>
-#include "MachOFile.h"
 
-class DyldSharedCache;
+#include "Allocator.h"
+#include "DyldSharedCache.h"
+#include "Platform.h"
+
+namespace dyld4 {
+    class ProcessConfig;
+}
+
+using dyld4::ProcessConfig;
 
 namespace dyld3 {
 
 struct SharedCacheOptions {
+#if !TARGET_OS_EXCLAVEKIT
     // Note we look in the default cache dir first, and then the fallback, if not null
-    int             cacheDirFD = -1;
-    bool            forcePrivate;
-    bool            useHaswell;
-    bool            verbose;
-    bool            disableASLR;
-    bool            enableReadOnlyDataConst;
-    bool            preferCustomerCache;
-    bool            forceDevCache;
-    bool            isTranslated;
-    bool            usePageInLinking;
-    Platform        platform;
+    int                 cacheDirFD = -1;
+#else
+    DyldSharedCache*     cacheHeader = nullptr;
+    size_t               cacheSize;
+    const char*          cachePath   = nullptr;
+#endif // !TARGET_OS_EXCLAVEKIT
+    bool                 forcePrivate;
+    bool                 useHaswell;
+    bool                 verbose;
+    bool                 disableASLR;
+    bool                 enableReadOnlyDataConst;
+    bool                 enableTPRO;
+    bool                 preferCustomerCache;
+    bool                 forceDevCache;
+    bool                 isTranslated;
+    bool                 usePageInLinking;
+    mach_o::Platform     platform;
+    const ProcessConfig* config = nullptr;
 };
 
 struct SharedCacheLoadInfo {
@@ -54,9 +69,10 @@ struct SharedCacheLoadInfo {
     long                        slide           = 0;
     const char*                 errorMessage    = nullptr;
     bool                        cacheFileFound  = false;
-    uint64_t                    FSID            = 0;
-    uint64_t                    FSObjID         = 0;
     bool                        development     = false;
+#if !TARGET_OS_EXCLAVEKIT
+    FileIdTuple                 cacheFileID;
+#endif // !TARGET_OS_EXCLAVEKIT
 };
 
 bool loadDyldCache(const SharedCacheOptions& options, SharedCacheLoadInfo* results);
@@ -72,6 +88,7 @@ bool findInSharedCacheImage(const SharedCacheLoadInfo& loadInfo, const char* dyl
 bool pathIsInSharedCacheImage(const SharedCacheLoadInfo& loadInfo, const char* dylibPathToFind);
 
 void deallocateExistingSharedCache();
+
 
 } // namespace dyld3
 

@@ -72,17 +72,6 @@ Error::Error(const char* format, ...)
     va_end(list);
 }
 
-Error::Error(const char* format, va_list list)
-{
-    if ( _buffer == nullptr )
-        _buffer = _simple_salloc();
-// FIXME: Remove ignore once rdar://84603673 is resolved.
-#pragma clang diagnostic push
-#pragma clang diagnostic ignored "-Wformat-nonliteral"
-    _simple_vsprintf(_buffer, format, list);
-#pragma clang diagnostic pop
-}
-
 const char* Error::message() const
 {
     return _buffer ? _simple_string(_buffer) : "";

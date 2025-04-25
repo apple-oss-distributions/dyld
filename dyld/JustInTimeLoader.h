@@ -74,7 +74,7 @@ public:
     bool                        overridesDylibInCache(const DylibPatch*& patchTable, uint16_t& cacheDylibOverriddenIndex) const;
     bool                        dyldDoesObjCFixups() const;
     const SectionLocations*     getSectionLocations() const;
-    void                        withLayout(Diagnostics &diag, RuntimeState& state, void (^callback)(const mach_o::Layout &layout)) const;
+    void                        withLayout(Diagnostics &diag, const RuntimeState& state, void (^callback)(const mach_o::Layout &layout)) const;
     // these are private "virtual" methods
     bool                        hasBeenFixedUp(RuntimeState&) const;
     bool                        beginInitializers(RuntimeState&);
@@ -94,7 +94,7 @@ public:
     static void         handleStrongWeakDefOverrides(RuntimeState& state, DyldCacheDataConstLazyScopedWriter& cacheDataConst);
 #endif
 
-    static void         parseSectionLocations(const dyld3::MachOFile* mf, SectionLocations& metadata);
+    static void         parseSectionLocations(const mach_o::Header* hdr, SectionLocations& metadata);
 
     // Wehn patching an iOSMac dylib, we may need an additional patch table for the macOS twin. This returns that patch table
     const DylibPatch*   getCatalystMacTwinPatches() const;

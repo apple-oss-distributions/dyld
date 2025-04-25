@@ -29,7 +29,7 @@
 #include <compare>
 
 // common
-#include "Defines.h"
+#include "MachODefines.h"
 #include "CString.h"
 
 // mach-o
@@ -48,8 +48,8 @@ class VIS_HIDDEN Version32
 {
 public:
                   constexpr Version32(uint16_t major, uint8_t minor, uint8_t micro=0) : _raw((major << 16) | (minor << 8) | micro) { }
-                   explicit Version32(uint32_t raw) : _raw(raw) { }
-                            Version32() : _raw(0x00010000) { }
+         explicit constexpr Version32(uint32_t raw) : _raw(raw) { }
+                  constexpr Version32() : _raw(0x00010000) { }
 
     static Error            fromString(std::string_view versString, Version32& vers,
                                        void (^ _Nullable truncationHandler)(void) = nullptr);

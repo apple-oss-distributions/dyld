@@ -34,10 +34,6 @@
 #include "MemoryBuffer.h"
 #include "Symbol.h"
 
-#if BUILDING_MACHO_WRITER
-#include "Containers.h"
-#endif
-
 #ifndef N_LIB
 #define N_LIB    0x68
 #endif
@@ -59,69 +55,11 @@ public:
     struct DebugNoteItem     { uint64_t addr=0; uint64_t size=0; const char* name=nullptr; uint8_t type=0; uint8_t sectNum=0; };
     struct DebugNote         { const DebugNoteFileInfo* fileInfo; std::vector<DebugNoteItem> items; };
 
-#if BUILDING_MACHO_WRITER
-    struct DebugBuilderNoteItem
-    {
-        uint64_t        addr=0;
-        uint64_t        size=0;
-
-        union {
-            // when using convenience NList constructor this has to point to
-            // the note's name, otherwise the pointer won't be used, so callers
-            // can use the `userData` field to store their own context.
-            // ld's layout uses this to store atoms and implement efficient reuse
-            // of the string pool strings.
-            void*       userData=nullptr;
-            const char* name;
-        };
-
-        uint8_t         type=0;
-        uint8_t         sectNum=0;
-        uint32_t        stringPoolOffset=0;
-    };
-
-    struct DebugBuilderNote
-    {
-        const DebugNoteFileInfo*            fileInfo;
-        std::vector<DebugBuilderNoteItem>   items;
-        uint32_t                            srcDirPoolOffset=0;
-        uint32_t                            srcNamePoolOffset=0;
-        uint32_t                            originLibPathPoolOffset=0;
-        uint32_t                            objPathPoolOffset=0;
-    };
-
-    struct NListLayout
-    {
-        std::span<const Symbol>             globals;
-        std::span<const uint32_t>           globalsStrx;
-        std::span<const uint32_t>           reexportStrx;
-        std::span<const Symbol>             undefs;
-        std::span<const uint32_t>           undefsStrx;
-        std::span<const Symbol>             locals;
-        std::span<const uint32_t>           localsStrx;
-        std::span<const DebugBuilderNote>   debugNotes;
-        uint32_t                            debugNotesNListCount=0;
-    };
-#endif // BUILDING_MACHO_WRITER
-
                     // encapsulates symbol table in a final linked image
                     NListSymbolTable(uint32_t preferredLoadAddress, const struct nlist*, uint32_t nlistCount, const char* stringPool, uint32_t stringPoolSize,
                                  uint32_t localsCount, uint32_t globalsCount, uint32_t undefsCount);
                     NListSymbolTable(uint64_t preferredLoadAddress, const struct nlist_64*, uint32_t nlistCount, const char* stringPool, uint32_t stringPoolSize,
                                  uint32_t localsCount, uint32_t globalsCount, uint32_t undefsCount);
-#if BUILDING_MACHO_WRITER
-                    // Convenience NList constructors used in unit tests
-                    // \{
-                    NListSymbolTable(std::span<const Symbol> symbols, uint64_t prefLoadAddr, bool is64, std::span<DebugBuilderNote> debugNotes={}, bool zeroModTimes=false,
-                                     bool objectFile=false);
-                    NListSymbolTable(std::span<const Symbol> globals, std::span<const Symbol> undefs, std::span<const Symbol> locals, std::span<DebugBuilderNote> debugNotes, uint64_t prefLoadAddr, bool is64, bool zeroModTimes);
-                    // \}
-
-                    // NList constructor with a precomputed layout and nlist buffer
-                    NListSymbolTable(NListLayout layout, std::span<uint8_t> nlistBuffer, uint64_t prefLoadAddr, bool is64, bool zeroModTimes);
-
-    static uint32_t countDebugNoteNLists(std::span<const DebugBuilderNote> debugNotes);
-#endif
 
     Error           valid(uint64_t maxVmOffset) const;
     bool            hasExportedSymbol(const char* symbolName, Symbol& symbol) const;
@@ -145,68 +83,14 @@ public:
     uint32_t        undefsStartIndex() const;
     bool            symbolAtIndex(uint32_t symbolIndex, Symbol& symbol) const;
 
-private:
+protected:
+    // only for use by NListSymbolTableWriter
+    NListSymbolTable() = default;
+
     int             libOrdinalFromDesc(uint16_t n_desc) const;
     Symbol          symbolFromNList(const char* symbolName, uint64_t n_value, uint8_t n_type, uint8_t n_sect, uint16_t n_desc) const;
-    struct nlist    nlistFromSymbol(const Symbol&, uint32_t strx, uint32_t reexportStrx);
-    struct nlist_64 nlist64FromSymbol(const Symbol&, uint32_t strx, uint32_t reexportStrx);
     bool            forEachSymbol(uint32_t startSymbolIndex, uint32_t symbolCount,
                                   void (^callback)(const char* symbolName, uint64_t n_value, uint8_t n_type, uint8_t n_sect, uint16_t n_desc, uint32_t symbolIndex, bool& stop)) const;
-
-#if BUILDING_MACHO_WRITER
-
-    struct SymbolPartition
-    {
-        std::vector<Symbol>     locals;
-        std::vector<Symbol>     globals;
-        std::vector<Symbol>     undefs;
-
-        SymbolPartition(std::span<const Symbol> symbol, bool objectFile);
-    };
-
-    struct NListBuffer
-    {
-
-        WritableMemoryBuffer storage;
-        std::span<uint8_t> buffer;
-
-        NListBuffer(std::span<uint8_t> buffer): buffer(buffer) {}
-        NListBuffer(std::span<nlist_64> buffer): buffer((uint8_t*)buffer.data(), buffer.size_bytes()) {}
-        NListBuffer(std::span<struct nlist> buffer): buffer((uint8_t*)buffer.data(), buffer.size_bytes()) {}
-
-        NListBuffer(size_t bufferSize)
-        {
-            storage = WritableMemoryBuffer::allocate(bufferSize);
-            buffer = storage;
-        }
-
-        NListBuffer() {}
-
-
-        void add(nlist_64 nlist)
-        {
-            assert(buffer.size() >= (sizeof(nlist_64)));
-            *(nlist_64*)buffer.data() = nlist;
-            buffer = buffer.subspan(sizeof(nlist_64));
-        }
-
-        void add(struct nlist nlist)
-        {
-            assert(buffer.size() >= (sizeof(struct nlist)));
-            *(struct nlist*)buffer.data() = nlist;
-            buffer = buffer.subspan(sizeof(struct nlist));
-        }
-    };
-
-                    NListSymbolTable(const SymbolPartition& partition, std::span<DebugBuilderNote> debugNotes,
-                            uint64_t prefLoadAddr, bool is64, bool zeroModTimes);
-
-                    NListSymbolTable(NListLayout layout, NListBuffer nlist, std::vector<char> stringPool,
-                            uint64_t prefLoadAddr, bool is64, bool zeroModTimes);
-
-    template <typename T>
-    void            addStabsFromDebugNotes(std::span<const DebugBuilderNote> debugNotes, bool zeroModTimes, NListBuffer& nlists);
-#endif
 
     uint64_t                _preferredLoadAddress;
     const char*             _stringPool;
@@ -217,10 +101,6 @@ private:
     uint32_t                _localsCount;
     uint32_t                _globalsCount;
     uint32_t                _undefsCount;
-#if BUILDING_MACHO_WRITER
-    NListBuffer             _nlistBuffer;
-    std::vector<char>       _stringPoolBuffer;
-#endif
 };
 
 

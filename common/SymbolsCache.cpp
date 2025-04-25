@@ -439,9 +439,9 @@ static Error getDylibID(sqlite3* symbolsDB, std::string_view installName,
     return Error::none();
 }
 
-static Error getDylibUUID(sqlite3* symbolsDB, std::string_view installName,
-                          Platform platform, std::string_view arch,
-                          std::string& binaryUUID)
+static Error getBinaryUUID(sqlite3* symbolsDB, const std::string_view path,
+                           const Platform platform, const std::string_view arch,
+                           std::string& binaryUUID)
 {
     // Check if the DB is new enough to have the UUID column.  It appeared in 1.2
     {
@@ -453,14 +453,14 @@ static Error getDylibUUID(sqlite3* symbolsDB, std::string_view installName,
             return Error();
     }
 
-    const char* selectQuery = "SELECT UUID FROM BINARY WHERE INSTALL_NAME = ? AND PLATFORM = ? AND ARCH = ?";
+    const char* selectQuery = "SELECT UUID FROM BINARY WHERE PATH = ? AND PLATFORM = ? AND ARCH = ?";
     sqlite3_stmt *statement = nullptr;
     if ( int result = sqlite3_prepare_v2(symbolsDB, selectQuery, -1, &statement, 0) ) {
         Error err = Error("Could not prepare statement for table 'BINARY' because: %s", (const char*)strerror(result));
         return err;
     }
 
-    if ( int result = sqlite3_bind_text(statement, 1, installName.data(), -1, SQLITE_TRANSIENT) ) {
+    if ( int result = sqlite3_bind_text(statement, 1, path.data(), -1, SQLITE_TRANSIENT) ) {
         Error err = Error("Could not bind text for table 'BINARY' because: %s", (const char*)strerror(result));
         return err;
     }
@@ -488,7 +488,7 @@ static Error getDylibUUID(sqlite3* symbolsDB, std::string_view installName,
         return Error::none();
 
     if ( results.size() > 1 ) {
-        return Error("Too many binary results for dylib: %s", installName.data());
+        return Error("Too many binary results for binary UUID: %s", path.data());
     }
 
     binaryUUID = results.front();
@@ -496,9 +496,9 @@ static Error getDylibUUID(sqlite3* symbolsDB, std::string_view installName,
     return Error::none();
 }
 
-static Error getDylibProject(sqlite3* symbolsDB, std::string_view installName,
-                             Platform platform, std::string_view arch,
-                             std::string& projectName)
+static Error getBinaryProject(sqlite3* symbolsDB, const std::string_view path,
+                              const Platform platform, const std::string_view arch,
+                              std::string& projectName)
 {
     // Check if the DB is new enough. The Project column appeared in version 3
     {
@@ -510,14 +510,14 @@ static Error getDylibProject(sqlite3* symbolsDB, std::string_view installName,
             return Error();
     }
 
-    const char* selectQuery = "SELECT PROJECT_NAME FROM BINARY WHERE INSTALL_NAME = ? AND PLATFORM = ? AND ARCH = ?";
+    const char* selectQuery = "SELECT PROJECT_NAME FROM BINARY WHERE PATH = ? AND PLATFORM = ? AND ARCH = ?";
     sqlite3_stmt *statement = nullptr;
     if ( int result = sqlite3_prepare_v2(symbolsDB, selectQuery, -1, &statement, 0) ) {
         Error err = Error("Could not prepare statement for table 'BINARY' because: %s", (const char*)strerror(result));
         return err;
     }
 
-    if ( int result = sqlite3_bind_text(statement, 1, installName.data(), -1, SQLITE_TRANSIENT) ) {
+    if ( int result = sqlite3_bind_text(statement, 1, path.data(), -1, SQLITE_TRANSIENT) ) {
         Error err = Error("Could not bind text for table 'BINARY' because: %s", (const char*)strerror(result));
         return err;
     }
@@ -545,10 +545,57 @@ static Error getDylibProject(sqlite3* symbolsDB, std::string_view installName,
         return Error::none();
 
     if ( results.size() > 1 ) {
-        return Error("Too many binary results for dylib: %s", installName.data());
+        return Error("Too many binary results for binary project name: %s", path.data());
     }
 
     projectName = results.front();
+
+    return Error::none();
+}
+
+static Error getBinaryInstallName(sqlite3* symbolsDB, const std::string_view path,
+                                  const Platform platform, const std::string_view arch,
+                                  std::string& installName)
+{
+    const char* selectQuery = "SELECT INSTALL_NAME FROM BINARY WHERE PATH = ? AND PLATFORM = ? AND ARCH = ?";
+    sqlite3_stmt *statement = nullptr;
+    if ( int result = sqlite3_prepare_v2(symbolsDB, selectQuery, -1, &statement, 0) ) {
+        Error err = Error("Could not prepare statement for table 'BINARY' because: %s", (const char*)strerror(result));
+        return err;
+    }
+
+    if ( int result = sqlite3_bind_text(statement, 1, path.data(), -1, SQLITE_TRANSIENT) ) {
+        Error err = Error("Could not bind text for table 'BINARY' because: %s", (const char*)strerror(result));
+        return err;
+    }
+
+    if ( int result = sqlite3_bind_int(statement, 2, platform.value()) ) {
+        Error err = Error("Could not bind int for table 'BINARY' because: %s", (const char*)strerror(result));
+        return err;
+    }
+
+    if ( int result = sqlite3_bind_text(statement, 3, arch.data(), -1, SQLITE_TRANSIENT) ) {
+        Error err = Error("Could not bind text for table 'BINARY' because: %s", (const char*)strerror(result));
+        return err;
+    }
+
+    // Get results
+    std::vector<std::string> results;
+    while( sqlite3_step(statement) == SQLITE_ROW ) {
+        if ( sqlite3_column_type(statement, 0) != SQLITE_NULL )
+            results.push_back((const char*)sqlite3_column_text(statement, 0));
+    }
+
+    sqlite3_finalize(statement);
+
+    if ( results.empty() )
+        return Error::none();
+
+    if ( results.size() > 1 ) {
+        return Error("Too many binary results for binary install name: %s", path.data());
+    }
+
+    installName = results.front();
 
     return Error::none();
 }
@@ -990,17 +1037,17 @@ static Error getSlicesToAdd(const SymbolsCache::ArchPlatforms& archPlatforms,
         return Error::none();
 
     Error parseErr = mach_o::forEachHeader({ (uint8_t*)buffer, bufferSize }, path,
-                                           ^(const Header *mh, size_t sliceLength, bool &stop) {
+                                           ^(const Header *hdr, size_t sliceLength, bool &stop) {
         std::span<const Platform> supportedPlatforms;
         if ( archPlatforms.empty() ) {
             // support all platforms if there are no archs
-        } else if ( auto it = archPlatforms.find(mh->archName()); it != archPlatforms.end() ) {
+        } else if ( auto it = archPlatforms.find(hdr->archName()); it != archPlatforms.end() ) {
             supportedPlatforms = it->second;
         } else {
             return;
         }
 
-        PlatformAndVersions pvs = mh->platformAndVersions();
+        PlatformAndVersions pvs = hdr->platformAndVersions();
         if ( pvs.platform.empty() )
             return;
 
@@ -1014,36 +1061,43 @@ static Error getSlicesToAdd(const SymbolsCache::ArchPlatforms& archPlatforms,
         if ( !supportedPlatforms.empty() && (std::find(supportedPlatforms.begin(), supportedPlatforms.end(), platform) == supportedPlatforms.end()) )
             return;
 
-        if ( !mh->isDylib() )
+        if ( !hdr->isDylib() && !hdr->isDynamicExecutable() )
             return;
 
-        const dyld3::MachOFile* mf = (const dyld3::MachOFile*)mh;
-        std::string_view installName = mf->installName();
-        std::string_view dylibPath = path;
-        if ( installName != dylibPath ) {
-            // We now typically require that install names and paths match.  However symlinks may allow us to bring in a path which
-            // doesn't match its install name.
-            // For example:
-            //   /usr/lib/libstdc++.6.0.9.dylib is a real file with install name /usr/lib/libstdc++.6.dylib
-            //   /usr/lib/libstdc++.6.dylib is a symlink to /usr/lib/libstdc++.6.0.9.dylib
-            // So long as we add both paths (with one as an alias) then this will work, even if dylibs are removed from disk
-            // but the symlink remains.
-            // Apply the same symlink crawling for dylibs that will install their contents to Cryptex paths but will have
-            // install names with the cryptex paths removed.
-            char resolvedSymlinkPath[PATH_MAX];
-            if ( fileSystem.getRealPath(installName.data(), resolvedSymlinkPath) ) {
-                if ( resolvedSymlinkPath == dylibPath ) {
-                    // Symlink is the install name and points to the on-disk dylib
-                    //fprintf(stderr, "Symlink works: %s == %s\n", inputFile.path, installName.c_str());
-                    dylibPath = installName;
+        if ( hdr->isDylib() ) {
+            std::string_view installName = hdr->installName();
+            std::string_view dylibPath = path;
+            if ( installName != dylibPath ) {
+                // We now typically require that install names and paths match.  However symlinks may allow us to bring in a path which
+                // doesn't match its install name.
+                // For example:
+                //   /usr/lib/libstdc++.6.0.9.dylib is a real file with install name /usr/lib/libstdc++.6.dylib
+                //   /usr/lib/libstdc++.6.dylib is a symlink to /usr/lib/libstdc++.6.0.9.dylib
+                // So long as we add both paths (with one as an alias) then this will work, even if dylibs are removed from disk
+                // but the symlink remains.
+                // Apply the same symlink crawling for dylibs that will install their contents to Cryptex paths but will have
+                // install names with the cryptex paths removed.
+                char resolvedSymlinkPath[PATH_MAX];
+                if ( fileSystem.getRealPath(installName.data(), resolvedSymlinkPath) ) {
+                    if ( resolvedSymlinkPath == dylibPath ) {
+                        // Symlink is the install name and points to the on-disk dylib
+                        //fprintf(stderr, "Symlink works: %s == %s\n", inputFile.path, installName.c_str());
+                        dylibPath = installName;
+                    }
+                } else {
+                    // HACK: The build record doesn't have symlinks or anything to allow the above realpath code
+                    // to reason about the cryptex. So just look for it specifically
+                    if ( dylibPath == (std::string("/System/Cryptexes/OS") + std::string(installName)) )
+                        dylibPath = installName;
                 }
             }
+
+            const dyld3::MachOFile* mf = (const dyld3::MachOFile*)hdr;
+            if ( !mf->canBePlacedInDyldCache(dylibPath.data(), false /* check objc */, ^(const char* format, ...){ }) )
+                return;
         }
 
-        if ( !mf->canBePlacedInDyldCache(dylibPath.data(), ^(const char* format, ...){ }) )
-            return;
-
-        slices.push_back({ mh, sliceLength, platform });
+        slices.push_back({ hdr, sliceLength, platform });
     });
 
     if ( parseErr ) {
@@ -1062,24 +1116,24 @@ static std::string_view leafName(std::string_view str)
 }
 
 static mach_o::Error makeBinaryFromJSON(const SymbolsCache::ArchPlatforms& archPlatforms,
-                                        const dyld3::json::Node& rootNode, std::string_view path,
+                                        const json::Node& rootNode, std::string_view path,
                                         std::string_view projectName,
                                         bool allowExecutables,
                                         std::vector<SymbolsCacheBinary>& binaries)
 {
-    using dyld3::json::Node;
+    using json::Node;
 
     // In XBS we expect trace files to be decompressed along with some helpful preamble.  The key for that is
     // a node called "api-version" so if we see that, we know this file has a certain structure
     Diagnostics diags;
-    if ( dyld3::json::getOptionalValue(diags, rootNode, "api-version") ) {
+    if ( json::getOptionalValue(diags, rootNode, "api-version") ) {
         // Walk the trace-files[] and then the contents[]
-        const Node& traceFilesNode = dyld3::json::getRequiredValue(diags, rootNode, "trace-files");
+        const Node& traceFilesNode = json::getRequiredValue(diags, rootNode, "trace-files");
         if ( diags.hasError() )
             return Error("Could not parse JSON '%s' because: %s", path.data(), diags.errorMessageCStr());
 
         for ( const Node& traceFileNode : traceFilesNode.array ) {
-            const Node& contentsNode = dyld3::json::getRequiredValue(diags, traceFileNode, "contents");
+            const Node& contentsNode = json::getRequiredValue(diags, traceFileNode, "contents");
             if ( diags.hasError() )
                 return Error("Could not parse JSON '%s' because: %s", path.data(), diags.errorMessageCStr());
 
@@ -1092,32 +1146,32 @@ static mach_o::Error makeBinaryFromJSON(const SymbolsCache::ArchPlatforms& archP
         return Error::none();
     }
 
-    const Node& versionNode = dyld3::json::getRequiredValue(diags, rootNode, "version");
+    const Node& versionNode = json::getRequiredValue(diags, rootNode, "version");
     if ( diags.hasError() )
         return Error("Could not parse JSON '%s' because: %s", path.data(), diags.errorMessageCStr());
 
-    uint64_t jsonVersion = dyld3::json::parseRequiredInt(diags, versionNode);
+    uint64_t jsonVersion = json::parseRequiredInt(diags, versionNode);
     if ( diags.hasError() )
         return Error("Could not parse JSON '%s' because: %s", path.data(), diags.errorMessageCStr());
 
-    if ( jsonVersion != 1 ) {
+    if ( jsonVersion > 2 ) {
         // Is it ok to silently return?  It allows old tools to ignore new JSON so maybe what we want
         return Error::none();
     }
 
     // Skip binaries which aren't cache eligible
-    const Node* sharedCacheEligibleNode = dyld3::json::getOptionalValue(diags, rootNode, "shared-cache-eligible");
+    const Node* sharedCacheEligibleNode = json::getOptionalValue(diags, rootNode, "shared-cache-eligible");
     if ( diags.hasError() )
         return Error("Could not parse JSON '%s' because: %s", path.data(), diags.errorMessageCStr());
 
     if ( (sharedCacheEligibleNode != nullptr) && sharedCacheEligibleNode->value != "yes" )
         return Error::none();
 
-    const Node& archNode = dyld3::json::getRequiredValue(diags, rootNode, "arch");
+    const Node& archNode = json::getRequiredValue(diags, rootNode, "arch");
     if ( diags.hasError() )
         return Error("Could not parse JSON '%s' because: %s", path.data(), diags.errorMessageCStr());
 
-    const std::string& archName = dyld3::json::parseRequiredString(diags, archNode);
+    const std::string& archName = json::parseRequiredString(diags, archNode);
     if ( diags.hasError() )
         return Error("Could not parse JSON '%s' because: %s", path.data(), diags.errorMessageCStr());
 
@@ -1130,7 +1184,7 @@ static mach_o::Error makeBinaryFromJSON(const SymbolsCache::ArchPlatforms& archP
         return Error::none();
     }
 
-    const Node& platformsNode = dyld3::json::getRequiredValue(diags, rootNode, "platforms");
+    const Node& platformsNode = json::getRequiredValue(diags, rootNode, "platforms");
     if ( diags.hasError() )
         return Error("Could not parse JSON '%s' because: %s", path.data(), diags.errorMessageCStr());
 
@@ -1139,11 +1193,11 @@ static mach_o::Error makeBinaryFromJSON(const SymbolsCache::ArchPlatforms& archP
 
     Platform platform;
     for ( const Node& platformNode : platformsNode.array ) {
-        const Node& nameNode = dyld3::json::getRequiredValue(diags, platformNode, "name");
+        const Node& nameNode = json::getRequiredValue(diags, platformNode, "name");
         if ( diags.hasError() )
             return Error("Could not parse JSON '%s' because: %s", path.data(), diags.errorMessageCStr());
 
-        const std::string& platformName = dyld3::json::parseRequiredString(diags, nameNode);
+        const std::string& platformName = json::parseRequiredString(diags, nameNode);
         if ( diags.hasError() )
             return Error("Could not parse JSON '%s' because: %s", path.data(), diags.errorMessageCStr());
 
@@ -1162,11 +1216,11 @@ static mach_o::Error makeBinaryFromJSON(const SymbolsCache::ArchPlatforms& archP
     if ( Error err = platform.valid() )
         return Error::none();
 
-    const Node* installNameNode = dyld3::json::getOptionalValue(diags, rootNode, "install-name");
+    const Node* installNameNode = json::getOptionalValue(diags, rootNode, "install-name");
     if ( diags.hasError() )
         return Error("Could not parse JSON '%s' because: %s", path.data(), diags.errorMessageCStr());
 
-    const Node* finalPathNode = dyld3::json::getOptionalValue(diags, rootNode, "final-output-path");
+    const Node* finalPathNode = json::getOptionalValue(diags, rootNode, "final-output-path");
     if ( diags.hasError() )
         return Error("Could not parse JSON '%s' because: %s", path.data(), diags.errorMessageCStr());
 
@@ -1178,51 +1232,51 @@ static mach_o::Error makeBinaryFromJSON(const SymbolsCache::ArchPlatforms& archP
 
     std::string_view installName;
     if ( installNameNode != nullptr ) {
-        installName = dyld3::json::parseRequiredString(diags, *installNameNode);
+        installName = json::parseRequiredString(diags, *installNameNode);
         if ( diags.hasError() )
             return Error("Could not parse JSON '%s' because: %s", path.data(), diags.errorMessageCStr());
     }
 
     std::string_view finalPath;
     if ( finalPathNode != nullptr ) {
-        finalPath = dyld3::json::parseRequiredString(diags, *finalPathNode);
+        finalPath = json::parseRequiredString(diags, *finalPathNode);
         if ( diags.hasError() )
             return Error("Could not parse JSON '%s' because: %s", path.data(), diags.errorMessageCStr());
     } else {
         finalPath = installName;
     }
 
-    const Node* uuidNode = dyld3::json::getOptionalValue(diags, rootNode, "uuid");
+    const Node* uuidNode = json::getOptionalValue(diags, rootNode, "uuid");
     if ( diags.hasError() )
         return Error("Could not parse JSON '%s' because: %s", path.data(), diags.errorMessageCStr());
 
     std::string_view uuid;
     if ( uuidNode ) {
-        uuid = dyld3::json::parseRequiredString(diags, *uuidNode);
+        uuid = json::parseRequiredString(diags, *uuidNode);
         if ( diags.hasError() )
             return Error("Could not parse JSON '%s' because: %s", path.data(), diags.errorMessageCStr());
     }
 
     std::vector<SymbolsCacheBinary::ImportedSymbol> importedSymbols;
     std::vector<SymbolsCacheBinary::TargetBinary> reexports;
-    const Node* linkedDylibsNode = dyld3::json::getOptionalValue(diags, rootNode, "linked-dylibs");
+    const Node* linkedDylibsNode = json::getOptionalValue(diags, rootNode, "linked-dylibs");
     if ( diags.hasError() )
         return Error("Could not parse JSON '%s' because: %s", path.data(), diags.errorMessageCStr());
 
     if ( (linkedDylibsNode != nullptr) && !linkedDylibsNode->array.empty() ) {
         for ( const Node& linkedDylibNode : linkedDylibsNode->array ) {
-            const Node& targetInstallNameNode = dyld3::json::getRequiredValue(diags, linkedDylibNode, "install-name");
+            const Node& targetInstallNameNode = json::getRequiredValue(diags, linkedDylibNode, "install-name");
             if ( diags.hasError() )
                 return Error("Could not parse JSON '%s' because: %s", path.data(), diags.errorMessageCStr());
 
-            std::string_view targetInstallName = dyld3::json::parseRequiredString(diags, targetInstallNameNode);
+            std::string_view targetInstallName = json::parseRequiredString(diags, targetInstallNameNode);
             if ( diags.hasError() )
                 return Error("Could not parse JSON '%s' because: %s", path.data(), diags.errorMessageCStr());
 
-            if ( !dyld3::MachOFile::isSharedCacheEligiblePath(targetInstallName.data()) )
+            if ( !Header::isSharedCacheEligiblePath(targetInstallName.data()) )
                 continue;
 
-            const Node& importedSymbolsNode = dyld3::json::getRequiredValue(diags, linkedDylibNode, "imported-symbols");
+            const Node& importedSymbolsNode = json::getRequiredValue(diags, linkedDylibNode, "imported-symbols");
             if ( diags.hasError() )
                 return Error("Could not parse JSON '%s' because: %s", path.data(), diags.errorMessageCStr());
 
@@ -1233,7 +1287,7 @@ static mach_o::Error makeBinaryFromJSON(const SymbolsCache::ArchPlatforms& archP
                 }
             }
 
-            const Node& attributesNode = dyld3::json::getRequiredValue(diags, linkedDylibNode, "attributes");
+            const Node& attributesNode = json::getRequiredValue(diags, linkedDylibNode, "attributes");
             if ( diags.hasError() )
                 return Error("Could not parse JSON '%s' because: %s", path.data(), diags.errorMessageCStr());
 
@@ -1247,8 +1301,8 @@ static mach_o::Error makeBinaryFromJSON(const SymbolsCache::ArchPlatforms& archP
     }
 
     __block std::vector<std::string> exportedSymbols;
-    if ( !installName.empty() && dyld3::MachOFile::isSharedCacheEligiblePath(installName.data()) ) {
-        const Node* exportedSymbolsNode = dyld3::json::getOptionalValue(diags, rootNode, "exports");
+    if ( !installName.empty() && Header::isSharedCacheEligiblePath(installName.data()) ) {
+        const Node* exportedSymbolsNode = json::getOptionalValue(diags, rootNode, "exports");
         if ( diags.hasError() )
             return Error("Could not parse JSON '%s' because: %s", path.data(), diags.errorMessageCStr());
 
@@ -1276,7 +1330,7 @@ Error SymbolsCache::makeBinariesFromJSON(const ArchPlatforms& archPlatforms,
                                          std::string_view projectName, bool allowExecutables,
                                          std::vector<SymbolsCacheBinary>& binaries)
 {
-    using dyld3::json::Node;
+    using json::Node;
 
     // The buffer is likely in the "JSON lines" format.  If so, parse each line as its own JSON
     {
@@ -1292,7 +1346,7 @@ Error SymbolsCache::makeBinariesFromJSON(const ArchPlatforms& archPlatforms,
 
             if ( line.starts_with('{') && line.ends_with('}') ) {
                 Diagnostics diags;
-                Node rootNode = dyld3::json::readJSON(diags, line.data(), line.size());
+                Node rootNode = json::readJSON(diags, line.data(), line.size(), false /* useJSON5 */);
                 if ( diags.hasError() )
                     return Error("Could not parse JSON '%s' because: %s", path.data(), diags.errorMessageCStr());
 
@@ -1309,7 +1363,7 @@ Error SymbolsCache::makeBinariesFromJSON(const ArchPlatforms& archPlatforms,
     }
 
     Diagnostics diags;
-    Node rootNode = dyld3::json::readJSON(diags, buffer, bufferSize);
+    Node rootNode = json::readJSON(diags, buffer, bufferSize, false /* useJSON5 */);
     if ( diags.hasError() )
         return Error("Could not parse JSON '%s' because: %s", path.data(), diags.errorMessageCStr());
 
@@ -1371,7 +1425,8 @@ Error SymbolsCache::makeBinaries(const ArchPlatforms& archPlatforms,
         // Add re-exports
         __block std::vector<SymbolsCacheBinary::TargetBinary> reexports;
         if ( const char* installName = mh->installName(); (installName != nullptr) && (installName[0] == '/') ) {
-            mh->forEachLinkedDylib(^(const char* loadPath, mach_o::LinkedDylibAttributes kind, Version32 compatVersion, Version32 curVersion, bool& stop) {
+            mh->forEachLinkedDylib(^(const char* loadPath, mach_o::LinkedDylibAttributes kind, Version32 compatVersion, Version32 curVersion,
+                                     bool synthesizedLink, bool& stop) {
                 if ( kind.reExport )
                     reexports.push_back(loadPath);
             });
@@ -1386,7 +1441,9 @@ Error SymbolsCache::makeBinaries(const ArchPlatforms& archPlatforms,
             uuidString = uuidStrBuffer;
         }
 
-        SymbolsCacheBinary binary(std::string(binaryInstallName), platform, sliceArch,
+        std::string_view binaryPath = mh->isDylib() ? binaryInstallName : path;
+
+        SymbolsCacheBinary binary(std::string(binaryPath), platform, sliceArch,
                                   std::string(uuidString), std::string(projectName));
         binary.installName = binaryInstallName;
         binary.exportedSymbols = std::move(exportedSymbols);
@@ -1673,7 +1730,7 @@ mach_o::Error SymbolsCache::getAllBinaries(std::vector<SymbolsCacheBinary>& bina
                 projectName = (const char*)sqlite3_column_text(statement, 4);
         }
         binaries.push_back({
-            path, mach_o::Platform((uint32_t)platform), arch,
+            path, Platform((uint32_t)platform), arch,
             (uuid != nullptr ? uuid : ""),
             (projectName != nullptr ? projectName : "")
         });
@@ -1955,11 +2012,12 @@ struct std::hash<BinaryKey>
 
 } // namespace std
 
-Error SymbolsCache::checkNewBinaries(bool warnOnRemovedSymbols,
+Error SymbolsCache::checkNewBinaries(bool warnOnRemovedSymbols, ExecutableMode executableMode,
                                      std::vector<SymbolsCacheBinary>&& binaries,
                                      const BinaryProjects& binaryProjects,
-                                     std::vector<ErrorResultBinary>& errors,
-                                     std::vector<mach_o::Error>& warnings) const
+                                     std::vector<ResultBinary>& results,
+                                     std::vector<mach_o::Error>& internalWarnings,
+                                     std::vector<ExportsChangedBinary>* changedExports) const
 {
     // Split out in to OS dylibs vs other binaries
     // We only want to verify the exports from OS binaries
@@ -2039,7 +2097,7 @@ Error SymbolsCache::checkNewBinaries(bool warnOnRemovedSymbols,
                         std::vector<std::string> exports;
                         if ( Error err = ::getExports(this->symbolsDB, binaryID.value(), exports) ) {
                             // FIXME: What should we do here? For now log the error and skip the binary
-                            warnings.push_back(Error("Skipping re-exported binary due to getExports(): %s", err.message()));
+                            internalWarnings.push_back(Error("Skipping re-exported binary due to getExports(): %s", err.message()));
                             continue;
                         }
 
@@ -2047,7 +2105,7 @@ Error SymbolsCache::checkNewBinaries(bool warnOnRemovedSymbols,
                         std::vector<std::string> reexports;
                         if ( Error err = ::getReexports(this->symbolsDB, binaryID.value(), reexports) ) {
                             // FIXME: What should we do here? For now log the error and skip the binary
-                            warnings.push_back(Error("Skipping re-exported binary due to getReexports(): %s", err.message()));
+                            internalWarnings.push_back(Error("Skipping re-exported binary due to getReexports(): %s", err.message()));
                             continue;
                         }
 
@@ -2093,7 +2151,7 @@ Error SymbolsCache::checkNewBinaries(bool warnOnRemovedSymbols,
         std::optional<int64_t> binaryID;
         if ( Error err = getDylibID(this->symbolsDB, binary.installName, binary.platform, binary.arch, binaryID) ) {
             // FIXME: What should we do here? For now log the error and skip the binary
-            warnings.push_back(Error("Skipping binary due to getDylibID(): %s", err.message()));
+            internalWarnings.push_back(Error("Skipping binary due to getDylibID(): %s", err.message()));
             continue;
         }
 
@@ -2108,7 +2166,7 @@ Error SymbolsCache::checkNewBinaries(bool warnOnRemovedSymbols,
         std::vector<std::string> exports;
         if ( Error err = ::getExports(this->symbolsDB, binaryID.value(), exports) ) {
             // FIXME: What should we do here? For now log the error and skip the binary
-            warnings.push_back(Error("Skipping binary due to getExports(): %s", err.message()));
+            internalWarnings.push_back(Error("Skipping binary due to getExports(): %s", err.message()));
             continue;
         }
 
@@ -2118,7 +2176,7 @@ Error SymbolsCache::checkNewBinaries(bool warnOnRemovedSymbols,
             std::vector<std::string> reexports;
             if ( Error err = ::getReexports(this->symbolsDB, binaryID.value(), reexports) ) {
                 // FIXME: What should we do here? For now log the error and skip the binary
-                warnings.push_back(Error("Skipping re-exported binary due to getReexports(): %s", err.message()));
+                internalWarnings.push_back(Error("Skipping re-exported binary due to getReexports(): %s", err.message()));
                 continue;
             }
 
@@ -2152,7 +2210,7 @@ Error SymbolsCache::checkNewBinaries(bool warnOnRemovedSymbols,
                     std::vector<std::string> nextReexports;
                     if ( Error err = ::getReexports(this->symbolsDB, reexportBinaryID.value(), nextReexports) ) {
                         // FIXME: What should we do here? For now log the error and skip the binary
-                        warnings.push_back(Error("Skipping re-exported binary due to getReexports(): %s", err.message()));
+                        internalWarnings.push_back(Error("Skipping re-exported binary due to getReexports(): %s", err.message()));
                         continue;
                     }
 
@@ -2163,7 +2221,7 @@ Error SymbolsCache::checkNewBinaries(bool warnOnRemovedSymbols,
                     std::vector<std::string> reexportedExports;
                     if ( Error err = ::getExports(this->symbolsDB, reexportedBinaryID, reexportedExports) ) {
                         // FIXME: What should we do here? For now log the error and skip the binary
-                        warnings.push_back(Error("Skipping binary due to getExports(): %s", err.message()));
+                        internalWarnings.push_back(Error("Skipping binary due to getExports(): %s", err.message()));
                         continue;
                     }
 
@@ -2172,11 +2230,48 @@ Error SymbolsCache::checkNewBinaries(bool warnOnRemovedSymbols,
             }
         }
 
+        std::string binaryProject;
+        if ( Error err = getBinaryProject(this->symbolsDB, binary.path, binary.platform, binary.arch, binaryProject) ) {
+            // No project is ok. We can continue without it
+        }
+
         // Work out if any exports were removed
         std::set<std::string_view> removedExports;
         removedExports.insert(exports.begin(), exports.end());
         for ( std::string_view exp : binary.exportedSymbols )
             removedExports.erase(exp);
+
+        if ( changedExports != nullptr ) {
+            // Find out if we added exports
+            std::set<std::string_view> addedExports;
+            addedExports.insert(binary.exportedSymbols.begin(), binary.exportedSymbols.end());
+            for ( std::string_view exp : exports )
+                addedExports.erase(exp);
+
+            for ( std::string_view exp : removedExports ) {
+                ExportsChangedBinary result;
+                result.installName = binary.path;
+                result.arch = binary.arch;
+                result.uuid = binary.uuid;
+                result.projectName = binaryProject;
+                result.symbolName = exp;
+                result.wasAdded = false;
+
+                changedExports->push_back(std::move(result));
+            }
+
+            for ( std::string_view exp : addedExports ) {
+                ExportsChangedBinary result;
+                result.installName = binary.path;
+                result.arch = binary.arch;
+                result.uuid = binary.uuid;
+                result.projectName = binaryProject;
+                result.symbolName = exp;
+                result.wasAdded = true;
+
+                changedExports->push_back(std::move(result));
+            }
+        }
 
         if ( removedExports.empty() ) {
             if ( verbose )
@@ -2204,24 +2299,19 @@ Error SymbolsCache::checkNewBinaries(bool warnOnRemovedSymbols,
                 continue;
         }
 
-        std::string binaryProject;
-        if ( Error err = getDylibProject(this->symbolsDB, binary.installName, binary.platform, binary.arch, binaryProject) ) {
-            // No project is ok. We can continue without it
-        }
-
         // If we removed exports, now we need to see if they have uses
         for ( std::string_view exp : removedExports ) {
             std::vector<std::string> clientPaths;
             if ( Error err = getUsesOfExport(this->symbolsDB, binaryID.value(), exp, clientPaths) ) {
                 // FIXME: What should we do here? For now log the error and skip the binary export
-                warnings.push_back(Error("Skipping binary export due to getUsesOfExport(): %s", err.message()));
+                internalWarnings.push_back(Error("Skipping binary export due to getUsesOfExport(): %s", err.message()));
                 continue;
             }
 
             // No uses.  Skip this one
             if ( clientPaths.empty() ) {
                 if ( warnOnRemovedSymbols )
-                    warnings.push_back(Error("Binary '%s' removing unused export: '%s'", binary.path.data(), exp.data()));
+                    internalWarnings.push_back(Error("Binary '%s' removing unused export: '%s'", binary.path.data(), exp.data()));
                 continue;
             }
 
@@ -2230,7 +2320,41 @@ Error SymbolsCache::checkNewBinaries(bool warnOnRemovedSymbols,
                 std::string clientUUID;
                 std::string clientRootPath;
                 std::string clientProject;
-                if ( Error err = getDylibProject(this->symbolsDB, path, binary.platform, binary.arch, clientProject) ) {
+                bool warnOnClient = false;
+
+                // Skip executables and non-shared cache dylibs if we aren't verifying them
+                {
+                    std::string clientInstallName;
+                    if ( Error err = getBinaryInstallName(this->symbolsDB, path, binary.platform, binary.arch, clientInstallName) ) {
+                        // Skip binaries if their install name generates some kind of error
+                        internalWarnings.push_back(Error("Skipping binary export due to getBinaryInstallName(): %s", err.message()));
+                        continue;
+                    }
+
+                    bool isCacheEligible = false;
+                    if ( !clientInstallName.empty() ) {
+                        isCacheEligible = Header::isSharedCacheEligiblePath(clientInstallName.data());
+                    }
+
+                    switch ( executableMode ) {
+                        case ExecutableMode::off:
+                            // This means we're verifying only shared cache dylibs.  Skip everything else
+                            if ( !isCacheEligible )
+                                continue;
+                            break;
+                        case ExecutableMode::warn:
+                            // If we later find issues with this client, record them as errors
+                            // if its from the shared cache, but warnings otherwise
+                            if ( !isCacheEligible )
+                                warnOnClient = true;
+                            break;
+                        case ExecutableMode::error:
+                            // anu issues found here will be errors
+                            break;
+                    }
+                }
+
+                if ( Error err = getBinaryProject(this->symbolsDB, path, binary.platform, binary.arch, clientProject) ) {
                     // No project is ok. We can continue without it
                 }
                 if ( auto it = newClientsMap.find({ path, binary.platform, binary.arch }); it != newClientsMap.end() ) {
@@ -2260,25 +2384,26 @@ Error SymbolsCache::checkNewBinaries(bool warnOnRemovedSymbols,
                     }
 
                     // See if we can get a UUID from the database
-                    if ( Error err = getDylibUUID(this->symbolsDB, path, binary.platform, binary.arch, clientUUID) ) {
+                    if ( Error err = getBinaryUUID(this->symbolsDB, path, binary.platform, binary.arch, clientUUID) ) {
                         // No UUID is ok. We can continue without it
                     }
                 }
 
-                ErrorResultBinary result;
+                ResultBinary result;
                 result.installName = binary.path;
                 result.arch = binary.arch;
                 result.uuid = binary.uuid;
                 result.rootPath = binary.rootPath;
-                result.projectName = binaryProject;;
+                result.projectName = binaryProject;
+                result.warn = warnOnClient;
 
-                result.client.installName = path;
+                result.client.path = path;
                 result.client.uuid = clientUUID;
                 result.client.rootPath = clientRootPath;
                 result.client.projectName = clientProject;
                 result.client.symbolName = exp;
 
-                errors.push_back(std::move(result));
+                results.push_back(std::move(result));
             }
         }
     }
@@ -2339,4 +2464,304 @@ Error SymbolsCache::dump() const
     }
 
     return Error::none();
+}
+
+//
+// MARK: --- helper methods to output results ---
+//
+
+void printResultSummary(std::span<ResultBinary> verifyResults, bool bniOutput,
+                        FILE* summaryLogFile)
+{
+    std::set<std::string> errorClientProjects;
+    std::set<std::string> warnClientProjects;
+
+    // Get the projects which are errors, then the list which are only warnings
+    for ( const ResultBinary& result : verifyResults ) {
+        if ( result.warn )
+            continue;
+
+        if ( result.client.projectName.empty())
+            continue;
+
+        errorClientProjects.insert(result.client.projectName);
+    }
+
+    // Get the projects which are errors, then the list which are only warnings
+    for ( const ResultBinary& result : verifyResults ) {
+        if ( !result.warn )
+            continue;
+
+        if ( result.client.projectName.empty())
+            continue;
+
+        // Skip projects also in the error list
+        if ( errorClientProjects.count(result.client.projectName) )
+            continue;
+
+        warnClientProjects.insert(result.client.projectName);
+    }
+
+    if ( errorClientProjects.empty() && warnClientProjects.empty() )
+        return;
+
+    fprintf(summaryLogFile, "--- Summary ---\n\n");
+
+    if ( !errorClientProjects.empty() )
+        fprintf(summaryLogFile, "Error: some projects have removed symbols\n\n");
+    else
+        fprintf(summaryLogFile, "Warning: some projects have removed symbols\n\n");
+
+    fprintf(summaryLogFile, "Expected resolution is to rebuild dependencies\n\n");
+
+    auto printProjects = [&](const std::set<std::string>& clientProjects) {
+        if ( bniOutput ) {
+            fprintf(summaryLogFile, "Run command: xbs dispatch addProjects");
+            for ( std::string_view project : clientProjects )
+                fprintf(summaryLogFile, " %s", project.data());
+        } else {
+            fprintf(summaryLogFile, "Add the following to your submission notes, or container\n");
+            fprintf(summaryLogFile, "  REBUILD_DEPENDENCIES=");
+            bool needsComma = false;
+            for ( std::string_view project : clientProjects ) {
+                if ( needsComma )
+                    fprintf(summaryLogFile, ",");
+                else
+                    needsComma = true;
+                fprintf(summaryLogFile, "%s", project.data());
+            }
+        }
+        fprintf(summaryLogFile, "\n\n");
+    };
+
+    if ( !errorClientProjects.empty() )
+        printProjects(errorClientProjects);
+
+    if ( !warnClientProjects.empty() )
+        printProjects(warnClientProjects);
+}
+
+void printResultsSymbolDetails(std::span<ResultBinary> verifyResults, FILE* detailsLogFile)
+{
+    struct ProjectResult
+    {
+        struct Client
+        {
+            std::string path;
+            std::string uuid;
+            std::set<std::string> symbols;
+        };
+
+        struct ClientProject
+        {
+            // map from path to its results
+            std::map<std::string, Client> clients;
+        };
+
+        struct Dylib
+        {
+            std::string uuid;
+
+            // map from project name to its clients
+            std::map<std::string, ClientProject> clientProjects;
+        };
+
+        // map from install name to its results
+        std::map<std::string, Dylib> dylibs;
+    };
+
+    // map from project name to its results
+    // loop twice. First iteration prints errors, second prints warnings
+    for ( bool errors : { true, false } ) {
+        std::map<std::string, ProjectResult> failingProjects;
+        for ( const ResultBinary& result : verifyResults ) {
+            if ( result.warn ) {
+                // result is just a warning.  Ok if we are generating warnings, but not if errors
+                if ( errors )
+                    continue;
+            } else {
+                // result is an error.  Ok if we are generating errors, but not if warnings
+                if ( !errors )
+                    continue;
+            }
+
+            std::string projectName = result.projectName.empty() ? "<unknown project>" : result.projectName;
+            std::string clientProjectName = result.client.projectName.empty() ? "<unknown project>" : result.client.projectName;
+
+            ProjectResult&          projectResult = failingProjects[projectName];
+            ProjectResult::Dylib&   dylib = projectResult.dylibs[result.installName];
+
+            dylib.uuid = result.uuid;
+            ProjectResult::ClientProject&   clientProject = dylib.clientProjects[clientProjectName];
+            ProjectResult::Client&          client = clientProject.clients[result.client.path];
+            client.path = result.client.path;
+            client.uuid = result.client.uuid;
+            client.symbols.insert(result.client.symbolName);
+        }
+
+        if ( failingProjects.empty() )
+            continue;
+
+        fprintf(detailsLogFile, "--- Detailed symbol information (%s) ---\n\n",
+                errors ? "errors" : "warnings");
+
+        for ( std::pair<std::string, ProjectResult> result : failingProjects ) {
+            fprintf(detailsLogFile, "%s:\n", result.first.data());
+            for ( std::pair<std::string, ProjectResult::Dylib> dylib : result.second.dylibs ) {
+                std::string dylibUUID;
+                if ( !dylib.second.uuid.empty())
+                    dylibUUID = " (" + dylib.second.uuid + ")";
+                fprintf(detailsLogFile, "  %s%s:\n", dylib.first.data(), dylibUUID.data());
+
+                for ( std::pair<std::string, ProjectResult::ClientProject> clientProject : dylib.second.clientProjects ) {
+                    fprintf(detailsLogFile, "    %s:\n", clientProject.first.data());
+                    for ( std::pair<std::string, ProjectResult::Client> client : clientProject.second.clients ) {
+                        std::string clientUUID;
+                        if ( !client.second.uuid.empty())
+                            clientUUID = " (" + client.second.uuid + ")";
+                        fprintf(detailsLogFile, "      %s%s:\n", client.first.data(), clientUUID.data());
+                        for ( std::string_view symbolName : client.second.symbols )
+                            fprintf(detailsLogFile, "        %s\n", symbolName.data());
+                    }
+                }
+            }
+            fprintf(detailsLogFile, "\n");
+        }
+    }
+}
+
+void printResultsInternalInformation(std::span<ResultBinary> verifyResults,
+                                     std::span<std::pair<std::string, std::string>> rootErrors,
+                                     FILE* detailsLogFile)
+{
+    std::set<std::string> usedRootPaths;
+    for ( const ResultBinary& result : verifyResults ) {
+        if ( !result.rootPath.empty() )
+            usedRootPaths.insert(result.rootPath);
+        if ( !result.client.rootPath.empty() )
+            usedRootPaths.insert(result.client.rootPath);
+    }
+
+    if ( !usedRootPaths.empty() || !rootErrors.empty() ) {
+        fprintf(detailsLogFile, "--- Internal information ---\n\n");
+    }
+
+    if ( !usedRootPaths.empty() ) {
+        fprintf(detailsLogFile, "Note, the following root paths were used in the above errors:\n");
+        for ( std::string_view usedRootPath : usedRootPaths ) {
+            fprintf(detailsLogFile, "    %s\n", usedRootPath.data());
+        }
+        fprintf(detailsLogFile, "\n");
+    }
+
+    if ( !rootErrors.empty() ) {
+        fprintf(detailsLogFile, "Note, the following root paths were inaccessible:\n");
+        for ( const auto& rootPathAndError : rootErrors ) {
+            fprintf(detailsLogFile, "    %s due to '%s'\n", rootPathAndError.first.data(), rootPathAndError.second.data());
+        }
+        fprintf(detailsLogFile, "\n");
+    }
+}
+
+void printResultsJSON(std::span<ResultBinary> verifyResults,
+                      std::span<ExportsChangedBinary> exportsChanged,
+                      FILE* jsonFile)
+{
+    fprintf(jsonFile, "{\n");
+
+    {
+        fprintf(jsonFile, "  \"removed-used-symbols\" : [\n");
+
+        bool needsComma = false;
+        for ( const ResultBinary& binary : verifyResults ) {
+            if ( needsComma )
+                fprintf(jsonFile, ",\n");
+            else
+                needsComma = true;
+
+            bool defInSharedCache = Header::isSharedCacheEligiblePath(binary.installName.c_str());
+            bool useInSharedCache = Header::isSharedCacheEligiblePath(binary.client.path.c_str());
+
+            fprintf(jsonFile, "    {\n");
+
+            fprintf(jsonFile, "      \"arch\" : \"%s\",\n", binary.arch.c_str());
+            fprintf(jsonFile, "      \"symbol-name\" : \"%s\",\n", binary.client.symbolName.c_str());
+
+            fprintf(jsonFile, "      \"def-uuid\" : \"%s\",\n", binary.uuid.c_str());
+            fprintf(jsonFile, "      \"def-project-name\" : \"%s\",\n", binary.projectName.c_str());
+            fprintf(jsonFile, "      \"def-install-name\" : \"%s\",\n", binary.installName.c_str());
+            fprintf(jsonFile, "      \"def-shared-cache-eligible\" : \"%s\",\n", defInSharedCache ? "yes" : "no");
+
+            fprintf(jsonFile, "      \"use-uuid\" : \"%s\",\n", binary.client.uuid.c_str());
+            fprintf(jsonFile, "      \"use-project-name\" : \"%s\",\n", binary.client.projectName.c_str());
+            fprintf(jsonFile, "      \"use-path\" : \"%s\",\n", binary.client.path.c_str());
+            fprintf(jsonFile, "      \"use-shared-cache-eligible\" : \"%s\"\n", useInSharedCache ? "yes" : "no");
+            fprintf(jsonFile, "    }");
+        }
+        fprintf(jsonFile, "\n");
+
+        fprintf(jsonFile, "  ],\n");
+    }
+
+    {
+        fprintf(jsonFile, "  \"added-exports\" : [\n");
+
+        bool needsComma = false;
+        for ( const ExportsChangedBinary& binary : exportsChanged ) {
+            if ( !binary.wasAdded )
+                continue;
+
+            if ( needsComma )
+                fprintf(jsonFile, ",\n");
+            else
+                needsComma = true;
+
+            bool inSharedCache = Header::isSharedCacheEligiblePath(binary.installName.c_str());
+
+            fprintf(jsonFile, "    {\n");
+
+            fprintf(jsonFile, "      \"arch\" : \"%s\",\n", binary.arch.c_str());
+            fprintf(jsonFile, "      \"symbol-name\" : \"%s\",\n", binary.symbolName.c_str());
+            fprintf(jsonFile, "      \"uuid\" : \"%s\",\n", binary.uuid.c_str());
+            fprintf(jsonFile, "      \"project-name\" : \"%s\",\n", binary.projectName.c_str());
+            fprintf(jsonFile, "      \"install-name\" : \"%s\",\n", binary.installName.c_str());
+            fprintf(jsonFile, "      \"shared-cache-eligible\" : \"%s\"\n", inSharedCache ? "yes" : "no");
+            fprintf(jsonFile, "    }");
+        }
+        fprintf(jsonFile, "\n");
+
+        fprintf(jsonFile, "  ],\n");
+    }
+
+    {
+        fprintf(jsonFile, "  \"removed-exports\" : [\n");
+
+        bool needsComma = false;
+        for ( const ExportsChangedBinary& binary : exportsChanged ) {
+            if ( binary.wasAdded )
+                continue;
+
+            if ( needsComma )
+                fprintf(jsonFile, ",\n");
+            else
+                needsComma = true;
+
+            bool inSharedCache = Header::isSharedCacheEligiblePath(binary.installName.c_str());
+
+            fprintf(jsonFile, "    {\n");
+
+            fprintf(jsonFile, "      \"arch\" : \"%s\",\n", binary.arch.c_str());
+            fprintf(jsonFile, "      \"symbol-name\" : \"%s\",\n", binary.symbolName.c_str());
+            fprintf(jsonFile, "      \"uuid\" : \"%s\",\n", binary.uuid.c_str());
+            fprintf(jsonFile, "      \"project-name\" : \"%s\",\n", binary.projectName.c_str());
+            fprintf(jsonFile, "      \"install-name\" : \"%s\",\n", binary.installName.c_str());
+            fprintf(jsonFile, "      \"shared-cache-eligible\" : \"%s\"\n", inSharedCache ? "yes" : "no");
+            fprintf(jsonFile, "    }");
+        }
+        fprintf(jsonFile, "\n");
+
+        fprintf(jsonFile, "  ]\n");
+    }
+
+    fprintf(jsonFile, "}\n");
 }

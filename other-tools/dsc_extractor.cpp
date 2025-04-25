@@ -48,6 +48,7 @@
 
 #define NO_ULEB
 #include "Architectures.hpp"
+#include "Header.h"
 #include "MachOFileAbstraction.hpp"
 
 #include "dsc_iterator.h"
@@ -66,6 +67,8 @@
 #include <algorithm>
 #include <dispatch/dispatch.h>
 #include <optional>
+
+using mach_o::Header;
 
 asm(".linker_option \"-lCrashReporterClient\"");
 
@@ -391,13 +394,13 @@ static CacheFiles mapCacheFiles(const char* path)
     }
 
     // Load all subcaches, if we have them
-    if ( cache->header.mappingOffset >= __offsetof(dyld_cache_header, subCacheArrayCount) ) {
+    if ( cache->header.mappingOffset >= offsetof(dyld_cache_header, subCacheArrayCount) ) {
         if ( cache->header.subCacheArrayCount != 0 ) {
             const dyld_subcache_entry* subCacheEntries = (dyld_subcache_entry*)((uint8_t*)cache + cache->header.subCacheArrayOffset);
 
             for (uint32_t i = 0; i != cache->header.subCacheArrayCount; ++i) {
-                std::string subCachePath = std::string(path) + "." + dyld3::json::unpaddedDecimal(i + 1);
-                if ( cache->header.mappingOffset > __offsetof(dyld_cache_header, cacheSubType) ) {
+                std::string subCachePath = std::string(path) + "." + json::unpaddedDecimal(i + 1);
+                if ( cache->header.mappingOffset > offsetof(dyld_cache_header, cacheSubType) ) {
                     subCachePath = basePath + subCacheEntries[i].fileSuffix;
                 }
 
@@ -442,11 +445,11 @@ static CacheFiles mapCacheFiles(const char* path)
 
 struct seg_info
 {
-    seg_info(const char* n, uint64_t o, uint64_t s)
+    seg_info(std::string_view n, uint64_t o, uint64_t s)
     : segName(n), offset(o), sizem(s) { }
-    const char* segName;
-    uint64_t    offset;
-    uint64_t    sizem;
+    std::string_view    segName;
+    uint64_t            offset;
+    uint64_t            sizem;
 };
 
 class CStringHash {
@@ -773,16 +776,19 @@ public:
         const size_t newIndSymTabOffset = new_linkedit_data.size();
 
         // Copy (and adjust) indirect symbol table
-        const uint32_t* mergedIndSymTab = (uint32_t*)(linkeditBaseAddress + dynamicSymTab->indirectsymoff);
-        new_linkedit_data.insert(new_linkedit_data.end(),
-                                 (char*)mergedIndSymTab,
-                                 (char*)(mergedIndSymTab + dynamicSymTab->nindirectsyms));
-        if ( undefSymbolShift != 0 ) {
-            uint32_t* newIndSymTab = (uint32_t*)&new_linkedit_data[newIndSymTabOffset];
-            for (uint32_t i=0; i < dynamicSymTab->nindirectsyms; ++i) {
-                newIndSymTab[i] += undefSymbolShift;
+        if ( dynamicSymTab->nindirectsyms != 0 ) {
+            const uint32_t* mergedIndSymTab = (uint32_t*)(linkeditBaseAddress + dynamicSymTab->indirectsymoff);
+            new_linkedit_data.insert(new_linkedit_data.end(),
+                                     (char*)mergedIndSymTab,
+                                     (char*)(mergedIndSymTab + dynamicSymTab->nindirectsyms));
+            if ( undefSymbolShift != 0 ) {
+                uint32_t* newIndSymTab = (uint32_t*)&new_linkedit_data[newIndSymTabOffset];
+                for (uint32_t i=0; i < dynamicSymTab->nindirectsyms; ++i) {
+                    newIndSymTab[i] += undefSymbolShift;
+                }
             }
         }
+
         const uint64_t newStringPoolOffset = new_linkedit_data.size();
 
         // pointer align string pool size
@@ -849,7 +855,7 @@ void dylib_maker(const void* mapped_cache, std::optional<const DyldSharedCache*>
 
     size_t  additionalSize  = 0;
     for(std::vector<seg_info>::const_iterator it=segments.begin(); it != segments.end(); ++it) {
-        if ( strcmp(it->segName, "__LINKEDIT") != 0 )
+        if ( it->segName != "__LINKEDIT" )
             additionalSize += it->sizem;
     }
 
@@ -860,13 +866,13 @@ void dylib_maker(const void* mapped_cache, std::optional<const DyldSharedCache*>
     uint64_t                textOffsetInCache    = 0;
     for( std::vector<seg_info>::const_iterator it=segments.begin(); it != segments.end(); ++it) {
 
-        if(strcmp(it->segName, "__TEXT") == 0 )
+        if( it->segName == "__TEXT" )
             textOffsetInCache = it->offset;
 
         //printf("segName=%s, offset=0x%llX, size=0x%0llX\n", it->segName, it->offset, it->sizem);
         // Copy all but the __LINKEDIT.  It will be copied later during the optimizer in to a temporary buffer but it would
         // not be efficient to copy it all now for each dylib.
-        if (strcmp(it->segName, "__LINKEDIT") == 0 )
+        if ( it->segName == "__LINKEDIT" )
             continue;
         std::copy(((uint8_t*)mapped_cache)+it->offset, ((uint8_t*)mapped_cache)+it->offset+it->sizem, std::back_inserter(new_dylib_data));
     }
@@ -1042,9 +1048,9 @@ int dyld_shared_cache_extract_dylibs_progress(const char* shared_cache_file_path
         return result;
     }
 
-    mapped_cache->forEachImage(^(const mach_header *mh, const char *installName) {
-        ((const dyld3::MachOAnalyzer*)mh)->forEachSegment(^(const dyld3::MachOAnalyzer::SegmentInfo &info, bool &stop) {
-            map[installName].push_back(seg_info(info.segName, info.vmAddr - mapped_cache->unslidLoadAddress(), info.vmSize));
+    mapped_cache->forEachImage(^(const Header *hdr, const char *installName) {
+        hdr->forEachSegment(^(const Header::SegmentInfo &info, bool &stop) {
+            map[installName].push_back(seg_info(info.segmentName, info.vmaddr - mapped_cache->unslidLoadAddress(), info.vmsize));
         });
     });
 

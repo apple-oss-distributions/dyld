@@ -1,6 +1,9 @@
 #!/bin/sh
 
-if [ -n "${SYSTEM_PREFIX}" ]; then
+if [ "${DRIVERKIT}" == 1 ]; then
+    # do nothing
+    exit 0
+elif [ -n "${SYSTEM_PREFIX}" ]; then # ExclaveKit
     # do nothing
     exit 0
 fi

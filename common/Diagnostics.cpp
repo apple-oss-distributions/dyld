@@ -72,18 +72,18 @@ void Diagnostics::error(const char* format, ...)
 {
     va_list    list;
     va_start(list, format);
-    error(format, list);
+    error(format, va_list_wrap(list));
     va_end(list);
 }
 
-void Diagnostics::error(const char* format, va_list list)
+void Diagnostics::error(const char* format, va_list_wrap vaWrap)
 {
 #if TARGET_OS_EXCLAVEKIT
-    vsnprintf(_strBuf, sizeof(_strBuf), format, list);
+    vsnprintf(_strBuf, sizeof(_strBuf), format, vaWrap.list);
 #else
     if ( _buffer == nullptr )
         _buffer = _simple_salloc();
-    _simple_vsprintf(_buffer, format, list);
+    _simple_vsprintf(_buffer, format, vaWrap.list);
 #endif
 
 #if BUILDING_CACHE_BUILDER || BUILDING_UNIT_TESTS || BUILDING_CACHE_BUILDER_UNIT_TESTS
@@ -111,7 +111,7 @@ void Diagnostics::error(const char* format, va_list list)
         _simple_sresize(_buffer);
     va_list list;
     va_start(list, format);
-    error(format, list);
+    error(format, va_list_wrap(list));
     va_end(list);
 #endif
  }

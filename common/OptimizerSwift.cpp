@@ -133,7 +133,7 @@ using metadata_visitor::SwiftVisitor;
 #if BUILDING_CACHE_BUILDER || BUILDING_CACHE_BUILDER_UNIT_TESTS
 using cache_builder::BuilderConfig;
 using cache_builder::CacheDylib;
-using cache_builder::SwiftProtocolConformanceOptimizer;
+using cache_builder::SwiftOptimizer;
 #endif
 
 // Tracks which types conform to which protocols
@@ -955,7 +955,7 @@ static void emitPrespecializedMetadataHashTables(Diagnostics& diag, lsl::Allocat
     }
 }
 
-static void emitHeader(const BuilderConfig& config, SwiftProtocolConformanceOptimizer& opt)
+static void emitHeader(const BuilderConfig& config, SwiftOptimizer& opt)
 {
     CacheVMAddress cacheBaseAddress = config.layout.cacheBaseAddress;
     VMOffset typeOffset = opt.typeConformancesHashTable->cacheVMAddress - cacheBaseAddress;
@@ -1132,7 +1132,7 @@ static VMOffset findPrespecializedDataOffset(const BuilderConfig& config, Diagno
         return VMOffset(0ull);
 
     if ( !bindTarget.has_value() ) {
-        diag.error("__swift_prespecializationsData symbol not found in %s", prespecializedDylib->inputMF->installName());
+        diag.error("__swift_prespecializationsData symbol not found in %s", prespecializedDylib->inputHdr->installName());
         return VMOffset(0ull);
     }
 
@@ -1151,7 +1151,7 @@ void buildSwiftHashTables(const BuilderConfig& config,
                           const void* headerInfoRO, const void* headerInfoRW,
                           CacheVMAddress headerInfoROUnslidVMAddr,
                           cache_builder::CacheDylib* prespecializedDylib,
-                          SwiftProtocolConformanceOptimizer& swiftProtocolConformanceOptimizer)
+                          SwiftOptimizer& swiftOptimizer)
 {
     STACK_ALLOCATOR(allocator, 0);
     lsl::Vector<SwiftTypeProtocolConformanceLocation> foundTypeProtocolConformances(allocator);
@@ -1180,31 +1180,31 @@ void buildSwiftHashTables(const BuilderConfig& config,
     // We have all the conformances.  Now build the hash tables
     emitTypeHashTable(diag, allocator,
                       foundTypeProtocolConformances,
-                      swiftProtocolConformanceOptimizer.typeConformancesHashTable);
+                      swiftOptimizer.typeConformancesHashTable);
     if ( diag.hasError() )
         return;
     emitMetadataHashTable(diag, allocator,
                           foundMetadataProtocolConformances,
-                          swiftProtocolConformanceOptimizer.metadataConformancesHashTable);
+                          swiftOptimizer.metadataConformancesHashTable);
     if ( diag.hasError() )
         return;
     emitForeignTypeHashTable(diag, allocator,
                              foundForeignTypeProtocolConformances,
                              foundForeignNames,
-                             swiftProtocolConformanceOptimizer.foreignTypeConformancesHashTable);
+                             swiftOptimizer.foreignTypeConformancesHashTable);
     if ( diag.hasError() )
         return;
 
-    if ( prespecializedDylib && !swiftProtocolConformanceOptimizer.prespecializedMetadataHashTables.empty() ) {
+    if ( prespecializedDylib && !swiftOptimizer.prespecializedMetadataHashTables.empty() ) {
         emitPrespecializedMetadataHashTables(diag, allocator, config.layout.cacheBaseAddress,
-                                            swiftProtocolConformanceOptimizer.prespecializedMetadataHashTables,
+                                            swiftOptimizer.prespecializedMetadataHashTables,
                                             *prespecializedDylib,
                                             prespecializedDylib->makeCacheSwiftVisitor(config, extraRegions));
         if ( diag.hasError() )
             return;
     }
 
-    swiftProtocolConformanceOptimizer.prespecializedDataOffset =
+    swiftOptimizer.prespecializedDataOffset =
         findPrespecializedDataOffset(config, diag, prespecializedDylib);
     if ( diag.hasError() )
         return;
@@ -1212,10 +1212,10 @@ void buildSwiftHashTables(const BuilderConfig& config,
     // Make sure the hash tables work
     checkHashTables();
     if ( prespecializedDylib )
-        checkPointerHashTables(prespecializedDylib->makeCacheSwiftVisitor(config, extraRegions), swiftProtocolConformanceOptimizer.prespecializedMetadataHashTables, config);
+        checkPointerHashTables(prespecializedDylib->makeCacheSwiftVisitor(config, extraRegions), swiftOptimizer.prespecializedMetadataHashTables, config);
 
     // Emit the header to point to everything else
-    emitHeader(config, swiftProtocolConformanceOptimizer);
+    emitHeader(config, swiftOptimizer);
 }
 
 #endif // BUILDING_CACHE_BUILDER || BUILDING_CACHE_BUILDER_UNIT_TESTS

@@ -92,6 +92,7 @@ namespace mach_o {
 //
 
 constinit const Platform::Epoch Platform::Epoch::invalid(0);
+constinit const Platform::Epoch Platform::Epoch::fall2012(2012);
 constinit const Platform::Epoch Platform::Epoch::fall2015(2015);
 constinit const Platform::Epoch Platform::Epoch::fall2016(2016);
 constinit const Platform::Epoch Platform::Epoch::fall2017(2017);
@@ -105,6 +106,8 @@ constinit const Platform::Epoch Platform::Epoch::fall2022(2022);
 constinit const Platform::Epoch Platform::Epoch::fall2023(2023);
 constinit const Platform::Epoch Platform::Epoch::spring2024(2024, true);
 constinit const Platform::Epoch Platform::Epoch::fall2024(2024);
+constinit const Platform::Epoch Platform::Epoch::spring2025(2025, true);
+constinit const Platform::Epoch Platform::Epoch::fall2025(2025);
 
 
 
@@ -121,17 +124,19 @@ constinit const Platform::Epoch Platform::Epoch::fall2024(2024);
 class VIS_HIDDEN PlatformInfo
 {
 public:
-    consteval PlatformInfo(uint32_t v, CString nm, bool isSim, bool fp, uint16_t year, CString altName = {})
-                             : value(v), name(nm), altName(altName), isSimulator(isSim),supportsFairPlayEncryption(fp), baseYear(year) { }
+    consteval PlatformInfo(uint32_t v, CString nm, bool isSim, bool fp, uint16_t year, const PlatformInfo* info, CString altName = {})
+                             : basePlatformInfo(info), name(nm), altName(altName), value(v), baseYear(year), isSimulator(isSim), supportsFairPlayEncryption(fp) { }
 
-    uint32_t            value;
+    const PlatformInfo* basePlatformInfo;
     CString             name;
     CString             altName;
+    uint32_t            value;
+    uint16_t            baseYear;    // year 1.0 shipped
     bool                isSimulator;
     bool                isExclaveCore=false;
     bool                isExclaveKit=false;
     bool                supportsFairPlayEncryption;
-    uint16_t            baseYear;    // year 1.0 shipped
+    
 
     // Epoch is private to Platform and PlatformInfo, so convert to year/spring of use by subclasses
     Version32 versionForEpoch(Platform::Epoch e) const {
@@ -208,7 +213,7 @@ protected:
 class VIS_HIDDEN PlatformInfo_macOS : public PlatformInfo
 {
 public:
-    consteval PlatformInfo_macOS() : PlatformInfo(PLATFORM_MACOS, "macOS", false, false, 2009, "macOSX") { }
+    consteval PlatformInfo_macOS() : PlatformInfo(PLATFORM_MACOS, "macOS", false, false, 2009, &PlatformInfo_macOS::singleton, "macOSX") { }
 
     Version32 versionForYear(uint16_t year, bool spring) const override {
         if ( (year > 2020) || ((year ==2020) && !spring) )
@@ -236,7 +241,8 @@ public:
 
     static const PlatformInfo_macOS singleton;
 protected:
-    consteval PlatformInfo_macOS(uint32_t v, CString nm, bool isSim) : PlatformInfo(v, nm, isSim, false, 2009) { }
+    consteval PlatformInfo_macOS(uint32_t v, CString nm, bool isSim, const PlatformInfo* info = &PlatformInfo_macOS::singleton) 
+                                    : PlatformInfo(v, nm, isSim, false, 2009, info) { }
 };
 const PlatformInfo_macOS        PlatformInfo_macOS::singleton;
 
@@ -244,11 +250,12 @@ const PlatformInfo_macOS        PlatformInfo_macOS::singleton;
 class VIS_HIDDEN PlatformInfo_iOS : public PlatformInfo
 {
 public:
-    consteval PlatformInfo_iOS() : PlatformInfo(PLATFORM_IOS, "iOS", false, true, 2006) { }
+    consteval PlatformInfo_iOS() : PlatformInfo(PLATFORM_IOS, "iOS", false, true, 2006, &PlatformInfo_iOS::singleton) { }
 
     static const PlatformInfo_iOS singleton;
 protected:
-    consteval PlatformInfo_iOS(uint32_t v, CString nm, bool isSim, CString altName = {}) : PlatformInfo(v, nm, isSim, !isSim, 2006, altName) { }
+    consteval PlatformInfo_iOS(uint32_t v, CString nm, bool isSim, const PlatformInfo* info = &PlatformInfo_iOS::singleton, CString altName = {})
+                                : PlatformInfo(v, nm, isSim, !isSim, 2006, info, altName) { }
 };
 const PlatformInfo_iOS      PlatformInfo_iOS::singleton;
 
@@ -268,20 +275,21 @@ const PlatformInfo_iOS_simulator         PlatformInfo_iOS_simulator::singleton;
 class VIS_HIDDEN PlatformInfo_tvOS : public PlatformInfo_iOS
 {
 public:
-    consteval PlatformInfo_tvOS() : PlatformInfo_iOS(PLATFORM_TVOS, "tvOS", false) { }
+    consteval PlatformInfo_tvOS() : PlatformInfo_iOS(PLATFORM_TVOS, "tvOS", false, &PlatformInfo_tvOS::singleton) { }
 
     static const PlatformInfo_tvOS  singleton;
 protected:
-    consteval PlatformInfo_tvOS(uint32_t v, CString nm, bool isSim) : PlatformInfo_iOS(v, nm, isSim) { }
+    consteval PlatformInfo_tvOS(uint32_t v, CString nm, bool isSim, const PlatformInfo* info = &PlatformInfo_tvOS::singleton)
+                                : PlatformInfo_iOS(v, nm, isSim, info) { }
 };
 const PlatformInfo_tvOS      PlatformInfo_tvOS::singleton;
 
 
-// tvOS_simulator uses same versioning as iOS
-class VIS_HIDDEN PlatformInfo_tvOS_simulator : public PlatformInfo_iOS
+// tvOS_simulator uses same versioning as tvOS
+class VIS_HIDDEN PlatformInfo_tvOS_simulator : public PlatformInfo_tvOS
 {
 public:
-    consteval PlatformInfo_tvOS_simulator() : PlatformInfo_iOS(PLATFORM_TVOSSIMULATOR, "tvOS-simulator", true) { }
+    consteval PlatformInfo_tvOS_simulator() : PlatformInfo_tvOS(PLATFORM_TVOSSIMULATOR, "tvOS-simulator", true) { }
 
     static const PlatformInfo_tvOS_simulator    singleton;
 };
@@ -294,7 +302,7 @@ const PlatformInfo_tvOS_simulator  PlatformInfo_tvOS_simulator::singleton;
 class VIS_HIDDEN PlatformInfo_macCatalyst : public PlatformInfo_iOS
 {
 public:
-    consteval PlatformInfo_macCatalyst() : PlatformInfo_iOS(PLATFORM_MACCATALYST, "macCatalyst", false, "Mac Catalyst") {
+    consteval PlatformInfo_macCatalyst() : PlatformInfo_iOS(PLATFORM_MACCATALYST, "macCatalyst", false, &PlatformInfo_iOS::singleton, "Mac Catalyst") {
         supportsFairPlayEncryption = false;
     }
 
@@ -315,11 +323,12 @@ const PlatformInfo_zippered PlatformInfo_zippered::singleton;
 class VIS_HIDDEN PlatformInfo_watchOS : public PlatformInfo
 {
 public:
-    consteval PlatformInfo_watchOS() : PlatformInfo(PLATFORM_WATCHOS, "watchOS", false, true, 2013) { }
+    consteval PlatformInfo_watchOS() : PlatformInfo(PLATFORM_WATCHOS, "watchOS", false, true, 2013, &PlatformInfo_watchOS::singleton) { }
 
     static const PlatformInfo_watchOS   singleton;
 protected:
-    consteval PlatformInfo_watchOS(uint32_t v, CString nm, bool isSim) : PlatformInfo(v, nm, isSim, !isSim, 2013) { }
+    consteval PlatformInfo_watchOS(uint32_t v, CString nm, bool isSim, const PlatformInfo* info = &PlatformInfo_watchOS::singleton)
+                                    : PlatformInfo(v, nm, isSim, !isSim, 2013, info) { }
 };
 const PlatformInfo_watchOS    PlatformInfo_watchOS::singleton;
 
@@ -338,7 +347,7 @@ const PlatformInfo_watchOS_simulator PlatformInfo_watchOS_simulator::singleton;
 class VIS_HIDDEN PlatformInfo_bridgeOS : public PlatformInfo
 {
 public:
-    consteval PlatformInfo_bridgeOS() : PlatformInfo(PLATFORM_BRIDGEOS, "bridgeOS", false, false, 2015) { }
+    consteval PlatformInfo_bridgeOS() : PlatformInfo(PLATFORM_BRIDGEOS, "bridgeOS", false, false, 2015, &PlatformInfo_bridgeOS::singleton) { }
 
     uint16_t minorVersionForSpring(uint16_t major) const override {
         // The past 2 releases have been 7.3 and 8.3, so assume that pattern for those releases.
@@ -352,7 +361,7 @@ public:
 
     static const PlatformInfo_bridgeOS singleton;
 protected:
-    consteval PlatformInfo_bridgeOS(uint32_t v, CString nm) : PlatformInfo(v, nm, false, false, 2015) { }
+    consteval PlatformInfo_bridgeOS(uint32_t v, CString nm) : PlatformInfo(v, nm, false, false, 2015, &PlatformInfo_bridgeOS::singleton) { }
 };
 const PlatformInfo_bridgeOS         PlatformInfo_bridgeOS::singleton;
 
@@ -361,7 +370,7 @@ const PlatformInfo_bridgeOS         PlatformInfo_bridgeOS::singleton;
 class VIS_HIDDEN PlatformInfo_driverKit : public PlatformInfo
 {
 public:
-    consteval PlatformInfo_driverKit() : PlatformInfo(PLATFORM_DRIVERKIT, "driverKit", false, true, 2000) { }
+    consteval PlatformInfo_driverKit() : PlatformInfo(PLATFORM_DRIVERKIT, "driverKit", false, true, 2000, &PlatformInfo_driverKit::singleton) { }
 
     static const PlatformInfo_driverKit singleton;
 };
@@ -372,7 +381,7 @@ const PlatformInfo_driverKit         PlatformInfo_driverKit::singleton;
 class VIS_HIDDEN PlatformInfo_firmware : public PlatformInfo
 {
 public:
-    consteval PlatformInfo_firmware() : PlatformInfo(PLATFORM_FIRMWARE, "firmware", false, false, 0, "free standing") { }
+    consteval PlatformInfo_firmware() : PlatformInfo(PLATFORM_FIRMWARE, "firmware", false, false, 0, &PlatformInfo_firmware::singleton, "free standing") { }
 
     Version32 versionForYear(uint16_t year, bool spring) const override {
         return Version32(1,0);
@@ -391,7 +400,7 @@ const PlatformInfo_firmware         PlatformInfo_firmware::singleton;
 class VIS_HIDDEN PlatformInfo_sepOS : public PlatformInfo
 {
 public:
-    consteval PlatformInfo_sepOS() : PlatformInfo(PLATFORM_SEPOS, "sepOS", false, false, 0) { }
+    consteval PlatformInfo_sepOS() : PlatformInfo(PLATFORM_SEPOS, "sepOS", false, false, 0, &PlatformInfo_sepOS::singleton) { }
 
     Version32 versionForYear(uint16_t year, bool spring) const override {
         return Version32(1,0);
@@ -409,7 +418,7 @@ const PlatformInfo_sepOS         PlatformInfo_sepOS::singleton;
 class VIS_HIDDEN PlatformInfo_macOS_exclaveCore : public PlatformInfo_macOS
 {
 public:
-    consteval PlatformInfo_macOS_exclaveCore() : PlatformInfo_macOS(PLATFORM_MACOS_EXCLAVECORE, "macOS-exclaveCore", false)
+    consteval PlatformInfo_macOS_exclaveCore() : PlatformInfo_macOS(PLATFORM_MACOS_EXCLAVECORE, "macOS-exclaveCore", false, &PlatformInfo_macOS_exclaveCore::singleton)
     {
         isExclaveCore = true;
     }
@@ -422,7 +431,7 @@ const PlatformInfo_macOS_exclaveCore PlatformInfo_macOS_exclaveCore::singleton;
 class VIS_HIDDEN PlatformInfo_macOS_exclaveKit : public PlatformInfo_macOS
 {
 public:
-    consteval PlatformInfo_macOS_exclaveKit() : PlatformInfo_macOS(PLATFORM_MACOS_EXCLAVEKIT, "macOS-exclaveKit", false)
+    consteval PlatformInfo_macOS_exclaveKit() : PlatformInfo_macOS(PLATFORM_MACOS_EXCLAVEKIT, "macOS-exclaveKit", false, &PlatformInfo_macOS_exclaveKit::singleton)
     {
         isExclaveKit = true;
     }
@@ -436,7 +445,7 @@ const PlatformInfo_macOS_exclaveKit PlatformInfo_macOS_exclaveKit::singleton;
 class VIS_HIDDEN PlatformInfo_iOS_exclaveCore : public PlatformInfo_iOS
 {
 public:
-    consteval PlatformInfo_iOS_exclaveCore() : PlatformInfo_iOS(PLATFORM_IOS_EXCLAVECORE, "iOS-exclaveCore", false)
+    consteval PlatformInfo_iOS_exclaveCore() : PlatformInfo_iOS(PLATFORM_IOS_EXCLAVECORE, "iOS-exclaveCore", false, &PlatformInfo_iOS_exclaveCore::singleton)
     {
         supportsFairPlayEncryption = false;
         isExclaveCore = true;
@@ -450,7 +459,7 @@ const PlatformInfo_iOS_exclaveCore PlatformInfo_iOS_exclaveCore::singleton;
 class VIS_HIDDEN PlatformInfo_iOS_exclaveKit : public PlatformInfo_iOS
 {
 public:
-    consteval PlatformInfo_iOS_exclaveKit() : PlatformInfo_iOS(PLATFORM_IOS_EXCLAVEKIT, "iOS-exclaveKit", false)
+    consteval PlatformInfo_iOS_exclaveKit() : PlatformInfo_iOS(PLATFORM_IOS_EXCLAVEKIT, "iOS-exclaveKit", false, &PlatformInfo_iOS_exclaveKit::singleton)
     {
         supportsFairPlayEncryption = false;
         isExclaveKit = true;
@@ -465,7 +474,7 @@ const PlatformInfo_iOS_exclaveKit PlatformInfo_iOS_exclaveKit::singleton;
 class VIS_HIDDEN PlatformInfo_tvOS_exclaveCore : public PlatformInfo_tvOS
 {
 public:
-    consteval PlatformInfo_tvOS_exclaveCore() : PlatformInfo_tvOS(PLATFORM_TVOS_EXCLAVECORE, "tvOS-exclaveCore", false)
+    consteval PlatformInfo_tvOS_exclaveCore() : PlatformInfo_tvOS(PLATFORM_TVOS_EXCLAVECORE, "tvOS-exclaveCore", false, &PlatformInfo_tvOS_exclaveCore::singleton)
     {
         supportsFairPlayEncryption = false;
         isExclaveCore = true;
@@ -479,7 +488,7 @@ const PlatformInfo_tvOS_exclaveCore PlatformInfo_tvOS_exclaveCore::singleton;
 class VIS_HIDDEN PlatformInfo_tvOS_exclaveKit : public PlatformInfo_tvOS
 {
 public:
-    consteval PlatformInfo_tvOS_exclaveKit() : PlatformInfo_tvOS(PLATFORM_TVOS_EXCLAVEKIT, "tvOS-exclaveKit", false)
+    consteval PlatformInfo_tvOS_exclaveKit() : PlatformInfo_tvOS(PLATFORM_TVOS_EXCLAVEKIT, "tvOS-exclaveKit", false, &PlatformInfo_tvOS_exclaveKit::singleton)
     {
         supportsFairPlayEncryption = false;
         isExclaveKit = true;
@@ -494,7 +503,7 @@ const PlatformInfo_tvOS_exclaveKit PlatformInfo_tvOS_exclaveKit::singleton;
 class VIS_HIDDEN PlatformInfo_watchOS_exclaveCore : public PlatformInfo_watchOS
 {
 public:
-    consteval PlatformInfo_watchOS_exclaveCore() : PlatformInfo_watchOS(PLATFORM_WATCHOS_EXCLAVECORE, "watchOS-exclaveCore", false)
+    consteval PlatformInfo_watchOS_exclaveCore() : PlatformInfo_watchOS(PLATFORM_WATCHOS_EXCLAVECORE, "watchOS-exclaveCore", false, &PlatformInfo_watchOS_exclaveCore::singleton)
     {
         supportsFairPlayEncryption = false;
         isExclaveCore = true;
@@ -508,7 +517,7 @@ const PlatformInfo_watchOS_exclaveCore PlatformInfo_watchOS_exclaveCore::singlet
 class VIS_HIDDEN PlatformInfo_watchOS_exclaveKit : public PlatformInfo_watchOS
 {
 public:
-    consteval PlatformInfo_watchOS_exclaveKit() : PlatformInfo_watchOS(PLATFORM_WATCHOS_EXCLAVEKIT, "watchOS-exclaveKit", false)
+    consteval PlatformInfo_watchOS_exclaveKit() : PlatformInfo_watchOS(PLATFORM_WATCHOS_EXCLAVEKIT, "watchOS-exclaveKit", false, &PlatformInfo_watchOS_exclaveKit::singleton)
     {
         supportsFairPlayEncryption = false;
         isExclaveKit = true;
@@ -521,7 +530,7 @@ const PlatformInfo_watchOS_exclaveKit PlatformInfo_watchOS_exclaveKit::singleton
 class VIS_HIDDEN PlatformInfo_visionOS : public PlatformInfo
 {
 public:
-    consteval PlatformInfo_visionOS() : PlatformInfo(PLATFORM_VISIONOS, "visionOS", false, true, 2022, "xrOS") {}
+    consteval PlatformInfo_visionOS() : PlatformInfo(PLATFORM_VISIONOS, "visionOS", false, true, 2022, &PlatformInfo_visionOS::singleton, "xrOS") {}
 
     uint16_t minorVersionForSpring(uint16_t major) const override {
         // The first spring release is 1.1
@@ -535,14 +544,14 @@ public:
 
     static const PlatformInfo_visionOS singleton;
 protected:
-    consteval PlatformInfo_visionOS(uint32_t v, CString nm, bool isSim, CString altName = {}) : PlatformInfo(v, nm, isSim, !isSim, 2022, altName) { }
+    consteval PlatformInfo_visionOS(uint32_t v, CString nm, bool isSim, const PlatformInfo* info = &PlatformInfo_visionOS::singleton, CString altName = {}) : PlatformInfo(v, nm, isSim, !isSim, 2022, info, altName) { }
 };
 const PlatformInfo_visionOS          PlatformInfo_visionOS::singleton;
 
 class VIS_HIDDEN PlatformInfo_visionOS_simulator : public PlatformInfo_visionOS
 {
 public:
-    consteval PlatformInfo_visionOS_simulator() : PlatformInfo_visionOS(PLATFORM_VISIONOSSIMULATOR, "visionOS-simulator", true, "xrOS-simulator") { }
+    consteval PlatformInfo_visionOS_simulator() : PlatformInfo_visionOS(PLATFORM_VISIONOSSIMULATOR, "visionOS-simulator", true, &PlatformInfo_visionOS::singleton, "xrOS-simulator") { }
 
     static const PlatformInfo_visionOS_simulator    singleton;
 };
@@ -551,7 +560,7 @@ const PlatformInfo_visionOS_simulator          PlatformInfo_visionOS_simulator::
 class VIS_HIDDEN PlatformInfo_visionOS_exclaveCore : public PlatformInfo_visionOS
 {
 public:
-    consteval PlatformInfo_visionOS_exclaveCore() : PlatformInfo_visionOS(PLATFORM_VISIONOS_EXCLAVECORE, "visionOS-exclaveCore", false, "xrOS-exclaveCore")
+    consteval PlatformInfo_visionOS_exclaveCore() : PlatformInfo_visionOS(PLATFORM_VISIONOS_EXCLAVECORE, "visionOS-exclaveCore", false, &PlatformInfo_visionOS_exclaveCore::singleton, "xrOS-exclaveCore")
     {
         supportsFairPlayEncryption = false;
         isExclaveCore = true;
@@ -564,7 +573,7 @@ const PlatformInfo_visionOS_exclaveCore          PlatformInfo_visionOS_exclaveCo
 class VIS_HIDDEN PlatformInfo_visionOS_exclaveKit : public PlatformInfo_visionOS
 {
 public:
-    consteval PlatformInfo_visionOS_exclaveKit() : PlatformInfo_visionOS(PLATFORM_VISIONOS_EXCLAVEKIT, "visionOS-exclaveKit", false, "xrOS-exclaveKit")
+    consteval PlatformInfo_visionOS_exclaveKit() : PlatformInfo_visionOS(PLATFORM_VISIONOS_EXCLAVEKIT, "visionOS-exclaveKit", false, &PlatformInfo_visionOS_exclaveKit::singleton, "xrOS-exclaveKit")
     {
         supportsFairPlayEncryption = false;
         isExclaveKit = true;
@@ -614,9 +623,8 @@ constinit const PlatformInfo* PlatformInfo::knownPlatformInfos[] = {
 //
 
 
-Platform::Platform(uint32_t platformNumber)
+Platform::Platform(uint32_t platformNumber) : _info(nullptr), _value(0)
 {
-    _info = nullptr;
     for (const PlatformInfo* p : PlatformInfo::knownPlatformInfos) {
         assert(p->value != 0 && "PlatformInfo value uninitialized, this might be a problem with C++ static initializers order");
         if ( p->value == platformNumber ) {
@@ -624,6 +632,7 @@ Platform::Platform(uint32_t platformNumber)
             return;
         }
     }
+    _value = platformNumber;
 }
 
 Platform Platform::byName(std::string_view name) {
@@ -666,14 +675,27 @@ Error Platform::valid() const
 
 bool Platform::empty() const
 {
-    return (_info == nullptr);
+    return (_info == nullptr) && _value == 0;
 }
 
 CString Platform::name() const
 {
-    if ( _info == nullptr )
+    if ( _info == nullptr ) {
+        if ( _value != 0 )
+            return "future";
         return "unknown";
+    }
     return _info->name;
+}
+
+Platform Platform::basePlatform() const
+{
+    if ( _info == nullptr ) {
+        if ( _value != 0 )
+            return *this;
+        return Platform();
+    }
+    return Platform(*(_info->basePlatformInfo));
 }
 
 bool Platform::isSimulator() const
@@ -720,9 +742,25 @@ bool Platform::canLoad(Platform other) const
     return false;
 }
 
+CString Platform::libSystemDir() const
+{
+    if ( *this == Platform::sepOS )
+        return "";
+    if ( *this == Platform::firmware )
+        return "";
+    if ( isExclaveCore() )
+        return "";
+
+    if ( *this == Platform::driverKit )
+        return "/System/DriverKit/usr/lib/system/";
+    if ( isExclaveKit() )
+        return "/System/ExclaveKit/usr/lib/system/";
+    return "/usr/lib/system/";
+}
+
 uint32_t Platform::value() const
 {
-    return _info ? _info->value : 0;
+    return _info ? _info->value : _value;
 }
 
 Platform::Epoch Platform::epoch(Version32 v) const
@@ -889,6 +927,20 @@ Error PlatformAndVersions::setFromTargetTriple(CString triple, Architecture& out
     if ( (vendor == nullptr) || (osVers == nullptr) )
         return Error("missing dashes in target triple '%s'", triple.c_str());
 
+
+    // also return architecture from triple
+    outArch = Architecture::byName(arch);
+    if ( outArch == Architecture() )
+        return Error("unknown architecture in target triple '%s'", triple.c_str());
+
+    // firmware uses triples like "thumbv7m-apple-unknown-macho"
+    if ( strcmp(osVers, "unknown") == 0 ) {
+        this->platform = Platform::firmware;
+        this->minOS    = Version32(0,0);
+        this->sdk      = Version32(0,0);
+        return Error::none();
+    }
+
     // split osVersion into osName and minOS version
     const size_t osVersLen = strlen(osVers);
     char osName[triple.size()+1];
@@ -902,17 +954,10 @@ Error PlatformAndVersions::setFromTargetTriple(CString triple, Architecture& out
             break;
         }
     }
-    if ( strlen(minOSVers) == 0 )
-        return Error("missing OS version in target triple '%s'", triple.c_str());
 
     //  macosx is historical name
     if ( strcmp(osName, "macosx") == 0 )
         strlcpy(osName, "macos", sizeof(osName));
-
-    // also return architecture from triple
-    outArch = Architecture::byName(arch);
-    if ( outArch == Architecture() )
-        return Error("unknown architecture in target triple '%s'", triple.c_str());
 
     // Apple sub-platforms are fourth part of triple, but need to be added to OS name to make platform name
     // e.g. "arm64-apple-tvos16.0-simulator" --> "tvos-simulator"
@@ -923,6 +968,9 @@ Error PlatformAndVersions::setFromTargetTriple(CString triple, Architecture& out
     this->platform = Platform::byName(osName);
     if ( this->platform.empty() )
         return Error("unknown OS in target triple '%s'", triple.c_str());
+
+    if ( (strlen(minOSVers) == 0) && (this->platform != Platform::firmware) )
+        return Error("missing OS version in target triple '%s'", triple.c_str());
 
     // get minOS from version trailing OS name in triple
     if (Error err = Version32::fromString(minOSVers, this->minOS))

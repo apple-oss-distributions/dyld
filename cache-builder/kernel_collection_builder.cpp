@@ -34,6 +34,8 @@
 #include <string>
 #include <vector>
 
+using mach_o::Platform;
+
 static const uint64_t kMinBuildVersion = 1; //The minimum version BuildOptions struct we can support
 static const uint64_t kMaxBuildVersion = 1; //The maximum version BuildOptions struct we can support
 
@@ -79,7 +81,7 @@ struct KernelCollectionBuilder {
         va_list list;
         va_start(list, format);
         Diagnostics diag;
-        diag.error(format, list);
+        diag.error(format, va_list_wrap(list));
         va_end(list);
 
         errorStorage.push_back(diag.errorMessage());
@@ -160,7 +162,7 @@ static bool loadFileFromData(struct KernelCollectionBuilder* builder,
     dyld3::closure::FileSystemNull fileSystem;
     const dyld3::GradedArchs& arch = dyld3::GradedArchs::forName(builder->arch);
     auto loaded = dyld3::MachOAnalyzer::loadFromBuffer(diag, fileSystem, fileInfo.path, arch,
-                                                       dyld3::Platform::unknown, fileInfo);
+                                                       Platform(), fileInfo);
     if ( !loaded ) {
         builder->error("in %s: %s", fileInfo.path, diag.errorMessage().c_str());
         return false;
@@ -565,7 +567,7 @@ bool runKernelCollectionBuilder(struct KernelCollectionBuilder* builder) {
     builderOptions.outputFilePath = runtimePath;
     builderOptions.outputMapFilePath = builderOptions.outputFilePath + ".json";
     builderOptions.archs = &dyld3::GradedArchs::forName(builder->arch);
-    builderOptions.platform = dyld3::Platform::unknown;
+    builderOptions.platform = Platform();
     builderOptions.localSymbolMode = DyldSharedCache::LocalSymbolsMode::keep;
     builderOptions.cacheConfiguration = kDyldSharedCacheTypeProduction;
     builderOptions.optimizeDyldDlopens = false;

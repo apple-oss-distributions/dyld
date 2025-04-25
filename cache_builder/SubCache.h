@@ -29,6 +29,7 @@
 #include "Chunk.h"
 #include "MachOFile.h"
 #include "Optimizers.h"
+#include "Platform.h"
 #include "Types.h"
 
 #include <uuid/uuid.h>
@@ -135,7 +136,7 @@ public:
     void addCacheHeaderChunk(const BuilderConfig& config, const std::span<CacheDylib> cacheDylibs);
     void addObjCHeaderInfoReadWriteChunk(const BuilderConfig& config, ObjCOptimizer& objcOptimizer);
     void addCodeSignatureChunk();
-    void addObjCOptsHeaderChunk(ObjCOptimizer& objcOptimizer);
+    void addObjCOptsHeaderChunk(const BuilderConfig& config, ObjCOptimizer& objcOptimizer);
     void addObjCHeaderInfoReadOnlyChunk(const BuilderConfig& config, ObjCOptimizer& objcOptimizer);
     void addObjCImageInfoChunk(const BuilderConfig& config, ObjCOptimizer& objcOptimizer);
     void addObjCSelectorStringsChunk(const BuilderConfig& config, ObjCSelectorOptimizer& objCSelectorOptimizer);
@@ -149,17 +150,19 @@ public:
                                         ObjCProtocolOptimizer& objcProtocolOptimizer);
     void addObjCCategoriesChunk(const BuilderConfig& config,
                                 ObjCCategoryOptimizer& objcCategoryOptimizer);
-    void addObjCIMPCachesChunk(ObjCIMPCachesOptimizer& objcIMPCachesOptimizer);
+    void addObjCIMPCachesChunk(const BuilderConfig& config, ObjCIMPCachesOptimizer& objcIMPCachesOptimizer);
     void addCacheTrieChunk(DylibTrieOptimizer& dylibTrieOptimizer);
     void addPatchTableChunk(PatchTableOptimizer& patchTableOptimizer);
+    void addFunctionVariantsChunk(FunctionVariantsOptimizer& optimizer);
     void addCacheDylibsLoaderChunk(PrebuiltLoaderBuilder& builder);
     void addExecutableLoaderChunk(PrebuiltLoaderBuilder& builder);
     void addExecutablesTrieChunk(PrebuiltLoaderBuilder& builder);
-    void addSwiftOptsHeaderChunk(SwiftProtocolConformanceOptimizer& opt);
-    void addSwiftTypeHashTableChunk(SwiftProtocolConformanceOptimizer& opt);
-    void addSwiftMetadataHashTableChunk(SwiftProtocolConformanceOptimizer& opt);
-    void addSwiftForeignHashTableChunk(SwiftProtocolConformanceOptimizer& opt);
-    void addSwiftPrespecializedMetadataPointerTableChunks(SwiftProtocolConformanceOptimizer& opt);
+    void addSwiftOptsHeaderChunk(const BuilderConfig& config, SwiftOptimizer& opt);
+    void addSwiftTypeHashTableChunk(const BuilderConfig& config, SwiftOptimizer& opt);
+    void addSwiftMetadataHashTableChunk(const BuilderConfig& config, SwiftOptimizer& opt);
+    void addSwiftForeignHashTableChunk(const BuilderConfig& config, SwiftOptimizer& opt);
+    void addSwiftPrespecializedMetadataPointerTableChunks(const BuilderConfig& config, SwiftOptimizer& opt);
+    void addPrewarmingDataChunk(const BuilderConfig& config, PrewarmingOptimizer& opt);
     void addUnmappedSymbols(const BuilderConfig& config, UnmappedSymbolsOptimizer& opt);
     void addDynamicConfigChunk();
     void addSlideInfoChunks();
@@ -167,7 +170,7 @@ public:
 
     // When "kind == sub", sets the suffix on this subCache
     // This has to be done after creating things like stubs sub caches, which might move the indices
-    void setSuffix(dyld3::Platform platform, bool forceDevelopmentSubCacheSuffix,
+    void setSuffix(mach_o::Platform platform, bool forceDevelopmentSubCacheSuffix,
                    size_t subCacheIndex);
 
     void setCodeSignatureSize(const BuilderOptions& options, const BuilderConfig& config,
@@ -188,9 +191,11 @@ public:
                                 CacheVMAddress dyldInCacheEntryUnslidAddr,
                                 const DylibTrieOptimizer& dylibTrieOptimizer,
                                 const ObjCOptimizer& objcOpt,
-                                const SwiftProtocolConformanceOptimizer& swiftProtocolConformanceOpt,
+                                const SwiftOptimizer& swiftOpt,
                                 const PatchTableOptimizer& patchTableOptimizer,
-                                const PrebuiltLoaderBuilder& prebuiltLoaderBuilder);
+                                const FunctionVariantsOptimizer& functionVariantOptimizer,
+                                const PrebuiltLoaderBuilder& prebuiltLoaderBuilder,
+                                const PrewarmingOptimizer& prewarmingOptimizer);
 
     // Adds any additional fields which are set only on the .symbols subCache
     void addSymbolsCacheHeaderInfo(const UnmappedSymbolsOptimizer& unmappedSymbolsOptimizer);
@@ -311,6 +316,7 @@ public:
     std::unique_ptr<SwiftProtocolConformancesHashTableChunk>    swiftForeignTypeHashTable;
     std::unique_ptr<CacheTrieChunk>                             cacheDylibsTrie;
     std::unique_ptr<PatchTableChunk>                            patchTable;
+    std::unique_ptr<FunctionVariantsPatchTableChunk>            functionVariants;
     std::unique_ptr<DynamicConfigChunk>                         dynamicConfig;
     std::unique_ptr<PrebuiltLoaderChunk>                        cacheDylibsLoaders;
     std::unique_ptr<PrebuiltLoaderChunk>                        executableLoaders;
@@ -320,6 +326,7 @@ public:
     std::unique_ptr<UniquedGOTsChunk>                           uniquedAuthGOTs;
     std::unique_ptr<UniquedGOTsChunk>                           uniquedAuthPtrs;
     std::vector<std::unique_ptr<PointerHashTableChunk>>         pointerHashTables;
+    std::unique_ptr<PrewarmingChunk>                            prewarmingChunk;
 
     // Each subCache has its own Linkedit so needs its own optimizer
     SymbolStringsOptimizer                                      symbolStringsOptimizer;

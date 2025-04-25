@@ -26,7 +26,7 @@
 
 #if !TARGET_OS_EXCLAVEKIT
 
-#include "MachOFile.h"
+#include "Header.h"
 #include "dyld_process_info_internal.h"
 
 #include "RemoteNotificationResponder.h"
@@ -155,8 +155,8 @@ void RemoteNotificationResponder::notifyMonitorOfImageListChanges(bool unloading
         strcpy(pathPool, imagePaths[j]);
         uint32_t len = (uint32_t)strlen(pathPool);
         bzero(entries->uuid, 16);
-        dyld3::MachOFile* mf = (dyld3::MachOFile*)loadAddresses[j];
-        mf->getUuid(entries->uuid);
+        mach_o::Header* mh = (mach_o::Header*)loadAddresses[j];
+        mh->getUuid(entries->uuid);
         entries->loadAddress = (uint64_t)loadAddresses[j];
         entries->pathStringOffset = (uint32_t)(pathPool - pathPoolStart);
         entries->pathLength  = len;

@@ -26,12 +26,13 @@
 
 #include <cstdarg>
 
-#include "Defines.h"
+#include "MachODefines.h"
+#include "va_list_wrap.h"
 
 namespace mach_o
 {
 
-using WarningHandler = void(*)(const void* context, const char* format, va_list);
+using WarningHandler = void(*)(const void* context, const char* format, va_list_wrap);
 void setWarningHandler(WarningHandler) VIS_HIDDEN;
 bool hasWarningHandler() VIS_HIDDEN;
 

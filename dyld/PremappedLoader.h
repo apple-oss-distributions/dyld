@@ -44,21 +44,18 @@ class PremappedLoader : public JustInTimeLoader
 {
 public:
     // these are the "virtual" methods that override Loader
-    void                        loadDependents(Diagnostics& diag, RuntimeState& state, const LoadOptions& options);
-    void                        applyFixups(Diagnostics&, RuntimeState& state, DyldCacheDataConstLazyScopedWriter&, bool allowLazyBinds,
-                                            lsl::Vector<PseudoDylibSymbolToMaterialize>* materializingSymbols) const;
     bool                        dyldDoesObjCFixups() const;
-    void                        withLayout(Diagnostics &diag, RuntimeState& state, void (^callback)(const mach_o::Layout &layout)) const;
+    void                        withLayout(Diagnostics &diag, const RuntimeState& state, void (^callback)(const mach_o::Layout &layout)) const;
     bool                        hasBeenFixedUp(RuntimeState&) const;
     bool                        beginInitializers(RuntimeState&);
 
 
-    static Loader*      makePremappedLoader(Diagnostics& diag, RuntimeState& state, const char* path, const LoadOptions& options, const mach_o::Layout* layout);
+    static Loader*      makePremappedLoader(Diagnostics& diag, RuntimeState& state, const char* path, bool isInDyldCache, uint32_t dylibCacheIndex, const LoadOptions& options, const mach_o::Layout* layout);
     static Loader*      makeLaunchLoader(Diagnostics& diag, RuntimeState& state, const MachOAnalyzer* mainExec, const char* mainExecPath, const mach_o::Layout* layout);
 
 private:
     PremappedLoader(const MachOFile* mh, const Loader::InitialOptions& options, const mach_o::Layout* layout);
-    static PremappedLoader*     make(RuntimeState& state, const MachOFile* mh, const char* path, bool willNeverUnload, const mach_o::Layout* layout);
+    static PremappedLoader*     make(RuntimeState& state, const MachOFile* mh, const char* path, bool willNeverUnload, bool overridesCache, uint16_t overridesDylibIndex, const mach_o::Layout* layout);
 
 
 };

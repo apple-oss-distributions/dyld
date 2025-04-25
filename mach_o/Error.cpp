@@ -86,14 +86,14 @@ Error::Error(const char* format, ...)
     va_end(list);
 }
 
-Error::Error(const char* format, va_list list)
+Error::Error(const char* format, va_list_wrap vaWrap)
 {
 #if TARGET_OS_EXCLAVEKIT
-    vsnprintf(_strBuf, sizeof(_strBuf), format, list);
+    vsnprintf(_strBuf, sizeof(_strBuf), format, vaWrap.list);
 #else
     if ( _buffer == nullptr )
         _buffer = _simple_salloc();
-    _simple_vsprintf(_buffer, format, list);
+    _simple_vsprintf(_buffer, format, vaWrap.list);
 #endif
 }
 

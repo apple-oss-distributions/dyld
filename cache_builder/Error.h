@@ -45,7 +45,6 @@ class VIS_HIDDEN [[nodiscard]] Error
 public:
                     Error() = default;
                     Error(const char* format, ...)  __attribute__((format(printf, 2, 3)));
-                    Error(const char* format, va_list list);
                     Error(const Error&) = delete;  // can't copy
                     Error(Error&&); // can move
                     Error& operator=(const Error&) = delete; //  can't copy assign

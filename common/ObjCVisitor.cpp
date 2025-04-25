@@ -39,6 +39,7 @@
 
 using namespace objc_visitor;
 using ResolvedValue = metadata_visitor::ResolvedValue;
+using mach_o::Header;
 
 #if !SUPPORT_VM_LAYOUT
 using metadata_visitor::Segment;
@@ -1141,7 +1142,7 @@ const char* Method::getName(const Visitor& objcVisitor) const
             // The uint32_t name field is an offset from itself to a selref.  The selref then points to the selector string
             const uint8_t* fieldPos = (const uint8_t*)&((const relative_method_t*)this->methodPos.value())->nameOffset;
             int32_t relativeOffsetFromField = *(int32_t*)fieldPos;
-            VMOffset relativeOffsetFromMethod((uint64_t)__offsetof(relative_method_t, nameOffset) + relativeOffsetFromField);
+            VMOffset relativeOffsetFromMethod((uint64_t)offsetof(relative_method_t, nameOffset) + relativeOffsetFromField);
 
             VMAddress methodVMAddr = this->methodPos.vmAddress();
             VMAddress nameSelRefVMAddr = methodVMAddr + relativeOffsetFromMethod;
@@ -1175,7 +1176,7 @@ const char* Method::getTypes(const Visitor& objcVisitor) const
         case Kind::relativeIndirect: {
             const uint8_t* fieldPos = (const uint8_t*)&((const relative_method_t*)this->methodPos.value())->typesOffset;
             int32_t relativeOffsetFromField = *(int32_t*)fieldPos;
-            VMOffset relativeOffsetFromMethod((uint64_t)__offsetof(relative_method_t, typesOffset) + relativeOffsetFromField);
+            VMOffset relativeOffsetFromMethod((uint64_t)offsetof(relative_method_t, typesOffset) + relativeOffsetFromField);
 
             VMAddress methodVMAddr = this->methodPos.vmAddress();
             VMAddress typeVMAddr = methodVMAddr + relativeOffsetFromMethod;
@@ -1199,7 +1200,7 @@ const void* Method::getIMP(const Visitor& objcVisitor) const
         case Kind::relativeIndirect: {
             const uint8_t* fieldPos = (const uint8_t*)&((const relative_method_t*)this->methodPos.value())->impOffset;
             int32_t relativeOffsetFromField = *(int32_t*)fieldPos;
-            VMOffset relativeOffsetFromMethod((uint64_t)__offsetof(relative_method_t, impOffset) + relativeOffsetFromField);
+            VMOffset relativeOffsetFromMethod((uint64_t)offsetof(relative_method_t, impOffset) + relativeOffsetFromField);
 
             VMAddress methodVMAddr = this->methodPos.vmAddress();
             VMAddress impVMAddr = methodVMAddr + relativeOffsetFromMethod;
@@ -1226,7 +1227,7 @@ VMAddress Method::getNameVMAddr(const Visitor& objcVisitor) const
             // The uint32_t name field is an offset from itself to a selref.  The selref then points to the selector string
             const uint8_t* fieldPos = (const uint8_t*)&((const relative_method_t*)this->methodPos.value())->nameOffset;
             int32_t relativeOffsetFromField = *(int32_t*)fieldPos;
-            VMOffset relativeOffsetFromMethod((uint64_t)__offsetof(relative_method_t, nameOffset) + relativeOffsetFromField);
+            VMOffset relativeOffsetFromMethod((uint64_t)offsetof(relative_method_t, nameOffset) + relativeOffsetFromField);
 
             VMAddress methodVMAddr = this->methodPos.vmAddress();
             VMAddress nameSelRefVMAddr = methodVMAddr + relativeOffsetFromMethod;
@@ -1259,7 +1260,7 @@ VMAddress Method::getTypesVMAddr(const Visitor& objcVisitor) const
         case Kind::relativeDirect: {
             const uint8_t* fieldPos = (const uint8_t*)&((const relative_method_t*)this->methodPos.value())->typesOffset;
             int32_t relativeOffsetFromField = *(int32_t*)fieldPos;
-            VMOffset relativeOffsetFromMethod((uint64_t)__offsetof(relative_method_t, typesOffset) + relativeOffsetFromField);
+            VMOffset relativeOffsetFromMethod((uint64_t)offsetof(relative_method_t, typesOffset) + relativeOffsetFromField);
 
             VMAddress methodVMAddr = this->methodPos.vmAddress();
             VMAddress typeVMAddr = methodVMAddr + relativeOffsetFromMethod;
@@ -1279,7 +1280,12 @@ std::optional<VMAddress> Method::getIMPVMAddr(const Visitor& objcVisitor) const
         case Kind::relativeDirect:  {
             const uint8_t* fieldPos = (const uint8_t*)&((const relative_method_t*)this->methodPos.value())->impOffset;
             int32_t relativeOffsetFromField = *(int32_t*)fieldPos;
-            VMOffset relativeOffsetFromMethod((uint64_t)__offsetof(relative_method_t, impOffset) + relativeOffsetFromField);
+
+            // protocols have null impls
+            if ( relativeOffsetFromField == 0 )
+                return std::nullopt;
+
+            VMOffset relativeOffsetFromMethod((uint64_t)offsetof(relative_method_t, impOffset) + relativeOffsetFromField);
 
             VMAddress methodVMAddr = this->methodPos.vmAddress();
             VMAddress impVMAddr = methodVMAddr + relativeOffsetFromMethod;
@@ -1301,7 +1307,7 @@ VMAddress Method::getNameSelRefVMAddr(const Visitor& objcVisitor) const
             // The uint32_t name field is an offset from itself to a selref.  The selref then points to the selector string
             const uint8_t* fieldPos = (const uint8_t*)&((const relative_method_t*)this->methodPos.value())->nameOffset;
             int32_t relativeOffsetFromField = *(int32_t*)fieldPos;
-            VMOffset relativeOffsetFromMethod((uint64_t)__offsetof(relative_method_t, nameOffset) + relativeOffsetFromField);
+            VMOffset relativeOffsetFromMethod((uint64_t)offsetof(relative_method_t, nameOffset) + relativeOffsetFromField);
 
             VMAddress methodVMAddr = this->methodPos.vmAddress();
             VMAddress nameSelRefVMAddr = methodVMAddr + relativeOffsetFromMethod;
@@ -1348,7 +1354,7 @@ void Method::setTypes(const Visitor& objcVisitor, VMAddress typesVMAddr)
         case Kind::relativeIndirect:
         case Kind::relativeDirect: {
             VMAddress methodVMAddr = this->methodPos.vmAddress();
-            VMAddress typesFieldVMAddr = methodVMAddr + VMOffset((uint64_t)__offsetof(relative_method_t, typesOffset));
+            VMAddress typesFieldVMAddr = methodVMAddr + VMOffset((uint64_t)offsetof(relative_method_t, typesOffset));
 
             VMOffset typesRelativeOffset = typesVMAddr - typesFieldVMAddr;
             int64_t relativeOffset = (int64_t)typesRelativeOffset.rawValue();
@@ -1370,18 +1376,21 @@ void Method::setIMP(const Visitor& objcVisitor, std::optional<VMAddress> impVMAd
     switch ( this->kind ) {
         case Kind::relativeIndirect:
         case Kind::relativeDirect: {
-            // We don't support NULL imp's with relative method lists.
-            assert(impVMAddr.has_value());
+            if ( !impVMAddr.has_value() ) {
+                // A NULL imp is probably a protocol, and is expected.  Every other IMP in the
+                // protocol is also going to be NULL, so just make sure this one matches
+                assert(!this->getIMPVMAddr(objcVisitor).has_value());
+            } else {
+                VMAddress methodVMAddr = this->methodPos.vmAddress();
+                VMAddress impFieldVMAddr = methodVMAddr + VMOffset((uint64_t)offsetof(relative_method_t, impOffset));
 
-            VMAddress methodVMAddr = this->methodPos.vmAddress();
-            VMAddress impFieldVMAddr = methodVMAddr + VMOffset((uint64_t)__offsetof(relative_method_t, impOffset));
+                VMOffset impRelativeOffset = impVMAddr.value() - impFieldVMAddr;
+                int64_t relativeOffset = (int64_t)impRelativeOffset.rawValue();
 
-            VMOffset impRelativeOffset = impVMAddr.value() - impFieldVMAddr;
-            int64_t relativeOffset = (int64_t)impRelativeOffset.rawValue();
-
-            const uint8_t* fieldPos = (const uint8_t*)&((const relative_method_t*)this->methodPos.value())->impOffset;
-            assert((int32_t)relativeOffset == relativeOffset);
-            *(int32_t*)fieldPos = (int32_t)relativeOffset;
+                const uint8_t* fieldPos = (const uint8_t*)&((const relative_method_t*)this->methodPos.value())->impOffset;
+                assert((int32_t)relativeOffset == relativeOffset);
+                *(int32_t*)fieldPos = (int32_t)relativeOffset;
+            }
             break;
         }
         case Kind::pointer: {
@@ -1748,23 +1757,23 @@ std::optional<Visitor::Section> Visitor::findSection(std::span<const char*> altS
 #endif
 
     __block std::optional<Visitor::Section> objcDataSection;
-    mf->forEachSection(^(const dyld3::MachOFile::SectionInfo& sectInfo, bool malformedSectionRange, bool& stop) {
+    ((const Header*)mf)->forEachSection(^(const Header::SegmentInfo& segInfo, const Header::SectionInfo& sectInfo, bool& stop) {
         bool segMatch = std::any_of(altSegNames.begin(), altSegNames.end(), [&sectInfo](const char* segName) {
-            return strncmp(sectInfo.segInfo.segName, segName, 16) == 0;
+            return sectInfo.segmentName == segName;
         });
         if ( !segMatch )
             return;
-        if ( strncmp(sectInfo.sectName, sectionName, 16) != 0 )
+        if ( sectInfo.sectionName != sectionName )
             return;
 
 #if SUPPORT_VM_LAYOUT
-        const void* targetValue = (const void*)(sectInfo.sectAddr + this->dylibMA->getSlide());
-        ResolvedValue target(targetValue, VMAddress(sectInfo.sectAddr));
+        const void* targetValue = (const void*)(sectInfo.address + this->dylibMA->getSlide());
+        ResolvedValue target(targetValue, VMAddress(sectInfo.address));
 #else
-        VMOffset offsetInSegment(sectInfo.sectAddr - sectInfo.segInfo.vmAddr);
-        ResolvedValue target(this->segments[sectInfo.segInfo.segIndex], offsetInSegment);
+        VMOffset offsetInSegment(sectInfo.address - segInfo.vmaddr);
+        ResolvedValue target(this->segments[sectInfo.segIndex], offsetInSegment);
 #endif
-        objcDataSection.emplace(std::move(target), sectInfo.sectSize);
+        objcDataSection.emplace(std::move(target), sectInfo.size);
 
         stop = true;
     });

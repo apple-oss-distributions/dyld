@@ -47,11 +47,13 @@ extern "C" {
 }
 #endif
 
+#include "Header.h"
 #include "MachOFile.h"
 #include "MachOLoaded.h"
 #include "CodeSigningTypes.h"
 
 
+using mach_o::Header;
 
 namespace dyld3 {
 
@@ -207,18 +209,18 @@ const uint8_t* MachOLoaded::getExportsTrie(const LinkEditInfo& leInfo, uint64_t&
 
 void MachOLoaded::getLayoutInfo(LayoutInfo& result) const
 {
-    forEachSegment(^(const SegmentInfo& info, bool& stop) {
-        if ( strcmp(info.segName, "__TEXT") == 0 ) {
-            result.textUnslidVMAddr = (uintptr_t)info.vmAddr;
-            result.slide = (uintptr_t)(((uint64_t)this) - info.vmAddr);
+    ((const Header*)this)->forEachSegment(^(const Header::SegmentInfo& info, bool& stop) {
+        if ( info.segmentName == "__TEXT" ) {
+            result.textUnslidVMAddr = (uintptr_t)info.vmaddr;
+            result.slide = (uintptr_t)(((uint64_t)this) - info.vmaddr);
         }
-        else if ( strcmp(info.segName, "__LINKEDIT") == 0 ) {
-            result.linkeditUnslidVMAddr = (uintptr_t)info.vmAddr;
+        else if ( info.segmentName == "__LINKEDIT" ) {
+            result.linkeditUnslidVMAddr = (uintptr_t)info.vmaddr;
             result.linkeditFileOffset   = (uint32_t)info.fileOffset;
             result.linkeditFileSize     = (uint32_t)info.fileSize;
-            result.linkeditSegIndex     = info.segIndex;
+            result.linkeditSegIndex     = info.segmentIndex;
         }
-        result.lastSegIndex = info.segIndex;
+        result.lastSegIndex = info.segmentIndex;
     });
 }
 
@@ -238,11 +240,11 @@ bool MachOLoaded::hasExportedSymbol(const char* symbolName, DependentToMachOLoad
                 *result = (uint8_t*)foundInfo.foundInDylib + foundInfo.value;
                 *resultPointsToInstructions = false;
                 int64_t slide = foundInfo.foundInDylib->getSlide();
-                foundInfo.foundInDylib->forEachSection(^(const SectionInfo& sectInfo, bool malformedSectionRange, bool& stop) {
-                    uint64_t sectStartAddr = sectInfo.sectAddr + slide;
-                    uint64_t sectEndAddr = sectStartAddr + sectInfo.sectSize;
+                foundInfo.foundInDylib->forEachSection(^(const Header::SectionInfo& sectInfo, bool& stop) {
+                    uint64_t sectStartAddr = sectInfo.address + slide;
+                    uint64_t sectEndAddr = sectStartAddr + sectInfo.size;
                     if ( ((uint64_t)*result >= sectStartAddr) && ((uint64_t)*result < sectEndAddr) ) {
-                        *resultPointsToInstructions = (sectInfo.sectFlags & S_ATTR_PURE_INSTRUCTIONS) || (sectInfo.sectFlags & S_ATTR_SOME_INSTRUCTIONS);
+                        *resultPointsToInstructions = (sectInfo.flags & S_ATTR_PURE_INSTRUCTIONS) || (sectInfo.flags & S_ATTR_SOME_INSTRUCTIONS);
                         stop = true;
                     }
                 });
@@ -535,26 +537,12 @@ void MachOLoaded::forEachImportedSymbol(Diagnostics& diag, void (^callback)(cons
     }
 }
 
-const char* MachOLoaded::dependentDylibLoadPath(uint32_t depIndex) const
+std::string_view MachOLoaded::segmentName(uint32_t targetSegIndex) const
 {
-    __block const char* foundLoadPath = nullptr;
-    __block uint32_t curDepIndex = 0;
-    forEachDependentDylib(^(const char* loadPath, bool isWeak, bool isReExport, bool isUpward, uint32_t compatVersion, uint32_t curVersion, bool& stop) {
-        if ( curDepIndex == depIndex ) {
-            foundLoadPath = loadPath;
-            stop = true;
-        }
-        ++curDepIndex;
-    });
-    return foundLoadPath;
-}
-
-const char* MachOLoaded::segmentName(uint32_t targetSegIndex) const
-{
-    __block const char* result = nullptr;
-	forEachSegment(^(const SegmentInfo& info, bool& stop) {
-        if ( targetSegIndex == info.segIndex ) {
-            result = info.segName;
+    __block std::string_view result;
+	((const Header*)this)->forEachSegment(^(const Header::SegmentInfo& info, bool& stop) {
+        if ( targetSegIndex == info.segmentIndex ) {
+            result = info.segmentName;
             stop = true;
         }
     });
@@ -628,9 +616,9 @@ bool MachOLoaded::findClosestSymbol(uint64_t address, const char** symbolName, u
 
     // find section index the address is in to validate n_sect
     __block uint32_t sectionIndexForTargetAddress = 0;
-    forEachSection(^(const SectionInfo& sectInfo, bool malformedSectionRange, bool& stop) {
+    forEachSection(^(const Header::SectionInfo& sectInfo, bool& stop) {
         ++sectionIndexForTargetAddress;
-        if ( (sectInfo.sectAddr <= targetUnslidAddress) && (targetUnslidAddress < sectInfo.sectAddr+sectInfo.sectSize) ) {
+        if ( (sectInfo.address <= targetUnslidAddress) && (targetUnslidAddress < sectInfo.address+sectInfo.size) ) {
             stop = true;
         }
     });
@@ -720,18 +708,18 @@ bool MachOLoaded::findClosestSymbol(uint64_t address, const char** symbolName, u
 const void* MachOLoaded::findSectionContent(const char* segName, const char* sectName, uint64_t& size) const
 {
     __block const void* result = nullptr;
-    forEachSection(^(const SectionInfo& sectInfo, bool malformedSectionRange, bool& stop) {
-        if ( strcmp(sectInfo.sectName, sectName) != 0 )
+    forEachSection(^(const Header::SectionInfo& sectInfo, bool& stop) {
+        if ( sectInfo.sectionName != sectName )
             return;
 
-        if ( strcmp(sectInfo.segInfo.segName, segName) != 0 )
+        if ( sectInfo.segmentName != segName )
             return;
 
-        size = sectInfo.sectSize;
+        size = sectInfo.size;
         if ( this->isPreload() )
-            result = (uint8_t*)this + sectInfo.sectFileOffset;
+            result = (uint8_t*)this + sectInfo.fileOffset;
         else
-            result = (void*)(sectInfo.sectAddr + getSlide());
+            result = (void*)(sectInfo.address + getSlide());
         stop = true;
     });
     return result;
@@ -742,8 +730,8 @@ bool MachOLoaded::intersectsRange(uintptr_t start, uintptr_t length) const
 {
     __block bool result = false;
     uintptr_t slide = getSlide();
-    forEachSegment(^(const SegmentInfo& info, bool& stop) {
-        if ( (info.vmAddr+info.vmSize+slide >= start) && (info.vmAddr+slide < start+length) )
+    ((const Header*)this)->forEachSegment(^(const Header::SegmentInfo& info, bool& stop) {
+        if ( (info.vmaddr + info.vmsize + slide >= start) && (info.vmaddr + slide < start + length) )
             result = true;
     });
     return result;
@@ -926,11 +914,11 @@ void MachOLoaded::forEachFixupInAllChains(Diagnostics& diag, uint16_t pointer_fo
         if ( this->isPreload() ) {
             // starts are vm-offsets but image is not loaded with zerofill, so need to map vm-offsets to file-offsets
             __block uint64_t startVmAddr = ~0ULL;
-            this->forEachSegment(^(const SegmentInfo& info, bool& stop) {
+            ((const Header*)this)->forEachSegment(^(const Header::SegmentInfo& info, bool& stop) {
                 if ( startVmAddr == ~0ULL )
-                    startVmAddr = info.vmAddr + startVmOffset;
-                if ( (info.vmAddr <= startVmAddr) && (startVmAddr < (info.vmAddr + info.vmSize)) ) {
-                    uint64_t startFileOffset = info.fileOffset + startVmAddr - info.vmAddr;
+                    startVmAddr = info.vmaddr + startVmOffset;
+                if ( (info.vmaddr <= startVmAddr) && (startVmAddr < (info.vmaddr + info.vmsize)) ) {
+                    uint64_t startFileOffset = info.fileOffset + startVmAddr - info.vmaddr;
                     chain = (ChainedFixupPointerOnDisk*)((uint8_t*)this + startFileOffset);
                     stop = true;
                 }
@@ -947,7 +935,7 @@ void MachOLoaded::forEachFixupInAllChains(Diagnostics& diag, uint16_t pointer_fo
 uint64_t MachOLoaded::firstSegmentFileOffset() const
 {
     __block uint64_t result = 0;
-    this->forEachSegment(^(const SegmentInfo& info, bool& stop) {
+    ((const Header*)this)->forEachSegment(^(const Header::SegmentInfo& info, bool& stop) {
         result = info.fileOffset;
         stop = true;
     });

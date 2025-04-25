@@ -1,0 +1,84 @@
+.Dd Nov 20, 2024
+.Dt ld-layout-file 1
+.Os Darwin
+.Sh NAME
+.Nm ld-layout-file
+.Nd "ld Layout file format documentation"
+.Sh DESCRIPTION
+ld can specify a file that describes specifications and constraints about the layout of the binary to be emitted. This file is specified at link time with the -layout_file option to
+.Xr ld 1
+.
+The file is using a JSON5 file format, where the different keys and values are described below.
+The main purpose of the desription is to have a set of constraints defined by the user depending on the hardware they are trying to target, and  make sure that the emitted binary properly conforms to it.
+
+.Sh REGIONS
+A region is a high level abstract memory description of what is needed for a specific hardware, with addresses and bounds. A region contains segments, which themselves can contain one or multiple sections.
+
+The root node of the file contains the following attribute:
+.Ss "regions": <array>
+This specifies an array of regions, where each entry is a dictionary that represents a region. Every region entry must specify the following attribute:
+
+.Ss "name": <string>
+The name of the region.
+
+.Ss "kind": <dict>
+The type of region. The dictionary must define the following attributes:
+.Ss "type": <string>
+The name of the type of the kind of region. The string can have any of the following values:
+ "default" : a regular region, with inputs, symbols, etc.
+ "empty" : an empty region, were the file backed segment is zeroed.
+ "raw" : TODO: a region containing the contents of a file on disk.
+
+Every region entry must specify one of the two following attributes:
+.Ss "vmAddress": <int>
+The virtual start address for the region.
+.Ss "previous": <string>
+The name of the region after which the region should start.
+
+Region entries may specify the following attributes:
+.Ss "vmSize": <int>
+The maximum memory size of the region.
+
+.Ss "textSeg": <string>
+The name of the underlying text segment. The default value for the segment follows the format "REGION_TEXT", where "REGION" is the name of the region. The name of the segment can have a most 17 characters.
+.Ss "dataSeg": string>
+The name of the underlying text segment. The default value for the segment follows the format "REGION_DATA", where "REGION" is the name of the region. The name of the segment can have a most 17 characters.
+
+.Ss default region
+The layout supports a default region, where all symbols will be moved to by default, and which should always be defined in the file. Any symbol or input that is not explicitly specified to be in a custom region will end up inside that default region.
+The default value for the text segment in the default region is "__TEXT".
+The default value for the data segment in the default region is "__DATA".
+
+.Sh ENTRY POINT
+The layout file must specify an entry point for the executable being emitted.
+The root node of the file contains the following attribute:
+.Ss "entry": <dict>
+The dictionary must define the following attribute:
+.Ss "name": <string>
+The name of the symbol to be used as the entry point.
+
+.Sh VERSION
+The layout file must specify a version number.
+.Ss "version": <int>
+ The latest version number of the layout file format is 0.
+
+.El
+.Sh EXAMPLES
+{
+    version : 0,
+    regions : [
+        {
+            name      : "default",
+            kind      : { type : "default",  permissions : "rwx" },
+            vmAddress : 0x8000,
+            vmSize    : 0x4000,
+            textSeg   : "NEWTEXT",
+            dataSeg   : "NEWDATA"
+        }
+    ],
+    entry   : { name : "_entry" }
+}
+
+.El
+.Sh SEE ALSO
+.Xr ld 1

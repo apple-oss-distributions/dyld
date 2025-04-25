@@ -28,7 +28,7 @@
 #include <compare>
 
 // common
-#include "Defines.h"
+#include "MachODefines.h"
 #include "CString.h"
 
 // mach-o

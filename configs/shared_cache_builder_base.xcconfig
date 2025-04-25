@@ -1,9 +1,9 @@
 #include "base.xcconfig"
 
 ARCHS                     = arm64 x86_64
-MACOSX_DEPLOYMENT_TARGET  = 11.0
+MACOSX_DEPLOYMENT_TARGET  = 13.0
 
 // TODO: use swiftGenericMetadataBuilder from the SDK
-OTHER_LDFLAGS=$(inherited) -weak-lswiftGenericMetadataBuilder -L${SRCROOT}/cache_builder
+OTHER_LDFLAGS=$(inherited) -weak-lswiftGenericMetadataBuilder -L${SRCROOT}/cache_builder -lCrashReporterClient
 
 LD_RUNPATH_SEARCH_PATHS=$(inherited) @loader_path/ @loader_path/../lib/swift @loader_path/../lib

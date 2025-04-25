@@ -45,8 +45,7 @@
 #include "UUID.h"
 #include "MachOAnalyzer.h"
 #include "SharedCacheRuntime.h"
-
-class DyldSharedCache;
+#include "DyldSharedCache.h"
 
 namespace dyld4 {
 
@@ -87,18 +86,28 @@ private:
 class SyscallDelegate
 {
 public:
+    SyscallDelegate() = default;
+
+    bool                onHaswell() const;
+    void                getDyldCache(const dyld3::SharedCacheOptions& opts, dyld3::SharedCacheLoadInfo& loadInfo) const;
+
 #if !TARGET_OS_EXCLAVEKIT
+
+#if !BUILDING_DYLD
+    SyscallDelegate(const DyldSharedCache* dyldCache)
+        : _dyldCache(dyldCache) { }
+#endif // !BUILDING_DYLD
+
     uint64_t            amfiFlags(bool restricted, bool fairPlayEncryted) const;
     bool                internalInstall() const;
     bool                isTranslated() const;
     bool                getCWD(char path[PATH_MAX]) const;
     const GradedArchs&  getGradedArchs(const char* archName, bool keysOff, bool osBinariesOnly) const;
     int                 openLogFile(const char* path) const;
-    bool                hasExistingDyldCache(uint64_t& cacheBaseAddress, uint64_t& fsid, uint64_t& fsobjid) const;
+    bool                hasExistingDyldCache(uint64_t& cacheBaseAddress, FileIdTuple& cacheFileID) const;
     void                disablePageInLinking() const;
-    void                getDyldCache(const dyld3::SharedCacheOptions& opts, dyld3::SharedCacheLoadInfo& loadInfo) const;
     void                forEachInDirectory(const char* dir, bool dirs, void (^handler)(const char* pathInDir, const char* leafName)) const;
-    bool                getDylibInfo(const char* dylibPath, dyld3::Platform platform, const GradedArchs& archs, uint32_t& version, char installName[PATH_MAX]) const;
+    bool                getDylibInfo(const char* dylibPath, mach_o::Platform platform, const GradedArchs& archs, uint32_t& version, char installName[PATH_MAX]) const;
     bool                isContainerized(const char* homeDir) const;
     bool                isMaybeContainerized(const char* homeDir) const;
     bool                fileExists(const char* path, FileID* fileID=nullptr, int* errNum=nullptr) const;
@@ -106,9 +115,11 @@ public:
     bool                mkdirs(const char* path) const;
     bool                realpath(const char* filePath, char output[1024]) const;
     bool                realpathdir(const char* dirPath, char output[1024]) const;
-    const void*         mapFileReadOnly(Diagnostics& diag, const char* path, size_t* size=nullptr, FileID* fileID=nullptr, bool* isOSBinary=nullptr, char* betterPath=nullptr) const;
+    bool                registerSignature(Diagnostics& diag, const char* path, const char* uuidStr, int fd, uint64_t fileOffset, uint32_t signatureOffset, uint32_t signatureSize) const;
+    int                 openFileReadOnly(Diagnostics& diag, const char* path) const;
+    const void*         mapFileReadOnly(Diagnostics& diag, const char* path, int* fileDescriptor=nullptr, size_t* size=nullptr, FileID* fileID=nullptr, bool* isOSBinary=nullptr, char* betterPath=nullptr) const;
     void                unmapFile(const void* buffer, size_t size) const;
-    void                withReadOnlyMappedFile(Diagnostics& diag, const char* path, bool checkIfOSBinary, void (^handler)(const void* mapping, size_t mappedSize, bool isOSBinary, const FileID& fileID, const char* realPath)) const;
+    void                withReadOnlyMappedFile(Diagnostics& diag, const char* path, bool checkIfOSBinary, void (^handler)(const void* mapping, size_t mappedSize, bool isOSBinary, const FileID& fileID, const char* realPath, int fileDescriptor)) const;
     bool                getFileAttribute(const char* path, const char* attrName, Array<uint8_t>& attributeBytes) const;
     bool                setFileAttribute(const char* path, const char* attrName, const Array<uint8_t>& attributeBytes) const;
     bool                saveFileWithAttribute(Diagnostics& diag, const char* path, const void* buffer, size_t size, const char* attrName, const Array<uint8_t>& attributeBytes) const;
@@ -119,11 +130,11 @@ public:
     bool                sandboxBlockedSyscall(int syscallNum) const;
     bool                sandboxBlockedPageInLinking() const;
     bool                getpath(int fd, char* realerPath) const;
-    bool                onHaswell() const;
     bool                dtraceUserProbesEnabled() const;
     void                dtraceRegisterUserProbes(dof_ioctl_data_t* probes) const;
     void                dtraceUnregisterUserProbe(int registeredID) const;
     bool                kernelDyldImageInfoAddress(void*& infoAddress, size_t& infoSize) const;
+    bool                inLockdownMode() const;
 
     struct DyldCommPage
     {
@@ -137,12 +148,14 @@ public:
                   disablePageInLinking      :  1,     // dyld_flags=0x00000080
                   // TODO: rdar://124408076 (Remove `enableSwiftPrespecData` boot-arg) remove once qualified
                   disableSwiftPrespecData   :  1,     // dyld_flags=0x00000100
-                  unusedFlagsLow            :  9,
-                  enableCompactInfo         :  1,     // dyld_flags=0x00040000
-                  disableCompactInfo        :  1,     // dyld_flags=0x00080000
+                  disableProdSimChecks      :  1,     // dyld_flags=0x00000200
+                  unusedFlagsLow            :  8,
+                  enableAtlasUsage          :  1,     // dyld_flags=0x00040000
+                  disableAtlasUsage         :  1,     // dyld_flags=0x00080000
                   forceRODataConst          :  1,     // dyld_flags=0x00100000
                   forceRWDataConst          :  1,     // dyld_flags=0x00200000
-                  unusedFlagsHigh           :  10,
+                  unused0                   :  1,
+                  unusedFlagsHigh           :  9,
                   libPlatformRoot           :  1,
                   libPthreadRoot            :  1,
                   libKernelRoot             :  1,

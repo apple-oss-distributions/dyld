@@ -41,10 +41,11 @@
 
 // Darwin
 #include <mach-o/loader.h>
+#include <sys/mman.h>
 
 using namespace ld;
 using namespace mach_o;
-using namespace dyld3::json;
+using namespace json;
 
 struct JSONHeader
 {
@@ -395,13 +396,15 @@ static void addAtoms(Diagnostics& diag, DynamicAtomFile* af, const Node& atomsNo
 
             const Node* addendNode = getOptionalValue(diag, contentEntry, "addend");
             const Node* authPtrNode = getOptionalValue(diag, contentEntry, "authPtr");
+            size_t newAtomSize = bytes.size() + fixupSize;
+            atom->setContentAsZeros(newAtomSize);
             addFixup(diag, arch, usesAuthPtrs, atom, (uint32_t)bytes.size(), kind,
                      af->atoms()[targetIndex], addendNode, authPtrNode);
             if ( diag.hasError() )
                 return;
 
             // resize atom's byte to make place for the fixup content
-            bytes.resize(bytes.size() + fixupSize);
+            bytes.resize(newAtomSize);
 
             if ( diag.hasError() )
                 return;
@@ -414,7 +417,7 @@ Error linkerMakeFromJSON(Linker& linker, std::span<const char> jsonData, std::sp
 {
     // read input JSON
     Diagnostics jsonDiag;
-    Node rootNode = readJSON(jsonDiag, jsonData.data(), jsonData.size());
+    Node rootNode = readJSON(jsonDiag, jsonData.data(), jsonData.size(), false /* useJSON5 */);
     if ( jsonDiag.hasError() )
         return jsonDiag.toError();
 
@@ -431,6 +434,7 @@ Error linkerMakeFromJSON(Linker& linker, std::span<const char> jsonData, std::sp
         "-platform_version", header.pvs.platform.name(), verStr, verStr,
         "-dylib", "-o", outputPath,
         "-install_name", strdup(header.installName.data()),
+        "-add_lldb_no_nlist_section" // rdar://146167046 (Please add `__TEXT,__lldb_no_nlist` section to libswiftPrespecialized.dylib)
     };
     // convert raw options string into options vector
     // this only splits options by a whitespace, no special logic to escape quotes or so

@@ -28,6 +28,7 @@
 #include "Chunk.h"
 #include "MachOFile.h"
 #include "Types.h"
+#include "dyld_cache_format.h"
 
 #include <string>
 #include <unordered_map>
@@ -63,6 +64,7 @@ struct CoalescedGOTSection : CoalescedSection
         std::string_view                    targetDylibName;
         dyld3::MachOFile::PointerMetaData   pmd;
         bool                                isWeakImport;
+        bool                                isFunctionVariant    = false;
     };
 
     struct Hash
@@ -76,6 +78,7 @@ struct CoalescedGOTSection : CoalescedSection
             hash ^= std::hash<std::string_view>{}(v.targetDylibName);
             hash ^= std::hash<uint32_t>{}(*(uint32_t*)&v.pmd);
             hash ^= std::hash<bool>{}(v.isWeakImport);
+            hash ^= std::hash<bool>{}(v.isFunctionVariant);
             return hash;
         }
     };
@@ -87,12 +90,15 @@ struct CoalescedGOTSection : CoalescedSection
             return (a.isWeakImport == b.isWeakImport)
                 && (a.targetSymbolName == b.targetSymbolName)
                 && (a.targetDylibName == b.targetDylibName)
+                && (a.isFunctionVariant == b.isFunctionVariant)
                 && (memcmp(&a.pmd, &b.pmd, sizeof(a.pmd)) == 0);
         }
     };
 
+    struct FunctionVariantInfo { uint32_t dylibIndex; uint32_t variantIndex; };
     // Map from bind target to offsets in to the GOTs buffer
-    std::unordered_map<GOTKey, uint32_t, Hash, EqualTo> gotTargetsToOffsets;
+    std::unordered_map<GOTKey, uint32_t, Hash, EqualTo>             gotTargetsToOffsets;
+    std::unordered_map<GOTKey, FunctionVariantInfo, Hash, EqualTo>  functionVariantIndexes;
 };
 
 struct DylibSectionCoalescer

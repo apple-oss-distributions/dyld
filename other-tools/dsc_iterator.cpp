@@ -34,7 +34,9 @@
 #include "dsc_iterator.h"
 #define NO_ULEB
 #include "DyldSharedCache.h"
-#include "MachOAnalyzer.h"
+#include "Header.h"
+
+using mach_o::Header;
 
 
 static void forEachDylibInCache(const void* shared_cache_file, void (^handler)(const dyld_cache_image_info* cachedDylibInfo, bool isAlias))
@@ -43,7 +45,7 @@ static void forEachDylibInCache(const void* shared_cache_file, void (^handler)(c
     const dyld_cache_mapping_info*  mappings    = (dyld_cache_mapping_info*)((char*)shared_cache_file + header->mappingOffset);
     dyld_cache_image_info*          images      = (dyld_cache_image_info*)((char*)shared_cache_file + header->imagesOffsetOld);
     uint32_t                        imagesCount = header->imagesCountOld;
-    if ( header->mappingOffset >= __offsetof(dyld_cache_header, imagesCount) ) {
+    if ( header->mappingOffset >= offsetof(dyld_cache_header, imagesCount) ) {
         images = (dyld_cache_image_info*)((char*)shared_cache_file + header->imagesOffset);
         imagesCount = header->imagesCount;
     }
@@ -69,38 +71,36 @@ extern int dyld_shared_cache_iterate(const void* shared_cache_file, uint32_t sha
     const dyld_cache_mapping_info* mappings           = (dyld_cache_mapping_info*)((char*)shared_cache_file + header->mappingOffset);
     const uint64_t                 unslideLoadAddress = mappings[0].address;
 
-    __block uint32_t index = 0;
     __block int      result = 0;
     forEachDylibInCache(shared_cache_file, ^(const dyld_cache_image_info* cachedDylibInfo, bool isAlias) {
         uint64_t                    imageCacheOffset = cachedDylibInfo->address - unslideLoadAddress;
-        const dyld3::MachOAnalyzer* ma               = (dyld3::MachOAnalyzer*)((uint8_t*)shared_cache_file + imageCacheOffset);
+        const Header*               mh               = (Header*)((uint8_t*)shared_cache_file + imageCacheOffset);
         const char*                 dylibPath        = (char*)shared_cache_file + cachedDylibInfo->pathFileOffset;
 
         dyld_shared_cache_dylib_info dylibInfo;
         uuid_t                       uuid;
         dylibInfo.version    = 2;
-        dylibInfo.machHeader = ma;
+        dylibInfo.machHeader = mh;
         dylibInfo.path       = dylibPath;
         dylibInfo.modTime    = cachedDylibInfo->modTime;
         dylibInfo.inode      = cachedDylibInfo->inode;
         dylibInfo.isAlias    = isAlias;
-        ma->getUuid(uuid);
+        mh->getUuid(uuid);
         dylibInfo.uuid       = &uuid;
-        ma->forEachSegment(^(const dyld3::MachOAnalyzer::SegmentInfo& info, bool& stop) {
-            if ( info.fileSize > info.vmSize ) {
+        mh->forEachSegment(^(const Header::SegmentInfo& info, bool& stop) {
+            if ( info.fileSize > info.vmsize ) {
                 stop = true;
                 return;
             }
             dyld_shared_cache_segment_info segInfo;
             segInfo.version       = 2;
-            segInfo.name          = info.segName;
+            segInfo.name          = info.segmentName.data(); // FIXME: Might not be null terminated
             segInfo.fileOffset    = info.fileOffset;
-            segInfo.fileSize      = info.vmSize;
-            segInfo.address       = info.vmAddr;
-            segInfo.addressOffset = info.vmAddr - unslideLoadAddress;
+            segInfo.fileSize      = info.vmsize;
+            segInfo.address       = info.vmaddr;
+            segInfo.addressOffset = info.vmaddr - unslideLoadAddress;
             callback(&dylibInfo, &segInfo);
         });
-        index++;
     });
     return result;
 }

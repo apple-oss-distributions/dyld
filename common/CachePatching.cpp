@@ -200,19 +200,18 @@ void PatchTable::forEachPatchableGOTUseOfExport(uint32_t imageIndex, uint32_t dy
 
 const char* PatchTable::patchKindName(PatchKind patchKind)
 {
-    const char* name = "(unknown patch kind)";
     switch ( patchKind ) {
         case PatchKind::regular:
-            name = "";
+            return "";
             break;
         case PatchKind::cfObj2:
-            name = "(CF obj2)";
+            return "(CF obj2)";
             break;
         case PatchKind::objcClass:
-            name = "(objc class)";
+            return "(objc class)";
             break;
     }
-    return name;
+    return "(unknown patch kind)";
 }
 
 //

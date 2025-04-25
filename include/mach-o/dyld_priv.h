@@ -328,7 +328,11 @@ extern void dyld_get_image_versions(const struct mach_header* mh, void (^callbac
 // This finds the SDK version a binary was built against.
 // Returns zero on error, or if SDK version could not be determined.
 //
-// Exists in Mac OS X 10.8 and later 
+// Note on watchOS and bridgeOS, this returns the equivalent iOS SDK version number
+// (i.e an app built against watchOS 2.0 SDK returns 9.0).  To see the
+// platform specific sdk version use dyld_get_program_sdk_watch_os_version().
+
+// Exists in Mac OS X 10.8 and later
 // Exists in iOS 6.0 and later
 extern uint32_t dyld_get_sdk_version(const struct mach_header* mh);
 
@@ -337,7 +341,7 @@ extern uint32_t dyld_get_sdk_version(const struct mach_header* mh);
 // This finds the SDK version that the main executable was built against.
 // Returns zero on error, or if SDK version could not be determined.
 //
-// Note on watchOS, this returns the equivalent iOS SDK version number
+// Note on watchOS and bridgeOS, this returns the equivalent iOS SDK version number
 // (i.e an app built against watchOS 2.0 SDK returns 9.0).  To see the
 // platform specific sdk version use dyld_get_program_sdk_watch_os_version().
 //
@@ -358,20 +362,6 @@ extern uint32_t dyld_get_program_sdk_watch_os_version(void) __API_AVAILABLE(watc
 //       whereas this returns the raw watchOS version (e.g. 2.0).
 // Exists in Watch OS 3.0 and later
 extern uint32_t dyld_get_program_min_watch_os_version(void) __API_AVAILABLE(watchos(3.0));
-#endif
-
-#if TARGET_OS_BRIDGE
-// bridgeOS only.
-// This finds the bridgeOS SDK version that the main executable was built against.
-// Exists in bridgeOS 2.0 and later
-extern uint32_t dyld_get_program_sdk_bridge_os_version(void) __API_AVAILABLE(bridgeos(2.0));
-
-// bridgeOS only.
-// This finds the Watch min OS version that the main executable was built to run on.
-// Note: dyld_get_program_min_os_version() returns the iOS equivalent (e.g. 9.0)
-//       whereas this returns the raw bridgeOS version (e.g. 2.0).
-// Exists in bridgeOS 2.0 and later
-extern uint32_t dyld_get_program_min_bridge_os_version(void) __API_AVAILABLE(bridgeos(2.0));
 #endif
 
 //
@@ -671,11 +661,10 @@ extern const char*  __progname;
 // called by libSystem_initializer only
 extern void _dyld_initializer(void);
 
+#if !TARGET_OS_EXCLAVEKIT
 // never called from source code. Used by static linker to implement lazy binding
 extern void dyld_stub_binder(void) __asm__("dyld_stub_binder");
-
-// never call from source code.  Used by closure builder to bind missing lazy symbols to
-extern void _dyld_missing_symbol_abort(void);
+#endif
 
 // Called only by objc to see if dyld has uniqued this selector.
 // Returns the value if dyld has uniqued it, or nullptr if it has not.
@@ -778,7 +767,11 @@ _dyld_find_foreign_type_protocol_conformance(const void *protocol,
 extern uint32_t _dyld_swift_optimizations_version(void) __API_AVAILABLE(macos(12.0), ios(15.0), watchos(8.0), tvos(15.0));
 
 // Swift uses this define to guard for the above symbol being available at build time
+#if !TARGET_OS_EXCLAVEKIT
 #define DYLD_FIND_PROTOCOL_CONFORMANCE_DEFINED 1
+#else
+#define DYLD_FIND_PROTOCOL_CONFORMANCE_DEFINED 0
+#endif
 
 // Called only by Swift to check if dyld has pre-optimized protocol conformances in the closure
 // for the given on-disk mach_header containing a __swift5_proto section
@@ -810,7 +803,11 @@ _dyld_find_foreign_type_protocol_conformance_on_disk(const void *protocol,
                                                      uint32_t flags);
 
 // Swift uses this define to guard for the above symbols being available at build time
+#if !TARGET_OS_EXCLAVEKIT
 #define DYLD_FIND_PROTOCOL_ON_DISK_CONFORMANCE_DEFINED 1
+#else
+#define DYLD_FIND_PROTOCOL_ON_DISK_CONFORMANCE_DEFINED 0
+#endif
 
 // called by exit() before it calls cxa_finalize() so that thread_local
 // objects are destroyed before global objects.
@@ -950,6 +947,13 @@ extern _dyld_pseudodylib_handle _dyld_pseudodylib_register(
     void* addr, size_t size, _dyld_pseudodylib_callbacks_handle callbacks_handle, void* context);
 extern void _dyld_pseudodylib_deregister(_dyld_pseudodylib_handle pd_handle);
 
+// If a root is used that overrides a dylib in the dyld cache, dyld patches all
+// uses of the dylib in the cache to point to the new dylib.
+// But if that dylib is missing some symbol that other dylibs in the cache use,
+// dyld will patch those uses to DYLD_BADROOT_MARKER, or NULL if the use is a weak-import.
+// That will cause a crash and the crash will be easy to identify in crash logs.
+#define DYLD_BADROOT_MARKER 0xbad4007
+
 
 // Called only by libobjc to check if dyld has loaded the image described by imageID, that contains pre-optimized categories
 // The imageID parameter is a private interface between dyld and libobjc, and no assumption should be made about its value.
@@ -1000,6 +1004,20 @@ extern const void *_dyld_find_pointer_hash_table_entry(const void *table,
 
 // Swift uses this define to guard for the above symbol being available at build time
 #define DYLD_FIND_POINTER_HASH_TABLE_ENTRY_DEFINED 1
+
+// libc uses these in backtrace() to check if frames are in the dyld stack
+extern const void* _dyld_stack_top;
+extern const void* _dyld_stack_bottom;
+
+// Gets the range of the dyld stack
+// Exists in macOS 15.4 and later
+// Exists in iOS 18.4 and later
+void _dyld_stack_range(const void** stack_bottom, const void** stack_top);
+
+// Returns the base address and size of each prewarming metadata range in the cache
+// Exists in macOS 15.4 and later
+// Exists in iOS 18.4 and later
+extern void _dyld_for_each_prewarming_range(void (*callback)(const void* base, size_t size));
 
 #if __cplusplus
 }

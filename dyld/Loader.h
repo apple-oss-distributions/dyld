@@ -119,7 +119,8 @@ public:
                         hasWeakDefs        :  1,
                         hasTLVs            :  1,
                         belowLibSystem     :  1,
-                        padding            :  2;
+                        hasFuncVarFixups   :  1,
+                        padding            :  1;
     LoaderRef           ref;
     uuid_t              uuid;
     uint32_t            cpusubtype;
@@ -136,7 +137,7 @@ public:
 
     struct LoadOptions
     {
-        typedef const Loader* (^Finder)(Diagnostics& diag, dyld3::Platform, const char* loadPath, const LoadOptions& options);
+        typedef const Loader* (^Finder)(Diagnostics& diag, mach_o::Platform, const char* loadPath, const LoadOptions& options);
         typedef void          (^Missing)(const char* pathNotFound);
 
         bool        launching           = false;
@@ -163,10 +164,12 @@ public:
         uint64_t        targetRuntimeOffset;
         uintptr_t       targetAddressForDlsym;
         Kind            kind;
-        bool            isCode;
-        bool            isWeakDef;
-        bool            isMissingFlatLazy;
-        bool            isMaterializing;
+        bool            isCode              = false;
+        bool            isWeakDef           = false;
+        bool            isMissingFlatLazy   = false;
+        bool            isMaterializing     = false;
+        bool            isFunctionVariant   = false;
+        uint16_t        variantIndex        = 0;
     };
     struct BindTarget { const Loader* loader; uint64_t runtimeOffset; };
     typedef mach_o::LinkedDylibAttributes   LinkedDylibAttributes;
@@ -240,7 +243,7 @@ public:
     bool                    overridesDylibInCache(const DylibPatch*& patchTable, uint16_t& cacheDylibOverriddenIndex) const;
     bool                    dyldDoesObjCFixups() const;
     const SectionLocations* getSectionLocations() const;
-    void                    withLayout(Diagnostics &diag, RuntimeState& state, void (^callback)(const mach_o::Layout &layout)) const;
+    void                    withLayout(Diagnostics &diag, const RuntimeState& state, void (^callback)(const mach_o::Layout &layout)) const;
 
     // these are private
     bool                    hasBeenFixedUp(RuntimeState&) const;
@@ -256,11 +259,13 @@ public:
     bool                    validMagic() const { return (this->magic == kMagic); }
     const char*             leafName(const RuntimeState&) const;
 #if SUPPORT_VM_LAYOUT
-    const MachOAnalyzer*    analyzer(RuntimeState& state) const;
+    const MachOAnalyzer*    analyzer(const RuntimeState& state) const;
+    const mach_o::Header*   header(const RuntimeState& state) const;
 #endif
     bool                    hasExportedSymbol(Diagnostics& diag, RuntimeState&, const char* symbolName, ExportedSymbolMode mode,
                                               ResolverMode resolverMode, ResolvedSymbol* result,
                                               dyld3::Array<const Loader*>* searched=nullptr) const;
+    uint64_t                selectFromFunctionVariants(Diagnostics& diag, const RuntimeState& state, const char* symbolName, uint32_t fvTableIndex) const;
     void                    logSegmentsFromSharedCache(RuntimeState& state) const;
     bool                    hasConstantSegmentsToProtect() const;
     void                    makeSegmentsReadOnly(RuntimeState& state) const;
@@ -271,6 +276,7 @@ public:
     void                    runInitializersBottomUpPlusUpwardLinks(RuntimeState&) const;
     void                    findAndRunAllInitializers(RuntimeState&) const;
     bool                    hasMagic() const;
+    void                    applyFixupsCheckCachePatching(RuntimeState& state, DyldCacheDataConstLazyScopedWriter& cacheDataConst) const;
     void                    applyCachePatchesToOverride(RuntimeState& state, const Loader* dylibToPatch,
                                                         uint16_t overriddenDylibIndex, const DylibPatch* patches,
                                                         DyldCacheDataConstLazyScopedWriter& cacheDataConst) const;
@@ -279,6 +285,7 @@ public:
     void                    applyFixupsGeneric(Diagnostics&, RuntimeState& state, uint64_t sliceOffset, const Array<const void*>& bindTargets,
                                                const Array<const void*>& overrideBindTargets, bool laziesMustBind,
                                                const Array<MissingFlatLazySymbol>& missingFlatLazySymbols) const;
+    void                    applyFunctionVariantFixups(Diagnostics& diag, const RuntimeState& state) const;
     void                    forEachBindTarget(Diagnostics& diag, RuntimeState& state,
                                               CacheWeakDefOverride patcher, bool allowLazyBinds,
                                           void (^callback)(const ResolvedSymbol& target, bool& stop),
@@ -290,6 +297,7 @@ public:
     void                    logLoad(RuntimeState&, const char* path) const;
     void                    tooNewErrorAddendum(Diagnostics& diag, RuntimeState&) const;
     void                    logChainToLinksWith(RuntimeState& state, const char* msgPrefix) const;
+    uint64_t                functionVariantTableVMOffset(const RuntimeState &state) const;
 
     static uintptr_t        resolvedAddress(RuntimeState& state, const ResolvedSymbol& symbol);
 
@@ -297,6 +305,8 @@ public:
     static void             appendHexByte(uint8_t value, char*& p);
     static void             uuidToStr(const uuid_t uuid, char  uuidStr[64]);
     static void             applyInterposingToDyldCache(RuntimeState& state);
+    static void             adjustFunctionVariantsInDyldCache(RuntimeState& state);
+
     static uintptr_t        interpose(RuntimeState& state, uintptr_t value, const Loader* forLoader=nullptr);
     static const Loader*    getLoader(Diagnostics& diag, RuntimeState& state, const char* loadPath, const LoadOptions& options);
     static const char*      leafName(const char* path);
@@ -311,6 +321,12 @@ public:
     static bool             expandAndNormalizeAtExecutablePath(const char* mainPath, const char* loadPath, char fixedPath[PATH_MAX]);
 
     struct LinksWithChain { LinksWithChain* next=nullptr; const Loader* ldr=nullptr; LinkedDylibAttributes attr=LinkedDylibAttributes::regular; };
+
+#if TARGET_OS_EXCLAVEKIT
+    static void             setUpExclaveKitSharedCachePageInLinking(RuntimeState& state);
+    static void             exclaveKitPageInFixups(void* cbarg_for_segment, uintptr_t address_where_fixed_up_page_will_be_mapped,
+                                                   void* __sized_by(size) buf_to_perform_fixups_in, size_t size);
+#endif
 
 protected:
 
@@ -334,6 +350,7 @@ protected:
         bool hasWeakDefs        = false;
         bool hasTLVs            = false;
         bool belowLibSystem     = false;
+        bool hasFuncVarFixups   = false;
    };
 
     struct CodeSignatureInFile
@@ -349,17 +366,21 @@ protected:
                                          neverUnload(options.neverUnloaded), leaveMapped(options.leaveMapped), hasReadOnlyObjC(options.roObjC),
                                          pre2022Binary(options.pre2022Binary), isPremapped(premapped), hasUUIDLoadCommand(options.hasUUID),
                                          hasWeakDefs(options.hasWeakDefs), hasTLVs(options.hasTLVs), belowLibSystem(options.belowLibSystem),
-                                         padding(0),
+                                         hasFuncVarFixups(options.hasFuncVarFixups), padding(0),
                                          ref(prebuiltApp, prebuiltIndex),
                                          cpusubtype(0), unused(0) { }
 
+#if TARGET_OS_EXCLAVEKIT
+    void                        setUpExclaveKitPageInLinking(Diagnostics& diag, RuntimeState& state, uintptr_t slide, uint64_t sliceOffset, const Array<const void*>& bindTargets) const;
+#else
     void                        setUpPageInLinking(Diagnostics& diag, RuntimeState& state, uintptr_t slide, uint64_t sliceOffset, const Array<const void*>& bindTargets) const;
+#endif
 
     void                        recursivelyLogChainToLinksWith(RuntimeState& state, const char* msgPrefx, const Loader* targetLoader, LinksWithChain* start, LinksWithChain* prev, Array<const Loader*>& visited) const;
 
     static bool                 expandAtLoaderPath(RuntimeState& state, const char* loadPath, const LoadOptions& options, const Loader* ldr, bool fromLCRPATH, char fixedPath[]);
     static bool                 expandAtExecutablePath(RuntimeState& state, const char* loadPath, const LoadOptions& options, bool fromLCRPATH, char fixedPath[]);
-    static const Loader*        makePremappedLoader(Diagnostics& diag, RuntimeState& state, const char* path, const LoadOptions& options, const mach_o::Layout* layout);
+    static const Loader*        makePremappedLoader(Diagnostics& diag, RuntimeState& state, const char* path, bool isInDyldCache, uint32_t dylibIndex, const LoadOptions& options, const mach_o::Layout* layout);
     static const Loader*        makeDiskLoader(Diagnostics& diag, RuntimeState& state, const char* path, const LoadOptions& options, bool overridesDyldCache, uint32_t dylibIndex,
                                                const mach_o::Layout* layout);
     static const Loader*        makeDyldCacheLoader(Diagnostics& diag, RuntimeState& state, const char* path, const LoadOptions& options, uint32_t dylibIndex,
@@ -368,7 +389,7 @@ protected:
     static const Loader*        makePseudoDylibLoader(Diagnostics& diag, RuntimeState &state, const char* path, const LoadOptions& options, const PseudoDylib* pd);
 
 #if SUPPORT_VM_LAYOUT
-    static const MachOAnalyzer* mapSegments(Diagnostics&, RuntimeState&, const char* path, uint64_t vmSpace,
+    static const MachOAnalyzer* mapSegments(Diagnostics&, RuntimeState&, const char* path, int fd, uint64_t vmSpace,
                                             const CodeSignatureInFile& codeSignature, bool hasCodeSignature,
                                             const Array<Region>& segments, bool neverUnloads, bool prebuilt, const FileValidationInfo&);
 #endif

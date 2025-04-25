@@ -248,6 +248,11 @@ Adjustor<P>::Adjustor(Diagnostics& diag,
                 _exportTrieCmd = (linkedit_data_command*)cmd;
                 this->adjustLinkeditLoadCommand(MovedLinkedit::Kind::exportTrie, _exportTrieCmd->dataoff, _exportTrieCmd->datasize);
                 break;
+            case LC_FUNCTION_VARIANTS: {
+                linkedit_data_command* functionVariantsCmd = (linkedit_data_command*)cmd;
+                this->adjustLinkeditLoadCommand(MovedLinkedit::Kind::functionVariants, functionVariantsCmd->dataoff, functionVariantsCmd->datasize);
+                break;
+            }
             case macho_segment_command<P>::CMD:
                 macho_segment_command<P>* segCmd = (macho_segment_command<P>*)cmd;
                 _segCmds.push_back(segCmd);

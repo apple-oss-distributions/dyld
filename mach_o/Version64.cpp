@@ -61,11 +61,59 @@ Error Version64::fromString(CString versString, Version64& vers)
     return Error::none();
 }
 
+static void appendDigit(char*& s, unsigned& num, unsigned place, bool& startedPrinting)
+{
+    if ( num >= place ) {
+        unsigned dig = (num/place);
+        *s++ = '0' + dig;
+        num -= (dig*place);
+        startedPrinting = true;
+    }
+    else if ( startedPrinting ) {
+        *s++ = '0';
+    }
+}
 
+static void appendNumber(char*& s, unsigned num)
+{
+    assert(num < 9999999);
+    bool startedPrinting = false;
+    appendDigit(s, num, 10000000, startedPrinting);
+    appendDigit(s, num,  1000000, startedPrinting);
+    appendDigit(s, num,   100000, startedPrinting);
+    appendDigit(s, num,    10000, startedPrinting);
+    appendDigit(s, num,     1000, startedPrinting);
+    appendDigit(s, num,      100, startedPrinting);
+    appendDigit(s, num,       10, startedPrinting);
+    appendDigit(s, num,        1, startedPrinting);
+    if ( !startedPrinting )
+        *s++ = '0';
+}
+
+/* A.B.C.D.E packed as a24.b10.c10.d10.e10 */
 const char* Version64::toString(char buffer[64]) const
 {
-    assert("unimplemented");
-    return NULL;
+    char* s = buffer;
+    appendNumber(s, (_raw >> 40));
+    *s++ = '.';
+    appendNumber(s, (_raw >> 30) & 0x3FF);
+    unsigned c = (_raw >> 20) & 0x3FF;
+    if ( c != 0 ) {
+        *s++ = '.';
+        appendNumber(s, c);
+    }
+    unsigned d = (_raw >> 10) & 0x3FF;
+    if ( d != 0 ) {
+        *s++ = '.';
+        appendNumber(s, d);
+    }
+    unsigned e = _raw & 0x3FF;
+    if ( e != 0 ) {
+        *s++ = '.';
+        appendNumber(s, e);
+    }
+    *s++ = '\0';
+    return buffer;
 }
 
 } // namespace mach_o

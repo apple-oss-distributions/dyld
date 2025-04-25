@@ -56,6 +56,9 @@
 #endif
 #include "Tracing.h"
 
+// mach-o
+#include "Error.h"
+
 #if __has_feature(ptrauth_calls)
     #include <ptrauth.h>
     #define __ptrauth_dyld_pd_callback __ptrauth(ptrauth_key_process_dependent_code, 1, ptrauth_string_discriminator("jit-callback"))
@@ -69,19 +72,14 @@ namespace dyld4 {
 
 using lsl::UUID;
 using lsl::UniquePtr;
-using lsl::OrderedMap;
 using lsl::Vector;
 using lsl::Allocator;
 using lsl::MemoryManager;
 using dyld3::MachOLoaded;
 using dyld3::MachOAnalyzer;
 
-namespace Atlas {
-struct ProcessSnapshot;
-};
-using Atlas::ProcessSnapshot;
-
 class DyldCacheDataConstLazyScopedWriter;
+class RuntimeState;
 
 class Loader;
 class Reaper;
@@ -113,11 +111,143 @@ struct ObjCClassReplacement
     uintptr_t           rootImpl;
 };
 
-typedef void                (*NotifyFunc)(const mach_header* mh, intptr_t slide);
-typedef void                (*LoadNotifyFunc)(const mach_header* mh, const char* path, bool unloadable);
-typedef void                (*BulkLoadNotifier)(unsigned count, const mach_header* mhs[], const char* paths[]);
+// Wrapper for a callback block/function which forces calling it in a read-only context
+template<typename T>
+struct ReadOnlyCallback
+{
+private:
+    typedef typename callback_impl::return_type<T>::type RetTy;
+
+public:
+    ReadOnlyCallback() = default;
+    ReadOnlyCallback(const ReadOnlyCallback&) = default;
+    ReadOnlyCallback(ReadOnlyCallback&&) = default;
+    ReadOnlyCallback& operator=(const ReadOnlyCallback&) = default;
+    ReadOnlyCallback& operator=(ReadOnlyCallback&&) = default;
+
+    ReadOnlyCallback(std::nullptr_t) : callback(nullptr) { }
+
+    ReadOnlyCallback(T callback) : callback(callback) { }
+
+    const void* raw() const { return (void*)callback; }
+
+    template<class ...ArgTypes>
+    requires std::is_void_v<RetTy>
+    void operator() (ArgTypes&&... args) const {
+        static_assert(std::is_pod_v<RetTy> || std::is_void_v<RetTy>, "unsupported type");
+        bool unused = MemoryManager::withReadOnlyTPROMemory([&]{
+            callback(std::forward<ArgTypes>(args)...);
+            return false;
+        });
+        (void)unused;
+    }
+
+    template<class ...ArgTypes>
+    auto operator() (ArgTypes&&... args) const {
+        static_assert(std::is_pod_v<RetTy>, "unsupported type");
+        RetTy result = MemoryManager::withReadOnlyTPROMemory([&]{
+            return callback(std::forward<ArgTypes>(args)...);
+        });
+        return result;
+    }
+
+    operator bool() const { return callback != nullptr; }
+
+    bool operator!=(std::nullptr_t) const { return callback != nullptr; }
+
+private:
+    T callback = nullptr;
+};
+
+// api callbacks
+typedef void (*NotifyFuncPtr)(const mach_header* mh, intptr_t slide);
+typedef void (*LoadNotifyFuncPtr)(const mach_header* mh, const char* path, bool unloadable);
+typedef void (*BulkLoadNotifierPtr)(unsigned count, const mach_header* mhs[], const char* paths[]);
+typedef void (*DlsymNotifyPtr)(const char* symbolName);
+typedef void (^IterateCacheTextFuncPtr)(const dyld_shared_cache_dylib_text_info* info);
+typedef void (^ObjCClassFuncPtr)(void* classPtr, bool isLoaded, bool* stop);
+typedef void (^ObjCProtocolFuncPtr)(void* protocolPtr, bool isLoaded, bool* stop);
+typedef void (^ObjCVisitClassesFuncPtr)(const void* classPtr);
+typedef void (*PrewarmingDataFuncPtr)(const void* base, size_t size);
+
+typedef ReadOnlyCallback<NotifyFuncPtr>                 NotifyFunc;
+typedef ReadOnlyCallback<LoadNotifyFuncPtr>             LoadNotifyFunc;
+typedef ReadOnlyCallback<BulkLoadNotifierPtr>           BulkLoadNotifier;
+typedef ReadOnlyCallback<DlsymNotifyPtr>                DlsymNotify;
+typedef ReadOnlyCallback<IterateCacheTextFuncPtr>       IterateCacheTextFunc;
+typedef ReadOnlyCallback<ObjCClassFuncPtr>              ObjCClassFunc;
+typedef ReadOnlyCallback<ObjCProtocolFuncPtr>           ObjCProtocolFunc;
+typedef ReadOnlyCallback<ObjCVisitClassesFuncPtr>       ObjCVisitClassesFunc;
+typedef ReadOnlyCallback<_dyld_objc_notify_mapped3>     ObjCMapped3;
+typedef ReadOnlyCallback<_dyld_objc_notify_patch_class> ObjCPatchClass;
+typedef ReadOnlyCallback<_dyld_objc_notify_init2>       ObjCInit2;
+typedef ReadOnlyCallback<_dyld_objc_notify_unmapped>    ObjCUnmapped;
+typedef ReadOnlyCallback<PrewarmingDataFuncPtr>         PrewarmingDataFunc;
+
+// Note this one doens't get wrapped in a callback, as we know we won't call it with TPRO in RW
 typedef int                 (*MainFunc)(int argc, const char* const argv[], const char* const envp[], const char* const apple[]);
-typedef void                (*DlsymNotify)(const char* symbolName);
+
+// objc callbacks
+struct ObjCCallbacks
+{
+    uintptr_t version;
+};
+
+struct ObjCCallbacksV4 : ObjCCallbacks
+{
+    // uintptr_t version; // == 4
+    ObjCMapped3     mapped        = nullptr;
+    ObjCInit2       init          = nullptr;
+    ObjCUnmapped    unmapped      = nullptr;
+    ObjCPatchClass  patches       = nullptr;
+};
+
+// pseudo dylib callbacks
+struct PseudoDylibRegisterCallbacks
+{
+    uintptr_t version;
+};
+
+struct PseudoDylibRegisterCallbacksV1 : PseudoDylibRegisterCallbacks
+{
+    // uintptr_t version; // == 1
+    ReadOnlyCallback<_dyld_pseudodylib_dispose_string>          dispose_error_message   = nullptr;
+    ReadOnlyCallback<_dyld_pseudodylib_initialize>              initialize              = nullptr;
+    ReadOnlyCallback<_dyld_pseudodylib_deinitialize>            deinitialize            = nullptr;
+    ReadOnlyCallback<_dyld_pseudodylib_lookup_symbols>          lookup_symbols          = nullptr;
+    ReadOnlyCallback<_dyld_pseudodylib_lookup_address>          lookup_address          = nullptr;
+    ReadOnlyCallback<_dyld_pseudodylib_find_unwind_sections>    find_unwind_sections    = nullptr;
+};
+
+struct PseudoDylibRegisterCallbacksV2 : PseudoDylibRegisterCallbacks
+{
+    // uintptr_t version; // == 2
+    // Added in version 1
+    ReadOnlyCallback<_dyld_pseudodylib_dispose_string>          dispose_string          = nullptr;
+    ReadOnlyCallback<_dyld_pseudodylib_initialize>              initialize              = nullptr;
+    ReadOnlyCallback<_dyld_pseudodylib_deinitialize>            deinitialize            = nullptr;
+    ReadOnlyCallback<_dyld_pseudodylib_lookup_symbols>          lookup_symbols          = nullptr;
+    ReadOnlyCallback<_dyld_pseudodylib_lookup_address>          lookup_address          = nullptr;
+    ReadOnlyCallback<_dyld_pseudodylib_find_unwind_sections>    find_unwind_sections    = nullptr;
+    // Added in version 2
+    ReadOnlyCallback<_dyld_pseudodylib_loadable_at_path>        loadable_at_path        = nullptr;
+};
+
+struct PseudoDylibRegisterCallbacksV3 : PseudoDylibRegisterCallbacks
+{
+    // uintptr_t version; // == 3
+    // Added in version 1
+    ReadOnlyCallback<_dyld_pseudodylib_dispose_string>          dispose_string                  = nullptr;
+    ReadOnlyCallback<_dyld_pseudodylib_initialize>              initialize                      = nullptr;
+    ReadOnlyCallback<_dyld_pseudodylib_deinitialize>            deinitialize                    = nullptr;
+    ReadOnlyCallback<_dyld_pseudodylib_lookup_symbols>          lookup_symbols                  = nullptr;
+    ReadOnlyCallback<_dyld_pseudodylib_lookup_address>          lookup_address                  = nullptr;
+    ReadOnlyCallback<_dyld_pseudodylib_find_unwind_sections>    find_unwind_sections            = nullptr;
+    // Added in version 2
+    ReadOnlyCallback<_dyld_pseudodylib_loadable_at_path>            loadable_at_path            = nullptr;
+    // Added in version 3
+    ReadOnlyCallback<_dyld_pseudodylib_finalize_requested_symbols>  finalize_requested_symbols  = nullptr;
+};
 
 struct RuntimeLocks
 {
@@ -126,16 +256,16 @@ public:
 
     void                    withLoadersReadLock(void (^work)());
     template<typename F>
-    ALWAYS_INLINE void      withLoadersWriteLock(MemoryManager& memoryManager, F work)
+    ALWAYS_INLINE void      withLoadersWriteLock(F work)
     {
         // We wrap with withWritableMemory outside the BUILDING_DYLD because we need to swap the writability in early dyld (before
         // libSystemHelpers is configured) and it compiles to a noop for non-dyld targets.
-        memoryManager.withWritableMemory([&]{
+        MemoryManager::withWritableMemory([&]{
             #if BUILDING_DYLD
             if ( this->_libSystemHelpers != nullptr ) {
-                this->_libSystemHelpers->os_unfair_recursive_lock_lock_with_options(&_loadersLock, OS_UNFAIR_LOCK_NONE);
+                this->_libSystemHelpers.os_unfair_recursive_lock_lock_with_options(&_loadersLock, OS_UNFAIR_LOCK_NONE);
                 work();
-                this->_libSystemHelpers->os_unfair_recursive_lock_unlock(&_loadersLock);
+                this->_libSystemHelpers.os_unfair_recursive_lock_unlock(&_loadersLock);
             }
             else
             #endif // BUILDING_DYLD
@@ -144,18 +274,45 @@ public:
             }
         });
     }
-    void                    withNotifiersReadLock(void (^work)());
+
+    // TODO: Possibly remove this if all clients of withLoadersWriteLock would instead explicitly do withWritableMemory() first
     template<typename F>
-    ALWAYS_INLINE void      withNotifiersWriteLock(MemoryManager& memoryManager, F work)
+    ALWAYS_INLINE void      withLoadersWriteLockAndProtectedStack(F work)
     {
         // We wrap with withWritableMemory outside the BUILDING_DYLD because we need to swap the writability in early dyld (before
         // libSystemHelpers is configured) and it compiles to a noop for non-dyld targets.
-        memoryManager.withWritableMemory([&]{
+        MemoryManager::withWritableMemory([&]{
+            #if BUILDING_DYLD
+            if ( this->_libSystemHelpers != nullptr ) {
+                this->_libSystemHelpers.os_unfair_recursive_lock_lock_with_options(&_loadersLock, OS_UNFAIR_LOCK_NONE);
+
+                // There is only one protected stack, so only take it once we have the writer lock
+                MemoryManager::withProtectedStack([&] {
+                    work();
+                });
+
+                this->_libSystemHelpers.os_unfair_recursive_lock_unlock(&_loadersLock);
+            }
+            else
+            #endif // BUILDING_DYLD
+            {
+                work();
+            }
+        });
+    }
+
+    void                    withNotifiersReadLock(void (^work)());
+    template<typename F>
+    ALWAYS_INLINE void      withNotifiersWriteLock(F work)
+    {
+        // We wrap with withWritableMemory outside the BUILDING_DYLD because we need to swap the writability in early dyld (before
+        // libSystemHelpers is configured) and it compiles to a noop for non-dyld targets.
+        MemoryManager::withWritableMemory([&]{
         #if BUILDING_DYLD
             if ( this->_libSystemHelpers != nullptr ) {
-                this->_libSystemHelpers->os_unfair_recursive_lock_lock_with_options(&_notifiersLock, OS_UNFAIR_LOCK_NONE);
+                this->_libSystemHelpers.os_unfair_recursive_lock_lock_with_options(&_notifiersLock, OS_UNFAIR_LOCK_NONE);
                 work();
-                this->_libSystemHelpers->os_unfair_recursive_lock_unlock(&_notifiersLock);
+                this->_libSystemHelpers.os_unfair_recursive_lock_unlock(&_notifiersLock);
             }
             else
         #endif // BUILDING_DYLD
@@ -165,8 +322,7 @@ public:
         });
 
     }
-    void                    withTLVLock(void (^work)());
-
+    
     // Helpers to reset locks across fork()
     void                    takeLockBeforeFork();
     void                    releaseLockInForkParent();
@@ -174,14 +330,13 @@ public:
     void                    takeDlopenLockBeforeFork();
     void                    releaseDlopenLockInForkParent();
     void                    resetDlopenLockInForkChild();
-    void                    setHelpers(const LibSystemHelpers* helpers) { _libSystemHelpers = helpers; }
+    void                    setHelpers(LibSystemHelpersWrapper helpers) { _libSystemHelpers = helpers; }
 
 private:
-    const LibSystemHelpers*   _libSystemHelpers      = nullptr;
+    LibSystemHelpersWrapper _libSystemHelpers;
 #if BUILDING_DYLD
     dyld_recursive_mutex  _loadersLock;
     dyld_recursive_mutex  _notifiersLock;
-    dyld_recursive_mutex  _tlvInfosLock;
     dyld_recursive_mutex  _apiLock;
 
 public:
@@ -201,6 +356,7 @@ struct WeakDefMapValue {
 };
 
 typedef dyld3::CStringMapTo<WeakDefMapValue> WeakDefMap;
+
 
 #if SUPPORT_PREBUILTLOADERS || BUILDING_UNIT_TESTS || BUILDING_CACHE_BUILDER_UNIT_TESTS
 #if SUPPORT_VM_LAYOUT
@@ -308,14 +464,14 @@ typedef dyld3::MultiMap<SwiftForeignTypeProtocolConformanceDiskLocationKey, Swif
 #endif // SUPPORT_PREBUILTLOADERS || BUILDING_UNIT_TESTS || BUILDING_CACHE_BUILDER_UNIT_TESTS
 
 struct PseudoDylibCallbacks {
-    _dyld_pseudodylib_dispose_string __ptrauth_dyld_pd_callback dispose_string = nullptr;
-    _dyld_pseudodylib_initialize __ptrauth_dyld_pd_callback initialize = nullptr;
-    _dyld_pseudodylib_deinitialize __ptrauth_dyld_pd_callback deinitialize = nullptr;
-    _dyld_pseudodylib_lookup_symbols __ptrauth_dyld_pd_callback lookupSymbols = nullptr;
-    _dyld_pseudodylib_lookup_address __ptrauth_dyld_pd_callback lookupAddress = nullptr;
-    _dyld_pseudodylib_find_unwind_sections __ptrauth_dyld_pd_callback findUnwindSections = nullptr;
-    _dyld_pseudodylib_loadable_at_path __ptrauth_dyld_pd_callback loadableAtPath = nullptr;
-    _dyld_pseudodylib_finalize_requested_symbols __ptrauth_dyld_pd_callback finalizeRequestedSymbols = nullptr;
+    ReadOnlyCallback<_dyld_pseudodylib_dispose_string> dispose_string = nullptr;
+    ReadOnlyCallback<_dyld_pseudodylib_initialize> initialize = nullptr;
+    ReadOnlyCallback<_dyld_pseudodylib_deinitialize> deinitialize = nullptr;
+    ReadOnlyCallback<_dyld_pseudodylib_lookup_symbols> lookupSymbols = nullptr;
+    ReadOnlyCallback<_dyld_pseudodylib_lookup_address> lookupAddress = nullptr;
+    ReadOnlyCallback<_dyld_pseudodylib_find_unwind_sections> findUnwindSections = nullptr;
+    ReadOnlyCallback<_dyld_pseudodylib_loadable_at_path> loadableAtPath = nullptr;
+    ReadOnlyCallback<_dyld_pseudodylib_finalize_requested_symbols> finalizeRequestedSymbols = nullptr;
 };
 
 // Describes a named, opaque, in-memory data structure that supports dylib-like
@@ -366,19 +522,15 @@ public:
     Vector<ConstAuthLoader>         delayLoaded;
     const Loader*                   libSystemLoader      = nullptr;
     const Loader*                   libdyldLoader        = nullptr;
-#if BUILDING_DYLD || BUILDING_UNIT_TESTS
-    const void*                     libdyldMissingSymbol = nullptr;
-#endif
-    uint64_t                        libdyldMissingSymbolRuntimeOffset = 0;
-    MemoryManager&                  memoryManager;
     RuntimeLocks&                   locks;
-    dyld4::ProgramVars*             vars                 = nullptr;
-    const LibSystemHelpers*         libSystemHelpers     = nullptr;
+    dyld4::ProgramVars              vars;
+    LibSystemHelpersWrapper         libSystemHelpers;
     Vector<InterposeTupleAll>       interposingTuplesAll;
     Vector<InterposeTupleSpecific>  interposingTuplesSpecific;
     Vector<InterposeTupleAll>       patchedObjCClasses;
     Vector<ObjCClassReplacement>    objcReplacementClasses;
     Vector<InterposeTupleAll>       patchedSingletons;
+    Vector<const char*>             prebuiltLoaderSetRealPaths;
     size_t                          numSingletonObjectsPatched = 0;
     uint64_t                        weakDefResolveSymbolCount = 0;
     WeakDefMap*                     weakDefMap                = nullptr;
@@ -394,33 +546,33 @@ public:
     ForeignProtocolMap*             foreignProtocolMap  = nullptr;
 #endif // SUPPORT_PREBUILTLOADERS || BUILD_FOR_UNIT_TESTS
 #if !TARGET_OS_EXCLAVEKIT
-    FileManager                     fileManager;
+    FileManager                        fileManager;
 #endif
 #if HAS_EXTERNAL_STATE
-    ExternallyViewableState         externallyViewable;
+    ExternallyViewableState*        externallyViewable;
 #endif
     Vector<AuthPseudoDylib>         pseudoDylibs;
 
 #if BUILDING_DYLD
     StructuredError                 structuredError;
 #endif
-    bool                            shouldProtectInitializers = false;
                                 RuntimeState(const ProcessConfig& c, RuntimeLocks& locks, Allocator& alloc)
                                     : config(c), persistentAllocator(alloc),
-                                    loaded(alloc), delayLoaded(alloc), memoryManager(*alloc.memoryManager()),
+                                    loaded(alloc), delayLoaded(alloc),
                                     locks(locks),
                                     interposingTuplesAll(alloc), interposingTuplesSpecific(alloc),
                                     patchedObjCClasses(alloc), objcReplacementClasses(alloc),
-                                    patchedSingletons(alloc),
+                                    patchedSingletons(alloc), prebuiltLoaderSetRealPaths(alloc),
 #if !TARGET_OS_EXCLAVEKIT
                                     fileManager(persistentAllocator, &config.syscall),
 #endif
                                     pseudoDylibs(alloc),
                                     _notifyAddImage(alloc), _notifyRemoveImage(alloc),
                                     _notifyLoadImage(alloc), _notifyBulkLoadImage(alloc),
-                                    _tlvInfos(alloc), _loadersNeedingDOFUnregistration(alloc),
+                                    _loadersNeedingDOFUnregistration(alloc),
                                     _missingFlatLazySymbols(alloc), _dynamicReferences(alloc),
-                                    _dlopenRefCounts(alloc), _dynamicNeverUnloads(alloc) { }
+                                    _dlopenRefCounts(alloc), _dynamicNeverUnloads(alloc),
+                                    _protectedStack(config.process.enableProtectedStack) { }
 
     void                        setMainLoader(const Loader*);
     void                        add(const Loader*);
@@ -429,7 +581,6 @@ public:
     void                        setMainFunc(MainFunc func)   { _driverKitMain = func; }
 
     void                        setDyldLoader(const Loader* ldr);
-    void                        setHelpers(const LibSystemHelpers* helpers);
 
     uint8_t*                    appState(uint16_t index);
     uint8_t*                    cachedDylibState(uint16_t index);
@@ -437,7 +588,7 @@ public:
     const MachOFile*            appMF(uint16_t index) const;
     void                        setAppMF(uint16_t index, const MachOFile* mf);
     const MachOFile*            cachedDylibMF(uint16_t index) const;
-    const mach_o::Layout*       cachedDylibLayout(uint16_t index);
+    const mach_o::Layout*       cachedDylibLayout(uint16_t index) const;
 #else
     const MachOLoaded*          appLoadAddress(uint16_t index) const;
     void                        setAppLoadAddress(uint16_t index, const MachOLoaded* ml);
@@ -447,9 +598,10 @@ public:
     void                        log(const char* format, ...) const __attribute__((format(printf, 2, 3))) ;
     void                        vlog(const char* format, va_list list) __attribute__((format(printf, 2, 0)));
 
-    void                        setObjCNotifiers(_dyld_objc_notify_unmapped, _dyld_objc_notify_patch_class,
-                                                 _dyld_objc_notify_mapped2, _dyld_objc_notify_init2,
-                                                 _dyld_objc_notify_mapped3);
+    void                        setObjCNotifiers(ObjCUnmapped,
+                                                 ObjCPatchClass,
+                                                 ObjCInit2,
+                                                 ObjCMapped3);
     void                        addNotifyAddFunc(const Loader* callbackLoader, NotifyFunc);
     void                        addNotifyRemoveFunc(const Loader* callbackLoader, NotifyFunc);
     void                        addNotifyLoadImage(const Loader* callbackLoader, LoadNotifyFunc);
@@ -474,8 +626,9 @@ public:
     void                        notifyDebuggerLoad(const std::span<const Loader*>& newLoaders);
     void                        notifyDebuggerUnload(const std::span<const Loader*>& removingLoaders);
     void                        notifyDtrace(const std::span<const Loader*>& newLoaders);
-    bool                        libSystemInitialized() const { return (libSystemHelpers != nullptr); }
+    bool                        libSystemInitialized() const { return _libSystemInitialized; }
     void                        partitionDelayLoads(std::span<const Loader*> newLoaders, std::span<const Loader*> rootLoaders, Vector<const Loader*>* newAndNotDelayed=nullptr);
+    mach_o::Error               loadInsertedLibraries(dyld3::OverflowSafeArray<Loader*>& topLevelLoaders, const Loader* mainLoader);
 
     void                        incDlRefCount(const Loader* ldr);  // used by dlopen
     void                        decDlRefCount(const Loader* ldr);  // used by dlclose
@@ -504,9 +657,6 @@ public:
     typedef void  (*TLV_TermFunc)(void* objAddr);
 
     void                        initialize();
-    void                        setUpTLVs(const MachOAnalyzer* ma);
-    void                        addTLVTerminationFunc(TLV_TermFunc func, void* objAddr);
-    void                        exitTLV();
 
 #if BUILDING_DYLD
     void                        initializeClosureMode();
@@ -514,8 +664,6 @@ public:
     const PrebuiltLoaderSet*    processPrebuiltLoaderSet() const { return _processPrebuiltLoaderSet; }
     const PrebuiltLoaderSet*    cachedDylibsPrebuiltLoaderSet() const { return _cachedDylibsPrebuiltLoaderSet; }
     uint8_t*                    prebuiltStateArray(bool app) const { return (app ? _processDylibStateArray : _cachedDylibsStateArray); }
-    void                        setInitialImageCount(uint32_t count) { _initialImageCount = count; }
-    uint32_t                    initialImageCount() const { return _initialImageCount; }
 
     const PrebuiltLoader*       findPrebuiltLoader(const char* loadPath) const;
     bool                        saveAppClosureFile() const { return _saveAppClosureFile; }
@@ -535,9 +683,10 @@ public:
     void                        printLinkageChain(const Loader::LinksWithChain* start, const char* msgPrefix);
 
 
-    // this need to be virtual to be callable from libdyld.dylb
-    virtual void                _finalizeListTLV(void* l);
-    virtual void*               _instantiateTLVs(dyld_thread_key_t key);
+    // this need to be virtual to be callable from libdyld.dylib
+    virtual void                emptySlot() { } // cannot remove because it was change vtable of APIs
+
+    lsl::ProtectedStack&        protectedStack() { return this->_protectedStack; }
 
 private:
     //
@@ -587,32 +736,6 @@ private:
         uintptr_t      refCount;
     };
 
-    // when a thread_local is first accessed on a thread, the thunk calls into dyld
-    // to allocate the variables.  The pthread_key is the index used to find the
-    // TLV_Info which then describes how much to allocate and how to initalize that memory.
-    struct TLV_Info
-    {
-        const MachOAnalyzer*    ma;
-        uint32_t                key;
-        uint32_t                initialContentOffset;
-        uint32_t                initialContentSize;
-    };
-
-    // used to record _tlv_atexit() entries to clean up on thread exit
-    struct TLV_Terminator
-    {
-        TLV_TermFunc  termFunc;
-        void*         objAddr;
-    };
-
-    struct TLV_TerminatorList {
-        TLV_TerminatorList* next  = nullptr;
-        uintptr_t           count = 0;
-        TLV_Terminator      elements[7];
-
-        void                reverseWalkChain(void (^work)(TLV_TerminatorList*));
-    };
-
     struct RegisteredDOF
     {
         const Loader*   ldr;
@@ -642,7 +765,6 @@ private:
     void                        garbageCollectImages();
     void                        garbageCollectInner();
     void                        removeLoaders(const std::span<const Loader*>& loadersToRemove);
-    void                        withTLVLock(void (^work)());
     void                        setUpLogging();
 #if SUPPORT_ON_DISK_PREBUILTLOADERS
     void                        buildAppPrebuiltLoaderSetPath(bool createDirs);
@@ -660,16 +782,14 @@ private:
     void                        reloadFSInfos();
     void                        recursiveMarkNonDelayed(const Loader* ldr, Loader::LinksWithChain* start, Loader::LinksWithChain* prev);
 
-    _dyld_objc_notify_unmapped      _notifyObjCUnmapped     = nullptr;
-    _dyld_objc_notify_patch_class   _notifyObjCPatchClass   = nullptr;
-    _dyld_objc_notify_mapped2       _notifyObjCMapped2      = nullptr;
-    _dyld_objc_notify_init2         _notifyObjCInit2        = nullptr;
-    _dyld_objc_notify_mapped3       _notifyObjCMapped3      = nullptr;
+    ObjCMapped3                     _notifyObjCMapped3      = nullptr;
+    ObjCPatchClass                  _notifyObjCPatchClass   = nullptr;
+    ObjCInit2                       _notifyObjCInit2        = nullptr;
+    ObjCUnmapped                    _notifyObjCUnmapped     = nullptr;
     Vector<NotifyFunc>              _notifyAddImage;
     Vector<NotifyFunc>              _notifyRemoveImage;
     Vector<LoadNotifyFunc>          _notifyLoadImage;
     Vector<BulkLoadNotifier>        _notifyBulkLoadImage;
-    Vector<TLV_Info>                _tlvInfos;
     Vector<RegisteredDOF>           _loadersNeedingDOFUnregistration;
     Vector<MissingFlatSymbol>       _missingFlatLazySymbols;
     Vector<DynamicReference>        _dynamicReferences;
@@ -686,13 +806,11 @@ private:
 #endif
     bool                            _saveAppClosureFile;
     bool                            _failIfCouldBuildAppClosureFile;
-    uint32_t                        _initialImageCount              = 256;
     PermanentRanges*                _permanentRanges                = nullptr;
     MainFunc                        _driverKitMain                  = nullptr;
     Vector<DlopenCount>             _dlopenRefCounts;
     Vector<const Loader*>           _dynamicNeverUnloads;
     std::atomic<int32_t>            _gcCount                        = 0;
-    dyld_thread_key_t               _tlvTerminatorsKey              = -1;
     dyld_thread_key_t               _dlerrorPthreadKey              = -1;
     int                             _logDescriptor                  = -1;
     bool                            _logToSyslog                    = false;
@@ -700,10 +818,14 @@ private:
     bool                            _hasOverriddenCachedDylib       = false;
     bool                            _hasOverriddenUnzipperedTwin    = false;
     bool                            _wrotePrebuiltLoaderSet         = false;
+    bool                            _libSystemInitialized           = false;
 #if TARGET_OS_IPHONE && !TARGET_OS_SIMULATOR
     bool                            _vmAccountingSuspended    = false;
 #endif // TARGET_OS_IPHONE && !TARGET_OS_SIMULATOR
+#if !TARGET_OS_EXCLAVEKIT
     UniquePtr<OrderedMap<uint64_t,UUID>>    _fsUUIDMap;
+#endif /* !TARGET_OS_EXCLAVEKIT */
+    lsl::ProtectedStack             _protectedStack;
 };
 
 

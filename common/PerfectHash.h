@@ -34,6 +34,7 @@
 
 #if BUILDING_CACHE_BUILDER || BUILDING_UNIT_TESTS || BUILDING_CACHE_BUILDER_UNIT_TESTS
 #include <unordered_map>
+#include <vector>
 #endif
 
 namespace objc {

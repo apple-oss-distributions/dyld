@@ -79,12 +79,13 @@ class PrebuiltLoader : public Loader
 public:
     union BindTargetRef {
     public:
-                    BindTargetRef(Diagnostics& diag, const ResolvedSymbol&);
+                    BindTargetRef(Diagnostics& diag, const RuntimeState& state, const ResolvedSymbol&);
                     BindTargetRef(const BindTarget&);
 #if SUPPORT_VM_LAYOUT
         uint64_t    value(RuntimeState&) const;
 #endif
-        bool        isAbsolute() const   { return (_abs.kind == 1); }
+        bool        isAbsolute() const   { return (_abs.kind == absolute); }
+        bool        isFunctionVariant(uint64_t& fvTableOffset, uint16_t& variantIndex) const;
         LoaderRef   loaderRef() const;
         uint64_t    offset() const;
         const char* loaderLeafName(RuntimeState& state) const;
@@ -106,21 +107,28 @@ public:
         BindTargetRef(uint64_t absoluteValue);
         uint64_t unpackAbsoluteValue() const;
 
-
+        enum Kind { imageOffset, absolute, imageFunctionVariant };
         struct LoaderAndOffset {
             uint64_t    loaderRef   : 16,
                         high8       :  8,
-                        low39       : 39,   // signed
-                        kind        :  1;
+                        low38       : 38,   // unsigned
+                        kind        :  2;
         };
         struct Absolute {
             uint64_t    high8       :  8,
-                        low55       : 55,   // signed
-                        kind        :  1;
+                        low54       : 54,   // signed
+                        kind        :  2;
         };
-        LoaderAndOffset _regular;
-        Absolute        _abs;
-        uint64_t        _raw;
+        struct LoaderAndFunctionVariant {
+            uint64_t    loaderRef     : 16,
+                        variantIndex  : 10,    // which function variant in table
+                        fvTableOffset : 36,    // vm offset of FunctionVariantTable from mach_header
+                        kind          :  2;
+        };
+        LoaderAndOffset          _regular;
+        LoaderAndFunctionVariant _funcVariant;
+        Absolute                 _abs;
+        uint64_t                 _raw;
     };
     static_assert(sizeof(BindTargetRef) == 8, "Invalid size");
 
@@ -194,7 +202,7 @@ public:
     bool                        overridesDylibInCache(const DylibPatch*& patchTable, uint16_t& cacheDylibOverriddenIndex) const;
     bool                        dyldDoesObjCFixups() const;
     const SectionLocations*     getSectionLocations() const;
-    void                        withLayout(Diagnostics &diag, RuntimeState& state, void (^callback)(const mach_o::Layout &layout)) const;
+    void                        withLayout(Diagnostics &diag, const RuntimeState& state, void (^callback)(const mach_o::Layout &layout)) const;
     // these are private "virtual" methods
     bool                        hasBeenFixedUp(RuntimeState&) const;
     bool                        beginInitializers(RuntimeState&);
@@ -223,7 +231,10 @@ public:
 
     static PrebuiltLoader*      makeCachedDylib(PrebuiltLoaderSet* dyldCacheLoaders, const MachOLoaded* ml, const char* path, size_t& size);
 
+    const ObjCBinaryInfo*       objCBinaryInfo() const;
+
 private:
+
     friend struct PrebuiltLoaderSet;
 
                                 PrebuiltLoader(const Loader& jitLoader);
@@ -232,7 +243,7 @@ private:
 
     // helper functions
     State&                      loaderState(const RuntimeState& state) const;
-    void                        map(Diagnostics& diag, RuntimeState& state, const LoadOptions& options) const;
+    void                        map(Diagnostics& diag, RuntimeState& state, const LoadOptions& options, bool parentIsPrebuilt) const;
 #if SUPPORT_VM_LAYOUT
     void                        setLoadAddress(RuntimeState& state, const MachOLoaded* ml) const;
 #else
@@ -242,7 +253,6 @@ private:
     const Array<BindTargetRef>  bindTargets() const;
     const Array<BindTargetRef>  overrideBindTargets() const;
     const FileValidationInfo*   fileValidationInfo() const;
-    const ObjCBinaryInfo*       objCBinaryInfo() const;
     void                        applyObjCFixups(RuntimeState& state) const;
     void                        printObjCFixups(RuntimeState& state, FILE* out) const;
     void                        invalidateInIsolation(const RuntimeState& state) const;
@@ -314,7 +324,7 @@ private:
     uint32_t    swiftTypeConformanceTableOffset;
     uint32_t    swiftMetadataConformanceTableOffset;
     uint32_t    swiftForeignTypeConformanceTableOffset;
-
+    uint32_t    padding1;
 
     // followed by PrebuiltLoader objects
 
@@ -350,12 +360,14 @@ struct ObjCBinaryInfo {
     uint64_t classListRuntimeOffset                = 0;
     uint64_t categoryListRuntimeOffset             = 0;
     uint64_t protocolListRuntimeOffset             = 0;
+    uint64_t protocolRefsRuntimeOffset             = 0;
 
     // Counts of the above sections.
     uint32_t selRefsCount                          = 0;
     uint32_t classListCount                        = 0;
     uint32_t categoryCount                         = 0;
     uint32_t protocolListCount                     = 0;
+    uint32_t protocolRefsCount                     = 0;
 
     // Do we have stable Swift fixups to apply to at least one class?
     bool     hasClassStableSwiftFixups             = false;
@@ -384,6 +396,10 @@ struct ObjCBinaryInfo {
     // Note we only fix up selector refs in the __objc_selrefs section, and in pointer-based method lists
     uint32_t selectorReferencesFixupsOffset         = 0;
     uint32_t selectorReferencesFixupsCount          = 0;
+    // Offset to an array of BindTargetRef's.  One for each protocol reference to fix up
+    // Note we only fix up selector refs in the __objc_protorefs section.
+    uint32_t protocolReferencesFixupsOffset         = 0;
+    uint32_t protocolReferencesFixupsCount          = 0;
 
     const Array<uint8_t> protocolFixups() const
     {
@@ -393,6 +409,11 @@ struct ObjCBinaryInfo {
     {
         return Array<PrebuiltLoader::BindTargetRef>((PrebuiltLoader::BindTargetRef*)((uint8_t*)this+selectorReferencesFixupsOffset),
                                                     selectorReferencesFixupsCount, selectorReferencesFixupsCount);
+    }
+    const Array<PrebuiltLoader::BindTargetRef> protocolReferenceFixups() const
+    {
+        return Array<PrebuiltLoader::BindTargetRef>((PrebuiltLoader::BindTargetRef*)((uint8_t*)this+protocolReferencesFixupsOffset),
+                                                    protocolReferencesFixupsCount, protocolReferencesFixupsCount);
     }
 };
 

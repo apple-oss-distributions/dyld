@@ -164,6 +164,31 @@ extern int macho_for_each_defined_rpath(const struct mach_header* _Nonnull mh, s
 SPI_AVAILABLE(macos(15.0), ios(18.0), tvos(18.0), watchos(11.0));
 
 
+/*!
+ * @function macho_source_version
+ *
+ * @abstract
+ *      Returns the source version from the LC_SOURCE_VERSION of a mach_header.
+ *      
+ *      The source version is encoded into a uint64_t value and supports up to 5 version components.
+ *      The version components A[.B[.C[.D[.E]]]] are encoded into bit: a24.b10.c10.d10.e10.
+ *      For example the version 1.0 is encoded as 0x100_0000_0000.
+ *
+ * @param mh
+ *      Pointer to a mach-o file/slice loaded into memory.
+ *
+ * @param version
+ *      A pointer to where to store the version if found)
+ *
+ *
+ * @return
+ *      Returns true on success and fills in the version.
+ *      If mh is not a mach_header or there is no LC_SOURCE_VERSION, then false will be returned.
+ */
+extern bool macho_source_version(const struct mach_header* _Nonnull mh, uint64_t* _Nonnull version)
+__SPI_AVAILABLE(macos(15.4), ios(18.4), tvos(18.4), watchos(11.4), visionos(2.4));
+
+
 #if __cplusplus
 }
 #endif

@@ -29,9 +29,6 @@
 #include <mach-o/fixup-chains.h>
 
 #include <span>
-#if BUILDING_MACHO_WRITER
-  #include <vector>
-#endif
 
 #include "Error.h"
 #include "Header.h"
@@ -70,6 +67,7 @@ public:
         virtual bool             supportsAuth() const = 0;
         virtual uint32_t         minNext() const = 0;   // aka stride, 4 or 8
         virtual uint32_t         maxNext() const = 0;   // max distance next chain entry could be
+        virtual uint32_t         ptrAlignmentSize() const; // minimum ptr alignment size for this format
         virtual uint64_t         maxRebaseTargetOffset(bool authenticated) const = 0;
         virtual bool             supportsBinds() const = 0;
         virtual uint32_t         maxBindOrdinal(bool authenticated) const = 0;
@@ -77,88 +75,40 @@ public:
         virtual int32_t          bindMinEmbeddableAddend(bool authenticated) const = 0;
         virtual const void*      nextLocation(const void* loc) const = 0;
         void                     forEachFixupLocationInChain(const void* chainStartLoc, uint64_t prefLoadAddr, const MappedSegment* seg,
-                                                             void (^callback)(const Fixup& info, bool& stop)) const;
-        virtual Fixup            parseChainEntry(const void* loc, const MappedSegment* seg, uint64_t preferedLoadAddress=0) const = 0;
-#if BUILDING_MACHO_WRITER
-        virtual void             writeChainEntry(const Fixup& fixup, const void* nextLoc, uint64_t preferedLoadAddress) const = 0;
-#endif
+                                                             std::span<const uint64_t> segOffsetTable, uint32_t pageIndex, uint32_t pageSize,
+                                                             void (^callback)(const Fixup& f, bool& stop)) const;
+        virtual Fixup            parseChainEntry(const void* loc, const MappedSegment* seg, uint64_t preferedLoadAddress=0, std::span<const uint64_t> segOffsetTable={}) const = 0;
+        virtual void             writeChainEntry(const Fixup& fixup, const void* nextLoc, uint64_t preferedLoadAddress, std::span<const MappedSegment*>) const;
 
     protected:
         constexpr                PointerFormat() { }
     };
 
-#if BUILDING_MACHO_WRITER
-
-    // Information we need to encode a single segment with chained fixups
-    struct SegmentFixupsInfo {
-        MappedSegment             mappedSegment;
-        std::span<const Fixup>    fixups;
-        uint32_t                  numPageExtras;
-    };
-
-#if BUILDING_UNIT_TESTS
-                    // used by unit tests to build chained fixups
-                    ChainedFixups(std::span<const Fixup::BindTarget> bindTargets,
-                                  std::span<const Fixup> fixups,
-                                  std::span<const MappedSegment> segments,
-                                  uint64_t preferredLoadAddress,
-                                  const PointerFormat& pf, uint32_t pageSize, bool setDataChains);
-#endif
-
-                    // used by Layout to build chained fixups
-                    ChainedFixups(std::span<const Fixup::BindTarget> bindTargets,
-                                  std::span<const SegmentFixupsInfo> segments,
-                                  uint64_t preferredLoadAddress,
-                                  const PointerFormat& pf, uint32_t pageSize, bool setDataChains);
-
-
-
-    static size_t           linkeditSize(std::span<const Fixup::BindTarget> bindTargets,
-                                         std::span<const SegmentFixupsInfo> segments,
-                                         uint32_t pageSize);
-
-    // Fills in the SegmentFixupsInfo::numPageExtras field for every segment with page extras
-    static void             calculateSegmentPageExtras(std::span<SegmentFixupsInfo> segments,
-                                                       const PointerFormat& pointerFormat,
-                                                       uint32_t pageSize);
-
-#endif
-
-    Error                   valid(uint64_t preferredLoadAddress, std::span<const MappedSegment> segments) const;
+    Error                   validLinkedit(uint64_t preferredLoadAddress, std::span<const MappedSegment> segments) const;
+    Error                   validStartsSection(std::span<const MappedSegment> segments) const;
+    Error                   valid(uint64_t preferredLoadAddress, std::span<const MappedSegment> segments, bool startsInSection=false) const;
     uint32_t                pageSize() const;
-    const PointerFormat&    pointerFormat() const;
     void                    forEachFixupChainStartLocation(std::span<const MappedSegment> segments,
-                                                           void (^callback)(const void* chainStart, uint32_t segIndex, const PointerFormat&, bool& stop)) const;
+                                                           void (^callback)(const void* chainStart, uint32_t segIndex, uint32_t pageIndex,
+                                                                            uint32_t pageSize, const PointerFormat&, bool& stop)) const;
     void                    forEachBindTarget(void (^callback)(const Fixup::BindTarget&, bool& stop)) const;
 
-    const dyld_chained_fixups_header*  bytes(size_t& size) const;
+    const dyld_chained_fixups_header*   linkeditHeader() const;
+    const dyld_chained_starts_offsets*  startsSectionHeader() const;
 
     static const char*      importsFormatName(uint32_t format);
     const char*             importsFormatName() const;
 
-
-#if !BUILDING_UNIT_TESTS
-private:
-#endif
-
     Error                                   forEachBindTarget(void (^callback)(int libOrdinal, const char* symbolName, int64_t addend, bool weakImport, bool& stop)) const;
     const dyld_chained_starts_in_segment*   startsForSegment(uint32_t segIndex) const;
-    static Error                            importsFormat(std::span<const Fixup::BindTarget> bindTargets, uint16_t& importsFormat, size_t& stringPoolSize);
 
-#if BUILDING_MACHO_WRITER
-    void                                    buildFixups(std::span<const Fixup::BindTarget> bindTargets,
-                                                        std::span<const SegmentFixupsInfo> segments,
-                                                        uint64_t preferredLoadAddress,
-                                                        const PointerFormat& pf, uint32_t pageSize, bool setDataChains);
-    static uint32_t                         addSymbolString(CString symbolName, std::vector<char>& pool);
-#endif
+    const dyld_chained_fixups_header*          _fixupsHeader      = nullptr;
+    const dyld_chained_starts_offsets*         _chainStartsHeader = nullptr;
+    size_t                                     _fixupsSize        = 0;
 
-    const dyld_chained_fixups_header*          _fixupsHeader = nullptr;
-    size_t                                     _fixupsSize   = 0;
-#if BUILDING_MACHO_WRITER
-    Error                                      _buildError;
-    std::vector<uint8_t>                       _bytes;
-#endif
+protected:
+    // For use only by ChainedFixupsWriter
+    ChainedFixups() = default;
  };
 
 

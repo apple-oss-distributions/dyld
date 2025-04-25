@@ -30,13 +30,19 @@
 
 namespace mach_o {
 
-const char* Fixup::keyName() const
+const char* Fixup::keyName(uint8_t keyNum)
 {
-    assert(authenticated);
+    assert(keyNum < 4);
     static const char* const names[] = {
         "IA", "IB", "DA", "DB"
     };
-    return names[this->auth.key];
+    return names[keyNum];
+}
+
+const char* Fixup::keyName() const
+{
+    assert(authenticated);
+    return keyName(this->auth.key);
 }
 
 bool Fixup::operator==(const Fixup& other) const

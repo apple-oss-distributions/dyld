@@ -95,17 +95,17 @@ public:
     };
 
     struct SegmentMappingInfo {
-        const void*     srcSegment;
-        const char*     segName;
-        uint8_t*        dstSegment;
-        uint64_t        dstCacheUnslidAddress;
-        uint32_t        dstCacheFileOffset;
-        uint32_t        dstCacheSegmentSize;
-        uint32_t        dstCacheFileSize;
-        uint32_t        copySegmentSize;
-        uint32_t        srcSegmentIndex;
+        const void*         srcSegment;
+        std::string_view    segName;
+        uint8_t*            dstSegment;
+        uint64_t            dstCacheUnslidAddress;
+        uint32_t            dstCacheFileOffset;
+        uint32_t            dstCacheSegmentSize;
+        uint32_t            dstCacheFileSize;
+        uint32_t            copySegmentSize;
+        uint32_t            srcSegmentIndex;
         // Used by the AppCacheBuilder to work out which one of the regions this segment is in
-        const Region*   parentRegion            = nullptr;
+        const Region*       parentRegion            = nullptr;
     };
 
     struct CoalescedSection

@@ -56,8 +56,9 @@ void CacheBuilder::copyRawSegments()
     forEachDylibInfo(^(const DylibInfo& dylib, Diagnostics& dylibDiag, cache_builder::ASLR_Tracker& dylibASLRTracker,
                        const CacheBuilder::DylibSectionCoalescer* sectionCoalescer) {
         for (const SegmentMappingInfo& info : dylib.cacheLocation) {
-            if (log) fprintf(stderr, "copy %s segment %15s (0x%08X bytes) from %p to %p (logical addr 0x%llX) for %s\n",
-                             _options.archs->name(), info.segName, info.copySegmentSize, info.srcSegment, info.dstSegment, info.dstCacheUnslidAddress, dylib.input->mappedFile.runtimePath.c_str());
+            if (log) fprintf(stderr, "copy %s segment %15.*s (0x%08X bytes) from %p to %p (logical addr 0x%llX) for %s\n",
+                             _options.archs->name(), (int)info.segName.size(), info.segName.data(),
+                             info.copySegmentSize, info.srcSegment, info.dstSegment, info.dstCacheUnslidAddress, dylib.input->mappedFile.runtimePath.c_str());
             ::memcpy(info.dstSegment, info.srcSegment, info.copySegmentSize);
         }
     });

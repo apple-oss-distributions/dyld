@@ -21,7 +21,6 @@
  * @APPLE_LICENSE_HEADER_END@
  */
 
-#include "Defines.h"
 #include "Error.h"
 #include "Platform.h"
 #include "Architecture.h"
@@ -38,15 +37,18 @@ namespace mach_o {
 // MARK: --- Policy methods ---
 //
 
-Policy::Policy(Architecture arch, PlatformAndVersions pvs, uint32_t filetype, bool pathMayBeInSharedCache, bool kernel)
+Policy::Policy(Architecture arch, PlatformAndVersions pvs, uint32_t filetype, bool pathMayBeInSharedCache, bool kernel, bool staticExec)
  : _featureEpoch(pvs.platform.epoch(pvs.minOS)), _enforcementEpoch(pvs.platform.epoch(pvs.sdk)),
-   _arch(arch), _pvs(pvs), _filetype(filetype), _pathMayBeInSharedCache(pathMayBeInSharedCache), _kernel(kernel)
+   _arch(arch), _pvs(pvs), _filetype(filetype), _pathMayBeInSharedCache(pathMayBeInSharedCache), _kernel(kernel), _staticExec(staticExec)
 {
 }
 
 bool Policy::dyldLoadsOutput() const
 {
     if ( _kernel )
+        return false;
+
+    if ( _staticExec )
         return false;
 
     switch (_filetype) {
@@ -72,13 +74,26 @@ Policy::Usage Policy::useBuildVersionLoadCommand() const
 {
     if ( _pvs.platform == Platform::bridgeOS )
         return Policy::mustUse;
+
+    // all arm64 variants are new and use LC_BUILD_VERSION
+    if ( _arch == Architecture::arm64 ) {
+        // except for pre-12.0 iOS and tvOS devices
+        if ( ((_pvs.platform == Platform::iOS) || (_pvs.platform == Platform::tvOS)) && (_featureEpoch < Platform::Epoch::fall2018) )
+            return Policy::mustNotUse;
+        return Policy::mustUse;
+    }
+
     return (_featureEpoch >= Platform::Epoch::fall2018) ? Policy::preferUse : Policy::mustNotUse;
 }
 
 Policy::Usage Policy::useDataConst() const
 {
+    if ( !dyldLoadsOutput() )
+        return Policy::preferDontUse;
+
     if ( _pvs.platform == Platform::firmware )
         return Policy::preferDontUse;
+
     return (_featureEpoch >= Platform::Epoch::fall2019) ? Policy::preferUse : Policy::mustNotUse;
 }
 
@@ -92,6 +107,13 @@ Policy::Usage Policy::useGOTforClassRefs() const
     return (_featureEpoch >= Platform::Epoch::fall2024) ? Policy::preferUse : Policy::mustNotUse;
 }
 
+Policy::Usage Policy::useConstInterpose() const
+{
+    if ( !dyldLoadsOutput() )
+        return Policy::preferDontUse;
+
+    return (_featureEpoch >= Platform::Epoch::fall2024) ? Policy::preferUse : Policy::mustNotUse;
+}
 
 Policy::Usage Policy::useChainedFixups() const
 {
@@ -246,11 +268,16 @@ Policy::Usage Policy::useDataConstForSelRefs() const
 
 Policy::Usage Policy::useSourceVersionLoadCommand() const
 {
-    // Only userland uses LC_SOURCE_VERSION
-    if ( !dyldLoadsOutput() )
-        return Policy::preferDontUse;
+    // objects/firmware don't use LC_SOURCE_VERSION
+    switch (_filetype) {
+        case MH_OBJECT:
+        case MH_PRELOAD:
+            return Policy::preferDontUse;
+        default:
+            break;
+    }
 
-    if ( _featureEpoch >= Platform::Epoch::fall2015 )
+    if ( _featureEpoch >= Platform::Epoch::fall2012 )
         return Policy::preferUse;
 
     return Policy::preferDontUse;
@@ -282,6 +309,10 @@ bool Policy::canUseDelayInit() const
     return ( _featureEpoch >= Platform::Epoch::fall2024 );
 }
 
+bool Policy::useProtectedStack() const
+{
+    return false;
+}
 
 // enforcements
 bool Policy::enforceReadOnlyLinkedit() const
@@ -326,7 +357,7 @@ bool Policy::enforceSectionsInSegment() const
 
 bool Policy::enforceHasLinkedDylibs() const
 {
-    return (_enforcementEpoch >= Platform::Epoch::fall2021);
+    return (_enforcementEpoch >= Platform::Epoch::spring2025);
 }
 
 bool Policy::enforceInstallNamesAreRealPaths() const
@@ -351,15 +382,32 @@ bool Policy::enforceNoDuplicateDylibs() const
 
 bool Policy::enforceNoDuplicateRPaths() const
 {
-    return (_enforcementEpoch >= Platform::Epoch::fall2024);
+    return (_enforcementEpoch >= Platform::Epoch::spring2025);
 }
 
 bool Policy::enforceDataSegmentPermissions() const
 {
+    return (_enforcementEpoch >= Platform::Epoch::fall2025);
+}
+
+bool Policy::enforceDataConstSegmentPermissions() const
+{
     // dylibs in shared region don't set SG_READ_ONLY because of __objc_const
     if ( _pathMayBeInSharedCache )
         return false;
-    return (_enforcementEpoch >= Platform::Epoch::fall2023);
+    return (_enforcementEpoch >= Platform::Epoch::spring2025);
+}
+
+bool Policy::enforceImageListRemoveMainExecutable() const
+{
+    // Old simulators add the main executable to all_image_info in the simulator process, not in the host
+    return (_enforcementEpoch <= Platform::Epoch::fall2022);
+}
+
+bool Policy::enforceSetSimulatorSharedCachePath() const
+{
+    // Old simulators do not correctly fill out the private cache fields in the all_image_info, so do it for them
+    return (_enforcementEpoch <= Platform::Epoch::fall2021);
 }
 
 

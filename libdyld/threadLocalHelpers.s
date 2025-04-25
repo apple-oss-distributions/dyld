@@ -51,15 +51,30 @@
 #define XMM7_SAVE_RSP			0x70
 
 
+// Note: dyld cache builder finds __tlv_get_addr as _tlv_bootstrap+8
+    .globl          __tlv_bootstrap
+#if TARGET_OS_DRIVERKIT
+    .private_extern __tlv_bootstrap
+#endif
+__tlv_bootstrap:
+    jmp   __tlv_bootstrap_error
+    nop
+    nop
+    nop
+
 	// returns address of TLV in %rax, all other registers preserved
-	.globl _tlv_get_addr
-	.private_extern _tlv_get_addr
-_tlv_get_addr:
-	movq	8(%rdi),%rax			// get key from descriptor
+	.globl          __tlv_get_addr
+	.private_extern __tlv_get_addr
+    .alt_entry      __tlv_get_addr
+__tlv_get_addr:
+	movl	8(%rdi),%eax			// get 32-bit key from descriptor (TLV_Thunkv2.key)
 	movq	%gs:0x0(,%rax,8),%rax	// get thread value
 	testq	%rax,%rax				// if NULL, lazily allocate
 	je		LlazyAllocate
-	addq	16(%rdi),%rax			// add offset from descriptor
+    pushq   %rdi
+    movl    12(%rdi),%edi           // load 32-bit offset from descriptor (TLV_Thunkv2.offset)
+	addq	%rdi,%rax               // add offset to allocation base
+    popq    %rdi
 	ret
 LlazyAllocate:
 	pushq		%rbp
@@ -136,8 +151,7 @@ Lz:	movq		%rcx, (%r8)
 
 Lalloc:
 	movq		RDI_SAVE_RBP(%rbp),%rdi
-	movq		8(%rdi),%rdi		        // get key from descriptor
-	call		_instantiateTLVs_thunk      // instantiateTLVs(key)
+    call        __ZN4dyld20ThreadLocalVariables19instantiateVariableERKNS0_5ThunkE  // ThreadLocalVariables::instantiateVariable(ThreadLocalVariables::Thunk&)
 
 	cmpl		$0, _hasXSave(%rip)
 	jne			Lxrstror
@@ -162,6 +176,8 @@ Lxrstror:
 
 Ldone:
 	movq		RDI_SAVE_RBP(%rbp),%rdi
+    movl        12(%rdi),%esi               // load 32-bit offset from descriptor (TLV_Thunkv2.offset)
+    addq        %rsi,%rax                   // add offset to allocation base
 	movq		RSI_SAVE_RBP(%rbp),%rsi
 	movq		RDX_SAVE_RBP(%rbp),%rdx
 	movq		RCX_SAVE_RBP(%rbp),%rcx
@@ -172,7 +188,6 @@ Ldone:
 	movq		R11_SAVE_RBP(%rbp),%r11
 	movq		%rbp,%rsp
 	popq		%rbp
- 	addq		16(%rdi),%rax			// result = buffer + offset
 	ret
 
 	.data
@@ -186,17 +201,28 @@ _hasXSave:			.long 0
 #endif // __x86_64__
 
 #if __arm64__
+
+    // Note: dyld cache builder finds __tlv_get_addr as _tlv_bootstrap+8
+    .globl          __tlv_bootstrap
+#if TARGET_OS_DRIVERKIT
+    .private_extern __tlv_bootstrap
+#endif
+__tlv_bootstrap:
+    b   __tlv_bootstrap_error
+    nop
+
 	// Parameters: X0 = descriptor
 	// Result:  X0 = address of TLV
 	// Note: all registers except X0, x16, and x17 are preserved
 	.align 2
-	.globl _tlv_get_addr
-	.private_extern _tlv_get_addr
-_tlv_get_addr:
+    .globl          __tlv_get_addr
+    .private_extern __tlv_get_addr
+    .alt_entry      __tlv_get_addr
+__tlv_get_addr:
 #if __LP64__
-	ldr		x16, [x0, #8]			// get key from descriptor
+	ldr		w16, [x0, #8]			// get key from descriptor (TLV_Thunkv2.key)
 #else
-	ldr		w16, [x0, #4]			// get key from descriptor
+	ldrh    w16, [x0, #4]			// get key from descriptor (TLV_Thunkv2_32.key)
 #endif
 #if !TARGET_OS_EXCLAVEKIT
 	mrs		x17, TPIDRRO_EL0
@@ -208,9 +234,9 @@ _tlv_get_addr:
 #endif
 	cbz		x17, LlazyAllocate		// if NULL, lazily allocate
 #if __LP64__
-	ldr		x16, [x0, #16]			// get offset from descriptor
+	ldr		w16, [x0, #12]			// get offset from descriptor (TLV_Thunkv2.offset)
 #else
-	ldr		w16, [x0, #8]			// get offset from descriptor
+	ldrh 	w16, [x0, #6]			// get offset from descriptor (TLV_Thunkv2_32.offset)
 #endif
 	add		x0, x17, x16			// return allocation+offset
 	ret		lr
@@ -237,13 +263,12 @@ LlazyAllocate:
 	stp		q6,  q7,  [sp, #-32]!
 	stp		x0, x17,  [sp, #-16]!	// save descriptor
 
-	mov		x0, x16					// use key from descriptor as parameter
-	bl		_instantiateTLVs_thunk  // instantiateTLVs(key)
+	bl		__ZN4dyld20ThreadLocalVariables19instantiateVariableERKNS0_5ThunkE  // ThreadLocalVariables::instantiateVariable(ThreadLocalVariables::Thunk&)
 	ldp		x16, x17, [sp], #16		// pop descriptor
 #if __LP64__
-	ldr		x16, [x16, #16]			// get offset from descriptor
+	ldr		w16, [x16, #12]			// get offset from descriptor (TLV_Thunkv2.offset)
 #else
-	ldr		w16, [x16, #8]			// get offset from descriptor
+	ldrh	w16, [x16, #6]			// get offset from descriptor (TLV_Thunkv2_32.offset)
 #endif
 	add		x0, x0, x16				// return allocation+offset
 
@@ -270,18 +295,28 @@ LlazyAllocate:
 
 #endif // __arm64__
 
-
-
+#if !TARGET_OS_EXCLAVEKIT
      // dyld_stub_binder is no longer used, but needed by old binaries to link
     .align 4
     .globl dyld_stub_binder
 dyld_stub_binder:
 #if __x86_64__
-    jmp __dyld_missing_symbol_abort
+    jmp _abort
 #else
-    b   __dyld_missing_symbol_abort
+    b   _abort
+#endif
 #endif
 
+    // debug builds of libc++ headers generate calls to libcpp_verbose_abort()
+#if DEBUG
+    .private_extern __ZNSt3__122__libcpp_verbose_abortEPKcz
+__ZNSt3__122__libcpp_verbose_abortEPKcz:
+#if __x86_64__
+    jmp _abort_report_np
+#else
+    b   _abort_report_np
+#endif
+#endif // DEBUG
 
 
 	.subsections_via_symbols

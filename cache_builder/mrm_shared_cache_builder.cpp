@@ -52,19 +52,21 @@ static const uint64_t kMinBuildVersion = 1; //The minimum version BuildOptions s
 static const uint64_t kMaxBuildVersion = 3; //The maximum version BuildOptions struct we can support
 
 static const uint32_t MajorVersion = 1;
-static const uint32_t MinorVersion = 6;
+static const uint32_t MinorVersion = 7;
 
 struct BuildInstance {
     std::unique_ptr<cache_builder::BuilderOptions>  options;
     std::vector<cache_builder::FileAlias>           aliases;
     std::vector<cache_builder::FileAlias>           intermediateAliases;
     std::string                                     mainCacheFilePath;
+    std::string                                     atlasPath;
     std::vector<const char*>                        errors;
     std::vector<const char*>                        warnings;
     std::vector<std::string>                        errorStrings;   // Owns the data for the errors
     std::vector<std::string>                        warningStrings; // Owns the data for the warnings
     std::vector<CacheBuffer>                        cacheBuffers;
     std::vector<std::string>                        cachePaths;     // Owns the data for the cache paths
+    std::vector<std::byte>                          atlas;
     std::string                                     loggingPrefix;
     std::string                                     jsonMap;
     std::string                                     mainCacheUUID;
@@ -114,6 +116,7 @@ struct MRMSharedCacheBuilder {
     std::string swiftGenericMetadataFileData;
     void* objcOptimizationsFileData;
     size_t objcOptimizationsFileLength;
+    std::string prewarmingMetadataFileData;
 
     // An array of builders and their options as we may have more than one builder for a given device variant.
     std::vector<BuildInstance> builders;
@@ -178,7 +181,7 @@ struct MRMSharedCacheBuilder {
         va_list list;
         va_start(list, format);
         Diagnostics diag;
-        diag.error(format, list);
+        diag.error(format, va_list_wrap(list));
         va_end(list);
 
         errorStorage.push_back(diag.errorMessage());
@@ -190,7 +193,7 @@ struct MRMSharedCacheBuilder {
         va_list list;
         va_start(list, format);
         Diagnostics diag;
-        diag.error(format, list);
+        diag.error(format, va_list_wrap(list));
         va_end(list);
 
         warningsStorage.push_back(diag.errorMessage());
@@ -299,6 +302,42 @@ static bool addFileImpl(struct MRMSharedCacheBuilder* builder, const char* path,
                 builder->swiftGenericMetadataFileData = std::string((char*)data, size);
                 success = true;
                 return;
+            case OptimizationFile: {
+                // TODO: Remove DylibOrderFile..SwiftGenericMetadataFile once image assembly
+                // passes this for all files from the OrderFiles project
+                CString leafName = CString(path).leafName();
+                if ( leafName == "dylib-order.txt" ) {
+                    builder->dylibOrderFileData = std::string((char*)data, size);
+                    success = true;
+                    return;
+                }
+                if ( leafName == "dirty-data-segments-order.txt" ) {
+                    builder->dirtyDataOrderFileData = std::string((char*)data, size);
+                    success = true;
+                    return;
+                }
+                if ( leafName == "shared-cache-objc-optimizations.json" ) {
+                    builder->objcOptimizationsFileData = data;
+                    builder->objcOptimizationsFileLength = size;
+                    success = true;
+                    return;
+                }
+                if ( leafName == "swift-generic-metadata.json" ) {
+                    builder->swiftGenericMetadataFileData = std::string((char*)data, size);
+                    success = true;
+                    return;
+                }
+                if ( leafName == "prewarming-metadata.json" ) {
+                    builder->prewarmingMetadataFileData = std::string((char*)data, size);
+                    success = true;
+                    return;
+                }
+                // Skip this file as image assembly will probably just give us all files in a given
+                // directory and that might include new/unrelated content
+                builder->warning("unknown optimization file path: %s", path);
+                success = true;
+                return;
+            }
             default:
                 builder->error("unknown file flags value");
                 break;
@@ -355,7 +394,7 @@ bool addSymlink(struct MRMSharedCacheBuilder* builder, const char* fromPath, con
 }
 
 static cache_builder::LocalSymbolsMode platformExcludeLocalSymbols(Platform platform) {
-    if ( dyld3::MachOFile::isSimulatorPlatform((dyld3::Platform)platform) )
+    if ( mach_o::Platform((uint32_t)platform).isSimulator() )
         return cache_builder::LocalSymbolsMode::keep;
     if ( (platform == Platform::macOS) || (platform == Platform::iOSMac) )
         return cache_builder::LocalSymbolsMode::keep;
@@ -427,10 +466,10 @@ static bool printStats(const BuildOptions_v1* options) {
 
 // This is a JSON file containing the list of classes for which
 // we should try to build IMP caches.
-static dyld3::json::Node parseObjcOptimizationsFile(Diagnostics& diags, const void* data, size_t length) {
+static json::Node parseObjcOptimizationsFile(Diagnostics& diags, const void* data, size_t length) {
     if ( data == nullptr )
-        return dyld3::json::Node();
-    return dyld3::json::readJSON(diags, data, length);
+        return json::Node();
+    return json::readJSON(diags, data, length, false /* useJSON5 */);
 }
 
 static cache_builder::CacheKind getCacheKind(const BuildOptions_v1* options)
@@ -438,11 +477,11 @@ static cache_builder::CacheKind getCacheKind(const BuildOptions_v1* options)
     // Work out what kind of cache we are building.  macOS/driverKit/exclaveKit are always development
     if (   (options->platform == macOS)
         || (options->platform == driverKit)
-        || dyld3::MachOFile::isExclaveKitPlatform((dyld3::Platform)options->platform) )
+        || mach_o::Platform(options->platform).isExclaveKit() )
         return cache_builder::CacheKind::development;
 
     // Sims are always development
-    if ( dyld3::MachOFile::isSimulatorPlatform((dyld3::Platform)options->platform) )
+    if ( mach_o::Platform(options->platform).isSimulator() )
         return cache_builder::CacheKind::development;
 
     // iOS is always universal. If building for InternalMinDevelopment, we'll build universal
@@ -500,6 +539,14 @@ static bool shouldEmitCustomerCache(const BuildOptions_v1* options)
     return true;
 }
 
+static std::string cacheFileName(const char* arch, bool isSimulator) {
+    if ( isSimulator ) {
+        return std::string("dyld_sim_shared_cache_") + arch;
+    } else {
+        return std::string("dyld_shared_cache_") + arch;
+    }
+}
+
 static bool createBuilders(struct MRMSharedCacheBuilder* builder)
 {
     if (builder->state != MRMSharedCacheBuilder::AcceptingFiles) {
@@ -534,7 +581,7 @@ static bool createBuilders(struct MRMSharedCacheBuilder* builder)
         const char *loggingSuffix = "";
         if ( builder->options->platform == Platform::driverKit )
             loggingSuffix = ".driverKit";
-        if ( dyld3::MachOFile::isExclaveKitPlatform((dyld3::Platform)builder->options->platform) )
+        if ( mach_o::Platform(builder->options->platform).isExclaveKit() )
             loggingSuffix = ".exclaveKit";
 
         std::string loggingPrefix = "";
@@ -543,20 +590,22 @@ static bool createBuilders(struct MRMSharedCacheBuilder* builder)
         loggingPrefix += std::string(".") + builder->options->archs[i];
         loggingPrefix += loggingSuffix;
 
+        std::string mainCacheFileName;
         std::string runtimePath;
-        if ( dyld3::MachOFile::isSimulatorPlatform((dyld3::Platform)builder->options->platform) ) {
+        if ( mach_o::Platform(builder->options->platform).isSimulator() ) {
             // Sim caches are written exactly where instructed, without adding any directory structure
-            runtimePath = runtimePath + "dyld_sim_shared_cache_" + builder->options->archs[i];
+            mainCacheFileName = cacheFileName(builder->options->archs[i], true);
+            runtimePath = mainCacheFileName;
         } else {
+            mainCacheFileName = cacheFileName(builder->options->archs[i], false);
             if ( builder->options->platform == Platform::macOS )
-                runtimePath = MACOSX_MRM_DYLD_SHARED_CACHE_DIR;
+                runtimePath = MACOSX_MRM_DYLD_SHARED_CACHE_DIR + mainCacheFileName;
             else if ( builder->options->platform == Platform::driverKit )
-                runtimePath = DRIVERKIT_DYLD_SHARED_CACHE_DIR;
-            else if ( dyld3::MachOFile::isExclaveKitPlatform((dyld3::Platform)builder->options->platform) )
-                runtimePath = EXCLAVEKIT_DYLD_SHARED_CACHE_DIR;
+                runtimePath = DRIVERKIT_DYLD_SHARED_CACHE_DIR + mainCacheFileName;
+            else if ( mach_o::Platform(builder->options->platform).isExclaveKit() )
+                runtimePath = EXCLAVEKIT_DYLD_SHARED_CACHE_DIR + mainCacheFileName;
             else
-                runtimePath = IPHONE_DYLD_SHARED_CACHE_DIR;
-            runtimePath = runtimePath + "dyld_shared_cache_" + builder->options->archs[i];
+                runtimePath = IPHONE_DYLD_SHARED_CACHE_DIR + mainCacheFileName;
         }
 
         bool dylibsRemovedFromDisk  = filesRemovedFromDisk(builder->options);
@@ -574,10 +623,11 @@ static bool createBuilders(struct MRMSharedCacheBuilder* builder)
             forceDevelopmentSubCacheSuffix = true;
 
         auto options = std::make_unique<cache_builder::BuilderOptions>(builder->options->archs[i],
-                                                                       (dyld3::Platform)builder->options->platform,
+                                                                       builder->options->platform,
                                                                        dylibsRemovedFromDisk, isLocallyBuiltCache,
                                                                        cacheKind, forceDevelopmentSubCacheSuffix);
 
+        options->mainCacheFileName           = mainCacheFileName;
         options->logPrefix                   = loggingPrefix;
         options->debug                       = builder->options->verboseDiagnostics;
         options->timePasses                  = options->debug ? true : timePasses(builder->options);
@@ -588,12 +638,14 @@ static bool createBuilders(struct MRMSharedCacheBuilder* builder)
                                                                           builder->objcOptimizationsFileLength);
         options->localSymbolsMode            = excludeLocalSymbols(builder->options);
         options->swiftGenericMetadataFile    = builder->swiftGenericMetadataFileData;
+        options->prewarmingOptimizations     = builder->prewarmingMetadataFileData;
 
         BuildInstance buildInstance;
         buildInstance.options               = std::move(options);
         buildInstance.aliases               = aliases;
         buildInstance.intermediateAliases   = intermediateAliases;
         buildInstance.mainCacheFilePath     = runtimePath;
+        buildInstance.atlasPath             = runtimePath + ".atlas";
 
         builder->builders.push_back(std::move(buildInstance));
     }
@@ -628,6 +680,7 @@ static void runBuilders(struct MRMSharedCacheBuilder* builder)
                     case FileFlags::DirtyDataOrderFile:
                     case FileFlags::ObjCOptimizationsFile:
                     case FileFlags::SwiftGenericMetadataFile:
+                    case FileFlags::OptimizationFile:
                         builder->error("Order files should not be in the file system");
                         return;
                 }
@@ -641,7 +694,7 @@ static void runBuilders(struct MRMSharedCacheBuilder* builder)
             error = cacheBuilder->build();
 
             // Get result buffers, even if there's an error.  That way we'll free them
-            cacheBuilder->getResults(buildInstance.cacheBuffers);
+            cacheBuilder->getResults(buildInstance.cacheBuffers, buildInstance.atlas);
 
             if ( !error.hasError() )
                 break;
@@ -747,8 +800,8 @@ static void runBuilders(struct MRMSharedCacheBuilder* builder)
                 return true;
             });
 
-            if ( (buildInstance.options->platform == dyld3::Platform::macOS)
-                || dyld3::MachOFile::isSimulatorPlatform(buildInstance.options->platform) ) {
+            if ( (buildInstance.options->platform == Platform::macOS)
+                || buildInstance.options->platform.isSimulator() ) {
                 // For compatibility with update_dyld_shared_cache/update_dyld_sim_shared_cache, put a .map file next to the shared cache
                 buildInstance.macOSMap = cacheBuilder->getMapFileBuffer();
                 buildInstance.macOSMapPath = buildInstance.mainCacheFilePath + ".map";
@@ -888,6 +941,34 @@ static void createBuildResults(struct MRMSharedCacheBuilder* builder)
             ++cacheIndex;
         }
 
+#if SUPPORT_CACHE_BUILDER_MEMORY_BUFFERS
+        FileResult_v1 arlasFileResult;
+        arlasFileResult.version     = 1;
+        arlasFileResult.path        = buildInstance.atlasPath.c_str();
+        arlasFileResult.behavior    = AddFile;
+        arlasFileResult.data        = (const uint8_t*)&buildInstance.atlas[0];
+        arlasFileResult.size        = buildInstance.atlas.size();
+        arlasFileResult.hashArch    = buildInstance.options->archs.name();
+        arlasFileResult.hashType    = buildInstance.cdHashType.c_str();
+        arlasFileResult.hash        = buildInstance.cacheBuffers.front().cdHash.c_str();;
+
+        builder->fileResultStorage_v1.emplace_back(arlasFileResult);
+#else
+        FileResult_v2 arlasFileResult;
+        arlasFileResult.version          = 2;
+        arlasFileResult.path             = buildInstance.atlasPath.c_str();
+        arlasFileResult.behavior         = AddFile;
+        arlasFileResult.data             = (const uint8_t*)&buildInstance.atlas[0];
+        arlasFileResult.size             = buildInstance.atlas.size();
+        arlasFileResult.hashArch         = buildInstance.options->archs.name();
+        arlasFileResult.hashType         = buildInstance.cdHashType.c_str();
+        arlasFileResult.hash             = buildInstance.cacheBuffers.front().cdHash.c_str();
+        arlasFileResult.fd               = 0;
+        arlasFileResult.tempFilePath     = nullptr;
+
+        builder->fileResultStorage_v2.emplace_back(arlasFileResult);
+#endif
+
         // Add a file result for the .map file
         // FIXME: We only emit a single map file right now.
         if ( !buildInstance.macOSMap.empty() ) {
@@ -924,10 +1005,6 @@ static void createBuildResults(struct MRMSharedCacheBuilder* builder)
 
 static void calculateDylibsToDelete(struct MRMSharedCacheBuilder* builder)
 {
-    // Keep ExclaveKit binaries on disk, remove that exception later (rdar://112851136)
-    if ( dyld3::MachOFile::isExclaveKitPlatform((dyld3::Platform)builder->options->platform) )
-        return;
-
     // Add entries to tell us to remove all of the dylibs from disk which are in every cache.
     const size_t numCaches = builder->builders.size();
     for (const auto& dylibAndCount : builder->dylibsInCaches) {
@@ -979,9 +1056,10 @@ static void calculateDylibsToDelete(struct MRMSharedCacheBuilder* builder)
                 Diagnostics loaderDiag;
                 const bool  isOSBinary = false;
                 const dyld3::GradedArchs& archs = buildInstance.options->archs;
-                dyld3::Platform platform = buildInstance.options->platform;
+                mach_o::Platform platform = buildInstance.options->platform;
+                uint64_t sliceOffset = 0;
                 uint64_t sliceSize = 0;
-                if ( const auto* mf = dyld3::MachOFile::compatibleSlice(loaderDiag, sliceSize, buffer, bufferSize,
+                if ( const auto* mf = dyld3::MachOFile::compatibleSlice(loaderDiag, sliceOffset, sliceSize, buffer, bufferSize,
                                                                         pathToRemove, platform,
                                                                         isOSBinary, archs) ) {
                     // This arch was compatible, so the dylib was rejected from this cache for some other reason, eg,
@@ -993,11 +1071,11 @@ static void calculateDylibsToDelete(struct MRMSharedCacheBuilder* builder)
                 }
 
                 // Check iOSMac, just in case we couldn't load the slice on macOS
-                if ( (platform == dyld3::Platform::macOS) && loaderDiag.hasError() ) {
+                if ( (platform == mach_o::Platform::macOS) && loaderDiag.hasError() ) {
                     loaderDiag.clearError();
 
-                    if ( const auto* mf = dyld3::MachOFile::compatibleSlice(loaderDiag, sliceSize, buffer, bufferSize,
-                                                                            pathToRemove, dyld3::Platform::iOSMac,
+                    if ( const auto* mf = dyld3::MachOFile::compatibleSlice(loaderDiag, sliceOffset, sliceSize, buffer, bufferSize,
+                                                                            pathToRemove, mach_o::Platform::macCatalyst,
                                                                             isOSBinary, archs) ) {
                         // This arch was compatible, so the dylib was rejected from this cache for some other reason, eg,
                         // cache overflow.  We need to keep it on-disk
@@ -1033,14 +1111,28 @@ static bool runSymbolsCacheBuilder(struct MRMSharedCacheBuilder* builder) {
                         if ( pvs.platform.empty() )
                             return;
 
-                        // HACK: Pretend zippered are macOS, so that the database doesn't have to care about zippering
-                        mach_o::Platform platform;
-                        if ( (pvs.platform == mach_o::Platform::zippered) || (pvs.platform == mach_o::Platform::macCatalyst) )
-                            platform = mach_o::Platform::macOS;
-                        else
-                            platform = pvs.platform;
+                        archPlatforms[mh->archName()].push_back(pvs.platform);
+                    });
+                    if ( parseErr ) {
+                        builder->error("Cannot build symbols cache because: %s", parseErr.message());
+                    }
+                }
+            });
+        } else if ( mach_o::Platform(builder->options->platform).isExclaveKit() ) {
+            // Note Image Assembly might not know which archs/platforms to build as a single DylibCache could
+            // have different archs for different platforms, like userland vs driverKit vs exclaves.
+            builder->fileSystem.forEachFileInfo(^(const char* path, const void* buffer, size_t bufferSize,
+                                                  FileFlags fileFlags, uint64_t inode, uint64_t modTime,
+                                                  const char* projectName) {
+                if ( !strcmp(path, "/System/ExclaveKit/usr/lib/libSystem.dylib") ) {
+                    const std::span<uint8_t> bufferSpan = { (uint8_t*)buffer, bufferSize };
+                    mach_o::Error parseErr = mach_o::forEachHeader(bufferSpan, path,
+                                                                   ^(const mach_o::Header* mh, size_t sliceHeader, bool &stop) {
+                        mach_o::PlatformAndVersions pvs = mh->platformAndVersions();
+                        if ( pvs.platform.empty() )
+                            return;
 
-                        archPlatforms[mh->archName()].push_back(platform);
+                        archPlatforms[mh->archName()].push_back(pvs.platform);
                     });
                     if ( parseErr ) {
                         builder->error("Cannot build symbols cache because: %s", parseErr.message());
@@ -1056,7 +1148,8 @@ static bool runSymbolsCacheBuilder(struct MRMSharedCacheBuilder* builder) {
                 if ( !strcmp(path, "/usr/lib/libSystem.dylib")
                     || !strcmp(path, "/usr/lib/libSystem.B.dylib")
                     || !strcmp(path, "/System/DriverKit/usr/lib/libSystem.dylib")
-                    || !strcmp(path, "/System/DriverKit/usr/lib/libSystem.B.dylib") ) {
+                    || !strcmp(path, "/System/DriverKit/usr/lib/libSystem.B.dylib")
+                    || !strcmp(path, "/System/ExclaveKit/usr/lib/libSystem.dylib") ) {
                     const std::span<uint8_t> bufferSpan = { (uint8_t*)buffer, bufferSize };
                     mach_o::Error parseErr = mach_o::forEachHeader(bufferSpan, path,
                                                                    ^(const mach_o::Header* mh, size_t sliceHeader, bool &stop) {
@@ -1104,6 +1197,7 @@ static bool runSymbolsCacheBuilder(struct MRMSharedCacheBuilder* builder) {
                 case FileFlags::DirtyDataOrderFile:
                 case FileFlags::ObjCOptimizationsFile:
                 case FileFlags::SwiftGenericMetadataFile:
+                case FileFlags::OptimizationFile:
                     builder->error("Order files should not be in the file system");
                     return;
             }
@@ -1153,6 +1247,8 @@ static bool runSymbolsCacheBuilder(struct MRMSharedCacheBuilder* builder) {
         const char* resultPath = MACOSX_MRM_DYLD_SHARED_CACHE_DIR "dyld_symbols.db";;
         if ( builder->options->platform == driverKit )
             resultPath = DRIVERKIT_DYLD_SHARED_CACHE_DIR "dyld_symbols.db";
+        else if ( mach_o::Platform(builder->options->platform).isExclaveKit() )
+            resultPath = EXCLAVEKIT_DYLD_SHARED_CACHE_DIR "dyld_symbols.db";
 
 #if SUPPORT_CACHE_BUILDER_MEMORY_BUFFERS
         FileResult_v1 cacheFileResult;

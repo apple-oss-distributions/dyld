@@ -34,8 +34,6 @@
 #include "DyldAPIs.h"
 #include "FileManager.h"
 
-using dyld4::gDyld;
-
 #define NO_ULEB
 #include "FileAbstraction.hpp"
 #include "MachOFileAbstraction.hpp"
@@ -49,45 +47,110 @@ using dyld4::Atlas::Image;
 using dyld4::Atlas::ProcessSnapshot;
 #if BUILDING_LIBDYLD
 using dyld4::Atlas::Process;
+#include "DyldLegacyInterfaceGlue.h"
+namespace dyld4 {
+    extern class APIs* gAPIs;
+}
+using dyld4::gAPIs;
 #endif
 
 
+#if BUILDING_DYLD
+FileManager& defaultFileManager();
+#else
 static
 FileManager& defaultFileManager() {
-#if BUILDING_DYLD
-    return gDyld.apis->fileManager;
-#else
     static FileManager* sFileManager = nullptr;
     static dispatch_once_t onceToken;
     dispatch_once(&onceToken, ^{
-        sFileManager = Allocator::defaultAllocator().makeUnique<FileManager>(Allocator::defaultAllocator(), nullptr).release();
+        sFileManager =  dyld4::MemoryManager::memoryManager().defaultAllocator().makeUnique<FileManager>(dyld4::MemoryManager::memoryManager().defaultAllocator(), nullptr).release();
     });
     return *sFileManager;
-#endif /* BUILDING_DYLD */
 }
+#endif /* !BUILDING_DYLD */
 
 // This file is essentially glue to bind the public API/SPI to the internal object representations.
 // No significant implementation code should be present in this file
 
 #if BUILDING_LIBDYLD
+#include <libgen.h>
+extern int _NSGetExecutablePath(char* buf, uint32_t* bufsize);
+IntrospectionVtable* dyldFrameworkIntrospectionVtable() {
+    static IntrospectionVtable* vtable = nullptr;
+    static dispatch_once_t onceToken;
+    dispatch_once(&onceToken, ^{
+        bool useAtlas = true;
+        char pathBuffer[4096];
+        uint32_t legnth = 4096;
+        _NSGetExecutablePath(&pathBuffer[0], &legnth);
+        const char* baseName = basename(pathBuffer);
+
+        if ((strcmp(baseName, "ReportCrash") == 0)
+            || (strcmp(baseName, "sandboxd") == 0)
+            || (strcmp(baseName, "com.apple.dt.instruments.dtsecurity") == 0)
+            || (strcmp(baseName, "DTServiceHub") == 0)
+            || (strcmp(baseName, "trace") == 0)
+            || (strcmp(baseName, "trace_internal") == 0)) {
+            useAtlas = false;
+        }
+#if !TARGET_OS_EXCLAVEKIT
+        // Check boot-args after builtin overrides so they take precedence
+        if (gAPIs->_dyld_commpage().disableAtlasUsage) {
+            useAtlas = false;
+        }
+        // CHheck enablement secons so that if both  disable and enable bits are set it defaults to enabled
+        if (gAPIs->_dyld_commpage().enableAtlasUsage) {
+            useAtlas = true;
+        }
+#endif
+        if (!useAtlas) {
+            return;
+        }
+        // We want to use the atlas, so try to open up Dyld.framework
+        void* handle = dlopen("/System/Library/PrivateFrameworks/Dyld.framework/Dyld", RTLD_LOCAL);
+#if TARGET_OS_OSX
+        // One OS X with versioned paths if the library is not n the cache the symlink will be in
+        // base system and the dylib will be in the cryptex which will result in the above dlopen()
+        // failing. Once this gets through a single build and is in the cache that will be never be an issue
+        //FIXME: We can remove this after the first submission, once the paths have been added
+        if (!handle) {
+            handle = dlopen("/System/Library/PrivateFrameworks/Dyld.framework/Versions/A/Dyld", RTLD_LOCAL);
+        }
+#endif
+        vtable = (IntrospectionVtable*)dlsym(handle, "_dyld_legacy_introspection_vtable");
+    });
+    return vtable;
+}
 
 #pragma mark -
 #pragma mark Process
 
 dyld_process_t dyld_process_create_for_task(task_t task, kern_return_t *kr) {
-    return (dyld_process_t)Allocator::defaultAllocator().makeUnique<Process>(Allocator::defaultAllocator(), defaultFileManager(), task, kr).release();
+    if ( const IntrospectionVtable* vtable = dyldFrameworkIntrospectionVtable() ) {
+        return vtable->dyld_process_create_for_task(task, kr);
+    }
+    return (dyld_process_t)dyld4::MemoryManager::memoryManager().defaultAllocator().makeUnique<Process>(dyld4::MemoryManager::memoryManager().defaultAllocator(), defaultFileManager(), task, kr).release();
 }
 
 dyld_process_t dyld_process_create_for_current_task() {
+    if ( const IntrospectionVtable* vtable = dyldFrameworkIntrospectionVtable() ) {
+        return vtable->dyld_process_create_for_current_task();
+    }
     return dyld_process_create_for_task(mach_task_self(), nullptr);
 }
 
 void dyld_process_dispose(dyld_process_t process) {
+    if ( const IntrospectionVtable* vtable = dyldFrameworkIntrospectionVtable() ) {
+        return vtable->dyld_process_dispose(process);
+    }
     UniquePtr<Process> temp((Process*)process);
 }
 
 uint32_t dyld_process_register_for_image_notifications(dyld_process_t process, kern_return_t *kr,
                                                        dispatch_queue_t queue, void (^block)(dyld_image_t image, bool load)) {
+    if ( const IntrospectionVtable* vtable = dyldFrameworkIntrospectionVtable() ) {
+        return vtable->dyld_process_register_for_image_notifications(process, kr, queue, block);
+    }
     kern_return_t krSink = KERN_SUCCESS;
     if (kr == nullptr) {
         kr = &krSink;
@@ -98,6 +161,9 @@ uint32_t dyld_process_register_for_image_notifications(dyld_process_t process, k
 
 uint32_t dyld_process_register_for_event_notification(dyld_process_t process, kern_return_t *kr, uint32_t event,
                                                       dispatch_queue_t queue, void (^block)()) {
+    if ( const IntrospectionVtable* vtable = dyldFrameworkIntrospectionVtable() ) {
+        return vtable->dyld_process_register_for_event_notification(process, kr, event, queue, block);
+    }
     kern_return_t krSink = KERN_SUCCESS;
     if (kr == nullptr) {
         kr = &krSink;
@@ -106,6 +172,9 @@ uint32_t dyld_process_register_for_event_notification(dyld_process_t process, ke
 }
 
 void dyld_process_unregister_for_notification(dyld_process_t process, uint32_t handle) {
+    if ( const IntrospectionVtable* vtable = dyldFrameworkIntrospectionVtable() ) {
+        return vtable->dyld_process_unregister_for_notification(process, handle);
+    }
     ((dyld4::Atlas::Process*)process)->unregisterEventHandler(handle);
 }
 
@@ -113,21 +182,30 @@ void dyld_process_unregister_for_notification(dyld_process_t process, uint32_t h
 #pragma mark Process Snaphsot
 
 dyld_process_snapshot_t dyld_process_snapshot_create_for_process(dyld_process_t process, kern_return_t *kr) {
+    if ( const IntrospectionVtable* vtable = dyldFrameworkIntrospectionVtable() ) {
+        return vtable->dyld_process_snapshot_create_for_process(process, kr);
+    }
     return (dyld_process_snapshot_t)((Process*)process)->getSnapshot(kr).release();
 }
 
 dyld_process_snapshot_t dyld_process_snapshot_create_from_data(void* buffer, size_t size, void* reserved1, size_t reserved2) {
+    if ( const IntrospectionVtable* vtable = dyldFrameworkIntrospectionVtable() ) {
+        return vtable->dyld_process_snapshot_create_from_data(buffer, size, reserved1, reserved2);
+    }
     // Make sure no one uses the reserved parameters
     assert(reserved1 == nullptr);
     assert(reserved2 == 0);
     STACK_ALLOCATOR(ephemeralAllocator, 0);
     auto bytes = std::span((std::byte*)buffer, size);
-    return (dyld_process_snapshot_t)Allocator::defaultAllocator()
+    return (dyld_process_snapshot_t)dyld4::MemoryManager::memoryManager().defaultAllocator()
                                 .makeUnique<ProcessSnapshot>(ephemeralAllocator, defaultFileManager(), false, bytes).release();
 }
 
 
 void dyld_process_snapshot_dispose(dyld_process_snapshot_t snapshot) {
+    if ( const IntrospectionVtable* vtable = dyldFrameworkIntrospectionVtable() ) {
+        return vtable->dyld_process_snapshot_dispose(snapshot);
+    }
     ProcessSnapshot* processSnapshot = (ProcessSnapshot*)snapshot;
     if ( !processSnapshot->valid() )
         return;
@@ -135,6 +213,9 @@ void dyld_process_snapshot_dispose(dyld_process_snapshot_t snapshot) {
 }
 
 void dyld_process_snapshot_for_each_image(dyld_process_snapshot_t snapshot, void (^block)(dyld_image_t image)) {
+    if ( const IntrospectionVtable* vtable = dyldFrameworkIntrospectionVtable() ) {
+        return vtable->dyld_process_snapshot_for_each_image(snapshot, block);
+    }
     ProcessSnapshot* processSnapshot = (ProcessSnapshot*)snapshot;
     if ( !processSnapshot->valid() )
         return;
@@ -144,6 +225,9 @@ void dyld_process_snapshot_for_each_image(dyld_process_snapshot_t snapshot, void
 }
 
 dyld_shared_cache_t dyld_process_snapshot_get_shared_cache(dyld_process_snapshot_t snapshot) {
+    if ( const IntrospectionVtable* vtable = dyldFrameworkIntrospectionVtable() ) {
+        return vtable->dyld_process_snapshot_get_shared_cache(snapshot);
+    }
     ProcessSnapshot* processSnapshot = (ProcessSnapshot*)snapshot;
     if ( !processSnapshot->valid() )
         return nullptr;
@@ -158,45 +242,91 @@ dyld_shared_cache_t dyld_process_snapshot_get_shared_cache(dyld_process_snapshot
 #pragma mark SharedCache
 
 bool dyld_shared_cache_pin_mapping(dyld_shared_cache_t cache) {
+#if BUILDING_LIBDYLD
+    if ( const IntrospectionVtable* vtable = dyldFrameworkIntrospectionVtable() ) {
+        return vtable->dyld_shared_cache_pin_mapping(cache);
+    }
+#endif /* BUILDING_LIBDYLD */
     return ((dyld4::Atlas::SharedCache*)cache)->pin();
 }
 
 void dyld_shared_cache_unpin_mapping(dyld_shared_cache_t cache) {
+#if BUILDING_LIBDYLD
+    if ( const IntrospectionVtable* vtable = dyldFrameworkIntrospectionVtable() ) {
+        return vtable->dyld_shared_cache_unpin_mapping(cache);
+    }
+#endif /* BUILDING_LIBDYLD */
     ((dyld4::Atlas::SharedCache*)cache)->unpin();
 }
 
 uint64_t dyld_shared_cache_get_base_address(dyld_shared_cache_t cache_atlas) {
+#if BUILDING_LIBDYLD
+    if ( const IntrospectionVtable* vtable = dyldFrameworkIntrospectionVtable() ) {
+        return vtable->dyld_shared_cache_get_base_address(cache_atlas);
+    }
+#endif /* BUILDING_LIBDYLD */
     auto cache = (dyld4::Atlas::SharedCache*)cache_atlas;
-    return cache->rebasedAddress();
+    return (uint64_t)cache->rebasedAddress();
+
 }
 
 uint64_t dyld_shared_cache_get_mapped_size(dyld_shared_cache_t cache_atlas) {
+#if BUILDING_LIBDYLD
+    if ( const IntrospectionVtable* vtable = dyldFrameworkIntrospectionVtable() ) {
+        return vtable->dyld_shared_cache_get_mapped_size(cache_atlas);
+    }
+#endif /* BUILDING_LIBDYLD */
     auto cache = (dyld4::Atlas::SharedCache*)cache_atlas;
     return cache->size();
 }
 
 bool dyld_shared_cache_is_mapped_private(dyld_shared_cache_t cache_atlas) {
+#if BUILDING_LIBDYLD
+    if ( const IntrospectionVtable* vtable = dyldFrameworkIntrospectionVtable() ) {
+        return vtable->dyld_shared_cache_is_mapped_private(cache_atlas);
+    }
+#endif /* BUILDING_LIBDYLD */
     auto cache = (dyld4::Atlas::SharedCache*)cache_atlas;
     return cache->isPrivateMapped();
 }
 
 void dyld_shared_cache_copy_uuid(dyld_shared_cache_t cache_atlas, uuid_t *uuid) {
+#if BUILDING_LIBDYLD
+    if ( const IntrospectionVtable* vtable = dyldFrameworkIntrospectionVtable() ) {
+        return vtable->dyld_shared_cache_copy_uuid(cache_atlas, uuid);
+    }
+#endif /* BUILDING_LIBDYLD */
     auto cache = (dyld4::Atlas::SharedCache*)cache_atlas;
     memcpy((void*)&uuid[0], cache->uuid().begin(), 16);
 }
 
 void dyld_shared_cache_for_each_file(dyld_shared_cache_t cache_atlas, void (^block)(const char* file_path)) {
+#if BUILDING_LIBDYLD
+    if ( const IntrospectionVtable* vtable = dyldFrameworkIntrospectionVtable() ) {
+        return vtable->dyld_shared_cache_for_each_file(cache_atlas, block);
+    }
+#endif /* BUILDING_LIBDYLD */
     auto cache = (dyld4::Atlas::SharedCache*)cache_atlas;
     cache->forEachFilePath(block);
 }
 
 void dyld_shared_cache_for_each_image(dyld_shared_cache_t cache, void (^block)(dyld_image_t image)) {
+#if BUILDING_LIBDYLD
+    if ( const IntrospectionVtable* vtable = dyldFrameworkIntrospectionVtable() ) {
+        return vtable->dyld_shared_cache_for_each_image(cache, block);
+    }
+#endif /* BUILDING_LIBDYLD */
     ((dyld4::Atlas::SharedCache*)cache)->forEachImage(^(dyld4::Atlas::Image* image) {
         block((dyld_image_t)image);
     });
 }
 
 void dyld_for_each_installed_shared_cache_with_system_path(const char* root_path, void (^block)(dyld_shared_cache_t atlas)) {
+#if BUILDING_LIBDYLD
+    if ( const IntrospectionVtable* vtable = dyldFrameworkIntrospectionVtable() ) {
+        return vtable->dyld_for_each_installed_shared_cache_with_system_path(root_path, block);
+    }
+#endif /* BUILDING_LIBDYLD */
     STACK_ALLOCATOR(ephemeralAllocator, 0);
     dyld4::Atlas::SharedCache::forEachInstalledCacheWithSystemPath(ephemeralAllocator, defaultFileManager(), root_path, ^(dyld4::Atlas::SharedCache* cache){
         block((dyld_shared_cache_t)cache);
@@ -204,6 +334,11 @@ void dyld_for_each_installed_shared_cache_with_system_path(const char* root_path
 }
 
 void dyld_for_each_installed_shared_cache(void (^block)(dyld_shared_cache_t cache)) {
+#if BUILDING_LIBDYLD
+    if ( const IntrospectionVtable* vtable = dyldFrameworkIntrospectionVtable() ) {
+        return vtable->dyld_for_each_installed_shared_cache(block);
+    }
+#endif /* BUILDING_LIBDYLD */
     STACK_ALLOCATOR(ephemeralAllocator, 0);
     dyld4::Atlas::SharedCache::forEachInstalledCacheWithSystemPath(ephemeralAllocator, defaultFileManager(), "/", ^(dyld4::Atlas::SharedCache* cache){
         block((dyld_shared_cache_t)cache);
@@ -211,6 +346,11 @@ void dyld_for_each_installed_shared_cache(void (^block)(dyld_shared_cache_t cach
 }
 
 bool dyld_shared_cache_for_file(const char* filePath, void (^block)(dyld_shared_cache_t cache)) {
+#if BUILDING_LIBDYLD
+    if ( const IntrospectionVtable* vtable = dyldFrameworkIntrospectionVtable() ) {
+        return vtable->dyld_shared_cache_for_file(filePath, block);
+    }
+#endif /* BUILDING_LIBDYLD */
     STACK_ALLOCATOR(ephemeralAllocator, 0);
     auto cacheFile = defaultFileManager().fileRecordForPath(ephemeralAllocator, filePath);
     auto cache = SharedCache::createForFileRecord(ephemeralAllocator, std::move(cacheFile));
@@ -225,15 +365,30 @@ bool dyld_shared_cache_for_file(const char* filePath, void (^block)(dyld_shared_
 
 bool dyld_image_content_for_segment(dyld_image_t image, const char* segmentName,
                                     void (^contentReader)(const void* content, uint64_t vmAddr, uint64_t vmSize)) {
+#if BUILDING_LIBDYLD
+    if ( const IntrospectionVtable* vtable = dyldFrameworkIntrospectionVtable() ) {
+        return vtable->dyld_image_content_for_segment(image, segmentName, contentReader);
+    }
+#endif /* BUILDING_LIBDYLD */
     return ((Image*)image)->contentForSegment(segmentName, contentReader);
 }
 
 bool dyld_image_content_for_section(dyld_image_t image, const char* segmentName, const char* sectionName,
                                     void (^contentReader)(const void* content, uint64_t vmAddr, uint64_t vmSize)) {
+#if BUILDING_LIBDYLD
+    if ( const IntrospectionVtable* vtable = dyldFrameworkIntrospectionVtable() ) {
+        return vtable->dyld_image_content_for_section(image, segmentName, sectionName, contentReader);
+    }
+#endif /* BUILDING_LIBDYLD */
     return ((Image*)image)->contentForSection(segmentName, sectionName, contentReader);
 }
 
 bool dyld_image_copy_uuid(dyld_image_t image, uuid_t* uuid) {
+#if BUILDING_LIBDYLD
+    if ( const IntrospectionVtable* vtable = dyldFrameworkIntrospectionVtable() ) {
+        return vtable->dyld_image_copy_uuid(image, uuid);
+    }
+#endif /* BUILDING_LIBDYLD */
     using lsl::UUID;
 
     UUID imageUUID = ((dyld4::Atlas::Image*)image)->uuid();
@@ -245,20 +400,42 @@ bool dyld_image_copy_uuid(dyld_image_t image, uuid_t* uuid) {
 }
 
 bool dyld_image_for_each_segment_info(dyld_image_t image, void (^block)(const char* segmentName, uint64_t vmAddr, uint64_t vmSize, int perm)) {
+#if BUILDING_LIBDYLD
+    if ( const IntrospectionVtable* vtable = dyldFrameworkIntrospectionVtable() ) {
+        return vtable->dyld_image_for_each_segment_info(image, block);
+    }
+#endif /* BUILDING_LIBDYLD */
+    // FIXME: Make a temporary null terminated buffer for the segment name
     return ((dyld4::Atlas::Image*)image)->forEachSegment(block);
 }
 
 bool dyld_image_for_each_section_info(dyld_image_t image,
                                  void (^block)(const char* segmentName, const char* sectionName, uint64_t vmAddr, uint64_t vmSize)) {
+#if BUILDING_LIBDYLD
+    if ( const IntrospectionVtable* vtable = dyldFrameworkIntrospectionVtable() ) {
+        return vtable->dyld_image_for_each_section_info(image, block);
+    }
+#endif /* BUILDING_LIBDYLD */
+    // FIXME: Make a temporary null terminated buffer for the segment and section names
     return ((dyld4::Atlas::Image*)image)->forEachSection(block);
 }
 
 const char* dyld_image_get_installname(dyld_image_t image) {
+#if BUILDING_LIBDYLD
+    if ( const IntrospectionVtable* vtable = dyldFrameworkIntrospectionVtable() ) {
+        return vtable->dyld_image_get_installname(image);
+    }
+#endif /* BUILDING_LIBDYLD */
     return ((dyld4::Atlas::Image*)image)->installname();
 }
 
 #if !BUILDING_CACHE_BUILDER
 const char* dyld_image_get_file_path(dyld_image_t image) {
+#if BUILDING_LIBDYLD
+    if ( const IntrospectionVtable* vtable = dyldFrameworkIntrospectionVtable() ) {
+        return vtable->dyld_image_get_file_path(image);
+    }
+#endif /* BUILDING_LIBDYLD */
     return ((Image*)image)->filename();
 }
 #endif
@@ -310,6 +487,11 @@ bool dyld_image_local_nlist_content_4Symbolication(dyld_image_t image,
                                                    void (^contentReader)(const void* nListStart, uint64_t nListCount,
                                                                          const char* stringTable))
 {
+#if BUILDING_LIBDYLD
+    if ( const IntrospectionVtable* vtable = dyldFrameworkIntrospectionVtable() ) {
+        return vtable->dyld_image_local_nlist_content_4Symbolication(image, contentReader);
+    }
+#endif /* BUILDING_LIBDYLD */
     Image* atlasImage = (dyld4::Atlas::Image*)image;
     const SharedCache* sharedCache = atlasImage->sharedCache();
     if ( !sharedCache )

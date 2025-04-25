@@ -88,7 +88,6 @@
 #define DBG_DYLD_DEBUGGING_MAP_LOOP             (KDBG_CODE(DBG_DYLD, DBG_DYLD_DEBUGGING_SUBCLASS, 2))
 #define DBG_DYLD_DEBUGGING_MARK                 (KDBG_CODE(DBG_DYLD, DBG_DYLD_DEBUGGING_SUBCLASS, 3))
 
-
 struct dyld_all_image_infos;
 
 namespace dyld3 {
@@ -100,6 +99,14 @@ enum class DyldTimingBuildClosure : uint64_t {
     DlopenClosure_UsedSharedCacheOther      = 3,
     DlopenClosure_NoLoad                    = 4,
     DlopenClosure_Built                     = 5
+};
+
+// Flags for DBG_DYLD_TIMING_LAUNCH_EXECUTABLE
+enum class DyldLaunchExecutableFlags : uint64_t {
+    None                = 0,
+    HasTPROHeap         = 1 << 0, // this implies __TPRO_CONST too as the heap is in __TPRO_CONST
+    HasTPRODataConst    = 1 << 1,
+    HasTPROStacks       = 1 << 2,
 };
 
 struct VIS_HIDDEN kt_arg {

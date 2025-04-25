@@ -2,7 +2,8 @@
 #include "base.xcconfig"
 
 ARCHS                     = arm64 x86_64
-MACOSX_DEPLOYMENT_TARGET  = 11.0
+MACOSX_DEPLOYMENT_TARGET  = 13.0
 
 INSTALL_PATH = $(SIMULATOR_RUNTIME_BUNDLE_INSTALL_DIR)/Contents/Resources
 
+OTHER_LDFLAGS = $(inherited) -lCrashReporterClient

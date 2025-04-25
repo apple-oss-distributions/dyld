@@ -44,14 +44,21 @@
 #include "CachePatching.h"
 #include "Diagnostics.h"
 #include "MachOAnalyzer.h"
+#include "Header.h"
 
 #if !(BUILDING_LIBDYLD || BUILDING_DYLD)
 #include "JSON.h"
 #endif
 
+typedef dyld3::MachOFile::PointerMetaData  PointerMetaData;
+
 namespace dyld4 {
     class PrebuiltLoader;
     struct PrebuiltLoaderSet;
+}
+
+namespace mach_o {
+    struct FunctionVariants;
 }
 
 namespace objc_opt {
@@ -81,11 +88,35 @@ struct VIS_HIDDEN ObjCOptimizationHeader
     uint64_t relativeMethodSelectorBaseAddressOffset;
 };
 
+// convenience tuple for tracking file by fs/inode
+struct VIS_HIDDEN FileIdTuple
+{
+                FileIdTuple() { ::bzero(this, sizeof(FileIdTuple)); }
+#if !TARGET_OS_EXCLAVEKIT
+                FileIdTuple(const struct stat&);
+                FileIdTuple(const char* path);
+                FileIdTuple(uint64_t fsidScalar, uint64_t fsobjidScalar);
+    explicit    operator bool() const;
+    bool        operator==(const FileIdTuple& other) const;
+    bool        getPath(char pathBuff[PATH_MAX]) const;
+    uint64_t    inode() const;
+    uint64_t    fsID() const;
+#endif
+
+private:
+    void        init(const struct stat&);
+
+#if !TARGET_OS_EXCLAVEKIT
+    fsid_t      fsid;       // file system
+    fsobj_id_t  fsobjid;    // inode within filesystem
+#endif // !TARGET_OS_EXCLAVEKIT
+};
+
 class VIS_HIDDEN DyldSharedCache
 {
 public:
 
-#if BUILDING_CACHE_BUILDER
+#if BUILDING_CACHE_BUILDER || BUILDING_CACHE_BUILDER_UNIT_TESTS
     // FIXME: Delete this as its no longer used
     struct FileAlias
     {
@@ -111,7 +142,7 @@ public:
         std::string                                 outputFilePath;
         std::string                                 outputMapFilePath;
         const dyld3::GradedArchs*                   archs;
-        dyld3::Platform                             platform;
+        mach_o::Platform                            platform;
         LocalSymbolsMode                            localSymbolMode;
         uint64_t                                    cacheConfiguration;
         bool                                        optimizeDyldDlopens;
@@ -126,7 +157,7 @@ public:
         bool                                        evictLeafDylibsOnOverflow;
         std::unordered_map<std::string, unsigned>   dylibOrdering;
         std::unordered_map<std::string, unsigned>   dirtyDataSegmentOrdering;
-        dyld3::json::Node                           objcOptimizations;
+        json::Node                                  objcOptimizations;
         std::string                                 loggingPrefix;
         // Customer and dev caches share a local symbols file.  Only one will get this set to emit the file
         std::string                                 localSymbolsPath;
@@ -149,55 +180,75 @@ public:
         uint64_t                    inode;                  // only recorded if inodesAreSameAsRuntime
     };
 
-    struct CreateResults
-    {
-        std::string                             errorMessage;
-        std::set<std::string>                   warnings;
-        std::set<const dyld3::MachOAnalyzer*>   evictions;
-    };
-
-
-    // This function verifies the set of dylibs that will go into the cache are self contained.  That the depend on no dylibs
-    // outset the set.  It will call back the loader function to try to find any mising dylibs.
-    static bool verifySelfContained(std::vector<MappedMachO>& dylibsToCache,
-                                    std::unordered_set<std::string>& badZippered,
-                                    MappedMachO (^loader)(const std::string& runtimePath, Diagnostics& diag), std::vector<std::pair<DyldSharedCache::MappedMachO, std::set<std::string>>>& excluded);
-
-
-    //
-    // This function is single threaded and creates a shared cache. The cache file is created in-memory.
-    //
-    // Inputs:
-    //      options:        various per-platform flags
-    //      dylibsToCache:  a list of dylibs to include in the cache
-    //      otherOsDylibs:  a list of other OS dylibs and bundle which should have load info added to the cache
-    //      osExecutables:  a list of main executables which should have closures created in the cache
-    //
-    // Returns:
-    //    On success:
-    //         cacheContent: start of the allocated cache buffer which must be vm_deallocated after the caller writes out the buffer.
-    //         cacheLength:  size of the allocated cache buffer
-    //         cdHash:       hash of the code directory of the code blob of the created cache
-    //         warnings:     all warning messsages generated during the creation of the cache
-    //
-    //    On failure:
-    //         cacheContent: nullptr
-    //         errorMessage: the string describing why the cache could not be created
-    //         warnings:     all warning messsages generated before the failure
-    //
-    static CreateResults create(const CreateOptions&               options,
-                                const dyld3::closure::FileSystem&  fileSystem,
-                                const std::vector<MappedMachO>&    dylibsToCache,
-                                const std::vector<MappedMachO>&    otherOsDylibs,
-                                const std::vector<MappedMachO>&    osExecutables);
-
-
     //
     // Returns a text "map" file as a big string
     //
     std::string         mapFile() const;
 
-#endif // BUILDING_CACHE_BUILDER
+#endif // BUILDING_CACHE_BUILDER || BUILDING_CACHE_BUILDER_UNIT_TESTS
+
+#if !TARGET_OS_EXCLAVEKIT
+    //
+    // When the dyld cache is mapped from files, there is one region that is dynamically constructed
+    //
+    class DynamicRegion
+    {
+    public:
+        static DynamicRegion*   make(uintptr_t prefAddress=0);
+        void                    free();
+
+        void                    setDyldCacheFileID(FileIdTuple);
+        void                    setOSCryptexPath(const char*);
+        void                    setCachePath(const char*);
+        void                    setReadOnly();
+        void                    setSystemWideFlags(__uint128_t);
+        void                    setProcessorFlags(__uint128_t);
+
+        bool                    validMagic() const;
+        uint32_t                version() const;
+
+        // available in version 0
+        bool                    getDyldCacheFileID(FileIdTuple& ids) const;
+
+        // available in version 1
+        const char*             osCryptexPath() const;
+
+        // available in version 2
+        const char*             cachePath() const;
+
+        // available in version 3
+        __uint128_t             getSystemWideFunctionVariantFlags() const;
+        __uint128_t             getProcessorFunctionVariantFlags() const;
+
+        static size_t           size();
+
+    private:
+                        DynamicRegion();
+
+        static constexpr const char* sMagic = "dyld_data    v3";
+
+        // fields in v0
+        char            _magic[16];              // e.g. "dyld_data    v0"
+        FileIdTuple     _dyldCache;              // the inode of the main file for this dyld cache
+
+        // fields added in v1
+        uint32_t        _osCryptexPathOffset;
+
+        // fields added in v2
+        uint32_t        _cachePathOffset;
+
+        // fields added in v3
+        uint64_t        _paddingToAlign;
+        __uint128_t     _systemWideFunctionVariantFlags;  // system wide function-variant flags set in launchd
+        __uint128_t     _processorFunctionVariantFlags;   // arm64 or x86_64 specific function-variant flags
+    };
+
+
+    //
+    // Returns the DynamicRegion of the dyld cache
+    //
+    const DynamicRegion*   dynamicRegion() const;
+#endif // !TARGET_OS_EXCLAVEKIT
 
 
     //
@@ -209,14 +260,14 @@ public:
     //
     // Returns the platform the cache is for
     //
-    dyld3::Platform    platform() const;
+    mach_o::Platform    platform() const;
 
 
     //
     // Iterates over each dylib in the cache
     //
-    void                forEachImage(void (^handler)(const mach_header* mh, const char* installName)) const;
-    void                forEachDylib(void (^handler)(const dyld3::MachOAnalyzer* ma, const char* installName, uint32_t imageIndex, uint64_t inode, uint64_t mtime, bool& stop)) const;
+    void                forEachImage(void (^handler)(const mach_o::Header* hdr, const char* installName)) const;
+    void                forEachDylib(void (^handler)(const mach_o::Header* hdr, const char* installName, uint32_t imageIndex, uint64_t inode, uint64_t mtime, bool& stop)) const;
 
 
     //
@@ -273,7 +324,7 @@ public:
     //
     // If path is a dylib in the cache, return is mach_header
     //
-    const dyld3::MachOFile* getImageFromPath(const char* dylibPath) const;
+    const mach_o::Header* getImageFromPath(const char* dylibPath) const;
 
     //
     // Get image path from index
@@ -290,6 +341,13 @@ public:
     //
     void                forEachImageTextSegment(void (^handler)(uint64_t loadAddressUnslid, uint64_t textSegmentSize, const uuid_t dylibUUID, const char* installName, bool& stop)) const;
 
+    //
+    // Returns the dyld_cache_image_text_info[] from the cache header
+    //
+    std::span<const dyld_cache_image_text_info> textImageSegments() const;
+
+    // Get the path from a dyld_cache_image_text_info
+    std::string_view imagePath(const dyld_cache_image_text_info& info) const;
 
     //
     // Iterates over each of the three regions in the cache
@@ -446,6 +504,17 @@ public:
     //
     const dyld4::PrebuiltLoaderSet* findLaunchLoaderSetWithCDHash(const char* cdHashString) const;
 
+
+    //
+    // Iterates over each of the prewarming data entries
+    //
+    void                forEachPrewarmingEntry(void (^handler)(const void* content, uint64_t unslidVMAddr, uint64_t vmSize)) const;
+
+    //
+    // Iterates over function variant pointers in the dyld cache
+    //
+    void forEachFunctionVariantPatchLocation(void (^handler)(const void* loc, PointerMetaData pmd, const mach_o::FunctionVariants& fvs, const mach_o::Header* dylibHdr, int variantIndex, bool& stop)) const;
+
     //
     // searches cache for PrebuiltLoader for program by cdHash
     //
@@ -569,6 +638,7 @@ public:
     // Returns true if the given MachO is in the shared cache range.
     // Returns false if the cache is null.
     static bool inDyldCache(const DyldSharedCache* cache, const dyld3::MachOFile* mf);
+    static bool inDyldCache(const DyldSharedCache* cache, const mach_o::Header* header);
 
     // Returns ture if the given path is a subCache filepath.
     static bool isSubCachePath(const char* leafName);
@@ -618,11 +688,36 @@ private:
     const ObjCOptimizationHeader* objcOpts() const;
 };
 
+#if BUILDING_CACHE_BUILDER || BUILDING_CACHE_BUILDER_UNIT_TESTS
 
+// Manages checking newly built caches against baseline builds
+struct BaselineCachesChecker
+{
+    BaselineCachesChecker(std::vector<const char*> archs, mach_o::Platform platform);
 
+    // Add a baseline cache map to the checker
+    mach_o::Error addBaselineMap(std::string_view path);
+    mach_o::Error addBaselineMaps(std::string_view dirPath);
+    mach_o::Error addNewMap(std::string_view mapString);
+    void          setFilesFromNewCaches(std::span<const char* const> files);
 
+    const std::set<std::string>& unionBaselineDylibs() { return _unionBaselineDylibs; }
 
+    std::set<std::string> dylibsMissingFromNewCaches() const;
 
+private:
+    // returns if we have a baseline arch for every arch we are building for
+    bool    allBaselineArchsPresent() const;
+
+    std::vector<std::string>                                    _archs;
+    mach_o::Platform                                            _platform;
+    std::set<std::string>                                       _unionBaselineDylibs;
+    std::set<std::string>                                       _dylibsInNewCaches;
+    std::unordered_map<std::string, std::vector<std::string>>   _baselineDylibs;
+    std::unordered_map<std::string, std::set<std::string>>      _newDylibs;
+};
+
+#endif // BUILDING_CACHE_BUILDER || BUILDING_CACHE_BUILDER_UNIT_TESTS
 
 
 #endif /* DyldSharedCache_h */

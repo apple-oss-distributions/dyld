@@ -74,6 +74,11 @@ enum FileFlags
     DirtyDataOrderFile                          = 101,
     ObjCOptimizationsFile                       = 102,
     SwiftGenericMetadataFile                    = 103,
+
+    // This replaces all the magic JSON files and order files, ie, 100..103 above
+    // The path (or some field in the file if its JSON) will be used later to work
+    // out which file it is
+    OptimizationFile                            = 1000,
 };
 
 struct BuildOptions_v1

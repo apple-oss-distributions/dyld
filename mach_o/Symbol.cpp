@@ -38,7 +38,7 @@ namespace mach_o {
 //
 // MARK: --- Symbol methods ---
 //
-Symbol Symbol::makeRegularExport(CString name, uint64_t imageOffset, uint8_t sectNum, bool dontDeadStrip, bool cold, bool neverStrip)
+Symbol Symbol::makeRegularExport(CString name, uint64_t imageOffset, uint8_t sectNum, bool dontDeadStrip, bool cold, bool neverStrip, bool isThumb)
 {
     Symbol symbol(name);
     symbol._kind        = Kind::regular;
@@ -49,10 +49,12 @@ Symbol Symbol::makeRegularExport(CString name, uint64_t imageOffset, uint8_t sec
         symbol.setDontDeadStrip();
     if ( cold )
         symbol.setCold();
+    if ( isThumb )
+        symbol.setIsThumb();
     return symbol;
 }
 
-Symbol Symbol::makeRegularHidden(CString name, uint64_t imageOffset, uint8_t sectNum, bool dontDeadStrip, bool cold)
+Symbol Symbol::makeRegularHidden(CString name, uint64_t imageOffset, uint8_t sectNum, bool dontDeadStrip, bool cold, bool isThumb)
 {
     Symbol symbol(name);
     symbol._kind        = Kind::regular;
@@ -63,10 +65,12 @@ Symbol Symbol::makeRegularHidden(CString name, uint64_t imageOffset, uint8_t sec
         symbol.setDontDeadStrip();
     if ( cold )
         symbol.setCold();
+    if ( isThumb )
+        symbol.setIsThumb();
     return symbol;
 }
 
-Symbol Symbol::makeRegularLocal(CString name, uint64_t imageOffset, uint8_t sectNum, bool dontDeadStrip, bool cold)
+Symbol Symbol::makeRegularLocal(CString name, uint64_t imageOffset, uint8_t sectNum, bool dontDeadStrip, bool cold, bool isThumb)
 {
     Symbol symbol(name);
     symbol._kind        = Kind::regular;
@@ -77,10 +81,12 @@ Symbol Symbol::makeRegularLocal(CString name, uint64_t imageOffset, uint8_t sect
         symbol.setDontDeadStrip();
     if ( cold )
         symbol.setCold();
+    if ( isThumb )
+        symbol.setIsThumb();
     return symbol;
 }
 
-Symbol Symbol::makeRegularWasPrivateExtern(CString name, uint64_t imageOffset, uint8_t sectNum, bool dontDeadStrip, bool cold)
+Symbol Symbol::makeRegularWasPrivateExtern(CString name, uint64_t imageOffset, uint8_t sectNum, bool dontDeadStrip, bool cold, bool isThumb)
 {
     Symbol symbol(name);
     symbol._kind        = Kind::regular;
@@ -91,10 +97,12 @@ Symbol Symbol::makeRegularWasPrivateExtern(CString name, uint64_t imageOffset, u
         symbol.setDontDeadStrip();
     if ( cold )
         symbol.setCold();
+    if ( isThumb )
+        symbol.setIsThumb();
     return symbol;
 }
 
-Symbol Symbol::makeWeakDefExport(CString name, uint64_t imageOffset, uint8_t sectOrd, bool dontDeadStrip, bool cold)
+Symbol Symbol::makeWeakDefExport(CString name, uint64_t imageOffset, uint8_t sectOrd, bool dontDeadStrip, bool cold, bool isThumb)
 {
     Symbol symbol(name);
     symbol._kind        = Kind::regular;
@@ -106,10 +114,12 @@ Symbol Symbol::makeWeakDefExport(CString name, uint64_t imageOffset, uint8_t sec
         symbol.setDontDeadStrip();
     if ( cold )
         symbol.setCold();
+    if ( isThumb )
+        symbol.setIsThumb();
     return symbol;
 }
 
-Symbol Symbol::makeWeakDefAutoHide(CString name, uint64_t imageOffset, uint8_t sectOrd, bool dontDeadStrip, bool cold)
+Symbol Symbol::makeWeakDefAutoHide(CString name, uint64_t imageOffset, uint8_t sectOrd, bool dontDeadStrip, bool cold, bool isThumb)
 {
     Symbol symbol(name);
     symbol._kind        = Kind::regular;
@@ -121,10 +131,12 @@ Symbol Symbol::makeWeakDefAutoHide(CString name, uint64_t imageOffset, uint8_t s
         symbol.setDontDeadStrip();
     if ( cold )
         symbol.setCold();
+    if ( isThumb )
+        symbol.setIsThumb();
     return symbol;
 }
 
-Symbol Symbol::makeWeakDefHidden(CString name, uint64_t imageOffset, uint8_t sectOrd, bool dontDeadStrip, bool cold)
+Symbol Symbol::makeWeakDefHidden(CString name, uint64_t imageOffset, uint8_t sectOrd, bool dontDeadStrip, bool cold, bool isThumb)
 {
     Symbol symbol(name);
     symbol._kind        = Kind::regular;
@@ -136,10 +148,12 @@ Symbol Symbol::makeWeakDefHidden(CString name, uint64_t imageOffset, uint8_t sec
         symbol.setDontDeadStrip();
     if ( cold )
         symbol.setCold();
+    if ( isThumb )
+        symbol.setIsThumb();
     return symbol;
 }
 
-Symbol Symbol::makeWeakDefWasPrivateExtern(CString name, uint64_t imageOffset, uint8_t sectOrd, bool dontDeadStrip, bool cold)
+Symbol Symbol::makeWeakDefWasPrivateExtern(CString name, uint64_t imageOffset, uint8_t sectOrd, bool dontDeadStrip, bool cold, bool isThumb)
 {
     Symbol symbol(name);
     symbol._kind        = Kind::regular;
@@ -151,10 +165,12 @@ Symbol Symbol::makeWeakDefWasPrivateExtern(CString name, uint64_t imageOffset, u
         symbol.setDontDeadStrip();
     if ( cold )
         symbol.setCold();
+    if ( isThumb )
+        symbol.setIsThumb();
     return symbol;
 }
 
-Symbol Symbol::makeAltEntry(CString name, uint64_t imageOffset, uint8_t sectOrd, Scope scope, bool dontDeadStrip, bool cold, bool weakDef)
+Symbol Symbol::makeAltEntry(CString name, uint64_t imageOffset, uint8_t sectOrd, Scope scope, bool dontDeadStrip, bool cold, bool weakDef, bool isThumb)
 {
     Symbol symbol(name);
     symbol._kind        = Kind::altEntry;
@@ -166,18 +182,31 @@ Symbol Symbol::makeAltEntry(CString name, uint64_t imageOffset, uint8_t sectOrd,
         symbol.setDontDeadStrip();
     if ( cold )
         symbol.setCold();
+    if ( isThumb )
+        symbol.setIsThumb();
     return symbol;
 }
 
-Symbol Symbol::makeDynamicResolver(CString name, uint8_t sectNum, uint64_t stubImageOffset, uint64_t funcImageOffset)
+Symbol Symbol::makeDynamicResolver(CString name, uint8_t sectNum, uint64_t stubImageOffset, uint64_t funcImageOffset, Symbol::Scope scope)
 {
     // FIXME: do we need to support non-exported resolver functions?
     Symbol symbol(name);
     symbol._kind        = Kind::resolver;
-    symbol._scope       = Scope::global;
+    symbol._scope       = scope;
     symbol._sectOrdinal = sectNum;
     symbol._implOffset  = funcImageOffset;
     symbol._u.resolverStubOffset = stubImageOffset;
+    return symbol;
+}
+
+Symbol Symbol::makeFunctionVariantExport(CString name, uint8_t sectNumOfDefault, uint64_t imageOffsetOfDefault, uint32_t functionVariantTableIndex)
+{
+    Symbol symbol(name);
+    symbol._kind        = Kind::functionVariant;
+    symbol._scope       = Scope::global;
+    symbol._sectOrdinal = sectNumOfDefault;
+    symbol._implOffset  = imageOffsetOfDefault;
+    symbol._u.functionVariantTableIndex = functionVariantTableIndex;
     return symbol;
 }
 
@@ -196,23 +225,13 @@ Symbol Symbol::makeThreadLocalExport(CString name, uint64_t imageOffset, uint8_t
     return symbol;
 }
 
-Symbol Symbol::makeAbsoluteExport(CString name, uint64_t address, bool dontDeadStrip)
+Symbol Symbol::makeAbsolute(CString name, uint64_t address, bool dontDeadStrip, Scope scope, uint8_t sectNum)
 {
     Symbol symbol(name);
     symbol._kind        = Kind::absolute;
-    symbol._scope       = Scope::global;
+    symbol._scope       = scope;
     symbol._implOffset  = address;
-    if ( dontDeadStrip )
-        symbol.setDontDeadStrip();
-    return symbol;
-}
-
-Symbol Symbol::makeAbsoluteLocal(CString name, uint64_t address, bool dontDeadStrip)
-{
-    Symbol symbol(name);
-    symbol._kind        = Kind::absolute;
-    symbol._scope       = Scope::translationUnit;
-    symbol._implOffset  = address;
+    symbol._sectOrdinal = sectNum;
     if ( dontDeadStrip )
         symbol.setDontDeadStrip();
     return symbol;
@@ -303,6 +322,14 @@ bool Symbol::isDynamicResolver(uint64_t& resolverStubOffset) const
     if ( _kind != Kind::resolver )
         return false;
     resolverStubOffset = _u.resolverStubOffset;
+    return true;
+}
+
+bool Symbol::isFunctionVariant(uint32_t& functionVariantTableIndex) const
+{
+    if ( _kind != Kind::functionVariant )
+        return false;
+    functionVariantTableIndex = _u.functionVariantTableIndex;
     return true;
 }
 

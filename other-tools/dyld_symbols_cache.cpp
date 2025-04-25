@@ -28,6 +28,7 @@
 #include <sys/mman.h>
 #include <sys/stat.h>
 
+#include <list>
 #include <string>
 #include <vector>
 
@@ -98,6 +99,54 @@ static void forEachSymlink(const std::string& path,
     ::closedir(dir);
 }
 
+static void printResults(std::span<ResultBinary> verifyResults,
+                         std::span<std::pair<std::string, std::string>> rootErrors,
+                         bool bniOutput,
+                         const char* detailsLogPath)
+{
+    FILE* detailsLogFile = nullptr;
+    if ( detailsLogPath != nullptr ) {
+        detailsLogFile = fopen(detailsLogPath, "a");
+        if ( detailsLogFile == nullptr ) {
+            fprintf(stderr, "Could not open log file '%s' due to: %s\n\n", detailsLogPath, strerror(errno));
+        } else {
+            fprintf(stderr, "Additional logging available in '%s'\n", detailsLogPath);
+        }
+    }
+
+    if ( detailsLogFile == nullptr )
+        detailsLogFile = stderr;
+
+    printResultSummary(verifyResults, bniOutput, stderr);
+
+    printResultsSymbolDetails(verifyResults, detailsLogFile);
+
+    printResultsInternalInformation(verifyResults, rootErrors, detailsLogFile);
+
+    if ( detailsLogFile != stderr )
+        fclose(detailsLogFile);
+}
+
+static void printResultsJSON(std::string_view jsonPath,
+                             std::span<ResultBinary> verifyResults,
+                             std::span<ExportsChangedBinary> exportsChanged)
+{
+    assert(!jsonPath.empty());
+    if ( jsonPath == "-" ) {
+        printResultsJSON(verifyResults, exportsChanged, stdout);
+    } else {
+        FILE* jsonFile = fopen(jsonPath.data(), "a");
+        if ( jsonFile == nullptr ) {
+            fprintf(stderr, "Could not open json file '%s' due to: %s\n\n", jsonPath.data(), strerror(errno));
+            exit(1);
+        }
+
+        printResultsJSON(verifyResults, exportsChanged, jsonFile);
+
+        fclose(jsonFile);
+    }
+}
+
 int main(int argc, const char* argv[], const char* envp[], const char* apple[])
 {
     if ( argc == 1 ) {
@@ -114,8 +163,11 @@ int main(int argc, const char* argv[], const char* envp[], const char* apple[])
     bool verifying = false;
     bool building = false;
     bool bniOutput = false;
+    SymbolsCache::ExecutableMode executableMode = SymbolsCache::ExecutableMode::off;
+    bool checkForChangedExports = false;
     bool verifyIndividually = false;
     const char* detailsLogPath = nullptr;
+    const char* jsonPath = nullptr;
     std::vector<std::string> rootPaths;
     std::vector<std::string> jsonRootPaths;
     __block std::unordered_set<std::string> verifyProjects;
@@ -214,6 +266,12 @@ int main(int argc, const char* argv[], const char* envp[], const char* apple[])
         else if ( strcmp(arg, "-bni") == 0 ) {
             bniOutput = true;
         }
+        else if ( strcmp(arg, "-verify_executables") == 0 ) {
+            executableMode = SymbolsCache::ExecutableMode::error;
+        }
+        else if ( strcmp(arg, "-warn_executables") == 0 ) {
+            executableMode = SymbolsCache::ExecutableMode::warn;
+        }
         else if ( strcmp(arg, "-details_log_path") == 0 ) {
             if ( ++i < argc ) {
                 detailsLogPath = argv[i];
@@ -258,6 +316,18 @@ int main(int argc, const char* argv[], const char* envp[], const char* apple[])
         else if ( strcmp(arg, "-verbose") == 0 ) {
             verbose = true;
         }
+        else if ( strcmp(arg, "-json") == 0 ) {
+            if ( ++i < argc ) {
+                jsonPath = argv[i];
+            }
+            else {
+                fprintf(stderr, "-json missing path\n");
+                return 1;
+            }
+        }
+        else if ( strcmp(arg, "-changed_exports") == 0 ) {
+            checkForChangedExports = true;
+        }
         else if ( strcmp(arg, "-help") == 0 ) {
             usage();
             return 0;
@@ -279,27 +349,59 @@ int main(int argc, const char* argv[], const char* envp[], const char* apple[])
         return 1;
     }
 
+    std::string driverKitPath;
+    std::string exclaveKitPath;
     if ( symbolsDBPath.empty() && !dylibCachePath.empty() ) {
         symbolsDBPath = dylibCachePath + "/System/Library/dyld/dyld_symbols.db";
+        driverKitPath = dylibCachePath + "/System/DriverKit/System/Library/dyld/dyld_symbols.db";
+        exclaveKitPath = dylibCachePath + "/System/ExclaveKit/System/Library/dyld/dyld_symbols.db";
     }
 
-    SymbolsCache cache(symbolsDBPath);
-    if ( !building ) {
+    // There are potentially multiple caches, if driverKit/exclaveKit were in use
+    std::list<SymbolsCache> caches;
+    {
+        SymbolsCache& cache = caches.emplace_back(symbolsDBPath);
         if ( Error err = cache.open() ) {
             fprintf(stderr, "Could not open database due to: %s\n", (const char*)err.message());
             return 1;
         }
     }
 
-    if ( verbose )
-        cache.setVerbose();
+    if ( !building ) {
+        // Try driverKit/exclaveKit. These are non-fatal if they are missing
+        if ( fileExists(driverKitPath) ) {
+            SymbolsCache& cache = caches.emplace_back(driverKitPath);
+            if ( Error err = cache.open() ) {
+                fprintf(stderr, "Could not open database due to: %s\n", (const char*)err.message());
+                return 1;
+            }
+        }
+
+        if ( fileExists(exclaveKitPath) ) {
+            SymbolsCache& cache = caches.emplace_back(exclaveKitPath);
+            if ( Error err = cache.open() ) {
+                fprintf(stderr, "Could not open database due to: %s\n", (const char*)err.message());
+                return 1;
+            }
+        }
+    }
+
+
+    if ( verbose ) {
+        for ( SymbolsCache& cache : caches )
+            cache.setVerbose();
+    }
 
     if ( printAllBinaries ) {
         std::vector<SymbolsCacheBinary> allBinaries;
-        if ( Error err = cache.getAllBinaries(allBinaries) ) {
-            fprintf(stderr, "Could not get all binaries due to: %s\n", (const char*)err.message());
-            return 1;
+
+        for ( SymbolsCache& cache : caches ) {
+            if ( Error err = cache.getAllBinaries(allBinaries) ) {
+                fprintf(stderr, "Could not get all binaries due to: %s\n", (const char*)err.message());
+                return 1;
+            }
         }
+
         for ( const SymbolsCacheBinary& binary : allBinaries )
             printf("%s %s %s %s %s\n", binary.arch.c_str(), binary.platform.name().c_str(),
                    binary.path.c_str(), binary.uuid.c_str(), binary.projectName.c_str());
@@ -307,10 +409,14 @@ int main(int argc, const char* argv[], const char* envp[], const char* apple[])
 
     if ( printAllExports ) {
         std::vector<SymbolsCache::ExportedSymbol> allExports;
-        if ( Error err = cache.getAllExports(allExports) ) {
-            fprintf(stderr, "Could not get all exports due to: %s\n", (const char*)err.message());
-            return 1;
+
+        for ( SymbolsCache& cache : caches ) {
+            if ( Error err = cache.getAllExports(allExports) ) {
+                fprintf(stderr, "Could not get all exports due to: %s\n", (const char*)err.message());
+                return 1;
+            }
         }
+
         for ( const SymbolsCache::ExportedSymbol& exportedSymbol : allExports )
             printf("%s %s %s\n", exportedSymbol.archName.c_str(), exportedSymbol.installName.c_str(),
                    exportedSymbol.symbolName.c_str());
@@ -318,10 +424,14 @@ int main(int argc, const char* argv[], const char* envp[], const char* apple[])
 
     if ( printAllImports ) {
         std::vector<SymbolsCache::ImportedSymbol> allImports;
-        if ( Error err = cache.getAllImports(allImports) ) {
-            fprintf(stderr, "Could not get all imports due to: %s\n", (const char*)err.message());
-            return 1;
+
+        for ( SymbolsCache& cache : caches ) {
+            if ( Error err = cache.getAllImports(allImports) ) {
+                fprintf(stderr, "Could not get all imports due to: %s\n", (const char*)err.message());
+                return 1;
+            }
         }
+
         for ( const SymbolsCache::ImportedSymbol& importedSymbol : allImports )
             printf("%s %s %s %s\n", importedSymbol.archName.c_str(), importedSymbol.clientPath.c_str(),
                    importedSymbol.targetInstallName.c_str(), importedSymbol.targetSymbolName.c_str());
@@ -329,10 +439,14 @@ int main(int argc, const char* argv[], const char* envp[], const char* apple[])
 
     if ( !allUsersOfInstallName.empty() ) {
         std::vector<SymbolsCache::ImportedSymbol> allImports;
-        if ( Error err = cache.getAllImports(allImports) ) {
-            fprintf(stderr, "Could not get all imports due to: %s\n", (const char*)err.message());
-            return 1;
+
+        for ( SymbolsCache& cache : caches ) {
+            if ( Error err = cache.getAllImports(allImports) ) {
+                fprintf(stderr, "Could not get all imports due to: %s\n", (const char*)err.message());
+                return 1;
+            }
         }
+
         for ( const SymbolsCache::ImportedSymbol& importedSymbol : allImports ) {
             if ( importedSymbol.targetInstallName != allUsersOfInstallName )
                 continue;
@@ -415,9 +529,9 @@ int main(int argc, const char* argv[], const char* envp[], const char* apple[])
         dyld3::closure::FileSystemNull fileSystem;
 
         __block std::vector<SymbolsCacheBinary> binaries;
-        if ( mach_o::Error err = cache.makeBinaries({ }, fileSystem,
-                                                    fileMapping.buffer.data(), fileMapping.buffer.size(),
-                                                    fileRealPathView, "", binaries) ) {
+        if ( mach_o::Error err = SymbolsCache::makeBinaries({ }, fileSystem,
+                                                            fileMapping.buffer.data(), fileMapping.buffer.size(),
+                                                            fileRealPathView, "", binaries) ) {
             // TODO: Should we error out if the binaries are bad?  For now skip them
             continue;
         }
@@ -431,6 +545,8 @@ int main(int argc, const char* argv[], const char* envp[], const char* apple[])
 
     if ( building ) {
         // We might be building a new database, so add the tables
+        assert(caches.size() == 1);
+        SymbolsCache& cache = caches.front();
         if ( Error err = cache.create() ) {
             fprintf(stderr, "error: %s\n", (const char*)err.message());
             return 1;
@@ -444,174 +560,55 @@ int main(int argc, const char* argv[], const char* envp[], const char* apple[])
 
     // verifying
     (void)verifying;
-    std::vector<ErrorResultBinary> verifyErrors;
-    std::vector<Error> verifyWarnings;
+    std::vector<ResultBinary> verifyResults;
+    std::vector<Error> internalWarnings;
+    std::vector<ExportsChangedBinary> exportsChanged;
+    std::vector<ExportsChangedBinary>* exportsChangedPtr = checkForChangedExports ? &exportsChanged : nullptr;
     bool warnOnRemovedSymbols = false;
 
-    if ( verifyIndividually ) {
-        for ( const SymbolsCacheBinary& binary : newBinaries ) {
-            if ( Error verifyErr = cache.checkNewBinaries(warnOnRemovedSymbols, { binary }, verifyProjects,
-                                                          verifyErrors, verifyWarnings) ) {
+    for ( SymbolsCache& cache : caches ) {
+        if ( verifyIndividually ) {
+            for ( const SymbolsCacheBinary& binary : newBinaries ) {
+                if ( Error verifyErr = cache.checkNewBinaries(warnOnRemovedSymbols, executableMode,
+                                                              { binary }, verifyProjects,
+                                                              verifyResults, internalWarnings,
+                                                              exportsChangedPtr) ) {
+                    fprintf(stderr, "Could not verify binaries because: %s\n", (const char*)verifyErr.message());
+                    return 1;
+                }
+            }
+        } else {
+            if ( Error verifyErr = cache.checkNewBinaries(warnOnRemovedSymbols, executableMode,
+                                                          std::move(newBinaries), verifyProjects,
+                                                          verifyResults, internalWarnings,
+                                                          exportsChangedPtr) ) {
                 fprintf(stderr, "Could not verify binaries because: %s\n", (const char*)verifyErr.message());
                 return 1;
             }
         }
+    }
+
+    if ( !verifyResults.empty() ) {
+        if ( jsonPath != nullptr )
+            printResultsJSON(jsonPath, verifyResults, exportsChanged);
+        else
+            printResults(verifyResults, rootErrors, bniOutput, detailsLogPath);
+
+        // only return 1 if we had an error, not if everything is a warning
+        for ( const ResultBinary& result : verifyResults ) {
+            if ( !result.warn )
+                return 1;
+        }
     } else {
-        if ( Error verifyErr = cache.checkNewBinaries(warnOnRemovedSymbols, std::move(newBinaries), verifyProjects,
-                                                      verifyErrors, verifyWarnings) ) {
-            fprintf(stderr, "Could not verify binaries because: %s\n", (const char*)verifyErr.message());
-            return 1;
+        // no errors, but we might still want JSON output of the changed exports
+        if ( jsonPath != nullptr ) {
+            printResultsJSON(jsonPath, verifyResults, exportsChanged);
+            return 0;
         }
     }
 
-    if ( !verifyErrors.empty() ) {
-        std::set<std::string> clientProjects;
-        for ( const ErrorResultBinary& result : verifyErrors ) {
-            if ( !result.client.projectName.empty() )
-                clientProjects.insert(result.client.projectName);
-        }
-
-        if ( !clientProjects.empty() ) {
-            fprintf(stderr, "--- Summary ---\n\n");
-            fprintf(stderr, "Error: some projects have removed symbols\n\n");
-            fprintf(stderr, "Expected resolution is to rebuild dependencies\n\n");
-
-            if ( bniOutput ) {
-                fprintf(stderr, "Run command: xbs dispatch addProjects");
-                for ( std::string_view project : clientProjects )
-                    fprintf(stderr, " %s", project.data());
-            } else {
-                fprintf(stderr, "Add the following to your submission notes, or container\n");
-                fprintf(stderr, "  REBUILD_DEPENDENCIES=");
-                bool needsComma = false;
-                for ( std::string_view project : clientProjects ) {
-                    if ( needsComma )
-                        fprintf(stderr, ",");
-                    else
-                        needsComma = true;
-                    fprintf(stderr, "%s", project.data());
-                }
-            }
-            fprintf(stderr, "\n\n");
-        }
-
-        struct ProjectResult
-        {
-            struct Client
-            {
-                std::string installName;
-                std::string uuid;
-                std::set<std::string> symbols;
-            };
-
-            struct ClientProject
-            {
-                // map from install name to its results
-                std::map<std::string, Client> clients;
-            };
-
-            struct Dylib
-            {
-                std::string uuid;
-
-                // map from project name to its clients
-                std::map<std::string, ClientProject> clientProjects;
-            };
-
-            // map from install name to its results
-            std::map<std::string, Dylib> dylibs;
-        };
-
-        // map from project name to its results
-        std::map<std::string, ProjectResult> failingProjects;
-        for ( const ErrorResultBinary& result : verifyErrors ) {
-            std::string projectName = result.projectName.empty() ? "<unknown project>" : result.projectName;
-            std::string clientProjectName = result.client.projectName.empty() ? "<unknown project>" : result.client.projectName;
-
-            ProjectResult&          projectResult = failingProjects[projectName];
-            ProjectResult::Dylib&   dylib = projectResult.dylibs[result.installName];
-
-            dylib.uuid = result.uuid;
-            ProjectResult::ClientProject&   clientProject = dylib.clientProjects[clientProjectName];
-            ProjectResult::Client&          client = clientProject.clients[result.client.installName];
-            client.installName = result.client.installName;
-            client.uuid = result.client.uuid;
-            client.symbols.insert(result.client.symbolName);
-        }
-
-        FILE* detailsLogFile = nullptr;
-        if ( detailsLogPath != nullptr ) {
-            detailsLogFile = fopen(detailsLogPath, "a");
-            if ( detailsLogFile == nullptr ) {
-                fprintf(stderr, "Could not open log file '%s' due to: %s\n\n", detailsLogPath, strerror(errno));
-            } else {
-                fprintf(stderr, "Additional logging avaialable in '%s'\n", detailsLogPath);
-            }
-        }
-
-        if ( detailsLogFile == nullptr )
-            detailsLogFile = stderr;
-
-        fprintf(detailsLogFile, "--- Detailed symbol information ---\n\n");
-        for ( std::pair<std::string, ProjectResult> result : failingProjects ) {
-            fprintf(detailsLogFile, "%s:\n", result.first.data());
-            for ( std::pair<std::string, ProjectResult::Dylib> dylib : result.second.dylibs ) {
-                std::string dylibUUID;
-                if ( !dylib.second.uuid.empty())
-                    dylibUUID = " (" + dylib.second.uuid + ")";
-                fprintf(detailsLogFile, "  %s%s:\n", dylib.first.data(), dylibUUID.data());
-
-                for ( std::pair<std::string, ProjectResult::ClientProject> clientProject : dylib.second.clientProjects ) {
-                    fprintf(detailsLogFile, "    %s:\n", clientProject.first.data());
-                    for ( std::pair<std::string, ProjectResult::Client> client : clientProject.second.clients ) {
-                        std::string clientUUID;
-                        if ( !client.second.uuid.empty())
-                            clientUUID = " (" + client.second.uuid + ")";
-                        fprintf(detailsLogFile, "      %s%s:\n", client.first.data(), clientUUID.data());
-                        for ( std::string_view symbolName : client.second.symbols )
-                            fprintf(detailsLogFile, "        %s\n", symbolName.data());
-                    }
-                }
-            }
-            fprintf(detailsLogFile, "\n");
-        }
-
-        std::set<std::string> usedRootPaths;
-        for ( const ErrorResultBinary& result : verifyErrors ) {
-            if ( !result.rootPath.empty() )
-                usedRootPaths.insert(result.rootPath);
-            if ( !result.client.rootPath.empty() )
-                usedRootPaths.insert(result.client.rootPath);
-        }
-
-        if ( !usedRootPaths.empty() || !rootErrors.empty() ) {
-            fprintf(detailsLogFile, "--- Internal information ---\n\n");
-        }
-
-        if ( !usedRootPaths.empty() ) {
-            fprintf(detailsLogFile, "Note, the following root paths were used in the above errors:\n");
-            for ( std::string_view usedRootPath : usedRootPaths ) {
-                fprintf(detailsLogFile, "    %s\n", usedRootPath.data());
-            }
-            fprintf(detailsLogFile, "\n");
-        }
-
-        if ( !rootErrors.empty() ) {
-            fprintf(detailsLogFile, "Note, the following root paths were inaccessible:\n");
-            for ( const auto& rootPathAndError : rootErrors ) {
-                fprintf(detailsLogFile, "    %s due to '%s'\n", rootPathAndError.first.data(), rootPathAndError.second.data());
-            }
-            fprintf(detailsLogFile, "\n");
-        }
-
-        if ( detailsLogFile != stderr )
-            fclose(detailsLogFile);
-
-        return 1;
-    }
-
-    if ( !verifyWarnings.empty() ) {
-        for ( Error& warning : verifyWarnings ) {
+    if ( !internalWarnings.empty() ) {
+        for ( Error& warning : internalWarnings ) {
             fprintf(stderr, "warning: %s\n", (const char*)warning.message());
         }
         return 0;

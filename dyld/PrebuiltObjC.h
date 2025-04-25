@@ -235,6 +235,11 @@ struct PrebuiltObjC
                                           VMOffset selectorStringVMAddr, VMOffset selectorReferenceVMAddr,
                                           const char* selectorString);
 
+        void visitReferenceToObjCProtocol(const objc::SelectorHashTable* objcSelOpt,
+                                          ProtocolMapTy& appSelectorMap,
+                                          VMOffset selectorStringVMAddr, VMOffset selectorReferenceVMAddr,
+                                          const char* selectorString);
+
         void visitClass(const VMAddress dyldCacheBaseAddress,
                         const objc::ClassHashTable* objcClassOpt,
                         SharedCacheImagesMapTy& sharedCacheImagesMap,
@@ -313,9 +318,12 @@ struct PrebuiltObjC
         std::unordered_set<InputDylibVMAddress, VMAddressHash, VMAddressEqual>  missingWeakImports;
 #endif
 
-        // Selector optimsation data structures
+        // Selector optimization data structures
         dyld3::OverflowSafeArray<PrebuiltLoader::BindTargetRef> selectorFixups;
         SelectorMapTy                                           selectorMap;
+
+        // Protocol optimization data structures
+        dyld3::OverflowSafeArray<PrebuiltLoader::BindTargetRef> protocolFixups;
 
         ObjCBinaryInfo                                          binaryInfo;
     };
@@ -369,6 +377,7 @@ struct PrebuiltObjC
         ObjCBinaryInfo                                          binaryInfo;
         dyld3::OverflowSafeArray<uint8_t>                       protocolISAFixups;
         dyld3::OverflowSafeArray<PrebuiltLoader::BindTargetRef> selectorReferenceFixups;
+        dyld3::OverflowSafeArray<PrebuiltLoader::BindTargetRef> protocolReferenceFixups;
     };
 
     // Indexed by the app Loader index

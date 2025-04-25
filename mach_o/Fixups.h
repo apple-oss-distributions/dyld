@@ -27,7 +27,7 @@
 
 #include "CString.h"
 
-#include "Defines.h"
+#include "MachODefines.h"
 
 namespace mach_o {
 
@@ -81,7 +81,7 @@ struct VIS_HIDDEN Fixup
     bool            operator!=(const Fixup& other) const { return !this->operator==(other); }
     bool            operator<(const Fixup& other) const  { return (this->location < other.location); }
     const char*     keyName() const;
-    
+
     struct BindTarget
     {
         CString     symbolName;
@@ -128,6 +128,7 @@ struct VIS_HIDDEN Fixup
         auth.diversity          = div;
     }
 
+    static const char*     keyName(uint8_t keyNum);
 
 };
 

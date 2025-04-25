@@ -29,6 +29,7 @@
 #include <span>
 #include <string_view>
 
+#include <stdio.h>
 #include <limits.h>
 #include <mach-o/loader.h>
 #include <mach-o/fat.h>
@@ -41,13 +42,44 @@
 #include "Error.h"
 #include "Policy.h"
 
-#if BUILDING_MACHO_WRITER
-#include <vector>
+#ifndef LC_ATOM_INFO
+  #define LC_ATOM_INFO      0x36
 #endif
 
-#ifndef LC_ATOM_INFO
-#define LC_ATOM_INFO      0x36
+#ifndef LC_FUNCTION_VARIANTS
+  #define LC_FUNCTION_VARIANTS      0x37
 #endif
+
+#ifndef LC_FUNCTION_VARIANT_FIXUPS
+  #define LC_FUNCTION_VARIANT_FIXUPS      0x38
+#endif
+
+#ifndef EXPORT_SYMBOL_FLAGS_FUNCTION_VARIANT
+  #define EXPORT_SYMBOL_FLAGS_FUNCTION_VARIANT  0x20
+#endif
+
+
+#ifndef VM_PROT_READ
+    #define VM_PROT_READ    0x01
+#endif
+
+#ifndef VM_PROT_WRITE
+    #define VM_PROT_WRITE   0x02
+#endif
+
+#ifndef VM_PROT_EXECUTE
+    #define VM_PROT_EXECUTE 0x04
+#endif
+
+#ifndef LC_TARGET_TRIPLE
+    #define LC_TARGET_TRIPLE 0x39
+    struct target_triple_command {
+        uint32_t     cmd;        /* LC_TARGET_TRIPLE */
+        uint32_t     cmdsize;    /* including string */
+        union lc_str triple;     /* target triple string */
+    };
+#endif
+
 
 #ifndef DYLIB_USE_WEAK_LINK
     struct dylib_use_command {
@@ -98,7 +130,8 @@ private:
 };
 static_assert(sizeof(LinkedDylibAttributes) == 1);
 
-inline bool operator==(const LinkedDylibAttributes& a, LinkedDylibAttributes b) { return (a.raw == b.raw); }
+VIS_HIDDEN inline bool operator==(const LinkedDylibAttributes& a, LinkedDylibAttributes b) { return (a.raw == b.raw); }
+
 
 /*!
  * @class Header
@@ -130,11 +163,13 @@ struct VIS_HIDDEN Header
     bool            isMainExecutable() const;
     bool            isDynamicExecutable() const;
     bool            isStaticExecutable() const;
+    bool            isDylinker() const;
     bool            isKextBundle() const;
     bool            isObjectFile() const;
     bool            isFileSet() const;
     bool            isPreload() const;
     bool            isPIE() const;
+    bool            usesTwoLevelNamespace() const;
     bool            isArch(const char* archName) const;
     bool            inDyldCache() const;
     bool            hasThreadLocalVariables() const;
@@ -157,12 +192,16 @@ struct VIS_HIDDEN Header
     void                forAllowableClient(void (^callback)(const char* clientName, bool& stop)) const;
     PlatformAndVersions platformAndVersions() const;
     bool                builtForPlatform(Platform, bool onlyOnePlatform=false) const;
-    bool                isZippered() const;
+    bool                builtForSimulator() const;
+    void                forEachBuildTool(void (^handler)(Platform platform, uint32_t tool, uint32_t version)) const;
     bool                getUuid(uuid_t uuid) const;
+    bool                sourceVersion(Version64& version) const;
     bool                getDylibInstallName(const char** installName, Version32* compatVersion, Version32* currentVersion) const;
     const char*         installName() const;  // returns nullptr is no install name
     const char*         umbrellaName() const; // returns nullptr if dylib is not in an umbrella
-    void                forEachLinkedDylib(void (^callback)(const char* loadPath, LinkedDylibAttributes kind, Version32 compatVersion, Version32 curVersion, bool& stop)) const;
+    void                forEachLinkedDylib(void (^callback)(const char* loadPath, LinkedDylibAttributes kind,
+                                                            Version32 compatVersion, Version32 curVersion,
+                                                            bool synthesizedLink, bool& stop)) const;
     const char*         linkedDylibLoadPath(uint32_t depIndex) const;
     uint32_t            linkedDylibCount(bool* allDepsAreRegular = nullptr) const;
     bool                canBeFairPlayEncrypted() const;
@@ -172,6 +211,7 @@ struct VIS_HIDDEN Header
     bool                hasChainedFixupsLoadCommand() const;
     bool                hasOpcodeFixups() const;
     bool                hasCodeSignature(uint32_t& fileOffset, uint32_t& size) const;
+    bool                hasLinkerOptimizationHints(uint32_t& offset, uint32_t& size) const;
     bool                getEntry(uint64_t& offset, bool& usesCRT) const;
     bool                hasIndirectSymbolTable(uint32_t& fileOffset, uint32_t& count) const;
     bool                hasSplitSegInfo(bool& isMarker) const;
@@ -179,9 +219,19 @@ struct VIS_HIDDEN Header
     CString             libOrdinalName(int libOrdinal) const;
     const load_command* findLoadCommand(uint32_t& index, bool (^predicate)(const load_command* lc)) const;
     void                findLoadCommandRange(uint32_t& startIndex, uint32_t& endIndex, bool (^predicate)(const load_command* lc)) const;
+    void                printLoadCommands(FILE* out=stdout, unsigned indentLevel=0) const;
+    bool                hasFunctionVariantFixups() const;
+    bool                loadableIntoProcess(Platform processPlatform, CString path, bool internalInstall=false) const;
+    bool                hasPlusLoadMethod() const;
+    void                forEachSingletonPatch(void (^handler)(uint64_t runtimeOffset)) const;
+    bool                hasObjCMessageReferences() const;
+    bool                findObjCDataSection(CString sectionName, uint64_t& sectionRuntimeOffset, uint64_t& sectionSize) const;
+    CString             targetTriple() const; // returns empty string if no triple specified
+    bool                hasFunctionsVariantTable(uint64_t& runtimeOffset) const;
 
     // load command helpers
     static const dylib_command* isDylibLoadCommand(const load_command* lc);
+    const thread_command*       unixThreadLoadCommand() const;
     uint32_t                    sizeForLinkedDylibCommand(const char* path, LinkedDylibAttributes depAttrs, uint32_t& traditionalCmd) const;
 
     // methods that look for segments/sections
@@ -194,19 +244,55 @@ struct VIS_HIDDEN Header
     int64_t          getSlide() const;
     bool             hasObjC() const;
     bool             hasDataConst() const;
-    CString          segmentName(uint32_t segIndex) const;
+    std::string_view segmentName(uint32_t segIndex) const;
     uint64_t         segmentVmAddr(uint32_t segIndex) const;
     uint64_t         segmentVmSize(uint32_t segIndex) const;
     uint32_t         segmentFileOffset(uint32_t segIndex) const;
-    struct SegmentInfo { CString segmentName; uint64_t vmaddr=0; uint64_t vmsize=0; uint32_t fileOffset=0; uint32_t fileSize=0; uint32_t flags=0; uint8_t perms=0; };
+    
+    struct SegmentInfo {
+        std::string_view    segmentName;
+        uint64_t            vmaddr              = 0;
+        uint64_t            vmsize              = 0;
+        uint32_t            fileOffset          = 0;
+        uint32_t            fileSize            = 0;
+        uint32_t            flags               = 0;
+        uint16_t            segmentIndex        = 0;
+        uint8_t             maxProt             = 0;
+        uint8_t             initProt            = 0;
+        
+        bool        readOnlyData() const    { return flags & SG_READ_ONLY; }
+        bool        isProtected() const     { return flags & SG_PROTECTED_VERSION_1; }
+        bool        executable() const      { return initProt & VM_PROT_EXECUTE; }
+        bool        writable() const        { return initProt & VM_PROT_WRITE; }
+        bool        readable() const        { return initProt & VM_PROT_READ; }
+        bool        hasZeroFill() const     { return (initProt == 3) && (fileSize < vmsize); }
+    };
     void             forEachSegment(void (^callback)(const SegmentInfo& info, bool& stop)) const;
-    struct SectionInfo { CString sectionName; CString segmentName; uint32_t segIndex=0; uint32_t segPerms=0; uint32_t flags=0; uint32_t alignment=0;
-                         uint64_t address=0; uint64_t size=0; uint32_t fileOffset=0;
-                         uint32_t relocsOffset=0; uint32_t relocsCount=0; uint32_t reserved1=0; uint32_t reserved2=0; };
+    void             forEachSegment(void (^callback)(const SegmentInfo& info, uint64_t sizeOfSections, uint32_t maxAlignOfSections, bool& stop)) const;
+    struct SectionInfo {
+        std::string_view    sectionName;
+        std::string_view    segmentName;
+        uint32_t            segIndex        = 0;
+        uint32_t            segMaxProt      = 0;
+        uint32_t            segInitProt     = 0;
+        uint32_t            flags           = 0;
+        uint32_t            alignment       = 0;
+        uint64_t            address         = 0;
+        uint64_t            size            = 0;
+        uint32_t            fileOffset      = 0;
+        uint32_t            relocsOffset    = 0;
+        uint32_t            relocsCount     = 0;
+        uint32_t            reserved1       = 0;
+        uint32_t            reserved2       = 0;
+    };
     void             forEachSection(void (^callback)(const SectionInfo&, bool& stop)) const;
+    void             forEachSection(void (^callback)(const SegmentInfo&, const SectionInfo&, bool& stop)) const;
     void             forEachInterposingSection(void (^callback)(const SectionInfo&, bool& stop)) const;
+    std::span<const uint8_t> findSectionContent(CString segName, CString sectName, bool useVmOffset) const;
+    static uint32_t  threadLoadCommandsSize(const Architecture& arch);
     uint32_t         threadLoadCommandsSize() const;
     uint32_t         headerAndLoadCommandsSize() const;
+    static uint32_t  pointerAligned(bool is64, uint32_t value);
     uint32_t         pointerAligned(uint32_t value) const;
     uint32_t         fileSize() const;
     const uint8_t*   computeLinkEditBias(bool zeroFillExpanded) const;
@@ -216,80 +302,7 @@ struct VIS_HIDDEN Header
     bool             hasFirmwareChainStarts(uint16_t* pointerFormat=nullptr, uint32_t* startsCount=nullptr, const uint32_t** starts=nullptr) const;
     bool             hasFirmwareRebaseRuns() const;
     bool             forEachFirmwareRebaseRuns(void (^callback)(uint32_t offset, bool& stop)) const;
-
-#if BUILDING_MACHO_WRITER
-    // for building
-    static Header*  make(std::span<uint8_t> buffer, uint32_t filetype, uint32_t flags, Architecture, bool addImplicitTextSegment=true);
-    
-    void            save(char savedPath[PATH_MAX]) const;
-    load_command*   findLoadCommand(uint32_t cmd);
-    void            setHasThreadLocalVariables();
-    void            setHasWeakDefs();
-    void            setUsesWeakDefs();
-    void            setAppExtensionSafe();
-    void            setSimSupport();
-    void            setNoReExportedDylibs();
-    void            addPlatformInfo(Platform, Version32 minOS, Version32 sdk, std::span<const build_tool_version> tools={});
-    void            addUniqueUUID(uuid_t copyOfUUID=nullptr);
-    void            addNullUUID();
-    void            updateUUID(uuid_t);
-    void            addInstallName(const char* path, Version32 compatVers, Version32 currentVersion);
-    void            addLinkedDylib(const char* path, LinkedDylibAttributes kind=LinkedDylibAttributes::regular, Version32 compatVers=Version32(1,0), Version32 currentVersion=Version32(1,0));
-    void            setLinkedDylib(load_command* cmd, const char* path, LinkedDylibAttributes kind, Version32 compatVers, Version32 currentVersion);
-    void            addLibSystem();
-    void            addDylibId(CString name, Version32 compatVers, Version32 currentVersion);
-    void            addDyldID();
-    void            addDynamicLinker();
-    void            addRPath(const char* path);
-    void            addSourceVersion(Version64 srcVers);
-    void            addDyldEnvVar(const char* envVar);
-    void            addAllowableClient(const char* clientName);
-    void            addUmbrellaName(const char* umbrellaName);
-    void            addFairPlayEncrypted(uint32_t offset, uint32_t size);
-    void            addCodeSignature(uint32_t fileOffset, uint32_t fileSize);
-    void            addSegment(std::string_view segName, uint64_t vmaddr, uint64_t vmsize, uint32_t perms, uint32_t sectionCount);
-    void            setMain(uint32_t offset);
-    void            setCustomStackSize(uint64_t stackSize);
-    void            setUnixEntry(uint64_t addr);
-    void            setSymbolTable(uint32_t nlistOffset, uint32_t nlistCount, uint32_t stringPoolOffset, uint32_t stringPoolSize,
-                                   uint32_t localsCount, uint32_t globalsCount, uint32_t undefCount, uint32_t indOffset, uint32_t indCount, bool dynSymtab);
-    void            setBindOpcodesInfo(uint32_t rebaseOffset, uint32_t rebaseSize,
-                                       uint32_t bindsOffset, uint32_t bindsSize,
-                                       uint32_t weakBindsOffset, uint32_t weakBindsSize,
-                                       uint32_t lazyBindsOffset, uint32_t lazyBindsSize,
-                                       uint32_t exportTrieOffset, uint32_t exportTrieSize);
-    void            setChainedFixupsInfo(uint32_t cfOffset, uint32_t cfSize);
-    void            setExportTrieInfo(uint32_t offset, uint32_t size);
-    void            setSplitSegInfo(uint32_t offset, uint32_t size);
-    void            setDataInCode(uint32_t offset, uint32_t size);
-    void            setFunctionStarts(uint32_t offset, uint32_t size);
-    void            addLinkerOption(std::span<uint8_t> buffer, uint32_t count);
-    void            setAtomInfo(uint32_t offset, uint32_t size);
-
-    void            updateRelocatableSegmentSize(uint64_t vmSize, uint32_t fileSize);
-    void            setRelocatableSectionCount(uint32_t sectionCount);
-    void            setRelocatableSectionInfo(uint32_t sectionIndex, const char* segName, const char* sectName, uint32_t flags, uint64_t address,
-                                              uint64_t size, uint32_t fileOffset, uint16_t alignment, uint32_t relocsOffset, uint32_t relocsCount);
-
-    void            addSegment(const SegmentInfo&, std::span<const char* const> sectionNames=std::span<const char* const>{});
-    void            updateSegment(const SegmentInfo& info);
-    void            updateSection(const SectionInfo& info);
-    Error           removeLoadCommands(uint32_t index, uint32_t endIndex);
-    // returns nullptr if there's not enough padding space available
-    load_command*   insertLoadCommand(uint32_t atIndex, uint32_t cmdSize);
-
-    struct LinkerOption
-    {
-        std::vector<uint8_t> buffer;
-        uint32_t             count = 0;
-
-        uint32_t lcSize() const { return ((uint32_t)buffer.size() + sizeof(linker_option_command) + 7) & (-8); }
-
-        static LinkerOption make(std::span<CString>);
-    };
-
-    static uint32_t relocatableHeaderAndLoadCommandsSize(bool is64, uint32_t sectionCount, uint32_t platformsCount, std::span<const Header::LinkerOption> linkerOptions);
-#endif
+    static const char* protectionString(uint32_t flags, char str[8]);
 
 private:
     friend class Image;
@@ -300,8 +313,6 @@ private:
 
     bool            entryAddrFromThreadCmd(const thread_command* cmd, uint64_t& addr) const;
 
-    bool            hasMachOBigEndianMagic() const;
-    void            removeLoadCommand(void (^callback)(const load_command* cmd, bool& remove, bool& stop));
     bool            hasLoadCommand(uint32_t lc) const;
     void            forEachPlatformLoadCommand(void (^callback)(Platform platform, Version32 minOS, Version32 sdk)) const;
     Error           validSemanticsPlatform() const;
@@ -314,21 +325,19 @@ private:
     Error           validSemanticsSegmentInIsolation(const Policy& policy, uint64_t wholeFileSize, const segment_command_64* segLC) const;
     Error           validSemanticsMain(const Policy& policy) const;
 
-    load_command*   firstLoadCommand();
-    load_command*   appendLoadCommand(uint32_t cmd, uint32_t cmdSize);
-    void            appendLoadCommand(const load_command* lc);
-    void            addBuildVersion(Platform, Version32 minOS, Version32 sdk, std::span<const build_tool_version> tools);
-    void            addMinVersion(Platform, Version32 minOS, Version32 sdk);
-
     template <typename SG, typename SC>
     Error           validSegment(const Policy& policy, uint64_t wholeFileSize, const SG* seg) const;
 
-    static CString  name16(const char name[16]);
+    static std::string_view        name16(const char name[16]);
 
     const encryption_info_command* findFairPlayEncryptionLoadCommand() const;
 
     static LinkedDylibAttributes   loadCommandToDylibKind(const dylib_command* dylibCmd);
 
+protected:
+    bool            hasMachOBigEndianMagic() const;
+
+protected:
     mach_header  mh;
 };
 

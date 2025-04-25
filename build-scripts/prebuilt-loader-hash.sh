@@ -5,7 +5,7 @@ echo -e "#include \"PrebuiltLoader.h\"\n#include \"PrebuiltObjC.h\"\n#include \"
 
 # always preprocess headers using macOS SDK
 # use "env -i" to remove other env vars set by xcode to keep side-channel info about real platform away from xcrun and clang
-env -i xcrun -v -sdk macosx.internal clang++ -target arm64-apple-macos11.0 -DBUILDING_DYLD=1 -std=c++2a -w -Wno-incompatible-sysroot -fsyntax-only -Xclang -fdump-record-layouts -Icommon -Idyld -Iinclude -Icache-builder -Icache_builder -Ilsl -Imach_o -Iinclude/mach-o ${DERIVED_FILE_DIR}/test.cpp > ${DERIVED_FILE_DIR}/test.out
+env -i xcrun -v -sdk macosx.internal clang++ -target arm64-apple-macos13.0 -DBUILDING_DYLD=1 -std=c++2a -w -Wno-incompatible-sysroot -fsyntax-only -Xclang -fdump-record-layouts -Icommon -Idyld -Iinclude -Icache-builder -Icache_builder -Ilsl -Imach_o -Iinclude/mach-o ${DERIVED_FILE_DIR}/test.cpp > ${DERIVED_FILE_DIR}/test.out
 
 grep -A100 "class dyld4::PrebuiltLoader"                                            ${DERIVED_FILE_DIR}/test.out | grep -B100 -m1 sizeof= > ${DERIVED_FILE_DIR}/pbl.ast
 grep -A100 "struct dyld4::PrebuiltLoaderSet"                                        ${DERIVED_FILE_DIR}/test.out | grep -B100 -m1 sizeof= > ${DERIVED_FILE_DIR}/pbls.ast

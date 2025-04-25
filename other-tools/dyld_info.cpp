@@ -44,6 +44,7 @@
 #include <string>
 
 // mach_o
+#include "DyldSharedCache.h"
 #include "Header.h"
 #include "Version32.h"
 #include "Universal.h"
@@ -55,59 +56,15 @@
 #include "FunctionStarts.h"
 #include "Misc.h"
 #include "Instructions.h"
+#include "FunctionVariants.h"
 
 // common
 #include "Defines.h"
 #include "FileUtils.h"
+#include "SymbolicatedImage.h"
 
-// libLTO.dylib is only built for macOS
-#if TARGET_OS_OSX
-    #if DEBUG
-        // building Debug in xcode always uses libLTO
-        #define HAVE_LIBLTO 1
-    #elif BUILDING_FOR_TOOLCHAIN
-        // building for toolchain uses libLTO
-        #define HAVE_LIBLTO 1
-    #else
-        // building for /usr/local/bin/ does not use libLTO
-        #define HAVE_LIBLTO 0
-    #endif
-#else
-    #define HAVE_LIBLTO 0
-#endif
-
-
-// llvm
-#if HAVE_LIBLTO
-    #include <llvm-c/Disassembler.h>
-    extern "C" void lto_initialize_disassembler();  // from libLTO.dylib but not in Disassembler.h
-    extern "C" int LLVMSetDisasmOptions(LLVMDisasmContextRef context, uint64_t options);\
-    WEAK_LINK_FORCE_IMPORT(LLVMCreateDisasm);
-    WEAK_LINK_FORCE_IMPORT(LLVMDisasmDispose);
-    WEAK_LINK_FORCE_IMPORT(LLVMDisasmInstruction);
-    WEAK_LINK_FORCE_IMPORT(LLVMSetDisasmOptions);
-    WEAK_LINK_FORCE_IMPORT(lto_initialize_disassembler);
-    #ifndef LLVMDisassembler_ReferenceType_In_ARM64_ADRP
-        #define LLVMDisassembler_ReferenceType_In_ARM64_ADRP   0x100000001
-    #endif
-    #ifndef LLVMDisassembler_ReferenceType_In_ARM64_ADDXri
-        #define LLVMDisassembler_ReferenceType_In_ARM64_ADDXri 0x100000002
-    #endif
-    #ifndef LLVMDisassembler_ReferenceType_In_ARM64_LDRXui
-        #define LLVMDisassembler_ReferenceType_In_ARM64_LDRXui 0x100000003
-    #endif
-    #ifndef LLVMDisassembler_ReferenceType_In_ARM64_LDRXl
-        #define LLVMDisassembler_ReferenceType_In_ARM64_LDRXl  0x100000004
-    #endif
-    #ifndef LLVMDisassembler_ReferenceType_In_ARM64_ADR
-        #define LLVMDisassembler_ReferenceType_In_ARM64_ADR    0x100000005
-    #endif
-    #ifndef LLVMDisassembler_Option_PrintImmHex
-        #define LLVMDisassembler_Option_PrintImmHex 2
-    #endif
-    asm(".linker_option \"-lLTO\"");
-#endif
-
+// other_tools
+#include "MiscFileUtils.h"
 
 using mach_o::Header;
 using mach_o::LinkedDylibAttributes;
@@ -123,1005 +80,12 @@ using mach_o::Architecture;
 using mach_o::SplitSegInfo;
 using mach_o::Error;
 using mach_o::Instructions;
+using mach_o::FunctionVariantsRuntimeTable;
+using mach_o::FunctionVariants;
+using mach_o::FunctionVariantFixups;
+using other_tools::SymbolicatedImage;
 
 typedef mach_o::ChainedFixups::PointerFormat    PointerFormat;
-
-
-
-/*!
- * @class SymbolicatedImage
- *
- * @abstract
- *      Utility class for analyzing and printing mach-o files
- */
-class SymbolicatedImage
-{
-public:
-                    SymbolicatedImage(const Image& im);
-                    ~SymbolicatedImage();
-
-    const Image&    image() const   { return _image; }
-    bool            is64() const    { return _is64; }
-    uint8_t         ptrSize() const { return _ptrSize; }
-    void            forEachDefinedObjCClass(void (^callback)(uint64_t classVmAddr)) const;
-    void            forEachObjCCategory(void (^callback)(uint64_t categoryVmAddr)) const;
-    const char*     className(uint64_t classVmAddr) const;
-    const char*     superClassName(uint64_t classVmAddr) const;
-    uint64_t        metaClassVmAddr(uint64_t classVmAddr) const;
-    void            getProtocolNames(uint64_t classVmAddr, char names[1024]) const;
-    const char*     categoryName(uint64_t categoryVmAddr) const;
-    const char*     categoryClassName(uint64_t categoryVmAddr) const;
-    void            forEachMethodInList(uint64_t methodListVmAddr, void (^callback)(const char* methodName, uint64_t implAddr)) const;
-    void            forEachMethodInClass(uint64_t classVmAddr, void (^callback)(const char* methodName, uint64_t implAddr)) const;
-    void            forEachMethodInCategory(uint64_t categoryVmAddr, void (^instanceCallback)(const char* methodName, uint64_t implAddr),
-                                                                     void (^classCallback)(const char* methodName, uint64_t implAddr)) const;
-    const char*     selectorFromObjCStub(uint64_t sectionVmAdr, const uint8_t* sectionContent, uint32_t& offset) const;
-
-    const uint8_t*  content(const Header::SectionInfo& sectInfo) const;
-    const char*     symbolNameAt(uint64_t addr) const;
-    const char*     cStringAt(uint64_t addr) const;
-    bool            isBind(const void* location, const Fixup::BindTarget*& bindTarget) const;
-    bool            isRebase(const void* location, uint64_t& rebaseTargetVmAddr) const;
-    const void*     locationFromVmAddr(uint64_t vmaddr) const;
-    void            forEachSymbolRangeInSection(size_t sectNum, void (^callback)(const char* name, uint64_t addr, uint64_t size)) const;
-    bool            fairplayEncryptsSomeObjcStrings() const;
-
-    size_t          fixupCount() const { return _fixups.size(); }
-    uint8_t         fixupSectNum(size_t fixupIndex) const        { return _fixups[fixupIndex].sectNum; }
-    uint64_t        fixupAddress(size_t fixupIndex) const        { return _fixups[fixupIndex].address; }
-    CString         fixupInSymbol(size_t fixupIndex) const       { return _fixups[fixupIndex].inSymbolName; }
-    uint32_t        fixupInSymbolOffset(size_t fixupIndex) const { return _fixups[fixupIndex].inSymbolOffset; }
-    const char*     fixupTypeString(size_t fixupIndex) const;
-    const char*     fixupTargetString(size_t fixupIndex, bool symbolic, char buffer[4096]) const;
-    CString         fixupSegment(size_t sectNum) const { return _sectionSymbols[sectNum-1].sectInfo.segmentName; }
-    CString         fixupSection(size_t sectNum) const { return _sectionSymbols[sectNum-1].sectInfo.sectionName; }
-
-
-    const char*     libOrdinalName(int libraryOrdinal, char buffer[128]) const { return libOrdinalName(image().header(), libraryOrdinal, buffer); }
-
-    static const char* libOrdinalName(const Header* header, int libraryOrdinal, char buffer[128]);
-
-#if HAVE_LIBLTO
-    void                    loadDisassembler();
-    const char*             lookupSymbol(uint64_t referencePC, uint64_t referenceValue, uint64_t& referenceType, const char*& referenceName);
-    int                     opInfo(uint64_t pc, uint64_t offset, uint64_t opSize, /* uint64_t instSize, */int tagType, void* tagBuf);
-    LLVMDisasmContextRef    llvmRef() const { return _llvmRef; }
-    const char*             targetTriple() const;
-    void                    setSectionContentBias(const uint8_t* p) { _disasmSectContentBias = p; }
-#endif
-
-protected:
-    void            addFixup(const Fixup& fixup);
-    void            findClosestSymbol(uint64_t runtimeOffset, const char*& inSymbolName, uint32_t& inSymbolOffset) const;
-
-    struct SectionSymbols {
-        struct Sym { uint64_t offsetInSection; const char* name; };
-        Header::SectionInfo  sectInfo;
-        std::vector<Sym>     symbols;
-    };
-    struct FixupInfo {
-        Fixup           fixup;
-        uint64_t        address             = 0;
-        CString         inSymbolName;
-        uint32_t        inSymbolOffset      = 0;
-        uint32_t        sectNum             = 0;
-    };
-    const Image&                                 _image;
-    std::vector<SectionSymbols>                  _sectionSymbols;
-    std::vector<Fixup::BindTarget>               _fixupTargets;
-    std::vector<FixupInfo>                       _fixups;
-    std::unordered_map<const void*,size_t>       _fixupsMap;
-    std::unordered_map<uint64_t, const char*>    _symbolsMap;
-    std::unordered_map<uint64_t, const char*>    _stringLiteralsMap;
-    std::vector<MappedSegment>                   _mappedSegments;
-    uint64_t                                     _fairplayEncryptedStartAddr = 0;
-    uint64_t                                     _fairplayEncryptedEndAddr   = 0;
-    const bool                                   _is64;
-    const size_t                                 _ptrSize;
-    const uint64_t                               _prefLoadAddress;
-#if HAVE_LIBLTO
-    LLVMDisasmContextRef                         _llvmRef = nullptr;
-    const uint8_t*                               _disasmSectContentBias = nullptr;
-#endif
-};
-
-SymbolicatedImage::SymbolicatedImage(const Image& im)
-  : _image(im), _is64(im.header()->is64()), _ptrSize(_is64 ? 8 : 4), _prefLoadAddress(im.header()->preferredLoadAddress())
-{
-    // build list of sections
-    _image.header()->forEachSection(^(const Header::SectionInfo& sectInfo, bool& stop) {
-        _sectionSymbols.push_back({sectInfo});
-    });
-
-    // check for encrypted range
-    uint32_t fairplayTextOffsetStart;
-    uint32_t fairplaySize;
-    if ( _image.header()->isFairPlayEncrypted(fairplayTextOffsetStart, fairplaySize) ) {
-        _fairplayEncryptedStartAddr = _prefLoadAddress + fairplayTextOffsetStart;
-        _fairplayEncryptedEndAddr   = _fairplayEncryptedStartAddr + fairplaySize;
-    }
-
-    // add entries for all functions for function-starts table
-    if ( _image.hasFunctionStarts() ) {
-        _image.functionStarts().forEachFunctionStart(0, ^(uint64_t funcAddr) {
-            //printf("addr: 0x%08llX\n", funcAddr);
-            char* label;
-            asprintf(&label, "<anon-%08llX>", funcAddr);
-            _symbolsMap[funcAddr] = label;
-        });
-    }
-    __block bool hasLocalSymbols = false;
-    if ( _image.hasSymbolTable() ) {
-        // add symbols from nlist
-        _image.symbolTable().forEachDefinedSymbol(^(const Symbol& symbol, uint32_t symbolIndex, bool& stop) {
-            uint64_t absAddress;
-            if ( !symbol.isAbsolute(absAddress) && (symbol.implOffset() != 0) ) {
-                const char* symName = symbol.name().c_str();
-                _symbolsMap[_prefLoadAddress+symbol.implOffset()] = symName;
-                SectionSymbols& ss = _sectionSymbols[symbol.sectionOrdinal()-1];
-                uint64_t offsetInSection = _prefLoadAddress+symbol.implOffset()-ss.sectInfo.address;
-                ss.symbols.push_back({offsetInSection, symName});
-            }
-            if ( symbol.scope() == Symbol::Scope::translationUnit )
-                hasLocalSymbols = true;
-        });
-        // add stubs and cstring literals
-        std::span<const uint32_t> indirectTable = _image.indirectSymbolTable();
-        __block std::vector<const char*> symbolNames;
-        symbolNames.resize(_image.symbolTable().totalCount());
-        _image.symbolTable().forEachSymbol(^(const char* symbolName, uint64_t n_value, uint8_t n_type, uint8_t n_sect, uint16_t n_desc, uint32_t symbolIndex, bool& stop) {
-            symbolNames[symbolIndex] = symbolName;
-        });
-        _image.header()->forEachSection(^(const Header::SectionInfo& sectInfo, bool& stop) {
-            uint32_t type = (sectInfo.flags & SECTION_TYPE);
-            if ( type == S_SYMBOL_STUBS ) {
-                const int stubSize          = sectInfo.reserved2;
-                int stubsIndirectStartIndex = sectInfo.reserved1;
-                int stubsIndirectCount      = (int)(sectInfo.size / stubSize);
-                for (int i=0; i < stubsIndirectCount; ++i) {
-                    uint32_t symbolIndex = indirectTable[stubsIndirectStartIndex+i];
-                    if ( (symbolIndex & (INDIRECT_SYMBOL_LOCAL|INDIRECT_SYMBOL_ABS)) == 0 )
-                        _symbolsMap[sectInfo.address + stubSize*i] = symbolNames[symbolIndex];
-                }
-            }
-            else if ( type == S_NON_LAZY_SYMBOL_POINTERS ) {
-                int gotsIndirectStartIndex = sectInfo.reserved1;
-                int gotsIndirectCount      = (int)(sectInfo.size / 8);  // FIXME: arm64_32
-                for (int i=0; i < gotsIndirectCount; ++i) {
-                    uint32_t symbolIndex = indirectTable[gotsIndirectStartIndex+i];
-                    if ( (symbolIndex & (INDIRECT_SYMBOL_LOCAL|INDIRECT_SYMBOL_ABS)) == 0 )
-                        _symbolsMap[sectInfo.address + 8*i] = symbolNames[symbolIndex];
-                }
-            }
-        });
-    }
-    // add c-string labels
-    _image.header()->forEachSection(^(const Header::SectionInfo& sectInfo, bool& stop) {
-        uint32_t type = (sectInfo.flags & SECTION_TYPE);
-        if ( type == S_CSTRING_LITERALS ) {
-            const char* sectionContent  = (char*)content(sectInfo);
-            const char* stringStart     = sectionContent;
-            uint64_t    stringAddr      = sectInfo.address;
-            for (int i=0; i < sectInfo.size; ++i) {
-                if ( sectionContent[i] == '\0' ) {
-                    if ( *stringStart != '\0' ) {
-                        _stringLiteralsMap[stringAddr] = stringStart;
-                        //fprintf(stderr, "0x%08llX -> \"%s\"\n", sectInfo.address + i, stringStart);
-                    }
-                    stringStart = &sectionContent[i+1];
-                    stringAddr  = sectInfo.address + i + 1;
-                }
-            }
-        }
-    });
-    _image.withSegments(^(std::span<const MappedSegment> segments) {
-        for (const MappedSegment& seg : segments) {
-            _mappedSegments.push_back(seg);
-        }
-    });
-
-    // build list of fixups
-    _image.forEachBindTarget(^(const Fixup::BindTarget& target, bool& stop) {
-        _fixupTargets.push_back(target);
-    });
-    _image.forEachFixup(^(const Fixup& fixup, bool& stop) {
-        this->addFixup(fixup);
-    });
-
-    // if has ObjC and stripped
-    if ( !hasLocalSymbols && _image.header()->hasObjC() ) {
-        // add back stripped class and method names
-        this->forEachDefinedObjCClass(^(uint64_t classVmAddr) {
-            const char* classname       = this->className(classVmAddr);
-            _symbolsMap[classVmAddr] = classname;
-            this->forEachMethodInClass(classVmAddr, ^(const char* methodName, uint64_t implAddr) {
-                char* label;
-                asprintf(&label, "-[%s %s]", classname, methodName);
-                _symbolsMap[implAddr] = label;
-            });
-            uint64_t    metaClassVmaddr = this->metaClassVmAddr(classVmAddr);
-            this->forEachMethodInClass(metaClassVmaddr, ^(const char* methodName, uint64_t implAddr) {
-                char* label;
-                asprintf(&label, "+[%s %s]", classname, methodName);
-                _symbolsMap[implAddr] = label;
-            });
-        });
-        // add back objc stub names
-        _image.header()->forEachSection(^(const Header::SectionInfo& sectInfo, bool& stop) {
-            if ( (sectInfo.sectionName == "__objc_stubs") && sectInfo.segmentName.starts_with("__TEXT") ) {
-                const uint8_t* sectionContent = content(sectInfo);
-                uint64_t       sectionVmAdr   = sectInfo.address;
-                for (uint32_t offset=0; offset < sectInfo.size; ) {
-                    uint64_t    labelAddr    = sectionVmAdr+offset;
-                    const char* stubSelector = this->selectorFromObjCStub(sectionVmAdr, sectionContent, offset);
-                    char* label;
-                    asprintf(&label, "_objc_msgSend$%s", stubSelector);
-                    _symbolsMap[labelAddr] = label;
-                }
-            }
-        });
-    }
-
-    // add synthetic symbols that depend on fixups
-    for (SectionSymbols& ss : _sectionSymbols) {
-        if ( (ss.sectInfo.sectionName == "__objc_selrefs") && ss.sectInfo.segmentName.starts_with("__DATA") ) {
-            for ( uint32_t sectOff=0; sectOff < ss.sectInfo.size; sectOff += _ptrSize) {
-                const uint8_t* loc = content(ss.sectInfo) + sectOff;
-                const auto&    pos = _fixupsMap.find(loc);
-                if ( pos != _fixupsMap.end() ) {
-                    const Fixup& fixup = _fixups[pos->second].fixup;
-                    if ( !fixup.isBind ) {
-                        if ( const char* selector = this->cStringAt(_prefLoadAddress + fixup.rebase.targetVmOffset) ) {
-                            char* label;
-                            asprintf(&label, "selector \"%s\"", selector);
-                            _symbolsMap[ss.sectInfo.address+sectOff] = label;
-                        }
-                    }
-                }
-            }
-        }
-        else if ( (ss.sectInfo.sectionName == "__objc_superrefs") && ss.sectInfo.segmentName.starts_with("__DATA") ) {
-            for ( uint32_t sectOff=0; sectOff < ss.sectInfo.size; sectOff += _ptrSize) {
-                const uint8_t* loc = content(ss.sectInfo) + sectOff;
-                const auto&    pos = _fixupsMap.find(loc);
-                if ( pos != _fixupsMap.end() ) {
-                    const Fixup& fixup = _fixups[pos->second].fixup;
-                    if ( fixup.isBind ) {
-                        // FIXME
-                    }
-                    else {
-                        const auto& symbolPos = _symbolsMap.find(_prefLoadAddress + fixup.rebase.targetVmOffset);
-                        if ( symbolPos != _symbolsMap.end() ) {
-                            char* label;
-                            asprintf(&label, "super %s", symbolPos->second);
-                            _symbolsMap[ss.sectInfo.address+sectOff] = label;
-                        }
-                    }
-                }
-            }
-        }
-        else if ( (ss.sectInfo.sectionName == "__cfstring") && ss.sectInfo.segmentName.starts_with("__DATA") ) {
-            const size_t cfStringSize = _ptrSize * 4;
-            for ( uint32_t sectOff=0; sectOff < ss.sectInfo.size; sectOff += cfStringSize) {
-                const uint8_t* curContent = content(ss.sectInfo) + sectOff;
-                uint64_t       stringVmAddr;
-                if ( this->isRebase(&curContent[cfStringSize/2], stringVmAddr) ) {
-                    if ( const char* str = this->cStringAt(stringVmAddr) ) {
-                        char* label;
-                        asprintf(&label, "@\"%s\"", str);
-                        _symbolsMap[ss.sectInfo.address+sectOff] = label;
-                    }
-                    else if ( *((uint32_t*)(&curContent[3*cfStringSize/4])) == 0 ) {
-                        // empty string has no cstring
-                        _symbolsMap[ss.sectInfo.address+sectOff] = "@\"\"";
-                    }
-                }
-                curContent += cfStringSize;
-            }
-        }
-    }
-
-    // sort symbols within section
-    for (SectionSymbols& ss : _sectionSymbols) {
-        std::sort(ss.symbols.begin(), ss.symbols.end(), [](const SectionSymbols::Sym& a, const SectionSymbols::Sym& b) {
-            return (a.offsetInSection < b.offsetInSection);
-        });
-    }
-    // for any sections that don't have a symbol at start, add seg/sect synthetic symbol
-    for (SectionSymbols& ss : _sectionSymbols) {
-        if ( ss.symbols.empty() || (ss.symbols[0].offsetInSection != 0) ) {
-            // section has no symbols, so makeup one at start
-            std::string* str = new std::string(ss.sectInfo.segmentName);
-            str->append(",");
-            str->append(ss.sectInfo.sectionName);
-            ss.symbols.insert(ss.symbols.begin(), {0, str->c_str()});
-        }
-    }
-}
-
-bool SymbolicatedImage::fairplayEncryptsSomeObjcStrings() const
-{
-    if ( _fairplayEncryptedStartAddr == 0 )
-        return false;
-
-    for (const SectionSymbols& ss : _sectionSymbols) {
-        if ( ss.sectInfo.address < _fairplayEncryptedEndAddr ) {
-            if ( ss.sectInfo.sectionName.starts_with("__objc_") )
-                return true;
-        }
-    }
-    return false;
-}
-
-
-const uint8_t* SymbolicatedImage::content(const Header::SectionInfo& sectInfo) const
-{
-    const Header* header = image().header();
-    if ( header->inDyldCache() ) {
-        return (uint8_t*)(sectInfo.address + header->getSlide());
-    }
-    else {
-        return (uint8_t*)(header) + sectInfo.fileOffset;
-    }
-}
-
-void SymbolicatedImage::addFixup(const Fixup& fixup)
-{
-    _fixupsMap[fixup.location] = _fixups.size();
-    uint64_t    segOffset     = (uint8_t*)fixup.location - (uint8_t*)(fixup.segment->content);
-    uint64_t    runtimeOffset = fixup.segment->runtimeOffset + segOffset;
-    uint64_t    address       = _prefLoadAddress + runtimeOffset;
-    const char* inSymbolName;
-    uint32_t    inSymbolOffset;
-    this->findClosestSymbol(runtimeOffset, inSymbolName, inSymbolOffset);
-    uint32_t    sectNum = 1;
-    for ( const SectionSymbols& ss : _sectionSymbols ) {
-        if ( ss.sectInfo.segmentName == fixup.segment->segName ) {
-            if ( (ss.sectInfo.address <= address) && (address < ss.sectInfo.address+ss.sectInfo.size) )
-                break;
-        }
-        sectNum++;
-    }
-    _fixups.push_back({fixup, address, inSymbolName, inSymbolOffset, sectNum});
-}
-
-
-void SymbolicatedImage::findClosestSymbol(uint64_t runtimeOffset, const char*& inSymbolName, uint32_t& inSymbolOffset) const
-{
-    inSymbolName    = "";
-    inSymbolOffset  = 0;
-    for (const SectionSymbols& ss : _sectionSymbols) {
-        if ( (runtimeOffset >= ss.sectInfo.address) && (runtimeOffset < ss.sectInfo.address+ss.sectInfo.size) ) {
-            // find largest symbol address that is <= target address
-            const uint64_t targetSectOffset = runtimeOffset-ss.sectInfo.address;
-            auto it = std::lower_bound(ss.symbols.begin(), ss.symbols.end(), targetSectOffset, [](const SectionSymbols::Sym& sym, uint64_t sectOffset) -> bool {
-                return sym.offsetInSection <= sectOffset;
-            });
-            // lower_bound returns the symbol after the one we need
-            if ( (it != ss.symbols.end()) && (it != ss.symbols.begin()) ) {
-                --it;
-                inSymbolName   = it->name;
-                inSymbolOffset = (uint32_t)(runtimeOffset - (ss.sectInfo.address+it->offsetInSection));
-            }
-            else if ( ss.symbols.empty() ) {
-                inSymbolName   = "";
-                inSymbolOffset = 0;
-            }
-            else {
-                inSymbolName   = ss.symbols.front().name;
-                inSymbolOffset = (uint32_t)(runtimeOffset - (ss.sectInfo.address + ss.symbols.front().offsetInSection));
-            }
-            break;
-        }
-    }
-}
-
-const char* SymbolicatedImage::selectorFromObjCStub(uint64_t sectionVmAdr, const uint8_t* sectionContent, uint32_t& offset) const
-{
-    if ( _image.header()->arch().usesArm64Instructions() ) {
-        const uint32_t* instructions = (uint32_t*)(sectionContent + offset);
-        uint32_t selAdrpInstruction  = instructions[0];
-        uint32_t selLdrInstruction   = instructions[1];
-        if ( (selAdrpInstruction & 0x9F000000) == 0x90000000 ) {
-            int32_t  adrpAddend     = (int32_t)(((selAdrpInstruction & 0x60000000) >> 29) | ((selAdrpInstruction & 0x01FFFFE0) >> 3));
-            uint64_t adrpTargetAddr = ((sectionVmAdr+offset) & (-4096)) + adrpAddend*0x1000;
-            if ( (selLdrInstruction & 0x3B000000) == 0x39000000 ) {
-                uint64_t    ldrAddend       = ((selLdrInstruction & 0x003FFC00) >> 10) * _ptrSize;
-                uint64_t    selectorVmAddr  = adrpTargetAddr + ldrAddend;
-                const void* selectorContent = this->locationFromVmAddr(selectorVmAddr);
-                uint64_t    rebaseTargetVmAddr;
-                if ( this->isRebase(selectorContent, rebaseTargetVmAddr) ) {
-                    if ( const char* selector = this->cStringAt(rebaseTargetVmAddr) ) {
-                        offset += 0x20;
-                        return selector;
-                    }
-                }
-            }
-        }
-        offset += 0x20;
-    }
-
-    return nullptr;
-}
-
-
-const char* SymbolicatedImage::symbolNameAt(uint64_t addr) const
-{
-    const auto& pos = _symbolsMap.find(addr);
-    if ( pos != _symbolsMap.end() )
-        return pos->second;
-    return nullptr;
-}
-
-const char* SymbolicatedImage::cStringAt(uint64_t addr) const
-{
-    if ( (_fairplayEncryptedStartAddr <= addr) && (addr < _fairplayEncryptedEndAddr) )
-        return "##unavailable##";
-
-    const auto& pos = _stringLiteralsMap.find(addr);
-    if ( pos != _stringLiteralsMap.end() )
-        return pos->second;
-    return nullptr;
-}
-
-bool SymbolicatedImage::isBind(const void* location, const Fixup::BindTarget*& bindTarget) const
-{
-    const auto& pos = _fixupsMap.find(location);
-    if ( pos == _fixupsMap.end() )
-        return false;
-    const Fixup& fixup = _fixups[pos->second].fixup;
-    if ( !fixup.isBind )
-        return false;
-    bindTarget = &_fixupTargets[fixup.bind.bindOrdinal];
-    return true;
-}
-
-bool SymbolicatedImage::isRebase(const void* location, uint64_t& rebaseTargetVmAddr) const
-{
-    const auto& pos = _fixupsMap.find(location);
-    if ( pos == _fixupsMap.end() )
-        return false;
-    const Fixup& fixup = _fixups[pos->second].fixup;
-    if ( fixup.isBind )
-        return false;
-    if ( !_is64 && _image.header()->isMainExecutable() )
-        rebaseTargetVmAddr = fixup.rebase.targetVmOffset;   // arm64_32 main rebases start at 0 not start of TEXt
-    else
-        rebaseTargetVmAddr = _prefLoadAddress + fixup.rebase.targetVmOffset;
-    return true;
-}
-
-const void* SymbolicatedImage::locationFromVmAddr(uint64_t addr) const
-{
-    uint64_t vmOffset = addr - _prefLoadAddress;
-    for ( const MappedSegment& seg : _mappedSegments ) {
-        if ( seg.readable && (seg.runtimeOffset <= vmOffset) && (vmOffset < seg.runtimeOffset+seg.runtimeSize) ) {
-            return (void*)((uint8_t*)seg.content + vmOffset - seg.runtimeOffset);
-        }
-    }
-    return nullptr;
-}
-
-// for a section with symbols in it, divides up section by symbols and call callback once for each range
-// if there is no symbol at start of section, callback is called for that range with NULL for name
-void SymbolicatedImage::forEachSymbolRangeInSection(size_t sectNum, void (^callback)(const char* name, uint64_t addr, uint64_t size)) const
-{
-    const SectionSymbols&   ss       = _sectionSymbols[sectNum-1];
-    uint64_t                lastAddr = ss.sectInfo.address;
-    const char*             lastName = nullptr;
-    for (const SectionSymbols::Sym& sym : ss.symbols) {
-        uint64_t addr = ss.sectInfo.address + sym.offsetInSection;
-        if ( (lastName == nullptr) && (addr == ss.sectInfo.address) ) {
-            // if first symbol is start of section, we don't need extra callback
-        }
-        else {
-            callback(lastName, lastAddr, addr - lastAddr);
-        }
-        lastAddr = addr;
-        lastName = sym.name;
-    }
-    if ( lastName != nullptr )
-        callback(lastName, lastAddr, ss.sectInfo.address + ss.sectInfo.size - lastAddr);
-}
-
-
-const char* SymbolicatedImage::className(uint64_t classVmAddr) const
-{
-    uint64_t roDataFieldAddr = classVmAddr + 4*_ptrSize;
-    if ( const void* roDataFieldContent = this->locationFromVmAddr(roDataFieldAddr) ) {
-        uint64_t roDataVmAddr;
-        if ( this->isRebase(roDataFieldContent, roDataVmAddr) ) {
-            roDataVmAddr &= -4; // remove swift bits
-            uint64_t nameFieldAddr = roDataVmAddr + 3*_ptrSize;
-            if ( const void* nameFieldContent = this->locationFromVmAddr(nameFieldAddr) ) {
-                uint64_t nameAddr;
-                if ( this->isRebase(nameFieldContent, nameAddr) ) {
-                    if ( const char* className = this->cStringAt(nameAddr) ) {
-                        return className;
-                    }
-                }
-            }
-        }
-    }
-    return nullptr;
-}
-
-const char* SymbolicatedImage::superClassName(uint64_t classVmAddr) const
-{
-    uint64_t superClassFieldAddr = classVmAddr + _ptrSize;
-    if ( const void* superClassFieldContent = this->locationFromVmAddr(superClassFieldAddr) ) {
-        uint64_t                 superClassVmAddr;
-        const Fixup::BindTarget* superClassBindTarget;
-        if ( this->isRebase(superClassFieldContent, superClassVmAddr) ) {
-            return this->className(superClassVmAddr);
-        }
-        else if ( this->isBind(superClassFieldContent, superClassBindTarget) ) {
-            CString supername = superClassBindTarget->symbolName;
-            if ( supername.starts_with("_OBJC_CLASS_$_") ) {
-                return supername.substr(14).c_str();
-            }
-            return supername.c_str();
-        }
-    }
-    return nullptr;
-}
-
-// if class conforms to protocols, return string of protocol names, eg. "<NSFoo, NSBar>"
-void SymbolicatedImage::getProtocolNames(uint64_t classVmAddr, char names[1024]) const
-{
-    names[0] = '\0';
-    uint64_t roDataFieldAddr = classVmAddr + 4*_ptrSize;
-    if ( const void* roDataFieldContent = this->locationFromVmAddr(roDataFieldAddr) ) {
-        uint64_t roDataVmAddr;
-        if ( this->isRebase(roDataFieldContent, roDataVmAddr) ) {
-            roDataVmAddr &= -4; // remove swift bits
-            uint64_t baseProtocolsFieldAddr = roDataVmAddr + ((_ptrSize==8) ? 40 : 24);
-            if ( const void* baseProtocolsFieldContent = this->locationFromVmAddr(baseProtocolsFieldAddr) ) {
-                uint64_t baseProtocolsListAddr;
-                if ( this->isRebase(baseProtocolsFieldContent, baseProtocolsListAddr) ) {
-                    if ( const void* protocolListContent = this->locationFromVmAddr(baseProtocolsListAddr) ) {
-                        uint32_t count = *(uint32_t*)protocolListContent;
-                        strlcpy(names, "<", 1024);
-                        bool needComma = false;
-                        for (uint32_t i=0; i < count; ++i) {
-                            if ( needComma )
-                                strlcat(names, ", ", 1024);
-                            uint64_t protocolPtrAddr = baseProtocolsListAddr + (i+1)*_ptrSize;
-                            if ( const void* protocolPtrContent = this->locationFromVmAddr(protocolPtrAddr) ) {
-                                uint64_t protocolAddr;
-                                if ( this->isRebase(protocolPtrContent, protocolAddr) ) {
-                                    uint64_t protocolNameFieldAddr = protocolAddr + _ptrSize;
-                                    if ( const void* protocolNameFieldContent = this->locationFromVmAddr(protocolNameFieldAddr) ) {
-                                        uint64_t protocolStringAddr;
-                                        if ( this->isRebase(protocolNameFieldContent, protocolStringAddr) ) {
-                                            if ( const char* ptotocolName = this->cStringAt(protocolStringAddr) ) {
-                                                strlcat(names, ptotocolName, 1024);
-                                            }
-                                        }
-                                    }
-                                }
-                            }
-                            needComma = true;
-                        }
-                        strlcat(names, ">", 1024);
-                   }
-                }
-            }
-        }
-    }
-}
-
-uint64_t SymbolicatedImage::metaClassVmAddr(uint64_t classVmAddr) const
-{
-    uint64_t metaClassFieldAddr = classVmAddr;
-    if ( const void* metaClassFieldContent = this->locationFromVmAddr(metaClassFieldAddr) ) {
-        uint64_t                 metaClassVmAddress;
-        const Fixup::BindTarget* bindTarget;
-        if ( this->isRebase(metaClassFieldContent, metaClassVmAddress) ) {
-            return metaClassVmAddress;
-        }
-        else if ( this->isBind(metaClassFieldContent, bindTarget) ) {
-            // for faster dyld cache patch, classlist is sometimes binds to self for class instead of rebase
-            Symbol symbol;
-            if ( _image.exportsTrie().hasExportedSymbol(bindTarget->symbolName.c_str(), symbol) ) {
-                return symbol.implOffset();
-            }
-        }
-    }
-    return 0;
-}
-
-const char* SymbolicatedImage::categoryName(uint64_t categoryVmAddr) const
-{
-    uint64_t catNameFieldAddr = categoryVmAddr;
-    if ( const void* catNameFieldContent = this->locationFromVmAddr(catNameFieldAddr) ) {
-        uint64_t nameVmAddr;
-        if ( this->isRebase(catNameFieldContent, nameVmAddr) ) {
-            if ( const char* className = this->cStringAt(nameVmAddr) ) {
-                return className;
-            }
-        }
-    }
-    return nullptr;
-}
-
-const char* SymbolicatedImage::categoryClassName(uint64_t categoryVmAddr) const
-{
-    uint64_t classFieldAddr = categoryVmAddr + _ptrSize;
-    if ( const void* classFieldContent = this->locationFromVmAddr(classFieldAddr) ) {
-        uint64_t                 classVmAddr;
-        const Fixup::BindTarget* classBindTarget;
-       if ( this->isRebase(classFieldContent, classVmAddr) ) {
-            return this->className(classVmAddr);
-        }
-        else if ( this->isBind(classFieldContent, classBindTarget) ) {
-            CString supername = classBindTarget->symbolName;
-            if ( supername.starts_with("_OBJC_CLASS_$_") ) {
-                return supername.substr(14).c_str();
-            }
-            return supername.c_str();
-        }
-    }
-    return nullptr;
-}
-
-
-void SymbolicatedImage::forEachMethodInClass(uint64_t classVmAddr, void (^callback)(const char* methodName, uint64_t implAddr)) const
-{
-    uint64_t roDataFieldAddr = classVmAddr + 4*_ptrSize;
-    if ( const void* roDataFieldContent = this->locationFromVmAddr(roDataFieldAddr) ) {
-        uint64_t roDataVmAddr;
-        if ( this->isRebase(roDataFieldContent, roDataVmAddr) ) {
-            roDataVmAddr &= -4; // remove swift bits
-            uint64_t methodListFieldAddr = roDataVmAddr + ((_ptrSize==8) ? 32 : 20);
-            if ( const void* methodListFieldContent = this->locationFromVmAddr(methodListFieldAddr) ) {
-                uint64_t methodListAddr;
-                if ( this->isRebase(methodListFieldContent, methodListAddr) ) {
-                    this->forEachMethodInList(methodListAddr, callback);
-                }
-            }
-        }
-    }
-}
-
-void SymbolicatedImage::forEachMethodInCategory(uint64_t categoryVmAddr, void (^instanceCallback)(const char* methodName, uint64_t implAddr),
-                                                                         void (^classCallback)(const char* methodName, uint64_t implAddr)) const
-{
-    uint64_t instanceMethodsFieldAddr = categoryVmAddr + 2*_ptrSize;
-    if ( const void* instanceMethodsFieldContent = this->locationFromVmAddr(instanceMethodsFieldAddr) ) {
-        uint64_t  methodListVmAddr;
-        if ( this->isRebase(instanceMethodsFieldContent, methodListVmAddr) ) {
-            this->forEachMethodInList(methodListVmAddr, instanceCallback);
-        }
-    }
-    uint64_t classMethodsFieldAddr = categoryVmAddr + 3*_ptrSize;
-    if ( const void* classMethodsFieldContent = this->locationFromVmAddr(classMethodsFieldAddr) ) {
-        uint64_t  methodListVmAddr;
-        if ( this->isRebase(classMethodsFieldContent, methodListVmAddr) ) {
-            this->forEachMethodInList(methodListVmAddr, classCallback);
-        }
-    }
-}
-
-
-void SymbolicatedImage::forEachMethodInList(uint64_t methodListVmAddr, void (^callback)(const char* methodName, uint64_t implAddr)) const
-{
-     if ( const void* methodListContent = this->locationFromVmAddr(methodListVmAddr) ) {
-        const uint32_t* methodListArray = (uint32_t*)methodListContent;
-        uint32_t entrySize = methodListArray[0];
-        uint32_t count     = methodListArray[1];
-        if ( entrySize == 0x8000000C ) {
-            // relative method lists
-            for (uint32_t i=0; i < count; ++i) {
-                int32_t  nameOffset           = methodListArray[i*3+2];
-                uint64_t methodSelectorVmAddr = methodListVmAddr+i*12+nameOffset+8;
-                int32_t  implOffset           = methodListArray[i*3+4];
-                uint64_t implAddr             = methodListVmAddr+i*12+implOffset+16;
-                if ( const void* methodSelectorContent = this->locationFromVmAddr(methodSelectorVmAddr) ) {
-                    uint64_t selectorTargetAddr;
-                    if ( this->isRebase(methodSelectorContent, selectorTargetAddr) ) {
-                        if ( const char* methodName = this->cStringAt(selectorTargetAddr) )
-                            callback(methodName, implAddr);
-                    }
-                }
-            }
-        }
-        else if ( entrySize == 24 ) {
-            // 64-bit absolute method lists
-            for (uint32_t i=0; i < count; ++i) {
-                if ( const void* methodNameContent = this->locationFromVmAddr(methodListVmAddr+i*24+8) ) {
-                    uint64_t methodNameAddr;
-                    if ( this->isRebase(methodNameContent, methodNameAddr) ) {
-                        if ( const char* methodName = this->cStringAt(methodNameAddr) ) {
-                            if ( const void* methodImplContent = this->locationFromVmAddr(methodListVmAddr+i*24+24) ) {
-                                uint64_t implAddr;
-                                if ( this->isRebase(methodImplContent, implAddr) ) {
-                                    callback(methodName, implAddr);
-                                }
-                            }
-                        }
-                    }
-                }
-            }
-        }
-    }
- }
-
-
-void SymbolicatedImage::forEachDefinedObjCClass(void (^callback)(uint64_t classVmAddr)) const
-{
-    _image.header()->forEachSection(^(const Header::SectionInfo& sectInfo, bool& stop) {
-        if ( (sectInfo.sectionName == "__objc_classlist") && sectInfo.segmentName.starts_with("__DATA") ) {
-            const uint8_t* sectionContent    = content(sectInfo);
-            const uint8_t* sectionContentEnd = sectionContent + sectInfo.size;
-            const uint8_t* curContent        = sectionContent;
-            while ( curContent < sectionContentEnd ) {
-                const Fixup::BindTarget* bindTarget;
-                uint64_t                 rebaseTargetVmAddr;
-                if ( this->isRebase(curContent, rebaseTargetVmAddr) ) {
-                    callback(rebaseTargetVmAddr);
-                }
-                else if ( this->isBind(curContent, bindTarget) ) {
-                    // for faster dyld cache patch, classlist is sometimes binds to self for class instead of rebase
-                    Symbol symbol;
-                    if ( _image.exportsTrie().hasExportedSymbol(bindTarget->symbolName.c_str(), symbol) ) {
-                        callback(symbol.implOffset());
-                    }
-                }
-                curContent += _ptrSize;
-            }
-        }
-    });
-}
-
-void SymbolicatedImage::forEachObjCCategory(void (^callback)(uint64_t categoryVmAddr)) const
-{
-    _image.header()->forEachSection(^(const Header::SectionInfo& sectInfo, bool& stop) {
-        if ( (sectInfo.sectionName == "__objc_catlist") && sectInfo.segmentName.starts_with("__DATA") ) {
-            const uint8_t* sectionContent    = content(sectInfo);
-            const uint8_t* sectionContentEnd = sectionContent + sectInfo.size;
-            const uint8_t* curContent        = sectionContent;
-            while ( curContent < sectionContentEnd ) {
-                uint64_t   rebaseTargetVmAddr;
-                if ( this->isRebase(curContent, rebaseTargetVmAddr) )
-                    callback(rebaseTargetVmAddr);
-                curContent += _ptrSize;
-            }
-        }
-    });
-}
-
-const char* SymbolicatedImage::libOrdinalName(const Header* header, int libOrdinal, char buffer[128])
-{
-    CString name = header->libOrdinalName(libOrdinal);
-    // convert:
-    //  /path/stuff/Foo.framework/Foo   => Foo
-    //  /path/stuff/libfoo.dylib        => libfoo
-    //  /path/stuff/libfoo.A.dylib      => libfoo
-    strlcpy(buffer, name.leafName().c_str(), 128);
-    if ( name.ends_with(".dylib") ) {
-        size_t len = strlen(buffer);
-        buffer[len-6] = '\0';
-        if ( (len > 8) && (buffer[len-8] == '.') )
-            buffer[len-8] = '\0';
-    }
-
-    return buffer;
-}
-
-const char* SymbolicatedImage::fixupTypeString(size_t fixupIndex) const
-{
-    const Fixup& fixup = _fixups[fixupIndex].fixup;
-    if ( fixup.isBind  ) {
-        if ( fixup.authenticated )
-            return "auth-bind";
-        else if ( fixup.isLazyBind )
-            return "lazy-bind";
-        else
-            return "bind";
-    }
-    else {
-        if ( fixup.authenticated )
-            return "auth-rebase";
-        else
-            return "rebase";
-    }
-}
-
-const char* SymbolicatedImage::fixupTargetString(size_t fixupIndex, bool symbolic, char buffer[4096]) const
-{
-    const Fixup& fixup = _fixups[fixupIndex].fixup;
-    char         authInfo[64];
-
-    authInfo[0] = '\0';
-    if ( fixup.authenticated )
-        snprintf(authInfo, sizeof(authInfo), " (div=0x%04X ad=%d key=%s)", fixup.auth.diversity, fixup.auth.usesAddrDiversity, fixup.keyName());
-
-    if ( fixup.isBind ) {
-        char                     dylibBuf[128];
-        const Fixup::BindTarget& bindTarget = _fixupTargets[fixup.bind.bindOrdinal];
-        int64_t                  addend     = bindTarget.addend + fixup.bind.embeddedAddend;
-
-        if ( addend != 0 )
-            snprintf(buffer, 4096, "%s/%s + 0x%llX%s",      libOrdinalName(bindTarget.libOrdinal, dylibBuf), bindTarget.symbolName.c_str(), addend, authInfo);
-        else if ( bindTarget.weakImport )
-            snprintf(buffer, 4096, "%s/%s [weak-import]%s", libOrdinalName(bindTarget.libOrdinal, dylibBuf), bindTarget.symbolName.c_str(), authInfo);
-        else
-            snprintf(buffer, 4096, "%s/%s%s",               libOrdinalName(bindTarget.libOrdinal, dylibBuf), bindTarget.symbolName.c_str(), authInfo);
-    }
-    else {
-        if ( symbolic ) {
-            const char* inSymbolName;
-            uint32_t    inSymbolOffset;
-            this->findClosestSymbol(fixup.rebase.targetVmOffset, inSymbolName, inSymbolOffset);
-            if ( strncmp(inSymbolName, "__TEXT,", 7) == 0 ) {
-                const char* str = this->cStringAt(_prefLoadAddress+fixup.rebase.targetVmOffset);
-                snprintf(buffer, 4096, "\"%s\"%s", str, authInfo);
-            }
-            else if ( inSymbolOffset == 0 ) {
-                snprintf(buffer, 4096, "%s%s", inSymbolName, authInfo);
-            }
-            else {
-                snprintf(buffer, 4096, "%s+%u%s", inSymbolName, inSymbolOffset, authInfo);
-            }
-        }
-        else {
-            snprintf(buffer, 4096, "0x%08llX%s",_prefLoadAddress+fixup.rebase.targetVmOffset, authInfo);
-        }
-    }
-    return buffer;
-}
-
-SymbolicatedImage::~SymbolicatedImage()
-{
-#if HAVE_LIBLTO
-    if ( _llvmRef != nullptr ) {
-        LLVMDisasmDispose(_llvmRef);
-        _llvmRef = nullptr;
-    }
-#endif
-}
-
-
-#if HAVE_LIBLTO
-
-static const char* printDumpSymbolCallback(void* di, uint64_t referenceValue, uint64_t* referenceType,
-                                           uint64_t referencePC, const char** referenceName)
-{
-    return ((SymbolicatedImage*)di)->lookupSymbol(referencePC, referenceValue, *referenceType, *referenceName);
-}
-
-static int printDumpOpInfoCallback(void* di, uint64_t pc, uint64_t offset, uint64_t opSize, /* uint64_t instSize, */
-                                   int tagType, void* tagBuf)
-{
-    return ((SymbolicatedImage*)di)->opInfo(pc, offset, opSize, tagType, tagBuf);
-}
-
-const char* SymbolicatedImage::targetTriple() const
-{
-    Architecture arch = _image.header()->arch();
-    if ( arch.usesArm64Instructions() )
-        return "arm64e-apple-darwin";
-    else if ( arch.usesx86_64Instructions() )
-        return "x86_64h-apple-darwin";
-    else
-        return "unknown";
-}
-
-void SymbolicatedImage::loadDisassembler()
-{
-    // libLTO is weak linked, need to bail out if libLTO.dylib not loaded
-    if ( &lto_initialize_disassembler == nullptr )
-        return;
-
-    // Hack for using llvm disassemble in libLTO.dylib
-    static bool llvmDisAssemblerInitialized = false;
-    if ( !llvmDisAssemblerInitialized ) {
-        lto_initialize_disassembler();
-        llvmDisAssemblerInitialized = true;
-    }
-
-    // instantiate llvm disassembler object
-    _llvmRef = LLVMCreateDisasm(targetTriple(), this, 0, &printDumpOpInfoCallback, &printDumpSymbolCallback);
-    if ( _llvmRef != nullptr )
-        LLVMSetDisasmOptions(_llvmRef, LLVMDisassembler_Option_PrintImmHex);
-}
-
-
-const char* SymbolicatedImage::lookupSymbol(uint64_t refPC, uint64_t refValue, uint64_t& refType, const char*& refName)
-{
-    //printf("refPC=0x%08llX, refType=0x%llX\n", refPC, refType);
-    refName = nullptr;
-    if ( refType == LLVMDisassembler_ReferenceType_In_Branch ) {
-        refType = LLVMDisassembler_ReferenceType_InOut_None;
-        const auto& pos = _symbolsMap.find(refValue);
-        if ( pos != _symbolsMap.end() ) {
-            return pos->second;
-        }
-        return nullptr;
-    }
-    else if ( refType == LLVMDisassembler_ReferenceType_In_ARM64_ADR ) {
-        const auto& pos = _stringLiteralsMap.find(refValue);
-        if ( pos != _stringLiteralsMap.end() ) {
-            refType = LLVMDisassembler_ReferenceType_Out_LitPool_CstrAddr;
-            refName = pos->second;
-            return nullptr;
-        }
-        else {
-            const auto& pos2 = _symbolsMap.find(refValue);
-            if ( pos2 != _symbolsMap.end() ) {
-                refName = pos2->second;
-                refType = LLVMDisassembler_ReferenceType_Out_LitPool_SymAddr;
-                return nullptr;
-            }
-
-        }
-    }
-    else if ( refType == LLVMDisassembler_ReferenceType_In_ARM64_LDRXl ) {
-        const auto& pos = _symbolsMap.find(refValue);
-        if ( pos != _symbolsMap.end() ) {
-            refType = LLVMDisassembler_ReferenceType_Out_LitPool_SymAddr;
-            refName = pos->second;
-            return nullptr;
-        }
-    }
-    else if ( (refType == LLVMDisassembler_ReferenceType_In_ARM64_LDRXui) || (refType == LLVMDisassembler_ReferenceType_In_ARM64_ADDXri) ) {
-        const uint32_t* instructionPtr = (uint32_t*)(&_disasmSectContentBias[refPC]);
-        uint32_t thisInstruction = instructionPtr[0];
-        uint32_t prevInstruction = instructionPtr[-1];
-        // if prev instruction was ADRP and it matches register, the we can compute target
-        Instructions::arm64::AdrpInfo  adrpInfo;
-        Instructions::arm64::Imm12Info imm12Info;
-        if ( Instructions::arm64::isADRP(prevInstruction, adrpInfo) && Instructions::arm64::isImm12(thisInstruction, imm12Info) ) {
-            if ( adrpInfo.dstReg == imm12Info.srcReg ) {
-                uint64_t targetAddr = (refPC & -4096) + adrpInfo.pageOffset*4096 + imm12Info.offset;
-                const auto& pos = _symbolsMap.find(targetAddr);
-                if ( pos != _symbolsMap.end() ) {
-                    refName = pos->second;
-                    refType = LLVMDisassembler_ReferenceType_Out_LitPool_SymAddr;
-                    return nullptr;
-                }
-            }
-        }
-    }
-    else if ( refType == LLVMDisassembler_ReferenceType_In_ARM64_ADRP ) {
-    }
-    else if ( refType == LLVMDisassembler_ReferenceType_In_PCrel_Load ) {
-        const auto& pos = _stringLiteralsMap.find(refValue);
-        if ( pos != _stringLiteralsMap.end() ) {
-            refType = LLVMDisassembler_ReferenceType_Out_LitPool_CstrAddr;
-            refName = pos->second;
-            return nullptr;
-        }
-        const auto& pos2 = _symbolsMap.find(refValue);
-        if ( pos2 != _symbolsMap.end() ) {
-            refName = pos2->second;
-            return nullptr;
-        }
-        return nullptr;
-    }
-    else if ( refType == LLVMDisassembler_ReferenceType_InOut_None ) {
-        return nullptr;
-    }
-    else {
-        //printf("refPC=0x%08llX, refType=0x%llX\n", refPC, refType);
-    }
-    return nullptr;
-}
-
-int SymbolicatedImage::opInfo(uint64_t pc, uint64_t offset, uint64_t opSize, /* uint64_t instSize, */int tagType, void* tagBuf)
-{
-    return 0;
-}
-#endif // HAVE_LIBLTO
-
-
-
-
-
-
-
-
 
 static void printPlatforms(const Header* header)
 {
@@ -1160,23 +124,30 @@ static void printSegments(const Header* header)
 {
     if ( header->isPreload() ) {
         printf("    -segments:\n");
-        printf("       file-offset vm-addr       segment      section         sect-size  seg-size perm\n");
+        printf("       file-offset vm-addr       segment     section         sect-size  seg-size  init/max-prot\n");
         __block std::string_view lastSegName;
         header->forEachSection(^(const Header::SectionInfo& sectInfo, bool& stop) {
             if ( sectInfo.segmentName != lastSegName ) {
                 uint64_t segVmSize = header->segmentVmSize(sectInfo.segIndex);
-                char permChars[8];
-                permString(sectInfo.segPerms, permChars);
-                printf("        0x%06X   0x%09llX    %-16s                   %6lluKB   %s\n",
-                       sectInfo.fileOffset, sectInfo.address, sectInfo.segmentName.c_str(), segVmSize/1024, permChars);
+                char maxProtChars[8];
+                permString(sectInfo.segMaxProt, maxProtChars);
+                char initProtChars[8];
+                permString(sectInfo.segInitProt, initProtChars);
+                printf("        0x%06X   0x%09llX    %-16.*s                    %6lluKB     %s/%s\n",
+                       sectInfo.fileOffset, sectInfo.address,
+                       (int)sectInfo.segmentName.size(), sectInfo.segmentName.data(),
+                       segVmSize/1024, initProtChars, maxProtChars);
                 lastSegName = sectInfo.segmentName;
             }
-                printf("        0x%06X   0x%09llX              %-16s %7llu\n", sectInfo.fileOffset, sectInfo.address, sectInfo.sectionName.c_str(), sectInfo.size);
+                printf("        0x%06X   0x%09llX             %-16.*s %7llu\n",
+                       sectInfo.fileOffset, sectInfo.address,
+                       (int)sectInfo.sectionName.size(), sectInfo.sectionName.data(),
+                       sectInfo.size);
         });
     }
     else if ( header->inDyldCache() ) {
         printf("    -segments:\n");
-        printf("        unslid-addr   segment   section        sect-size  seg-size perm\n");
+        printf("        unslid-addr    segment   section        sect-size  seg-size   init/max-prot\n");
         __block std::string_view lastSegName;
         __block uint64_t         segVmAddr    = 0;
         __block uint64_t         startVmAddr  = header->segmentVmAddr(0);
@@ -1184,18 +155,25 @@ static void printSegments(const Header* header)
             if ( sectInfo.segmentName != lastSegName ) {
                 segVmAddr = header->segmentVmAddr(sectInfo.segIndex);
                 uint64_t segVmSize = header->segmentVmSize(sectInfo.segIndex);
-                char permChars[8];
-                permString(sectInfo.segPerms, permChars);
-                printf("        0x%09llX    %-16s                  %6lluKB  %s\n",
-                       segVmAddr, sectInfo.segmentName.c_str(), segVmSize/1024, permChars);
+                char maxProtChars[8];
+                permString(sectInfo.segMaxProt, maxProtChars);
+                char initProtChars[8];
+                permString(sectInfo.segInitProt, initProtChars);
+                printf("        0x%09llX    %-16.*s                %6lluKB     %s/%s\n",
+                       segVmAddr,
+                       (int)sectInfo.segmentName.size(), sectInfo.segmentName.data(),
+                       segVmSize/1024, initProtChars, maxProtChars);
                 lastSegName = sectInfo.segmentName;
             }
-                printf("        0x%09llX             %-16s %7llu\n", startVmAddr+sectInfo.address, sectInfo.sectionName.c_str(), sectInfo.size);
+                printf("        0x%09llX           %-16.*s %7llu\n",
+                       startVmAddr+sectInfo.address,
+                       (int)sectInfo.sectionName.size(), sectInfo.sectionName.data(),
+                       sectInfo.size);
         });
     }
     else {
         printf("    -segments:\n");
-        printf("        load-offset   segment  section       sect-size  seg-size perm\n");
+        printf("        load-offset   segment  section       sect-size  seg-size   init/max-prot\n");
         __block std::string_view lastSegName;
         __block uint64_t         textSegVmAddr = 0;
         header->forEachSection(^(const Header::SectionInfo& sectInfo, bool& stop) {
@@ -1205,13 +183,20 @@ static void printSegments(const Header* header)
             if ( sectInfo.segmentName != lastSegName ) {
                 uint64_t segVmAddr = header->segmentVmAddr(sectInfo.segIndex);
                 uint64_t segVmSize = header->segmentVmSize(sectInfo.segIndex);
-                char permChars[8];
-                permString(sectInfo.segPerms, permChars);
-                printf("        0x%08llX    %-16s                  %6lluKB %s\n",
-                       segVmAddr-textSegVmAddr, sectInfo.segmentName.c_str(), segVmSize/1024, permChars);
+                char maxProtChars[8];
+                permString(sectInfo.segMaxProt, maxProtChars);
+                char initProtChars[8];
+                permString(sectInfo.segInitProt, initProtChars);
+                printf("        0x%08llX    %-16.*s                  %6lluKB    %s/%s\n",
+                       segVmAddr-textSegVmAddr,
+                       (int)sectInfo.segmentName.size(), sectInfo.segmentName.data(),
+                       segVmSize/1024, initProtChars,maxProtChars);
                 lastSegName = sectInfo.segmentName;
             }
-                printf("        0x%08llX             %-16s %6llu\n", sectInfo.address, sectInfo.sectionName.c_str(), sectInfo.size);
+                printf("        0x%08llX             %-16.*s %6llu\n",
+                       sectInfo.address,
+                       (int)sectInfo.sectionName.size(), sectInfo.sectionName.data(),
+                       sectInfo.size);
         });
     }
 }
@@ -1222,7 +207,10 @@ static void printLinkedDylibs(const Header* mh)
         return;
     printf("    -linked_dylibs:\n");
     printf("        attributes     load path\n");
-    mh->forEachLinkedDylib(^(const char* loadPath, LinkedDylibAttributes depAttrs, Version32 compatVersion, Version32 curVersion, bool& stop) {
+    mh->forEachLinkedDylib(^(const char* loadPath, LinkedDylibAttributes depAttrs, Version32 compatVersion, Version32 curVersion, 
+                             bool synthesizedLink, bool& stop) {
+        if ( synthesizedLink )
+            return;
         std::string attributes;
         if ( depAttrs.upward )
             attributes += "upward ";
@@ -1242,12 +230,12 @@ static void printInitializers(const Image& image)
     SymbolicatedImage symImage(image);
 
     // print static initializers
-    image.forEachInitializer(^(uint32_t initOffset) {
-        const char* initName       = "?";
+    bool contentRebased = false;
+    image.forEachInitializer(contentRebased, ^(uint32_t initOffset) {
         uint64_t    unslidInitAddr = image.header()->preferredLoadAddress() + initOffset;
         Symbol      symbol;
         uint64_t    addend         = 0;
-        initName = symImage.symbolNameAt(initOffset);
+        const char* initName       = symImage.symbolNameAt(initOffset);
         if ( initName == nullptr ) {
             if ( image.symbolTable().findClosestDefinedSymbol(unslidInitAddr, symbol) ) {
                 initName = symbol.name().c_str();
@@ -1265,12 +253,11 @@ static void printInitializers(const Image& image)
 
     // print static terminators
     if ( !image.header()->isArch("arm64e") ) {
-        image.forEachClassicTerminator(^(uint32_t termOffset) {
-            const char* termName       = "?";
+        image.forEachClassicTerminator(contentRebased, ^(uint32_t termOffset) {
             uint64_t    unslidInitAddr = image.header()->preferredLoadAddress() + termOffset;
             Symbol      symbol;
             uint64_t    addend         = 0;
-            termName = symImage.symbolNameAt(termOffset);
+            const char* termName       = symImage.symbolNameAt(termOffset);
             if ( termName == nullptr ) {
                 if ( image.symbolTable().findClosestDefinedSymbol(unslidInitAddr, symbol) ) {
                     termName = symbol.name().c_str();
@@ -1321,8 +308,7 @@ static void printChainInfo(const Image& image)
     const uint32_t*    fwStarts;
     if ( image.hasChainedFixups() ) {
         const ChainedFixups& chainedFixups = image.chainedFixups();
-        size_t chainHeaderSize;
-        if ( const dyld_chained_fixups_header* chainHeader = chainedFixups.bytes(chainHeaderSize) ) {
+        if ( const dyld_chained_fixups_header* chainHeader = (dyld_chained_fixups_header*)chainedFixups.linkeditHeader() ) {
             printf("      fixups_version:   0x%08X\n",  chainHeader->fixups_version);
             printf("      starts_offset:    0x%08X\n",  chainHeader->starts_offset);
             printf("      imports_offset:   0x%08X\n",  chainHeader->imports_offset);
@@ -1419,61 +405,65 @@ static void printChainDetails(const Image& image)
     uint16_t           fwPointerFormat;
     uint32_t           fwStartsCount;
     const uint32_t*    fwStarts;
+    uint64_t           prefLoadAddr = image.header()->preferredLoadAddress();
     if ( image.hasChainedFixups() ) {
-        const PointerFormat& pf = image.chainedFixups().pointerFormat();
-        image.forEachFixup(^(const Fixup& info, bool& stop) {
-            uint64_t vmOffset = (uint8_t*)info.location - (uint8_t*)image.header();
-            const void* nextLoc = pf.nextLocation(info.location);
-            uint32_t next = 0;
-            if ( nextLoc != nullptr )
-                next = (uint32_t)((uint8_t*)nextLoc - (uint8_t*)info.location)/pf.minNext();
-            if ( info.isBind ) {
-                if ( image.header()->is64() ) {
-                    const char* authPrefix = "     ";
-                    char authInfoStr[128] = "";
-                    if ( info.authenticated ) {
-                        authPrefix = "auth-";
-                        snprintf(authInfoStr, sizeof(authInfoStr), "key: %s, addrDiv: %d, diversity: 0x%04X, ",
-                                 info.keyName(), info.auth.usesAddrDiversity, info.auth.diversity);
-                    }
-                    char addendInfo[32] = "";
-                    if ( info.bind.embeddedAddend != 0 )
-                        snprintf(addendInfo, sizeof(addendInfo), ", addend: %d", info.bind.embeddedAddend);
-                    printf("  0x%08llX:  raw: 0x%016llX    %sbind: (next: %03d, %sbindOrdinal: 0x%06X%s)\n",
-                            vmOffset, *((uint64_t*)info.location), authPrefix, next, authInfoStr, info.bind.bindOrdinal, addendInfo);
-                }
-                else {
-                    printf("  0x%08llX:  raw: 0x%08X     bind: (next: %02d bindOrdinal: 0x%07X)\n",
-                            vmOffset, *((uint32_t*)info.location), next, info.bind.bindOrdinal);
+        image.withSegments(^(std::span<const MappedSegment> segments) {
+            image.chainedFixups().forEachFixupChainStartLocation(segments, ^(const void* chainStart, uint32_t segIndex, uint32_t pageIndex, uint32_t pageSize, const ChainedFixups::PointerFormat& pf, bool& stop) {
+                pf.forEachFixupLocationInChain(chainStart, prefLoadAddr, &segments[segIndex], {}, pageIndex, pageSize,
+                                               ^(const Fixup& info, bool& stop2) {
+                    uint64_t vmOffset = (uint8_t*)info.location - (uint8_t*)image.header();
+                    const void* nextLoc = pf.nextLocation(info.location);
+                    uint32_t next = 0;
+                    if ( nextLoc != nullptr )
+                        next = (uint32_t)((uint8_t*)nextLoc - (uint8_t*)info.location)/pf.minNext();
+                    if ( info.isBind ) {
+                        if ( image.header()->is64() ) {
+                            const char* authPrefix = "     ";
+                            char authInfoStr[128] = "";
+                            if ( info.authenticated ) {
+                                authPrefix = "auth-";
+                                snprintf(authInfoStr, sizeof(authInfoStr), "key: %s, addrDiv: %d, diversity: 0x%04X, ",
+                                         info.keyName(), info.auth.usesAddrDiversity, info.auth.diversity);
+                            }
+                            char addendInfo[32] = "";
+                            if ( info.bind.embeddedAddend != 0 )
+                                snprintf(addendInfo, sizeof(addendInfo), ", addend: %d", info.bind.embeddedAddend);
+                            printf("  0x%08llX:  raw: 0x%016llX    %sbind: (next: %03d, %sbindOrdinal: 0x%06X%s)\n",
+                                   vmOffset, *((uint64_t*)info.location), authPrefix, next, authInfoStr, info.bind.bindOrdinal, addendInfo);
+                        }
+                        else {
+                            printf("  0x%08llX:  raw: 0x%08X     bind: (next: %02d bindOrdinal: 0x%07X)\n",
+                                   vmOffset, *((uint32_t*)info.location), next, info.bind.bindOrdinal);
 
-                }
-            }
-            else {
-                uint8_t high8 = 0; // FIXME:
-                if ( image.header()->is64() ) {
-                    const char* authPrefix = "     ";
-                    char authInfoStr[128] = "";
-                    if ( info.authenticated ) {
-                        authPrefix = "auth-";
-                        snprintf(authInfoStr, sizeof(authInfoStr), "key: %s, addrDiv: %d, diversity: 0x%04X, ",
-                                 info.keyName(), info.auth.usesAddrDiversity, info.auth.diversity);
+                        }
                     }
-                    char high8Info[32] = "";
-                    if ( high8 != 0 )
-                        snprintf(high8Info, sizeof(high8Info), ", high8: 0x%02X", high8);
-                    printf("  0x%08llX:  raw: 0x%016llX  %srebase: (next: %03d, %starget: 0x%011llX%s)\n",
-                            vmOffset, *((uint64_t*)info.location), authPrefix, next, authInfoStr, info.rebase.targetVmOffset, high8Info);
-                }
-                else {
-                    printf("  0x%08llX:  raw: 0x%08X  rebase: (next: %02d target: 0x%07llX)\n",
-                            vmOffset, *((uint32_t*)info.location), next, info.rebase.targetVmOffset);
+                    else {
+                        uint8_t high8 = 0; // FIXME:
+                        if ( image.header()->is64() ) {
+                            const char* authPrefix = "     ";
+                            char authInfoStr[128] = "";
+                            if ( info.authenticated ) {
+                                authPrefix = "auth-";
+                                snprintf(authInfoStr, sizeof(authInfoStr), "key: %s, addrDiv: %d, diversity: 0x%04X, ",
+                                         info.keyName(), info.auth.usesAddrDiversity, info.auth.diversity);
+                            }
+                            char high8Info[32] = "";
+                            if ( high8 != 0 )
+                                snprintf(high8Info, sizeof(high8Info), ", high8: 0x%02X", high8);
+                            printf("  0x%08llX:  raw: 0x%016llX  %srebase: (next: %03d, %starget: 0x%011llX%s)\n",
+                                   vmOffset, *((uint64_t*)info.location), authPrefix, next, authInfoStr, info.rebase.targetVmOffset, high8Info);
+                        }
+                        else {
+                            printf("  0x%08llX:  raw: 0x%08X  rebase: (next: %02d target: 0x%07llX)\n",
+                                   vmOffset, *((uint32_t*)info.location), next, info.rebase.targetVmOffset);
 
-                }
-            }
+                        }
+                    }
+                });
+            });
         });
     }
     else if ( image.header()->hasFirmwareChainStarts(&fwPointerFormat, &fwStartsCount, &fwStarts) ) {
-        uint64_t prefLoadAddr = image.header()->preferredLoadAddress();
         image.forEachFixup(^(const Fixup& info, bool& stop) {
             uint64_t segOffset = (uint8_t*)info.location - (uint8_t*)info.segment->content;
             uint64_t vmAddr    = prefLoadAddr + info.segment->runtimeOffset + segOffset;
@@ -1509,8 +499,7 @@ static void printChainHeader(const Image& image)
     const uint32_t*    fwStarts;
     if ( image.hasChainedFixups() ) {
         const ChainedFixups& chainedFixups = image.chainedFixups();
-        size_t               chainHeaderSize;
-        if ( const dyld_chained_fixups_header* chainsHeader = chainedFixups.bytes(chainHeaderSize) ) {
+        if ( const dyld_chained_fixups_header* chainsHeader = chainedFixups.linkeditHeader() ) {
             printf("        dyld_chained_fixups_header:\n");
             printf("            fixups_version  0x%08X\n", chainsHeader->fixups_version);
             printf("            starts_offset   0x%08X\n", chainsHeader->starts_offset);
@@ -1577,6 +566,7 @@ static void printExports(const Image& image)
             uint64_t        resolverFuncOffset;
             uint64_t        absAddress;
             int             libOrdinal;
+            uint32_t        fvtIndex;
             const char*     importName;
             const char*     symbolName = symbol.name().c_str();
             if ( symbol.isReExport(libOrdinal, importName) ) {
@@ -1592,8 +582,11 @@ static void printExports(const Image& image)
             else if ( symbol.isThreadLocal() ) {
                 printf("        0x%08llX  %s [per-thread]\n", symbol.implOffset(), symbolName);
             }
+            else if ( symbol.isFunctionVariant(fvtIndex) ) {
+                printf("        0x%08llX  %s [function-variants-table#%d]\n", symbol.implOffset(), symbolName, fvtIndex);
+            }
             else if ( symbol.isDynamicResolver(resolverFuncOffset) ) {
-                printf("        0x%08llX  %s [resolver=0x%08llX]\n", symbol.implOffset(), symbolName, resolverFuncOffset);
+                printf("        0x%08llX  %s [dynamic-resolver=0x%08llX]\n", symbol.implOffset(), symbolName, resolverFuncOffset);
             }
             else if ( symbol.isWeakDef() ) {
                 printf("        0x%08llX  %s [weak-def]\n", symbol.implOffset(), symbolName);
@@ -1629,13 +622,48 @@ static void printFixups(const Image& image)
     SymbolicatedImage symImage(image);
     printf("        segment         section          address             type   target\n");
     for (size_t i=0; i < symImage.fixupCount(); ++i) {
-        uint8_t sectNum = symImage.fixupSectNum(i);
-        char targetStr[4096];
-        printf("        %-12s    %-16s 0x%08llX   %11s  %s\n",
-               symImage.fixupSegment(sectNum).c_str(), symImage.fixupSection(sectNum).c_str(),
+        char             targetStr[4096];
+        uint8_t          sectNum  = symImage.fixupSectNum(i);
+        std::string_view segName  = symImage.fixupSegment(sectNum);
+        std::string_view sectName = symImage.fixupSection(sectNum);
+        printf("        %-12.*s    %-16.*s 0x%08llX   %12s  %s\n",
+               (int)segName.size(), segName.data(), 
+               (int)sectName.size(), sectName.data(),
                symImage.fixupAddress(i), symImage.fixupTypeString(i), symImage.fixupTargetString(i, false, targetStr));
     }
+    if ( image.hasFunctionVariantFixups() ) {
+        image.functionVariantFixups().forEachFixup(^(FunctionVariantFixups::InternalFixup fixupInfo) {
+            uint64_t address = image.segment(fixupInfo.segIndex).runtimeOffset + fixupInfo.segOffset + image.header()->preferredLoadAddress();
+            __block uint32_t sectNum = 1;
+            image.header()->forEachSection(^(const Header::SectionInfo& sectInfo, bool& stop) {
+                if ( (sectInfo.address <= address) && (address < sectInfo.address+sectInfo.size) ) {
+                    stop = true;
+                    return;
+                }
+                ++sectNum;
+            });
+            const char* kindStr = "variant";
+            const char* extras  = "";
+            char        authInfoStr[128];
+            if ( fixupInfo.pacAuth ) {
+                kindStr = "auth-variant";
+                snprintf(authInfoStr, sizeof(authInfoStr), "  (div=0x%04X ad=%d key=%s)", fixupInfo.pacDiversity, fixupInfo.pacAddress, mach_o::Fixup::keyName(fixupInfo.pacKey));
+                extras = authInfoStr;
+            }
+            printf("        %-12s    %-16s 0x%08llX   %12s  table #%d %s\n",
+                   image.segment(fixupInfo.segIndex).segName.data(), symImage.fixupSection(sectNum).data(),
+                   address, kindStr, fixupInfo.variantIndex, extras);
+
+        });
+    }
 }
+
+static void printLoadCommands(const Image& image)
+{
+    printf("    -load_commands:\n");
+    image.header()->printLoadCommands(stdout);
+}
+
 
 static void printObjC(const Image& image)
 {
@@ -1650,7 +678,7 @@ static void printObjC(const Image& image)
         char protocols[1024];
         const char* classname = symInfo.className(classVmAddr);
         const char* supername = symInfo.superClassName(classVmAddr);
-        symInfo.getProtocolNames(classVmAddr, protocols);
+        symInfo.getClassProtocolNames(classVmAddr, protocols);
         printf("        @interface %s : %s %s\n", classname, supername, protocols);
         // walk instance methods
         symInfo.forEachMethodInClass(classVmAddr, ^(const char* methodName, uint64_t implAddr) {
@@ -1673,6 +701,26 @@ static void printObjC(const Image& image)
         },
                                         ^(const char* methodName, uint64_t implAddr) {
             printf("          0x%08llX  +[%s %s]\n", implAddr, classname, methodName);
+        });
+        printf("        @end\n");
+    });
+
+    symInfo.forEachObjCProtocol(^(uint64_t protocolVmAddr) {
+        char protocols[1024];
+        const char* protocolname = symInfo.protocolName(protocolVmAddr);
+        symInfo.getProtocolProtocolNames(protocolVmAddr, protocols);
+        printf("        @protocol %s : %s\n", protocolname, protocols);
+        symInfo.forEachMethodInProtocol(protocolVmAddr, ^(const char* methodName) {
+            printf("          -[%s %s]\n", protocolname, methodName);
+        },
+                                        ^(const char* methodName) {
+            printf("          +[%s %s]\n", protocolname, methodName);
+        },
+                                        ^(const char* methodName) {
+            printf("          -[%s %s]\n", protocolname, methodName);
+        },
+                                        ^(const char* methodName) {
+            printf("          +[%s %s]\n", protocolname, methodName);
         });
         printf("        @end\n");
     });
@@ -2023,13 +1071,12 @@ static void dumpGOT(const SymbolicatedImage& symInfo, const Header::SectionInfo&
     while ( curContent < sectionContentEnd ) {
         const Fixup::BindTarget* bindTarget;
         uint64_t                 rebaseTargetVmAddr;
-        const char*              targetName = "";
         printf("0x%08llX  ", curAddr);
         if ( symInfo.isBind(curContent, bindTarget) ) {
             printf("%s\n", bindTarget->symbolName.c_str());
         }
         else if ( symInfo.isRebase(curContent, rebaseTargetVmAddr) ) {
-            targetName = symInfo.symbolNameAt(rebaseTargetVmAddr);
+            const char* targetName = symInfo.symbolNameAt(rebaseTargetVmAddr);
             if ( targetName != nullptr )
                 printf("%s\n", targetName);
             else
@@ -2059,7 +1106,6 @@ static void dumpClassPointers(const SymbolicatedImage& symInfo, const Header::Se
     }
 }
 
-
 static void dumpStringPointers(const SymbolicatedImage& symInfo, const Header::SectionInfo& sectInfo)
 {
     const uint8_t* sectionContent    = symInfo.content(sectInfo);
@@ -2079,13 +1125,128 @@ static void dumpStringPointers(const SymbolicatedImage& symInfo, const Header::S
     }
 }
 
+
+struct NameAndFlagBitNum { CString name; uint32_t flagBitNum; };
+
+#define FUNCTION_VARIANT_SYSTEM_WIDE(_flagBitNum, _name, _flagBitsInitialization) \
+    { _name, _flagBitNum },
+static const NameAndFlagBitNum sSystemWideFVNamesAndFlagBitNums[] = {
+    #include "FunctionVariantsSystemWide.inc"
+};
+
+#define FUNCTION_VARIANT_PER_PROCESS(_flagBitNum, _name, _flagBitsInitialization) \
+    { _name, _flagBitNum },
+static const NameAndFlagBitNum sPerProcessFVNamesAndFlagBitNums[] = {
+    #include "FunctionVariantsPerProcess.inc"
+};
+
+#define FUNCTION_VARIANT_ARM64(_flagBitNum, _name, _flagBitsInitialization) \
+    { _name, _flagBitNum },
+static const NameAndFlagBitNum sArm64FVNamesAndFlagBitNums[] = {
+    #include "FunctionVariantsArm64.inc"
+};
+
+#define FUNCTION_VARIANT_X86_64(_flagBitNum, _name, _flagBitsInitialization) \
+    { _name, _flagBitNum },
+static const NameAndFlagBitNum sIntelFVNamesAndFlagBitNums[] = {
+    #include "FunctionVariantsX86_64.inc"
+};
+
+
+static CString findName(std::span<const NameAndFlagBitNum> nameAndKeys, uint8_t flagBitNum)
+{
+    for (const NameAndFlagBitNum& entry : nameAndKeys) {
+        if ( entry.flagBitNum == flagBitNum )
+            return entry.name;
+    }
+    return "???";
+}
+
+static void dumpFunctionVariantTables(const SymbolicatedImage& symInfo, const FunctionVariants& allTables)
+{
+    printf("    -function_variants:\n");
+    for (uint32_t i=0; i < allTables.count(); ++i) {
+        printf("      table #%u\n", i);
+        const FunctionVariantsRuntimeTable*        table = allTables.entry(i);
+        std::span<const NameAndFlagBitNum> nameTable;
+        switch ( table->kind ) {
+            case FunctionVariantsRuntimeTable::Kind::perProcess:
+                printf("        namespace: per-process\n");
+                nameTable = std::span<const NameAndFlagBitNum>(sPerProcessFVNamesAndFlagBitNums, sizeof(sPerProcessFVNamesAndFlagBitNums)/sizeof(NameAndFlagBitNum));
+                break;
+            case FunctionVariantsRuntimeTable::Kind::systemWide:
+                printf("        namespace: system-wide\n");
+                nameTable = std::span<const NameAndFlagBitNum>(sSystemWideFVNamesAndFlagBitNums, sizeof(sSystemWideFVNamesAndFlagBitNums)/sizeof(NameAndFlagBitNum));
+                break;
+            case FunctionVariantsRuntimeTable::Kind::arm64:
+                printf("        namespace: arm64\n");
+                nameTable = std::span<const NameAndFlagBitNum>(sArm64FVNamesAndFlagBitNums, sizeof(sArm64FVNamesAndFlagBitNums)/sizeof(NameAndFlagBitNum));
+                break;
+            case FunctionVariantsRuntimeTable::Kind::x86_64:
+                printf("        namespace: x86_64\n");
+                nameTable = std::span<const NameAndFlagBitNum>(sIntelFVNamesAndFlagBitNums, sizeof(sIntelFVNamesAndFlagBitNums)/sizeof(NameAndFlagBitNum));
+                break;
+            default:
+                printf("      namespace: unknown (%d)\n", table->kind);
+                return;
+        }
+        __block size_t longestNameLength = 0;
+        table->forEachVariant(^(FunctionVariantsRuntimeTable::Kind kind, uint32_t implOffset, bool implIsTable, std::span<const uint8_t> flagBitNums, bool& stop) {
+            const char* name = symInfo.symbolNameAt(symInfo.prefLoadAddress() + implOffset);
+            if ( name == NULL )
+                name = "???";
+            size_t len = strlen(name);
+            if ( len > longestNameLength )
+                longestNameLength = len;
+        });
+        table->forEachVariant(^(FunctionVariantsRuntimeTable::Kind kind, uint32_t implOffset, bool implIsTable, std::span<const uint8_t> flagBitNums, bool& stop) {
+            if ( implIsTable ) {
+                printf("            table: #%d", implOffset);
+                printf("%*s", (int)(longestNameLength+14), "-->");
+            }
+            else {
+                const char* name = symInfo.symbolNameAt(symInfo.prefLoadAddress() + implOffset);
+                if ( name == NULL )
+                    name = "???";
+                printf("         function: 0x%08X %s ", implOffset, name);
+                printf("%*s", (int)(longestNameLength-strlen(name)+4), "-->");
+            }
+            if ( flagBitNums.size() == 0 ) {
+                printf("  0x00 (\"default\")\n");
+            }
+            else if ( flagBitNums.size() == 1 ) {
+                printf("  0x%02X (\"%s\")\n", flagBitNums[0], findName(nameTable, flagBitNums[0]).c_str());
+            }
+            else {
+                printf("  ");
+                for (uint8_t flag : flagBitNums)
+                    printf("0x%02X ", flag);
+                printf("(");
+                for (uint8_t flag : flagBitNums)
+                    printf("\"%s\" ", findName(nameTable, flag).c_str());
+                printf(")\n");
+            }
+        });
+    }
+}
+
+static void printFunctionVariants(const Image& image)
+{
+    if ( image.hasFunctionVariants() ) {
+        SymbolicatedImage symImage(image);
+        dumpFunctionVariantTables(symImage, image.functionVariants());
+    }
+}
+
 static void printDisassembly(const Image& image)
 {
     __block SymbolicatedImage symImage(image);
     __block size_t sectNum = 1;
     image.header()->forEachSection(^(const Header::SectionInfo& sectInfo, bool& stop) {
         if ( sectInfo.flags & (S_ATTR_PURE_INSTRUCTIONS|S_ATTR_SOME_INSTRUCTIONS) ) {
-            printf("(%s,%s) section:\n", sectInfo.segmentName.c_str(), sectInfo.sectionName.c_str());
+            printf("(%.*s,%.*s) section:\n", 
+                   (int)sectInfo.segmentName.size(), sectInfo.segmentName.data(),
+                   (int)sectInfo.sectionName.size(), sectInfo.sectionName.data());
             disassembleSection(symImage, sectInfo, sectNum);
         }
         ++sectNum;
@@ -2111,13 +1272,16 @@ static void usage()
             "\t-shared_region              print shared cache (split seg) info\n"
             "\t-function_starts            print function starts information\n"
             "\t-opcodes                    print opcodes information\n"
+            "\t-load_commands              print load commands\n"
             "\t-uuid                       print UUID of binary\n"
+            "\t-function_variants          print info on function variants in binary\n"
             "\t-disassemble                print all code sections using disassembler\n"
             "\t-section <seg> <sect>       print content of section, formatted by section type\n"
             "\t-all_sections               print content of all sections, formatted by section type\n"
             "\t-section_bytes <seg> <sect> print content of section, as raw hex bytes\n"
             "\t-all_sections_bytes         print content of all sections, formatted as raw hex bytes\n"
             "\t-validate_only              only prints an malformedness about file(s)\n"
+            "\t-no_validate                don't check for malformedness about file(s)\n"
         );
 }
 
@@ -2153,10 +1317,13 @@ struct PrintOptions
     bool            opcodes             = false;
     bool            unwind              = false;
     bool            uuid                = false;
+    bool            loadCommands        = false;
+    bool            functionVariants    = false;
     bool            disassemble         = false;
     bool            allSections         = false;
     bool            allSectionsHex      = false;
     bool            validateOnly        = false;
+    bool            validate            = true;
     SegSectVector   sections;
     SegSectVector   sectionsHex;
 };
@@ -2170,6 +1337,8 @@ int main(int argc, const char* argv[])
     }
 
     bool                             someOptionSpecified = false;
+    const char*                      dyldCachePath = nullptr;
+    bool                             allDyldCache = false;
     PrintOptions                     printOptions;
     __block std::vector<const char*> files;
             std::vector<const char*> cmdLineArchs;
@@ -2245,6 +1414,10 @@ int main(int argc, const char* argv[])
             printOptions.uuid = true;
             someOptionSpecified = true;
         }
+        else if ( strcmp(arg, "-load_commands") == 0 ) {
+            printOptions.loadCommands = true;
+            someOptionSpecified = true;
+        }
         else if ( strcmp(arg, "-disassemble") == 0 ) {
             printOptions.disassemble = true;
             someOptionSpecified = true;
@@ -2276,9 +1449,16 @@ int main(int argc, const char* argv[])
             printOptions.allSectionsHex = true;
             someOptionSpecified = true;
         }
+        else if ( strcmp(arg, "-function_variants") == 0 ) {
+            printOptions.functionVariants = true;
+            someOptionSpecified = true;
+        }
         else if ( strcmp(arg, "-validate_only") == 0 ) {
             printOptions.validateOnly = true;
             someOptionSpecified = true;
+        }
+        else if ( strcmp(arg, "-no_validate") == 0 ) {
+            printOptions.validate = false;
         }
         else if ( strcmp(arg, "-arch") == 0 ) {
             if ( ++i < argc ) {
@@ -2302,12 +1482,18 @@ int main(int argc, const char* argv[])
                 return 1;
             }
         }
+        else if ( strcmp(arg, "-dyld_cache_path") == 0 ) {
+            if ( ++i < argc ) {
+                dyldCachePath = argv[i];
+            }
+            else {
+                fprintf(stderr, "-dyld_cache_path path");
+                return 1;
+            }
+
+        }
         else if ( strcmp(arg, "-all_dyld_cache") == 0 ) {
-            size_t                  cacheLen;
-            const DyldSharedCache*  dyldCache   = (DyldSharedCache*)_dyld_get_shared_cache_range(&cacheLen);
-            dyldCache->forEachImage(^(const mach_header* mh, const char* installName) {
-                files.push_back(installName);
-            });
+            allDyldCache = true;
         }
         else if ( arg[0] == '-' ) {
             fprintf(stderr, "dyld_info: unknown option: %s\n", arg);
@@ -2317,6 +1503,31 @@ int main(int argc, const char* argv[])
             files.push_back(arg);
         }
     }
+
+    const DyldSharedCache* dyldCache = nullptr;
+    if ( dyldCachePath ) {
+        std::vector<const DyldSharedCache*> dyldCaches = DyldSharedCache::mapCacheFiles(dyldCachePath);
+        if ( dyldCaches.empty() ) {
+            fprintf(stderr, "dyld_info: can't map shared cache at %s\n", dyldCachePath);
+            return 1;
+        }
+        dyldCache = dyldCaches.front();
+    } else {
+        size_t cacheLen;
+        dyldCache = (DyldSharedCache*)_dyld_get_shared_cache_range(&cacheLen);
+    }
+
+    if ( allDyldCache ) {
+        if ( dyldCache ) {
+            dyldCache->forEachImage(^(const Header* hdr, const char* installName) {
+                files.push_back(installName);
+            });
+        } else {
+            fprintf(stderr, "dyld_info: -all_dyld_cache specified but shared cache isn't loaded");
+            return 1;
+        }
+    }
+
 
     // check some files specified
     if ( files.size() == 0 ) {
@@ -2333,7 +1544,7 @@ int main(int argc, const char* argv[])
     }
 
     __block bool sliceFound = false;
-    forSelectedSliceInPaths(files, cmdLineArchs, ^(const char* path, const Header* header, size_t sliceLen) {
+    other_tools::forSelectedSliceInPaths(files, cmdLineArchs, dyldCache, ^(const char* path, const Header* header, size_t sliceLen) {
         if ( header == nullptr )
             return; // non-mach-o file found
         sliceFound = true;
@@ -2341,9 +1552,11 @@ int main(int argc, const char* argv[])
         if ( header->isObjectFile() )
             return;
         Image image((void*)header, sliceLen, (header->inDyldCache() ? Image::MappingKind::dyldLoadedPostFixups : Image::MappingKind::wholeSliceMapped));
-        if ( Error err = image.validate() ) {
-            printf("   %s\n", err.message());
-            return;
+        if ( printOptions.validate ) {
+            if ( Error err = image.validate() ) {
+                printf("   %s\n", err.message());
+                return;
+            }
         }
         if ( !printOptions.validateOnly ) {
             if ( printOptions.platform )
@@ -2398,8 +1611,14 @@ int main(int argc, const char* argv[])
             //if ( printOptions.swiftProtocols )
             //    printSwiftProtocolConformances(ma, dyldCache, cacheLen);
 
+            if ( printOptions.loadCommands )
+                printLoadCommands(image);
+
             if ( printOptions.sharedRegion )
                 printSharedRegion(image);
+
+            if ( printOptions.functionVariants )
+                printFunctionVariants(image);
 
             if ( printOptions.disassemble )
                 printDisassembly(image);
@@ -2409,7 +1628,9 @@ int main(int argc, const char* argv[])
                 __block size_t sectNum = 1;
                 image.header()->forEachSection(^(const Header::SectionInfo& sectInfo, bool& stop) {
                     if ( printOptions.allSections || hasSegSect(printOptions.sections, sectInfo) ) {
-                        printf("(%s,%s) section:\n", sectInfo.segmentName.c_str(), sectInfo.sectionName.c_str());
+                        printf("(%.*s,%.*s) section:\n", 
+                               (int)sectInfo.segmentName.size(), sectInfo.segmentName.data(),
+                               (int)sectInfo.sectionName.size(), sectInfo.sectionName.data());
                         if ( sectInfo.flags & (S_ATTR_PURE_INSTRUCTIONS|S_ATTR_SOME_INSTRUCTIONS) ) {
                             disassembleSection(symImage, sectInfo, sectNum);
                         }
@@ -2451,7 +1672,9 @@ int main(int argc, const char* argv[])
                 __block size_t sectNum = 1;
                 image.header()->forEachSection(^(const Header::SectionInfo& sectInfo, bool& stop) {
                     if ( printOptions.allSectionsHex || hasSegSect(printOptions.sectionsHex, sectInfo) ) {
-                        printf("(%s,%s) section:\n", sectInfo.segmentName.c_str(), sectInfo.sectionName.c_str());
+                        printf("(%.*s,%.*s) section:\n", 
+                               (int)sectInfo.segmentName.size(), sectInfo.segmentName.data(),
+                               (int)sectInfo.sectionName.size(), sectInfo.sectionName.data());
                         dumpHex(symImage, sectInfo, sectNum);
                     }
                     ++sectNum;
@@ -2474,6 +1697,7 @@ int main(int argc, const char* argv[])
 
     return 0;
 }
+
 
 
 

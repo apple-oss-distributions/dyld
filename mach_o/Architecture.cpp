@@ -21,6 +21,9 @@
  * @APPLE_LICENSE_HEADER_END@
  */
 
+#include <TargetConditionals.h>
+
+#include <assert.h>
 #include <stdint.h>
 #include <string.h>
 #include <mach/machine.h>
@@ -33,11 +36,13 @@
 
 #include "Architecture.h"
 
+#if TARGET_OS_EXCLAVEKIT
+    #define OSSwapBigToHostInt32 __builtin_bswap32
+    #define OSSwapHostToBigInt32 __builtin_bswap32
+#endif
 
 namespace mach_o {
 
-
-#if !TARGET_OS_EXCLAVEKIT
 Architecture::Architecture(const mach_header* mh)
 : _cputype(mh->cputype), _cpusubtype(mh->cpusubtype)
 {
@@ -104,8 +109,16 @@ Architecture Architecture::byName(std::string_view name)
         return arm64;
     else if ( name == "arm64e" )
         return arm64e;
+    else if ( name == "arm64e.kernel" )
+        return arm64e_kernel;
+    else if ( name == "arm64e.kernel.v1" )
+        return arm64e_kernel_v2;
+    else if ( name == "arm64e.kernel.v2" )
+        return arm64e_kernel_v2;
     else if ( name == "arm64_32" )
         return arm64_32;
+    else if ( name == "armv6" )
+        return armv6;
     else if ( name == "armv6m" )
         return armv6m;
     else if ( (name == "armv7k")  || (name == "thumbv7k") )
@@ -151,6 +164,8 @@ const char* Architecture::name() const
         return "arm64e";
     else if ( *this == arm64_32 )
         return "arm64_32";
+    else if ( *this == armv6 )
+        return "armv6";
     else if ( *this == armv6m )
         return "armv6m";
     else if ( *this == armv7k )
@@ -173,6 +188,10 @@ const char* Architecture::name() const
         return "arm64e.old";
     else if ( *this == arm64e_kernel )
         return "arm64e.kernel";
+    else if ( *this == arm64e_kernel_v1 )
+        return "arm64e.kernel.v1";
+    else if ( *this == arm64e_kernel_v2 )
+        return "arm64e.kernel.v2";
     else if ( *this == ppc )
         return "ppc";
     return "unknown";
@@ -187,6 +206,7 @@ const constinit Architecture Architecture::armv7s(  CPU_TYPE_ARM,      CPU_SUBTY
 const constinit Architecture Architecture::arm64(   CPU_TYPE_ARM64,    CPU_SUBTYPE_ARM64_ALL);
 const constinit Architecture Architecture::arm64e(  CPU_TYPE_ARM64,    CPU_SUBTYPE_ARM64E | 0x80000000);
 const constinit Architecture Architecture::arm64_32(CPU_TYPE_ARM64_32, CPU_SUBTYPE_ARM64_32_V8);
+const constinit Architecture Architecture::armv6(   CPU_TYPE_ARM,      CPU_SUBTYPE_ARM_V6);
 const constinit Architecture Architecture::armv6m(  CPU_TYPE_ARM,      CPU_SUBTYPE_ARM_V6M);
 const constinit Architecture Architecture::armv7k(  CPU_TYPE_ARM,      CPU_SUBTYPE_ARM_V7K);
 const constinit Architecture Architecture::armv7m(  CPU_TYPE_ARM,      CPU_SUBTYPE_ARM_V7M);
@@ -199,7 +219,9 @@ const constinit Architecture Architecture::arm64_32_alt( CPU_TYPE_ARM64_32,   CP
 const constinit Architecture Architecture::arm64e_v1(    CPU_TYPE_ARM64,      CPU_SUBTYPE_ARM64E | 0x81000000);  // future ABI version not supported
 const constinit Architecture Architecture::arm64e_old(   CPU_TYPE_ARM64,      CPU_SUBTYPE_ARM64E);               // pre-ABI versioned
 
-const constinit Architecture Architecture::arm64e_kernel(CPU_TYPE_ARM64,      CPU_SUBTYPE_ARM64E | 0xC0000000);
+const constinit Architecture Architecture::arm64e_kernel(CPU_TYPE_ARM64,         CPU_SUBTYPE_ARM64E | 0xC0000000);
+const constinit Architecture Architecture::arm64e_kernel_v1(CPU_TYPE_ARM64,      CPU_SUBTYPE_ARM64E | 0xC1000000);
+const constinit Architecture Architecture::arm64e_kernel_v2(CPU_TYPE_ARM64,      CPU_SUBTYPE_ARM64E | 0xC2000000);
 
 
 
@@ -245,15 +267,50 @@ bool Architecture::usesArm64AuthPointers() const
     return (_cputype == CPU_TYPE_ARM64) && ((_cpusubtype & ~CPU_SUBTYPE_MASK) == CPU_SUBTYPE_ARM64E);
 }
 
-
 bool Architecture::usesx86_64Instructions() const
 {
     // true for: x86_64 and x86_64h
     return (_cputype == CPU_TYPE_X86_64);
 }
 
+bool Architecture::usesArm32Instructions() const
+{
+    if ( _cputype != CPU_TYPE_ARM )
+       return false;
+    switch ( _cpusubtype ) {
+        case CPU_SUBTYPE_ARM_V6M:
+        case CPU_SUBTYPE_ARM_V7M:
+        case CPU_SUBTYPE_ARM_V7EM:
+            return false;   // these cores are thumb-only
+    }
+    return true;
+}
 
-#endif // !TARGET_OS_EXCLAVEKIT
+bool Architecture::usesThumbInstructions() const
+{
+    // all Apple cores support thumb instructions
+    return ( _cputype == CPU_TYPE_ARM );
+}
+
+bool Architecture::usesArmZeroCostExceptions() const
+{
+    // true for: armv7k
+    return (_cputype == CPU_TYPE_ARM) && (_cpusubtype == CPU_SUBTYPE_ARM_V7K);
+}
+
+bool Architecture::isArm64eKernel() const
+{
+    return ( _cputype == CPU_TYPE_ARM64 &&
+            ((_cpusubtype & ~CPU_SUBTYPE_ARM64_PTR_AUTH_MASK)
+                == (CPU_SUBTYPE_ARM64E | 0xC0000000)) );
+}
+
+int Architecture::arm64eABIVersion() const
+{
+    assert(usesArm64AuthPointers());
+    return CPU_SUBTYPE_ARM64_PTR_AUTH_VERSION(_cpusubtype);
+}
+
 
 } // namespace mach_o
 

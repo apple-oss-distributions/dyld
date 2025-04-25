@@ -63,8 +63,11 @@ extern "C" {
   #include <vector>
 #endif // !BUILDING_DYLD
 
+#include "Architecture.h"
 #include "Array.h"
+#include "Header.h"
 #include "MachOFile.h"
+#include "Platform.h"
 #include "SupportedArchs.h"
 #include "CodeSigningTypes.h"
 
@@ -77,6 +80,9 @@ extern "C" {
 #if !BUILDING_DYLD
 #include "ObjCVisitor.h"
 #endif
+
+using mach_o::Header;
+using mach_o::Platform;
 
 namespace dyld3 {
 
@@ -258,7 +264,7 @@ const char* FatFile::archNames(char strBuf[256], uint64_t fileLen) const
     this->forEachSlice(diag, fileLen, false, ^(uint32_t sliceCpuType, uint32_t sliceCpuSubType, const void* sliceStart, uint64_t sliceSize, bool& stop) {
         if ( needComma )
             strlcat(strBuf, ",", 256);
-        strlcat(strBuf, MachOFile::archName(sliceCpuType, sliceCpuSubType), 256);
+        strlcat(strBuf, mach_o::Architecture(sliceCpuType, sliceCpuSubType).name(), 256);
         needComma = true;
     });
     return strBuf;
@@ -356,7 +362,12 @@ int GradedArchs::grade(uint32_t cputype, uint32_t cpusubtype, bool isOSBinary) c
 
 const char* GradedArchs::name() const
 {
-    return MachOFile::archName(_orderedCpuTypes[0].type, _orderedCpuTypes[0].subtype);
+    mach_o::Architecture arch = mach_o::Architecture(_orderedCpuTypes[0].type, _orderedCpuTypes[0].subtype);
+    // FIXME: Existing clients of this function don't expect the various arm64e names,
+    //        such as arm64e.old.
+    if ( arch.usesArm64AuthPointers() )
+        return "arm64e";
+    return arch.name();
 }
 
 void GradedArchs::forEachArch(bool platformBinariesOnly, void (^handler)(const char*)) const
@@ -366,7 +377,12 @@ void GradedArchs::forEachArch(bool platformBinariesOnly, void (^handler)(const c
             break;
         if ( p.osBinary && !platformBinariesOnly )
             continue;
-        handler(MachOFile::archName(p.type, p.subtype));
+        // Note: mach_o::Architecture uses high bits to distiguish arm64e variant
+        // passing the base cpu type/subtype will result in "arm64.old"
+        if ( (p.type == CPU_TYPE_ARM64) && (p.subtype == CPU_SUBTYPE_ARM64E) )
+            handler("arm64e");
+        else
+            handler(mach_o::Architecture(p.type, p.subtype).name());
     }
 }
 
@@ -384,7 +400,7 @@ bool GradedArchs::supports64() const
     return (_orderedCpuTypes.front().type & CPU_ARCH_ABI64) != 0;
 }
 
-#if __x86_64__
+#if !TARGET_OS_SIMULATOR && __x86_64__
 static bool isHaswell()
 {
     // FIXME: figure out a commpage way to check this
@@ -477,51 +493,6 @@ const GradedArchs& GradedArchs::forName(const char* archName, bool keysOff)
 
 ////////////////////////////  MachOFile ////////////////////////////////////////
 
-
-const MachOFile::ArchInfo MachOFile::_s_archInfos[] = {
-    { "x86_64",   CPU_TYPE_X86_64,   CPU_SUBTYPE_X86_64_ALL  },
-    { "x86_64h",  CPU_TYPE_X86_64,   CPU_SUBTYPE_X86_64_H    },
-    { "i386",     CPU_TYPE_I386,     CPU_SUBTYPE_I386_ALL    },
-    { "arm64",    CPU_TYPE_ARM64,    CPU_SUBTYPE_ARM64_ALL   },
-#if SUPPORT_ARCH_arm64e
-    { "arm64e",   CPU_TYPE_ARM64,    CPU_SUBTYPE_ARM64E     },
-#endif
-#if SUPPORT_ARCH_arm64_32
-    { "arm64_32", CPU_TYPE_ARM64_32, CPU_SUBTYPE_ARM64_32_V8 },
-#endif
-    { "armv7k",   CPU_TYPE_ARM,      CPU_SUBTYPE_ARM_V7K     },
-    { "armv7s",   CPU_TYPE_ARM,      CPU_SUBTYPE_ARM_V7S     },
-    { "armv7",    CPU_TYPE_ARM,      CPU_SUBTYPE_ARM_V7      },
-    { "armv6m",   CPU_TYPE_ARM,      CPU_SUBTYPE_ARM_V6M     },
-    { "armv7m",   CPU_TYPE_ARM,      CPU_SUBTYPE_ARM_V7M     },
-    { "armv7em",  CPU_TYPE_ARM,      CPU_SUBTYPE_ARM_V7EM    },
-    { "armv8m",   CPU_TYPE_ARM,      CPU_SUBTYPE_ARM_V8M     },
-};
-
-const MachOFile::PlatformInfo MachOFile::_s_platformInfos[] = {
-    { "macOS",              Platform::macOS,                LC_VERSION_MIN_MACOSX   },
-    { "iOS",                Platform::iOS,                  LC_VERSION_MIN_IPHONEOS },
-    { "tvOS",               Platform::tvOS,                 LC_VERSION_MIN_TVOS     },
-    { "watchOS",            Platform::watchOS,              LC_VERSION_MIN_WATCHOS  },
-    { "bridgeOS",           Platform::bridgeOS,             LC_BUILD_VERSION        },
-    { "MacCatalyst",        Platform::iOSMac,               LC_BUILD_VERSION        },
-    { "iOS-sim",            Platform::iOS_simulator,        LC_BUILD_VERSION        },
-    { "tvOS-sim",           Platform::tvOS_simulator,       LC_BUILD_VERSION        },
-    { "watchOS-sim",        Platform::watchOS_simulator,    LC_BUILD_VERSION        },
-    { "driverKit",          Platform::driverKit,            LC_BUILD_VERSION        },
-    { "visionOS",           Platform::visionOS,             LC_BUILD_VERSION        },
-    { "visionOS-sim",       Platform::visionOS_simulator,   LC_BUILD_VERSION        },
-    { "macOSExclaveCore",   Platform::macOSExclaveCore,     LC_BUILD_VERSION        },
-    { "macOSExclaveKit",    Platform::macOSExclaveKit,      LC_BUILD_VERSION        },
-    { "iOSExclaveCore",     Platform::iOSExclaveCore,       LC_BUILD_VERSION        },
-    { "iOSExclaveKit",      Platform::iOSExclaveKit,        LC_BUILD_VERSION        },
-    { "tvOSExclaveCore",    Platform::tvOSExclaveCore,      LC_BUILD_VERSION        },
-    { "tvOSExclaveKit",     Platform::tvOSExclaveKit,       LC_BUILD_VERSION        },
-
-};
-
-
-
 bool MachOFile::is64() const
 {
     return (this->magic == MH_MAGIC_64);
@@ -564,340 +535,16 @@ bool MachOFile::uses16KPages() const
 
 bool MachOFile::isArch(const char* aName) const
 {
-    return (strcmp(aName, archName(this->cputype, this->cpusubtype)) == 0);
-}
-
-const char* MachOFile::archName(uint32_t cputype, uint32_t cpusubtype)
-{
-    for (const ArchInfo& info : _s_archInfos) {
-        if ( (cputype == info.cputype) && ((cpusubtype & ~CPU_SUBTYPE_MASK) == info.cpusubtype) ) {
-            return info.name;
-        }
-    }
-    return "unknown";
-}
-
-bool MachOFile::cpuTypeFromArchName(const char* archName, cpu_type_t* cputype, cpu_subtype_t* cpusubtype)
-{
-   for (const ArchInfo& info : _s_archInfos) {
-        if ( strcmp(archName, info.name) == 0 ) {
-            *cputype    = info.cputype;
-            *cpusubtype = info.cpusubtype;
-            return true;
-       }
-    }
-    return false;
+    return (strcmp(aName, mach_o::Architecture(this->cputype, this->cpusubtype).name()) == 0);
 }
 
 const char* MachOFile::archName() const
 {
-    return archName(this->cputype, this->cpusubtype);
-}
-
-static void appendDigit(char*& s, unsigned& num, unsigned place, bool& startedPrinting)
-{
-    if ( num >= place ) {
-        unsigned dig = (num/place);
-        *s++ = '0' + dig;
-        num -= (dig*place);
-        startedPrinting = true;
-    }
-    else if ( startedPrinting ) {
-        *s++ = '0';
-    }
-}
-
-static void appendNumber(char*& s, unsigned num)
-{
-    assert(num < 99999);
-    bool startedPrinting = false;
-    appendDigit(s, num, 10000, startedPrinting);
-    appendDigit(s, num,  1000, startedPrinting);
-    appendDigit(s, num,   100, startedPrinting);
-    appendDigit(s, num,    10, startedPrinting);
-    appendDigit(s, num,     1, startedPrinting);
-    if ( !startedPrinting )
-        *s++ = '0';
-}
-
-void MachOFile::packedVersionToString(uint32_t packedVersion, char versionString[32])
-{
-    // sprintf(versionString, "%d.%d.%d", (packedVersion >> 16), ((packedVersion >> 8) & 0xFF), (packedVersion & 0xFF));
-    char* s = versionString;
-    appendNumber(s, (packedVersion >> 16));
-    *s++ = '.';
-    appendNumber(s, (packedVersion >> 8) & 0xFF);
-    if ( (packedVersion & 0xFF) != 0 ) {
-        *s++ = '.';
-        appendNumber(s, (packedVersion & 0xFF));
-    }
-    *s++ = '\0';
-}
-
-bool MachOFile::builtForPlatform(Platform reqPlatform, bool onlyOnePlatform) const
-{
-    __block bool foundRequestedPlatform = false;
-    __block bool foundOtherPlatform     = false;
-    forEachSupportedPlatform(^(Platform platform, uint32_t minOS, uint32_t sdk) {
-        if ( platform == reqPlatform )
-            foundRequestedPlatform = true;
-        else
-            foundOtherPlatform = true;
-    });
-    // if checking that this binary is built for exactly one platform, fail if more
-    if ( foundOtherPlatform && onlyOnePlatform )
-        return false;
-    if ( foundRequestedPlatform )
-        return true;
-
-    // binary has no explict load command to mark platform
-    // could be an old macOS binary, look at arch
-    if  ( !foundOtherPlatform && (reqPlatform == Platform::macOS) ) {
-        if ( this->cputype == CPU_TYPE_X86_64 )
-            return true;
-        if ( this->cputype == CPU_TYPE_I386 )
-            return true;
-    }
-
-#if BUILDING_DYLDINFO
-    // Allow offline tools to analyze binaries dyld doesn't load, ie, those with platforms
-    if ( !foundOtherPlatform && (reqPlatform == Platform::unknown) )
-        return true;
-#endif
-
-    return false;
-}
-
-bool MachOFile::loadableIntoProcess(Platform processPlatform, const char* path, bool internalInstall) const
-{
-    if ( this->builtForPlatform(processPlatform) )
-        return true;
-
-    // Some host macOS dylibs can be loaded into simulator processes
-    if ( MachOFile::isSimulatorPlatform(processPlatform) && this->builtForPlatform(Platform::macOS)) {
-        static const char* const macOSHost[] = {
-            "/usr/lib/system/libsystem_kernel.dylib",
-            "/usr/lib/system/libsystem_platform.dylib",
-            "/usr/lib/system/libsystem_pthread.dylib",
-            "/usr/lib/system/libsystem_platform_debug.dylib",
-            "/usr/lib/system/libsystem_pthread_debug.dylib",
-            "/usr/lib/system/host/liblaunch_sim.dylib",
-        };
-        for (const char* libPath : macOSHost) {
-            if (strcmp(libPath, path) == 0)
-                return true;
-        }
-    }
-
-    // If this is being called on main executable where we expect a macOS program, Catalyst programs are also runnable
-    if ( (this->filetype == MH_EXECUTE) && (processPlatform == Platform::macOS) && this->builtForPlatform(Platform::iOSMac, true) )
-        return true;
-#if (TARGET_OS_OSX && TARGET_CPU_ARM64)
-    if ( (this->filetype == MH_EXECUTE) && (processPlatform == Platform::macOS) && this->builtForPlatform(Platform::iOS, true) )
-        return true;
-#endif
-
-    // allow iOS executables to use visionOS dylibs
-    if ( (processPlatform == Platform::iOS) && this->builtForPlatform(Platform::visionOS, true) )
-        return true;
-
-    // allow iOS_Sim executables to use visionOS_Sim dylibs
-    if ( (processPlatform == Platform::iOS_simulator) && this->builtForPlatform(Platform::visionOS_simulator, true) )
-        return true;
-
-
-    bool iOSonMac = (processPlatform == Platform::iOSMac);
-#if (TARGET_OS_OSX && TARGET_CPU_ARM64)
-    // allow iOS binaries in iOSApp
-    if ( processPlatform == Platform::iOS ) {
-        // can load Catalyst binaries into iOS process
-        if ( this->builtForPlatform(Platform::iOSMac) )
-            return true;
-        iOSonMac = true;
-    }
-#endif
-    // macOS dylibs can be loaded into iOSMac processes
-    if ( (iOSonMac) && this->builtForPlatform(Platform::macOS, true) )
-        return true;
-
-    return false;
-}
-
-bool MachOFile::isZippered() const
-{
-    __block bool macOS = false;
-    __block bool iOSMac = false;
-    forEachSupportedPlatform(^(Platform platform, uint32_t minOS, uint32_t sdk) {
-        if ( platform == Platform::macOS )
-            macOS = true;
-        else if ( platform == Platform::iOSMac )
-            iOSMac = true;
-    });
-    return macOS && iOSMac;
+    return mach_o::Architecture(this->cputype, this->cpusubtype).name();
 }
 
 bool MachOFile::inDyldCache() const {
     return (this->flags & MH_DYLIB_IN_CACHE);
-}
-
-Platform MachOFile::currentPlatform()
-{
-#if TARGET_OS_SIMULATOR
-  #if TARGET_OS_WATCH
-    return Platform::watchOS_simulator;
-  #elif TARGET_OS_TV
-    return Platform::tvOS_simulator;
-  #elif TARGET_OS_VISION
-    return Platform::visionOS_simulator;
-  #elif TARGET_OS_IOS
-    return Platform::iOS_simulator;
-  #endif
-#elif TARGET_OS_BRIDGE
-    return Platform::bridgeOS;
-#elif TARGET_OS_WATCH
-    return Platform::watchOS;
-#elif TARGET_OS_TV
-    return Platform::tvOS;
-#elif TARGET_OS_IOS
-    return Platform::iOS;
-#elif TARGET_OS_OSX
-    return Platform::macOS;
-#elif TARGET_OS_DRIVERKIT
-    return Platform::driverKit;
-#elif TARGET_OS_VISION
-  return Platform::visionOS;
-#else
-    #if TARGET_OS_EXCLAVECORE
-      #if __is_target_os(macos)
-        return Platform::macOSExclaveCore
-      #elif __is_target_os(ios)
-        return Platform::iOSExclaveCore;
-      #elif __is_target_os(tvos)
-        return Platform::tvOSExclaveCore;
-      #else
-        #error unknown platform
-      #endif
-    #elif TARGET_OS_EXCLAVEKIT
-      #if __is_target_os(macos)
-        return Platform::macOSExclaveKit;
-      #elif __is_target_os(ios)
-        return Platform::iOSExclaveKit;
-      #elif __is_target_os(tvos)
-        return Platform::tvOSExclaveKit;
-      #else
-        #error unknown platform
-      #endif
-    #else
-      #error unknown platform
-    #endif
-#endif
-}
-
-Platform MachOFile::basePlatform(dyld3::Platform reqPlatform) {
-    switch(reqPlatform) {
-        case Platform::unknown:               return Platform::unknown;
-        case Platform::macOS:                 return Platform::macOS;
-        case Platform::iOS:                   return Platform::iOS;
-        case Platform::tvOS:                  return Platform::tvOS;
-        case Platform::watchOS:               return Platform::watchOS;
-        case Platform::bridgeOS:              return Platform::bridgeOS;
-        case Platform::iOSMac:                return Platform::iOS;
-        case Platform::iOS_simulator:         return Platform::iOS;
-        case Platform::tvOS_simulator:        return Platform::tvOS;
-        case Platform::watchOS_simulator:     return Platform::watchOS;
-        case Platform::driverKit:             return Platform::driverKit;
-        case Platform::visionOS:              return Platform::visionOS;
-        case Platform::visionOS_simulator:    return Platform::visionOS;
-        case Platform::macOSExclaveCore:      return Platform::macOSExclaveCore;
-        case Platform::macOSExclaveKit:       return Platform::macOSExclaveKit;
-        case Platform::iOSExclaveCore:        return Platform::iOSExclaveCore;
-        case Platform::iOSExclaveKit:         return Platform::iOSExclaveKit;
-        case Platform::tvOSExclaveCore:       return Platform::tvOSExclaveCore;
-        case Platform::tvOSExclaveKit:        return Platform::tvOSExclaveKit;
-
-
-        default:                              return reqPlatform;
-    }
-}
-
-
-const char* MachOFile::currentArchName()
-{
-#if __arm64e__
-    return "arm64e";
-#elif __arm64__
-#if __LP64__
-    return "arm64";
-#else
-    return "arm64_32";
-#endif
-#elif __x86_64__
-    return isHaswell() ? "x86_64h" : "x86_64";
-#else
-    #error unknown arch
-#endif
-}
-
-bool MachOFile::isExclaveKitPlatform(Platform platform, Platform* basePlatform)
-{
-    switch ( platform ) {
-        case Platform::macOSExclaveKit:
-            if ( basePlatform )
-                *basePlatform = Platform::macOS;
-            return true;
-        case Platform::iOSExclaveKit:
-            if ( basePlatform )
-                *basePlatform = Platform::iOS;
-            return true;
-        case Platform::tvOSExclaveKit:
-            if ( basePlatform )
-                *basePlatform = Platform::tvOS;
-            return true;
-       default:
-            return false;
-    }
-}
-
-bool MachOFile::isSimulatorPlatform(Platform platform, Platform* basePlatform)
-{
-    switch ( platform ) {
-        case Platform::iOS_simulator:
-            if ( basePlatform )
-                *basePlatform = Platform::iOS;
-            return true;
-        case Platform::watchOS_simulator:
-            if ( basePlatform )
-                *basePlatform = Platform::watchOS;
-            return true;
-        case Platform::tvOS_simulator:
-            if ( basePlatform )
-                *basePlatform = Platform::tvOS;
-            return true;
-        case Platform::visionOS_simulator:
-            if ( basePlatform )
-                *basePlatform = Platform::visionOS;
-            return true;
-       default:
-            return false;
-    }
-}
-
-bool MachOFile::isBuiltForSimulator() const
-{
-    __block bool result = false;
-    this->forEachSupportedPlatform(^(Platform platform, uint32_t minOS, uint32_t sdk) {
-        switch ( platform ) {
-            case Platform::iOS_simulator:
-            case Platform::watchOS_simulator:
-            case Platform::tvOS_simulator:
-            case Platform::visionOS_simulator:
-                result = true;
-                break;
-           default:
-                break;
-        }
-    });
-    return result;
 }
 
 bool MachOFile::isDyld() const
@@ -969,95 +616,6 @@ bool MachOFile::isPreload() const
 {
     return (this->filetype == MH_PRELOAD);
 }
-
-const char* MachOFile::platformName(Platform reqPlatform)
-{
-    for (const PlatformInfo& info : _s_platformInfos) {
-        if ( info.platform == reqPlatform )
-            return info.name;
-    }
-    return "unknown";
-}
-
-void MachOFile::forEachSupportedPlatform(void (^handler)(Platform platform, uint32_t minOS, uint32_t sdk)) const
-{
-    Diagnostics diag;
-    __block bool foundPlatform = false;
-    forEachLoadCommand(diag, ^(const load_command* cmd, bool& stop) {
-        const build_version_command* buildCmd = (build_version_command *)cmd;
-        const version_min_command*   versCmd  = (version_min_command*)cmd;
-        uint32_t                     sdk;
-        switch ( cmd->cmd ) {
-            case LC_BUILD_VERSION:
-                handler((Platform)(buildCmd->platform), buildCmd->minos, buildCmd->sdk);
-                foundPlatform = true;
-                break;
-            case LC_VERSION_MIN_MACOSX:
-                sdk = versCmd->sdk;
-                // The original LC_VERSION_MIN_MACOSX did not have an sdk field, assume sdk is same as minOS for those old binaries
-                if ( sdk == 0 )
-                    sdk = versCmd->version;
-                handler(Platform::macOS, versCmd->version, sdk);
-                foundPlatform = true;
-                break;
-            case LC_VERSION_MIN_IPHONEOS:
-                if ( (this->cputype == CPU_TYPE_X86_64) || (this->cputype == CPU_TYPE_I386) )
-                    handler(Platform::iOS_simulator, versCmd->version, versCmd->sdk); // old sim binary
-                else
-                    handler(Platform::iOS, versCmd->version, versCmd->sdk);
-                foundPlatform = true;
-                break;
-            case LC_VERSION_MIN_TVOS:
-                if ( this->cputype == CPU_TYPE_X86_64 )
-                    handler(Platform::tvOS_simulator, versCmd->version, versCmd->sdk); // old sim binary
-                else
-                    handler(Platform::tvOS, versCmd->version, versCmd->sdk);
-                foundPlatform = true;
-                break;
-            case LC_VERSION_MIN_WATCHOS:
-                if ( (this->cputype == CPU_TYPE_X86_64) || (this->cputype == CPU_TYPE_I386) )
-                    handler(Platform::watchOS_simulator, versCmd->version, versCmd->sdk); // old sim binary
-                else
-                    handler(Platform::watchOS, versCmd->version, versCmd->sdk);
-                foundPlatform = true;
-                break;
-        }
-    });
-    if ( !foundPlatform ) {
-        // old binary with no explicit platform
-#if (BUILDING_DYLD || BUILDING_CLOSURE_UTIL) && TARGET_OS_OSX
-        if ( this->cputype == CPU_TYPE_X86_64 )
-            handler(Platform::macOS, 0x000A0500, 0x000A0500); // guess it is a macOS 10.5 binary
-        // <rdar://problem/75343399>
-        // The Go linker emits non-standard binaries without a platform and we have to live with it.
-        if ( this->cputype == CPU_TYPE_ARM64 )
-            handler(Platform::macOS, 0x000B0000, 0x000B0000); // guess it is a macOS 11.0 binary
-#endif
-    }
-    diag.assertNoError();   // any malformations in the file should have been caught by earlier validate() call
-}
-
-void MachOFile::forEachSupportedBuildTool(void (^handler)(Platform platform, uint32_t tool, uint32_t version)) const
-{
-    Diagnostics diag;
-    forEachLoadCommand(diag, ^(const load_command* cmd, bool& stop) {
-        switch ( cmd->cmd ) {
-            case LC_BUILD_VERSION: {
-                const build_version_command* buildCmd = (build_version_command *)cmd;
-                for ( uint32_t i = 0; i != buildCmd->ntools; ++i ) {
-                    uint32_t offset = sizeof(build_version_command) + (i * sizeof(build_tool_version));
-                    if ( offset >= cmd->cmdsize )
-                        break;
-
-                    const build_tool_version* firstTool = (const build_tool_version*)(&buildCmd[1]);
-                    handler((Platform)(buildCmd->platform), firstTool[i].tool, firstTool[i].version);
-                }
-            }
-        }
-    });
-    diag.assertNoError();   // any malformations in the file should have been caught by earlier validate() call
-}
-
 
 bool MachOFile::isMachO(Diagnostics& diag, uint64_t fileSize) const
 {
@@ -1199,12 +757,12 @@ void MachOFile::removeLoadCommand(Diagnostics& diag, void (^callback)(const load
 bool MachOFile::hasObjC() const
 {
     __block bool result = false;
-    forEachSection(^(const SectionInfo& info, bool malformedSectionRange, bool& stop) {
-        if ( (strcmp(info.sectName, "__objc_imageinfo") == 0) && (strncmp(info.segInfo.segName, "__DATA", 6) == 0) ) {
+    forEachSection(^(const Header::SectionInfo& info, bool& stop) {
+        if ( (info.sectionName == "__objc_imageinfo") && info.segmentName.starts_with("__DATA") ) {
             result = true;
             stop = true;
         }
-        if ( (this->cputype == CPU_TYPE_I386) && (strcmp(info.sectName, "__image_info") == 0) && (strcmp(info.segInfo.segName, "__OBJC") == 0) ) {
+        if ( (this->cputype == CPU_TYPE_I386) && (info.sectionName == "__image_info") && (info.segmentName == "__OBJC") ) {
             result = true;
             stop = true;
         }
@@ -1223,72 +781,12 @@ bool MachOFile::hasConstObjCSection() const
 bool MachOFile::hasSection(const char* segName, const char* sectName) const
 {
     __block bool result = false;
-    forEachSection(^(const SectionInfo& info, bool malformedSectionRange, bool& stop) {
-        if ( (strcmp(info.segInfo.segName, segName) == 0) && (strcmp(info.sectName, sectName) == 0) ) {
+    forEachSection(^(const Header::SectionInfo& info, bool& stop) {
+        if ( (info.segmentName == segName) && (info.sectionName == sectName) ) {
             result = true;
             stop = true;
         }
     });
-    return result;
-}
-
-const char* MachOFile::installName() const
-{
-    const char*  name;
-    uint32_t     compatVersion;
-    uint32_t     currentVersion;
-    if ( getDylibInstallName(&name, &compatVersion, &currentVersion) )
-        return name;
-    return nullptr;
-}
-
-bool MachOFile::getDylibInstallName(const char** installName, uint32_t* compatVersion, uint32_t* currentVersion) const
-{
-    Diagnostics diag;
-    __block bool found = false;
-    forEachLoadCommand(diag, ^(const load_command* cmd, bool& stop) {
-        if ( (cmd->cmd == LC_ID_DYLIB) || (cmd->cmd == LC_ID_DYLINKER) ) {
-            const dylib_command*  dylibCmd = (dylib_command*)cmd;
-            *compatVersion  = dylibCmd->dylib.compatibility_version;
-            *currentVersion = dylibCmd->dylib.current_version;
-            *installName    = (char*)dylibCmd + dylibCmd->dylib.name.offset;
-            found = true;
-            stop = true;
-        }
-    });
-    diag.assertNoError();   // any malformations in the file should have been caught by earlier validate() call
-    return found;
-}
-
-bool MachOFile::getUuid(uuid_t uuid) const
-{
-    Diagnostics diag;
-    __block bool found = false;
-    forEachLoadCommand(diag, ^(const load_command* cmd, bool& stop) {
-        if ( cmd->cmd == LC_UUID ) {
-            const uuid_command* uc = (const uuid_command*)cmd;
-            memcpy(uuid, uc->uuid, sizeof(uuid_t));
-            found = true;
-            stop = true;
-        }
-    });
-    diag.assertNoError();   // any malformations in the file should have been caught by earlier validate() call
-    if ( !found )
-        bzero(uuid, sizeof(uuid_t));
-    return found;
-}
-
-UUID MachOFile::uuid() const {
-    Diagnostics diag;
-    __block UUID result;
-    forEachLoadCommand(diag, ^(const load_command* cmd, bool& stop) {
-        if ( cmd->cmd == LC_UUID ) {
-            const uuid_command* uc = (const uuid_command*)cmd;
-            result = UUID(uc->uuid);
-            stop = true;
-        }
-    });
-    diag.assertNoError();
     return result;
 }
 
@@ -1321,22 +819,25 @@ void MachOFile::forEachDependentDylib(void (^callback)(const char* loadPath, boo
     if ( (count == 0) && !stopped ) {
         // The dylibs that make up libSystem can link with nothing
         // except for dylibs in libSystem.dylib which are ok to link with nothing (they are on bottom)
+        const Header* hdr = (const Header*)this;
 #if TARGET_OS_EXCLAVEKIT
-        if ( !this->isDylib() || (strncmp(this->installName(), "/System/ExclaveKit/usr/lib/system/", 34) != 0) )
+        if ( !this->isDylib() || (strncmp(hdr->installName(), "/System/ExclaveKit/usr/lib/system/", 34) != 0) )
             callback("/System/ExclaveKit/usr/lib/libSystem.dylib", false, false, false, 0x00010000, 0x00010000, stopped);
 #else
-        if ( this->builtForPlatform(Platform::driverKit, true) ) {
-            if ( !this->isDylib() || (strncmp(this->installName(), "/System/DriverKit/usr/lib/system/", 33) != 0) )
+        if ( hdr->builtForPlatform(Platform::driverKit, true) ) {
+            if ( !this->isDylib() || (strncmp(hdr->installName(), "/System/DriverKit/usr/lib/system/", 33) != 0) )
                 callback("/System/DriverKit/usr/lib/libSystem.B.dylib", false, false, false, 0x00010000, 0x00010000, stopped);
         }
-        else if ( this->builtForPlatform(Platform::macOSExclaveKit, true)
-                 || this->builtForPlatform(Platform::iOSExclaveKit, true)
-                 || this->builtForPlatform(Platform::tvOSExclaveKit, true) ) {
+        else if (   hdr->builtForPlatform(Platform::macOS_exclaveKit, true)
+                 || hdr->builtForPlatform(Platform::iOS_exclaveKit, true)
+                 || hdr->builtForPlatform(Platform::tvOS_exclaveKit, true)
+                 || hdr->builtForPlatform(Platform::watchOS_exclaveKit, true)
+                 || hdr->builtForPlatform(Platform::visionOS_exclaveKit, true) ) {
             // do nothing for ExclaveKit dylibs
             // FIXME: only allow this behavior on internal builds
         }
         else {
-            if ( !this->isDylib() || (strncmp(this->installName(), "/usr/lib/system/", 16) != 0) )
+            if ( !this->isDylib() || (strncmp(hdr->installName(), "/usr/lib/system/", 16) != 0) )
                 callback("/usr/lib/libSystem.B.dylib", false, false, false, 0x00010000, 0x00010000, stopped);
         }
 #endif // TARGET_OS_EXCLAVEKIT
@@ -1344,100 +845,6 @@ void MachOFile::forEachDependentDylib(void (^callback)(const char* loadPath, boo
 #endif // !BUILDING_SHARED_CACHE_UTIL && !BUILDING_DYLDINFO && !BUILDING_UNIT_TESTS
     diag.assertNoError();   // any malformations in the file should have been caught by earlier validate() call
 }
-
-void MachOFile::forDyldEnv(void (^callback)(const char* envVar, bool& stop)) const
-{
-    Diagnostics diag;
-    forEachLoadCommand(diag, ^(const load_command* cmd, bool& stop) {
-         if ( cmd->cmd == LC_DYLD_ENVIRONMENT ) {
-            const dylinker_command* envCmd = (dylinker_command*)cmd;
-            const char* keyEqualsValue = (char*)envCmd + envCmd->name.offset;
-            // only process variables that start with DYLD_
-            if ( (strncmp(keyEqualsValue, "DYLD_", 5) == 0) ) {
-                const char* equals = strchr(keyEqualsValue, '=');
-                if ( equals != NULL ) {
-                    callback(keyEqualsValue, stop);
-                }
-            }
-        }
-    });
-    diag.assertNoError();   // any malformations in the file should have been caught by earlier validate() call
-}
-
-bool MachOFile::enforceCompatVersion() const
-{
-    __block bool result = true;
-    forEachSupportedPlatform(^(Platform platform, uint32_t minOS, uint32_t sdk) {
-        switch ( platform ) {
-            case Platform::macOS:
-                if ( minOS >= 0x000A0E00 )  // macOS 10.14
-                    result = false;
-                break;
-            case Platform::iOS:
-            case Platform::tvOS:
-            case Platform::iOS_simulator:
-            case Platform::tvOS_simulator:
-                if ( minOS >= 0x000C0000 )  // iOS 12.0
-                    result = false;
-                break;
-            case Platform::watchOS:
-            case Platform::watchOS_simulator:
-                if ( minOS >= 0x00050000 )  // watchOS 5.0
-                    result = false;
-                break;
-            case Platform::bridgeOS:
-                if ( minOS >= 0x00030000 )  // bridgeOS 3.0
-                    result = false;
-                break;
-            case Platform::driverKit:
-            case Platform::iOSMac:
-                result = false;
-                break;
-            case Platform::visionOS:
-            case Platform::visionOS_simulator:
-                result = false;
-                break;
-            case Platform::macOSExclaveCore:
-            case Platform::macOSExclaveKit:
-            case Platform::iOSExclaveCore:
-            case Platform::iOSExclaveKit:
-            case Platform::tvOSExclaveCore:
-            case Platform::tvOSExclaveKit:
-                result = false;
-                break;
-
-
-            case Platform::unknown:
-                break;
-        }
-    });
-    return result;
-}
-
-const thread_command* MachOFile::unixThreadLoadCommand() const {
-    Diagnostics diag;
-    __block const thread_command* command = nullptr;
-    forEachLoadCommand(diag, ^(const load_command* cmd, bool& stop) {
-        if ( cmd->cmd == LC_UNIXTHREAD ) {
-            command = (const thread_command*)cmd;
-            stop = true;
-        }
-    });
-    return command;
-}
-
-const linkedit_data_command* MachOFile::chainedFixupsCmd() const {
-    Diagnostics diag;
-    __block const linkedit_data_command* command = nullptr;
-    forEachLoadCommand(diag, ^(const load_command* cmd, bool& stop) {
-        if ( cmd->cmd == LC_DYLD_CHAINED_FIXUPS ) {
-            command = (const linkedit_data_command*)cmd;
-            stop = true;
-        }
-    });
-    return command;
-}
-
 
 uint32_t MachOFile::entryAddrRegisterIndexForThreadCmd() const
 {
@@ -1473,249 +880,14 @@ uint64_t MachOFile::entryAddrFromThreadCmd(const thread_command* cmd) const
     return use64BitEntryRegs() ? regs64[index] : regs32[index];
 }
 
-
-bool MachOFile::getEntry(uint64_t& offset, bool& usesCRT) const
+void MachOFile::forEachSection(void (^callback)(const Header::SectionInfo&, bool& stop)) const
 {
-    Diagnostics diag;
-    offset = 0;
-    forEachLoadCommand(diag, ^(const load_command* cmd, bool& stop) {
-        if ( cmd->cmd == LC_MAIN ) {
-            entry_point_command* mainCmd = (entry_point_command*)cmd;
-            usesCRT = false;
-            offset = mainCmd->entryoff;
-            stop = true;
-        }
-        else if ( cmd->cmd == LC_UNIXTHREAD ) {
-            stop = true;
-            usesCRT = true;
-            uint64_t startAddress = entryAddrFromThreadCmd((thread_command*)cmd);
-            offset = startAddress - preferredLoadAddress();
-        }
-    });
-    return (offset != 0);
+    ((const Header*)this)->forEachSection(callback);
 }
 
-
-void MachOFile::forEachSegment(void (^callback)(const SegmentInfo& info, bool& stop)) const
+void MachOFile::forEachSection(void (^callback)(const Header::SegmentInfo&, const Header::SectionInfo&, bool& stop)) const
 {
-    Diagnostics diag;
-    const bool  intel32  = (this->cputype == CPU_TYPE_I386);
-    __block uint32_t segIndex = 0;
-    forEachLoadCommand(diag, ^(const load_command* cmd, bool& stop) {
-        if ( cmd->cmd == LC_SEGMENT_64 ) {
-            const segment_command_64* segCmd = (segment_command_64*)cmd;
-            uint64_t sizeOfSections = segCmd->vmsize;
-            uint8_t p2align = 0;
-            const section_64* const sectionsStart = (section_64*)((char*)segCmd + sizeof(struct segment_command_64));
-            const section_64* const sectionsEnd   = &sectionsStart[segCmd->nsects];
-            for (const section_64* sect=sectionsStart; sect < sectionsEnd; ++sect) {
-                sizeOfSections = sect->addr + sect->size - segCmd->vmaddr;
-                if ( sect->align > p2align )
-                    p2align = sect->align;
-            }
-            SegmentInfo info;
-            info.fileOffset        = segCmd->fileoff;
-            info.fileSize          = segCmd->filesize;
-            info.vmAddr            = segCmd->vmaddr;
-            info.vmSize            = segCmd->vmsize;
-            info.sizeOfSections    = sizeOfSections;
-            info.segName           = segCmd->segname;
-            info.loadCommandOffset = (uint32_t)((uint8_t*)segCmd - (uint8_t*)this);
-            info.protections       = segCmd->initprot;
-            info.textRelocs        = false;
-            info.readOnlyData      = ((segCmd->flags & SG_READ_ONLY) != 0);
-            info.isProtected       = (segCmd->flags & SG_PROTECTED_VERSION_1) ? 1 : 0;
-            info.hasZeroFill       = (segCmd->initprot == 3) && (segCmd->filesize < segCmd->vmsize);
-            info.p2align           = p2align;
-            info.segIndex          = segIndex;
-            callback(info, stop);
-            ++segIndex;
-        }
-        else if ( cmd->cmd == LC_SEGMENT ) {
-            const segment_command* segCmd = (segment_command*)cmd;
-            uint64_t sizeOfSections = segCmd->vmsize;
-            uint8_t p2align = 0;
-            bool  hasTextRelocs = false;
-            const section* const sectionsStart = (section*)((char*)segCmd + sizeof(struct segment_command));
-            const section* const sectionsEnd   = &sectionsStart[segCmd->nsects];
-            for (const section* sect=sectionsStart; sect < sectionsEnd; ++sect) {
-                sizeOfSections = sect->addr + sect->size - segCmd->vmaddr;
-                if ( sect->align > p2align )
-                    p2align = sect->align;
-                if ( sect->flags & (S_ATTR_EXT_RELOC|S_ATTR_LOC_RELOC) )
-                    hasTextRelocs = true;
-           }
-            SegmentInfo info;
-            info.fileOffset        = segCmd->fileoff;
-            info.fileSize          = segCmd->filesize;
-            info.vmAddr            = segCmd->vmaddr;
-            info.vmSize            = segCmd->vmsize;
-            info.sizeOfSections    = sizeOfSections;
-            info.segName           = segCmd->segname;
-            info.loadCommandOffset = (uint32_t)((uint8_t*)segCmd - (uint8_t*)this);
-            info.protections       = segCmd->initprot;
-            info.textRelocs        = intel32 && !info.writable() && hasTextRelocs;
-            info.readOnlyData      = ((segCmd->flags & SG_READ_ONLY) != 0);
-            info.isProtected       = (segCmd->flags & SG_PROTECTED_VERSION_1) ? 1 : 0;
-            info.hasZeroFill       = (segCmd->initprot == 3) && (segCmd->filesize < segCmd->vmsize);
-            info.p2align           = p2align;
-            info.segIndex          = segIndex;
-            callback(info, stop);
-            ++segIndex;
-        }
-    });
-    diag.assertNoError();   // any malformations in the file should have been caught by earlier validate() call
-}
-
-uint64_t MachOFile::preferredLoadAddress() const
-{
-    __block uint64_t textVmAddr = 0;
-    forEachSegment(^(const SegmentInfo& info, bool& stop) {
-        if ( strcmp(info.segName, "__TEXT") == 0 ) {
-            textVmAddr = info.vmAddr;
-            stop = true;
-        }
-    });
-    return textVmAddr;
-}
-
-void MachOFile::forEachSection(void (^callback)(const SectionInfo& sectInfo, bool malformedSectionRange, bool& stop)) const
-{
-    Diagnostics diag;
-    BLOCK_ACCCESSIBLE_ARRAY(char, sectNameCopy, 20);  // read as:  char sectNameCopy[20];
-    const bool intel32 = (this->cputype == CPU_TYPE_I386);
-    __block uint32_t segIndex = 0;
-    forEachLoadCommand(diag, ^(const load_command* cmd, bool& stop) {
-        SectionInfo sectInfo;
-        if ( cmd->cmd == LC_SEGMENT_64 ) {
-            const segment_command_64* segCmd = (segment_command_64*)cmd;
-            uint64_t sizeOfSections = segCmd->vmsize;
-            uint8_t p2align = 0;
-            const section_64* const sectionsStart = (section_64*)((char*)segCmd + sizeof(struct segment_command_64));
-            const section_64* const sectionsEnd   = &sectionsStart[segCmd->nsects];
-            for (const section_64* sect=sectionsStart; sect < sectionsEnd; ++sect) {
-                sizeOfSections = sect->addr + sect->size - segCmd->vmaddr;
-                if ( sect->align > p2align )
-                    p2align = sect->align;
-            }
-            sectInfo.segInfo.fileOffset        = segCmd->fileoff;
-            sectInfo.segInfo.fileSize          = segCmd->filesize;
-            sectInfo.segInfo.vmAddr            = segCmd->vmaddr;
-            sectInfo.segInfo.vmSize            = segCmd->vmsize;
-            sectInfo.segInfo.sizeOfSections    = sizeOfSections;
-            sectInfo.segInfo.segName           = segCmd->segname;
-            sectInfo.segInfo.loadCommandOffset = (uint32_t)((uint8_t*)segCmd - (uint8_t*)this);
-            sectInfo.segInfo.protections       = segCmd->initprot;
-            sectInfo.segInfo.textRelocs        = false;
-            sectInfo.segInfo.readOnlyData      = ((segCmd->flags & SG_READ_ONLY) != 0);
-            sectInfo.segInfo.isProtected       = (segCmd->flags & SG_PROTECTED_VERSION_1) ? 1 : 0;
-            sectInfo.segInfo.p2align           = p2align;
-            sectInfo.segInfo.segIndex          = segIndex;
-            for (const section_64* sect=sectionsStart; !stop && (sect < sectionsEnd); ++sect) {
-                const char* sectName = sect->sectname;
-                if ( sectName[15] != '\0' ) {
-                    strlcpy(sectNameCopy, sectName, 17);
-                    sectName = sectNameCopy;
-                }
-                bool malformedSectionRange = (sect->addr < segCmd->vmaddr) || greaterThanAddOrOverflow(sect->addr, sect->size, segCmd->vmaddr + segCmd->filesize);
-                sectInfo.sectName       = sectName;
-                sectInfo.sectFileOffset = sect->offset;
-                sectInfo.sectFlags      = sect->flags;
-                sectInfo.sectAddr       = sect->addr;
-                sectInfo.sectSize       = sect->size;
-                sectInfo.sectAlignP2    = sect->align;
-                sectInfo.reserved1      = sect->reserved1;
-                sectInfo.reserved2      = sect->reserved2;
-                callback(sectInfo, malformedSectionRange, stop);
-            }
-            ++segIndex;
-        }
-        else if ( cmd->cmd == LC_SEGMENT ) {
-            const segment_command* segCmd = (segment_command*)cmd;
-            uint64_t sizeOfSections = segCmd->vmsize;
-            uint8_t p2align = 0;
-            bool  hasTextRelocs = false;
-            const section* const sectionsStart = (section*)((char*)segCmd + sizeof(struct segment_command));
-            const section* const sectionsEnd   = &sectionsStart[segCmd->nsects];
-            for (const section* sect=sectionsStart; sect < sectionsEnd; ++sect) {
-                sizeOfSections = sect->addr + sect->size - segCmd->vmaddr;
-                if ( sect->align > p2align )
-                    p2align = sect->align;
-                if ( sect->flags & (S_ATTR_EXT_RELOC|S_ATTR_LOC_RELOC) )
-                    hasTextRelocs = true;
-            }
-            sectInfo.segInfo.fileOffset        = segCmd->fileoff;
-            sectInfo.segInfo.fileSize          = segCmd->filesize;
-            sectInfo.segInfo.vmAddr            = segCmd->vmaddr;
-            sectInfo.segInfo.vmSize            = segCmd->vmsize;
-            sectInfo.segInfo.sizeOfSections    = sizeOfSections;
-            sectInfo.segInfo.segName           = segCmd->segname;
-            sectInfo.segInfo.loadCommandOffset = (uint32_t)((uint8_t*)segCmd - (uint8_t*)this);
-            sectInfo.segInfo.protections       = segCmd->initprot;
-            sectInfo.segInfo.textRelocs        = intel32 && !sectInfo.segInfo.writable() && hasTextRelocs;
-            sectInfo.segInfo.readOnlyData      = ((segCmd->flags & SG_READ_ONLY) != 0);
-            sectInfo.segInfo.isProtected       = (segCmd->flags & SG_PROTECTED_VERSION_1) ? 1 : 0;
-            sectInfo.segInfo.p2align           = p2align;
-            sectInfo.segInfo.segIndex          = segIndex;
-            for (const section* sect=sectionsStart; !stop && (sect < sectionsEnd); ++sect) {
-                const char* sectName = sect->sectname;
-                if ( sectName[15] != '\0' ) {
-                    strlcpy(sectNameCopy, sectName, 17);
-                    sectName = sectNameCopy;
-                }
-                bool malformedSectionRange = (sect->addr < segCmd->vmaddr) || greaterThanAddOrOverflow(sect->addr, sect->size, segCmd->vmaddr + segCmd->filesize);
-                sectInfo.sectName       = sectName;
-                sectInfo.sectFileOffset = sect->offset;
-                sectInfo.sectFlags      = sect->flags;
-                sectInfo.sectAddr       = sect->addr;
-                sectInfo.sectSize       = sect->size;
-                sectInfo.sectAlignP2    = sect->align;
-                sectInfo.reserved1      = sect->reserved1;
-                sectInfo.reserved2      = sect->reserved2;
-                callback(sectInfo, malformedSectionRange, stop);
-            }
-            ++segIndex;
-        }
-    });
-    diag.assertNoError();   // any malformations in the file should have been caught by earlier validate() call
-}
-
-void MachOFile::forEachInterposingSection(Diagnostics& diag, void (^handler)(uint64_t vmOffset, uint64_t vmSize, bool& stop)) const
-{
-    const unsigned ptrSize   = pointerSize();
-    const unsigned entrySize = 2 * ptrSize;
-    forEachSection(^(const MachOFile::SectionInfo& info, bool malformedSectionRange, bool &stop) {
-        if ( ((info.sectFlags & SECTION_TYPE) == S_INTERPOSING) || ((strcmp(info.sectName, "__interpose") == 0) && ((strncmp(info.segInfo.segName, "__DATA", 6) == 0) || strncmp(info.segInfo.segName, "__AUTH", 6) == 0)) ) {
-            if ( info.sectSize % entrySize != 0 ) {
-                diag.error("interposing section %s/%s has bad size", info.segInfo.segName, info.sectName);
-                stop = true;
-                return;
-            }
-            if ( malformedSectionRange ) {
-                diag.error("interposing section %s/%s extends beyond the end of the segment", info.segInfo.segName, info.sectName);
-                stop = true;
-                return;
-            }
-            if ( (info.sectAddr % ptrSize) != 0 ) {
-                diag.error("interposing section %s/%s is not pointer aligned", info.segInfo.segName, info.sectName);
-                stop = true;
-                return;
-            }
-            handler(info.sectAddr - preferredLoadAddress(), info.sectSize, stop);
-        }
-    });
-}
-
-bool MachOFile::isRestricted() const
-{
-    __block bool result = false;
-    forEachSection(^(const MachOFile::SectionInfo& info, bool malformedSectionRange, bool &stop) {
-        if ( (strcmp(info.segInfo.segName, "__RESTRICT") == 0) && (strcmp(info.sectName, "__restrict") == 0) ) {
-            result = true;
-            stop = true;
-        }
-    });
-    return result;
+    ((const Header*)this)->forEachSection(callback);
 }
 
 bool MachOFile::hasWeakDefs() const
@@ -1728,11 +900,6 @@ bool MachOFile::usesWeakDefs() const
     return (this->flags & MH_BINDS_TO_WEAK);
 }
 
-bool MachOFile::hasThreadLocalVariables() const
-{
-    return (this->flags & MH_HAS_TLV_DESCRIPTORS);
-}
-
 #if BUILDING_CACHE_BUILDER || BUILDING_CACHE_BUILDER_UNIT_TESTS || BUILDING_UNIT_TESTS || BUILDING_DYLD_SYMBOLS_CACHE
 static bool endsWith(const char* str, const char* suffix)
 {
@@ -1741,22 +908,6 @@ static bool endsWith(const char* str, const char* suffix)
     if ( strLen < suffixLen )
         return false;
     return (strcmp(&str[strLen-suffixLen], suffix) == 0);
-}
-
-bool MachOFile::isSharedCacheEligiblePath(const char* dylibName) {
-    return (   (strncmp(dylibName, "/usr/lib/", 9) == 0)
-            || (strncmp(dylibName, "/System/Library/", 16) == 0)
-            || (strncmp(dylibName, "/System/iOSSupport/usr/lib/", 27) == 0)
-            || (strncmp(dylibName, "/System/iOSSupport/System/Library/", 34) == 0)
-            || (strncmp(dylibName, "/Library/Apple/usr/lib/", 23) == 0)
-            || (strncmp(dylibName, "/Library/Apple/System/Library/", 30) == 0)
-            || (strncmp(dylibName, "/System/DriverKit/", 18) == 0)
-            || (strncmp(dylibName, "/System/Cryptexes/OS/usr/lib/", 29) == 0)
-            || (strncmp(dylibName, "/System/Cryptexes/OS/System/Library/", 36) == 0)
-            || (strncmp(dylibName, "/System/Cryptexes/OS/System/iOSSupport/usr/lib/", 47) == 0)
-            || (strncmp(dylibName, "/System/Cryptexes/OS/System/iOSSupport/System/Library/", 54) == 0)
-            || (strncmp(dylibName, "/System/ExclaveKit/usr/lib/", 27) == 0)
-            || (strncmp(dylibName, "/System/ExclaveKit/System/Library/", 34) == 0));
 }
 
 static bool startsWith(const char* buffer, const char* valueToFind) {
@@ -1808,7 +959,7 @@ static bool platformExcludesSharedCache_iOS(const char* installName) {
 // Returns true if the current platform requires that this install name be excluded from the shared cache
 // Note that this overrides any exclusion from anywhere else.
 static bool platformExcludesSharedCache(Platform platform, const char* installName) {
-    if ( (platform == dyld3::Platform::macOS) || (platform == dyld3::Platform::iOSMac) )
+    if ( (platform == Platform::macOS) || (platform == Platform::macCatalyst) || (platform == Platform::zippered) )
         return platformExcludesSharedCache_macOS(installName);
     // Everything else is based on iOS so just use that value
     return platformExcludesSharedCache_iOS(installName);
@@ -1819,7 +970,7 @@ static bool platformExcludesSharedCache(Platform platform, const char* installNa
 bool MachOFile::addendsExceedPatchTableLimit(Diagnostics& diag, mach_o::Fixups fixups) const
 {
     // rdar://122906481 (Shared cache builder - explicitly model dylibs without a need for a patch table)
-    if ( strcmp(installName(), "/usr/lib/libswiftPrespecialized.dylib") == 0 )
+    if ( strcmp(((const Header*)this)->installName(), "/usr/lib/libswiftPrespecialized.dylib") == 0 )
         return false;
 
     const bool     is64bit = is64();
@@ -1921,9 +1072,9 @@ bool MachOFile::addendsExceedPatchTableLimit(Diagnostics& diag, mach_o::Fixups f
     return addendTooLarge;
 }
 
-bool MachOFile::canBePlacedInDyldCache(const char* path, void (^failureReason)(const char* format, ...)) const
+bool MachOFile::canBePlacedInDyldCache(const char* path, bool checkObjC, void (^failureReason)(const char* format, ...)) const
 {
-    if ( !isSharedCacheEligiblePath(path) ) {
+    if ( !Header::isSharedCacheEligiblePath(path) ) {
         // Dont spam the user with an error about paths when we know these are never eligible.
         return false;
     }
@@ -1935,7 +1086,7 @@ bool MachOFile::canBePlacedInDyldCache(const char* path, void (^failureReason)(c
     }
 
 
-    const char* dylibName = installName();
+    const char* dylibName = ((const Header*)this)->installName();
     if ( dylibName[0] != '/' ) {
         failureReason("install name not an absolute path");
         // Don't continue as we don't want to spam the log with errors we don't need.
@@ -1954,15 +1105,9 @@ bool MachOFile::canBePlacedInDyldCache(const char* path, void (^failureReason)(c
         return false;
     }
 
-    __block bool platformExcludedFile = false;
-    forEachSupportedPlatform(^(Platform platform, uint32_t minOS, uint32_t sdk) {
-        if ( platformExcludedFile )
-            return;
-        if ( platformExcludesSharedCache(platform, dylibName) ) {
-            platformExcludedFile = true;
-            return;
-        }
-    });
+    mach_o::PlatformAndVersions pvs = ((const Header*)this)->platformAndVersions();
+    bool platformExcludedFile = platformExcludesSharedCache(pvs.platform, dylibName);
+    
     if ( platformExcludedFile ) {
         failureReason("install name is not shared cache eligible on platform");
         return false;
@@ -1976,7 +1121,8 @@ bool MachOFile::canBePlacedInDyldCache(const char* path, void (^failureReason)(c
 
     // don't put debug variants into dyld cache
     if ( endsWith(path, "_profile.dylib") || endsWith(path, "_debug.dylib") || endsWith(path, "_asan.dylib")
-        || endsWith(path, "_profile") || endsWith(path, "_debug") || endsWith(path, "/CoreADI") ) {
+        || endsWith(path, "_profile") || endsWith(path, "_debug") || endsWith(path, "_asan")
+        || endsWith(path, "/CoreADI") ) {
         failureReason("Variant image");
         return false;
     }
@@ -2026,7 +1172,7 @@ bool MachOFile::canBePlacedInDyldCache(const char* path, void (^failureReason)(c
         // Skip weak links.  They are allowed to be missing
         if ( isWeak )
             return;
-        if ( !isSharedCacheEligiblePath(loadPath) ) {
+        if ( !Header::isSharedCacheEligiblePath(loadPath) ) {
             badDep = loadPath;
             stop = true;
         }
@@ -2038,13 +1184,13 @@ bool MachOFile::canBePlacedInDyldCache(const char* path, void (^failureReason)(c
     }
 
     // dylibs with interposing info cannot be in cache
-    if ( hasInterposingTuples() ) {
+    if ( ((const Header*)this)->hasInterposingTuples() ) {
         failureReason("Has interposing tuples");
         return false;
     }
 
     // Temporarily kick out swift binaries out of dyld cache on watchOS simulators as they have missing split seg
-    if ( (this->cputype == CPU_TYPE_I386) && builtForPlatform(Platform::watchOS_simulator) ) {
+    if ( (this->cputype == CPU_TYPE_I386) && ((const Header*)this)->builtForPlatform(Platform::watchOS_simulator) ) {
         if ( strncmp(dylibName, "/usr/lib/swift/", 15) == 0 ) {
             failureReason("i386 swift binary");
             return false;
@@ -2083,9 +1229,9 @@ bool MachOFile::canBePlacedInDyldCache(const char* path, void (^failureReason)(c
         if ( splitSeg.isV1() ) {
             // Split seg v1 can only support 1 __DATA, and no other writable segments
             __block bool foundBadSegment = false;
-            forEachSegment(^(const SegmentInfo& info, bool& stop) {
-                if ( info.protections == (VM_PROT_READ | VM_PROT_WRITE) ) {
-                    if ( strcmp(info.segName, "__DATA") == 0 )
+            ((const Header*)this)->forEachSegment(^(const Header::SegmentInfo& info, bool& stop) {
+                if ( info.initProt == (VM_PROT_READ | VM_PROT_WRITE) ) {
+                    if ( info.segmentName == "__DATA" )
                         return;
 
                     failureReason("RW segments other than __DATA requires split seg v2");
@@ -2108,7 +1254,7 @@ bool MachOFile::canBePlacedInDyldCache(const char* path, void (^failureReason)(c
 
         if ( (isArch("x86_64") || isArch("x86_64h")) ) {
             __block bool rebasesOk = true;
-            uint64_t startVMAddr = preferredLoadAddress();
+            uint64_t startVMAddr = ((const Header*)this)->preferredLoadAddress();
             uint64_t endVMAddr = startVMAddr + mappedSize();
             fixups.forEachRebase(diag, ^(uint64_t runtimeOffset, uint64_t rebasedValue, bool &stop) {
                 // We allow TBI for x86_64 dylibs, but then require that the remainder of the offset
@@ -2193,14 +1339,14 @@ bool MachOFile::canBePlacedInDyldCache(const char* path, void (^failureReason)(c
 
     // Check there are no pointer based objc method lists in CONST segments
 #if BUILDING_CACHE_BUILDER || BUILDING_CACHE_BUILDER_UNIT_TESTS
-    {
+    if ( checkObjC ) {
         typedef std::pair<VMAddress, VMAddress> Range;
         __block std::vector<Range> constRanges;
-        this->forEachSegment(^(const SegmentInfo& info, bool& stop) {
-            if ( info.vmSize == 0 )
+        ((const Header*)this)->forEachSegment(^(const Header::SegmentInfo& info, bool& stop) {
+            if ( info.vmsize == 0 )
                 return;
-            if ( !strcmp(info.segName, "__DATA_CONST") || !strcmp(info.segName, "__AUTH_CONST") )
-                constRanges.push_back({ VMAddress(info.vmAddr), VMAddress(info.vmAddr + info.vmSize) });
+            if ( info.segmentName == "__DATA_CONST" || info.segmentName == "__AUTH_CONST" )
+                constRanges.push_back({ VMAddress(info.vmaddr), VMAddress(info.vmaddr + info.vmsize) });
         });
 
         if ( !constRanges.empty() ) {
@@ -2257,7 +1403,7 @@ bool MachOFile::canBePlacedInDyldCache(const char* path, void (^failureReason)(c
 #if BUILDING_CACHE_BUILDER || BUILDING_CACHE_BUILDER_UNIT_TESTS
 objc_visitor::Visitor MachOFile::makeObjCVisitor(Diagnostics& diag) const
 {
-    VMAddress dylibBaseAddress(this->preferredLoadAddress());
+    VMAddress dylibBaseAddress(((const Header*)this)->preferredLoadAddress());
 
     __block std::vector<metadata_visitor::Segment> segments;
     __block std::vector<uint64_t> bindTargets;
@@ -2328,16 +1474,16 @@ objc_visitor::Visitor MachOFile::makeObjCVisitor(Diagnostics& diag) const
 
 
 // Returns true if the executable path is eligible for a PrebuiltLoader on the given platform.
-bool MachOFile::canHavePrebuiltExecutableLoader(dyld3::Platform platform, const std::string_view& path,
+bool MachOFile::canHavePrebuiltExecutableLoader(Platform platform, const std::string_view& path,
                                                 void (^failureReason)(const char*)) const
 {
     // For now we can't build prebuilt loaders for the simulator
-    if ( isSimulatorPlatform(platform) ) {
+    if ( platform.isSimulator() ) {
         // Don't spam with tons of messages about executables
         return false;
     }
 
-    if ( (platform == dyld3::Platform::macOS) || (platform == dyld3::Platform::iOSMac) ) {
+    if ( (platform == Platform::macOS) || (platform == Platform::macCatalyst) ) {
         // We no longer support ROSP, so skip all paths which start with the special prefix
         if ( path.starts_with("/System/Library/Templates/Data/") ) {
             // Dont spam the user with an error about paths when we know these are never eligible.
@@ -2367,15 +1513,9 @@ bool MachOFile::canHavePrebuiltExecutableLoader(dyld3::Platform platform, const 
             failureReason("path not eligible");
             return false;
         }
-    } else {
-        // On embedded, only staged apps are excluded.  They will run from a different location at runtime
-        if ( path.find("/staged_system_apps/") != std::string::npos ) {
-            // Dont spam the user with an error about paths when we know these are never eligible.
-            return false;
-        }
     }
 
-    if ( !hasCodeSignature() ) {
+    if ( !this->hasLoadCommand(LC_CODE_SIGNATURE) ) {
         failureReason("missing code signature");
         return false;
     }
@@ -2408,8 +1548,8 @@ bool MachOFile::canBePlacedInKernelCollection(const char* path, void (^failureRe
 
         // xnu kernel cannot have a page zero
         __block bool foundPageZero = false;
-        forEachSegment(^(const SegmentInfo &segmentInfo, bool &stop) {
-            if ( strcmp(segmentInfo.segName, "__PAGEZERO") == 0 ) {
+        ((const Header*)this)->forEachSegment(^(const Header::SegmentInfo &segmentInfo, bool &stop) {
+            if ( segmentInfo.segmentName == "__PAGEZERO" ) {
                 foundPageZero = true;
                 stop = true;
             }
@@ -2465,7 +1605,7 @@ bool MachOFile::canBePlacedInKernelCollection(const char* path, void (^failureRe
     }
 
     // dylibs with interposing info cannot be in cache
-    if ( hasInterposingTuples() ) {
+    if ( ((const Header*)this)->hasInterposingTuples() ) {
         failureReason("Has interposing tuples");
         return false;
     }
@@ -2473,8 +1613,8 @@ bool MachOFile::canBePlacedInKernelCollection(const char* path, void (^failureRe
     // Only x86_64 is allowed to have RWX segments
     if ( !isArch("x86_64") && !isArch("x86_64h") ) {
         __block bool foundBadSegment = false;
-        forEachSegment(^(const SegmentInfo &info, bool &stop) {
-            if ( (info.protections & (VM_PROT_WRITE | VM_PROT_EXECUTE)) == (VM_PROT_WRITE | VM_PROT_EXECUTE) ) {
+        ((const Header*)this)->forEachSegment(^(const Header::SegmentInfo &info, bool &stop) {
+            if ( (info.initProt & (VM_PROT_WRITE | VM_PROT_EXECUTE)) == (VM_PROT_WRITE | VM_PROT_EXECUTE) ) {
                 failureReason("Segments are not allowed to be both writable and executable");
                 foundBadSegment = true;
                 stop = true;
@@ -2499,145 +1639,6 @@ bool MachOFile::usesClassicRelocationsInKernelCollection() const {
 }
 #endif // BUILDING_APP_CACHE_UTIL || BUILDING_DYLDINFO
 
-#if BUILDING_CACHE_BUILDER || BUILDING_CACHE_BUILDER_UNIT_TESTS
-static bool platformExcludesPrebuiltClosure_macOS(const char* path) {
-    // We no longer support ROSP, so skip all paths which start with the special prefix
-    if ( startsWith(path, "/System/Library/Templates/Data/") )
-        return true;
-
-    // anything inside a .app bundle is specific to app, so should not get a prebuilt closure
-    if ( strstr(path, ".app/") != NULL )
-        return true;
-
-    return false;
-}
-
-static bool platformExcludesPrebuiltClosure_iOS(const char* path) {
-    if ( strcmp(path, "/System/Library/Caches/com.apple.xpc/sdk.dylib") == 0 )
-        return true;
-    if ( strcmp(path, "/System/Library/Caches/com.apple.xpcd/xpcd_cache.dylib") == 0 )
-        return true;
-    return false;
-}
-
-// Returns true if the current platform requires that this install name be excluded from the shared cache
-// Note that this overrides any exclusion from anywhere else.
-static bool platformExcludesPrebuiltClosure(Platform platform, const char* path) {
-    if ( MachOFile::isSimulatorPlatform(platform) )
-        return false;
-    if ( (platform == dyld3::Platform::macOS) || (platform == dyld3::Platform::iOSMac) )
-        return platformExcludesPrebuiltClosure_macOS(path);
-    // Everything else is based on iOS so just use that value
-    return platformExcludesPrebuiltClosure_iOS(path);
-}
-
-bool MachOFile::canHavePrecomputedDlopenClosure(const char* path, void (^failureReason)(const char*)) const
-{
-    __block bool retval = true;
-
-    // only dylibs can go in cache
-    if ( (this->filetype != MH_DYLIB) && (this->filetype != MH_BUNDLE) ) {
-        retval = false;
-        failureReason("not MH_DYLIB or MH_BUNDLE");
-    }
-
-    // flat namespace files cannot go in cache
-    if ( (this->flags & MH_TWOLEVEL) == 0 ) {
-        retval = false;
-        failureReason("not built with two level namespaces");
-    }
-
-    // can only depend on other dylibs with absolute paths
-    __block bool allDepPathsAreGood = true;
-    forEachDependentDylib(^(const char* loadPath, bool isWeak, bool isReExport, bool isUpward, uint32_t compatVersion, uint32_t curVersion, bool& stop) {
-        if ( loadPath[0] != '/' ) {
-            allDepPathsAreGood = false;
-            stop = true;
-        }
-    });
-    if ( !allDepPathsAreGood ) {
-        retval = false;
-        failureReason("depends on dylibs that are not absolute paths");
-    }
-
-    __block bool platformExcludedFile = false;
-    forEachSupportedPlatform(^(Platform platform, uint32_t minOS, uint32_t sdk) {
-        if ( platformExcludedFile )
-            return;
-        if ( platformExcludesPrebuiltClosure(platform, path) ) {
-            platformExcludedFile = true;
-            return;
-        }
-    });
-    if ( platformExcludedFile ) {
-        failureReason("file cannot get a prebuilt closure on this platform");
-        return false;
-    }
-
-    // dylibs with interposing info cannot have dlopen closure pre-computed
-    if ( hasInterposingTuples() ) {
-        retval = false;
-        failureReason("has interposing tuples");
-    }
-
-    // special system dylib overrides cannot have closure pre-computed
-    if ( strncmp(path, "/usr/lib/system/introspection/", 30) == 0 ) {
-        retval = false;
-        failureReason("override of OS dylib");
-    }
-
-    return retval;
-}
-#endif
-
-bool MachOFile::hasInterposingTuples() const
-{
-    __block bool hasInterposing = false;
-    Diagnostics diag;
-    forEachInterposingSection(diag, ^(uint64_t vmOffset, uint64_t vmSize, bool &stop) {
-        hasInterposing = true;
-        stop = true;
-    });
-    return hasInterposing;
-}
-
-bool MachOFile::isFairPlayEncrypted(uint32_t& textOffset, uint32_t& size) const
-{
-    if ( const encryption_info_command* encCmd = findFairPlayEncryptionLoadCommand() ) {
-       if ( encCmd->cryptid == 1 ) {
-            // Note: cryptid is 0 in just-built apps.  The AppStore sets cryptid to 1
-            textOffset = encCmd->cryptoff;
-            size       = encCmd->cryptsize;
-            return true;
-        }
-    }
-    textOffset = 0;
-    size = 0;
-    return false;
-}
-
-bool MachOFile::canBeFairPlayEncrypted() const
-{
-    return (findFairPlayEncryptionLoadCommand() != nullptr);
-}
-
-const encryption_info_command* MachOFile::findFairPlayEncryptionLoadCommand() const
-{
-    __block const encryption_info_command* result = nullptr;
-    Diagnostics diag;
-    forEachLoadCommand(diag, ^(const load_command* cmd, bool& stop) {
-         if ( (cmd->cmd == LC_ENCRYPTION_INFO) || (cmd->cmd == LC_ENCRYPTION_INFO_64) ) {
-            result = (encryption_info_command*)cmd;
-            stop = true;
-        }
-    });
-    if ( diag.noError() )
-        return result;
-    else
-        return nullptr;
-}
-
-
 bool MachOFile::hasLoadCommand(uint32_t cmdNum) const
 {
     __block bool hasLC = false;
@@ -2649,18 +1650,6 @@ bool MachOFile::hasLoadCommand(uint32_t cmdNum) const
         }
     });
     return hasLC;
-}
-
-bool MachOFile::allowsAlternatePlatform() const
-{
-    __block bool result = false;
-    forEachSection(^(const SectionInfo& info, bool malformedSectionRange, bool& stop) {
-        if ( (strcmp(info.sectName, "__allow_alt_plat") == 0) && (strncmp(info.segInfo.segName, "__DATA", 6) == 0) ) {
-            result = true;
-            stop = true;
-        }
-    });
-    return result;
 }
 
 bool MachOFile::hasChainedFixups() const
@@ -2960,16 +1949,17 @@ static void getArchNames(const GradedArchs& archs, bool isOSBinary, char buffer[
     });
 }
 
-const MachOFile* MachOFile::compatibleSlice(Diagnostics& diag, uint64_t& sliceLenOut, const void* fileContent, size_t contentSize, const char* path, Platform platform, bool isOSBinary, const GradedArchs& archs, bool internalInstall)
+const MachOFile* MachOFile::compatibleSlice(Diagnostics& diag, uint64_t& sliceOffsetOut, uint64_t& sliceLenOut, const void* fileContent, size_t contentSize, const char* path, Platform platform, bool isOSBinary, const GradedArchs& archs, bool internalInstall)
 {
-    const MachOFile* mf = nullptr;
+    const Header* mh = nullptr;
     if ( const dyld3::FatFile* ff = dyld3::FatFile::isFatFile(fileContent) ) {
         uint64_t  sliceOffset;
         uint64_t  sliceLen;
         bool      missingSlice;
         if ( ff->isFatFileWithSlice(diag, contentSize, archs, isOSBinary, sliceOffset, sliceLen, missingSlice) ) {
-            mf = (MachOFile*)((long)fileContent + sliceOffset);
+            mh = (const Header*)((long)fileContent + sliceOffset);
             sliceLenOut = sliceLen;
+            sliceOffsetOut = sliceOffset;
         }
         else {
             BLOCK_ACCCESSIBLE_ARRAY(char, gradedArchsBuf, 256);
@@ -2981,33 +1971,31 @@ const MachOFile* MachOFile::compatibleSlice(Diagnostics& diag, uint64_t& sliceLe
         }
     }
     else {
-        mf = (MachOFile*)fileContent;
+        mh = (const Header*)fileContent;
         sliceLenOut = contentSize;
+        sliceOffsetOut = 0;
     }
 
-    if ( !mf->hasMachOMagic() || !mf->isMachO(diag, contentSize) ) {
-        if ( diag.noError() )
-            diag.error("not a mach-o file");
+    std::span<const uint8_t> contents{(uint8_t*)mh, (size_t)sliceLenOut};
+    if ( !Header::isMachO(contents) ) {
+        diag.error("slice is not valid mach-o file");
         return nullptr;
     }
 
-    if ( archs.grade(mf->cputype, mf->cpusubtype, isOSBinary) == 0 ) {
+    if ( archs.grade(mh->arch().cpuType(), mh->arch().cpuSubtype(), isOSBinary) == 0 ) {
         BLOCK_ACCCESSIBLE_ARRAY(char, gradedArchsBuf, 256);
         getArchNames(archs, isOSBinary, gradedArchsBuf);
-        diag.error("mach-o file, but is an incompatible architecture (have '%s', need '%s')", mf->archName(), gradedArchsBuf);
+        diag.error("mach-o file, but is an incompatible architecture (have '%s', need '%s')", mh->archName(), gradedArchsBuf);
         return nullptr;
     }
 
-    if ( !mf->loadableIntoProcess(platform, path, internalInstall) ) {
-        __block Platform havePlatform = Platform::unknown;
-        mf->forEachSupportedPlatform(^(Platform aPlat, uint32_t minOS, uint32_t sdk) {
-            havePlatform = aPlat;
-        });
-        diag.error("mach-o file (%s), but incompatible platform (have '%s', need '%s')", path, MachOFile::platformName(havePlatform), MachOFile::platformName(platform));
+    if ( !mh->loadableIntoProcess(platform, path, internalInstall) ) {
+        Platform havePlatform = mh->platformAndVersions().platform;
+        diag.error("mach-o file (%s), but incompatible platform (have '%s', need '%s')", path, havePlatform.name().c_str(), platform.name().c_str());
         return nullptr;
     }
 
-    return mf;
+    return (const MachOFile*)mh;
 }
 
 const uint8_t* MachOFile::trieWalk(Diagnostics& diag, const uint8_t* start, const uint8_t* end, const char* symbol)
@@ -3098,19 +2086,6 @@ const uint8_t* MachOFile::trieWalk(Diagnostics& diag, const uint8_t* start, cons
     return nullptr;
 }
 
-void MachOFile::forEachRPath(void (^callback)(const char* rPath, bool& stop)) const
-{
-    Diagnostics diag;
-    forEachLoadCommand(diag, ^(const load_command* cmd, bool& stop) {
-         if ( cmd->cmd == LC_RPATH ) {
-            const char* rpath = (char*)cmd + ((struct rpath_command*)cmd)->path.offset;
-            callback(rpath, stop);
-        }
-    });
-    diag.assertNoError();   // any malformations in the file should have been caught by earlier validate() call
-}
-
-
 bool MachOFile::inCodeSection(uint32_t runtimeOffset) const
 {
     // only needed for arm64e code to know to sign pointers
@@ -3118,10 +2093,10 @@ bool MachOFile::inCodeSection(uint32_t runtimeOffset) const
         return false;
 
     __block bool result = false;
-    uint64_t baseAddress = this->preferredLoadAddress();
-    this->forEachSection(^(const SectionInfo& sectInfo, bool malformedSectionRange, bool& stop) {
-        if ( ((sectInfo.sectAddr-baseAddress) <= runtimeOffset) && (runtimeOffset < (sectInfo.sectAddr+sectInfo.sectSize-baseAddress)) ) {
-            result = ( (sectInfo.sectFlags & S_ATTR_PURE_INSTRUCTIONS) || (sectInfo.sectFlags & S_ATTR_SOME_INSTRUCTIONS) );
+    uint64_t baseAddress = ((const Header*)this)->preferredLoadAddress();
+    this->forEachSection(^(const Header::SectionInfo& sectInfo, bool& stop) {
+        if ( ((sectInfo.address-baseAddress) <= runtimeOffset) && (runtimeOffset < (sectInfo.address+sectInfo.size-baseAddress)) ) {
+            result = ( (sectInfo.flags & S_ATTR_PURE_INSTRUCTIONS) || (sectInfo.flags & S_ATTR_SOME_INSTRUCTIONS) );
             stop = true;
         }
     });
@@ -3141,22 +2116,6 @@ uint32_t MachOFile::dependentDylibCount(bool* allDepsAreNormalPtr) const
     if ( allDepsAreNormalPtr != nullptr )
         *allDepsAreNormalPtr = allDepsAreNormal;
     return count;
-}
-
-bool MachOFile::hasPlusLoadMethod(Diagnostics& diag) const
-{
-    __block bool result = false;
-
-    // in new objc runtime compiler puts classes/categories with +load method in specical section
-    forEachSection(^(const SectionInfo& info, bool malformedSectionRange, bool& stop) {
-        if ( strncmp(info.segInfo.segName, "__DATA", 6) != 0 )
-            return;
-        if ( (strcmp(info.sectName, "__objc_nlclslist") == 0) || (strcmp(info.sectName, "__objc_nlcatlist") == 0)) {
-            result = true;
-            stop = true;
-        }
-    });
-    return result;
 }
 
 uint32_t MachOFile::getFixupsLoadCommandFileOffset() const
@@ -3204,8 +2163,8 @@ bool MachOFile::hasInitializer(Diagnostics& diag) const
     if ( result )
         return true;
 
-    forEachSection(^(const SectionInfo& info, bool malformedSectionRange, bool& stop) {
-        if ( (info.sectFlags & SECTION_TYPE) != S_INIT_FUNC_OFFSETS )
+    forEachSection(^(const Header::SectionInfo& info, bool& stop) {
+        if ( (info.flags & SECTION_TYPE) != S_INIT_FUNC_OFFSETS )
             return;
         result = true;
         stop = true;
@@ -3217,67 +2176,26 @@ bool MachOFile::hasInitializer(Diagnostics& diag) const
 void MachOFile::forEachInitializerPointerSection(Diagnostics& diag, void (^callback)(uint32_t sectionOffset, uint32_t sectionSize, bool& stop)) const
 {
     const unsigned ptrSize     = pointerSize();
-    const uint64_t baseAddress = preferredLoadAddress();
-    forEachSection(^(const SectionInfo& info, bool malformedSectionRange, bool& sectStop) {
-        if ( (info.sectFlags & SECTION_TYPE) == S_MOD_INIT_FUNC_POINTERS ) {
-            if ( (info.sectSize % ptrSize) != 0 ) {
-                diag.error("initializer section %s/%s has bad size", info.segInfo.segName, info.sectName);
+    const uint64_t baseAddress = ((const Header*)this)->preferredLoadAddress();
+    forEachSection(^(const Header::SectionInfo& info, bool& sectStop) {
+        if ( (info.flags & SECTION_TYPE) == S_MOD_INIT_FUNC_POINTERS ) {
+            if ( (info.size % ptrSize) != 0 ) {
+                diag.error("initializer section %.*s/%.*s has bad size",
+                           (int)info.segmentName.size(), info.segmentName.data(),
+                           (int)info.sectionName.size(), info.sectionName.data());
                 sectStop = true;
                 return;
             }
-            if ( malformedSectionRange ) {
-                diag.error("initializer section %s/%s extends beyond its segment", info.segInfo.segName, info.sectName);
+            if ( (info.address % ptrSize) != 0 ) {
+                diag.error("initializer section %.*s/%.*s is not pointer aligned",
+                           (int)info.segmentName.size(), info.segmentName.data(),
+                           (int)info.sectionName.size(), info.sectionName.data());
                 sectStop = true;
                 return;
             }
-            if ( (info.sectAddr % ptrSize) != 0 ) {
-                diag.error("initializer section %s/%s is not pointer aligned", info.segInfo.segName, info.sectName);
-                sectStop = true;
-                return;
-            }
-            callback((uint32_t)(info.sectAddr - baseAddress), (uint32_t)info.sectSize, sectStop);
+            callback((uint32_t)(info.address - baseAddress), (uint32_t)info.size, sectStop);
         }
     });
-}
-
-bool MachOFile::hasCodeSignature() const
-{
-    return this->hasLoadCommand(LC_CODE_SIGNATURE);
-}
-
-bool MachOFile::hasCodeSignature(uint32_t& fileOffset, uint32_t& size) const
-{
-    fileOffset = 0;
-    size = 0;
-
-    Diagnostics diag;
-    forEachLoadCommand(diag, ^(const load_command* cmd, bool& stop) {
-        if ( cmd->cmd == LC_CODE_SIGNATURE ) {
-            const linkedit_data_command* sigCmd = (linkedit_data_command*)cmd;
-            fileOffset = sigCmd->dataoff;
-            size       = sigCmd->datasize;
-            stop = true;
-        }
-    });
-    diag.assertNoError();   // any malformations in the file should have been caught by earlier validate() call
-
-    // early exist if no LC_CODE_SIGNATURE
-    if ( fileOffset == 0 )
-        return false;
-
-    // <rdar://problem/13622786> ignore code signatures in macOS binaries built with pre-10.9 tools
-    if ( (this->cputype == CPU_TYPE_X86_64) || (this->cputype == CPU_TYPE_I386) ) {
-        __block bool foundPlatform = false;
-        __block bool badSignature  = false;
-        forEachSupportedPlatform(^(Platform platform, uint32_t minOS, uint32_t sdk) {
-            foundPlatform = true;
-            if ( (platform == Platform::macOS) && (sdk < 0x000A0900) )
-                badSignature = true;
-        });
-        return foundPlatform && !badSignature;
-    }
-
-    return true;
 }
 
 uint64_t MachOFile::mappedSize() const
@@ -3294,20 +2212,20 @@ void MachOFile::analyzeSegmentsLayout(uint64_t& vmSpace, bool& hasZeroFill) cons
     __block uint64_t lowestVmAddr   = 0xFFFFFFFFFFFFFFFFULL;
     __block uint64_t highestVmAddr  = 0;
     __block uint64_t sumVmSizes     = 0;
-    forEachSegment(^(const SegmentInfo& segmentInfo, bool& stop) {
-        if ( strcmp(segmentInfo.segName, "__PAGEZERO") == 0 )
+    ((const Header*)this)->forEachSegment(^(const Header::SegmentInfo& segmentInfo, bool& stop) {
+        if ( segmentInfo.segmentName == "__PAGEZERO" )
             return;
-        if ( segmentInfo.writable() && (segmentInfo.fileSize !=  segmentInfo.vmSize) )
+        if ( segmentInfo.writable() && (segmentInfo.fileSize !=  segmentInfo.vmsize) )
             writeExpansion = true; // zerofill at end of __DATA
-        if ( segmentInfo.vmSize == 0 ) {
+        if ( segmentInfo.vmsize == 0 ) {
             // Always zero fill if we have zero-sized segments
             writeExpansion = true;
         }
-        if ( segmentInfo.vmAddr < lowestVmAddr )
-            lowestVmAddr = segmentInfo.vmAddr;
-        if ( segmentInfo.vmAddr+segmentInfo.vmSize > highestVmAddr )
-            highestVmAddr = segmentInfo.vmAddr+segmentInfo.vmSize;
-        sumVmSizes += segmentInfo.vmSize;
+        if ( segmentInfo.vmaddr < lowestVmAddr )
+            lowestVmAddr = segmentInfo.vmaddr;
+        if ( segmentInfo.vmaddr+segmentInfo.vmsize > highestVmAddr )
+            highestVmAddr = segmentInfo.vmaddr + segmentInfo.vmsize;
+        sumVmSizes += segmentInfo.vmsize;
     });
     uint64_t totalVmSpace = (highestVmAddr - lowestVmAddr);
     // LINKEDIT vmSize is not required to be a multiple of page size.  Round up if that is the case
@@ -3318,7 +2236,7 @@ void MachOFile::analyzeSegmentsLayout(uint64_t& vmSpace, bool& hasZeroFill) cons
     // The aux KC may have __DATA first, in which case we always want to vm_copy to the right place
     bool hasOutOfOrderSegments = false;
 #if BUILDING_APP_CACHE_UTIL || BUILDING_DYLDINFO
-    uint64_t textSegVMAddr = preferredLoadAddress();
+    uint64_t textSegVMAddr = ((const Header*)this)->preferredLoadAddress();
     hasOutOfOrderSegments = textSegVMAddr != lowestVmAddr;
 #endif
 
@@ -3326,21 +2244,11 @@ void MachOFile::analyzeSegmentsLayout(uint64_t& vmSpace, bool& hasZeroFill) cons
     hasZeroFill = writeExpansion || hasHole || hasOutOfOrderSegments;
 }
 
-uint32_t MachOFile::segmentCount() const
-{
-    __block uint32_t count   = 0;
-    forEachSegment(^(const SegmentInfo& info, bool& stop) {
-        ++count;
-    });
-    return count;
-}
-
-
 void MachOFile::forEachDOFSection(Diagnostics& diag, void (^callback)(uint32_t offset)) const
 {
-    forEachSection(^(const SectionInfo& info, bool malformedSectionRange, bool &stop) {
-        if ( ( (info.sectFlags & SECTION_TYPE) == S_DTRACE_DOF ) && !malformedSectionRange ) {
-            callback((uint32_t)(info.sectAddr - info.segInfo.vmAddr));
+    forEachSection(^(const Header::SegmentInfo& segInfo, const Header::SectionInfo& info, bool &stop) {
+        if ( (info.flags & SECTION_TYPE) == S_DTRACE_DOF ) {
+            callback((uint32_t)(info.address - segInfo.vmaddr));
         }
     });
 }
@@ -3350,11 +2258,11 @@ bool MachOFile::hasExportTrie(uint32_t& runtimeOffset, uint32_t& size) const
     __block uint64_t textUnslidVMAddr   = 0;
     __block uint64_t linkeditUnslidVMAddr   = 0;
     __block uint64_t linkeditFileOffset     = 0;
-    forEachSegment(^(const SegmentInfo& info, bool& stop) {
-        if ( strcmp(info.segName, "__TEXT") == 0 ) {
-            textUnslidVMAddr = info.vmAddr;
-        } else if ( strcmp(info.segName, "__LINKEDIT") == 0 ) {
-            linkeditUnslidVMAddr = info.vmAddr;
+    ((const Header*)this)->forEachSegment(^(const Header::SegmentInfo& info, bool& stop) {
+        if ( info.segmentName == "__TEXT" ) {
+            textUnslidVMAddr = info.vmaddr;
+        } else if ( info.segmentName == "__LINKEDIT" ) {
+            linkeditUnslidVMAddr = info.vmaddr;
             linkeditFileOffset   = info.fileOffset;
             stop = true;
         }
@@ -3459,7 +2367,7 @@ void MachOFile::forEachCodeDirectoryBlob(const void* codeSigStart, size_t codeSi
 
     // Note: The kernel sometimes chooses sha1 on watchOS, and sometimes sha256.
     // Embed all of them so that we just need to match any of them
-    const bool isWatchOS = this->builtForPlatform(Platform::watchOS);
+    const bool isWatchOS = ((const Header*)this)->builtForPlatform(Platform::watchOS);
     const bool isMainExecutable = this->isMainExecutable();
     auto hashRankFn = isWatchOS ? &hash_rank_watchOS_dylibs : &hash_rank;
 
@@ -3828,25 +2736,25 @@ void MachOFile::withFileLayout(Diagnostics &diag, void (^callback)(const mach_o:
         return;
     }
 
-    uint32_t numSegments = this->segmentCount();
+    uint32_t numSegments = ((const Header*)this)->segmentCount();
     BLOCK_ACCCESSIBLE_ARRAY(mach_o::SegmentLayout, segmentLayout, numSegments);
-    this->forEachSegment(^(const SegmentInfo &info, bool &stop) {
+    ((const Header*)this)->forEachSegment(^(const Header::SegmentInfo &info, bool &stop) {
         mach_o::SegmentLayout segment;
-        segment.vmAddr      = info.vmAddr;
-        segment.vmSize      = info.vmSize;
+        segment.vmAddr      = info.vmaddr;
+        segment.vmSize      = info.vmsize;
         segment.fileOffset  = info.fileOffset;
         segment.fileSize    = info.fileSize;
         segment.buffer      = (uint8_t*)this + info.fileOffset;
-        segment.protections = info.protections;
+        segment.protections = info.initProt;
 
         segment.kind        = mach_o::SegmentLayout::Kind::unknown;
-        if ( !strcmp(info.segName, "__TEXT") ) {
+        if ( info.segmentName == "__TEXT" ) {
             segment.kind    = mach_o::SegmentLayout::Kind::text;
-        } else if ( !strcmp(info.segName, "__LINKEDIT") ) {
+        } else if ( info.segmentName == "__LINKEDIT" ) {
             segment.kind    = mach_o::SegmentLayout::Kind::linkedit;
         }
 
-        segmentLayout[info.segIndex] = segment;
+        segmentLayout[info.segmentIndex] = segment;
     });
 
     mach_o::Layout layout(this, { &segmentLayout[0], &segmentLayout[numSegments] }, linkedit);
@@ -3854,59 +2762,10 @@ void MachOFile::withFileLayout(Diagnostics &diag, void (^callback)(const mach_o:
 }
 #endif // !SUPPORT_VM_LAYOUT
 
-bool MachOFile::hasObjCMessageReferences() const {
-
-    __block bool foundSection = false;
-    forEachSection(^(const SectionInfo& sectInfo, bool malformedSectionRange, bool& stop) {
-        if ( strncmp(sectInfo.segInfo.segName, "__DATA", 6) != 0 )
-            return;
-        if ( strcmp(sectInfo.sectName, "__objc_msgrefs") != 0 )
-            return;
-        foundSection = true;
-        stop = true;
-    });
-    return foundSection;
-}
-
-uint32_t MachOFile::loadCommandsFreeSpace() const
-{
-    __block uint32_t firstSectionFileOffset = 0;
-    __block uint32_t firstSegmentFileOffset = 0;
-    forEachSection(^(const SectionInfo& sectInfo, bool malformedSectionRange, bool& stop) {
-        firstSectionFileOffset = sectInfo.sectFileOffset;
-        firstSegmentFileOffset = (uint32_t)sectInfo.segInfo.fileOffset;
-        stop = true;
-    });
-
-    uint32_t headerSize = (this->magic == MH_MAGIC_64) ? sizeof(mach_header_64) : sizeof(mach_header);
-    uint32_t existSpaceUsed = this->sizeofcmds + headerSize;
-    return firstSectionFileOffset - firstSegmentFileOffset - existSpaceUsed;
-}
-
-bool MachOFile::findObjCDataSection(const char *sectionName, uint64_t& sectionRuntimeOffset, uint64_t& sectionSize) const
-{
-    uint64_t baseAddress = preferredLoadAddress();
-
-    __block bool foundSection = false;
-    forEachSection(^(const SectionInfo& sectInfo, bool malformedSectionRange, bool& stop) {
-        if ( (strcmp(sectInfo.segInfo.segName, "__DATA") != 0) &&
-             (strcmp(sectInfo.segInfo.segName, "__DATA_CONST") != 0) &&
-             (strcmp(sectInfo.segInfo.segName, "__DATA_DIRTY") != 0) )
-            return;
-        if ( strcmp(sectInfo.sectName, sectionName) != 0 )
-            return;
-        foundSection         = true;
-        sectionRuntimeOffset = sectInfo.sectAddr - baseAddress;
-        sectionSize          = sectInfo.sectSize;
-        stop                 = true;
-    });
-    return foundSection;
-}
-
 bool MachOFile::enforceFormat(Malformed kind) const
 {
     // TODO: Add a mapping from generic releases to platform versions
-#if BUILDING_DYLDINFO || BUILDING_APP_CACHE_UTIL || BUILDING_RUN_STATIC
+#if BUILDING_DYLDINFO || BUILDING_APP_CACHE_UTIL
     // HACK: If we are the kernel, we have a different format to enforce
     if ( isFileSet() ) {
         bool result = false;
@@ -3980,137 +2839,131 @@ bool MachOFile::enforceFormat(Malformed kind) const
 #endif
 
     __block bool result = false;
-    forEachSupportedPlatform(^(Platform platform, uint32_t minOS, uint32_t sdk) {
-        switch (platform) {
-        case Platform::macOS:
+    mach_o::PlatformAndVersions pvs = ((const Header*)this)->platformAndVersions();
+    pvs.unzip(^(mach_o::PlatformAndVersions p) {
+        if ( p.platform == Platform::macOS ) {
             switch (kind) {
-            case Malformed::linkeditOrder:
-            case Malformed::linkeditAlignment:
-            case Malformed::dyldInfoAndlocalRelocs:
-                // enforce these checks on new binaries only
-                if (sdk >= 0x000A0E00) // macOS 10.14
-                    result = true;
-                break;
-            case Malformed::segmentOrder:
-            case Malformed::linkeditPermissions:
-            case Malformed::textPermissions:
-            case Malformed::executableData:
-            case Malformed::writableData:
-            case Malformed::codeSigAlignment:
-                // enforce these checks on new binaries only
-                if (sdk >= 0x000A0F00) // macOS 10.15
-                    result = true;
-                break;
-            case Malformed::sectionsAddrRangeWithinSegment:
-                // enforce these checks on new binaries only
-                if (sdk >= 0x000A1000) // macOS 10.16
-                    result = true;
-                break;
-            case Malformed::noLinkedDylibs:
-            case Malformed::loaderPathsAreReal:
-            case Malformed::mainExecInDyldCache:
-            case Malformed::zerofillSwiftMetadata:
-            case Malformed::sdkOnOrAfter2021:
-                // enforce these checks on new binaries only
-                if (sdk >= 0x000D0000) // macOS 13.0
-                    result = true;
-                break;
-            case Malformed::noUUID:
-            case Malformed::sdkOnOrAfter2022:
-                if (sdk >= 0x000E0000) // macOS 14.0  FIXME
-                    result = true;
-                break;
+                case Malformed::linkeditOrder:
+                case Malformed::linkeditAlignment:
+                case Malformed::dyldInfoAndlocalRelocs:
+                    // enforce these checks on new binaries only
+                    if (p.sdk.value() >= 0x000A0E00) // macOS 10.14
+                        result = true;
+                    break;
+                case Malformed::segmentOrder:
+                case Malformed::linkeditPermissions:
+                case Malformed::textPermissions:
+                case Malformed::executableData:
+                case Malformed::writableData:
+                case Malformed::codeSigAlignment:
+                    // enforce these checks on new binaries only
+                    if (p.sdk.value() >= 0x000A0F00) // macOS 10.15
+                        result = true;
+                    break;
+                case Malformed::sectionsAddrRangeWithinSegment:
+                    // enforce these checks on new binaries only
+                    if (p.sdk.value() >= 0x000A1000) // macOS 10.16
+                        result = true;
+                    break;
+                case Malformed::noLinkedDylibs:
+                case Malformed::loaderPathsAreReal:
+                case Malformed::mainExecInDyldCache:
+                case Malformed::zerofillSwiftMetadata:
+                case Malformed::sdkOnOrAfter2021:
+                    // enforce these checks on new binaries only
+                    if (p.sdk.value() >= 0x000D0000) // macOS 13.0
+                        result = true;
+                    break;
+                case Malformed::noUUID:
+                case Malformed::sdkOnOrAfter2022:
+                    if (p.sdk.value() >= 0x000E0000) // macOS 14.0  FIXME
+                        result = true;
+                    break;
             }
-            break;
-        case Platform::iOS:
-        case Platform::tvOS:
-        case Platform::iOSMac:
+        } else if ( p.platform == Platform::iOS || p.platform == Platform::tvOS || p.platform == Platform::macCatalyst ) {
             switch (kind) {
-            case Malformed::linkeditOrder:
-            case Malformed::dyldInfoAndlocalRelocs:
-            case Malformed::textPermissions:
-            case Malformed::executableData:
-            case Malformed::writableData:
-                result = true;
-                break;
-            case Malformed::linkeditAlignment:
-            case Malformed::segmentOrder:
-            case Malformed::linkeditPermissions:
-            case Malformed::codeSigAlignment:
-                // enforce these checks on new binaries only
-                if (sdk >= 0x000D0000) // iOS 13
+                case Malformed::linkeditOrder:
+                case Malformed::dyldInfoAndlocalRelocs:
+                case Malformed::textPermissions:
+                case Malformed::executableData:
+                case Malformed::writableData:
                     result = true;
-                break;
-            case Malformed::sectionsAddrRangeWithinSegment:
-                // enforce these checks on new binaries only
-                if (sdk >= 0x000E0000) // iOS 14
-                    result = true;
-                break;
-            case Malformed::noLinkedDylibs:
-            case Malformed::loaderPathsAreReal:
-            case Malformed::mainExecInDyldCache:
-            case Malformed::zerofillSwiftMetadata:
-            case Malformed::sdkOnOrAfter2021:
-                // enforce these checks on new binaries only
-                if (sdk >= 0x00100000) // iOS 16
-                    result = true;
-                break;
-            case Malformed::noUUID:
-            case Malformed::sdkOnOrAfter2022:
-                if (sdk >= 0x00110000) // iOS 17.0 FIXME
-                    result = true;
-                break;
+                    break;
+                case Malformed::linkeditAlignment:
+                case Malformed::segmentOrder:
+                case Malformed::linkeditPermissions:
+                case Malformed::codeSigAlignment:
+                    // enforce these checks on new binaries only
+                    if (p.sdk.value() >= 0x000D0000) // iOS 13
+                        result = true;
+                    break;
+                case Malformed::sectionsAddrRangeWithinSegment:
+                    // enforce these checks on new binaries only
+                    if (p.sdk.value() >= 0x000E0000) // iOS 14
+                        result = true;
+                    break;
+                case Malformed::noLinkedDylibs:
+                case Malformed::loaderPathsAreReal:
+                case Malformed::mainExecInDyldCache:
+                case Malformed::zerofillSwiftMetadata:
+                case Malformed::sdkOnOrAfter2021:
+                    // enforce these checks on new binaries only
+                    if (p.sdk.value() >= 0x00100000) // iOS 16
+                        result = true;
+                    break;
+                case Malformed::noUUID:
+                case Malformed::sdkOnOrAfter2022:
+                    if (p.sdk.value() >= 0x00110000) // iOS 17.0 FIXME
+                        result = true;
+                    break;
             }
-            break;
-        case Platform::watchOS:
+        } else if ( p.platform == Platform::watchOS ) {
             switch (kind) {
-            case Malformed::linkeditOrder:
-            case Malformed::dyldInfoAndlocalRelocs:
-            case Malformed::textPermissions:
-            case Malformed::executableData:
-            case Malformed::writableData:
-                result = true;
-                break;
-            case Malformed::linkeditAlignment:
-            case Malformed::segmentOrder:
-            case Malformed::linkeditPermissions:
-            case Malformed::codeSigAlignment:
-            case Malformed::sectionsAddrRangeWithinSegment:
-            case Malformed::noLinkedDylibs:
-            case Malformed::loaderPathsAreReal:
-            case Malformed::mainExecInDyldCache:
-            case Malformed::zerofillSwiftMetadata:
-            case Malformed::sdkOnOrAfter2021:
-                // enforce these checks on new binaries only
-                if (sdk >= 0x00090000) // watchOS 9
+                case Malformed::linkeditOrder:
+                case Malformed::dyldInfoAndlocalRelocs:
+                case Malformed::textPermissions:
+                case Malformed::executableData:
+                case Malformed::writableData:
                     result = true;
-                break;
-            case Malformed::noUUID:
-            case Malformed::sdkOnOrAfter2022:
-                if (sdk >= 0x000A0000) // watchOS 10 FIXME
-                    result = true;
-                break;
+                    break;
+                case Malformed::linkeditAlignment:
+                case Malformed::segmentOrder:
+                case Malformed::linkeditPermissions:
+                case Malformed::codeSigAlignment:
+                case Malformed::sectionsAddrRangeWithinSegment:
+                case Malformed::noLinkedDylibs:
+                case Malformed::loaderPathsAreReal:
+                case Malformed::mainExecInDyldCache:
+                case Malformed::zerofillSwiftMetadata:
+                case Malformed::sdkOnOrAfter2021:
+                    // enforce these checks on new binaries only
+                    if (p.sdk.value() >= 0x00090000) // watchOS 9
+                        result = true;
+                    break;
+                case Malformed::noUUID:
+                case Malformed::sdkOnOrAfter2022:
+                    if (p.sdk.value() >= 0x000A0000) // watchOS 10 FIXME
+                        result = true;
+                    break;
             }
-            break;
-        case Platform::driverKit:
+        } else if ( p.platform == Platform::driverKit ) {
             result = true;
-            break;
-        case Platform::visionOS:
-        case Platform::visionOS_simulator:
+        } else if ( p.platform == Platform::visionOS || p.platform == Platform::visionOS_simulator ) {
             result = true; // do all checks by default
             if ( kind == Malformed::sdkOnOrAfter2022 ) {
-                if (sdk < 0x00020000) // visionOS 2.0 FIXME
+                if (p.sdk.value() < 0x00020000) // visionOS 2.0 FIXME
                     result = false;
             }
-            break;
-
-
-        default:
+        }
+        
+        // if binary is so old, there is no platform info, don't enforce malformed errors
+        else if ( p.platform.empty() ) {
+            result = false;
+        } else {
             result = true;
-            break;
         }
     });
-    // if binary is so old, there is no platform info, don't enforce malformed errors
+    
     return result;
 }
 
@@ -4183,43 +3036,47 @@ bool MachOFile::validSegments(Diagnostics& diag, const char* path, size_t fileLe
     __block bool badSize        = false;
     __block bool hasTEXT        = false;
     __block bool hasLINKEDIT    = false;
-    forEachSegment(^(const SegmentInfo& info, bool& stop) {
-        if ( strcmp(info.segName, "__TEXT") == 0 ) {
-            if ( (info.protections != (VM_PROT_READ|VM_PROT_EXECUTE)) && enforceFormat(Malformed::textPermissions) ) {
+    ((const Header*)this)->forEachSegment(^(const Header::SegmentInfo& info, bool& stop) {
+        if ( info.segmentName == "__TEXT" ) {
+            if ( (info.initProt != (VM_PROT_READ|VM_PROT_EXECUTE)) && enforceFormat(Malformed::textPermissions) ) {
                 diag.error("in '%s' __TEXT segment permissions is not 'r-x'", path);
                 badPermissions = true;
                 stop = true;
             }
             hasTEXT = true;
         }
-        else if ( strcmp(info.segName, "__LINKEDIT") == 0 ) {
-            if ( (info.protections != VM_PROT_READ) && enforceFormat(Malformed::linkeditPermissions) ) {
+        else if ( info.segmentName == "__LINKEDIT" ) {
+            if ( (info.initProt != VM_PROT_READ) && enforceFormat(Malformed::linkeditPermissions) ) {
                 diag.error("in '%s' __LINKEDIT segment permissions is not 'r--'", path);
                 badPermissions = true;
                 stop = true;
             }
             hasLINKEDIT = true;
         }
-        else if ( (info.protections & 0xFFFFFFF8) != 0 ) {
-            diag.error("in '%s' %s segment permissions has invalid bits set", path, info.segName);
+        else if ( (info.initProt & 0xFFFFFFF8) != 0 ) {
+            diag.error("in '%s' %.*s segment permissions has invalid bits set", path,
+                       (int)info.segmentName.size(), info.segmentName.data());
             badPermissions = true;
             stop = true;
         }
         if ( greaterThanAddOrOverflow(info.fileOffset, info.fileSize, fileLen) ) {
-            diag.error("in '%s' %s segment content extends beyond end of file", path, info.segName);
+            diag.error("in '%s' %.*s segment content extends beyond end of file", path,
+                       (int)info.segmentName.size(), info.segmentName.data());
             badSize = true;
             stop = true;
         }
         if ( is64() ) {
-            if ( info.vmAddr+info.vmSize < info.vmAddr ) {
-                diag.error("in '%s' %s segment vm range wraps", path, info.segName);
+            if ( info.vmaddr + info.vmsize < info.vmaddr ) {
+                diag.error("in '%s' %.*s segment vm range wraps", path,
+                           (int)info.segmentName.size(), info.segmentName.data());
                 badSize = true;
                 stop = true;
             }
        }
        else {
-            if ( (uint32_t)(info.vmAddr+info.vmSize) < (uint32_t)(info.vmAddr) ) {
-                diag.error("in '%s' %s segment vm range wraps", path, info.segName);
+            if ( (uint32_t)(info.vmaddr + info.vmsize) < (uint32_t)(info.vmaddr) ) {
+                diag.error("in '%s' %.*s segment vm range wraps", path,
+                           (int)info.segmentName.size(), info.segmentName.data());
                 badSize = true;
                 stop = true;
             }
@@ -4238,16 +3095,18 @@ bool MachOFile::validSegments(Diagnostics& diag, const char* path, size_t fileLe
 
     // check for overlapping segments
     __block bool badSegments = false;
-    forEachSegment(^(const SegmentInfo& info1, bool& stop1) {
-        uint64_t seg1vmEnd   = info1.vmAddr + info1.vmSize;
+    ((const Header*)this)->forEachSegment(^(const Header::SegmentInfo& info1, bool& stop1) {
+        uint64_t seg1vmEnd   = info1.vmaddr + info1.vmsize;
         uint64_t seg1FileEnd = info1.fileOffset + info1.fileSize;
-        forEachSegment(^(const SegmentInfo& info2, bool& stop2) {
-            if ( info1.segIndex == info2.segIndex )
+        ((const Header*)this)->forEachSegment(^(const Header::SegmentInfo& info2, bool& stop2) {
+            if ( info1.segmentIndex == info2.segmentIndex )
                 return;
-            uint64_t seg2vmEnd   = info2.vmAddr + info2.vmSize;
+            uint64_t seg2vmEnd   = info2.vmaddr + info2.vmsize;
             uint64_t seg2FileEnd = info2.fileOffset + info2.fileSize;
-            if ( ((info2.vmAddr <= info1.vmAddr) && (seg2vmEnd > info1.vmAddr) && (seg1vmEnd > info1.vmAddr )) || ((info2.vmAddr >= info1.vmAddr ) && (info2.vmAddr < seg1vmEnd) && (seg2vmEnd > info2.vmAddr)) ) {
-                diag.error("in '%s' segment %s vm range overlaps segment %s", path, info1.segName, info2.segName);
+            if ( ((info2.vmaddr <= info1.vmaddr) && (seg2vmEnd > info1.vmaddr) && (seg1vmEnd > info1.vmaddr )) || ((info2.vmaddr >= info1.vmaddr ) && (info2.vmaddr < seg1vmEnd) && (seg2vmEnd > info2.vmaddr)) ) {
+                diag.error("in '%s' segment %.*s vm range overlaps segment %.*s", path,
+                           (int)info1.segmentName.size(), info1.segmentName.data(),
+                           (int)info2.segmentName.size(), info2.segmentName.data());
                 badSegments = true;
                 stop1 = true;
                 stop2 = true;
@@ -4257,20 +3116,24 @@ bool MachOFile::validSegments(Diagnostics& diag, const char* path, size_t fileLe
                      // HACK: Split shared caches might put the __TEXT in a SubCache, then the __DATA in a later SubCache.
                      // The file offsets are in to each SubCache file, which means that they might overlap
                      // For now we have no choice but to disable this error
-                     diag.error("in '%s' segment %s file content overlaps segment %s", path, info1.segName, info2.segName);
+                     diag.error("in '%s' segment %.*s file content overlaps segment %.*s", path,
+                                (int)info1.segmentName.size(), info1.segmentName.data(),
+                                (int)info2.segmentName.size(), info2.segmentName.data());
                      badSegments = true;
                      stop1 = true;
                      stop2 = true;
                  }
             }
-            if ( (info1.segIndex < info2.segIndex) && !stop1 ) {
-                if ( (info1.vmAddr > info2.vmAddr) || ((info1.fileOffset > info2.fileOffset ) && (info1.fileOffset != 0) && (info2.fileOffset  != 0)) ){
+            if ( (info1.segmentIndex < info2.segmentIndex) && !stop1 ) {
+                if ( (info1.vmaddr > info2.vmaddr) || ((info1.fileOffset > info2.fileOffset ) && (info1.fileOffset != 0) && (info2.fileOffset  != 0)) ){
                     if ( !inDyldCache() && enforceFormat(Malformed::segmentOrder) && !isStaticExecutable() ) {
                         // <rdar://80084852> whitelist go libraries __DWARF segments
-                        if ( (strcmp(info1.segName, "__DWARF") != 0 && strcmp(info2.segName, "__DWARF") != 0) ) {
+                        if ( info1.segmentName != "__DWARF" && info2.segmentName != "__DWARF" ) {
                             // dyld cache __DATA_* segments are moved around
                             // The static kernel also has segments with vmAddr's before __TEXT
-                            diag.error("in '%s' segment load commands out of order with respect to layout for %s and %s", path, info1.segName, info2.segName);
+                            diag.error("in '%s' segment load commands out of order with respect to layout for %.*s and %.*s", path,
+                                       (int)info1.segmentName.size(), info1.segmentName.data(),
+                                       (int)info2.segmentName.size(), info2.segmentName.data());
                             badSegments = true;
                             stop1 = true;
                             stop2 = true;
@@ -4335,38 +3198,6 @@ bool MachOFile::validSegments(Diagnostics& diag, const char* path, size_t fileLe
 
     return !badSections;
 }
-
-void MachOFile::forEachSingletonPatch(Diagnostics& diag, void (^handler)(SingletonPatchKind kind,
-                                                                         uint64_t runtimeOffset)) const
-{
-    uint32_t ptrSize = this->pointerSize();
-    uint32_t elementSize = (2 * ptrSize);
-    uint64_t loadAddress = this->preferredLoadAddress();
-    this->forEachSection(^(const SectionInfo &sectInfo, bool malformedSectionRange, bool &stop) {
-        if ( strcmp(sectInfo.sectName, "__const_cfobj2") != 0 )
-            return;
-        stop = true;
-
-        if ( (sectInfo.sectSize % elementSize) != 0 ) {
-            diag.error("Incorrect patching size (%lld).  Should be a multiple of (2 * ptrSize)", sectInfo.sectSize);
-            return;
-        }
-
-        if ( sectInfo.reserved2 != elementSize ) {
-            // ld64 must have rejected one or more of the elements in the section, so
-            // didn't set the reserved2 to let us patch
-            diag.error("reserved2 is unsupported value %d.  Expected %d",
-                       sectInfo.reserved2, elementSize);
-            return;
-        }
-
-        for ( uint64_t offset = 0; offset != sectInfo.sectSize; offset += elementSize ) {
-            uint64_t targetRuntimeOffset = (sectInfo.sectAddr + offset) - loadAddress;
-            handler(SingletonPatchKind::cfObj2, targetRuntimeOffset);
-        }
-    });
-}
-
 
 } // namespace dyld3
 

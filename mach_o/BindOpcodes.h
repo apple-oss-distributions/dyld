@@ -29,9 +29,6 @@
 
 #include <optional>
 #include <span>
-#if BUILDING_MACHO_WRITER
-  #include <vector>
-#endif
 
 #include "Error.h"
 #include "Header.h"
@@ -69,16 +66,6 @@ public:
         const BindTarget*  target=nullptr;
     };
 
-#if BUILDING_MACHO_WRITER
-    enum class BuilderKind { regular, lazy, weak };
-
-                    // used by unit tests to build opcodes
-    typedef void (^LazyStartRecorder)(size_t offset, const char* symbolName);
-
-                    // Note 'binds' input will be sorted by this method
-                    BindOpcodes(std::span<LocAndTarget> binds, bool is64, BuilderKind kind = BuilderKind::regular, LazyStartRecorder starts=nullptr);
-#endif
-
     Error           valid(std::span<const MappedSegment> segments, uint32_t dylibCount, bool allowTextFixups=false, bool onlyFixupsInWritableSegments=true) const;
     void            forEachBindLocation(void (^callback)(const LocAndTarget&, bool& stop)) const;
     void            forEachBindTarget(void (^callback)(const Fixup::BindTarget& target, bool& stop), void (^strongHandler)(const char* symbolName)) const;
@@ -99,14 +86,6 @@ protected:
     const uint8_t*       _opcodesStart;
     const uint8_t*       _opcodesEnd;
     const uint32_t       _pointerSize;
-#if BUILDING_MACHO_WRITER
-    std::vector<uint8_t> _opcodes;
-    
-    void                 append_byte(uint8_t value);
-    void                 append_uleb128(uint64_t value);
-    void                 append_sleb128(int64_t value);
-    void                 append_string(const char* str);
-#endif
 };
 
 class VIS_HIDDEN LazyBindOpcodes : public BindOpcodes
@@ -114,12 +93,6 @@ class VIS_HIDDEN LazyBindOpcodes : public BindOpcodes
 public:
                     // encapsulates Bind opcodes from a final linked image
                     LazyBindOpcodes(const uint8_t* start, size_t size, bool is64) : BindOpcodes(start, size, is64) { }
-
-#if BUILDING_MACHO_WRITER
-                    // used by unit tests to build opcodes
-                    LazyBindOpcodes(std::span<LocAndTarget> binds, bool is64, BindOpcodes::LazyStartRecorder recorder)
-                       : BindOpcodes(binds, is64, BuilderKind::lazy, recorder) { }
-#endif
 
 protected:
     bool            hasDoneBetweenBinds() const override final;
@@ -131,11 +104,6 @@ class VIS_HIDDEN WeakBindOpcodes : public BindOpcodes
 public:
                     // encapsulates Bind opcodes from a final linked image
                     WeakBindOpcodes(const uint8_t* start, size_t size, bool is64) : BindOpcodes(start, size, is64) { }
-
-#if BUILDING_MACHO_WRITER
-                    // used by unit tests to build opcodes
-                    WeakBindOpcodes(std::span<LocAndTarget> binds, bool is64) : BindOpcodes(binds, is64, BuilderKind::weak) { }
-#endif
 
 protected:
     std::optional<int>  implicitLibraryOrdinal() const override final;

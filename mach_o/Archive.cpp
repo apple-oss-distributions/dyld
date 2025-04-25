@@ -21,6 +21,10 @@
  * @APPLE_LICENSE_HEADER_END@
  */
 
+#include <TargetConditionals.h>
+
+#if !TARGET_OS_EXCLAVEKIT
+
 #include "Archive.h"
 
 // stl
@@ -34,27 +38,7 @@
 
 namespace mach_o {
 
-namespace {
-
 constexpr std::string_view AR_EFMT1_SV(AR_EFMT1);
-
-class Entry : ar_hdr
-{
-public:
-    void                        getName(char *, int) const;
-    uint64_t                    modificationTime() const;
-    Error                       content(std::span<const uint8_t>& content) const;
-    Error                       next(Entry*& next) const;
-    Error                       valid() const;
-
-    static uint64_t             extendedFormatNameSize(std::string_view name);
-    static uint64_t             entrySize(bool extendedFormatNames, std::string_view name, uint64_t contentSize);
-    static size_t               write(std::span<uint8_t> buffer, bool extendedFormatNames, std::string_view name, uint64_t mktime, std::span<const uint8_t> content);
-
-private:
-    bool                        hasLongName() const;
-    uint64_t                    getLongNameSpace() const;
-};
 
 static inline uint64_t align(uint64_t addr, uint8_t p2)
 {
@@ -203,9 +187,6 @@ Error Entry::valid() const
     return Error("archive member invalid control bits");
 }
 
-constexpr static std::string_view archive_magic = "!<arch>\n";
-}
-
 std::optional<Archive> Archive::isArchive(std::span<const uint8_t> buffer)
 {
     if ( buffer.size() >= archive_magic.size()
@@ -288,42 +269,6 @@ Error Archive::forEachMachO(void (^handler)(const Member&, const mach_o::Header*
     return std::move(err);
 }
 
-#if BUILDING_MACHO_WRITER
-size_t Archive::size(std::span<const Member> members, bool extendedFormatNames)
-{
-    uint64_t size = archive_magic.size();
-
-    for ( const Member& m : members ) {
-        size += Entry::entrySize(extendedFormatNames, m.name, m.contents.size());
-    }
-
-    return size;
 }
 
-Error Archive::make(std::span<uint8_t> buffer, std::span<const Member> members, bool extendedFormatNames)
-{
-    if ( buffer.size() < archive_magic.size() ) {
-        return Error("buffer to small");
-    }
-
-    std::span<uint8_t> remainingSpace = buffer;
-    memcpy(remainingSpace.data(), archive_magic.data(), archive_magic.size());
-    remainingSpace = remainingSpace.subspan(archive_magic.size());
-
-    for ( const Member& m : members ) {
-        size_t writtenBytes = Entry::write(remainingSpace, extendedFormatNames, m.name, m.mtime, m.contents);
-        if ( writtenBytes > remainingSpace.size() ) {
-            assert(false && "invalid buffer size");
-            return Error("buffer to small");
-        }
-
-        remainingSpace = remainingSpace.subspan(writtenBytes);
-    }
-
-    assert(remainingSpace.empty());
-    if ( isArchive(buffer).has_value() )
-        return Error::none();
-    return Error("error writing archive");
-}
-#endif
-}
+#endif // !TARGET_OS_EXCLAVEKIT

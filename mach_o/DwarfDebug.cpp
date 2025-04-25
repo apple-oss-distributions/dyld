@@ -251,8 +251,10 @@ bool DwarfDebug::skip_form(const uint8_t*& offset, const uint8_t* end, uint64_t 
             sz = 8;
             break;
         case DW_FORM_string:
-            while (offset != end && *offset)
-                ++offset;
+            if ( offset == end )
+                return false;
+            // rdar://124698722 (off-by-one error when decoding DW_FORM_string)
+            offset += strnlen((char*)offset, (end-offset-1)) + 1;
             return true;
         case DW_FORM_data1:
         case DW_FORM_flag:
@@ -261,6 +263,7 @@ bool DwarfDebug::skip_form(const uint8_t*& offset, const uint8_t* end, uint64_t 
             break;
         case DW_FORM_block:
             sz = read_uleb128(offset, end, malformed);
+            return true; // offset already updated by read_uleb128()
             break;
         case DW_FORM_block1:
             if (offset == end)
@@ -270,13 +273,15 @@ bool DwarfDebug::skip_form(const uint8_t*& offset, const uint8_t* end, uint64_t 
         case DW_FORM_sdata:
         case DW_FORM_udata:
         case DW_FORM_ref_udata:
-            read_uleb128(offset, end, malformed);
-            return true;
+            sz = read_uleb128(offset, end, malformed);
+            return true; // offset already updated by read_uleb128()
+            break;
         case DW_FORM_addrx:
         case DW_FORM_strx:
         case DW_FORM_rnglistx:
             sz = read_uleb128(offset, end, malformed);
-            return true;
+            return true; // offset already updated by read_uleb128()
+            break;
         case DW_FORM_addrx1:
         case DW_FORM_strx1:
             sz = 1;
@@ -302,6 +307,7 @@ bool DwarfDebug::skip_form(const uint8_t*& offset, const uint8_t* end, uint64_t 
             break;
         case DW_FORM_exprloc:
             sz = read_uleb128(offset, end, malformed);
+            return true; // offset already updated by read_uleb128()
             break;
         case DW_FORM_flag_present:
             sz = 0;

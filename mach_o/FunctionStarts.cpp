@@ -75,47 +75,6 @@ void FunctionStarts::forEachFunctionStart(uint64_t loadAddr, void (^callback)(ui
 }
 
 
-#if BUILDING_MACHO_WRITER
-FunctionStarts::FunctionStarts(uint64_t prefLoadAddr, std::span<const uint64_t> functionAddresses)
-{
-    uint64_t lastAddr = prefLoadAddr;
-    for (uint64_t addr : functionAddresses) {
-        assert(addr >= lastAddr && "function addresses not sorted");
-        // <rdar://problem/10422823> filter out zero-length atoms, so LC_FUNCTION_STARTS address can't spill into next section
-        if ( addr == lastAddr)
-            continue;
-        // FIXME: for 32-bit arm need to check thumbness
-        uint64_t delta = addr - lastAddr;
-        append_uleb128(delta);
-        lastAddr = addr;
-    }
-    // terminate delta encoded list
-    _bytes.push_back(0);
-    // 8-byte align
-    while ( (_bytes.size() % 8) != 0 )
-        _bytes.push_back(0);
-
-    // set up pointers to data can be parsed
-    _funcStartsBegin = &_bytes[0];
-    _funcStartsEnd   = &_bytes[_bytes.size()];
-}
-
-void FunctionStarts::append_uleb128(uint64_t value)
-{
-    uint8_t byte;
-    do {
-        byte = value & 0x7F;
-        value &= ~0x7F;
-        if ( value != 0 )
-            byte |= 0x80;
-        _bytes.push_back(byte);
-        value = value >> 7;
-    } while( byte >= 0x80 );
-}
-
-#endif // BUILDING_MACHO_WRITER
-
-
 
 
 } // namespace mach_o

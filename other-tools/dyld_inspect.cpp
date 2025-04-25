@@ -14,7 +14,7 @@
 
 static void usage()
 {
-    fprintf(stderr, "Usage: dyld_inspect <options>* -p pid | -all \n"
+    fprintf(stderr, "Usage: dyld_inspect <options>* [ -p pid | -all | -all_installed_caches ]\n"
             "\t-shared_cache_uuid       print shared cache UUID\n"
             "\t-shared_cache_address    print shared cache base address\n"
             //"\t-shared_cache_path       print shared cache path\n"
@@ -22,6 +22,68 @@ static void usage()
             //FIXME: Keep hidden for now, make public once we settle on the output format
 //            "\t-images                  print all images loaded in the process\n"
         );
+}
+
+static void printAllInstalledCaches(bool printSharedCacheUUID, bool printSharedCacheAddress, bool printImages)
+{
+    dyld_for_each_installed_shared_cache(^(dyld_shared_cache_t cache) {
+        // Get the path from the first file
+        __block const char* cachePath = nullptr;
+        dyld_shared_cache_for_each_file(cache, ^(const char *file_path) {
+            if ( !cachePath )
+                cachePath = file_path;
+        });
+
+        // Get the shared cache data
+        uint64_t cacheBaseAddress = dyld_shared_cache_get_base_address(cache);
+        uuid_t cacheUUID;
+        dyld_shared_cache_copy_uuid(cache, &cacheUUID);
+
+        bool printSeparator = false;
+        {
+            if ( printSeparator ) printf("  ");
+            printSeparator = true;
+
+            printf("%s", cachePath);
+        }
+        if ( printSharedCacheUUID ) {
+            if ( printSeparator ) printf("  ");
+            printSeparator = true;
+
+            uuid_string_t uuidString;
+            uuid_unparse_upper(cacheUUID, uuidString);
+            printf("%s", uuidString);
+        }
+        if ( printSharedCacheAddress ) {
+            if ( printSeparator ) printf("  ");
+            printSeparator = true;
+
+            printf("0x%08llx", cacheBaseAddress);
+        }
+        printf("\n");
+
+        if (printImages) {
+            dyld_shared_cache_for_each_image(cache, ^(dyld_image_t image) {
+                printf("      ");
+                uuid_t imageUUID;
+                uuid_clear(imageUUID);
+                dyld_image_copy_uuid(image, &imageUUID);
+                uuid_string_t uuidString;
+                uuid_unparse_upper(imageUUID, uuidString);
+                printf("%s", uuidString);
+                const char* installname = dyld_image_get_installname(image);
+                const char* file_path = dyld_image_get_file_path(image);
+                if (file_path) {
+                    printf("%s\n", file_path);
+                } else if (installname) {
+                    printf("%s\n", installname);
+                }
+                dyld_image_for_each_segment_info(image, ^(const char *segmentName, uint64_t vmAddr, uint64_t vmSize, int perm) {
+                    printf("            %16s 0x%08llx-0x%08llx\n", segmentName, vmAddr, vmAddr+vmSize);
+                });
+            });
+        }
+    });
 }
 
 int main(int argc, const char* argv[], const char* envp[], const char* apple[])
@@ -33,6 +95,7 @@ int main(int argc, const char* argv[], const char* envp[], const char* apple[])
 
     bool allProcesses = false;
     int specificProcessPID          = 0;
+    bool allInstalledCaches         = false;
     bool printSharedCacheUUID       = false;
     bool printSharedCacheAddress    = false;
     bool printImages                = false;
@@ -75,6 +138,9 @@ int main(int argc, const char* argv[], const char* envp[], const char* apple[])
         else if ( strcmp(arg, "-all") == 0 ) {
             allProcesses = true;
         }
+        else if ( strcmp(arg, "-all_installed_caches") == 0 ) {
+            allInstalledCaches = true;
+        }
         else if ( strcmp(arg, "-help") == 0 ) {
             usage();
             return 0;
@@ -86,8 +152,8 @@ int main(int argc, const char* argv[], const char* envp[], const char* apple[])
         }
     }
 
-    if ( !allProcesses && (specificProcessPID == 0) ) {
-        fprintf(stderr, "expected -p PID, or -all flag\n");
+    if ( !allProcesses && (specificProcessPID == 0) && !allInstalledCaches ) {
+        fprintf(stderr, "expected -p PID, -all, or -all_installed_caches flag\n");
         return 1;
     }
 
@@ -127,20 +193,16 @@ int main(int argc, const char* argv[], const char* envp[], const char* apple[])
             }
             return;
         }
+        uint64_t cacheBaseAddress = 0;
+        uuid_t cacheUUID;
+        uuid_clear(cacheUUID);
 
         // Get the shared cache data
         dyld_shared_cache_t dyldSharedCache = dyld_process_snapshot_get_shared_cache(dyldSnapshot);
-        if ( !dyldSharedCache ) {
-            if ( exitOnError ) {
-                fprintf(stderr, "dyld_process_snapshot_get_shared_cache(pid = %d) failed\n", pid);
-                exit(1);
-            }
-            return;
+        if ( dyldSharedCache ) {
+            cacheBaseAddress = dyld_shared_cache_get_base_address(dyldSharedCache);
+            dyld_shared_cache_copy_uuid(dyldSharedCache, &cacheUUID);
         }
-        uint64_t cacheBaseAddress = dyld_shared_cache_get_base_address(dyldSharedCache);
-        uuid_t cacheUUID;
-        uuid_clear(cacheUUID);
-        dyld_shared_cache_copy_uuid(dyldSharedCache, &cacheUUID);
 
         bool printSeparator = false;
         if ( allProcesses ) {
@@ -209,8 +271,11 @@ int main(int argc, const char* argv[], const char* envp[], const char* apple[])
         for ( int i=0; i < pidcount; ++i ) {
             handleProcess(pids[i], false);
         }
-    } else {
+    } else if ( specificProcessPID != 0 ) {
         handleProcess(specificProcessPID, true);
+    } else {
+        // printing all installed caches
+        printAllInstalledCaches(printSharedCacheUUID, printSharedCacheAddress, printImages);
     }
 
     return 0;

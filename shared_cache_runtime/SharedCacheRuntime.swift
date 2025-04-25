@@ -23,7 +23,7 @@
 
 // implementationOnly so we don't leak the c types into the public interface
 @_implementationOnly import dyld_cache_module
-
+//@_implementationOnly import MachO_Private.dyld_cache_format
 
 enum SharedCacheRuntimeError: Error {
     /// ran out of buffer while parsing

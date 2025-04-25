@@ -25,6 +25,8 @@
 #define Array_h
 
 #include <algorithm>
+#include <span>
+
 #include <stdint.h>
 #include <stdio.h>
 #include <assert.h>
@@ -34,6 +36,7 @@
 #if !TARGET_OS_EXCLAVEKIT
 #include <mach/mach.h>
 #endif
+
 #include "Allocator.h"
 
 namespace dyld3 {
@@ -167,7 +170,7 @@ inline void OverflowSafeArray<T,MAXCOUNT>::growTo(uint64_t n)
        // MAXCOUNT is not specified, keep doubling size
        _overflowBufferSize = round_page(std::max(this->_allocCount * 2, n) * sizeof(T));
     }
-#if !TARGET_OS_EXCLAVEKIT
+#if !DYLD_FEATURE_EMBEDDED_PAGE_ALLOCATOR
     int kr = ::vm_allocate(mach_task_self(), (vm_address_t*)&_overflowBuffer, (vm_size_t)_overflowBufferSize, VM_FLAGS_ANYWHERE | VM_MAKE_TAG(VM_MEMORY_DYLD));
 #else
     _overflowBuffer = lsl::MemoryManager::allocate_pages(_overflowBufferSize);
@@ -199,7 +202,7 @@ inline void OverflowSafeArray<T,MAXCOUNT>::growTo(uint64_t n)
     this->_allocCount = _overflowBufferSize / sizeof(T);
 
     if ( oldBuffer != 0 )
-#if !TARGET_OS_EXCLAVEKIT
+#if !DYLD_FEATURE_EMBEDDED_PAGE_ALLOCATOR
         ::vm_deallocate(mach_task_self(), (vm_address_t)oldBuffer, (vm_size_t)oldBufferSize);
 #else
         lsl::MemoryManager::deallocate_pages(oldBuffer, oldBufferSize);
@@ -223,7 +226,7 @@ inline OverflowSafeArray<T,MAXCOUNT>::~OverflowSafeArray()
     clear();
 
     if ( _overflowBuffer != 0 )
-#if !TARGET_OS_EXCLAVEKIT
+#if !DYLD_FEATURE_EMBEDDED_PAGE_ALLOCATOR
         ::vm_deallocate(mach_task_self(), (vm_address_t)_overflowBuffer, (vm_size_t)_overflowBufferSize);
 #else
     lsl::MemoryManager::deallocate_pages(_overflowBuffer, _overflowBufferSize);
@@ -238,7 +241,7 @@ inline OverflowSafeArray<T,MAXCOUNT>& OverflowSafeArray<T,MAXCOUNT>::operator=(O
 
     // Free our buffer if we have one
     if ( _overflowBuffer != 0 )
-#if !TARGET_OS_EXCLAVEKIT
+#if !DYLD_FEATURE_EMBEDDED_PAGE_ALLOCATOR
         vm_deallocate(mach_task_self(), (vm_address_t)_overflowBuffer, (vm_size_t)_overflowBufferSize);
 #else
     lsl::MemoryManager::deallocate_pages(_overflowBuffer, _overflowBufferSize);

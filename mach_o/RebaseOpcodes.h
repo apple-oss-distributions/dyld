@@ -28,9 +28,6 @@
 #include <stdio.h>
 
 #include <span>
-#if BUILDING_MACHO_WRITER
-  #include <vector>
-#endif
 
 #include "Error.h"
 #include "Header.h"
@@ -52,11 +49,6 @@ class VIS_HIDDEN RebaseOpcodes
 public:
                     // encapsulates rebase opcodes from a final linked image
                     RebaseOpcodes(const uint8_t* start, size_t size, bool is64);
-#if BUILDING_MACHO_WRITER
-                    // used by unit tests to build opcodes
-                    struct Location { uint32_t segIndex; uint64_t segOffset; auto operator<=>(const Location&) const = default; };
-                    RebaseOpcodes(std::span<const Location> sortedLocs, bool is64);
-#endif
 
     Error           valid(std::span<const MappedSegment> segments, bool allowTextFixups=false, bool onlyFixupsInWritableSegments=true) const;
     void            forEachRebaseLocation(std::span<const MappedSegment> segments, uint64_t prefLoadAdder, void (^callback)(const Fixup& fixup, bool& stop)) const;
@@ -70,14 +62,10 @@ private:
     Error           forEachRebase(void (^handler)(const char* opcodeName, int type, bool segIndexSet,
                                                   uint8_t segmentIndex, uint64_t segmentOffset, bool& stop)) const;
 
+protected:
     const uint8_t*       _opcodesStart;
     const uint8_t*       _opcodesEnd;
     const uint32_t       _pointerSize;
-#if BUILDING_MACHO_WRITER
-    std::vector<uint8_t> _opcodes;
-    void                 append_uleb128(uint64_t value);
-    void                 append_byte(uint8_t value);
-#endif
  };
 
 

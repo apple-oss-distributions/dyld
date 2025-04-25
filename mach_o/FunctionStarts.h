@@ -28,11 +28,7 @@
 #include <span>
 #include <stdint.h>
 
-#if BUILDING_MACHO_WRITER
-  #include <vector>
-#endif
-
-#include "Defines.h"
+#include "MachODefines.h"
 #include "Error.h"
 
 namespace mach_o {
@@ -52,23 +48,9 @@ public:
     Error               valid(uint64_t maxFuncOffset) const;
     void                forEachFunctionStart(uint64_t loadAddr, void (^callback)(uint64_t funcAddr)) const;
 
-#if BUILDING_MACHO_WRITER
-                        // used build a function starts blob
-                        FunctionStarts(uint64_t prefLoadAddr, std::span<const uint64_t> functionAddresses);
-
-    std::span<const uint8_t>  bytes() const { return _bytes; }
-#endif
-
-private:
-#if BUILDING_MACHO_WRITER
-    void                  append_uleb128(uint64_t value);
-#endif
-
+protected:
     const uint8_t*       _funcStartsBegin;
     const uint8_t*       _funcStartsEnd;
-#if BUILDING_MACHO_WRITER
-    std::vector<uint8_t> _bytes;
-#endif
 };
 
 

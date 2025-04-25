@@ -40,6 +40,9 @@
 #include "NListSymbolTable.h"
 #include "Misc.h"
 
+// other_tools
+#include "MiscFileUtils.h"
+
 
 using mach_o::Universal;
 using mach_o::Header;
@@ -346,7 +349,7 @@ int main(int argc, const char* argv[])
     }
 
     __block bool sliceFound = false;
-    mach_o::forSelectedSliceInPaths(files, cmdLineArchs, ^(const char* path, const Header* header, size_t sliceLen) {
+    other_tools::forSelectedSliceInPaths(files, cmdLineArchs, ^(const char* path, const Header* header, size_t sliceLen) {
         sliceFound = true;
         printf("%s [%s]:\n", path, header->archName());
         Image image((void*)header, sliceLen, (header->inDyldCache() ? Image::MappingKind::dyldLoadedPostFixups : Image::MappingKind::wholeSliceMapped));
@@ -369,7 +372,10 @@ int main(int argc, const char* argv[])
 
             // build table of info about each imported dylib
             __block std::vector<std::string> imports;
-            header->forEachLinkedDylib(^(const char* loadPath, mach_o::LinkedDylibAttributes, mach_o::Version32, mach_o::Version32, bool& stop) {
+            header->forEachLinkedDylib(^(const char* loadPath, mach_o::LinkedDylibAttributes, mach_o::Version32, mach_o::Version32,
+                                         bool synthesizedLink, bool& stop) {
+                if ( synthesizedLink )
+                    return;
                 std::string leafName = loadPath;
                 if ( const char* lastSlash = strrchr(loadPath, '/') )
                     leafName = lastSlash+1;

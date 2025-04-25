@@ -70,30 +70,75 @@ struct Layout
         // For the host OS, regions should be 1GB aligned
         // If this has a value, then we use it.  Otherwise we fall back to the sim fixed addresses
         std::optional<uint64_t> regionAlignment;
+
+        // How much __TEXT in each subCache before we split to a new file
+        CacheVMSize subCacheTextLimit;
     };
 
-    // Used only for arm64
+    // arm64* layout
+    //
+    //                                     ┌──────▶┌────────────────────────────┬──────┐
+    //                                     │       │                            │      │
+    // ┌────────────────────────────┬──────┘       │    __TEXT: Dylib 0 .. n    │      └──────▶┌────────────────────────────┐
+    // │                            │              │                            │              │                            │
+    // │     2GB __TEXT+__DATA      │              ├────────────────────────────┼──────┐       │ 110MB __TEXT: Dylib 0 .. k │
+    // │                            │              │                            │      │       │                            │
+    // ├────────────────────────────┼──────┐       │ __DATA_CONST: Dylib 0 .. n │      │       ├────────────────────────────┤
+    // │                            │      │       │                            │      │       │                            │
+    // │     2GB __TEXT+__DATA      │      │       ├────────────────────────────┤      │       │    Stubs: Dylib 0 .. k     │
+    // │                            │      │       │                            │      │       │                            │
+    // ├────────────────────────────┤      │       │       Padding: 32MB        │      │       ├────────────────────────────┤
+    // │                            │      │       │                            │      │       │                            │
+    // │            ...             │      │       ├────────────────────────────┤      │       │     110MB __TEXT: ...      │
+    // │                            │      │       │                            │      │       │                            │
+    // ├────────────────────────────┤      │       │    __DATA: Dylib 0 .. n    │      │       ├────────────────────────────┤
+    // │                            │      │       │                            │      │       │                            │
+    // │  __TEXT+__DATA+__LINKEDIT  │      │       ├────────────────────────────┤      │       │         Stubs: ...         │
+    // │                            │      │       │                            │      │       │                            │
+    // └────────────────────────────┘      │       │ __TPRO_CONST: Dylib 0 .. n │      └──────▶└────────────────────────────┘
+    //                                     │       │                            │
+    //                                     │       ├────────────────────────────┤
+    //                                     │       │                            │
+    //                                     │       │    __AUTH: Dylib 0 .. n    │
+    //                                     │       │                            │
+    //                                     │       ├────────────────────────────┤
+    //                                     │       │                            │
+    //                                     │       │ __AUTH_CONST: Dylib 0 .. n │
+    //                                     │       │                            │
+    //                                     │       ├────────────────────────────┤
+    //                                     │       │                            │
+    //                                     │       │       Padding: 32MB        │
+    //                                     │       │                            │
+    //                                     │       ├────────────────────────────┤
+    //                                     │       │                            │
+    //                                     │       │ __READ_ONLY: Dylib 0 .. n  │
+    //                                     │       │                            │
+    //                                     └──────▶└────────────────────────────┘
     struct Contiguous
     {
         // How many bytes of padding do we add between each Region
         CacheVMSize regionPadding;
 
+        // How much __TEXT + DATA + ... (not LINKEDIT) in each subCache before we split to a new file
+        CacheVMSize subCacheTextDataLimit;
+
         // How much __TEXT before we make a new stubs subCache
         CacheVMSize subCacheStubsLimit;
+
+        // How much padding will we have in every "subCacheTextDataLimit" (2GB) region of memory
+        CacheVMSize subCachePadding;
     };
 
     // Fields for all layouts
     CacheVMAddress          cacheBaseAddress;
     CacheVMSize             cacheSize;
     std::optional<uint64_t> cacheMaxSlide;
+    std::optional<uint64_t> cacheFixedSlide;
     const bool              is64;
     const bool              hasAuthRegion;
     const bool              tproIsInData;
     const uint32_t          pageSize;
     const uint32_t          machHeaderAlignment = 4096;
-
-    // How much __TEXT in each subCache before we split to a new file
-    CacheVMSize subCacheTextLimit;
 
     // Fields only used for discontiguous layouts, ie, x86_64
     std::optional<Discontiguous>    discontiguous;

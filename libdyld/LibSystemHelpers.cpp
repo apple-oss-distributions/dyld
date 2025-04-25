@@ -59,9 +59,16 @@ extern "C" int __cxa_atexit(void (*func)(void*), void* arg, void* dso);
 #include "LibSystemHelpers.h"
 #include "DyldProcessConfig.h"
 #include "DyldAPIs.h"
+#include "ThreadLocalVariables.h"
 
-// implemented in assembly
-extern "C" void* tlv_get_addr(dyld3::MachOAnalyzer::TLV_Thunk*);
+extern "C" struct mach_header __dso_handle; // mach_header of libdyld.dylib
+
+namespace dyld4 {
+    extern class APIs* gAPIs;
+}
+
+extern void _dyld_make_delayed_module_initializer_calls();
+
 
 uint8_t dyld_process_has_objc_patches = 0;
 
@@ -69,7 +76,7 @@ namespace dyld4 {
 
 uintptr_t LibSystemHelpers::version() const
 {
-    return 6;
+    return 7;
 }
 
 void* LibSystemHelpers::malloc(size_t size) const
@@ -89,7 +96,7 @@ size_t LibSystemHelpers::malloc_size(const void* p) const
 
 kern_return_t LibSystemHelpers::vm_allocate(vm_map_t task, vm_address_t* address, vm_size_t size, int flags) const
 {
-#if !TARGET_OS_EXCLAVEKIT
+#if !DYLD_FEATURE_EMBEDDED_PAGE_ALLOCATOR
     return ::vm_allocate(task, address, size, flags);
 #else
     //TODO: EXCLAVES. Then replace calls to MemoryManager::allocate_pages
@@ -109,20 +116,7 @@ kern_return_t LibSystemHelpers::vm_deallocate(vm_map_t task, vm_address_t addres
 // Note: driverkit uses a different arm64e ABI, so we cannot call libSystem's pthread_key_create() from dyld
 int LibSystemHelpers::pthread_key_create_free(dyld_thread_key_t* key) const
 {
-#if TARGET_OS_EXCLAVEKIT
-    return ::tss_create(key, &::free);
-#else
-    return ::pthread_key_create(key, &::free);
-#endif
-}
-
-int LibSystemHelpers::pthread_key_init_free(int key) const
-{
-#if TARGET_OS_EXCLAVEKIT
-    return 0; // ::tss_create already sets up the destructor;
-#else
-    return ::pthread_key_init_np(key, &::free);
-#endif
+    return dyld_thread_key_create(key, &::free);
 }
 
 void LibSystemHelpers::run_async(void* (*func)(void*), void* context) const
@@ -138,29 +132,9 @@ void LibSystemHelpers::run_async(void* (*func)(void*), void* context) const
 #endif
 }
 
-static void finalizeListTLV_thunk(void* list)
-{
-    // Called by pthreads when the current thread is going away
-    gDyld.apis->_finalizeListTLV(list);
-}
-
-// Note: driverkit uses a different arm64e ABI, so we cannot call libSystem's pthread_key_create() from dyld
-int LibSystemHelpers::pthread_key_create_thread_exit(dyld_thread_key_t* key) const
-{
-#if TARGET_OS_EXCLAVEKIT
-    return ::tss_create(key, &finalizeListTLV_thunk);
-#else
-    return ::pthread_key_create(key, &finalizeListTLV_thunk);
-#endif
-}
-
 void* LibSystemHelpers::pthread_getspecific(dyld_thread_key_t key) const
 {
-#if TARGET_OS_EXCLAVEKIT
-    return ::tss_get(key);
-#else
-    return ::pthread_getspecific(key);
-#endif
+    return dyld_thread_getspecific(key);
 }
 
 int LibSystemHelpers::pthread_setspecific(dyld_thread_key_t key, const void* value) const
@@ -243,11 +217,6 @@ int LibSystemHelpers::mkstemp(char* templatePath) const
 #endif
 }
 
-LibSystemHelpers::TLVGetAddrFunc LibSystemHelpers::getTLVGetAddrFunc() const
-{
-    return &::tlv_get_addr;
-}
-
 // Added in version 2
 
 void LibSystemHelpers::os_unfair_recursive_lock_unlock_forked_child(dyld_recursive_mutex_t lock) const
@@ -281,6 +250,66 @@ void LibSystemHelpers::os_unfair_lock_unlock(dyld_mutex_t lock) const
     ::os_unfair_lock_unlock(lock);
 #endif
 }
+
+// Added in version 7
+
+
+static bool legacyDyldLookup4OldBinaries(const char* name, void** address)
+{
+#if SUPPPORT_PRE_LC_MAIN
+    if (strcmp(name, "__dyld_dlopen") == 0) {
+        *address = (void*)&dlopen;
+        return true;
+    } 
+    else if (strcmp(name, "__dyld_dlsym") == 0) {
+        *address = (void*)&dlsym;
+        return true;
+    } 
+    else if (strcmp(name, "__dyld_dladdr") == 0) {
+        *address = (void*)&dladdr;
+        return true;
+    } 
+    else if (strcmp(name, "__dyld_get_image_slide") == 0) {
+        *address = (void*)&_dyld_get_image_slide;
+        return true;
+    }
+    else if (strcmp(name, "__dyld_make_delayed_module_initializer_calls") == 0) {
+        *address = (void*)&_dyld_make_delayed_module_initializer_calls;
+        return true;
+    } 
+    else if (strcmp(name, "__dyld_lookup_and_bind") == 0) {
+#pragma clang diagnostic push
+#pragma clang diagnostic ignored "-Wdeprecated-declarations"
+        *address = (void*)&_dyld_lookup_and_bind;
+#pragma clang diagnostic pop
+        return true;
+    }
+#endif
+    *address = 0;
+    return false;
+}
+
+void LibSystemHelpers::setDefaultProgramVars(ProgramVars& vars) const
+{
+    vars.__prognamePtr = &__progname;
+#if !TARGET_OS_EXCLAVEKIT
+    vars.NXArgcPtr  = &NXArgc;
+    vars.NXArgvPtr  = &NXArgv;
+    vars.environPtr = (const char***)&environ;
+#endif
+}
+
+
+FuncLookup LibSystemHelpers::legacyDyldFuncLookup() const
+{
+    return &legacyDyldLookup4OldBinaries;
+}
+
+mach_o::Error LibSystemHelpers::setUpThreadLocals(const DyldSharedCache* cache, const Header* hdr) const
+{
+    return dyld::sThreadLocalVariables.setUpImage(cache, hdr);
+}
+
 
 } // namespace dyld4
 

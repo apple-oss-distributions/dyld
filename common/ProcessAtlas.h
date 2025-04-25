@@ -35,6 +35,7 @@
 #endif
 
 #include "UUID.h"
+#include "Bitmap.h"
 #include "Vector.h"
 #include "Allocator.h"
 #include "OrderedSet.h"
@@ -65,6 +66,30 @@ using lsl::SharedPtr;
 using lsl::UUID;
 using lsl::Vector;
 using lsl::OrderedSet;
+using lsl::Bitmap;
+
+// A type safe wrapper around pointers which only permits dyld to cast to pointers, and forces libdyld to use uint64_t.
+// This is to support the case where arm64_32 clients of these APIs inspect arm64e processes
+class VIS_HIDDEN SafePointer
+{
+public:
+    explicit operator bool() const {
+        return (pointer != 0);
+    }
+
+    explicit operator uint64_t() const {
+        return pointer;
+    }
+
+    SafePointer() = default;
+    SafePointer(uint32_t v) = delete;
+    SafePointer(uint64_t v) : pointer(v) { }
+
+    constexpr auto operator <=>(const SafePointer& rhs) const = default;
+
+private:
+    uint64_t pointer = 0;
+};
 
 /* The Mapper abstraction provides an interface we can use to abstract away in memory vs file layout for the cache
  *
@@ -81,7 +106,7 @@ struct VIS_HIDDEN Mapper {
         Pointer(const Pointer&) = delete;
         Pointer& operator=(const Pointer&) = delete;
 
-        Pointer(Mapper* mapper, const void* address, uint64_t size) : _mapper(mapper), _size(size) {
+        Pointer(Mapper* mapper, const SafePointer address, uint64_t size) : _mapper(mapper), _size(size) {
             auto [pointer, mmaped] = _mapper->map(address,_size);
             _pointer = pointer;
             _mmapped = mmaped;
@@ -99,21 +124,23 @@ struct VIS_HIDDEN Mapper {
             }
         }
         explicit operator bool() {
-            return (_pointer != nullptr);
+            return ((uint64_t)_pointer != 0);
         }
+
         T& operator*() {
-            return *((T*)_pointer);
+            return *((T*)(uint64_t)_pointer);
         }
         T* operator->() {
-            return (T*)_pointer;
+            return (T*)(uint64_t)_pointer;
         }
 
         const T& operator*() const {
-            return *((const T*)_pointer);
+            return *((const T*)(uint64_t)_pointer);
         }
         const T* operator->() const {
-            return (const T*)_pointer;
+            return (const T*)(uint64_t)_pointer;
         }
+
         friend void swap(Pointer& x, Pointer& y) {
             x.swap(y);
         }
@@ -126,15 +153,15 @@ struct VIS_HIDDEN Mapper {
             swap(_pointer, other._pointer);
             swap(_mmapped, other._mmapped);
         }
-        Mapper*              _mapper     = nullptr;
+        Mapper*             _mapper     = nullptr;
         uint64_t            _size       = 0;
-        void*               _pointer    = nullptr;
+        SafePointer         _pointer;
         bool                _mmapped    = false;
     };
 
     ~Mapper();
     template<typename T>
-    Pointer<T>  map(const void* addr, uint64_t size) {
+    Pointer<T>  map(const SafePointer addr, uint64_t size) {
         return Pointer<T>(this, addr, size);
     }
     struct Mapping {
@@ -144,21 +171,21 @@ struct VIS_HIDDEN Mapper {
         int         fd; // If fd == -1 that means this is a memory mapping
     };
 
-    static SharedPtr<Mapper>                        mapperForSharedCache(Allocator& allocator, FileRecord& file, const void* baseAddress);
-    static SharedPtr<Mapper>                        mapperForMachO(Allocator& allocator, FileRecord& file, const UUID& uuid, const void* baseAddress);
+    static SharedPtr<Mapper>                        mapperForSharedCache(Allocator& allocator, FileRecord& file, const SafePointer baseAddress);
+    static SharedPtr<Mapper>                        mapperForMachO(Allocator& allocator, FileRecord& file, const UUID& uuid, const SafePointer baseAddress);
     static std::pair<SharedPtr<Mapper>,uint64_t>    mapperForSharedCacheLocals(Allocator& allocator, FileRecord& file);
 
     Mapper(Allocator& allocator);
     Mapper(Allocator& allocator, uint64_t size);
     Mapper(Allocator& allocator, const Vector<Mapping>& mapper);
-    const void*                                     baseAddress() const;
+    const SafePointer                               baseAddress() const;
     const uint64_t                                  size() const;
     bool                                            pin();
     void                                            unpin();
     void                                            dump() const;
 private:
-    std::pair<void*,bool>                           map(const void* addr, uint64_t size) const;
-    void                                            unmap(const void* addr, uint64_t size) const;
+    std::pair<SafePointer,bool>                     map(const SafePointer addr, uint64_t size) const;
+    void                                            unmap(const SafePointer addr, uint64_t size) const;
     Vector<Mapping>                                 _mappings;
     void*                                           _flatMapping;
     Allocator&                                      _allocator;
@@ -176,12 +203,12 @@ struct SharedCache;
 #if BUILDING_DYLD
                         Image(RuntimeState* state, Allocator& ephemeralAllocator, SharedPtr<Mapper>& M, const Loader* ldr);
 #endif
-                        Image(Allocator& ephemeralAllocator, FileRecord&& file, SharedPtr<Mapper>& M, const struct mach_header* mh);
-                        Image(Allocator& ephemeralAllocator, FileRecord&& file, SharedPtr<Mapper>& M, const struct mach_header* mh, const UUID& uuid);
-                        Image(Allocator& ephemeralAllocator, SharedPtr<Mapper>& M, void* baseAddress, uint64_t cacheSlide, SharedCache* sharedCache);
+                        Image(Allocator& ephemeralAllocator, FileRecord&& file, SharedPtr<Mapper>& M, const SafePointer mh);
+                        Image(Allocator& ephemeralAllocator, FileRecord&& file, SharedPtr<Mapper>& M, const SafePointer mh, const UUID& uuid);
+                        Image(Allocator& ephemeralAllocator, SharedPtr<Mapper>& M, SafePointer baseAddress, uint64_t cacheSlide, SharedCache* sharedCache);
 
     std::strong_ordering    operator<=>(const Image& other) const;
-    uint64_t            rebasedAddress() const;
+    SafePointer         rebasedAddress() const;
     const UUID&         uuid() const;
     const char*         installname() const ;
     const char*         filename() const;
@@ -209,7 +236,7 @@ private:
     mutable UUID                            _uuid;
     mutable Mapper::Pointer<MachOLoaded>    _ml;
     std::optional<uint64_t>                 _sharedCacheSlide;
-    void*                                   _rebasedAddress     = nullptr;
+    SafePointer                             _rebasedAddress;
     SharedCache*                            _sharedCache        = nullptr;
     mutable const char*                     _installname        = nullptr;
     mutable bool                            _uuidLoaded         = false;
@@ -231,9 +258,9 @@ private:
 };
 
 struct VIS_HIDDEN SharedCache {
-                                    SharedCache(Allocator& ephemeralAllocator, FileRecord&& file, SharedPtr<Mapper>& M, uint64_t rebasedAddress, bool P);
+                                    SharedCache(Allocator& ephemeralAllocator, FileRecord&& file, SharedPtr<Mapper>& M, SafePointer rebasedAddress, bool P);
     const UUID&                     uuid() const;
-    uint64_t                        rebasedAddress() const;
+    SafePointer                     rebasedAddress() const;
     uint64_t                        size() const;
     void                            forEachFilePath(void (^block)(const char* file_path)) const;
     bool                            isPrivateMapped() const;
@@ -264,34 +291,8 @@ private:
     Mapper::Pointer<dyld_cache_header>  _header;
     SharedPtr<Mapper>                   _mapper;
     uint64_t                            _slide      = 0;
-    uint64_t                            _rebasedAddress;
+    SafePointer                         _rebasedAddress;
     bool                                _private;
-};
-
-struct VIS_HIDDEN Bitmap {
-    Bitmap()                            = delete;
-    Bitmap(const Bitmap&)               = delete;
-    Bitmap(Bitmap&&);
-    Bitmap& operator=(const Bitmap&)    = delete;
-    Bitmap& operator=(Bitmap&&);
-    Bitmap(Allocator& allocator, size_t size);
-    Bitmap(Allocator& allocator, std::span<std::byte>& data);
-    void setBit(size_t bit);
-    bool checkBit(size_t bit)  const;
-    void emit(Vector<std::byte>& data) const;
-    size_t size() const;
-    friend void swap(Bitmap& x, Bitmap& y) {
-        x.swap(y);
-    }
-private:
-    void swap(Bitmap& other) {
-        if (this == &other) { return; }
-        using std::swap;
-        swap(_size,     other._size);
-        swap(_bitmap,   other._bitmap);
-    }
-    size_t                  _size   = 0;
-    UniquePtr<std::byte>    _bitmap = nullptr;
 };
 
 struct VIS_HIDDEN ProcessSnapshot {
@@ -302,7 +303,7 @@ struct VIS_HIDDEN ProcessSnapshot {
     void                                forEachImage(void (^block)(Image* image));
     void                                forEachImageNotIn(const ProcessSnapshot& other, void (^block)(Image* image));
 #if BUILDING_DYLD
-    void                                addImages(RuntimeState* state, const std::span<const Loader*>& loaders);
+    void                                addImages(RuntimeState* state, Vector<ConstAuthLoader>& loaders);
     void                                removeImages(RuntimeState* state, const std::span<const Loader*>& loaders);
 #endif /* BUILDING_DYLD */
     void                                addImage(Image&& images);
@@ -334,14 +335,18 @@ private:
         bool deserialize(const std::span<std::byte> data);
     private:
         template <typename T>
-        static void emit(T t, Vector<std::byte>& data) {
+        void emit(T t, Vector<std::byte>& data) {
             auto newData = (std::byte*)&t;
             for(auto i = 0; i < sizeof(T); ++i) {
                 data.push_back(newData[i]);
             }
         }
+        template<>
+        void emit(std::span<std::byte> t, Vector<std::byte>& data) {
+            std::copy(t.begin(), t.end(), std::back_inserter(data));
+        }
         template <typename T>
-        static auto read(std::span<std::byte>& data) {
+        auto read(std::span<std::byte>& data) {
             contract(sizeof(T) <= data.size());
             T result;
             std::copy(&data[0], &data[sizeof(T)], (std::byte*)&result);
@@ -353,6 +358,10 @@ private:
 
         void emitStringRef(const char* string, Vector<std::byte>& data);
     private:
+        static const size_t kByteSize      = 8;
+        static const size_t kPageSize4K    = 4096;
+        static const size_t kPageSize16K   = 16384;
+
         ProcessSnapshot&                _processSnapshot;
         Allocator&                      _ephemeralAllocator;
         FileManager&                    _fileManager;

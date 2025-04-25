@@ -28,7 +28,7 @@
 #include <span>
 #include <stdint.h>
 
-#include "Defines.h"
+#include "MachODefines.h"
 #include "Error.h"
 #include "Architecture.h"
 

@@ -104,7 +104,7 @@ private:
             // If keys need destructros called call them
             if constexpr(!std::is_trivially_destructible<value_type>::value) {
                 for (auto i = 0; i < node->capacity(); ++i) {
-                    node->keys()[i].~T();
+                    node->allKeySlots()[i].~T();
                 }
             }
             allocator->free((void*)node);
@@ -127,6 +127,13 @@ private:
                 return std::span<value_type>((value_type*)&_data.leaf.keys[0], size());
             } else {
                 return std::span<value_type>((value_type*)&_data.internal.keys[0], size());
+            }
+        }
+        std::span<value_type> allKeySlots() const {
+            if (leaf()) {
+                return std::span<value_type>((value_type*)&_data.leaf.keys[0], capacity());
+            } else {
+                return std::span<value_type>((value_type*)&_data.internal.keys[0], capacity());
             }
         }
         std::span<NodeCore*> children() const {
@@ -250,7 +257,7 @@ private:
             Node* right = children()[index+1];
 
             // Move the key from the index down into the merged child and shift eleements
-            left->keys()[left->size()] = std::move(keys()[index]);
+            left->allKeySlots()[left->size()] = std::move(keys()[index]);
             std::move(keys().begin()+index+1, keys().end(), keys().begin()+index);
             std::move(children().begin()+index+2, children().end(), children().begin()+index+1);
 
@@ -307,7 +314,7 @@ private:
     }
 
     template<>
-    constexpr static uint8_t getInteriorNodeCapacity<2>() {
+    constexpr uint8_t getInteriorNodeCapacity<2>() {
         return 2;
     }
 
@@ -323,7 +330,7 @@ private:
     }
 
     template<>
-    constexpr static uint8_t getLeafNodeCapacity<2>(uint16_t targetSize) {
+    constexpr uint8_t getLeafNodeCapacity<2>(uint16_t targetSize) {
         return 2;
     }
 

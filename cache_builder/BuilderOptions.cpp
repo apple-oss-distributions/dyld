@@ -23,15 +23,18 @@
 */
 
 #include "BuilderOptions.h"
+#include "Platform.h"
 
 using namespace cache_builder;
 using dyld3::GradedArchs;
+
+using mach_o::Platform;
 
 //
 // MARK: --- cache_builder::Options methods ---
 //
 
-BuilderOptions::BuilderOptions(std::string_view archName, dyld3::Platform platform,
+BuilderOptions::BuilderOptions(std::string_view archName, Platform platform,
                                bool dylibsRemovedFromDisk, bool isLocallyBuiltCache,
                                CacheKind kind, bool forceDevelopmentSubCacheSuffix)
     : archs(GradedArchs::forName(archName.data()))
@@ -45,30 +48,30 @@ BuilderOptions::BuilderOptions(std::string_view archName, dyld3::Platform platfo
 
 bool BuilderOptions::isSimulator() const
 {
-    return dyld3::MachOFile::isSimulatorPlatform(this->platform);
+    return this->platform.isSimulator();
 }
 
 bool BuilderOptions::isExclaveKit() const
 {
-    return dyld3::MachOFile::isExclaveKitPlatform(this->platform);
+    return this->platform.isExclaveKit();
 }
 
 //
 // MARK: --- cache_builder::InputFile methods ---
 //
 
-void InputFile::setError(error::Error&& err)
+void InputFile::addError(error::Error&& err)
 {
-    // This is a good place to catch if a specific dylib has an error
-    this->error = std::move(err);
+    // This is a good place to breakpoint and catch if a specific dylib has an error
+    this->errors.push_back(std::move(err));
 }
 
-const error::Error& InputFile::getError() const
+std::span<const error::Error> InputFile::getErrors() const
 {
-    return this->error;
+    return this->errors;
 }
 
 bool InputFile::hasError() const
 {
-    return this->error.hasError();
+    return !this->errors.empty();
 }

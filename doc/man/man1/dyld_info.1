@@ -1,4 +1,4 @@
-.Dd January 9, 2024
+.Dd July 24, 2024
 .Dt dyld_info 1
 .Os Darwin
 .Sh NAME
@@ -27,6 +27,7 @@
 .Op Fl section_bytes Ar segment-name Ar section-name
 .Op Fl all_sections_bytes
 .Op Fl validate_only
+.Op Fl no_validate
 .Ar file(s)
 .Sh DESCRIPTION
 The dyld_info tool will display information that dyld uses from binaries.
@@ -81,6 +82,8 @@ Display content of specified section as hex bytes.
 Display content of all sections as hex bytes.
 .It Fl validate_only
 Display nothing if binary is valid, or information about what parts are malformed.
+.It Fl no_validate
+Skip validation before inspecting binary.
 .It Fl all_dir Ar directory
 Will start at specified directory, recursively scan, and run dyld_info on each file found.
 .It Fl all_dyld_cache

@@ -44,6 +44,7 @@
   #include <sys/mman.h>
   #include <sys/stat.h>
   #include <sys/ioctl.h>
+  #include <sys/sysctl.h>
   #include <libkern/OSAtomic.h>
   #include <libc_private.h>
   #include <pthread.h>
@@ -835,6 +836,13 @@ int getattrlist(const char* path, void* attrList, void * attrBuf, size_t attrBuf
 int getfsstat(struct statfs *buf, int bufsize, int flags) {
     if ( gSyscallHelpers->version >= 17 )
         return gSyscallHelpers->getfsstat(buf, bufsize, flags);
+    return -1;
+}
+
+int sysctlbyname(const char* name, void* oldp, size_t* oldlenp, void* newp, size_t newlen)
+{
+    if ( gSyscallHelpers->version >= 18 )
+        return gSyscallHelpers->sysctlbyname(name, oldp, oldlenp, newp, newlen);
     return -1;
 }
 

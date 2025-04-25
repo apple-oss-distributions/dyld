@@ -16,3 +16,4 @@ SDKROOT = macosx.internal
 SUPPORTED_PLATFORMS = macosx iphoneos watchos appletvos bridgeos;
 VERSIONING_SYSTEM = "apple-generic";
 
+CODE_SIGN_IDENTITY = $(TRUSTED_CODE_SIGN_IDENTITY)

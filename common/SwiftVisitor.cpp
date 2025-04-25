@@ -35,6 +35,7 @@
 #include <assert.h>
 
 using namespace metadata_visitor;
+using mach_o::Header;
 
 //
 // MARK: --- SwiftVisitor methods ---
@@ -76,21 +77,21 @@ std::optional<SwiftVisitor::SectionContent> SwiftVisitor::findSection(const char
 #endif
 
     __block std::optional<SwiftVisitor::SectionContent> sectionContent;
-    mf->forEachSection(^(const dyld3::MachOFile::SectionInfo& sectInfo, bool malformedSectionRange, bool& stop) {
-        if ( (strcmp(sectInfo.segInfo.segName, segmentName) != 0) )
+    ((const Header*)mf)->forEachSection(^(const Header::SegmentInfo& segInfo, const Header::SectionInfo& sectInfo, bool& stop) {
+        if ( sectInfo.segmentName != segmentName )
             return;
-        if ( strcmp(sectInfo.sectName, sectionName) != 0 )
+        if ( sectInfo.sectionName != sectionName )
             return;
 
 #if SUPPORT_VM_LAYOUT
-        const void* targetValue = (const void*)(sectInfo.sectAddr + this->dylibMA->getSlide());
-        ResolvedValue target(targetValue, VMAddress(sectInfo.sectAddr));
+        const void* targetValue = (const void*)(sectInfo.address + this->dylibMA->getSlide());
+        ResolvedValue target(targetValue, VMAddress(sectInfo.address));
 #else
-        VMOffset offsetInSegment(sectInfo.sectAddr - sectInfo.segInfo.vmAddr);
-        ResolvedValue target(this->segments[sectInfo.segInfo.segIndex], offsetInSegment);
+        VMOffset offsetInSegment(sectInfo.address - segInfo.vmaddr);
+        ResolvedValue target(this->segments[sectInfo.segIndex], offsetInSegment);
 #endif
         sectionContent.emplace(std::move(target));
-        sectionContent->sectSize       = sectInfo.sectSize;
+        sectionContent->sectSize       = sectInfo.size;
 
         stop = true;
     });

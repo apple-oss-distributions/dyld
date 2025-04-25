@@ -31,7 +31,7 @@
 #include <string_view>
 
 #include "CString.h"
-#include "Defines.h"
+#include "MachODefines.h"
 #include "Version32.h"
 #include "Error.h"
 
@@ -54,9 +54,9 @@ class Architecture;
 class VIS_HIDDEN Platform
 {
 public:
-                        Platform(const Platform& other) : _info(other._info) { }
+    constexpr           Platform(const Platform& other) : _info(other._info), _value(other._value) { }
                         Platform(uint32_t platformNumber);
-                        Platform(): Platform(0) {}
+    constexpr           Platform() : _info(nullptr) {}
 
     // checks if constructed Platform is a known platform
     Error               valid() const;
@@ -66,12 +66,18 @@ public:
 
     // returns static string or "unknown"
     CString             name() const;
+    
+    // return the base platform (or itself)
+    Platform            basePlatform() const;
 
     // returns if this is a simulator platform
     bool                isSimulator() const;
     bool                isExclaveCore() const;
     bool                isExclaveKit() const;
     bool                isExclave() const { return isExclaveCore() || isExclaveKit(); }
+
+    // returns directory of the system libraries for the given platform, or an empty string if the platform doesn't use libSystem
+    CString             libSystemDir() const;
 
 
     // return PLATFORM_ number
@@ -87,8 +93,8 @@ public:
     static Platform     current();
     static Platform     byName(std::string_view name);
 
-    bool                operator==(const Platform& other) const { return (_info == other._info); }
-    Platform&           operator=(const Platform& other) { _info = other._info; return *this; }
+    bool                operator==(const Platform& other) const { return (_info == other._info && _value == other._value); }
+    Platform&           operator=(const Platform& other) { _info = other._info; _value = other._value; return *this; }
 
     // known platforms
     static constinit const Platform     macOS;
@@ -135,7 +141,8 @@ private:
         auto            operator<=>(const Epoch& other) const = default;
 
         static constinit const Epoch      invalid;
-        static constinit const Epoch      fall2015;
+        static constinit const Epoch      fall2012; // iOS 6
+        static constinit const Epoch      fall2015; // iOS 9
         static constinit const Epoch      fall2016;
         static constinit const Epoch      fall2017;
         static constinit const Epoch      fall2018;
@@ -148,6 +155,8 @@ private:
         static constinit const Epoch      fall2023;
         static constinit const Epoch    spring2024;
         static constinit const Epoch      fall2024;
+        static constinit const Epoch    spring2025;
+        static constinit const Epoch      fall2025;
 
     private:
         friend class PlatformInfo; // to get access to year()
@@ -165,6 +174,7 @@ private:
 
     explicit constexpr  Platform(const PlatformInfo& info) : _info(&info) { }
     const PlatformInfo*  _info;
+    uint32_t             _value = 0;
 };
 
 

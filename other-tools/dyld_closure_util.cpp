@@ -200,12 +200,26 @@ int main(int argc, const char* argv[])
             exit(1);
         }
 
+        std::string_view libSystemPath;
+        if ( dyldCache->platform() == mach_o::Platform::driverKit ) {
+            libSystemPath = "/System/DriverKit/usr/lib/libSystem.dylib";
+        } else if ( dyldCache->platform().isExclaveKit() ) {
+            libSystemPath = "/System/ExclaveKit/usr/lib/libSystem.dylib";
+        } else {
+            libSystemPath = "/usr/lib/libSystem.B.dylib";
+        }
+
         // HACK: use libSystem.dylib from cache as main executable to bootstrap state
         uint32_t imageIndex;
-        if ( dyldCache->hasImagePath("/usr/lib/libSystem.B.dylib", imageIndex) ) {
+        if ( dyldCache->hasImagePath(libSystemPath.data(), imageIndex) ) {
             uint64_t ignore1;
             uint64_t ignore2;
             mainMA = (MachOAnalyzer*)dyldCache->getIndexedImageEntry(imageIndex, ignore1, ignore2);
+        }
+
+        if ( mainMA == nullptr ) {
+            fprintf(stderr, "dyld_closure_util: can't find libSystem in dyld cache\n");
+            exit(1);
         }
     }
 
@@ -215,7 +229,7 @@ int main(int argc, const char* argv[])
     osDelegate._rootPath    = fsRootPath;
     osDelegate._overlayPath = fsOverlayPath;
 
-    Allocator&             alloc = Allocator::defaultAllocator();
+    Allocator&             alloc = MemoryManager::memoryManager().defaultAllocator();
     __block ProcessConfig  config(&kernArgs, osDelegate, alloc);
     RuntimeLocks           locks;
     RuntimeState           state(config, locks, alloc);
@@ -234,16 +248,13 @@ int main(int argc, const char* argv[])
             state.setMainLoader(mainLoader);
 
             // platform was a guess from libSystem.dylib, now we have the actual binary loaded, use its platform
-            mainLoader->loadAddress(state)->forEachSupportedPlatform(^(dyld3::Platform plat, uint32_t minOS, uint32_t sdk) {
-                const dyld3::Platform* p = &config.process.platform;
-                *(dyld3::Platform*)p = plat;
-            });
+            mach_o::PlatformAndVersions pvs = ((mach_o::Header*)mainLoader->loadAddress(state))->platformAndVersions();
+            config.process.platform = pvs.platform;
 
             // now that main executable is loaded, use its actual platform as the global platform
-            if ( state.config.process.platform == dyld3::Platform::macOS ) {
-                mainLoader->loadAddress(state)->forEachSupportedPlatform(^(dyld3::Platform exePlatform, uint32_t minOS, uint32_t sdk) {
-                    config.process.platform = exePlatform;
-                });
+            if ( state.config.process.platform == mach_o::Platform::macOS ) {
+                mach_o::PlatformAndVersions pvsExe = ((mach_o::Header*)mainLoader->loadAddress(state))->platformAndVersions();
+                config.process.platform = pvsExe.platform;
             }
             __block MissingPaths missingPaths;
             auto missingLogger = ^(const char* mustBeMissingPath) {
@@ -291,7 +302,7 @@ int main(int argc, const char* argv[])
     else if ( printClosureFile ) {
         size_t       mappedSize;
         Diagnostics  diag;
-        if ( const dyld4::PrebuiltLoaderSet* pbls = (dyld4::PrebuiltLoaderSet*)config.syscall.mapFileReadOnly(diag, printClosureFile, &mappedSize) ) {
+        if ( const dyld4::PrebuiltLoaderSet* pbls = (dyld4::PrebuiltLoaderSet*)config.syscall.mapFileReadOnly(diag, printClosureFile, nullptr /* fd */, &mappedSize) ) {
             if ( pbls->validHeader(state) ) {
                 state.setProcessPrebuiltLoaderSet(pbls);
                 pbls->print(state, stdout, /* printComments */ true);

@@ -28,12 +28,7 @@
 #include <span>
 #include <stdint.h>
 
-#if BUILDING_MACHO_WRITER
-  #include <vector>
-  #include <unordered_map>
-#endif
-
-#include "Defines.h"
+#include "MachODefines.h"
 #include "Error.h"
 
 namespace mach_o {
@@ -57,25 +52,12 @@ public:
 
     Error   valid() const;
 
-#if BUILDING_MACHO_WRITER
-                        // used build data in code
-                        DataInCode(std::span<const Entry> entries);
-    static size_t       estimateDataInCodeSize(std::span<const Entry> entries);
-
-    std::span<const uint8_t>  bytes() const { return _bytes; }
-#endif
-
     static uint32_t     dataInCodeSize(bool is64);
 
-private:
+protected:
 
     const uint8_t*       _dataInCodeStart;
     const uint8_t*       _dataInCodeEnd;
-#if BUILDING_MACHO_WRITER
-    std::vector<uint8_t> _bytes;
-    Error                _buildError;
-    static const bool    _verbose = false;
-#endif
 };
 
 

@@ -93,7 +93,7 @@ public:
     int impCachesVersion = 1;
 
     IMPCachesBuilder(Diagnostics& diag, TimeRecorder& timeRecorder,
-                     const std::vector<imp_caches::Dylib>& inputDylibs, const dyld3::json::Node& optimizerConfiguration);
+                     const std::vector<imp_caches::Dylib>& inputDylibs, const json::Node& optimizerConfiguration);
 
     struct ObjCClass {
 
@@ -174,7 +174,7 @@ private:
         __block std::vector<std::string>    dependentLibraries;
     };
 
-    const std::string * nameAndIsMetaclassPairFromNode(const dyld3::json::Node & node, bool* metaclass);
+    const std::string * nameAndIsMetaclassPairFromNode(const json::Node & node, bool* metaclass);
 
     Diagnostics& _diagnostics;
     TimeRecorder& _timeRecorder;

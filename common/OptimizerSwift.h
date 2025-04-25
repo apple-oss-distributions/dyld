@@ -476,7 +476,7 @@ void buildSwiftHashTables(const cache_builder::BuilderConfig& config,
                           const void* headerInfoRO, const void* headerInfoRW,
                           CacheVMAddress headerInfoROUnslidVMAddr,
                           cache_builder::CacheDylib* prespecializedDylib,
-                          cache_builder::SwiftProtocolConformanceOptimizer& swiftProtocolConformanceOptimizer);
+                          cache_builder::SwiftOptimizer& swiftOptimizer);
 #endif // BUILDING_CACHE_BUILDER || BUILDING_CACHE_BUILDER_UNIT_TESTS
 
 std::optional<uint16_t> getPreoptimizedHeaderROIndex(const void* headerInfoRO, const void* headerInfoRW, const dyld3::MachOAnalyzer* ma);

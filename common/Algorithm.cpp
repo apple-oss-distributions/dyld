@@ -21,10 +21,7 @@
  * @APPLE_LICENSE_HEADER_END@
  */
 
-#if BUILDING_MACHO_WRITER
-
 #include "Algorithm.h"
+#include "Defines.h"
 
-bool gSerializeDispatchApply = false;
-
-#endif
+VIS_HIDDEN bool gSerializeDispatchApply = false;

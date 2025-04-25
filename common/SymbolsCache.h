@@ -78,12 +78,12 @@ struct VIS_HIDDEN SymbolsCacheBinary
     std::string                         inputFileName;
 };
 
-// Represents a binary for which we found errors in checkBinaries
-struct ErrorResultBinary
+// Represents a binary for which we found errors/warnings in checkBinaries
+struct ResultBinary
 {
     struct ClientBinary
     {
-        std::string installName;
+        std::string path;
         std::string uuid;
         std::string rootPath;
         std::string projectName;
@@ -96,6 +96,20 @@ struct ErrorResultBinary
     std::string     rootPath;
     std::string     projectName;
     ClientBinary    client;
+
+    // defaults to erroring out, but can change to just a warning
+    bool            warn = false;
+};
+
+// Represents a binary for which exports changed
+struct ExportsChangedBinary
+{
+    std::string     symbolName;
+    std::string     installName;
+    std::string     arch;
+    std::string     uuid;
+    std::string     projectName;
+    bool            wasAdded = false; // false -> was removed, true -> was added
 };
 
 class VIS_HIDDEN SymbolsCache
@@ -132,16 +146,24 @@ public:
 
     typedef std::unordered_set<std::string> BinaryProjects;
 
+    enum class ExecutableMode
+    {
+        off,
+        warn,
+        error
+    };
+
     // This is the main method that drives verification of new content in the build.
     // We parse them in to the input here, then this method checks if the database will
     // have new missing symbol errors as a result of applying these binaries to the database
     // Note the return value is an error if there was some issue querying the database, while
     // the output 'errors' is about errors on binaries themselves, not database errors
-    mach_o::Error checkNewBinaries(bool warnOnRemovedSymbols,
+    mach_o::Error checkNewBinaries(bool warnOnRemovedSymbols, ExecutableMode executableMode,
                                    std::vector<SymbolsCacheBinary>&& binaries,
                                    const BinaryProjects& binaryProjects,
-                                   std::vector<ErrorResultBinary>& errors,
-                                   std::vector<mach_o::Error>& warnings) const;
+                                   std::vector<ResultBinary>& results,
+                                   std::vector<mach_o::Error>& internalWarnings,
+                                   std::vector<ExportsChangedBinary>* exportsChanged = nullptr) const;
 
     mach_o::Error addBinaries(std::vector<SymbolsCacheBinary>& binaries);
 
@@ -218,5 +240,19 @@ private:
                                std::string_view uuid, std::string_view projectName,
                                int64_t& binaryID);
 };
+
+// helper methods to print the output from the symbols cache
+VIS_HIDDEN void printResultSummary(std::span<ResultBinary> verifyResults, bool bniOutput,
+                                   FILE* summaryLogFile);
+
+VIS_HIDDEN void printResultsSymbolDetails(std::span<ResultBinary> verifyResults, FILE* detailsLogFile);
+
+VIS_HIDDEN void printResultsInternalInformation(std::span<ResultBinary> verifyResults,
+                                                std::span<std::pair<std::string, std::string>> rootErrors,
+                                                FILE* detailsLogFile);
+
+VIS_HIDDEN void printResultsJSON(std::span<ResultBinary> verifyResults,
+                                 std::span<ExportsChangedBinary> exportsChanged,
+                                 FILE* jsonFile);
 
 #endif /* SymbolsCache_h */

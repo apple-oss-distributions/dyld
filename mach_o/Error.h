@@ -25,9 +25,11 @@
 #ifndef mach_o_Error_h
 #define mach_o_Error_h
 
+#include <TargetConditionals.h>
 #include <stdarg.h>
 
-#include "Defines.h"
+#include "MachODefines.h"
+#include "va_list_wrap.h"
 
 namespace mach_o {
 
@@ -44,7 +46,7 @@ class VIS_HIDDEN [[nodiscard]] Error
 public:
                     Error() = default;
                     Error(const char* format, ...)  __attribute__((format(printf, 2, 3)));
-                    Error(const char* format, va_list list) __attribute__((format(printf, 2, 0)));
+                    Error(const char* format, va_list_wrap vaWrap) __attribute__((format(printf, 2, 0)));
                     Error(Error&&); // can move
                     Error& operator=(const Error&) = delete; //  can't copy assign
                     Error& operator=(Error&&); // can move

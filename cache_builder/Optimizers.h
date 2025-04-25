@@ -354,7 +354,7 @@ struct PointerHashTableOptimizerInfo
     uint32_t               numPointerKeys = 0;
 };
 
-struct SwiftProtocolConformanceOptimizer
+struct SwiftOptimizer
 {
     // How much space we need for the Swift optimization header
     uint64_t                                    optsHeaderByteSize = 0;
@@ -419,7 +419,7 @@ struct UnmappedSymbolsOptimizer
         uint32_t    nlistCount          = 0;
     };
 
-    // On embedded, locals are unmapped and stored in a .symols file.  This is the map
+    // On embedded, locals are unmapped and stored in a .symbols file.  This is the map
     // of those strings
     SymbolStringMap                 stringMap;
     uint32_t                        stringBufferSize    = 0;
@@ -484,12 +484,24 @@ struct PatchTableOptimizer
 
     // The Chunk in a SubCache which will contain the dylib patch table
     const PatchTableChunk*      patchTableChunk = nullptr;
-    
+
     // One PatchInfo for each cache dylib.
     // After bind(), each dylib will have a list of all the locations it used in other dylibs.
     // There will be one list of locations for each bindTargets[] entry in the dylib
     std::vector<PatchInfo>      patchInfos;
 };
+
+struct FunctionVariantsOptimizer
+{
+    // How much linkedit space we need for the list of pointers that need updating at launch
+    uint64_t                                        fvInfoTotalByteSize = 0;
+
+    // The Chunk in the global SubCache which will contain the dylib patch table
+    const FunctionVariantsPatchTableChunk*          chunk = nullptr;
+
+    std::vector<dyld_cache_function_variant_entry>  infos;
+};
+
 
 struct PrebuiltLoaderBuilder
 {
@@ -512,6 +524,15 @@ struct PrebuiltLoaderBuilder
 
     // The Chunk in a SubCache which will contain the executable trie
     const CacheTrieChunk*           executableTrieChunk = nullptr;
+};
+
+struct PrewarmingOptimizer
+{
+    // How much space we need for the prewarming data
+    uint64_t                prewarmingByteSize = 0;
+
+    // The Chunk in a SubCache which will contain the prewarming data
+    PrewarmingChunk*        prewarmingChunk = nullptr;
 };
 
 } // namespace cache_builder

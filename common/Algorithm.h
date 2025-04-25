@@ -24,8 +24,6 @@
 #ifndef Algorithm_h
 #define Algorithm_h
 
-#if BUILDING_MACHO_WRITER
-
 #include <atomic>
 #include <algorithm>
 #include <optional>
@@ -69,8 +67,19 @@ inline void mapReduce(std::span<ElementTy> elements, size_t elementsPerChunk,
     // call map(elements range) on each MAP object for a subrange of elements
     const size_t chunkCount     = (elements.size() + (elementsPerChunk - 1)) / elementsPerChunk;
     const size_t lastChunkIndex = chunkCount - 1;
-    ChunkTy      chunksStorage[chunkCount];
-    ChunkTy*     chunks = chunksStorage; // work around clang bug
+
+    // rdar://130080127 (Inputs with lots of potential duplicate functions may exhaust available stack space)
+    std::unique_ptr<ChunkTy[]> chunksHeapStorage;
+    ChunkTy*                   chunks = nullptr;
+    constexpr size_t MaxStackAllocaSize = 1 << 17; // limit at 128kb
+    if ( (sizeof(ChunkTy) * chunkCount) <= MaxStackAllocaSize ) {
+        void* space = alloca(sizeof(ChunkTy) * chunkCount);
+        chunks = new (space) ChunkTy[chunkCount];
+    } else {
+        chunksHeapStorage = std::make_unique<ChunkTy[]>(chunkCount);
+        chunks = chunksHeapStorage.get();
+    }
+
     dispatchApply(std::span(chunks, chunkCount), ^(size_t i, ChunkTy& chunk) {
         if ( i == lastChunkIndex )
             map(i, chunk, elements.subspan(i * elementsPerChunk)); // Run the last chunk with whatever is left over
@@ -388,7 +397,5 @@ void parallelSort(Container& c)
 {
     parallelSort(c, std::less<std::remove_reference_t<decltype(*c.begin())>>{});
 }
-
-#endif
 
 #endif /* Algorithm_h */

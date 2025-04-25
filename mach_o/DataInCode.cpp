@@ -28,10 +28,6 @@
 
 #include "DataInCode.h"
 
-#if BUILDING_MACHO_WRITER
-#include <map>
-#endif
-
 namespace mach_o {
 
 DataInCode::DataInCode(const uint8_t* start, size_t size)
@@ -43,20 +39,5 @@ Error DataInCode::valid() const
 {
     return Error::none();
 }
-
-#if BUILDING_MACHO_WRITER
-
-DataInCode::DataInCode(std::span<const Entry> entries)
-{
-    assert(entries.empty());
-
-    this->_bytes.reserve(1);
-
-    // set up buffer
-    this->_dataInCodeStart = &this->_bytes.front();
-    this->_dataInCodeEnd   = &this->_bytes.back();
-}
-
-#endif // BUILDING_MACHO_WRITER
 
 } // namepace mach_o

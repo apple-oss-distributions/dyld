@@ -72,6 +72,7 @@ struct MovedLinkedit
         functionStarts,
         dataInCode,
         exportTrie,
+        functionVariants,
 
         numKinds
     };

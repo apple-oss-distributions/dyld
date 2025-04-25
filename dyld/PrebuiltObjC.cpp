@@ -30,6 +30,7 @@
 #include <sys/types.h>
 
 #include "Defines.h"
+#include "Header.h"
 #include "Loader.h"
 #include "PrebuiltLoader.h"
 #include "JustInTimeLoader.h"
@@ -43,6 +44,7 @@
 #include "PrebuiltObjC.h"
 #include "objc-shared-cache.h"
 
+using mach_o::Header;
 
 #if SUPPORT_PREBUILTLOADERS || BUILDING_UNIT_TESTS || BUILDING_CACHE_BUILDER_UNIT_TESTS
 using dyld3::OverflowSafeArray;
@@ -475,25 +477,25 @@ static void optimizeObjCSelectors(RuntimeState& state,
                                   ObjCOptimizerImage&                image)
 {
 
-    const mach_o::MachOFileRef mf       = image.jitLoader->mf(state);
-    uint32_t                pointerSize = mf->pointerSize();
+    const Header*   hdr         = (const Header*)image.jitLoader->mf(state);
+    uint32_t        pointerSize = hdr->pointerSize();
 
     // The legacy (objc1) codebase uses a bunch of sections we don't want to reason about.  If we see them just give up.
     __block bool foundBadSection = false;
-    mf->forEachSection(^(const MachOAnalyzer::SectionInfo& sectInfo, bool malformedSectionRange, bool& stop) {
-        if ( strcmp(sectInfo.segInfo.segName, "__OBJC") != 0 )
+    hdr->forEachSection(^(const Header::SectionInfo& sectInfo, bool& stop) {
+        if ( sectInfo.segmentName != "__OBJC" )
             return;
-        if ( strcmp(sectInfo.sectName, "__module_info") == 0 ) {
+        if ( sectInfo.sectionName == "__module_info" ) {
             foundBadSection = true;
             stop            = true;
             return;
         }
-        if ( strcmp(sectInfo.sectName, "__protocol") == 0 ) {
+        if ( sectInfo.sectionName == "__protocol" ) {
             foundBadSection = true;
             stop            = true;
             return;
         }
-        if ( strcmp(sectInfo.sectName, "__message_refs") == 0 ) {
+        if ( sectInfo.sectionName == "__message_refs" ) {
             foundBadSection = true;
             stop            = true;
             return;
@@ -508,8 +510,8 @@ static void optimizeObjCSelectors(RuntimeState& state,
     // Note this isn't actually supported in libobjc any more.  Its logic for deciding whether to support it is if this is true:
     // #if (defined(__x86_64__) && (TARGET_OS_OSX || TARGET_OS_SIMULATOR))
     // So to keep it simple, lets only do this walk if we are x86_64
-    if ( mf->isArch("x86_64") || mf->isArch("x86_64h") ) {
-        if ( mf->hasObjCMessageReferences() ) {
+    if ( hdr->isArch("x86_64") || hdr->isArch("x86_64h") ) {
+        if ( hdr->hasObjCMessageReferences() ) {
             image.diag.error("Cannot handle message refs");
             return;
         }
@@ -703,6 +705,62 @@ static void optimizeObjCProtocols(RuntimeState& state,
 
         image.visitProtocol(objcProtocolOpt, sharedCacheImagesMap, InputDylibVMAddress(protocolVMAddr.rawValue()),
                             InputDylibVMAddress(protocolNameVMAddr.rawValue()), protocolName);
+    });
+}
+
+static void optimizeObjCProtocolReferences(RuntimeState& state,
+                                           const objc::ProtocolHashTable* objcProtocolOpt,
+                                           PrebuiltObjC::SharedCacheImagesMapTy& sharedCacheImagesMap,
+                                           PrebuiltObjC::ProtocolMapTy& protocolMap,
+                                           ObjCOptimizerImage& image)
+{
+    if ( image.binaryInfo.protocolRefsCount == 0 )
+        return;
+
+    image.protocolFixups.reserve(image.binaryInfo.protocolRefsCount);
+
+    // FIXME: Don't make a duplicate one of these if we can pass one in instead
+    __block objc_visitor::Visitor objcVisitor = makeObjCVisitor(image.diag, state, image.jitLoader);
+    if ( image.diag.hasError() )
+        return;
+
+    objcVisitor.forEachProtocolReference(^(metadata_visitor::ResolvedValue& protocolRefValue) {
+        if ( image.diag.hasError() )
+            return;
+
+        // Follow the protocol reference to get to the actual protocol
+        metadata_visitor::ResolvedValue protocolValue = objcVisitor.resolveRebase(protocolRefValue);
+        objc_visitor::Protocol objcProtocol(protocolValue);
+
+        const char* protocolName = objcProtocol.getName(objcVisitor);
+
+        // Check if this protocol is in the map in the shared cache.  If so use that one
+        __block std::optional<uint64_t> protocolCacheOffset;
+        objcProtocolOpt->forEachProtocol(protocolName,
+                                         ^(uint64_t classCacheOffset, uint16_t dylibObjCIndex, bool& stopObjects) {
+            // Check if this image is loaded
+            if ( auto cacheIt = sharedCacheImagesMap.find(dylibObjCIndex); cacheIt != sharedCacheImagesMap.end() ) {
+                protocolCacheOffset = classCacheOffset;
+                stopObjects = true;
+            }
+        });
+        if ( protocolCacheOffset.has_value() ) {
+            // We use an absolute bind to point in to the shared cache protocols
+            PrebuiltLoader::BindTargetRef bindTarget = PrebuiltLoader::BindTargetRef::makeAbsolute(protocolCacheOffset.value());
+            image.protocolFixups.push_back(bindTarget);
+            return;
+        }
+
+        // Not using the shared cache, so we should find the protocol in the map in the closure
+        prebuilt_objc::ObjCStringKey key = { protocolName };
+        auto nameIt = protocolMap.find(key);
+        if ( nameIt == protocolMap.end() ) {
+            // FIXME: What do we do here?  The protocols are wrong?  Skip this image for now.
+            image.diag.error("Could not find protocol '%s'", protocolName);
+            return;
+        }
+        const prebuilt_objc::ObjCObjectLocation& protocolLocation = nameIt->value;
+        image.protocolFixups.push_back(protocolLocation.objectLocation);
     });
 }
 
@@ -909,6 +967,15 @@ void PrebuiltObjC::generatePerImageFixups(RuntimeState& state, uint32_t pointerS
                 fixups.selectorReferenceFixups.push_back(target);
             }
         }
+
+        // Protocol references.
+        // These are a BindTargetRef for every protocol reference to fixup
+        if ( !image.protocolFixups.empty() ) {
+            fixups.protocolReferenceFixups.reserve(image.protocolFixups.count());
+            for ( const PrebuiltLoader::BindTargetRef& target : image.protocolFixups ) {
+                fixups.protocolReferenceFixups.push_back(target);
+            }
+        }
     }
 }
 
@@ -1100,19 +1167,15 @@ void PrebuiltObjC::forEachSelectorReferenceToUnique(RuntimeState&           stat
 }
 
 static std::optional<VMOffset> getImageInfo(Diagnostics& diag, RuntimeState& state,
-                                            const Loader* ldr, const mach_o::MachOFileRef& mf)
+                                            const Loader* ldr, const Header* hdr)
 {
     __block std::optional<VMOffset> objcImageInfoRuntimeOffset;
-    mf->forEachSection(^(const dyld3::MachOAnalyzer::SectionInfo& sectionInfo, bool malformedSectionRange, bool& stop) {
-        if ( strncmp(sectionInfo.segInfo.segName, "__DATA", 6) != 0 )
+    hdr->forEachSection(^(const Header::SectionInfo& sectionInfo, bool& stop) {
+        if ( !sectionInfo.segmentName.starts_with("__DATA") )
             return;
-        if (strcmp(sectionInfo.sectName, "__objc_imageinfo") != 0)
+        if ( sectionInfo.sectionName != "__objc_imageinfo" )
             return;
-        if ( malformedSectionRange ) {
-            stop = true;
-            return;
-        }
-        if ( sectionInfo.sectSize != 8 ) {
+        if ( sectionInfo.size != 8 ) {
             stop = true;
             return;
         }
@@ -1120,14 +1183,14 @@ static std::optional<VMOffset> getImageInfo(Diagnostics& diag, RuntimeState& sta
         // We can't just access the image info directly from the MachOFile.  Instead we have to
         // use the layout to find the actual location of the segment, as we might be in the cache builder
         ldr->withLayout(diag, state, ^(const mach_o::Layout& layout) {
-            const mach_o::SegmentLayout& segment = layout.segments[sectionInfo.segInfo.segIndex];
-            uint64_t offsetInSegment = sectionInfo.sectAddr - segment.vmAddr;
+            const mach_o::SegmentLayout& segment = layout.segments[sectionInfo.segIndex];
+            uint64_t offsetInSegment = sectionInfo.address - segment.vmAddr;
             const auto* imageInfo = (MachOAnalyzer::ObjCImageInfo*)(segment.buffer + offsetInSegment);
 
             if ( (imageInfo->flags & MachOAnalyzer::ObjCImageInfo::dyldPreoptimized) != 0 )
                 return;
 
-            objcImageInfoRuntimeOffset = VMOffset(sectionInfo.sectAddr - layout.textUnslidVMAddr());
+            objcImageInfoRuntimeOffset = VMOffset(sectionInfo.address - layout.textUnslidVMAddr());
         });
         stop = true;
     });
@@ -1206,23 +1269,23 @@ void PrebuiltObjC::make(Diagnostics& diag, RuntimeState& state)
     // classes/protocols are always preferred over the app ones, so a shared cache image being delayed or not
     // impacts the choice of classes/protocols.  See protocolIsInSharedCache() for example.
     for ( const Loader* ldr : state.loaded ) {
-        const mach_o::MachOFileRef mf = ldr->mf(state);
-        uint32_t pointerSize = mf->pointerSize();
+        const Header* hdr = (const Header*)ldr->mf(state);
+        uint32_t pointerSize = hdr->pointerSize();
 
-        std::optional<VMOffset> objcImageInfoRuntimeOffset = getImageInfo(diag, state, ldr, mf);
+        std::optional<VMOffset> objcImageInfoRuntimeOffset = getImageInfo(diag, state, ldr, hdr);
 
         if ( !objcImageInfoRuntimeOffset.has_value() )
             continue;
 
         if ( ldr->dylibInDyldCache ) {
             // Add shared cache images to a map so that we can see them later for looking up classes
-            uint64_t dylibUnslidVMAddr = mf->preferredLoadAddress();
+            uint64_t dylibUnslidVMAddr = hdr->preferredLoadAddress();
 
             std::optional<uint16_t> objcIndex;
             objcIndex = objc::getPreoptimizedHeaderROIndex(headerInfoRO, headerInfoRW,
                                                            headerInfoROUnslidVMAddr.rawValue(),
                                                            dylibUnslidVMAddr,
-                                                           mf->is64());
+                                                           hdr->is64());
             if ( !objcIndex.has_value() )
                 return;
             sharedCacheImagesMap.insert({ *objcIndex, { VMAddress(dylibUnslidVMAddr), ldr } });
@@ -1239,12 +1302,12 @@ void PrebuiltObjC::make(Diagnostics& diag, RuntimeState& state)
         // Find FairPlay encryption range if encrypted
         uint32_t fairPlayFileOffset;
         uint32_t fairPlaySize;
-        if ( mf->isFairPlayEncrypted(fairPlayFileOffset, fairPlaySize) )
+        if ( hdr->isFairPlayEncrypted(fairPlayFileOffset, fairPlaySize) )
             return;
 
         __block bool hasProtectedSegment = false;
-        mf->forEachSegment(^(const dyld3::MachOAnalyzer::SegmentInfo& segInfo, bool& stop) {
-            if ( segInfo.isProtected ) {
+        hdr->forEachSegment(^(const Header::SegmentInfo& segInfo, bool& stop) {
+            if ( segInfo.isProtected() ) {
                 hasProtectedSegment = true;
                 stop                = true;
             }
@@ -1254,7 +1317,7 @@ void PrebuiltObjC::make(Diagnostics& diag, RuntimeState& state)
 #endif
 
         // This image is good so record it for use later.
-        objcImages.emplace_back((const JustInTimeLoader*)ldr, mf->preferredLoadAddress(), pointerSize);
+        objcImages.emplace_back((const JustInTimeLoader*)ldr, hdr->preferredLoadAddress(), pointerSize);
         ObjCOptimizerImage& image = objcImages.back();
         image.jitLoader           = (const JustInTimeLoader*)ldr;
 
@@ -1265,7 +1328,7 @@ void PrebuiltObjC::make(Diagnostics& diag, RuntimeState& state)
         auto getPointerBasedSection = ^(const char* name, uint64_t& runtimeOffset, uint32_t& pointerCount) {
             uint64_t offset;
             uint64_t count;
-            if ( mf->findObjCDataSection(name, offset, count) ) {
+            if ( hdr->findObjCDataSection(name, offset, count) ) {
                 if ( (count % pointerSize) != 0 ) {
                     image.diag.error("Invalid objc pointer section size");
                     return;
@@ -1284,6 +1347,7 @@ void PrebuiltObjC::make(Diagnostics& diag, RuntimeState& state)
         getPointerBasedSection("__objc_classlist", image.binaryInfo.classListRuntimeOffset, image.binaryInfo.classListCount);
         getPointerBasedSection("__objc_catlist", image.binaryInfo.categoryListRuntimeOffset, image.binaryInfo.categoryCount);
         getPointerBasedSection("__objc_protolist", image.binaryInfo.protocolListRuntimeOffset, image.binaryInfo.protocolListCount);
+        getPointerBasedSection("__objc_protorefs", image.binaryInfo.protocolRefsRuntimeOffset, image.binaryInfo.protocolRefsCount);
     }
 
     for ( ObjCOptimizerImage& image : objcImages ) {
@@ -1307,6 +1371,15 @@ void PrebuiltObjC::make(Diagnostics& diag, RuntimeState& state)
 
     // If we successfully analyzed the classes and selectors, we can now make the maps
     generateHashTables();
+
+    // Once we have the hash tables with the canonical protocols, we can generate the fixups
+    // for the protorefs, which need to point to the canonical protocol
+    for ( ObjCOptimizerImage& image : objcImages ) {
+        if ( image.diag.hasError() )
+            continue;
+
+        optimizeObjCProtocolReferences(state, objcProtocolOpt, sharedCacheImagesMap, protocolMap, image);
+    }
 
     uint32_t pointerSize = state.mainExecutableLoader->mf(state)->pointerSize();
     generatePerImageFixups(state, pointerSize);
@@ -1349,12 +1422,22 @@ uint32_t PrebuiltObjC::serializeFixups(const Loader& jitLoader, BumpAllocator& a
 
     // Selector references
     if ( !fixups.selectorReferenceFixups.empty() ) {
-        uint16_t selectorsArrayOff                = allocator.size() - serializationStart;
-        fixupInfo->selectorReferencesFixupsOffset = selectorsArrayOff;
+        uint64_t selectorsArrayOff                = allocator.size() - serializationStart;
+        fixupInfo->selectorReferencesFixupsOffset = (uint32_t)selectorsArrayOff;
         fixupInfo->selectorReferencesFixupsCount  = (uint32_t)fixups.selectorReferenceFixups.count();
         allocator.zeroFill(fixups.selectorReferenceFixups.count() * sizeof(PrebuiltLoader::BindTargetRef));
         BumpAllocatorPtr<uint8_t> selectorsArray(allocator, serializationStart + selectorsArrayOff);
         memcpy(selectorsArray.get(), fixups.selectorReferenceFixups.data(), (size_t)(fixups.selectorReferenceFixups.count() * sizeof(PrebuiltLoader::BindTargetRef)));
+    }
+
+    // Protocol references
+    if ( !fixups.protocolReferenceFixups.empty() ) {
+        uint64_t protocolsArrayOff                = allocator.size() - serializationStart;
+        fixupInfo->protocolReferencesFixupsOffset = (uint32_t)protocolsArrayOff;
+        fixupInfo->protocolReferencesFixupsCount  = (uint32_t)fixups.protocolReferenceFixups.count();
+        allocator.zeroFill(fixups.protocolReferenceFixups.count() * sizeof(PrebuiltLoader::BindTargetRef));
+        BumpAllocatorPtr<uint8_t> protocolsArray(allocator, serializationStart + protocolsArrayOff);
+        memcpy(protocolsArray.get(), fixups.protocolReferenceFixups.data(), (size_t)(fixups.protocolReferenceFixups.count() * sizeof(PrebuiltLoader::BindTargetRef)));
     }
 
     return serializationStart;

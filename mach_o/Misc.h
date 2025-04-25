@@ -28,21 +28,18 @@
 #include <stdint.h>
 
 #include <span>
+#include <string_view>
 
-#include "Defines.h"
-#include "Header.h"
+#include "MachODefines.h"
 #include "Error.h"
 
 namespace mach_o {
 
-// replacements for posix that handle EINTR and EAGAIN
-int	resilient_stat(const char* path, struct stat* buf) VIS_HIDDEN;
-int	resilient_open(const char* path, int flag, int other) VIS_HIDDEN;
-
+struct Header;
 
 /// Returns true if (addLHS + addRHS) > b, or if the add overflowed
 template<typename T>
-inline bool greaterThanAddOrOverflow(uint32_t addLHS, uint32_t addRHS, T b) {
+VIS_HIDDEN inline bool greaterThanAddOrOverflow(uint32_t addLHS, uint32_t addRHS, T b) {
     uint32_t sum;
     if (__builtin_add_overflow(addLHS, addRHS, &sum) )
         return true;
@@ -51,7 +48,7 @@ inline bool greaterThanAddOrOverflow(uint32_t addLHS, uint32_t addRHS, T b) {
 
 /// Returns true if (addLHS + addRHS) > b, or if the add overflowed
 template<typename T>
-inline bool greaterThanAddOrOverflow(uint64_t addLHS, uint64_t addRHS, T b) {
+VIS_HIDDEN inline bool greaterThanAddOrOverflow(uint64_t addLHS, uint64_t addRHS, T b) {
     uint64_t sum;
     if (__builtin_add_overflow(addLHS, addRHS, &sum) )
         return true;
@@ -60,6 +57,7 @@ inline bool greaterThanAddOrOverflow(uint64_t addLHS, uint64_t addRHS, T b) {
 
 
 uint64_t    read_uleb128(const uint8_t*& p, const uint8_t* end, bool& malformed) VIS_HIDDEN;
+uint64_t    read_uleb128(std::span<const uint8_t>& buffer, bool& malformed) VIS_HIDDEN;
 int64_t     read_sleb128(const uint8_t*& p, const uint8_t* end, bool& malformed) VIS_HIDDEN;
 uint32_t	uleb128_size(uint64_t value) VIS_HIDDEN;
 
@@ -72,12 +70,6 @@ inline void pageAlign16K(uint64_t& value)
 {
     value = ((value + 0x3FFF) & (-0x4000));
 }
-
-bool withReadOnlyMappedFile(const char* path, void (^handler)(std::span<const uint8_t>)) VIS_HIDDEN;
-
-// used by command line tools to process files that may be on disk or in dyld cache
-void forSelectedSliceInPaths(std::span<const char*> paths, std::span<const char*> archFilter,
-                             void (^callback)(const char* slicePath, const Header* sliceHeader, size_t sliceLength)) VIS_HIDDEN;
 
 // used to walk fat/thin files and get all mach-o headers
 Error forEachHeader(std::span<const uint8_t> buffer, std::string_view path,

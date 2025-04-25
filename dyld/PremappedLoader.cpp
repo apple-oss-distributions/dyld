@@ -44,121 +44,12 @@ PremappedLoader::PremappedLoader(const MachOFile* mh, const Loader::InitialOptio
 }
 
 //////////////////////// "virtual" functions /////////////////////////////////
-
-void PremappedLoader::loadDependents(Diagnostics& diag, RuntimeState& state, const LoadOptions& options)
-{
-    if ( dependentsSet )
-        return;
-
-    // add first level of dependents
-    __block int                 depIndex = 0;
-    const mach_o::MachOFileRef& mf = this->mappedAddress;
-    const Header*               mh = (Header*)(&mf->magic); // Better way?
-    mh->forEachLinkedDylib(^(const char* loadPath, LinkedDylibAttributes depAttr, Version32 compatVersion, Version32 curVersion, bool& stop) {
-        if ( !this->allDepsAreNormal )
-            dependentAttrs(depIndex) = depAttr;
-        const Loader* depLoader = nullptr;
-        // for absolute paths, do a quick check if this is already loaded with exact match
-        if ( loadPath[0] == '/' ) {
-            for ( const Loader* ldr : state.loaded ) {
-                if ( ldr->matchesPath(state, loadPath) ) {
-                    depLoader = ldr;
-                    break;
-                }
-            }
-        }
-        if ( depLoader == nullptr ) {
-            // first load, so do full search
-            LoadChain   nextChain { options.rpathStack, this };
-            LoadOptions depOptions             = options;
-            depOptions.requestorNeedsFallbacks = false;
-            depOptions.rpathStack              = &nextChain;
-            depOptions.canBeMissing            = depAttr.weakLink;
-            Diagnostics depDiag;
-            depLoader               = getLoader(depDiag, state, loadPath, depOptions);
-            if ( depDiag.hasError() ) {
-                char  fromUuidStr[64];
-                this->getUuidStr(fromUuidStr);
-                diag.error("Library not loaded: %s\n  Referenced from:  <%s> %s\n  Reason: %s\n", loadPath, fromUuidStr, this->path(state), depDiag.errorMessage());
-                stop = true;
-            }
-        }
-        dependents[depIndex] = (Loader*)depLoader;
-        depIndex++;
-    });
-    dependentsSet = true;
-    if ( diag.hasError() )
-        return;
-
-    // breadth first recurse
-    LoadChain   nextChain { options.rpathStack, this };
-    LoadOptions depOptions = options;
-    depOptions.rpathStack  = &nextChain;
-    for ( depIndex = 0; depIndex < this->depCount; ++depIndex ) {
-        if ( Loader* depLoader = dependents[depIndex] ) {
-            depLoader->loadDependents(diag, state, depOptions);
-        }
-    }
-}
-
-void PremappedLoader::applyFixups(Diagnostics& diag, RuntimeState& state, DyldCacheDataConstLazyScopedWriter&, bool allowLazyBinds,
-                                  lsl::Vector<PseudoDylibSymbolToMaterialize>* materializingSymbols) const
-{
-    // build targets table
-    STACK_ALLOC_OVERFLOW_SAFE_ARRAY(const void*, bindTargets, 512);
-    STACK_ALLOC_OVERFLOW_SAFE_ARRAY(const void*, overrideTargetAddrs, 32);
-    STACK_ALLOC_OVERFLOW_SAFE_ARRAY(MissingFlatLazySymbol, missingFlatLazySymbols, 4);
-    this->forEachBindTarget(diag, state, nullptr, allowLazyBinds, ^(const ResolvedSymbol& target, bool& stop) {
-        const void* targetAddr = (const void*)Loader::interpose(state, Loader::resolvedAddress(state, target), this);
-        if ( state.config.log.fixups ) {
-            const char* targetLoaderName = target.targetLoader ? target.targetLoader->leafName(state) : "<none>";
-            state.log("<%s/bind#%llu> -> %p (%s/%s)\n", this->leafName(state), bindTargets.count(), targetAddr, targetLoaderName, target.targetSymbolName);
-        }
-
-        // Record missing flat-namespace lazy symbols
-        if ( target.isMissingFlatLazy )
-            missingFlatLazySymbols.push_back({ target.targetSymbolName, (uint32_t)bindTargets.count() });
-        bindTargets.push_back(targetAddr);
-    }, ^(const ResolvedSymbol& target, bool& stop) {
-        // Missing weak binds need placeholders to make the target indices line up, but we should otherwise ignore them
-        if ( (target.kind == Loader::ResolvedSymbol::Kind::bindToImage) && (target.targetLoader == nullptr) ) {
-            if ( state.config.log.fixups )
-                state.log("<%s/bind#%llu> -> missing-weak-bind (%s)\n", this->leafName(state), overrideTargetAddrs.count(), target.targetSymbolName);
-
-            overrideTargetAddrs.push_back((const void*)UINTPTR_MAX);
-        } else {
-            const void* targetAddr = (const void*)Loader::interpose(state, Loader::resolvedAddress(state, target), this);
-            if ( state.config.log.fixups ) {
-                const char* targetLoaderName = target.targetLoader ? target.targetLoader->leafName(state) : "<none>";
-                state.log("<%s/bind#%llu> -> %p (%s/%s)\n", this->leafName(state), overrideTargetAddrs.count(), targetAddr, targetLoaderName, target.targetSymbolName);
-            }
-
-            // Record missing flat-namespace lazy symbols
-            if ( target.isMissingFlatLazy )
-                missingFlatLazySymbols.push_back({ target.targetSymbolName, (uint32_t)overrideTargetAddrs.count() });
-            overrideTargetAddrs.push_back(targetAddr);
-        }
-    });
-    if ( diag.hasError() )
-        return;
-
-    // do fixups using bind targets table
-    this->applyFixupsGeneric(diag, state, ~0ULL, bindTargets, overrideTargetAddrs, true, missingFlatLazySymbols);
-
-
-    // mark any __DATA_CONST segments read-only
-    if ( this->hasConstantSegmentsToProtect() )
-        this->makeSegmentsReadOnly(state);
-
-    this->fixUpsApplied = true;
-}
-
 bool PremappedLoader::dyldDoesObjCFixups() const
 {
     return false; //TODO: double-check exclaves behaviour
 }
 
-void PremappedLoader::withLayout(Diagnostics &diag, RuntimeState& state,
+void PremappedLoader::withLayout(Diagnostics &diag, const RuntimeState& state,
                         void (^callback)(const mach_o::Layout &layout)) const
 {
     this->analyzer()->withVMLayout(diag, callback);
@@ -182,23 +73,17 @@ bool PremappedLoader::beginInitializers(RuntimeState&)
 
 //////////////////////// private functions  /////////////////////////////////
 
-static bool hasPlusLoad(const MachOFile* mh)
-{
-    Diagnostics diag;
-    return mh->hasPlusLoadMethod(diag);
-}
-
-static bool hasDataConst(const MachOFile* mh)
+static bool hasDataConst(const Header* mh)
 {
     __block bool result = false;
-    mh->forEachSegment(^(const MachOAnalyzer::SegmentInfo& info, bool& stop) {
-        if ( info.readOnlyData )
+    mh->forEachSegment(^(const Header::SegmentInfo& info, bool& stop) {
+        if ( info.readOnlyData() )
             result = true;
     });
     return result;
 }
 
-PremappedLoader* PremappedLoader::make(RuntimeState& state, const MachOFile* mh, const char* path, bool willNeverUnload, const mach_o::Layout* layout)
+PremappedLoader* PremappedLoader::make(RuntimeState& state, const MachOFile* mh, const char* path, bool willNeverUnload, bool overridesCache, uint16_t overridesDylibIndex, const mach_o::Layout* layout)
 {
     bool allDepsAreNormal  = true;
     uint32_t depCount      = mh->dependentDylibCount(&allDepsAreNormal);
@@ -210,18 +95,18 @@ PremappedLoader* PremappedLoader::make(RuntimeState& state, const MachOFile* mh,
     uuid_t uuid;
 
     Loader::InitialOptions options;
-    options.inDyldCache     = false;
+    options.inDyldCache     = DyldSharedCache::inDyldCache(state.config.dyldCache.addr, mh);
     options.hasObjc         = mh->hasObjC();
-    options.mayHavePlusLoad = hasPlusLoad(mh);
-    options.roData          = hasDataConst(mh);
+    options.mayHavePlusLoad = ((const Header*)mh)->hasPlusLoadMethod();
+    options.roData          = hasDataConst((const Header*)mh);
     options.neverUnloaded   = willNeverUnload;
     options.leaveMapped     = true;
     options.roObjC          = options.hasObjc && mh->hasSection("__DATA_CONST", "__objc_selrefs");
     options.pre2022Binary   = true;
-    options.hasUUID         = mh->getUuid(uuid);
+    options.hasUUID         = ((const Header*)mh)->getUuid(uuid);
     options.hasWeakDefs     = mh->hasWeakDefs();
-    options.hasTLVs         = mh->hasThreadLocalVariables();
-    options.belowLibSystem  = mh->isDylib() && (strncmp(mh->installName(), "/usr/lib/system/lib", 19) == 0);
+    options.hasTLVs         = ((Header*)mh)->hasThreadLocalVariables();
+    options.belowLibSystem  = mh->isDylib() && (strncmp(((const Header*)mh)->installName(), "/usr/lib/system/lib", 19) == 0);
 
     PremappedLoader* p = new (storage) PremappedLoader(mh, options, layout);
 
@@ -232,7 +117,7 @@ PremappedLoader* PremappedLoader::make(RuntimeState& state, const MachOFile* mh,
     p->fixUpsApplied    = false;
     p->inited           = false;
     p->hidden           = false;
-    p->altInstallName   = mh->isDylib() && (strcmp(mh->installName(), path) != 0);;
+    p->altInstallName   = mh->isDylib() && (strcmp(((const Header*)mh)->installName(), path) != 0);;
     p->allDepsAreNormal = allDepsAreNormal;
     p->padding          = 0;
 
@@ -245,12 +130,16 @@ PremappedLoader* PremappedLoader::make(RuntimeState& state, const MachOFile* mh,
 
     p->cpusubtype   = mh->cpusubtype;
 
-    parseSectionLocations(mh, p->sectionLocations);
+    parseSectionLocations((const Header*)mh, p->sectionLocations);
 
     if ( !mh->hasExportTrie(p->exportsTrieRuntimeOffset, p->exportsTrieSize) ) {
         p->exportsTrieRuntimeOffset = 0;
         p->exportsTrieSize          = 0;
     }
+
+    p->overridePatches = nullptr;
+    p->overridesCache  = overridesCache;
+    p->overrideIndex   = overridesDylibIndex;
 
     for ( unsigned i = 0; i < depCount; ++i ) {
         new (&p->dependents[i]) (AuthLoader) { nullptr };
@@ -261,33 +150,55 @@ PremappedLoader* PremappedLoader::make(RuntimeState& state, const MachOFile* mh,
     strlcpy(((char*)p) + p->pathOffset, path, PATH_MAX);
     state.add(p);
 
+    if ( overridesCache ) {
+        state.setHasOverriddenCachedDylib();
+    }
+
     if ( state.config.log.loaders )
         state.log("using PremappedLoader %p for %s\n", p, path);
 
     return p;
 }
 
-Loader* PremappedLoader::makePremappedLoader(Diagnostics& diag, RuntimeState& state, const char* path, const LoadOptions& options, const mach_o::Layout* layout)
+Loader* PremappedLoader::makePremappedLoader(Diagnostics& diag, RuntimeState& state, const char* path, bool isInDyldCache, uint32_t dylibCacheIndex, const LoadOptions& options, const mach_o::Layout* layout)
 {
-    Loader* result = nullptr;
+    mach_header_64* mh = nullptr;
+    bool wasPremapped = false;
     for (auto& mappedFile : state.config.process.preMappedFiles) {
         if ( strcmp(path, mappedFile.path) != 0 )
             continue;
-        xrt_platform_premapped_macho_change_state((mach_header_64*)mappedFile.loadAddress, XRT__PLATFORM_PREMAPPED_MACHO_READWRITE);
-        result = PremappedLoader::make(state, ( const MachOAnalyzer*)mappedFile.loadAddress, mappedFile.path, true, layout);
+        mh  = (mach_header_64*)mappedFile.loadAddress;
+        wasPremapped = true;
+        xrt_platform_premapped_macho_change_state(mh, XRT__PLATFORM_PREMAPPED_MACHO_READWRITE);
         break;
     }
-    if ( result == nullptr && !options.canBeMissing ) {
-        diag.error("'%s' could not be found in Pre-Mapped files\n", path);
+
+    if ( mh == nullptr ) {
+        // Image is not in the list of pre-mapped files, look in the shared cache
+        if ( isInDyldCache ) {
+            uint64_t mtime = 0;
+            uint64_t inode = 0;
+            mh = (mach_header_64*)state.config.dyldCache.getIndexedImageEntry(dylibCacheIndex, mtime, inode);
+        }
+
+        if ( mh == nullptr && !options.canBeMissing )
+            diag.error("'%s' could not be found\n", path);
     }
 
+    if ( mh == nullptr )
+        return nullptr;
+
+    bool overridesDyldCache = wasPremapped && isInDyldCache;
+
+    Loader* result = PremappedLoader::make(state, (const MachOAnalyzer*)mh, path, true, overridesDyldCache, dylibCacheIndex, layout);
+    result->ref.index = dylibCacheIndex;
     return result;
 }
 
 Loader* PremappedLoader::makeLaunchLoader(Diagnostics& diag, RuntimeState& state, const MachOAnalyzer* mainExec, const char* mainExecPath, const mach_o::Layout* layout)
 {
     xrt_platform_premapped_macho_change_state((mach_header_64 *)mainExec, XRT__PLATFORM_PREMAPPED_MACHO_READWRITE);
-    Loader* result = PremappedLoader::make(state, mainExec, mainExecPath, true, layout);
+    Loader* result = PremappedLoader::make(state, mainExec, mainExecPath, true /* willNeverUnload */, false /* overridesCache */, 0 /* overridesDylibIndex*/, layout);
     return result;
 }
 

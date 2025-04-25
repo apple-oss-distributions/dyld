@@ -43,6 +43,7 @@
 #include "dyld_process_info_internal.h"
 
 #include "Tracing.h"
+#include "DyldLegacyInterfaceGlue.h"
 
 extern "C" int _dyld_func_lookup(const char* name, void** address);
 
@@ -396,6 +397,9 @@ dyld_process_info_notify _dyld_process_info_notify(task_t task, dispatch_queue_t
                                                    void (^notifyExit)(),
                                                    kern_return_t* kr)
 {
+    if ( const IntrospectionVtable* vtable = dyldFrameworkIntrospectionVtable() ) {
+        return vtable->_dyld_process_info_notify(task, queue, notify, notifyExit, kr);
+    }
     kern_return_t krSink = KERN_SUCCESS;
     if (kr == nullptr) {
         kr = &krSink;
@@ -405,22 +409,32 @@ dyld_process_info_notify _dyld_process_info_notify(task_t task, dispatch_queue_t
     dyld_process_info_notify result = new dyld_process_info_notify_base(queue, notify, notifyExit, task, kr);
     if (result->enabled())
         return result;
-    const_cast<dyld_process_info_notify_base*>(result)->release();
+    delete result;
+   // const_cast<dyld_process_info_notify_base*>(result)->release();
     return nullptr;
 }
 
 void _dyld_process_info_notify_main(dyld_process_info_notify object, void (^notifyMain)())
 {
+    if ( const IntrospectionVtable* vtable = dyldFrameworkIntrospectionVtable() ) {
+        return vtable->_dyld_process_info_notify_main(object, notifyMain);
+    }
 	object->setNotifyMain(notifyMain);
 }
 
 void _dyld_process_info_notify_retain(dyld_process_info_notify object)
 {
+    if ( const IntrospectionVtable* vtable = dyldFrameworkIntrospectionVtable() ) {
+        return vtable->_dyld_process_info_notify_retain(object);
+    }
     const_cast<dyld_process_info_notify_base*>(object)->retain();
 }
 
 void _dyld_process_info_notify_release(dyld_process_info_notify object)
 {
+    if ( const IntrospectionVtable* vtable = dyldFrameworkIntrospectionVtable() ) {
+        return vtable->_dyld_process_info_notify_release(object);
+    }
     const_cast<dyld_process_info_notify_base*>(object)->release();
 }
 

@@ -29,7 +29,7 @@
 
 #include <span>
 
-#include "Defines.h"
+#include "MachODefines.h"
 #include "Architecture.h"
 
 
@@ -51,9 +51,7 @@ public:
 
     bool                    checksOSBinary() const { return _requiresOSBinaries; }
 
-#if BUILDING_LIBDYLD || BUILDING_UNIT_TESTS
     static const GradedArchitectures&  currentLaunch(const char* simArches); // for emulating how the kernel chooses which slice to exec()
-#endif
     static const GradedArchitectures&  currentLoad(bool keysOff, bool platformBinariesOnly);
 
     // pre-built objects for use by dyld to see if a slice is loadable
@@ -66,7 +64,6 @@ public:
     static constinit const GradedArchitectures load_watchSeries3;
     static constinit const GradedArchitectures load_watchSeries4;
 
-#if BUILDING_LIBDYLD || BUILDING_UNIT_TESTS
     // pre-built objects for use to see if a program is launchable
     static constinit const GradedArchitectures launch_iOS;                // arm64e iOS
     static constinit const GradedArchitectures launch_mac;                // Intel macs
@@ -74,7 +71,6 @@ public:
     static constinit const GradedArchitectures launch_macAppleSilicon;    // Apple Silicon macs
     static constinit const GradedArchitectures launch_sim;                // iOS simulator for Intel macs
     static constinit const GradedArchitectures launch_simAppleSilicon;    // iOS simulator for Apple Silicon macs
-#endif
 
 private:
 

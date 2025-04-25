@@ -51,6 +51,7 @@ __END_DECLS
 #include <sys/mman.h>
 #include <sys/stat.h>
 #include <sys/fsgetpath.h>
+#include <sys/sysctl.h>
 #include <unistd.h>
 #include <System/sys/reason.h>
 
@@ -158,6 +159,8 @@ namespace dyld {
         DYLD_SYSCALL_VTABLE_ENTRY(getattrlist);
         DYLD_SYSCALL_VTABLE_ENTRY(getfsstat);
         void            (*notifyMonitorOfDyldBeforeInitializers)(void);
+        // Add in version 18
+        DYLD_SYSCALL_VTABLE_ENTRY(sysctlbyname);
 	};
 
 #if __cplusplus

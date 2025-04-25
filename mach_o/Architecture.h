@@ -32,7 +32,7 @@
 #include <mach-o/loader.h>
 #include <mach-o/fat.h>
 
-#include "Defines.h"
+#include "MachODefines.h"
 
 namespace mach_o {
 
@@ -53,13 +53,11 @@ public:
                   constexpr Architecture() : _cputype(0), _cpusubtype(0) { }
                   constexpr Architecture(const Architecture& other) : _cputype(other._cputype), _cpusubtype(other._cpusubtype) { }
 
-#if BUILDING_UNIT_TESTS
-                            Architecture(const char* name) { *this = byName(name); }
-#endif
-
     bool                    operator==(const Architecture& other) const;
     bool                    operator!=(const Architecture& other) const { return !operator==(other); }
 
+    cpu_type_t              cpuType() const { return _cputype; }
+    cpu_subtype_t           cpuSubtype() const { return _cpusubtype; }
     bool                    sameCpu(const Architecture& other) const { return (_cputype == other._cputype); }
     bool                    is64() const;
     bool                    isBigEndian() const;
@@ -70,6 +68,11 @@ public:
     bool                    usesArm64Instructions() const;
     bool                    usesArm64AuthPointers() const;
     bool                    usesx86_64Instructions() const;
+    bool                    usesArm32Instructions() const;
+    bool                    usesThumbInstructions() const;
+    bool                    usesArmZeroCostExceptions() const;
+    bool                    isArm64eKernel() const;
+    int                     arm64eABIVersion() const;
 
     static Architecture current();
     static Architecture byName(std::string_view name);
@@ -84,7 +87,10 @@ public:
     static constinit const Architecture arm64e_v1;  // wrong ABI version (for testing)
     static constinit const Architecture arm64e_old; // pre-ABI versioned (for testing)
     static constinit const Architecture arm64e_kernel;
+    static constinit const Architecture arm64e_kernel_v1; // wrong ABI version (for testing)
+    static constinit const Architecture arm64e_kernel_v2; // wrong ABI version (for testing)
     static constinit const Architecture arm64_32;
+    static constinit const Architecture armv6;
     static constinit const Architecture armv6m;
     static constinit const Architecture armv7k;
     static constinit const Architecture armv7s;

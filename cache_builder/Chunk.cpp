@@ -68,6 +68,9 @@ namespace cache_builder
             // FIXME: Not sure why this is 16.  Seems like 8 would be sufficient.
             nlist       = 16,
 
+            // This chunk points to data which contains a uint128_t or similar, so needs 128-bit alignment
+            struct128   = 16,
+
             // Inside the cache there is minimal overhead for 16K alignment even on 4K hardware
             page        = 16*1024,
         };
@@ -632,12 +635,37 @@ const char* PatchTableChunk::name() const
     return "cache patch table";
 }
 
+
+//
+// MARK: --- FunctionVariantsPatchTableChunk methods ---
+//
+
+FunctionVariantsPatchTableChunk::FunctionVariantsPatchTableChunk()
+: Chunk(Kind::cacheFunctionVariantsPatchTable, Alignment::struct64)
+{
+}
+
+FunctionVariantsPatchTableChunk::~FunctionVariantsPatchTableChunk()
+{
+}
+
+void FunctionVariantsPatchTableChunk::dump() const
+{
+    printf("FunctionVariantsPatchTableChunk\n");
+}
+
+const char* FunctionVariantsPatchTableChunk::name() const
+{
+    return "function variants table";
+}
+
+
 //
 // MARK: --- PrebuiltLoaderChunk methods ---
 //
 
 PrebuiltLoaderChunk::PrebuiltLoaderChunk(Kind kind)
-    : Chunk(kind, Alignment::struct64)
+    : Chunk(kind, Alignment::struct128)
 {
 }
 
@@ -752,7 +780,10 @@ const char* LinkeditDataChunk::name() const
             chunkName = "linkedit function starts";
             break;
         case Chunk::Kind::linkeditDataInCode:
-            chunkName = "linkedit Mr Data (in code)";
+            chunkName = "linkedit data-in-code";
+            break;
+        case Chunk::Kind::linkeditFunctionVariants  :
+            chunkName = "linkedit function-variants-table";
             break;
         case Chunk::Kind::linkeditExportTrie:
             chunkName = "linkedit export trie";
@@ -783,6 +814,12 @@ bool LinkeditDataChunk::isNSymbolStrings() const
 {
     return this->kind == Chunk::Kind::linkeditSymbolStrings;
 }
+
+bool LinkeditDataChunk::isFunctionVariantsTable() const
+{
+    return this->kind == Chunk::Kind::linkeditFunctionVariants;
+}
+
 
 //
 // MARK: --- NListChunk methods ---
@@ -950,4 +987,28 @@ const char* AlignChunk::name() const
 
 const AlignChunk* AlignChunk::isAlignChunk() const {
     return this;
+}
+
+//
+// MARK: --- PrewarmingChunk methods ---
+//
+
+PrewarmingChunk::PrewarmingChunk(Kind kind)
+    : Chunk(kind, Alignment::uleb)
+{
+}
+
+PrewarmingChunk::~PrewarmingChunk()
+{
+
+}
+
+void PrewarmingChunk::dump() const
+{
+    printf("PrewarmingChunk\n");
+}
+
+const char* PrewarmingChunk::name() const
+{
+    return "prewarming data";
 }

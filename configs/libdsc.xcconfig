@@ -1,3 +1,8 @@
 #include "base.xcconfig"
 
-SKIP_INSTALL[sdk=exclavekit*] = YES
+SUPPORTED_PLATFORMS = macosx iphoneos watchos appletvos bridgeos xros
+
+PRIVATE_HEADERS_FOLDER_PATH = /usr/local/include/mach-o
+
+// Turn off the use of __libcpp_verbose_abort from std::string_view
+CLANG_CXX_STANDARD_LIBRARY_HARDENING='_LIBCPP_HARDENING_MODE_NONE'

@@ -223,7 +223,7 @@ struct Builder
 {
     static const bool verbose = false;
 
-    Builder(const std::vector<Dylib>& dylibs, const dyld3::json::Node& objcOptimizations);
+    Builder(const std::vector<Dylib>& dylibs, const json::Node& objcOptimizations);
     ~Builder();
     Builder() = delete;
     Builder(const Builder&) = delete;
@@ -239,7 +239,7 @@ struct Builder
     Diagnostics                     diags;
     TimeRecorder                    time;
     const std::vector<Dylib>&       dylibs;
-    const dyld3::json::Node&        objcOptimizations;
+    const json::Node&               objcOptimizations;
 
     // Note, we own this pointer, but we can't use a unique pointer without including
     // the header and we want to keep things more separated

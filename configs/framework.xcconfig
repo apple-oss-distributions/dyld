@@ -1,0 +1,37 @@
+#include "base.xcconfig"
+
+SUPPORTED_PLATFORMS = macosx iphoneos appltevos iphonesimulator
+
+// Basic config
+INSTALL_PATH                    = /System/Library/PrivateFrameworks
+DYLIB_INSTALL_NAME_BASE         = $(INSTALL_PATH)
+VERSIONING_SYSTEM               = apple-generic-hidden
+GCC_PREPROCESSOR_DEFINITIONS    = BUILDING_DYLD_FRAMEWORK=1 $(inherited)
+SUPPORTED_PLATFORMS             = macosx iphoneos xros watchos appletvos bridgeos watchsimulator iphonesimulator xrsimulator appletvsimulator exclavekit.macosx exclavekit.iphoneos exclavekit.appletvos
+
+// reset header search paths
+HEADER_SEARCH_PATHS         =
+
+// clang search paths
+SYSTEM_HEADER_SEARCH_PATHS  = /usr/local/include $(inherited)
+USER_HEADER_SEARCH_PATHS    = $(SRCROOT)/framework $(SRCROOT)/framework/Internal $(inherited)
+
+// Support for ASi
+OTHER_LDFLAGS = $(inherited) -lCrashReporterClient
+
+// Swift and modules
+SWIFT_VERSION                   = 5.0
+SWIFT_INSTALL_OBJC_HEADER       = NO
+SWIFT_OBJC_INTEROP_MODE         = objc
+BUILD_LIBRARY_FOR_DISTRIBUTION  = YES
+SUPPORTS_TEXT_BASED_API         = YES
+CLANG_ENABLE_MODULES            = YES
+_EXPERIMENTAL_SWIFT_EXPLICIT_MODULES = YES
+
+// Temporary list to prevent users linking to us prior to a stable interface
+LD_DYLIB_ALLOWABLE_CLIENTS = libdyld.dylib UnitTests-framework
+
+CODE_SIGN_IDENTITY = $(TRUSTED_CODE_SIGN_IDENTITY)
+
+// Use this when testing back deployment issues
+//MACOSX_DEPLOYMENT_TARGET = 13.0

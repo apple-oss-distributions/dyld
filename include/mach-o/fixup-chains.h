@@ -23,7 +23,7 @@
  */
 
 #ifndef __MACH_O_FIXUP_CHAINS__
-#define __MACH_O_FIXUP_CHAINS__ 6
+#define __MACH_O_FIXUP_CHAINS__ 7
 
 
 #include <stdint.h>
@@ -80,7 +80,7 @@ enum {
 // This struct is embedded in __TEXT,__chain_starts section in firmware
 struct dyld_chained_starts_offsets
 {
-    uint32_t    pointer_format;     // DYLD_CHAINED_PTR_32_FIRMWARE
+    uint32_t    pointer_format;     // DYLD_CHAINED_PTR_32_FIRMWARE or DYLD_CHAINED_PTR_ARM64E_KERNEL
     uint32_t    starts_count;       // number of starts in array
     uint32_t    chain_starts[1];    // array chain start offsets
 };
@@ -102,6 +102,7 @@ enum {
     DYLD_CHAINED_PTR_X86_64_KERNEL_CACHE    = 11,    // stride 1, x86_64 kernel caches
     DYLD_CHAINED_PTR_ARM64E_USERLAND24      = 12,    // stride 8, unauth target is vm offset, 24-bit bind
     DYLD_CHAINED_PTR_ARM64E_SHARED_CACHE    = 13,    // stride 8, regular/auth targets both vm offsets.  Only A keys supported
+    DYLD_CHAINED_PTR_ARM64E_SEGMENTED       = 14,    // stride 4, rebase offsets use segIndex and segOffset
 };
 
 
@@ -186,6 +187,27 @@ struct dyld_chained_ptr_arm64e_auth_bind24
                 auth      :  1;    // == 1
 };
 
+// DYLD_CHAINED_PTR_ARM64E_SEGMENTED
+struct dyld_chained_ptr_arm64e_segmented_rebase
+{
+    uint32_t    targetSegOffset : 28,   // offset in segment
+                targetSegIndex  :  4;   // index into segment address table
+    uint32_t    padding         : 19,
+                next            : 12,   // 4-byte stide
+                auth            :  1;   // == 0
+};
+
+// DYLD_CHAINED_PTR_ARM64E_SEGMENTED
+struct dyld_chained_ptr_arm64e_auth_segmented_rebase
+{
+    uint32_t    targetSegOffset : 28,   // offset in segment
+                targetSegIndex  :  4;   // index into segment address table
+    uint32_t    diversity       : 16,
+                addrDiv         :  1,
+                key             :  2,
+                next            : 12,   // 4-byte stide
+                auth            :  1;   // == 1
+};
 
 // DYLD_CHAINED_PTR_64
 struct dyld_chained_ptr_64_bind

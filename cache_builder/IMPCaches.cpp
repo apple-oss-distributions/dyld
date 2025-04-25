@@ -1261,20 +1261,20 @@ void IMPCachesBuilder::buildClassesMap(Diagnostics& diag)
     }
 }
 
-const std::string * IMPCachesBuilder::nameAndIsMetaclassPairFromNode(const dyld3::json::Node & node, bool* metaclass) {
-    const dyld3::json::Node& metaclassNode = dyld3::json::getRequiredValue(_diagnostics, node, "metaclass");
+const std::string * IMPCachesBuilder::nameAndIsMetaclassPairFromNode(const json::Node & node, bool* metaclass) {
+    const json::Node& metaclassNode = json::getRequiredValue(_diagnostics, node, "metaclass");
     if (_diagnostics.hasError()) return nullptr;
 
-    if (metaclass != nullptr) *metaclass  = dyld3::json::parseRequiredInt(_diagnostics, metaclassNode) != 0;
-    const dyld3::json::Node& nameNode = dyld3::json::getRequiredValue(_diagnostics, node, "name");
+    if (metaclass != nullptr) *metaclass  = json::parseRequiredInt(_diagnostics, metaclassNode) != 0;
+    const json::Node& nameNode = json::getRequiredValue(_diagnostics, node, "name");
     if (_diagnostics.hasError()) return nullptr;
 
-    return &(dyld3::json::parseRequiredString(_diagnostics, nameNode));
+    return &(json::parseRequiredString(_diagnostics, nameNode));
 }
 
 IMPCachesBuilder::IMPCachesBuilder(Diagnostics& diag, TimeRecorder& timeRecorder,
                                    const std::vector<imp_caches::Dylib>& inputDylibs,
-                                   const dyld3::json::Node& optimizerConfiguration)
+                                   const json::Node& optimizerConfiguration)
     : _diagnostics(diag), _timeRecorder(timeRecorder)
 {
     // Add one DylibState for every input dylib
@@ -1285,19 +1285,19 @@ IMPCachesBuilder::IMPCachesBuilder(Diagnostics& diag, TimeRecorder& timeRecorder
         this->dylibs.push_back(std::move(d));
     }
 
-    const dyld3::json::Node * version = dyld3::json::getOptionalValue(diag, optimizerConfiguration, "version");
-    int64_t versionInt = (version != NULL) ? dyld3::json::parseRequiredInt(diag, *version) : 1;
+    const json::Node * version = json::getOptionalValue(diag, optimizerConfiguration, "version");
+    int64_t versionInt = (version != NULL) ? json::parseRequiredInt(diag, *version) : 1;
     if (versionInt == 2) {
         // v2 has a single neededClasses array, with a key to know if it's a metaclass
         // or class. This lets us order them by importance so that we handle the important
         // cases first in the algorithm, while it's still easy to place things (as we process
         // more classes, constraints build up and we risk dropping difficult classes)
 
-        const dyld3::json::Node& classes = dyld3::json::getRequiredValue(diag, optimizerConfiguration, "neededClasses");
+        const json::Node& classes = json::getRequiredValue(diag, optimizerConfiguration, "neededClasses");
         if (diag.hasError()) return;
 
         int i = 0;
-        for (const dyld3::json::Node& n : classes.array) {
+        for (const json::Node& n : classes.array) {
             bool metaclass = false;
             const std::string *name = nameAndIsMetaclassPairFromNode(n, &metaclass);
             if (name != nullptr) {
@@ -1316,7 +1316,7 @@ IMPCachesBuilder::IMPCachesBuilder(Diagnostics& diag, TimeRecorder& timeRecorder
         int i = 0;
 
         if (metaclasses != optimizerConfiguration.map.cend()) {
-            for (const dyld3::json::Node& n : metaclasses->second.array) {
+            for (const json::Node& n : metaclasses->second.array) {
                 neededMetaclasses[n.value] = i++;
             }
         }
@@ -1324,7 +1324,7 @@ IMPCachesBuilder::IMPCachesBuilder(Diagnostics& diag, TimeRecorder& timeRecorder
         auto classes = optimizerConfiguration.map.find("neededClasses");
 
         if (classes != optimizerConfiguration.map.cend()) {
-            for (const dyld3::json::Node& n : classes->second.array) {
+            for (const json::Node& n : classes->second.array) {
                 neededClasses[n.value] = i++;
             }
         }
@@ -1334,14 +1334,14 @@ IMPCachesBuilder::IMPCachesBuilder(Diagnostics& diag, TimeRecorder& timeRecorder
     if (sels != optimizerConfiguration.map.cend()) {
         // TODO: The emitter for this isn't implemented yet
         assert(sels->second.array.empty());
-        for (const dyld3::json::Node& n : sels->second.array) {
+        for (const json::Node& n : sels->second.array) {
             selectorsToInline.insert(n.value);
         }
     }
 
-    const dyld3::json::Node* classHierarchiesToFlattenNode = dyld3::json::getOptionalValue(diag, optimizerConfiguration, "flatteningRoots");
+    const json::Node* classHierarchiesToFlattenNode = json::getOptionalValue(diag, optimizerConfiguration, "flatteningRoots");
     if (classHierarchiesToFlattenNode != nullptr) {
-        for (const dyld3::json::Node& n : classHierarchiesToFlattenNode->array) {
+        for (const json::Node& n : classHierarchiesToFlattenNode->array) {
             bool metaclass = false;
             const std::string *name = nameAndIsMetaclassPairFromNode(n, &metaclass);
             if (metaclass) {
@@ -2020,7 +2020,7 @@ const IMPCaches::ClassData::ClassLocator IMPCachesBuilder::ObjCClass::superclass
 namespace imp_caches
 {
 
-Builder::Builder(const std::vector<Dylib>& dylibs, const dyld3::json::Node& objcOptimizations)
+Builder::Builder(const std::vector<Dylib>& dylibs, const json::Node& objcOptimizations)
     : diags(verbose), dylibs(dylibs), objcOptimizations(objcOptimizations)
 {
 }

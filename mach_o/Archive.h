@@ -24,21 +24,42 @@
 #ifndef mach_o_Archive_h
 #define mach_o_Archive_h
 
+#include <TargetConditionals.h>
+
+#if !TARGET_OS_EXCLAVEKIT
+
+// Darwin
+#include <ar.h>
+
 // stl
 #include <string_view>
 #include <optional>
-#include <vector>
 
 // mach_o
 #include "Header.h"
 
-// ld
-#include <TargetConditionals.h>
-#if !TARGET_OS_EXCLAVEKIT
-#include "File.h"
-#endif //!TARGET_OS_EXCLAVEKIT
-
 namespace mach_o {
+
+class Entry : ar_hdr
+{
+public:
+    void                        getName(char *, int) const;
+    uint64_t                    modificationTime() const;
+    Error                       content(std::span<const uint8_t>& content) const;
+    Error                       next(Entry*& next) const;
+    Error                       valid() const;
+
+    static uint64_t             extendedFormatNameSize(std::string_view name);
+    static uint64_t             entrySize(bool extendedFormatNames, std::string_view name, uint64_t contentSize);
+    static size_t               write(std::span<uint8_t> buffer, bool extendedFormatNames, std::string_view name, uint64_t mktime, std::span<const uint8_t> content);
+
+private:
+    bool                        hasLongName() const;
+    uint64_t                    getLongNameSpace() const;
+};
+
+// if a member file in a static library has this name, then force load it
+#define ALWAYS_LOAD_MEMBER_NAME "__ALWAYS_LOAD.o"
 
 /*!
  * @class Archive
@@ -63,18 +84,16 @@ public:
     mach_o::Error   forEachMember(void (^handler)(const Member&, bool& stop)) const;
     mach_o::Error   forEachMachO(void (^handler)(const Member&, const mach_o::Header*, bool& stop)) const;
 
-#if BUILDING_MACHO_WRITER
-    // for building
-    static size_t   size(std::span<const Member> members, bool extendedFormatNames = true);
-    static Error    make(std::span<uint8_t> buffer, std::span<const Member> members, bool extendedFormatNames = true);
-#endif
-
     std::span<const uint8_t> buffer;
 
-private:
+    constexpr static std::string_view archive_magic = "!<arch>\n";
+
+protected:
 
     Archive(std::span<const uint8_t> buffer): buffer(buffer) {}
 };
 }
+
+#endif // !TARGET_OS_EXCLAVEKIT
 
 #endif // mach_o_Archive_h
