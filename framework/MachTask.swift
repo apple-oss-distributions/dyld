@@ -73,7 +73,7 @@ extension MachTask {
             throw AtlasError.machError(KERN_RESOURCE_SHORTAGE)
         }
         var vmSize = vm_size_t(0)
-        let kr = vm_read_overwrite(self.port, vm_address_t(address.value), vm_size_t(MemoryLayout<T>.size), vm_address_t(UInt(bitPattern:baseAddress)), &vmSize)
+        let kr = vm_read_overwrite(self.port, vm_address_t(address.value & 0x00ff_ffff_ffff_ffff), vm_size_t(MemoryLayout<T>.size), vm_address_t(UInt(bitPattern:baseAddress)), &vmSize)
         guard kr == KERN_SUCCESS else {
             throw AtlasError.machError(kr)
         }

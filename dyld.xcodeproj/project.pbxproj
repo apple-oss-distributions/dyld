@@ -298,6 +298,7 @@
 		379CA19D2C8FBEF1002AEB56 /* BPList.swift in Sources */ = {isa = PBXBuildFile; fileRef = 379CA19C2C8FBEF1002AEB56 /* BPList.swift */; };
 		379CA19F2C90C81E002AEB56 /* BPListTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 379CA19E2C90C812002AEB56 /* BPListTests.swift */; };
 		379EF49D26D3747600703900 /* OrderedSetTests.mm in Sources */ = {isa = PBXBuildFile; fileRef = 379EF49C26D3747600703900 /* OrderedSetTests.mm */; };
+		37A865F32D9F0408000C9BAD /* CacheScavenger.cpp in Sources */ = {isa = PBXBuildFile; fileRef = 37A865F22D9F0406000C9BAD /* CacheScavenger.cpp */; };
 		37A9C07C2CBC87FF00D17B04 /* libcompression.tbd in Frameworks */ = {isa = PBXBuildFile; fileRef = 37A9C07B2CBC87FF00D17B04 /* libcompression.tbd */; };
 		37A9C07E2CBC892600D17B04 /* libParallelCompression.tbd in Frameworks */ = {isa = PBXBuildFile; fileRef = 37A9C07D2CBC892600D17B04 /* libParallelCompression.tbd */; platformFilters = (bridgeos, ios, macos, tvos, watchos, xros, ); };
 		37A9C0802CBC930E00D17B04 /* testbins.aar in Resources */ = {isa = PBXBuildFile; fileRef = 37A9C07F2CBC930E00D17B04 /* testbins.aar */; };
@@ -346,8 +347,10 @@
 		37CA069D2BDAF7DE002597A3 /* Cksum.cpp in Sources */ = {isa = PBXBuildFile; fileRef = 37B33EF02A65FB03006A26CC /* Cksum.cpp */; };
 		37CA9BD52746DC08008485A5 /* RemoteNotificationResponder.cpp in Sources */ = {isa = PBXBuildFile; fileRef = 37CA9BD32746DC08008485A5 /* RemoteNotificationResponder.cpp */; };
 		37CB5E1226FAA36100DDC20A /* OrderedMapTests.mm in Sources */ = {isa = PBXBuildFile; fileRef = 37CB5E1126FAA36100DDC20A /* OrderedMapTests.mm */; };
+		37CBEF3D2DA03E47000EE426 /* CacheScavenger.cpp in Sources */ = {isa = PBXBuildFile; fileRef = 37A865F22D9F0406000C9BAD /* CacheScavenger.cpp */; };
 		37D4D75E25DAEC9E00F65044 /* OptimizerSwift.cpp in Sources */ = {isa = PBXBuildFile; fileRef = C13F65FA25CCE33A0097F92E /* OptimizerSwift.cpp */; };
 		37D4D75F25DAEC9E00F65044 /* OptimizerSwift.h in Sources */ = {isa = PBXBuildFile; fileRef = C13F65F925CCE33A0097F92E /* OptimizerSwift.h */; };
+		37D8E68D2D89F5F5000E6767 /* MiscTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 37D8E68C2D89F5F5000E6767 /* MiscTests.swift */; };
 		37EB73AF2C2B390100382466 /* ByteStreamTests.mm in Sources */ = {isa = PBXBuildFile; fileRef = 37EB73AE2C2B390100382466 /* ByteStreamTests.mm */; };
 		37FDB4D32A9D316400FA59D1 /* PropertyList.cpp in Sources */ = {isa = PBXBuildFile; fileRef = 37A2088D2A671153007CEEB8 /* PropertyList.cpp */; };
 		39D08420BD1FFC17EB25E1C9 /* CRC32c.cpp in Sources */ = {isa = PBXBuildFile; fileRef = 08567AC67B08A457162A389F /* CRC32c.cpp */; };
@@ -1921,6 +1924,7 @@
 		379EF49C26D3747600703900 /* OrderedSetTests.mm */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.cpp.objcpp; path = OrderedSetTests.mm; sourceTree = "<group>"; };
 		37A2088C2A671153007CEEB8 /* PropertyList.h */ = {isa = PBXFileReference; fileEncoding = 4; lastKnownFileType = sourcecode.c.h; path = PropertyList.h; sourceTree = "<group>"; };
 		37A2088D2A671153007CEEB8 /* PropertyList.cpp */ = {isa = PBXFileReference; fileEncoding = 4; lastKnownFileType = sourcecode.cpp.cpp; path = PropertyList.cpp; sourceTree = "<group>"; };
+		37A865F22D9F0406000C9BAD /* CacheScavenger.cpp */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.cpp.cpp; path = CacheScavenger.cpp; sourceTree = "<group>"; };
 		37A9C07B2CBC87FF00D17B04 /* libcompression.tbd */ = {isa = PBXFileReference; lastKnownFileType = "sourcecode.text-based-dylib-definition"; name = libcompression.tbd; path = Platforms/AppleTVOS.platform/Developer/SDKs/AppleTVOS18.1.Internal.sdk/usr/lib/libcompression.tbd; sourceTree = DEVELOPER_DIR; };
 		37A9C07D2CBC892600D17B04 /* libParallelCompression.tbd */ = {isa = PBXFileReference; lastKnownFileType = "sourcecode.text-based-dylib-definition"; name = libParallelCompression.tbd; path = Platforms/AppleTVOS.platform/Developer/SDKs/AppleTVOS18.1.Internal.sdk/usr/lib/libParallelCompression.tbd; sourceTree = DEVELOPER_DIR; };
 		37A9C07F2CBC930E00D17B04 /* testbins.aar */ = {isa = PBXFileReference; lastKnownFileType = file; path = testbins.aar; sourceTree = "<group>"; };
@@ -1965,6 +1969,7 @@
 		37CB5E1526FE556D00DDC20A /* AllocatorTestSequence.h */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.c.h; path = AllocatorTestSequence.h; sourceTree = "<group>"; };
 		37CC8A182B5120B80055480C /* AAREncoder.h */ = {isa = PBXFileReference; fileEncoding = 4; lastKnownFileType = sourcecode.c.h; path = AAREncoder.h; sourceTree = "<group>"; };
 		37CC8A192B5120B80055480C /* AAREncoder.cpp */ = {isa = PBXFileReference; fileEncoding = 4; lastKnownFileType = sourcecode.cpp.cpp; path = AAREncoder.cpp; sourceTree = "<group>"; };
+		37D8E68C2D89F5F5000E6767 /* MiscTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = MiscTests.swift; sourceTree = "<group>"; };
 		37D92BC826F0694C008F0309 /* OrderedMap.h */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.c.h; path = OrderedMap.h; sourceTree = "<group>"; };
 		37EB73AE2C2B390100382466 /* ByteStreamTests.mm */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.cpp.objcpp; path = ByteStreamTests.mm; sourceTree = "<group>"; };
 		37FF66D326F7E83B008EFAFE /* OrderedSet.h */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.c.h; path = OrderedSet.h; sourceTree = "<group>"; };
@@ -2961,6 +2966,7 @@
 				37888B712A425A46005024BA /* Dyld.h */,
 				378E968A2CB99DF700C00F1E /* Introspection.h */,
 				37B620002A788B1000E72CB8 /* SnapshotShared.h */,
+				37A865F22D9F0406000C9BAD /* CacheScavenger.cpp */,
 				378E967C2CB9969500C00F1E /* ProcessScavenger.h */,
 				378E967D2CB9969500C00F1E /* ProcessScavenger.cpp */,
 				378E96862CB99DA300C00F1E /* LegacyAPIShims.mm */,
@@ -2999,6 +3005,7 @@
 				3726A52B2C97D39D004170D0 /* BPlistTestGlue.h */,
 				3726A5252C97CE50004170D0 /* BPListTestGlue.mm */,
 				378E96972CBB780B00C00F1E /* MachOTests.swift */,
+				37D8E68C2D89F5F5000E6767 /* MiscTests.swift */,
 			);
 			path = "framework-unit-tests";
 			sourceTree = "<group>";
@@ -5748,6 +5755,7 @@
 				378E96892CB99DA300C00F1E /* LegacyAPIShims.mm in Sources */,
 				37AD60BD2C8904D90079B2D7 /* AARDecoder.swift in Sources */,
 				37B640252CB731D600EA96D3 /* Address.swift in Sources */,
+				37A865F32D9F0408000C9BAD /* CacheScavenger.cpp in Sources */,
 				378E96962CB9B7C900C00F1E /* MachO.swift in Sources */,
 				378E96812CB9977200C00F1E /* PropertyList.cpp in Sources */,
 				378E96852CB99AD200C00F1E /* Error.cpp in Sources */,
@@ -5765,6 +5773,8 @@
 			buildActionMask = 2147483647;
 			files = (
 				378E96922CB9A93200C00F1E /* Header.cpp in Sources */,
+				37D8E68D2D89F5F5000E6767 /* MiscTests.swift in Sources */,
+				37CBEF3D2DA03E47000EE426 /* CacheScavenger.cpp in Sources */,
 				37AD60D02C8A56EC0079B2D7 /* FilePathExtensionTests.swift in Sources */,
 				376552CB2CC6B90F00B469A6 /* LegacyIntrospectionTests.mm in Sources */,
 				37AD60CC2C891D9A0079B2D7 /* CompactInfoUnwrapTests.m in Sources */,

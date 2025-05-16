@@ -622,6 +622,7 @@ __attribute__((noinline)) static MainFunc prepare(APIs& state, const Header* dyl
             flags |= (uint64_t)dyld3::DyldLaunchExecutableFlags::HasTPRODataConst;
         if ( state.config.process.enableProtectedStack )
             flags |= (uint64_t)dyld3::DyldLaunchExecutableFlags::HasTPROStacks;
+
         launchTraceID = dyld3::kdebug_trace_dyld_duration_start(DBG_DYLD_TIMING_LAUNCH_EXECUTABLE, (uint64_t)state.config.process.mainExecutableHdr, flags, 0);
     }
 
@@ -1277,11 +1278,11 @@ static void initializeLibc(KernelArgs* kernArgs, void* dyldSharedCache) __attrib
     // set up random value for stack canary
     const char** apple = kernArgs->findApple();
 
+
     // FIXME: Refactor this to be cleaner
     // We intialize the memory manager here even though it is not technically part of libc, because we need
     // to do it after mach_init() is run, but before we setup the stack guards.
     MemoryManager::init((const char**)kernArgs->findEnvp(), apple, dyldSharedCache);
-
 
     // TPRO memory is RO at this point, so make it RW so that we can set the __stack_chk_guard
     MemoryManager::withWritableMemory([&] {

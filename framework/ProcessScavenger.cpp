@@ -24,6 +24,7 @@
 
 #include <fcntl.h>
 #include <libgen.h>
+#include <algorithm>
 #include <libproc.h>
 #include <sys/mman.h>
 #include <mach/task.h>
@@ -148,6 +149,15 @@ struct RemoteMap {
         memcpy(_data, (void *)localAddress, _size);
         (void)vm_deallocate(mach_task_self(), (vm_address_t)localAddress, _size);
     }
+    RemoteMap(const RemoteMap&) = delete;
+    RemoteMap(RemoteMap&& other) {
+        swap(other);
+    }
+    MmappedBuffer& operator=(const MmappedBuffer&) = delete;
+    RemoteMap& operator=(RemoteMap&& other) {
+        swap(other);
+        return *this;
+    }
     ~RemoteMap() {
         if (_data) {
             free(_data);
@@ -163,6 +173,12 @@ struct RemoteMap {
         return _size;
     }
 private:
+    void swap(RemoteMap& other) {
+        if (this == &other) { return; }
+        using std::swap;
+        swap(_data, other._data);
+        swap(_size, other._size);
+    }
     void*               _data   = nullptr;
     vm_size_t           _size   = 0;
 };
@@ -248,6 +264,8 @@ bool scavengeProcessFromRegions(Allocator& allocator, task_read_t task, ByteStre
     snapshotFlags.setFlag(SnapshotFlagsPointerSize4Bytes, true);
 #endif
     mach_vm_size_t      size;
+    bool dyldFound           = false;
+    bool mainExecutableFound = false;
     for (mach_vm_address_t address = 0; ; address += size) {
         vm_region_basic_info_data_64_t  info;
         mach_port_t                     objectName;
@@ -259,37 +277,57 @@ bool scavengeProcessFromRegions(Allocator& allocator, task_read_t task, ByteStre
         if ( info.protection != (VM_PROT_READ|VM_PROT_EXECUTE) ) {
             continue;
         }
-        RemoteMap map(task, address, (size_t)size);
+        RemoteMap map(task, address, std::min((size_t)size, (size_t)PAGE_SIZE));
         if (!map) {
             continue;
         }
         auto mf = Header::isMachO(map.span());
-        if (mf) {
-            auto& image = images.addObject<Dictionary>();
-            uint64_t preferredLoadAddress = mf->preferredLoadAddress();
-            if (preferredLoadAddress) {
-                image.addObjectForKey<Integer>(kDyldAtlasImagePreferredLoadAddressKey, preferredLoadAddress);
-            }
-            image.addObjectForKey<Integer>(kDyldAtlasImageLoadAddressKey, address);
-            const char* installname = mf->installName();
-            if (installname) {
-                image.addObjectForKey<String>(kDyldAtlasImageInstallnameKey, installname);
-            }
-            uuid_t uuid;
-            if (mf->getUuid(uuid)) {
-                image.addObjectForKey<UUID>(kDyldAtlasImageUUIDKey, uuid);
-            }
-            char executablePath[PATH_MAX+1];
-            int len = proc_regionfilename(pid, address, executablePath, PATH_MAX);
-            if ( len != 0 ) {
-                executablePath[len] = '\0';
-                image.addObjectForKey<String>(kDyldAtlasImageFilePathKey, executablePath);
-            }
-            addSegmentArray(image, mf);
-        }
         if (!mf) {
             continue;
         }
+        if (mf->machHeaderSize() > PAGE_SIZE) {
+            size_t newSize =  (size_t)lsl::roundToNextAligned(PAGE_SIZE, mf->machHeaderSize());
+            auto newMap = RemoteMap(task, address, newSize);
+            map = std::move(newMap);
+            if (!map) {
+                continue;
+            }
+            mf = Header::isMachO(map.span());
+            if (!mf) {
+                continue;
+            }
+        }
+        if (mf->isDylinker()) {
+            dyldFound = true;
+        }
+        if (mf->isMainExecutable()) {
+            mainExecutableFound = true;
+        }
+        // If this is not dyld or a main executable we don't need to scan the region
+        if (!mf->isDylinker() && !mf->isMainExecutable()) { continue; }
+        auto& image = images.addObject<Dictionary>();
+        uint64_t preferredLoadAddress = mf->preferredLoadAddress();
+        if (preferredLoadAddress) {
+            image.addObjectForKey<Integer>(kDyldAtlasImagePreferredLoadAddressKey, preferredLoadAddress);
+        }
+        image.addObjectForKey<Integer>(kDyldAtlasImageLoadAddressKey, address);
+        const char* installname = mf->installName();
+        if (installname) {
+            image.addObjectForKey<String>(kDyldAtlasImageInstallnameKey, installname);
+        }
+        uuid_t uuid;
+        if (mf->getUuid(uuid)) {
+            image.addObjectForKey<UUID>(kDyldAtlasImageUUIDKey, uuid);
+        }
+        char executablePath[PATH_MAX+1];
+        int len = proc_regionfilename(pid, address, executablePath, PATH_MAX);
+        if ( len != 0 ) {
+            executablePath[len] = '\0';
+            image.addObjectForKey<String>(kDyldAtlasImageFilePathKey, executablePath);
+        }
+        addSegmentArray(image, mf);
+        // If we have found dyld and the main executable we are done, exit early
+        if (dyldFound && mainExecutableFound) { break; }
     }
     rootDictionary.addObjectForKey<Integer>(kDyldAtlasSnapshotInitialImageCount, 1);
     rootDictionary.addObjectForKey<Integer>(kDyldAtlasSnapshotState, dyld_process_state_not_started);

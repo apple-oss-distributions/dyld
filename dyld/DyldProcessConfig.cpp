@@ -2218,17 +2218,26 @@ void ProcessConfig::PathOverrides::forEachDylibFallback(Platform platform, bool 
             return;
         }
         
-        if ( platform != Platform::macCatalyst ) {
+        if ( platform == Platform::iOS
+            || platform == Platform::watchOS
+            || platform == Platform::tvOS
+            || platform == Platform::bridgeOS
+            || platform == Platform::visionOS) {
+            if ( _fallbackPathMode != FallbackPathMode::none ) {
+                handler("/usr/local/lib", Type::standardFallback, stop);
+                if ( stop )
+                    return;
+                // fall into /usr/lib case
+                handler("/usr/lib", Type::standardFallback, stop);
+            }
+        }
+
+        if ( platform.isSimulator() || platform == Platform::macCatalyst ) {
             if ( _fallbackPathMode != FallbackPathMode::none ) {
                 handler("/usr/local/lib", Type::standardFallback, stop);
                 if ( stop )
                     return;
             }
-        }
-        
-        if ( platform.isSimulator() || platform == Platform::macCatalyst ) {
-            if ( _fallbackPathMode != FallbackPathMode::none )
-                handler("/usr/lib", Type::standardFallback, stop);
         }
     }
 }

@@ -38,6 +38,6 @@ DIRTY                    = -Wl,-dirty_data_list,$(DERIVED_SOURCES_DIR)/dyld.dirt
 LLDB_SUPPORT = -Wl,-exported_symbol,_lldb_image_notifier -Wl,-exported_symbol,_dyld_all_image_infos
 LLDB_SUPPORT[sdk=*simulator*] =
 
-OTHER_LDFLAGS = -e $(ENTRY_NAME) -Wl,-exported_symbol,$(ENTRY_NAME) $(LLDB_SUPPORT) -Wl,-no_inits @$(DERIVED_SOURCES_DIR)/archives.txt -nostdlib -Wl,-dylinker -Wl,-dylinker_install_name,/usr/lib/dyld $(ALIGNMENT) -Wl,-fixup_chains -Wl,-data_const -fapple-link-rtlib $(DIRTY)
+OTHER_LDFLAGS = -e $(ENTRY_NAME) -Wl,-exported_symbol,$(ENTRY_NAME) $(LLDB_SUPPORT) -Wl,-no_inits @$(DERIVED_SOURCES_DIR)/archives.txt -nostdlib -Wl,-dylinker -Wl,-dylinker_install_name,/usr/lib/dyld $(ALIGNMENT) -Wl,-fixup_chains -Wl,-data_const -fapple-link-rtlib $(DIRTY) -Wl,-section_order,__TPRO_CONST,__data:__allocator
 
 CODE_SIGN_IDENTITY = $(TRUSTED_CODE_SIGN_IDENTITY)

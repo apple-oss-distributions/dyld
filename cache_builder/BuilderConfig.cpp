@@ -101,7 +101,9 @@ cache_builder::Layout::Layout(const BuilderOptions& options)
         // Everyone else uses contiguous mappings
         this->contiguous.emplace();
         this->contiguous->regionPadding = CacheVMSize(32_MB);
-        this->contiguous->subCacheTextDataLimit = CacheVMSize(2_GB);
+
+        // Note minus a little to account for rdar://146432183
+        this->contiguous->subCacheTextDataLimit = CacheVMSize(2_GB - 16_MB);
         this->contiguous->subCacheStubsLimit = CacheVMSize(110_MB);
 
         // Note we have 2 padding regions in total in a given TEXT/DATA/AUTH/... region

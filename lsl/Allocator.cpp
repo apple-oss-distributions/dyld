@@ -31,6 +31,7 @@
 
 #if !TARGET_OS_EXCLAVEKIT
 
+#include <System/sys/csr.h>
 
   #include <sys/mman.h>
   #include <mach/mach.h>
@@ -145,7 +146,6 @@ MemoryManager::MemoryManager(const char** envp, const char** apple, void* dyldSh
 #endif
 
 #if BUILDING_DYLD && !TARGET_OS_EXCLAVEKIT
-
     _sharedCache = dyldSharedCache;
 #endif //  BUILDING_DYLD && !TARGET_OS_EXCLAVEKIT
 #endif /* DYLD_FEATURE_USE_INTERNAL_ALLOCATOR */
@@ -172,13 +172,13 @@ void MemoryManager::init(const char** envp, const char** apple, void* dyldShared
         MemoryManager::Buffer buffer{(void*)&sPoolBytes[0], ALLOCATOR_DEFAULT_POOL_SIZE};
         // Create a memory manager, a pool, and an allocator
         auto memoryManager = new (sMemoryManagerBuffer) MemoryManager(envp, apple,  dyldSharedCache);
+        sMemoryManagerInitialized = true;
         bool tproEnabledOnPool = false;
 #if DYLD_FEATURE_USE_HW_TPRO
         tproEnabledOnPool = bootStrapMemoryManager.tproEnabled();
 #endif
         auto pool = new (sPoolBuffer) Allocator::Pool((Allocator*)sAllocatorBuffer, nullptr, buffer, buffer, tproEnabledOnPool);
         memoryManager->_defaultAllocator = new (sAllocatorBuffer) Allocator(*memoryManager, *pool);
-        sMemoryManagerInitialized = true;
     });
 #else
     auto memoryManager = new (sMemoryManagerBuffer) MemoryManager(envp, apple,  dyldSharedCache);
@@ -775,7 +775,7 @@ void* Allocator::Pool::aligned_alloc_best_fit(uint64_t alignment, uint64_t size)
     }
 
     if (!candidateMetadata) {
-        // We do not check the last metadata, which is what the default allocation policy uses, so call that
+        // We do not check the last metadata, which is what the sdefault allocation policy uses, so call that
         return aligned_alloc(alignment,  size);
     }
 

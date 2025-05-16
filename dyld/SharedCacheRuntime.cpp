@@ -362,6 +362,12 @@ static bool preflightCacheFile(const SharedCacheOptions& options, SharedCacheLoa
                 else
                     maxProt |= VM_PROT_TPRO;
             }
+            if ( (slidableMappings[i].flags & DYLD_CACHE_MAPPING_CONST_TPRO_DATA) != 0 ) {
+                // This is __TPRO_CONST. Just make it a normal readwrite mapping, and let `dyld` remap it
+                // in each process based on the security settings
+                initProt = VM_PROT_READ | VM_PROT_WRITE;
+                maxProt  = VM_PROT_READ | VM_PROT_WRITE;
+            }
         }
 
         // Add a file for each mapping

@@ -1154,7 +1154,7 @@ void Header::forEachPlatformLoadCommand(void (^handler)(Platform platform, Versi
 
     // old binary with no explicit platform
 #if TARGET_OS_OSX
-    if ( (mh.cputype == CPU_TYPE_X86_64) | (mh.cputype == CPU_TYPE_I386) )
+    if ( (mh.cputype == CPU_TYPE_X86_64) || (mh.cputype == CPU_TYPE_I386) )
         handler(Platform::macOS, Version32(10, 5), Version32(10, 5)); // guess it is a macOS 10.5 binary
     // <rdar://problem/75343399>
     // The Go linker emits non-standard binaries without a platform and we have to live with it.
@@ -1464,7 +1464,14 @@ bool Header::hasCodeSignature(uint32_t& fileOffset, uint32_t& size) const
             stop                          = true;
         }
     });
-    // FIXME: may need to ignore codesigs from pre 10.9 macOS binaries
+
+    // <rdar://problem/13622786> ignore code signatures in macOS binaries built with pre-10.9 tools
+    if ( mh.cputype == CPU_TYPE_X86_64 ) {
+        PlatformAndVersions pvs = platformAndVersions();
+        if ( (pvs.platform == Platform::macOS) && (pvs.sdk < Version32(10,9)) )
+            return false;
+    }
+
     return result;
 }
 

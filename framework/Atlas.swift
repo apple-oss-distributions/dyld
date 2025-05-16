@@ -424,8 +424,8 @@ internal struct SharedCache {
         }
     }
 
-    init(path: FilePath) throws(AtlasError) {
-        guard let bplist = Snapshot.findCacheBPlist(uuid:nil, path:path) else {
+    init(path: FilePath, forceScavenge: Bool = false) throws(AtlasError) {
+        guard let bplist = Snapshot.findCacheBPlist(uuid:nil, path:path, forceScavenge:forceScavenge) else {
             throw AtlasError.placeHolder
         }
         // We are being created outside of a snapshot, create a context and store it to anchor the graph
@@ -1108,7 +1108,7 @@ internal struct Process {
                     let allImageInfos: dyld_all_image_infos_64 = try task.readStruct(address:RebasedAddress(taskDyldInfo.all_image_info_addr))
                     // On the right side we need to access these values atomically but here we don't need to worry since the mapping
                     // is not shared and the vm_copy acted as a memory barrier
-                    atlasAddress    = RebasedAddress(allImageInfos.compact_dyld_image_info_addr & 0x00ff_ffff_ffff_ffff)
+                    atlasAddress    = RebasedAddress(allImageInfos.compact_dyld_image_info_addr)
                     atlasSize       = allImageInfos.compact_dyld_image_info_size
                     timestamp       = allImageInfos.infoArrayChangeTimestamp
                 } else if taskDyldInfo.all_image_info_format == TASK_DYLD_ALL_IMAGE_INFO_32 {
@@ -1709,11 +1709,31 @@ internal extension FilePath {
             defer {
                 Darwin.closedir(dirp)
             }
-            while let dirEntry =  readdir(dirp) {
-                guard dirEntry.pointee.d_type == DT_REG else {
+            while let dirEntry =  Darwin.readdir(dirp) {
+                // We cannot use pointee because that can copy, and Swift does not provide any ergonomic way to get to the underlying data
+                // since people should not generally do that, but here we are, so we get the raw pointer and directly load the fields
+                // we need to.
+
+                // We assume dirent is greater than a UInt16 (and we can therefore use aligned loads) and that _DARWIN_FEATURE_64_BIT_INODE is
+                // set (so we know the types of fields). Both of these are true on all current platforms.
+                assert(MemoryLayout<dirent>.alignment > MemoryLayout<UInt16>.alignment)
+                assert(_DARWIN_FEATURE_64_BIT_INODE != 0)
+
+                let rawPointer = UnsafeRawPointer(dirEntry)
+                let dirType = rawPointer.load(fromByteOffset:MemoryLayout<dirent>.offset(of: \.d_type)!, as:UInt8.self)
+
+                guard dirType == DT_REG else {
                     continue
                 }
-                guard let component = FilePath.Component(dirEntry.pointee.name) else {
+
+                let componentSize = rawPointer.load(fromByteOffset:MemoryLayout<dirent>.offset(of: \.d_namlen)!, as:UInt16.self)+1
+                let componentStartIndex = MemoryLayout<dirent>.offset(of: \.d_name)!
+                let componentBuffer = UnsafeRawBufferPointer(start:rawPointer+componentStartIndex, count:Int(componentSize))
+
+                guard let componentString = componentBuffer.bindMemory(to: UInt8.self).baseAddress.flatMap(String.init(cString:))  else {
+                    continue
+                }
+                guard let component = FilePath.Component(componentString) else {
                     continue
                 }
                 result.append(self.appending(component))

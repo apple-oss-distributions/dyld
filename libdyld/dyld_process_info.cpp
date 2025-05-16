@@ -77,6 +77,10 @@ RemoteBuffer::map(task_t task, mach_vm_address_t remote_address, vm_size_t size)
         return std::make_pair(MACH_VM_MIN_ADDRESS, KERN_INVALID_ARGUMENT);
     }
     mach_vm_address_t localAddress = 0;
+#if __arm64e__
+    // Mask out TBI bits
+    remote_address &= 0x00ff'ffff'ffff'ffffUL;
+#endif
 #if TARGET_OS_SIMULATOR
     static dispatch_once_t onceToken;
     dispatch_once(&onceToken, ^{

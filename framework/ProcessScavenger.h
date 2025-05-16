@@ -37,6 +37,7 @@
 extern "C" {
 #endif
 VIS_HIDDEN bool scavengeProcess(task_read_t task, void** buffer, uint64_t* bufferSize);
+VIS_HIDDEN void* scavengeCache(const char* path, uint64_t* bufferSize);
 #if __cplusplus
 }
 #endif

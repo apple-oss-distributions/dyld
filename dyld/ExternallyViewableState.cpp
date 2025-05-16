@@ -242,7 +242,7 @@ struct dyld_all_image_infos* ExternallyViewableState::getProcessInfo()
 void ExternallyViewableState::addDyldSimInfo(const char* path, uint64_t loadAddress) {
     _dyldSimPath           = _persistentAllocator->strdup(path);
     _dyldSimLoadAddress    = loadAddress;
-    notifyMonitorOfImageListChangesSim(false, 1, (const struct mach_header**)&loadAddress, &path);
+    notifyMonitorOfImageListChangesSim(false, 1, (const struct mach_header**)&loadAddress, &_dyldSimPath);
     // Stop dyld from directly issuing break point requests. The only other user of this
     // function pointer is the transition to dyld in the cache, and we don't do that
     // in simulators.
@@ -540,7 +540,7 @@ void ExternallyViewableState::removeImages(lsl::Allocator& persistentAllocator, 
                 break;
             }
         }
-        if (removed) {
+        if (!removed) {
             remaingUuids.push_back(it);
         }
     }
@@ -1020,11 +1020,6 @@ void ExternallyViewableState::notifyMonitorOfImageListChangesSim(bool unloading,
         auto legacyDyldImage = Atlas::Image(ephemeralAllocator, std::move(legacyDyldFileRecord),  snapshot.identityMapper(), (uint64_t)&__dso_handle);
         snapshot.addImage(std::move(legacyDyldImage));
 
-        // Add dyld_sim
-        auto simFileRecord = glueFileManager->fileRecordForPath(ephemeralAllocator, _dyldSimPath);
-        auto simImage = Atlas::Image(ephemeralAllocator, std::move(simFileRecord),  snapshot.identityMapper(), (uint64_t)_dyldSimLoadAddress);
-        snapshot.addImage(std::move(simImage));
-
         auto serializedCompactInfo = snapshot.serialize();
         aarEncoder.addFile("process.cinfo", serializedCompactInfo);
 #endif /* DYLD_FEATURE_COMPACT_INFO_GENERATION */
@@ -1095,10 +1090,6 @@ void ExternallyViewableState::notifyMonitorOfImageListChangesSim(bool unloading,
         // Handle dyld
         auto& dyldImage = images.addObject<Dictionary>();
         atlasAddImage(dyldImage, (uint64_t)&__dso_handle, _runtimeState->config.process.dyldPath);
-
-        // Handle dyld_sim
-        auto& dyldSimImage = images.addObject<Dictionary>();
-        atlasAddImage(dyldSimImage, (uint64_t)_dyldSimLoadAddress, _dyldSimPath);
 
         // Synthesize the dyldState
         if ( _allImageInfo->errorMessage != 0 ) {

@@ -661,7 +661,7 @@ void HeaderWriter::setUnixEntry(uint64_t startAddr)
         words[2] = 6;   // flavor = ARM_THREAD_STATE64
         words[3] = 68;  // count  = ARM_EXCEPTION_STATE64_COUNT * 2 <=> 34 uint64_t's
         bzero(&words[4], lcSize-16);
-        *(uint64_t*)(&words[68]) = startAddr;  // register pc = startAddr
+        memcpy(&words[68], &startAddr, 8);  // register pc = startAddr
     }
     else if ( mh.cputype == CPU_TYPE_X86_64 ) {
         uint32_t   lcSize = threadLoadCommandsSize();
@@ -669,7 +669,7 @@ void HeaderWriter::setUnixEntry(uint64_t startAddr)
         words[2] = 4;   // flavor = x86_THREAD_STATE64
         words[3] = 42;  // count  = x86_THREAD_STATE64_COUNT
         bzero(&words[4], lcSize-16);
-        *(uint64_t*)(&words[36]) = startAddr;  // register pc = startAddr
+        memcpy(&words[36], &startAddr, 8);  // register pc = startAddr
     }
     else if ( mh.cputype == CPU_TYPE_ARM ) {
         uint32_t   lcSize = threadLoadCommandsSize();

@@ -72,13 +72,16 @@ AAREncoder::~AAREncoder() {
 void AAREncoder::addFile(std::string_view path, std::span<std::byte> data) {
     char* pathStr = (char*)_allocator->malloc(path.size()+1);
     memcpy(pathStr, path.data(), path.size());
+    pathStr[path.size()] = 0;
     _files.push_back({pathStr, data});
 }
 void AAREncoder::addSymLink(std::string_view from, std::string_view to) {
     char* fromStr   = (char*)_allocator->malloc(from.size()+1);
     char* toStr     = (char*)_allocator->malloc(to.size()+1);
     memcpy(fromStr, from.data(), from.size());
+    fromStr[from.size()] = 0;
     memcpy(toStr, to.data(), to.size());
+    toStr[to.size()] = 0;
     _links.push_back({ fromStr, toStr });
 }
 

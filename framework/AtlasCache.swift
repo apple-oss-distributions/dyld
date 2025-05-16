@@ -32,7 +32,7 @@ struct AtlasCache {
     var pathMap = [String : BPList.UnsafeRawDictionary]()
     var buffers = [Data]()
     let lock = OSAllocatedUnfairLock()
-    mutating func getCachePlist(uuid: UUID?, path: FilePath?) -> BPList.UnsafeRawDictionary? {
+    mutating func getCachePlist(uuid: UUID?, path: FilePath?, forceScavenge: Bool) -> BPList.UnsafeRawDictionary? {
         return try? lock.withLockUnchecked { () -> BPList.UnsafeRawDictionary? in
             //FIXME: Delegate support
             if let uuid, let result = uuidMap[uuid] {
@@ -41,13 +41,23 @@ struct AtlasCache {
             guard let path else {
                 return nil
             }
-            if let result = pathMap[path.string] {
+            if !forceScavenge, let result = pathMap[path.string] {
                 return result
             }
-            guard let atlasFileName = path.lastComponent?.stem.appending(".atlas"),
-                  let data = try? Data(contentsOf:URL(fileURLWithPath:path.removingLastComponent().appending(atlasFileName).string), options:.mappedIfSafe) else {
-                return nil
+            guard let atlasFileName = path.lastComponent?.stem.appending(".atlas") else {
+                return  nil
             }
+            var embeddedData = try? Data(contentsOf:URL(fileURLWithPath:path.removingLastComponent().appending(atlasFileName).string), options:.mappedIfSafe)
+            var scavengedData: Data? = nil
+            if forceScavenge || embeddedData == nil {
+                embeddedData = nil
+                var scavengedBufferSize = UInt64(0)
+                if let scavegedBuffer =  scavengeCache(path.string, &scavengedBufferSize) {
+                    scavengedData = Data(bytesNoCopy:scavegedBuffer, count:Int(scavengedBufferSize), deallocator:.free)
+                }
+            }
+            let data = embeddedData ?? scavengedData
+            guard let data else { return nil }
             buffers.append(data)
             var archive  = try AARDecoder(data:data)
             let archivePath = uuid?.cacheAtlasArchivePath ?? "caches/names/\(path.lastComponent!.string).plist"
@@ -58,11 +68,13 @@ struct AtlasCache {
                 return nil
             }
             var skipValidation = false
-            for prefix in SharedCache.sharedCachePaths {
-                if path.string.hasPrefix(prefix) {
-                    // The shared cache is coming from snapshot protected storage, skip validation
-                    skipValidation = true
-                    break
+            if scavengedData == nil {
+                for prefix in SharedCache.sharedCachePaths {
+                    if path.string.hasPrefix(prefix) {
+                        // The shared cache is coming from snapshot protected storage, skip validation
+                        skipValidation = true
+                        break
+                    }
                 }
             }
             if !skipValidation {
@@ -111,9 +123,9 @@ struct AtlasCache {
 fileprivate var bufferCache = AtlasCache()
 
 internal extension Snapshot {
-    static func findCacheBPlist(uuid: UUID?, path: FilePath?) -> BPList.UnsafeRawDictionary? {
+    static func findCacheBPlist(uuid: UUID?, path: FilePath?, forceScavenge: Bool = false) -> BPList.UnsafeRawDictionary? {
         if #available(macOS 13.0, *) {
-            guard let plist = bufferCache.getCachePlist(uuid:uuid, path:path) else {
+            guard let plist = bufferCache.getCachePlist(uuid:uuid, path:path, forceScavenge:forceScavenge) else {
                 return nil
             }
             return plist
