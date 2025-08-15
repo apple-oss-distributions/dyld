@@ -631,12 +631,12 @@ int main(int argc, const char* argv[], const char* envp[])
 
     bool cacheBuildSuccess = runSharedCacheBuilder(sharedCacheBuilder);
 
-    writeMRMResults(cacheBuildSuccess, sharedCacheBuilder, cacheDir, verbose);
+    bool cacheWriteSuccess = writeMRMResults(cacheBuildSuccess, sharedCacheBuilder, cacheDir, verbose);
 
     destroySharedCacheBuilder(sharedCacheBuilder);
 
     unloadMRMFiles(mappedFiles);
     
-    return (cacheBuildSuccess ? 0 : 1);
+    return (cacheBuildSuccess && cacheWriteSuccess ? 0 : 1);
 }
 

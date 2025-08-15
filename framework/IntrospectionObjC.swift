@@ -41,11 +41,14 @@ extension _DYSegment {
         }
     }
 
-    @objc fileprivate override init() {
-        impl = nil
+    @objc private override init() {
+        fatalError("init() not supported")
+    }
+    @objc private init(internal: Bool) {
+        super.init()
     }
     @nonobjc convenience fileprivate init(_ impl: Segment) {
-        self.init()
+        self.init(internal:true)
         self.impl = impl
     }
     @nonobjc private var impl: Segment!
@@ -63,7 +66,7 @@ extension _DYImage {
         guard let sharedCache = impl.sharedCache else {
             return nil
         }
-        return _DYSharedCache(sharedCache:sharedCache)
+        return _DYSharedCache(sharedCache)
     }
     @objc func getFastPathData(_ data: UnsafeMutablePointer<_DYImageFastPathData>) {
         switch impl.info.installname {
@@ -97,11 +100,14 @@ extension _DYImage {
         return impl.segments.map { _DYSegment($0) }
     }()
 
-    @objc fileprivate override init() {
-        impl = nil
+    @objc private override init() {
+        fatalError("init() not supported")
+    }
+    @objc private init(internal: Bool) {
+        super.init()
     }
     @nonobjc convenience fileprivate init(_ impl: Image) {
-        self.init()
+        self.init(internal:true)
         self.impl = impl
     }
     @nonobjc private var impl: Image!
@@ -110,12 +116,15 @@ extension _DYImage {
 @objc @implementation
 extension _DYEnvironment {
     @objc var rootPath:   String?  { return impl.rootPath }
-    @objc fileprivate override init() {
-        impl = nil
+    @objc private override init() {
+        fatalError("init() not supported")
+    }
+    @objc private init(internal: Bool) {
+        super.init()
     }
     @nonobjc convenience fileprivate init?(_ impl: Environment?) {
         guard let impl else { return nil }
-        self.init()
+        self.init(internal:true)
         self.impl = impl
     }
     @nonobjc private var impl: Environment!
@@ -128,11 +137,14 @@ extension _DYAOTImage {
     @objc var aotSize:      UInt64  { return impl.aotSize }
     @objc var aotImageKey:  Data    { return impl.aotImageKey }
 
-    @objc fileprivate override init() {
-        impl = nil
+    @objc private override init() {
+        fatalError("init() not supported")
+    }
+    @objc private init(internal: Bool) {
+        super.init()
     }
     @nonobjc convenience fileprivate init(_ impl: AOTImage) {
-        self.init()
+        self.init(internal:true)
         self.impl = impl
     }
     @nonobjc private var impl: AOTImage!
@@ -140,14 +152,17 @@ extension _DYAOTImage {
 
 @objc @implementation
 extension _DYSubCache {
-    @objc fileprivate override init() {
-        impl = nil
-    }
     func withVMLayoutData(_ block:(@escaping (Data) -> Void)) -> Bool {
         return impl.withVMLayoutData(block)
     }
-    @nonobjc convenience fileprivate init(impl: SubCache) {
-        self.init()
+    @objc private override init() {
+        fatalError("init() not supported")
+    }
+    @objc private init(internal: Bool) {
+        super.init()
+    }
+    @nonobjc convenience fileprivate init(_ impl: SubCache) {
+        self.init(internal:true)
         self.impl = impl
     }
     @nonobjc private var impl: SubCache!
@@ -176,36 +191,34 @@ extension _DYSharedCache {
         impl.unpinMappings()
     }
     @objc lazy var subCaches: [_DYSubCache] = {
-        return impl.subCaches.map { _DYSubCache(impl: $0) }
+        return impl.subCaches.map { _DYSubCache($0) }
     }()
     @objc class func installedSharedCaches() -> [_DYSharedCache] {
-        return SharedCache.installedSharedCaches().map { _DYSharedCache(sharedCache:$0) }
+        return SharedCache.installedSharedCaches().map { _DYSharedCache($0) }
     }
     @objc(installedSharedCachesForSystemPath:)  class func installedSharedCaches(systemPath: String) -> [_DYSharedCache] {
-        return SharedCache.installedSharedCaches(systemPath:FilePath(systemPath)).map { _DYSharedCache(sharedCache:$0) }
+        return SharedCache.installedSharedCaches(systemPath:FilePath(systemPath)).map { _DYSharedCache($0) }
     }
 
-    @objc fileprivate override init() {
-        impl = nil
+    @objc private override init() {
+        fatalError("init() not supported")
     }
-    @objc init(path:String) throws {
+    @objc private init(internal: Bool) {
+        super.init()
+    }
+    @objc convenience init(path:String) throws {
+        self.init(internal:true)
         impl = try SharedCache(path:FilePath(path))
     }
-    @nonobjc convenience fileprivate init(sharedCache: SharedCache) {
-        self.init()
-        self.impl = sharedCache
+    @nonobjc convenience fileprivate init(_ impl: SharedCache) {
+        self.init(internal:true)
+        self.impl = impl
     }
     @nonobjc private var impl: SharedCache!
 }
 
 @objc @implementation
 extension _DYSnapshot {
-    @objc fileprivate override init() {
-        self.impl = nil
-    }
-    @objc init(data: Data) throws {
-        self.impl = try Snapshot(data:data)
-    }
     @objc var pid:                  pid_t           { return impl.pid }
     @objc var pageSize:             size_t          { return impl.pageSize }
     @objc var images:               [_DYImage]!     { return impl.images.map { _DYImage($0) } }
@@ -219,11 +232,21 @@ extension _DYSnapshot {
         guard let sharedCache = impl.sharedCache else {
             return nil
         }
-        return _DYSharedCache(sharedCache:sharedCache)
+        return _DYSharedCache(sharedCache)
     }()
 
-    @nonobjc convenience fileprivate init(impl: Snapshot) {
-        self.init()
+    @objc private override init() {
+        fatalError("init() not supported")
+    }
+    @objc private init(internal: Bool) {
+        super.init()
+    }
+    @objc convenience init(data: Data) throws {
+        self.init(internal:true)
+        self.impl = try Snapshot(data:data)
+    }
+    @nonobjc convenience fileprivate init(_ impl: Snapshot) {
+        self.init(internal:true)
         self.impl = impl
     }
     @nonobjc private var impl: Snapshot!
@@ -239,8 +262,9 @@ extension _DYEventHandlerToken {
     @objc var value: UInt32 {
         return _value
     }
-    @objc fileprivate override init() {
+    @objc private override init() {
         self._value = nil
+        super.init()
     }
     @objc public init(value: UInt32) {
         self._value = value
@@ -258,16 +282,13 @@ extension _DYProcess {
         }
     }
 
-    @objc fileprivate override init() {
-        self.impl = nil
-    }
     @objc(initWithTask:queue:error:) init(task: task_read_t, queue: DispatchQueue? = nil) throws {
         self.impl = try Process(task:task, queue:queue)
     }
 
     @objc(processForCurrentTask) class func forCurrentTask() -> Self {
         let process = Process.forCurrentTask()
-        return _DYProcess(impl:process) as! Self
+        return _DYProcess(process) as! Self
     }
 
     @objc(registerChangeNotificationsWithError:handler:)
@@ -289,11 +310,17 @@ extension _DYProcess {
     }
         
     @objc(getCurrentSnapshotAndReturnError:) func getCurrentSnapshot() throws -> _DYSnapshot {
-        return _DYSnapshot(impl:impl.getCurrentSnapshot())
+        return _DYSnapshot(impl.getCurrentSnapshot())
     }
-    
-    @nonobjc convenience fileprivate init(impl: Process) {
-        self.init()
+
+    @objc private override init() {
+        fatalError("init() not supported")
+    }
+    @objc private init(internal: Bool) {
+        super.init()
+    }
+    @nonobjc convenience private init(_ impl: Process) {
+        self.init(internal:true)
         self.impl = impl
     }
     @nonobjc private var impl: Process!

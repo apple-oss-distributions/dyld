@@ -573,9 +573,7 @@ private:
 #if DYLD_FEATURE_USE_HW_TPRO
     bool                    _tproEnable                 = false;
 #endif // DYLD_FEATURE_USE_HW_TPRO
-#if SUPPORT_ROSETTA
     bool                    _translated                 = false;
-#endif /* SUPPORT_ROSETTA */
 #if BUILDING_DYLD
     void*                   _sharedCache                = nullptr;
 #endif // BUILDING_DYLD

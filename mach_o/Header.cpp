@@ -439,7 +439,7 @@ Error Header::validStructureLoadCommands(uint64_t fileSize) const
         return Error("load commands length (%llu) exceeds length of file (%llu)", headerAndLCSize, fileSize);
     }
 
-    // check for reconized filetype
+    // check for recognized filetype
     switch ( mh.filetype ) {
         case MH_EXECUTE:
         case MH_DYLIB:

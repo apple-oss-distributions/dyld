@@ -2484,6 +2484,7 @@ MachOFile::PointerMetaData::PointerMetaData()
     this->authenticated       = 0;
     this->key                 = 0;
     this->usesAddrDiversity   = 0;
+    this->padding             = 0;
 }
 
 MachOFile::PointerMetaData::PointerMetaData(const ChainedFixupPointerOnDisk* fixupLoc, uint16_t pointer_format)
@@ -2493,6 +2494,7 @@ MachOFile::PointerMetaData::PointerMetaData(const ChainedFixupPointerOnDisk* fix
     this->authenticated       = 0;
     this->key                 = 0;
     this->usesAddrDiversity   = 0;
+    this->padding             = 0;
     switch ( pointer_format ) {
         case DYLD_CHAINED_PTR_ARM64E:
         case DYLD_CHAINED_PTR_ARM64E_KERNEL:

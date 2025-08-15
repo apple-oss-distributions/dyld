@@ -155,7 +155,8 @@ public:
                   forceRODataConst          :  1,     // dyld_flags=0x00100000
                   forceRWDataConst          :  1,     // dyld_flags=0x00200000
                   unused0                   :  1,
-                  unusedFlagsHigh           :  9,
+                  unused1                   :  1,
+                  unusedFlagsHigh           :  8,
                   libPlatformRoot           :  1,
                   libPthreadRoot            :  1,
                   libKernelRoot             :  1,

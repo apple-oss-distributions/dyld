@@ -755,6 +755,9 @@ PlatformAndVersions APIs::getImagePlatformAndVersions(const Header* hdr)
         return PlatformAndVersions(config.dyldCache.platform, Version32(config.dyldCache.osVersion), Version32(config.dyldCache.osVersion));
     }
     else if ( hdr->hasMachOMagic() ) {
+        // validiate load commands are well formed
+        if ( mach_o::Error err = hdr->validStructureLoadCommands(0x10000) )
+            return PlatformAndVersions(Platform(0), Version32(0), Version32(0));
         // look for LC_BUILD_VERSION or derive from dylib info
         return this->getPlatformAndVersions(hdr);
     } else {

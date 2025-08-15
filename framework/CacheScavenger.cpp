@@ -97,6 +97,11 @@ CacheMapping mapFile(std::string dir, std::string name) {
     }
     dyld_cache_header* cacheHeader = (dyld_cache_header*)mapping;
 
+    // Validate that this is a cache file
+    if ( strncmp(cacheHeader->magic, "dyld_v1", 7) != 0 ) {
+        munmap(mapping, stat_buf.st_size);
+        return { nullptr, 0 };
+    }
     return { mapping, static_cast<size_t>(stat_buf.st_size), 0, cacheHeader->sharedRegionStart };
 }
 

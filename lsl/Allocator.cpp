@@ -235,12 +235,6 @@ void MemoryManager::adoptLock(Lock&& lock) {
 int MemoryManager::vmFlags(bool tproEnabled) const {
     int result = 0;
 
-#if DYLD_FEATURE_USE_HW_TPRO
-    if (tproEnabled) {
-        // add tpro for memory protection on platform that support it
-        result |= VM_FLAGS_TPRO;
-    }
-#endif // DYLD_FEATURE_USE_HW_TPRO
 
 #if BUILDING_DYLD && !TARGET_OS_EXCLAVEKIT
     // Only include the dyld tag for allocations made by dyld

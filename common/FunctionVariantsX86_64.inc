@@ -46,8 +46,8 @@ FUNCTION_VARIANT_X86_64( 6, "avx512bw",   (*(uint64_t*)_COMM_PAGE_CPU_CAPABILITI
 FUNCTION_VARIANT_X86_64( 7, "bmi1",       (*(uint64_t*)_COMM_PAGE_CPU_CAPABILITIES64) & kHasBMI1)
 FUNCTION_VARIANT_X86_64( 8, "rosetta",    config.process.isTranslated)
 FUNCTION_VARIANT_X86_64( 9, "haswell",    (_COMM_PAGE_CPUFAMILY == CPUFAMILY_INTEL_HASWELL))
-FUNCTION_VARIANT_X86_64(10, "ivybridge",  true)
-FUNCTION_VARIANT_X86_64(11, "nehalem",    true)
+FUNCTION_VARIANT_X86_64(10, "ivybridge",  true) // all macs that macOS 15 runs on are at least ivybridge
+FUNCTION_VARIANT_X86_64(11, "nehalem",    true) // all macs that macOS 15 runs on are at least nehalem
 
 // These were added in Fall 2025
 

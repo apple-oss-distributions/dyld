@@ -285,8 +285,9 @@ bool scavengeProcessFromRegions(Allocator& allocator, task_read_t task, ByteStre
         if (!mf) {
             continue;
         }
-        if (mf->machHeaderSize() > PAGE_SIZE) {
-            size_t newSize =  (size_t)lsl::roundToNextAligned(PAGE_SIZE, mf->machHeaderSize());
+        uint32_t headerSize = mf->headerAndLoadCommandsSize();
+        if (headerSize > PAGE_SIZE) {
+            size_t newSize =  (size_t)lsl::roundToNextAligned(PAGE_SIZE, headerSize);
             auto newMap = RemoteMap(task, address, newSize);
             map = std::move(newMap);
             if (!map) {

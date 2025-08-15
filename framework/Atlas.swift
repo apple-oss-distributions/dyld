@@ -403,18 +403,22 @@ internal struct SharedCache {
                     continue
                 }
                 for child in children {
-                    if child.extension == nil || child.extension == "development" {
+                    let fileName = child.lastComponent!.stem
+                    let fileExtension = child.extension
+                    if !fileName.hasPrefix("dyld_shared_cache_") && !fileName.hasPrefix("dyld_sim_shared_cache_") { continue }
+                    if fileExtension != nil && fileExtension != "development" { continue }
+                    if fileExtension == "development" {
                         // Development subcaches end in .development, filter those out here
                         if (child.lastComponent!.string.components(separatedBy:".").count > 2) {
                             continue;
                         }
-                        guard let sharedCache = try? SharedCache(path:child) else {
-                            continue
-                        }
-                        if !enumeratedCaches.contains(sharedCache.uuid) {
-                            enumeratedCaches.insert(sharedCache.uuid)
-                            result.append(sharedCache)
-                        }
+                    }
+                    guard let sharedCache = try? SharedCache(path:child) else {
+                        continue
+                    }
+                    if !enumeratedCaches.contains(sharedCache.uuid) {
+                        enumeratedCaches.insert(sharedCache.uuid)
+                        result.append(sharedCache)
                     }
                 }
             }

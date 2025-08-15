@@ -300,7 +300,8 @@ struct VIS_HIDDEN MachOFile : mach_header
                     high8             :  8,
                     authenticated     :  1,
                     key               :  2,
-                    usesAddrDiversity :  1;
+                    usesAddrDiversity :  1,
+                    padding           :  4 = 0;
     };
 
     static uint16_t chainedPointerFormat(const dyld_chained_fixups_header* chainHeader);
