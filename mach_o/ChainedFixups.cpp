@@ -475,7 +475,7 @@ public:
         return newValue;
     }
 
-    void             writeChainEntry(const Fixup& fixup, const void* nextLoc, uint64_t preferedLoadAddress, std::span<const MappedSegment*>) const override {
+    Error             writeChainEntry(const Fixup& fixup, const void* nextLoc, uint64_t preferedLoadAddress, std::span<const MappedSegment*>) const override {
         intptr_t delta = (nextLoc == nullptr) ? 0 : ((uint8_t*)nextLoc - (uint8_t*)fixup.location);
         if ( fixup.isBind ) {
             if ( bindBitCount() == 24 ) {
@@ -489,9 +489,13 @@ public:
                     authBind24Ptr->diversity = fixup.auth.diversity;
                     authBind24Ptr->zero      = 0;
                     authBind24Ptr->ordinal   = fixup.bind.bindOrdinal;
-                    assert(authBind24Ptr->next*stride() == delta);
-                    assert(authBind24Ptr->ordinal == fixup.bind.bindOrdinal);
-                    assert(fixup.bind.embeddedAddend == 0);
+                    // validate things fit into bit fields
+                    if ( authBind24Ptr->next*stride() != delta )
+                        return badChainDistance(fixup, delta);
+                    if ( authBind24Ptr->ordinal != fixup.bind.bindOrdinal )
+                        return badBindOrdinal(fixup);
+                    if ( fixup.bind.embeddedAddend != 0 )
+                        return badAddend(fixup, fixup.bind.embeddedAddend);
                 }
                 else {
                     dyld_chained_ptr_arm64e_bind24* bind24Ptr = (dyld_chained_ptr_arm64e_bind24*)fixup.location;
@@ -501,9 +505,12 @@ public:
                     bind24Ptr->addend   = fixup.bind.embeddedAddend;
                     bind24Ptr->zero     = 0;
                     bind24Ptr->ordinal  = fixup.bind.bindOrdinal;
-                    assert(signExtendedAddend(bind24Ptr) == fixup.bind.embeddedAddend);
-                    assert(bind24Ptr->next*stride() == delta);
-                    assert(bind24Ptr->ordinal == fixup.bind.bindOrdinal);
+                    if ( signExtendedAddend(bind24Ptr) != fixup.bind.embeddedAddend )
+                        return badAddend(fixup, fixup.bind.embeddedAddend);
+                    if ( bind24Ptr->next*stride() != delta )
+                        return badChainDistance(fixup, delta);
+                    if ( bind24Ptr->ordinal != fixup.bind.bindOrdinal )
+                        return badBindOrdinal(fixup);
                 }
             }
             else {
@@ -517,9 +524,12 @@ public:
                     authBindPtr->diversity = fixup.auth.diversity;
                     authBindPtr->zero      = 0;
                     authBindPtr->ordinal   = fixup.bind.bindOrdinal;
-                    assert(authBindPtr->next*stride() == delta);
-                    assert(authBindPtr->ordinal == fixup.bind.bindOrdinal);
-                    assert(fixup.bind.embeddedAddend == 0);
+                    if ( authBindPtr->next*stride() != delta )
+                        return badChainDistance(fixup, delta);
+                    if ( authBindPtr->ordinal != fixup.bind.bindOrdinal )
+                        return badBindOrdinal(fixup);
+                    if ( fixup.bind.embeddedAddend != 0 )
+                        return badAddend(fixup, fixup.bind.embeddedAddend);
                 }
                 else {
                     dyld_chained_ptr_arm64e_bind* bindPtr = (dyld_chained_ptr_arm64e_bind*)fixup.location;
@@ -529,9 +539,12 @@ public:
                     bindPtr->addend   = fixup.bind.embeddedAddend;
                     bindPtr->zero     = 0;
                     bindPtr->ordinal  = fixup.bind.bindOrdinal;
-                    assert(signExtendedAddend(bindPtr) == fixup.bind.embeddedAddend);
-                    assert(bindPtr->next*stride() == delta);
-                    assert(bindPtr->ordinal == fixup.bind.bindOrdinal);
+                    if ( signExtendedAddend(bindPtr) != fixup.bind.embeddedAddend )
+                        return badAddend(fixup, fixup.bind.embeddedAddend);
+                    if ( bindPtr->next*stride() != delta )
+                        return badChainDistance(fixup, delta);
+                    if ( bindPtr->ordinal != fixup.bind.bindOrdinal )
+                        return badBindOrdinal(fixup);
                 }
             }
         }
@@ -545,9 +558,11 @@ public:
                 authRebasePtr->addrDiv   = fixup.auth.usesAddrDiversity;
                 authRebasePtr->diversity = fixup.auth.diversity;
                 authRebasePtr->target    = fixup.rebase.targetVmOffset;
-                assert(authRebasePtr->next*stride() == delta);
-                assert(authRebasePtr->target == fixup.rebase.targetVmOffset);
-            }
+                if ( authRebasePtr->next*stride() != delta )
+                    return badChainDistance(fixup, delta);
+                if ( authRebasePtr->target != fixup.rebase.targetVmOffset )
+                    return badVmOffset(fixup);
+           }
             else {
                 unaligned_dyld_chained_ptr_arm64e_rebase* rebasePtr = (unaligned_dyld_chained_ptr_arm64e_rebase*)fixup.location;
                 uint8_t   high8 = (fixup.rebase.targetVmOffset >> 56);
@@ -557,10 +572,17 @@ public:
                 rebasePtr->next     = delta/stride();
                 rebasePtr->high8    = high8;
                 rebasePtr->target   = low56 + (this->unauthRebaseIsVmAddr() ? preferedLoadAddress : 0);
-                assert(rebasePtr->next*stride() == delta);
-                assert(rebasePtr->target == (low56 + (this->unauthRebaseIsVmAddr() ? preferedLoadAddress : 0)));
+                if ( rebasePtr->next*stride() != delta )
+                    return badChainDistance(fixup, delta);
+                if ( rebasePtr->target != (low56 + (this->unauthRebaseIsVmAddr() ? preferedLoadAddress : 0)) ) {
+                    if ( this->unauthRebaseIsVmAddr() )
+                        return badVmAddr(fixup, preferedLoadAddress);
+                    else
+                        return badVmOffset(fixup);
+                }
             }
         }
+        return Error::none();
     }
 
 protected:
@@ -666,7 +688,7 @@ public:
     const char*     description() const override           { return "arm64e shared cache, 8-byte stride, target vmoffset"; }
     uint32_t        ptrAlignmentSize() const override      { return 8; } // arm64e userspace requires 8-byte ptr alignment
     uint64_t        maxRebaseTargetOffset(bool auth) const override    { return 0x3FFFFFFFFULL; }
-    void            writeChainEntry(const Fixup& fixup, const void* nextLoc, uint64_t preferedLoadAddress, std::span<const MappedSegment*>) const override;
+    Error           writeChainEntry(const Fixup& fixup, const void* nextLoc, uint64_t preferedLoadAddress, std::span<const MappedSegment*>) const override;
 protected:
     uint32_t        bindBitCount() const override          { return 0; }
     uint32_t        stride() const override                { return 8; }
@@ -693,9 +715,10 @@ protected:
 
 };
 
-void PointerFormat_DYLD_CHAINED_PTR_ARM64E_SHARED_CACHE::writeChainEntry(const Fixup& fixup, const void* nextLoc, uint64_t preferedLoadAddress, std::span<const MappedSegment*>) const
+Error PointerFormat_DYLD_CHAINED_PTR_ARM64E_SHARED_CACHE::writeChainEntry(const Fixup& fixup, const void* nextLoc, uint64_t preferedLoadAddress, std::span<const MappedSegment*>) const
 {
-    assert(!fixup.isBind && "shared cache does not support binds");
+    if ( fixup.isBind )
+        return Error ("shared cache fixup formate does not support binds");
     intptr_t delta = (nextLoc == nullptr) ? 0 : ((uint8_t*)nextLoc - (uint8_t*)fixup.location);
     if ( fixup.authenticated ) {
         dyld_chained_ptr_arm64e_shared_cache_auth_rebase* authRebasePtr = (dyld_chained_ptr_arm64e_shared_cache_auth_rebase*)fixup.location;
@@ -705,8 +728,10 @@ void PointerFormat_DYLD_CHAINED_PTR_ARM64E_SHARED_CACHE::writeChainEntry(const F
         authRebasePtr->addrDiv       = fixup.auth.usesAddrDiversity;
         authRebasePtr->diversity     = fixup.auth.diversity;
         authRebasePtr->runtimeOffset = (fixup.rebase.targetVmOffset & 0x3FFFFFFFFULL);
-        assert(authRebasePtr->next*8 == delta);
-        assert(authRebasePtr->runtimeOffset == fixup.rebase.targetVmOffset);
+        if ( authRebasePtr->next*8 != delta )
+            return badChainDistance(fixup, delta);
+        if ( authRebasePtr->runtimeOffset != fixup.rebase.targetVmOffset )
+            return badVmOffset(fixup);
     }
     else {
         dyld_chained_ptr_arm64e_shared_cache_rebase* rebasePtr = (dyld_chained_ptr_arm64e_shared_cache_rebase*)fixup.location;
@@ -715,8 +740,13 @@ void PointerFormat_DYLD_CHAINED_PTR_ARM64E_SHARED_CACHE::writeChainEntry(const F
         rebasePtr->unused        = 0;
         rebasePtr->high8         = ((fixup.rebase.targetVmOffset >> 56) & 0xFF);
         rebasePtr->runtimeOffset = (fixup.rebase.targetVmOffset & 0x3FFFFFFFFULL);
-        assert(rebasePtr->next*8 == delta);
+        if ( rebasePtr->next*8 != delta )
+            return badChainDistance(fixup, delta);
+        uint64_t targetFromEncoding = (rebasePtr->runtimeOffset | ((uint64_t)rebasePtr->high8 << 56));
+        if ( targetFromEncoding != fixup.rebase.targetVmOffset )
+            return badVmOffset(fixup);
     }
+    return Error::none();
 }
 
 
@@ -732,7 +762,7 @@ public:
     const char*      description() const override          { return "authenticated arm64e, 8-byte stride, target segIndex/offset8"; }
     bool             is64() const override                 { return true; }
     Fixup            parseChainEntry(const void* loc, const MappedSegment* seg, uint64_t preferedLoadAddress, std::span<const uint64_t> segOffsetTable) const override;
-    void             writeChainEntry(const Fixup& fixup, const void* nextLoc, uint64_t preferedLoadAddress, std::span<const MappedSegment*>) const override;
+    Error            writeChainEntry(const Fixup& fixup, const void* nextLoc, uint64_t preferedLoadAddress, std::span<const MappedSegment*>) const override;
     const void*      nextLocation(const void* loc) const override;
     uint64_t         maxRebaseTargetOffset(bool authenticated) const override    { return 0x0FFFFFFF;  }
 protected:
@@ -778,14 +808,16 @@ static bool findSegIndexAndOffset(std::span<const MappedSegment*> segments, uint
 }
 
 
-void PointerFormat_DYLD_CHAINED_PTR_ARM64E_SEGMENTED::writeChainEntry(const Fixup& fixup, const void* nextLoc, uint64_t preferedLoadAddress, std::span<const MappedSegment*> segments) const
+Error PointerFormat_DYLD_CHAINED_PTR_ARM64E_SEGMENTED::writeChainEntry(const Fixup& fixup, const void* nextLoc, uint64_t preferedLoadAddress, std::span<const MappedSegment*> segments) const
 {
     intptr_t delta = (nextLoc == nullptr) ? 0 : ((uint8_t*)nextLoc - (uint8_t*)fixup.location);
-    assert(!fixup.isBind && "firmware format does not support binds");
+    if ( fixup.isBind )
+        return Error("firmware format does not support binds");
     uint8_t  segIndex;
     uint64_t segOffset;
     bool found = findSegIndexAndOffset(segments, fixup.rebase.targetVmOffset, segIndex, segOffset);
-    assert(found && "target vm address not in any segment");
+    if ( !found )
+        return Error("target vm address not in any segment");
 
     if ( fixup.authenticated ) {
         //fprintf(stderr, "key=%d, addr=%d, div=0x%04X\n", fixup.auth.key, fixup.auth.usesAddrDiversity, fixup.auth.diversity);
@@ -797,9 +829,10 @@ void PointerFormat_DYLD_CHAINED_PTR_ARM64E_SEGMENTED::writeChainEntry(const Fixu
         authRebasePtr->diversity        = fixup.auth.diversity;
         authRebasePtr->targetSegIndex   = segIndex;
         authRebasePtr->targetSegOffset  = (uint32_t)segOffset;
-        assert(authRebasePtr->next*stride()   == delta);
-        assert(authRebasePtr->targetSegIndex  == segIndex);
-        assert(authRebasePtr->targetSegOffset == segOffset);
+        if ( authRebasePtr->next*stride() != delta )
+            return badChainDistance(fixup, delta);
+        if ( (authRebasePtr->targetSegIndex != segIndex) || (authRebasePtr->targetSegOffset != segOffset) )
+            return badSegIndexOrOffset(fixup, segIndex, segOffset);
     }
     else {
         //fprintf(stderr, "segIndex=%d, segOffset=0x%0llX\n", segIndex, segOffset);
@@ -809,10 +842,12 @@ void PointerFormat_DYLD_CHAINED_PTR_ARM64E_SEGMENTED::writeChainEntry(const Fixu
         rebasePtr->padding          = 0;
         rebasePtr->targetSegIndex   = segIndex;
         rebasePtr->targetSegOffset  = (uint32_t)segOffset;
-        assert(rebasePtr->next*stride()   == delta);
-        assert(rebasePtr->targetSegIndex  == segIndex);
-        assert(rebasePtr->targetSegOffset == segOffset);
+        if ( rebasePtr->next*stride() != delta )
+            return badChainDistance(fixup, delta);
+        if ( (rebasePtr->targetSegIndex != segIndex) || (rebasePtr->targetSegOffset != segOffset) )
+            return badSegIndexOrOffset(fixup, segIndex, segOffset);
     }
+    return Error::none();
 }
 
 
@@ -853,7 +888,7 @@ public:
             return Fixup(loc, seg, ((uint64_t)(rebasePtr->high8) << 56) | rebasePtr->target);
     }
 
-    void             writeChainEntry(const Fixup& fixup, const void* nextLoc, uint64_t preferedLoadAddress, std::span<const MappedSegment*>) const override {
+    Error            writeChainEntry(const Fixup& fixup, const void* nextLoc, uint64_t preferedLoadAddress, std::span<const MappedSegment*>) const override {
         intptr_t delta = (nextLoc == nullptr) ? 0 : ((uint8_t*)nextLoc - (uint8_t*)fixup.location);
         if ( fixup.isBind ) {
             dyld_chained_ptr_64_bind*  bindPtr = (dyld_chained_ptr_64_bind*)fixup.location;
@@ -862,9 +897,12 @@ public:
             bindPtr->reserved = 0;
             bindPtr->addend   = fixup.bind.embeddedAddend;
             bindPtr->ordinal  = fixup.bind.bindOrdinal;
-            assert(bindPtr->addend == fixup.bind.embeddedAddend);
-            assert(bindPtr->next*4 == delta);
-            assert(bindPtr->ordinal == fixup.bind.bindOrdinal);
+            if ( bindPtr->addend != fixup.bind.embeddedAddend )
+                return badAddend(fixup, fixup.bind.embeddedAddend);
+            if ( bindPtr->next*4 != delta )
+                return badChainDistance(fixup, delta);
+            if ( bindPtr->ordinal != fixup.bind.bindOrdinal )
+                return badBindOrdinal(fixup);
         }
         else if ( unauthRebaseIsVmAddr() ) {
             dyld_chained_ptr_64_rebase* rebasePtr = (dyld_chained_ptr_64_rebase*)fixup.location;
@@ -875,9 +913,11 @@ public:
             rebasePtr->reserved = 0;
             rebasePtr->high8    = high8;
             rebasePtr->target   = low56+preferedLoadAddress;
-            assert(rebasePtr->next*4 == delta);
-            assert(rebasePtr->target == (low56+preferedLoadAddress));
-        }
+            if ( rebasePtr->next*4 != delta )
+                return badChainDistance(fixup, delta);
+            if ( rebasePtr->target != (low56+preferedLoadAddress) )
+                return badVmAddr(fixup, preferedLoadAddress);
+       }
         else {
             dyld_chained_ptr_64_rebase* rebasePtr = (dyld_chained_ptr_64_rebase*)fixup.location;
             uint8_t   high8 = (fixup.rebase.targetVmOffset >> 56);
@@ -887,9 +927,13 @@ public:
             rebasePtr->reserved = 0;
             rebasePtr->high8    = high8;
             rebasePtr->target   = low56;
-            assert(rebasePtr->next*4 == delta);
-            assert(rebasePtr->target == low56);
+            if ( rebasePtr->next*4 != delta )
+                return badChainDistance(fixup, delta);
+            uint64_t targetFromEncoding = (low56 | ((uint64_t)rebasePtr->high8 << 56));
+            if ( targetFromEncoding != fixup.rebase.targetVmOffset )
+                return badVmOffset(fixup);
         }
+        return Error::none();
     }
 
 protected:
@@ -932,7 +976,7 @@ public:
             return Fixup(loc, seg, rebasePtr->target);
     }
 
-    void             writeChainEntry(const Fixup& fixup, const void* nextLoc, uint64_t preferedLoadAddress, std::span<const MappedSegment*>) const override {
+    Error            writeChainEntry(const Fixup& fixup, const void* nextLoc, uint64_t preferedLoadAddress, std::span<const MappedSegment*>) const override {
         intptr_t delta = (nextLoc == nullptr) ? 0 : ((uint8_t*)nextLoc - (uint8_t*)fixup.location);
         if ( fixup.isBind ) {
             dyld_chained_ptr_32_bind* bindPtr = (dyld_chained_ptr_32_bind*)fixup.location;
@@ -940,9 +984,12 @@ public:
             bindPtr->next     = (uint32_t)(delta/4);
             bindPtr->addend   = fixup.bind.embeddedAddend;
             bindPtr->ordinal  = fixup.bind.bindOrdinal;
-            assert(bindPtr->next*4 == delta);
-            assert(bindPtr->addend == fixup.bind.embeddedAddend);
-            assert(bindPtr->ordinal == fixup.bind.bindOrdinal);
+            if ( bindPtr->next*4 != delta )
+                return badChainDistance(fixup, delta);
+            if ( bindPtr->addend != fixup.bind.embeddedAddend )
+                return badAddend(fixup, fixup.bind.embeddedAddend);
+            if ( bindPtr->ordinal != fixup.bind.bindOrdinal )
+                return badBindOrdinal(fixup);
         }
         else {
             dyld_chained_ptr_32_rebase*  rebasePtr = (dyld_chained_ptr_32_rebase*)fixup.location;
@@ -950,9 +997,12 @@ public:
             rebasePtr->next     = (uint32_t)(delta/4);
             uint64_t target = fixup.rebase.targetVmOffset+preferedLoadAddress;
             rebasePtr->target   = (uint32_t)target;
-            assert(rebasePtr->next*4 == delta);
-            assert(rebasePtr->target == target);
+            if ( rebasePtr->next*4 != delta )
+                return badChainDistance(fixup, delta);
+            if ( rebasePtr->target != target )
+                return badVmOffset(fixup);
         }
+        return Error::none();
     }
 
 };
@@ -989,13 +1039,16 @@ public:
         return Fixup(loc, seg, rebasePtr->target);
     }
 
-    void             writeChainEntry(const Fixup& fixup, const void* nextLoc, uint64_t preferedLoadAddress, std::span<const MappedSegment*>) const override {
+    Error            writeChainEntry(const Fixup& fixup, const void* nextLoc, uint64_t preferedLoadAddress, std::span<const MappedSegment*>) const override {
         intptr_t delta = (nextLoc == nullptr) ? 0 : ((uint8_t*)nextLoc - (uint8_t*)fixup.location);
         dyld_chained_ptr_32_cache_rebase*  rebasePtr = (dyld_chained_ptr_32_cache_rebase*)fixup.location;
         rebasePtr->next     = (uint32_t)(delta/4);
         rebasePtr->target   = (uint32_t)fixup.rebase.targetVmOffset;
-        assert(rebasePtr->next*4 == delta);
-        assert(rebasePtr->target == fixup.rebase.targetVmOffset);
+        if ( rebasePtr->next*4 != delta )
+            return badChainDistance(fixup, delta);
+        if ( rebasePtr->target != fixup.rebase.targetVmOffset )
+            return badVmOffset(fixup);
+        return Error::none();
     }
 };
 
@@ -1032,13 +1085,16 @@ public:
         return Fixup(loc, seg, rebasePtr->target - preferedLoadAddress);
     }
 
-    void             writeChainEntry(const Fixup& fixup, const void* nextLoc, uint64_t preferedLoadAddress, std::span<const MappedSegment*>) const override {
+    Error            writeChainEntry(const Fixup& fixup, const void* nextLoc, uint64_t preferedLoadAddress, std::span<const MappedSegment*>) const override {
         intptr_t delta = (nextLoc == nullptr) ? 0 : ((uint8_t*)nextLoc - (uint8_t*)fixup.location);
         dyld_chained_ptr_32_firmware_rebase*  rebasePtr = (dyld_chained_ptr_32_firmware_rebase*)fixup.location;
         rebasePtr->next     = (uint32_t)(delta/4);
         rebasePtr->target   = (uint32_t)fixup.rebase.targetVmOffset;
-        assert(rebasePtr->next*4 == delta);
-        assert(rebasePtr->target == fixup.rebase.targetVmOffset);
+        if ( rebasePtr->next*4 != delta )
+            return badChainDistance(fixup, delta);
+        if ( rebasePtr->target != fixup.rebase.targetVmOffset )
+            return badVmOffset(fixup);
+        return Error::none();
     }
 };
 
@@ -1092,7 +1148,7 @@ public:
 
     }
 
-    void             writeChainEntry(const Fixup& fixup, const void* nextLoc, uint64_t preferedLoadAddress, std::span<const MappedSegment*>) const override {
+    Error            writeChainEntry(const Fixup& fixup, const void* nextLoc, uint64_t preferedLoadAddress, std::span<const MappedSegment*>) const override {
         intptr_t delta = (nextLoc == nullptr) ? 0 : ((uint8_t*)nextLoc - (uint8_t*)fixup.location);
         dyld_chained_ptr_64_kernel_cache_rebase* rebasePtr = (dyld_chained_ptr_64_kernel_cache_rebase*)fixup.location;
 
@@ -1103,8 +1159,11 @@ public:
         rebasePtr->diversity  = fixup.auth.diversity;
         rebasePtr->cacheLevel = 0;  // FIXME
         rebasePtr->target     = fixup.rebase.targetVmOffset;
-        assert(rebasePtr->next*4 == delta);
-        assert(rebasePtr->target == fixup.rebase.targetVmOffset);
+        if ( rebasePtr->next*4 != delta )
+            return badChainDistance(fixup, delta);
+        if ( rebasePtr->target != fixup.rebase.targetVmOffset )
+            return badVmOffset(fixup);
+        return Error::none();
     }
 };
 
@@ -1144,7 +1203,7 @@ public:
 
     }
 
-    void             writeChainEntry(const Fixup& fixup, const void* nextLoc, uint64_t preferedLoadAddress, std::span<const MappedSegment*>) const override {
+    Error            writeChainEntry(const Fixup& fixup, const void* nextLoc, uint64_t preferedLoadAddress, std::span<const MappedSegment*>) const override {
         intptr_t delta = (nextLoc == nullptr) ? 0 : ((uint8_t*)nextLoc - (uint8_t*)fixup.location);
         dyld_chained_ptr_64_kernel_cache_rebase* rebasePtr = (dyld_chained_ptr_64_kernel_cache_rebase*)fixup.location;
 
@@ -1155,10 +1214,55 @@ public:
         rebasePtr->diversity  = 0;
         rebasePtr->cacheLevel = 0;  // FIXME
         rebasePtr->target     = fixup.rebase.targetVmOffset;
-        assert(rebasePtr->next == delta);
-        assert(rebasePtr->target == fixup.rebase.targetVmOffset);
+        if ( rebasePtr->next != delta )
+            return badChainDistance(fixup, delta);
+        if ( rebasePtr->target != fixup.rebase.targetVmOffset )
+            return badVmOffset(fixup);
+        return Error::none();
     }
 };
+
+Error ChainedFixups::PointerFormat::badChainDistance(const Fixup& fixup, intptr_t delta) const
+{
+    return Error("distance between fixups (%ld) is not encodable in chain for fixup at %.*s+0x%0lX",
+                 delta, (int)fixup.segment->segName.size(), fixup.segment->segName.data(),
+                 (uintptr_t)fixup.location - (uintptr_t)fixup.segment->content);
+}
+
+Error ChainedFixups::PointerFormat::badBindOrdinal(const Fixup& fixup) const
+{
+    return Error("bind ordinal (%u) too large in fixup at %.*s+0x%0lX",
+                 fixup.bind.bindOrdinal, (int)fixup.segment->segName.size(), fixup.segment->segName.data(),
+                 (uintptr_t)fixup.location - (uintptr_t)fixup.segment->content);
+}
+
+Error ChainedFixups::PointerFormat::badVmOffset(const Fixup& fixup) const
+{
+    return Error("vmOffset (0x%0llX) cannot fit in fixup at %.*s+0x%0lX",
+                 fixup.rebase.targetVmOffset, (int)fixup.segment->segName.size(), fixup.segment->segName.data(),
+                 (uintptr_t)fixup.location - (uintptr_t)fixup.segment->content);
+}
+
+Error ChainedFixups::PointerFormat::badVmAddr(const Fixup& fixup, uint64_t baseAddress) const
+{
+    return Error("vmAddress (0x%0llX) cannot fit in fixup at %.*s+0x%0lX",
+                 fixup.rebase.targetVmOffset+baseAddress, (int)fixup.segment->segName.size(), fixup.segment->segName.data(),
+                 (uintptr_t)fixup.location - (uintptr_t)fixup.segment->content);
+}
+
+Error ChainedFixups::PointerFormat::badAddend(const Fixup& fixup, int64_t addend) const
+{
+    return Error("addend (%lld) cannot fit in fixup at %.*s+0x%0lX",
+                 addend, (int)fixup.segment->segName.size(), fixup.segment->segName.data(),
+                 (uintptr_t)fixup.location - (uintptr_t)fixup.segment->content);
+}
+
+Error ChainedFixups::PointerFormat::badSegIndexOrOffset(const Fixup& fixup, uint8_t segIndex, uint64_t segOffset) const
+{
+    return Error("segIndex (%d) and segOffset (0x%0llX) cannot fit in fixup at %.*s+0x%0lX",
+                 segIndex, segOffset, (int)fixup.segment->segName.size(), fixup.segment->segName.data(),
+                 (uintptr_t)fixup.location - (uintptr_t)fixup.segment->content);
+}
 
 
 bool ChainedFixups::PointerFormat::valid(uint16_t pointer_format)

@@ -38,6 +38,7 @@
 #endif
 
 #include "Allocator.h"
+#include "StringUtils.h"
 
 namespace dyld3 {
 
@@ -177,11 +178,19 @@ inline void OverflowSafeArray<T,MAXCOUNT>::growTo(uint64_t n)
     int kr = 0;
 #endif
     if (kr != 0) {
-#if BUILDING_LIBDYLD && !TARGET_OS_EXCLAVEKIT
-        //FIXME We should figure out a way to do this in dyld
+#if !TARGET_OS_EXCLAVEKIT
         char crashString[256];
+#if BUILDING_DYLD
+        // snprintf in dyld uses _simple_salloc, which calls vm_allocate
+        strlcpy(crashString, "OverflowSafeArray failed to allocate 0x", sizeof(crashString));
+        appendHexToString(crashString, (uint64_t)_overflowBufferSize, sizeof(crashString));
+        strlcat(crashString, " bytes, vm_allocate returned: 0x", sizeof(crashString));
+        appendHexToString(crashString, kr, sizeof(crashString));
+        strlcat(crashString, "\n", sizeof(crashString));
+#else
         snprintf(crashString, sizeof(crashString), "OverflowSafeArray failed to allocate %llu bytes, vm_allocate returned: %d\n",
                  (uint64_t)_overflowBufferSize, kr);
+#endif
         CRSetCrashLogMessage(crashString);
 #endif
         assert(0);

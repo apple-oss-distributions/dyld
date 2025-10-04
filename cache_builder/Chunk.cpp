@@ -135,11 +135,6 @@ StubsChunk* Chunk::isStubsChunk()
     return nullptr;
 }
 
-UniquedGOTsChunk* Chunk::isUniquedGOTsChunk()
-{
-    return nullptr;
-}
-
 const DylibSegmentChunk* Chunk::isTPROChunk() const
 {
     return nullptr;
@@ -891,11 +886,6 @@ void UniquedGOTsChunk::dump() const
 const char* UniquedGOTsChunk::name() const
 {
     return "uniqued GOTs";
-}
-
-UniquedGOTsChunk* UniquedGOTsChunk::isUniquedGOTsChunk()
-{
-    return this;
 }
 
 //

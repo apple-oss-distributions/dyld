@@ -1020,6 +1020,30 @@ const Loader* Loader::getLoader(Diagnostics& diag, RuntimeState& state, const ch
                                                 possiblePathIsInDyldCache = true;
                                             }
                                         }
+                                        else {
+                                            // this might be a symlink to a dylib in the cache
+                                            char realFullPath[PATH_MAX];
+                                            if ( state.config.syscall.realpath(possiblePath, realFullPath) ) {
+                                                if ( strcmp(possiblePath, realFullPath) != 0 ) {
+                                                    if ( strncmp(realFullPath, simRoot, simRootLen) == 0 ) {
+                                                        possiblePathInSimDyldCache = &realFullPath[simRootLen];
+                                                        if ( state.config.dyldCache.indexOfPath(possiblePathInSimDyldCache, dylibInCacheIndex) ) {
+                                                            if ( state.config.log.searching )
+                                                                state.log("  found: symlink redirecting to dylib in cache: \"%s\"\n", possiblePathInSimDyldCache);
+                                                            uint64_t expectedMTime;
+                                                            uint64_t expectedInode;
+                                                            state.config.dyldCache.addr->getIndexedImageEntry(dylibInCacheIndex, expectedMTime, expectedInode);
+                                                            FileID expectedID(expectedInode, state.config.process.dyldSimFSID, expectedMTime, true);
+                                                            if ( possiblePathFileID == expectedID ) {
+                                                                // inode/mtime matches when sim dyld cache was built, so use dylib from dyld cache and ignore file on disk
+                                                                possiblePathHasFileOnDisk = false;
+                                                                possiblePathIsInDyldCache = true;
+                                                            }
+                                                        }
+                                                    }
+                                                }
+                                            }
+                                        }
                                     }
                                 }
                             }
@@ -2040,7 +2064,7 @@ void Loader::setUpPageInLinking(Diagnostics& diag, RuntimeState& state, uintptr_
     }
     // don't use page-in linking after libSystem is initialized
     // don't use page-in linking if process has a sandbox that disables syscall
-    bool canUsePageInLinkingSyscall = (state.config.process.pageInLinkingMode >= 2) && !state.libSystemInitialized() && !state.config.syscall.sandboxBlockedPageInLinking();
+    bool canUsePageInLinkingSyscall = (state.config.process.pageInLinkingMode >= 2) && !state.libdyldInitialized() && !state.config.syscall.sandboxBlockedPageInLinking();
     const MachOAnalyzer* ma       = (MachOAnalyzer*)this->loadAddress(state);
     const bool enableTpro         = state.config.process.enableTproDataConst;
     __block uint16_t     format   = 0;
@@ -2313,6 +2337,9 @@ void Loader::applyFixupsGeneric(Diagnostics& diag, RuntimeState& state, uint64_t
     const uintptr_t      slide = ma->getSlide();
     if ( ma->hasChainedFixups() ) {
         bool applyFixupsNow = true;
+#if DYLD_FEATURE_MEMORY_ACCOUNTING
+        __block uint32_t dataConstSize = 0;
+#endif
 #if TARGET_OS_EXCLAVEKIT
         if ( state.config.process.pageInLinkingMode == 2 ) {
             this->setUpExclaveKitPageInLinking(diag, state, slide, sliceOffset, bindTargets);
@@ -2323,7 +2350,7 @@ void Loader::applyFixupsGeneric(Diagnostics& diag, RuntimeState& state, uint64_t
 #else
   #if !TARGET_OS_SIMULATOR
         // only do page in linking, if binary has standard chained fixups, config allows, and not so many targets that is wastes wired memory
-        if ( (state.config.process.pageInLinkingMode != 0) && ma->hasChainedFixupsLoadCommand() && (bindTargets.count() < 10000) && !this->hasFuncVarFixups ) {
+        if ( (state.config.process.pageInLinkingMode != 0) && ma->hasChainedFixupsLoadCommand() && (bindTargets.count() < 100'000) && !this->hasFuncVarFixups ) {
             this->setUpPageInLinking(diag, state, slide, sliceOffset, bindTargets);
             // if we cannot do page-in-linking, then do fixups now
             applyFixupsNow = diag.hasError();
@@ -2347,7 +2374,7 @@ void Loader::applyFixupsGeneric(Diagnostics& diag, RuntimeState& state, uint64_t
                                 return;
                             }
                             if ( state.config.log.fixups )
-                                state.log("fixup: *0x%012lX = 0x%012lX\n", (uintptr_t)loc, (uintptr_t)newValue);
+                                state.log("fixup: *0x%010lX = 0x%016lX\n", (uintptr_t)loc, (uintptr_t)newValue);
                             *((uintptr_t*)loc) = (uintptr_t)newValue;
                         });
                     });
@@ -2358,12 +2385,37 @@ void Loader::applyFixupsGeneric(Diagnostics& diag, RuntimeState& state, uint64_t
                 ma->withChainStarts(diag, ma->chainStartsOffset(), ^(const dyld_chained_starts_in_image* startsInfo) {
                     ma->fixupAllChainedFixups(diag, startsInfo, slide, bindTargets, ^(void* loc, void* newValue) {
                         if ( state.config.log.fixups )
-                            state.log("fixup: *0x%012lX = 0x%012lX\n", (uintptr_t)loc, (uintptr_t)newValue);
+                            state.log("fixup: *0x%010lX = 0x%016lX\n", (uintptr_t)loc, (uintptr_t)newValue);
                         *((uintptr_t*)loc) = (uintptr_t)newValue;
                     });
                 });
             }
+#if DYLD_FEATURE_MEMORY_ACCOUNTING
+            // Adjust accounting for roots. Tehcnically this could be handled in a more generic fashion, but that would require
+            // plumbing the results of setUpPageInLinking() up the stack. In practice for the OS to work the dylibs rooting the
+            // shared cache must be built with relativelty recent toolchains, which means they will use fixup chains, so e can just
+            // deal with the accoutning here instead of plumbing it arround.
+            uint16_t            overriddenDylibIndex;
+            const DylibPatch*   patches;
+            if ( this->overridesDylibInCache(patches, overriddenDylibIndex) ) {
+                const mach_o::Header* dyldMH = (const Header*)ma;
+                dyldMH->forEachSegment(^(const Header::SegmentInfo& segInfo, bool& stop) {
+                    if ( segInfo.readOnlyData() ) {
+                        dataConstSize += segInfo.vmsize + (uint32_t)PAGE_SIZE;
+                    }
+                });
+            }
+#endif /* DYLD_FEATURE_MEMORY_ACCOUNTING */
         }
+#if DYLD_FEATURE_MEMORY_ACCOUNTING
+        uint16_t            overriddenDylibIndex;
+        const DylibPatch*   patches;
+        if ( this->overridesDylibInCache(patches, overriddenDylibIndex) ) {
+            // Account for the page roundng due to __DATA,__DATA_DIRTY, and __AUTH needing full pages
+            dataConstSize += (uint32_t)PAGE_SIZE*3;
+            state.increaseJetsamLimit(dataConstSize);
+        }
+#endif /* DYLD_FEATURE_MEMORY_ACCOUNTING */
 #if TARGET_OS_EXCLAVEKIT && XRT_DYLD_FIXUP_INTERFACE_VERSION >= 1
         // At this point, it is safe for the ExclaveKit runtime to touch the
         // runtime sections; let them know.
@@ -2377,7 +2429,7 @@ void Loader::applyFixupsGeneric(Diagnostics& diag, RuntimeState& state, uint64_t
             uintptr_t  locValue = *loc;
             uintptr_t  newValue = locValue + slide;
             if ( state.config.log.fixups )
-                state.log("fixup: *0x%012lX = 0x%012lX <rebase>\n", (uintptr_t)loc, (uintptr_t)newValue);
+                state.log("fixup: *0x%010lX = 0x%016lX <rebase>\n", (uintptr_t)loc, (uintptr_t)newValue);
             *loc = newValue;
         });
         if ( diag.hasError() )
@@ -2401,7 +2453,7 @@ void Loader::applyFixupsGeneric(Diagnostics& diag, RuntimeState& state, uint64_t
             }
 #endif
             if ( state.config.log.fixups )
-                state.log("fixup: *0x%012lX = 0x%012lX <%s/bind#%u>\n", (uintptr_t)loc, (uintptr_t)newValue, this->leafName(state), targetIndex);
+                state.log("fixup: *0x%010lX = 0x%016lX <%s/bind#%u>\n", (uintptr_t)loc, (uintptr_t)newValue, this->leafName(state), targetIndex);
             *loc = newValue;
 
         }, ^(uint64_t runtimeOffset, unsigned overrideBindTargetIndex, bool& stop) {
@@ -2411,12 +2463,12 @@ void Loader::applyFixupsGeneric(Diagnostics& diag, RuntimeState& state, uint64_t
             // Skip missing weak binds
             if ( newValue == UINTPTR_MAX ) {
                 if ( state.config.log.fixups )
-                    state.log("fixup: *0x%012lX (skipping missing weak bind) <%s/weak-bind#%u>\n", (uintptr_t)loc, this->leafName(state), overrideBindTargetIndex);
+                    state.log("fixup: *0x%010lX (skipping missing weak bind) <%s/weak-bind#%u>\n", (uintptr_t)loc, this->leafName(state), overrideBindTargetIndex);
                 return;
             }
 
             if ( state.config.log.fixups )
-                state.log("fixup: *0x%012lX = 0x%012lX <%s/weak-bind#%u>\n", (uintptr_t)loc, (uintptr_t)newValue, this->leafName(state), overrideBindTargetIndex);
+                state.log("fixup: *0x%010lX = 0x%016lX <%s/weak-bind#%u>\n", (uintptr_t)loc, (uintptr_t)newValue, this->leafName(state), overrideBindTargetIndex);
             *loc = newValue;
         });
     }
@@ -2428,7 +2480,7 @@ void Loader::applyFixupsGeneric(Diagnostics& diag, RuntimeState& state, uint64_t
             uintptr_t  locValue = *loc;
             uintptr_t  newValue = locValue + slide;
             if ( state.config.log.fixups )
-                state.log("fixup: *0x%012lX = 0x%012lX <rebase>\n", (uintptr_t)loc, (uintptr_t)newValue);
+                state.log("fixup: *0x%010lX = 0x%016lX <rebase>\n", (uintptr_t)loc, (uintptr_t)newValue);
             *loc = newValue;
         });
         if ( diag.hasError() )
@@ -2439,7 +2491,7 @@ void Loader::applyFixupsGeneric(Diagnostics& diag, RuntimeState& state, uint64_t
             uintptr_t* loc      = (uintptr_t*)((uint8_t*)ma + runtimeOffset);
             uintptr_t  newValue = (uintptr_t)(bindTargets[targetIndex]);
             if ( state.config.log.fixups )
-                state.log("fixup: *0x%012lX = 0x%012lX <%s/bind#%u>\n", (uintptr_t)loc, (uintptr_t)newValue, this->leafName(state), targetIndex);
+                state.log("fixup: *0x%019lX = 0x%016lX <%s/bind#%u>\n", (uintptr_t)loc, (uintptr_t)newValue, this->leafName(state), targetIndex);
             *loc = newValue;
         });
     }
@@ -2466,7 +2518,7 @@ void Loader::applyFunctionVariantFixups(Diagnostics& diag, const RuntimeState& s
         if ( fixupInfo.pacAuth )
             bestImplAddr = signPointer(bestImplAddr, loc, fixupInfo.pacAddress, fixupInfo.pacDiversity, (ptrauth_key)fixupInfo.pacKey);
 #endif
-        if ( state.config.log.fixups )
+        if ( state.config.log.fixups || state.config.log.functionVariants )
             state.log("fixup: *0x%012lX = 0x%012lX <function-variant-table#%u>\n", (uintptr_t)loc, (uintptr_t)bestImplAddr, fixupInfo.variantIndex);
         *loc = bestImplAddr;
     });
@@ -3221,6 +3273,10 @@ bool Loader::hasExportedSymbol(Diagnostics& diag, RuntimeState& state, const cha
                     resolver = __builtin_ptrauth_sign_unauthenticated(resolver, ptrauth_key_asia, 0);
 #endif
                     const void* resolverResult = (*resolver)();
+#if __has_feature(ptrauth_calls)
+                    // rdar://149320216 resolver returns a PAC signed pointer, we need to strip signing before calculating offset
+                    resolverResult = __builtin_ptrauth_strip(resolverResult, ptrauth_key_asia);
+#endif
                     targetRuntimeOffset = (uintptr_t)resolverResult - (uintptr_t)dylibLoadAddress;
                 }
 #endif
@@ -3426,6 +3482,37 @@ uintptr_t Loader::interpose(RuntimeState& state, uintptr_t value, const Loader* 
 }
 
 #if BUILDING_DYLD && !TARGET_OS_EXCLAVEKIT
+bool Loader::overriddenCacheHeader(RuntimeState& state, const mach_o::Header* dylibHdr)
+{
+    // convert dylibHdr to cacheDylibIndex
+    const DyldSharedCache* dyldCache = state.config.dyldCache.addr;
+    __block uint32_t cacheDylibIndex = 0;
+    __block bool     found           = false;
+    dyldCache->forEachDylib(^(const mach_o::Header* hdr, const char* installName, uint32_t imageIndex, uint64_t inode, uint64_t mtime, bool& stop) {
+        if ( hdr == dylibHdr ) {
+            cacheDylibIndex = imageIndex;
+            found = true;
+            stop = true;
+        }
+    });
+    if ( !found )
+        return false;
+
+    // see if some dylib overrides cacheDylibIndex
+    for (const Loader* ldr : state.loaded) {
+        if ( !ldr->dylibInDyldCache ) {
+            uint16_t            overriddenDylibIndex;
+            const DylibPatch*   patches;
+            if ( ldr->overridesDylibInCache(patches, overriddenDylibIndex) ) {
+                if ( overriddenDylibIndex == cacheDylibIndex )
+                    return true;
+            }
+        }
+    }
+
+    return false;
+}
+
 void Loader::adjustFunctionVariantsInDyldCache(RuntimeState& state)
 {
     const DyldSharedCache* dyldCache = state.config.dyldCache.addr;
@@ -3439,7 +3526,21 @@ void Loader::adjustFunctionVariantsInDyldCache(RuntimeState& state)
     // If dylibs in dyld cache have any function-variants, select which variant to use.
     // Requires DATA_CONST to be writable, and function-variant flags to be setup.
     if ( dyldCache != nullptr ) {
+        __block const mach_o::Header* lastDylibHdr          = nullptr;
+        __block bool                  lastDylibIsOverridden = false;
         dyldCache->forEachFunctionVariantPatchLocation(^(const void* loc, PointerMetaData pmd, const mach_o::FunctionVariants& fvs, const mach_o::Header* dylibHdr, int variantIndex, bool& stop) {
+            // need special handling if there are roots installed
+            if ( state.hasOverriddenCachedDylib() ) {
+                // if dylibHdr is for a cache dylib that has been overridden, do not patch function variant uses that point into it
+                // they will be fixed up as part of cache patching
+                if ( lastDylibHdr != dylibHdr ) {
+                    // calling overriddenCacheHeader() is expensive so don't call again if same as previous
+                    lastDylibIsOverridden = Loader::overriddenCacheHeader(state, dylibHdr);
+                    lastDylibHdr          = dylibHdr;
+                }
+                if ( lastDylibIsOverridden )
+                    return;  // don't patch
+            }
             uintptr_t  bestImplOffset = (uintptr_t)state.config.process.selectFromFunctionVariants(fvs, variantIndex);
             uintptr_t  bestImplAddr   = (uintptr_t)dylibHdr + (uintptr_t)bestImplOffset;
             uintptr_t* fixupLoc       = (uintptr_t*)loc;
@@ -3449,10 +3550,14 @@ void Loader::adjustFunctionVariantsInDyldCache(RuntimeState& state)
 #endif
             if ( *fixupLoc != bestImplAddr ) {
                 dataConstWriterPtr->makeWriteable();
-                if ( state.config.log.fixups )
-                    state.log("dyld cache function variant patch: *%p = %p\n", fixupLoc, (void*)bestImplAddr);
+                if ( state.config.log.fixups || state.config.log.functionVariants )
+                    state.log("dyld cache function variant patching:      *%p = %p <%s/function-variant-table#%u>\n",
+                              fixupLoc, (void*)bestImplAddr,  leafName(dylibHdr->installName()), variantIndex);
                 *fixupLoc = bestImplAddr;
             }
+            else if ( state.config.log.functionVariants )
+                state.log("dyld cache function variant already using: *%p = %p <%s/function-variant-table#%u>\n",
+                          fixupLoc, (void*)bestImplAddr, leafName(dylibHdr->installName()), variantIndex);
         });
     }
 }
@@ -3473,6 +3578,7 @@ void Loader::applyInterposingToDyldCache(RuntimeState& state)
     DyldCacheDataConstScopedWriter patcher(state);
 
     state.setVMAccountingSuspending(true);
+    uint32_t dirtiedDataConstPagecount = state.patchedDataConstPageCount();
     for ( const InterposeTupleAll& tuple : state.interposingTuplesAll ) {
         uint32_t imageIndex;
         uintptr_t cacheOffsetOfReplacee = tuple.replacee - (uintptr_t)dyldCache;
@@ -3503,6 +3609,7 @@ void Loader::applyInterposingToDyldCache(RuntimeState& state)
                 if ( pmd.authenticated ) {
                     newValue = dyld3::MachOLoaded::ChainedFixupPointerOnDisk::Arm64e::signPointer(newValue, loc, pmd.usesAddrDiversity, pmd.diversity, pmd.key);
                     *loc     = newValue;
+                    state.recordInDataConstBitmap((uint64_t)loc);
                     if ( state.config.log.interposing )
                         state.log("interpose: *%p = %p (JOP: diversity 0x%04X, addr-div=%d, key=%s)\n",
                                   loc, (void*)newValue, pmd.diversity, pmd.usesAddrDiversity, MachOLoaded::ChainedFixupPointerOnDisk::Arm64e::keyName(pmd.key));
@@ -3512,9 +3619,12 @@ void Loader::applyInterposingToDyldCache(RuntimeState& state)
                 if ( state.config.log.interposing )
                     state.log("interpose: *%p = 0x%0llX (dyld cache patch) to %s\n", loc, newLoc + addend, exportName);
                 *loc = newValue;
+                state.recordInDataConstBitmap((uint64_t)loc);
             });
         });
     }
+    dirtiedDataConstPagecount = state.patchedDataConstPageCount() - dirtiedDataConstPagecount;
+    state.increaseJetsamLimit(dirtiedDataConstPagecount * (uint32_t)PAGE_SIZE);
     state.setVMAccountingSuspending(false);
 }
 #endif // !TARGET_OS_EXCLAVEKIT
@@ -3535,6 +3645,7 @@ void Loader::applyCachePatchesToOverride(RuntimeState& state, const Loader* dyli
     assert((patchVersion == 2) || (patchVersion == 3) || (patchVersion == 4));
     __block bool suspended = false;
     __block const DylibPatch* cachePatch = patches;
+    uint32_t dirtiedDataConstPagecount = state.patchedDataConstPageCount();
     dyldCache->forEachPatchableExport(overriddenDylibIndex, ^(uint32_t dylibVMOffsetOfImpl, const char* exportName,
                                                               PatchKind patchKind) {
         const DylibPatch* patch = cachePatch;
@@ -3567,10 +3678,8 @@ void Loader::applyCachePatchesToOverride(RuntimeState& state, const Loader* dyli
 
             // overridden dylib may not effect this dylib, so only suspend when we find it does effect it
             if ( !suspended ) {
-#if !TARGET_OS_EXCLAVEKIT
                 state.setVMAccountingSuspending(true);
                 suspended = true;
-#endif // !TARGET_OS_EXCLAVEKIT
             }
 
             uintptr_t* loc                  = (uintptr_t*)((uint8_t*)dylibToPatchMA + userVMOffset);
@@ -3587,7 +3696,7 @@ void Loader::applyCachePatchesToOverride(RuntimeState& state, const Loader* dyli
                 }
             }
             // rdar://125168527 (help debug issues with roots missing symbols)
-            if ( !isWeakImport && (targetRuntimeAddress == DYLD_BADROOT_MARKER) ) {
+            if ( !isWeakImport && (targetRuntimeAddress == DYLD_BADROOT_MARKER) && state.config.log.badRootNonGOT ) {
                 const char* overriddenPath = dyldCache->getIndexedImagePath(overriddenDylibIndex);
                 state.log("symbol '%s' missing from root that overrides %s. Use of that symbol in %s is being set to 0xBAD4007.\n", exportName, overriddenPath, dylibToPatch->path(state));
             }
@@ -3596,8 +3705,9 @@ void Loader::applyCachePatchesToOverride(RuntimeState& state, const Loader* dyli
                 newValue = dyld3::MachOLoaded::ChainedFixupPointerOnDisk::Arm64e::signPointer(newValue, loc, pmd.usesAddrDiversity, pmd.diversity, pmd.key);
                 if ( *loc != newValue ) {
                     *loc = newValue;
+                    state.recordInDataConstBitmap((uint64_t)loc);
                     if ( state.config.log.fixups ) {
-                        state.log("cache fixup: *0x%012lX = 0x%012lX (*%s+0x%012lX = %s+0x%012lX) (JOP: diversity=0x%04X, addr-div=%d, key=%s)\n",
+                        state.log("cache fixup: *0x%010lX = 0x%016lX (*%s+0x%010lX = %s+0x%010lX) (JOP: diversity=0x%04X, addr-div=%d, key=%s)\n",
                                   (long)loc, newValue,
                                   dylibToPatch->leafName(state), (long)userVMOffset,
                                   this->leafName(state), (long)patch->overrideOffsetOfImpl,
@@ -3609,8 +3719,9 @@ void Loader::applyCachePatchesToOverride(RuntimeState& state, const Loader* dyli
 #endif
             if ( *loc != newValue ) {
                 *loc = newValue;
+                state.recordInDataConstBitmap((uint64_t)loc);
                 if ( state.config.log.fixups )
-                    state.log("cache fixup: *0x%012lX = 0x%012lX (*%s+0x%012lX = %s+0x%012lX)\n",
+                    state.log("cache fixup: *0x%010lX = 0x%016lX (*%s+0x%010lX = %s+0x%016lX)\n",
                               (long)loc, (long)newValue,
                               dylibToPatch->leafName(state), (long)userVMOffset,
                               this->leafName(state), (long)patch->overrideOffsetOfImpl);
@@ -3620,11 +3731,11 @@ void Loader::applyCachePatchesToOverride(RuntimeState& state, const Loader* dyli
     // Ensure the end marker is as expected
     assert(cachePatch->overrideOffsetOfImpl == DylibPatch::endOfPatchTable);
 
-
+    // Update the dirtiedDataConstPagecount to reflect the delta between what was already dirty and what is now dirty
+    dirtiedDataConstPagecount = state.patchedDataConstPageCount() - dirtiedDataConstPagecount;
+    state.increaseJetsamLimit(dirtiedDataConstPagecount * (uint32_t)PAGE_SIZE);
     if ( suspended ) {
-#if !TARGET_OS_EXCLAVEKIT
         state.setVMAccountingSuspending(false);
-#endif // !TARGET_OS_EXCLAVEKIT
     }
 }
 
@@ -3683,6 +3794,7 @@ void Loader::applyCachePatches(RuntimeState& state, DyldCacheDataConstLazyScoped
 
     __block bool suspended = false;
     __block const DylibPatch* cachePatch = patches;
+    uint32_t dirtiedDataConstPagecount = state.patchedDataConstPageCount();
     dyldCache->forEachPatchableExport(overriddenDylibIndex, ^(uint32_t dylibVMOffsetOfImpl, const char* exportName,
                                                               PatchKind patchKind) {
         const DylibPatch* patch = cachePatch;
@@ -3715,10 +3827,8 @@ void Loader::applyCachePatches(RuntimeState& state, DyldCacheDataConstLazyScoped
 
             // overridden dylib may not effect this dylib, so only suspend when we find it does effect it
             if ( !suspended ) {
-#if !TARGET_OS_EXCLAVEKIT
                 state.setVMAccountingSuspending(true);
                 suspended = true;
-#endif // !TARGET_OS_EXCLAVEKIT
             }
 
             uintptr_t* loc      = (uintptr_t*)((uint8_t*)dyldCache + cacheVMOffset);
@@ -3729,18 +3839,19 @@ void Loader::applyCachePatches(RuntimeState& state, DyldCacheDataConstLazyScoped
                 newValue = 0;
 
             // rdar://125168527 (help debug issues with roots missing symbols)
-            if ( !isWeakImport && (targetRuntimeAddress == DYLD_BADROOT_MARKER) ) {
-                // FIXME: re-enable when we can check all the dylibs using this shared GOT slot have not been rooted
-                //const char* overriddenPath = dyldCache->getIndexedImagePath(overriddenDylibIndex);
-                //state.log("symbol '%s' missing from root that overrides %s. The shared GOT use of that symbol is being set to 0xBAD4007.\n", exportName, overriddenPath);
+            if ( !isWeakImport && (targetRuntimeAddress == DYLD_BADROOT_MARKER) && state.config.log.badRootGOT ) {
+                // FIXME: we really need to check all the dylibs using this shared GOT slot have not been rooted
+                const char* overriddenPath = dyldCache->getIndexedImagePath(overriddenDylibIndex);
+                state.log("symbol '%s' missing from root that overrides %s. The shared GOT use of that symbol is being set to 0xBAD4007.\n", exportName, overriddenPath);
             }
 #if __has_feature(ptrauth_calls)
             if ( pmd.authenticated && (newValue != 0) ) {
                 newValue = dyld3::MachOLoaded::ChainedFixupPointerOnDisk::Arm64e::signPointer(newValue, loc, pmd.usesAddrDiversity, pmd.diversity, pmd.key);
                 if ( *loc != newValue ) {
                     *loc = newValue;
+                    state.recordInDataConstBitmap((uint64_t)loc);
                     if ( state.config.log.fixups ) {
-                        state.log("cache GOT fixup: *0x%012lX = 0x%012lX (*cache+0x%012lX = %s+0x%012lX) (JOP: diversity=0x%04X, addr-div=%d, key=%s)\n",
+                        state.log("cache GOT fixup: *0x%010lX = 0x%016lX (*cache+0x%010lX = %s+0x%016lX) (JOP: diversity=0x%04X, addr-div=%d, key=%s)\n",
                                   (long)loc, newValue, (long)cacheVMOffset,
                                   this->leafName(state), (long)patch->overrideOffsetOfImpl,
                                   pmd.diversity, pmd.usesAddrDiversity,
@@ -3752,8 +3863,9 @@ void Loader::applyCachePatches(RuntimeState& state, DyldCacheDataConstLazyScoped
 #endif
             if ( *loc != newValue ) {
                 *loc = newValue;
+                state.recordInDataConstBitmap((uint64_t)loc);
                 if ( state.config.log.fixups )
-                    state.log("cache GOT fixup: *0x%012lX = 0x%012lX (*cache+0x%012lX = %s+0x%012lX)\n",
+                    state.log("cache GOT fixup: *0x%010lX = 0x%016lX (*cache+0x%010lX = %s+0x%016lX)\n",
                               (long)loc, (long)newValue,
                               (long)cacheVMOffset,
                               this->leafName(state), (long)patch->overrideOffsetOfImpl);
@@ -3763,11 +3875,11 @@ void Loader::applyCachePatches(RuntimeState& state, DyldCacheDataConstLazyScoped
     // Ensure the end marker is as expected
     assert(cachePatch->overrideOffsetOfImpl == DylibPatch::endOfPatchTable);
 
-
+    // Update the dirtiedDataConstPagecount to reflect the delta between what was already dirty and what is now dirty
+    dirtiedDataConstPagecount = state.patchedDataConstPageCount() - dirtiedDataConstPagecount;
+    state.increaseJetsamLimit(dirtiedDataConstPagecount * (uint32_t)PAGE_SIZE);
     if ( suspended ) {
-#if !TARGET_OS_EXCLAVEKIT
         state.setVMAccountingSuspending(false);
-#endif // !TARGET_OS_EXCLAVEKIT
     }
 }
 
@@ -3799,7 +3911,7 @@ uint16_t Loader::indexOfUnzipperedTwin(const RuntimeState& state, uint16_t overr
 }
 
 #if !TARGET_OS_EXCLAVEKIT
-uint64_t Loader::getOnDiskBinarySliceOffset(RuntimeState& state, const MachOAnalyzer* ma, const char* path)
+uint64_t Loader::getOnDiskBinarySliceOffset(RuntimeState& state, const MachOFile* mf, const char* path)
 {
 #if BUILDING_DYLD
 #if TARGET_OS_OSX && __arm64__
@@ -3812,7 +3924,7 @@ uint64_t Loader::getOnDiskBinarySliceOffset(RuntimeState& state, const MachOAnal
     state.config.syscall.withReadOnlyMappedFile(diag, path, false, ^(const void* mapping, size_t mappedSize, bool isOSBinary, const FileID& fileID, const char* realPath, int fileDescriptor) {
         if ( const dyld3::FatFile* ff = dyld3::FatFile::isFatFile(mapping) ) {
             ff->forEachSlice(diag, mappedSize, ^(uint32_t sliceCpuType, uint32_t sliceCpuSubType, const void* sliceStart, uint64_t sliceSize, bool& stop) {
-                if ( memcmp(ma, sliceStart, 64) == 0 ) {
+                if ( memcmp(mf, sliceStart, 64) == 0 ) {
                     sliceOffset = (uint8_t*)sliceStart - (uint8_t*)mapping;
                     stop = true;
                 }

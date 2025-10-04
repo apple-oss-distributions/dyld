@@ -271,6 +271,10 @@ struct VIS_HIDDEN ObjCProtocol
     {
         return is64 ? 0x30 : 0x18;
     }
+    static constexpr uint32_t getOffsetToSize(bool is64)
+    {
+        return is64 ? 0x40 : 0x20;
+    }
 };
 
 struct VIS_HIDDEN ObjCPropertyList

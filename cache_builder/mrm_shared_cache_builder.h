@@ -128,6 +128,9 @@ struct BuildOptions_v3
     bool                                        filesRemovedFromDisk;
     bool                                        timePasses;
     bool                                        printStats;
+    // Added in v3.1 (still just v3 as there's no clients of it yet)
+    bool                                        verboseIMPCaches;
+    bool                                        verboseCacheLayout;
 };
 
 enum FileBehavior
@@ -152,21 +155,6 @@ struct FileResult_v1
     const char*                                 hashArch;
     const char*                                 hashType;
     const char*                                 hash;
-};
-
-struct FileResult_v2
-{
-    uint64_t                                    version;            // Future proofing, set to 2
-    const char*                                 path;
-    enum FileBehavior                           behavior;
-    const uint8_t*                              data;               // May be null.  Owned by the cache builder.  Destroyed by destroySharedCacheBuilder
-    uint64_t                                    size;
-    // CDHash, must be set for new or modified files
-    const char*                                 hashArch;
-    const char*                                 hashType;
-    const char*                                 hash;
-    int                                         fd;
-    const char*                                 tempFilePath;
 };
 
 struct CacheResult
@@ -221,6 +209,9 @@ const struct CacheResult* const* getCacheResults(struct MRMSharedCacheBuilder* b
 
 __API_AVAILABLE(macos(10.12))
 const char* const* getFilesToRemove(const struct MRMSharedCacheBuilder* builder, uint64_t* fileCount);
+
+__API_AVAILABLE(macos(10.12))
+const char* const* getCacheStats(const struct MRMSharedCacheBuilder* builder, uint64_t* resultCount);
 
 __API_AVAILABLE(macos(10.12))
 void destroySharedCacheBuilder(struct MRMSharedCacheBuilder* builder);

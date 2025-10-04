@@ -54,6 +54,7 @@ struct VIS_HIDDEN HeaderWriter : public Header
     void            setAppExtensionSafe();
     void            setSimSupport();
     void            setNoReExportedDylibs();
+    void            setNoDynamicAccess();
     void            addPlatformInfo(Platform, Version32 minOS, Version32 sdk, std::span<const build_tool_version> tools={});
     void            addUniqueUUID(uuid_t copyOfUUID=nullptr);
     void            addNullUUID();
@@ -76,9 +77,10 @@ struct VIS_HIDDEN HeaderWriter : public Header
     void            addSegment(std::string_view segName, uint64_t vmaddr, uint64_t vmsize, uint32_t perms, uint32_t sectionCount);
     void            setMain(uint32_t offset);
     void            setCustomStackSize(uint64_t stackSize);
-    void            setUnixEntry(uint64_t addr);
+    void            setUnixEntry(uint64_t addr, bool entryIsThumb=false, uint64_t sp=0);
     void            setSymbolTable(uint32_t nlistOffset, uint32_t nlistCount, uint32_t stringPoolOffset, uint32_t stringPoolSize,
-                                   uint32_t localsCount, uint32_t globalsCount, uint32_t undefCount, uint32_t indOffset, uint32_t indCount, bool dynSymtab);
+                                   uint32_t localsCount, uint32_t globalsCount, uint32_t undefCount, uint32_t indOffset, uint32_t indCount, bool dynSymtab,
+                                   uint32_t locrelOffset, uint32_t locrelCount, uint32_t extrelOffset, uint32_t extrelCount);
     void            setBindOpcodesInfo(uint32_t rebaseOffset, uint32_t rebaseSize,
                                        uint32_t bindsOffset, uint32_t bindsSize,
                                        uint32_t weakBindsOffset, uint32_t weakBindsSize,

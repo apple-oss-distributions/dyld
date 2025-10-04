@@ -40,6 +40,7 @@
 #include "ClosureFileSystemPhysical.h"
 #include "FileUtils.h"
 #include "Header.h"
+#include "GradedArchitectures.h"
 #include "JSONWriter.h"
 #include "MachOAppCache.h"
 
@@ -47,11 +48,11 @@ using namespace json;
 
 using dyld3::closure::FileSystemPhysical;
 using dyld3::closure::LoadedFileInfo;
-using dyld3::GradedArchs;
 using dyld3::MachOAnalyzer;
 using dyld3::MachOAppCache;
 using json::Node;
 
+using mach_o::GradedArchitectures;
 using mach_o::Header;
 using mach_o::Platform;
 
@@ -344,7 +345,7 @@ static int dumpAppCache(const DumpOptions& options) {
         return 1;
     }
 
-    const GradedArchs& archs = GradedArchs::forName(gOpts.archs[0]);
+    const GradedArchitectures& archs = GradedArchitectures::forName(gOpts.archs[0], /*keysOff=*/false, /*isKernel=*/true);
     Platform platform = Platform();
 
     // HACK: Pass a real option for building a kernel app cache
@@ -923,7 +924,7 @@ static int validateFile(const ValidateOptions& options) {
     if (options.filePath == nullptr)
         exit_usage();
 
-    const GradedArchs& archs = GradedArchs::forName(gOpts.archs[0]);
+    const GradedArchitectures& archs = GradedArchitectures::forName(gOpts.archs[0], /*keysOff=*/false, /*isKernel=*/true);
     Platform platform = Platform();
 
     // HACK: Pass a real option for building a kernel app cache
@@ -1013,7 +1014,7 @@ static int listBundles(const ListBundlesOptions& options) {
 static CFDataRef
 createKernelCollectionForArch(const CreateKernelCollectionOptions& options, const char* arch,
                               Diagnostics& diag) {
-    const GradedArchs& archs = GradedArchs::forName(arch);
+    const GradedArchitectures& archs = GradedArchitectures::forName(arch, /*keysOff=*/false, /*isKernel=*/true);
     Platform platform = Platform();
 
 

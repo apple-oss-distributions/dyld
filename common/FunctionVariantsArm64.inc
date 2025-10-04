@@ -22,6 +22,8 @@
  */
 
 
+
+
 //
 // included by:
 //   ld to convert function variant name(s) to required flag bits
@@ -74,6 +76,8 @@ FUNCTION_VARIANT_ARM64(34, "dit",       (hw_opt_arm_caps & ((__uint128_t)1 << CA
 FUNCTION_VARIANT_ARM64(35, "fp16",      (hw_opt_arm_caps & ((__uint128_t)1 << CAP_BIT_FEAT_FP16))    )
 FUNCTION_VARIANT_ARM64(36, "ssbs",      (hw_opt_arm_caps & ((__uint128_t)1 << CAP_BIT_FEAT_SSBS))    )
 FUNCTION_VARIANT_ARM64(37, "bti",       (hw_opt_arm_caps & ((__uint128_t)1 << CAP_BIT_FEAT_BTI))     )
+
+
 FUNCTION_VARIANT_ARM64(44, "sme",        (hw_opt_arm_caps & ((__uint128_t)1 << CAP_BIT_FEAT_SME))         )
 FUNCTION_VARIANT_ARM64(45, "sme2",       (hw_opt_arm_caps & ((__uint128_t)1 << CAP_BIT_FEAT_SME2))        )
 FUNCTION_VARIANT_ARM64(46, "smef64f64",  (hw_opt_arm_caps & ((__uint128_t)1 << CAP_BIT_FEAT_SME_F64F64))  )
@@ -87,6 +91,7 @@ FUNCTION_VARIANT_ARM64(53, "smei16i32",  (hw_opt_arm_caps & ((__uint128_t)1 << C
 FUNCTION_VARIANT_ARM64(54, "AdvSIMD",    (hw_opt_arm_caps & ((__uint128_t)1 << CAP_BIT_AdvSIMD))          )
 FUNCTION_VARIANT_ARM64(55, "AdvSIMDHpfp",(hw_opt_arm_caps & ((__uint128_t)1 << CAP_BIT_AdvSIMD_HPFPCvt))  )  // name?
 FUNCTION_VARIANT_ARM64(56, "crc32",      (hw_opt_arm_caps & ((__uint128_t)1 << CAP_BIT_CRC32))            )
+
 
 
 // These were added in Fall 2025

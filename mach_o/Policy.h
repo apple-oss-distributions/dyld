@@ -82,11 +82,14 @@ public:
     Usage       useAuthStubsInKexts() const;
     Usage       useDataConstForSelRefs() const;
     Usage       useSourceVersionLoadCommand() const;
-    Usage       useLegacyLinkedit() const;
     bool        use4KBLoadCommandsPadding() const;
     bool        canUseDelayInit() const;
     uint16_t    chainedFixupsFormat() const;
     bool        useProtectedStack() const;
+    bool        canUseEntryName() const;
+    Usage       useEntryPointLoadCommand() const;
+    bool        keepDwarfUnwind() const;
+    bool        canInferEmptySignedClassROs() const;
 
     // restrictions
     bool        enforceReadOnlyLinkedit() const;
@@ -107,10 +110,12 @@ public:
     bool        enforceDataConstSegmentPermissions() const;
     bool        enforceImageListRemoveMainExecutable() const;
     bool        enforceSetSimulatorSharedCachePath() const;
+    bool        enforceUniqueSegmentNames() const;
 
 private:
     bool              dyldLoadsOutput() const;
     bool              kernelOrKext() const;
+    bool              isDynamicFirmware() const;
 
     Platform::Epoch   _featureEpoch;
     Platform::Epoch   _enforcementEpoch;

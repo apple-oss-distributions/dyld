@@ -86,44 +86,44 @@ void NListSymbolTableWriter::addStabsFromDebugNotes(std::span<const DebugBuilder
     for (const DebugBuilderNote& note : debugNotes) {
         uint32_t mtime = (zeroModTimes ? 0 : note.fileInfo->objModTime());
         if ( note.srcDirPoolOffset == 0 && note.srcNamePoolOffset == 0 ) {
-            nlists.add(T{{note.objPathPoolOffset},  N_AST,  0,                       0, (V)mtime});
+            nlists.add(T{{.n_strx = note.objPathPoolOffset}, N_AST, 0, 0, (V)mtime});
         }
         else {
             if ( !startedSOs )
-                nlists.add(T{{1}, N_SO, 1, 0, 0}); // match ld64 which always started debug notes with an "end SO"
+                nlists.add(T{{.n_strx = 1}, N_SO, 1, 0, 0}); // match ld64 which always started debug notes with an "end SO"
             // Put this before the other N_SO's.  We can't put it right before the N_OSO as lldb expects the N_OSO
             // to be immediately preceded by the N_SO
             if ( note.originLibPathPoolOffset != 0 ) {
-                nlists.add(T{{note.originLibPathPoolOffset}, N_LIB, 0, 0, 0});
+                nlists.add(T{{.n_strx = note.originLibPathPoolOffset}, N_LIB, 0, 0, 0});
             }
             startedSOs = true;
-            nlists.add(T{{note.srcDirPoolOffset},  N_SO,  0,                           0, 0});
-            nlists.add(T{{note.srcNamePoolOffset}, N_SO,  0,                           0, 0});
-            nlists.add(T{{note.objPathPoolOffset}, N_OSO, note.fileInfo->objSubType(), 1, (V)mtime});
+            nlists.add(T{{.n_strx = note.srcDirPoolOffset},  N_SO,  0,                           0, 0});
+            nlists.add(T{{.n_strx = note.srcNamePoolOffset}, N_SO,  0,                           0, 0});
+            nlists.add(T{{.n_strx = note.objPathPoolOffset}, N_OSO, note.fileInfo->objSubType(), 1, (V)mtime});
             for (const DebugBuilderNoteItem& item : note.items) {
                 uint32_t stringPoolOffset = item.stringPoolOffset;
                 switch ( item.type ) {
                 case N_FUN:
                     // for functions, we use four symbols to record the name, address, size, and sectNum
-                    nlists.add(T{{1},                                N_BNSYM, item.sectNum, 0, (V)item.addr});
-                    nlists.add(T{{stringPoolOffset}, N_FUN,   item.sectNum, 0, (V)item.addr});
-                    nlists.add(T{{1},                                N_FUN,   0,            0, (V)item.size});
-                    nlists.add(T{{1},                                N_ENSYM, item.sectNum, 0, (V)item.addr});
+                    nlists.add(T{{.n_strx = 1},                N_BNSYM, item.sectNum, 0, (V)item.addr});
+                    nlists.add(T{{.n_strx = stringPoolOffset}, N_FUN,   item.sectNum, 0, (V)item.addr});
+                    nlists.add(T{{.n_strx = 1},                N_FUN,   0,            0, (V)item.size});
+                    nlists.add(T{{.n_strx = 1},                N_ENSYM, item.sectNum, 0, (V)item.addr});
                     break;
                 case N_STSYM:
                     // for static variables, we record the name, address, and sectNum
-                    nlists.add(T{{stringPoolOffset}, N_STSYM, item.sectNum, 0, (V)item.addr});
+                    nlists.add(T{{.n_strx = stringPoolOffset}, N_STSYM, item.sectNum, 0, (V)item.addr});
                     break;
                 case N_GSYM:
                     // for global variables, we record just the name
-                    nlists.add(T{{stringPoolOffset}, N_GSYM,  0,            0, 0});
+                    nlists.add(T{{.n_strx = stringPoolOffset}, N_GSYM,  0,            0, 0});
                     break;
                 default:
                     assert(false && "invalid debug note item");
                     break;
                 }
             }
-            nlists.add(T{{1},                           N_SO, 1, 0, 0});
+            nlists.add(T{{.n_strx = 1},              N_SO, 1, 0, 0});
         }
     }
 }

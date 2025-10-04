@@ -633,231 +633,6 @@ static void closeSplitCacheFiles(CacheInfo infoArray[16], uint32_t numFiles) {
 }
 #endif // !TARGET_OS_EXCLAVEKIT
 
-#if !TARGET_OS_SIMULATOR
-static void rebaseChainV2(uint8_t* pageContent, uint16_t startOffset, uintptr_t slideAmount, const dyld_cache_slide_info2* slideInfo)
-{
-    const uintptr_t   deltaMask    = (uintptr_t)(slideInfo->delta_mask);
-    const uintptr_t   valueMask    = ~deltaMask;
-    const uintptr_t   valueAdd     = (uintptr_t)(slideInfo->value_add);
-    const unsigned    deltaShift   = __builtin_ctzll(deltaMask) - 2;
-
-    uint32_t pageOffset = startOffset;
-    uint32_t delta = 1;
-    while ( delta != 0 ) {
-        uint8_t* loc = pageContent + pageOffset;
-        uintptr_t rawValue = *((uintptr_t*)loc);
-        delta = (uint32_t)((rawValue & deltaMask) >> deltaShift);
-        uintptr_t value = (rawValue & valueMask);
-        if ( value != 0 ) {
-            value += valueAdd;
-            value += slideAmount;
-        }
-        *((uintptr_t*)loc) = value;
-        //dyld::log("         pageOffset=0x%03X, loc=%p, org value=0x%08llX, new value=0x%08llX, delta=0x%X\n", pageOffset, loc, (uint64_t)rawValue, (uint64_t)value, delta);
-        pageOffset += delta;
-    }
-}
-#endif
-
-#if !__LP64__ && !TARGET_OS_SIMULATOR
-static void rebaseChainV4(uint8_t* pageContent, uint16_t startOffset, uintptr_t slideAmount, const dyld_cache_slide_info4* slideInfo)
-{
-    const uintptr_t   deltaMask    = (uintptr_t)(slideInfo->delta_mask);
-    const uintptr_t   valueMask    = ~deltaMask;
-    const uintptr_t   valueAdd     = (uintptr_t)(slideInfo->value_add);
-    const unsigned    deltaShift   = __builtin_ctzll(deltaMask) - 2;
-
-    uint32_t pageOffset = startOffset;
-    uint32_t delta = 1;
-    while ( delta != 0 ) {
-        uint8_t* loc = pageContent + pageOffset;
-        uintptr_t rawValue = *((uintptr_t*)loc);
-        delta = (uint32_t)((rawValue & deltaMask) >> deltaShift);
-        uintptr_t value = (rawValue & valueMask);
-        if ( (value & 0xFFFF8000) == 0 ) {
-           // small positive non-pointer, use as-is
-        }
-        else if ( (value & 0x3FFF8000) == 0x3FFF8000 ) {
-           // small negative non-pointer
-           value |= 0xC0000000;
-        }
-        else {
-            value += valueAdd;
-            value += slideAmount;
-        }
-        *((uintptr_t*)loc) = value;
-        //dyld::log("         pageOffset=0x%03X, loc=%p, org value=0x%08llX, new value=0x%08llX, delta=0x%X\n", pageOffset, loc, (uint64_t)rawValue, (uint64_t)value, delta);
-        pageOffset += delta;
-    }
-}
-#endif
-
-#if !TARGET_OS_SIMULATOR
-
-// update all __DATA pages with slide info
-static bool rebaseDataPages(bool isVerbose, const dyld_cache_slide_info* slideInfo, const uint8_t *dataPagesStart,
-                            SharedCacheLoadInfo* results)
-{
-    const dyld_cache_slide_info* slideInfoHeader = slideInfo;
-    if ( slideInfoHeader != nullptr ) {
-        if ( slideInfoHeader->version == 2 ) {
-            const dyld_cache_slide_info2* slideHeader = (dyld_cache_slide_info2*)slideInfo;
-            const uint32_t  page_size = slideHeader->page_size;
-            const uint16_t* page_starts = (uint16_t*)((long)(slideInfo) + slideHeader->page_starts_offset);
-            const uint16_t* page_extras = (uint16_t*)((long)(slideInfo) + slideHeader->page_extras_offset);
-            for (int i=0; i < slideHeader->page_starts_count; ++i) {
-                uint8_t* page = (uint8_t*)(long)(dataPagesStart + (page_size*i));
-                uint16_t pageEntry = page_starts[i];
-                //dyld4::log("page[%d]: page_starts[i]=0x%04X\n", i, pageEntry);
-                if ( pageEntry == DYLD_CACHE_SLIDE_PAGE_ATTR_NO_REBASE )
-                    continue;
-                if ( pageEntry & DYLD_CACHE_SLIDE_PAGE_ATTR_EXTRA ) {
-                    uint16_t chainIndex = (pageEntry & 0x3FFF);
-                    bool done = false;
-                    while ( !done ) {
-                        uint16_t pInfo = page_extras[chainIndex];
-                        uint16_t pageStartOffset = (pInfo & 0x3FFF)*4;
-                        //dyld4::log("     chain[%d] pageOffset=0x%03X\n", chainIndex, pageStartOffset);
-                        rebaseChainV2(page, pageStartOffset, results->slide, slideHeader);
-                        done = (pInfo & DYLD_CACHE_SLIDE_PAGE_ATTR_END);
-                        ++chainIndex;
-                    }
-                }
-                else {
-                    uint32_t pageOffset = pageEntry * 4;
-                    //dyld::log("     start pageOffset=0x%03X\n", pageOffset);
-                    rebaseChainV2(page, pageOffset, results->slide, slideHeader);
-                }
-            }
-        }
-#if __LP64__
-        else if ( slideInfoHeader->version == 3 ) {
-             const dyld_cache_slide_info3* slideHeader = (dyld_cache_slide_info3*)slideInfo;
-             const uint32_t                pageSize    = slideHeader->page_size;
-             for (int i=0; i < slideHeader->page_starts_count; ++i) {
-                 uint8_t* page = (uint8_t*)(dataPagesStart + (pageSize*i));
-                 uint64_t delta = slideHeader->page_starts[i];
-                 //dyld::log("page[%d]: page_starts[i]=0x%04X\n", i, delta);
-                 if ( delta == DYLD_CACHE_SLIDE_V3_PAGE_ATTR_NO_REBASE )
-                     continue;
-                 delta = delta/sizeof(uint64_t); // initial offset is byte based
-                 dyld_cache_slide_pointer3* loc = (dyld_cache_slide_pointer3*)page;
-                 do {
-                     loc += delta;
-                     delta = loc->plain.offsetToNextPointer;
-                     if ( loc->auth.authenticated ) {
-#if __has_feature(ptrauth_calls)
-                        uint64_t target = slideHeader->auth_value_add + loc->auth.offsetFromSharedCacheBase + results->slide;
-                        MachOLoaded::ChainedFixupPointerOnDisk ptr;
-                        ptr.raw64 = *((uint64_t*)loc);
-                        loc->raw = ptr.arm64e.signPointer(loc, target);
-#else
-                        results->errorMessage = "invalid pointer kind in cache file";
-                        return false;
-#endif
-                     }
-                     else {
-                        MachOLoaded::ChainedFixupPointerOnDisk ptr;
-                        ptr.raw64 = *((uint64_t*)loc);
-                        loc->raw = ptr.arm64e.unpackTarget() + results->slide;
-                     }
-                } while (delta != 0);
-            }
-        }
-        else if ( slideInfoHeader->version == 5 ) {
-#if __has_feature(ptrauth_calls)
-             const dyld_cache_slide_info5* slideHeader = (dyld_cache_slide_info5*)slideInfo;
-             const uint32_t                pageSize    = slideHeader->page_size;
-             for (int i=0; i < slideHeader->page_starts_count; ++i) {
-                 uint8_t* page = (uint8_t*)(dataPagesStart + (pageSize*i));
-                 uint64_t delta = slideHeader->page_starts[i];
-                 //dyld4::console("page[%d]: page_starts[i]=0x%04llX\n", i, delta);
-                 if ( delta == DYLD_CACHE_SLIDE_V5_PAGE_ATTR_NO_REBASE )
-                     continue;
-                 delta = delta/sizeof(uint64_t); // initial offset is byte based
-                 dyld_cache_slide_pointer5* loc = (dyld_cache_slide_pointer5*)page;
-                 do {
-                     loc += delta;
-                     delta = loc->regular.next;
-
-                     MachOLoaded::ChainedFixupPointerOnDisk ptr;
-                     ptr.raw64 = *((uint64_t*)loc);
-
-                     uint64_t target = slideHeader->value_add + loc->regular.runtimeOffset + results->slide;
-                     if ( loc->auth.auth ) {
-                         loc->raw = ptr.cache64e.signPointer(loc, target);
-                     } else {
-                         loc->raw = target | ptr.cache64e.high8();
-                     }
-                } while (delta != 0);
-            }
-#else
-            results->errorMessage = "invalid pointer kind in cache file";
-            return false;
-#endif
-        }
-#else
-        else if ( slideInfoHeader->version == 1 ) {
-            const dyld_cache_slide_info* slideHeader = (dyld_cache_slide_info*)slideInfo;
-            const uint32_t page_size = 4096;
-
-            const dyld_cache_slide_info_entry* entries = (dyld_cache_slide_info_entry*)((char*)slideHeader + slideHeader->entries_offset);
-            const uint16_t* tocs = (uint16_t*)((char*)slideHeader + slideHeader->toc_offset);
-            for(int i=0; i < slideHeader->toc_count; ++i) {
-                const dyld_cache_slide_info_entry* entry = &entries[tocs[i]];
-                uint8_t* page = (uint8_t*)(long)(dataPagesStart + (page_size * i));
-                for(int j = 0; j < slideHeader->entries_size; ++j) {
-                    uint8_t bitmask = entry->bits[j];
-                    for (unsigned k = 0; k != 8; ++k) {
-                        if ( bitmask & (1 << k) ) {
-                            uint32_t pageOffset = ((j * 8) + k) * 4;
-                            uint32_t* loc = (uint32_t*)(page + pageOffset);
-                            *loc = *loc + results->slide;
-                        }
-                    }
-                }
-            }
-        }
-        else if ( slideInfoHeader->version == 4 ) {
-            const dyld_cache_slide_info4* slideHeader = (dyld_cache_slide_info4*)slideInfo;
-            const uint32_t  page_size = slideHeader->page_size;
-            const uint16_t* page_starts = (uint16_t*)((long)(slideInfo) + slideHeader->page_starts_offset);
-            const uint16_t* page_extras = (uint16_t*)((long)(slideInfo) + slideHeader->page_extras_offset);
-            for (int i=0; i < slideHeader->page_starts_count; ++i) {
-                uint8_t* page = (uint8_t*)(long)(dataPagesStart + (page_size*i));
-                uint16_t pageEntry = page_starts[i];
-                //dyld::log("page[%d]: page_starts[i]=0x%04X\n", i, pageEntry);
-                if ( pageEntry == DYLD_CACHE_SLIDE4_PAGE_NO_REBASE )
-                    continue;
-                if ( pageEntry & DYLD_CACHE_SLIDE4_PAGE_USE_EXTRA ) {
-                    uint16_t chainIndex = (pageEntry & DYLD_CACHE_SLIDE4_PAGE_INDEX);
-                    bool done = false;
-                    while ( !done ) {
-                        uint16_t pInfo = page_extras[chainIndex];
-                        uint16_t pageStartOffset = (pInfo & DYLD_CACHE_SLIDE4_PAGE_INDEX)*4;
-                        //dyld::log("     chain[%d] pageOffset=0x%03X\n", chainIndex, pageStartOffset);
-                        rebaseChainV4(page, pageStartOffset, results->slide, slideHeader);
-                        done = (pInfo & DYLD_CACHE_SLIDE4_PAGE_EXTRA_END);
-                        ++chainIndex;
-                    }
-                }
-                else {
-                    uint32_t pageOffset = pageEntry * 4;
-                    //dyld::log("     start pageOffset=0x%03X\n", pageOffset);
-                    rebaseChainV4(page, pageOffset, results->slide, slideHeader);
-                }
-            }
-        }
-#endif // LP64
-        else {
-            results->errorMessage = "invalid slide info in cache file";
-            return false;
-        }
-    }
-    return true;
-}
-
-#endif // !TARGET_OS_SIMULATOR
 
 // this has a large stack frame size, so don't inline into loadDyldCache()
 // Note: disable tail call optimization, otherwise tailcall may remove stack allocated blob
@@ -1177,10 +952,12 @@ static bool mapSplitCachePrivate(const SharedCacheOptions& options, SharedCacheL
 #endif // !TARGET_OS_EXCLAVEKIT
 
         if ( !canUsePageInLinking ) {
+            const DyldSharedCache* subCache = (const DyldSharedCache*)(subcache.mappings[0].sms_address);
+
             // Change __DATA_CONST to read-write while fixup chains are applied
             if ( options.enableReadOnlyDataConst ) {
-                const DyldSharedCache* subCache = (const DyldSharedCache*)(subcache.mappings[0].sms_address);
-                subCache->forEachRegion(^(const void*, uint64_t vmAddr, uint64_t size, uint32_t initProt, uint32_t maxProt, uint64_t flags, bool& stopRegion) {
+                subCache->forEachRegion(^(const void*, uint64_t vmAddr, uint64_t size, uint32_t initProt,
+                                          uint32_t maxProt, uint64_t flags, uint64_t fileOffset, bool& stopRegion) {
                     if ( flags & DYLD_CACHE_MAPPING_CONST_DATA ) {
                         // Skip TPRO
                         bool isTPRO = (flags & DYLD_CACHE_MAPPING_CONST_TPRO_DATA) && options.enableTPRO;
@@ -1197,19 +974,17 @@ static bool mapSplitCachePrivate(const SharedCacheOptions& options, SharedCacheL
             }
 
             dyld4::MemoryManager::withWritableMemory([&] {
-                for (unsigned j = 0; j < subcache.mappingsCount; ++j) {
-                    if ( subcache.mappings[j].sms_slide_size == 0 )
-                        continue;
-                    const dyld_cache_slide_info* slideInfoHeader = (const dyld_cache_slide_info*)subcache.mappings[j].sms_slide_start;
-                    const uint8_t* mappingPagesStart = (const uint8_t*)subcache.mappings[j].sms_address;
-                    success &= rebaseDataPages(options.verbose, slideInfoHeader, mappingPagesStart, results);
+                if ( mach_o::Error err = subCache->fixupDataPages(results->slide) ) {
+                    results->errorMessage = "error fixing up shared cache";
+                    dyld4::console("error: cannot fix up shared cache due to %s\n", err.message());
+                    success = false;
                 }
             });
 
             // Change __DATA_CONST back to read-only
             if ( options.enableReadOnlyDataConst ) {
-                const DyldSharedCache* subCache = (const DyldSharedCache*)(subcache.mappings[0].sms_address);
-                subCache->forEachRegion(^(const void*, uint64_t vmAddr, uint64_t size, uint32_t initProt, uint32_t maxProt, uint64_t flags, bool& stopRegion) {
+                subCache->forEachRegion(^(const void*, uint64_t vmAddr, uint64_t size, uint32_t initProt,
+                                          uint32_t maxProt, uint64_t flags, uint64_t fileOffset, bool& stopRegion) {
                     if ( flags & DYLD_CACHE_MAPPING_CONST_DATA ) {
                         // Skip TPRO
                         bool isTPRO = (flags & DYLD_CACHE_MAPPING_CONST_TPRO_DATA) && options.enableTPRO;

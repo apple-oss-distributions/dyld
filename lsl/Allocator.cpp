@@ -79,7 +79,7 @@
 #define ALLOCATOR_TRACE(...)
 #endif
 
-#if BUILDING_DYLD
+#if BUILDING_DYLD || DYLD_FEATURE_USE_INTERNAL_ALLOCATOR
 extern "C" void* __dso_handle;
 #endif
 
@@ -125,7 +125,10 @@ void Lock::assertOwner() {
 #pragma mark -
 #pragma mark MemoryManager
 
-MemoryManager::MemoryManager(const char** envp, const char** apple, void* dyldSharedCache) {
+MemoryManager::MemoryManager(const char** envp, const char** apple, void* dyldSharedCache,
+                             bool didInitialProtCopy)
+    : _didInitialProtCopy(didInitialProtCopy)
+{
     // Eventually we will use this to parse parameters for controlling comapct info mlock()
     // We need to do this before allocator is created
 #if DYLD_FEATURE_USE_INTERNAL_ALLOCATOR
@@ -166,22 +169,25 @@ void MemoryManager::init(const char** envp, const char** apple, void* dyldShared
     // We need to correcttly manipualte the memory here since the memory manager lives in protected memory
     // Since that is a fairly complex process the best thing is to create a bootstrap manager on the stack
     // and use it
-    MemoryManager bootStrapMemoryManager(envp, apple,  dyldSharedCache);
+    MemoryManager bootStrapMemoryManager(envp, apple,  dyldSharedCache, false);
     bootStrapMemoryManager.withWritableMemoryInternal([&] {
+        bool didInitialProtCopy = false;
+        bool asanEnabled = false;
+
         // Figure out the size of the default allocator
         MemoryManager::Buffer buffer{(void*)&sPoolBytes[0], ALLOCATOR_DEFAULT_POOL_SIZE};
         // Create a memory manager, a pool, and an allocator
-        auto memoryManager = new (sMemoryManagerBuffer) MemoryManager(envp, apple,  dyldSharedCache);
+        auto memoryManager = new (sMemoryManagerBuffer) MemoryManager(envp, apple, dyldSharedCache, didInitialProtCopy);
         sMemoryManagerInitialized = true;
         bool tproEnabledOnPool = false;
 #if DYLD_FEATURE_USE_HW_TPRO
         tproEnabledOnPool = bootStrapMemoryManager.tproEnabled();
 #endif
-        auto pool = new (sPoolBuffer) Allocator::Pool((Allocator*)sAllocatorBuffer, nullptr, buffer, buffer, tproEnabledOnPool);
+        auto pool = new (sPoolBuffer) Allocator::Pool((Allocator*)sAllocatorBuffer, nullptr, buffer, buffer, tproEnabledOnPool, asanEnabled);
         memoryManager->_defaultAllocator = new (sAllocatorBuffer) Allocator(*memoryManager, *pool);
     });
 #else
-    auto memoryManager = new (sMemoryManagerBuffer) MemoryManager(envp, apple,  dyldSharedCache);
+    auto memoryManager = new (sMemoryManagerBuffer) MemoryManager(envp, apple,  dyldSharedCache, false);
     memoryManager->_defaultAllocator = new (sAllocatorBuffer) Allocator();
     sMemoryManagerInitialized = true;
 #endif /* DYLD_FEATURE_USE_INTERNAL_ALLOCATOR */
@@ -214,6 +220,20 @@ MemoryManager& MemoryManager::memoryManager() {
 void MemoryManager::setDyldCacheAddr(void* sharedCache) {
 #if BUILDING_DYLD && !TARGET_OS_EXCLAVEKIT
     _sharedCache = (dyld_cache_header*)sharedCache;
+
+    // If 'dyld_hw_tpro' is not set, then the shared cache for this process needs to use
+    // mprotect and not TPRO, when changing its state for the TPRO_CONST segment specifically.
+    // As ProcessConfig is constructed inside a withWriteableMemory block, we need to now make
+    // the cache TPRO_CONST writable to match the expectations of the caller with that block
+    bool shouldProtectCache = true;
+#if DYLD_FEATURE_USE_INTERNAL_ALLOCATOR
+#if DYLD_FEATURE_USE_HW_TPRO
+    shouldProtectCache = !this->_tproEnable;
+#endif
+#endif
+
+    if ( shouldProtectCache )
+        this->writeProtect(false);
 #endif /* BUILDING_DYLD && !TARGET_OS_EXCLAVEKIT */
 }
 
@@ -221,6 +241,12 @@ void MemoryManager::setProtectedStack(ProtectedStack& protectedStack) {
 #if DYLD_FEATURE_USE_HW_TPRO
     _protectedStack = &protectedStack;
 #endif /* DYLD_FEATURE_USE_HW_TPRO */
+}
+
+void MemoryManager::clearProtectedStack() {
+#if BUILDING_UNIT_TESTS && DYLD_FEATURE_USE_HW_TPRO
+    _protectedStack = nullptr;
+#endif /* BUILDING_UNIT_TESTS && DYLD_FEATURE_USE_HW_TPRO */
 }
 
 #if !TARGET_OS_EXCLAVEKIT
@@ -301,13 +327,6 @@ void MemoryManager::vm_deallocate_bytes(void* p, uint64_t size) {
 
 #else
 
-template<typename T>
-static void appendHexToString(char *dst, T value, uint64_t size) {
-    char buffer[130];
-    bytesToHex((const uint8_t*)&value, sizeof(T), buffer);
-    strlcat(dst, buffer, (size_t)size);
-}
-
 [[nodiscard]] MemoryManager::Buffer MemoryManager::vm_allocate_bytes(uint64_t size, bool tproEnabled) {
     kern_return_t kr = KERN_FAILURE;
     uint64_t targetSize = roundToNextAligned<kPageSize>(size);
@@ -377,12 +396,21 @@ extern void* tproConstEnd     __asm("segment$end$__TPRO_CONST");
 
 void MemoryManager::writeProtect(bool protect) {
 #if !TARGET_OS_EXCLAVEKIT && BUILDING_DYLD
+    int perms = VM_PROT_READ;
+    if ( !protect )
+        perms |= VM_PROT_WRITE;
+
+    int sharedCacheExtraPerms = 0;
+    if ( !this->_didInitialProtCopy ) {
+        sharedCacheExtraPerms |= VM_PROT_COPY;
+        this->_didInitialProtCopy = true;
+    }
+
     // First (un)lock dyld's __TPRO_CONST segment if it is not part of the shared cache
     const mach_header* dyldMH = (const mach_header*)&__dso_handle;
     if (!(dyldMH->flags & MH_DYLIB_IN_CACHE)) {
         size_t tproConstSize = (size_t)&tproConstEnd - (size_t)&tproConstStart;
-        kern_return_t kr = ::vm_protect(mach_task_self(), (vm_address_t)&tproConstStart, (vm_size_t)tproConstSize, false,
-                                        VM_PROT_READ | (protect ? 0 : (VM_PROT_WRITE | VM_PROT_COPY)));
+        kern_return_t kr = ::vm_protect(mach_task_self(), (vm_address_t)&tproConstStart, (vm_size_t)tproConstSize, false, perms);
         if (kr != KERN_SUCCESS) {
             // fprintf(stderr, "FAILED: %d", kr);
         }
@@ -396,7 +424,7 @@ void MemoryManager::writeProtect(bool protect) {
         for (auto i = 0; i < cacheHeader->tproMappingsCount; ++i) {
             void* addr = (void*)(mappings[i].unslidAddress + slide);
             kern_return_t kr = ::vm_protect(mach_task_self(), (vm_address_t)addr, (vm_size_t)mappings[i].size, false,
-                                            VM_PROT_READ | (protect ? 0 : (VM_PROT_WRITE | VM_PROT_COPY)));
+                                            perms | sharedCacheExtraPerms);
             if (kr != KERN_SUCCESS) {
                 // fprintf(stderr, "FAILED: %d", kr);
             }
@@ -672,15 +700,22 @@ Allocator& MemoryManager::defaultAllocator() {
 #pragma mark Allocator Pool
 
 #if DYLD_FEATURE_USE_INTERNAL_ALLOCATOR
+
+static bool asanEnabled()
+{
+
+    return false;
+}
+
 Allocator::Pool::Pool(Allocator* allocator, Pool* prevPool, uint64_t size, bool tproEnabled)
-: Pool(allocator, prevPool, MemoryManager::memoryManager().vm_allocate_bytes(size, tproEnabled), tproEnabled) {
+: Pool(allocator, prevPool, MemoryManager::memoryManager().vm_allocate_bytes(size, tproEnabled), tproEnabled, asanEnabled()) {
     _vmAllocated = true;
 }
 
-Allocator::Pool::Pool(Allocator* allocator, Pool* prevPool, Buffer region, bool tproEnabled)
-    : Pool(allocator, prevPool, region, region, tproEnabled) {}
+Allocator::Pool::Pool(Allocator* allocator, Pool* prevPool, Buffer region, bool tproEnabled, bool asanEnabled)
+    : Pool(allocator, prevPool, region, region, tproEnabled, asanEnabled) {}
 
-Allocator::Pool::Pool(Allocator* allocator, Pool* prevPool, Buffer region, Buffer freeRegion, bool tproEnabled)
+Allocator::Pool::Pool(Allocator* allocator, Pool* prevPool, Buffer region, Buffer freeRegion, bool tproEnabled, bool asanEnabled)
 : _allocator(allocator), _prevPool(prevPool), _poolBuffer(region) {
     assert(region.contains(freeRegion));
     freeRegion.size = freeRegion.size & ~0x0fUL;
@@ -688,6 +723,7 @@ Allocator::Pool::Pool(Allocator* allocator, Pool* prevPool, Buffer region, Buffe
 #if DYLD_FEATURE_USE_HW_TPRO
     _tproEnabled = tproEnabled;
 #endif // DYLD_FEATURE_USE_HW_TPRO
+
 
     // Setup the metadata for the pool
     _lastFreeMetadata = new (freeRegion.address) AllocationMetadata(this, freeRegion.size);

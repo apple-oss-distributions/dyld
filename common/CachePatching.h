@@ -380,6 +380,8 @@ struct PatchTable
 
     static const char* patchKindName(PatchKind patchKind);
 
+    void dump() const;
+
 private:
     const dyld_cache_patch_info* info() const;
 
@@ -486,6 +488,8 @@ struct PatchTableV4 : PatchTableV3
     void forEachPatchableGOTUseOfExport(uint32_t imageIndex, uint32_t dylibVMOffsetOfImpl,
                                         GOTUseHandler handler) const;
 
+    void dump() const;
+
 private:
     const dyld_cache_patch_info_v4*     info() const;
 
@@ -500,20 +504,25 @@ namespace cache_builder
 enum class UniquedGOTKind { regular, authGot, authPtr };
 
 struct CacheDylib;
+struct Chunk;
 
-struct dyld_cache_patchable_location
+// This defines a location in a dylib which should be tracked in the patch table
+struct DyldCachePatchableLocation
 {
-    dyld_cache_patchable_location(CacheVMAddress cacheVMAddr, dyld3::MachOFile::PointerMetaData pmd,
-                                  uint64_t addend, bool isWeakImport);
-    ~dyld_cache_patchable_location() = default;
-    dyld_cache_patchable_location(const dyld_cache_patchable_location&) = default;
-    dyld_cache_patchable_location(dyld_cache_patchable_location&&) = default;
-    dyld_cache_patchable_location& operator=(const dyld_cache_patchable_location&) = default;
-    dyld_cache_patchable_location& operator=(dyld_cache_patchable_location&&) = default;
+    DyldCachePatchableLocation(InputDylibVMOffset clientDylibOffset,
+                               dyld3::MachOFile::PointerMetaData pmd,
+                               uint64_t addend, bool isWeakImport);
+    ~DyldCachePatchableLocation() = default;
+    DyldCachePatchableLocation(const DyldCachePatchableLocation&) = default;
+    DyldCachePatchableLocation(DyldCachePatchableLocation&&) = default;
+    DyldCachePatchableLocation& operator=(const DyldCachePatchableLocation&) = default;
+    DyldCachePatchableLocation& operator=(DyldCachePatchableLocation&&) = default;
 
-    bool operator==(const dyld_cache_patchable_location& other) const = default;
+    bool operator==(const DyldCachePatchableLocation& other) const = default;
 
-    CacheVMAddress      cacheVMAddr;
+    // When building the patch table, we might not know the final address of the locations, but we do know
+    // where they are in a given input dylib, so record that on all fixups and adjust them later to VMAddrs
+    InputDylibVMOffset  clientDylibOffset;
     uint64_t            high7                   : 7,
                         unused                  : 4,
                         isWeakImport            : 1,
@@ -524,16 +533,53 @@ struct dyld_cache_patchable_location
                         addend                  : 32;
 };
 
+// This defines a location in a coalesced GOT which should be tracked in the patch table
+struct DyldCachePatchableGOTLocation
+{
+    DyldCachePatchableGOTLocation(const Chunk* clientGOT, VMOffset clientGOTOffset,
+                                  dyld3::MachOFile::PointerMetaData pmd,
+                                  uint64_t addend, bool isWeakImport);
+    ~DyldCachePatchableGOTLocation() = default;
+    DyldCachePatchableGOTLocation(const DyldCachePatchableGOTLocation&) = default;
+    DyldCachePatchableGOTLocation(DyldCachePatchableGOTLocation&&) = default;
+    DyldCachePatchableGOTLocation& operator=(const DyldCachePatchableGOTLocation&) = default;
+    DyldCachePatchableGOTLocation& operator=(DyldCachePatchableGOTLocation&&) = default;
+
+    bool operator==(const DyldCachePatchableGOTLocation& other) const = default;
+
+    // When building the patch table, we might not know the final address of the locations, but we do know
+    // where they are in a given GOT, so record that on all fixups and adjust them later to VMAddrs
+    const Chunk*        clientGOT;
+    VMOffset            clientGOTOffset;
+    uint64_t            high7                   : 7,
+                        unused                  : 4,
+                        isWeakImport            : 1,
+                        authenticated           : 1,
+                        usesAddressDiversity    : 1,
+                        key                     : 2,
+                        discriminator           : 16,
+                        addend                  : 32;
+};
+
+struct DylibOffset
+{
+    const CacheDylib*   cacheDylib = nullptr;
+    InputDylibVMOffset  vmOffset;
+};
+
 // There will be one of these PatchInfo structs for each dylib in the cache
 struct PatchInfo
 {
     struct GOTInfo
     {
-        dyld_cache_patchable_location   patchInfo;
-        VMOffset                        targetValue;
+        DyldCachePatchableGOTLocation   useLocation;
+
+        // uint64_t -> absolute value
+        // DylibOffset -> offset in to some cache dylib
+        std::variant<uint64_t, DylibOffset> targetValue;
     };
 
-    std::vector<std::vector<dyld_cache_patchable_location>> bindUses;
+    std::vector<std::vector<DyldCachePatchableLocation>>    bindUses;
     std::vector<std::vector<GOTInfo>>                       bindGOTUses;
     std::vector<std::vector<GOTInfo>>                       bindAuthGOTUses;
     std::vector<std::vector<GOTInfo>>                       bindAuthPtrUses;
@@ -552,15 +598,35 @@ struct DylibClient
     DylibClient& operator=(const DylibClient&) = delete;
     DylibClient& operator=(DylibClient&&) = default;
 
-    typedef std::map<CacheVMAddress, std::vector<dyld_cache_patchable_location>, CacheVMAddressLessThan> UsesMap;
+    // The key to this map is the address in the dylib which defines the symbol,
+    // while the map value is a vector of all locations in other dylibs which use the definition
+    typedef std::map<InputDylibVMAddress, std::vector<DyldCachePatchableLocation>, InputDylibVMAddressLessThan> UsesMap;
 
-    const CacheDylib*   clientCacheDylib = nullptr;
+    const CacheDylib*   clientCacheDylib;
+    UsesMap             uses;
+};
+
+struct GOTClient
+{
+    GOTClient()
+    {
+    }
+    ~GOTClient()                  = default;
+    GOTClient(const GOTClient&) = delete;
+    GOTClient(GOTClient&&)      = default;
+    GOTClient& operator=(const GOTClient&) = delete;
+    GOTClient& operator=(GOTClient&&) = default;
+
+    // The key to this map is the address in the dylib which defines the symbol,
+    // while the map value is a vector of all locations in the coalesced GOT sections which use it
+    typedef std::map<InputDylibVMAddress, std::vector<DyldCachePatchableGOTLocation>, InputDylibVMAddressLessThan> UsesMap;
+
     UsesMap             uses;
 };
 
 struct DylibClients
 {
-    DylibClients() : gotClient(nullptr)
+    DylibClients()
     {
     }
     ~DylibClients()                  = default;
@@ -569,41 +635,58 @@ struct DylibClients
     DylibClients& operator=(const DylibClients&) = delete;
     DylibClients& operator=(DylibClients&&) = default;
 
-    // Other dylibs which point to this dylib, not via uniqued GOTs
-    std::vector<DylibClient>                         clients;
+    typedef std::unordered_map<InputDylibVMAddress, std::string_view,
+                               InputDylibVMAddressHash, InputDylibVMAddressEqual> ExportToNameMap;
 
-    // For and uniqued GOTs which use this dylib
-    DylibClient                                      gotClient;
+    // Other dylibs which point to this dylib, not via uniqued GOTs
+    std::vector<DylibClient>            clients;
+
+    // Uniqued GOTs which use this dylib
+    GOTClient                           gotClient;
+
+    // The names of any used exports
+    ExportToNameMap                     exportsToName;
 
 private:
-    std::vector<CacheVMAddress>                      usedExports;
+    struct CacheToInputAddr
+    {
+        CacheVMAddress      cacheAddr;
+        InputDylibVMAddress inputAddr;
+    };
+
+    std::vector<InputDylibVMAddress>    usedInputDylibExports;
+
+    // We later fill this in once we know the VM addresses of everything
+    std::vector<CacheToInputAddr>       usedCacheDylibExports;
 
 public:
 
-    const std::vector<CacheVMAddress>& getUsedExports() const { return usedExports; }
+    const std::vector<InputDylibVMAddress>& getUsedInputDylibExports() const { return usedInputDylibExports; }
+    const std::vector<CacheToInputAddr>&    getUsedCacheDylibExports() const { return usedCacheDylibExports; }
 
     // This accepts the new exports by value, so that callers can pass
     // an rvalue reference to avoid an unnecessary copy.
-    void setUsedExports(std::vector<CacheVMAddress> newUsedExports) {
-        assert(usedExports.empty() && "Used exports should be set only once");
+    void setUsedExports(std::vector<InputDylibVMAddress> newUsedExports) {
+        assert(usedInputDylibExports.empty() && "Used exports should be set only once");
 
-        usedExports = std::move(newUsedExports);
+        usedInputDylibExports = std::move(newUsedExports);
 
-        std::sort(usedExports.begin(), usedExports.end(), CacheVMAddressLessThan());
-        usedExports.erase(std::unique(usedExports.begin(), usedExports.end(),
-            CacheVMAddressEqual()), usedExports.end());
+        std::sort(usedInputDylibExports.begin(), usedInputDylibExports.end(), InputDylibVMAddressLessThan());
+        usedInputDylibExports.erase(std::unique(usedInputDylibExports.begin(), usedInputDylibExports.end(),
+                                                InputDylibVMAddressEqual()), usedInputDylibExports.end());
     }
 
-    decltype(usedExports)::const_iterator findExport(const CacheVMAddress& addr) const {
-        auto exportIt = std::lower_bound(usedExports.cbegin(),
-                                         usedExports.cend(), addr,
-                                         CacheVMAddressLessThan());
-        if (exportIt != usedExports.cend() && *exportIt == addr) {
-            return exportIt;
-        }
+    uint32_t findExportIndex(const CacheVMAddress& addr) const {
+        auto it = std::lower_bound(usedCacheDylibExports.begin(), usedCacheDylibExports.end(), addr, [](auto& entry, auto& searchAddr) {
+            return entry.cacheAddr < searchAddr;
+        });
+        assert(it != usedCacheDylibExports.end() && "no export entry");
+        assert(it->cacheAddr == addr && "no export entry");
 
-        return usedExports.cend();
+        return (uint32_t)std::distance(usedCacheDylibExports.begin(), it);
     }
+
+    void calculateCacheUsedExports(const CacheDylib& cacheDylib);
 };
 
 struct PatchTableBuilder
@@ -611,6 +694,8 @@ struct PatchTableBuilder
     typedef std::unordered_set<CacheVMAddress, CacheVMAddressHash, CacheVMAddressEqual> PatchableClassesSet;
     typedef std::unordered_set<CacheVMAddress, CacheVMAddressHash, CacheVMAddressEqual> PatchableSingletonsSet;
 
+    error::Error    prepare(const std::span<CacheDylib>& cacheDylibs,
+                            const std::span<PatchInfo>& patchInfos);
     error::Error    build(const std::span<CacheDylib>& cacheDylibs,
                           const std::span<PatchInfo>& patchInfos,
                           const PatchableClassesSet& patchableObjCClasses,
@@ -618,7 +703,7 @@ struct PatchTableBuilder
                           CacheVMAddress cacheBaseAddress);
     uint64_t        getPatchTableSize() const;
     error::Error    write(uint8_t* buffer, uint64_t bufferSize, uint64_t patchInfoAddr) const;
-    
+
 private:
     // Takes the PatchInfo's for each dylib, and merges them in to the data structures needed
     // in the builder
@@ -630,12 +715,8 @@ private:
                                     const PatchableClassesSet& patchableObjCClasses,
                                     const PatchableSingletonsSet& patchableCFObj2,
                                     CacheVMAddress cacheBaseAddress);
-    
-    typedef std::unordered_map<CacheVMAddress, std::string_view,
-                               CacheVMAddressHash, CacheVMAddressEqual> ExportToNameMap;
-    
+
     std::vector<DylibClients>   dylibClients;
-    ExportToNameMap             exportsToName;
     
     std::vector<dyld_cache_image_patches_v2>            patchImages;
     std::vector<dyld_cache_image_export_v2>             imageExports;
@@ -646,7 +727,10 @@ private:
     std::vector<dyld_cache_image_got_clients_v3>        gotClients;
     std::vector<dyld_cache_patchable_export_v3>         gotClientExports;
     std::vector<dyld_cache_patchable_location_v4_got>   gotPatchLocations;
-    
+
+    // Once we've run prepare() we know the final size
+    uint64_t                    totalSize = 0;
+
     const bool                  log = false;
 };
 

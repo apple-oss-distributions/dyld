@@ -47,6 +47,7 @@
 #include "DyldProcessConfig.h"
 #include "StringUtils.h"
 #include "DyldLegacyInterfaceGlue.h"
+#include "SafeVMPrimitives.h"
 
 extern "C" const dyld_all_image_infos* getProcessDyldInfo(); 
 
@@ -69,8 +70,6 @@ RemoteBuffer::RemoteBuffer(task_t task, mach_vm_address_t remote_address, size_t
 
 std::pair<mach_vm_address_t, kern_return_t>
 RemoteBuffer::map(task_t task, mach_vm_address_t remote_address, vm_size_t size) {
-    static kern_return_t (*mvrn)(vm_map_t, mach_vm_address_t*, mach_vm_size_t, mach_vm_offset_t, int, vm_map_read_t, mach_vm_address_t,
-                                 boolean_t, vm_prot_t*, vm_prot_t*, vm_inherit_t) = nullptr;
     vm_prot_t cur_protection = VM_PROT_NONE;
     vm_prot_t max_protection = VM_PROT_READ;
     if (size == 0) {
@@ -81,21 +80,7 @@ RemoteBuffer::map(task_t task, mach_vm_address_t remote_address, vm_size_t size)
     // Mask out TBI bits
     remote_address &= 0x00ff'ffff'ffff'ffffUL;
 #endif
-#if TARGET_OS_SIMULATOR
-    static dispatch_once_t onceToken;
-    dispatch_once(&onceToken, ^{
-        mvrn = (kern_return_t (*)(vm_map_t, mach_vm_address_t*, mach_vm_size_t, mach_vm_offset_t, int, vm_map_read_t, mach_vm_address_t,
-                                  boolean_t, vm_prot_t*, vm_prot_t*, vm_inherit_t))dlsym(RTLD_DEFAULT, "mach_vm_remap_new");
-        if (mvrn == nullptr) {
-            // We are running on a system that does not support task_read ports, use the old call
-            mvrn = (kern_return_t (*)(vm_map_t, mach_vm_address_t*, mach_vm_size_t, mach_vm_offset_t, int, vm_map_read_t, mach_vm_address_t,
-                                      boolean_t, vm_prot_t*, vm_prot_t*, vm_inherit_t))dlsym(RTLD_DEFAULT, "mach_vm_remap");
-        }
-    });
-#else
-    mvrn = &mach_vm_remap_new;
-#endif
-    auto kr = mvrn(mach_task_self(),
+    auto kr = mach_vm_remap_new(mach_task_self(),
                         &localAddress,
                         size,
                         0,  // mask
@@ -122,7 +107,9 @@ RemoteBuffer::map(task_t task, mach_vm_address_t remote_address, vm_size_t size)
         (void)vm_deallocate(mach_task_self(), (vm_address_t)localAddress, size);
         return std::make_pair(MACH_VM_MIN_ADDRESS, KERN_NO_SPACE);
     }
+    remote_memory_audit_start();
     memcpy(buffer, (void *)localAddress, size);
+    remote_memory_audit_end();
     ((char*)buffer)[size] = 0; // Add a null terminator so strlcpy does not read base the end of the buffer.
     (void)vm_deallocate(mach_task_self(), (vm_address_t)localAddress, size);
     return std::make_pair((vm_address_t)buffer, KERN_SUCCESS);

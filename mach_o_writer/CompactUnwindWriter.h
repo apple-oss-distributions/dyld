@@ -77,6 +77,7 @@ public:
     }
 
     std::span<const uint8_t>  bytes() const { return _bytes; }
+    Error&                    buildError() { return _buildError; }
 
     struct ImageOffsetFixup
     {
@@ -111,7 +112,7 @@ private:
     struct UniquePersonality { uint32_t offset; const void* handle; };
     void                compressDuplicates(Architecture, std::vector<WriterUnwindInfo>& entries, uint32_t& lsdaCount,
                                              CommonEncodingsMap& commonEncodings, std::vector<UniquePersonality>& personalities);
-    void                updatePersonalityForEntry(WriterUnwindInfo& entry, std::vector<UniquePersonality>& personalities);
+    bool                updatePersonalityForEntry(WriterUnwindInfo& entry, std::vector<UniquePersonality>& personalities);
 
     std::vector<uint8_t>            _bytes;
     std::vector<ImageOffsetFixup>   _imageOffsetFixups;

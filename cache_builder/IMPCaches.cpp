@@ -343,52 +343,35 @@ void AddressSpace::removeUninterestingSelectors() {
     }
 }
 
-int AddressSpace::sizeAvailableAfterIndex(int idx) const
+// Returns the size of the unbroken chain of empty cells
+// after idx to the space remaining in cell idx.
+// This is used to see if there is space to let a very
+// long method name overflow into the following empty cells.
+int AddressSpace::sizeAvailableAtOrAfterIndex(int idx) const
 {
-    int availableAfterThisAddress = bagSizeAtIndex(idx) - sizeAtIndex(idx);
+    int availableAtOrAfterThisIndex = bagSizeAtIndex(idx) - sizeAtIndex(idx);
+    if (availableAtOrAfterThisIndex == 0) return 0;
+
     for (int j = idx + 1; j < maximumIndex; j++) {
-        if (methodsByIndex.find(j) != methodsByIndex.end()) {
+        if (sizeAtIndex(j) > 0) {
             break;
         } else {
-            availableAfterThisAddress += bagSizeAtIndex(j);
+            availableAtOrAfterThisIndex += bagSizeAtIndex(j);
         }
     }
 
-    return availableAfterThisAddress;
-}
-
-// Because some selectors are longer than 128 bytes, we have to sometimes let
-// them overflow into the next 128-byte bucket. This method tells you if you
-// can place a method in a bucket without colliding with an overflowing selector
-// from one of the previous buckets.
-bool AddressSpace::canPlaceWithoutFillingOverflowCellAtIndex(int idx) const
-{
-    if ((idx == 0) || (sizeAtIndex(idx) > 0)) {
-        return true;
-    }
-
-    int j = idx;
-    int availableOnOrBefore = 0;
-
-    while (j > 0 && (sizeAtIndex(j) == 0)) {
-        availableOnOrBefore += bagSizeAtIndex(j);
-        j -= 1;
-    }
-
-    int sizeOfFirstNonEmptyCellBefore = sizeAtIndex(j);
-    return (sizeOfFirstNonEmptyCellBefore < availableOnOrBefore);
+    return availableAtOrAfterThisIndex;
 }
 
 bool AddressSpace::canPlaceMethodAtIndex(const Selector* method, int idx) const
 {
-    int  existingSize = sizeAtIndex(idx);
-    bool canPlaceWithoutFillingOverflow = canPlaceWithoutFillingOverflowCellAtIndex(idx);
+    int existingSize = sizeAtIndex(idx);
+    int available = bagSizeAtIndex(idx) - existingSize;
 
-    if (!canPlaceWithoutFillingOverflow) {
+    if (available == 0) {
         return false;
     }
 
-    int  available = bagSizeAtIndex(idx) - existingSize;
     int  methodSize = method->size();
     bool enoughRoom = available > methodSize;
 
@@ -396,18 +379,51 @@ bool AddressSpace::canPlaceMethodAtIndex(const Selector* method, int idx) const
         return true;
     }
 
-    bool tooBigButOverflowExists = (methodSize > 64) && (available > 0) && (sizeAvailableAfterIndex(idx) > methodSize);
+    // For long selectors (more than 64 characters), we let them overflow into the next cells
+    // if they are still empty. Otherwise they are very difficult to place.
+    bool tooBigButOverflowExists = (methodSize > 64) && (sizeAvailableAtOrAfterIndex(idx) >= methodSize);
 
     return tooBigButOverflowExists;
 }
 
 void AddressSpace::placeMethodAtIndex(Selector* method, int idx)
 {
-    auto [it, success] = methodsByIndex.try_emplace(idx, std::vector<Selector*>());
-    it->second.push_back(method);
+    auto [methods_it, success] = methodsByIndex.try_emplace(idx, std::vector<Selector*>());
+    methods_it->second.push_back(method);
 
-    auto [it2, success2] = sizes.try_emplace(idx, 0);
-    it2->second += method->size();
+    auto [sizes_it, success2] = sizes.try_emplace(idx, 0);
+    int remainingToPlace = method->size();
+
+    int bagSize = bagSizeAtIndex(idx);
+    const int occupiedInThisBag = sizes_it->second;
+    const int availableInThisBag = bagSize - occupiedInThisBag;
+
+    // If we can place the method now, do it and return
+    if (availableInThisBag >= remainingToPlace) {
+        sizes_it->second += remainingToPlace;
+        return;
+    }
+
+    // Otherwise we have to deal with overflows:
+    // Go through the next cells (which are supposed to be empty at this point, see
+    // canPlaceMethodAtIndex) and adjust their sizes until we have placed all
+    // of the characters in the method name.
+    sizes_it->second = bagSize;
+    remainingToPlace -= availableInThisBag;
+
+    while (remainingToPlace > 0) {
+        idx++;
+        std::tie(sizes_it, success2) = sizes.try_emplace(idx, 0);
+        bagSize = bagSizeAtIndex(idx);
+
+        // If there was no room for overflow canPlaceMethodAtIndex should have denied this
+        assert(sizes_it->second == 0);
+
+        int sizeToAdd = std::min(bagSize, remainingToPlace);
+        sizes_it->second = sizeToAdd;
+
+        remainingToPlace -= sizeToAdd;
+    }
 }
 
 // At this point selected are already sorted into 128-byte buckets.
@@ -1125,9 +1141,36 @@ bool IMPCachesBuilder::parseDylibs(Diagnostics& diag) {
     for (const auto& [k,v] : selectors.map) {
         totalSize += v->size();
     }
-    if (totalSize >= (1 << 24)) {
-        diag.warning("Dropping all IMP caches ; too many selectors\n");
-        return false;
+
+    // Allow up to 75% of total space
+    const uint64_t maxSelectors = selectorSizeLimit * 0.75;
+
+    if (totalSize >= maxSelectors) {
+        diag.warning("Dropping some IMP caches ; too many selectors\n");
+
+        // Get a sorted list of classes, to match what we do later in findShiftsAndMasks()
+        std::vector<IMPCaches::ClassData*> allClasses;
+        fillAllClasses(allClasses);
+
+        // Walk all the methods in order, assuming they are prioritised.  When we hit 75% of selector space, stop
+        // allowing new selectors, and so stop allowing new classes which would need more selectors
+        uint64_t selectorsSize = magicSelector.size() + 1;
+        std::unordered_set<std::string_view> seenSelectors;
+
+        for ( IMPCaches::ClassData* classData : allClasses) {
+            for ( const ClassData::Method& method : classData->methods ) {
+                if ( seenSelectors.count(method.selector->name) )
+                    continue;
+
+                if ( (selectorsSize + method.selector->name.size() + 1) > maxSelectors ) {
+                    classData->shouldGenerateImpCache = false;
+                    break;
+                }
+
+                seenSelectors.insert(method.selector->name);
+                selectorsSize += method.selector->name.size() + 1;
+            }
+        }
     }
 
     for (DylibState& d : dylibs) {
@@ -1274,8 +1317,9 @@ const std::string * IMPCachesBuilder::nameAndIsMetaclassPairFromNode(const json:
 
 IMPCachesBuilder::IMPCachesBuilder(Diagnostics& diag, TimeRecorder& timeRecorder,
                                    const std::vector<imp_caches::Dylib>& inputDylibs,
-                                   const json::Node& optimizerConfiguration)
-    : _diagnostics(diag), _timeRecorder(timeRecorder)
+                                   const json::Node& optimizerConfiguration,
+                                   uint32_t selectorSizeLimit)
+    : selectorSizeLimit(selectorSizeLimit), _diagnostics(diag), _timeRecorder(timeRecorder)
 {
     // Add one DylibState for every input dylib
     this->dylibs.reserve(inputDylibs.size());
@@ -1384,13 +1428,14 @@ struct BacktrackingState {
 
 static void backtrack(std::vector<BacktrackingState>& backtrackingStack, int& numberOfDroppedClasses, std::vector<IMPCaches::ClassData*>& allClasses) {
     int i = (int)backtrackingStack.size() - 1;
-    assert(i>0);
+    assert(i>=0);
     BacktrackingState & last = backtrackingStack.back();
     if (!last.result) {
         // backtracking over a skipped class
         numberOfDroppedClasses--;
+    } else {
+        allClasses[i]->backtrack(*(last.result));
     }
-    allClasses[i]->backtrack(*(last.result));
     backtrackingStack.pop_back();
 };
 
@@ -1640,8 +1685,8 @@ int IMPCachesBuilder::findShiftsAndMasks() {
                 currentClassIndex = backtrackingStack.size();
                 dropClass(_diagnostics, currentClassIndex, numberOfDroppedClasses, backtrackingStack, randomNumberGenerator, allClasses, "it's too difficult to place");
 
-                // FIXME: we should consider resetting backtrackingLength to the value it had when we snapshotted here (the risk makes this not worth trying at this point in the release).
-
+                // When we snapshot, we always reset the backtrackingLength, so do it here as well
+                backtrackingLength = 1;
                 backtrackingAttempts = 0;
                 continue;
             } else {
@@ -1657,9 +1702,12 @@ int IMPCachesBuilder::findShiftsAndMasks() {
                         bestSolutionSnapshotSelectors[k] = *v;
                     }
 #endif
+
+                    // This is our best solution yet so reset backtrackingLength
+                    backtrackingLength = 1;
                 }
 
-                _diagnostics.verbose("%lu / %lu (%s): backtracking\n", currentClassIndex, allClasses.size(), c->description().c_str());
+                _diagnostics.verbose("%lu / %lu (%s): backtracking %lu steps\n", currentClassIndex, allClasses.size(), c->description().c_str(), backtrackingLength);
                 assert(currentClassIndex != 0); // Backtracked all the way to the beginning, no solution
 
                 for (unsigned long j = 0 ; j < backtrackingLength ; j++) {
@@ -1769,6 +1817,26 @@ void IMPCachesBuilder::buildPerfectHashes(IMPCaches::HoleMap& holeMap, Diagnosti
     }
 
     computeLowBits(holeMap);
+
+    // Drop all selectors and imp caches over the limit
+    droppedClasses = false;
+    for (const auto& [k,v] : selectors.map) {
+        IMPCaches::Selector* sel = v.get();
+        if ( sel->offset >= selectorSizeLimit ) {
+            _diagnostics.verbose("Dropping selector out of buffer range: '%s'\n", sel->name.data());
+
+            for ( IMPCaches::ClassData* classData : sel->classes ) {
+                if ( !classData->shouldGenerateImpCache )
+                    continue;
+                classData->shouldGenerateImpCache = false;
+                droppedClasses = true;
+                _diagnostics.verbose("Dropping class %s, selectors too difficult to place\n", classData->name.data());
+            }
+        }
+    }
+
+    if ( droppedClasses )
+        removeUninterestingClasses();
 
     _timeRecorder.recordTime("assign selector addresses");
     _timeRecorder.popTimedSection();
@@ -2031,9 +2099,10 @@ Builder::~Builder()
         delete this->impCachesBuilder;
 }
 
-void Builder::buildImpCaches()
+void Builder::buildImpCaches(uint32_t selectorSizeLimit)
 {
-    impCachesBuilder = new IMPCaches::IMPCachesBuilder(this->diags, this->time, this->dylibs, this->objcOptimizations);
+    impCachesBuilder = new IMPCaches::IMPCachesBuilder(this->diags, this->time, this->dylibs,
+                                                       this->objcOptimizations, selectorSizeLimit);
 
     // Build the class map across all dylibs (including cross-image superclass references)
     impCachesBuilder->buildClassesMap(diags);

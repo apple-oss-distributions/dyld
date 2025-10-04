@@ -168,6 +168,7 @@ uint64_t DyldSharedCache::getSubCacheVmOffset(uint8_t index) const {
 
 void DyldSharedCache::forEachRegion(void (^handler)(const void* content, uint64_t vmAddr, uint64_t size,
                                                     uint32_t initProt, uint32_t maxProt, uint64_t flags,
+                                                    uint64_t fileOffset,
                                                     bool& stopRegion)) const
 {
     // <rdar://problem/49875993> sanity check cache header
@@ -182,7 +183,7 @@ void DyldSharedCache::forEachRegion(void (^handler)(const void* content, uint64_
         const dyld_cache_mapping_info* mappingsEnd = &mappings[header.mappingCount];
         for (const dyld_cache_mapping_info* m=mappings; m < mappingsEnd; ++m) {
             bool stop = false;
-            handler((char*)this + m->fileOffset, m->address, m->size, m->initProt, m->maxProt, 0, stop);
+            handler((char*)this + m->fileOffset, m->address, m->size, m->initProt, m->maxProt, 0, m->fileOffset, stop);
             if ( stop )
                 return;
         }
@@ -195,7 +196,7 @@ void DyldSharedCache::forEachRegion(void (^handler)(const void* content, uint64_
             // this is only called with a mapped dyld cache.  That means to get content,
             // we cannot use fileoffset, but intead us vmAddr + slide
             const void* content = (void*)(m->address + slide);
-            handler(content, m->address, m->size, m->initProt, m->maxProt, m->flags, stop);
+            handler(content, m->address, m->size, m->initProt, m->maxProt, m->flags, m->fileOffset, stop);
             if ( stop )
                 return;
         }
@@ -232,9 +233,9 @@ void DyldSharedCache::forEachRange(void (^handler)(const char* mappingName,
     __block uint32_t cacheFileIndex = 0;
     forEachCache(^(const DyldSharedCache *cache, bool& stopCache) {
         cache->forEachRegion(^(const void *content, uint64_t unslidVMAddr, uint64_t size,
-                        uint32_t initProt, uint32_t maxProt, uint64_t flags, bool& stopRegion) {
+                        uint32_t initProt, uint32_t maxProt, uint64_t flags,
+                               uint64_t fileOffset, bool& stopRegion) {
             const char* mappingName = DyldSharedCache::mappingName(maxProt, flags);
-            uint64_t fileOffset = (uint8_t*)content - (uint8_t*)cache;
             bool stop = false;
             handler(mappingName, unslidVMAddr, size, cacheFileIndex, fileOffset, initProt, maxProt, stop);
             if ( stop ) {
@@ -404,7 +405,8 @@ uint64_t DyldSharedCache::mappedSize() const
         __block uint64_t startAddr = 0;
         __block uint64_t endAddr = 0;
         forEachRegion(^(const void* content, uint64_t vmAddr, uint64_t size,
-                        uint32_t initProt, uint32_t maxProt, uint64_t flags, bool& stopRegion) {
+                        uint32_t initProt, uint32_t maxProt, uint64_t flags,
+                        uint64_t fileOffset, bool& stopRegion) {
             if ( startAddr == 0 )
                 startAddr = vmAddr;
             uint64_t end = vmAddr+size;
@@ -1118,7 +1120,8 @@ std::string DyldSharedCache::mapFile() const
 
     result.reserve(256*1024);
     forEachRegion(^(const void* content, uint64_t vmAddr, uint64_t size,
-                    uint32_t initProt, uint32_t maxProt, uint64_t flags, bool& stopRegion) {
+                    uint32_t initProt, uint32_t maxProt, uint64_t flags,
+                    uint64_t fileOffset, bool& stopRegion) {
         regionStartAddresses.push_back(vmAddr);
         regionSizes.push_back(size);
         regionFileOffsets.push_back((uint8_t*)content - (uint8_t*)this);
@@ -1841,79 +1844,8 @@ std::vector<const DyldSharedCache*> DyldSharedCache::mapCacheFiles(const char* p
     return caches;
 }
 
-void DyldSharedCache::applyCacheRebases() const {
-    auto rebaseChainV4 = ^(uint8_t* pageContent, uint16_t startOffset, const dyld_cache_slide_info4* slideInfo)
-    {
-        const uintptr_t   deltaMask    = (uintptr_t)(slideInfo->delta_mask);
-        const uintptr_t   valueMask    = ~deltaMask;
-        //const uintptr_t   valueAdd     = (uintptr_t)(slideInfo->value_add);
-        const unsigned    deltaShift   = __builtin_ctzll(deltaMask) - 2;
-
-        uint32_t pageOffset = startOffset;
-        uint32_t delta = 1;
-        while ( delta != 0 ) {
-            uint8_t* loc = pageContent + pageOffset;
-            uintptr_t rawValue = *((uintptr_t*)loc);
-            delta = (uint32_t)((rawValue & deltaMask) >> deltaShift);
-            pageOffset += delta;
-            uintptr_t value = (rawValue & valueMask);
-            if ( (value & 0xFFFF8000) == 0 ) {
-               // small positive non-pointer, use as-is
-            }
-            else if ( (value & 0x3FFF8000) == 0x3FFF8000 ) {
-               // small negative non-pointer
-               value |= 0xC0000000;
-            }
-            else {
-                // We don't want to fix up pointers, just the stolen integer slots above
-                // value += valueAdd;
-                // value += slideAmount;
-                continue;
-            }
-            *((uintptr_t*)loc) = value;
-            //dyld::log("         pageOffset=0x%03X, loc=%p, org value=0x%08llX, new value=0x%08llX, delta=0x%X\n", pageOffset, loc, (uint64_t)rawValue, (uint64_t)value, delta);
-        }
-    };
-
-    // On watchOS, the slide info v4 format steals high bits of integers.  We need to undo these
-    this->forEachCache(^(const DyldSharedCache *subCache, bool& stopCache) {
-        subCache->forEachSlideInfo(^(uint64_t mappingStartAddress, uint64_t mappingSize, const uint8_t *dataPagesStart,
-                                      uint64_t slideInfoOffset, uint64_t slideInfoSize, const dyld_cache_slide_info *slideInfo) {
-            if ( slideInfo->version == 4) {
-                const dyld_cache_slide_info4* slideHeader = (dyld_cache_slide_info4*)slideInfo;
-                const uint32_t  page_size = slideHeader->page_size;
-                const uint16_t* page_starts = (uint16_t*)((long)(slideInfo) + slideHeader->page_starts_offset);
-                const uint16_t* page_extras = (uint16_t*)((long)(slideInfo) + slideHeader->page_extras_offset);
-                for (int i=0; i < slideHeader->page_starts_count; ++i) {
-                    uint8_t* page = (uint8_t*)(long)(dataPagesStart + (page_size*i));
-                    uint16_t pageEntry = page_starts[i];
-                    //dyld::log("page[%d]: page_starts[i]=0x%04X\n", i, pageEntry);
-                    if ( pageEntry == DYLD_CACHE_SLIDE4_PAGE_NO_REBASE )
-                        continue;
-                    if ( pageEntry & DYLD_CACHE_SLIDE4_PAGE_USE_EXTRA ) {
-                        uint16_t chainIndex = (pageEntry & DYLD_CACHE_SLIDE4_PAGE_INDEX);
-                        bool done = false;
-                        while ( !done ) {
-                            uint16_t pInfo = page_extras[chainIndex];
-                            uint16_t pageStartOffset = (pInfo & DYLD_CACHE_SLIDE4_PAGE_INDEX)*4;
-                            //dyld::log("     chain[%d] pageOffset=0x%03X\n", chainIndex, pageStartOffset);
-                            rebaseChainV4(page, pageStartOffset, slideHeader);
-                            done = (pInfo & DYLD_CACHE_SLIDE4_PAGE_EXTRA_END);
-                            ++chainIndex;
-                        }
-                    }
-                    else {
-                        uint32_t pageOffset = pageEntry * 4;
-                        //dyld::log("     start pageOffset=0x%03X\n", pageOffset);
-                        rebaseChainV4(page, pageOffset, slideHeader);
-                    }
-                }
-            }
-        });
-    });
-}
-
 #endif
+
 const dyld_cache_slide_info* DyldSharedCache::legacyCacheSlideInfo() const
 {
     assert(header.mappingOffset <= offsetof(dyld_cache_header, mappingWithSlideOffset));
@@ -2610,3 +2542,290 @@ std::set<std::string> BaselineCachesChecker::dylibsMissingFromNewCaches() const
 }
 
 #endif // BUILDING_CACHE_BUILDER || BUILDING_CACHE_BUILDER_UNIT_TESTS
+
+static std::span<dyld_cache_mapping_and_slide_info const> slidMappings(const DyldSharedCache* cache)
+{
+    const dyld_cache_mapping_and_slide_info* base = (dyld_cache_mapping_and_slide_info*)((uint8_t*)cache + cache->header.mappingWithSlideOffset);
+    return { base, cache->header.mappingWithSlideCount };
+}
+
+#if __LP64__
+static void rebaseChainV2(uint8_t* pageContent, uint16_t startOffset, uintptr_t slideAmount, const dyld_cache_slide_info2* slideInfo)
+{
+    const uintptr_t   deltaMask    = (uintptr_t)(slideInfo->delta_mask);
+    const uintptr_t   valueMask    = ~deltaMask;
+    const uintptr_t   valueAdd     = (uintptr_t)(slideInfo->value_add);
+    const unsigned    deltaShift   = __builtin_ctzll(deltaMask) - 2;
+
+    uint32_t pageOffset = startOffset;
+    uint32_t delta = 1;
+    while ( delta != 0 ) {
+        uint8_t* loc = pageContent + pageOffset;
+        uintptr_t rawValue = *((uintptr_t*)loc);
+        delta = (uint32_t)((rawValue & deltaMask) >> deltaShift);
+        uintptr_t value = (rawValue & valueMask);
+        if ( value != 0 ) {
+            value += valueAdd;
+            value += slideAmount;
+        }
+        *((uintptr_t*)loc) = value;
+        //dyld::log("         pageOffset=0x%03X, loc=%p, org value=0x%08llX, new value=0x%08llX, delta=0x%X\n", pageOffset, loc, (uint64_t)rawValue, (uint64_t)value, delta);
+        pageOffset += delta;
+    }
+}
+#endif
+
+
+#if !__LP64__ || BUILDING_CACHE_BUILDER_UNIT_TESTS
+static void rebaseChainV4(uint8_t* pageContent, uint16_t startOffset, uintptr_t slideAmount, const dyld_cache_slide_info4* slideInfo)
+{
+    const uintptr_t   deltaMask    = (uintptr_t)(slideInfo->delta_mask);
+    const uintptr_t   valueMask    = ~deltaMask;
+    const uintptr_t   valueAdd     = (uintptr_t)(slideInfo->value_add);
+    const unsigned    deltaShift   = __builtin_ctzll(deltaMask) - 2;
+
+    uint32_t pageOffset = startOffset;
+    uint32_t delta = 1;
+    while ( delta != 0 ) {
+        uint8_t* loc = pageContent + pageOffset;
+        uintptr_t rawValue = *((uintptr_t*)loc);
+        delta = (uint32_t)((rawValue & deltaMask) >> deltaShift);
+        uintptr_t value = (rawValue & valueMask);
+        if ( (value & 0xFFFF8000) == 0 ) {
+           // small positive non-pointer, use as-is
+        }
+        else if ( (value & 0x3FFF8000) == 0x3FFF8000 ) {
+           // small negative non-pointer
+           value |= 0xC0000000;
+        }
+        else {
+            value += valueAdd;
+            value += slideAmount;
+        }
+        *((uintptr_t*)loc) = value;
+        //dyld::log("         pageOffset=0x%03X, loc=%p, org value=0x%08llX, new value=0x%08llX, delta=0x%X\n", pageOffset, loc, (uint64_t)rawValue, (uint64_t)value, delta);
+        pageOffset += delta;
+    }
+}
+#endif
+
+// fixup (rebase and potentially authenticate) a specific DATA/AUTH mapping
+static mach_o::Error fixupDataPages(const dyld_cache_slide_info* slideInfo, uint8_t* dataPagesStart, intptr_t slide)
+{
+    const dyld_cache_slide_info* slideInfoHeader = slideInfo;
+    if ( slideInfoHeader == nullptr )
+        return mach_o::Error::none();
+
+#if !__LP64__ || BUILDING_CACHE_BUILDER_UNIT_TESTS
+    if ( slideInfoHeader->version == 1 ) {
+        const dyld_cache_slide_info* slideHeader = (dyld_cache_slide_info*)slideInfo;
+        const uint32_t page_size = 4096;
+
+        const dyld_cache_slide_info_entry* entries = (dyld_cache_slide_info_entry*)((char*)slideHeader + slideHeader->entries_offset);
+        const uint16_t* tocs = (uint16_t*)((char*)slideHeader + slideHeader->toc_offset);
+        for(int i=0; i < slideHeader->toc_count; ++i) {
+            const dyld_cache_slide_info_entry* entry = &entries[tocs[i]];
+            uint8_t* page = (uint8_t*)(long)(dataPagesStart + (page_size * i));
+            for(int j = 0; j < slideHeader->entries_size; ++j) {
+                uint8_t bitmask = entry->bits[j];
+                for (unsigned k = 0; k != 8; ++k) {
+                    if ( bitmask & (1 << k) ) {
+                        uint32_t pageOffset = ((j * 8) + k) * 4;
+                        uint32_t* loc = (uint32_t*)(page + pageOffset);
+                        *loc = *loc + (int32_t)slide;
+                    }
+                }
+            }
+        }
+        return mach_o::Error::none();
+    }
+
+    if ( slideInfoHeader->version == 4 ) {
+        const dyld_cache_slide_info4* slideHeader = (dyld_cache_slide_info4*)slideInfo;
+        const uint32_t  page_size = slideHeader->page_size;
+        const uint16_t* page_starts = (uint16_t*)((long)(slideInfo) + slideHeader->page_starts_offset);
+        const uint16_t* page_extras = (uint16_t*)((long)(slideInfo) + slideHeader->page_extras_offset);
+        for (int i=0; i < slideHeader->page_starts_count; ++i) {
+            uint8_t* page = (uint8_t*)(long)(dataPagesStart + (page_size*i));
+            uint16_t pageEntry = page_starts[i];
+            //dyld::log("page[%d]: page_starts[i]=0x%04X\n", i, pageEntry);
+            if ( pageEntry == DYLD_CACHE_SLIDE4_PAGE_NO_REBASE )
+                continue;
+            if ( pageEntry & DYLD_CACHE_SLIDE4_PAGE_USE_EXTRA ) {
+                uint16_t chainIndex = (pageEntry & DYLD_CACHE_SLIDE4_PAGE_INDEX);
+                bool done = false;
+                while ( !done ) {
+                    uint16_t pInfo = page_extras[chainIndex];
+                    uint16_t pageStartOffset = (pInfo & DYLD_CACHE_SLIDE4_PAGE_INDEX)*4;
+                    //dyld::log("     chain[%d] pageOffset=0x%03X\n", chainIndex, pageStartOffset);
+                    rebaseChainV4(page, pageStartOffset, slide, slideHeader);
+                    done = (pInfo & DYLD_CACHE_SLIDE4_PAGE_EXTRA_END);
+                    ++chainIndex;
+                }
+            }
+            else {
+                uint32_t pageOffset = pageEntry * 4;
+                //dyld::log("     start pageOffset=0x%03X\n", pageOffset);
+                rebaseChainV4(page, pageOffset, slide, slideHeader);
+            }
+        }
+        return mach_o::Error::none();
+    }
+#endif
+
+#if __LP64__
+    if ( slideInfoHeader->version == 2 ) {
+        const dyld_cache_slide_info2* slideHeader = (dyld_cache_slide_info2*)slideInfo;
+        const uint32_t  page_size = slideHeader->page_size;
+        const uint16_t* page_starts = (uint16_t*)((long)(slideInfo) + slideHeader->page_starts_offset);
+        const uint16_t* page_extras = (uint16_t*)((long)(slideInfo) + slideHeader->page_extras_offset);
+        for (int i=0; i < slideHeader->page_starts_count; ++i) {
+            uint8_t* page = (uint8_t*)(long)(dataPagesStart + (page_size*i));
+            uint16_t pageEntry = page_starts[i];
+            //dyld4::log("page[%d]: page_starts[i]=0x%04X\n", i, pageEntry);
+            if ( pageEntry == DYLD_CACHE_SLIDE_PAGE_ATTR_NO_REBASE )
+                continue;
+            if ( pageEntry & DYLD_CACHE_SLIDE_PAGE_ATTR_EXTRA ) {
+                uint16_t chainIndex = (pageEntry & 0x3FFF);
+                bool done = false;
+                while ( !done ) {
+                    uint16_t pInfo = page_extras[chainIndex];
+                    uint16_t pageStartOffset = (pInfo & 0x3FFF)*4;
+                    //dyld4::log("     chain[%d] pageOffset=0x%03X\n", chainIndex, pageStartOffset);
+                    rebaseChainV2(page, pageStartOffset, slide, slideHeader);
+                    done = (pInfo & DYLD_CACHE_SLIDE_PAGE_ATTR_END);
+                    ++chainIndex;
+                }
+            }
+            else {
+                uint32_t pageOffset = pageEntry * 4;
+                //dyld::log("     start pageOffset=0x%03X\n", pageOffset);
+                rebaseChainV2(page, pageOffset, slide, slideHeader);
+            }
+        }
+        return mach_o::Error::none();
+    }
+
+    if ( slideInfoHeader->version == 3 ) {
+#if __has_feature(ptrauth_calls) || BUILDING_CACHE_BUILDER_UNIT_TESTS
+         const dyld_cache_slide_info3* slideHeader = (dyld_cache_slide_info3*)slideInfo;
+         const uint32_t                pageSize    = slideHeader->page_size;
+         for (int i=0; i < slideHeader->page_starts_count; ++i) {
+             uint8_t* page = (uint8_t*)(dataPagesStart + (pageSize*i));
+             uint64_t delta = slideHeader->page_starts[i];
+             //dyld::log("page[%d]: page_starts[i]=0x%04X\n", i, delta);
+             if ( delta == DYLD_CACHE_SLIDE_V3_PAGE_ATTR_NO_REBASE )
+                 continue;
+             delta = delta/sizeof(uint64_t); // initial offset is byte based
+             dyld_cache_slide_pointer3* loc = (dyld_cache_slide_pointer3*)page;
+             do {
+                 loc += delta;
+                 delta = loc->plain.offsetToNextPointer;
+                 if ( loc->auth.authenticated ) {
+                     uint64_t target = slideHeader->auth_value_add + loc->auth.offsetFromSharedCacheBase + slide;
+                     MachOLoaded::ChainedFixupPointerOnDisk ptr;
+                     ptr.raw64 = *((uint64_t*)loc);
+#if BUILDING_DYLD
+                     // only sign pointers in dyld
+                     loc->raw = ptr.arm64e.signPointer(loc, target);
+#else
+                     loc->raw = target;
+#endif // BUILDING_DYLD
+                 }
+                 else {
+                    MachOLoaded::ChainedFixupPointerOnDisk ptr;
+                    ptr.raw64 = *((uint64_t*)loc);
+                    loc->raw = ptr.arm64e.unpackTarget() + slide;
+                 }
+            } while (delta != 0);
+        }
+        return mach_o::Error::none();
+#else
+        return mach_o::Error("invalid pointer kind in cache file");
+#endif // __has_feature(ptrauth_calls) || BUILDING_CACHE_BUILDER_UNIT_TESTS
+    }
+
+    if ( slideInfoHeader->version == 5 ) {
+#if __has_feature(ptrauth_calls) || BUILDING_CACHE_BUILDER_UNIT_TESTS
+         const dyld_cache_slide_info5* slideHeader = (dyld_cache_slide_info5*)slideInfo;
+         const uint32_t                pageSize    = slideHeader->page_size;
+         for (int i=0; i < slideHeader->page_starts_count; ++i) {
+             uint8_t* page = (uint8_t*)(dataPagesStart + (pageSize*i));
+             uint64_t delta = slideHeader->page_starts[i];
+             //dyld4::console("page[%d]: page_starts[i]=0x%04llX\n", i, delta);
+             if ( delta == DYLD_CACHE_SLIDE_V5_PAGE_ATTR_NO_REBASE )
+                 continue;
+             delta = delta/sizeof(uint64_t); // initial offset is byte based
+             dyld_cache_slide_pointer5* loc = (dyld_cache_slide_pointer5*)page;
+             do {
+                 loc += delta;
+                 delta = loc->regular.next;
+
+                 MachOLoaded::ChainedFixupPointerOnDisk ptr;
+                 ptr.raw64 = *((uint64_t*)loc);
+
+                 uint64_t target = slideHeader->value_add + loc->regular.runtimeOffset + slide;
+                 if ( loc->auth.auth ) {
+#if BUILDING_DYLD
+                     // only sign pointers in dyld
+                     loc->raw = ptr.cache64e.signPointer(loc, target);
+#else
+                     loc->raw = target;
+#endif // BUILDING_DYLD
+                 } else {
+                     loc->raw = target | ptr.cache64e.high8();
+                 }
+            } while (delta != 0);
+        }
+        return mach_o::Error::none();
+#else
+        return mach_o::Error("invalid pointer kind in cache file");
+#endif // __has_feature(ptrauth_calls) || BUILDING_CACHE_BUILDER_UNIT_TESTS
+    }
+#endif // LP64
+
+    return mach_o::Error("invalid slide info in cache file");
+}
+
+mach_o::Error DyldSharedCache::fixupDataPages(intptr_t slideToApply) const
+{
+    std::span<dyld_cache_mapping_and_slide_info const> mappings = slidMappings(this);
+
+    // Nothing to do if we only have 1 mapping, as that means we are only TEXT or only LINKEDIT
+    if ( mappings.size() == 1 )
+        return mach_o::Error::none();
+
+    // LINEKDIT must be last
+    const dyld_cache_mapping_and_slide_info& linkeditMapping = mappings.back();
+
+    for ( const dyld_cache_mapping_and_slide_info& mapping : mappings ) {
+        if ( mapping.slideInfoFileSize == 0 )
+            continue;
+
+        // slide info is relative to where linkedit was mapped
+        uint64_t slideInfoLinkeditOffset = mapping.slideInfoFileOffset - linkeditMapping.fileOffset;
+        uint64_t slideInfoAddr = linkeditMapping.address + slideInfoLinkeditOffset;
+        const dyld_cache_slide_info* slideInfo = (const dyld_cache_slide_info*)(slideInfoAddr + slide());
+        uint8_t* dataPages = (uint8_t*)(mapping.address + slide());
+
+        if ( mach_o::Error err = ::fixupDataPages(slideInfo, dataPages, slideToApply) )
+            return err;
+    }
+
+    return mach_o::Error::none();
+}
+
+mach_o::Error DyldSharedCache::fixupAllDataPages(intptr_t slideToApply) const
+{
+    // Fix up the pages in all subcaches
+    __block mach_o::Error err = mach_o::Error::none();
+    forEachCache(^(const DyldSharedCache* cache, bool& stopCache) {
+        if ( mach_o::Error cacheErr = cache->fixupDataPages(slideToApply) ) {
+            err = std::move(cacheErr);
+            stopCache = true;
+            return;
+        }
+    });
+
+    return std::move(err);
+}

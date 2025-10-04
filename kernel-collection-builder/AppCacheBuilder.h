@@ -25,7 +25,7 @@
 #define AppCacheBuilder_h
 
 #include "ASLRTracker.h"
-#include "CacheBuilder.h"
+#include "KernelCacheBuilder.h"
 #include "MachOFileAbstraction.hpp"
 #include "MachOAppCache.h"
 
@@ -44,7 +44,7 @@ public:
             kernel,                 // The base first party kernel collection with xnu and boot time kexts
             pageableKC,              // Other first party kexts which are usually only for some HW, eg, different GPUs
             kernelCollectionLevel2, // Placeholder until we find a use for this
-            auxKC,                  // Third party kexts, or Apple kexts updated out of band with the OS, if any
+            auxKC,                  // Third party kext#include "KernelCacheBuilder.h"s, or Apple kexts updated out of band with the OS, if any
         };
 
         enum class StripMode {

@@ -656,13 +656,13 @@ void ExportsTrieWriter::forEachExportedSymbol(void (^callback)(const Symbol& sym
     return trie.forEachExportedSymbol(callback);
 }
 
-Error ExportsTrieWriter::valid(uint64_t maxVmOffset) const
+Error ExportsTrieWriter::valid(uint64_t baseAddr, uint64_t maxVmOffset) const
 {
     if ( _buildError.hasError() )
         return Error("%s", _buildError.message());
 
     ExportsTrie trie = *this;
-    return trie.valid(maxVmOffset);
+    return trie.valid(baseAddr, maxVmOffset);
 }
 
 // generic trie builder

@@ -81,10 +81,10 @@ public:
 
     ~ChunkBumpAllocator();
 
-    std::span<uint8_t> allocate(uint64_t size, uint16_t align=sizeof(uintptr_t));
+    std::span<uint8_t> allocate(size_t size, uint16_t align=sizeof(uintptr_t));
 
     template<typename T>
-    std::span<T> allocate(uint64_t count)
+    std::span<T> allocate(size_t count)
     {
         return std::span((T*)allocate(count * sizeof(T), alignof(T)).data(), count);
     }

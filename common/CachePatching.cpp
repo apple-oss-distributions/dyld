@@ -28,6 +28,7 @@
 
 #if BUILDING_CACHE_BUILDER || BUILDING_CACHE_BUILDER_UNIT_TESTS
 #include "CacheDylib.h"
+#include <ranges>
 #endif // BUILDING_CACHE_BUILDER || BUILDING_CACHE_BUILDER_UNIT_TESTS
 
 #include <assert.h>
@@ -196,6 +197,19 @@ void PatchTable::forEachPatchableGOTUseOfExport(uint32_t imageIndex, uint32_t dy
             assert("Unknown patch table version");
             break;
     }
+}
+
+void PatchTable::dump() const
+{
+#if BUILDING_SHARED_CACHE_UTIL
+    switch ( this->version() ) {
+        case 4:
+            return ((PatchTableV4*)this)->dump();
+        default:
+            assert("Unknown patch table version");
+            break;
+    }
+#endif
 }
 
 const char* PatchTable::patchKindName(PatchKind patchKind)
@@ -732,6 +746,185 @@ void PatchTableV4::forEachPatchableGOTUseOfExport(uint32_t imageIndex, uint32_t 
     }
 }
 
+void PatchTableV4::dump() const
+{
+#if BUILDING_SHARED_CACHE_UTIL
+
+    printf("version: %d\n", this->version());
+    printf("patch table address: 0x%llx\n", this->tableVMAddr);
+
+    {
+        const dyld_cache_patch_info_v4* patchInfo = this->info();
+        printf("header: {\n");
+        printf("  patchTableVersion: %d\n", patchInfo->patchTableVersion);
+        printf("  patchLocationVersion: %d\n", patchInfo->patchLocationVersion);
+        printf("  patchTableArrayAddr: %lld\n", patchInfo->patchTableArrayAddr);
+        printf("  patchTableArrayCount: %lld\n", patchInfo->patchTableArrayCount);
+        printf("  patchImageExportsArrayAddr: %lld\n", patchInfo->patchImageExportsArrayAddr);
+        printf("  patchImageExportsArrayCount: %lld\n", patchInfo->patchImageExportsArrayCount);
+        printf("  patchClientsArrayAddr: %lld\n", patchInfo->patchClientsArrayAddr);
+        printf("  patchClientsArrayCount: %lld\n", patchInfo->patchClientsArrayCount);
+        printf("  patchClientExportsArrayAddr: %lld\n", patchInfo->patchClientExportsArrayAddr);
+        printf("  patchClientExportsArrayCount: %lld\n", patchInfo->patchClientExportsArrayCount);
+        printf("  patchLocationArrayAddr: %lld\n", patchInfo->patchLocationArrayAddr);
+        printf("  patchLocationArrayCount: %lld\n", patchInfo->patchLocationArrayCount);
+        printf("  gotClientsArrayAddr: %lld\n", patchInfo->gotClientsArrayAddr);
+        printf("  gotClientsArrayCount: %lld\n", patchInfo->gotClientsArrayCount);
+        printf("  gotClientExportsArrayAddr: %lld\n", patchInfo->gotClientExportsArrayAddr);
+        printf("  gotClientExportsArrayCount: %lld\n", patchInfo->gotClientExportsArrayCount);
+        printf("  gotLocationArrayAddr: %lld\n", patchInfo->gotLocationArrayAddr);
+        printf("  gotLocationArrayCount: %lld\n", patchInfo->gotLocationArrayCount);
+        printf("  patchExportNamesAddr: %lld\n", patchInfo->patchExportNamesAddr);
+        printf("  patchExportNamesSize: %lld\n", patchInfo->patchExportNamesSize);
+        printf("}\n");
+    }
+
+    printf("\n");
+
+    {
+        std::span<const dyld_cache_image_patches_v2> elements = this->images();
+        printf("dyld_cache_image_patches_v2 (total = %zu): {\n", elements.size());
+        for ( const auto& element : elements ) {
+            printf("  [%ld]: { [%d, %d], [%d, %d] }\n",
+                   &element - elements.data(),
+                   element.patchClientsStartIndex, element.patchClientsCount,
+                   element.patchExportsStartIndex, element.patchExportsCount);
+        }
+        printf("} // dyld_cache_image_patches_v2\n");
+    }
+
+    printf("\n");
+
+    {
+        std::span<const dyld_cache_image_export_v2> elements = this->imageExports();
+        printf("dyld_cache_image_export_v2 (total = %zu): {\n", elements.size());
+        for ( const auto& element : elements ) {
+            printf("  [%ld]: { 0x%x, 0x%x, %d }\n",
+                   &element - elements.data(),
+                   element.dylibOffsetOfImpl, element.exportNameOffset,
+                   element.patchKind);
+        }
+        printf("} // dyld_cache_image_export_v2\n");
+    }
+
+    printf("\n");
+
+    {
+        std::span<const dyld_cache_image_clients_v2> elements = this->imageClients();
+        printf("dyld_cache_image_clients_v2 (total = %zu): {\n", elements.size());
+        for ( const auto& element : elements ) {
+            printf("  [%ld]: { %d, [%d, %d] }\n",
+                   &element - elements.data(),
+                   element.clientDylibIndex, element.patchExportsStartIndex,
+                   element.patchExportsCount);
+        }
+        printf("} // dyld_cache_image_clients_v2\n");
+    }
+
+    printf("\n");
+
+    {
+        std::span<const dyld_cache_patchable_export_v2> elements = this->clientExports();
+        printf("dyld_cache_patchable_export_v2 (total = %zu): {\n", elements.size());
+        for ( const auto& element : elements ) {
+            printf("  [%ld]: { %d, [%d, %d] }\n",
+                   &element - elements.data(),
+                   element.imageExportIndex, element.patchLocationsStartIndex,
+                   element.patchLocationsCount);
+        }
+        printf("} // dyld_cache_patchable_export_v2\n");
+    }
+
+    printf("\n");
+
+    {
+        std::span<const dyld_cache_patchable_location_v4> elements = this->patchableLocations();
+        printf("dyld_cache_patchable_location_v4 (total = %zu): {\n", elements.size());
+        for ( const auto& element : elements ) {
+            // TODO: regular vs auth
+            printf("  [%ld]: { 0x%x }\n",
+                   &element - elements.data(),
+                   element.dylibOffsetOfUse);
+        }
+        printf("} // dyld_cache_patchable_location_v4\n");
+    }
+
+    printf("\n");
+
+    {
+        std::span<const dyld_cache_image_got_clients_v3> elements = this->gotClients();
+        printf("dyld_cache_image_got_clients_v3 (total = %zu): {\n", elements.size());
+        for ( const auto& element : elements ) {
+            printf("  [%ld]: { [%d, %d] }\n",
+                   &element - elements.data(),
+                   element.patchExportsStartIndex, element.patchExportsCount);
+        }
+        printf("} // dyld_cache_image_got_clients_v3\n");
+    }
+
+    printf("\n");
+
+    {
+        std::span<const dyld_cache_patchable_export_v3> elements = this->gotClientExports();
+        printf("dyld_cache_patchable_export_v3 (total = %zu): {\n", elements.size());
+        for ( const auto& element : elements ) {
+            printf("  [%ld]: { %d, [%d, %d] }\n",
+                   &element - elements.data(),
+                   element.imageExportIndex,
+                   element.patchLocationsStartIndex, element.patchLocationsCount);
+        }
+        printf("} // dyld_cache_patchable_export_v3\n");
+    }
+
+    printf("\n");
+
+    {
+        std::span<const dyld_cache_patchable_location_v4_got> elements = this->gotPatchableLocations();
+        printf("dyld_cache_patchable_location_v4_got (total = %zu): {\n", elements.size());
+        for ( const auto& element : elements ) {
+            // TODO: regular vs auth
+            printf("  [%ld]: { 0x%llx }\n",
+                   &element - elements.data(),
+                   element.cacheOffsetOfUse);
+        }
+        printf("} // dyld_cache_patchable_location_v4_got\n");
+    }
+
+    printf("\n");
+
+    {
+        std::string_view elements = this->exportNames();
+        uint32_t totalStrings = 0;
+        for ( std::string_view str = elements; !str.empty(); ++totalStrings ) {
+            auto pos = str.find('\0');
+            if ( pos == std::string::npos )
+                break;
+            str = str.substr(pos + 1);
+        }
+
+        printf("export_names (total = %d): {\n", totalStrings);
+
+        uint32_t index = 0;
+        for ( std::string_view str = elements; !str.empty(); ++index ) {
+            auto pos = str.find('\0');
+            if ( pos == std::string::npos )
+                break;
+
+            printf("  [%d]: { 0x%lx, \"%s\" }\n",
+                   index,
+                   str.data() - elements.data(),
+                   str.data());
+
+            str = str.substr(pos + 1);
+        }
+        printf("} // export_names\n");
+    }
+
+    printf("\n");
+
+#endif // BUILDING_SHARED_CACHE_UTIL
+}
+
 #if BUILDING_CACHE_BUILDER || BUILDING_CACHE_BUILDER_UNIT_TESTS
 
 namespace cache_builder
@@ -755,7 +948,7 @@ void PatchTableBuilder::mergePatchInfos(const std::span<CacheDylib>& cacheDylibs
             const CacheDylib::BindTarget& bindTarget = cacheDylib.bindTargets[bindIndex];
 
             // Skip binds with no uses
-            const std::vector<dyld_cache_patchable_location>& clientUses = dylibPatchInfo.bindUses[bindIndex];
+            const std::span<const DyldCachePatchableLocation> clientUses = dylibPatchInfo.bindUses[bindIndex];
             if ( clientUses.empty() )
                 continue;
 
@@ -763,29 +956,29 @@ void PatchTableBuilder::mergePatchInfos(const std::span<CacheDylib>& cacheDylibs
             if ( bindTarget.kind == CacheDylib::BindTarget::Kind::absolute )
                 continue;
 
-            assert(bindTarget.kind == CacheDylib::BindTarget::Kind::cacheImage);
-            const CacheDylib::BindTarget::CacheImage& cacheImageTarget = bindTarget.cacheImage;
-            CacheVMAddress                            bindTargetVMAddr = cacheImageTarget.targetDylib->cacheLoadAddress + cacheImageTarget.targetRuntimeOffset;
-            assert(cacheImageTarget.targetDylib->needsPatchTable && "target dylibs must be patchable");
+            assert(bindTarget.kind == CacheDylib::BindTarget::Kind::inputImage);
+            const CacheDylib::BindTarget::InputImage& inputImageTarget = bindTarget.inputImage;
+            InputDylibVMAddress                       bindTargetVMAddr = inputImageTarget.targetDylib->inputLoadAddress + inputImageTarget.targetRuntimeOffset;
+            assert(inputImageTarget.targetDylib->needsPatchTable && "target dylibs must be patchable");
 
             // Find the target dylib.  We need to add this dylib as a client of the target
-            DylibClients& targetDylibClients = dylibClients[cacheImageTarget.targetDylib->cacheIndex];
+            DylibClients& targetDylibClients = dylibClients[inputImageTarget.targetDylib->cacheIndex];
 
             // Add this dylib as a client if its not already there
             if ( targetDylibClients.clients.empty() || (targetDylibClients.clients.back().clientCacheDylib != &cacheDylib) )
                 targetDylibClients.clients.emplace_back(&cacheDylib);
 
             DylibClient&                                targetDylibClient = targetDylibClients.clients.back();
-            std::vector<dyld_cache_patchable_location>& uses              = targetDylibClient.uses[bindTargetVMAddr];
+            std::vector<DyldCachePatchableLocation>&    uses              = targetDylibClient.uses[bindTargetVMAddr];
             uses.insert(uses.end(), clientUses.begin(), clientUses.end());
 
-            exportsToName.insert({ bindTargetVMAddr, dylibPatchInfo.bindTargetNames[bindIndex] });
+            targetDylibClients.exportsToName.insert({ bindTargetVMAddr, dylibPatchInfo.bindTargetNames[bindIndex] });
 
             if ( log ) {
                 printf("%d patch loc(s) in %s, of symbol %s in %s\n",
                        (uint32_t)clientUses.size(), cacheDylib.installName.data(),
                        dylibPatchInfo.bindTargetNames[bindIndex].c_str(),
-                       cacheDylibs[cacheImageTarget.targetDylib->cacheIndex].installName.data());
+                       cacheDylibs[inputImageTarget.targetDylib->cacheIndex].installName.data());
             }
         }
 
@@ -809,7 +1002,7 @@ void PatchTableBuilder::mergePatchInfos(const std::span<CacheDylib>& cacheDylibs
                 const CacheDylib::BindTarget& bindTarget = cacheDylib.bindTargets[bindIndex];
 
                 // Skip binds with no uses
-                const std::vector<PatchInfo::GOTInfo>& clientUses = bindGOTUses[bindIndex];
+                const std::span<const PatchInfo::GOTInfo> clientUses = bindGOTUses[bindIndex];
                 if ( clientUses.empty() )
                     continue;
 
@@ -817,25 +1010,25 @@ void PatchTableBuilder::mergePatchInfos(const std::span<CacheDylib>& cacheDylibs
                 if ( bindTarget.kind == CacheDylib::BindTarget::Kind::absolute )
                     continue;
 
-                assert(bindTarget.kind == CacheDylib::BindTarget::Kind::cacheImage);
-                const CacheDylib::BindTarget::CacheImage& cacheImageTarget = bindTarget.cacheImage;
-                CacheVMAddress                            bindTargetVMAddr = cacheImageTarget.targetDylib->cacheLoadAddress + cacheImageTarget.targetRuntimeOffset;
+                assert(bindTarget.kind == CacheDylib::BindTarget::Kind::inputImage);
+                const CacheDylib::BindTarget::InputImage& inputImageTarget = bindTarget.inputImage;
+                InputDylibVMAddress                       bindTargetVMAddr = inputImageTarget.targetDylib->inputLoadAddress + inputImageTarget.targetRuntimeOffset;
 
                 // Find the target dylib.  We need to add this dylib as a client of the target
-                DylibClients& targetDylibClients = dylibClients[cacheImageTarget.targetDylib->cacheIndex];
+                DylibClients& targetDylibClients = dylibClients[inputImageTarget.targetDylib->cacheIndex];
 
-                DylibClient&                                targetDylibClient = targetDylibClients.gotClient;
-                std::vector<dyld_cache_patchable_location>& uses              = targetDylibClient.uses[bindTargetVMAddr];
+                GOTClient&                                  gotClient = targetDylibClients.gotClient;
+                std::vector<DyldCachePatchableGOTLocation>& uses      = gotClient.uses[bindTargetVMAddr];
                 for ( const PatchInfo::GOTInfo& gotInfo : clientUses )
-                    uses.push_back(gotInfo.patchInfo);
+                    uses.push_back(gotInfo.useLocation);
 
-                exportsToName.insert({ bindTargetVMAddr, dylibPatchInfo.bindTargetNames[bindIndex] });
+                targetDylibClients.exportsToName.insert({ bindTargetVMAddr, dylibPatchInfo.bindTargetNames[bindIndex] });
 
                 if ( log ) {
                     printf("%d patch loc(s) in %s, of symbol %s in %s\n",
                            (uint32_t)clientUses.size(), cacheDylib.installName.data(),
                            dylibPatchInfo.bindTargetNames[bindIndex].c_str(),
-                           cacheDylibs[cacheImageTarget.targetDylib->cacheIndex].installName.data());
+                           cacheDylibs[inputImageTarget.targetDylib->cacheIndex].installName.data());
                 }
             }
         }
@@ -855,18 +1048,18 @@ void PatchTableBuilder::calculateRequiredSpace(const std::span<CacheDylib>& cach
     uint64_t numGotClientExports     = 0;
     uint64_t numGotPatchLocations    = 0;
 
-    typedef std::unordered_map<CacheVMAddress, uint32_t, CacheVMAddressHash, CacheVMAddressEqual> ExportNameOffsetMap;
-    ExportNameOffsetMap exportNameOffsets;
-
     for ( uint32_t dylibIndex = 0; dylibIndex != cacheDylibs.size(); ++dylibIndex ) {
         DylibClients& dylibClientData = dylibClients[dylibIndex];
-        std::vector<CacheVMAddress> usedExports;
+        std::vector<InputDylibVMAddress> usedExports;
+
+        typedef std::unordered_map<InputDylibVMAddress, uint32_t, InputDylibVMAddressHash, InputDylibVMAddressEqual> ExportNameOffsetMap;
+        ExportNameOffsetMap exportNameOffsets;
 
         for ( const DylibClient& clientDylib : dylibClientData.clients ) {
             bool clientUsed = false;
-            for ( auto& exportVMAddrAndUses : clientDylib.uses ) {
-                CacheVMAddress                                    exportCacheVMAddr = exportVMAddrAndUses.first;
-                const std::vector<dyld_cache_patchable_location>& uses              = exportVMAddrAndUses.second;
+            for ( auto& exportDylibVMAddrAndUses : clientDylib.uses ) {
+                InputDylibVMAddress                               exportDylibVMAddr = exportDylibVMAddrAndUses.first;
+                const std::span<const DyldCachePatchableLocation> uses              = exportDylibVMAddrAndUses.second;
                 if ( uses.empty() )
                     continue;
 
@@ -876,15 +1069,15 @@ void PatchTableBuilder::calculateRequiredSpace(const std::span<CacheDylib>& cach
                 numPatchLocations += uses.size();
 
                 // Track this location as one the target dylib needs to export
-                usedExports.push_back(exportCacheVMAddr);
+                usedExports.push_back(exportDylibVMAddr);
 
                 // We need space for the name too
-                auto itAndInserted = exportNameOffsets.insert({ exportCacheVMAddr, numPatchExportNameBytes });
+                auto itAndInserted = exportNameOffsets.insert({ exportDylibVMAddr, numPatchExportNameBytes });
                 if ( itAndInserted.second ) {
                     // We inserted the name, so make space for it
                     // We should have an export already, from the previous scan to size the tables
-                    auto exportNameIt = exportsToName.find(exportCacheVMAddr);
-                    assert(exportNameIt != exportsToName.end());
+                    auto exportNameIt = dylibClientData.exportsToName.find(exportDylibVMAddr);
+                    assert(exportNameIt != dylibClientData.exportsToName.end());
                     const std::string_view& exportName = exportNameIt->second;
                     numPatchExportNameBytes += exportName.size() + 1;
                 }
@@ -897,9 +1090,10 @@ void PatchTableBuilder::calculateRequiredSpace(const std::span<CacheDylib>& cach
 
         // GOTs
         {
-            for ( auto& exportVMAddrAndUses : dylibClientData.gotClient.uses ) {
-                CacheVMAddress                              exportCacheVMAddr = exportVMAddrAndUses.first;
-                std::vector<dyld_cache_patchable_location>& uses              = exportVMAddrAndUses.second;
+            for ( auto& exportDylibVMAddrAndUses : dylibClientData.gotClient.uses ) {
+                InputDylibVMAddress                         exportDylibVMAddr = exportDylibVMAddrAndUses.first;
+                std::vector<DyldCachePatchableGOTLocation>& uses              = exportDylibVMAddrAndUses.second;
+
                 if ( uses.empty() )
                     continue;
 
@@ -911,15 +1105,15 @@ void PatchTableBuilder::calculateRequiredSpace(const std::span<CacheDylib>& cach
                 numGotPatchLocations += uses.size();
 
                 // Track this location as one the target dylib needs to export
-                usedExports.push_back(exportCacheVMAddr);
+                usedExports.push_back(exportDylibVMAddr);
 
                 // We need space for the name too
-                auto itAndInserted = exportNameOffsets.insert({ exportCacheVMAddr, numPatchExportNameBytes });
+                auto itAndInserted = exportNameOffsets.insert({ exportDylibVMAddr, numPatchExportNameBytes });
                 if ( itAndInserted.second ) {
                     // We inserted the name, so make space for it
                     // We should have an export already, from the previous scan to size the tables
-                    auto exportNameIt = exportsToName.find(exportCacheVMAddr);
-                    assert(exportNameIt != exportsToName.end());
+                    auto exportNameIt = dylibClientData.exportsToName.find(exportDylibVMAddr);
+                    assert(exportNameIt != dylibClientData.exportsToName.end());
                     const std::string_view& exportName = exportNameIt->second;
                     numPatchExportNameBytes += exportName.size() + 1;
                 }
@@ -932,20 +1126,50 @@ void PatchTableBuilder::calculateRequiredSpace(const std::span<CacheDylib>& cach
         dylibClientData.setUsedExports(std::move(usedExports));
 
         // Track how many exports this image needs
-        numImageExports += dylibClientData.getUsedExports().size();
+        numImageExports += dylibClientData.getUsedInputDylibExports().size();
     }
 
-    // Now reserve the space
+    // align to 4
+    while ( (numPatchExportNameBytes % 4) != 0 )
+        ++numPatchExportNameBytes;
 
+    // Now reserve the space
     patchImages.reserve(numPatchImages);
     imageExports.reserve(numImageExports);
     patchClients.reserve(numPatchClients);
     clientExports.reserve(numClientExports);
     patchLocations.reserve(numPatchLocations);
-    patchExportNames.reserve(numPatchExportNameBytes);
     gotClients.reserve(numGOTClients);
     gotClientExports.reserve(numGotClientExports);
     gotPatchLocations.reserve(numGotPatchLocations);
+    patchExportNames.reserve(numPatchExportNameBytes);
+
+    uint64_t patchInfoSize = sizeof(dyld_cache_patch_info_v4);
+    patchInfoSize += sizeof(dyld_cache_image_patches_v2) * numPatchImages;
+    patchInfoSize += sizeof(dyld_cache_image_export_v2) * numImageExports;
+    patchInfoSize += sizeof(dyld_cache_image_clients_v2) * numPatchClients;
+    patchInfoSize += sizeof(dyld_cache_patchable_export_v3) * numClientExports;
+    patchInfoSize += sizeof(dyld_cache_patchable_location_v4) * numPatchLocations;
+    patchInfoSize += sizeof(dyld_cache_image_got_clients_v3) * numGOTClients;
+    patchInfoSize += sizeof(dyld_cache_patchable_export_v3) * numGotClientExports;
+    patchInfoSize += sizeof(dyld_cache_patchable_location_v4_got) * numGotPatchLocations;
+    patchInfoSize += numPatchExportNameBytes;
+
+    totalSize = patchInfoSize;
+
+#if 0
+    fprintf(stderr, "sizeof(dyld_cache_patch_info_v3): %lu\n", sizeof(dyld_cache_patch_info_v3));
+    fprintf(stderr, "sizeof(dyld_cache_image_patches_v2) * patchImages.size(): %lu with %lu uses\n", sizeof(dyld_cache_image_patches_v2) * patchImages.size(), patchImages.size());
+    fprintf(stderr, "sizeof(dyld_cache_image_export_v2) * imageExports.size(): %lu with %lu uses\n", sizeof(dyld_cache_image_export_v2) * imageExports.size(), imageExports.size());
+    fprintf(stderr, "sizeof(dyld_cache_image_clients_v2) * patchClients.size(): %lu with %lu uses\n", sizeof(dyld_cache_image_clients_v2) * patchClients.size(), patchClients.size());
+    fprintf(stderr, "sizeof(dyld_cache_patchable_export_v2) * clientExports.size(): %lu with %lu uses\n", sizeof(dyld_cache_patchable_export_v2) * clientExports.size(), clientExports.size());
+    fprintf(stderr, "sizeof(dyld_cache_patchable_location_v2) * patchLocations.size(): %lu with %lu uses\n", sizeof(dyld_cache_patchable_location_v2) * patchLocations.size(), patchLocations.size());
+    fprintf(stderr, "sizeof(dyld_cache_image_got_clients_v3) * gotClients.size(): %lu with %lu uses\n", sizeof(dyld_cache_image_got_clients_v3) * gotClients.size(), gotClients.size());
+    fprintf(stderr, "sizeof(dyld_cache_patchable_export_v3) * gotClientExports.size(): %lu with %lu uses\n", sizeof(dyld_cache_patchable_export_v3) * gotClientExports.size(), gotClientExports.size());
+    fprintf(stderr, "sizeof(dyld_cache_patchable_location_v3) * gotPatchLocations.size(): %lu with %lu uses\n", sizeof(dyld_cache_patchable_location_v3) * gotPatchLocations.size(), gotPatchLocations.size());
+    fprintf(stderr, "patchExportNames.size(): %lu\n", patchExportNames.size());
+    fprintf(stderr, "patchInfoSize: %lld\n", patchInfoSize);
+#endif
 }
 
 void PatchTableBuilder::calculatePatchTable(const std::span<CacheDylib>& cacheDylibs,
@@ -953,6 +1177,13 @@ void PatchTableBuilder::calculatePatchTable(const std::span<CacheDylib>& cacheDy
                                             const PatchableSingletonsSet& patchableCFObj2,
                                             CacheVMAddress cacheBaseAddress)
 {
+    // Calculate the real VM addresses for all exports.  This needs to be done late as the input dylib addresses
+    // can change sort order when the cache moves segments
+    for ( uint32_t dylibIndex = 0; dylibIndex != cacheDylibs.size(); ++dylibIndex ) {
+        DylibClients& dylibClientData = dylibClients[dylibIndex];
+        dylibClientData.calculateCacheUsedExports(cacheDylibs[dylibIndex]);
+    }
+
     typedef std::unordered_map<CacheVMAddress, uint32_t, CacheVMAddressHash, CacheVMAddressEqual> ExportNameOffsetMap;
     ExportNameOffsetMap exportNameOffsets;
 
@@ -966,7 +1197,7 @@ void PatchTableBuilder::calculatePatchTable(const std::span<CacheDylib>& cacheDy
         patchImage.patchClientsStartIndex = (uint32_t)patchClients.size();
         patchImage.patchClientsCount      = 0;
         patchImage.patchExportsStartIndex = (uint32_t)imageExports.size();
-        patchImage.patchExportsCount      = (uint32_t)dylibClientData.getUsedExports().size();
+        patchImage.patchExportsCount      = (uint32_t)dylibClientData.getUsedCacheDylibExports().size();
 
         if ( !cacheDylibs[dylibIndex].needsPatchTable ) {
             assert(patchImage.patchExportsCount == 0);
@@ -985,7 +1216,8 @@ void PatchTableBuilder::calculatePatchTable(const std::span<CacheDylib>& cacheDy
         for ( const DylibClient& clientDylib : dylibClientData.clients ) {
             bool clientUsed = false;
 
-            CacheVMAddress clientDylibVMAddr = clientDylib.clientCacheDylib->cacheLoadAddress;
+            InputDylibVMAddress clientInputDylibVMAddr = clientDylib.clientCacheDylib->inputLoadAddress;
+            CacheVMAddress clientCacheDylibVMAddr = clientDylib.clientCacheDylib->cacheLoadAddress;
 
             // We might add a client.  If we do, then set it up now so that we have the
             // right offset to the exports table
@@ -994,10 +1226,19 @@ void PatchTableBuilder::calculatePatchTable(const std::span<CacheDylib>& cacheDy
             clientImage.patchExportsStartIndex = (uint32_t)clientExports.size();
             clientImage.patchExportsCount      = 0;
 
+            // Make a sorted map of cache addresses so that code in dyld at runtime can do binary search
+            std::map<CacheVMAddress, InputDylibVMAddress, CacheVMAddressLessThan> exportMap;
             for ( auto& exportVMAddrAndUses : clientDylib.uses ) {
-                CacheVMAddress exportCacheVMAddr = exportVMAddrAndUses.first;
+                InputDylibVMAddress exportInputDylibVMAddr = exportVMAddrAndUses.first;
+                CacheVMAddress exportCacheDylibVMAddr = cacheDylibs[dylibIndex].adjustor->adjustVMAddr(exportInputDylibVMAddr);
+                exportMap[exportCacheDylibVMAddr] = exportInputDylibVMAddr;
+            }
 
-                const std::vector<dyld_cache_patchable_location>& uses = exportVMAddrAndUses.second;
+            for ( auto& cacheAndInputAddress : exportMap ) {
+                const CacheVMAddress exportCacheDylibVMAddr = cacheAndInputAddress.first;
+                const InputDylibVMAddress exportInputDylibVMAddr = cacheAndInputAddress.second;
+
+                const std::span<const DyldCachePatchableLocation> uses = clientDylib.uses.at(exportInputDylibVMAddr);
                 if ( uses.empty() )
                     continue;
 
@@ -1005,10 +1246,7 @@ void PatchTableBuilder::calculatePatchTable(const std::span<CacheDylib>& cacheDy
                 clientUsed = true;
 
                 // We should have an export already, from the previous scan to size the tables
-                auto exportIt = dylibClientData.findExport(exportCacheVMAddr);
-                assert(exportIt != dylibClientData.getUsedExports().end());
-
-                uint32_t imageExportIndex = (uint32_t)std::distance(dylibClientData.getUsedExports().cbegin(), exportIt);
+                uint32_t imageExportIndex = dylibClientData.findExportIndex(exportCacheDylibVMAddr);
 
                 // Add an export for this client dylib
                 dyld_cache_patchable_export_v2 cacheExport;
@@ -1020,9 +1258,12 @@ void PatchTableBuilder::calculatePatchTable(const std::span<CacheDylib>& cacheDy
 
                 // Now add the list of locations.
                 // At this point we need to translate from the locations the cache recorded to what we encode
-                for ( const dyld_cache_patchable_location& use : uses ) {
+                for ( const DyldCachePatchableLocation& use : uses ) {
                     dyld_cache_patchable_location_v4 loc;
-                    loc.dylibOffsetOfUse     = (uint32_t)(use.cacheVMAddr - clientDylibVMAddr).rawValue();
+                    // Translate from the offset in the input dylib to an offset in the final dylib
+                    InputDylibVMAddress inputVMAddr = clientInputDylibVMAddr + use.clientDylibOffset;
+                    CacheVMAddress cacheVMAddr = clientDylib.clientCacheDylib->adjustor->adjustVMAddr(inputVMAddr);
+                    loc.dylibOffsetOfUse     = (uint32_t)(cacheVMAddr - clientCacheDylibVMAddr).rawValue();
                     if ( use.authenticated ) {
                         loc.auth.high7                = use.high7;
                         loc.auth.isWeakImport         = use.isWeakImport;
@@ -1054,18 +1295,25 @@ void PatchTableBuilder::calculatePatchTable(const std::span<CacheDylib>& cacheDy
             gotClient.patchExportsStartIndex   = (uint32_t)gotClientExports.size();
             gotClient.patchExportsCount        = 0;
 
+            // Make a sorted map of cache addresses so that code in dyld at runtime can do binary search
+            std::map<CacheVMAddress, InputDylibVMAddress, CacheVMAddressLessThan> exportMap;
             for ( auto& exportVMAddrAndUses : dylibClientData.gotClient.uses ) {
-                CacheVMAddress exportCacheVMAddr = exportVMAddrAndUses.first;
+                InputDylibVMAddress exportInputDylibVMAddr = exportVMAddrAndUses.first;
+                CacheVMAddress exportCacheDylibVMAddr = cacheDylibs[dylibIndex].adjustor->adjustVMAddr(exportInputDylibVMAddr);
+                exportMap[exportCacheDylibVMAddr] = exportInputDylibVMAddr;
+            }
 
-                const std::vector<dyld_cache_patchable_location>& uses = exportVMAddrAndUses.second;
+            for ( auto& cacheAndInputAddress : exportMap ) {
+                const CacheVMAddress exportCacheDylibVMAddr = cacheAndInputAddress.first;
+                const InputDylibVMAddress exportInputDylibVMAddr = cacheAndInputAddress.second;
+
+                const std::span<const DyldCachePatchableGOTLocation> uses = dylibClientData.gotClient.uses.at(exportInputDylibVMAddr);
+
                 if ( uses.empty() )
                     continue;
 
                 // We should have an export already, from the previous scan to size the tables
-                auto exportIt = dylibClientData.findExport(exportCacheVMAddr);
-                assert(exportIt != dylibClientData.getUsedExports().end());
-
-                uint32_t imageExportIndex = (uint32_t)std::distance(dylibClientData.getUsedExports().cbegin(), exportIt);
+                uint32_t imageExportIndex = dylibClientData.findExportIndex(exportCacheDylibVMAddr);
 
                 // Add an export for this GOT client
                 dyld_cache_patchable_export_v3 cacheExport;
@@ -1077,9 +1325,10 @@ void PatchTableBuilder::calculatePatchTable(const std::span<CacheDylib>& cacheDy
 
                 // Now add the list of locations.
                 // At this point we need to translate from the locations the cache recorded to what we encode
-                for (const dyld_cache_patchable_location& use : uses) {
+                for (const DyldCachePatchableGOTLocation& use : uses) {
                     dyld_cache_patchable_location_v4_got loc;
-                    loc.cacheOffsetOfUse            = (use.cacheVMAddr - cacheBaseAddress).rawValue();
+                    CacheVMAddress cacheVMAddr      = use.clientGOT->cacheVMAddress + use.clientGOTOffset;
+                    loc.cacheOffsetOfUse            = (cacheVMAddr - cacheBaseAddress).rawValue();
                     loc.unusedPadding               = 0;
                     if ( use.authenticated ) {
                         loc.auth.high7                = use.high7;
@@ -1107,13 +1356,16 @@ void PatchTableBuilder::calculatePatchTable(const std::span<CacheDylib>& cacheDy
         CacheVMAddress    imageBaseAddress = cacheDylib.cacheLoadAddress;
 
         // Add all the exports for this image
-        for ( const CacheVMAddress exportCacheVMAddr : dylibClientData.getUsedExports() ) {
+        for ( const auto& cacheAndInputAddress : dylibClientData.getUsedCacheDylibExports() ) {
+            const CacheVMAddress exportCacheDylibVMAddr = cacheAndInputAddress.cacheAddr;
+            const InputDylibVMAddress exportInputDylibVMAddr = cacheAndInputAddress.inputAddr;
+
             // Add the name, if no-one else has
             uint32_t exportNameOffset  = 0;
-            auto     nameItAndInserted = exportNameOffsets.insert({ exportCacheVMAddr, (uint32_t)patchExportNames.size() });
+            auto     nameItAndInserted = exportNameOffsets.insert({ exportCacheDylibVMAddr, (uint32_t)patchExportNames.size() });
             if ( nameItAndInserted.second ) {
                 // We inserted the name, so make space for it
-                const std::string_view& exportName = exportsToName[exportCacheVMAddr];
+                const std::string_view& exportName = dylibClientData.exportsToName[exportInputDylibVMAddr];
                 patchExportNames.insert(patchExportNames.end(), &exportName[0], &exportName[0] + exportName.size() + 1);
                 exportNameOffset = nameItAndInserted.first->second;
             }
@@ -1122,17 +1374,16 @@ void PatchTableBuilder::calculatePatchTable(const std::span<CacheDylib>& cacheDy
                 exportNameOffset = nameItAndInserted.first->second;
             }
 
-
             PatchKind patchKind = PatchKind::regular;
-            if ( patchableObjCClasses.count(exportCacheVMAddr) ) {
+            if ( patchableObjCClasses.count(exportCacheDylibVMAddr) ) {
                 patchKind = PatchKind::objcClass;
             }
-            else if ( patchableCFObj2.count(exportCacheVMAddr) ) {
+            else if ( patchableCFObj2.count(exportCacheDylibVMAddr) ) {
                 patchKind = PatchKind::cfObj2;
             }
 
             dyld_cache_image_export_v2 imageExport;
-            imageExport.dylibOffsetOfImpl = (uint32_t)(exportCacheVMAddr - imageBaseAddress).rawValue();
+            imageExport.dylibOffsetOfImpl = (uint32_t)(exportCacheDylibVMAddr - imageBaseAddress).rawValue();
             imageExport.exportNameOffset  = (uint32_t)exportNameOffset;
             imageExport.patchKind         = (uint32_t)patchKind;
             imageExports.push_back(imageExport);
@@ -1147,32 +1398,7 @@ void PatchTableBuilder::calculatePatchTable(const std::span<CacheDylib>& cacheDy
 
 uint64_t PatchTableBuilder::getPatchTableSize() const
 {
-    uint64_t patchInfoSize = sizeof(dyld_cache_patch_info_v3);
-    patchInfoSize += sizeof(dyld_cache_image_patches_v2) * patchImages.size();
-    patchInfoSize += sizeof(dyld_cache_image_export_v2) * imageExports.size();
-    patchInfoSize += sizeof(dyld_cache_image_clients_v2) * patchClients.size();
-    patchInfoSize += sizeof(dyld_cache_patchable_export_v2) * clientExports.size();
-    patchInfoSize += sizeof(dyld_cache_patchable_location_v2) * patchLocations.size();
-    patchInfoSize += sizeof(dyld_cache_image_got_clients_v3) * gotClients.size();
-    patchInfoSize += sizeof(dyld_cache_patchable_export_v3) * gotClientExports.size();
-    patchInfoSize += sizeof(dyld_cache_patchable_location_v3) * gotPatchLocations.size();
-    patchInfoSize += patchExportNames.size();
-    
-#if 0
-    fprintf(stderr, "sizeof(dyld_cache_patch_info_v3): %lu\n", sizeof(dyld_cache_patch_info_v3));
-    fprintf(stderr, "sizeof(dyld_cache_image_patches_v2) * patchImages.size(): %lu with %lu uses\n", sizeof(dyld_cache_image_patches_v2) * patchImages.size(), patchImages.size());
-    fprintf(stderr, "sizeof(dyld_cache_image_export_v2) * imageExports.size(): %lu with %lu uses\n", sizeof(dyld_cache_image_export_v2) * imageExports.size(), imageExports.size());
-    fprintf(stderr, "sizeof(dyld_cache_image_clients_v2) * patchClients.size(): %lu with %lu uses\n", sizeof(dyld_cache_image_clients_v2) * patchClients.size(), patchClients.size());
-    fprintf(stderr, "sizeof(dyld_cache_patchable_export_v2) * clientExports.size(): %lu with %lu uses\n", sizeof(dyld_cache_patchable_export_v2) * clientExports.size(), clientExports.size());
-    fprintf(stderr, "sizeof(dyld_cache_patchable_location_v2) * patchLocations.size(): %lu with %lu uses\n", sizeof(dyld_cache_patchable_location_v2) * patchLocations.size(), patchLocations.size());
-    fprintf(stderr, "sizeof(dyld_cache_image_got_clients_v3) * gotClients.size(): %lu with %lu uses\n", sizeof(dyld_cache_image_got_clients_v3) * gotClients.size(), gotClients.size());
-    fprintf(stderr, "sizeof(dyld_cache_patchable_export_v3) * gotClientExports.size(): %lu with %lu uses\n", sizeof(dyld_cache_patchable_export_v3) * gotClientExports.size(), gotClientExports.size());
-    fprintf(stderr, "sizeof(dyld_cache_patchable_location_v3) * gotPatchLocations.size(): %lu with %lu uses\n", sizeof(dyld_cache_patchable_location_v3) * gotPatchLocations.size(), gotPatchLocations.size());
-    fprintf(stderr, "patchExportNames.size(): %lu\n", patchExportNames.size());
-    fprintf(stderr, "patchInfoSize: %lld\n", patchInfoSize);
-#endif
-    
-    return patchInfoSize;
+    return totalSize;
 }
 
 Error PatchTableBuilder::write(uint8_t* buffer, uint64_t bufferSize,
@@ -1235,11 +1461,8 @@ Error PatchTableBuilder::write(uint8_t* buffer, uint64_t bufferSize,
     return Error();
 }
 
-Error PatchTableBuilder::build(const std::span<CacheDylib>& cacheDylibs,
-                               const std::span<PatchInfo>& patchInfos,
-                               const PatchableClassesSet& patchableObjCClasses,
-                               const PatchableSingletonsSet& patchableCFObj2,
-                               CacheVMAddress cacheBaseAddress)
+Error PatchTableBuilder::prepare(const std::span<CacheDylib>& cacheDylibs,
+                                 const std::span<PatchInfo>& patchInfos)
 {
     if ( cacheDylibs.size() != patchInfos.size() ) {
         return Error("Mismatch in patch table inputs: %lld vs %lld",
@@ -1254,20 +1477,39 @@ Error PatchTableBuilder::build(const std::span<CacheDylib>& cacheDylibs,
     // We now have everything in the state we want, ie, each dylib has a list of who uses it.
     // That is the form the patch table uses on-disk
     this->calculateRequiredSpace(cacheDylibs);
+
+    return Error();
+}
+
+Error PatchTableBuilder::build(const std::span<CacheDylib>& cacheDylibs,
+                               const std::span<PatchInfo>& patchInfos,
+                               const PatchableClassesSet& patchableObjCClasses,
+                               const PatchableSingletonsSet& patchableCFObj2,
+                               CacheVMAddress cacheBaseAddress)
+{
+    if ( cacheDylibs.size() != patchInfos.size() ) {
+        return Error("Mismatch in patch table inputs: %lld vs %lld",
+                     (uint64_t)cacheDylibs.size(), (uint64_t)patchInfos.size());
+    }
+    if ( cacheDylibs.size() != dylibClients.size() ) {
+        return Error("Mismatch in patch table state: %lld vs %lld",
+                     (uint64_t)cacheDylibs.size(), (uint64_t)dylibClients.size());
+    }
+
     this->calculatePatchTable(cacheDylibs, patchableObjCClasses, patchableCFObj2, cacheBaseAddress);
 
     return Error();
 }
 
 //
-// MARK: --- dyld_cache_patchable_location methods ---
+// MARK: --- DyldCachePatchableLocation methods ---
 //
 
-dyld_cache_patchable_location::dyld_cache_patchable_location(CacheVMAddress cacheVMAddr,
-                                                             dyld3::MachOFile::PointerMetaData pmd,
-                                                             uint64_t addend, bool isWeakImport)
+DyldCachePatchableLocation::DyldCachePatchableLocation(InputDylibVMOffset clientDylibOffset,
+                                                       dyld3::MachOFile::PointerMetaData pmd,
+                                                       uint64_t addend, bool isWeakImport)
 {
-    this->cacheVMAddr          = cacheVMAddr;
+    this->clientDylibOffset    = clientDylibOffset;
     this->high7                = pmd.high8 >> 1;
     this->isWeakImport         = isWeakImport ? 1 : 0;
     this->unused               = 0;
@@ -1279,6 +1521,46 @@ dyld_cache_patchable_location::dyld_cache_patchable_location(CacheVMAddress cach
     // check for truncations
     assert(this->addend == addend);
     assert((this->high7 << 1) == pmd.high8);
+}
+
+//
+// MARK: --- DyldCachePatchableGOTLocation methods ---
+//
+
+DyldCachePatchableGOTLocation::DyldCachePatchableGOTLocation(const Chunk* clientGOT, VMOffset clientGOTOffset,
+                                                             dyld3::MachOFile::PointerMetaData pmd,
+                                                             uint64_t addend, bool isWeakImport)
+{
+    this->clientGOT            = clientGOT;
+    this->clientGOTOffset      = clientGOTOffset;
+    this->high7                = pmd.high8 >> 1;
+    this->isWeakImport         = isWeakImport ? 1 : 0;
+    this->unused               = 0;
+    this->authenticated        = pmd.authenticated;
+    this->usesAddressDiversity = pmd.usesAddrDiversity;
+    this->key                  = pmd.key;
+    this->discriminator        = pmd.diversity;
+    this->addend               = addend;
+    // check for truncations
+    assert(this->addend == addend);
+    assert((this->high7 << 1) == pmd.high8);
+}
+
+
+//
+// MARK: --- PatchTable methods ---
+//
+void DylibClients::calculateCacheUsedExports(const CacheDylib& cacheDylib)
+{
+    usedCacheDylibExports.reserve(usedInputDylibExports.size());
+    for ( const InputDylibVMAddress& inputVMAddr : this->usedInputDylibExports ) {
+        CacheVMAddress cacheVMAddr = cacheDylib.adjustor->adjustVMAddr(inputVMAddr);
+        usedCacheDylibExports.emplace_back(cacheVMAddr, inputVMAddr);
+    }
+
+    std::ranges::sort(usedCacheDylibExports, [](auto& l, auto& r) {
+        return l.cacheAddr < r.cacheAddr;
+    });
 }
 
 } // namespace cache_builder

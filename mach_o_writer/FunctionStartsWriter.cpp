@@ -39,7 +39,9 @@ FunctionStartsWriter::FunctionStartsWriter(uint64_t prefLoadAddr, std::span<cons
 {
     uint64_t lastAddr = prefLoadAddr;
     for (uint64_t addr : functionAddresses) {
-        assert(addr >= lastAddr && "function addresses not sorted");
+        // firmwares can built with an out of VM addr order of segments
+        assert(addr >= lastAddr
+                || lastAddr == prefLoadAddr && "function addresses not sorted");
         // <rdar://problem/10422823> filter out zero-length atoms, so LC_FUNCTION_STARTS address can't spill into next section
         if ( addr == lastAddr)
             continue;

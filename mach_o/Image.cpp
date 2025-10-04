@@ -187,25 +187,28 @@ Error Image::validLinkedit(const Policy& policy) const
     if ( Error err = validStructureLinkedit(policy) )
         return err;
 
+    uint64_t maxVmOffset = 0x4000;
+    uint32_t segCount = this->segmentCount();
+    MappedSegment segs[std::max(segCount,(uint32_t)1)];
+    for (uint32_t i=0; i < segCount; ++i) {
+        segs[i] = this->segment(i);
+        if ( segs[i].segName != "__LINKEDIT" ) {
+            maxVmOffset = std::max(maxVmOffset, segs[i].runtimeOffset + segs[i].runtimeSize);
+        }
+    }
+    std::span<const MappedSegment> segSpan{segs, segCount};
+
     // if image has an exports trie, validate that
     if ( this->hasExportsTrie() ) {
-        uint64_t max = 0x200000000; // FIXME
-        if ( Error err = this->exportsTrie().valid(max) )
+        if ( Error err = this->exportsTrie().valid(header()->preferredLoadAddress(), maxVmOffset) )
             return err;
     }
 
     // if image has a symbol table, validate that
     if ( this->hasSymbolTable() ) {
-        uint64_t max = 0x200000000; // FIXME
-        if ( Error err = this->symbolTable().valid(max) )
+        if ( Error err = this->symbolTable().valid(maxVmOffset) )
             return err;
     }
-
-    uint32_t segCount = this->segmentCount();
-    MappedSegment segs[std::max(segCount,(uint32_t)1)];
-    for (uint32_t i=0; i < segCount; ++i)
-        segs[i] = this->segment(i);
-    std::span<const MappedSegment> segSpan{segs, segCount};
 
     // if image has rebase opcodes
     if ( this->hasRebaseOpcodes() ) {

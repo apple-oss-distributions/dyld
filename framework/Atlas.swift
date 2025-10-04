@@ -277,6 +277,7 @@ internal struct Segment {
     public var preferredLoadAddress:    PreferredAddress    { return impl.preferredLoadAddress }
     public var vmSize:                  UInt64              { return impl.vmSize }
     public var permissions:             UInt64              { return impl.permissions }
+    public var info:                    Info                { return impl.info }
 
     func withSegmentData<ResultType>(_ body: (Data) throws(AtlasError) -> ResultType) throws(AtlasError) -> ResultType {
         return try impl.withSegmentData(body)
@@ -287,14 +288,25 @@ internal struct Segment {
     }
 }
 
+internal extension Segment {
+    struct Info {
+        let name:               BPList.FastString
+        let vmSize:             UInt64
+        let fileSize:           UInt64
+        let preferredAddress:   UInt64
+        let address:            UInt64
+        let permissions:        UInt64
+    }
+}
+
  extension Segment {
     final class Impl {
-        var name:                   String              { return bplist["name", as:String.self]! }
-        var vmSize:                 UInt64              { return UInt64(bplist["size", as:Int64.self]!) }
-        var fileSize:               UInt64              { return UInt64(bplist["fsze", as:Int64.self]!) }
-        var preferredLoadAddress:   PreferredAddress    { return PreferredAddress(bplist["padr", as:Int64.self]!) }
-        var address:                RebasedAddress      { return PreferredAddress(bplist["padr", as:Int64.self]!) + slide }
-        var permissions:            UInt64              { return UInt64(bplist["perm", as:Int64.self]!) }
+        var name:                   String                          { return bplist["name", as:String.self]! }
+        var vmSize:                 UInt64                          { return info.vmSize }
+        var fileSize:               UInt64                          { return info.fileSize }
+        var preferredLoadAddress:   PreferredAddress                { return PreferredAddress(info.preferredAddress) }
+        var address:                RebasedAddress                  { return RebasedAddress(info.address) }
+        var permissions:            UInt64                          { return info.permissions }
 
         let bplist:                 BPList.UnsafeRawDictionary
         let context:                Snapshot.DecoderContext
@@ -306,6 +318,51 @@ internal struct Segment {
             self.slide  = slide
             self.mapper = mapper
         }
+
+        private var _info:  Info?
+        var info: Info {
+            if _info != nil {
+                return _info!
+            }
+            var name:               BPList.FastString?
+            var vmSize:             UInt64?
+            var fileSize:           UInt64?
+            var preferredAddress:   UInt64?
+            var address:            UInt64?
+            var permissions:        UInt64?
+            do {
+                for (key, value) in bplist {
+                    if key == .string("name") {
+                        if try! value.isAsciiString {
+                            name = .asciiBuffer(UnsafeMutableRawBufferPointer(mutating:try value.unsafeRawBuffer()))
+                        } else {
+                            name = .bplist(value)
+                        }
+                    }
+                    if key == .string("size") {
+                        vmSize = UInt64(try value.asInt64())
+                    }
+                    if key == .string("fsze") {
+                        fileSize = UInt64(try value.asInt64())
+                    }
+                    if key == .string("padr") {
+                        preferredAddress = UInt64(try value.asInt64())
+                        address = (PreferredAddress(bplist["padr", as:Int64.self]!) + slide).value
+                    }
+                    if key == .string("perm") {
+                        permissions = UInt64(try value.asInt64())
+                    }
+                }
+            } catch {
+                fatalError("Segment parse failure")
+            }
+            guard let name, let vmSize, let fileSize, let preferredAddress, let address, let permissions else {
+                fatalError("Missing segment field")
+            }
+            _info = Info(name:name, vmSize:vmSize, fileSize:fileSize, preferredAddress:preferredAddress, address:address, permissions:permissions)
+            return _info!
+        }
+
         func withSegmentData<ResultType>(_ body: (Data) throws(AtlasError) -> ResultType) throws(AtlasError) -> ResultType {
             guard vmSize > 0 else { return try body(Data()) }
             let endAddress = preferredLoadAddress + vmSize
@@ -765,39 +822,41 @@ internal struct Snapshot {
 
         public init(data: Data, context: Snapshot.DecoderContext) throws(AtlasError) {
             self.context = context
-            do throws(AARDecoderError) {
+            do {
                 self.archive  = try AARDecoder(data: data)
-            } catch {
-                throw .aarDecoderError(error)
-            }
-            guard let bplistData = try? archive.data(path: "process.plist") else {
-                throw .missingPlist
-            }
-            do throws(BPListError) {
+                guard let bplistData = try archive.data(path: "process.plist") else {
+                    throw AtlasError.missingPlist
+                }
                 self.bplist = try BPList(data:bplistData).asDictionary()
-            } catch {
-                throw .bplistError(error)
-            }
-            try Snapshot.Impl.validate(bplist:bplist)
-            // Setup all the raw values we need for parsing
-            self.flags  = SnapshotFlags(rawValue:bplist["flags", as:Int64.self] ?? 0)
-            if let sharedCacheDict = bplist["dsc1", as:BPList.UnsafeRawDictionary.self] {
-                let sharedCacheInfo = SharedCache.ProcessRecord(bplist:sharedCacheDict)
-                context.sharedCacheRecord = sharedCacheInfo
-                context.sharedCachePath = sharedCacheInfo.filePath
-                var bplist = Snapshot.findCacheBPlist(uuid:sharedCacheInfo.uuid, path:sharedCacheInfo.filePath)
-                // If we did not find the cache atlas in the system atlases check to see if it was embedded in the process atlas
-                if  bplist == nil {
-                    bplist = findEmbeddedSharedCachePlist(uuid:sharedCacheInfo.uuid)
-                }
-                if let bplist {
+                try Snapshot.Impl.validate(bplist:bplist)
+                // Setup all the raw values we need for parsing
+                self.flags  = SnapshotFlags(rawValue:bplist["flags", as:Int64.self] ?? 0)
+                if let sharedCacheDict = bplist["dsc1", as:BPList.UnsafeRawDictionary.self] {
+                    let sharedCacheInfo = SharedCache.ProcessRecord(bplist:sharedCacheDict)
+                    context.sharedCacheRecord = sharedCacheInfo
                     context.sharedCachePath = sharedCacheInfo.filePath
-                    let cache = try SharedCache.Impl(bplist:bplist, context:context)
-                    context.sharedCacheSlide = sharedCacheInfo.address - cache.preferredLoadAddress
-                    context.sharedCache = cache
+                    var bplist = Snapshot.findCacheBPlist(uuid:sharedCacheInfo.uuid, path:sharedCacheInfo.filePath)
+                    // If we did not find the cache atlas in the system atlases check to see if it was embedded in the process atlas
+                    if  bplist == nil {
+                        bplist = findEmbeddedSharedCachePlist(uuid:sharedCacheInfo.uuid)
+                    }
+                    if let bplist {
+                        context.sharedCachePath = sharedCacheInfo.filePath
+                        let cache = try SharedCache.Impl(bplist:bplist, context:context)
+                        context.sharedCacheSlide = sharedCacheInfo.address - cache.preferredLoadAddress
+                        context.sharedCache = cache
+                    }
+                }
+                context.privateSharedRegion = flags.contains(.privateSharedRegion);
+            } catch {
+                switch error {
+                case is AARDecoderError: throw .aarDecoderError(error as! AARDecoderError)
+                case is BPListError: throw .bplistError(error as! BPListError)
+                case is AtlasError: throw error as! AtlasError
+                default: fatalError("Unknown error")
                 }
             }
-            context.privateSharedRegion = flags.contains(.privateSharedRegion);
+
         }
     }
 }
@@ -1104,20 +1163,20 @@ internal struct Process {
             // cases if the reader is on a e-core and the writer is a p-core this could live lock, so put an upper bound on the iteration. Once we move
             // to kernel owned images infos that will form a natural synchronization point and this won't be necessary.
             for _ in 0..<100 {
-                var atlasAddress:   RebasedAddress
+                var atlasAddress:   RemoteAddress
                 let taskDyldInfo    = try task.dyldInfo()
                 var atlasSize       = UInt64(0)
                 var timestamp       = UInt64(0)
                 if taskDyldInfo.all_image_info_format == TASK_DYLD_ALL_IMAGE_INFO_64 {
-                    let allImageInfos: dyld_all_image_infos_64 = try task.readStruct(address:RebasedAddress(taskDyldInfo.all_image_info_addr))
+                    let allImageInfos: dyld_all_image_infos_64 = try task.readStruct(address:RemoteAddress(taskDyldInfo.all_image_info_addr))
                     // On the right side we need to access these values atomically but here we don't need to worry since the mapping
                     // is not shared and the vm_copy acted as a memory barrier
-                    atlasAddress    = RebasedAddress(allImageInfos.compact_dyld_image_info_addr)
+                    atlasAddress    = RemoteAddress(allImageInfos.compact_dyld_image_info_addr)
                     atlasSize       = allImageInfos.compact_dyld_image_info_size
                     timestamp       = allImageInfos.infoArrayChangeTimestamp
                 } else if taskDyldInfo.all_image_info_format == TASK_DYLD_ALL_IMAGE_INFO_32 {
-                    let allImageInfos: dyld_all_image_infos_32 = try task.readStruct(address:RebasedAddress(taskDyldInfo.all_image_info_addr))
-                    atlasAddress    = RebasedAddress(allImageInfos.compact_dyld_image_info_addr)
+                    let allImageInfos: dyld_all_image_infos_32 = try task.readStruct(address:RemoteAddress(taskDyldInfo.all_image_info_addr))
+                    atlasAddress    = RemoteAddress(allImageInfos.compact_dyld_image_info_addr)
                     atlasSize       = UInt64(allImageInfos.compact_dyld_image_info_size)
                     timestamp       = allImageInfos.infoArrayChangeTimestamp
                 } else {
@@ -1678,8 +1737,17 @@ internal extension UnsafePointer {
 
 internal extension dirent {
     var name: String {
-        return withUnsafePointer(to: self.d_name) {
-            return String(cString: $0.qpointer(to: \.0)!)
+        // We want to always use unsafe pointers here and not to ever use nthe "safe" types. The issue is that C struct
+        // lies about its size which may be truncated to the length of the string (aka `self.d_namlen` here), which means
+        // tries to copy the struct it can read past the end of the buffer. Instead we access it by the pointer and limit
+        // the capacity manually.
+        // We would declare a conformance to non-Copyable, but that would need to be public and code be a compatibility
+        // issue for other code linking to us.
+        return  withUnsafePointer(to: self.d_name) {
+            // d_namlen does not include the null terminator, so add one to it since d_name is null terminated
+            return $0.withMemoryRebound(to: CChar.self, capacity: MemoryLayout.size(ofValue: Int(self.d_namlen+1))) {
+                return String(cString: $0)
+            }
         }
     }
 }

@@ -248,7 +248,7 @@ void ExportsTrie::forEachExportedSymbol(void (^callback)(const Symbol& symbol, b
     });
 }
 
-Error ExportsTrie::valid(uint64_t maxVmOffset) const
+Error ExportsTrie::valid(uint64_t baseAddr, uint64_t maxVmOffset) const
 {
     if ( _trieStart == _trieEnd )
         return Error::none();
@@ -268,6 +268,9 @@ Error ExportsTrie::valid(uint64_t maxVmOffset) const
         const char* importName;
         if ( !symbol.isAbsolute(absAddress) && !symbol.isReExport(libOrdinal, importName) ) {
             uint64_t vmOffset = symbol.implOffset();
+            if ( (int64_t)vmOffset < 0 ) // segments with address lower than __TEXT
+                vmOffset = baseAddr - vmOffset;
+
             if ( vmOffset > maxVmOffset ) {
                 contentErr = Error("vmOffset too large for %s", symbol.name().c_str());
                 trieStop = true;

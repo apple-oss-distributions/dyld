@@ -1,4 +1,7 @@
 _NXArgc
 _NXArgv
-_environ
+__ZN3lslL20sMemoryManagerBufferE
+__ZN3lslL25sMemoryManagerInitializedE
+__ZN4dyld21sThreadLocalVariablesE
 ___progname
+_environ

@@ -34,7 +34,12 @@ struct VMOffset
 {
     __attribute__((nodebug))
     VMOffset() = default;
+
+#if BUILDING_CACHE_BUILDER_UNIT_TESTS
+    inline VMOffset(uint64_t value) : value(value) { }
+#else
     explicit inline VMOffset(uint64_t value) : value(value) { }
+#endif
 
     // Don't allow implicit int32_t cosntruction, as it will promote to uint64_t incorrectly
     VMOffset(int32_t) = delete;
@@ -207,16 +212,39 @@ private:
     std::optional<uint64_t> value;
 };
 
-// The difference between 2 VM addresses might be a size, or might be an offset
-// This handles both, allowing for implicit conversions to the one we need
-struct VMOffsetOrInputDylibVMSize
+// A VM offset inside a dylib which is a cache input
+struct InputDylibVMOffset
 {
     __attribute__((nodebug))
-    VMOffsetOrInputDylibVMSize() = default;
-    explicit inline VMOffsetOrInputDylibVMSize(uint64_t value) : value(value) { }
+    InputDylibVMOffset() = default;
+    explicit inline InputDylibVMOffset(uint64_t value) : value(value) { }
 
     // Don't allow implicit int32_t cosntruction, as it will promote to uint64_t incorrectly
-    VMOffsetOrInputDylibVMSize(int32_t) = delete;
+    InputDylibVMOffset(int32_t) = delete;
+
+    // FIXME: Eventually try remove all of these if we can.
+    __attribute__((nodebug))
+    inline uint64_t rawValue() const { return value.value(); }
+
+private:
+    std::optional<uint64_t> value;
+};
+
+// The difference between 2 VM addresses might be a size, or might be an offset
+// This handles both, allowing for implicit conversions to the one we need
+struct InputDylibVMOffsetOrVMSize
+{
+    __attribute__((nodebug))
+    InputDylibVMOffsetOrVMSize() = default;
+    explicit inline InputDylibVMOffsetOrVMSize(uint64_t value) : value(value) { }
+
+    // Don't allow implicit int32_t cosntruction, as it will promote to uint64_t incorrectly
+    InputDylibVMOffsetOrVMSize(int32_t) = delete;
+
+    operator InputDylibVMOffset() const
+    {
+        return InputDylibVMOffset(value.value());
+    }
 
     operator VMOffset() const
     {
@@ -524,6 +552,12 @@ static inline InputDylibVMAddress operator+(const InputDylibVMAddress& a, const 
     return InputDylibVMAddress(a.rawValue() + b.rawValue());
 }
 
+// InputDylibVMAddress + InputDylibVMOffset -> InputDylibVMAddress
+static inline InputDylibVMAddress operator+(const InputDylibVMAddress& a, const InputDylibVMOffset& b)
+{
+    return InputDylibVMAddress(a.rawValue() + b.rawValue());
+}
+
 static inline bool operator<(const InputDylibVMAddress& a, const InputDylibVMAddress& b)
 {
     return a.rawValue() < b.rawValue();
@@ -532,6 +566,20 @@ static inline bool operator<(const InputDylibVMAddress& a, const InputDylibVMAdd
 static inline bool operator<=(const InputDylibVMAddress& a, const InputDylibVMAddress& b)
 {
     return a.rawValue() <= b.rawValue();
+}
+
+static inline bool operator==(const InputDylibVMAddress& a, const InputDylibVMAddress& b)
+{
+    return a.rawValue() == b.rawValue();
+}
+
+//
+// MARK: --- InputDylibVMOffset methods ---
+//
+
+static inline bool operator==(const InputDylibVMOffset& a, const InputDylibVMOffset& b)
+{
+    return a.rawValue() == b.rawValue();
 }
 
 //
@@ -543,9 +591,9 @@ static inline bool operator<=(const InputDylibVMAddress& a, const InputDylibVMAd
 //
 
 // VMAddr - VMAddr -> VMOffsetOrSize
-static inline VMOffsetOrInputDylibVMSize operator-(const InputDylibVMAddress& a, const InputDylibVMAddress& b)
+static inline InputDylibVMOffsetOrVMSize operator-(const InputDylibVMAddress& a, const InputDylibVMAddress& b)
 {
-    return VMOffsetOrInputDylibVMSize(a.rawValue() - b.rawValue());
+    return InputDylibVMOffsetOrVMSize(a.rawValue() - b.rawValue());
 }
 
 // VMOffset + offset -> VMOffset
@@ -556,8 +604,14 @@ static inline VMOffset& operator+=(VMOffset& a, uint64_t b)
     return a;
 }
 
+static inline bool operator==(const VMOffset& a, const VMOffset& b)
+{
+    return a.rawValue() == b.rawValue();
+}
+
 
 #if BUILDING_CACHE_BUILDER || BUILDING_CACHE_BUILDER_UNIT_TESTS
+// for maps of CacheVMAddress
 struct CacheVMAddressHash
 {
     size_t operator()(const CacheVMAddress& value) const
@@ -577,6 +631,31 @@ struct CacheVMAddressEqual
 struct CacheVMAddressLessThan
 {
     bool operator()(const CacheVMAddress& a, const CacheVMAddress& b) const
+    {
+        return a.rawValue() < b.rawValue();
+    }
+};
+
+// For maps of InputDylibVMAddress
+struct InputDylibVMAddressHash
+{
+    size_t operator()(const InputDylibVMAddress& value) const
+    {
+        return std::hash<uint64_t> {}(value.rawValue());
+    }
+};
+
+struct InputDylibVMAddressEqual
+{
+    bool operator()(const InputDylibVMAddress& a, const InputDylibVMAddress& b) const
+    {
+        return a.rawValue() == b.rawValue();
+    }
+};
+
+struct InputDylibVMAddressLessThan
+{
+    bool operator()(const InputDylibVMAddress& a, const InputDylibVMAddress& b) const
     {
         return a.rawValue() < b.rawValue();
     }

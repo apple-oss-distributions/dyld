@@ -32,7 +32,6 @@
 
 // llvm
 #if HAVE_LIBLTO
-    #include <llvm-c/Disassembler.h>
     extern "C" void lto_initialize_disassembler();  // from libLTO.dylib but not in Disassembler.h
     extern "C" int LLVMSetDisasmOptions(LLVMDisasmContextRef context, uint64_t options);\
     WEAK_LINK_FORCE_IMPORT(LLVMCreateDisasm);
@@ -71,7 +70,10 @@ SymbolicatedImage::SymbolicatedImage(const Image& im)
 {
     // build list of sections
     _image.header()->forEachSection(^(const Header::SectionInfo& sectInfo, bool& stop) {
-        _sectionSymbols.push_back({sectInfo});
+        std::string sectName(sectInfo.segmentName);
+        sectName += ",";
+        sectName += sectInfo.sectionName;
+        _sectionSymbols.push_back({sectName, sectInfo});
     });
 
     // check for encrypted range
@@ -382,8 +384,8 @@ void SymbolicatedImage::findClosestSymbol(uint64_t runtimeOffset, const char*& i
                 inSymbolOffset = (uint32_t)(runtimeOffset - (ss.sectInfo.address+it->offsetInSection));
             }
             else if ( ss.symbols.empty() ) {
-                inSymbolName   = "";
-                inSymbolOffset = 0;
+                inSymbolName   = ss.sectStartName.c_str();
+                inSymbolOffset = (uint32_t)(runtimeOffset - ss.sectInfo.address);
             }
             else {
                 inSymbolName   = ss.symbols.front().name;

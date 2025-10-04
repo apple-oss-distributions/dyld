@@ -189,4 +189,8 @@ CRC32c CRC32c::hardwareChecksumer() {
     return CRC32c(sCRC32cHW);
 }
 #endif
+
+bool CRC32c::hasHardwareChecksumer() {
+    return CRC_HW_CHECK;
+}
 };

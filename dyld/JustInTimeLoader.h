@@ -103,7 +103,6 @@ public:
 #if BUILDING_CACHE_BUILDER || BUILDING_CACHE_BUILDER_UNIT_TESTS
     static JustInTimeLoader*    makeJustInTimeLoaderDyldCache(RuntimeState& state, const MachOFile* mf, const char* loadPath, uint32_t dylibCacheIndex, const FileID& fileID, bool twin, uint32_t twinIndex,
                                                               const mach_o::Layout* layout);
-    static Loader*              makeLaunchLoader(Diagnostics& diag, RuntimeState& state, const MachOFile* mainExe, const char* mainExePath, const mach_o::Layout* layout);
 #endif
 #if BUILDING_CACHE_BUILDER_UNIT_TESTS || BUILDING_UNIT_TESTS
     static JustInTimeLoader*    makeJustInTimeLoader(RuntimeState& state, const MachOFile* mf, const char* loadPath);
@@ -112,9 +111,11 @@ public:
                                                       const mach_o::Layout* layout);
     static Loader*      makeJustInTimeLoaderDisk(Diagnostics& diag, RuntimeState& state, const char* loadPath, const LoadOptions& options, bool overridesCache, uint32_t overridesCacheIndex,
                                                  const mach_o::Layout* layout);
-    static Loader*      makeLaunchLoader(Diagnostics& diag, RuntimeState& state, const MachOAnalyzer* mainExe, const char* mainExePath,
-                                         const mach_o::Layout* layout);
-
+#if BUILDING_CACHE_BUILDER || BUILDING_CACHE_BUILDER_UNIT_TESTS
+    static Loader*      makeLaunchLoader(Diagnostics& diag, RuntimeState& state, const MachOFile* mainExe, const char* mainExePath, const mach_o::Layout* layout);
+#else
+    static Loader*      makeLaunchLoader(Diagnostics& diag, RuntimeState& state);
+#endif
     static const Loader* makePseudoDylibLoader(Diagnostics& diag, RuntimeState &state, const char* path, const LoadOptions& options, const PseudoDylib* pd);
 
 private:

@@ -69,6 +69,7 @@ extern "C" {
 #include "MachOFile.h"
 #include "Platform.h"
 #include "SupportedArchs.h"
+#include "Universal.h"
 #include "CodeSigningTypes.h"
 
 #include "ObjC.h"
@@ -81,8 +82,11 @@ extern "C" {
 #include "ObjCVisitor.h"
 #endif
 
+using mach_o::GradedArchitectures;
 using mach_o::Header;
 using mach_o::Platform;
+using mach_o::Universal;
+using mach_o::Version32;
 
 namespace dyld3 {
 
@@ -269,227 +273,6 @@ const char* FatFile::archNames(char strBuf[256], uint64_t fileLen) const
     });
     return strBuf;
 }
-
-bool FatFile::isFatFileWithSlice(Diagnostics& diag, uint64_t fileLen, const GradedArchs& archs, bool isOSBinary,
-                                 uint64_t& sliceOffset, uint64_t& sliceLen, bool& missingSlice) const
-{
-    missingSlice = false;
-    if ( (this->magic != OSSwapBigToHostInt32(FAT_MAGIC)) && (this->magic != OSSwapBigToHostInt32(FAT_MAGIC_64)) )
-        return false;
-
-    __block int bestGrade = 0;
-    forEachSlice(diag, fileLen, ^(uint32_t sliceCpuType, uint32_t sliceCpuSubType, const void* sliceStart, uint64_t sliceSize, bool& stop) {
-        if (int sliceGrade = archs.grade(sliceCpuType, sliceCpuSubType, isOSBinary)) {
-            if ( sliceGrade > bestGrade ) {
-                sliceOffset = (char*)sliceStart - (char*)this;
-                sliceLen    = sliceSize;
-                bestGrade   = sliceGrade;
-            }
-        }
-    });
-    if ( diag.hasError() )
-        return false;
-
-    if ( bestGrade == 0 )
-        missingSlice = true;
-
-    return (bestGrade != 0);
-}
-
-
-////////////////////////////  GradedArchs ////////////////////////////////////////
-
-
-#define GRADE_i386        CPU_TYPE_I386,       CPU_SUBTYPE_I386_ALL,    false
-#define GRADE_x86_64      CPU_TYPE_X86_64,     CPU_SUBTYPE_X86_64_ALL,  false
-#define GRADE_x86_64h     CPU_TYPE_X86_64,     CPU_SUBTYPE_X86_64_H,    false
-#define GRADE_armv7       CPU_TYPE_ARM,        CPU_SUBTYPE_ARM_V7,      false
-#define GRADE_armv7s      CPU_TYPE_ARM,        CPU_SUBTYPE_ARM_V7S,     false
-#define GRADE_armv7k      CPU_TYPE_ARM,        CPU_SUBTYPE_ARM_V7K,     false
-#define GRADE_armv6m      CPU_TYPE_ARM,        CPU_SUBTYPE_ARM_V6M,     false
-#define GRADE_armv7m      CPU_TYPE_ARM,        CPU_SUBTYPE_ARM_V7M,     false
-#define GRADE_armv7em     CPU_TYPE_ARM,        CPU_SUBTYPE_ARM_V7EM,    false
-#define GRADE_armv8m      CPU_TYPE_ARM,        CPU_SUBTYPE_ARM_V8M,     false
-#define GRADE_arm64       CPU_TYPE_ARM64,      CPU_SUBTYPE_ARM64_ALL,   false
-#define GRADE_arm64e      CPU_TYPE_ARM64,      CPU_SUBTYPE_ARM64E,      false
-#define GRADE_arm64e_pb   CPU_TYPE_ARM64,      CPU_SUBTYPE_ARM64E,      true
-#define GRADE_arm64_32    CPU_TYPE_ARM64_32,   CPU_SUBTYPE_ARM64_32_V8, false
-const GradedArchs GradedArchs::i386              = GradedArchs({GRADE_i386,    1});
-const GradedArchs GradedArchs::x86_64            = GradedArchs({GRADE_x86_64,  1});
-const GradedArchs GradedArchs::x86_64h           = GradedArchs({GRADE_x86_64h, 2}, {GRADE_x86_64, 1});
-const GradedArchs GradedArchs::arm64             = GradedArchs({GRADE_arm64,   1});
-#if SUPPORT_ARCH_arm64e
-const GradedArchs GradedArchs::arm64e_keysoff    = GradedArchs({GRADE_arm64e,    2}, {GRADE_arm64, 1});
-const GradedArchs GradedArchs::arm64e_keysoff_pb = GradedArchs({GRADE_arm64e_pb, 2}, {GRADE_arm64, 1});
-const GradedArchs GradedArchs::arm64e            = GradedArchs({GRADE_arm64e,    1});
-const GradedArchs GradedArchs::arm64e_pb         = GradedArchs({GRADE_arm64e_pb, 1});
-#endif
-const GradedArchs GradedArchs::armv7             = GradedArchs({GRADE_armv7,   1});
-const GradedArchs GradedArchs::armv7s            = GradedArchs({GRADE_armv7s,  2}, {GRADE_armv7, 1});
-const GradedArchs GradedArchs::armv7k            = GradedArchs({GRADE_armv7k,  1});
-const GradedArchs GradedArchs::armv7m            = GradedArchs({GRADE_armv7m,  1});
-const GradedArchs GradedArchs::armv7em           = GradedArchs({GRADE_armv7em,  1});
-
-
-#if SUPPORT_ARCH_arm64_32
-const GradedArchs GradedArchs::arm64_32          = GradedArchs({GRADE_arm64_32, 1});
-#endif
-
-#if BUILDING_LIBDYLD || BUILDING_UNIT_TESTS
-const GradedArchs GradedArchs::launch_AS         = GradedArchs({GRADE_arm64e,  3}, {GRADE_arm64,  2}, {GRADE_x86_64, 1});
-const GradedArchs GradedArchs::launch_AS_Sim     = GradedArchs({GRADE_arm64,   2}, {GRADE_x86_64, 1});
-const GradedArchs GradedArchs::launch_Intel_h    = GradedArchs({GRADE_x86_64h, 3}, {GRADE_x86_64, 2}, {GRADE_i386, 1});
-const GradedArchs GradedArchs::launch_Intel      = GradedArchs({GRADE_x86_64,  2}, {GRADE_i386,   1});
-const GradedArchs GradedArchs::launch_Intel_Sim  = GradedArchs({GRADE_x86_64,  2}, {GRADE_i386,   1});
-#endif
-
-int GradedArchs::grade(uint32_t cputype, uint32_t cpusubtype, bool isOSBinary) const
-{
-    for (const auto& p : _orderedCpuTypes) {
-        if (p.type == 0) { break; }
-        if ( (p.type == cputype) && (p.subtype == (cpusubtype & ~CPU_SUBTYPE_MASK)) ) {
-            if ( p.osBinary ) {
-                if ( isOSBinary )
-                    return p.grade;
-            }
-            else {
-                return p.grade;
-            }
-        }
-    }
-    return 0;
-}
-
-const char* GradedArchs::name() const
-{
-    mach_o::Architecture arch = mach_o::Architecture(_orderedCpuTypes[0].type, _orderedCpuTypes[0].subtype);
-    // FIXME: Existing clients of this function don't expect the various arm64e names,
-    //        such as arm64e.old.
-    if ( arch.usesArm64AuthPointers() )
-        return "arm64e";
-    return arch.name();
-}
-
-void GradedArchs::forEachArch(bool platformBinariesOnly, void (^handler)(const char*)) const
-{
-    for (const auto& p : _orderedCpuTypes) {
-        if (p.type == 0)
-            break;
-        if ( p.osBinary && !platformBinariesOnly )
-            continue;
-        // Note: mach_o::Architecture uses high bits to distiguish arm64e variant
-        // passing the base cpu type/subtype will result in "arm64.old"
-        if ( (p.type == CPU_TYPE_ARM64) && (p.subtype == CPU_SUBTYPE_ARM64E) )
-            handler("arm64e");
-        else
-            handler(mach_o::Architecture(p.type, p.subtype).name());
-    }
-}
-
-bool GradedArchs::checksOSBinary() const
-{
-    for (const auto& p : _orderedCpuTypes) {
-        if (p.type == 0) { return false; }
-        if ( p.osBinary ) { return true; }
-    }
-    __builtin_unreachable();
-}
-
-bool GradedArchs::supports64() const
-{
-    return (_orderedCpuTypes.front().type & CPU_ARCH_ABI64) != 0;
-}
-
-#if !TARGET_OS_SIMULATOR && __x86_64__
-static bool isHaswell()
-{
-    // FIXME: figure out a commpage way to check this
-    struct host_basic_info info;
-    mach_msg_type_number_t count = HOST_BASIC_INFO_COUNT;
-    mach_port_t hostPort = mach_host_self();
-    kern_return_t result = host_info(hostPort, HOST_BASIC_INFO, (host_info_t)&info, &count);
-    mach_port_deallocate(mach_task_self(), hostPort);
-    return (result == KERN_SUCCESS) && (info.cpu_subtype == CPU_SUBTYPE_X86_64_H);
-}
-#endif
-
-const GradedArchs& GradedArchs::forCurrentOS(bool keysOff, bool osBinariesOnly)
-{
-#if __arm64e__
-    if ( osBinariesOnly )
-        return (keysOff ? arm64e_keysoff_pb : arm64e_pb);
-    else
-        return (keysOff ? arm64e_keysoff : arm64e);
-#elif __ARM64_ARCH_8_32__
-    return arm64_32;
-#elif __arm64__
-    return arm64;
-#elif __x86_64__
- #if TARGET_OS_SIMULATOR
-    return x86_64;
-  #else
-    return isHaswell() ? x86_64h : x86_64;
-  #endif
-#else
-    #error unknown platform
-#endif
-}
-
-#if BUILDING_LIBDYLD || BUILDING_UNIT_TESTS
-const GradedArchs& GradedArchs::launchCurrentOS(const char* simArches)
-{
-#if TARGET_OS_SIMULATOR
-    // on Apple Silicon, there is both an arm64 and an x86_64 (under rosetta) simulators
-    // You cannot tell if you are running under rosetta, so CoreSimulator sets SIMULATOR_ARCHS
-    if ( strcmp(simArches, "arm64 x86_64") == 0 )
-        return launch_AS_Sim;
-    else
-        return x86_64;
-#elif TARGET_OS_OSX
-  #if __arm64__
-    return launch_AS;
-  #else
-    return isHaswell() ? launch_Intel_h : launch_Intel;
-  #endif
-#else
-    // all other platforms use same grading for executables as dylibs
-    return forCurrentOS(true, false);
-#endif
-}
-#endif // BUILDING_LIBDYLD
-
-const GradedArchs& GradedArchs::forName(const char* archName, bool keysOff)
-{
-    if (strcmp(archName, "x86_64h") == 0 )
-        return x86_64h;
-    else if (strcmp(archName, "x86_64") == 0 )
-        return x86_64;
-#if SUPPORT_ARCH_arm64e
-    else if (strcmp(archName, "arm64e") == 0 )
-        return keysOff ? arm64e_keysoff : arm64e;
-#endif
-    else if (strcmp(archName, "arm64") == 0 )
-        return arm64;
-    else if (strcmp(archName, "armv7k") == 0 )
-        return armv7k;
-    else if (strcmp(archName, "armv7s") == 0 )
-        return armv7s;
-    else if (strcmp(archName, "armv7") == 0 )
-        return armv7;
-    else if (strcmp(archName, "armv7m") == 0 )
-        return armv7m;
-    else if (strcmp(archName, "armv7em") == 0 )
-        return armv7em;
-#if SUPPORT_ARCH_arm64_32
-    else if (strcmp(archName, "arm64_32") == 0 )
-        return arm64_32;
-#endif
-    else if (strcmp(archName, "i386") == 0 )
-        return i386;
-    assert(0 && "unknown arch name");
-}
-
-
 
 ////////////////////////////  MachOFile ////////////////////////////////////////
 
@@ -792,6 +575,9 @@ bool MachOFile::hasSection(const char* segName, const char* sectName) const
 
 void MachOFile::forEachDependentDylib(void (^callback)(const char* loadPath, bool isWeak, bool isReExport, bool isUpward, uint32_t compatVersion, uint32_t curVersion, bool& stop)) const
 {
+    if ( this->isDyld() )
+        return;
+
     Diagnostics       diag;
     __block unsigned  count   = 0;
     __block bool      stopped = false;
@@ -993,7 +779,7 @@ bool MachOFile::addendsExceedPatchTableLimit(Diagnostics& diag, mach_o::Fixups f
                     case DYLD_CHAINED_PTR_ARM64E:
                     case DYLD_CHAINED_PTR_ARM64E_USERLAND:
                         if ( fixupLoc->arm64e.bind.bind ) {
-                            uint64_t ordinal = fixupLoc->arm64e.bind.ordinal;
+                            uint32_t ordinal = fixupLoc->arm64e.bind.ordinal;
                             uint64_t addend = (ordinal < targetAddends.size()) ? targetAddends[ordinal] : 0;
                             if ( fixupLoc->arm64e.bind.auth ) {
                                 if ( addend >= tooLargeAuthAddend ) {
@@ -1011,7 +797,7 @@ bool MachOFile::addendsExceedPatchTableLimit(Diagnostics& diag, mach_o::Fixups f
                         break;
                     case DYLD_CHAINED_PTR_ARM64E_USERLAND24:
                         if ( fixupLoc->arm64e.bind24.bind ) {
-                            uint64_t ordinal = fixupLoc->arm64e.bind24.ordinal;
+                            uint32_t ordinal = fixupLoc->arm64e.bind24.ordinal;
                             uint64_t addend = (ordinal < targetAddends.size()) ? targetAddends[ordinal] : 0;
                             if ( fixupLoc->arm64e.bind24.auth ) {
                                 if ( addend >= tooLargeAuthAddend ) {
@@ -1030,7 +816,7 @@ bool MachOFile::addendsExceedPatchTableLimit(Diagnostics& diag, mach_o::Fixups f
                     case DYLD_CHAINED_PTR_64:
                     case DYLD_CHAINED_PTR_64_OFFSET: {
                         if ( fixupLoc->generic64.rebase.bind ) {
-                            uint64_t ordinal = fixupLoc->generic64.bind.ordinal;
+                            uint32_t ordinal = fixupLoc->generic64.bind.ordinal;
                             uint64_t addend = (ordinal < targetAddends.size()) ? targetAddends[ordinal] : 0;
                             addend += fixupLoc->generic64.bind.addend;
                             if ( addend >= tooLargeRegularAddend ) {
@@ -1042,7 +828,7 @@ bool MachOFile::addendsExceedPatchTableLimit(Diagnostics& diag, mach_o::Fixups f
                     }
                     case DYLD_CHAINED_PTR_32:
                         if ( fixupLoc->generic32.bind.bind ) {
-                            uint64_t ordinal = fixupLoc->generic32.bind.ordinal;
+                            uint32_t ordinal = fixupLoc->generic32.bind.ordinal;
                             uint64_t addend = (ordinal < targetAddends.size()) ? targetAddends[ordinal] : 0;
                             addend += fixupLoc->generic32.bind.addend;
                             if ( addend >= tooLargeRegularAddend ) {
@@ -1337,8 +1123,41 @@ bool MachOFile::canBePlacedInDyldCache(const char* path, bool checkObjC, void (^
     if ( !passedLinkeditChecks )
         return false;
 
-    // Check there are no pointer based objc method lists in CONST segments
 #if BUILDING_CACHE_BUILDER || BUILDING_CACHE_BUILDER_UNIT_TESTS
+
+    // Make sure we don't have cheaper roots patching (binds in the __objc_classlist) with bind opcodes
+    if ( checkObjC && hasOpcodeFixups() && hasSection("__DATA_CONST", "__objc_classlist") ) {
+        this->withFileLayout(diag, ^(const mach_o::Layout& layout) {
+            mach_o::Fixups fixups(layout);
+
+            __block uint64_t classListStartOffset = 0;
+            __block uint64_t classListEndOffset = 0;
+            this->forEachSection(^(const Header::SectionInfo& sectInfo, bool& stop) {
+                if ( sectInfo.segmentName != "__DATA_CONST" )
+                    return;
+                if ( sectInfo.sectionName != "__objc_classlist" )
+                    return;
+
+                classListStartOffset = sectInfo.address - layout.textUnslidVMAddr();
+                classListEndOffset = classListStartOffset + sectInfo.size;
+                stop = true;
+            });
+
+            fixups.forEachBindLocation_Opcodes(diag, ^(uint64_t runtimeOffset, uint32_t segmentIndex, unsigned int targetIndex, bool &stop) {
+                if ( (runtimeOffset < classListStartOffset) || (runtimeOffset > classListEndOffset) )
+                    return;
+                passedLinkeditChecks = false;
+                failureReason("has opcode fixups and objc cheaper roots.  Likely has unaligned fixups");
+                stop = true;
+            }, ^(uint64_t runtimeOffset, uint32_t segmentIndex, unsigned int overrideBindTargetIndex, bool &stop) {
+            });
+        });
+
+        if ( !passedLinkeditChecks )
+            return false;
+    }
+
+    // Check there are no pointer based objc method lists in CONST segments
     if ( checkObjC ) {
         typedef std::pair<VMAddress, VMAddress> Range;
         __block std::vector<Range> constRanges;
@@ -1939,63 +1758,65 @@ int64_t MachOFile::read_sleb128(Diagnostics& diag, const uint8_t*& p, const uint
     return result;
 }
 
-static void getArchNames(const GradedArchs& archs, bool isOSBinary, char buffer[256])
+static void getArchNames(const GradedArchitectures& archs, bool isOSBinary, char buffer[256])
 {
     buffer[0] = '\0';
-    archs.forEachArch(isOSBinary, ^(const char* archName) {
+    archs.forEachArch(isOSBinary, ^(mach_o::Architecture arch) {
         if ( buffer[0] != '\0' )
             strlcat(buffer, "' or '", 256);
-        strlcat(buffer, archName, 256);
+        strlcat(buffer, arch.name(), 256);
     });
 }
-
-const MachOFile* MachOFile::compatibleSlice(Diagnostics& diag, uint64_t& sliceOffsetOut, uint64_t& sliceLenOut, const void* fileContent, size_t contentSize, const char* path, Platform platform, bool isOSBinary, const GradedArchs& archs, bool internalInstall)
+ 
+const MachOFile* MachOFile::compatibleSlice(Diagnostics& diag, uint64_t& sliceOffsetOut, uint64_t& sliceLenOut, const void* fileContent, size_t contentSize, const char* path, Platform platform, bool isOSBinary, const GradedArchitectures& archs, bool internalInstall)
 {
-    const Header* mh = nullptr;
-    if ( const dyld3::FatFile* ff = dyld3::FatFile::isFatFile(fileContent) ) {
-        uint64_t  sliceOffset;
-        uint64_t  sliceLen;
-        bool      missingSlice;
-        if ( ff->isFatFileWithSlice(diag, contentSize, archs, isOSBinary, sliceOffset, sliceLen, missingSlice) ) {
-            mh = (const Header*)((long)fileContent + sliceOffset);
-            sliceLenOut = sliceLen;
-            sliceOffsetOut = sliceOffset;
+    const Header* hdr = nullptr;
+    std::span<const uint8_t> content = { (const uint8_t*)fileContent, contentSize };
+    if ( const Universal* uni = Universal::isUniversal(content) ) {
+        if ( mach_o::Error err = uni->valid(content.size()) ) {
+            diag.error("%s", err.message());
+            return nullptr;
+        }
+        Universal::Slice slice;
+        if ( uni->bestSlice(archs, isOSBinary, slice) ) {
+            hdr = (const Header*)slice.buffer.data();
+            sliceLenOut = slice.buffer.size();
+            sliceOffsetOut = slice.buffer.data() - content.data();
         }
         else {
-            BLOCK_ACCCESSIBLE_ARRAY(char, gradedArchsBuf, 256);
-            getArchNames(archs, isOSBinary, gradedArchsBuf);
-
             char strBuf[256];
-            diag.error("fat file, but missing compatible architecture (have '%s', need '%s')", ff->archNames(strBuf, contentSize), gradedArchsBuf);
+            char gradedArchsBuf[256];
+            getArchNames(archs, isOSBinary, gradedArchsBuf);
+            diag.error("fat file, but missing compatible architecture (have '%s', need '%s')", uni->archNames(strBuf), gradedArchsBuf);
             return nullptr;
         }
     }
     else {
-        mh = (const Header*)fileContent;
+        hdr = (const Header*)fileContent;
         sliceLenOut = contentSize;
         sliceOffsetOut = 0;
     }
 
-    std::span<const uint8_t> contents{(uint8_t*)mh, (size_t)sliceLenOut};
+    std::span<const uint8_t> contents{(uint8_t*)hdr, (size_t)sliceLenOut};
     if ( !Header::isMachO(contents) ) {
         diag.error("slice is not valid mach-o file");
         return nullptr;
     }
 
-    if ( archs.grade(mh->arch().cpuType(), mh->arch().cpuSubtype(), isOSBinary) == 0 ) {
-        BLOCK_ACCCESSIBLE_ARRAY(char, gradedArchsBuf, 256);
+    if ( !archs.isCompatible(hdr->arch(), isOSBinary) ) {
+        char gradedArchsBuf[256];
         getArchNames(archs, isOSBinary, gradedArchsBuf);
-        diag.error("mach-o file, but is an incompatible architecture (have '%s', need '%s')", mh->archName(), gradedArchsBuf);
+        diag.error("mach-o file, but is an incompatible architecture (have '%s', need '%s')", hdr->archName(), gradedArchsBuf);
         return nullptr;
     }
 
-    if ( !mh->loadableIntoProcess(platform, path, internalInstall) ) {
-        Platform havePlatform = mh->platformAndVersions().platform;
+    if ( !hdr->loadableIntoProcess(platform, path, internalInstall) ) {
+        Platform havePlatform = hdr->platformAndVersions().platform;
         diag.error("mach-o file (%s), but incompatible platform (have '%s', need '%s')", path, havePlatform.name().c_str(), platform.name().c_str());
         return nullptr;
     }
 
-    return (const MachOFile*)mh;
+    return (const MachOFile*)hdr;
 }
 
 const uint8_t* MachOFile::trieWalk(Diagnostics& diag, const uint8_t* start, const uint8_t* end, const char* symbol)

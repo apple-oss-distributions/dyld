@@ -78,6 +78,7 @@ extern "C" void lldb_image_notifier(enum dyld_image_mode mode, uint32_t infoCoun
 // These functions need to be noinline because their precise calling semantics need to be maintained for an
 // external observer (lldb). The compiler does not know that, and may try to inline or optimize them away.
 __attribute__((noinline))
+__attribute__((visibility("default")))
 void lldb_image_notifier(enum dyld_image_mode mode, uint32_t infoCount, const dyld_image_info info[])
 {
 //    fprintf(stderr, "REAL notifiers:\n");
@@ -105,6 +106,7 @@ void lldb_image_notifier_sim_trap(enum dyld_image_mode mode, uint32_t infoCount,
 
 
 #if !TARGET_OS_SIMULATOR
+__attribute__((visibility("default")))
 struct dyld_all_image_infos dyld_all_image_infos __attribute__ ((section ("__DATA,__all_image_info")))
                             = {
                                 17, 0, MAYBE_ATOMIC(NULL), &lldb_image_notifier, false, false, (const mach_header*)&__dso_handle, NULL,
@@ -221,9 +223,12 @@ void ExternallyViewableState::setDyldState(uint8_t dyldState) {
     _dyldState = dyldState;
     // State updates are significant, so they update the atlas
 #if DYLD_FEATURE_ATLAS_GENERATION || DYLD_FEATURE_COMPACT_INFO_GENERATION
-    STACK_ALLOCATOR(allocator, 0);
-    auto newAtlas = generateAtlas(allocator);
-    activateAtlas(*_persistentAllocator, newAtlas);
+    if ( _runtimeState != nullptr ) {
+        // only update atlas if we are far enough into the process start up that RuntimeState exists
+        STACK_ALLOCATOR(allocator, 0);
+        auto newAtlas = generateAtlas(allocator);
+        activateAtlas(*_persistentAllocator, newAtlas);
+    }
 #endif /* DYLD_FEATURE_ATLAS_GENERATION || DYLD_FEATURE_COMPACT_INFO_GENERATION */
 }
 
@@ -285,7 +290,7 @@ static Vector<dyld_image_info>* loadedImagesInfos = nullptr;
 // 4. An entry in the cache bitmap for in cache dyld
 //
 // That describes all the memory address that may execute code or be read during the transition and while the in cache dyld starts up.
-void ExternallyViewableState::createMinimalInfo(Allocator& allocator, uint64_t dyldLoadAddress, const char* dyldPath, uint64_t mainExecutableAddress, const char* mainExecutablePath, const DyldSharedCache* cache) {
+void ExternallyViewableState::createMinimalInfo(Allocator& resultAllocator, uint64_t dyldLoadAddress, const char* dyldPath, uint64_t mainExecutableAddress, const char* mainExecutablePath, const DyldSharedCache* cache) {
 #if DYLD_FEATURE_COMPACT_INFO_GENERATION || DYLD_FEATURE_ATLAS_GENERATION
     STACK_ALLOCATOR(ephemeralAllocator, 0);
 #endif /* DYLD_FEATURE_COMPACT_INFO_GENERATION || DYLD_FEATURE_ATLAS_GENERATION */
@@ -302,7 +307,7 @@ void ExternallyViewableState::createMinimalInfo(Allocator& allocator, uint64_t d
         halt("dyld must have a UUID");
     }
 #if DYLD_FEATURE_COMPACT_INFO_GENERATION || DYLD_FEATURE_ATLAS_GENERATION
-    ByteStream outputStream(allocator);
+    ByteStream outputStream(ephemeralAllocator);
     AAREncoder aarEncoder(ephemeralAllocator);
 #endif /* DYLD_FEATURE_COMPACT_INFO_GENERATION || DYLD_FEATURE_ATLAS_GENERATION */
 #if DYLD_FEATURE_LEGACY_IMAGE_INFO
@@ -386,7 +391,7 @@ void ExternallyViewableState::createMinimalInfo(Allocator& allocator, uint64_t d
     using Array         = PropertyList::Array;
     using Dictionary    = PropertyList::Dictionary;
 
-    auto propertyListEncoder            = PropertyList(allocator);
+    auto propertyListEncoder            = PropertyList(ephemeralAllocator);
     auto& rootDictionary                = propertyListEncoder.rootDictionary();
     auto& images                        = rootDictionary.addObjectForKey<Array>(kDyldAtlasSnapshotImagesArrayKey);
     PropertyList::Bitmap* cacheBitmap   = gatherAtlasProcessInfo(mainExecutableAddress, cache, rootDictionary);
@@ -410,20 +415,20 @@ void ExternallyViewableState::createMinimalInfo(Allocator& allocator, uint64_t d
         }
     }
 
-    ByteStream newAtlas(allocator);
-    ByteStream fileStream(allocator);
+    ByteStream newAtlas(ephemeralAllocator);
+    ByteStream fileStream(ephemeralAllocator);
     propertyListEncoder.encode(fileStream);
     //    aarEncoder.setAlgorithm(COMPRESSION_LZFSE);
     aarEncoder.addFile("process.plist", fileStream);
     aarEncoder.encode(newAtlas);
     // Set the timestamp in case anyone tries to sync with it between the old and new interfaces
-    activateAtlas(allocator, newAtlas);
+    activateAtlas(resultAllocator, newAtlas);
 #endif /* DYLD_FEATURE_ATLAS_GENERATION */
 #if DYLD_FEATURE_COMPACT_INFO_GENERATION || DYLD_FEATURE_ATLAS_GENERATION
     aarEncoder.encode(outputStream);
     ByteStream result(ephemeralAllocator);
     result.insert(result.begin(), outputStream.begin(), outputStream.end());
-    activateAtlas(allocator, result);
+    activateAtlas(resultAllocator, result);
 #endif /* DYLD_FEATURE_COMPACT_INFO_GENERATION || DYLD_FEATURE_ATLAS_GENERATION */
 #if DYLD_FEATURE_SIMULATOR_NOTIFICATION_HOST_SUPPORT
     // The simulator host support keeps track of images as they are added. dyld and dyld_sim are special cased

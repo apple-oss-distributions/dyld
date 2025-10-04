@@ -44,6 +44,7 @@
 namespace lsl {
 
 template<typename T>
+requires std::is_trivially_destructible_v<T>
 struct TRIVIAL_ABI Vector {
 #pragma mark -
 #pragma mark Typedefs

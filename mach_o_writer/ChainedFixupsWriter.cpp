@@ -278,7 +278,7 @@ ChainedFixupsWriter::ChainedFixupsWriter(std::span<const Fixup::BindTarget> bind
         }
 
         for ( const Fixup fixup : sortedFixups) {
-            uint64_t segmentIndex = fixup.segment - &segments.front();
+            ptrdiff_t segmentIndex = fixup.segment - &segments.front();
             fixupsInSegments[segmentIndex].push_back(fixup);
         }
     }
@@ -391,7 +391,7 @@ void ChainedFixupsWriter::buildLinkeditFixups(std::span<const Fixup::BindTarget>
     // for 32-bit archs, compute max valid pointer value
     uint64_t maxValidPointer = 0;
     if ( !pointerFormat.is64() ) {
-        uint64_t lastDataSegmentIndex = segments.size() - (segments.back().mappedSegment.segName == "__LINKEDIT" ? 2 : 1);
+        size_t lastDataSegmentIndex = segments.size() - (segments.back().mappedSegment.segName == "__LINKEDIT" ? 2 : 1);
         const MappedSegment& lastDataSegment = segments[lastDataSegmentIndex].mappedSegment;
         // for 32-bit binaries rebase targets are 0 based, so load address needs to be included in max pointer computation
         uint64_t lastDataSegmentLastVMAddr = preferredLoadAddress + lastDataSegment.runtimeOffset + lastDataSegment.runtimeSize;
@@ -507,7 +507,10 @@ void ChainedFixupsWriter::buildLinkeditFixups(std::span<const Fixup::BindTarget>
 
                         if ( setDataChains ) {
                             // set end of chain for this page
-                            pointerFormat.writeChainEntry(*prevFixup, nullptr, preferredLoadAddress, mappedSegments);
+                            if ( Error err = pointerFormat.writeChainEntry(*prevFixup, nullptr, preferredLoadAddress, mappedSegments) ) {
+                                _buildError = std::move(err);
+                                break;
+                            }
                         }
                     }
                     while (curPageIndex < pageIndex) {
@@ -529,13 +532,20 @@ void ChainedFixupsWriter::buildLinkeditFixups(std::span<const Fixup::BindTarget>
                             break;
                         }
                         else if ( setDataChains ) {
-                            pointerFormat.writeChainEntry(*prevFixup, chain, preferredLoadAddress, mappedSegments);
-                        }
+                            if ( Error err = pointerFormat.writeChainEntry(*prevFixup, chain, preferredLoadAddress, mappedSegments) ) {
+                                _buildError = std::move(err);
+                                break;
+                            }
+                       }
                     }
                     else {
                         // prev/next are too far apart for chain to span, instead terminate chain at prevFixup
-                        if ( setDataChains )
-                            pointerFormat.writeChainEntry(*prevFixup, nullptr, preferredLoadAddress, mappedSegments);
+                        if ( setDataChains ) {
+                            if (Error err = pointerFormat.writeChainEntry(*prevFixup, nullptr, preferredLoadAddress, mappedSegments) ) {
+                                _buildError = std::move(err);
+                                break;
+                            }
+                       }
                         // then start new overflow chain
                         if ( (pageStarts[curPageIndex] & DYLD_CHAINED_PTR_START_MULTI) == 0 ) {
                             ++curExtrasIndex;
@@ -557,7 +567,10 @@ void ChainedFixupsWriter::buildLinkeditFixups(std::span<const Fixup::BindTarget>
             }
             if ( setDataChains && (prevFixup != nullptr) ) {
                 // set end of chain
-                pointerFormat.writeChainEntry(*prevFixup, nullptr, preferredLoadAddress, mappedSegments);
+                if (Error err = pointerFormat.writeChainEntry(*prevFixup, nullptr, preferredLoadAddress, mappedSegments) ) {
+                    _buildError = std::move(err);
+                    break;
+                }
             }
         } else {
             // No extras, so use parallelism
@@ -617,7 +630,9 @@ void ChainedFixupsWriter::buildLinkeditFixups(std::span<const Fixup::BindTarget>
             std::atomic<uint64_t>& unalignedFixupOffsetRef = unalignedFixupOffset;
 
             // Now process all pages in parallel
-            mapReduce(fixupRanges, std::max(fixupRanges.size() / 64, 32ul), ^(size_t, int&, std::span<FixupRange> ranges) {
+            mapReduce(fixupRanges, std::max(fixupRanges.size() / 64, 32ul), ^(size_t, std::vector<Error>& errors, std::span<FixupRange> ranges) {
+                if ( !errors.empty() )
+                    return;
                 for ( const FixupRange& fixupRange : ranges ) {
                     size_t pageIndex = &fixupRange - fixupRanges.data();
                     const Fixup* start = fixupRange.first.load(std::memory_order_relaxed);
@@ -645,11 +660,24 @@ void ChainedFixupsWriter::buildLinkeditFixups(std::span<const Fixup::BindTarget>
                                 atomic_min(unalignedFixupOffsetRef, segOffset, ~0ULL);
                                 break;
                             }
-                            pointerFormat.writeChainEntry(*prev, chain, preferredLoadAddress, mappedSegments);
+                            if (Error err = pointerFormat.writeChainEntry(*prev, chain, preferredLoadAddress, mappedSegments) ) {
+                                errors.push_back(std::move(err));
+                                break;
+                            }
                         }
 
                         // set end of chain
-                        pointerFormat.writeChainEntry(*end, nullptr, preferredLoadAddress, mappedSegments);
+                        if (Error err = pointerFormat.writeChainEntry(*end, nullptr, preferredLoadAddress, mappedSegments)) {
+                            errors.push_back(std::move(err));
+                            break;
+                        }
+                    }
+                }
+            },
+            ^(std::span<std::vector<Error>> allErrors) {
+                for (std::vector<Error>& errors : allErrors) {
+                    for (const Error& error : errors ) {
+                        _buildError.append("%s, ", error.message());
                     }
                 }
             });
@@ -733,16 +761,25 @@ void ChainedFixupsWriter::buildStartsSectionFixups(std::span<const SegmentFixups
             uint8_t* chain = (uint8_t*)fixup.location;
             uint64_t delta = (uint64_t)chain - (uint64_t)(prevFixup->location);
             if ( delta < maxDelta ) {
-                pointerFormat.writeChainEntry(*prevFixup, chain, 0 /* preferedLoadAddress */, mappedSegments);
+                if ( Error err = pointerFormat.writeChainEntry(*prevFixup, chain, 0 /* preferedLoadAddress */, mappedSegments) ) {
+                    _buildError = std::move(err);
+                    break;
+                }
             } else {
                 // prev/next are too far apart for chain to span, instead terminate chain at prevFixup
-                pointerFormat.writeChainEntry(*prevFixup, nullptr /* nextLoc */, 0 /* preferedLoadAddress */, mappedSegments);
+                if ( Error err = pointerFormat.writeChainEntry(*prevFixup, nullptr /* nextLoc */, 0 /* preferedLoadAddress */, mappedSegments) ) {
+                    _buildError = std::move(err);
+                    break;
+                }
                 startsOffsets.push_back((uint32_t)fixupOffset);
             }
             prevFixup = &fixup;
         }
         // Terminate last chain
-        pointerFormat.writeChainEntry(*prevFixup, nullptr /* nextLoc */, 0 /* preferedLoadAddress */, mappedSegments);
+        if ( Error err = pointerFormat.writeChainEntry(*prevFixup, nullptr /* nextLoc */, 0 /* preferedLoadAddress */, mappedSegments) ) {
+            _buildError = std::move(err);
+            return;
+        }
 
         uint32_t startsCount = (uint32_t)startsOffsets.size();
         assert(startsCount == startsOffsets.size());

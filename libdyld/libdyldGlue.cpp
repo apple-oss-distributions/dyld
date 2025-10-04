@@ -1147,6 +1147,11 @@ void _dyld_for_each_prewarming_range(void (*callback)(const void* base, size_t s
 }
 
 
+void _dyld_call_with_writable_tpro_memory(void (*func)(void*), void* ctx) {
+    checkTPROState();
+    gAPIs->_dyld_call_with_writable_tpro_memory(func, ctx);
+}
+
 //
 // MARK: --- crt data symbols ---
 //

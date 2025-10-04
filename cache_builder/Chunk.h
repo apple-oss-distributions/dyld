@@ -242,7 +242,6 @@ public:
     virtual const DylibSegmentChunk* isDylibSegmentChunk() const;
     virtual const LinkeditDataChunk* isLinkeditDataChunk() const;
     virtual StubsChunk* isStubsChunk();
-    virtual UniquedGOTsChunk* isUniquedGOTsChunk();
     virtual const DylibSegmentChunk* isTPROChunk() const;
 
 private:
@@ -816,7 +815,6 @@ public:
 
     // Virtual methods
     const char* name() const override final;
-    UniquedGOTsChunk* isUniquedGOTsChunk() override final;
 
 private:
     __attribute__((used))
@@ -905,6 +903,8 @@ private:
     __attribute__((used))
     virtual void dump() const override final;
 };
+
+typedef std::pair<const Chunk*, VMOffset> ChunkPlusOffset;
 
 } // namespace cache_builder
 

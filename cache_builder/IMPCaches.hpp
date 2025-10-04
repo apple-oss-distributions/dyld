@@ -275,7 +275,7 @@ constexpr std::string_view magicSelector = "\xf0\x9f\xa4\xaf";
 class AddressSpace {
 public:
     int sizeAtIndex(int idx) const;
-    int sizeAvailableAfterIndex(int idx) const;
+    int sizeAvailableAtOrAfterIndex(int idx) const;
     bool canPlaceMethodAtIndex(const Selector* method, int idx) const;
     void placeMethodAtIndex(Selector* method, int idx);
     

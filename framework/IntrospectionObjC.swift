@@ -32,6 +32,22 @@ extension _DYSegment {
     @objc var vmsize:               UInt64  { return impl.vmSize }
     @objc var address:              UInt64  { return impl.address.value }
     @objc var preferredLoadAddress: UInt64  { return impl.preferredLoadAddress.value }
+
+    @objc func getFastPathData(_ data: UnsafeMutablePointer<_DYSegmentFastPathData>) {
+        let info = impl.info
+        switch info.name {
+        case .asciiBuffer(let buffer):
+            data.pointee.segmentNamePtr     = buffer.baseAddress!
+            data.pointee.segmentNameSize    = UInt64(buffer.count)
+        default: break
+        }
+        data.pointee.fileSize           = info.fileSize
+        data.pointee.vmSize             = info.vmSize
+        data.pointee.address            = info.address
+        data.pointee.preferredAddress   = info.preferredAddress
+        data.pointee.permissions        = info.permissions
+    }
+
     func withSegmentData(_ block:(@escaping (Data) -> Void)) -> Bool {
         do {
             try impl.withSegmentData(block)

@@ -24,4 +24,21 @@ OTHER_TAPI_FLAGS = -fvisibility=hidden
 OTHER_LDFLAGS = $(inherited) -lCrashReporterClient
 
 // rdar://123474729 (-fvisibility=hidden doesn't hide all <filesystem> symbols)
-EXPORTED_SYMBOLS_FILE = configs/shared_cache_linker.exp
+EXPORTED_SYMBOLS_FILE = shared_cache_linker/shared_cache_linker.exp
+
+// For codesign to work
+GENERATE_INFOPLIST_FILE = YES
+
+// TODO: Clean these up.  They were moved from the build settings
+COPY_PHASE_STRIP = NO
+DEFINES_MODULE = YES
+ENABLE_USER_SCRIPT_SANDBOXING = YES
+INSTALL_PATH = $(LOCAL_LIBRARY_DIR)/Frameworks
+LD_RUNPATH_SEARCH_PATHS = $(inherited) @executable_path/../Frameworks @loader_path/Frameworks
+MACH_O_TYPE = mh_dylib
+MERGEABLE_LIBRARY = YES
+MODULE_VERIFIER_SUPPORTED_LANGUAGES = objective-c objective-c++
+MODULE_VERIFIER_SUPPORTED_LANGUAGE_STANDARDS = gnu17 gnu++20
+PRODUCT_BUNDLE_IDENTIFIER = com.apple.ld.framework
+SKIP_INSTALL = YES
+VERSION_INFO_PREFIX =

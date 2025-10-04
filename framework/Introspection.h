@@ -32,19 +32,6 @@
 
 NS_HEADER_AUDIT_BEGIN(nullability, sendability)
 
-@interface _DYSegment : NSObject
-@property(nonatomic, readonly) NSString* name;
-@property(nonatomic, readonly) uint64_t vmsize;
-@property(nonatomic, readonly) uint64_t permissions;
-@property(nonatomic, readonly) uint64_t address;
-@property(nonatomic, readonly) uint64_t preferredLoadAddress;
-- (BOOL)withSegmentData:(void (^_Nonnull)(NSData * _Nonnull))block;
-@end
-
-
-@class _DYSharedCache;
-@class _DYSnapshot;
-
 struct _DYImageFastPathData {
     void* installNamePtr;
     uint64_t    installNameSize;
@@ -56,6 +43,26 @@ struct _DYImageFastPathData {
     bool        unicodeInstallname;
     bool        unicodeFilePath;
 };
+
+struct _DYSegmentFastPathData {
+    void * _Nullable segmentNamePtr;
+    uint64_t segmentNameSize;
+    uint64_t vmSize;
+    uint64_t fileSize;
+    uint64_t address;
+    uint64_t preferredAddress;
+    uint64_t permissions;
+};
+
+@interface _DYSegment : NSObject
+@property(nonatomic, readonly) NSString* name;
+@property(nonatomic, readonly) uint64_t vmsize;
+@property(nonatomic, readonly) uint64_t permissions;
+@property(nonatomic, readonly) uint64_t address;
+@property(nonatomic, readonly) uint64_t preferredLoadAddress;
+- (BOOL)withSegmentData:(void (^_Nonnull)(NSData * _Nonnull))block;
+    - (void) getFastPathData:(struct _DYSegmentFastPathData*)data;
+@end
 
 @interface _DYEnvironment : NSObject
 @property(nonatomic, readonly, nullable) NSString* rootPath;

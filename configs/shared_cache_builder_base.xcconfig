@@ -1,6 +1,7 @@
-#include "base.xcconfig"
+#include "tools_base.xcconfig"
 
 ARCHS                     = arm64 x86_64
+EXCLUDED_ARCHS            = arm64e
 MACOSX_DEPLOYMENT_TARGET  = 13.0
 
 // TODO: use swiftGenericMetadataBuilder from the SDK

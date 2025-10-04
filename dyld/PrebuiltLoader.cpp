@@ -501,8 +501,13 @@ void PrebuiltLoader::applyFixups(Diagnostics& diag, RuntimeState& state, DyldCac
     // build targets table
     STACK_ALLOC_OVERFLOW_SAFE_ARRAY(const void*, targetAddrs, 512);
     for ( const BindTargetRef& target : this->bindTargets() ) {
-        void* value = (void*)(long)target.value(state);
-        if ( state.config.log.fixups ) {
+        void*    value = (void*)(long)target.value(state);
+        uint64_t fvTableOffset;
+        uint16_t variantIndex;
+        if ( state.config.log.functionVariants && target.isFunctionVariant(fvTableOffset, variantIndex) ) {
+            state.log("<%s/bind#%llu(variant-table#%d)> -> %p\n", this->leafName(state), targetAddrs.count(), variantIndex, value);
+        }
+        else if ( state.config.log.fixups ) {
             if ( target.isAbsolute() )
                 state.log("<%s/bind#%llu> -> %p\n", this->leafName(state), targetAddrs.count(), value);
             else
@@ -772,34 +777,50 @@ void PrebuiltLoader::invalidateInIsolation(const RuntimeState& state) const
         if ( checkForRoots ) {
             __block bool hasOnDiskOverride = false;
             bool stop = false;
-            state.config.pathOverrides.forEachPathVariant(this->path(state), state.config.process.platform, false, true, stop,
-                                                      ^(const char* possiblePath, ProcessConfig::PathOverrides::Type type, bool& innerStop) {
-                                                          // look only at variants that might override the original path
-                                                          if ( type > ProcessConfig::PathOverrides::Type::rawPath ) {
-                                                              innerStop = true;
-                                                              return;
-                                                          }
-                                                          FileID foundFileID = FileID::none();
-                                                          if ( state.config.fileExists(possiblePath, &foundFileID) ) {
-                                                              FileID recordedFileID = this->fileID(state);
-                                                              // Note: sim caches will have valid() fileIDs, others won't
-                                                              if ( recordedFileID.valid() ) {
-                                                                  if ( foundFileID != recordedFileID ) {
-                                                                      if ( state.config.log.loaders )
-                                                                          console("found '%s' with different inode/mtime than PrebuiltLoader for '%s'\n", possiblePath, this->path(state));
-                                                                      hasOnDiskOverride = true;
-                                                                      innerStop         = true;
-                                                                  }
-                                                              }
-                                                              else {
-                                                                  // this Loader had no recorded FileID, so it was not expected on disk, but now a file showed up
-                                                                  if ( state.config.log.loaders )
-                                                                      console("found '%s' which invalidates PrebuiltLoader for '%s'\n", possiblePath, this->path(state));
-                                                                  hasOnDiskOverride = true;
-                                                                  innerStop         = true;
-                                                              }
-                                                          }
-                                                      });
+
+            auto handler = ^(const char* possiblePath, ProcessConfig::PathOverrides::Type type, bool& innerStop) {
+#if TARGET_OS_WATCH && __arm64e__
+                // If we get to the original rawPath then we've looked at all other potential paths. If we find
+                // the original path exists but has the same UUID as the cache, then just use the cache version
+                if ( type == ProcessConfig::PathOverrides::Type::rawPath ) {
+                    FileID foundFileID = FileID::none();
+                    if ( state.config.fileExists(possiblePath, &foundFileID) ) {
+                        if ( state.config.dyldCache.uuidOfFileMatchesDyldCache(state.config.process, state.config.syscall, possiblePath) ) {
+                            if ( state.config.log.loaders )
+                                console("found '%s' with same UUID as PrebuiltLoader for '%s'\n", possiblePath, this->path(state));
+                            innerStop = true;
+                            return;
+                        }
+                    }
+                }
+#endif
+                // look only at variants that might override the original path
+                if ( type > ProcessConfig::PathOverrides::Type::rawPath ) {
+                    innerStop = true;
+                    return;
+                }
+                FileID foundFileID = FileID::none();
+                if ( state.config.fileExists(possiblePath, &foundFileID) ) {
+                    FileID recordedFileID = this->fileID(state);
+                    // Note: sim caches will have valid() fileIDs, others won't
+                    if ( recordedFileID.valid() ) {
+                        if ( foundFileID != recordedFileID ) {
+                            if ( state.config.log.loaders )
+                                console("found '%s' with different inode/mtime than PrebuiltLoader for '%s'\n", possiblePath, this->path(state));
+                            hasOnDiskOverride = true;
+                            innerStop         = true;
+                        }
+                    }
+                    else {
+                        // this Loader had no recorded FileID, so it was not expected on disk, but now a file showed up
+                        if ( state.config.log.loaders )
+                            console("found '%s' which invalidates PrebuiltLoader for '%s'\n", possiblePath, this->path(state));
+                        hasOnDiskOverride = true;
+                        innerStop         = true;
+                    }
+                }
+            };
+            state.config.pathOverrides.forEachPathVariant(this->path(state), state.config.process.platform, false, true, stop, handler);
             if ( hasOnDiskOverride ) {
                 if ( state.config.log.loaders )
                     console("PrebuiltLoader %p '%s' not used because a file was found that overrides it\n", this, this->leafName(state));

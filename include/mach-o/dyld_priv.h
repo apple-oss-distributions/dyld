@@ -1019,6 +1019,8 @@ void _dyld_stack_range(const void** stack_bottom, const void** stack_top);
 // Exists in iOS 18.4 and later
 extern void _dyld_for_each_prewarming_range(void (*callback)(const void* base, size_t size));
 
+extern void _dyld_call_with_writable_tpro_memory(void (*func)(void*), void* ctx) __SPI_AVAILABLE(macos(26.0), ios(26.0), watchos(26.0), tvos(26.0), visionos(26.0));
+
 #if __cplusplus
 }
 #endif /* __cplusplus */

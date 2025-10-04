@@ -60,16 +60,24 @@ Display the Objective-C classes and categories defined.
 Display a simple table of fixup locations and what dyld will set them to.
 .It Fl fixup_chains
 If the binary uses chained fixups, displays the format of the chains and the starts.
+.It Fl fixup_chain_header
+Display the fixup chains header fields.
 .It Fl fixup_chain_details
 Display a table of all the raw fixup chain bits and their meanings.
-.It Fl function_starts
-Display the offset of all functions starts and their name.
 .It Fl symbolic_fixups
 Display all fixups, grouped by data symbol.
+.It Fl shared_region
+Displays split-seg information from dylib files that may be placed in the dyld cache.
+.It Fl function_starts
+Display the offset of all functions starts and their name.
 .It Fl opcodes
 Display all the opcodes used to generate the rebase and binding information.
+.It Fl load_commands
+Display the load commands in the binary.
 .It Fl uuid
 Display the UUID of the binary.
+.It Fl function_variants
+Display info about function variants in the binary.
 .It Fl disassemble
 Display a disassemble of all code sections.
 .It Fl section Ar segment-name Ar section-name

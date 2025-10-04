@@ -189,6 +189,23 @@ extern bool macho_source_version(const struct mach_header* _Nonnull mh, uint64_t
 __SPI_AVAILABLE(macos(15.4), ios(18.4), tvos(18.4), watchos(11.4), visionos(2.4));
 
 
+/*!
+ * @function macho_for_each_runnable_arch_name
+ *
+ * @abstract
+ *      Iterates through the architecture names of main executables that can be
+ *      run on this device.  The iteration is in the order the kernel would
+ *      prioritize which arch to run in a fat file.
+ *
+ * @param callback
+ *      A block to call once per architecture name.
+ *      To stop iterating, set *stop to true.
+ */
+extern void macho_for_each_runnable_arch_name(void (^ _Nonnull callback)(const char* _Nonnull archName, bool* _Nonnull stop))
+SPI_AVAILABLE(macos(16.0), ios(19.0), tvos(19.0), watchos(12.0), visionos(3.0));
+
+
+
 #if __cplusplus
 }
 #endif

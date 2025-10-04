@@ -27,7 +27,7 @@
 #include "ASLRTracker.h"
 #include "MachOFileAbstraction.hpp"
 #include "DyldSharedCache.h"
-#include "CacheBuilder.h"
+#include "KernelCacheBuilder.h"
 #include "Diagnostics.h"
 #include "IMPCaches.hpp"
 
@@ -57,7 +57,7 @@ void CacheBuilder::copyRawSegments()
                        const CacheBuilder::DylibSectionCoalescer* sectionCoalescer) {
         for (const SegmentMappingInfo& info : dylib.cacheLocation) {
             if (log) fprintf(stderr, "copy %s segment %15.*s (0x%08X bytes) from %p to %p (logical addr 0x%llX) for %s\n",
-                             _options.archs->name(), (int)info.segName.size(), info.segName.data(),
+                             _options.arch.name(), (int)info.segName.size(), info.segName.data(),
                              info.copySegmentSize, info.srcSegment, info.dstSegment, info.dstCacheUnslidAddress, dylib.input->mappedFile.runtimePath.c_str());
             ::memcpy(info.dstSegment, info.srcSegment, info.copySegmentSize);
         }
@@ -70,7 +70,7 @@ void CacheBuilder::copyRawSegments()
 
         if (log) {
             fprintf(stderr, "copy %s __TEXT_COAL section %s (0x%08X bytes) to %p (logical addr 0x%llX)\n",
-                    _options.archs->name(), coalescedSection->sectionName.data(),
+                    _options.arch.name(), coalescedSection->sectionName.data(),
                     coalescedSection->bufferSize, coalescedSection->bufferAddr, coalescedSection->bufferVMAddr);
         }
         for (const auto& stringAndOffset : coalescedSection->stringsToOffsets) {

@@ -56,6 +56,7 @@
 #include "MachOLoaded.h"
 #include "ProcessAtlas.h"
 #include "Utilities.h"
+#include "SafeVMPrimitives.h"
 
 #include "CRC32c.h"
 #include "UUID.h"
@@ -1296,14 +1297,11 @@ UniquePtr<ProcessSnapshot> Process::getSnapshot(kern_return_t *kr) {
         BLEND_KERN_RETURN_LOCATION(*kr, 0xee);
         return nullptr;
     }
-    uint8_t remoteBuffer[16*1024];
-    mach_vm_size_t readSize = 0;
     uint64_t failedAddress = 0;
     while (1) {
         // Using mach_vm_read_overwrite because this is part of dyld. If the file is removed or the codesignature is invalid
         // then the system is broken beyond recovery anyway
-        *kr = mach_vm_read_overwrite(_task, task_dyld_info.all_image_info_addr, task_dyld_info.all_image_info_size,
-                                     (mach_vm_address_t)&remoteBuffer[0], &readSize);
+        auto taskInfoBuffer = SafeRemoteBuffer(_task, task_dyld_info.all_image_info_addr, task_dyld_info.all_image_info_size, kr);
         if (*kr != KERN_SUCCESS) {
             BLEND_KERN_RETURN_LOCATION(*kr, 0xed);
             // If we cannot read the all image info this is game over
@@ -1312,20 +1310,19 @@ UniquePtr<ProcessSnapshot> Process::getSnapshot(kern_return_t *kr) {
         uint64_t compactInfoAddress;
         uint64_t compactInfoSize;
         if (task_dyld_info.all_image_info_format == TASK_DYLD_ALL_IMAGE_INFO_32 ) {
-            const dyld_all_image_infos_32* info = (const dyld_all_image_infos_32*)&remoteBuffer[0];
+            const dyld_all_image_infos_32* info = (const dyld_all_image_infos_32*)&taskInfoBuffer.data()[0];
             compactInfoAddress              = info->compact_dyld_image_info_addr;
             compactInfoSize                 = info->compact_dyld_image_info_size;
         } else {
-            const dyld_all_image_infos_64* info = (const dyld_all_image_infos_64*)&remoteBuffer[0];
-            // Mask of TBI bits
-            compactInfoAddress              = (info->compact_dyld_image_info_addr & 0x00ff'ffff'ffff'ffff);
+            const dyld_all_image_infos_64* info = (const dyld_all_image_infos_64*)&taskInfoBuffer.data()[0];
+            compactInfoAddress              = info->compact_dyld_image_info_addr;
             compactInfoSize                 = info->compact_dyld_image_info_size;
         }
         if (compactInfoSize == 0) {
             return synthesizeSnapshot(kr);
         }
-        auto compactInfo = UniquePtr<std::byte>((std::byte*)_transactionalAllocator.malloc((size_t)compactInfoSize));
-        *kr = mach_vm_read_overwrite(_task, compactInfoAddress, compactInfoSize, (mach_vm_address_t)&*compactInfo, &readSize);
+        
+        auto compactInfoBuffer = SafeRemoteBuffer(_task, compactInfoAddress,compactInfoSize, kr);
         if (*kr != KERN_SUCCESS) {
             BLEND_KERN_RETURN_LOCATION(*kr, 0xec);
             if (compactInfoAddress == failedAddress) {
@@ -1336,8 +1333,7 @@ UniquePtr<ProcessSnapshot> Process::getSnapshot(kern_return_t *kr) {
             // The read failed, chances are the process mutated the compact info, retry
             continue;
         }
-        std::span<std::byte> data = std::span<std::byte>(&*compactInfo, (size_t)compactInfoSize);
-        UniquePtr<ProcessSnapshot> result = _transactionalAllocator.makeUnique<ProcessSnapshot>(_ephemeralAllocator, _fileManager, false, data);
+        UniquePtr<ProcessSnapshot> result = _transactionalAllocator.makeUnique<ProcessSnapshot>(_ephemeralAllocator, _fileManager, false, compactInfoBuffer.data());
         if (!result->valid()) {
             // Something blew up we don't know what
             *kr = KERN_FAILURE;

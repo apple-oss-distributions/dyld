@@ -41,3 +41,11 @@ LLDB_SUPPORT[sdk=*simulator*] =
 OTHER_LDFLAGS = -e $(ENTRY_NAME) -Wl,-exported_symbol,$(ENTRY_NAME) $(LLDB_SUPPORT) -Wl,-no_inits @$(DERIVED_SOURCES_DIR)/archives.txt -nostdlib -Wl,-dylinker -Wl,-dylinker_install_name,/usr/lib/dyld $(ALIGNMENT) -Wl,-fixup_chains -Wl,-data_const -fapple-link-rtlib $(DIRTY) -Wl,-section_order,__TPRO_CONST,__data:__allocator
 
 CODE_SIGN_IDENTITY = $(TRUSTED_CODE_SIGN_IDENTITY)
+
+// TODO: Clean these up.  They were moved from the build settings
+GCC_PREPROCESSOR_DEFINITIONS = DYLD_VERSION=$(RC_ProjectSourceVersion) _LIBCPP_NO_EXCEPTIONS=1 $(inherited)
+LD_GENERATE_MAP_FILE = YES
+ONLY_ACTIVE_ARCH[config=Debug] = NO
+SUPPORTED_PLATFORMS = macosx iphoneos xros watchos appletvos bridgeos watchsimulator iphonesimulator xrsimulator appletvsimulator exclavekit.macosx exclavekit.iphoneos exclavekit.appletvos exclavekit.xros exclavekit.watchos
+UNSTRIPPED_PRODUCT = NO
+USER_HEADER_SEARCH_PATHS = ./dyld ./common ./libdyld ${DERIVED_FILE_DIR}

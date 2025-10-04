@@ -87,12 +87,12 @@ struct UUID {
         }
         return true;
     }
-    std::byte* begin() { return _data.begin(); }
-    std::byte* end() { return _data.end(); }
-    const std::byte* begin() const { return _data.begin(); }
-    const std::byte* end() const { return _data.end(); }
-    const std::byte* cbegin() const { return _data.begin(); }
-    const std::byte* cend() const { return _data.end(); }
+    std::byte* begin() { return _data.data(); }
+    std::byte* end() { return _data.data() + _data.size(); }
+    const std::byte* begin() const { return _data.data(); }
+    const std::byte* end() const { return _data.data() + _data.size(); }
+    const std::byte* cbegin() const { return _data.data(); }
+    const std::byte* cend() const { return _data.data() + _data.size(); }
 private:
     void appendHexNibble(uint8_t value, char*& p) const {
         if ( value < 10 )

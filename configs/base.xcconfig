@@ -4,9 +4,11 @@
 // language versions
 GCC_C_LANGUAGE_STANDARD = c2x
 CLANG_CXX_LANGUAGE_STANDARD = c++20
+SWIFT_VERSION = 5.0
 
 // clang warnings
 CLANG_WARN_EMPTY_BODY = YES
+GCC_INLINES_ARE_PRIVATE_EXTERN = YES
 GCC_WARN_SHADOW = YES
 GCC_WARN_TYPECHECK_CALLS_TO_PRINTF = YES
 GCC_ENABLE_CPP_EXCEPTIONS = NO
@@ -16,26 +18,31 @@ GCC_WARN_FOUR_CHARACTER_CONSTANTS = NO
 GCC_WARN_ABOUT_MISSING_PROTOTYPES = YES
 GCC_WARN_UNINITIALIZED_AUTOS = YES
 ENABLE_ATP_WERROR_9999099099000000 = -Werror // Hack to enable -Werror in ATP
-WARNING_CFLAGS = $(ENABLE_ATP_WERROR_$(RC_ProjectCanonicalSourceVersion)) -Wmost -Wimplicit-fallthrough -Wno-unknown-pragmas -Wno-assume -Wformat-nonliteral -Wno-vla-extension -Wundef-prefix=SUPPORT_
+WARNING_CFLAGS = $(ENABLE_ATP_WERROR_$(RC_ProjectCanonicalSourceVersion)) -Wmost -Wimplicit-fallthrough -Wno-unknown-pragmas -Wno-assume -Wformat-nonliteral -Wno-vla-extension -Wundef-prefix=SUPPORT_ -Wundef-prefix=TARGET_OS_ -Wno-unused-but-set-variable
 
 // #ifndef __OPEN_SOURCE__
 OTHER_CFLAGS[arch=arm64e] = -Xclang -target-feature -Xclang +mte $(inherited)
 // #endif
 
 // clang optimization level
-GCC_OPTIMIZATION_LEVEL_Release = s
-GCC_OPTIMIZATION_LEVEL_Debug   = 0
-GCC_OPTIMIZATION_LEVEL         = $(GCC_OPTIMIZATION_LEVEL_$(CONFIGURATION))
+GCC_OPTIMIZATION_LEVEL[config=Debug] = 0
+GCC_OPTIMIZATION_LEVEL[config=Release] = s
+
+SWIFT_OPTIMIZATION_LEVEL[config=Debug] = -Onone
+SWIFT_OPTIMIZATION_LEVEL[config=Release] = -O
+SWIFT_COMPILATION_MODE[config=Release] = wholemodule
 
 // clang search paths
-USER_HEADER_SEARCH_PATHS  = ./dyld ./common ./mach_o
-HEADER_SEARCH_PATHS       = ./include
-ALWAYS_SEARCH_USER_PATHS  = NO
+USER_HEADER_SEARCH_PATHS    = ./dyld ./common ./mach_o
+SYSTEM_HEADER_SEARCH_PATHS  = ./include $(inherited)
+ALWAYS_SEARCH_USER_PATHS    = NO
 
 // linker options
 DEAD_CODE_STRIPPING = YES
 CURRENT_PROJECT_VERSION = $(RC_ProjectSourceVersion)
-
+DYLIB_COMPATIBILITY_VERSION =
+DYLIB_CURRENT_VERSION =
+VERSIONING_SYSTEM = apple-generic
 
 // Debug builds leave debug info in .o files, Release builds use .dSYM and strip debug map from DSTROOT
 DEBUG_INFORMATION_FORMAT_Release = dwarf-with-dsym
@@ -74,3 +81,19 @@ DYLD_SIGNING_IDENTITY_NO = -
 DYLD_SIGNING_IDENTITY_YES[sdk=macos*] = Apple Engineer:
 DYLD_SIGNING_IDENTITY_YES[sdk=*] = -
 TRUSTED_CODE_SIGN_IDENTITY = $(DYLD_SIGNING_IDENTITY_$(DYLD_USE_AMFI_TRUSTED_KEYS))
+
+CODE_SIGN_IDENTITY = -
+CODE_SIGN_STYLE = Automatic
+
+SDKROOT = macosx.internal
+
+DEBUG_INFORMATION_FORMAT[config=Debug] = dwarf
+DEBUG_INFORMATION_FORMAT[config=Release] = dwarf-with-dsym
+
+GCC_PREPROCESSOR_DEFINITIONS[config=Debug] = DEBUG=1 $(inherited)
+SWIFT_ACTIVE_COMPILATION_CONDITIONS[config=Debug] = DEBUG $(inherited)
+
+CLANG_CXX_STANDARD_LIBRARY_HARDENING = none
+
+PRODUCT_NAME = $(TARGET_NAME)
+SUPPORTED_PLATFORMS = $(AVAILABLE_PLATFORMS)

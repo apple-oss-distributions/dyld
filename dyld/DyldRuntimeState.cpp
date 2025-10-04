@@ -115,45 +115,6 @@ char error_string[1024] = "dyld: launch, loading dependent libraries";
 
 extern "C" struct mach_header __dso_handle; // mach_header of dyld itself
 
-#if BUILDING_DYLD && SUPPORT_PREBUILTLOADERS
-static bool hexCharToByte(const char hexByte, uint8_t& value)
-{
-    if ( hexByte >= '0' && hexByte <= '9' ) {
-        value = hexByte - '0';
-        return true;
-    }
-    else if ( hexByte >= 'A' && hexByte <= 'F' ) {
-        value = hexByte - 'A' + 10;
-        return true;
-    }
-    else if ( hexByte >= 'a' && hexByte <= 'f' ) {
-        value = hexByte - 'a' + 10;
-        return true;
-    }
-
-    return false;
-}
-
-static bool hexStringToBytes(const char* hexString, uint8_t buffer[], unsigned bufferMaxSize, unsigned& bufferLenUsed)
-{
-    bufferLenUsed = 0;
-    bool high     = true;
-    for ( const char* s = hexString; *s != '\0'; ++s ) {
-        if ( bufferLenUsed > bufferMaxSize )
-            return false;
-        uint8_t value;
-        if ( !hexCharToByte(*s, value) )
-            return false;
-        if ( high )
-            buffer[bufferLenUsed] = value << 4;
-        else
-            buffer[bufferLenUsed++] |= value;
-        high = !high;
-    }
-    return true;
-}
-#endif // BUILDING_DYLD && SUPPORT_PREBUILTLOADERS
-
 namespace dyld4 {
 
 PseudoDylib* PseudoDylib::create(Allocator &A, const char* identifier, void* addr, size_t size, PseudoDylibCallbacks* callbacks, void* context) {
@@ -611,30 +572,29 @@ void RuntimeState::partitionDelayLoads(std::span<const Loader*> newLoaders, std:
     }
 
     // now that all images are marked with if they should be delayed or not, move them to the correct list
-    for (size_t i=0; i < delayLoaded.size(); ++i) {
-        const Loader* ldr = delayLoaded[i];
-        if ( !ldr->isDelayInit(*this) ) {
-            // in delay list, but no longer delayed, move
-            loaded.push_back(ldr);
-            if ( config.log.libraries )
-                log("move delayed to loaded: %s\n", ldr->leafName(*this));
-            delayLoaded.erase(delayLoaded.begin() + i);
-            if ( newAndNotDelayed != nullptr )
-                newAndNotDelayed->push_back(ldr);
-            --i;
-        }
-    }
-    for (size_t i=0; i < loaded.size(); ++i) {
-        const Loader* ldr = loaded[i];
-        if ( ldr->isDelayInit(*this) ) {
-            // in loaded list, but now delayed, move
-            delayLoaded.push_back(ldr);
-            if ( config.log.libraries )
-                log("move loaded to delayed: %s\n", ldr->leafName(*this));
-            loaded.erase(loaded.begin() + i);
-            --i;
-        }
-    }
+    delayLoaded.erase(std::remove_if(delayLoaded.begin(), delayLoaded.end(), [this, &newAndNotDelayed](const Loader* ldr) {
+        if ( ldr->isDelayInit(*this) )
+            return false;
+
+        // in delay list, but no longer delayed, move
+        loaded.push_back(ldr);
+        if ( config.log.libraries )
+            log("move delayed to loaded: %s\n", ldr->leafName(*this));
+        if ( newAndNotDelayed != nullptr )
+            newAndNotDelayed->push_back(ldr);
+        return true;
+    }), delayLoaded.end());
+    loaded.erase(std::remove_if(loaded.begin(), loaded.end(), [this](const Loader* ldr) {
+        if ( !ldr->isDelayInit(*this) )
+            return false;
+
+        // in loaded list, but now delayed, move
+        delayLoaded.push_back(ldr);
+        if ( config.log.libraries )
+            log("move loaded to delayed: %s\n", ldr->leafName(*this));
+        return true;
+    }), loaded.end());
+
     // return all newLoaders that are not delayed
     if ( newAndNotDelayed != nullptr ) {
         for (const Loader* ldr : newLoaders) {
@@ -809,8 +769,8 @@ void RuntimeState::setUpLogging()
 #if BUILDING_DYLD
             else {
                 // Use syslog() for processes managed by launchd
-                // we can only check if launchd owned after libSystem initialized
-                if ( libSystemInitialized() ) {
+                // we can only check if launchd owned after libdyld is initialized
+                if ( libdyldInitialized() ) {
                     if ( libSystemHelpers.isLaunchdOwned() ) {
                         _logToSyslog = true;
                         _logSetUp    = true;
@@ -1053,6 +1013,96 @@ void RuntimeState::setLaunchMissingSymbol(const char* missingSymbolName, const c
 #endif // BUILDING_DYLD || BUILDING_UNIT_TESTS
 
 
+// <rdar://problem/29099600> dyld should tell the kernel when it is doing root fix-ups
+void RuntimeState::setVMAccountingSuspending(bool suspend)
+{
+#if DYLD_FEATURE_MEMORY_ACCOUNTING
+    if ( suspend == _vmAccountingSuspended )
+        return;
+    if ( this->config.log.fixups )
+        this->log("set vm.footprint_suspend=%d\n", suspend);
+    int    newValue = suspend ? 1 : 0;
+    int    oldValue = 0;
+    size_t newlen   = sizeof(newValue);
+    size_t oldlen   = sizeof(oldValue);
+    int    ret      = ::sysctlbyname("vm.footprint_suspend", &oldValue, &oldlen, &newValue, newlen);
+    if ( this->config.log.fixups && (ret != 0) )
+        this->log("vm.footprint_suspend => %d, errno=%d\n", ret, errno);
+    _vmAccountingSuspended = suspend;
+#endif /* DYLD_FEATURE_MEMORY_ACCOUNTING */
+}
+
+void RuntimeState::increaseJetsamLimit(uint32_t size) {
+#if DYLD_FEATURE_MEMORY_ACCOUNTING
+    if (!config.security.internalInstall) {
+        // Early exit on customer installs
+        return;
+    }
+    if (size == 0) { return; }
+    // Nothing to be done if the call fails, just try to keep going
+    (void)memorystatus_control(MEMORYSTATUS_CMD_INCREASE_JETSAM_TASK_LIMIT, getpid(), size, NULL, 0);
+#endif /* DYLD_FEATURE_MEMORY_ACCOUNTING */
+}
+
+uint32_t RuntimeState::patchedDataConstPageCount() const {
+    uint32_t result = 0;
+#if DYLD_FEATURE_MEMORY_ACCOUNTING
+    if (patchedSharedCacheDataConstPages.empty()) { return 0;}
+    result = 1; // Start with one page to account for the overhead of the bitmaps
+    for (const auto& [address,bitmap] : patchedSharedCacheDataConstPages) {
+        result += bitmap.getBitCount();
+    }
+#endif /* DYLD_FEATURE_MEMORY_ACCOUNTING */
+    return result;
+}
+
+void RuntimeState::recordInDataConstBitmap(uint64_t vmAddress) {
+#if DYLD_FEATURE_MEMORY_ACCOUNTING
+    if (!config.security.internalInstall) {
+        // Early exit on customer installs
+        return;
+    }
+    if (patchedSharedCacheDataConstPages.empty()) {
+        // A bitmap for the pages of the cache can get quite large, for macOS with 4K pages eahc pages ends up representing ~128MB of
+        // virtual address space, and since the cache is > 16GB that would be > 512KB per process. Instead we exploit the fact that
+        // __DATA/__AUTH are small contiguous regions and just do bitmaps of each  of them. We store those in an OrderedSet keyed
+        // by the vm address to the start of the __DATA const
+        const DyldSharedCache* dyldCache = config.dyldCache.addr;
+        dyldCache->forEachCache(^(const DyldSharedCache *cache, bool& stopCache) {
+            cache->forEachRegion(^(const void*, uint64_t vmAddr, uint64_t size, uint32_t initProt,
+                                   uint32_t maxProt, uint64_t flags, uint64_t fileOffset, bool& stopRegion) {
+                if ( !(maxProt & VM_PROT_WRITE) ) {
+                    // Only track __DATA/__AUTH regions
+                    return;
+                }
+                uint64_t contentAddress     = vmAddr + dyldCache->slide();
+                uint64_t contentPageCount   = size / PAGE_SIZE;
+                // fprintf(stderr, "Creating bitmap for __DATA_CONST @ 0x%llx (size: %llu, bitmap size: %llu)\n", contentAddress, size,contentPageCount);
+                patchedSharedCacheDataConstPages.push_back(std::make_pair(contentAddress, AccountingBitmap((size_t)contentPageCount)));
+            });
+        });
+    }
+    std::pair<uint64_t, AccountingBitmap>* activeBitmap = nullptr;
+    for (auto& bitmapRecord : patchedSharedCacheDataConstPages) {
+        if (bitmapRecord.first > vmAddress) { break; }
+        activeBitmap = &bitmapRecord;
+    }
+    if (activeBitmap) {
+        uint64_t bitOffset = ((vmAddress & ~PAGE_MASK)-(activeBitmap->first))>>PAGE_SHIFT;
+        // fprintf(stderr, "Setting for address 0x%llx, page base 0x%llx, map: 0x%llx, bit: %llu\n", vmAddress, (vmAddress & ~PAGE_MASK),activeBitmap->first, ((vmAddress & ~PAGE_MASK)-(activeBitmap->first))>>PAGE_SHIFT);
+        if (bitOffset >= activeBitmap->second.size()) {
+            // Patched pointer is in a non-const page like __DATA, assume the page will be dirtied anyway and return
+            // fprintf(stderr, "SKIPPING\n");
+            return;
+        }
+        // Calculate page offset and set the bit
+        activeBitmap->second.setBit((size_t)((vmAddress & ~PAGE_MASK)-(activeBitmap->first))>>PAGE_SHIFT);
+    }
+#endif /* DYLD_FEATURE_MEMORY_ACCOUNTING */
+}
+
+
+
 #if !TARGET_OS_EXCLAVEKIT
 #if BUILDING_DYLD || BUILDING_UNIT_TESTS
 // if a dylib interposes a function which would be in the dyld cache, except there is a dylib
@@ -1265,25 +1315,6 @@ bool RuntimeState::hasMissingFlatLazySymbols() const
     return !_missingFlatLazySymbols.empty();
 }
 
-// <rdar://problem/29099600> dyld should tell the kernel when it is doing root fix-ups
-void RuntimeState::setVMAccountingSuspending(bool suspend)
-{
-#if TARGET_OS_IPHONE && !TARGET_OS_SIMULATOR
-    if ( suspend == _vmAccountingSuspended )
-        return;
-    if ( this->config.log.fixups )
-        this->log("set vm.footprint_suspend=%d\n", suspend);
-    int    newValue = suspend ? 1 : 0;
-    int    oldValue = 0;
-    size_t newlen   = sizeof(newValue);
-    size_t oldlen   = sizeof(oldValue);
-    int    ret      = ::sysctlbyname("vm.footprint_suspend", &oldValue, &oldlen, &newValue, newlen);
-    if ( this->config.log.fixups && (ret != 0) )
-        this->log("vm.footprint_suspend => %d, errno=%d\n", ret, errno);
-    _vmAccountingSuspended = suspend;
-#endif
-}
-
 #if SUPPORT_IMAGE_UNLOADING || BUILDING_UNIT_TESTS
 void RuntimeState::incDlRefCount(const Loader* ldr)
 {
@@ -1474,7 +1505,7 @@ void Reaper::finalizeDeadImages()
     if ( _deadCount == 0 )
         return;
 
-    if ( _state.libSystemInitialized() ) {
+    if ( _state.libdyldInitialized() ) {
         STACK_ALLOC_OVERFLOW_SAFE_ARRAY(__cxa_range_t, ranges, _deadCount);
         for ( LoaderAndUse& lu : _unloadables ) {
             if ( lu.inUse )
@@ -2215,8 +2246,7 @@ void RuntimeState::addNotifyBulkLoadImage(const Loader* callbackLoader, BulkLoad
 void RuntimeState::initialize()
 {
 #if BUILDING_DYLD
-    _libSystemInitialized = true;
-
+    setLibdyldInitialized();
     // assign pthread_key for per-thread dlerror messages
     // NOTE: dlerror uses malloc() - not dyld's Allocator to store per-thread error messages
     // Use a temporary on the stack to ensure we don't try to write directly to variables in protected memory while in the callback
@@ -2700,7 +2730,6 @@ void RuntimeState::initializeClosureMode()
                     mayBuildAndSavePBLSet    = false;
                     requirePBLSet            = false;
                     cachePBLS                = nullptr;
-                    _cachedDylibsPrebuiltLoaderSet = nullptr;
                 }
                 else if ( ::strcmp(closureMode, "1") == 0 ) {
                     lookForPBLSetOnDisk      = false;
@@ -2842,7 +2871,7 @@ bool RuntimeState::inPrebuiltLoader(const void* p, size_t len) const
 void RuntimeState::setDyldPatchedObjCClasses() const
 {
 #if !TARGET_OS_EXCLAVEKIT
-    if ( this->libSystemInitialized() ) {
+    if ( this->libdyldInitialized() ) {
         if ( this->libSystemHelpers.version() >= 3 )
             this->libSystemHelpers.setDyldPatchedObjCClasses();
     }
@@ -2873,6 +2902,8 @@ void DyldCacheDataConstLazyScopedWriter::makeWriteable() const
     if ( _wasMadeWritable )
         return;
     if ( !_state.config.process.enableDataConst )
+        return;
+    if ( _state.config.process.enableTproDataConst )
         return;
     if ( _state.config.dyldCache.addr == nullptr )
         return;

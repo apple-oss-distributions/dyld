@@ -91,9 +91,11 @@ public:
     std::vector<DylibState> dylibs;
 
     int impCachesVersion = 1;
+    uint32_t selectorSizeLimit = 0;
 
     IMPCachesBuilder(Diagnostics& diag, TimeRecorder& timeRecorder,
-                     const std::vector<imp_caches::Dylib>& inputDylibs, const json::Node& optimizerConfiguration);
+                     const std::vector<imp_caches::Dylib>& inputDylibs, const json::Node& optimizerConfiguration,
+                     uint32_t selectorSizeLimit);
 
     struct ObjCClass {
 

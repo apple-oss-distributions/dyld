@@ -25,6 +25,7 @@
 #include <stdio.h>
 #include <string.h>
 #include <stdlib.h>
+#include <cassert>
 
 #include "Instructions.h"
 
@@ -216,16 +217,22 @@ bool Instructions::arm64::changeLDRtoADD(uint32_t& instruction, uint16_t imm12)
 //
 
 
-bool Instructions::arm::isBranch24(uint32_t instruction, uint32_t instructionAddr, BranchKind& kind, uint32_t& targetAddr)
+bool Instructions::arm::isBranch24(uint32_t instruction, uint32_t instructionAddr, BranchKind& kind, uint32_t& targetAddr, bool& isCond)
 {
-    // NOTE: b and bl can have 4-bit condition, but blx cannot.
-    // we do not support conditions because you cannot transform bl to blx
-    if ( (instruction & 0xFF000000) == 0xEB000000 )
-        kind = bl;
-    else if ( (instruction & 0xFE000000) == 0xFA000000 )
-        kind = blx;
-    else if ( (instruction & 0x0F000000) == 0x0A000000 )
-        kind = b;
+    // 4 top bits are used to encode the
+    // 0xE0000000 -> no condition
+    // 0xF0000000 -> blx/bx variants
+    // other values are used to encode a code for the conditional execution
+    if ( ((instruction & 0xF0000000) != 0xF0000000) && (instruction & 0x0F000000) == 0x0B000000 ) {
+        kind   = bl;
+        isCond = (instruction & 0xF0000000) != 0xE0000000;
+    } else if ( (instruction & 0xFE000000) == 0xFA000000 ) {
+        kind   = blx;
+        isCond = false;
+    } else if ( ((instruction & 0x0F000000) == 0x0A000000) && ((instruction & 0xF0000000) != 0xF0000000 )) {
+        kind   = b;
+        isCond = (instruction & 0xF0000000) != 0xE0000000;
+    }
     else
         return false;
 
@@ -285,13 +292,20 @@ bool Instructions::arm::makeBranch24(BranchKind kind, uint64_t instructionAddr, 
 
     if ( kind != b ) {
         if ( targetIsThumb ) {
+            uint32_t maskedCond = instruction & 0xF0000000;
+            assert(((maskedCond == 0xF0000000) || (maskedCond == 0xE0000000)) && "ARM can't branch to thumb with non-blx instruction");
             uint32_t opcode = 0xFA000000;  // blx
             uint32_t disp   = (uint32_t)(delta >> 2) & 0x00FFFFFF;
             uint32_t h_bit  = (uint32_t)(delta << 23) & 0x01000000;
             instruction     = opcode | h_bit | disp;
         }
         else {
-            uint32_t opcode = 0xEB000000;  //  bl
+            // preserve branch condition
+            uint32_t maskedCond = (instruction & 0xF0000000);
+            // except 0xf, that's an encoding for blx
+            if ( maskedCond == 0xF0000000 )
+                maskedCond = 0xE0000000; // unconditional
+            uint32_t opcode = 0x0B000000 | maskedCond;  //  bl
             uint32_t disp   = (uint32_t)(delta >> 2) & 0x00FFFFFF;
             instruction     = opcode | disp;
         }
@@ -302,7 +316,7 @@ bool Instructions::arm::makeBranch24(BranchKind kind, uint64_t instructionAddr, 
     }
     else {
         // simple arm-to-arm branch
-        uint32_t opcode = 0xEA000000;  // b
+        uint32_t opcode = 0x0A000000 | (instruction & 0xF0000000);  // b
         instruction     = (opcode & 0xFF000000) | ((uint32_t)(delta >> 2) & 0x00FFFFFF);
         return true;
     }
@@ -311,6 +325,19 @@ bool Instructions::arm::makeBranch24(BranchKind kind, uint64_t instructionAddr, 
 
 bool Instructions::arm::makeThumbBranch22(BranchKind kind, uint64_t instructionAddr, uint64_t targetAddr, bool targetIsThumb, uint32_t& instruction)
 {
+    if ( targetIsThumb ) {
+        // Thumb to thumb branch, we will be generating a bl instruction.
+        // Delta is always even, so mask out thumb bit in target.
+        targetAddr &= ~1ULL;
+    } else {
+        // Target is not thumb, we will be generating a blx instruction
+        // Since blx cannot have the low bit set, set bit[1] of the target to
+        // bit[1] of the base address, so that the difference is a multiple of
+        // 4 bytes.
+        targetAddr &= ~2ULL;
+        targetAddr |= (instructionAddr & 2ULL);
+    }
+
     int64_t delta = targetAddr - (instructionAddr + 4); // pcrel to start of BL instruction + 4
     const int64_t b22Limit  = 0x00FFFFFF;               // Note: thumb1 has only a +/-4MB range.  We only support thumb2 which has a +/-16MB branch range
     if ( (delta > b22Limit) || (delta < (-b22Limit)) )
@@ -593,7 +620,7 @@ bool Instructions::riscv::setAUIPCTarget(uint32_t& instruction, uint64_t instruc
 
 bool Instructions::riscv::setLUITarget(uint32_t& instruction, uint64_t targetAddr)
 {
-    const int64_t fourGBLimit  = 0x7FFFF000;               // Note: riscv32 will always be in range, riscv64 might not be
+    const int64_t fourGBLimit  = 0xFFFFF000;               // Note: riscv32 will always be in range, riscv64 might not be
     if ( targetAddr > fourGBLimit )
         return false;
 

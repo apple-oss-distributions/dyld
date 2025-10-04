@@ -27,12 +27,21 @@
 #include <stdint.h>
 #include <string.h>
 #include <mach/machine.h>
+#include <sys/types.h>
+#include <sys/sysctl.h>
+
 #if __x86_64__
   #include <mach/mach.h>
   #include <mach/host_info.h>
   #include <mach/mach_host.h>
 #endif
 
+#ifndef CPU_SUBTYPE_ARM_V8M_MAIN
+    #define CPU_SUBTYPE_ARM_V8M_MAIN 17
+#endif
+#ifndef CPU_SUBTYPE_ARM_V8_1M_MAIN
+    #define CPU_SUBTYPE_ARM_V8_1M_MAIN 19
+#endif
 
 #include "Architecture.h"
 
@@ -112,14 +121,14 @@ Architecture Architecture::byName(std::string_view name)
     else if ( name == "arm64e.kernel" )
         return arm64e_kernel;
     else if ( name == "arm64e.kernel.v1" )
-        return arm64e_kernel_v2;
+        return arm64e_kernel_v1;
     else if ( name == "arm64e.kernel.v2" )
         return arm64e_kernel_v2;
     else if ( name == "arm64_32" )
         return arm64_32;
     else if ( name == "armv6" )
         return armv6;
-    else if ( name == "armv6m" )
+    else if ( (name == "armv6m")  || (name == "thumbv6m") )
         return armv6m;
     else if ( (name == "armv7k")  || (name == "thumbv7k") )
         return armv7k;
@@ -127,6 +136,10 @@ Architecture Architecture::byName(std::string_view name)
         return armv7m;
     else if ( (name == "armv7em") || (name == "thumbv7em") )
         return armv7em;
+    else if ( (name == "armv8m.main")  || (name == "thumbv8m.main") )
+        return armv8m_main;
+    else if ( (name == "armv8.1m.main") || (name == "thumbv8.1m.main") )
+        return armv8_1m_main;
     else if ( (name == "armv7s")  || (name == "thumbv7s") )
         return armv7s;
     else if ( (name == "armv7")   || (name == "thumbv7") )
@@ -174,6 +187,10 @@ const char* Architecture::name() const
         return "armv7m";
     else if ( *this == armv7em )
         return "armv7em";
+    else if ( *this == armv8m_main )
+        return "armv8m.main";
+    else if ( *this == armv8_1m_main )
+        return "armv8.1m.main";
     else if ( *this == armv7s )
         return "armv7s";
     else if ( *this == armv7 )
@@ -211,6 +228,8 @@ const constinit Architecture Architecture::armv6m(  CPU_TYPE_ARM,      CPU_SUBTY
 const constinit Architecture Architecture::armv7k(  CPU_TYPE_ARM,      CPU_SUBTYPE_ARM_V7K);
 const constinit Architecture Architecture::armv7m(  CPU_TYPE_ARM,      CPU_SUBTYPE_ARM_V7M);
 const constinit Architecture Architecture::armv7em( CPU_TYPE_ARM,      CPU_SUBTYPE_ARM_V7EM);
+const constinit Architecture Architecture::armv8m_main( CPU_TYPE_ARM,  CPU_SUBTYPE_ARM_V8M_MAIN);
+const constinit Architecture Architecture::armv8_1m_main(CPU_TYPE_ARM, CPU_SUBTYPE_ARM_V8_1M_MAIN);
 const constinit Architecture Architecture::invalid(0,0);
 
 // non-standard cpu subtypes
@@ -281,6 +300,8 @@ bool Architecture::usesArm32Instructions() const
         case CPU_SUBTYPE_ARM_V6M:
         case CPU_SUBTYPE_ARM_V7M:
         case CPU_SUBTYPE_ARM_V7EM:
+        case CPU_SUBTYPE_ARM_V8M_MAIN:
+        case CPU_SUBTYPE_ARM_V8_1M_MAIN:
             return false;   // these cores are thumb-only
     }
     return true;
@@ -292,10 +313,30 @@ bool Architecture::usesThumbInstructions() const
     return ( _cputype == CPU_TYPE_ARM );
 }
 
+bool Architecture::usesArmOrThumbInstructions() const
+{
+    return usesThumbInstructions() || usesArm32Instructions();
+}
+
 bool Architecture::usesArmZeroCostExceptions() const
 {
     // true for: armv7k
     return (_cputype == CPU_TYPE_ARM) && (_cpusubtype == CPU_SUBTYPE_ARM_V7K);
+}
+
+bool Architecture::isArmFirmwareVariant() const
+{
+    if ( _cputype != CPU_TYPE_ARM )
+       return false;
+    switch ( _cpusubtype ) {
+        case CPU_SUBTYPE_ARM_V6M:
+        case CPU_SUBTYPE_ARM_V7M:
+        case CPU_SUBTYPE_ARM_V7EM:
+        case CPU_SUBTYPE_ARM_V8M_MAIN:
+        case CPU_SUBTYPE_ARM_V8_1M_MAIN:
+            return true;
+    }
+    return false;
 }
 
 bool Architecture::isArm64eKernel() const
@@ -309,6 +350,17 @@ int Architecture::arm64eABIVersion() const
 {
     assert(usesArm64AuthPointers());
     return CPU_SUBTYPE_ARM64_PTR_AUTH_VERSION(_cpusubtype);
+}
+
+// returns how much the kernel prefers launch this arch
+int Architecture::kernelGrade() const
+{
+    const int32_t cputypes[2] = { _cputype, _cpusubtype };
+    int           grade       = 0;
+    size_t        gradeSize   = sizeof(grade);
+    if ( ::sysctlbyname("kern.grade_cputype", &grade, &gradeSize, (void*)cputypes, sizeof(cputypes)) == 0 )
+        return grade;
+    return 0;
 }
 
 

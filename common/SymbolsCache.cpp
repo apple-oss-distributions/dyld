@@ -2036,6 +2036,12 @@ Error SymbolsCache::checkNewBinaries(bool warnOnRemovedSymbols, ExecutableMode e
     for ( SymbolsCacheBinary& binary : osDylibs ) {
         osDylibMap[{ binary.installName, binary.platform, binary.arch }] = &binary;
         newClientsMap[{ binary.path, binary.platform, binary.arch }] = &binary;
+
+        if ( binary.path.starts_with("/System/Cryptexes/OS/") ) {
+            constexpr int prefixLen = std::string_view("/System/Cryptexes/OS").size();
+            if ( binary.path.substr(prefixLen) == binary.installName )
+                newClientsMap[{ binary.installName, binary.platform, binary.arch }] = &binary;
+        }
     }
 
     for ( SymbolsCacheBinary* binary : otherBinaries )
@@ -2294,6 +2300,8 @@ Error SymbolsCache::checkNewBinaries(bool warnOnRemovedSymbols, ExecutableMode e
             // Filter out LAR and _tests projects
             // Note project name looks something like: dyld_tests-version.json
             if ( binary.inputFileName.find("_tests-") != std::string_view::npos )
+                continue;
+            if ( binary.inputFileName.find("Tests-") != std::string_view::npos )
                 continue;
             if ( binary.inputFileName.find("_lar-") != std::string_view::npos )
                 continue;

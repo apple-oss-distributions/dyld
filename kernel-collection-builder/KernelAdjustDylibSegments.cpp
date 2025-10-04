@@ -37,7 +37,7 @@
 #include <unordered_set>
 
 #include "ASLRTracker.h"
-#include "CacheBuilder.h"
+#include "KernelCacheBuilder.h"
 #include "Diagnostics.h"
 #include "DyldSharedCache.h"
 #include "Trie.hpp"

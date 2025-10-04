@@ -142,6 +142,7 @@ private:
 
         static constinit const Epoch      invalid;
         static constinit const Epoch      fall2012; // iOS 6
+        static constinit const Epoch      fall2013; // iOS 7
         static constinit const Epoch      fall2015; // iOS 9
         static constinit const Epoch      fall2016;
         static constinit const Epoch      fall2017;

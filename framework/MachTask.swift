@@ -22,6 +22,8 @@
  * @APPLE_LICENSE_HEADER_END@
  */
 
+@_implementationOnly import Dyld_Internal
+
 // We implement this a ~Copyable even though it ref counted because the ref count are syscalls, and thus very expensive. When we do need to copy
 // we will do it explicitly via a borrowing constructor.
 struct MachTask: ~Copyable {
@@ -64,36 +66,32 @@ extension MachTask {
         }
         return result
     }
-    func readStruct<T>(address: RebasedAddress) throws(AtlasError) -> T {
-        let buffer = UnsafeMutableRawBufferPointer.allocate(byteCount:MemoryLayout<T>.size, alignment:MemoryLayout<T>.alignment)
-        defer {
-            buffer.deallocate()
-        }
-        guard let baseAddress = buffer.baseAddress else {
-            throw AtlasError.machError(KERN_RESOURCE_SHORTAGE)
-        }
-        var vmSize = vm_size_t(0)
-        let kr = vm_read_overwrite(self.port, vm_address_t(address.value & 0x00ff_ffff_ffff_ffff), vm_size_t(MemoryLayout<T>.size), vm_address_t(UInt(bitPattern:baseAddress)), &vmSize)
+    func readStruct<T>(address: RemoteAddress) throws(AtlasError) -> T {
+        var vmSize = mach_msg_type_number_t(0)
+        var bufferPtrScalar: vm_offset_t = 0
+        let kr = vm_read_safe(self.port, address.value, mach_vm_size_t(MemoryLayout<T>.size), &bufferPtrScalar, &vmSize)
         guard kr == KERN_SUCCESS else {
             throw AtlasError.machError(kr)
+        }
+        defer {
+            vm_deallocate(mach_task_self_, bufferPtrScalar, vm_size_t(vmSize))
         }
         guard vmSize >= MemoryLayout<T>.size else {
             throw AtlasError.placeHolder
         }
+        let bufferPtr = UnsafeMutableRawPointer(bitPattern: Int(bitPattern: UInt(bufferPtrScalar)))
+        let buffer = UnsafeMutableRawBufferPointer(start:bufferPtr, count:Int(MemoryLayout<T>.size))
         return buffer.load(as:T.self)
     }
-    func readData(address: RebasedAddress, size: UInt64) throws(AtlasError) -> Data {
-        var result = Data(count:Int(size))
-        var vmSize = vm_size_t(size)
-        let kr = result.withUnsafeMutableBytes {
-            return vm_read_overwrite(self.port, vm_address_t(address.value), vm_size_t(size), vm_address_t(UInt(bitPattern:$0.baseAddress!)), &vmSize)
-        }
+    func readData(address: RemoteAddress, size: UInt64) throws(AtlasError) -> Data {
+        var vmSize = mach_msg_type_number_t(0)
+        var bufferPtrScalar: vm_offset_t = 0
+        let kr = vm_read_safe(self.port, address.value, size, &bufferPtrScalar, &vmSize)
         guard kr == KERN_SUCCESS else {
-            throw .machError(kr)
+            throw AtlasError.machError(kr)
         }
-        guard vmSize >= size else {
-            throw .truncatedVMRead
-        }
-        return result
+        let bufferPtr = UnsafeMutableRawPointer(bitPattern: Int(bitPattern: UInt(bufferPtrScalar)))
+
+        return Data(bytesNoCopy:bufferPtr!, count:Int(vmSize), deallocator:.virtualMemory)
     }
 }

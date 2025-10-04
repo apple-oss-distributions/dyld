@@ -42,7 +42,7 @@
 #include "MachOAnalyzer.h"
 #include "Diagnostics.h"
 #include "DyldSharedCache.h"
-#include "CacheBuilder.h"
+#include "KernelCacheBuilder.h"
 
 static const bool verbose = false;
 
@@ -1258,22 +1258,22 @@ void CacheBuilder::optimizeAwayStubs(const std::vector<StubOptimizerInfo>& image
                                      const std::unordered_map<uint64_t, std::pair<uint64_t, uint8_t*>>& stubsToIslands,
                                      const char* const neverStubEliminateSymbols[])
 {
-    std::string archName = _options.archs->name();
+    std::string archName = _options.arch.name();
 #if SUPPORT_ARCH_arm64_32
-    if ( startsWith(archName, "arm64_32") ) {
+    if ( _options.arch == mach_o::Architecture::arm64_32 ) {
         bypassStubs<Pointer32<LittleEndian> >(images, archName, cacheSlide, dyldCache,
                                               stubsToIslands, neverStubEliminateSymbols,
                                               _diagnostics);
         return;
     }
 #endif
-    if ( startsWith(archName, "arm64") ) {
+    if ( _options.arch.sameCpu(mach_o::Architecture::arm64) ) {
         bypassStubs<Pointer64<LittleEndian> >(images, archName, cacheSlide, dyldCache,
                                               stubsToIslands, neverStubEliminateSymbols,
                                               _diagnostics);
         return;
     }
-    if ( archName == "armv7k" ) {
+    if ( _options.arch == mach_o::Architecture::armv7k ) {
         bypassStubs<Pointer32<LittleEndian> >(images, archName, cacheSlide, dyldCache,
                                               stubsToIslands, neverStubEliminateSymbols,
                                               _diagnostics);

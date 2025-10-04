@@ -96,9 +96,6 @@
 // VM layout of binaries/caches
 #define SUPPORT_VM_LAYOUT (!BUILDING_CACHE_BUILDER && !BUILDING_CACHE_BUILDER_UNIT_TESTS)
 
-// The cache builder either mmap()s output buffers, or vm_allocate()s them.  This tracks which one
-#define SUPPORT_CACHE_BUILDER_MEMORY_BUFFERS ( BUILDING_MRM_CACHE_BUILDER || BUILDING_SIM_CACHE_BUILDER || BUILDING_CACHE_BUILDER_UNIT_TESTS )
-
 #if defined(__MAC_OS_X_VERSION_MIN_REQUIRED)
 // Host tools can only use introspection APIs starting in macOS 12
 #define SUPPORT_HOST_INTROSPECTION (__MAC_OS_X_VERSION_MIN_REQUIRED >= 120000)
@@ -178,6 +175,9 @@ static_assert((DYLD_FEATURE_SIMULATOR_NOTIFICATION_HOST_SUPPORT && DYLD_FEATURE_
 
 #define DYLD_FEATURE_USE_INTERNAL_ALLOCATOR (BUILDING_DYLD || BUILDING_ALLOCATOR_UNIT_TESTS)
 
+// Memory accounting support for Jetsam
+#define DYLD_FEATURE_MEMORY_ACCOUNTING (BUILDING_DYLD && (TARGET_OS_IPHONE && !TARGET_OS_EXCLAVEKIT && !TARGET_OS_SIMULATOR))
+
 #define ALLOCATOR_LOGGING_ENABLED (0)
 #define ALLOCATOR_MAKE_TRACE (0)
 
@@ -212,6 +212,8 @@ static_assert((DYLD_FEATURE_SIMULATOR_NOTIFICATION_HOST_SUPPORT && DYLD_FEATURE_
 
 #define TPRO_SEGMENT(_align) TPRO_SECTION(__data, _align)
 
+#define remote_memory_audit_start()
+#define remote_memory_audit_end()
 
 #ifndef PATH_MAX
   #define PATH_MAX 1024

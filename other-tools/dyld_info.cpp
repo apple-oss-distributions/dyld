@@ -122,7 +122,7 @@ static void permString(uint32_t permFlags, char str[4])
 
 static void printSegments(const Header* header)
 {
-    if ( header->isPreload() ) {
+    if ( header->isPreload() || header->hasDiscontiguousSegments() ) {
         printf("    -segments:\n");
         printf("       file-offset vm-addr       segment     section         sect-size  seg-size  init/max-prot\n");
         __block std::string_view lastSegName;
@@ -668,6 +668,11 @@ static void printLoadCommands(const Image& image)
 static void printObjC(const Image& image)
 {
     printf("    -objc:\n");
+    if ( image.header()->inDyldCache() ) {
+        printf("        warning: cannot print live objc info from dylibs in dyld shared cache\n");
+        return;
+    }
+
     // build list of all fixups
     SymbolicatedImage symInfo(image);
 
@@ -1067,6 +1072,7 @@ static void dumpGOT(const SymbolicatedImage& symInfo, const Header::SectionInfo&
     const uint8_t* sectionContent    = symInfo.content(sectInfo);
     const uint8_t* sectionContentEnd = sectionContent + sectInfo.size;
     const uint8_t* curContent        = sectionContent;
+    const uint8_t  ptrSize           = symInfo.ptrSize();
     uint64_t       curAddr           = sectInfo.address;
     while ( curContent < sectionContentEnd ) {
         const Fixup::BindTarget* bindTarget;
@@ -1081,9 +1087,15 @@ static void dumpGOT(const SymbolicatedImage& symInfo, const Header::SectionInfo&
                 printf("%s\n", targetName);
             else
                 printf("0x%08llX\n", rebaseTargetVmAddr);
+        } else {
+            if ( ptrSize == 8 ) {
+                printf("0x%08llX\n", *(uint64_t*)curContent);
+            } else {
+                printf("0x%04X\n", *(uint32_t*)curContent);
+            }
         }
-        curContent += symInfo.ptrSize();
-        curAddr    += symInfo.ptrSize();
+        curContent += ptrSize;
+        curAddr    += ptrSize;
     }
 }
 
@@ -1255,7 +1267,8 @@ static void printDisassembly(const Image& image)
 
 static void usage()
 {
-    fprintf(stderr, "Usage: dyld_info [-arch <arch>]* <options>* <mach-o file>+ | -all_dir <dir> \n"
+    fprintf(stderr, "Usage: dyld_info <options>* <mach-o file>+ | -all_dir <dir> | -all_dyld_cache\n"
+            "\t-arch                       limit to specified architecture(s) (defaults to all architectures)\n"
             "\t-platform                   print platform (default if no options specified)\n"
             "\t-segments                   print segments (default if no options specified)\n"
             "\t-linked_dylibs              print all dylibs this image links against (default if no options specified)\n"
@@ -1263,12 +1276,12 @@ static void usage()
             "\t-fixups                     print locations dyld will rebase/bind\n"
             "\t-exports                    print all exported symbols\n"
             "\t-imports                    print all symbols needed from other dylibs\n"
+            "\t-objc                       print objc classes, categories, etc\n"
             "\t-fixup_chains               print info about chain format and starts\n"
             "\t-fixup_chain_details        print detailed info about every fixup in chain\n"
             "\t-fixup_chain_header         print detailed info about the fixup chains header\n"
             "\t-symbolic_fixups            print ranges of each atom of DATA with symbol name and fixups\n"
           //"\t-swift_protocols            print swift protocols\n"
-            "\t-objc                       print objc classes, categories, etc\n"
             "\t-shared_region              print shared cache (split seg) info\n"
             "\t-function_starts            print function starts information\n"
             "\t-opcodes                    print opcodes information\n"
@@ -1282,6 +1295,8 @@ static void usage()
             "\t-all_sections_bytes         print content of all sections, formatted as raw hex bytes\n"
             "\t-validate_only              only prints an malformedness about file(s)\n"
             "\t-no_validate                don't check for malformedness about file(s)\n"
+            "\t-all_dir                    starting is specified directory, recurse to find all mach-o files\n"
+            "\t-all_dyld_cache             show specified info about all dylibs in the dyld cache\n"
         );
 }
 

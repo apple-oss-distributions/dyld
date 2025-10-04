@@ -437,7 +437,10 @@ bool CompactUnwind::findUnwindInfo(uint32_t targetFunctionOffset, UnwindInfo& re
     }
     const uint32_t firstLevelIndex             = low;
     const uint32_t firstLevelFunctionOffset    = firstLevelTable[firstLevelIndex].functionOffset;
-    const uint32_t firstLevelEndFunctionOffset = firstLevelTable[firstLevelIndex+1].functionOffset;
+    const uint32_t firstLevelEndFunctionOffset =
+        (firstLevelIndex+1) >= _unwindTable->indexCount
+        ? firstLevelFunctionOffset + 1
+        : firstLevelTable[firstLevelIndex+1].functionOffset;
     const void*    secondLevelAddr             = (uint8_t*)_unwindTable + firstLevelTable[firstLevelIndex].secondLevelPagesSectionOffset;
 
     if ( targetFunctionOffset > firstLevelEndFunctionOffset )

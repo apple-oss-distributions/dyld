@@ -67,6 +67,7 @@
 #include "Utilities.h"
 
 #include "Header.h"
+#include "Universal.h"
 
 #if !TARGET_OS_EXCLAVEKIT
 // internal libc.a variable that needs to be reset during fork()
@@ -78,6 +79,7 @@ using dyld3::MachOLoaded;
 using mach_o::Header;
 using mach_o::Platform;
 using mach_o::PlatformAndVersions;
+using mach_o::Universal;
 using mach_o::Version32;
 
 extern const dyld3::MachOLoaded __dso_handle;
@@ -404,6 +406,19 @@ void APIs::obsolete_dyld_get_program_min_bridge_os_version()
 #endif
 }
 
+// For watchOS and bridgeOS this returns the equivalent iOS SDK version.
+static uint32_t mapLegacyVersion(mach_o::Version32 version, Platform basePlatform)
+{
+    if ( basePlatform == Platform::bridgeOS ) {
+        return version.value() + 0x00090000;
+    }
+    else if ( basePlatform == Platform::watchOS ) {
+        if ( version.major() < 26 )
+            return version.value() + 0x00070000;
+    }
+    return version.value();
+}
+
 //
 // Returns the sdk version (encode as nibble XXXX.YY.ZZ) that the
 // specified binary was built against.
@@ -421,16 +436,7 @@ uint32_t APIs::getSdkVersion(const mach_header* mh)
     PlatformAndVersions pvs     = getImagePlatformAndVersions((const Header*)mh);
     
     if ( pvs.platform == config.process.platform ) {
-        Platform basePlatform = pvs.platform.basePlatform();
-        if ( basePlatform == Platform::bridgeOS ) {
-            retval = pvs.sdk.value() + 0x00090000;
-        }
-        else if ( basePlatform == Platform::watchOS ) {
-            retval = pvs.sdk.value() + 0x00070000;
-        }
-        else {
-            retval = pvs.sdk.value();
-        }
+        retval = mapLegacyVersion(pvs.sdk, pvs.platform.basePlatform());
     }
 
     return retval;
@@ -458,16 +464,7 @@ uint32_t APIs::dyld_get_min_os_version(const mach_header* mh)
     PlatformAndVersions pvs     = getImagePlatformAndVersions((const Header*)mh);
     
     if ( pvs.platform == config.process.platform ) {
-        Platform basePlatform = pvs.platform.basePlatform();
-        if ( basePlatform == Platform::bridgeOS ) {
-            retval = pvs.minOS.value() + 0x00090000;
-        }
-        else if ( basePlatform == Platform::watchOS ) {
-            retval = pvs.minOS.value() + 0x00070000;
-        }
-        else {
-            retval = pvs.minOS.value();
-        }
+        retval = mapLegacyVersion(pvs.minOS, pvs.platform.basePlatform());
     }
     
     if ( config.log.apis )
@@ -1054,7 +1051,8 @@ bool APIs::_dyld_is_memory_immutable(const void* addr, size_t length)
         if ( addr < (void*)((uint8_t*)dyldCache + dyldCache->mappedSize()) ) {
             dyldCache->forEachCache(^(const DyldSharedCache *cache, bool& stopCache) {
                 cache->forEachRegion(^(const void* content, uint64_t vmAddr, uint64_t size,
-                                            uint32_t initProt, uint32_t maxProt, uint64_t flags, bool& stopRegion) {
+                                       uint32_t initProt, uint32_t maxProt, uint64_t flags,
+                                       uint64_t fileOffset, bool& stopRegion) {
                     if ( (addr > content) && (((uint8_t*)addr + length) < ((uint8_t*)content + size)) ) {
                         // Note: in cache __DATA_CONST has initProt=1 and initProt=3
                         // we don't want __DATA_CONST to be considered immutable, so we check maxProt
@@ -1178,25 +1176,30 @@ int APIs::dladdr(const void* addr, Dl_info* info)
 
 struct PerThreadErrorMessage
 {
-    size_t sizeAllocated;
     bool   valid;
     char   message[1];
 };
 
+
 #if !TARGET_OS_DRIVERKIT
 void APIs::clearErrorString()
 {
-    if ( (dlerrorPthreadKey() == -1) || !libSystemInitialized() )
+    // if dlopen/dlsym called before libSystem initialized, dlerrorPthreadKey() won't be set, and malloc won't be available
+    if ( (dlerrorPthreadKey() == -1) || !libdyldInitialized() )
         return;
-    PerThreadErrorMessage* errorBuffer = (PerThreadErrorMessage*)this->libSystemHelpers.pthread_getspecific(dlerrorPthreadKey());
-    if ( errorBuffer != nullptr )
-        errorBuffer->valid = false;
+
+    if ( PerThreadErrorMessage* errorBuffer = (PerThreadErrorMessage*)this->libSystemHelpers.pthread_getspecific(dlerrorPthreadKey()) ) {
+        if ( this->libSystemHelpers.malloc_size(errorBuffer) == 0 )
+            this->libSystemHelpers.pthread_setspecific(dlerrorPthreadKey(), nullptr);
+        else
+            errorBuffer->valid = false;
+    }
 }
 
 void APIs::setErrorString(const char* format, ...)
 {
     // if dlopen/dlsym called before libSystem initialized, dlerrorPthreadKey() won't be set, and malloc won't be available
-    if ( (dlerrorPthreadKey() == -1) || !libSystemInitialized() )
+    if ( (dlerrorPthreadKey() == -1) || !libdyldInitialized() )
         return;
 
 #if !TARGET_OS_EXCLAVEKIT
@@ -1218,29 +1221,34 @@ void APIs::setErrorString(const char* format, ...)
     size_t                 strLen      = strlen(buf) + 1;
 #endif // !TARGET_OS_EXCLAVEKIT
 
-    size_t                 sizeNeeded  = sizeof(PerThreadErrorMessage) + strLen;
-    PerThreadErrorMessage* errorBuffer = (PerThreadErrorMessage*)this->libSystemHelpers.pthread_getspecific(dlerrorPthreadKey());
-    if ( errorBuffer != nullptr ) {
-        if ( errorBuffer->sizeAllocated < sizeNeeded ) {
+    size_t                  sizeNeeded  = std::max(offsetof(PerThreadErrorMessage, message[strLen]), (size_t)256);
+    PerThreadErrorMessage*  errorBuffer = (PerThreadErrorMessage*)this->libSystemHelpers.pthread_getspecific(dlerrorPthreadKey());
+    bool                    doAllocate  = false;
+    if ( errorBuffer == nullptr ) {
+        doAllocate = true;
+    }
+    else {
+        // check buffer is owned by malloc
+        size_t size = this->libSystemHelpers.malloc_size(errorBuffer);
+        if ( size == 0 ) {
+            doAllocate = true;
+        }
+        else if ( size < sizeNeeded ) {
+            // existing buffer too small, free and allocate new buffer
             this->libSystemHelpers.free(errorBuffer);
-            errorBuffer = nullptr;
+            doAllocate = true;
         }
     }
-    if ( errorBuffer == nullptr ) {
-        size_t allocSize                 = std::max(sizeNeeded, (size_t)256);
-        // dlerrorPthreadKey is set up to call libSystem's free() on thread destruction, so this has to use libSystem's malloc()
-        PerThreadErrorMessage* p         = (PerThreadErrorMessage*)this->libSystemHelpers.malloc(allocSize);
-        p->sizeAllocated                 = allocSize;
-        p->valid                         = false;
-        this->libSystemHelpers.pthread_setspecific(dlerrorPthreadKey(), p);
-        errorBuffer = p;
+    if ( doAllocate ) {
+        errorBuffer = (PerThreadErrorMessage*)this->libSystemHelpers.malloc(sizeNeeded);
+        this->libSystemHelpers.pthread_setspecific(dlerrorPthreadKey(), errorBuffer);
     }
 #if !TARGET_OS_EXCLAVEKIT
-    strcpy(errorBuffer->message, _simple_string(buf));
+    strlcpy(errorBuffer->message, _simple_string(buf), sizeNeeded-1);
     errorBuffer->valid = true;
     _simple_sfree(buf);
 #else
-    strlcpy(errorBuffer->message, buf, errorBuffer->sizeAllocated);
+    strlcpy(errorBuffer->message, buf, sizeNeeded-1);
     errorBuffer->valid = true;
 #endif // !TARGET_OS_EXCLAVEKIT
 }
@@ -1250,16 +1258,19 @@ char* APIs::dlerror()
     if ( config.log.apis )
         log("dlerror()");
 
-    if ( (dlerrorPthreadKey() == -1) || !libSystemInitialized() )
+    if ( (dlerrorPthreadKey() == -1) || !libdyldInitialized() )
         return nullptr; // if dlopen/dlsym called before libSystem initialized, dlerrorPthreadKey() won't be set
+
     PerThreadErrorMessage* errorBuffer = (PerThreadErrorMessage*)this->libSystemHelpers.pthread_getspecific(dlerrorPthreadKey());
     if ( errorBuffer != nullptr ) {
-        if ( errorBuffer->valid ) {
-            // you can only call dlerror() once, then the message is cleared
-            errorBuffer->valid = false;
-            if ( config.log.apis )
-                log(" => '%s'\n", errorBuffer->message);
-            return errorBuffer->message;
+        if ( this->libSystemHelpers.malloc_size(errorBuffer) != 0 ) {
+            if ( errorBuffer->valid ) {
+                // you can only call dlerror() once, then the message is cleared
+                errorBuffer->valid = false;
+                if ( config.log.apis )
+                    log(" => '%s'\n", errorBuffer->message);
+                return errorBuffer->message;
+            }
         }
     }
     if ( config.log.apis )
@@ -1300,13 +1311,14 @@ void* APIs::dlopen(const char* path, int mode)
 void* APIs::dlopen_from(const char* path, int mode, void* addressInCaller)
 {
 #if SUPPPORT_PRE_LC_MAIN
-    if (!libSystemInitialized()) {
+    if (!libdyldInitialized()) {
         // Usually libSystem will already be initialized, but some legacy binaries can call dlopen() first. If they do then
         // we need to force initialization of libSystem at that time. The reason is any library will link to libSystem and
         // trigger its initializers anyway, but until libSystem is up unfair locks don't work. If we let that happen we will
         // skip taking the api lock on entry, but will try to unlock it on release triggering a lock assertion
         const_cast<Loader*>(this->libSystemLoader)->beginInitializers(*this);
         this->libSystemLoader->runInitializers(*this);
+        this->setLibSystemInitialized();
     }
 #endif
     dyld3::ScopedTimer timer(DBG_DYLD_TIMING_DLOPEN, path, mode, 0);
@@ -1792,7 +1804,8 @@ void* APIs::dlsym(void* handle, const char* symbolName)
         __block bool found = false;
         locks.withLoadersReadLock(^{
             for ( const dyld4::Loader* image : loaded ) {
-
+                if ( image->header(*this)->noDynamicAccess() )
+                    continue;
                 if ( !image->hiddenFromFlat() && image->hasExportedSymbol(diag, *this, underscoredName, Loader::shallow, Loader::runResolver, &result) ) {
                     found = true;
                     break;
@@ -1874,6 +1887,11 @@ void* APIs::dlsym(void* handle, const char* symbolName)
     }
 
     if ( result.targetLoader != nullptr ) {
+        if ( result.targetLoader->header(*this)->noDynamicAccess() ) {
+            if ( config.log.apis )
+                log("     dlsym(\"%s\") => NULL (no dynamic access)\n", symbolName);
+            return nullptr;
+        }
         void* ptr = (void*)result.targetAddressForDlsym;
 
         // Finalize the symbol if this is a pseudodylib loader.
@@ -2249,7 +2267,8 @@ int APIs::dyld_shared_cache_find_iterate_text(const uuid_t cacheUuid, const char
 
     // get base address of cache
     __block uint64_t cacheUnslidBaseAddress = 0;
-    sharedCache->forEachRegion(^(const void* content, uint64_t vmAddr, uint64_t size, uint32_t initProt, uint32_t maxProt, uint64_t flags, bool& stopRegion) {
+    sharedCache->forEachRegion(^(const void* content, uint64_t vmAddr, uint64_t size, uint32_t initProt,
+                                 uint32_t maxProt, uint64_t flags, uint64_t fileOffset, bool& stopRegion) {
         if ( cacheUnslidBaseAddress == 0 )
             cacheUnslidBaseAddress = vmAddr;
     });
@@ -3286,37 +3305,31 @@ NSObjectFileImageReturnCode APIs::NSCreateObjectFileImageFromMemory(const void* 
     if ( config.log.apis )
         log("NSCreateObjectFileImageFromMemory(%p, 0x%08lX)\n", memImage, memImageSize);
     // sanity check the buffer is a mach-o file
-    __block Diagnostics diag;
-
+    std::span<const uint8_t> content = { (const uint8_t*)memImage, memImageSize };
+    const Header* hdr = nullptr;
+    
     // check if it is current arch mach-o or fat with slice for current arch
-    bool             usable = false;
-    const MachOFile* mf     = (MachOFile*)memImage;
-    if ( mf->hasMachOMagic() && mf->isMachO(diag, memImageSize) ) {
-        usable = (config.process.archs->grade(mf->cputype, mf->cpusubtype, false) != 0);
+    if ( const Universal* uni = Universal::isUniversal(content) ) {
+        Universal::Slice slice;
+        if ( uni->bestSlice(*config.process.archs, false, slice) )
+            hdr = Header::isMachO(slice.buffer);
+        
+    } else {
+        hdr = Header::isMachO(content);
     }
-    else if ( const dyld3::FatFile* ff = dyld3::FatFile::isFatFile(memImage) ) {
-        uint64_t sliceOffset;
-        uint64_t sliceLen;
-        bool     missingSlice;
-        if ( ff->isFatFileWithSlice(diag, memImageSize, *config.process.archs, false, sliceOffset, sliceLen, missingSlice) ) {
-            mf = (MachOFile*)((long)memImage + sliceOffset);
-            if ( mf->isMachO(diag, sliceLen) ) {
-                usable = true;
-            }
-        }
-    }
-    if ( usable ) {
-        if ( !((const Header*)mf)->loadableIntoProcess(config.process.platform, "OFI", config.security.isInternalOS) )
-            usable = false;
-    }
-    if ( !usable ) {
+    
+    if ( hdr == nullptr )
         return NSObjectFileImageFailure;
-    }
-
+    
+    if ( ! config.process.archs->isCompatible(hdr->arch()) )
+        return NSObjectFileImageFailure;
+    
+    if ( !hdr->loadableIntoProcess(config.process.platform, "OFI", config.security.isInternalOS) )
+        return NSObjectFileImageFailure;
+    
     // this API can only be used with bundles
-    if ( !mf->isBundle() ) {
+    if ( !hdr->isBundle() )
         return NSObjectFileImageInappropriateFile;
-    }
 
     // some apps deallocate the buffer right after calling NSCreateObjectFileImageFromMemory(), so we need to copy the buffer
     vm_address_t newAddr = 0;
@@ -3956,6 +3969,7 @@ void APIs::runAllInitializersForMain()
     if (!libSystemInitialized()) {
         const_cast<Loader*>(this->libSystemLoader)->beginInitializers(*this);
         this->libSystemLoader->runInitializers(*this);
+        this->setLibSystemInitialized();
     }
 
 #if HAS_EXTERNAL_STATE
@@ -4184,6 +4198,15 @@ void APIs::_dyld_for_each_prewarming_range(PrewarmingDataFunc callback)
         callback(content, (size_t)vmSize);
     });
 #endif
+}
+
+void APIs::_dyld_call_with_writable_tpro_memory(void (*func)(void*), void* ctx) {
+    if (libSystemInitialized()) {
+        halt("Illegal TPRO memory access");
+    }
+    MemoryManager::withWritableMemory([&] {
+        func(ctx);
+    });
 }
 
 } // namespace

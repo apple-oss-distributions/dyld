@@ -53,6 +53,16 @@ using mach_o::Fixup;
 
 // llvm
 #if HAVE_LIBLTO
+
+// stdint.h used to declare those and they're required by llvm headers
+#ifndef __STDC_LIMIT_MACROS
+#define __STDC_LIMIT_MACROS
+#endif
+
+#ifndef __STDC_CONSTANT_MACROS
+#define __STDC_CONSTANT_MACROS
+#endif
+
     #include <llvm-c/Disassembler.h>
 #endif
 
@@ -137,6 +147,7 @@ protected:
 
     struct SectionSymbols {
         struct Sym { uint64_t offsetInSection; const char* name; };
+        std::string          sectStartName;
         Header::SectionInfo  sectInfo;
         std::vector<Sym>     symbols;
     };

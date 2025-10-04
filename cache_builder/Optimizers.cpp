@@ -373,11 +373,14 @@ uint64_t StubOptimizer::gotAddrFromArm64Stub(Diagnostics& diag, std::string_view
     return (stubVMAddr & (-4096)) + adrpValue*4096 + ldrValue*8;
 }
 
-void StubOptimizer::generateArm64StubTo(uint8_t* stubBuffer,
-                                        uint64_t stubVMAddr, uint64_t targetVMAddr)
+void StubOptimizer::generateArm64StubTo(uint8_t* stubBuffer, uint64_t stubVMAddr,
+                                         uint64_t gotVMAddr, uint64_t targetVMAddr)
 {
     int64_t adrpDelta = (targetVMAddr & -4096) - (stubVMAddr & -4096);
-
+    if ( std::abs(adrpDelta) > 0xFFFFE000 ) {
+        generateArm64StubToGOT(stubBuffer, stubVMAddr, gotVMAddr);
+        return;
+    }
     uint32_t immhi   = (adrpDelta >> 9) & (0x00FFFFE0);
     uint32_t immlo   = (adrpDelta << 17) & (0x60000000);
     uint32_t newADRP = (0x90000010) | immlo | immhi;
@@ -391,14 +394,14 @@ void StubOptimizer::generateArm64StubTo(uint8_t* stubBuffer,
 }
 
 void StubOptimizer::generateArm64StubToGOT(uint8_t* stubBuffer,
-                                           uint64_t stubVMAddr, uint64_t targetVMAddr)
+                                           uint64_t stubVMAddr, uint64_t gotVMAddr)
 {
-    int64_t adrpDelta = (targetVMAddr & -4096) - (stubVMAddr & -4096);
+    int64_t adrpDelta = (gotVMAddr & -4096) - (stubVMAddr & -4096);
 
     uint32_t immhi   = (adrpDelta >> 9) & (0x00FFFFE0);
     uint32_t immlo   = (adrpDelta << 17) & (0x60000000);
     uint32_t newADRP = (0x90000010) | immlo | immhi;
-    uint32_t off12   = (targetVMAddr & 0xFFF) >> 3;
+    uint32_t off12   = (gotVMAddr & 0xFFF) >> 3;
     uint32_t newLDR  = (0xF9400210) | (off12 << 10);
 
     uint32_t* stubInstructions = (uint32_t*)stubBuffer;
@@ -448,14 +451,14 @@ void StubOptimizer::generateArm64_32StubTo(uint8_t* stubBuffer,
 }
 
 void StubOptimizer::generateArm64_32StubToGOT(uint8_t* stubBuffer,
-                                              uint64_t stubVMAddr, uint64_t targetVMAddr)
+                                              uint64_t stubVMAddr, uint64_t gotVMAddr)
 {
-    int64_t adrpDelta = (targetVMAddr & -4096) - (stubVMAddr & -4096);
+    int64_t adrpDelta = (gotVMAddr & -4096) - (stubVMAddr & -4096);
 
     uint32_t immhi   = (adrpDelta >> 9) & (0x00FFFFE0);
     uint32_t immlo   = (adrpDelta << 17) & (0x60000000);
     uint32_t newADRP = (0x90000010) | immlo | immhi;
-    uint32_t off12   = (targetVMAddr & 0xFFF) >> 2;
+    uint32_t off12   = (gotVMAddr & 0xFFF) >> 2;
     uint32_t newLDR  = (0xB9400210) | (off12 << 10);
 
     uint32_t* stubInstructions = (uint32_t*)stubBuffer;
@@ -497,11 +500,14 @@ uint64_t StubOptimizer::gotAddrFromArm64eStub(Diagnostics& diag, std::string_vie
     return (stubVMAddr & (-4096)) + adrpValue*4096 + addValue;
 }
 
-void StubOptimizer::generateArm64eStubTo(uint8_t* stubBuffer,
-                                         uint64_t stubVMAddr, uint64_t targetVMAddr)
+void StubOptimizer::generateArm64eStubTo(uint8_t* stubBuffer, uint64_t stubVMAddr,
+                                         uint64_t gotVMAddr, uint64_t targetVMAddr)
 {
     int64_t adrpDelta = (targetVMAddr & -4096) - (stubVMAddr & -4096);
-
+    if ( std::abs(adrpDelta) > 0xFFFFE000 ) {
+        generateArm64eStubToGOT(stubBuffer, stubVMAddr, gotVMAddr);
+        return;
+    }
     uint32_t immhi   = (adrpDelta >> 9) & (0x00FFFFE0);
     uint32_t immlo   = (adrpDelta << 17) & (0x60000000);
     uint32_t newADRP = (0x90000010) | immlo | immhi;
@@ -516,14 +522,14 @@ void StubOptimizer::generateArm64eStubTo(uint8_t* stubBuffer,
 }
 
 void StubOptimizer::generateArm64eStubToGOT(uint8_t* stubBuffer,
-                                            uint64_t stubVMAddr, uint64_t targetVMAddr)
+                                            uint64_t stubVMAddr, uint64_t gotVMAddr)
 {
-    int64_t adrpDelta = (targetVMAddr & -4096) - (stubVMAddr & -4096);
+    int64_t adrpDelta = (gotVMAddr & -4096) - (stubVMAddr & -4096);
 
     uint32_t immhi   = (adrpDelta >> 9) & (0x00FFFFE0);
     uint32_t immlo   = (adrpDelta << 17) & (0x60000000);
     uint32_t newADRP = (0x90000011) | immlo | immhi;
-    uint32_t off12   = (targetVMAddr & 0xFFF);
+    uint32_t off12   = (gotVMAddr & 0xFFF);
     uint32_t newADD  = (0x91000231) | (off12 << 10);
 
     uint32_t* stubInstructions = (uint32_t*)stubBuffer;
@@ -531,4 +537,15 @@ void StubOptimizer::generateArm64eStubToGOT(uint8_t* stubBuffer,
     stubInstructions[1] = newADD;      // ADD   X17, X17, lazy_pointer@pageoff
     stubInstructions[2] = 0xF9400230;  // LDR   X16, [X17]
     stubInstructions[3] = 0xD71F0A11;  // BRAA  X16, X17
+}
+
+//
+// MARK: --- UniquedGOTsOptimizer methods ---
+//
+void UniquedGOTsOptimizer::forEachFunctionVariant(void (^callback)(const CoalescedGOTSection::FunctionVariantInfo& tv, uint64_t gotVMAddr,
+                                                                   dyld3::MachOFile::PointerMetaData pmd)) const
+{
+    this->regularGOTs.forEachFunctionVariant(callback);
+    this->authGOTs.forEachFunctionVariant(callback);
+    this->authPtrs.forEachFunctionVariant(callback);
 }

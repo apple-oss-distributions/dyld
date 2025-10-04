@@ -1316,6 +1316,13 @@ void PrebuiltObjC::make(Diagnostics& diag, RuntimeState& state)
             return;
 #endif
 
+#if BUILDING_CACHE_BUILDER
+        // The cache builder will crash if it gets a binary with cheaper roots and bind opcodes
+        // Given up if we see this case
+        if ( hdr->hasOpcodeFixups() )
+            return;
+#endif
+
         // This image is good so record it for use later.
         objcImages.emplace_back((const JustInTimeLoader*)ldr, hdr->preferredLoadAddress(), pointerSize);
         ObjCOptimizerImage& image = objcImages.back();

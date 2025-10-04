@@ -57,7 +57,7 @@ bool CompactUnwindWriter::encodingCannotBeMerged(Architecture arch, uint32_t enc
 
 // there are two bits in compact unwind that encode which personality function is used
 // this function keeps track of which personality functions are used and when their 2-bit index is
-void CompactUnwindWriter::updatePersonalityForEntry(WriterUnwindInfo& entry, std::vector<UniquePersonality>& personalities)
+bool CompactUnwindWriter::updatePersonalityForEntry(WriterUnwindInfo& entry, std::vector<UniquePersonality>& personalities)
 {
     if ( (entry.personalityHandle != nullptr) || (entry.personalityOffset != 0) ) {
         std::optional<uint32_t> index;
@@ -76,9 +76,14 @@ void CompactUnwindWriter::updatePersonalityForEntry(WriterUnwindInfo& entry, std
             index = personalities.size();
             personalities.push_back({ entry.personalityOffset, entry.personalityHandle });
         }
+        if ( *index > 2 ) {
+            _buildError = Error("too many personality routines for compact unwind to encode");
+            return false;
+        }
         // update entry with personality index
         entry.encoding |= ((index.value()+ 1) << (__builtin_ctz(UNWIND_PERSONALITY_MASK)) );
     }
+    return true;
 }
 
 void CompactUnwindWriter::compressDuplicates(Architecture arch, std::vector<WriterUnwindInfo>& entries, uint32_t& lsdaCount,
@@ -91,7 +96,10 @@ void CompactUnwindWriter::compressDuplicates(Architecture arch, std::vector<Writ
     size_t inEntriesSize = entries.size();
     std::unordered_map<compact_unwind_encoding_t, unsigned int> encodingsUsed;
     std::erase_if(entries, [&](WriterUnwindInfo& entry) {
-        this->updatePersonalityForEntry(entry, personalities);
+        if ( _buildError ) // erase all entries after building failed
+            return true;
+        if ( !this->updatePersonalityForEntry(entry, personalities) )
+            return true;
         bool newNeedsDwarf  = encodingMeansUseDwarf(arch, entry.encoding);
         bool cannotBeMerged = encodingCannotBeMerged(arch, entry.encoding);
         bool duplicate      = true;
@@ -111,6 +119,9 @@ void CompactUnwindWriter::compressDuplicates(Architecture arch, std::vector<Writ
         last = entry;
         return duplicate;
     });
+
+    if ( _buildError )
+        return;
 
     using EncodingsAndUsage = std::pair<compact_unwind_encoding_t, unsigned int>;
     // put encodings into a vector and sort them descending by frequency and
@@ -334,7 +345,8 @@ CompactUnwindWriter::CompactUnwindWriter(Architecture arch, std::vector<WriterUn
     CommonEncodingsMap              commonEncodings;
     std::vector<UniquePersonality>  personalities;
     compressDuplicates(arch, unwindInfos, lsdaCount, commonEncodings, personalities);
-    // FIXME: need a way to error out if there are more than 3 personality functions used
+    if ( _buildError )
+        return;
 
     // calculate worst case size for all unwind info pages when allocating buffer
     const size_t entriesPerRegularPage = (maxPageSize-sizeof(unwind_info_regular_second_level_page_header))/sizeof(unwind_info_regular_second_level_entry);

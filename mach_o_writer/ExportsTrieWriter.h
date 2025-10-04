@@ -102,7 +102,7 @@ public:
 
     operator ExportsTrie() const;
 
-    Error           valid(uint64_t maxVmOffset) const;
+    Error           valid(uint64_t baseAddr, uint64_t maxVmOffset) const;
 };
 
 

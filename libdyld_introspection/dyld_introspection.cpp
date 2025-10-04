@@ -26,6 +26,8 @@
 
 #if !TARGET_OS_EXCLAVEKIT
 
+#include <System/sys/csr.h> // For csr_check()
+
 #include "dyld_introspection.h"
 #include "dyld_cache_format.h"
 #include "ProcessAtlas.h"
@@ -84,13 +86,31 @@ IntrospectionVtable* dyldFrameworkIntrospectionVtable() {
         uint32_t legnth = 4096;
         _NSGetExecutablePath(&pathBuffer[0], &legnth);
         const char* baseName = basename(pathBuffer);
-
-        if ((strcmp(baseName, "ReportCrash") == 0)
-            || (strcmp(baseName, "sandboxd") == 0)
-            || (strcmp(baseName, "com.apple.dt.instruments.dtsecurity") == 0)
+        if (strcmp(baseName, "ReportCrash") == 0) {
+            bool internalInstall = false;
+#if TARGET_OS_IPHONE && !TARGET_OS_SIMULATOR
+            uint32_t devFlags = *((uint32_t*)_COMM_PAGE_DEV_FIRM);
+            if ((devFlags & 1) == 1) {
+                internalInstall = true;
+            }
+#elif TARGET_OS_OSX
+            if (::csr_check(CSR_ALLOW_APPLE_INTERNAL) == 0) {
+                internalInstall = true;
+            }
+#endif
+            // Get a value 0..<100
+            uint32_t randValue = arc4random_uniform(100);
+            // Increase this up to 99 for all runs
+            if (!internalInstall || (randValue > 20)) {
+                useAtlas = false;
+            }
+        }
+        if ((strcmp(baseName, "com.apple.dt.instruments.dtsecurity") == 0)
             || (strcmp(baseName, "DTServiceHub") == 0)
             || (strcmp(baseName, "trace") == 0)
-            || (strcmp(baseName, "trace_internal") == 0)) {
+            || (strcmp(baseName, "trace_internal") == 0)
+            || (strcmp(baseName, "apple-hwtrace") == 0)
+            || (strcmp(baseName, "Xcode") == 0)) {
             useAtlas = false;
         }
 #if !TARGET_OS_EXCLAVEKIT

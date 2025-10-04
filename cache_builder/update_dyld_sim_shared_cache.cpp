@@ -365,10 +365,6 @@ static bool writeMRMResults(bool cacheBuildSuccess, MRMSharedCacheBuilder* share
                     continue;
             }
 
-            // We don't have an FD on the sim caches.  See rdar://66598213
-#if !SUPPORT_CACHE_BUILDER_MEMORY_BUFFERS
-#error Invalid config
-#endif
             if ( fileResult.data != nullptr ) {
                 const std::string path = dstRoot + "/" + fileResult.path;
                 std::string pathTemplate = path + "-XXXXXX";
@@ -430,7 +426,7 @@ static mach_o::Platform getPlatform(Diagnostics& diags, std::string_view rootPat
         });
     } else {
         const mach_o::Header* mh = (mach_o::Header*)mappedFile->buffer;
-        if ( mh->valid(mappedFile->bufferSize) ) {
+        if ( mh->valid(mappedFile->bufferSize).noError() ) {
             mach_o::PlatformAndVersions pvs = mh->platformAndVersions();
             if ( platform.empty() )
                 platform = pvs.platform;

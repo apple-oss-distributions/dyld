@@ -42,6 +42,7 @@
 #include "Header.h"
 #include "DyldSharedCache.h"
 #include "Vector.h"
+#include "SafeVMPrimitives.h"
 
 #include <sys/fsgetpath.h>
 #include <mach-o/dyld_priv.h>
@@ -146,7 +147,9 @@ struct RemoteMap {
             (void)vm_deallocate(mach_task_self(), (vm_address_t)localAddress, _size);
             return;
         }
+        remote_memory_audit_start();
         memcpy(_data, (void *)localAddress, _size);
+        remote_memory_audit_end();
         (void)vm_deallocate(mach_task_self(), (vm_address_t)localAddress, _size);
     }
     RemoteMap(const RemoteMap&) = delete;

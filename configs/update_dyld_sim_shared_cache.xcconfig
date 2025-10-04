@@ -1,9 +1,17 @@
 #include "<DEVELOPER_DIR>/AppleInternal/XcodeConfig/PlatformSupportHost.xcconfig"
-#include "base.xcconfig"
+#include "tools_base.xcconfig"
 
-ARCHS                     = arm64 x86_64
-MACOSX_DEPLOYMENT_TARGET  = 13.0
+ARCHS[sdk=macosx*] = x86_64 arm64
+EXCLUDED_ARCHS = arm64e
 
 INSTALL_PATH = $(SIMULATOR_RUNTIME_BUNDLE_INSTALL_DIR)/Contents/Resources
 
 OTHER_LDFLAGS = $(inherited) -lCrashReporterClient
+
+GCC_PREPROCESSOR_DEFINITIONS = $(inherited) BUILDING_CACHE_BUILDER=1 BUILDING_SIM_CACHE_BUILDER=1 BUILDING_MACHO_WRITER=1
+
+// TODO: Clean these up.  They were moved from the build settings
+MERGED_BINARY_TYPE = automatic
+SDKROOT = macosx.internal
+SIMULATOR_DIR_NAME = $(PLATFORM_FAMILY_NAME_$(DEVICE_PLATFORM_NAME)) $(IPHONE_SDK_MARKETING_VERSION)
+USER_HEADER_SEARCH_PATHS = ./dyld ./common ./cache_builder

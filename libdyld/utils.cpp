@@ -26,43 +26,51 @@
 #if !TARGET_OS_EXCLAVEKIT
 
 #include <string.h>
+#include <unistd.h>
 #include <sys/mman.h>
 #include <sys/types.h>
 #include <sys/stat.h>
 #include <mach-o/utils.h>
 #include <mach-o/utils_priv.h>
 #include <mach-o/dyld_priv.h>
+#include <TargetConditionals.h>
 
-#include "MachOFile.h"
 #include "FileUtils.h"
 #include "DyldDelegates.h"
 
 // mach_o
 #include "Architecture.h"
+#include "Error.h"
+#include "Fixup.h"
+#include "GradedArchitectures.h"
 #include "Header.h"
 #include "Image.h"
-#include "Error.h"
-#include "Version32.h"
-#include "Fixup.h"
 #include "Symbol.h"
+#include "Universal.h"
+#include "Version32.h"
 
-using dyld3::MachOFile;
-using dyld3::FatFile;
-using dyld3::GradedArchs;
 
+using mach_o::Architecture;
+using mach_o::Error;
+using mach_o::Fixup;
+using mach_o::GradedArchitectures;
 using mach_o::Header;
 using mach_o::Image;
-using mach_o::Error;
+using mach_o::LinkedDylibAttributes;
+using mach_o::Platform;
+using mach_o::Symbol;
+using mach_o::Universal;
 using mach_o::Version32;
 using mach_o::Version64;
 using mach_o::LinkedDylibAttributes;
 using mach_o::Fixup;
 using mach_o::Symbol;
 using mach_o::Platform;
+using mach_o::Architecture;
 
 // used by unit tests
 __attribute__((visibility("hidden")))
-int macho_best_slice_fd_internal(int fd, Platform platform, const GradedArchs& launchArchs, const GradedArchs& dylibArchs,  bool isOSBinary,
+int macho_best_slice_fd_internal(int fd, Platform platform, const GradedArchitectures& launchArchs, const GradedArchitectures& dylibArchs,  bool isOSBinary,
                                     void (^bestSlice)(const struct mach_header* slice, uint64_t sliceOffset, size_t sliceSize));
 
 
@@ -72,18 +80,19 @@ int macho_best_slice_fd_internal(int fd, Platform platform, const GradedArchs& l
 
 bool macho_cpu_type_for_arch_name(const char* archName, cpu_type_t* type, cpu_subtype_t* subtype)
 {
-    mach_o::Architecture arch = mach_o::Architecture::byName(archName);
-    if ( arch == mach_o::Architecture::invalid )
+    Architecture arch = Architecture::byName(archName);
+    if ( arch == Architecture::invalid )
         return false;
     
     *type = arch.cpuType();
     *subtype = arch.cpuSubtype();
+    
     return true;
 }
 
 const char* macho_arch_name_for_cpu_type(cpu_type_t type, cpu_subtype_t subtype)
 {
-    const char* result = mach_o::Architecture(type, subtype).name();
+    const char* result = Architecture(type, subtype).name();
     if ( strcmp(result, "unknown") == 0 )
         return nullptr;
     // Strip any suffix that further specifies the exact arm64e type (.old, .kernel, etc).
@@ -122,28 +131,35 @@ int macho_for_each_slice_in_fd(int fd, void (^callback)(const struct mach_header
     if ( ::fstat(fd, &statbuf) == -1 )
         return errno;
 
+    // when running as "root", calling open() on a file with no read-permissions actually succeeds, but we need it to fail
+    if ( ((statbuf.st_mode & (S_IRUSR|S_IROTH)) == 0) && (geteuid() == 0) )
+        return EACCES;
+
     const void* mappedFile = ::mmap(nullptr, (size_t)statbuf.st_size, PROT_READ, MAP_PRIVATE, fd, 0);
     if ( mappedFile == MAP_FAILED )
         return errno;
 
     int result = 0;
-    Diagnostics diag;
-    if ( const FatFile* ff = FatFile::isFatFile(mappedFile) ) {
-        ff->forEachSlice(diag, statbuf.st_size, ^(uint32_t sliceCpuType, uint32_t sliceCpuSubType, const void* sliceStart, uint64_t sliceSize, bool& stop) {
-            size_t sliceOffset = (uint8_t*)sliceStart - (uint8_t*)mappedFile;
-            if ( callback )
-                callback((mach_header*)sliceStart, sliceOffset, (size_t)sliceSize, &stop);
+    std::span<const uint8_t> content = {(uint8_t*)mappedFile, (size_t)statbuf.st_size};
+    if ( const Universal* uni = Universal::isUniversal(content) ) {
+        Error error = uni->valid(content.size());
+        if ( error.hasError() )
+            return EBADMACHO;
+        
+        uni->forEachSlice(^(Universal::Slice slice, bool &stop) {
+            if ( callback ) {
+                uint64_t fileOffset = slice.buffer.data() - content.data();
+                callback((const mach_header*)slice.buffer.data(), fileOffset, slice.buffer.size(), &stop);
+            }
         });
-        if ( diag.hasError() )
-            result = EBADMACHO;
     }
-    else if ( ((MachOFile*)mappedFile)->isMachO(diag, statbuf.st_size) ) {
+    else if ( const Header* hdr = Header::isMachO(content) ) {
         bool stop;
         if ( callback )
-            callback((mach_header*)mappedFile, 0, (size_t)statbuf.st_size, &stop);
+            callback((const mach_header*)hdr, 0, content.size(), &stop);
     }
     else {
-        // not a fat file nor a mach-o file
+        // not a universal file nor a mach-o file
         result = EFTYPE;
     }
 
@@ -164,18 +180,18 @@ int macho_best_slice(const char* path, void (^bestSlice)(const struct mach_heade
     return result;
 }
 
-static bool launchableOnCurrentPlatform(const Header* mh)
+static bool launchableOnCurrentPlatform(const Header* hdr)
 {
 #if TARGET_OS_OSX
     // macOS is special and can launch macOS, catalyst, and iOS apps
-    return ( mh->builtForPlatform(Platform::macOS) || mh->builtForPlatform(Platform::macCatalyst) || mh->builtForPlatform(Platform::iOS) );
+    return ( hdr->builtForPlatform(Platform::macOS) || hdr->builtForPlatform(Platform::macCatalyst) || hdr->builtForPlatform(Platform::iOS) );
 #else
-    return mh->builtForPlatform(Platform::current());
+    return hdr->builtForPlatform(Platform::current());
 #endif
 }
 
 // use directly by unit tests
-int macho_best_slice_fd_internal(int fd, Platform platform, const GradedArchs& launchArchs, const GradedArchs& dylibArchs, bool isOSBinary,
+int macho_best_slice_fd_internal(int fd, Platform platform, const GradedArchitectures& launchArchs, const GradedArchitectures& dylibArchs, bool isOSBinary,
                                     void (^ _Nullable bestSlice)(const struct mach_header* slice, uint64_t fileOffset, size_t sliceSize))
 {
     struct stat statbuf;
@@ -187,52 +203,44 @@ int macho_best_slice_fd_internal(int fd, Platform platform, const GradedArchs& l
     if ( mappedFile == MAP_FAILED )
         return errno;
  
-    Diagnostics  diag;
     int result = 0;
-    if ( const FatFile* ff = FatFile::isFatFile(mappedFile) ) {
-        __block int      bestGrade   = 0;
-        __block uint64_t sliceOffset = 0;
-        __block uint64_t sliceLen    = 0;
-        ff->forEachSlice(diag, statbuf.st_size, ^(uint32_t sliceCpuType, uint32_t sliceCpuSubType, const void* sliceStart, uint64_t sliceSize, bool& stop) {
-            if ( const Header* mh = Header::isMachO({(const uint8_t*)sliceStart, (size_t)sliceSize}) ) {
-                if ( mh->isMainExecutable() ) {
-                    int sliceGrade = launchArchs.grade(mh->arch().cpuType(), mh->arch().cpuSubtype(), isOSBinary);
-                    if ( (sliceGrade > bestGrade) && launchableOnCurrentPlatform(mh) ) {
-                        sliceOffset = (char*)sliceStart - (char*)mappedFile;
-                        sliceLen    = sliceSize;
-                        bestGrade   = sliceGrade;
-                    }
-                }
-                else {
-                    int sliceGrade = dylibArchs.grade(mh->arch().cpuType(), mh->arch().cpuSubtype(), isOSBinary);
-                    if ( (sliceGrade > bestGrade) && mh->loadableIntoProcess(platform, "") ) {
-                        sliceOffset = (char*)sliceStart - (char*)mappedFile;
-                        sliceLen    = sliceSize;
-                        bestGrade   = sliceGrade;
-                    }
-                }
-            }
-        });
-        if ( diag.hasError() )
+    std::span<const uint8_t> content = {(uint8_t*)mappedFile, (size_t)statbuf.st_size};
+    if ( const Universal* uni = Universal::isUniversal(content) ) {
+        Error error = uni->valid(content.size());
+        if ( error.hasError() )
             return EBADMACHO;
-
-        if ( bestGrade != 0 ) {
-            if ( bestSlice )
-                bestSlice((MachOFile*)((char*)mappedFile + sliceOffset), (size_t)sliceOffset, (size_t)sliceLen);
+        
+        Universal::Slice launchSlice, dylibSlice;
+        uni->bestSlice(launchArchs, isOSBinary, launchSlice);
+        uni->bestSlice(dylibArchs, isOSBinary, dylibSlice);
+        const Header* exe = Header::isMachO(launchSlice.buffer);
+        const Header* dylib = Header::isMachO(dylibSlice.buffer);
+        if ( exe && exe->isMainExecutable() ) {
+            if ( bestSlice ) {
+                uint64_t fileOffset = launchSlice.buffer.data() - content.data();
+                bestSlice((const mach_header*)launchSlice.buffer.data(), fileOffset, launchSlice.buffer.size());
+            }
+        }
+        else if ( dylib && !dylib->isMainExecutable() ) {
+            if ( bestSlice ) {
+                uint64_t fileOffset = dylibSlice.buffer.data() - content.data();
+                bestSlice((const mach_header*)dylibSlice.buffer.data(), fileOffset, dylibSlice.buffer.size());
+            }
         }
         else
             result = EBADARCH;
     }
-    else if ( const Header* mh = Header::isMachO({(const uint8_t*)mappedFile, (size_t)statbuf.st_size}) ) {
-        if ( mh->isMainExecutable() && (launchArchs.grade(mh->arch().cpuType(), mh->arch().cpuSubtype(), isOSBinary) != 0) && launchableOnCurrentPlatform(mh) )  {
+    else if ( const Header* hdr = Header::isMachO(content) ) {
+        if (    hdr->isMainExecutable()
+            &&  (launchArchs.isCompatible(hdr->arch(), isOSBinary) != 0) && launchableOnCurrentPlatform(hdr) )  {
             // the "best" of a main executable must pass grading and be a launchable
             if ( bestSlice )
-                bestSlice((const mach_header*)mh, 0, (size_t)statbuf.st_size);
+                bestSlice((const mach_header*)hdr, 0, content.size());
         }
-        else if ( (dylibArchs.grade(mh->arch().cpuType(), mh->arch().cpuSubtype(), isOSBinary) != 0) && mh->loadableIntoProcess(platform, "") ) {
+        else if ( (dylibArchs.isCompatible(hdr->arch(), isOSBinary) != 0) && hdr->loadableIntoProcess(platform, "") ) {
             // the "best" of a dylib/bundle must pass grading and match the platform of the current process
             if ( bestSlice )
-                bestSlice((const mach_header*)mh, 0, (size_t)statbuf.st_size);
+                bestSlice((const mach_header*)hdr, 0, content.size());
         }
         else {
             result = EBADARCH;
@@ -267,16 +275,16 @@ int macho_best_slice_in_fd(int fd, void (^bestSlice)(const struct mach_header* s
     if ( stripPointer(p) != p )
        keysOff = false;
 #endif
-    const Platform     platform    = Platform::current();
-    const GradedArchs* launchArchs = &GradedArchs::launchCurrentOS();
-    const GradedArchs* dylibArchs  = &GradedArchs::forCurrentOS(keysOff, false);
+    const Platform              platform    = Platform::current();
+    const GradedArchitectures*  launchArchs = &GradedArchitectures::currentLaunch();
+    const GradedArchitectures&  dylibArchs  = GradedArchitectures::currentLoad(keysOff, false);
 #if TARGET_OS_SIMULATOR
     const char* simArchNames = getenv("SIMULATOR_ARCHS");
     if ( simArchNames == nullptr )
         simArchNames = "x86_64";
-    launchArchs = &GradedArchs::launchCurrentOS(simArchNames);
+    launchArchs = &GradedArchitectures::currentLaunch(simArchNames);
 #endif
-    return macho_best_slice_fd_internal(fd, platform, *launchArchs, *dylibArchs, false, bestSlice);
+    return macho_best_slice_fd_internal(fd, platform, *launchArchs, dylibArchs, false, bestSlice);
 }
 
 
@@ -457,5 +465,137 @@ bool macho_source_version(const struct mach_header* _Nonnull mh, uint64_t* _Nonn
     *version = v.value();
     return true;
 }
+
+#if !TARGET_OS_SIMULATOR
+static bool hasFile(const char* path)
+{
+    struct stat statBuf;
+    if ( stat(path, &statBuf) == 0 )
+        return true;
+    char devPath[PATH_MAX];
+    strlcpy(devPath, path, sizeof(devPath));
+    strlcat(devPath, ".development", sizeof(devPath));
+    return ( stat(devPath, &statBuf) == 0 );
+}
+#endif
+
+
+void macho_for_each_runnable_arch_name(void (^ _Nonnull callback)(const char* _Nonnull archName, bool* _Nonnull stop))
+{
+    bool stop = false;
+#if TARGET_OS_SIMULATOR
+    // FIXME:  Should $SIMULATOR_ARCHS be used? Or is this API only about what the current simulator instance can run?
+    // fallthrough to arch specific handling
+#elif TARGET_OS_OSX
+    if ( hasFile("/System/Cryptexes/OS/System/Library/dyld/dyld_shared_cache_arm64e") ) {
+        // Apple Silicon mac
+        callback("arm64e", &stop);
+        if ( stop )
+            return;
+        callback("arm64", &stop);
+        if ( stop )
+            return;
+        if ( hasFile("/System/Cryptexes/OS/System/Library/dyld/dyld_shared_cache_x86_64") ) {
+            // has Rosetta support
+            callback("x86_64", &stop);
+        }
+        return;
+    }
+    else if ( hasFile("/System/Cryptexes/OS/System/Library/dyld/dyld_shared_cache_x86_64h") ) {
+        // Intel mac
+        callback("x86_64h", &stop);
+        if ( stop )
+            return;
+        callback("x86_64", &stop);
+        return;
+    }
+    else if ( hasFile("/System/Cryptexes/OS/System/Library/dyld/dyld_shared_cache_x86_64") ) {
+        // Old Intel mac
+        callback("x86_64", &stop);
+        return;
+    }
+#elif TARGET_OS_IOS
+    if ( hasFile("/System/Cryptexes/OS/System/Library/Caches/com.apple.dyld/dyld_shared_cache_arm64e") ) {
+        // iPhone or iPad
+        callback("arm64e", &stop);
+        if ( stop )
+            return;
+        callback("arm64", &stop);
+        return;
+    }
+    else if ( hasFile("/System/Cryptexes/OS/System/Library/Caches/com.apple.dyld/dyld_shared_cache_arm64") ) {
+        // old iPhone or ipad
+        callback("arm64", &stop);
+        return;
+    }
+#elif TARGET_OS_WATCH
+    // gather grading for architectures
+    struct NameAndGrade { const char* name; int grade=0; };
+    NameAndGrade gn[3] = { { "arm64e"}, { "arm64"}, { "arm64_32"} };
+    if ( hasFile("/System/Library/Caches/com.apple.dyld/dyld_shared_cache_arm64e") ) {
+        // M11 or later watch that supports 64-bit userland
+        gn[0].grade = Architecture::arm64e.kernelGrade();
+        gn[1].grade = Architecture::arm64.kernelGrade();
+    }
+    if ( hasFile("/System/Library/Caches/com.apple.dyld/dyld_shared_cache_arm64_32") ) {
+        gn[2].grade = Architecture::arm64_32.kernelGrade();
+    }
+    // sort three entries by grade (unrolled bubble sort)
+    if ( gn[0].grade < gn[1].grade )
+        std::swap(gn[0], gn[1]);
+    if ( gn[1].grade < gn[2].grade )
+        std::swap(gn[1], gn[2]);
+    if ( gn[0].grade < gn[1].grade )
+        std::swap(gn[0], gn[1]);
+    // return them in grading order
+    int usableCount = 0;
+    for ( int i=0; i < 3; ++i ) {
+        // skip NameAndGrade elements with no grade value
+        if ( gn[i].grade != 0 ) {
+            ++usableCount;
+            callback(gn[i].name, &stop);
+            if ( stop )
+                return;
+        }
+    }
+    if ( usableCount > 0 )
+        return;
+    // otherwise fall into no-dyld-cache case below
+#else
+    if ( hasFile("/System/Library/Caches/com.apple.dyld/dyld_shared_cache_arm64e") ) {
+        // Apple TV or other device with arm64e support
+        callback("arm64e", &stop);
+        if ( stop )
+            return;
+        callback("arm64", &stop);
+        return;
+    }
+    else if ( hasFile("/System/Library/Caches/com.apple.dyld/dyld_shared_cache_arm64") ) {
+        callback("arm64", &stop);
+        return;
+    }
+#endif
+    if ( stop )
+        return;
+
+    // no dyld cache, must be RAMDisk
+#if __arm64e__
+    callback("arm64e", &stop);
+    if ( stop )
+        return;
+    callback("arm64", &stop);
+#elif __arm64__
+  #if __LP64__
+    callback("arm64", &stop);
+  #else
+    callback("arm64_32", &stop);
+  #endif
+#elif __x86_64__
+    callback("x86_64", &stop);
+#endif
+}
+
+
+
 
 #endif // !TARGET_OS_EXCLAVEKIT

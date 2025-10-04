@@ -36,8 +36,10 @@
 #include <CommonCrypto/CommonDigest.h>
 #include <CommonCrypto/CommonDigestSPI.h>
 
+#include "Architecture.h"
 #include "Header.h"
 
+using mach_o::Architecture;
 using mach_o::Header;
 
 AppCacheBuilder::AppCacheBuilder(const DyldSharedCache::CreateOptions& options,
@@ -229,9 +231,7 @@ uint64_t AppCacheBuilder::numRegions() const {
 }
 
 uint64_t AppCacheBuilder::fixupsPageSize() const {
-    bool use4K = false;
-    use4K |= (_options.archs == &dyld3::GradedArchs::x86_64);
-    use4K |= (_options.archs == &dyld3::GradedArchs::x86_64h);
+    bool use4K = _options.arch.sameCpu(Architecture::x86_64);
     return use4K ? 4096 : 16384;
 }
 
@@ -248,16 +248,14 @@ uint64_t AppCacheBuilder::numWritablePagesToFixup(uint64_t numBytesToFixup) cons
 bool AppCacheBuilder::fixupsArePerKext() const {
     if ( appCacheOptions.cacheKind == Options::AppCacheKind::pageableKC )
         return true;
-    bool isX86 = (_options.archs == &dyld3::GradedArchs::x86_64) || (_options.archs == &dyld3::GradedArchs::x86_64h);
+    bool isX86 = _options.arch.sameCpu(Architecture::x86_64);
     return isX86 && (appCacheOptions.cacheKind == Options::AppCacheKind::auxKC);
 }
 
 // x86_64 kext's don't contain stubs for branches so we need to generate some
 // if branches cross from one KC to another, eg, from the auxKC to the base KC
 uint64_t AppCacheBuilder::numBranchRelocationTargets() {
-    bool mayHaveBranchRelocations = false;
-    mayHaveBranchRelocations |= (_options.archs == &dyld3::GradedArchs::x86_64);
-    mayHaveBranchRelocations |= (_options.archs == &dyld3::GradedArchs::x86_64h);
+    bool mayHaveBranchRelocations = _options.arch.sameCpu(Architecture::x86_64);
     if ( !mayHaveBranchRelocations )
         return 0;
 
@@ -317,7 +315,7 @@ bool AppCacheBuilder::removeStubs()
     if ( appCacheOptions.cacheKind != Options::AppCacheKind::kernel )
         return false;
 
-    if ( _options.archs != &dyld3::GradedArchs::arm64e )
+    if ( _options.arch != Architecture::arm64e_kernel )
         return false;
 
     if ( hasSancovGateSection() )
@@ -394,7 +392,7 @@ void AppCacheBuilder::assignSegmentRegionsAndOffsets()
     uint64_t branchTargetsFromKexts = numBranchRelocationTargets();
 
     uint32_t minimumSegmentAlignmentP2 = 14;
-    if ( (_options.archs == &dyld3::GradedArchs::x86_64) || (_options.archs == &dyld3::GradedArchs::x86_64h) ) {
+    if ( _options.arch.sameCpu(Architecture::x86_64) ) {
         minimumSegmentAlignmentP2 = 12;
     }
 
@@ -1295,7 +1293,7 @@ void AppCacheBuilder::copyRawSegments() {
             uint8_t* dstBuffer = segment.parentRegion->buffer + section.offsetInRegion;
             uint64_t dstVMAddr = segment.parentRegion->unslidLoadAddress + section.offsetInRegion;
             if (log) fprintf(stderr, "copy %s segment %s %s (0x%08lX bytes) from %p to %p (logical addr 0x%llX)\n",
-                             _options.archs->name(), segment.segmentName.c_str(), section.sectionName.c_str(),
+                             _options.arch.name(), segment.segmentName.c_str(), section.sectionName.c_str(),
                              section.data.size(), section.data.data(), dstBuffer, dstVMAddr);
             ::memcpy(dstBuffer, section.data.data(), section.data.size());
         }
@@ -4715,7 +4713,7 @@ void AppCacheBuilder::allocateBuffer()
 
         // The fixup format cannot handle a KC over 1GB (64MB for arm64e auxKC).  Error out if we exceed that
         uint64_t cacheLimit = 1 << 30;
-        if ( (appCacheOptions.cacheKind == Options::AppCacheKind::auxKC) && (_options.archs == &dyld3::GradedArchs::arm64e) )
+        if ( (appCacheOptions.cacheKind == Options::AppCacheKind::auxKC) && (_options.arch == Architecture::arm64e_kernel) )
             cacheLimit = 64 * (1 << 20);
         if ( _allocatedBufferSize >= cacheLimit ) {
             _diagnostics.error("kernel collection size exceeds maximum size of %lld vs actual size of %lld",
@@ -4799,8 +4797,8 @@ void AppCacheBuilder::generateCacheHeader() {
         // Write the header
         macho_header<P>* mh = (macho_header<P>*)header.header;
         mh->set_magic(MH_MAGIC_64);
-        mh->set_cputype(_options.archs->_orderedCpuTypes[0].type);
-        mh->set_cpusubtype(_options.archs->_orderedCpuTypes[0].subtype);
+        mh->set_cputype(_options.arch.cpuType());
+        mh->set_cpusubtype(_options.arch.cpuSubtype());
         mh->set_filetype(MH_FILESET);
         mh->set_ncmds((uint32_t)header.numLoadCommands);
         mh->set_sizeofcmds((uint32_t)header.loadCommandsSize);
@@ -5261,7 +5259,7 @@ void AppCacheBuilder::buildAppCache(const std::vector<InputDylib>& dylibs)
 
     // Set the chained pointer format
     // x86_64 uses unaligned fixups
-    if ( (_options.archs == &dyld3::GradedArchs::x86_64) || (_options.archs == &dyld3::GradedArchs::x86_64h) ) {
+    if ( _options.arch.sameCpu(Architecture::x86_64) ) {
         chainedPointerFormat = DYLD_CHAINED_PTR_X86_64_KERNEL_CACHE;
     } else {
         chainedPointerFormat = DYLD_CHAINED_PTR_64_KERNEL_CACHE;

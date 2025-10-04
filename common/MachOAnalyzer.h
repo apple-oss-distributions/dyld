@@ -32,6 +32,7 @@
 
 #include "MachOLoaded.h"
 #include "Array.h"
+#include "GradedArchitectures.h"
 #include "Header.h"
 #include "Platform.h"
 
@@ -70,17 +71,17 @@ struct VIS_HIDDEN MachOAnalyzer : public MachOLoaded
 
 #if !TARGET_OS_EXCLAVEKIT
     static bool loadFromBuffer(Diagnostics& diag, const closure::FileSystem& fileSystem,
-                               const char* path, const GradedArchs& archs, mach_o::Platform platform,
+                               const char* path, const mach_o::GradedArchitectures& archs, mach_o::Platform platform,
                                closure::LoadedFileInfo& info);
     static closure::LoadedFileInfo load(Diagnostics& diag, const closure::FileSystem& fileSystem,
-                                        const char* logicalPath, const GradedArchs& archs, mach_o::Platform platform, char realerPath[PATH_MAX]);
+                                        const char* logicalPath, const mach_o::GradedArchitectures& archs, mach_o::Platform platform, char realerPath[PATH_MAX]);
 #endif
     bool  isValidMainExecutable(Diagnostics& diag, const char* path, uint64_t sliceLength,
-                                                     const GradedArchs& archs, mach_o::Platform platform) const;
+                                                     const mach_o::GradedArchitectures& archs, mach_o::Platform platform) const;
 
     typedef void (^ExportsCallback)(const char* symbolName, uint64_t imageOffset, uint64_t flags,
                                     uint64_t other, const char* importName, bool& stop);
-    bool                validMachOForArchAndPlatform(Diagnostics& diag, size_t mappedSize, const char* path, const GradedArchs& archs, mach_o::Platform platform, bool isOSBinary, bool internalInstall=false) const;
+    bool                validMachOForArchAndPlatform(Diagnostics& diag, size_t mappedSize, const char* path, const mach_o::GradedArchitectures& archs, mach_o::Platform platform, bool isOSBinary, bool internalInstall=false) const;
 
     // Caches data useful for converting from raw data to VM addresses
     struct VMAddrConverter {

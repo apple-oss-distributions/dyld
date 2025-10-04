@@ -27,6 +27,7 @@
 
 #include <stdint.h>
 #include <stdarg.h>
+#include <string_view>
 #include <TargetConditionals.h>
 
 #if BUILDING_CACHE_BUILDER || BUILDING_UNIT_TESTS || BUILDING_CACHE_BUILDER_UNIT_TESTS
@@ -42,16 +43,29 @@
 #include "Defines.h"
 #include "va_list_wrap.h"
 
+#if __has_feature(ptrauth_calls)
+#include <ptrauth.h>
+// Note this is a DB key (per-process data) and address authenticated
+#define __ptrauth_dyld_diag __ptrauth(ptrauth_key_process_dependent_data, 1, 0)
+#else
+#define __ptrauth_dyld_diag
+#endif
+
 class VIS_HIDDEN Diagnostics
 {
 public:
-                    Diagnostics(bool verbose=false);
+                    Diagnostics();
                     ~Diagnostics();
+                    Diagnostics(const Diagnostics&) = delete;
+                    Diagnostics& operator=(const Diagnostics&) = delete;
+                    Diagnostics(Diagnostics&&);
+                    Diagnostics& operator=(Diagnostics&&);
 
     void            error(const char* format, ...)  __attribute__((format(printf, 2, 3)));
     void            error(const char* format, va_list_wrap vaWrap) __attribute__((format(printf, 2, 0)));
     void            appendError(const char* format, ...)  __attribute__((format(printf, 2, 3)));
 #if BUILDING_CACHE_BUILDER || BUILDING_UNIT_TESTS || BUILDING_CACHE_BUILDER_UNIT_TESTS
+                    Diagnostics(bool verbose);
                     Diagnostics(const std::string& prefix, bool verbose=false);
 
     void            warning(const char* format, ...)  __attribute__((format(printf, 2, 3)));
@@ -64,6 +78,7 @@ public:
     void            clearError();
     void            assertNoError() const;
     bool            errorMessageContains(const char* subString) const;
+    bool            empty() const;
 
 #if BUILDING_CACHE_BUILDER || BUILDING_UNIT_TESTS || BUILDING_CACHE_BUILDER_UNIT_TESTS
     const std::string               prefix() const;
@@ -76,6 +91,8 @@ public:
     const char*                     errorMessageCStr() const { return errorMessage(); }
 #endif
 
+    std::string_view                errorMessageSV() const;
+
 #if BUILDING_LD || BUILDING_UNIT_TESTS || BUILDING_SHARED_CACHE_LINKER || BUILDING_CACHE_BUILDER || BUILDING_CACHE_BUILDER_UNIT_TESTS
     mach_o::Error                   toError() const;
     void                            error(const mach_o::Error& err);
@@ -85,7 +102,9 @@ private:
 #if TARGET_OS_EXCLAVEKIT
     char                     _strBuf[1024];
 #else
-    void*                    _buffer = nullptr;
+    char* __ptrauth_dyld_diag _buffer = nullptr;
+    uint32_t                  _bufferSize = 0;
+    uint32_t                  _bufferUsed = 0;
 #endif
 #if BUILDING_CACHE_BUILDER || BUILDING_UNIT_TESTS || BUILDING_CACHE_BUILDER_UNIT_TESTS
     std::string              _prefix;

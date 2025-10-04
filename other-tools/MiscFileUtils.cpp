@@ -124,11 +124,11 @@ void forSelectedSliceInPaths(std::span<const char*> paths, std::span<const char*
 
         // dyld_for_each_installed_shared_cache() only available in macOS 12 aligned platforms
         // and we only build this code for earlier versions on macOS
-#if !TARGET_OS_OSX || (MAC_OS_X_VERSION_MIN_REQUIRED >= 120000)
         if ( !found ) {
             size_t                           cacheLen;
             if ( dyldCache == nullptr )
                 dyldCache   = (DyldSharedCache*)_dyld_get_shared_cache_range(&cacheLen);
+#if !TARGET_OS_OSX || (MAC_OS_X_VERSION_MIN_REQUIRED >= 120000)
             __block const DyldSharedCache*  dyldCacheDK = nullptr;
             __block const char*             currentArch = dyldCache->archName();
             if ( strncmp(path, "/System/DriverKit/", 18) == 0 ) {
@@ -160,7 +160,10 @@ void forSelectedSliceInPaths(std::span<const char*> paths, std::span<const char*
                     }
                 }
             }
-            else if ( dyldCache != nullptr ) {
+            else
+#endif
+
+            if ( dyldCache != nullptr ) {
                 // see if path is in current dyld shared cache
                 uint32_t imageIndex;
                 if ( dyldCache->hasImagePath(path, imageIndex) ) {
@@ -169,10 +172,6 @@ void forSelectedSliceInPaths(std::span<const char*> paths, std::span<const char*
                 }
             }
         }
-#else
-        (void)found;
-#endif
-
     }
 }
 

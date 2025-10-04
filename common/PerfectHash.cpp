@@ -48,9 +48,10 @@ Source is http://burtleburtle.net/bob/c/perfect.c
 #include "PerfectHash.h"
 
 #if BUILDING_CACHE_BUILDER || BUILDING_UNIT_TESTS || BUILDING_CACHE_BUILDER_UNIT_TESTS
-#include <dispatch/dispatch.h>
 #include <string>
 #include <vector>
+
+#include "Algorithm.h"
 #endif
 
 namespace objc {
@@ -333,19 +334,17 @@ static void scrambleinit(ub4 *scramble, ub4 smax)
  * put keys in tabb according to key->b_k
  * check if the initial hash might work
  */
-static int inittab(dyld3::OverflowSafeArray<bstuff>& tabb, dyld3::OverflowSafeArray<key>& keys, int complete)
+static int inittab(dyld3::OverflowSafeArray<bstuff>& tabb, std::span<key> keys)
 // bstuff   *tabb;                     /* output, list of keys with b for (a,b) */
 // ub4       blen;                                            /* length of tabb */
 // key      *keys;                               /* list of keys already hashed */
-// int       complete;        /* TRUE means to complete init despite collisions */
 {
-  int  nocollision = TRUE;
   ub4 i;
 
-  memset((void *)tabb.begin(), 0, (size_t)(sizeof(bstuff)*tabb.maxCount()));
+  memset((void *)tabb.data(), 0, (size_t)(sizeof(bstuff)*tabb.count()));
 
   /* Two keys with the same (a,b) guarantees a collision */
-  for (i = 0; i < keys.count(); i++) {
+  for (i = 0; i < keys.size(); i++) {
     key *mykey = &keys[i];
     key *otherkey;
 
@@ -355,9 +354,7 @@ static int inittab(dyld3::OverflowSafeArray<bstuff>& tabb, dyld3::OverflowSafeAr
     {
       if (mykey->a_k == otherkey->a_k)
       {
-        nocollision = FALSE;
-    if (!complete)
-      return FALSE;
+        return FALSE;
       }
     }
     ++tabb[mykey->b_k].listlen_b;
@@ -366,12 +363,12 @@ static int inittab(dyld3::OverflowSafeArray<bstuff>& tabb, dyld3::OverflowSafeAr
   }
 
   /* no two keys have the same (a,b) pair */
-  return nocollision;
+  return true;
 }
 
 
 /* Do the initial hash for normal mode (use lookup and checksum) */
-static void initnorm(dyld3::OverflowSafeArray<key>& keys, ub4 alen, ub4 blen, ub4 smax, ub8 salt)
+static void initnorm(std::span<key> allKeys, ub4 alen, ub4 blen, ub4 smax, ub8 salt)
 // key      *keys;                                          /* list of all keys */
 // ub4       alen;                    /* (a,b) has a in 0..alen-1, a power of 2 */
 // ub4       blen;                    /* (a,b) has b in 0..blen-1, a power of 2 */
@@ -380,16 +377,17 @@ static void initnorm(dyld3::OverflowSafeArray<key>& keys, ub4 alen, ub4 blen, ub
 // gencode  *final;                          /* output, code for the final hash */
 {
   ub4 loga = log2u(alen);                            /* log based 2 of blen */
-  dispatch_apply(keys.count(), DISPATCH_APPLY_AUTO, ^(size_t index) {
-    ub4 i = (ub4)index;
-    key *mykey = &keys[i];
-    ub8 hash = lookup8(mykey->name1_k, mykey->len1_k, salt);
-    if ( mykey->name2_k != nullptr ) {
-      ub8 hash2 = lookup8(mykey->name2_k, mykey->len2_k, salt);
-      hash = hash ^ hash2;
+  size_t chunkSize = 0x2000;
+  mapReduce(allKeys, chunkSize, ^(size_t chunkIndex, int&, std::span<key> keys) {
+    for ( auto& mykey : keys ) {
+      ub8 hash = lookup8(mykey.name1_k, mykey.len1_k, salt);
+      if ( mykey.name2_k != nullptr ) {
+        ub8 hash2 = lookup8(mykey.name2_k, mykey.len2_k, salt);
+        hash = hash ^ hash2;
+      }
+      mykey.a_k = (loga > 0) ? (ub4)(hash >> (UB8BITS-loga)) : 0;
+      mykey.b_k = (blen > 1) ? (hash & (blen-1)) : 0;
     }
-    mykey->a_k = (loga > 0) ? (ub4)(hash >> (UB8BITS-loga)) : 0;
-    mykey->b_k = (blen > 1) ? (hash & (blen-1)) : 0;
   });
 }
 
@@ -689,7 +687,7 @@ static bool findhash(dyld3::OverflowSafeArray<bstuff>& tabb,
         /* Try to find distinct (A,B) for all keys */
         *salt = si * 0x9e3779b97f4a7c13LL; /* golden ratio (arbitrary value) */
         initnorm(keys, *alen, blen, smax, *salt);
-        rslinit = inittab(tabb, keys, FALSE);
+        rslinit = inittab(tabb, keys);
         if (rslinit == 0)
         {
             /* didn't find distinct (a,b) */

@@ -42,6 +42,7 @@
 
 #include "Defines.h"
 #include "Array.h"
+#include "GradedArchitectures.h"
 #include "UUID.h"
 #include "MachOAnalyzer.h"
 #include "SharedCacheRuntime.h"
@@ -51,8 +52,8 @@ namespace dyld4 {
 
 using lsl::UUID;
 using dyld3::MachOAnalyzer;
-using dyld3::GradedArchs;
 using dyld3::Array;
+using mach_o::GradedArchitectures;
 
 // for detecting symlinks and hard links, so dyld does not load same file twice
 struct FileID
@@ -102,12 +103,12 @@ public:
     bool                internalInstall() const;
     bool                isTranslated() const;
     bool                getCWD(char path[PATH_MAX]) const;
-    const GradedArchs&  getGradedArchs(const char* archName, bool keysOff, bool osBinariesOnly) const;
+    const GradedArchitectures&  getGradedArchs(const char* archName, bool keysOff, bool osBinariesOnly) const;
     int                 openLogFile(const char* path) const;
     bool                hasExistingDyldCache(uint64_t& cacheBaseAddress, FileIdTuple& cacheFileID) const;
     void                disablePageInLinking() const;
     void                forEachInDirectory(const char* dir, bool dirs, void (^handler)(const char* pathInDir, const char* leafName)) const;
-    bool                getDylibInfo(const char* dylibPath, mach_o::Platform platform, const GradedArchs& archs, uint32_t& version, char installName[PATH_MAX]) const;
+    bool                getDylibInfo(const char* dylibPath, mach_o::Platform platform, const GradedArchitectures& archs, uint32_t& version, char installName[PATH_MAX]) const;
     bool                isContainerized(const char* homeDir) const;
     bool                isMaybeContainerized(const char* homeDir) const;
     bool                fileExists(const char* path, FileID* fileID=nullptr, int* errNum=nullptr) const;
@@ -224,7 +225,7 @@ public:
 #endif
 #if BUILDING_CACHE_BUILDER || BUILDING_CACHE_BUILDER_UNIT_TESTS
     PathToMapping           _mappedOtherDylibs;
-    const GradedArchs*      _gradedArchs    = nullptr;
+    const GradedArchitectures* _gradedArchs    = nullptr;
 #endif
 
 #if BUILDING_CLOSURE_UTIL || BUILDING_SHARED_CACHE_UTIL

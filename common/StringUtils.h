@@ -109,6 +109,24 @@ inline bool hexCharToUInt(const char hexByte, uint8_t& value) {
     return false;
 }
 
+inline bool hexCharToByte(const char hexByte, uint8_t& value)
+{
+    if ( hexByte >= '0' && hexByte <= '9' ) {
+        value = hexByte - '0';
+        return true;
+    }
+    else if ( hexByte >= 'A' && hexByte <= 'F' ) {
+        value = hexByte - 'A' + 10;
+        return true;
+    }
+    else if ( hexByte >= 'a' && hexByte <= 'f' ) {
+        value = hexByte - 'a' + 10;
+        return true;
+    }
+
+    return false;
+}
+
 inline uint64_t hexToUInt64(const char* startHexByte, const char** endHexByte) {
     const char* scratch;
     if (endHexByte == nullptr) {
@@ -151,6 +169,13 @@ inline bool hexStringToBytes(const char* hexString, uint8_t buffer[], unsigned b
         high = !high;
     }
     return true;
+}
+
+template<typename T>
+inline void appendHexToString(char *dst, T value, uint64_t size) {
+    char buffer[130];
+    bytesToHex((const uint8_t*)&value, sizeof(T), buffer);
+    strlcat(dst, buffer, (size_t)size);
 }
 
 #endif // StringUtils_h

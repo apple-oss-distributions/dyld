@@ -62,6 +62,7 @@ public:
     bool                    is64() const;
     bool                    isBigEndian() const;
     const char*             name() const; // returns static string
+    int                     kernelGrade() const;
     void                    set(mach_header&) const;
     void                    set(fat_arch&) const;
     void                    set(fat_arch_64&) const;
@@ -69,8 +70,10 @@ public:
     bool                    usesArm64AuthPointers() const;
     bool                    usesx86_64Instructions() const;
     bool                    usesArm32Instructions() const;
+    bool                    usesArmOrThumbInstructions() const;
     bool                    usesThumbInstructions() const;
     bool                    usesArmZeroCostExceptions() const;
+    bool                    isArmFirmwareVariant() const;
     bool                    isArm64eKernel() const;
     int                     arm64eABIVersion() const;
 
@@ -97,6 +100,8 @@ public:
     static constinit const Architecture armv7;
     static constinit const Architecture armv7m;
     static constinit const Architecture armv7em;
+    static constinit const Architecture armv8m_main;
+    static constinit const Architecture armv8_1m_main;
     static constinit const Architecture arm64_alt;
     static constinit const Architecture arm64_32_alt;
     static constinit const Architecture invalid;

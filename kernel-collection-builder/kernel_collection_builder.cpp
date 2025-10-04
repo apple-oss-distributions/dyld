@@ -28,12 +28,14 @@
 #include "Diagnostics.h"
 #include "ClosureFileSystemNull.h"
 #include "MachOAppCache.h"
+#include "GradedArchitectures.h"
 
 #include <dispatch/dispatch.h>
 #include <span>
 #include <string>
 #include <vector>
 
+using mach_o::GradedArchitectures;
 using mach_o::Platform;
 
 static const uint64_t kMinBuildVersion = 1; //The minimum version BuildOptions struct we can support
@@ -141,7 +143,7 @@ struct KernelCollectionBuilder* createKernelCollectionBuilder(const struct Build
         return builder;
     }
     builder->arch = archName;
-
+    
     return builder;
 }
 
@@ -160,8 +162,8 @@ static bool loadFileFromData(struct KernelCollectionBuilder* builder,
 
     Diagnostics diag;
     dyld3::closure::FileSystemNull fileSystem;
-    const dyld3::GradedArchs& arch = dyld3::GradedArchs::forName(builder->arch);
-    auto loaded = dyld3::MachOAnalyzer::loadFromBuffer(diag, fileSystem, fileInfo.path, arch,
+    const GradedArchitectures& archs = GradedArchitectures::forName(builder->arch, /*keysOff=*/false, /*isKernel=*/true);
+    auto loaded = dyld3::MachOAnalyzer::loadFromBuffer(diag, fileSystem, fileInfo.path, archs,
                                                        Platform(), fileInfo);
     if ( !loaded ) {
         builder->error("in %s: %s", fileInfo.path, diag.errorMessage().c_str());
@@ -566,7 +568,12 @@ bool runKernelCollectionBuilder(struct KernelCollectionBuilder* builder) {
     std::string runtimePath = "";
     builderOptions.outputFilePath = runtimePath;
     builderOptions.outputMapFilePath = builderOptions.outputFilePath + ".json";
-    builderOptions.archs = &dyld3::GradedArchs::forName(builder->arch);
+    // Use the kernel version of arm64e.
+    std::string_view arch = builder->arch;
+    if ( arch == "arm64e" ) {
+        arch = "arm64e.kernel";
+    }
+    builderOptions.arch = mach_o::Architecture::byName(arch);
     builderOptions.platform = Platform();
     builderOptions.localSymbolMode = DyldSharedCache::LocalSymbolsMode::keep;
     builderOptions.cacheConfiguration = kDyldSharedCacheTypeProduction;

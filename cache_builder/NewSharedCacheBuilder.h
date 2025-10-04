@@ -65,6 +65,7 @@ struct CacheBuffer {
     uint8_t*        bufferData  = nullptr;
     size_t          bufferSize  = 0;
     std::string     cdHash      = "";
+    std::string     agilecdHash = ""; // if using agile signatures, this is the other signature
     std::string     uuid        = "";
 
     // Something like .development, .development.data, .symbols, etc
@@ -74,12 +75,6 @@ struct CacheBuffer {
     bool usedByCustomerConfig = false;
     // True if development/universal caches need this buffer
     bool usedByDevelopmentConfig = false;
-
-    // The builder executable also passes back the fd.  This should typically be used instead of the data buffer
-#if !SUPPORT_CACHE_BUILDER_MEMORY_BUFFERS
-    int             fd          = 0;
-    std::string     tempPath    = "";
-#endif
 };
 
 class SharedCacheBuilder
@@ -111,6 +106,7 @@ public:
     std::string                 customerLoggingPrefix() const;
     std::string                 customerJSONMap(std::string_view disposition) const;
     std::string                 customerCacheUUID() const;
+    std::string                 stats(uint64_t startTimeNanos) const;
 
 #if BUILDING_CACHE_BUILDER_UNIT_TESTS
     // We need everything public to write tests
@@ -133,6 +129,7 @@ private:
     void            verifySelfContained();
     void            calculateDylibAliases();
     void            sortDylibs();
+    void            sortExecutables();
 
     bool            shouldBuildSwiftPrespecializedDylib();
     bool            reserveSwiftPrespecializedInputFile();
@@ -154,7 +151,7 @@ private:
     void            calculateObjCCategoriesSize();
     void            estimateSwiftHashTableSizes();
     void            calculateCacheDylibsTrie();
-    void            estimatePatchTableSize();
+    void            initializePatchTableOptimizer();
     void            estimateFunctionVariantsSize();
     void            estimateCacheLoadersSize();
     void            estimatePrewarmingSize();
@@ -201,6 +198,7 @@ private:
     error::Error    emitPreAttachedObjCCategories();
     void            computeSlideInfo();
     void            emitCacheDylibsTrie();
+    error::Error    calculatePatchTableSize();
     error::Error    emitPatchTable();
     void            emitFunctionVariants();
     error::Error    emitCacheDylibsPrebuiltLoaders();

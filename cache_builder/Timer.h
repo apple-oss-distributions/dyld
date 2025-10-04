@@ -102,9 +102,11 @@ struct Logger
 
     void log(const char* format, ...)  const __attribute__((format(printf, 2, 3)));
 
-    bool printTimers    = false;
-    bool printStats     = false;
-    bool printDebug     = false;
+    bool printTimers            = false;
+    bool printStats             = false;
+    bool printDebug             = false;
+    bool printDebugIMPCaches    = false;
+    bool printDebugCacheLayout  = false;
 
 private:
     std::string logPrefix;

@@ -1281,7 +1281,6 @@ void Adjustor<P>::adjustReferencesUsingInfoV2(const DylibSectionCoalescer* secti
     std::vector<std::string_view>   sectionNames;
 
     // Also track coalesced sections, if we have any
-    typedef DylibSectionCoalescer::OptimizedSection OptimizedSection;
     std::vector<uint64_t>                           coalescedSectionOriginalVMAddrs;
     std::vector<const OptimizedSection*>            coalescedSectionData;
     std::vector<cache_builder::ASLR_Tracker*>       aslrTrackers;
@@ -1400,32 +1399,19 @@ void Adjustor<P>::adjustReferencesUsingInfoV2(const DylibSectionCoalescer* secti
 
                     uint64_t toNewAddress   = 0;
                     uint64_t toAtomSlide    = 0;
+                    std::optional<uint64_t> coalescedToNewAddress;
                     if ( coalescedSectionData[toSectionIndex] != nullptr ) {
                         // To was optimized/coalesced
-                        const auto* offsetMap = &coalescedSectionData[toSectionIndex]->offsetMap;
-                        auto offsetIt = offsetMap->find((uint32_t)toSectionOffset);
-                        if ( coalescedSectionData[toSectionIndex]->sectionWillBeRemoved ) {
-                            // If the section was removed then we have to find an entry for every atom in there
-                            assert(offsetIt != offsetMap->end());
-                        } else {
-                            // Not all GOTs are optimized, but we should find the element somewhere
-                            assert((offsetIt != offsetMap->end()) || coalescedSectionData[toSectionIndex]->unoptimizedOffsets.count((uint32_t)toSectionOffset));
-                        }
+                        coalescedToNewAddress = coalescedSectionData[toSectionIndex]->cacheVMAddress((uint32_t)toSectionOffset);
+                    }
 
-                        if ( offsetIt == offsetMap->end() ) {
-                            // To was not fully optimized/coalesced
-                            // FIXME: Unify this with the else branch below where we didn't have a coalesced section
-                            toNewAddress = toSectionNewAddress + toSectionOffset;
-                            toAtomSlide = toSectionSlide;
-                        } else {
-                            uint64_t baseVMAddr = coalescedSectionData[toSectionIndex]->subCacheSection->cacheChunk->cacheVMAddress.rawValue();
-                            toNewAddress = baseVMAddr + offsetIt->second;
+                    if ( coalescedToNewAddress.has_value() ) {
+                        toNewAddress = coalescedToNewAddress.value();
 
-                            // The 'to' section is gone, but we still need the 'to' slide.  Instead of a section slide,
-                            // compute the slide for this individual atom
-                            uint64_t toAtomOriginalVMAddr = coalescedSectionOriginalVMAddrs[toSectionIndex] + toSectionOffset;
-                            toAtomSlide = toNewAddress - toAtomOriginalVMAddr;
-                        }
+                        // The 'to' section is gone, but we still need the 'to' slide.  Instead of a section slide,
+                        // compute the slide for this individual atom
+                        uint64_t toAtomOriginalVMAddr = coalescedSectionOriginalVMAddrs[toSectionIndex] + toSectionOffset;
+                        toAtomSlide = toNewAddress - toAtomOriginalVMAddr;
                     } else {
                         // To was not optimized/coalesced
                         toNewAddress = toSectionNewAddress + toSectionOffset;

@@ -295,6 +295,8 @@ struct VIS_HIDDEN MemoryManager {
 
     void setDyldCacheAddr(void* sharedCache);
     void setProtectedStack(ProtectedStack& protectedStack);
+    void clearProtectedStack();
+
 #if !TARGET_OS_EXCLAVEKIT
     MemoryManager(Lock&& lock);
     void adoptLock(Lock&& lock);
@@ -560,7 +562,7 @@ private:
 #if !TARGET_OS_EXCLAVEKIT
     [[nodiscard]] Lock::Guard lockGuard();
 #endif // !TARGET_OS_EXCLAVEKIT
-    MemoryManager(const char** envp, const char** apple, void* dyldSharedCache);
+    MemoryManager(const char** envp, const char** apple, void* dyldSharedCache, bool didInitialProtCopy);
     void writeProtect(bool protect);
     int vmFlags(bool tproEnabled) const;
 
@@ -569,6 +571,7 @@ private:
 #endif // !TARGET_OS_EXCLAVEKIT
     Allocator*              _defaultAllocator           = nullptr;
     uint64_t                _writeableCount             = 0;
+    bool                    _didInitialProtCopy         = false;
 
 #if DYLD_FEATURE_USE_HW_TPRO
     bool                    _tproEnable                 = false;
@@ -695,8 +698,8 @@ struct __attribute__((aligned(16))) VIS_HIDDEN Allocator {
         Pool(const Pool&)   = delete;
         Pool(Pool&&)        = delete;
         Pool(Allocator* allocator, Pool* prevPool, uint64_t size, bool tproEnabled);
-        Pool(Allocator* allocator, Pool* prevPool, Buffer region, bool tproEnabled);
-        Pool(Allocator* allocator, Pool* prevPool, Buffer region, Buffer freeRegion, bool tproEnabled);
+        Pool(Allocator* allocator, Pool* prevPool, Buffer region, bool tproEnabled, bool asanEnabled);
+        Pool(Allocator* allocator, Pool* prevPool, Buffer region, Buffer freeRegion, bool tproEnabled, bool asanEnabled);
         void* aligned_alloc(uint64_t alignment, uint64_t size);
         void* aligned_alloc_best_fit(uint64_t alignment, uint64_t size);
         void free(void* ptr);
@@ -998,7 +1001,7 @@ lsl::Allocator& __stackAllocatorInternal(void* storage, uint64_t count) {
     auto result = new (allocatorAddress) lsl::Allocator(lsl::MemoryManager::memoryManager());
 
     // Disable TPRO on ephemeral allocators to avoid exhausting virtual address space
-    auto pool = new (poolAddress) lsl::Allocator::Pool(result, nullptr, buffer, buffer, false /* tproEnable */);
+    auto pool = new (poolAddress) lsl::Allocator::Pool(result, nullptr, buffer, buffer, false /* tproEnable */, false /* asanEnable */);
     result->setInitialPool(*pool);
     return *result;
 }

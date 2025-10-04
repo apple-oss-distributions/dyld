@@ -47,7 +47,7 @@ struct VIS_HIDDEN Universal
 {
     struct Slice
     {
-        Architecture arch;
+        Architecture             arch;
         std::span<const uint8_t> buffer;
     };
 

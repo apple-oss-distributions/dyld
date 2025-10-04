@@ -43,7 +43,7 @@ const char* prune_trie(uint8_t* trie_start, uint32_t trie_start_size,
                         int (*remove)(const char* symbolName), uint32_t* trie_new_size)
 {
     ExportsTrie inputTrie(trie_start, trie_start_size);
-    if ( Error err = inputTrie.valid(0x100000000) )
+    if ( Error err = inputTrie.valid(0x0, 0x100000000) )
         return strdup(err.message()); // freed by caller
 
     // built new trie from existing, filtering out some symbols

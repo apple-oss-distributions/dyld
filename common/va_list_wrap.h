@@ -35,7 +35,7 @@ struct va_list_wrap
   // so use std::decay to strip the array type and use a pointer instead
   std::decay_t<va_list> list;
 
-  va_list_wrap(va_list list): list(list) {}
+  explicit va_list_wrap(va_list list): list(list) {}
 };
 
 #endif /* mach_o_Version64_h */

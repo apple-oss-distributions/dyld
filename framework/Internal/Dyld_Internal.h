@@ -32,5 +32,6 @@
 #include "ProcessScavenger.h"
 
 #include "Introspection.h"
+#include "SafeVMPrimitives.h"
 
 #endif /* Dyld_Internal_h */

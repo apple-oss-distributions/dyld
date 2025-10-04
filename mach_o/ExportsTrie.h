@@ -80,7 +80,7 @@ public:
                     // encapsulates exports trie in a final linked image
                     ExportsTrie(const uint8_t* start, size_t size) : GenericTrie(start, size) { }
 
-    Error           valid(uint64_t maxVmOffset) const;
+    Error           valid(uint64_t baseAddr, uint64_t maxVmOffset) const;
     bool            hasExportedSymbol(const char* symbolName, Symbol& symbol) const;
     void            forEachExportedSymbol(void (^callback)(const Symbol& symbol, bool& stop)) const;
     uint32_t        symbolCount() const;

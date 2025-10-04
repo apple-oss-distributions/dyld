@@ -75,6 +75,8 @@ public:
     void         setWeakDef()               { _weakDef = true; }
     void         setNotWeakDef()            { _weakDef = false; }
     void         setIsThumb()               { _isThumb = true; }
+    void         changeRegularToAltEntry();
+    void         changeAltEntryToRegular();
 
     static Symbol makeRegularExport(CString name, uint64_t imageOffset, uint8_t sectNum, bool dontDeadStrip, bool cold, bool neverStrip=false, bool isThumb=false);
     static Symbol makeRegularHidden(CString name, uint64_t imageOffset, uint8_t sectNum, bool dontDeadStrip, bool cold, bool isThumb=false);

@@ -23,11 +23,12 @@
 */
 
 #include "BuilderOptions.h"
+#include "GradedArchitectures.h"
 #include "Platform.h"
 
 using namespace cache_builder;
-using dyld3::GradedArchs;
 
+using mach_o::GradedArchitectures;
 using mach_o::Platform;
 
 //
@@ -36,13 +37,17 @@ using mach_o::Platform;
 
 BuilderOptions::BuilderOptions(std::string_view archName, Platform platform,
                                bool dylibsRemovedFromDisk, bool isLocallyBuiltCache,
-                               CacheKind kind, bool forceDevelopmentSubCacheSuffix)
-    : archs(GradedArchs::forName(archName.data()))
+                               CacheKind kind, bool forceDevelopmentSubCacheSuffix,
+                               std::string_view updateName, std::string_view deviceName)
+    : arch(mach_o::Architecture::byName(archName))
+    , gradedArchs(GradedArchitectures::forName(archName.data()))
     , platform(platform)
     , dylibsRemovedFromDisk(dylibsRemovedFromDisk)
     , isLocallyBuiltCache(isLocallyBuiltCache)
     , forceDevelopmentSubCacheSuffix(forceDevelopmentSubCacheSuffix)
     , kind(kind)
+    , updateName(updateName)
+    , deviceName(deviceName)
 {
 }
 

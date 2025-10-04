@@ -41,6 +41,7 @@
 #endif
 
 #include "dyld_cache_format.h"
+#include "Architecture.h"
 #include "CachePatching.h"
 #include "Diagnostics.h"
 #include "MachOAnalyzer.h"
@@ -141,7 +142,7 @@ public:
     {
         std::string                                 outputFilePath;
         std::string                                 outputMapFilePath;
-        const dyld3::GradedArchs*                   archs;
+        mach_o::Architecture                        arch;
         mach_o::Platform                            platform;
         LocalSymbolsMode                            localSymbolMode;
         uint64_t                                    cacheConfiguration;
@@ -354,6 +355,7 @@ public:
     //
     void                forEachRegion(void (^handler)(const void* content, uint64_t vmAddr, uint64_t size,
                                                       uint32_t initProt, uint32_t maxProt, uint64_t flags,
+                                                      uint64_t fileOffset,
                                                       bool& stopRegion)) const;
 
 
@@ -644,11 +646,6 @@ public:
     static bool isSubCachePath(const char* leafName);
 
 #if !(BUILDING_LIBDYLD || BUILDING_DYLD)
-    //
-    // Apply rebases for manually mapped shared cache
-    //
-    void applyCacheRebases() const;
-
     // mmap() an shared cache file read/only but laid out like it would be at runtime
     static const DyldSharedCache* mapCacheFile(const char* path,
                                                uint64_t baseCacheUnslidAddress,
@@ -656,6 +653,19 @@ public:
 
     static std::vector<const DyldSharedCache*> mapCacheFiles(const char* path);
 #endif
+
+    //
+    // Fixes up the DATA pages in just this subcache file
+    // Takes a slide, so that some tools can call this to get unslid VM addresses, while
+    // dyld can pass a slide to apply.
+    //
+    mach_o::Error fixupDataPages(intptr_t slideToApply) const;
+    //
+    // Fixes up the DATA pages in this cache and all subcaches
+    // Takes a slide, so that some tools can call this to get unslid VM addresses, while
+    // dyld can pass a slide to apply.
+    //
+    mach_o::Error fixupAllDataPages(intptr_t slideToApply) const;
 
     dyld_cache_header header;
 

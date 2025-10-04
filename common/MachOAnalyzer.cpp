@@ -47,17 +47,20 @@
 #include "CodeSigningTypes.h"
 #include "Array.h"
 #include "Header.h"
+#include "Universal.h"
 
 // FIXME: We should get this from cctools
 #define DYLD_CACHE_ADJ_V2_FORMAT 0x7F
 
 using mach_o::Header;
 using mach_o::Platform;
+using mach_o::GradedArchitectures;
+using mach_o::Universal;
 
 namespace dyld3 {
 
 bool MachOAnalyzer::isValidMainExecutable(Diagnostics& diag, const char* path, uint64_t sliceLength,
-                                          const GradedArchs& archs, Platform platform) const
+                                          const GradedArchitectures& archs, Platform platform) const
 {
     if ( !this->validMachOForArchAndPlatform(diag, (size_t)sliceLength, path, archs, platform, true) )
         return false;
@@ -75,27 +78,28 @@ bool MachOAnalyzer::isValidMainExecutable(Diagnostics& diag, const char* path, u
 
 #if !TARGET_OS_EXCLAVEKIT
 bool MachOAnalyzer::loadFromBuffer(Diagnostics& diag, const closure::FileSystem& fileSystem,
-                                   const char* path, const GradedArchs& archs, Platform platform,
+                                   const char* path, const GradedArchitectures& archs, Platform platform,
                                    closure::LoadedFileInfo& info)
 {
     // if fat, remap just slice needed
-    bool fatButMissingSlice;
-    const FatFile*       fh = (FatFile*)info.fileContent;
-    uint64_t sliceOffset = info.sliceOffset;
-    uint64_t sliceLen = info.sliceLen;
-    if ( fh->isFatFileWithSlice(diag, info.fileContentLen, archs, info.isOSBinary, sliceOffset, sliceLen, fatButMissingSlice) ) {
-        // unmap anything before slice
-        fileSystem.unloadPartialFile(info, sliceOffset, sliceLen);
-        // Update the info to keep track of the new slice offset.
-        info.sliceOffset = sliceOffset;
-        info.sliceLen = sliceLen;
+    bool fatButMissingSlice = false;
+    std::span<const uint8_t> content = {(const uint8_t*)info.fileContent, (size_t)info.fileContentLen};
+    if ( const Universal* uni = Universal::isUniversal(content) ) {
+        Universal::Slice slice;
+        if ( uni->bestSlice(archs, info.isOSBinary, slice) ) {
+            uint64_t sliceOffset = slice.buffer.data() - content.data();
+            // unmap anything before slice
+            fileSystem.unloadPartialFile(info, sliceOffset, slice.buffer.size());
+            // Update the info to keep track of the new slice offset.
+            info.sliceOffset = sliceOffset;
+            info.sliceLen = slice.buffer.size();
+        }
+        else {
+            fatButMissingSlice = true;
+        }
     }
-    else if ( diag.hasError() ) {
-        // We must have generated an error in the fat file parsing so use that error
-        fileSystem.unloadFile(info);
-        return false;
-    }
-    else if ( fatButMissingSlice ) {
+    
+    if ( fatButMissingSlice ) {
         diag.error("missing compatible arch in %s", path);
         fileSystem.unloadFile(info);
         return false;
@@ -134,7 +138,7 @@ bool MachOAnalyzer::loadFromBuffer(Diagnostics& diag, const closure::FileSystem&
 
 
 closure::LoadedFileInfo MachOAnalyzer::load(Diagnostics& diag, const closure::FileSystem& fileSystem,
-                                            const char* path, const GradedArchs& archs, Platform platform, char realerPath[PATH_MAX])
+                                            const char* path, const GradedArchitectures& archs, Platform platform, char realerPath[PATH_MAX])
 {
     // FIXME: This should probably be an assert, but if we happen to have a diagnostic here then something is wrong
     // above us and we should quickly return instead of doing unnecessary work.
@@ -226,7 +230,7 @@ void MachOAnalyzer::validateDyldCacheDylib(Diagnostics& diag, const char* path) 
 }
 #endif
 
-bool MachOAnalyzer::validMachOForArchAndPlatform(Diagnostics& diag, size_t sliceLength, const char* path, const GradedArchs& archs, Platform reqPlatform, bool isOSBinary, bool internalInstall) const
+bool MachOAnalyzer::validMachOForArchAndPlatform(Diagnostics& diag, size_t sliceLength, const char* path, const GradedArchitectures& archs, Platform reqPlatform, bool isOSBinary, bool internalInstall) const
 {
     // must start with mach-o magic value
     if ( (this->magic != MH_MAGIC) && (this->magic != MH_MAGIC_64) ) {
@@ -234,7 +238,7 @@ bool MachOAnalyzer::validMachOForArchAndPlatform(Diagnostics& diag, size_t slice
         return false;
     }
 
-    if ( !archs.grade(this->cputype, this->cpusubtype, isOSBinary) ) {
+    if ( !archs.isCompatible(((const Header*)this)->arch(), isOSBinary) ) {
         diag.error("could not use '%s' because it is not a compatible arch", path);
         return false;
     }
@@ -3463,7 +3467,7 @@ void MachOAnalyzer::forEachObjCClass(uint64_t classListRuntimeOffset, uint64_t c
     STACK_ALLOC_OVERFLOW_SAFE_ARRAY(uint64_t, bindTargets, 32);
     if ( this->hasChainedFixups() ) {
         intptr_t slide = this->getSlide();
-        Diagnostics diag;
+        __block Diagnostics diag;
         this->forEachBindTarget(diag, false, ^(const BindTargetInfo& info, bool& stop) {
             if ( diag.hasError() ) {
                 stop = true;

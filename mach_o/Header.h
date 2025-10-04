@@ -97,6 +97,10 @@
     #define DYLIB_USE_DELAYED_INIT   0x08
 #endif
 
+#ifndef MH_NO_DYNAMIC_ACCESS
+  #define MH_NO_DYNAMIC_ACCESS 0x400    // cannot be dlopen()ed or dlsym()ed
+#endif
+
 namespace mach_o {
 
 /*!
@@ -181,6 +185,7 @@ struct VIS_HIDDEN Header
     bool            noReexportedDylibs() const;
     bool            isAppExtensionSafe() const;
     bool            isSimSupport() const;
+    bool            noDynamicAccess() const;
 
     // methods that look for load commands
     Error               validStructureLoadCommands(uint64_t fileSize) const;
@@ -214,6 +219,7 @@ struct VIS_HIDDEN Header
     bool                hasLinkerOptimizationHints(uint32_t& offset, uint32_t& size) const;
     bool                getEntry(uint64_t& offset, bool& usesCRT) const;
     bool                hasIndirectSymbolTable(uint32_t& fileOffset, uint32_t& count) const;
+    bool                hasClassicRelocations(uint32_t& nLocRel, uint32_t& nExtRel) const;
     bool                hasSplitSegInfo(bool& isMarker) const;
     bool                hasAtomInfo(uint32_t& fileOffset, uint32_t& count) const;
     CString             libOrdinalName(int libOrdinal) const;
@@ -244,6 +250,7 @@ struct VIS_HIDDEN Header
     int64_t          getSlide() const;
     bool             hasObjC() const;
     bool             hasDataConst() const;
+    bool             hasDiscontiguousSegments() const;
     std::string_view segmentName(uint32_t segIndex) const;
     uint64_t         segmentVmAddr(uint32_t segIndex) const;
     uint64_t         segmentVmSize(uint32_t segIndex) const;
@@ -289,6 +296,7 @@ struct VIS_HIDDEN Header
     void             forEachSection(void (^callback)(const SegmentInfo&, const SectionInfo&, bool& stop)) const;
     void             forEachInterposingSection(void (^callback)(const SectionInfo&, bool& stop)) const;
     std::span<const uint8_t> findSectionContent(CString segName, CString sectName, bool useVmOffset) const;
+    bool             hasSection(CString segName, CString sectName, bool segNamePrefix=false) const;
     static uint32_t  threadLoadCommandsSize(const Architecture& arch);
     uint32_t         threadLoadCommandsSize() const;
     uint32_t         headerAndLoadCommandsSize() const;

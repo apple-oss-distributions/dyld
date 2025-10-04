@@ -44,6 +44,7 @@ struct VIS_HIDDEN CRC32c {
     void reset();
     static CRC32c softwareChecksumer();
     static CRC32c hardwareChecksumer();
+    static bool hasHardwareChecksumer();
 private:
     CRC32cImpl& _impl;
     uint32_t    _crc = 0xffffffff;

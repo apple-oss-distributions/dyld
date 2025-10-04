@@ -37,7 +37,7 @@ namespace mach_o {
 
 size_t ArchiveWriter::size(std::span<const Member> members, bool extendedFormatNames)
 {
-    uint64_t size = archive_magic.size();
+    size_t size = archive_magic.size();
 
     for ( const Member& m : members ) {
         size += Entry::entrySize(extendedFormatNames, m.name, m.contents.size());

@@ -12,9 +12,12 @@ SKIP_INSTALL[sdk=exclavekit*] = YES
 // Disable building the _asan variant for dyld on ExclaveKit
 BUILD_VARIANTS[sdk=exclavekit*] = normal
 
-GCC_PREPROCESSOR_DEFINITIONS_Release    =
-GCC_PREPROCESSOR_DEFINITIONS_Debug      =  DEBUG=1
-GCC_PREPROCESSOR_DEFINITIONS            = $(GCC_PREPROCESSOR_DEFINITIONS_$(CONFIGURATION)) _LIBCPP_NO_EXCEPTIONS=1 BUILDING_LIBDYLD_INTROSPECTION_STATIC=1
+GCC_PREPROCESSOR_DEFINITIONS = $(inherited) _LIBCPP_NO_EXCEPTIONS=1 BUILDING_LIBDYLD_INTROSPECTION_STATIC=1
 
 PRELINK_FLAGS = -no_inits -exported_symbol _dyld_*
 
+VERSIONING_SYSTEM =
+
+// TODO: Clean these up.  They were moved from the build settings
+EXECUTABLE_PREFIX = lib
+PRODUCT_NAME = dyld_introspection

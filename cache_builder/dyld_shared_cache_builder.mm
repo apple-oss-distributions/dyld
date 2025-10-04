@@ -329,6 +329,8 @@ struct SharedCacheBuilderOptions {
     bool                        listConfigs = false;
     bool                        copyRoots = false;
     bool                        debug = false;
+    bool                        debugIMPCaches = false;
+    bool                        debugCacheLayout = false;
     bool                        useMRM = false;
     bool                        timePasses = false;
     bool                        printStats = false;
@@ -341,7 +343,7 @@ struct SharedCacheBuilderOptions {
     std::list<std::string>      baselineCacheMapPaths;
     std::string                 baselineCacheMapDirPath;
     bool                        baselineCopyRoots = false;
-    bool                        emitMapFiles = false;
+    bool                        printCDHashes = false;
     std::set<std::string>       cmdLineArchs;
 };
 
@@ -508,13 +510,8 @@ static void writeMRMResults(bool cacheBuildSuccess, MRMSharedCacheBuilder* share
             for (uint64_t i = 0, e = fileResultCount; i != e; ++i) {
                 const FileResult* fileResultPtr = fileResults[i];
 
-#if SUPPORT_CACHE_BUILDER_MEMORY_BUFFERS
                 assert(fileResultPtr->version == 1);
                 const FileResult_v1& fileResult = *(const FileResult_v1*)fileResultPtr;
-#else
-                assert(fileResultPtr->version == 2);
-                const FileResult_v2& fileResult = *(const FileResult_v2*)fileResultPtr;
-#endif
 
                 switch (fileResult.behavior) {
                     case AddFile:
@@ -523,30 +520,9 @@ static void writeMRMResults(bool cacheBuildSuccess, MRMSharedCacheBuilder* share
                         continue;
                 }
 
-                // Use the fd if we have one
-#if !SUPPORT_CACHE_BUILDER_MEMORY_BUFFERS
-                // HACK: when building a macOS dyld cache on macOS it is not immediately usable because
-                // the file was just written to and marked tainted.  So, use the slow path below
-                // and copy to a new file that is not tainted.
-                if ( (fileResult.fd != 0) && (strncmp(fileResult.path, MACOSX_MRM_DYLD_SHARED_CACHE_DIR, strlen(MACOSX_MRM_DYLD_SHARED_CACHE_DIR)) != 0) ) {
-                    // If are building all caches, then we don't have a dst_root, and instead
-                    // want to just drop this file
-                    if ( options.dstRoot.empty() )
-                        continue;
-
-                    // Try link() the file, which will fail if crossing file systems,
-                    // so fall back to the regular write() path in that case
-                    const std::string path = options.dstRoot + fileResult.path;
-
-                    // mkstemp() makes file "rw-------", switch it to "rw-r--r--"
-                    ::fchmod(fileResult.fd, S_IRUSR|S_IWUSR|S_IRGRP|S_IROTH);
-                    ::unlink(path.c_str());
-                    int result = ::link(fileResult.tempFilePath, path.c_str());
-                    if ( result == 0 )
-                        continue;
-                    // Fall though to regular path
+                if ( options.printCDHashes ) {
+                    fprintf(stderr, "[%s/%s] %s cdhash: %s\n", fileResult.hashArch, fileResult.hashType, fileResult.path, fileResult.hash);
                 }
-#endif
 
                 if ( (fileResult.data != nullptr) && !options.dstRoot.empty() ) {
                     const std::string path = options.dstRoot + fileResult.path;
@@ -601,6 +577,45 @@ static void writeMRMResults(bool cacheBuildSuccess, MRMSharedCacheBuilder* share
                     size_t jsonLength = strlen(result.mapJSON) + 1;
                     ::ftruncate(fd, jsonLength);
                     uint64_t writtenSize = write64(fd, result.mapJSON, jsonLength);
+                    if ( writtenSize == jsonLength ) {
+                        ::fchmod(fd, S_IRUSR|S_IWUSR|S_IRGRP|S_IROTH); // mkstemp() makes file "rw-------", switch it to "rw-r--r--"
+                        if ( ::rename(pathTemplateSpace, path.c_str()) == 0) {
+                            ::close(fd);
+                            continue; // success
+                        }
+                    }
+                    else {
+                        fprintf(stderr, "ERROR: could not write map file %s\n", pathTemplateSpace);
+                        cacheBuildSuccess = false;
+                    }
+                    ::close(fd);
+                    ::unlink(pathTemplateSpace);
+                }
+                else {
+                    fprintf(stderr, "ERROR: could not open map file %s\n", pathTemplateSpace);
+                    cacheBuildSuccess = false;
+                }
+            }
+        }
+    }
+
+    // If we ask for -stats, then also emit the stat files
+    if ( options.printStats && !options.dstRoot.empty() ) {
+        uint64_t statResultCount = 0;
+        if ( const char* const* statResults = getCacheStats(sharedCacheBuilder, &statResultCount) ) {
+            for (uint64_t i = 0; i != statResultCount; ++i) {
+                std::string_view statString = statResults[i];
+
+                const std::string path = options.dstRoot + "/" + "stats." + std::to_string(i) + ".json";
+                std::string pathTemplate = path + "-XXXXXX";
+                size_t templateLen = strlen(pathTemplate.c_str()) + 2;
+                char pathTemplateSpace[templateLen];
+                strlcpy(pathTemplateSpace, pathTemplate.c_str(), templateLen);
+                int fd = mkstemp(pathTemplateSpace);
+                if ( fd != -1 ) {
+                    size_t jsonLength = statString.size();
+                    ::ftruncate(fd, jsonLength);
+                    uint64_t writtenSize = write64(fd, statString.data(), jsonLength);
                     if ( writtenSize == jsonLength ) {
                         ::fchmod(fd, S_IRUSR|S_IWUSR|S_IRGRP|S_IROTH); // mkstemp() makes file "rw-------", switch it to "rw-r--r--"
                         if ( ::rename(pathTemplateSpace, path.c_str()) == 0) {
@@ -698,6 +713,8 @@ static void buildCacheFromJSONManifest(Diagnostics& diags, const SharedCacheBuil
     buildOptions.archs                              = archs;
     buildOptions.numArchs                           = numArchs;
     buildOptions.verboseDiagnostics                 = options.debug;
+    buildOptions.verboseIMPCaches                   = options.debugIMPCaches;
+    buildOptions.verboseCacheLayout                 = options.debugCacheLayout;
     buildOptions.isLocallyBuiltCache                = true;
 
     // optimizeForSize was added in version 2
@@ -1034,7 +1051,7 @@ static const char* leafName(std::string_view str)
 
 int main(int argc, const char* argv[])
 {
-    SharedCacheBuilderOptions options;
+    __block SharedCacheBuilderOptions options;
     std::string jsonManifestPath;
     char* tempRootsDir = strdup("/tmp/dyld_shared_cache_builder.XXXXXX");
 
@@ -1045,6 +1062,10 @@ int main(int argc, const char* argv[])
         if (arg[0] == '-') {
             if (strcmp(arg, "-debug") == 0) {
                 options.debug = true;
+            } else if (strcmp(arg, "-debug-imp-caches") == 0) {
+                options.debugIMPCaches = true;
+            } else if (strcmp(arg, "-debug-cache-layout") == 0) {
+                options.debugCacheLayout = true;
             } else if (strcmp(arg, "-list_configs") == 0) {
                 options.listConfigs = true;
             } else if (strcmp(arg, "-root") == 0) {
@@ -1097,6 +1118,8 @@ int main(int argc, const char* argv[])
                 options.baselineDifferenceResultPath = realPath(argv[++i]);
             } else if (strcmp(arg, "-baseline_copy_roots") == 0) {
                 options.baselineCopyRoots = true;
+            } else if (strcmp(arg, "-print_cdhashes") == 0) {
+                options.printCDHashes = true;
             } else if (strcmp(arg, "-baseline_cache_map") == 0) {
                 std::string path = realPathOrExit("-baseline_cache_map", argv[++i]);
                 options.baselineCacheMapPaths.push_back(path);

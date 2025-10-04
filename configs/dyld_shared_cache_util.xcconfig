@@ -1,4 +1,11 @@
-#include "base.xcconfig"
+#include "tools_base.xcconfig"
 
 // This entitlement doesn't seem to work on macOS, so only set on iOS
 CODE_SIGN_ENTITLEMENTS[sdk=embedded*] = $(SRCROOT)/configs/jumbo_address_space_entitlement.plist
+
+GCC_PREPROCESSOR_DEFINITIONS = $(inherited) BUILDING_SHARED_CACHE_UTIL=1
+
+// TODO: Clean these up.  They were moved from the build settings
+INSTALL_PATH = /usr/local/bin
+OTHER_CFLAGS = -faligned-allocation
+SUPPORTED_PLATFORMS = macosx iphoneos xros watchos appletvos bridgeos

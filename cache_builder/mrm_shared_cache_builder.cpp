@@ -23,6 +23,7 @@
  */
 
 #include "mrm_shared_cache_builder.h"
+#include "Architecture.h"
 #include "Defines.h"
 #include "BuilderFileSystem.h"
 #include "NewSharedCacheBuilder.h"
@@ -52,7 +53,7 @@ static const uint64_t kMinBuildVersion = 1; //The minimum version BuildOptions s
 static const uint64_t kMaxBuildVersion = 3; //The maximum version BuildOptions struct we can support
 
 static const uint32_t MajorVersion = 1;
-static const uint32_t MinorVersion = 7;
+static const uint32_t MinorVersion = 8;
 
 struct BuildInstance {
     std::unique_ptr<cache_builder::BuilderOptions>  options;
@@ -65,7 +66,8 @@ struct BuildInstance {
     std::vector<std::string>                        errorStrings;   // Owns the data for the errors
     std::vector<std::string>                        warningStrings; // Owns the data for the warnings
     std::vector<CacheBuffer>                        cacheBuffers;
-    std::vector<std::string>                        cachePaths;     // Owns the data for the cache paths
+    std::vector<std::string>                        cachePaths;             // Owns the data for the cache paths
+    std::vector<std::string>                        cacheAgileHashPaths;   // Owns the data for the cache paths for agile signatures
     std::vector<std::byte>                          atlas;
     std::string                                     loggingPrefix;
     std::string                                     jsonMap;
@@ -76,6 +78,7 @@ struct BuildInstance {
     std::string                                     macOSMap;       // For compatibility with update_dyld_shared_cache's .map file
     std::string                                     macOSMapPath;   // Owns the string for the path
     std::string                                     cdHashType;     // Owns the data for the cdHashType
+    std::string                                     agileHashType;  // Owns the data for the other cdHashType (if using agile signatures)
 };
 
 struct BuildFileResult {
@@ -129,24 +132,14 @@ struct MRMSharedCacheBuilder {
     // We keep this in a vector to own the data.
     std::vector<FileResult*>                     fileResults;
 
-#if SUPPORT_CACHE_BUILDER_MEMORY_BUFFERS
     // The builder dylib passes back buffers
     std::vector<FileResult_v1>                   fileResultStorage_v1;
-#else
-    // The builder executable gets file descriptors
-    std::vector<FileResult_v2>                   fileResultStorage_v2;
-#endif
 
     // Buffers which were malloc()ed and need free()d
     std::vector<FileBuffer> buffersToFree;
 
     // Buffers which were vm_allocate()d, and need vm_deallocate()d
     std::vector<FileBuffer> buffersToDeallocate;
-
-#if !SUPPORT_CACHE_BUILDER_MEMORY_BUFFERS
-    // Buffers which were open()ed and mmap()ed
-    std::vector<MappedBuffer> buffersToUnmap;
-#endif
 
     // The results from all of the builders
     // We keep this in a vector to own the data.
@@ -156,6 +149,10 @@ struct MRMSharedCacheBuilder {
 
     // The files to remove.  These are in every copy of the caches we built
     std::vector<const char*> filesToRemove;
+
+    // 1 JSON string per cache we built, with stats
+    std::vector<const char*> stats;
+    std::vector<std::string> statsStorage;
 
     std::vector<const char*> errors;
     std::vector<std::string> errorStorage;
@@ -464,6 +461,26 @@ static bool printStats(const BuildOptions_v1* options) {
     return v3->printStats;
 }
 
+static bool debugIMPCaches(const BuildOptions_v1* options) {
+    // Old builds just don't print this verbose output
+    if ( options->version < 3 ) {
+        return false;
+    }
+
+    const BuildOptions_v3* v3 = (const BuildOptions_v3*)options;
+    return v3->verboseIMPCaches;
+}
+
+static bool debugCacheLayout(const BuildOptions_v1* options) {
+    // Old builds just don't print this verbose output
+    if ( options->version < 3 ) {
+        return false;
+    }
+
+    const BuildOptions_v3* v3 = (const BuildOptions_v3*)options;
+    return v3->verboseCacheLayout;
+}
+
 // This is a JSON file containing the list of classes for which
 // we should try to build IMP caches.
 static json::Node parseObjcOptimizationsFile(Diagnostics& diags, const void* data, size_t length) {
@@ -625,11 +642,15 @@ static bool createBuilders(struct MRMSharedCacheBuilder* builder)
         auto options = std::make_unique<cache_builder::BuilderOptions>(builder->options->archs[i],
                                                                        builder->options->platform,
                                                                        dylibsRemovedFromDisk, isLocallyBuiltCache,
-                                                                       cacheKind, forceDevelopmentSubCacheSuffix);
+                                                                       cacheKind, forceDevelopmentSubCacheSuffix,
+                                                                       builder->options->updateName,
+                                                                       builder->options->deviceName);
 
         options->mainCacheFileName           = mainCacheFileName;
         options->logPrefix                   = loggingPrefix;
         options->debug                       = builder->options->verboseDiagnostics;
+        options->debugIMPCaches              = debugIMPCaches(builder->options);
+        options->debugCacheLayout            = debugCacheLayout(builder->options);
         options->timePasses                  = options->debug ? true : timePasses(builder->options);
         options->stats                       = options->debug ? true : printStats(builder->options);
         options->dylibOrdering               = parseOrderFile(builder->dylibOrderFileData);
@@ -662,6 +683,10 @@ static void runBuilders(struct MRMSharedCacheBuilder* builder)
         std::unordered_set<std::string> evictedDylibsSet;
         __block std::unique_ptr<SharedCacheBuilder> cacheBuilder;
         Error error;
+
+        // Note down when we start so we can emit it in stats().
+        // This is outside the loop to include potential time in eviction and rebuilds
+        uint64_t startTimeNanos = clock_gettime_nsec_np(CLOCK_UPTIME_RAW);
         while ( true ) {
             cacheBuilder = std::make_unique<SharedCacheBuilder>(*buildInstance.options.get(), builder->fileSystem);
 
@@ -738,18 +763,8 @@ static void runBuilders(struct MRMSharedCacheBuilder* builder)
 
         // Track all buffers to be freed/unmapped (see allocateSubCacheBuffers() for allocation)
         for ( const CacheBuffer& buffer : buildInstance.cacheBuffers ) {
-#if SUPPORT_CACHE_BUILDER_MEMORY_BUFFERS
             // In MRM, we vm_allocated
             builder->buffersToDeallocate.emplace_back((FileBuffer){ buffer.bufferData, buffer.bufferSize });
-#else
-            // In the local builder, we mmap()ed
-            builder->buffersToUnmap.emplace_back((MappedBuffer) {
-                buffer.bufferData,
-                buffer.bufferSize,
-                buffer.fd,
-                buffer.tempPath
-            });
-#endif
         }
 
         if ( error.hasError() ) {
@@ -843,6 +858,7 @@ static void runBuilders(struct MRMSharedCacheBuilder* builder)
                     break;
                 case DyldSharedCache::Agile:
                     buildInstance.cdHashType = "sha1";
+                    buildInstance.agileHashType = "sha256";
                     break;
             }
 
@@ -853,7 +869,16 @@ static void runBuilders(struct MRMSharedCacheBuilder* builder)
             cacheBuilder->forEachCacheSymlink(^(const std::string_view &path) {
                 builder->dylibsInCaches[std::string(path)].insert(&buildInstance);
             });
+
+            // Track cache stats
+            builder->statsStorage.push_back(cacheBuilder->stats(startTimeNanos));
         }
+    }
+
+    // Make the stats vector from the storage
+    if ( !builder->statsStorage.empty() ) {
+        for ( std::string& str : builder->statsStorage )
+            builder->stats.push_back(str.data());
     }
 }
 
@@ -906,99 +931,72 @@ static void createBuildResults(struct MRMSharedCacheBuilder* builder)
         if (!buildInstance.errors.empty())
             continue;
 
-        for ( const CacheBuffer& buffer : buildInstance.cacheBuffers )
+        for ( const CacheBuffer& buffer : buildInstance.cacheBuffers ) {
             buildInstance.cachePaths.push_back(buildInstance.mainCacheFilePath + buffer.cacheFileSuffix);
+            if ( !buildInstance.agileHashType.empty() ) {
+                buildInstance.cacheAgileHashPaths.push_back(buildInstance.cachePaths.back() + ".cdhash");
+            }
+        }
 
         uint32_t cacheIndex = 0;
         for ( const CacheBuffer& cacheBuffer : buildInstance.cacheBuffers ) {
-#if SUPPORT_CACHE_BUILDER_MEMORY_BUFFERS
-            FileResult_v1 cacheFileResult;
-            cacheFileResult.version          = 1;
-            cacheFileResult.path             = buildInstance.cachePaths[cacheIndex].c_str();
-            cacheFileResult.behavior         = AddFile;
-            cacheFileResult.data             = cacheBuffer.bufferData;
-            cacheFileResult.size             = cacheBuffer.bufferSize;
-            cacheFileResult.hashArch         = buildInstance.options->archs.name();
-            cacheFileResult.hashType         = buildInstance.cdHashType.c_str();
-            cacheFileResult.hash             = cacheBuffer.cdHash.c_str();
+            {
+                FileResult_v1 cacheFileResult;
+                cacheFileResult.version          = 1;
+                cacheFileResult.path             = buildInstance.cachePaths[cacheIndex].c_str();
+                cacheFileResult.behavior         = AddFile;
+                cacheFileResult.data             = cacheBuffer.bufferData;
+                cacheFileResult.size             = cacheBuffer.bufferSize;
+                cacheFileResult.hashArch         = buildInstance.options->arch.name();
+                cacheFileResult.hashType         = buildInstance.cdHashType.c_str();
+                cacheFileResult.hash             = cacheBuffer.cdHash.c_str();
 
-            builder->fileResultStorage_v1.emplace_back(cacheFileResult);
-#else
-            FileResult_v2 cacheFileResult;
-            cacheFileResult.version          = 2;
-            cacheFileResult.path             = buildInstance.cachePaths[cacheIndex].c_str();
-            cacheFileResult.behavior         = AddFile;
-            cacheFileResult.data             = cacheBuffer.bufferData;
-            cacheFileResult.size             = cacheBuffer.bufferSize;
-            cacheFileResult.hashArch         = buildInstance.options->archs.name();
-            cacheFileResult.hashType         = buildInstance.cdHashType.c_str();
-            cacheFileResult.hash             = cacheBuffer.cdHash.c_str();
-            cacheFileResult.fd               = cacheBuffer.fd;
-            cacheFileResult.tempFilePath     = cacheBuffer.tempPath.c_str();
+                builder->fileResultStorage_v1.emplace_back(cacheFileResult);
+            }
 
-            builder->fileResultStorage_v2.emplace_back(cacheFileResult);
-#endif
+            // Generate a dummy file for the agile cdHash if we have it, this gets it in to the trust cache
+            if ( !buildInstance.agileHashType.empty() ) {
+                FileResult_v1 cacheFileResult;
+                cacheFileResult.version          = 1;
+                cacheFileResult.path             = buildInstance.cacheAgileHashPaths[cacheIndex].c_str();
+                cacheFileResult.behavior         = AddFile;
+                cacheFileResult.data             = (const uint8_t*)"cdhash";
+                cacheFileResult.size             = strlen("cdhash");
+                cacheFileResult.hashArch         = buildInstance.options->arch.name();
+                cacheFileResult.hashType         = buildInstance.agileHashType.c_str();
+                cacheFileResult.hash             = cacheBuffer.agilecdHash.c_str();
+
+                builder->fileResultStorage_v1.emplace_back(cacheFileResult);
+            }
             ++cacheIndex;
         }
 
-#if SUPPORT_CACHE_BUILDER_MEMORY_BUFFERS
         FileResult_v1 arlasFileResult;
         arlasFileResult.version     = 1;
         arlasFileResult.path        = buildInstance.atlasPath.c_str();
         arlasFileResult.behavior    = AddFile;
         arlasFileResult.data        = (const uint8_t*)&buildInstance.atlas[0];
         arlasFileResult.size        = buildInstance.atlas.size();
-        arlasFileResult.hashArch    = buildInstance.options->archs.name();
+        arlasFileResult.hashArch    = buildInstance.options->arch.name();
         arlasFileResult.hashType    = buildInstance.cdHashType.c_str();
         arlasFileResult.hash        = buildInstance.cacheBuffers.front().cdHash.c_str();;
 
         builder->fileResultStorage_v1.emplace_back(arlasFileResult);
-#else
-        FileResult_v2 arlasFileResult;
-        arlasFileResult.version          = 2;
-        arlasFileResult.path             = buildInstance.atlasPath.c_str();
-        arlasFileResult.behavior         = AddFile;
-        arlasFileResult.data             = (const uint8_t*)&buildInstance.atlas[0];
-        arlasFileResult.size             = buildInstance.atlas.size();
-        arlasFileResult.hashArch         = buildInstance.options->archs.name();
-        arlasFileResult.hashType         = buildInstance.cdHashType.c_str();
-        arlasFileResult.hash             = buildInstance.cacheBuffers.front().cdHash.c_str();
-        arlasFileResult.fd               = 0;
-        arlasFileResult.tempFilePath     = nullptr;
-
-        builder->fileResultStorage_v2.emplace_back(arlasFileResult);
-#endif
 
         // Add a file result for the .map file
         // FIXME: We only emit a single map file right now.
         if ( !buildInstance.macOSMap.empty() ) {
-#if SUPPORT_CACHE_BUILDER_MEMORY_BUFFERS
             FileResult_v1 cacheFileResult;
             cacheFileResult.version     = 1;
             cacheFileResult.path        = buildInstance.macOSMapPath.c_str();
             cacheFileResult.behavior    = AddFile;
             cacheFileResult.data        = (const uint8_t*)buildInstance.macOSMap.data();
             cacheFileResult.size        = buildInstance.macOSMap.size();
-            cacheFileResult.hashArch    = buildInstance.options->archs.name();
+            cacheFileResult.hashArch    = buildInstance.options->arch.name();
             cacheFileResult.hashType    = buildInstance.cdHashType.c_str();
             cacheFileResult.hash        = buildInstance.cacheBuffers.front().cdHash.c_str();;
 
             builder->fileResultStorage_v1.emplace_back(cacheFileResult);
-#else
-            FileResult_v2 cacheFileResult;
-            cacheFileResult.version          = 2;
-            cacheFileResult.path             = buildInstance.macOSMapPath.c_str();
-            cacheFileResult.behavior         = AddFile;
-            cacheFileResult.data             = (const uint8_t*)buildInstance.macOSMap.data();
-            cacheFileResult.size             = buildInstance.macOSMap.size();
-            cacheFileResult.hashArch         = buildInstance.options->archs.name();
-            cacheFileResult.hashType         = buildInstance.cdHashType.c_str();
-            cacheFileResult.hash             = buildInstance.cacheBuffers.front().cdHash.c_str();
-            cacheFileResult.fd               = 0;
-            cacheFileResult.tempFilePath     = nullptr;
-
-            builder->fileResultStorage_v2.emplace_back(cacheFileResult);
-#endif
         }
     }
 }
@@ -1055,7 +1053,7 @@ static void calculateDylibsToDelete(struct MRMSharedCacheBuilder* builder)
                 // so removing it from disk won't hurt
                 Diagnostics loaderDiag;
                 const bool  isOSBinary = false;
-                const dyld3::GradedArchs& archs = buildInstance.options->archs;
+                const mach_o::GradedArchitectures& archs = buildInstance.options->gradedArchs;
                 mach_o::Platform platform = buildInstance.options->platform;
                 uint64_t sliceOffset = 0;
                 uint64_t sliceSize = 0;
@@ -1250,9 +1248,8 @@ static bool runSymbolsCacheBuilder(struct MRMSharedCacheBuilder* builder) {
         else if ( mach_o::Platform(builder->options->platform).isExclaveKit() )
             resultPath = EXCLAVEKIT_DYLD_SHARED_CACHE_DIR "dyld_symbols.db";
 
-#if SUPPORT_CACHE_BUILDER_MEMORY_BUFFERS
         FileResult_v1 cacheFileResult;
-        cacheFileResult.version          = 2;
+        cacheFileResult.version          = 1;
         cacheFileResult.path             = resultPath;
         cacheFileResult.behavior         = AddFile;
         cacheFileResult.data             = buffer;
@@ -1263,22 +1260,6 @@ static bool runSymbolsCacheBuilder(struct MRMSharedCacheBuilder* builder) {
 
         builder->fileResultStorage_v1.emplace_back(cacheFileResult);
         builder->fileResults.push_back((FileResult*)&builder->fileResultStorage_v1.back());
-#else
-        FileResult_v2 cacheFileResult;
-        cacheFileResult.version          = 2;
-        cacheFileResult.path             = resultPath;
-        cacheFileResult.behavior         = AddFile;
-        cacheFileResult.data             = buffer;
-        cacheFileResult.size             = bufferSize;
-        cacheFileResult.hashArch         = "x86_64";
-        cacheFileResult.hashType         = "sha256";
-        cacheFileResult.hash             = "";
-        cacheFileResult.fd               = 0;
-        cacheFileResult.tempFilePath     = nullptr;
-
-        builder->fileResultStorage_v2.emplace_back(cacheFileResult);
-        builder->fileResults.push_back((FileResult*)&builder->fileResultStorage_v2.back());
-#endif
 
         builder->buffersToFree.emplace_back((FileBuffer) { (void*)buffer, bufferSize });
 
@@ -1304,13 +1285,8 @@ bool runSharedCacheBuilder(struct MRMSharedCacheBuilder* builder) {
         calculateDylibsToDelete(builder);
 
         // Copy from the storage to the vector we can return to the API.
-#if SUPPORT_CACHE_BUILDER_MEMORY_BUFFERS
         for (auto &fileResult : builder->fileResultStorage_v1)
             builder->fileResults.push_back((FileResult*)&fileResult);
-#else
-        for (auto &fileResult : builder->fileResultStorage_v2)
-            builder->fileResults.push_back((FileResult*)&fileResult);
-#endif
         for (auto &cacheResult : builder->cacheResultStorage)
             builder->cacheResults.push_back(&cacheResult);
 
@@ -1354,6 +1330,15 @@ const char* const* getFilesToRemove(const struct MRMSharedCacheBuilder* builder,
     return builder->filesToRemove.data();
 }
 
+const char* const* getCacheStats(const struct MRMSharedCacheBuilder* builder, uint64_t* resultCount) {
+    if ( builder->stats.empty() ) {
+        *resultCount = 0;
+        return nullptr;
+    }
+    *resultCount = builder->stats.size();
+    return builder->stats.data();
+}
+
 void destroySharedCacheBuilder(struct MRMSharedCacheBuilder* builder) {
 
     for ( FileBuffer& buffer : builder->buffersToFree ) {
@@ -1364,16 +1349,15 @@ void destroySharedCacheBuilder(struct MRMSharedCacheBuilder* builder) {
         vm_deallocate(mach_task_self(), (vm_address_t)buffer.buffer, buffer.size);
     }
 
-#if !SUPPORT_CACHE_BUILDER_MEMORY_BUFFERS
-    for ( MappedBuffer& buffer : builder->buffersToUnmap ) {
-        ::munmap(buffer.buffer, buffer.size);
-        ::close(buffer.fd);
-
-        // The builder tool will link this temp path to the new location, if needed.  We then
-        // remove the old path with this unlink().
-        ::unlink(buffer.tempPath.c_str());
-    }
-#endif
-
     delete builder;
+}
+
+
+// rdar://146678211 (slc_builder.dylib is using libcpp_verbose_abort() which does not exist on builder)
+// This can be removed when IA builders update to a host whose libc++.dylib has the symbol __ZNSt3__122__libcpp_verbose_abortEPKcz
+__attribute__((__noreturn__, visibility("hidden")))
+void _libcpp_verbose_abort(const char* msg, ...) __asm("__ZNSt3__122__libcpp_verbose_abortEPKcz");
+void _libcpp_verbose_abort(const char* msg, ...)
+{
+    abort();
 }

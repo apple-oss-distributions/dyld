@@ -308,6 +308,11 @@ public:
 #endif
     virtual void                                    _dyld_stack_range(const void** stack_bottom, const void** stack_top);
 
+    //
+    // Added iOS 19.0, macOS 16.0
+    //
+    virtual void                                    _dyld_call_with_writable_tpro_memory(void (*func)(void*), void* ctx);
+
 private:
 
 #if SUPPORT_PREBUILTLOADERS || BUILDING_UNIT_TESTS

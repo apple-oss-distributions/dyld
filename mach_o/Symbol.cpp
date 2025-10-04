@@ -412,5 +412,15 @@ void Symbol::setimplOffset(uint64_t newOffset)
     _implOffset = newOffset;
 }
 
+void Symbol::changeRegularToAltEntry()
+{
+    assert(_kind == Kind::regular && "only regular symbols can be changed to an alt entry");
+    _kind = Kind::altEntry;
+}
 
+void Symbol::changeAltEntryToRegular()
+{
+    assert(_kind == Kind::altEntry && "only altEntry symbols can be changed to regular");
+    _kind = Kind::regular;
+}
 } // namespace mach_o

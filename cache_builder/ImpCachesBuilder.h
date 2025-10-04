@@ -165,21 +165,19 @@ struct FallbackClassHash
 
 struct BucketMethod
 {
-    std::string_view installName;
     std::string_view className;
     std::string_view methodName;
     bool isInstanceMethod;
 
     bool operator==(const BucketMethod& other) const {
         return isInstanceMethod == other.isInstanceMethod &&
-                installName == other.installName &&
                 className == other.className &&
                 methodName == other.methodName;
     }
 
-    size_t hash() const {
+    size_t hash() const
+    {
         std::size_t seed = 0;
-        seed ^= std::hash<std::string_view>()(installName) + 0x9e3779b9 + (seed<<6) + (seed>>2);
         seed ^= std::hash<std::string_view>()(className) + 0x9e3779b9 + (seed<<6) + (seed>>2);
         seed ^= std::hash<std::string_view>()(methodName) + 0x9e3779b9 + (seed<<6) + (seed>>2);
         seed ^= std::hash<bool>()(isInstanceMethod) + 0x9e3779b9 + (seed<<6) + (seed>>2);
@@ -231,7 +229,9 @@ struct Builder
     Builder(Builder&&) = delete;
     Builder& operator=(Builder&&) = delete;
 
-    void buildImpCaches();
+    // Ensure that all the selectors will fit on 16 MB as that's the constant
+    // embedded in the placement algorithm
+    void buildImpCaches(uint32_t selectorSizeLimit = 1 << 24);
 
     void forEachSelector(void (^handler)(std::string_view str, uint32_t bufferOffset)) const;
     std::optional<imp_caches::IMPCache> getIMPCache(uint32_t dylibIndex, std::string_view className, bool isMetaClass);

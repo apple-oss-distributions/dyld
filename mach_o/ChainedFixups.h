@@ -78,11 +78,17 @@ public:
                                                              std::span<const uint64_t> segOffsetTable, uint32_t pageIndex, uint32_t pageSize,
                                                              void (^callback)(const Fixup& f, bool& stop)) const;
         virtual Fixup            parseChainEntry(const void* loc, const MappedSegment* seg, uint64_t preferedLoadAddress=0, std::span<const uint64_t> segOffsetTable={}) const = 0;
-        virtual void             writeChainEntry(const Fixup& fixup, const void* nextLoc, uint64_t preferedLoadAddress, std::span<const MappedSegment*>) const;
+        virtual Error            writeChainEntry(const Fixup& fixup, const void* nextLoc, uint64_t preferedLoadAddress, std::span<const MappedSegment*>) const;
 
     protected:
         constexpr                PointerFormat() { }
-    };
+        Error                    badChainDistance(const Fixup& fixup, intptr_t delta) const;
+        Error                    badBindOrdinal(const Fixup& fixup) const;
+        Error                    badVmOffset(const Fixup& fixup) const;
+        Error                    badVmAddr(const Fixup& fixup, uint64_t baseAddress) const;
+        Error                    badAddend(const Fixup& fixup, int64_t addend) const;
+        Error                    badSegIndexOrOffset(const Fixup& fixup, uint8_t  segIndex, uint64_t segOffset) const;
+  };
 
     Error                   validLinkedit(uint64_t preferredLoadAddress, std::span<const MappedSegment> segments) const;
     Error                   validStartsSection(std::span<const MappedSegment> segments) const;

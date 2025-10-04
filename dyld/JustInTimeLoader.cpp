@@ -44,7 +44,6 @@
 
 using dyld3::MachOAnalyzer;
 using dyld3::MachOFile;
-using dyld3::FatFile;
 using mach_o::Header;
 using mach_o::Platform;
 using mach_o::Version32;
@@ -168,7 +167,7 @@ static void getObjCPatchClasses(const dyld3::MachOAnalyzer* ma, PointerSet& clas
     if ( !ma->hasChainedFixups() )
         return;
 
-    Diagnostics diag;
+    __block Diagnostics diag;
 
     STACK_ALLOC_OVERFLOW_SAFE_ARRAY(const void*, bindTargets, 32);
     ma->forEachBindTarget(diag, false, ^(const dyld3::MachOAnalyzer::BindTargetInfo& info, bool& stop) {
@@ -363,7 +362,8 @@ const Loader::DylibPatch* JustInTimeLoader::makePatchTable(RuntimeState& state, 
                     state.log("   will patch cache uses of '%s' %s\n", exportName, PatchTable::patchKindName(patchKind));
                 const dyld3::MachOAnalyzer* implMA  = (const dyld3::MachOAnalyzer*)foundSymbolInfo.targetLoader->loadAddress(state);
                 uint8_t* newImplAddress = (uint8_t*)implMA + foundSymbolInfo.targetRuntimeOffset;
-
+                if ( state.config.log.functionVariants && foundSymbolInfo.isFunctionVariant )
+                    state.log("dyld cache uses of '%s/%s' will be patched to use %p\n", this->leafName(state), exportName, newImplAddress);
                 bool foundUsableObjCClass = false;
                 bool foundSingletonObject = false;
                 switch ( patchKind ) {
@@ -809,9 +809,15 @@ void JustInTimeLoader::applyFixups(Diagnostics& diag, RuntimeState& state, DyldC
     STACK_ALLOC_OVERFLOW_SAFE_ARRAY(MissingFlatLazySymbol, missingFlatLazySymbols, 4);
     this->forEachBindTarget(diag, state, cacheWeakDefFixup, allowLazyBinds, ^(const ResolvedSymbol& target, bool& stop) {
         const void* targetAddr = (const void*)Loader::interpose(state, Loader::resolvedAddress(state, target), this);
-        if ( state.config.log.fixups ) {
+        if ( target.isFunctionVariant && (state.config.log.functionVariants || state.config.log.fixups) ) {
             const char* targetLoaderName = target.targetLoader ? target.targetLoader->leafName(state) : "<none>";
-            state.log("<%s/bind#%llu> -> %p (%s/%s)\n", this->leafName(state), bindTargets.count(), targetAddr, targetLoaderName, target.targetSymbolName);
+            state.log("<%s/bind#%llu> -> %p <%s/variant-table#%d('%s')>)\n", this->leafName(state), bindTargets.count(),
+                      targetAddr, targetLoaderName, target.variantIndex, target.targetSymbolName);
+        }
+        else if ( state.config.log.fixups ) {
+            const char* targetLoaderName = target.targetLoader ? target.targetLoader->leafName(state) : "<none>";
+            state.log("<%s/bind#%llu> -> %p <%s/%s>)\n", this->leafName(state), bindTargets.count(),
+                      targetAddr, targetLoaderName, target.targetSymbolName);
         }
 
         // Record missing flat-namespace lazy symbols
@@ -862,7 +868,7 @@ void JustInTimeLoader::applyFixups(Diagnostics& diag, RuntimeState& state, DyldC
                         //state.log("found __dyld section in %s\n", this->path());
                         // dyld and libdyld have not been wired together yet, so peek into libdyld
                         // if libdyld.dylib is a root, it may not have been rebased yet
-                        if ( state.libdyldLoader->hasBeenFixedUp(state) ) {
+                        if ( state.libdyldLoader->hasBeenFixedUp(state) || state.libdyldLoader->dylibInDyldCache ) {
                             const Header*               libdyldHdr    = state.libdyldLoader->header(state);
                             std::span<const uint8_t>    helperSection = libdyldHdr->findSectionContent("__DATA_CONST", "__helper", true/*vm layout*/);
                             if ( helperSection.size() == sizeof(void*) ) {
@@ -1339,9 +1345,18 @@ Loader* JustInTimeLoader::makeJustInTimeLoaderDisk(Diagnostics& diag, RuntimeSta
 #endif
                 return result;
             }
+            const Header* hdr = (Header*)mf;
+            if ( hdr->noDynamicAccess() && !options.staticLinkage ) {
+                diag.error("cannot dlopen() image marked for no dynamic access '%s'", loadPath);
+#if !BUILDING_CACHE_BUILDER
+                state.config.syscall.unmapFile(mapping, mappedSize);
+                ::close(fileDescriptor);
+#endif
+                return result;
+            }
 #if !BUILDING_CACHE_BUILDER
             // do a deep inspection of the binary, looking for invalid mach-o constructs
-            if ( mach_o::Error err = ((Header*)mf)->valid(mappedSize) ) {
+            if ( mach_o::Error err = hdr->valid(mappedSize) ) {
                 diag.error("%s", err.message());
                 state.config.syscall.unmapFile(mapping, mappedSize);
                 ::close(fileDescriptor);
@@ -1427,18 +1442,21 @@ Loader* JustInTimeLoader::makeJustInTimeLoaderDisk(Diagnostics& diag, RuntimeSta
     return result;
 }
 
-Loader* JustInTimeLoader::makeLaunchLoader(Diagnostics& diag, RuntimeState& state, const MachOAnalyzer* mainExe, const char* mainExePath,
-                                           const mach_o::Layout* layout)
+#if !BUILDING_CACHE_BUILDER && !BUILDING_CACHE_BUILDER_UNIT_TESTS
+Loader* JustInTimeLoader::makeLaunchLoader(Diagnostics& diag, RuntimeState& state)
 {
-    FileID   mainFileID = FileID::none();
-    uint64_t mainSliceOffset = Loader::getOnDiskBinarySliceOffset(state, mainExe, mainExePath);
-#if !BUILDING_CACHE_BUILDER
-    state.config.syscall.fileExists(mainExePath, &mainFileID);
-#endif // !BUILDING_CACHE_BUILDER
-    return JustInTimeLoader::make(state, mainExe, mainExePath, mainFileID, mainSliceOffset, true, false, false, 0, layout);
-}
+    // check if main executable is valid mach-o
+    if ( mach_o::Error err = state.config.process.mainExecutableHdr->valid(state.config.process.mainExecutableSliceSize) ) {
+        diag.error("%s", err.message());
+        return nullptr;
+    }
 
-#if BUILDING_CACHE_BUILDER || BUILDING_CACHE_BUILDER_UNIT_TESTS
+    FileID   mainFileID = FileID::none();
+    uint64_t mainSliceOffset = Loader::getOnDiskBinarySliceOffset(state, state.config.process.mainExecutableMF, state.config.process.mainExecutablePath);
+    state.config.syscall.fileExists(state.config.process.mainExecutablePath, &mainFileID);
+    return JustInTimeLoader::make(state, state.config.process.mainExecutableMF, state.config.process.mainExecutablePath, mainFileID, mainSliceOffset, true, false, false, 0, nullptr);
+}
+#else
 Loader* JustInTimeLoader::makeLaunchLoader(Diagnostics& diag, RuntimeState& state, const MachOFile* mainExe, const char* mainExePath,
                                            const mach_o::Layout* layout)
 {

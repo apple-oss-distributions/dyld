@@ -94,7 +94,11 @@ struct VIS_HIDDEN Instructions
         enum BranchKind { b, bl, blx };
 
         // arm instructions
-        static bool isBranch24(uint32_t instruction, uint32_t instructionAddr, BranchKind& kind, uint32_t& targetAddr);
+        // isCond => true, when this is a 32-bit ARM conditionally executed branch
+        //              (the condition's code is encoded in the 4 top bits)
+        static bool isBranch24(uint32_t instruction, uint32_t instructionAddr, BranchKind& kind, uint32_t& targetAddr, bool& isCond);
+        // \a instruction must be initialized to the input instruction value,
+        //    so that the conditional code can be preserved
         static bool makeBranch24(BranchKind kind, uint64_t instructionAddr, uint64_t targetAddr, bool targetIsThumb, uint32_t& instruction);
         static bool isMovt(uint32_t instruction, uint16_t& value);
         static bool setMovt(uint32_t& instruction, uint16_t value);

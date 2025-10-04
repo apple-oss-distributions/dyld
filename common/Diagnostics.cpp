@@ -22,6 +22,7 @@
  */
 
 
+#include <limits.h>
 #include <stdint.h>
 #include <stdio.h>
 #include <string.h>
@@ -39,26 +40,73 @@
   #include <iostream>
 #endif
 
+#if !TARGET_OS_EXCLAVEKIT
+#include "BitUtils.h"
+#include <mach/mach.h>
+#endif
+
 #include "Diagnostics.h"
+
+#if !BUILDING_DYLD
+#define _simple_vsnprintf(str, size, fmt, ap) vsnprintf(str, size, fmt, ap)
+#endif
 
 #if BUILDING_CACHE_BUILDER || BUILDING_UNIT_TESTS || BUILDING_CACHE_BUILDER_UNIT_TESTS
   #include <dispatch/dispatch.h>
   dispatch_queue_t sWarningQueue = dispatch_queue_create("com.apple.dyld.cache-builder.warnings", NULL);
 #endif
 
-Diagnostics::Diagnostics(bool verbose)
 #if BUILDING_CACHE_BUILDER || BUILDING_UNIT_TESTS || BUILDING_CACHE_BUILDER_UNIT_TESTS
+Diagnostics::Diagnostics(bool verbose)
     : _prefix(""), _verbose(verbose)
+{
+}
 #endif
+
+Diagnostics::Diagnostics()
 {
 #if TARGET_OS_EXCLAVEKIT
-    _strBuf[0] = '\0';
+    this->_strBuf[0] = '\0';
 #endif
+}
+
+Diagnostics::Diagnostics(Diagnostics&& other)
+{
+#if TARGET_OS_EXCLAVEKIT
+    strlcpy(this->_strBuf, other._strBuf, sizeof(this->_strBuf));
+    other._strBuf[0] = '\0';
+#else
+    this->_buffer       = other._buffer;
+    this->_bufferSize   = other._bufferSize;
+    this->_bufferUsed   = other._bufferUsed;
+
+    other._buffer       = nullptr;
+    other._bufferSize   = 0;
+    other._bufferUsed   = 0;
+#endif
+}
+
+Diagnostics& Diagnostics::operator=(Diagnostics&& other)
+{
+#if TARGET_OS_EXCLAVEKIT
+    strlcpy(this->_strBuf, other._strBuf, sizeof(this->_strBuf));
+    other._strBuf[0] = '\0';
+#else
+    this->_buffer       = other._buffer;
+    this->_bufferSize   = other._bufferSize;
+    this->_bufferUsed   = other._bufferUsed;
+
+    other._buffer       = nullptr;
+    other._bufferSize   = 0;
+    other._bufferUsed   = 0;
+#endif
+
+    return *this;
 }
 
 #if BUILDING_CACHE_BUILDER || BUILDING_UNIT_TESTS || BUILDING_CACHE_BUILDER_UNIT_TESTS
 Diagnostics::Diagnostics(const std::string& prefix, bool verbose)
-    : _prefix(prefix),_verbose(verbose)
+    : _prefix(prefix), _verbose(verbose)
 {
 }
 #endif
@@ -81,9 +129,33 @@ void Diagnostics::error(const char* format, va_list_wrap vaWrap)
 #if TARGET_OS_EXCLAVEKIT
     vsnprintf(_strBuf, sizeof(_strBuf), format, vaWrap.list);
 #else
-    if ( _buffer == nullptr )
-        _buffer = _simple_salloc();
-    _simple_vsprintf(_buffer, format, vaWrap.list);
+    clearError();
+
+    va_list list2;
+    va_copy(list2, vaWrap.list);
+
+    // Get the size
+    char smallBuffer[1] = { '\0' };
+    int expectedSize = _simple_vsnprintf(smallBuffer, sizeof(smallBuffer), format, vaWrap.list) + 1;
+    assert(expectedSize >= 0);
+
+    const uint64_t alignedSize = lsl::roundToNextAligned(PAGE_SIZE, (uint64_t)expectedSize);
+
+    vm_address_t newBuffer = 0;
+    int kr = ::vm_allocate(mach_task_self(), &newBuffer, (vm_size_t)alignedSize,
+                           VM_FLAGS_ANYWHERE | VM_MAKE_TAG(VM_MEMORY_DYLD));
+    assert(kr == KERN_SUCCESS);
+
+    this->_buffer = (char*)newBuffer;
+
+    int actualSize = _simple_vsnprintf(this->_buffer, (size_t)alignedSize, format, list2);
+    assert(actualSize >= 0);
+    assert((actualSize + 1) == expectedSize);
+
+    this->_bufferUsed = actualSize + 1;
+    this->_bufferSize = (uint32_t)alignedSize;
+
+    va_end(list2);
 #endif
 
 #if BUILDING_CACHE_BUILDER || BUILDING_UNIT_TESTS || BUILDING_CACHE_BUILDER_UNIT_TESTS
@@ -91,15 +163,26 @@ void Diagnostics::error(const char* format, va_list_wrap vaWrap)
         return;
 
     if (_prefix.empty()) {
-        fprintf(stderr, "%s\n", _simple_string(_buffer));
+        fprintf(stderr, "%s\n", this->_buffer);
     } else {
-        fprintf(stderr, "[%s] %s\n", _prefix.c_str(), _simple_string(_buffer));
+        fprintf(stderr, "[%s] %s\n", _prefix.c_str(), this->_buffer);
     }
 #endif
 }
 
- void Diagnostics::appendError(const char* format, ...)
- {
+bool Diagnostics::empty() const
+{
+#if TARGET_OS_EXCLAVEKIT
+    return (this->_strBuf[0] == '\0');
+#else
+    if ( (_buffer == nullptr) || (_bufferUsed == 0) || (_bufferSize == 0) )
+        return true;
+    return false;
+#endif
+}
+
+void Diagnostics::appendError(const char* format, ...)
+{
 #if TARGET_OS_EXCLAVEKIT
     size_t len = strlen(_strBuf);
     va_list list;
@@ -107,19 +190,63 @@ void Diagnostics::error(const char* format, va_list_wrap vaWrap)
     vsnprintf(&_strBuf[len], sizeof(_strBuf)-len, format, list);
     va_end(list);
 #else
-   if ( _buffer != nullptr )
-        _simple_sresize(_buffer);
-    va_list list;
-    va_start(list, format);
-    error(format, va_list_wrap(list));
-    va_end(list);
+    if ( empty() ) {
+        va_list list;
+        va_start(list, format);
+        error(format, va_list_wrap(list));
+        va_end(list);
+        return;
+     }
+
+     // Existing buffer, so need to actually append
+     va_list list, list2;
+     va_start(list, format);
+     va_copy(list2, list);
+
+     // Get the size
+     char smallBuffer[1] = { '\0' };
+     int expectedSize = _simple_vsnprintf(smallBuffer, sizeof(smallBuffer), format, list) + 1;
+     assert(expectedSize >= 0);
+
+     uint64_t remainingSize = this->_bufferSize - this->_bufferUsed;
+     if ( remainingSize < expectedSize ) {
+         // Grow the buffer to make space
+         const uint64_t alignedSize = lsl::roundToNextAligned(PAGE_SIZE, (uint64_t)expectedSize + this->_bufferUsed);
+
+         vm_address_t newBuffer = 0;
+         int kr = ::vm_allocate(mach_task_self(), &newBuffer, (vm_size_t)alignedSize,
+                                VM_FLAGS_ANYWHERE | VM_MAKE_TAG(VM_MEMORY_DYLD));
+         assert(kr == KERN_SUCCESS);
+
+         // Copy the old buffer over to the new one
+         memcpy((void*)newBuffer, this->_buffer, this->_bufferSize);
+
+         // Free the existing buffer
+         ::vm_deallocate(mach_task_self(), (vm_address_t)this->_buffer, (vm_size_t)this->_bufferSize);
+
+         // Set the buffer to the new one
+         this->_buffer = (char*)newBuffer;
+         this->_bufferSize = (uint32_t)alignedSize;
+
+         remainingSize = this->_bufferSize - this->_bufferUsed;
+     }
+
+     // Write in to the existing buffer
+     int actualSize = _simple_vsnprintf(&this->_buffer[this->_bufferUsed - 1], (size_t)remainingSize, format, list2);
+     assert(actualSize >= 0);
+     assert((actualSize + 1) == expectedSize);
+
+     this->_bufferUsed += actualSize;
+
+     va_end(list);
+     va_end(list2);
 #endif
- }
+}
 
 bool Diagnostics::hasError() const
 {
 #if TARGET_OS_EXCLAVEKIT
-    return (*_strBuf != '\0');
+    return (this->_strBuf[0] != '\0');
 #else
     return _buffer != nullptr;
 #endif
@@ -128,7 +255,7 @@ bool Diagnostics::hasError() const
 bool Diagnostics::noError() const
 {
 #if TARGET_OS_EXCLAVEKIT
-    return (*_strBuf == '\0');
+    return (this->_strBuf[0] == '\0');
 #else
     return _buffer == nullptr;
 #endif
@@ -137,11 +264,14 @@ bool Diagnostics::noError() const
 void Diagnostics::clearError()
 {
 #if TARGET_OS_EXCLAVEKIT
-    *_strBuf = '\0';
+    this->_strBuf[0] = '\0';
 #else
-    if ( _buffer )
-        _simple_sfree(_buffer);
+    if ( _buffer ) {
+        ::vm_deallocate(mach_task_self(), (vm_address_t)this->_buffer, (vm_size_t)this->_bufferSize);
+    }
     _buffer = nullptr;
+    _bufferSize = 0;
+    _bufferUsed = 0;
 #endif
 }
 
@@ -156,6 +286,11 @@ bool Diagnostics::errorMessageContains(const char* subString) const
     if ( noError() )
         return false;
     return (strstr(errorMessageCStr(), subString) != nullptr);
+}
+
+std::string_view Diagnostics::errorMessageSV() const
+{
+    return this->errorMessageCStr();
 }
 
 #if BUILDING_CACHE_BUILDER || BUILDING_UNIT_TESTS || BUILDING_CACHE_BUILDER_UNIT_TESTS
@@ -212,7 +347,7 @@ std::string Diagnostics::errorMessage() const
 const char* Diagnostics::errorMessageCStr() const
 {
     if ( _buffer != nullptr )
-        return _simple_string(_buffer);
+        return this->_buffer;
     else
         return "";
 }
@@ -242,7 +377,7 @@ const char* Diagnostics::errorMessage() const
 #if TARGET_OS_EXCLAVEKIT
     return _strBuf;
 #else
-    return _simple_string(_buffer);
+    return this->_buffer;
 #endif
 }
 

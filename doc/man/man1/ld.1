@@ -221,7 +221,7 @@ the -F and directory.
 .It Fl all_load
 Loads all members of static archive libraries.
 .It Fl ObjC
-Loads all members of static archive libraries that implement an Objective-C class, category or a Swift struct, class or an extesion.
+Loads all members of static archive libraries that implement an Objective-C class, category or a Swift struct, class or an extension.
 .It Fl force_load Ar path_to_archive
 Loads all members of the specified static archive library.  Note: -all_load forces all members of all
 archives to be loaded.  This option allows you to target a specific archive.
@@ -809,6 +809,9 @@ The created output file will be in the prebound format.  This was used in Mac OS
 .It Fl weak_reference_mismatches Ar treatment
 Specifies what to do if a symbol is weak-imported in one object file but not weak-imported in another.  The valid
 treatments are: error, weak, or non-weak.  The default is non-weak.
+.It Fl deployment_target_mismatches Ar treatment
+Specifies what to do if linking an object file with a deployment target lower than the target specified using -platform_version.  The valid
+treatments are: error, warning, suppress.  The default is warning.
 .It Fl read_only_relocs Ar treatment
 Enables the use of relocations in read-only segments.  Options are: 'warning', 'error', or 'suppress'.  The default and only supported
 option for dynamic binaries is 'error'.  Other treatments are reserved for use with firmware or embedded targets.
@@ -913,6 +916,9 @@ order file  to cluster commonly used/dirty globals onto the same page(s).
 Normally, the linker will add extra info to dylibs with -install_name starting with /usr/lib or
 /System/Library/ that allows the dylib to be placed into the dyld shared cache.  Adding this option
 tells the linker to not add that extra info.
+.It Fl no_dynamic_access
+Marks the output file so that dyld will not (directly) allow it to be dlopen()ed and dyld will not find any
+symbols in it with dlsym().
 .It Fl search_in_sparse_frameworks
 For use when linking against versioned frameworks that do not have a normal variant.
 By default when -framework Foo,_suffix is used, the linker will follow Foo.framework/Foo if it is a symbolic link, append _suffix and search for a file with that path.
@@ -952,6 +958,9 @@ automatically adds a hook to redirect bundle resource lookups from mergeable fra
 The hook requires a minimum deployment version of iOS 12, you can use
 the option to disable the hook with a lower deployment target if your frameworks don't require bundle resource
 lookups. Disabling the hook might also improve launch time performance, so it's good to disable it regardless of the deployment target if it's not required.
+.It Fl add_mergeable_debug_hook
+Use this option in debug builds of mergeable libraries to add a hook to redirect
+bundle resource lookups based on private/internal classes.
 .El
 .Ss Obsolete Options
 .Bl -tag

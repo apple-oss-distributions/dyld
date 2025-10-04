@@ -91,6 +91,7 @@ extern "C" int amfi_check_dyld_policy_self(uint64_t input_flags, uint64_t* outpu
 #include "MachOLoaded.h"
 #include "MachOAnalyzer.h"
 #include "DyldSharedCache.h"
+#include "StringUtils.h"
 
 // dyld
 #include "DyldProcessConfig.h"
@@ -112,6 +113,7 @@ using dyld3::MachOFile;
 // mach_o
 using mach_o::FunctionVariants;
 using mach_o::FunctionVariantsRuntimeTable;
+using mach_o::GradedArchitectures;
 using mach_o::Header;
 using mach_o::Image;
 using mach_o::Platform;
@@ -119,54 +121,6 @@ using mach_o::Version32;
 
 
 extern const Header __dso_handle;
-
-#if !TARGET_OS_EXCLAVEKIT
-static bool hexCharToByte(const char hexByte, uint8_t& value)
-{
-    if ( hexByte >= '0' && hexByte <= '9' ) {
-        value = hexByte - '0';
-        return true;
-    }
-    else if ( hexByte >= 'A' && hexByte <= 'F' ) {
-        value = hexByte - 'A' + 10;
-        return true;
-    }
-    else if ( hexByte >= 'a' && hexByte <= 'f' ) {
-        value = hexByte - 'a' + 10;
-        return true;
-    }
-
-    return false;
-}
-
-static uint64_t hexToUInt64(const char* startHexByte, const char** endHexByte)
-{
-    const char* scratch;
-    if ( endHexByte == nullptr ) {
-        endHexByte = &scratch;
-    }
-    if ( startHexByte == nullptr )
-        return 0;
-    uint64_t retval = 0;
-    if ( (startHexByte[0] == '0') && (startHexByte[1] == 'x') ) {
-        startHexByte += 2;
-    }
-    *endHexByte = startHexByte + 16;
-
-    //FIXME overrun?
-    for ( uint32_t i = 0; i < 16; ++i ) {
-        uint8_t value;
-        if ( !hexCharToByte(startHexByte[i], value) ) {
-            *endHexByte = &startHexByte[i];
-            break;
-        }
-        retval = (retval << 4) + value;
-    }
-    return retval;
-}
-
-#endif // !TARGET_OS_EXCLAVEKIT
-
 
 namespace dyld4 {
 
@@ -325,7 +279,7 @@ uint64_t ProcessConfig::Process::selectFromFunctionVariants(const FunctionVarian
 
 
 #if !BUILDING_DYLD
-void ProcessConfig::reset(const MachOFile* mainExe, const char* mainPath, const DyldSharedCache* cache)
+void ProcessConfig::reset(const MachOFile* mainExe, const char* mainPath, uint64_t mainSliceSize, const DyldSharedCache* cache)
 {
     process.mainExecutablePath    = mainPath;
     process.mainUnrealPath        = mainPath;
@@ -335,6 +289,7 @@ void ProcessConfig::reset(const MachOFile* mainExe, const char* mainPath, const 
     process.mainExecutableMF      = (const MachOAnalyzer*)mainExe;
 #endif
     process.mainExecutableHdr     = (const Header*)mainExe;
+    process.mainExecutableSliceSize = mainSliceSize;
     dyldCache.addr                = cache;
 #if SUPPORT_VM_LAYOUT
     dyldCache.slide               = (cache != nullptr) ? cache->slide() : 0;
@@ -523,6 +478,8 @@ ProcessConfig::Process::Process(const KernelArgs* kernArgs, SyscallDelegate& sys
     this->isTranslated                                              = syscall.isTranslated();
     std::tie(this->mainExecutableFSID, this->mainExecutableObjID)   = this->getMainFileID();
     std::tie(this->dyldFSID, this->dyldObjID)                       = this->getDyldFileID();
+    this->mainExecutableSliceOffset                                 = 0;  // FIXME
+    this->mainExecutableSliceSize                                   = -1; // FIXME
     this->mainUnrealPath                                            = this->getMainUnrealPath(syscall, allocator);
     this->mainExecutablePath                                        = this->getMainPath(syscall, allocator);
     this->progname                                                  = PathOverrides::getLibraryLeafName(this->mainUnrealPath);
@@ -540,7 +497,7 @@ ProcessConfig::Process::Process(const KernelArgs* kernArgs, SyscallDelegate& sys
     this->dyldHdr                                                   = &__dso_handle;
     this->platform                                                  = this->getMainPlatform();
     this->catalystRuntime                                           = this->usesCatalyst();
-    this->archs                                                     = this->getMainArchs(syscall);
+    this->archs                                                     = &this->getMainArchs(syscall);
     this->enableDataConst                                           = this->defaultDataConst();
     this->enableTproHeap                                            = this->defaultTproHW();
     this->enableTproDataConst                                       = this->defaultTproDataConst();
@@ -838,10 +795,10 @@ Platform ProcessConfig::Process::getMainPlatform()
 }
 
 
-const GradedArchs* ProcessConfig::Process::getMainArchs(SyscallDelegate& sys)
+const GradedArchitectures& ProcessConfig::Process::getMainArchs(SyscallDelegate& sys)
 {
 #if TARGET_OS_EXCLAVEKIT
-    return &GradedArchs::arm64e;
+    return GradedArchitectures::load_arm64e;
 #else
     bool keysOff        = false;
     bool osBinariesOnly = false;
@@ -869,7 +826,7 @@ const GradedArchs* ProcessConfig::Process::getMainArchs(SyscallDelegate& sys)
             keysOff = true;
     }
 #endif
-    return &sys.getGradedArchs(mainExecutableMF->archName(), keysOff, osBinariesOnly);
+    return sys.getGradedArchs(mainExecutableMF->archName(), keysOff, osBinariesOnly);
 #endif
 }
 
@@ -1061,19 +1018,20 @@ void ProcessConfig::Security::pruneEnvVars(Process& proc)
 ProcessConfig::Logging::Logging(const Process& process, const Security& security, SyscallDelegate& syscall)
 {
 #if !TARGET_OS_EXCLAVEKIT
-    this->segments       = security.allowEnvVarsPrint && process.environ("DYLD_PRINT_SEGMENTS");
-    this->libraries      = security.allowEnvVarsPrint && process.environ("DYLD_PRINT_LIBRARIES");
-    this->fixups         = security.allowEnvVarsPrint && process.environ("DYLD_PRINT_BINDINGS");
-    this->initializers   = security.allowEnvVarsPrint && process.environ("DYLD_PRINT_INITIALIZERS");
-    this->apis           = security.allowEnvVarsPrint && process.environ("DYLD_PRINT_APIS");
-    this->notifications  = security.allowEnvVarsPrint && process.environ("DYLD_PRINT_NOTIFICATIONS");
-    this->interposing    = security.allowEnvVarsPrint && process.environ("DYLD_PRINT_INTERPOSING");
-    this->loaders        = security.allowEnvVarsPrint && process.environ("DYLD_PRINT_LOADERS");
-    this->searching      = security.allowEnvVarsPrint && process.environ("DYLD_PRINT_SEARCHING");
-    this->env            = security.allowEnvVarsPrint && process.environ("DYLD_PRINT_ENV");
-    this->useStderr      = security.allowEnvVarsPrint && process.environ("DYLD_PRINT_TO_STDERR");
-    this->descriptor     = STDERR_FILENO;
-    this->useFile        = false;
+    this->segments         = security.allowEnvVarsPrint && process.environ("DYLD_PRINT_SEGMENTS");
+    this->libraries        = security.allowEnvVarsPrint && process.environ("DYLD_PRINT_LIBRARIES");
+    this->fixups           = security.allowEnvVarsPrint && process.environ("DYLD_PRINT_BINDINGS");
+    this->initializers     = security.allowEnvVarsPrint && process.environ("DYLD_PRINT_INITIALIZERS");
+    this->apis             = security.allowEnvVarsPrint && process.environ("DYLD_PRINT_APIS");
+    this->notifications    = security.allowEnvVarsPrint && process.environ("DYLD_PRINT_NOTIFICATIONS");
+    this->interposing      = security.allowEnvVarsPrint && process.environ("DYLD_PRINT_INTERPOSING");
+    this->loaders          = security.allowEnvVarsPrint && process.environ("DYLD_PRINT_LOADERS");
+    this->searching        = security.allowEnvVarsPrint && process.environ("DYLD_PRINT_SEARCHING");
+    this->functionVariants = security.allowEnvVarsPrint && process.environ("DYLD_PRINT_FUNCTION_VARIANTS");
+    this->env              = security.allowEnvVarsPrint && process.environ("DYLD_PRINT_ENV");
+    this->useStderr        = security.allowEnvVarsPrint && process.environ("DYLD_PRINT_TO_STDERR");
+    this->descriptor       = STDERR_FILENO;
+    this->useFile          = false;
     if ( security.allowEnvVarsPrint && security.allowEnvVarsSharedCache ) {
         if ( const char* path = process.environ("DYLD_PRINT_TO_FILE") ) {
             int fd = syscall.openLogFile(path);
@@ -1087,17 +1045,40 @@ ProcessConfig::Logging::Logging(const Process& process, const Security& security
         if (const char* str = process.environ("DYLD_PRINT_LINKS_WITH") )
             this->linksWith = str;
     }
+    this->badRootNonGOT = false;
+    this->badRootGOT    = false;
+    if ( security.internalInstall ) {
+        this->badRootNonGOT = true;     // by default log non-GOT missing symbols on Internal installs
+        this->badRootGOT    = false;    // don't log shared GOT missing symbols because they may not be used
+        if ( const char* modeStr = process.environ("DYLD_PRINT_BAD_ROOTS") ) {
+            CString mode(modeStr);
+            if ( mode == "none" ) {
+                this->badRootNonGOT = false;
+                this->badRootGOT    = false;
+            }
+            else if ( mode == "all" ) {
+                this->badRootNonGOT = true;
+                this->badRootGOT    = true;
+            }
+            else if ( mode == "default" ) {
+                // default set above
+            }
+        }
+    }
 #else
-    this->segments       = true;
-    this->libraries      = true;
-    this->fixups         = false;
-    this->initializers   = true;
-    this->apis           = true;
-    this->notifications  = true;
-    this->interposing    = true;
-    this->loaders        = true;
-    this->searching      = true;
-    this->env            = true;
+    this->segments         = true;
+    this->libraries        = true;
+    this->fixups           = false;
+    this->initializers     = true;
+    this->apis             = true;
+    this->notifications    = true;
+    this->interposing      = true;
+    this->loaders          = true;
+    this->searching        = true;
+    this->functionVariants = false;
+    this->env              = true;
+    this->badRootNonGOT    = true;
+    this->badRootGOT       = false;
 #endif
 }
 
@@ -1411,9 +1392,30 @@ ProcessConfig::DyldCache::DyldCache(Process& process, const Security& security, 
             this->allowLibSystemOverrides = security.allowLibSystemOverrides;
             this->mainFileID  = loadInfo.cacheFileID;
 #endif // !TARGET_OS_EXCLAVEKIT
+
             this->addr        = loadInfo.loadAddress;
             this->development = loadInfo.development;
             this->dylibsExpectedOnDisk  = this->addr->header.dylibsExpectedOnDisk;
+
+            if ( security.internalInstall ) {
+                // on internal installs, roots can just be on-disk so always support them
+                this->allowAnyOverrides = true;
+            } else {
+#if TARGET_OS_EXCLAVEKIT
+                // FIXME: Should exclaves allow roots on customer?
+                this->allowAnyOverrides = true;
+#elif TARGET_OS_OSX
+                // FIXME: How do we handle roots on macOS?  Should we allow it for unzippered twins
+                // but nothing else?  Or only if the file system is live?  For now always allow them
+                this->allowAnyOverrides = true;
+#elif TARGET_OS_SIMULATOR
+                // We can always install roots in to the sim runtime
+                this->allowAnyOverrides = true;
+#else
+                // Customer embedded devices can always override libdispatch, but only in developer mode
+                this->allowAnyOverrides = this->development || security.allowDevelopmentVars;
+#endif
+            }
 
             // All of the following are manually set by the cache builder prior to building loaders
             // The cache builder won't use the calls here to set any initial values
@@ -1442,25 +1444,14 @@ ProcessConfig::DyldCache::DyldCache(Process& process, const Security& security, 
 
             this->patchTable = PatchTable(this->addr->patchTable(), this->addr->header.patchInfoAddr);
 
+            // Tell the memory manager that we now have a cache
+            lsl::MemoryManager::memoryManager().setDyldCacheAddr((void*)this->addr);
+
 #if !TARGET_OS_EXCLAVEKIT
             // The shared cache is mapped with RO __DATA_CONST, but this
             // process might need RW
             if ( !opts.enableReadOnlyDataConst )
                 makeDataConstWritable(log, syscall, true);
-
-            // If 'dyld_hw_tpro' is not set, then the shared cache for this process needs to use
-            // mprotect and not TPRO, when changing its state for the TPRO_CONST segment specifically.
-            // As ProcessConfig is constructed inside a withWriteableMemory block, we need to now make
-            // the cache TPRO_CONST writable to match the expectations of the caller with that block
-            if ( !process.defaultTproHW() ) {
-                this->addr->forEachTPRORegion(^(const void *content, uint64_t unslidVMAddr, uint64_t vmSize, bool &stopRegion) {
-                    void* regionBaseAddr = (void*)(unslidVMAddr + this->slide);
-                    kern_return_t kr = ::vm_protect(mach_task_self(), (vm_address_t)regionBaseAddr, (vm_size_t)vmSize, false, VM_PROT_WRITE | VM_PROT_READ | VM_PROT_COPY);
-                    if (kr != KERN_SUCCESS) {
-                         // fprintf(stderr, "FAILED: %d", kr);
-                    }
-                });
-            }
 #endif // !TARGET_OS_EXCLAVEKIT
 #endif // SUPPORT_VM_LAYOUT
 
@@ -1734,7 +1725,8 @@ void ProcessConfig::DyldCache::makeDataConstWritable(const Logging& lg, const Sy
 #if !TARGET_OS_EXCLAVEKIT
     const uint32_t perms = (writable ? VM_PROT_WRITE | VM_PROT_READ | VM_PROT_COPY : VM_PROT_READ);
     addr->forEachCache(^(const DyldSharedCache *cache, bool& stopCache) {
-        cache->forEachRegion(^(const void*, uint64_t vmAddr, uint64_t size, uint32_t initProt, uint32_t maxProt, uint64_t flags, bool& stopRegion) {
+        cache->forEachRegion(^(const void*, uint64_t vmAddr, uint64_t size, uint32_t initProt,
+                               uint32_t maxProt, uint64_t flags, uint64_t fileOffset, bool& stopRegion) {
             // Skip TPRO const until we can move this in to the MemoryManager to share state there
             // FIXME: Move to MemoryManager if needed, or make sure we never have weak-defs or binds to patch in __TPRO_CONST.
             if ( flags & DYLD_CACHE_MAPPING_CONST_TPRO_DATA )
@@ -1788,6 +1780,12 @@ bool ProcessConfig::DyldCache::isOverridablePath(const char* dylibPath) const
 #endif
         return true;
     }
+
+#if BUILDING_DYLD || BUILDING_UNIT_TESTS
+        // rdar://148536517 (dyld should require developer mode be enable to override shared cache libraries with disk ones)
+        if ( !this->allowAnyOverrides )
+            return false;
+#endif
 
     return DyldCache::isAlwaysOverridablePath(dylibPath);
 }
@@ -1898,7 +1896,7 @@ ProcessConfig::PathOverrides::PathOverrides(const Process& process, const Securi
 }
 
 #if !TARGET_OS_EXCLAVEKIT
-void ProcessConfig::PathOverrides::checkVersionedPath(SyscallDelegate& sys, const DyldCache& cache, Allocator& allocator, const char* path, Platform platform, const GradedArchs& archs)
+void ProcessConfig::PathOverrides::checkVersionedPath(SyscallDelegate& sys, const DyldCache& cache, Allocator& allocator, const char* path, Platform platform, const GradedArchitectures& archs)
 {
     static bool verbose = false;
     if (verbose) console("checkVersionedPath(%s)\n", path);
@@ -1979,7 +1977,7 @@ void ProcessConfig::PathOverrides::addPathOverride(Allocator& allocator, const c
 }
 
 void ProcessConfig::PathOverrides::processVersionedPaths(const Process& proc, SyscallDelegate& sys, const DyldCache& cache, Platform platform,
-                                                         const GradedArchs& archs, Allocator& allocator)
+                                                         const GradedArchitectures& archs, Allocator& allocator)
 {
     // check DYLD_VERSIONED_LIBRARY_PATH for dylib overrides
     __block bool stop = false;
@@ -2152,6 +2150,11 @@ void ProcessConfig::PathOverrides::addEnvVar(const Process& proc, const Security
         else if ( (key == "DYLD_ROOT_PATH") && proc.platform.isSimulator() ) {
             setString(allocator, _simRootPath, value);
         }
+        else if ( (key == "DYLD_OVERLAY_PATH") && sec.isInternalOS ) {
+            setString(allocator, _overlayPath, value);
+        }
+
+
         if ( (crashMsg != nullptr) && (strncmp(keyEqualsValue, "DYLD_", 5) == 0) ) {
             strlcat(crashMsg, keyEqualsValue, 2048);
             strlcat(crashMsg, " ", 2048);
@@ -2379,6 +2382,16 @@ void ProcessConfig::PathOverrides::forEachPathVariant(const char* initialPath, P
 
     // paths staring with @ are never valid for finding in iOSSupport or simulator
     if ( initialPath[0] != '@' ) {
+        if ( _overlayPath != nullptr ) {
+            // try overlay prefix
+            size_t rtpathSize = strlen(_overlayPath)+strlen(initialPath)+8;
+            char rtpath[rtpathSize];
+            strlcpy(rtpath, _overlayPath, rtpathSize);
+            strlcat(rtpath, initialPath, rtpathSize);
+            forEachImageSuffix(rtpath, Type::overlayPrefix, stop, handler);
+            if ( stop )
+                return;
+        }
 #if TARGET_OS_SIMULATOR
         if ( _simRootPath != nullptr ) {
             // try simulator prefix
@@ -2411,6 +2424,18 @@ void ProcessConfig::PathOverrides::forEachPathVariant(const char* initialPath, P
 
             // try looking in Catalyst support dir, but not in the shared cache
             if ( searchiOSSupport ) {
+                if ( _overlayPath != nullptr ) {
+                    // try iOSSupport in overlay prefix
+                    size_t rtpathSize = strlen(_overlayPath)+strlen("/System/iOSSupport")+strlen(initialPath)+8;
+                    char rtpath[rtpathSize];
+                    strlcpy(rtpath, _overlayPath, rtpathSize);
+                    strlcat(rtpath, "/System/iOSSupport", rtpathSize);
+                    strlcat(rtpath, initialPath, rtpathSize);
+                    forEachImageSuffix(rtpath, Type::overlayPrefix, stop, handler);
+                    if ( stop )
+                        return;
+                }
+
                 {
                     size_t rtpathLen = strlen("/System/iOSSupport")+strlen(initialPath)+8;
                     char rtpath[rtpathLen];
@@ -2588,6 +2613,8 @@ const char* ProcessConfig::PathOverrides::typeName(Type type)
             return "Catalyst prefix on disk";
         case catalystPrefix:
             return "Catalyst prefix";
+        case overlayPrefix:
+            return "DYLD_OVERLAY_PATH";
         case simulatorPrefix:
             return "simulator prefix";
         case cryptexCatalystPrefix:
@@ -2626,6 +2653,10 @@ bool ProcessConfig::PathOverrides::dontUsePrebuiltForApp() const
 
     // DYLD_INSERT_LIBRARIES and DYLD_IMAGE_SUFFIX disable building PrebuiltLoader for app
     if ( _insertedDylibs || _imageSuffix )
+        return true;
+
+    // DYLD_OVERLAY_PATH disables building PrebuiltLoader for app
+    if ( _overlayPath )
         return true;
 
     // LC_DYLD_ENVIRONMENT VERSIONED* paths disable building PrebuiltLoader for app

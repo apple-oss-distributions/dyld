@@ -66,17 +66,17 @@ public:
     ChunkBumpAllocatorZoneImpl& operator=(ChunkBumpAllocatorZoneImpl&&) = delete;
 
     // Get a next available memory chunk that's large enough to serve 
-    Entry* nextFreeChunk(uint64_t size=0);
+    Entry* nextFreeChunk(size_t size=0);
 
     void printStatistics();
 
 private:
 
-    size_t  allocationSizeForRequestedSize(uint64_t);
+    size_t  allocationSizeForRequestedSize(size_t);
 
     // chunk factory methods
-    Entry*  getFreeEntryLocked(uint64_t size);
-    Entry*  nextFreeChunkReclaimOld(uint64_t size, Entry* entry);
+    Entry*  getFreeEntryLocked(size_t size);
+    Entry*  nextFreeChunkReclaimOld(size_t size, Entry* entry);
     // reclaim entry methods - either moves the entry to the free list or it will be retired and moved to the used list
     void    reclaimEntry(Entry* entry);
     void    reclaimFreeEntryLocked(Entry* entry);
@@ -85,7 +85,7 @@ private:
     void    retireEntry(Entry* entry);
 
     // Entry chunks allocation helpers
-    Entry*  makeNewEntry(uint64_t size);
+    Entry*  makeNewEntry(size_t size);
     void    free(Entry*);
 
     Entry*              _freeList = nullptr;
@@ -117,7 +117,7 @@ ChunkBumpAllocatorZoneImpl::~ChunkBumpAllocatorZoneImpl()
     _usedList = nullptr;
 }
 
-Entry* ChunkBumpAllocatorZoneImpl::makeNewEntry(uint64_t size)
+Entry* ChunkBumpAllocatorZoneImpl::makeNewEntry(size_t size)
 {
     assert(size > sizeof(Entry));
     Entry* entry = (Entry*)malloc(size);
@@ -134,7 +134,7 @@ void ChunkBumpAllocatorZoneImpl::free(Entry* entry)
     ::free(entry);
 }
 
-Entry* ChunkBumpAllocatorZoneImpl::getFreeEntryLocked(uint64_t size)
+Entry* ChunkBumpAllocatorZoneImpl::getFreeEntryLocked(size_t size)
 {
     Entry* rootEntry = _freeList;
 
@@ -148,13 +148,13 @@ Entry* ChunkBumpAllocatorZoneImpl::getFreeEntryLocked(uint64_t size)
     return nullptr;
 }
 
-size_t ChunkBumpAllocatorZoneImpl::allocationSizeForRequestedSize(uint64_t size)
+size_t ChunkBumpAllocatorZoneImpl::allocationSizeForRequestedSize(size_t size)
 {
-    uint64_t baseSize = std::max((uint64_t)_chunkSize, size + sizeof(Entry));
+    size_t baseSize = std::max((size_t)_chunkSize, size + sizeof(Entry));
 
     // align allocation size to a power of 2
-    uint64_t leadingZeros = __builtin_clzll(baseSize);
-    uint64_t bufferSize = 1 << (64 - leadingZeros - 1);
+    size_t leadingZeros = __builtin_clzll(baseSize);
+    size_t bufferSize = 1 << (sizeof(size_t) * 8 - leadingZeros - 1);
     if ( bufferSize != baseSize ) {
         // for allocations smaller than 2mb align to a power of 2
         if ( bufferSize < (1 << 21) )
@@ -165,14 +165,14 @@ size_t ChunkBumpAllocatorZoneImpl::allocationSizeForRequestedSize(uint64_t size)
     return bufferSize;
 }
 
-Entry* ChunkBumpAllocatorZoneImpl::nextFreeChunk(uint64_t size)
+Entry* ChunkBumpAllocatorZoneImpl::nextFreeChunk(size_t size)
 {
     return nextFreeChunkReclaimOld(size, /* entry to reclaim */ nullptr);
 }
 
-Entry* ChunkBumpAllocatorZoneImpl::nextFreeChunkReclaimOld(uint64_t size, Entry* old)
+Entry* ChunkBumpAllocatorZoneImpl::nextFreeChunkReclaimOld(size_t size, Entry* old)
 {
-    uint64_t bufferSize = allocationSizeForRequestedSize(size);
+    size_t bufferSize = allocationSizeForRequestedSize(size);
     // quick check if top of the free list is set, we won't be using the actual value
     // so no lock is required
     if ( _freeList == nullptr ) {
@@ -288,7 +288,7 @@ void ChunkBumpAllocatorZoneImpl::printStatistics()
 ChunkBumpAllocator::ChunkBumpAllocator(ChunkBumpAllocatorZone& zone, ChunkBumpAllocatorChunk* chunk): _zone(zone), _chunk(chunk)
 {}
 
-std::span<uint8_t> ChunkBumpAllocator::allocate(uint64_t size, uint16_t align)
+std::span<uint8_t> ChunkBumpAllocator::allocate(size_t size, uint16_t align)
 {
     if ( !_chunk ) {
         assert(_zone);

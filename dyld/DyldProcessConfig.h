@@ -36,14 +36,17 @@
 #endif
 
 // mach_o
-#include "Platform.h"
-#include "Header.h"
 #include "FunctionVariants.h"
+#include "GradedArchitectures.h"
+#include "Header.h"
+#include "Platform.h"
 
 // common
 #include "Defines.h"
 #include "Array.h"
 #include "CString.h"
+
+
 #if BUILDING_CACHE_BUILDER
 #include "MachOFile.h"
 #else
@@ -66,9 +69,9 @@ using lsl::Allocator;
 using dyld3::MachOFile;
 using dyld3::MachOLoaded;
 using dyld3::MachOAnalyzer;
-using dyld3::GradedArchs;
 using mach_o::Header;
 using mach_o::FunctionVariants;
+using mach_o::GradedArchitectures;
 
 
 class APIs;
@@ -165,7 +168,7 @@ public:
                             ProcessConfig(const KernelArgs* kernArgs, SyscallDelegate&, Allocator&);
 
 #if !BUILDING_DYLD
-    void                    reset(const MachOFile* mainExe, const char* mainPath, const DyldSharedCache* cache);
+    void                    reset(const MachOFile* mainExe, const char* mainPath, uint64_t mainSliceSize, const DyldSharedCache* cache);
 #endif
 
     void                    scanForRoots() const;
@@ -188,6 +191,8 @@ public:
         const char*                 mainUnrealPath;             // raw path used to launch
         uint64_t                    mainExecutableFSID;
         uint64_t                    mainExecutableObjID;
+        uint64_t                    mainExecutableSliceOffset;
+        uint64_t                    mainExecutableSliceSize;
         uint32_t                    mainExecutableSDKVersion;
         uint32_t                    mainExecutableSDKVersionSet;
         uint32_t                    mainExecutableMinOSVersion;
@@ -212,31 +217,31 @@ public:
         bool                                           sharedCacheFileEnabled; //TODO: remove when transition file is removed
         bool                                           sharedCachePageInLinking;
 #else
-        DyldCommPage                commPage;
+        DyldCommPage                        commPage;
 #endif
-        int                         argc;
-        const char* const*          argv;
-        const char* const*          envp;
-        const char* const*          apple;
-        const char*                 progname;
-        const GradedArchs*          archs;
-        int                         pid;
-        bool                        isTranslated;
-        bool                        catalystRuntime; // Mac Catalyst app or iOS-on-mac app
-        bool                        enableDataConst; // Temporarily allow disabling __DATA_CONST for bringup
-        bool                        enableTproHeap; // Enable HW TPRO protections for the dyld heap (and TPRO_CONST)
-        bool                        enableTproDataConst; // Enable HW TPRO protections for __DATA_CONST
-        bool                        enableProtectedStack; // Enable HW TPRO protections for the stack
-        bool                        proactivelyUseWeakDefMap;
-        int                         pageInLinkingMode;
-        FunctionVariantFlags        perProcessFunctionVariantFlags;    // evaluated in-process
-        FunctionVariantFlags        systemWideFunctionVariantFlags;    // copied from dyld cache or evaluted in-process
-        FunctionVariantFlags        processorFunctionVariantFlags;     // copied from dyld cache or evaluted in-process
+        int                                 argc;
+        const char* const*                  argv;
+        const char* const*                  envp;
+        const char* const*                  apple;
+        const char*                         progname;
+        const mach_o::GradedArchitectures*  archs;
+        int                                 pid;
+        bool                                isTranslated;
+        bool                                catalystRuntime; // Mac Catalyst app or iOS-on-mac app
+        bool                                enableDataConst; // Temporarily allow disabling __DATA_CONST for bringup
+        bool                                enableTproHeap; // Enable HW TPRO protections for the dyld heap (and TPRO_CONST)
+        bool                                enableTproDataConst; // Enable HW TPRO protections for __DATA_CONST
+        bool                                enableProtectedStack; // Enable HW TPRO protections for the stack
+        bool                                proactivelyUseWeakDefMap;
+        int                                 pageInLinkingMode;
+        FunctionVariantFlags                perProcessFunctionVariantFlags; // evaluated in-process
+        FunctionVariantFlags                systemWideFunctionVariantFlags; // copied from dyld cache or evaluted in-process
+        FunctionVariantFlags                processorFunctionVariantFlags; // copied from dyld cache or evaluted in-process
 
-        const char*                 appleParam(const char* key) const;
-        const char*                 environ(const char* key) const;
-        void                        evaluateFunctionVariantFlags(const ProcessConfig& config);
-        uint64_t                    selectFromFunctionVariants(const FunctionVariants& fvs, uint32_t fvTableIndex) const;
+        const char*                         appleParam(const char* key) const;
+        const char*                         environ(const char* key) const;
+        void                                evaluateFunctionVariantFlags(const ProcessConfig& config);
+        uint64_t                            selectFromFunctionVariants(const FunctionVariants& fvs, uint32_t fvTableIndex) const;
 
     private:
         friend class ProcessConfig;
@@ -251,7 +256,7 @@ public:
         std::pair<uint64_t, uint64_t>   getMainFileID();
         const char*                     getMainUnrealPath(SyscallDelegate& syscall, Allocator& allocator);
         mach_o::Platform                getMainPlatform();
-        const GradedArchs*              getMainArchs(SyscallDelegate& osDelegate);
+        const GradedArchitectures&      getMainArchs(SyscallDelegate& osDelegate);
         bool                            isInternalSimulator(SyscallDelegate& syscall) const;
         bool                            usesCatalyst() const;
         bool                            defaultDataConst() const;
@@ -312,7 +317,10 @@ public:
         bool                        interposing;
         bool                        loaders;
         bool                        searching;
+        bool                        functionVariants;
         bool                        env;
+        bool                        badRootNonGOT;
+        bool                        badRootGOT;
         int                         descriptor;
         bool                        useStderr;
         bool                        useFile;
@@ -355,6 +363,7 @@ public:
         bool                            dylibsExpectedOnDisk;
         bool                            privateCache;
         bool                            allowLibSystemOverrides;
+        bool                            allowAnyOverrides;
         FunctionVariantFlags            systemWideFunctionVariantFlags;
         FunctionVariantFlags            processorFunctionVariantFlags;
 
@@ -398,9 +407,10 @@ public:
 
         bool                        sharedCacheLoadersAreAlwaysValid() const { return !rootsAreSupported; }
 
+        bool                        uuidOfFileMatchesDyldCache(const Process& process, const SyscallDelegate& syscall, const char* path) const;
+
     private:
         friend class ProcessConfig;
-        bool                        uuidOfFileMatchesDyldCache(const Process& process, const SyscallDelegate& syscall, const char* path) const;
         void                        setPlatformOSVersion(const Process& proc);
         void                        setupDyldCommPage(Process& process, const Security& security, SyscallDelegate& syscall);
         void                        setSystemWideFunctionVariantFlags();
@@ -414,7 +424,8 @@ public:
     public:
                                         PathOverrides(const Process&, const Security&, const Logging&, const DyldCache&, SyscallDelegate&, Allocator&);
 
-        enum Type { pathDirOverride, versionedOverride, suffixOverride, catalystPrefixOnDisk, catalystPrefix, simulatorPrefix, cryptexCatalystPrefix, cryptexPrefix,
+        enum Type { pathDirOverride, versionedOverride, suffixOverride, catalystPrefixOnDisk, catalystPrefix,
+                    overlayPrefix, simulatorPrefix, cryptexCatalystPrefix, cryptexPrefix,
                     rawPathOnDisk, rawPath, rpathExpansion, loaderPathExpansion, executablePathExpansion, implictRpathExpansion,
                     customFallback, standardFallback };
 
@@ -442,7 +453,7 @@ public:
     private:
         void                            setEnvVars(const char* envp[], const char* mainExePath);
         void                            addEnvVar(const Process& process, const Security& security, Allocator&, const char* keyEqualsValue, bool isLC_DYLD_ENV, char* crashMsg);
-        void                            processVersionedPaths(const Process& proc, SyscallDelegate&, const DyldCache&, mach_o::Platform, const GradedArchs&, Allocator& allocator);
+        void                            processVersionedPaths(const Process& proc, SyscallDelegate&, const DyldCache&, mach_o::Platform, const GradedArchitectures&, Allocator& allocator);
         void                            forEachEnvVar(void (^handler)(const char* envVar)) const;
         void                            forEachExecutableEnvVar(void (^handler)(const char* envVar)) const;
 
@@ -454,7 +465,7 @@ public:
         void                            forEachFrameworkFallback(mach_o::Platform platform, bool requestorNeedsFallbacks, bool& stop, void (^handler)(const char* fallbackDir, Type type, bool& stop)) const;
         void                            forEachImageSuffix(const char* path, Type type, bool& stop, void (^handler)(const char* possiblePath, Type type, bool& stop)) const;
         void                            addSuffix(const char* path, const char* suffix, char* result) const;
-        void                            checkVersionedPath(SyscallDelegate& delegate, const DyldCache&, Allocator&, const char* path, mach_o::Platform, const GradedArchs&);
+        void                            checkVersionedPath(SyscallDelegate& delegate, const DyldCache&, Allocator&, const char* path, mach_o::Platform, const GradedArchitectures&);
         void                            addPathOverride(Allocator& allocator, const char* installName, const char* overridePath);
 
         enum class FallbackPathMode { classic, restricted, none };
@@ -474,6 +485,7 @@ public:
         const char*                     _versionedDylibPathExeLC     = nullptr;
         const char*                     _insertedDylibs              = nullptr;
         const char*                     _imageSuffix                 = nullptr;
+        const char*                     _overlayPath                 = nullptr;
         const char*                     _simRootPath                 = nullptr;  // simulator only
         const char*                     _cryptexRootPath             = nullptr;  // cryptex only
         DylibOverride*                  _versionedOverrides          = nullptr;  // linked list of VERSIONED overrides

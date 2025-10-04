@@ -38,6 +38,7 @@
   #include <libproc.h>
   #include <mach/mach_time.h> // mach_absolute_time()
   #include <mach/mach_init.h>
+  #include <mach/mach_vm.h>
   #include <mach/shared_region.h>
   #include <sys/param.h>
   #include <sys/types.h>
@@ -67,6 +68,8 @@
 #endif
 
 #include "Defines.h"
+#include "GradedArchitectures.h"
+#include "Universal.h"
 #include "StringUtils.h"
 #include "MachOLoaded.h"
 #include "DyldSharedCache.h"
@@ -88,12 +91,12 @@
 #endif // !TARGET_OS_EXCLAVEKIT
 
 
-using dyld3::FatFile;
-using dyld3::GradedArchs;
 using dyld3::MachOAnalyzer;
 using dyld3::MachOFile;
 using dyld3::MachOLoaded;
+using mach_o::GradedArchitectures;
 using mach_o::Header;
+using mach_o::Universal;
 using lsl::Allocator;
 
 #if TARGET_OS_EXCLAVEKIT
@@ -311,25 +314,28 @@ __attribute__((noinline)) static MainFunc prepareSim(RuntimeState& state, const 
     if ( tempMapping == MAP_FAILED )
         halt("mmap(dyld_sim) failed");
 
-    // if fat file, pick matching slice
-    uint64_t             fileOffset = 0;
-    uint64_t             fileLength = sb.st_size;
-    const FatFile*       ff         = (FatFile*)tempMapping;
-    Diagnostics          diag;
-    bool                 missingSlice;
-    const MachOAnalyzer* sliceMapping = nullptr;
-    const GradedArchs&   archs        = GradedArchs::forCurrentOS(state.config.process.mainExecutableMF, false);
-    if ( ff->isFatFileWithSlice(diag, sb.st_size, archs, true, fileOffset, fileLength, missingSlice) ) {
-        sliceMapping = (MachOAnalyzer*)((uint8_t*)tempMapping + fileOffset);
+    // if universal file, pick matching slice
+    std::span<const uint8_t>    content     = {(const uint8_t*)tempMapping, (size_t)sb.st_size};
+    uint64_t                    fileOffset  = 0;
+    const MachOAnalyzer*        sliceMapping = nullptr;
+    const GradedArchitectures&  archs        = GradedArchitectures::currentLoad(state.config.process.mainExecutableMF, false);
+    if ( const Universal* uni = Universal::isUniversal(content) ) {
+        Universal::Slice slice;
+        if ( uni->bestSlice(archs, true, slice) ) {
+            fileOffset = slice.buffer.data() - content.data();
+            sliceMapping = (const MachOAnalyzer*)slice.buffer.data();
+        }
     }
-    else if ( ((MachOFile*)tempMapping)->isMachO(diag, fileLength) ) {
-        sliceMapping = (MachOAnalyzer*)tempMapping;
+    else if ( const Header* hdr = Header::isMachO(content) ) {
+        sliceMapping = (const MachOAnalyzer*)hdr;
     }
     else {
         halt("dyld_sim is not compatible with the loaded process, likely due to architecture mismatch");
     }
 
     // validate load commands
+    Diagnostics diag;
+    uint64_t    fileLength  = sb.st_size;
     if ( !sliceMapping->validMachOForArchAndPlatform(diag, (size_t)fileLength, "dyld_sim", archs, state.config.process.platform, true) )
         halt(diag.errorMessage()); //"dyld_sim is malformed");
 
@@ -603,7 +609,8 @@ __attribute__((noinline)) static MainFunc prepare(APIs& state, const Header* dyl
             const DyldSharedCache* dyldCache = state.config.dyldCache.addr;
             dyldCache->forEachCache(^(const DyldSharedCache *cache, bool& stopCache) {
                 cache->forEachRegion(^(const void* content, uint64_t vmAddr, uint64_t size,
-                                       uint32_t initProt, uint32_t maxProt, uint64_t flags, bool& stopRegion) {
+                                       uint32_t initProt, uint32_t maxProt, uint64_t flags,
+                                       uint64_t fileOffset, bool& stopRegion) {
                     if ( flags & DYLD_CACHE_MAPPING_CONST_DATA ) {
                         xrt_dyld_permissions_t protection = PAGE_PERM_READ;
                         xrt_dyld_mprotect_region((void*)(vmAddr + dyldCache->slide()), 0, size, protection, protection);
@@ -654,16 +661,6 @@ __attribute__((noinline)) static MainFunc prepare(APIs& state, const Header* dyl
     }
 #endif // TARGET_OS_OSX
 
-#if 0
-    // check if main executable is valid
-    Diagnostics diag;
-    bool validMainExec = state.config.process.mainExecutable->isValidMainExecutable(diag, state.config.process.mainExecutablePath, -1, *(state.config.process.archs), state.config.process.platform);
-    if ( !validMainExec && state.config.process.mainExecutable->enforceFormat(dyld3::MachOAnalyzer::Malformed::sdkOnOrAfter2021)) {
-        state.log("%s in %s", diag.errorMessage(), state.config.process.mainExecutablePath);
-        halt(diag.errorMessage());
-    }
-#endif
-
     // log env variables if asked
     if ( state.config.log.env ) {
         for (const char* const* p=state.config.process.envp; *p != nullptr; ++p) {
@@ -684,8 +681,7 @@ __attribute__((noinline)) static MainFunc prepare(APIs& state, const Header* dyl
         // if no pre-built Loader, make a just-in-time one
         state.loaded.reserve(512);  // guess starting point for Vector size
         Diagnostics buildDiag;
-        mainLoader = JustInTimeLoader::makeLaunchLoader(buildDiag, state, state.config.process.mainExecutableMF,
-                                                        state.config.process.mainExecutablePath, nullptr);
+        mainLoader = JustInTimeLoader::makeLaunchLoader(buildDiag, state);
         if ( buildDiag.hasError() ) {
             state.log("%s in %s\n", buildDiag.errorMessage(), state.config.process.mainExecutablePath);
             halt(buildDiag.errorMessage(), &state.structuredError);
@@ -1145,8 +1141,40 @@ static ExternallyViewableState* handleDyldInCache(Allocator& allocator, const He
             segRanges.push_back({segStart, segSize});
         });
         // we cannot unmap above because unmapping TEXT segment will crash forEachSegment(), do the unmap now
-        for (const Seg& s : segRanges)
+        for (const Seg& s : segRanges) {
             ::munmap(s.start, s.size);
+        }
+        if (usingNewProcessInfo) {
+            // Some clients don't deal well with the addresses used by the on disk dyld being reused by other clients
+            // so we are doing to add a mapping to prevent the addresses from being reused. There is a slight complication
+            // because on some systems codesigned __TEXT regions cannot be reused, so if we try to map over the whole thing
+            // it will fail. At first that might not seem to be an issue, but the problem is if the reused address are from
+            // dyld's __DATA region that would also be an issue.
+            //
+            // We could just attempt to remap over each memory region of dyld and ignore the results, failues would be unmappable
+            // anyway, and non-failures would add our guard mapping, but that would be several syscalls. Instead we try to map
+            // over thw whole of dyld, if we succeed we stop, if we don't contract the mapping by moving to the start of the next
+            // segment and try again.
+            size_t lastDyldAddress = (size_t)segRanges.back().start + segRanges.back().size;
+            for (const Seg& s : segRanges) {
+                mach_vm_address_t regionAddress = (vm_address_t)s.start;
+                vm_size_t    regionSize = (vm_size_t)(lastDyldAddress-regionAddress);
+                kern_return_t kr = mach_vm_map(mach_task_self(),
+                                               &regionAddress,
+                                               regionSize,
+                                               PAGE_MASK,                       // Page alignment
+                                               VM_FLAGS_FIXED,
+                                               MEMORY_OBJECT_NULL,              // Allocate memory instead of using an existing object
+                                               0,
+                                               FALSE,
+                                               VM_PROT_NONE,
+                                               VM_PROT_NONE,
+                                               VM_INHERIT_DEFAULT);
+                if (kr == KERN_SUCCESS) {
+                    break;
+                }
+            }
+        }
 
         return result;
     }
@@ -1387,7 +1415,6 @@ void start(KernelArgs* kernArgs, void* prevDyldMH, void* dyldSharedCache)
         ProcessConfig& config  = *new (allocator.aligned_alloc(alignof(ProcessConfig), sizeof(ProcessConfig))) ProcessConfig(kernArgs, sSyscallDelegate, allocator);
         // create APIs (aka RuntimeState) object in the allocator
         state = new (allocator.aligned_alloc(alignof(APIs), sizeof(APIs))) APIs(config, locks, allocator);
-        MemoryManager::memoryManager().setDyldCacheAddr((void*)state->config.dyldCache.addr);
         MemoryManager::memoryManager().setProtectedStack(state->protectedStack());
         // set initial state for ExternallyViewableState
         state->externallyViewable = externalState;

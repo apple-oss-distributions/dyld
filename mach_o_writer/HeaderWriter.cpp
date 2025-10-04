@@ -213,6 +213,12 @@ void HeaderWriter::setNoReExportedDylibs()
     mh.flags |= MH_NO_REEXPORTED_DYLIBS;
 }
 
+void HeaderWriter::setNoDynamicAccess()
+{
+    assert(mh.filetype == MH_DYLIB || mh.filetype == MH_DYLIB_STUB || mh.filetype == MH_EXECUTE);
+    mh.flags |= MH_NO_DYNAMIC_ACCESS;
+}
+
 void HeaderWriter::addPlatformInfo(Platform platform, Version32 minOS, Version32 sdk, std::span<const build_tool_version> tools)
 {
     Architecture arch(&mh);
@@ -373,6 +379,7 @@ void HeaderWriter::updateSegment(const SegmentInfo& info)
                 segCmd->filesize           = info.fileSize;
                 segCmd->maxprot            = info.maxProt;
                 segCmd->initprot           = info.initProt;
+                segCmd->flags              = info.flags;
                 stop = true;
                 return;
             }
@@ -386,6 +393,7 @@ void HeaderWriter::updateSegment(const SegmentInfo& info)
                 segCmd->filesize           = info.fileSize;
                 segCmd->maxprot            = info.maxProt;
                 segCmd->initprot           = info.initProt;
+                segCmd->flags              = info.flags;
                 stop = true;
                 return;
             }
@@ -652,7 +660,7 @@ void HeaderWriter::setCustomStackSize(uint64_t stackSize) {
     assert(found);
 }
 
-void HeaderWriter::setUnixEntry(uint64_t startAddr)
+void HeaderWriter::setUnixEntry(uint64_t startAddr, bool entryIsThumb, uint64_t sp)
 {
     // FIXME: support other archs
     if ( (mh.cputype == CPU_TYPE_ARM64) || (mh.cputype == CPU_TYPE_ARM64_32) ) {
@@ -661,7 +669,8 @@ void HeaderWriter::setUnixEntry(uint64_t startAddr)
         words[2] = 6;   // flavor = ARM_THREAD_STATE64
         words[3] = 68;  // count  = ARM_EXCEPTION_STATE64_COUNT * 2 <=> 34 uint64_t's
         bzero(&words[4], lcSize-16);
-        memcpy(&words[68], &startAddr, 8);  // register pc = startAddr
+        memcpy(&words[68], (uint8_t*)&startAddr, sizeof(uint64_t));  // register pc = startAddr
+        memcpy(&words[66], (uint8_t*)&sp, sizeof(uint64_t));         // register sp
     }
     else if ( mh.cputype == CPU_TYPE_X86_64 ) {
         uint32_t   lcSize = threadLoadCommandsSize();
@@ -670,6 +679,7 @@ void HeaderWriter::setUnixEntry(uint64_t startAddr)
         words[3] = 42;  // count  = x86_THREAD_STATE64_COUNT
         bzero(&words[4], lcSize-16);
         memcpy(&words[36], &startAddr, 8);  // register pc = startAddr
+        memcpy(&words[18], &sp, 8);         //  register rsp
     }
     else if ( mh.cputype == CPU_TYPE_ARM ) {
         uint32_t   lcSize = threadLoadCommandsSize();
@@ -677,7 +687,10 @@ void HeaderWriter::setUnixEntry(uint64_t startAddr)
         words[2] = 1;   // flavor = ARM_THREAD_STATE
         words[3] = 17;  // count  = ARM_THREAD_STATE_COUNT
         bzero(&words[4], lcSize-16);
-        words[15] = (uint32_t)startAddr;  // register pc = startAddr
+        if ( entryIsThumb )
+            startAddr |= 1;
+        words[19] = (uint32_t)startAddr;  // register pc = startAddr
+        words[17] = (uint32_t)sp;
     }
     else {
         assert(0 && "arch not supported");
@@ -807,7 +820,8 @@ void HeaderWriter::setLinkerOptimizationHints(uint32_t offset, uint32_t size)
 }
 
 void HeaderWriter::setSymbolTable(uint32_t nlistOffset, uint32_t nlistCount, uint32_t stringPoolOffset, uint32_t stringPoolSize,
-                                  uint32_t localsCount, uint32_t globalsCount, uint32_t undefCount, uint32_t indOffset, uint32_t indCount, bool dynSymtab)
+                                  uint32_t localsCount, uint32_t globalsCount, uint32_t undefCount, uint32_t indOffset, uint32_t indCount, bool dynSymtab,
+                                  uint32_t locrelOffset, uint32_t locrelCount, uint32_t extrelOffset, uint32_t extrelCount)
 {
     symtab_command stc;
     stc.cmd       = LC_SYMTAB;
@@ -831,6 +845,10 @@ void HeaderWriter::setSymbolTable(uint32_t nlistOffset, uint32_t nlistCount, uin
         dstc.nundefsym      = undefCount;
         dstc.indirectsymoff = indOffset;
         dstc.nindirectsyms  = indCount;
+        dstc.locreloff      = locrelOffset;
+        dstc.nlocrel        = locrelCount;
+        dstc.extreloff      = extrelOffset;
+        dstc.nextrel        = extrelCount;
         appendLoadCommand((load_command*)&dstc);
     }
 }

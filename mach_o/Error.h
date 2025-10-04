@@ -47,6 +47,9 @@ public:
                     Error() = default;
                     Error(const char* format, ...)  __attribute__((format(printf, 2, 3)));
                     Error(const char* format, va_list_wrap vaWrap) __attribute__((format(printf, 2, 0)));
+                    // va_list is declared as char*
+                    // use va_list_wrap, or cast real string arguments to const char* to avoid ambiguity
+                    Error(const char* format, va_list) = delete;
                     Error(Error&&); // can move
                     Error& operator=(const Error&) = delete; //  can't copy assign
                     Error& operator=(Error&&); // can move
@@ -56,7 +59,14 @@ public:
     void            append(const char* format, ...)  __attribute__((format(printf, 2, 3)));
     bool            hasError() const { return (_buffer != nullptr); }
     bool            noError() const  { return (_buffer == nullptr); }
-    explicit        operator bool() const { return hasError(); }
+
+    // These conversion operators only allow conversions on named variables, eg, `if ( Error e = func() )`
+    // They do not allow conversions of unnnamed temporaries, ie, rvalue refs: `if ( func() )`
+    // This is because it is easy to know from a named variable that "true" means there's an error,
+    // but might be hard to know from a function call that "true" means the function returns an error
+    explicit        operator bool() const & { return hasError(); }
+    explicit        operator bool() const && = delete;
+
     const char*     message() const;
     bool            messageContains(const char* subString) const;
 

@@ -306,6 +306,8 @@ public:
     static void             uuidToStr(const uuid_t uuid, char  uuidStr[64]);
     static void             applyInterposingToDyldCache(RuntimeState& state);
     static void             adjustFunctionVariantsInDyldCache(RuntimeState& state);
+    static bool             overriddenCacheHeader(RuntimeState& state, const mach_o::Header* dylibHdr);
+
 
     static uintptr_t        interpose(RuntimeState& state, uintptr_t value, const Loader* forLoader=nullptr);
     static const Loader*    getLoader(Diagnostics& diag, RuntimeState& state, const char* loadPath, const LoadOptions& options);
@@ -399,7 +401,7 @@ protected:
 
     static uint16_t             indexOfUnzipperedTwin(const RuntimeState& state, uint16_t overrideIndex);
 
-    static uint64_t             getOnDiskBinarySliceOffset(RuntimeState& state, const MachOAnalyzer* ma, const char* path);
+    static uint64_t             getOnDiskBinarySliceOffset(RuntimeState& state, const MachOFile* mf, const char* path);
 
 };
 

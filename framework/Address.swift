@@ -94,3 +94,14 @@ struct Slide {
     }
     let value: UInt64
 }
+
+// An address from a remote process (or could be the local process, but all accesses are via remote reads)
+struct RemoteAddress {
+    init(_ value:UInt64) {
+        self.value = value
+    }
+    init(_ value: UInt32) {
+        self.value = UInt64(value)
+    }
+    let value: UInt64
+}

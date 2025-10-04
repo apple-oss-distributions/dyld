@@ -39,7 +39,7 @@
 #include "MachOFileAbstraction.hpp"
 #include "Trie.hpp"
 #include "DyldSharedCache.h"
-#include "CacheBuilder.h"
+#include "KernelCacheBuilder.h"
 #include "MachOLoaded.h"
 
 #define ALIGN_AS_TYPE(value, type) \

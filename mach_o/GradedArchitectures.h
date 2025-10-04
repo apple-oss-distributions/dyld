@@ -48,21 +48,25 @@ public:
 
     bool                    hasCompatibleSlice(std::span<const Architecture> slices, bool isOSBinary, uint32_t& bestSliceIndex) const;
     bool                    isCompatible(Architecture arch, bool isOSBinary=false) const;
-
+    void                    forEachArch(bool isOSBinary, void (^handler)(Architecture arch)) const;
     bool                    checksOSBinary() const { return _requiresOSBinaries; }
-
-    static const GradedArchitectures&  currentLaunch(const char* simArches); // for emulating how the kernel chooses which slice to exec()
+    
+    static const GradedArchitectures&  currentLaunch(const char* simArches = nullptr); // for emulating how the kernel chooses which slice to exec()
     static const GradedArchitectures&  currentLoad(bool keysOff, bool platformBinariesOnly);
+    static const GradedArchitectures&  forName(std::string_view archName, bool keysOff = false, bool isKernel = false);
 
     // pre-built objects for use by dyld to see if a slice is loadable
     static constinit const GradedArchitectures load_mac;
     static constinit const GradedArchitectures load_macHaswell;
-    static constinit const GradedArchitectures load_arm64;                 // iPhone 8 (no PAC)
-    static constinit const GradedArchitectures load_arm64e;                // AppleSilicon or A12 and later
-    static constinit const GradedArchitectures load_arm64e_keysOff;        // running AppStore app with keys disabled
-    static constinit const GradedArchitectures load_arm64e_osBinaryOnly;   // don't load third party arm64e code
+    static constinit const GradedArchitectures load_arm64;                          // iPhone 8 (no PAC)
+    static constinit const GradedArchitectures load_arm64e;                         // AppleSilicon or A12 and later
+    static constinit const GradedArchitectures load_arm64e_kernel;                  // AppleSilicon Kernel
+    static constinit const GradedArchitectures load_arm64e_keysOff;                 // running AppStore app with keys disabled
+    static constinit const GradedArchitectures load_arm64e_osBinaryOnly;            // don't load third party arm64e code
+    static constinit const GradedArchitectures load_arm64e_keysOff_osBinaryOnly;    // macOS Apple Silicon running with signing keys disabled
     static constinit const GradedArchitectures load_watchSeries3;
     static constinit const GradedArchitectures load_watchSeries4;
+
 
     // pre-built objects for use to see if a program is launchable
     static constinit const GradedArchitectures launch_iOS;                // arm64e iOS
@@ -75,7 +79,7 @@ public:
 private:
 
         constexpr GradedArchitectures(const Architecture* const a[], uint32_t size, bool requiresOSBinaries=false)
-                    : _archs(a), _archCount(size/sizeof(Architecture)), _requiresOSBinaries(requiresOSBinaries) { }
+                    : _archs(a), _archCount(size/sizeof(Architecture*)), _requiresOSBinaries(requiresOSBinaries) { }
                   GradedArchitectures(const GradedArchitectures&) = delete;
 
     // Note: this is structured so that the static members (e.g. load_arm64) can be statically built (no initializer)

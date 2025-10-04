@@ -71,6 +71,26 @@ inline void pageAlign16K(uint64_t& value)
     value = ((value + 0x3FFF) & (-0x4000));
 }
 
+// magic way to tell compiler that 32-bit instruction may not be 32-bit aligned
+struct __attribute__((__packed__)) Unaligned32
+{
+    uint32_t value;
+};
+struct __attribute__((__packed__)) Unaligned64
+{
+    uint64_t value;
+};
+
+inline uint32_t readUnaligned32(const uint8_t* ptr)
+{
+    return ((Unaligned32*)ptr)->value;
+}
+
+inline uint64_t readUnaligned64(const uint8_t* ptr)
+{
+    return ((Unaligned64*)ptr)->value;
+}
+
 // used to walk fat/thin files and get all mach-o headers
 Error forEachHeader(std::span<const uint8_t> buffer, std::string_view path,
                     void (^callback)(const Header* sliceHeader, size_t sliceLength, bool& stop)) VIS_HIDDEN;

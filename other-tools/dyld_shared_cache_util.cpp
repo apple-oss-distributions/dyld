@@ -48,6 +48,7 @@
 #include <vector>
 #include <iostream>
 #include <optional>
+#include <ranges>
 
 #include "ClosureFileSystemPhysical.h"
 #include "DyldSharedCache.h"
@@ -116,6 +117,7 @@ enum Mode {
     modeLookupVA,
     modeExtract,
     modePatchTable,
+    modeDumpPatchTable,
     modeRootsCost,
     modeListDylibsWithSection,
     modeDuplicates,
@@ -149,7 +151,7 @@ static void usage() {
     fprintf(stderr, "Usage: dyld_shared_cache_util <command> [-fs-root] [-inode] [-versions] [-vmaddr] [shared-cache-file]\n"
         "    Commands:\n"
         "        -list [-uuid] [-vmaddr]                  list images\n"
-        "        -dependents <dylb-path>                  list dependents of dylib\n"
+        "        -dependents <dylib-path>                 list dependents of dylib\n"
         "        -linkedit                                print linkedit contents\n"
         "        -info                                    print shared cache info\n"
         "        -stats                                   print size stats\n"
@@ -186,7 +188,10 @@ static void usage() {
         "        -load_commands                           summarize load commands of each image\n"
         "        -cache_header                            print header of each shared cache file\n"
         "        -dylib_symbols                           print all symbol names and locations\n"
-        "        -function_starts                         print address of beginning of each function\n");
+        "        -function_starts                         print address of beginning of each function\n"
+        "        -function_variants                       print function variants fixups\n"
+        "        -roots_cost <dylib-path>                 estimate the dirty memory cost of installing a dylib root\n"
+        "        -prewarming_data                         print VM prewarming ranges\n");
 }
 
 static void checkMode(Mode mode) {
@@ -818,7 +823,7 @@ static void forEachSlidValue(const DyldSharedCache* dyldCache, uint64_t dataStar
 static bool findImageAndSegment(const DyldSharedCache* dyldCache, const std::vector<SegmentInfo>& segInfos, uint64_t cacheOffset, SegmentInfo* found)
 {
     const uint64_t locVmAddr = dyldCache->unslidLoadAddress() + cacheOffset;
-    const SegmentInfo target = { locVmAddr, 0, NULL, NULL };
+    const SegmentInfo target = { locVmAddr, 0, NULL, { } };
     const auto lowIt = std::lower_bound(segInfos.begin(), segInfos.end(), target,
                                                                         [](const SegmentInfo& l, const SegmentInfo& r) -> bool {
                                                                             return l.vmAddr+l.vmSize < r.vmAddr+r.vmSize;
@@ -1244,6 +1249,49 @@ static void dumpObjCClassMethodLists(const DyldSharedCache* dyldCache)
         exit(1);
 }
 
+static bool patchKindIsRootOptimized(PatchKind patchKind)
+{
+    return (patchKind == PatchKind::cfObj2) || (patchKind == PatchKind::objcClass);
+}
+
+struct PatchPageMetric
+{
+    std::unordered_set<uint64_t> pages;
+    size_t numUses = 0;
+
+    void addUse(uint64_t cacheOffset)
+    {
+        ++numUses;
+        pages.insert(cacheOffset & ~0x3FFF);
+    }
+};
+
+static void logCostOfRootPerSymbol(const std::unordered_map<CString, PatchPageMetric>& pagesPerSymbol)
+{
+    printf("\n%ld symbols page coverage:\n", pagesPerSymbol.size());
+
+    struct Metric
+    {
+        CString symName;
+        size_t numPages = 0;
+        size_t numUses = 0;
+    };
+
+    std::vector<Metric> metrics;
+    metrics.reserve(pagesPerSymbol.size());
+
+    std::ranges::transform(pagesPerSymbol, std::back_inserter(metrics), [](auto& entry) {
+        return Metric{entry.first, (size_t)entry.second.pages.size(), entry.second.numUses};
+    });
+    std::ranges::sort(metrics, [](auto& l, auto& r) {
+        if ( l.numPages == r.numPages )
+            return l.symName < r.symName;
+        return l.numPages < r.numPages;
+    });
+
+    for ( auto& metric : metrics )
+        printf("%s is on %ld pages, %ld uses\n", metric.symName.c_str(), metric.numPages, metric.numUses);
+}
 
 int main (int argc, const char* argv[]) {
 
@@ -1439,6 +1487,9 @@ int main (int argc, const char* argv[]) {
             }
             else if (strcmp(opt, "-patch_table") == 0) {
                 options.mode = modePatchTable;
+            }
+            else if (strcmp(opt, "-dump_patch_table") == 0) {
+                options.mode = modeDumpPatchTable;
             }
             else if (strcmp(opt, "-function_variants") == 0) {
                 options.mode = modeFunctionVariants;
@@ -1882,8 +1933,6 @@ int main (int argc, const char* argv[]) {
             // The cache has not been slid if we loaded it from disk
             bool cacheRebased = (sharedCachePath == nullptr);
             dyld3::MachOAnalyzer::VMAddrConverter vmAddrConverter = dyldCache->makeVMAddrConverter(cacheRebased);
-            if ( !cacheRebased )
-                dyldCache->applyCacheRebases();
 
             uint64_t sharedCacheRelativeSelectorBaseVMAddress = dyldCache->sharedCacheRelativeSelectorBaseVMAddress();
 
@@ -1986,10 +2035,12 @@ int main (int argc, const char* argv[]) {
                     }
 
                     for (const ExportInfoTrie::Entry& entry: exports) {
-                        const char* resolver = "";
+                        const char* flags = "";
                         if ( entry.info.flags & EXPORT_SYMBOL_FLAGS_STUB_AND_RESOLVER )
-                            resolver = " (resolver)";
-                        printf("%s: %s%s\n", installName, entry.name.c_str(), resolver);
+                            flags = " (resolver)";
+                        if ( entry.info.flags & EXPORT_SYMBOL_FLAGS_WEAK_DEFINITION )
+                            flags = " (weak-def)";
+                        printf("%s: %s%s\n", installName, entry.name.c_str(), flags);
                     }
                 }
             });
@@ -2018,12 +2069,18 @@ int main (int argc, const char* argv[]) {
         printf("flags:                              0x%08x\n", dyldCache->objcOptFlags());
         if ( const objc::SelectorHashTable* selectors = dyldCache->objcSelectorHashTable() ) {
             printf("num selectors:                      %u\n", selectors->occupancy());
+            printf("selectors base address:             0x%llx\n",
+                   dyldCache->unslidLoadAddress() + ((uint64_t)selectors - (uint64_t)dyldCache));
         }
         if ( const objc::ClassHashTable* classes = dyldCache->objcClassHashTable() ) {
             printf("num classes:                        %u\n", classes->occupancy());
+            printf("classes base address:               0x%llx\n",
+                   dyldCache->unslidLoadAddress() + ((uint64_t)classes - (uint64_t)dyldCache));
         }
         if ( const objc::ProtocolHashTable* protocols = dyldCache->objcProtocolHashTable() ) {
             printf("num protocols:                      %u\n", protocols->occupancy());
+            printf("protocols base address:             0x%llx\n",
+                   dyldCache->unslidLoadAddress() + ((uint64_t)protocols - (uint64_t)dyldCache));
         }
         if ( const void* relativeMethodListSelectorBase = dyldCache->objcRelativeMethodListsBaseAddress() ) {
             printf("method list selector base address:  0x%llx\n", dyldCache->unslidLoadAddress() + ((uint64_t)relativeMethodListSelectorBase - (uint64_t)dyldCache));
@@ -2214,8 +2271,6 @@ int main (int argc, const char* argv[]) {
                 return 1;
             }
         }
-
-        dyldCache->applyCacheRebases();
 
         auto getString = ^const char *(const dyld3::MachOAnalyzer* ma, VMAddress nameVMAddr){
             dyld3::MachOAnalyzer::PrintableStringResult result;
@@ -3296,6 +3351,7 @@ int main (int argc, const char* argv[]) {
         if (diag.hasError())
             return 1;
 
+        __block bool anyBadEntry = false;
         dyldCache->forEachImage(^(const Header *mh, const char *installName) {
             if (diag.hasError())
                 return;
@@ -3321,21 +3377,26 @@ int main (int argc, const char* argv[]) {
 
                 const uint8_t* impCacheBuffer = (const uint8_t*)(objcClass.methodCacheVMAddr + slide);
                 uint32_t cacheMask = 0;
+                uint32_t cacheShift = 0;
                 uint32_t sizeOfHeader = 0;
                 if (impCachesVersion < 3) {
                     const ImpCacheHeader_v1* impCache = (const ImpCacheHeader_v1*)impCacheBuffer;
-                    printf("%s (%s): %d buckets\n", className, type, impCache->cache_mask + 1);
+                    cacheMask = impCache->cache_mask;
+                    cacheShift = impCache->cache_shift;
+                    sizeOfHeader = sizeof(ImpCacheHeader_v1);
+
+                    printf("%s (%s): %d buckets, 0x%X mask, 0x%X shift\n", className, type, impCache->cache_mask + 1, cacheMask, cacheShift);
                     if ((classVMAddr + impCache->fallback_class_offset) != objcClass.superclassVMAddr)
                         printf("Flattening fallback: %s\n", classVMAddrToNameMap[classVMAddr + impCache->fallback_class_offset]);
-                    cacheMask = impCache->cache_mask;
-                    sizeOfHeader = sizeof(ImpCacheHeader_v1);
                 } else {
                     const ImpCacheHeader_v2* impCache = (const ImpCacheHeader_v2*)impCacheBuffer;
-                    printf("%s (%s): %d buckets\n", className, type, impCache->cache_mask + 1);
+                    cacheMask = impCache->cache_mask;
+                    cacheShift = impCache->cache_shift;
+                    sizeOfHeader = sizeof(ImpCacheHeader_v2);
+
+                    printf("%s (%s): %d buckets, 0x%X mask, 0x%X shift\n", className, type, impCache->cache_mask + 1, cacheMask, cacheShift);
                     if ((classVMAddr + impCache->fallback_class_offset) != objcClass.superclassVMAddr)
                         printf("Flattening fallback: %s\n", classVMAddrToNameMap[classVMAddr + impCache->fallback_class_offset]);
-                    cacheMask = impCache->cache_mask;
-                    sizeOfHeader = sizeof(ImpCacheHeader_v2);
                 }
 
                 const uint8_t* buckets = impCacheBuffer + sizeOfHeader;
@@ -3344,14 +3405,17 @@ int main (int argc, const char* argv[]) {
                     uint64_t sel = 0;
                     uint64_t imp = 0;
                     bool empty = false;
+                    uint32_t selOff=0;
                     if (impCachesVersion == 1) {
                         const ImpCacheEntry_v1* bucket = (ImpCacheEntry_v1*)buckets + i;
+                        selOff = bucket->selOffset;
                         sel = selectorStringVMAddrStart + bucket->selOffset;
                         imp = classVMAddr - bucket->impOffset;
                         if (bucket->selOffset == 0xFFFFFFF && bucket->impOffset == 0)
                             empty = true;
                     } else {
                         const ImpCacheEntry_v2* bucket = (ImpCacheEntry_v2*)buckets + i;
+                        selOff = bucket->selOffset;
                         sel = selectorStringVMAddrStart + bucket->selOffset;
                         imp = classVMAddr - (bucket->impOffset << 2);
                         if (bucket->selOffset == 0x3FFFFFF && bucket->impOffset == 0)
@@ -3368,12 +3432,21 @@ int main (int argc, const char* argv[]) {
                             fprintf(stderr, "Could not find IMP %llx (for %s)\n", imp, (const char*)(sel + slide));
                         }
                         assert(it != methodToClassMap.end());
-                        printf("  - 0x%016llx: %s (from %s)\n", imp, (const char*)(sel + slide), it->second);
+                        printf("  - 0x%016llx: %s (from %s) (selOff: 0x%X)\n", imp, (const char*)(sel + slide), it->second, selOff);
+                        uint32_t expectedBucket = (selOff >> cacheShift) & cacheMask;
+                        if ( expectedBucket != i ) {
+                            fprintf(stderr, "  [BAD IMP CACHE] - 0x%016llx: %s (from %s) (selOff: 0x%X) (bucket: %d vs expected: %d)\n", imp, (const char*)(sel + slide), it->second, selOff, i, expectedBucket);
+                            anyBadEntry = true;
+                        }
                     }
                 }
            };
             ma->forEachObjCClass(diag, vmAddrConverter, visitClass);
         });
+        if ( anyBadEntry ) {
+            fprintf(stderr, "IMP cache is malformed\n");
+            exit(1);
+        }
     } else {
         switch ( options.mode ) {
             case modeList: {
@@ -3626,18 +3699,22 @@ int main (int argc, const char* argv[]) {
             case modePatchTable: {
                 printf("Patch table size: %lld bytes\n", dyldCache->header.patchInfoSize);
 
+                uint64_t cacheBaseAddress = dyldCache->unslidLoadAddress();
                 std::vector<SegmentInfo> segInfos;
                 buildSegmentInfo(dyldCache, segInfos);
                 __block uint32_t imageIndex = 0;
+                __block std::unordered_map<CString, PatchPageMetric> pagesPerSymbol;
+
                 dyldCache->forEachImage(^(const Header* hdr, const char* installName) {
                     printf("%s:\n", installName);
-                    uint64_t cacheBaseAddress = dyldCache->unslidLoadAddress();
                     uint64_t dylibBaseAddress = hdr->preferredLoadAddress();
                     dyldCache->forEachPatchableExport(imageIndex, ^(uint32_t dylibVMOffsetOfImpl, const char* exportName,
                                                                     PatchKind patchKind) {
                         uint64_t cacheOffsetOfImpl = (dylibBaseAddress + dylibVMOffsetOfImpl) - cacheBaseAddress;
                         printf("    export: 0x%08llX%s  %s\n", cacheOffsetOfImpl,
                                PatchTable::patchKindName(patchKind), exportName);
+
+                        CString exportNameStr(exportName);
                         dyldCache->forEachPatchableUseOfExport(imageIndex, dylibVMOffsetOfImpl,
                                                                ^(uint32_t userImageIndex, uint32_t userVMOffset,
                                                                  dyld3::MachOLoaded::PointerMetaData pmd, uint64_t addend,
@@ -3653,6 +3730,9 @@ int main (int argc, const char* argv[]) {
                             const uint64_t patchLocVmAddr = imageHdr->preferredLoadAddress() + userVMOffset;
                             const uint64_t patchLocCacheOffset = patchLocVmAddr - cacheBaseAddress;
                             findImageAndSegment(dyldCache, segInfos, patchLocCacheOffset, &usageAt);
+
+                            if ( !patchKindIsRootOptimized(patchKind) )
+                                pagesPerSymbol[exportNameStr].addUse(patchLocVmAddr);
 
                             // Verify that findImage and the callback image match
                             std::string_view userInstallName = imageHdr->installName();
@@ -3705,26 +3785,36 @@ int main (int argc, const char* argv[]) {
                                 "IA", "IB", "DA", "DB"
                             };
 
+                            if ( !patchKindIsRootOptimized(patchKind) )
+                                pagesPerSymbol["GOT"].addUse(cacheBaseAddress + cacheVMOffset);
+
                             const char* weakImportString = isWeakImport ? " (weak-import)" : "";
                             if ( addend == 0 ) {
                                 if ( pmd.authenticated ) {
-                                    printf("        used by: GOT%s (PAC: div=%d, addr=%s, key=%s)\n",
-                                           weakImportString, pmd.diversity, pmd.usesAddrDiversity ? "true" : "false", keyNames[pmd.key]);
+                                    printf("        used by: GOT%s (0x%llx) (PAC: div=%d, addr=%s, key=%s)\n",
+                                           weakImportString, cacheVMOffset, pmd.diversity, pmd.usesAddrDiversity ? "true" : "false", keyNames[pmd.key]);
                                 } else {
-                                    printf("        used by: GOT%s\n", weakImportString);
+                                    printf("        used by: GOT%s (0x%llx)\n", weakImportString, cacheVMOffset);
                                 }
                             } else {
                                 if ( pmd.authenticated ) {
-                                    printf("        used by: GOT%s (addend=%lld) (PAC: div=%d, addr=%s, key=%s)\n",
-                                           weakImportString, addend, pmd.diversity, pmd.usesAddrDiversity ? "true" : "false", keyNames[pmd.key]);
+                                    printf("        used by: GOT%s (0x%llx) (addend=%lld) (PAC: div=%d, addr=%s, key=%s)\n",
+                                           weakImportString, cacheVMOffset, addend, pmd.diversity, pmd.usesAddrDiversity ? "true" : "false", keyNames[pmd.key]);
                                 } else {
-                                    printf("        used by: GOT%s (addend=%lld)\n", weakImportString, addend);
+                                    printf("        used by: GOT%s (0x%llx) (addend=%lld)\n", weakImportString, cacheVMOffset, addend);
                                 }
                             }
                         });
                     });
                     ++imageIndex;
                 });
+
+                logCostOfRootPerSymbol(pagesPerSymbol);
+                break;
+            }
+            case modeDumpPatchTable: {
+                PatchTable patchTable(dyldCache->patchTable(), dyldCache->header.patchInfoAddr);
+                patchTable.dump();
                 break;
             }
             case modeRootsCost: {
@@ -3749,13 +3839,16 @@ int main (int argc, const char* argv[]) {
                 // For each page of the cache, we record if it was dirtied by patching, and by which dylibs
                 typedef std::pair<const char*, std::string_view> InstallNameAndSegment;
                 __block std::map<uint64_t, std::set<InstallNameAndSegment>> pages;
+                __block std::unordered_map<CString, PatchPageMetric> pagesPerSymbol;
 
                 uint64_t cacheBaseAddress = dyldCache->unslidLoadAddress();
                 dyldCache->forEachPatchableExport(rootImageIndex.value(),
                                                   ^(uint32_t dylibVMOffsetOfImpl, const char* exportName,
                                                     PatchKind patchKind) {
-                    if ( (patchKind == PatchKind::cfObj2) || (patchKind == PatchKind::objcClass) )
+                    if ( patchKindIsRootOptimized(patchKind) )
                         return;
+
+                    CString exportNameStr(exportName);
                     dyldCache->forEachPatchableUseOfExport(rootImageIndex.value(), dylibVMOffsetOfImpl,
                                                            ^(uint32_t userImageIndex, uint32_t userVMOffset,
                                                              dyld3::MachOLoaded::PointerMetaData pmd, uint64_t addend,
@@ -3774,8 +3867,9 @@ int main (int argc, const char* argv[]) {
 
                         // Round to the 16KB page we dirty
                         //clientUsedPages[userImageIndex].insert(usageAt.vmAddr & ~0x3FFF);
-                        uint64_t pageAddr = usageAt.vmAddr & ~0x3FFF;
+                        uint64_t pageAddr = patchLocVmAddr & ~0x3FFF;
                         pages[pageAddr].insert({ usageAt.installName, usageAt.segName });
+                        pagesPerSymbol[exportNameStr].addUse(pageAddr);
                     });
 
                     // Print GOT uses
@@ -3786,7 +3880,8 @@ int main (int argc, const char* argv[]) {
                         // Round to the 16KB page we dirty
                         //gotUsedPages.insert((cacheBaseAddress + cacheVMOffset) & ~0x3FFF);
                         uint64_t pageAddr = (cacheBaseAddress + cacheVMOffset) & ~0x3FFF;
-                        pages[pageAddr].insert({ "GOT", nullptr });
+                        pages[pageAddr].insert({ "GOT", "" });
+                        pagesPerSymbol["GOT"].addUse(pageAddr);
                     });
                 });
 
@@ -3816,6 +3911,7 @@ int main (int argc, const char* argv[]) {
                     printf("\n");
                 }
 
+                logCostOfRootPerSymbol(pagesPerSymbol);
                 break;
             }
             case modeMachHeaders: {

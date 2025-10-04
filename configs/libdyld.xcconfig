@@ -60,3 +60,14 @@ TAPI_EXTRA_PUBLIC_HEADERS = ${SRCROOT}/include/dlfcn.h
 TAPI_EXTRA_PRIVATE_HEADERS = ${SRCROOT}/include/mach-o/dyld_priv.h ${SRCROOT}/include/dlfcn_private.h
 
 CODE_SIGN_IDENTITY = $(TRUSTED_CODE_SIGN_IDENTITY)
+
+// TODO: Clean these up.  They were moved from the build settings
+EXECUTABLE_PREFIX = lib
+HEADER_SEARCH_PATHS = ./include
+ONLY_ACTIVE_ARCH[config=Debug] = NO
+PRODUCT_NAME = dyld
+SUPPORTS_TEXT_BASED_API = YES
+TAPI_VERIFY_MODE = Pedantic
+USER_HEADER_SEARCH_PATHS = $(DERIVED_FILE_DIR)
+VERSION_INFO_EXPORT_DECL = __attribute__((visibility("default")))
+

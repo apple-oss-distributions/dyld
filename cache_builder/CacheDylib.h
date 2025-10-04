@@ -34,6 +34,7 @@
 #include "SectionCoalescer.h"
 #include "SwiftVisitor.h"
 #include "Timer.h"
+#include "Image.h"
 
 #include <list>
 
@@ -82,6 +83,8 @@ struct CacheDylib
     std::vector<error::Error> calculateBindTargets(Diagnostics& diag, const BuilderConfig& config, Timer::AggregateTimer& timer,
                                                    const std::vector<const CacheDylib *>& cacheDylibs,
                                                    PatchInfo& dylibPatchInfo);
+    void calcuatePatchInfo(Diagnostics& diag, const BuilderConfig& config, Timer::AggregateTimer& timer,
+                           PatchInfo& dylibPatchInfo);
     void bind(Diagnostics& diag, const BuilderConfig& config, Timer::AggregateTimer& timer,
               PatchInfo& dylibPatchInfo, FunctionVariantsOptimizer& functionVariantsOptimizer);
     void updateObjCSelectorReferences(Diagnostics& diag, const BuilderConfig& config, Timer::AggregateTimer& timer,
@@ -180,6 +183,10 @@ struct CacheDylib
 #endif
     };
 
+    // Map from where the GOT is located in the dylib to where its located in the coalesced section
+    // We don't know the final VMAddr yet, but can map from GOTs in the client to the GOT+offset in the final cache
+    typedef std::unordered_map<const InputDylibVMAddress, ChunkPlusOffset, InputDylibVMAddressHash, InputDylibVMAddressEqual> CoalescedGOTsMap;
+
     typedef std::pair<BindTarget, std::string> BindTargetAndName;
     enum class SearchMode
     {
@@ -206,24 +213,28 @@ private:
                                                       const std::vector<const CacheDylib*>& cacheDylibs) const;
     std::optional<BindTargetAndName>    findDyldMagicSymbolAddress(const char* fullSymbolName, std::string_view name) const;
 
-    // Map from where the GOT is located in the dylib to where its located in the coalesced section
-    typedef std::unordered_map<const CacheVMAddress, CacheVMAddress, CacheVMAddressHash, CacheVMAddressEqual> CoalescedGOTMap;
+    void calculateBindLocationPatchInfo(Diagnostics& diag, const BuilderConfig& config,
+                                        const BindTarget& bindTarget, uint64_t addend,
+                                        uint32_t bindOrdinal, uint32_t segIndex,
+                                        InputDylibVMAddress fixupVMAddr, dyld3::MachOFile::PointerMetaData pmd,
+                                        CoalescedGOTsMap& coalescedGOTs, CoalescedGOTsMap& coalescedAuthGOTs,
+                                        CoalescedGOTsMap& coalescedAuthPtrs, PatchInfo& dylibPatchInfo);
 
     void bindLocation(Diagnostics& diag, const BuilderConfig& config,
                       const BindTarget& bindTarget, uint64_t addend,
                       uint32_t bindOrdinal, uint32_t segIndex,
                       dyld3::MachOFile::ChainedFixupPointerOnDisk* fixupLoc,
                       CacheVMAddress fixupVMAddr, dyld3::MachOFile::PointerMetaData pmd,
-                      CoalescedGOTMap& coalescedGOTs, CoalescedGOTMap& coalescedAuthGOTs,
-                      CoalescedGOTMap& coalescedAuthPtrs, PatchInfo& dylibPatchInfo,
+                      CoalescedGOTsMap& coalescedGOTs, CoalescedGOTsMap& coalescedAuthGOTs,
+                      CoalescedGOTsMap& coalescedAuthPtrs, PatchInfo& dylibPatchInfo,
                       FunctionVariantsOptimizer& functionVariantsOptimizer);
     void bindWithChainedFixups(Diagnostics& diag, const BuilderConfig& config,
-                               CoalescedGOTMap& coalescedGOTs, CoalescedGOTMap& coalescedAuthGOTs,
-                               CoalescedGOTMap& coalescedAuthPtrs, PatchInfo& dylibPatchInfo,
+                               CoalescedGOTsMap& coalescedGOTs, CoalescedGOTsMap& coalescedAuthGOTs,
+                               CoalescedGOTsMap& coalescedAuthPtrs, PatchInfo& dylibPatchInfo,
                                FunctionVariantsOptimizer& functionVariantsOptimizer);
     void bindWithOpcodeFixups(Diagnostics& diag, const BuilderConfig& config,
-                              CoalescedGOTMap& coalescedGOTs, CoalescedGOTMap& coalescedAuthGOTs,
-                              CoalescedGOTMap& coalescedAuthPtrs, PatchInfo& dylibPatchInfo,
+                              CoalescedGOTsMap& coalescedGOTs, CoalescedGOTsMap& coalescedAuthGOTs,
+                              CoalescedGOTsMap& coalescedAuthPtrs, PatchInfo& dylibPatchInfo,
                               FunctionVariantsOptimizer& functionVariantsOptimizer);
 
     void forEachReferenceToASelRef(Diagnostics &diags,
@@ -260,6 +271,7 @@ public:
     InputFile*                              inputFile               = nullptr;
     const dyld3::MachOFile*                 inputMF                 = nullptr;
     const mach_o::Header*                   inputHdr                = nullptr;
+    std::unique_ptr<mach_o::Image>          inputImage              = nullptr;
     InputDylibVMAddress                     inputLoadAddress;
     std::string_view                        installName;
     uint32_t                                cacheIndex;

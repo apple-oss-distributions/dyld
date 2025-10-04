@@ -38,7 +38,6 @@
 #include <CommonCrypto/CommonDigest.h>
 #include <CommonCrypto/CommonDigestSPI.h>
 
-using dyld3::GradedArchs;
 using dyld3::MachOFile;
 
 using mach_o::Header;
@@ -427,8 +426,8 @@ void SubCache::setSuffix(Platform platform, bool forceDevelopmentSubCacheSuffix,
     const char* readonlySuffix = forceDevelopmentSubCacheSuffix ? ".development.dyldreadonly" : ".dyldreadonly";
     const char* subCacheSuffix = forceDevelopmentSubCacheSuffix ? ".development" : "";
 
-    if ( platform == Platform::macOS ) {
-        // macOS never has a .development suffix
+    if ( (platform == Platform::macOS) || platform.isSimulator() ) {
+        // macOS/sims never has a .development suffix
         this->fileSuffix = "." + json::decimal(subCacheIndex);
     } else if ( platform == Platform::driverKit ) {
         // driverKit never has a .development suffix
@@ -456,7 +455,7 @@ void SubCache::setSuffix(Platform platform, bool forceDevelopmentSubCacheSuffix,
 static std::string getCodeSigningIdentifier(const BuilderOptions& options)
 {
     std::string cacheIdentifier = "com.apple.dyld.cache.";
-    cacheIdentifier += options.archs.name();
+    cacheIdentifier += options.arch.name();
     if ( options.dylibsRemovedFromDisk ) {
         switch ( options.kind ) {
             case CacheKind::development:
@@ -744,6 +743,14 @@ void SubCache::codeSign(Diagnostics& diag, const BuilderOptions& options, const 
     // Note: cdHash is defined as first 20 bytes of hash
     memcpy(this->cdHash, fullCdHash, 20);
 
+    if ( layout.agile ) {
+        // hash of entire code directory (cdHash) uses same hash as each page
+        uint8_t altfullCdHash[CS_HASH_SIZE_SHA256];
+        CCDigest(kCCDigestSHA256, (const uint8_t*)cd256, layout.cd256Size, altfullCdHash);
+        // Note: cdHash is defined as first 20 bytes of hash
+        memcpy(this->agilecdHash, altfullCdHash, 20);
+    }
+
     // Set the UUID string in the subcache
     uuid_unparse_upper(dyldCacheHeader->uuid, this->uuidString);
 }
@@ -962,7 +969,8 @@ static uint32_t numTPRORegions(const BuilderConfig& config, SubCache* mainSubCac
     return count;
 }
 
-void SubCache::addCacheHeaderChunk(const BuilderConfig& config, const std::span<CacheDylib> cacheDylibs)
+void SubCache::addCacheHeaderChunk(const BuilderOptions& options, const BuilderConfig& config,
+                                   const std::span<CacheDylib> cacheDylibs)
 {
     // calculate size of header info and where first dylib's mach_header should start
     uint64_t numMappings = this->regions.size();
@@ -975,7 +983,7 @@ void SubCache::addCacheHeaderChunk(const BuilderConfig& config, const std::span<
         startOffset += sizeof(dyld_cache_tpro_mapping_info) * numTPRORegions(config, this, this->subCaches);
     }
 
-    if ( this->needsCacheHeaderImageList() ) {
+    if ( this->needsCacheHeaderImageList(options) ) {
         startOffset += sizeof(dyld_cache_image_info) * cacheDylibs.size();
         startOffset += sizeof(dyld_cache_image_text_info) * cacheDylibs.size();
         for ( const CacheDylib& cacheDylib : cacheDylibs ) {
@@ -1217,12 +1225,11 @@ void SubCache::addCacheTrieChunk(DylibTrieOptimizer& dylibTrieOptimizer)
 
 void SubCache::addPatchTableChunk(PatchTableOptimizer& patchTableOptimizer)
 {
-    // We can't compute the size yet.  We need to know how many fixups we have
-    // And yet we have an estimate, so we'll use it
+    // We can't compute the size yet so just make an empty chunk
 
     this->patchTable = std::make_unique<PatchTableChunk>();
-    this->patchTable->cacheVMSize       = CacheVMSize(patchTableOptimizer.patchTableTotalByteSize);
-    this->patchTable->subCacheFileSize  = CacheFileSize(patchTableOptimizer.patchTableTotalByteSize);
+    this->patchTable->cacheVMSize       = CacheVMSize(0ULL);
+    this->patchTable->subCacheFileSize  = CacheFileSize(0ULL);
 
     patchTableOptimizer.patchTableChunk = this->patchTable.get();
 
@@ -1542,15 +1549,16 @@ void SubCache::writeCacheHeaderMappings()
 }
 
 void SubCache::writeCacheHeader(const BuilderOptions& options, const BuilderConfig& config,
-                                const std::span<CacheDylib> cacheDylibs)
+                                const std::span<CacheDylib> cacheDylibs,
+                                uint32_t osVersion, uint32_t altPlatform, uint32_t altOsVersion)
 {
     Chunk& cacheHeaderChunk = *this->cacheHeader.get();
     dyld_cache_header* dyldCacheHeader = (dyld_cache_header*)cacheHeaderChunk.subCacheBuffer;
 
     // "dyld_v1" + spaces + archName(), with enough spaces to pad to 15 bytes
     std::string magic = "dyld_v1";
-    magic.append(15 - magic.length() - strlen(options.archs.name()), ' ');
-    magic.append(options.archs.name());
+    magic.append(15 - magic.length() - strlen(options.arch.name()), ' ');
+    magic.append(options.arch.name());
     assert(magic.length() == 15);
 
     // Num of mappings depends on cache layout.
@@ -1621,9 +1629,9 @@ void SubCache::writeCacheHeader(const BuilderOptions& options, const BuilderConf
     dyldCacheHeader->programsPBLSetPoolSize        = 0; // set later only on the main cache file
     dyldCacheHeader->programTrieAddr               = 0; // set later only on the main cache file
     dyldCacheHeader->programTrieSize               = 0; // set later only on the main cache file
-    dyldCacheHeader->osVersion                     = 0; // set later only on the main cache file
-    dyldCacheHeader->altPlatform                   = 0; // set later only on the main cache file
-    dyldCacheHeader->altOsVersion                  = 0; // set later only on the main cache file
+    dyldCacheHeader->osVersion                     = osVersion;
+    dyldCacheHeader->altPlatform                   = altPlatform;
+    dyldCacheHeader->altOsVersion                  = altOsVersion;
     dyldCacheHeader->swiftOptsOffset               = 0; // set later only on the main cache file
     dyldCacheHeader->swiftOptsSize                 = 0; // set later only on the main cache file
     dyldCacheHeader->subCacheArrayOffset           = 0;
@@ -1655,7 +1663,6 @@ void SubCache::writeCacheHeader(const BuilderOptions& options, const BuilderConf
 void SubCache::addMainCacheHeaderInfo(const BuilderOptions& options, const BuilderConfig& config,
                                       const std::span<CacheDylib> cacheDylibs,
                                       CacheVMSize totalVMSize, uint64_t maxSlide,
-                                      uint32_t osVersion, uint32_t altPlatform, uint32_t altOsVersion,
                                       CacheVMAddress dyldInCacheUnslidAddr,
                                       CacheVMAddress dyldInCacheEntryUnslidAddr,
                                       const DylibTrieOptimizer& dylibTrieOptimizer,
@@ -1699,10 +1706,6 @@ void SubCache::addMainCacheHeaderInfo(const BuilderOptions& options, const Build
 
     dyldCacheHeader->dyldInCacheMH      = dyldInCacheUnslidAddr.rawValue();
     dyldCacheHeader->dyldInCacheEntry   = dyldInCacheEntryUnslidAddr.rawValue();
-
-    dyldCacheHeader->osVersion      = osVersion;
-    dyldCacheHeader->altPlatform    = altPlatform;
-    dyldCacheHeader->altOsVersion   = altOsVersion;
 
     // record max slide now that final size is established
     dyldCacheHeader->maxSlide           = maxSlide;
@@ -1783,7 +1786,7 @@ void SubCache::addCacheHeaderImageInfo(const BuilderOptions& options,
                                        const BuilderConfig& config,
                                        const std::span<CacheDylib> cacheDylibs)
 {
-    if ( !this->needsCacheHeaderImageList() )
+    if ( !this->needsCacheHeaderImageList(options) )
         return;
 
     Chunk&             cacheHeaderChunk   = *this->cacheHeader.get();
@@ -1917,16 +1920,17 @@ bool SubCache::isStubsCustomerCache() const
     return this->kind == Kind::stubsCustomer;
 }
 
-bool SubCache::needsCacheHeaderImageList() const
+bool SubCache::needsCacheHeaderImageList(const BuilderOptions& options) const
 {
     // Symbols and stubs files don't need an image list
-    // We'd like to not add the image list to subcaches, only the main cache, but Rosetta needs
-    // the image list on subCaches.
     switch ( this->kind ) {
         case Kind::mainDevelopment:
         case Kind::mainCustomer:
-        case Kind::subUniversal:
             return true;
+        case Kind::subUniversal:
+            // We'd like to not add the image list to subcaches, only the main cache, but Rosetta needs
+            // the image list on subCaches.
+            return options.arch.sameCpu(mach_o::Architecture::x86_64);
         case Kind::stubsDevelopment:
         case Kind::stubsCustomer:
         case Kind::symbols:

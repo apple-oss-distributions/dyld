@@ -93,6 +93,7 @@ namespace mach_o {
 
 constinit const Platform::Epoch Platform::Epoch::invalid(0);
 constinit const Platform::Epoch Platform::Epoch::fall2012(2012);
+constinit const Platform::Epoch Platform::Epoch::fall2013(2013);
 constinit const Platform::Epoch Platform::Epoch::fall2015(2015);
 constinit const Platform::Epoch Platform::Epoch::fall2016(2016);
 constinit const Platform::Epoch Platform::Epoch::fall2017(2017);
@@ -124,8 +125,9 @@ constinit const Platform::Epoch Platform::Epoch::fall2025(2025);
 class VIS_HIDDEN PlatformInfo
 {
 public:
-    consteval PlatformInfo(uint32_t v, CString nm, bool isSim, bool fp, uint16_t year, const PlatformInfo* info, CString altName = {})
-                             : basePlatformInfo(info), name(nm), altName(altName), value(v), baseYear(year), isSimulator(isSim), supportsFairPlayEncryption(fp) { }
+    consteval PlatformInfo(uint32_t v, CString nm, bool isSim, bool fp, bool alignedIn2025, uint16_t year, const PlatformInfo* info, CString altName = {})
+        : basePlatformInfo(info), name(nm), altName(altName), value(v), baseYear(year),
+          isSimulator(isSim), supportsFairPlayEncryption(fp), wasAlignedIn2025(alignedIn2025) { }
 
     const PlatformInfo* basePlatformInfo;
     CString             name;
@@ -136,12 +138,7 @@ public:
     bool                isExclaveCore=false;
     bool                isExclaveKit=false;
     bool                supportsFairPlayEncryption;
-    
-
-    // Epoch is private to Platform and PlatformInfo, so convert to year/spring of use by subclasses
-    Version32 versionForEpoch(Platform::Epoch e) const {
-        return versionForYear(e.year(), e.isSpring());
-    }
+    bool                wasAlignedIn2025;           // was this platform bumped to version 26.0 in fall 2025?
 
     // Epoch is private to Platform and PlatformInfo, so convert to year/spring of use by subclasses
     Platform::Epoch epochForVersion(Version32 vers) const {
@@ -151,9 +148,6 @@ public:
         return Platform::Epoch(year, spring);
     }
 
-    virtual Version32 versionForYear(uint16_t year, bool spring) const {
-        return majorVersionFromBaseYear(year, spring);
-    }
     virtual void yearForVersion(Version32 vers, uint16_t& year, bool& spring) const {
         yearForMajorVersion(vers, year, spring);
     }
@@ -167,32 +161,23 @@ protected:
     friend class Platform;
     static constinit const PlatformInfo* knownPlatformInfos[];
 
-    // version bumped by 1.0 each Fall, started at baseYear
-    Version32 majorVersionFromBaseYear(uint16_t year, bool spring) const {
-        unsigned major = year - baseYear;
-        uint16_t minor = 0;
-        if ( spring ) {
-            --major;
-            minor = minorVersionForSpring(major);
-        }
-        return Version32(major, minor);
-    }
-
-    // version bumped by 0.1 each Fall
-    Version32 tenVersionFromBaseYear(uint16_t year, bool spring, uint16_t tenBaseYear) const {
-        // version is 10.xx
-        uint16_t subVersion = year - tenBaseYear;
-        uint8_t  dot        = 0;
-        if ( spring ) {
-            --subVersion;
-            dot = 4;
-        }
-        return Version32(10, subVersion, dot);
-    }
-
     void yearForMajorVersion(Version32 vers, uint16_t& year, bool& spring) const {
         // version is >= 11.0
-        year = baseYear + vers.major();
+
+        // In 2025, many platform aligned on version 26
+        if ( wasAlignedIn2025 ) {
+            if ( vers.major() >= 26 ) {
+                year = 2000 + (vers.major() - 1);
+            } else {
+                // clamp anything in the gap to 26
+                year = baseYear + vers.major();
+                if ( year > 2026 )
+                    year = 2026;
+            }
+        } else {
+            year = baseYear + vers.major();
+        }
+
         spring = (vers.minor() >= minorVersionForSpring(vers.major()));
         // Say the 2023 fall release has the year 2023, then we want the following spring release,
         // what availability calls 2023(e) to actually be in calendar year 2024
@@ -213,14 +198,7 @@ protected:
 class VIS_HIDDEN PlatformInfo_macOS : public PlatformInfo
 {
 public:
-    consteval PlatformInfo_macOS() : PlatformInfo(PLATFORM_MACOS, "macOS", false, false, 2009, &PlatformInfo_macOS::singleton, "macOSX") { }
-
-    Version32 versionForYear(uint16_t year, bool spring) const override {
-        if ( (year > 2020) || ((year ==2020) && !spring) )
-            return majorVersionFromBaseYear(year, spring);       // 2020 - 2009 -> 11.0
-        else
-            return tenVersionFromBaseYear(year, spring, 2004);   // 2019 - 2004 -> 10.15
-    }
+    consteval PlatformInfo_macOS() : PlatformInfo(PLATFORM_MACOS, "macOS", false, false, true, 2009, &PlatformInfo_macOS::singleton, "macOSX") { }
 
     void yearForVersion(Version32 vers, uint16_t& year, bool& spring) const override {
         if ( vers >= Version32(11,0) )
@@ -242,7 +220,7 @@ public:
     static const PlatformInfo_macOS singleton;
 protected:
     consteval PlatformInfo_macOS(uint32_t v, CString nm, bool isSim, const PlatformInfo* info = &PlatformInfo_macOS::singleton) 
-                                    : PlatformInfo(v, nm, isSim, false, 2009, info) { }
+                                    : PlatformInfo(v, nm, isSim, false, true, 2009, info) { }
 };
 const PlatformInfo_macOS        PlatformInfo_macOS::singleton;
 
@@ -250,12 +228,12 @@ const PlatformInfo_macOS        PlatformInfo_macOS::singleton;
 class VIS_HIDDEN PlatformInfo_iOS : public PlatformInfo
 {
 public:
-    consteval PlatformInfo_iOS() : PlatformInfo(PLATFORM_IOS, "iOS", false, true, 2006, &PlatformInfo_iOS::singleton) { }
+    consteval PlatformInfo_iOS() : PlatformInfo(PLATFORM_IOS, "iOS", false, true, true, 2006, &PlatformInfo_iOS::singleton) { }
 
     static const PlatformInfo_iOS singleton;
 protected:
     consteval PlatformInfo_iOS(uint32_t v, CString nm, bool isSim, const PlatformInfo* info = &PlatformInfo_iOS::singleton, CString altName = {})
-                                : PlatformInfo(v, nm, isSim, !isSim, 2006, info, altName) { }
+                                : PlatformInfo(v, nm, isSim, !isSim, true, 2006, info, altName) { }
 };
 const PlatformInfo_iOS      PlatformInfo_iOS::singleton;
 
@@ -323,12 +301,12 @@ const PlatformInfo_zippered PlatformInfo_zippered::singleton;
 class VIS_HIDDEN PlatformInfo_watchOS : public PlatformInfo
 {
 public:
-    consteval PlatformInfo_watchOS() : PlatformInfo(PLATFORM_WATCHOS, "watchOS", false, true, 2013, &PlatformInfo_watchOS::singleton) { }
+    consteval PlatformInfo_watchOS() : PlatformInfo(PLATFORM_WATCHOS, "watchOS", false, true, true, 2013, &PlatformInfo_watchOS::singleton) { }
 
     static const PlatformInfo_watchOS   singleton;
 protected:
     consteval PlatformInfo_watchOS(uint32_t v, CString nm, bool isSim, const PlatformInfo* info = &PlatformInfo_watchOS::singleton)
-                                    : PlatformInfo(v, nm, isSim, !isSim, 2013, info) { }
+                                    : PlatformInfo(v, nm, isSim, !isSim, true, 2013, info) { }
 };
 const PlatformInfo_watchOS    PlatformInfo_watchOS::singleton;
 
@@ -347,7 +325,7 @@ const PlatformInfo_watchOS_simulator PlatformInfo_watchOS_simulator::singleton;
 class VIS_HIDDEN PlatformInfo_bridgeOS : public PlatformInfo
 {
 public:
-    consteval PlatformInfo_bridgeOS() : PlatformInfo(PLATFORM_BRIDGEOS, "bridgeOS", false, false, 2015, &PlatformInfo_bridgeOS::singleton) { }
+    consteval PlatformInfo_bridgeOS() : PlatformInfo(PLATFORM_BRIDGEOS, "bridgeOS", false, false, false, 2015, &PlatformInfo_bridgeOS::singleton) { }
 
     uint16_t minorVersionForSpring(uint16_t major) const override {
         // The past 2 releases have been 7.3 and 8.3, so assume that pattern for those releases.
@@ -361,7 +339,7 @@ public:
 
     static const PlatformInfo_bridgeOS singleton;
 protected:
-    consteval PlatformInfo_bridgeOS(uint32_t v, CString nm) : PlatformInfo(v, nm, false, false, 2015, &PlatformInfo_bridgeOS::singleton) { }
+    consteval PlatformInfo_bridgeOS(uint32_t v, CString nm) : PlatformInfo(v, nm, false, false, false, 2015, &PlatformInfo_bridgeOS::singleton) { }
 };
 const PlatformInfo_bridgeOS         PlatformInfo_bridgeOS::singleton;
 
@@ -370,7 +348,7 @@ const PlatformInfo_bridgeOS         PlatformInfo_bridgeOS::singleton;
 class VIS_HIDDEN PlatformInfo_driverKit : public PlatformInfo
 {
 public:
-    consteval PlatformInfo_driverKit() : PlatformInfo(PLATFORM_DRIVERKIT, "driverKit", false, true, 2000, &PlatformInfo_driverKit::singleton) { }
+    consteval PlatformInfo_driverKit() : PlatformInfo(PLATFORM_DRIVERKIT, "driverKit", false, true, false, 2000, &PlatformInfo_driverKit::singleton) { }
 
     static const PlatformInfo_driverKit singleton;
 };
@@ -381,11 +359,8 @@ const PlatformInfo_driverKit         PlatformInfo_driverKit::singleton;
 class VIS_HIDDEN PlatformInfo_firmware : public PlatformInfo
 {
 public:
-    consteval PlatformInfo_firmware() : PlatformInfo(PLATFORM_FIRMWARE, "firmware", false, false, 0, &PlatformInfo_firmware::singleton, "free standing") { }
+    consteval PlatformInfo_firmware() : PlatformInfo(PLATFORM_FIRMWARE, "firmware", false, false, false, 0, &PlatformInfo_firmware::singleton, "free standing") { }
 
-    Version32 versionForYear(uint16_t year, bool spring) const override {
-        return Version32(1,0);
-    }
     void yearForVersion(Version32 vers, uint16_t& year, bool& spring) const override {
         year = 2020;
         spring = false;
@@ -400,11 +375,8 @@ const PlatformInfo_firmware         PlatformInfo_firmware::singleton;
 class VIS_HIDDEN PlatformInfo_sepOS : public PlatformInfo
 {
 public:
-    consteval PlatformInfo_sepOS() : PlatformInfo(PLATFORM_SEPOS, "sepOS", false, false, 0, &PlatformInfo_sepOS::singleton) { }
+    consteval PlatformInfo_sepOS() : PlatformInfo(PLATFORM_SEPOS, "sepOS", false, false, false, 0, &PlatformInfo_sepOS::singleton) { }
 
-    Version32 versionForYear(uint16_t year, bool spring) const override {
-        return Version32(1,0);
-    }
     void yearForVersion(Version32 vers, uint16_t& year, bool& spring) const override {
         year = 2020;
         spring = false;
@@ -530,7 +502,7 @@ const PlatformInfo_watchOS_exclaveKit PlatformInfo_watchOS_exclaveKit::singleton
 class VIS_HIDDEN PlatformInfo_visionOS : public PlatformInfo
 {
 public:
-    consteval PlatformInfo_visionOS() : PlatformInfo(PLATFORM_VISIONOS, "visionOS", false, true, 2022, &PlatformInfo_visionOS::singleton, "xrOS") {}
+    consteval PlatformInfo_visionOS() : PlatformInfo(PLATFORM_VISIONOS, "visionOS", false, true, true, 2022, &PlatformInfo_visionOS::singleton, "xrOS") {}
 
     uint16_t minorVersionForSpring(uint16_t major) const override {
         // The first spring release is 1.1
@@ -544,7 +516,7 @@ public:
 
     static const PlatformInfo_visionOS singleton;
 protected:
-    consteval PlatformInfo_visionOS(uint32_t v, CString nm, bool isSim, const PlatformInfo* info = &PlatformInfo_visionOS::singleton, CString altName = {}) : PlatformInfo(v, nm, isSim, !isSim, 2022, info, altName) { }
+    consteval PlatformInfo_visionOS(uint32_t v, CString nm, bool isSim, const PlatformInfo* info = &PlatformInfo_visionOS::singleton, CString altName = {}) : PlatformInfo(v, nm, isSim, !isSim, true, 2022, info, altName) { }
 };
 const PlatformInfo_visionOS          PlatformInfo_visionOS::singleton;
 
@@ -966,6 +938,11 @@ Error PlatformAndVersions::setFromTargetTriple(CString triple, Architecture& out
         strlcat(osName, env, sizeof(osName));
     }
     this->platform = Platform::byName(osName);
+
+    // EFIShell
+    if ( this->platform.empty() && CString(osName) == "windows-macho" )
+        this->platform = Platform::firmware;
+
     if ( this->platform.empty() )
         return Error("unknown OS in target triple '%s'", triple.c_str());
 

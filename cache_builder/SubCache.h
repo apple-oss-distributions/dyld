@@ -38,6 +38,8 @@
 namespace cache_builder
 {
 
+struct BuilderOptions;
+
 struct Region
 {
     // Note the order of this enum is the order in the final cache binary.
@@ -133,7 +135,8 @@ public:
     // These methods are called by computeSubCaches() to add Chunk's to the subCache
     void addDylib(const BuilderConfig& config, CacheDylib& cacheDylib);
     void addLinkeditFromDylib(CacheDylib& cacheDylib);
-    void addCacheHeaderChunk(const BuilderConfig& config, const std::span<CacheDylib> cacheDylibs);
+    void addCacheHeaderChunk(const BuilderOptions& options, const BuilderConfig& config,
+                             const std::span<CacheDylib> cacheDylibs);
     void addObjCHeaderInfoReadWriteChunk(const BuilderConfig& config, ObjCOptimizer& objcOptimizer);
     void addCodeSignatureChunk();
     void addObjCOptsHeaderChunk(const BuilderConfig& config, ObjCOptimizer& objcOptimizer);
@@ -180,13 +183,13 @@ public:
 
     // Emits a dyld_cache_header for this subCache
     void writeCacheHeader(const BuilderOptions& options, const BuilderConfig& config,
-                          const std::span<CacheDylib> cacheDylibs);
+                          const std::span<CacheDylib> cacheDylibs,
+                          uint32_t osVersion, uint32_t altPlatform, uint32_t altOsVersion);
 
     // Adds any additional fields which are set only on the main subCache(s)
     void addMainCacheHeaderInfo(const BuilderOptions& options, const BuilderConfig& config,
                                 const std::span<CacheDylib> cacheDylibs,
                                 CacheVMSize totalVMSize, uint64_t maxSlide,
-                                uint32_t osVersion, uint32_t altPlatform, uint32_t altOsVersion,
                                 CacheVMAddress dyldInCacheUnslidAddr,
                                 CacheVMAddress dyldInCacheEntryUnslidAddr,
                                 const DylibTrieOptimizer& dylibTrieOptimizer,
@@ -219,13 +222,6 @@ public:
     static void     forEachTPRORegionInData(SubCache* mainSubCache, std::span<SubCache*> subCaches,
                                             void (^callback)(Region& region, const Chunk* firstChunk, const Chunk* lastChunk));
 
-#if BUILDING_CACHE_BUILDER_UNIT_TESTS
-    // We need everything public to write tests
-public:
-#else
-private:
-#endif
-
     // Adds the given chunk to the given region
     void addTextChunk(Chunk* chunk);
     void addDataChunk(Chunk* chunk);
@@ -239,9 +235,16 @@ private:
     void addCodeSignatureChunk(Chunk* chunk);
     void addObjCReadWriteChunk(const BuilderConfig& config, Chunk* chunk);
 
+#if BUILDING_CACHE_BUILDER_UNIT_TESTS
+    // We need everything public to write tests
+public:
+#else
+private:
+#endif
+
     // Returns true if the cache header on this subCache needs an image list
     // The symbols cache and stubs caches, for example, don't need this
-    bool needsCacheHeaderImageList() const;
+    bool needsCacheHeaderImageList(const BuilderOptions& options) const;
 
     // Add image info to the subCache header, if it needs it
     void addCacheHeaderImageInfo(const BuilderOptions& options,
@@ -279,11 +282,8 @@ public:
     uint8_t*            buffer      = nullptr;
     uint64_t            bufferSize  = 0;
     CacheVMAddress      subCacheVMAddress;
-#if !SUPPORT_CACHE_BUILDER_MEMORY_BUFFERS
-    int                 fd          = 0;
-    std::string         tempPath;
-#endif
     uint8_t             cdHash[20];
+    uint8_t             agilecdHash[20];  // if using agile signatures, this is the sha256
     uuid_string_t       uuidString;
     std::string         fileSuffix;
 
@@ -322,9 +322,6 @@ public:
     std::unique_ptr<PrebuiltLoaderChunk>                        executableLoaders;
     std::unique_ptr<CacheTrieChunk>                             executablesTrie;
     std::unique_ptr<SymbolStringsChunk>                         optimizedSymbolStrings;
-    std::unique_ptr<UniquedGOTsChunk>                           uniquedGOTs;
-    std::unique_ptr<UniquedGOTsChunk>                           uniquedAuthGOTs;
-    std::unique_ptr<UniquedGOTsChunk>                           uniquedAuthPtrs;
     std::vector<std::unique_ptr<PointerHashTableChunk>>         pointerHashTables;
     std::unique_ptr<PrewarmingChunk>                            prewarmingChunk;
 

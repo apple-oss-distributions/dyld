@@ -25,6 +25,7 @@
 #ifndef BuilderOptions_hpp
 #define BuilderOptions_hpp
 
+#include "Architecture.h"
 #include "Error.h"
 #include "JSON.h"
 #include "MachOFile.h"
@@ -52,13 +53,15 @@ struct BuilderOptions
 {
     BuilderOptions(std::string_view archName, mach_o::Platform platform,
                    bool dylibsRemovedFromDisk, bool isLocallyBuiltCache,
-                   CacheKind kind, bool forceDevelopmentSubCacheSuffix);
+                   CacheKind kind, bool forceDevelopmentSubCacheSuffix,
+                   std::string_view updateName, std::string_view deviceName);
 
     bool isSimulator() const;
     bool isExclaveKit() const;
 
     // Core fields
-    const dyld3::GradedArchs&                   archs;
+    mach_o::Architecture                        arch;
+    const mach_o::GradedArchitectures&          gradedArchs;
     std::string                                 mainCacheFileName;
     mach_o::Platform                            platform;
     bool                                        dylibsRemovedFromDisk;
@@ -66,12 +69,16 @@ struct BuilderOptions
     bool                                        forceDevelopmentSubCacheSuffix;
     CacheKind                                   kind;
     LocalSymbolsMode                            localSymbolsMode;
+    std::string                                 updateName;
+    std::string                                 deviceName;
 
     // Logging/printing
     std::string                                 logPrefix;
-    bool                                        timePasses   = false;
-    bool                                        stats        = false;
-    bool                                        debug        = false;
+    bool                                        timePasses          = false;
+    bool                                        stats               = false;
+    bool                                        debug               = false;
+    bool                                        debugIMPCaches      = false;
+    bool                                        debugCacheLayout    = false;
 
     // Other
     std::unordered_map<std::string, unsigned>   dylibOrdering;

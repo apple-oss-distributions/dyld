@@ -62,6 +62,11 @@ bool Policy::dyldLoadsOutput() const
     return false;
 }
 
+bool Policy::isDynamicFirmware() const
+{
+    return dyldLoadsOutput() && (_pvs.platform == Platform::firmware);
+}
+
 bool Policy::kernelOrKext() const
 {
     if ( _kernel )
@@ -117,9 +122,13 @@ Policy::Usage Policy::useConstInterpose() const
 
 Policy::Usage Policy::useChainedFixups() const
 {
-    // arm64e kernel/kext use chained fixups
-    if ( kernelOrKext() && _arch.usesArm64AuthPointers() )
-        return Policy::mustUse;
+    if ( kernelOrKext() ) {
+        // arm64e kernel/kext use chained fixups
+        if ( _arch.usesArm64AuthPointers() )
+            return Policy::mustUse;
+        // arm64/x86 kernel/kexts use classic relocations
+        return Policy::mustNotUse;
+    }
 
     // firmware may use chained fixups, but has to opt-in
     if ( !dyldLoadsOutput() )
@@ -165,6 +174,10 @@ Policy::Usage Policy::useChainedFixups() const
 uint16_t Policy::chainedFixupsFormat() const
 {
     if ( _arch.usesArm64AuthPointers() ) {
+        // rdar://142631843 (ld uses inconsistent chained fixup format for firmware 'dylibs')
+        if ( isDynamicFirmware() )
+            return DYLD_CHAINED_PTR_ARM64E_USERLAND24;
+
         if ( !dyldLoadsOutput() )
             return DYLD_CHAINED_PTR_ARM64E_KERNEL;
 
@@ -174,6 +187,10 @@ uint16_t Policy::chainedFixupsFormat() const
 
         return DYLD_CHAINED_PTR_ARM64E;
     } else if ( _arch.is64() ) {
+        // rdar://142631843 (ld uses inconsistent chained fixup format for firmware 'dylibs')
+        if ( isDynamicFirmware() )
+            return DYLD_CHAINED_PTR_64_OFFSET;
+
         if ( !dyldLoadsOutput() )
             return DYLD_CHAINED_PTR_64_OFFSET;
 
@@ -192,6 +209,9 @@ Policy::Usage Policy::useOpcodeFixups() const
 {
     // opcode fixups introduced in macOS 10.6
     if ( _arch.usesx86_64Instructions() && (_pvs.platform == Platform::macOS) && (_pvs.minOS < Version32(10,6)) )
+        return Policy::mustNotUse;
+
+    if ( kernelOrKext() )
         return Policy::mustNotUse;
 
     // if not pre-macOS 10.6, then complement useChainedFixups()
@@ -283,19 +303,6 @@ Policy::Usage Policy::useSourceVersionLoadCommand() const
     return Policy::preferDontUse;
 }
 
-Policy::Usage Policy::useLegacyLinkedit() const
-{
-    if ( dyldLoadsOutput() ) {
-        // older releases didn't have a regular year-based version bump, so check the exact versions
-        if ( _pvs.platform == Platform::macOS && _pvs.minOS < Version32(10, 6) )
-            return Policy::mustUse;
-        if ( _pvs.platform == Platform::iOS && _pvs.minOS < Version32(3, 1) )
-            return Policy::mustUse;
-    }
-
-    return Policy::preferDontUse;
-}
-
 bool Policy::use4KBLoadCommandsPadding() const
 {
     if ( (_filetype == MH_DYLIB || _filetype == MH_DYLIB_STUB) && _pathMayBeInSharedCache )
@@ -314,10 +321,72 @@ bool Policy::useProtectedStack() const
     return false;
 }
 
+bool Policy::canUseEntryName() const
+{
+    if ( _pvs.platform == Platform::driverKit )
+        return false;
+
+    switch ( _filetype ) {
+        case MH_EXECUTE:
+        case MH_PRELOAD:
+        case MH_DYLINKER:
+            return true;
+        default:
+            return false;
+    }
+}
+
+Policy::Usage Policy::useEntryPointLoadCommand() const
+{
+    if ( _filetype != MH_EXECUTE )
+        return Policy::Usage::mustNotUse;
+
+    if ( _staticExec )
+        return Policy::Usage::mustNotUse;
+
+    if ( _pvs.platform == Platform::driverKit )
+        return Policy::Usage::mustNotUse;
+
+    if ( _arch.usesArm64Instructions() )
+        return Policy::Usage::mustUse;
+
+    return (_featureEpoch >= Platform::Epoch::fall2012 ? Policy::Usage::mustUse : Policy::Usage::mustNotUse);
+}
+
+bool Policy::keepDwarfUnwind() const
+{
+    if ( _staticExec )
+        return true;
+    if ( kernelOrKext() )
+        return true;
+
+    switch ( _filetype ) {
+        case MH_PRELOAD:
+        case MH_OBJECT:
+            return true;
+        default:
+            return (_featureEpoch < Platform::Epoch::fall2013);
+    }
+}
+
+bool Policy::canInferEmptySignedClassROs() const
+{
+    if ( !_arch.usesArm64AuthPointers() )
+        return false;
+
+    if ( !dyldLoadsOutput() )
+        return false;
+
+    return (_featureEpoch >= Platform::Epoch::fall2019);
+}
+
 // enforcements
 bool Policy::enforceReadOnlyLinkedit() const
 {
-    return (_enforcementEpoch >= Platform::Epoch::fall2015);
+    if ( _filetype == MH_EXECUTE )
+        return (_enforcementEpoch >= Platform::Epoch::fall2025);
+    else
+        return (_enforcementEpoch >= Platform::Epoch::fall2015);
 }
 
 bool Policy::enforceLinkeditContentAlignment() const
@@ -332,7 +401,10 @@ bool Policy::enforceOneFixupEncoding() const
 
 bool Policy::enforceSegmentOrderMatchesLoadCmds() const
 {
-    return (_enforcementEpoch >= Platform::Epoch::fall2019);
+    if ( _filetype == MH_EXECUTE )
+        return (_enforcementEpoch >= Platform::Epoch::fall2025);
+    else
+        return (_enforcementEpoch >= Platform::Epoch::fall2019);
 }
 
 bool Policy::enforceTextSegmentPermissions() const
@@ -367,7 +439,15 @@ bool Policy::enforceInstallNamesAreRealPaths() const
 
 bool Policy::enforceHasUUID() const
 {
-    return (_filetype != MH_OBJECT) && (_enforcementEpoch >= Platform::Epoch::fall2021);
+    switch ( _filetype ) {
+        case MH_OBJECT:
+            return false;
+        case MH_EXECUTE:
+            // dyld main executable validation was not enabled until Fall 2025
+            return (_enforcementEpoch >= Platform::Epoch::fall2025);
+        default:
+            return (_enforcementEpoch >= Platform::Epoch::fall2021);
+    }
 }
 
 bool Policy::enforceMainFlagsCorrect() const
@@ -377,12 +457,12 @@ bool Policy::enforceMainFlagsCorrect() const
 
 bool Policy::enforceNoDuplicateDylibs() const
 {
-    return (_enforcementEpoch >= Platform::Epoch::fall2024);
+    return (_enforcementEpoch >= Platform::Epoch::fall2025);
 }
 
 bool Policy::enforceNoDuplicateRPaths() const
 {
-    return (_enforcementEpoch >= Platform::Epoch::spring2025);
+    return (_enforcementEpoch >= Platform::Epoch::fall2025);
 }
 
 bool Policy::enforceDataSegmentPermissions() const
@@ -410,6 +490,10 @@ bool Policy::enforceSetSimulatorSharedCachePath() const
     return (_enforcementEpoch <= Platform::Epoch::fall2021);
 }
 
+bool Policy::enforceUniqueSegmentNames() const
+{
+    return (_enforcementEpoch >= Platform::Epoch::fall2025);
+}
 
 
 

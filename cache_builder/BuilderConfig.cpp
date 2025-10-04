@@ -25,6 +25,7 @@
 #include "BuilderConfig.h"
 #include "BuilderOptions.h"
 #include "CodeSigningTypes.h"
+#include "Architecture.h"
 #include "Platform.h"
 
 #include "dyld_cache_config.h"
@@ -32,8 +33,8 @@
 #include <assert.h>
 
 using namespace cache_builder;
-using dyld3::GradedArchs;
 
+using mach_o::Architecture;
 using mach_o::Platform;
 
 //
@@ -43,9 +44,11 @@ using mach_o::Platform;
 cache_builder::Logger::Logger(const BuilderOptions& options)
     : logPrefix(options.logPrefix)
 {
-    this->printTimers = options.timePasses;
-    this->printStats  = options.stats;
-    this->printDebug  = options.debug;
+    this->printTimers           = options.timePasses;
+    this->printStats            = options.stats;
+    this->printDebug            = options.debug;
+    this->printDebugIMPCaches   = options.debugIMPCaches;
+    this->printDebugCacheLayout = options.debugCacheLayout;
 }
 
 void cache_builder::Logger::log(const char* format, ...) const
@@ -65,33 +68,31 @@ void cache_builder::Logger::log(const char* format, ...) const
 // MARK: --- cache_builder::Layout methods ---
 //
 
-static uint32_t defaultPageSize(std::string_view archName)
+static uint32_t defaultPageSize(Architecture arch)
 {
-    if ( (archName == "x86_64") || (archName == "x86_64h") )
+    if ( arch.sameCpu(Architecture::x86_64) )
         return 4096;
     else
         return 16384;
 }
 
-static bool hasAuthRegion(std::string_view archName)
+static bool hasAuthRegion(Architecture arch)
 {
-    return archName == "arm64e";
+    return arch == Architecture::arm64e;
 }
 
-static uint32_t supportsTPROMapping(std::string_view archName)
+static uint32_t supportsTPROMapping(Architecture arch)
 {
-    return (archName != "x86_64") && (archName != "x86_64h");
+    return !arch.sameCpu(Architecture::x86_64);
 }
 
 cache_builder::Layout::Layout(const BuilderOptions& options)
-    : is64(options.archs.supports64())
-    , hasAuthRegion(::hasAuthRegion(options.archs.name()))
-    , tproIsInData(!::supportsTPROMapping(options.archs.name()))
-    , pageSize(defaultPageSize(options.archs.name()))
+: is64(options.arch.is64())
+    , hasAuthRegion(::hasAuthRegion(options.arch))
+    , tproIsInData(!::supportsTPROMapping(options.arch))
+    , pageSize(defaultPageSize(options.arch))
 {
-    std::string_view archName = options.archs.name();
-
-    if ( (archName == "x86_64") || (archName == "x86_64h") ) {
+    if ( options.arch.sameCpu(Architecture::x86_64) ) {
         // x86_64 uses discontiguous mappings
         this->discontiguous.emplace();
 
@@ -101,9 +102,7 @@ cache_builder::Layout::Layout(const BuilderOptions& options)
         // Everyone else uses contiguous mappings
         this->contiguous.emplace();
         this->contiguous->regionPadding = CacheVMSize(32_MB);
-
-        // Note minus a little to account for rdar://146432183
-        this->contiguous->subCacheTextDataLimit = CacheVMSize(2_GB - 16_MB);
+        this->contiguous->subCacheTextDataLimit = CacheVMSize(2_GB);
         this->contiguous->subCacheStubsLimit = CacheVMSize(110_MB);
 
         // Note we have 2 padding regions in total in a given TEXT/DATA/AUTH/... region
@@ -118,10 +117,10 @@ cache_builder::Layout::Layout(const BuilderOptions& options)
     };
     CacheLayout layout;
 
-    if ( (archName == "x86_64") || (archName == "x86_64h") ) {
+    if ( options.arch.sameCpu(Architecture::x86_64) ) {
         layout.baseAddress = X86_64_SHARED_REGION_START;
         layout.cacheSize = X86_64_SHARED_REGION_SIZE;
-    } else if ( (archName == "arm64") || (archName == "arm64e") ) {
+    } else if ( options.arch.sameCpu(Architecture::arm64) ) {
         layout.baseAddress = ARM64_SHARED_REGION_START;
 
         if ( options.isSimulator() ) {
@@ -135,7 +134,7 @@ cache_builder::Layout::Layout(const BuilderOptions& options)
         // caches putting 1.5GB of TEXT in the first cache region, this will ensure that
         // this 1.5GB of TEXT will stay in the same 2GB region.  <rdar://problem/49852839>
         cacheMaxSlide = 512_MB;
-    } else if ( archName == "arm64_32" ) {
+    } else if ( options.arch == Architecture::arm64_32 ) {
         layout.baseAddress = ARM64_32_SHARED_REGION_START;
         layout.cacheSize = 2_GB;
 
@@ -161,8 +160,7 @@ SlideInfo::SlideInfo(const BuilderOptions& options, const Layout& layout)
     if ( options.isSimulator() )
         return;
 
-    std::string_view archName = options.archs.name();
-    if ( (archName == "x86_64") || (archName == "x86_64h") || (archName == "arm64") ) {
+    if ( options.arch.sameCpu(Architecture::x86_64) || (options.arch == Architecture::arm64) ) {
         this->slideInfoFormat = SlideInfoFormat::v2;
 
         // 1 uint16_t per page
@@ -172,14 +170,14 @@ SlideInfo::SlideInfo(const BuilderOptions& options, const Layout& layout)
         this->slideInfoDeltaMask = 0x00FFFF0000000000ULL;
 
         // Only x86_64 needs a value add field on slide info V2
-        if ( (archName == "x86_64") || (archName == "x86_64h") ) {
+        if ( options.arch.sameCpu(Architecture::x86_64) ) {
             this->slideInfoValueAdd = layout.cacheBaseAddress;
         }
         else {
             this->slideInfoValueAdd = CacheVMAddress(0ULL);
         }
     }
-    else if ( archName == "arm64e" ) {
+    else if ( options.arch == Architecture::arm64e ) {
         // 1 uint16_t per page
         this->slideInfoBytesPerDataPage = 2;
 
@@ -192,7 +190,7 @@ SlideInfo::SlideInfo(const BuilderOptions& options, const Layout& layout)
             this->slideInfoFormat = SlideInfoFormat::v3;
         }
     }
-    else if ( archName == "arm64_32" ) {
+    else if ( options.arch == Architecture::arm64_32 ) {
         this->slideInfoFormat = SlideInfoFormat::v1;
 
         // 128 bytes per page.  Enough for a bitmap with 1-bit entry per 32-bit location
@@ -215,20 +213,19 @@ static cache_builder::CodeSign::Mode platformCodeSigningDigestMode(Platform plat
     return cache_builder::CodeSign::Mode::onlySHA256;
 }
 
-static uint32_t codeSigningPageSize(Platform platform, const GradedArchs& arch)
+static uint32_t codeSigningPageSize(Platform platform, Architecture arch)
 {
-    std::string_view archName = arch.name();
-    if ( (archName == "arm64e") || (archName == "arm64_32") )
+    if ( (arch == Architecture::arm64e) || (arch == Architecture::arm64_32) )
         return CS_PAGE_SIZE_16K;
 
     // arm64 on iOS is new enough for 16k pages, as is arm64 on macOS (ie the simulator)
-    if ( archName == "arm64") {
+    if ( arch == Architecture::arm64 ) {
         if ( platform.isSimulator() || (platform == Platform::iOS) )
             return CS_PAGE_SIZE_16K;
         return CS_PAGE_SIZE_4K;
     }
 
-    if ( (archName == "x86_64") || (archName == "x86_64h") )
+    if ( arch.sameCpu(Architecture::x86_64) )
         return CS_PAGE_SIZE_4K;
 
     // Unknown arch
@@ -237,7 +234,7 @@ static uint32_t codeSigningPageSize(Platform platform, const GradedArchs& arch)
 
 cache_builder::CodeSign::CodeSign(const BuilderOptions& options)
     : mode(platformCodeSigningDigestMode(options.platform))
-    , pageSize(codeSigningPageSize(options.platform, options.archs))
+    , pageSize(codeSigningPageSize(options.platform, options.arch))
 {
 }
 

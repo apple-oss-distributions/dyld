@@ -236,6 +236,24 @@ inline void mergeVectorChunks(std::vector<ValTy>& outVec, std::span<std::vector<
     }
 }
 
+template<typename ValTy>
+inline void mergeVectorChunks(std::vector<ValTy>& outVec, std::vector<ValTy>* chunks, size_t numChunks, size_t stride)
+{
+    size_t totalSize = 0;
+    for ( size_t i = 0; i < numChunks; ++i ) {
+        std::vector<ValTy>* chunk = (std::vector<ValTy>*)((uint8_t*)chunks + i * stride);
+        totalSize += chunk->size();
+    }
+    if ( totalSize == 0 ) return;
+
+    outVec.reserve(outVec.size() + totalSize);
+    for ( size_t i = 0; i < numChunks; ++i ) {
+        std::vector<ValTy>& chunk = *(std::vector<ValTy>*)((uint8_t*)chunks + i * stride);
+        if ( !chunk.empty() )
+            outVec.insert(outVec.end(), chunk.begin(), chunk.end());
+    }
+}
+
 namespace details
 {
 

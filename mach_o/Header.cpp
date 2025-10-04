@@ -286,9 +286,10 @@ const Header* Header::isMachO(std::span<const uint8_t> content)
     if ( content.size() < sizeof(mach_header) )
         return nullptr;
 
-    const Header* mh = (const Header*)content.data();
-    if ( mh->hasMachOMagic() )
-        return mh;
+    if ( const Header* mh = (const Header*)content.data() ) {
+        if ( mh->hasMachOMagic() )
+            return mh;
+    }
     return nullptr;
 }
 
@@ -322,6 +323,12 @@ bool Header::isSimSupport() const
 {
     return (this->mh.flags & MH_SIM_SUPPORT) != 0;
 }
+
+bool Header::noDynamicAccess() const
+{
+    return (this->mh.flags & MH_NO_DYNAMIC_ACCESS) != 0;
+}
+
 
 //
 // MARK: --- methods for validating mach-o content ---
@@ -423,7 +430,7 @@ static Error stringOverflow(const load_command* cmd, uint32_t index, uint32_t st
 
     const char* str = (char*)cmd + strOffset;
     const char* end = (char*)cmd + cmd->cmdsize;
-    for ( const char* s = str; s < end; ++s ) {
+    for ( const char* s = end-1; s >= str; --s ) {
         if ( *s == '\0' ) {
             return Error::none();
         }
@@ -627,11 +634,12 @@ Error Header::validSemanticsUUID(const Policy& policy) const
     });
     if ( uuidCount > 1 )
         return Error("too many LC_UUID load commands");
-    if ( (uuidCount == 0) && policy.enforceHasUUID() )
-        return Error("missing LC_UUID load command");
-
+    if ( (uuidCount == 0) && policy.enforceHasUUID() ) {
+            return Error("missing LC_UUID load command");
+    }
     return Error::none();
 }
+
 
 Error Header::validSemanticsInstallName(const Policy& policy) const
 {
@@ -854,7 +862,7 @@ Error Header::validSemanticsSegments(const Policy& policy, uint64_t fileSize) co
     {
         Interval    vm;
         Interval    file;
-        const char* name;
+        CString     name;
     };
     STACK_ALLOC_OVERFLOW_SAFE_ARRAY(SegRange, ranges, 12);
     __block Error     lcError;
@@ -913,15 +921,18 @@ Error Header::validSemanticsSegments(const Policy& policy, uint64_t fileSize) co
     }
 
     // check for overlapping segments, by looking at every possible pair of segments
+    const bool checkNames = isDyldManaged() && policy.enforceUniqueSegmentNames();
     for ( const SegRange& r1 : ranges ) {
         for ( const SegRange& r2 : ranges ) {
             if ( &r1 == &r2 )
                 continue;
             if ( r1.vm.overlaps(r2.vm) )
-                return Error("vm range of segment '%s' overlaps segment '%s'", r1.name, r2.name);
+                return Error("vm range of segment '%s' overlaps segment '%s'", r1.name.c_str(), r2.name.c_str());
             // can't compare file offsets for segments in dyld cache because they may be offsets into different files
             if ( !this->inDyldCache() && r1.file.overlaps(r2.file) )
-                return Error("file range of segment '%s' overlaps segment '%s'", r1.name, r2.name);
+                return Error("file range of segment '%s' overlaps segment '%s'", r1.name.c_str(), r2.name.c_str());
+            if ( checkNames && (r1.name == r2.name) )
+                return Error("duplicate segment name '%s'", r1.name.c_str());
         }
     }
 
@@ -932,13 +943,14 @@ Error Header::validSemanticsSegments(const Policy& policy, uint64_t fileSize) co
             const SegRange& a = ranges[i-1];
             const SegRange& b = ranges[i];
             if ( (b.file.start < a.file.start) && (b.file.start != b.file.end) )
-                return Error("segment '%s' file offset out of order", a.name);
+                return Error("segment '%s' file offset out of order", a.name.c_str());
             if ( b.vm.start < a.vm.start ) {
-                if ( isFileSet() && (strcmp(b.name, "__PRELINK_INFO") == 0) ) {
+                if ( isFileSet() && (b.name == "__PRELINK_INFO") ) {
                     // __PRELINK_INFO may have no vmaddr set
-                }
-                else {
-                    return Error("segment '%s' vm address out of order", b.name);
+                } else if ( arch().usesx86_64Instructions() && isDynamicExecutable() && !isPIE() ) {
+                    // rdar://149897776 (allow out of VM address order segments on legacy x86 binaries)
+                } else {
+                    return Error("segment '%s' vm address out of order", b.name.c_str());
                 }
             }
         }
@@ -1338,6 +1350,9 @@ void Header::forEachLinkedDylib(void (^callback)(const char* loadPath, LinkedDyl
                                                  Version32 compatVersion, Version32 curVersion,
                                                  bool synthesizedLink, bool& stop)) const
 {
+    if ( this->isDylinker() )
+        return;
+
     __block unsigned count   = 0;
     __block bool     stopped = false;
     forEachLoadCommandSafe(^(const load_command* cmd, bool& stop) {
@@ -1419,7 +1434,7 @@ bool Header::entryAddrFromThreadCmd(const thread_command* cmd, uint64_t& addr) c
         case CPU_TYPE_ARM64:
         case CPU_TYPE_ARM64_32:
             if ( flavor == 6 ) {   // ARM_THREAD_STATE64
-                addr = regs64[32]; // arm_thread_state64_t.__pc
+                memcpy((uint32_t*)&addr, (uint32_t*)&regs64[32], sizeof(uint64_t)); // arm_thread_state64_t.__pc
                 return true;
             }
             break;
@@ -1499,6 +1514,23 @@ bool Header::hasIndirectSymbolTable(uint32_t& fileOffset, uint32_t& count) const
             fileOffset  = dySymCmd->indirectsymoff;
             count       = dySymCmd->nindirectsyms;
             result      = true;
+            stop        = true;
+        }
+    });
+    return result;
+}
+
+bool Header::hasClassicRelocations(uint32_t& nLocRel, uint32_t& nExtRel) const
+{
+    __block bool result = false;
+    nLocRel = 0;
+    nExtRel = 0;
+    forEachLoadCommandSafe(^(const load_command* cmd, bool& stop) {
+        if ( cmd->cmd == LC_DYSYMTAB) {
+            dysymtab_command* dySymCmd = (dysymtab_command*)cmd;
+            nLocRel = dySymCmd->nlocrel;
+            nExtRel = dySymCmd->nextrel;
+            result      = (nLocRel != 0 || nExtRel != 0);
             stop        = true;
         }
     });
@@ -2338,6 +2370,21 @@ bool Header::hasDataConst() const
     return result;
 }
 
+bool Header::hasDiscontiguousSegments() const
+{
+    uint64_t loadAddr = preferredLoadAddress();
+    __block bool res = false;
+    this->forEachSegment(^(const SegmentInfo& info, bool& stop) {
+        if ( info.maxProt == 0 )
+            return;
+        if ( info.vmaddr < loadAddr ) {
+            res = true;
+            stop = true;
+        }
+    });
+    return res;
+}
+
 std::string_view Header::segmentName(uint32_t segIndex) const
 {
     __block std::string_view    result;
@@ -2484,10 +2531,12 @@ void Header::forEachSection(void (^callback)(const SectionInfo&, bool& stop)) co
             const segment_command_64* segCmd        = (segment_command_64*)cmd;
             const section_64* const   sectionsStart = (section_64*)((char*)segCmd + sizeof(struct segment_command_64));
             const section_64* const   sectionsEnd   = &sectionsStart[segCmd->nsects];
+            std::string_view segName = name16(segCmd->segname);
             for ( const section_64* sect = sectionsStart; !stop && (sect < sectionsEnd); ++sect ) {
+                std::string_view segNameFromSectLC = name16(sect->segname);
                 SectionInfo info = {
                     // Note: use of segCmd->segname is for bin compat for copy protection in rdar://146096183
-                    .sectionName=name16(sect->sectname), .segmentName=name16(segCmd->segname), .segIndex=segmentIndex,
+                    .sectionName=name16(sect->sectname), .segmentName=segNameFromSectLC.empty() ? segName : segNameFromSectLC, .segIndex=segmentIndex,
                     .segMaxProt=(uint32_t)segCmd->maxprot, .segInitProt=(uint32_t)segCmd->initprot,
                     .flags=sect->flags, .alignment=sect->align, .address=sect->addr, .size=sect->size, .fileOffset=sect->offset,
                     .relocsOffset=sect->reloff, .relocsCount=sect->nreloc, .reserved1=sect->reserved1, .reserved2=sect->reserved2
@@ -2646,16 +2695,25 @@ bool Header::hasCustomStackSize(uint64_t& size) const {
     return result;
 }
 
-bool Header::isRestricted() const
+// checks if a section exists.
+// use `segNamePrefix` to just match segment name prefix (e.g. "__DATA" matches "__DATA_CONST")
+bool Header::hasSection(CString segName, CString sectName, bool segNamePrefix) const
 {
     __block bool result = false;
     this->forEachSection(^(const SectionInfo& info, bool& stop) {
-        if ( (info.segmentName == "__RESTRICT") && (info.sectionName == "__restrict") ) {
-            result = true;
-            stop   = true;
+        if ( info.sectionName == sectName ) {
+            if ( (segNamePrefix && info.segmentName.starts_with(segName)) || (info.segmentName == segName)) {
+                result = true;
+                stop   = true;
+            }
         }
     });
     return result;
+}
+
+bool Header::isRestricted() const
+{
+    return this->hasSection("__RESTRICT", "__restrict");
 }
 
 bool Header::hasInterposingTuples() const
@@ -2803,7 +2861,7 @@ uint32_t Header::threadLoadCommandsSize(const Architecture& arch)
         cmdSize = Header::pointerAligned(false, 16 + 34 * 8); // base size + ARM_EXCEPTION_STATE64_COUNT * 8
     else if ( arch.sameCpu(Architecture::x86_64) )
         cmdSize = Header::pointerAligned(true, 16 + 42 * 4); // base size + x86_THREAD_STATE64_COUNT * 4
-    else if ( arch.usesThumbInstructions() || arch.usesArm32Instructions() )
+    else if ( arch.usesArmOrThumbInstructions() )
         cmdSize = Header::pointerAligned(false, 16 + 17 * 4); // base size + ARM_THREAD_STATE_COUNT * 4
     else
         assert(0 && "unsupported arch for thread load command");

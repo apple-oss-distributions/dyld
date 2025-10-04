@@ -78,6 +78,7 @@ static_assert(sizeof(FunctionVariantTableEntry) == 64, "struct should be 64-byte
  #define FUNCTION_VARIANT_TABLE_EXPORTED(_name, ...) \
     extern const struct FunctionVariantTableEntry OS_CONCAT(fvtemp_, _name)[] __asm("_" OS_STRINGIFY(_name)); \
     __attribute__((section("__LD,__func_variants")))  \
+    __attribute__((no_sanitize("address"))) \
     const struct FunctionVariantTableEntry OS_CONCAT(fvtemp_, _name)[] = { \
     __VA_ARGS__  \
 };
@@ -88,6 +89,7 @@ static_assert(sizeof(FunctionVariantTableEntry) == 64, "struct should be 64-byte
 #define FUNCTION_VARIANT_TABLE(_name, ...) \
     extern const struct FunctionVariantTableEntry OS_CONCAT(fvtemp_, _name)[] __asm("_" OS_STRINGIFY(_name)); \
     __attribute__((visibility("hidden")))  \
+    __attribute__((no_sanitize("address"))) \
     __attribute__((section("__LD,__func_variants")))  \
     const struct FunctionVariantTableEntry OS_CONCAT(fvtemp_, _name)[] = { \
     __VA_ARGS__  \

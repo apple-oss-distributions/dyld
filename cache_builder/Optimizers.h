@@ -176,11 +176,14 @@ struct ObjCIMPCachesOptimizer
         }
     };
 
+    typedef std::pair<const CacheDylib*, InputDylibVMAddress> InputDylibLocation;
+
     typedef std::pair<imp_caches::IMPCache, VMOffset> IMPCacheAndOffset;
     typedef std::unordered_map<ClassKey, IMPCacheAndOffset, ClassKeyHash, ClassKeyEqual> IMPCacheMap;
-    typedef std::pair<const CacheDylib*, InputDylibVMAddress> InputDylibLocation;
     typedef std::unordered_map<imp_caches::FallbackClass, InputDylibLocation, imp_caches::FallbackClassHash> ClassMap;
-    typedef std::unordered_map<imp_caches::BucketMethod, InputDylibLocation, imp_caches::BucketMethodHash> MethodMap;
+    typedef std::unordered_map<imp_caches::BucketMethod, InputDylibLocation, imp_caches::BucketMethodHash> DylibMethodMap;
+
+    typedef std::unordered_map<std::string_view, DylibMethodMap> MethodMap;
 
     std::vector<imp_caches::Dylib>          dylibs;
 
@@ -442,6 +445,9 @@ struct UniquedGOTsOptimizer
     CoalescedGOTSection         regularGOTs;
     CoalescedGOTSection         authGOTs;
     CoalescedGOTSection         authPtrs;
+
+    void forEachFunctionVariant(void (^callback)(const CoalescedGOTSection::FunctionVariantInfo& tv, uint64_t gotVMAddr,
+                                                 dyld3::MachOFile::PointerMetaData pmd)) const;
 };
 
 struct StubOptimizer
@@ -456,19 +462,19 @@ struct StubOptimizer
     static uint64_t gotAddrFromArm64eStub(Diagnostics& diag, std::string_view dylibID,
                                           const uint8_t* stubInstructions, uint64_t stubVMAddr);
 
-    static void generateArm64StubTo(uint8_t* stubBuffer,
-                                    uint64_t stubVMAddr, uint64_t targetVMAddr);
-    static void generateArm64eStubTo(uint8_t* stubBuffer,
-                                     uint64_t stubVMAddr, uint64_t targetVMAddr);
+    static void generateArm64StubTo(uint8_t* stubBuffer, uint64_t stubVMAddr,
+                                    uint64_t gotVMAddr, uint64_t targetVMAddr);
+    static void generateArm64eStubTo(uint8_t* stubBuffer, uint64_t stubVMAddr,
+                                      uint64_t gotVMAddr, uint64_t targetVMAddr);
     static void generateArm64_32StubTo(uint8_t* stubBuffer,
                                        uint64_t stubVMAddr, uint64_t targetVMAddr);
 
     static void generateArm64StubToGOT(uint8_t* stubBuffer,
-                                       uint64_t stubVMAddr, uint64_t targetVMAddr);
+                                       uint64_t stubVMAddr, uint64_t gotVMAddr);
     static void generateArm64eStubToGOT(uint8_t* stubBuffer,
-                                        uint64_t stubVMAddr, uint64_t targetVMAddr);
+                                        uint64_t stubVMAddr, uint64_t gotVMAddr);
     static void generateArm64_32StubToGOT(uint8_t* stubBuffer,
-                                          uint64_t stubVMAddr, uint64_t targetVMAddr);
+                                          uint64_t stubVMAddr, uint64_t gotVMAddr);
 
     // Some never eliminate symbols are parsed from export tries.  This owns those strings
     // as we can't point to them with a std::string_view
@@ -479,16 +485,15 @@ struct StubOptimizer
 
 struct PatchTableOptimizer
 {
-    // How much space we need for the patch table
-    uint64_t                    patchTableTotalByteSize = 0;
-
     // The Chunk in a SubCache which will contain the dylib patch table
-    const PatchTableChunk*      patchTableChunk = nullptr;
+    PatchTableChunk*            patchTableChunk = nullptr;
 
     // One PatchInfo for each cache dylib.
     // After bind(), each dylib will have a list of all the locations it used in other dylibs.
     // There will be one list of locations for each bindTargets[] entry in the dylib
     std::vector<PatchInfo>      patchInfos;
+
+    PatchTableBuilder           builder;
 };
 
 struct FunctionVariantsOptimizer

@@ -32,6 +32,7 @@
 #include <errno.h>
 #include <sys/mman.h>
 #include <sys/syslimits.h>
+#include <sys/stat.h>
 #include <mach-o/arch.h>
 #include <mach-o/loader.h>
 #include <mach-o/dyld_priv.h>
@@ -235,7 +236,9 @@ int main(int argc, const char* argv[])
     RuntimeState           state(config, locks, alloc);
 
      if ( inputMainExecutablePath != nullptr ) {
-        config.reset(mainMA, inputMainExecutablePath, osDelegate._dyldCache);
+        struct stat statBuf;
+        stat(inputMainExecutablePath, &statBuf);
+        config.reset(mainMA, inputMainExecutablePath, statBuf.st_size, osDelegate._dyldCache);
         state.resetCachedDylibsArrays(dyldCache->dylibsLoaderSet());
 
         // Load the executable from disk

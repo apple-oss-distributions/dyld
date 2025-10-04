@@ -34,6 +34,7 @@
 #include <string_view>
 
 #include "Defines.h"
+#include "GradedArchitectures.h"
 #include "Header.h"
 #include "UUID.h"
 #include "Diagnostics.h"
@@ -113,74 +114,12 @@ VIS_HIDDEN inline bool greaterThanAddOrOverflow(uint64_t addLHS, uint64_t addRHS
     return (addLHS > b) || (addRHS > (b-addLHS));
 }
 
-// A prioritized list of architectures
-class VIS_HIDDEN GradedArchs {
-public:
-    struct CpuGrade { uint32_t type = 0; uint32_t subtype = 0; bool osBinary = false; uint16_t grade = 0; };
-    // never construct new ones - just use existing static instances
-    GradedArchs()                   = delete;
-    GradedArchs(const GradedArchs&) = delete;
-    constexpr GradedArchs(const CpuGrade& cg0, const CpuGrade& cg1 = {0,0,false,0} , const CpuGrade& cg2 = {0,0,false,0}) : _orderedCpuTypes({cg0, cg1, cg2, CpuGrade()}) {}
-
-#if BUILDING_LIBDYLD || BUILDING_UNIT_TESTS
-    static const GradedArchs&  launchCurrentOS(const char* simArches=""); // for emulating how the kernel chooses which slice to exec()
-#endif
-    static const GradedArchs&  forCurrentOS(bool keysOff, bool platformBinariesOnly);
-    static const GradedArchs&  forName(const char* archName, bool keysOff = false);
-
-
-    int                     grade(uint32_t cputype, uint32_t cpusubtype, bool platformBinariesOnly) const;
-    const char*             name() const;
-    bool                    checksOSBinary() const;
-    bool                    supports64() const;
-    void                    forEachArch(bool platformBinariesOnly, void (^handler)(const char* name)) const;
-
-    // pre-built lists for existing hardware
-#ifdef i386
-#undef i386
-#endif
-    static const GradedArchs i386;            // 32-bit Mac
-    static const GradedArchs x86_64;          // older Mac
-    static const GradedArchs x86_64h;         // haswell Mac
-    static const GradedArchs arm64;           // A11 or earlier iPhone or iPad
-#if SUPPORT_ARCH_arm64e
-    static const GradedArchs arm64e;            // A12 or later iPhone or iPad
-    static const GradedArchs arm64e_keysoff;    // A12 running with signing keys disabled
-    static const GradedArchs arm64e_pb;         // macOS Apple Silicon running platform binary
-    static const GradedArchs arm64e_keysoff_pb; // macOS Apple Silicon running with signing keys disabled
-#endif
-    static const GradedArchs armv7k;          // watch thru series 3
-    static const GradedArchs armv7s;          // deprecated
-    static const GradedArchs armv7;           // deprecated
-    static const GradedArchs armv6m;          // firmware
-    static const GradedArchs armv7m;          // firmware
-    static const GradedArchs armv7em;         // firmware
-    static const GradedArchs armv8m;          // firmware
-
-#if SUPPORT_ARCH_arm64_32
-    static const GradedArchs arm64_32;        // watch series 4 and later
-#endif
-
-#if BUILDING_LIBDYLD || BUILDING_UNIT_TESTS
-    static const GradedArchs launch_AS;       // Apple Silicon macs
-    static const GradedArchs launch_AS_Sim;   // iOS simulator for Apple Silicon macs
-    static const GradedArchs launch_Intel_h;  // Intel macs with haswell cpu
-    static const GradedArchs launch_Intel;    // Intel macs
-    static const GradedArchs launch_Intel_Sim; // iOS simulator for Intel macs
-#endif
-
-// private:
-// should be private, but compiler won't statically initialize static members above
-    const std::array<CpuGrade, 4>     _orderedCpuTypes;  // zero terminated
-};
-
 
 // A file read/mapped into memory
 struct VIS_HIDDEN FatFile : fat_header
 {
     static const FatFile*  isFatFile(const void* fileContent);
     void                   forEachSlice(Diagnostics& diag, uint64_t fileLen, void (^callback)(uint32_t sliceCpuType, uint32_t sliceCpuSubType, const void* sliceStart, uint64_t sliceSize, bool& stop)) const;
-    bool                   isFatFileWithSlice(Diagnostics& diag, uint64_t fileLen, const GradedArchs& archs, bool osBinary, uint64_t& sliceOffset, uint64_t& sliceLen, bool& missingSlice) const;
     const char*            archNames(char strBuf[256], uint64_t fileLen) const;
 private:
     bool                   isValidSlice(Diagnostics& diag, uint64_t fileLen, uint32_t sliceIndex,
@@ -198,7 +137,7 @@ struct VIS_HIDDEN MachOFile : mach_header
 
     static uint64_t         read_uleb128(Diagnostics& diag, const uint8_t*& p, const uint8_t* end);
     static int64_t          read_sleb128(Diagnostics& diag, const uint8_t*& p, const uint8_t* end);
-    static const MachOFile* compatibleSlice(Diagnostics& diag, uint64_t& sliceOffsetOut, uint64_t& sliceLenOut, const void* content, size_t size, const char* path, mach_o::Platform platform, bool isOSBinary, const GradedArchs&, bool internalInstall=false);
+    static const MachOFile* compatibleSlice(Diagnostics& diag, uint64_t& sliceOffsetOut, uint64_t& sliceLenOut, const void* content, size_t size, const char* path, mach_o::Platform platform, bool isOSBinary, const mach_o::GradedArchitectures&, bool internalInstall=false);
     static const MachOFile* isMachO(const void* content);
 
     bool            hasMachOMagic() const;

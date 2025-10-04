@@ -596,7 +596,7 @@ void _dyld_process_info_for_each_image(dyld_process_info info, void (^callback)(
         } else if (fastPathInfo.unicodeInstallname) {
             strlcat(path, image.installname.UTF8String, MAXPATHLEN);
         } else {
-            pathPtr = nil;
+            pathPtr = "<bad_string>";
         }
         callback(fastPathInfo.address, fastPathInfo.uuid, pathPtr);
     }
@@ -606,6 +606,7 @@ void _dyld_process_info_for_each_aot_image(dyld_process_info info, bool (^callba
     if (!info) {
         return;
     }
+
     _DYSnapshot* snapshot = (__bridge _DYSnapshot*)info;
     if (snapshot.aotImages) {
         return;
@@ -626,7 +627,18 @@ void _dyld_process_info_for_each_segment(dyld_process_info info, uint64_t machHe
             continue;
         }
         for (_DYSegment* segment in image.segments) {
-            callback(segment.address, segment.vmsize, segment.name.UTF8String);
+            struct _DYSegmentFastPathData fastPathInfo = { nil, 0, 0, 0, 0, 0 };
+            [segment getFastPathData:&fastPathInfo];
+            char name[17];
+            const char* namePtr = &name[0];
+            if (fastPathInfo.segmentNamePtr) {
+                strlcpy(name, (const char*)fastPathInfo.segmentNamePtr, (size_t)MIN(17, fastPathInfo.segmentNameSize+1));
+            } else {
+                // The segment name was not a UTF8String, go back through the slow path
+                namePtr = segment.name.UTF8String;
+            }
+
+            callback(fastPathInfo.address, fastPathInfo.vmSize, namePtr);
         }
         break;
     }

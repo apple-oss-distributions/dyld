@@ -109,6 +109,7 @@ extern "C" int amfi_check_dyld_policy_self(uint64_t input_flags, uint64_t* outpu
 #include "DyldDelegates.h"
 #include "Tracing.h"
 #include "Utilities.h"
+#include "Universal.h"
 #include "RosettaSupport.h"
 
 #if !TARGET_OS_EXCLAVEKIT
@@ -128,8 +129,9 @@ using dyld3::MachOFile;
 using dyld3::MachOAnalyzer;
 using dyld3::FatFile;
 
-using mach_o::Version32;
 using mach_o::Header;
+using mach_o::Universal;
+using mach_o::Version32;
 
 namespace dyld4 {
 
@@ -265,14 +267,14 @@ bool SyscallDelegate::getCWD(char path[PATH_MAX]) const
 #endif
 }
 
-const GradedArchs& SyscallDelegate::getGradedArchs(const char* archName, bool keysOff, bool osBinariesOnly) const
+const GradedArchitectures& SyscallDelegate::getGradedArchs(const char* archName, bool keysOff, bool osBinariesOnly) const
 {
 #if BUILDING_DYLD
-    return dyld3::GradedArchs::forCurrentOS(keysOff, osBinariesOnly);
+    return GradedArchitectures::currentLoad(keysOff, osBinariesOnly);
 #elif BUILDING_CACHE_BUILDER
     return *_gradedArchs;
 #else
-    return dyld3::GradedArchs::forName(archName, keysOff);
+    return GradedArchitectures::forName(archName, keysOff);
 #endif
 }
 
@@ -434,31 +436,32 @@ void SyscallDelegate::forEachInDirectory(const char* dirPath, bool dirsOnly, voi
 #endif
 }
 
-bool SyscallDelegate::getDylibInfo(const char* dylibPath, mach_o::Platform platform, const GradedArchs& archs, uint32_t& version, char installName[PATH_MAX]) const
+bool SyscallDelegate::getDylibInfo(const char* dylibPath, mach_o::Platform platform, const GradedArchitectures& archs, uint32_t& version, char installName[PATH_MAX]) const
 {
 #if BUILDING_DYLD
     __block Diagnostics diag;
     __block bool        result = false;
     this->withReadOnlyMappedFile(diag, dylibPath, false, ^(const void* mapping, size_t mappedSize, bool isOSBinary, const FileID&, const char*, const int) {
-        bool             missingSlice;
-        uint64_t         fileOffset = 0;
-        uint64_t         fileLength = mappedSize;
-        const FatFile*   ff         = (FatFile*)mapping;
-        const Header*    mh         = nullptr;
-        if ( ff->isFatFileWithSlice(diag, mappedSize, archs, true, fileOffset, fileLength, missingSlice) ) {
-            mh = (const Header*)((uint8_t*)mapping + fileOffset);
-        }
-        else if ( ((MachOFile*)mapping)->isMachO(diag, fileLength) ) {
-            mh = (const Header*)mapping;
+        const Header* hdr = nullptr;
+        std::span<const uint8_t> content = { (const uint8_t*)mapping, mappedSize };
+        if ( const Universal* uni = Universal::isUniversal(content) ) {
+            Universal::Slice slice;
+            if ( uni->bestSlice(archs, isOSBinary, slice) ) {
+                hdr = (const Header*)slice.buffer.data();
+            }
         }
         else {
-            return;
+            hdr = Header::isMachO(content);
         }
-        if ( mh->isDylib() && mh->loadableIntoProcess(platform, dylibPath) ) {
+        
+        if ( hdr == nullptr )
+            return;
+        
+        if ( hdr->isDylib() && hdr->loadableIntoProcess(platform, dylibPath) ) {
             const char* dylibInstallName;
             Version32   compatVersion;
             Version32   currentVersion;
-            if ( mh->getDylibInstallName(&dylibInstallName, &compatVersion, &currentVersion) ) {
+            if ( hdr->getDylibInstallName(&dylibInstallName, &compatVersion, &currentVersion) ) {
                 version = currentVersion.value();
                 ::strlcpy(installName, dylibInstallName, PATH_MAX);
                 result = true;

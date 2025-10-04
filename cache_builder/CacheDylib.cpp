@@ -26,6 +26,7 @@
 #include "BuilderConfig.h"
 #include "BuilderOptions.h"
 #include "CacheDylib.h"
+#include "Chunk.h"
 #include "MachOFile.h"
 #include "MachOFileAbstraction.hpp"
 #include "Header.h"
@@ -92,6 +93,8 @@ CacheDylib::CacheDylib(InputFile& inputFile)
     , inputLoadAddress(this->inputHdr->preferredLoadAddress())
     , installName(this->inputHdr->installName())
 {
+    if ( inputFile.mf )
+        inputImage = std::make_unique<mach_o::Image>(inputFile.mf, inputFile.size, Image::MappingKind::wholeSliceMapped);
 }
 
 CacheDylib::CacheDylib(std::string_view installName)
@@ -575,7 +578,7 @@ void CacheDylib::categorizeLinkedit(const BuilderConfig& config)
 
 void CacheDylib::copyRawSegments(const BuilderConfig& config, Timer::AggregateTimer& timer)
 {
-    const bool log = config.log.printDebug;
+    const bool log = config.log.printDebugCacheLayout;
 
     Timer::AggregateTimer::Scope timedScope(timer, "dylib copyRawSegments time");
 
@@ -967,32 +970,6 @@ std::vector<Error> CacheDylib::calculateBindTargets(Diagnostics& diag,
             return;
         }
 
-        // Adjust the bind target.  We have a runtime offset for the target input dylib, but we need to know where that runtime Offset will
-        // map to in the target cache dylib
-        switch ( bindTarget.kind ) {
-            case BindTarget::Kind::absolute:
-                // Skip these.  They won't change due to shifting the input dylib in to the cache
-                break;
-            case BindTarget::Kind::inputImage: {
-                // Convert from an input dylib offset to the cache dylib offset
-                BindTarget::InputImage inputImage        = bindTarget.inputImage;
-                InputDylibVMAddress    targetInputVMAddr = inputImage.targetDylib->inputLoadAddress + inputImage.targetRuntimeOffset;
-                CacheVMAddress         targetCacheVMAddr = inputImage.targetDylib->adjustor->adjustVMAddr(targetInputVMAddr);
-
-                // Actually change the bindTarget to reflect the new type
-                bindTarget.kind = BindTarget::Kind::cacheImage;
-                bindTarget.inputImage.~InputImage();
-                bindTarget.cacheImage = (BindTarget::CacheImage) { VMOffset(targetCacheVMAddr - inputImage.targetDylib->cacheLoadAddress),
-                                                                   inputImage.targetDylib, inputImage.isWeakDef,
-                                                                   inputImage.isFunctionVariant, inputImage.functionVariantTableIndex };
-                break;
-            }
-            case BindTarget::Kind::cacheImage:
-                diag.error("Shouldn't see cacheImage fixups at this point");
-                stop = true;
-                return;
-        }
-
         bindTarget.addend = addend;
         bindTarget.isWeakImport = weakImport;
 #if DEBUG
@@ -1018,50 +995,20 @@ std::vector<Error> CacheDylib::calculateBindTargets(Diagnostics& diag,
     }
     else if ( this->inputMF->hasOpcodeFixups() ) {
         // Use the fixups from the source dylib
-        mach_o::LinkeditLayout linkedit;
-        if ( !this->inputMF->getLinkeditLayout(diag, linkedit) ) {
-            diag.error("Couldn't get dylib layout");
-            return { };
-        }
+        this->inputMF->withFileLayout(diag, ^(const mach_o::Layout &layout) {
+            mach_o::Fixups fixups(layout);
 
-        // Use the segment layout from the cache dylib so that VMAddresses are correct
-        __block std::vector<mach_o::SegmentLayout> segmentLayout;
-        segmentLayout.reserve(this->segments.size());
-        for ( const DylibSegmentChunk& dylibSegment : this->segments ) {
-            mach_o::SegmentLayout segment;
-            segment.vmAddr      = dylibSegment.cacheVMAddress.rawValue();
-            segment.vmSize      = dylibSegment.cacheVMSize.rawValue();
-            segment.fileOffset  = dylibSegment.subCacheFileOffset.rawValue();
-            segment.fileSize    = dylibSegment.subCacheFileSize.rawValue();
-            segment.buffer      = dylibSegment.subCacheBuffer;
-
-            segment.kind        = mach_o::SegmentLayout::Kind::unknown;
-            if ( dylibSegment.segmentName == "__TEXT" ) {
-                segment.kind    = mach_o::SegmentLayout::Kind::text;
-            } else if ( dylibSegment.segmentName == "__LINKEDIT" ) {
-                segment.kind    = mach_o::SegmentLayout::Kind::linkedit;
-            }
-            segmentLayout.push_back(segment);
-        }
-
-        // The cache segments don't have the permissions.  Get that from the load commands
-        this->cacheHdr->forEachSegment(^(const Header::SegmentInfo& info, bool& stop) {
-            segmentLayout[info.segmentIndex].protections = info.initProt;
+            bool allowLazyBinds = false;
+            fixups.forEachBindTarget(diag, allowLazyBinds, 0,
+                ^(const mach_o::Fixups::BindTargetInfo& info, bool& stop) {
+                    handleBindTarget(info.libOrdinal, info.symbolName, info.addend, info.weakImport, stop);
+                },
+                ^(const mach_o::Fixups::BindTargetInfo& info, bool& stop) {
+                    if ( !this->weakBindTargetsStartIndex.has_value() )
+                        this->weakBindTargetsStartIndex = this->bindTargets.size();
+                    handleBindTarget(info.libOrdinal, info.symbolName, info.addend, info.weakImport, stop);
+                });
         });
-
-        mach_o::Layout layout(this->inputMF, { segmentLayout.data(), segmentLayout.data() + segmentLayout.size() }, linkedit);
-        mach_o::Fixups fixups(layout);
-
-        bool allowLazyBinds = false;
-        fixups.forEachBindTarget(diag, allowLazyBinds, 0,
-            ^(const mach_o::Fixups::BindTargetInfo& info, bool& stop) {
-                handleBindTarget(info.libOrdinal, info.symbolName, info.addend, info.weakImport, stop);
-            },
-            ^(const mach_o::Fixups::BindTargetInfo& info, bool& stop) {
-                if ( !this->weakBindTargetsStartIndex.has_value() )
-                    this->weakBindTargetsStartIndex = this->bindTargets.size();
-                handleBindTarget(info.libOrdinal, info.symbolName, info.addend, info.weakImport, stop);
-            });
     }
     else {
         // Cache dylibs shouldn't use old style fixups.
@@ -1078,34 +1025,13 @@ void CacheDylib::bindLocation(Diagnostics& diag, const BuilderConfig& config,
                               uint32_t bindOrdinal, uint32_t segIndex,
                               dyld3::MachOFile::ChainedFixupPointerOnDisk* fixupLoc,
                               CacheVMAddress fixupVMAddr, MachOFile::PointerMetaData pmd,
-                              CoalescedGOTMap& coalescedGOTs, CoalescedGOTMap& coalescedAuthGOTs,
-                              CoalescedGOTMap& coalescedAuthPtrs, PatchInfo& dylibPatchInfo,
+                              CoalescedGOTsMap& coalescedGOTs, CoalescedGOTsMap& coalescedAuthGOTs,
+                              CoalescedGOTsMap& coalescedAuthPtrs, PatchInfo& dylibPatchInfo,
                               FunctionVariantsOptimizer& functionVariantsOptimizer)
 {
     switch ( bindTarget.kind ) {
         case BindTarget::Kind::absolute: {
             uint64_t targetValue = bindTarget.absolute.value + addend;
-
-            if ( needsPatchTable ) {
-                auto checkGOTs = ^(CoalescedGOTMap& gotMap, std::vector<std::vector<PatchInfo::GOTInfo>>& gotInfo) {
-                    auto gotIt = gotMap.find(fixupVMAddr);
-                    if ( gotIt != gotMap.end() ) {
-                        // Probably a missing weak import.  Rewrite the original GOT anyway, but also the coalesced one
-                        dyld_cache_patchable_location patchLoc(gotIt->second, pmd, addend, bindTarget.isWeakImport);
-                        auto& gotUses = gotInfo[bindOrdinal];
-                        gotUses.emplace_back((PatchInfo::GOTInfo){ patchLoc, VMOffset(targetValue) });
-                        return true;
-                    }
-                    return false;
-                };
-                if ( checkGOTs(coalescedGOTs, dylibPatchInfo.bindGOTUses) ) {
-                    // normal GOT
-                } else if ( checkGOTs(coalescedAuthGOTs, dylibPatchInfo.bindAuthGOTUses) ) {
-                    // auth GOT
-                } else if ( checkGOTs(coalescedAuthPtrs, dylibPatchInfo.bindAuthPtrUses) ) {
-                    // auth ptr
-                }
-            }
 
             if ( config.layout.is64 ) {
                 fixupLoc->raw64 = targetValue;
@@ -1153,26 +1079,12 @@ void CacheDylib::bindLocation(Diagnostics& diag, const BuilderConfig& config,
             // note down the fixup to the GOT.  We can't just apply the GOT fixup, as we might be running in parallel with
             // other threads all trying to do the same thing
             if( needsPatchTable ) {
-                uint64_t                   patchTableAddend = addend;
-                MachOFile::PointerMetaData patchTablePMD    = pmd;
-                uint64_t                   addendHigh8      = addend >> 56;
-                if ( addendHigh8 != 0 ) {
-                    // Put the high8 from the addend in to the high8 of the patch
-                    assert(patchTablePMD.high8 == 0);
-                    patchTablePMD.high8 = (uint32_t)addendHigh8;
-
-                    // Remove high8 from the addend
-                    patchTableAddend = patchTableAddend & 0x00FFFFFFFFFFFFFFULL;
-                }
-
-                VMOffset finalVMOffset = CacheVMAddress(finalVMAddrWithAddend) - config.layout.cacheBaseAddress;
-
-                auto checkGOTs = ^(CoalescedGOTMap& gotMap, std::vector<std::vector<PatchInfo::GOTInfo>>& gotInfo) {
-                    auto gotIt = gotMap.find(fixupVMAddr);
+                // The GOT map is keyed by the input VMAddr, so convert back to that
+                VMOffset segmentVMOffset = fixupVMAddr - this->segments[segIndex].cacheVMAddress;
+                InputDylibVMAddress inputFixupVMAddr = this->segments[segIndex].inputVMAddress + segmentVMOffset;
+                auto checkGOTs = ^(CoalescedGOTsMap& gotMap) {
+                    auto gotIt = gotMap.find(inputFixupVMAddr);
                     if ( gotIt != gotMap.end() ) {
-                        dyld_cache_patchable_location patchLoc(gotIt->second, patchTablePMD, patchTableAddend, bindTarget.isWeakImport);
-                        auto& gotUses = gotInfo[bindOrdinal];
-                        gotUses.emplace_back((PatchInfo::GOTInfo){ patchLoc, finalVMOffset });
 
                         // NULL out this entry
                         if ( config.layout.is64 ) {
@@ -1187,15 +1099,9 @@ void CacheDylib::bindLocation(Diagnostics& diag, const BuilderConfig& config,
                     }
                     return false;
                 };
-                if ( checkGOTs(coalescedGOTs, dylibPatchInfo.bindGOTUses) ) {
-                    // normal GOT
-                } else if ( checkGOTs(coalescedAuthGOTs, dylibPatchInfo.bindAuthGOTUses) ) {
-                    // auth GOT
-                } else if ( checkGOTs(coalescedAuthPtrs, dylibPatchInfo.bindAuthPtrUses) ) {
-                    // auth ptr
+                if ( checkGOTs(coalescedGOTs) || checkGOTs(coalescedAuthGOTs) || checkGOTs(coalescedAuthPtrs) ) {
+                    // normal GOT/auth GOT/auth ptr
                 } else {
-                    // Location wasn't coalesced.  So add to the regular list of uses
-                    dylibPatchInfo.bindUses[bindOrdinal].emplace_back(fixupVMAddr, patchTablePMD, patchTableAddend, bindTarget.isWeakImport);
                     // if target is a function variant, record that dyld may need to update pointer at launch
                     if ( bindTarget.cacheImage.isFunctionVariant ) {
                         uint64_t fvTableVmAddr = 0;
@@ -1229,8 +1135,8 @@ void CacheDylib::bindLocation(Diagnostics& diag, const BuilderConfig& config,
 }
 
 void CacheDylib::bindWithChainedFixups(Diagnostics& diag, const BuilderConfig& config,
-                                       CoalescedGOTMap& coalescedGOTs, CoalescedGOTMap& coalescedAuthGOTs,
-                                       CoalescedGOTMap& coalescedAuthPtrs, PatchInfo& dylibPatchInfo,
+                                       CoalescedGOTsMap& coalescedGOTs, CoalescedGOTsMap& coalescedAuthGOTs,
+                                       CoalescedGOTsMap& coalescedAuthPtrs, PatchInfo& dylibPatchInfo,
                                        FunctionVariantsOptimizer& functionVariantsOptimizer)
 {
     auto fixupHandler = ^(MachOFile::ChainedFixupPointerOnDisk* fixupLoc, uint16_t chainedFormat,
@@ -1295,7 +1201,8 @@ void CacheDylib::bindWithChainedFixups(Diagnostics& diag, const BuilderConfig& c
         this->bindLocation(diag, config, targetInTable, addend, bindOrdinal, segIndex,
                            fixupLoc, fixupVMAddr, pmd,
                            coalescedGOTs, coalescedAuthGOTs, 
-                           coalescedAuthPtrs, dylibPatchInfo, functionVariantsOptimizer);
+                           coalescedAuthPtrs, dylibPatchInfo,
+                           functionVariantsOptimizer);
     };
 
     this->inputMF->withFileLayout(diag, ^(const mach_o::Layout &layout) {
@@ -1327,8 +1234,8 @@ void CacheDylib::bindWithChainedFixups(Diagnostics& diag, const BuilderConfig& c
 }
 
 void CacheDylib::bindWithOpcodeFixups(Diagnostics& diag, const BuilderConfig& config,
-                                      CoalescedGOTMap& coalescedGOTs, CoalescedGOTMap& coalescedAuthGOTs,
-                                      CoalescedGOTMap& coalescedAuthPtrs, PatchInfo& dylibPatchInfo,
+                                      CoalescedGOTsMap& coalescedGOTs, CoalescedGOTsMap& coalescedAuthGOTs,
+                                      CoalescedGOTsMap& coalescedAuthPtrs, PatchInfo& dylibPatchInfo,
                                       FunctionVariantsOptimizer& functionVariantsOptimizer)
 {
     auto handleFixup = ^(uint64_t fixupRuntimeOffset, int bindOrdinal, uint32_t segmentIndex, bool& stopSegment) {
@@ -1350,7 +1257,8 @@ void CacheDylib::bindWithOpcodeFixups(Diagnostics& diag, const BuilderConfig& co
         this->bindLocation(diag, config, targetInTable, addend, bindOrdinal, segmentIndex,
                            (dyld3::MachOFile::ChainedFixupPointerOnDisk*)fixupLoc,
                            fixupVMAddr, dyld3::MachOFile::PointerMetaData(),
-                           coalescedGOTs, coalescedAuthGOTs, coalescedAuthPtrs, dylibPatchInfo, functionVariantsOptimizer);
+                           coalescedGOTs, coalescedAuthGOTs, coalescedAuthPtrs, dylibPatchInfo,
+                           functionVariantsOptimizer);
     };
 
     // Use the fixups from the source dylib
@@ -1434,6 +1342,163 @@ void CacheDylib::bindWithOpcodeFixups(Diagnostics& diag, const BuilderConfig& co
         });
 }
 
+void CacheDylib::calculateBindLocationPatchInfo(Diagnostics& diag, const BuilderConfig& config,
+                                                const BindTarget& bindTarget, uint64_t addend,
+                                                uint32_t bindOrdinal, uint32_t segIndex,
+                                                InputDylibVMAddress fixupVMAddr, MachOFile::PointerMetaData pmd,
+                                                CoalescedGOTsMap& coalescedGOTs, CoalescedGOTsMap& coalescedAuthGOTs,
+                                                CoalescedGOTsMap& coalescedAuthPtrs, PatchInfo& dylibPatchInfo)
+{
+    switch ( bindTarget.kind ) {
+        case BindTarget::Kind::absolute: {
+            uint64_t targetValue = bindTarget.absolute.value + addend;
+
+            auto checkGOTs = ^(CoalescedGOTsMap& gotMap, std::vector<std::vector<PatchInfo::GOTInfo>>& gotInfo) {
+                auto gotIt = gotMap.find(fixupVMAddr);
+                if ( gotIt != gotMap.end() ) {
+                    // Probably a missing weak import.  Rewrite the original GOT anyway, but also the coalesced one
+                    const ChunkPlusOffset gotPlusOffset = gotIt->second;
+                    DyldCachePatchableGOTLocation patchLoc(gotPlusOffset.first, gotPlusOffset.second, pmd, addend, bindTarget.isWeakImport);
+                    auto& gotUses = gotInfo[bindOrdinal];
+                    gotUses.emplace_back((PatchInfo::GOTInfo){ patchLoc, targetValue });
+                    return true;
+                }
+                return false;
+            };
+            if ( checkGOTs(coalescedGOTs, dylibPatchInfo.bindGOTUses) ) {
+                // normal GOT
+            } else if ( checkGOTs(coalescedAuthGOTs, dylibPatchInfo.bindAuthGOTUses) ) {
+                // auth GOT
+            } else if ( checkGOTs(coalescedAuthPtrs, dylibPatchInfo.bindAuthPtrUses) ) {
+                // auth ptr
+            }
+            return;
+        }
+        case BindTarget::Kind::inputImage: {
+            InputDylibVMAddress targetDylibLoadAddress = bindTarget.inputImage.targetDylib->inputLoadAddress;
+            InputDylibVMAddress targetVMAddr = targetDylibLoadAddress + bindTarget.inputImage.targetRuntimeOffset;
+            uint64_t            finalTargetVMAddrWithAddend  = targetVMAddr.rawValue() + addend;
+
+            // Work out if the location we just wrote is a coalesced GOT.  If so, NULL the current location and
+            // note down the fixup to the GOT.  We can't just apply the GOT fixup, as we might be running in parallel with
+            // other threads all trying to do the same thing
+            uint64_t                   patchTableAddend = addend;
+            MachOFile::PointerMetaData patchTablePMD    = pmd;
+            uint64_t                   addendHigh8      = addend >> 56;
+            if ( addendHigh8 != 0 ) {
+                // Put the high8 from the addend in to the high8 of the patch
+                assert(patchTablePMD.high8 == 0);
+                patchTablePMD.high8 = (uint32_t)addendHigh8;
+
+                // Remove high8 from the addend
+                patchTableAddend = patchTableAddend & 0x00FFFFFFFFFFFFFFULL;
+            }
+
+            InputDylibVMOffset finalTargetVMOffset = InputDylibVMAddress(finalTargetVMAddrWithAddend) - targetDylibLoadAddress;
+
+            auto checkGOTs = ^(CoalescedGOTsMap& gotMap, std::vector<std::vector<PatchInfo::GOTInfo>>& gotInfo) {
+                auto gotIt = gotMap.find(fixupVMAddr);
+                if ( gotIt != gotMap.end() ) {
+                    const ChunkPlusOffset gotPlusOffset = gotIt->second;
+                    DyldCachePatchableGOTLocation patchLoc(gotPlusOffset.first, gotPlusOffset.second, patchTablePMD, patchTableAddend, bindTarget.isWeakImport);
+                    auto& gotUses = gotInfo[bindOrdinal];
+                    DylibOffset dylibOffset = { bindTarget.inputImage.targetDylib, finalTargetVMOffset };
+                    gotUses.emplace_back((PatchInfo::GOTInfo){ patchLoc, dylibOffset });
+                    return true;
+                }
+                return false;
+            };
+            if ( checkGOTs(coalescedGOTs, dylibPatchInfo.bindGOTUses) ) {
+                // normal GOT
+            } else if ( checkGOTs(coalescedAuthGOTs, dylibPatchInfo.bindAuthGOTUses) ) {
+                // auth GOT
+            } else if ( checkGOTs(coalescedAuthPtrs, dylibPatchInfo.bindAuthPtrUses) ) {
+                // auth ptr
+            } else {
+                // Location wasn't coalesced.  So add to the regular list of uses
+                InputDylibVMOffset fixupVMOffset = fixupVMAddr - this->inputLoadAddress;
+                DyldCachePatchableLocation patchLoc = { fixupVMOffset, patchTablePMD, patchTableAddend, bindTarget.isWeakImport };
+                dylibPatchInfo.bindUses[bindOrdinal].push_back(patchLoc);
+            }
+            break;
+        }
+        case BindTarget::Kind::cacheImage: {
+            diag.error("Input binds should not have been converted to cache binds in %s: %d",
+                       this->installName.data(), bindOrdinal);
+            return;
+        }
+    }
+}
+
+void CacheDylib::calcuatePatchInfo(Diagnostics& diag, const BuilderConfig& config, Timer::AggregateTimer& timer,
+                                   PatchInfo& dylibPatchInfo)
+{
+    Timer::AggregateTimer::Scope timedScope(timer, "dylib patch info calculation time");
+
+    __block CoalescedGOTsMap coalescedGOTs      = optimizedSections.gots.getCoalescedGOTsMap();
+    __block CoalescedGOTsMap coalescedAuthGOTs  = optimizedSections.auth_gots.getCoalescedGOTsMap();
+    __block CoalescedGOTsMap coalescedAuthPtrs  = optimizedSections.auth_ptrs.getCoalescedGOTsMap();
+
+    // Track which locations this dylib uses in other dylibs.  One per bindTarget
+    dylibPatchInfo.bindUses.resize(this->bindTargets.size());
+    dylibPatchInfo.bindGOTUses.resize(this->bindTargets.size());
+    dylibPatchInfo.bindAuthGOTUses.resize(this->bindTargets.size());
+    dylibPatchInfo.bindAuthPtrUses.resize(this->bindTargets.size());
+
+    if ( !needsPatchTable )
+        return;
+
+    auto handleFixup = ^(InputDylibVMAddress fixupVMAddr, int64_t embeddedAddend, int bindOrdinal, dyld3::MachOFile::PointerMetaData pmd,
+                         uint32_t segmentIndex, bool& stopSegment) {
+        if ( bindOrdinal >= this->bindTargets.size() ) {
+            diag.error("out of range bind ordinal %d (max %lu)", bindOrdinal, this->bindTargets.size());
+            stopSegment   = true;
+            return;
+        }
+
+        const BindTarget& targetInTable = this->bindTargets[bindOrdinal];
+        uint64_t          addend        = targetInTable.addend + embeddedAddend;
+
+        this->calculateBindLocationPatchInfo(diag, config, targetInTable, addend, bindOrdinal, segmentIndex,
+                                             fixupVMAddr, pmd,
+                                             coalescedGOTs, coalescedAuthGOTs, coalescedAuthPtrs, dylibPatchInfo);
+    };
+
+    this->inputMF->withFileLayout(diag, ^(const mach_o::Layout& layout) {
+        mach_o::Fixups fixups(layout);
+        if ( this->inputMF->hasChainedFixups() ) {
+            fixups.withChainStarts(diag, ^(const dyld_chained_starts_in_image* starts) {
+                fixups.forEachFixupChainSegment(diag, starts, ^(const dyld_chained_starts_in_segment *segInfo, uint32_t segIndex, bool &stopSegment) {
+                    InputDylibVMAddress segmentVMAddr = this->segments[segIndex].inputVMAddress;
+                    fixups.forEachFixupInSegmentChains(diag, segInfo, segIndex, true,
+                                                       ^(dyld3::MachOFile::ChainedFixupPointerOnDisk *fixupLocation, uint64_t fixupSegmentOffset, bool &stopChain) {
+                        uint32_t bindOrdinal = 0;
+                        int64_t embeddedAddend = 0;
+                        if ( fixupLocation->isBind(segInfo->pointer_format, bindOrdinal, embeddedAddend) ) {
+                            MachOFile::PointerMetaData pmd(fixupLocation, segInfo->pointer_format);
+                            handleFixup(segmentVMAddr + VMOffset(fixupSegmentOffset), embeddedAddend, bindOrdinal, pmd, segIndex, stopChain);
+                        }
+                    });
+                });
+            });
+        } else if ( this->inputMF->hasOpcodeFixups() ) {
+            const dyld3::MachOFile::PointerMetaData pmd;
+            fixups.forEachBindLocation_Opcodes(diag,
+                                               ^(uint64_t runtimeOffset, uint32_t segmentIndex, unsigned int targetIndex, bool& stop) {
+                InputDylibVMAddress fixupVMAddr = this->inputLoadAddress + VMOffset(runtimeOffset);
+                handleFixup(fixupVMAddr, 0, targetIndex, pmd, segmentIndex, stop);
+            },
+            ^(uint64_t runtimeOffset, uint32_t segmentIndex, unsigned int overrideBindTargetIndex, bool& stop) {
+                assert(this->weakBindTargetsStartIndex.has_value());
+                InputDylibVMAddress fixupVMAddr = this->inputLoadAddress + VMOffset(runtimeOffset);
+                handleFixup(fixupVMAddr, 0, this->weakBindTargetsStartIndex.value() + overrideBindTargetIndex, pmd, segmentIndex, stop);
+            });
+        } else {
+            // Cache dylibs shouldn't use old style fixups.
+        }
+    });
+}
+
 void CacheDylib::bind(Diagnostics& diag, const BuilderConfig& config, Timer::AggregateTimer& timer,
                       PatchInfo& dylibPatchInfo, FunctionVariantsOptimizer& functionVariantsOptimizer)
 {
@@ -1442,40 +1507,16 @@ void CacheDylib::bind(Diagnostics& diag, const BuilderConfig& config, Timer::Agg
     // As we are running in parallel, addresses in other dylibs may not have been shifted yet.  We may also
     // race looking at the export trie in a target dylib, while it is being shifted by AdjustDylibSegments.
     // Given that, we'll look at our own cache dylib, but everyone elses input dylib, as those won't mutate
-
-    // Map from where the GOT is located in the dylib to where its located in the coalesced section
-    typedef std::unordered_map<const CacheVMAddress, CacheVMAddress, CacheVMAddressHash, CacheVMAddressEqual> CoalescedGOTsMap;
-    auto mapGOTs = [](const DylibSectionCoalescer::OptimizedSection& gotSection, std::span<DylibSegmentChunk> dylibSegments,
-                      CoalescedGOTsMap& coalescedGOTs) {
-        if ( !gotSection.offsetMap.empty() ) {
-            uint32_t segmentIndex = gotSection.segmentIndex.value();
-            CacheVMAddress dylibGOTBaseVMAddr = dylibSegments[segmentIndex].cacheVMAddress + gotSection.sectionVMOffsetInSegment;
-            CacheVMAddress cacheGOTBaseVMAddr = gotSection.subCacheSection->cacheChunk->cacheVMAddress;
-            for ( const auto& dylibOffsetAndCacheOffset : gotSection.offsetMap ) {
-                VMOffset dylibSectionOffset((uint64_t)dylibOffsetAndCacheOffset.first);
-                VMOffset cacheSectionOffset((uint64_t)dylibOffsetAndCacheOffset.second);
-                coalescedGOTs[dylibGOTBaseVMAddr + dylibSectionOffset] = cacheGOTBaseVMAddr + cacheSectionOffset;
-            }
-        }
-    };
-    CoalescedGOTsMap coalescedGOTs;
-    CoalescedGOTsMap coalescedAuthGOTs;
-    CoalescedGOTsMap coalescedAuthPtrs;
-
-    mapGOTs(optimizedSections.gots, this->segments, coalescedGOTs);
-    mapGOTs(optimizedSections.auth_gots, this->segments, coalescedAuthGOTs);
-    mapGOTs(optimizedSections.auth_ptrs, this->segments, coalescedAuthPtrs);
-
-    // Track which locations this dylib uses in other dylibs.  One per bindTarget
-    dylibPatchInfo.bindUses.resize(this->bindTargets.size());
-    dylibPatchInfo.bindGOTUses.resize(this->bindTargets.size());
-    dylibPatchInfo.bindAuthGOTUses.resize(this->bindTargets.size());
-    dylibPatchInfo.bindAuthPtrUses.resize(this->bindTargets.size());
+    CoalescedGOTsMap coalescedGOTs      = optimizedSections.gots.getCoalescedGOTsMap();
+    CoalescedGOTsMap coalescedAuthGOTs  = optimizedSections.auth_gots.getCoalescedGOTsMap();
+    CoalescedGOTsMap coalescedAuthPtrs  = optimizedSections.auth_ptrs.getCoalescedGOTsMap();
 
     if ( this->inputMF->hasChainedFixups() )
-        bindWithChainedFixups(diag, config, coalescedGOTs, coalescedAuthGOTs, coalescedAuthPtrs, dylibPatchInfo, functionVariantsOptimizer);
+        bindWithChainedFixups(diag, config, coalescedGOTs, coalescedAuthGOTs, coalescedAuthPtrs, dylibPatchInfo,
+                              functionVariantsOptimizer);
     else if ( this->inputMF->hasOpcodeFixups() ) {
-        bindWithOpcodeFixups(diag, config, coalescedGOTs, coalescedAuthGOTs, coalescedAuthPtrs, dylibPatchInfo, functionVariantsOptimizer);
+        bindWithOpcodeFixups(diag, config, coalescedGOTs, coalescedAuthGOTs, coalescedAuthPtrs, dylibPatchInfo,
+                             functionVariantsOptimizer);
     } else {
         // Cache dylibs shouldn't use old style fixups.
     }
@@ -1834,7 +1875,7 @@ void CacheDylib::optimizeLoadsFromConstants(const BuilderConfig& config,
                                             Timer::AggregateTimer& timer,
                                             const ObjCStringsChunk* selectorStringsChunk)
 {
-    const bool logSelectors = config.log.printDebug;
+    const bool logSelectors = config.log.printDebugCacheLayout;
 
     Timer::AggregateTimer::Scope timedScope(timer, "dylib optimizeLoadsFromConstants time");
 
@@ -2018,9 +2059,9 @@ Error CacheDylib::setObjCImpCachesPointers(const BuilderConfig& config,
     if ( bindTarget.kind != BindTarget::Kind::inputImage )
         return Error("Couldn't build IMP caches because: symbol is wrong kind");
 
-    BindTarget::InputImage inputImage        = bindTarget.inputImage;
-    InputDylibVMAddress    targetInputVMAddr = inputImage.targetDylib->inputLoadAddress + inputImage.targetRuntimeOffset;
-    CacheVMAddress         targetCacheVMAddr = inputImage.targetDylib->adjustor->adjustVMAddr(targetInputVMAddr);
+    BindTarget::InputImage bindInputImage    = bindTarget.inputImage;
+    InputDylibVMAddress    targetInputVMAddr = bindInputImage.targetDylib->inputLoadAddress + bindInputImage.targetRuntimeOffset;
+    CacheVMAddress         targetCacheVMAddr = bindInputImage.targetDylib->adjustor->adjustVMAddr(targetInputVMAddr);
 
     // Find the segment for the content
     for ( DylibSegmentChunk& segment : this->segments ) {
@@ -2085,7 +2126,7 @@ Error CacheDylib::emitObjCIMPCaches(const BuilderConfig& config, Timer::Aggregat
     if ( !objcIMPCachesOptimizer.builder )
         return Error();
 
-    const bool log = config.log.printDebug;
+    const bool log = config.log.printDebugIMPCaches;
 
     Timer::AggregateTimer::Scope timedScope(timer, "emitObjCIMPCaches time");
 
@@ -2184,13 +2225,13 @@ Error CacheDylib::emitObjCIMPCaches(const BuilderConfig& config, Timer::Aggregat
                 currentBucket->impOffset = 0;
             } else {
                 imp_caches::BucketMethod bucketMethod = {
-                    .installName = bucket.installName,
                     .className = bucket.className,
                     .methodName = bucket.methodName,
                     .isInstanceMethod = bucket.isInstanceMethod
                 };
-                auto bucketIt = objcIMPCachesOptimizer.methodMap.find(bucketMethod);
-                assert(bucketIt != objcIMPCachesOptimizer.methodMap.end());
+                const auto& dylibMethodMap = objcIMPCachesOptimizer.methodMap.at(bucket.installName);
+                auto bucketIt = dylibMethodMap.find(bucketMethod);
+                assert(bucketIt != dylibMethodMap.end());
 
                 const ObjCIMPCachesOptimizer::InputDylibLocation& bucketInputLocation = bucketIt->second;
                 CacheVMAddress methodVMAddr = bucketInputLocation.first->adjustor->adjustVMAddr(bucketInputLocation.second);
@@ -2263,9 +2304,9 @@ CacheDylib::GOTToTargetMap CacheDylib::getUniquedGOTTargets(const PatchInfo& dyl
             const BindTarget::CacheImage& cacheImageTarget = bindTarget.cacheImage;
             CacheVMAddress bindTargetVMAddr = cacheImageTarget.targetDylib->cacheLoadAddress + cacheImageTarget.targetRuntimeOffset;
 
-
             for ( const PatchInfo::GOTInfo& gotInfo : clientUses ) {
-                gotToTargetMap[gotInfo.patchInfo.cacheVMAddr] = bindTargetVMAddr;
+                CacheVMAddress gotVMAddr = gotInfo.useLocation.clientGOT->cacheVMAddress + gotInfo.useLocation.clientGOTOffset;
+                gotToTargetMap[gotVMAddr] = bindTargetVMAddr;
             }
         }
     }
@@ -2387,7 +2428,7 @@ CacheDylib::OldToNewStubMap CacheDylib::buildStubMaps(const BuilderConfig& confi
                     // Customer stub
                     uint8_t* newStubBuffer = customerStubs.subCacheBuffer + stubOffset;
                     StubOptimizer::generateArm64StubTo(newStubBuffer, newStubVMAddr.rawValue(),
-                                                       gotTargetVMAddr->rawValue());
+                                                       targetLPAddr, gotTargetVMAddr->rawValue());
                 }
             } else if ( this->cacheHdr->isArch("arm64e") ) {
                 uint64_t targetLPAddr = StubOptimizer::gotAddrFromArm64eStub(diag, this->installName,
@@ -2415,7 +2456,7 @@ CacheDylib::OldToNewStubMap CacheDylib::buildStubMaps(const BuilderConfig& confi
                     // Customer stub
                     uint8_t* newStubBuffer = customerStubs.subCacheBuffer + stubOffset;
                     StubOptimizer::generateArm64eStubTo(newStubBuffer, newStubVMAddr.rawValue(),
-                                                        gotTargetVMAddr->rawValue());
+                                                        targetLPAddr, gotTargetVMAddr->rawValue());
                 }
             } else if ( this->cacheHdr->isArch("arm64_32") ) {
                 uint64_t targetLPAddr = StubOptimizer::gotAddrFromArm64_32Stub(diag, this->installName,
@@ -2958,7 +2999,7 @@ metadata_visitor::SwiftVisitor CacheDylib::makeCacheSwiftVisitor(const BuilderCo
 metadata_visitor::Visitor CacheDylib::makeCacheVisitor(const BuilderConfig& config) const
 {
     // Get the segment ranges.  We need this as the dylib's segments are in different buffers, not in VM layout
-    std::vector<metadata_visitor::Segment> cacheSegments;
+    __block std::vector<metadata_visitor::Segment> cacheSegments;
     cacheSegments.reserve(this->segments.size());
     for ( uint32_t segIndex = 0; segIndex != this->segments.size(); ++segIndex ) {
         const DylibSegmentChunk& segmentInfo = this->segments[segIndex];
@@ -2977,27 +3018,18 @@ metadata_visitor::Visitor CacheDylib::makeCacheVisitor(const BuilderConfig& conf
         cacheSegments.push_back(std::move(segment));
     }
 
-    auto addGots = [&cacheSegments](const DylibSectionCoalescer::OptimizedSection& gotSection) {
-        if ( gotSection.subCacheSection != nullptr ) {
-            auto* chunk = gotSection.subCacheSection->cacheChunk;
-            if ( chunk != nullptr ) {
-                metadata_visitor::Segment segment;
-                segment.startVMAddr = VMAddress(chunk->cacheVMAddress.rawValue());
-                segment.endVMAddr   = VMAddress((chunk->cacheVMAddress + chunk->cacheVMSize).rawValue());
-                segment.bufferStart = chunk->subCacheBuffer;
-
-                // Cache segments never have a chained format. They always use the Fixup struct
-                segment.onDiskDylibChainedPointerFormat = { };
-
-                cacheSegments.push_back(std::move(segment));
-            }
-        }
-    };
-
     // Add the GOTs too, if we have them
-    addGots(optimizedSections.gots);
-    addGots(optimizedSections.auth_gots);
-    addGots(optimizedSections.auth_ptrs);
+    optimizedSections.forEachCacheGOTChunk(^(const cache_builder::Chunk* chunk) {
+        metadata_visitor::Segment segment;
+        segment.startVMAddr = VMAddress(chunk->cacheVMAddress.rawValue());
+        segment.endVMAddr   = VMAddress((chunk->cacheVMAddress + chunk->cacheVMSize).rawValue());
+        segment.bufferStart = chunk->subCacheBuffer;
+
+        // Cache segments never have a chained format. They always use the Fixup struct
+        segment.onDiskDylibChainedPointerFormat = { };
+
+        cacheSegments.push_back(std::move(segment));
+    });
 
     std::vector<uint64_t> unusedBindTargets;
     metadata_visitor::Visitor visitor(config.layout.cacheBaseAddress, this->cacheMF,

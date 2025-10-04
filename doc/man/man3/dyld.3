@@ -67,7 +67,7 @@ returns a pointer to the mach header of the image indexed by image_index.  If
 is out of range, NULL is returned.
 .Pp
 .Fn _dyld_get_image_vmaddr_slide
-returns the virtural memory address slide amount of the image indexed by
+returns the virtual memory address slide amount of the image indexed by
 .Fa image_index.
 If
 .Fa image_index
@@ -95,7 +95,7 @@ registers the specified function to be called when an image is removed
 .Pp
 .Fn NSVersionOfRunTimeLibrary
 returns the current_version number of the currently loaded dylib 
-specifed by the libraryName.  The libraryName parameter would be "bar" for /path/libbar.3.dylib and
+specified by the libraryName.  The libraryName parameter would be "bar" for /path/libbar.3.dylib and
 "Foo" for /path/Foo.framework/Versions/A/Foo.  This function returns -1 if no such library is loaded.
 .Pp
 .Fn NSVersionOfLinkTimeLibrary

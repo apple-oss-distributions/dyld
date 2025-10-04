@@ -53,6 +53,7 @@
 #include "AAREncoder.h"
 #include <SharedCacheLinker/SharedCacheLinker.h>
 #include "ThreadLocalVariables.h"
+#include "Algorithm.h"
 
 // mach_o
 #include "ExportsTrie.h"
@@ -71,8 +72,6 @@
 #include <sys/stat.h>
 #include <unordered_set>
 
-using mach_o::Header;
-using dyld3::GradedArchs;
 using dyld3::MachOFile;
 
 using dyld4::JustInTimeLoader;
@@ -156,6 +155,144 @@ void SharedCacheBuilder::forEachCacheSymlink(void (^callback)(const std::string_
     }
 }
 
+struct DylibSizes
+{
+    uint64_t textSegment        = 0;
+    uint64_t dataSegment        = 0;
+    uint64_t dataConstSegment   = 0;
+    uint64_t dataDirtySegment   = 0;
+    uint64_t authSegment        = 0;
+    uint64_t authConstSegment   = 0;
+    uint64_t linkeditSegment    = 0;
+
+    // any other segment not in the above
+    uint64_t otherSegment       = 0;
+
+    // Just the __TEXT __text section
+    uint64_t textSection        = 0;
+
+    // parts of the linkedit
+    uint64_t exportTrie         = 0;
+    uint64_t symbolTable        = 0;
+    uint64_t symbolStrings      = 0;
+};
+
+static DylibSizes getDylibSizes(std::span<const SubCache> subCaches,
+                                std::span<const CacheDylib> cacheDylibs)
+{
+    __block DylibSizes dylibSizes;
+    __block std::unordered_set<uint64_t> linkeditSizes;
+
+    // segment sizes
+    for ( const CacheDylib& cacheDylib : cacheDylibs ) {
+        cacheDylib.cacheHdr->forEachSegment(^(const Header::SegmentInfo& info, bool& stop) {
+            if ( info.segmentName == "__TEXT" )
+                dylibSizes.textSegment += info.vmsize;
+            else if ( info.segmentName == "__DATA" )
+                dylibSizes.dataSegment += info.vmsize;
+            else if ( info.segmentName == "__DATA_CONST" )
+                dylibSizes.dataConstSegment += info.vmsize;
+            else if ( info.segmentName == "__DATA_DIRTY" )
+                dylibSizes.dataDirtySegment += info.vmsize;
+            else if ( info.segmentName == "__AUTH" )
+                dylibSizes.authSegment += info.vmsize;
+            else if ( info.segmentName == "__AUTH_CONST" )
+                dylibSizes.authConstSegment += info.vmsize;
+            else if ( info.segmentName == "__LINKEDIT" )
+                linkeditSizes.insert(info.vmsize);
+            else
+                dylibSizes.otherSegment += info.vmsize;
+        });
+    }
+    for ( uint64_t size : linkeditSizes )
+        dylibSizes.linkeditSegment += size;
+
+    // section sizes
+    for ( const CacheDylib& cacheDylib : cacheDylibs ) {
+        cacheDylib.cacheHdr->forEachSection(^(const Header::SectionInfo& info, bool& stop) {
+            if ( (info.segmentName == "__TEXT") && (info.sectionName == "__text") )
+                dylibSizes.textSection += info.size;
+        });
+    }
+
+    // linkedit sizes
+    for ( const CacheDylib& cacheDylib : cacheDylibs ) {
+        for ( const LinkeditDataChunk& chunk : cacheDylib.linkeditChunks ) {
+            if ( chunk.kind == Chunk::Kind::linkeditExportTrie )
+                dylibSizes.exportTrie += chunk.cacheVMSize.rawValue();
+        }
+
+        if ( !cacheDylib.optimizedSymbols.nlist64.empty() ) {
+            dylibSizes.symbolTable += (sizeof(struct nlist_64) * cacheDylib.optimizedSymbols.nlist64.size());
+        } else {
+            dylibSizes.symbolTable += (sizeof(struct nlist) * cacheDylib.optimizedSymbols.nlist64.size());
+        }
+    }
+
+    for ( const SubCache& subCache : subCaches ) {
+        if ( subCache.optimizedSymbolStrings )
+            dylibSizes.symbolStrings += subCache.optimizedSymbolStrings->cacheVMSize.rawValue();
+    }
+
+    return dylibSizes;
+}
+
+std::string SharedCacheBuilder::stats(uint64_t startTimeNanos) const
+{
+    uint64_t endTimeNanos = clock_gettime_nsec_np(CLOCK_UPTIME_RAW);
+    uint64_t totalTime = (endTimeNanos - startTimeNanos) / 1000000000;
+
+    DylibSizes dylibSizes = getDylibSizes(this->subCaches, this->cacheDylibs);
+
+    std::string result;
+    result += "{\n";
+
+    // add all the top level fields
+    result += std::string("  \"version\": 1,\n");
+    result += std::string("  \"minor-version\": 0,\n");
+    result += std::string("  \"update\": \"") + this->options.updateName + "\",\n";
+    result += std::string("  \"device\": \"") + this->options.deviceName + "\",\n";
+    result += std::string("  \"platform\": \"") + this->options.platform.name().c_str() + "\",\n";
+    result += std::string("  \"arch\": \"") + this->options.arch.name() + "\",\n";
+
+    // main stats
+    result += std::string("  \"dylibs-count\": ") + std::to_string(this->cacheDylibs.size()) + ",\n";
+    result += std::string("  \"total-vm-size\": ") + std::to_string(this->totalVMSize.rawValue()) + ",\n";
+    result += std::string("  \"total-text-segment-size\": ") + std::to_string(dylibSizes.textSegment) + ",\n";
+    result += std::string("  \"total-data-segment-size\": ") + std::to_string(dylibSizes.dataSegment) + ",\n";
+    result += std::string("  \"total-data-dirty-segment-size\": ") + std::to_string(dylibSizes.dataDirtySegment) + ",\n";
+    result += std::string("  \"total-data-const-segment-size\": ") + std::to_string(dylibSizes.dataConstSegment) + ",\n";
+    result += std::string("  \"total-auth-segment-size\": ") + std::to_string(dylibSizes.authSegment) + ",\n";
+    result += std::string("  \"total-auth-const-segment-size\": ") + std::to_string(dylibSizes.authConstSegment) + ",\n";
+    result += std::string("  \"total-other-segment-size\": ") + std::to_string(dylibSizes.otherSegment) + ",\n";
+    result += std::string("  \"total-linkedit-segment-size\": ") + std::to_string(dylibSizes.linkeditSegment) + ",\n";
+    result += std::string("  \"total-text-section-size\": ") + std::to_string(dylibSizes.textSection) + ",\n";
+
+    // optimization stats
+    result += std::string("  \"objc-selector-hash-table-size\": ") + std::to_string(this->objcSelectorOptimizer.selectorHashTableTotalByteSize) + ",\n";
+    result += std::string("  \"objc-class-hash-table-size\": ") + std::to_string(this->objcClassOptimizer.classHashTableTotalByteSize) + ",\n";
+    result += std::string("  \"objc-protocol-hash-table-size\": ") + std::to_string(this->objcProtocolOptimizer.protocolHashTableTotalByteSize) + ",\n";
+    result += std::string("  \"objc-selectors-count\": ") + std::to_string(this->objcSelectorOptimizer.selectorsMap.size()) + ",\n";
+    result += std::string("  \"objc-classes-count\": ") + std::to_string(this->objcClassOptimizer.namesMap.size()) + ",\n";
+    result += std::string("  \"objc-protocols-count\": ") + std::to_string(this->objcProtocolOptimizer.namesMap.size()) + ",\n";
+
+    // linkedit breakdown
+    result += std::string("  \"linkedit-export-trie-size\": ") + std::to_string(dylibSizes.exportTrie) + ",\n";
+    result += std::string("  \"linkedit-symbol-table-size\": ") + std::to_string(dylibSizes.symbolTable) + ",\n";
+    result += std::string("  \"linkedit-symbol-strings-size\": ") + std::to_string(dylibSizes.symbolStrings) + ",\n";
+
+    // cache metadata
+    result += std::string("  \"patch-table-size\": ") + std::to_string(this->patchTableOptimizer.patchTableChunk->cacheVMSize.rawValue()) + ",\n";
+    result += std::string("  \"dylib-loaders-size\": ") + std::to_string(this->prebuiltLoaderBuilder.cacheDylibsLoaderSize) + ",\n";
+    result += std::string("  \"executable-loaders-size\": ") + std::to_string(this->prebuiltLoaderBuilder.executablesLoaderSize) + ",\n";
+
+    // Times
+    result += std::string("  \"total-build-time\": ") + std::to_string(totalTime) + "\n";
+
+    result += "}\n";
+    return result;
+}
+
 void SharedCacheBuilder::addFile(const void* buffer, size_t bufferSize, std::string_view path,
                                  uint64_t inode, uint64_t modTime, bool forceNotCacheEligible)
 {
@@ -168,7 +305,7 @@ void SharedCacheBuilder::addFile(const void* buffer, size_t bufferSize, std::str
         Diagnostics diag;
         if ( const MachOFile* mf = MachOFile::compatibleSlice(diag, sliceOffset, sliceLen, buffer, bufferSize, path.data(),
                                                               Platform::macCatalyst, isOSBinary,
-                                                              this->options.archs) ) {
+                                                              this->options.gradedArchs) ) {
             InputFile inputFile;
             inputFile.mf                    = mf;
             inputFile.inode                 = inode;
@@ -184,7 +321,7 @@ void SharedCacheBuilder::addFile(const void* buffer, size_t bufferSize, std::str
     Diagnostics diag;
     if ( const MachOFile* mf = MachOFile::compatibleSlice(diag, sliceOffset, sliceLen, buffer, bufferSize, path.data(),
                                                           this->options.platform, isOSBinary,
-                                                          this->options.archs) ) {
+                                                          this->options.gradedArchs) ) {
         InputFile inputFile;
         inputFile.mf                    = mf;
         inputFile.inode                 = inode;
@@ -256,6 +393,7 @@ Error SharedCacheBuilder::calculateInputs()
         return Error("Cannot build cache with no dylibs");
 
     this->sortDylibs();
+    this->sortExecutables();
 
     // Note this needs to be after sorting, so the order of objc dylibs is consistent with all dylibs list
     this->findObjCDylibs();
@@ -303,7 +441,6 @@ Error SharedCacheBuilder::estimateGlobalOptimizations()
     this->estimateSwiftHashTableSizes();
 
     this->calculateCacheDylibsTrie();
-    this->estimatePatchTableSize();
     this->estimateFunctionVariantsSize();
     this->estimateCacheLoadersSize();
     this->estimatePrewarmingSize();
@@ -319,6 +456,10 @@ Error SharedCacheBuilder::estimateGlobalOptimizations()
 // Outputs: subCaches
 Error SharedCacheBuilder::createSubCaches()
 {
+    Timer::Scope timedScope(this->config, "createSubCaches time");
+    Timer::AggregateTimer aggregateTimerOwner(this->config);
+    auto& aggregateTimer = aggregateTimerOwner;
+
     this->computeSubCaches();
 
     // Per-subCache optimizations
@@ -327,8 +468,54 @@ Error SharedCacheBuilder::createSubCaches()
     if ( Error error = this->calculateUniqueGOTs(); error.hasError() )
         return error;
 
+    // Finalize the subcaches, by removing any unused regions
+    for ( SubCache& subCache : this->subCaches ) {
+        // Add slide info for each DATA/AUTH segment.  Do this after we've added any other DATA*
+        // segments
+        if ( this->config.slideInfo.slideInfoFormat.has_value() )
+            subCache.addSlideInfoChunks();
+
+        subCache.removeEmptyRegions();
+    }
+
+    // Analyze the dylibs to work out binds and patch table info
+    {
+        this->initializePatchTableOptimizer();
+
+        // Because blocks...
+        std::vector<const CacheDylib*> builderCacheDylibsOwner;
+        auto& builderCacheDylibs = builderCacheDylibsOwner;
+        for ( const CacheDylib& cacheDylib : this->cacheDylibs )
+            builderCacheDylibs.push_back(&cacheDylib);
+
+        Error err = parallel::forEach(this->cacheDylibs, ^(size_t index, CacheDylib& cacheDylib) {
+            Diagnostics diag;
+            PatchInfo& dylibPatchInfo = this->patchTableOptimizer.patchInfos[cacheDylib.cacheIndex];
+
+            std::vector<Error> symbolErrors = cacheDylib.calculateBindTargets(diag, this->config, aggregateTimer, builderCacheDylibs,
+                                                                              dylibPatchInfo);
+            if ( !symbolErrors.empty() ) {
+                for ( const Error& symbolErr : symbolErrors )
+                    this->errors.push_back(symbolErr.message());
+            }
+            if ( diag.hasError() )
+                return Error("%s", diag.errorMessageCStr());
+
+            cacheDylib.calcuatePatchInfo(diag, this->config, aggregateTimer, dylibPatchInfo);
+            if ( diag.hasError() )
+                return Error("%s", diag.errorMessageCStr());
+
+            return Error();
+        });
+
+        if ( err )
+            return err;
+    }
+
     this->sortSubCacheSegments();
     this->calculateSlideInfoSize();
+    if ( Error error = this->calculatePatchTableSize(); error.hasError() )
+        return error;
     this->calculateCodeSignatureSize();
     this->printSubCaches();
     if ( Error error = this->computeSubCacheLayout(); error.hasError() )
@@ -337,220 +524,6 @@ Error SharedCacheBuilder::createSubCaches()
         return error;
 
     return Error();
-}
-
-// This name is used only to create a placeholder input file and determine the library order.
-const std::string_view swiftPrespecializedDylibInstallName = "/usr/lib/libswiftPrespecialized.dylib";
-
-bool SharedCacheBuilder::shouldBuildSwiftPrespecializedDylib()
-{
-    if ( options.platform == Platform::driverKit )
-        return false;
-
-    if ( options.platform.isExclaveKit() )
-        return false;
-
-    // build the dylib, only if the order file is defined
-    if ( options.swiftGenericMetadataFile.empty() )
-        return false;
-
-    // check if the metadata builder is available
-#if !BUILDING_CACHE_BUILDER_UNIT_TESTS && !BUILDING_SIM_CACHE_BUILDER
-    if ( swift_externalMetadataBuilder_create == nullptr )
-        return false;
-#endif // !BUILDING_CACHE_BUILDER_UNIT_TESTS
-
-    return true;
-}
-
-Error SharedCacheBuilder::buildSwiftPrespecializedDylibJSON()
-{
-#if !BUILDING_CACHE_BUILDER_UNIT_TESTS && !BUILDING_SIM_CACHE_BUILDER
-    Timer::Scope timedScope(this->config, "buildSwiftPrespecializedDylibJSON time");
-
-    SwiftExternalMetadataBuilder* builder = swift_externalMetadataBuilder_create(options.platform.value(), options.archs.name());
-    if ( !builder )
-        return Error("swift_externalMetadataBuilder_create failed");
-
-    for ( const CacheDylib& dylib : this->cacheDylibs ) {
-        if ( dylib.inputHdr == nullptr ) continue;
-
-        // TODO: rdar://132262275 (dyld shared cache builder should tell Swift Metadata builder also about dyld)
-        if ( dylib.inputHdr->isDylinker() ) continue;
-
-        if ( const char* err = swift_externalMetadataBuilder_addDylib(builder, dylib.inputHdr->installName(),
-                (const struct mach_header*)dylib.inputHdr, dylib.inputFile->size) )
-            return Error("swift_externalMetadataBuilder_addDylib failed: %s", err);
-    }
-
-    if ( const char* err = swift_externalMetadataBuilder_readNamesJSON(builder, options.swiftGenericMetadataFile.c_str()) )
-        return Error("swift_externalMetadataBuilder_readNamesJSON failed: %s", err);
-
-    if ( const char* err = swift_externalMetadataBuilder_buildMetadata(builder) )
-        return Error("swift_externalMetadataBuilder_buildMetadata failed: %s", err);
-
-    if ( const char* json = swift_externalMetadataBuilder_getMetadataJSON(builder) )
-        swiftPrespecializedDylibJSON = json;
-    else
-        return Error("swift_externalMetadataBuilder_getMetadataJSON returned an empty JSON");
-
-    const std::string_view placeholderVersion = R"("platformVersion": "1.0")";
-    // Patch platformVersion if it's 1.0 until rdar://122585868 is fixed
-    if ( auto pos = swiftPrespecializedDylibJSON.find(placeholderVersion);
-            pos != swiftPrespecializedDylibJSON.npos ) {
-
-        __block mach_o::Version32 newMinOS;
-        // determine new deployment target based on dyld's version
-        for ( const InputFile& inputFile : allInputFiles ) {
-            if ( !inputFile.mf )
-                continue;
-
-            if ( !endsWith(inputFile.path, "dyld") )
-                continue;
-
-            ((Header*)inputFile.mf)->platformAndVersions().unzip(^(mach_o::PlatformAndVersions pvs) {
-                if ( pvs.platform == options.platform )
-                    newMinOS = pvs.minOS;
-            });
-            break;
-        }
-
-        if ( newMinOS > mach_o::Version32(1, 0) ) {
-            char verStr[32];
-            newMinOS.toString(verStr);
-            std::string newVersion = "\"platformVersion\": \"";
-            newVersion += verStr;
-            newVersion += "\"";
-
-            swiftPrespecializedDylibJSON.replace(pos, placeholderVersion.size(), newVersion);
-        }
-    }
-
-    swift_externalMetadataBuilder_destroy(builder);
-
-    if ( options.debug ) {
-        std::string path;
-        if ( const char* dir = getenv("TMPDIR") )
-            path = dir;
-        if ( path.empty() )
-            path = "/tmp";
-        path += "/swift-prespecialized.json-XXXXXX";
-
-        int outFileFd = mkstemp(path.data());
-        if ( outFileFd != -1 ) {
-            write(outFileFd, swiftPrespecializedDylibJSON.data(), swiftPrespecializedDylibJSON.size());
-        }
-    }
-#endif // !BUILDING_CACHE_BUILDER_UNIT_TESTS
-
-    return Error::none();
-}
-
-bool SharedCacheBuilder::reserveSwiftPrespecializedInputFile()
-{
-    if ( !shouldBuildSwiftPrespecializedDylib() )
-        return false;
-
-    InputFile inputFile;
-    inputFile.mf = nullptr;
-    inputFile.inode = 0;
-    inputFile.mtime = 0;
-    inputFile.path = swiftPrespecializedDylibInstallName;
-    allInputFiles.push_back(std::move(inputFile));
-    cacheDylibs.push_back(CacheDylib(swiftPrespecializedDylibInstallName));
-    return true;
-}
-
-Error SharedCacheBuilder::createSwiftPrespecializedDylib()
-{
-    if ( !shouldBuildSwiftPrespecializedDylib() )
-        return Error::none();
-
-    if ( Error err = buildSwiftPrespecializedDylibJSON() )
-        return err;
-
-    InputFile* inputFile = nullptr;
-    if ( allInputFiles.empty() || allInputFiles.back().path != swiftPrespecializedDylibInstallName )
-        return Error("missing input file placeholder for Swift prespecialized dylib");
-    inputFile = &allInputFiles.back();
-
-    std::vector<const char*> dylibsList;
-    // the dylib list needs to be in order of objc dylibs
-    for ( const CacheDylib* dylib : this->objcOptimizer.objcDylibs )
-        dylibsList.push_back(CString::dup(dylib->installName).c_str());
-
-    // TODO: support in-memory file buffer
-    std::string path;
-    if ( const char* dir = getenv("TMPDIR") )
-        path = dir;
-    if ( path.empty() )
-        path = "/tmp";
-    path += "/libswiftPrespecialized.dylib-XXXXXX";
-
-    int outFileFd = mkstemp(path.data());
-    if ( outFileFd == -1 )
-        return Error("couldn't create a temporary file for Swift prespecialized dylib: %s", (const char*)strerror(errno));
-
-    close(outFileFd);
-    if ( const char* err = ldMakeDylibFromJSON(swiftPrespecializedDylibJSON, dylibsList, path.c_str()) )
-        return Error("%s", err);
-
-    // cleanup dylibs list
-    for ( const char* str : dylibsList )
-        free((void*)str);
-
-    // re-open output file
-    outFileFd = open(path.c_str(), O_RDONLY);
-    if ( outFileFd < 0 )
-        return Error("could not open swift dylib file because: %s", (const char*)strerror(errno));
-
-    struct stat stat_buf;
-    if (  fstat(outFileFd, &stat_buf) == -1 )
-        return Error("could not stat swift dylib file because: %s", (const char*)strerror(errno));
-
-    vm_size_t bufferSize = stat_buf.st_size;
-    void* buffer = mmap(nullptr, bufferSize, PROT_READ, MAP_FILE | MAP_SHARED, outFileFd, 0);
-    if ( buffer == MAP_FAILED ) {
-        // Failed to mmap the file
-        return Error("could not mmap swift dylib file because: %s", (const char*)strerror(errno));
-    }
-
-    Diagnostics diag;
-    uint64_t sliceOffset = 0;
-    inputFile->mf = MachOFile::compatibleSlice(diag, sliceOffset, inputFile->size, buffer, bufferSize, path.data(),
-                                    this->options.platform, /* isOSBinary */ false,
-                                    this->options.archs);
-    if ( diag.hasError() )
-        return Error("%s", diag.errorMessageCStr());
-
-    // recreate cache dylib at the reserved slot
-    auto cacheDylibIt = std::find_if(cacheDylibs.begin(), cacheDylibs.end(), [](CacheDylib& dylib) {
-            return dylib.inputHdr == nullptr && dylib.installName == swiftPrespecializedDylibInstallName;
-    });
-    if ( cacheDylibIt == cacheDylibs.end() )
-        return Error("missing cache dylib slot for Swift prespecialized dylib");
-
-    // save previously computed cache index
-    uint32_t index = cacheDylibIt->cacheIndex;
-    // recreate cache dylib with the updated input file
-    *cacheDylibIt = CacheDylib(*inputFile);
-    cacheDylibIt->cacheIndex = index;
-    // rdar://122906481 (Shared cache builder - explicitly model dylibs without a need for a patch table)
-    cacheDylibIt->needsPatchTable = false;
-    this->swiftPrespecializedDylib = &*cacheDylibIt;
-
-    // sanity check Swift dylib compatibility
-    __block Error err = Error::none();
-    inputFile->mf->withFileLayout(diag, ^(const mach_o::Layout& layout) {
-        mach_o::SplitSeg splitSeg(layout);
-
-        if ( !splitSeg.isV2() )
-            err = Error("Swift prespecialized dylib must use split seg V2");
-    });
-    if ( !inputFile->mf->hasChainedFixups() )
-        err = Error("Swift prespecialized dylib must use chained fixups");
-
-    return std::move(err);
 }
 
 // This is phase 4 of the build() process. It takes the inputs and Optimizers
@@ -587,12 +560,6 @@ Error SharedCacheBuilder::runDylibPasses()
     Timer::AggregateTimer aggregateTimerOwner(this->config);
     auto& aggregateTimer = aggregateTimerOwner;
 
-    // Because blocks...
-    std::vector<const CacheDylib*> builderCacheDylibsOwner;
-    auto& builderCacheDylibs = builderCacheDylibsOwner;
-    for ( const CacheDylib& cacheDylib : this->cacheDylibs )
-        builderCacheDylibs.push_back(&cacheDylib);
-
     Error err = parallel::forEach(this->cacheDylibs, ^(size_t index, CacheDylib& cacheDylib) {
         Diagnostics diag;
 
@@ -610,15 +577,6 @@ Error SharedCacheBuilder::runDylibPasses()
             return Error("%s", diag.errorMessageCStr());
 
         cacheDylib.updateSymbolTables(diag, this->config, aggregateTimer);
-        if ( diag.hasError() )
-            return Error("%s", diag.errorMessageCStr());
-
-        std::vector<Error> symbolErrors = cacheDylib.calculateBindTargets(diag, this->config, aggregateTimer, builderCacheDylibs,
-                                                                          dylibPatchInfo);
-        if ( !symbolErrors.empty() ) {
-            for ( const Error& symbolErr : symbolErrors )
-                this->errors.push_back(symbolErr.message());
-        }
         if ( diag.hasError() )
             return Error("%s", diag.errorMessageCStr());
 
@@ -687,7 +645,7 @@ Error SharedCacheBuilder::postDylibEmitChunks()
     }
 
     this->emitCacheDylibsTrie();
-    if ( Error error = this->emitPatchTable(); error.hasError() )
+    if ( Error error = this->emitPatchTable() )
         return error;
 
     this->emitFunctionVariants();
@@ -739,7 +697,6 @@ Error SharedCacheBuilder::postDylibEmitChunks()
 // Outputs: final emitted data in the sub caches
 Error SharedCacheBuilder::finalize()
 {
-
     // Do objc very late, as it adds segments to the mach-o, which aren't in sync with
     // the segments on the CacheDylib
     this->addObjcSegments();
@@ -822,73 +779,101 @@ void SharedCacheBuilder::categorizeInputs()
     Stats        stats(this->config);
     Timer::Scope timedScope(this->config, "categorizeInputs time");
 
-    for ( InputFile& inputFile : this->allInputFiles ) {
-        if ( inputFile.mf == nullptr ) continue;
+    struct Chunk
+    {
+        std::vector<CacheDylib>                         cacheDylibs;
+        std::vector<InputFile*>                         exeInputFiles;
+        std::vector<InputFile*>                         nonCacheDylibInputFiles;
+    };
 
-        // only process valid images
-        if ( ((Header*)inputFile.mf)->isDyldManaged() ) {
-            // don't try to validate kernel or firmware mach-o binaries
-            Image image(inputFile.mf, inputFile.size, Image::MappingKind::wholeSliceMapped);
-            if ( mach_o::Error err = image.validate() ) {
-                inputFile.addError(Error("%s", err.message()));
-                continue;
-            }
-        }
+    mapReduce(std::span(allInputFiles), 32, ^(size_t i, Chunk& chunk, std::span<InputFile> files){
+        for ( InputFile& inputFile : files ) {
+            if ( inputFile.mf == nullptr ) continue;
 
-        if ( inputFile.mf->isDylib() || inputFile.mf->isDyld() ) {
-            auto failureHandler = ^(const char* format, ...) __attribute__((format(printf, 1, 2))) {
-                char*   output_string;
-                va_list list;
-                va_start(list, format);
-                vasprintf(&output_string, format, list);
-                va_end(list);
-                inputFile.addError(Error("%s", (const char*)output_string));
-                free(output_string);
-            };
-
-            std::string_view installName = ((const Header*)inputFile.mf)->installName();
-            std::string_view dylibPath = inputFile.path;
-            if ( (installName != dylibPath) && ((this->options.platform == Platform::macOS) || startsWith(dylibPath, "/System/Cryptexes/OS/")) ) {
-                // We now typically require that install names and paths match.  However symlinks may allow us to bring in a path which
-                // doesn't match its install name.
-                // For example:
-                //   /usr/lib/libstdc++.6.0.9.dylib is a real file with install name /usr/lib/libstdc++.6.dylib
-                //   /usr/lib/libstdc++.6.dylib is a symlink to /usr/lib/libstdc++.6.0.9.dylib
-                // So long as we add both paths (with one as an alias) then this will work, even if dylibs are removed from disk
-                // but the symlink remains.
-                // Apply the same symlink crawling for dylibs that will install their contents to Cryptex paths but will have
-                // install names with the cryptex paths removed.
-                char resolvedSymlinkPath[PATH_MAX];
-                if ( fileSystem.getRealPath(installName.data(), resolvedSymlinkPath) ) {
-                    if ( resolvedSymlinkPath == dylibPath ) {
-                        // Symlink is the install name and points to the on-disk dylib
-                        //fprintf(stderr, "Symlink works: %s == %s\n", inputFile.path, installName.c_str());
-                        dylibPath = installName;
-                    }
+            // only process valid images
+            if ( ((Header*)inputFile.mf)->isDyldManaged() ) {
+                // don't try to validate kernel or firmware mach-o binaries
+                Image image(inputFile.mf, inputFile.size, Image::MappingKind::wholeSliceMapped);
+                if ( mach_o::Error err = image.validate() ) {
+                    inputFile.addError(Error("%s", err.message()));
+                    continue;
                 }
             }
 
-            if ( !inputFile.forceNotCacheEligible && inputFile.mf->canBePlacedInDyldCache(dylibPath.data(), true /* check objc */, failureHandler) ) {
-                CacheDylib cacheDylib(inputFile);
-                this->cacheDylibs.push_back(std::move(cacheDylib));
+            if ( inputFile.mf->isDylib() || inputFile.mf->isDyld() ) {
+                auto failureHandler = ^(const char* format, ...) __attribute__((format(printf, 1, 2))) {
+                    char*   output_string;
+                    va_list list;
+                    va_start(list, format);
+                    vasprintf(&output_string, format, list);
+                    va_end(list);
+                    inputFile.addError(Error("%s", (const char*)output_string));
+                    free(output_string);
+                };
+
+                std::string_view installName = ((const Header*)inputFile.mf)->installName();
+                std::string_view dylibPath = inputFile.path;
+                if ( (installName != dylibPath) && ((this->options.platform == Platform::macOS) || startsWith(dylibPath, "/System/Cryptexes/OS/")) ) {
+                    // We now typically require that install names and paths match.  However symlinks may allow us to bring in a path which
+                    // doesn't match its install name.
+                    // For example:
+                    //   /usr/lib/libstdc++.6.0.9.dylib is a real file with install name /usr/lib/libstdc++.6.dylib
+                    //   /usr/lib/libstdc++.6.dylib is a symlink to /usr/lib/libstdc++.6.0.9.dylib
+                    // So long as we add both paths (with one as an alias) then this will work, even if dylibs are removed from disk
+                    // but the symlink remains.
+                    // Apply the same symlink crawling for dylibs that will install their contents to Cryptex paths but will have
+                    // install names with the cryptex paths removed.
+                    char resolvedSymlinkPath[PATH_MAX];
+                    if ( fileSystem.getRealPath(installName.data(), resolvedSymlinkPath) ) {
+                        if ( resolvedSymlinkPath == dylibPath ) {
+                            // Symlink is the install name and points to the on-disk dylib
+                            //fprintf(stderr, "Symlink works: %s == %s\n", inputFile.path, installName.c_str());
+                            dylibPath = installName;
+                        }
+                    }
+                }
+
+                if ( !inputFile.forceNotCacheEligible && inputFile.mf->canBePlacedInDyldCache(dylibPath.data(), true /* check objc */, failureHandler) ) {
+                    CacheDylib cacheDylib(inputFile);
+                    chunk.cacheDylibs.push_back(std::move(cacheDylib));
+                }
+                else {
+                    chunk.nonCacheDylibInputFiles.push_back(&inputFile);
+                }
+                continue;
             }
-            else {
-                this->nonCacheDylibInputFiles.push_back(&inputFile);
+
+            if ( inputFile.mf->isDynamicExecutable() ) {
+                auto failureHandler = ^(const char* reason) {
+                    inputFile.addError(Error("%s", reason));
+                };
+                if ( inputFile.mf->canHavePrebuiltExecutableLoader(options.platform, inputFile.path, failureHandler) ) {
+                    chunk.exeInputFiles.push_back(&inputFile);
+                }
+
+                continue;
             }
-            continue;
+        }
+    }, ^(std::span<Chunk> chunks) {
+        size_t cacheDylibsSize = 0;
+        size_t nonCacheSize = 0;
+        size_t exeSize = 0;
+        for ( Chunk& chunk : chunks ) {
+            cacheDylibsSize += chunk.cacheDylibs.size();
+            nonCacheSize += chunk.nonCacheDylibInputFiles.size();
+            exeSize += chunk.exeInputFiles.size();
         }
 
-        if ( inputFile.mf->isDynamicExecutable() ) {
-            auto failureHandler = ^(const char* reason) {
-                inputFile.addError(Error("%s", reason));
-            };
-            if ( inputFile.mf->canHavePrebuiltExecutableLoader(options.platform, inputFile.path, failureHandler) ) {
-                this->exeInputFiles.push_back(&inputFile);
-            }
+        cacheDylibs.reserve(cacheDylibsSize);
+        nonCacheDylibInputFiles.reserve(cacheDylibsSize);
+        exeInputFiles.reserve(exeSize);
 
-            continue;
+        for ( Chunk& chunk : chunks ) {
+            std::move(chunk.cacheDylibs.begin(), chunk.cacheDylibs.end(), std::back_inserter(cacheDylibs));
+            std::move(chunk.nonCacheDylibInputFiles.begin(), chunk.nonCacheDylibInputFiles.end(), std::back_inserter(nonCacheDylibInputFiles));
+            std::move(chunk.exeInputFiles.begin(), chunk.exeInputFiles.end(), std::back_inserter(exeInputFiles));
         }
-    }
+    });
 
     if ( this->config.log.printStats ) {
         stats.add("  inputs: found %lld cache eligible dylibs\n", (uint64_t)this->cacheDylibs.size());
@@ -1093,39 +1078,38 @@ void SharedCacheBuilder::sortDylibs()
 {
     Timer::Scope timedScope(this->config, "sortDylibs time");
 
-    std::sort(this->cacheDylibs.begin(), this->cacheDylibs.end(), [&](const CacheDylib& a, const CacheDylib& b) {
+    auto sortOrder = [this](const CacheDylib& dylib) -> uint64_t {
         // HACK: See addObjCOptimizationsToSubCache() and addObjCTextChunk()
         // We put the libobjc __TEXT first in the sub cache so that offsets from it to OBJC_RO are
         // positive.  But dyld4 and objc HeaderInfo data structures rely on the cache dylibs being
         // sorted by mach_header, and moving objc first breaks the order we determine here.  So hack
         // this too and put libobjc first for now.
-        bool isObjCA = (a.installName == "/usr/lib/libobjc.A.dylib");
-        bool isObjCB = (b.installName == "/usr/lib/libobjc.A.dylib");
-        if ( isObjCA != isObjCB )
-            return isObjCA;
+        if ( endsWith(dylib.installName, "/usr/lib/libobjc.A.dylib") )
+            return (1ULL << 32);
+        // rdar://147457741 (dyld shared cache builder should guarnatee that dyld and libdyld end up in the same split cache)
+        if ( endsWith(dylib.installName, "/usr/lib/system/libdyld.dylib") )
+            return (2ULL << 32);
+        if ( endsWith(dylib.installName, "/usr/lib/dyld") )
+            return (3ULL << 32);
 
-        const auto& orderA = options.dylibOrdering.find(std::string(a.installName));
-        const auto& orderB = options.dylibOrdering.find(std::string(b.installName));
-        bool        foundA = (orderA != options.dylibOrdering.end());
-        bool        foundB = (orderB != options.dylibOrdering.end());
-
-        // Order all __DATA_DIRTY segments specified in the order file first, in
-        // the order specified in the file, followed by any other __DATA_DIRTY
-        // segments in lexicographic order.
-        if ( foundA && foundB )
-            return orderA->second < orderB->second;
-        else if ( foundA )
-            return true;
-        else if ( foundB )
-            return false;
+        // fixed order first
+        if ( const auto& fixedOrder = options.dylibOrdering.find(std::string(dylib.installName)); fixedOrder != options.dylibOrdering.end() )
+            return (4ULL << 32) + fixedOrder->second;
 
         // Sort mac before iOSMac
-        bool isIOSMacA = startsWith(a.installName, "/System/iOSSupport/");
-        bool isIOSMacB = startsWith(b.installName, "/System/iOSSupport/");
-        if ( isIOSMacA != isIOSMacB )
-            return !isIOSMacA;
+        if ( startsWith(dylib.installName, "/System/iOSSupport/") )
+            return (6ULL << 32);
+        return (5ULL << 32);
+    };
 
-        // Finally sort by install name
+    std::sort(this->cacheDylibs.begin(), this->cacheDylibs.end(), [&](const CacheDylib& a, const CacheDylib& b) {
+        uint64_t aOrder = sortOrder(a);
+        uint64_t bOrder = sortOrder(b);
+
+        if ( aOrder != bOrder )
+            return aOrder < bOrder;
+
+        // Finally sort by install name if there's no explicit ordering
         return a.installName < b.installName;
     });
 
@@ -1133,6 +1117,46 @@ void SharedCacheBuilder::sortDylibs()
     uint32_t cacheIndex = 0;
     for ( CacheDylib& cacheDylib : cacheDylibs )
         cacheDylib.cacheIndex = cacheIndex++;
+}
+
+void SharedCacheBuilder::sortExecutables()
+{
+    Timer::Scope timedScope(this->config, "sortExecutables time");
+
+    // make a list of the position on all binaries for anything we don't explicitly sort
+    std::unordered_map<const InputFile*, uint32_t> originalPositions;
+    for ( const InputFile* file : this->exeInputFiles )
+        originalPositions[file] = (uint32_t)originalPositions.size();
+
+    // TODO: Use a file from the perf teams if we have one
+    auto sortOrder = [&originalPositions](const InputFile* file) -> uint64_t {
+        uint32_t originalPos = originalPositions.at(file);
+
+        // Sort some paths first
+        if ( file->path.starts_with("/usr/libexec/") )
+            return (1ULL << 32) + originalPos;
+        if ( file->path.starts_with("/Applications/") )
+            return (2ULL << 32) + originalPos;
+        if ( file->path.starts_with("/private/var/staged_system_apps/") )
+            return (3ULL << 32) + originalPos;
+        if ( file->path.starts_with("/usr/bin/") )
+            return (4ULL << 32) + originalPos;
+
+        // Sort some other paths last
+        if ( file->path.starts_with("/AppleInternal/") )
+            return (62ULL << 32) + originalPos;
+        if ( file->path.starts_with("/usr/local/bin/") )
+            return (63ULL << 32) + originalPos;
+
+        // Any path not in the lists above gets sorted by original position
+        return (32ULL << 32) + originalPos;
+    };
+
+    // Just in case we overflow the buffer in emitExecutablePrebuiltLoaders(), sort the exe files to prioritize
+    // daemons and other common apps
+    std::sort(this->exeInputFiles.begin(), this->exeInputFiles.end(), [&](const InputFile* a, const InputFile* b) {
+        return sortOrder(a) < sortOrder(b);
+    });
 }
 
 Error SharedCacheBuilder::calculateDylibDependents()
@@ -1384,7 +1408,7 @@ struct FoundSymbol
     VMOffset          offsetInDylib;
 };
 
-static FoundSymbol findTargetClass(Diagnostics diag,
+static FoundSymbol findTargetClass(Diagnostics& diag,
                                    const std::vector<CacheDylib>& cacheDylibs,
                                    std::string_view symbolName, std::optional<uint32_t> cacheIndex)
 {
@@ -1428,8 +1452,7 @@ void SharedCacheBuilder::estimateIMPCaches()
         return;
 
     // Only arm64* are is supported by the runtime
-    std::string_view archName = this->options.archs.name();
-    if ( archName != "arm64e" && archName != "arm64")
+    if ( !this->options.arch.sameCpu(mach_o::Architecture::arm64) )
         return;
 
     // Skip everything if the JSON file is empty
@@ -1587,6 +1610,7 @@ void SharedCacheBuilder::estimateIMPCaches()
             bool                    isWeakImport     = false;
         };
 
+        auto& dylibMethodMap = objcIMPCachesOptimizer.methodMap[cacheDylib.installName];
         __block std::vector<BindTarget> bindTargets;
         __block Diagnostics diag;
         cacheDylib.inputMF->withFileLayout(diag, ^(const mach_o::Layout& layout) {
@@ -1677,7 +1701,6 @@ void SharedCacheBuilder::estimateIMPCaches()
                     objc_visitor::Method objcMethod = objcMethodList.getMethod(objcVisitor, i);
 
                     imp_caches::BucketMethod methodKey = {
-                        .installName = cacheDylib.installName,
                         .className = impCacheClass.name,
                         .methodName = objcMethod.getName(objcVisitor),
                         .isInstanceMethod = !impCacheClass.isMetaClass
@@ -1688,7 +1711,7 @@ void SharedCacheBuilder::estimateIMPCaches()
                         &cacheDylib,
                         InputDylibVMAddress(impVMAddr.rawValue())
                     };
-                    objcIMPCachesOptimizer.methodMap[methodKey] = inputDylibLocation;
+                    dylibMethodMap[methodKey] = inputDylibLocation;
                 }
             }
 
@@ -1753,7 +1776,6 @@ void SharedCacheBuilder::estimateIMPCaches()
                         objc_visitor::Method objcMethod = objcMethodList.getMethod(objcVisitor, i);
 
                         imp_caches::BucketMethod methodKey = {
-                            .installName = cacheDylib.installName,
                             .className = impCacheCategory.cls->name,
                             .methodName = objcMethod.getName(objcVisitor),
                             .isInstanceMethod = true
@@ -1763,7 +1785,7 @@ void SharedCacheBuilder::estimateIMPCaches()
                             &cacheDylib,
                             InputDylibVMAddress(impVMAddr.rawValue())
                         };
-                        objcIMPCachesOptimizer.methodMap[methodKey] = inputDylibLocation;
+                        dylibMethodMap[methodKey] = inputDylibLocation;
                     }
                 }
 
@@ -1775,7 +1797,6 @@ void SharedCacheBuilder::estimateIMPCaches()
                         objc_visitor::Method objcMethod = objcMethodList.getMethod(objcVisitor, i);
 
                         imp_caches::BucketMethod methodKey = {
-                            .installName = cacheDylib.installName,
                             .className = impCacheCategory.cls->name,
                             .methodName = objcMethod.getName(objcVisitor),
                             .isInstanceMethod = false
@@ -1785,7 +1806,7 @@ void SharedCacheBuilder::estimateIMPCaches()
                             &cacheDylib,
                             InputDylibVMAddress(impVMAddr.rawValue())
                         };
-                        objcIMPCachesOptimizer.methodMap[methodKey] = inputDylibLocation;
+                        dylibMethodMap[methodKey] = inputDylibLocation;
                     }
                 }
             }
@@ -1800,6 +1821,10 @@ void SharedCacheBuilder::estimateIMPCaches()
     // We should probably keep the piece here to walk the classes as that can perhaps give us a good estimate of the size of the IMP caches
     // themselves, minus the strings which need their own buffer
     this->objcIMPCachesOptimizer.builder->buildImpCaches();
+
+    for ( const std::string& warning : this->objcIMPCachesOptimizer.builder->diags.warnings() ) {
+        this->warning("IMP caches: %s", warning.data());
+    }
 
     // Push all the IMP cache selectors in to the main selectors buffer.
     // We could try have an IMP cache selectors buffer and a regular selectors buffer, but that complicates
@@ -1830,6 +1855,7 @@ void SharedCacheBuilder::estimateIMPCaches()
 
     // Add space for the IMP caches themselves
     this->objcIMPCachesOptimizer.dylibIMPCaches.resize(dylibs.size());
+    size_t discardedCaches = 0;
     for ( uint32_t dylibIndex = 0; dylibIndex != dylibs.size(); ++dylibIndex ) {
         imp_caches::Dylib& dylib = dylibs[dylibIndex];
         ObjCIMPCachesOptimizer::IMPCacheMap& dylibIMPCaches = objcIMPCachesOptimizer.dylibIMPCaches[dylibIndex];
@@ -1837,6 +1863,24 @@ void SharedCacheBuilder::estimateIMPCaches()
             std::optional<imp_caches::IMPCache> impCache = this->objcIMPCachesOptimizer.builder->getIMPCache(dylibIndex, cls.name, cls.isMetaClass);
             if ( !impCache.has_value() )
                 continue;
+
+            // rdar://147219191 (Selector bucket overflows in IMP caches result in malformed tables)
+            // validate selector offsets point to matching buckets
+            bool discard = false;
+            for ( uint32_t slot = 0; slot < impCache->buckets.size(); ++slot ) {
+                const imp_caches::Bucket& bucket = impCache->buckets[slot];
+                if ( !bucket.isEmptyBucket ) {
+                    uint32_t expectedSlot = (bucket.selOffset >> impCache->cache_shift) & impCache->cache_mask;
+                    if ( expectedSlot != slot ) {
+                        discard = true;
+                        break;
+                    }
+                }
+            }
+            if ( discard ) {
+                ++discardedCaches;
+                continue;
+            }
 
             VMOffset currentOffset((uint64_t)this->objcIMPCachesOptimizer.impCachesTotalByteSize);
             assert((this->objcIMPCachesOptimizer.impCachesTotalByteSize % 8) == 0);
@@ -1847,6 +1891,10 @@ void SharedCacheBuilder::estimateIMPCaches()
             ObjCIMPCachesOptimizer::IMPCacheAndOffset impCacheAndOffset = { std::move(impCache).value(), currentOffset };
             dylibIMPCaches[classKey] = std::move(impCacheAndOffset);
         }
+    }
+
+    if ( discardedCaches != 0 ) {
+        this->warning("[ERROR] discarded IMP caches: %lu", discardedCaches);
     }
 
     if ( this->config.log.printStats ) {
@@ -2444,7 +2492,10 @@ static uint32_t hashTableSize(uint32_t maxElements, uint32_t perElementData)
     uint32_t elementsWithPadding = maxElements * 11 / 10; // if close to power of 2, perfect hash may fail, so don't get within 10% of that
     uint32_t powTwoCapacity      = 1 << (32 - __builtin_clz(elementsWithPadding - 1));
     uint32_t headerSize          = 4 * (8 + 256);
-    return headerSize + powTwoCapacity / 2 + powTwoCapacity + powTwoCapacity * perElementData;
+    uint32_t totalSize = headerSize + powTwoCapacity / 2 + powTwoCapacity + powTwoCapacity * perElementData;
+
+    // Add in a little extra room for very small tables when we are building unit tests
+    return std::max(totalSize, 4096U);
 }
 
 void SharedCacheBuilder::estimateObjCHashTableSizes()
@@ -2733,103 +2784,16 @@ void SharedCacheBuilder::calculateCacheDylibsTrie()
     }
 }
 
-void SharedCacheBuilder::estimatePatchTableSize()
+void SharedCacheBuilder::initializePatchTableOptimizer()
 {
-    Stats        stats(this->config);
-    Timer::Scope timedScope(this->config, "estimatePatchTableSize time");
-
-    // The patch table consists of a series of arrays.
-    // For each dylib, we have a list of all clients of that dylib
-    // For each dylib we also have a list of used exports
-    // For each client we then have a list of symbols used
-    // And for each list of symbols, we have a list of locations to patch
-    // We need to estimate a patch table based on the above lists
-
-    __block uint32_t bindStringsLength = 0;
-    __block uint32_t numBindTargets = 0;
-    __block uint32_t numBinds = 0;
-    uint32_t numClients = 0;
-    for ( const CacheDylib& cacheDylib : this->cacheDylibs ) {
-        if ( !cacheDylib.needsPatchTable )
-            continue;
-        __block Diagnostics diag;
-        cacheDylib.inputMF->withFileLayout(diag, ^(const mach_o::Layout& layout) {
-            mach_o::Fixups fixups(layout);
-            fixups.forEachBindTarget(diag, true, 0,
-                                     ^(const mach_o::Fixups::BindTargetInfo& info, bool &stop) {
-                ++numBindTargets;
-                bindStringsLength += strlen(info.symbolName) + 1;
-            }, ^(const mach_o::Fixups::BindTargetInfo &info, bool &stop) {
-                ++numBindTargets;
-                bindStringsLength += strlen(info.symbolName) + 1;
-            });
-
-            if ( cacheDylib.inputMF->hasChainedFixups() ) {
-                fixups.withChainStarts(diag, ^(const dyld_chained_starts_in_image* starts) {
-                    fixups.forEachFixupInAllChains(diag, starts, false,
-                                                   ^(mach_o::ChainedFixupPointerOnDisk* fixupLoc,
-                                                     uint64_t fixupSegmentOffset,
-                                                     const dyld_chained_starts_in_segment* segInfo,
-                                                     bool& stop) {
-                        uint32_t bindOrdinal = ~0U;
-                        int64_t  addend = -1;
-                        if ( fixupLoc->isBind(segInfo->pointer_format, bindOrdinal, addend) )
-                            ++numBinds;
-                    });
-                });
-            } else {
-                fixups.forEachBindLocation_Opcodes(diag,
-                                                   ^(uint64_t runtimeOffset, uint32_t segmentIndex,
-                                                     unsigned int targetIndex, bool &stop) {
-                    ++numBinds;
-                }, ^(uint64_t runtimeOffset, uint32_t segmentIndex, unsigned int overrideBindTargetIndex,
-                     bool &stop) {
-                    ++numBinds;
-                });
-            }
-        });
-
-        numClients += (uint32_t)cacheDylib.dependents.size();
-    }
-
-    // Start with the patch header
-    uint64_t size = sizeof(dyld_cache_patch_info_v3);
-
-    // One of these for each dylib
-    size += sizeof(dyld_cache_image_patches_v2) * this->cacheDylibs.size();
-
-    // Estimate that 2/3 of exports are used
-    size += (sizeof(dyld_cache_image_export_v2) * numBindTargets * 2) / 3;
-    size += (bindStringsLength * 2) / 3;
-
-    // 1 entry per client
-    size += sizeof(dyld_cache_image_clients_v2) * numClients;
-
-    // 1 entry per bind target
-    size += sizeof(dyld_cache_patchable_export_v2) * numBindTargets;
-
-    // 1 entry per location we bind to
-    size += sizeof(dyld_cache_patchable_location_v4) * numBinds;
-
-#if BUILDING_CACHE_BUILDER_UNIT_TESTS
-    // HACK: This is temporary, until we have rdar://143965686, as unit tests are often so small their estimate is too low
-    size += 1024;
-#endif
-
-    this->patchTableOptimizer.patchTableTotalByteSize = size;
-    
     // Reserve space for the patch infos, one per dylib
+    // TODO: Just move these to the dylib.  We don't really need them to be owned by the PatchTableOptimizer
     this->patchTableOptimizer.patchInfos.resize(this->cacheDylibs.size());
-
-    if ( this->config.log.printStats ) {
-        stats.add("  patch table estimated size: %lld\n", (uint64_t)this->patchTableOptimizer.patchTableTotalByteSize);
-    }
 }
 
 void SharedCacheBuilder::estimateFunctionVariantsSize()
 {
     this->functionVariantsOptimizer.fvInfoTotalByteSize = sizeof(dyld_cache_function_variant_entry) * 256;  // FIXME
-
 }
 
 void SharedCacheBuilder::estimatePrewarmingSize()
@@ -2937,7 +2901,7 @@ void SharedCacheBuilder::estimateCacheLoadersSize()
     // patch tables, etc.  For now, 20KB/executable seems about right
     // FIXME: Small programs like daemons need just 500 bytes or so, but large /Applications need up to 1MB
     // Come up with a better estimate
-    this->prebuiltLoaderBuilder.executablesLoaderSize = 20_KB * this->exeInputFiles.size();
+    this->prebuiltLoaderBuilder.executablesLoaderSize = 30_KB * this->exeInputFiles.size();
 
     // Estimate the trie size
     // Assume they are all at a high offset
@@ -3114,18 +3078,48 @@ void SharedCacheBuilder::addGlobalOptimizationsToSubCache(SubCache& subCache)
 // anything we need, based on whatever else is already in the SubCache.
 void SharedCacheBuilder::addFinalChunksToSubCache(SubCache& subCache)
 {
-    subCache.addCacheHeaderChunk(this->config, this->cacheDylibs);
-
-    // Add slide info for each DATA/AUTH segment.  Do this after we've added any other DATA*
-    // segments
-    if ( this->config.slideInfo.slideInfoFormat.has_value() )
-        subCache.addSlideInfoChunks();
+    subCache.addCacheHeaderChunk(this->options, this->config, this->cacheDylibs);
 
     // Add a code signature region
     subCache.addCodeSignatureChunk();
+}
 
-    // Finalize the SubCache, by removing any unused regions
-    subCache.removeEmptyRegions();
+static std::optional<Header::SectionInfo> getStubsSection(const DylibSegmentChunk* dylibChunk)
+{
+    if ( dylibChunk == nullptr )
+        return std::nullopt;
+    if ( dylibChunk->kind != Chunk::Kind::dylibText )
+        return std::nullopt;
+
+    const MachOFile* mf = dylibChunk->inputFile->mf;
+    __block std::optional<Header::SectionInfo> stubsSection;
+    ((const Header*)mf)->forEachSection(^(const Header::SectionInfo &sectInfo, bool &stop) {
+        if ( dylibChunk->segmentName != sectInfo.segmentName )
+            return;
+
+        unsigned sectionType = (sectInfo.flags & SECTION_TYPE);
+        if ( sectionType != S_SYMBOL_STUBS )
+            return;
+
+        if ( sectInfo.segmentName != "__TEXT" ) {
+            // stubs aren't in __TEXT.  Give up on this one for now
+            return;
+        }
+
+        if ( mf->isArch("arm64e") ) {
+            // For arm64e, we can only optimize __auth_stubs
+            if ( sectInfo.sectionName != "__auth_stubs" )
+                return;
+        } else {
+            // For non-arm64e, we can only optimize __stubs
+            if ( sectInfo.sectionName != "__stubs" )
+                return;
+        }
+
+        stubsSection = sectInfo;
+    });
+
+    return stubsSection;
 }
 
 // Add stubs Chunk's for every stubs section in the given text subCache
@@ -3139,59 +3133,29 @@ static void addStubsChunks(const std::unordered_map<const InputFile*, CacheDylib
         const DylibSegmentChunk* textChunk = textRegionChunk->isDylibSegmentChunk();
         if ( textChunk == nullptr )
             continue;
-        if ( textChunk->kind != Chunk::Kind::dylibText )
+
+        std::optional<Header::SectionInfo> sectInfo = getStubsSection(textChunk);
+        if ( !sectInfo )
             continue;
 
-        const MachOFile* mf = textChunk->inputFile->mf;
-        ((const Header*)mf)->forEachSection(^(const Header::SectionInfo &sectInfo, bool &stop) {
-            if ( textChunk->segmentName != sectInfo.segmentName )
-                return;
+        // Make a stubs chunk for this stubs section
+        CacheDylib* cacheDylib = fileToDylibMap.at(textChunk->inputFile);
+        StubsChunk* devStubsChunk = &cacheDylib->developmentStubs;
+        StubsChunk* customerStubsChunk = &cacheDylib->customerStubs;
 
-            unsigned sectionType = (sectInfo.flags & SECTION_TYPE);
-            if ( sectionType != S_SYMBOL_STUBS )
-                return;
+        assert(devStubsChunk->segmentName.empty());
+        devStubsChunk->segmentName = sectInfo->segmentName;
+        devStubsChunk->sectionName = sectInfo->sectionName;
+        devStubsChunk->subCacheFileSize = CacheFileSize(sectInfo->size);
+        devStubsChunk->cacheVMSize = CacheVMSize(sectInfo->size);
+        devStubsSubCache.addStubsChunk(devStubsChunk);
 
-            if ( sectInfo.segmentName != "__TEXT" ) {
-                // stubs aren't in __TEXT.  Give up on this one for now
-                return;
-            }
-
-            // Make a stubs chunk for this stubs section
-            CacheDylib* cacheDylib = fileToDylibMap.at(textChunk->inputFile);
-            StubsChunk* devStubsChunk = nullptr;
-            StubsChunk* customerStubsChunk = nullptr;
-
-            if ( mf->isArch("arm64e") ) {
-                // For arm64e, we can only optimize __auth_stubs
-                if ( sectInfo.sectionName == "__auth_stubs" ) {
-                    devStubsChunk       = &cacheDylib->developmentStubs;
-                    customerStubsChunk  = &cacheDylib->customerStubs;
-                }
-            } else {
-                // For non-arm64e, we can only optimize __stubs
-                if ( sectInfo.sectionName == "__stubs" ) {
-                    devStubsChunk       = &cacheDylib->developmentStubs;
-                    customerStubsChunk  = &cacheDylib->customerStubs;
-                }
-            }
-
-            if ( devStubsChunk == nullptr )
-                return;
-
-            assert(devStubsChunk->segmentName.empty());
-            devStubsChunk->segmentName = sectInfo.segmentName;
-            devStubsChunk->sectionName = sectInfo.sectionName;
-            devStubsChunk->subCacheFileSize = CacheFileSize(sectInfo.size);
-            devStubsChunk->cacheVMSize = CacheVMSize(sectInfo.size);
-            devStubsSubCache.addStubsChunk(devStubsChunk);
-
-            assert(customerStubsChunk->segmentName.empty());
-            customerStubsChunk->segmentName = sectInfo.segmentName;
-            customerStubsChunk->sectionName = sectInfo.sectionName;
-            customerStubsChunk->subCacheFileSize = CacheFileSize(sectInfo.size);
-            customerStubsChunk->cacheVMSize = CacheVMSize(sectInfo.size);
-            customerStubsSubCache.addStubsChunk(customerStubsChunk);
-        });
+        assert(customerStubsChunk->segmentName.empty());
+        customerStubsChunk->segmentName = sectInfo->segmentName;
+        customerStubsChunk->sectionName = sectInfo->sectionName;
+        customerStubsChunk->subCacheFileSize = CacheFileSize(sectInfo->size);
+        customerStubsChunk->cacheVMSize = CacheVMSize(sectInfo->size);
+        customerStubsSubCache.addStubsChunk(customerStubsChunk);
     }
 }
 
@@ -3438,6 +3402,11 @@ void SharedCacheBuilder::makeLargeLayoutSubCaches(SubCache* firstSubCache,
                 // Assume the worst in terms of padding, ie, that every segment is preceded by the max
                 // possible number of padding bytes
                 textDataSize += CacheVMSize(segmentInfo.alignment()) + segmentInfo.cacheVMSize;
+
+                // The One Cache stubs will also be included in this limit so account for them too
+                // See addStubsChunks()
+                if ( std::optional<Header::SectionInfo> sectInfo = getStubsSection(&segmentInfo) )
+                    textDataSize += CacheVMSize(sectInfo->size);
             }
 
             // If we exceed the current limit, then the current subCache is complete and we need
@@ -4118,9 +4087,8 @@ static CString getActualSymbolImplDylib(CString symbolName, CString boundDylibNa
     const auto& posi = installNameToDylibMap.find(boundDylibName);
     if ( posi != installNameToDylibMap.end() ) {
         CacheDylib* targetDylib = posi->second;
-        Image       targetImage(targetDylib->inputMF, targetDylib->inputFile->size, Image::MappingKind::wholeSliceMapped);
         Symbol      symbol;
-        if ( targetImage.exportsTrie().hasExportedSymbol(symbolName.c_str(), symbol) ) {
+        if ( targetDylib->inputImage->hasExportsTrie() && targetDylib->inputImage->exportsTrie().hasExportedSymbol(symbolName.c_str(), symbol) ) {
             betterDylib = (const char*)(targetDylib->installName.data()); // FIXME
             uint32_t fvi;
             if (symbol.isFunctionVariant(fvi) ) {
@@ -4148,7 +4116,7 @@ static CString getActualSymbolImplDylib(CString symbolName, CString boundDylibNa
 static void parseGOTs(const CacheDylib* dylib, const DylibSegmentChunk* chunk,
                       std::string_view segmentName, std::string_view sectionName,
                       const std::unordered_map<std::string_view, CacheDylib*>& installNameToDylibMap,
-                      DylibSectionCoalescer::OptimizedSection& dylibOptimizedSection)
+                      OptimizedGOTSection& dylibOptimizedSection)
 {
     __block Diagnostics diag;
 
@@ -4261,9 +4229,6 @@ static void parseGOTs(const CacheDylib* dylib, const DylibSegmentChunk* chunk,
 
     bool hasFunctionVariantFixups = dylib->inputHdr->hasFunctionVariantFixups();
 
-    auto* cacheGotSection = (CoalescedGOTSection*)dylibOptimizedSection.subCacheSection;
-    DylibSectionCoalescer::DylibSectionOffsetToCacheSectionOffset& offsetMap = dylibOptimizedSection.offsetMap;
-
     // Walk the entries in this section
     // File layout so just add the file offset
     const uint8_t* content      = (const uint8_t*)dylib->inputHdr + gotSectionInfo->second.fileOffset;
@@ -4286,9 +4251,8 @@ static void parseGOTs(const CacheDylib* dylib, const DylibSegmentChunk* chunk,
         if ( !isBind ) {
             if ( hasFunctionVariantFixups ) {
                 // see if this rebase is the local of an internal function variant
-                Image image(dylib->inputHdr, dylib->inputFile->size, Image::MappingKind::wholeSliceMapped);
                 uint32_t segIndex = gotSectionInfo->first.segmentIndex;
-                image.functionVariantFixups().forEachFixup(^(mach_o::FunctionVariantFixups::InternalFixup fixupInfo) {
+                dylib->inputImage->functionVariantFixups().forEachFixup(^(mach_o::FunctionVariantFixups::InternalFixup fixupInfo) {
                     if ( fixupInfo.segIndex != segIndex )
                         return;
                     uint64_t segOffset = sourceSectionOffset + gotSectionInfo->second.address - gotSectionInfo->first.vmaddr;
@@ -4299,7 +4263,7 @@ static void parseGOTs(const CacheDylib* dylib, const DylibSegmentChunk* chunk,
                 });
             }
             if ( !targetIsFunctionVariant ) {
-                dylibOptimizedSection.unoptimizedOffsets.insert(sourceSectionOffset);
+                dylibOptimizedSection.addUnoptimizedOffset(sourceSectionOffset);
                 continue;
             }
         }
@@ -4325,7 +4289,7 @@ static void parseGOTs(const CacheDylib* dylib, const DylibSegmentChunk* chunk,
             if ( (bindTarget.libOrdinal > 0) && ((unsigned)bindTarget.libOrdinal <= dependents.size()) ) {
                 targetInstallName = dependents[bindTarget.libOrdinal - 1];
             } else {
-                dylibOptimizedSection.unoptimizedOffsets.insert(sourceSectionOffset);
+                dylibOptimizedSection.addUnoptimizedOffset(sourceSectionOffset);
                 continue;
             }
 
@@ -4343,35 +4307,22 @@ static void parseGOTs(const CacheDylib* dylib, const DylibSegmentChunk* chunk,
             key = { bindTarget.symbolName, targetInstallName, pmd, bindTarget.weakImport, targetIsFunctionVariant };
         }
 
-        int cacheSectionOffset = (int)(cacheGotSection->gotTargetsToOffsets.size() * pointerSize);
-        auto itAndInserted = cacheGotSection->gotTargetsToOffsets.insert({ key, cacheSectionOffset });
-        if ( itAndInserted.second ) {
-            // We inserted the element, so its offset is already valid.  Nothing else to do
-
+        if ( dylibOptimizedSection.addOptimizedOffset(sourceSectionOffset, pointerSize, key) ) {
             if (log) {
                 uint64_t gotOffset = ((uint64_t)pos - (uint64_t)content) - pointerSize;
                 printf("%s[%lld]: %s -> (%s, %s)\n",
                        sectionName.data(), gotOffset, dylib->inputHdr->installName(),
                        key.targetDylibName.data(), key.targetSymbolName.data());
             }
-        } else {
-            // Debugging only.  If we didn't include the GOT then we saved that many bytes
-            cacheGotSection->savedSpace += pointerSize;
-            cacheSectionOffset = itAndInserted.first->second;
         }
-
-        // Now keep track of this offset in our source dylib as pointing to this offset
-        offsetMap[sourceSectionOffset] = cacheSectionOffset;
 
         // store function-variant index in other map
         if ( targetIsFunctionVariant )
-            cacheGotSection->functionVariantIndexes[key] = { targetDylib->cacheIndex, functionVariantIndex };
+            dylibOptimizedSection.addFunctionVariantInfo(key, { targetDylib->cacheIndex, functionVariantIndex });
     }
 
-    // Record which segment/section we just visited
-    uint32_t segmentIndex = gotSectionInfo->second.segIndex;
-    dylibOptimizedSection.segmentIndex = segmentIndex;
-    dylibOptimizedSection.sectionVMOffsetInSegment = VMOffset(gotSectionInfo->second.address - gotSectionInfo->first.vmaddr);
+    // Record which section we just visited
+    dylibOptimizedSection.setSourceSectionInfo(gotSectionInfo->second);
 }
 
 // This runs after we've assigned Chunk's to SubCache's, but before we've actually
@@ -4426,9 +4377,6 @@ Error SharedCacheBuilder::calculateUniqueGOTs()
             // Skip sections if their segment doesn't exist
             switch ( sectionKind ) {
                 case UniquedGOTKind::regular:
-                    if ( dataConstRegion == nullptr )
-                        continue;
-
                     region = dataConstRegion;
                     segmentName = "__DATA_CONST";
                     sectionName = "__got";
@@ -4436,9 +4384,6 @@ Error SharedCacheBuilder::calculateUniqueGOTs()
                     subCacheUniquedGOTs = &subCache.uniquedGOTsOptimizer.regularGOTs;
                     break;
                 case UniquedGOTKind::authGot:
-                    if ( authConstRegion == nullptr )
-                        continue;
-
                     region = authConstRegion;
                     segmentName = "__AUTH_CONST";
                     sectionName = "__auth_got";
@@ -4446,9 +4391,6 @@ Error SharedCacheBuilder::calculateUniqueGOTs()
                     subCacheUniquedGOTs = &subCache.uniquedGOTsOptimizer.authGOTs;
                     break;
                 case UniquedGOTKind::authPtr:
-                    if ( authConstRegion == nullptr )
-                        continue;
-
                     region = authConstRegion;
                     segmentName = "__AUTH_CONST";
                     sectionName = "__auth_ptr";
@@ -4456,8 +4398,10 @@ Error SharedCacheBuilder::calculateUniqueGOTs()
                     subCacheUniquedGOTs = &subCache.uniquedGOTsOptimizer.authPtrs;
                     break;
             }
+            if ( region == nullptr )
+                continue;
 
-            std::vector<DylibSectionCoalescer::OptimizedSection*> dylibOptimizedSections;
+            std::vector<OptimizedSection*> dylibOptimizedSections;
             dylibOptimizedSections.reserve(region->chunks.size());
             for ( const Chunk* chunk : region->chunks ) {
                 const DylibSegmentChunk* segmentChunk = chunk->isDylibSegmentChunk();
@@ -4468,7 +4412,7 @@ Error SharedCacheBuilder::calculateUniqueGOTs()
                     continue;
 
                 CacheDylib* dylib = fileToDylibMap.at(segmentChunk->inputFile);
-                DylibSectionCoalescer::OptimizedSection* dylibUniquedGOTs = nullptr;
+                OptimizedGOTSection* dylibUniquedGOTs = nullptr;
                 switch ( sectionKind ) {
                     case UniquedGOTKind::regular:
                         dylibUniquedGOTs = &dylib->optimizedSections.gots;
@@ -4482,102 +4426,19 @@ Error SharedCacheBuilder::calculateUniqueGOTs()
                 }
 
                 // Set the dylib GOTs to point to the subCache they'll be uniqued to
-                dylibUniquedGOTs->subCacheSection = subCacheUniquedGOTs;
-                dylibOptimizedSections.push_back(dylibUniquedGOTs);
+                dylibUniquedGOTs->setSubCacheSection(subCacheUniquedGOTs);
 
                 parseGOTs(dylib, segmentChunk, segmentName, sectionName, installNameToDylibMap, *dylibUniquedGOTs);
             }
 
-            if ( subCacheUniquedGOTs->gotTargetsToOffsets.empty() )
+            if ( subCacheUniquedGOTs->empty() )
                 continue;
 
-            // Sort the coalesced GOTs based on the target install name.  We find GOTs in the order we parse
-            // the fixups in the dylibs, but we want the final cache to keep all GOTs for the same target near
-            // each other
-            typedef CoalescedGOTSection::GOTKey Key;
-            std::vector<Key> sortedKeys;
-            sortedKeys.reserve(subCacheUniquedGOTs->gotTargetsToOffsets.size());
-            for ( const auto& keyAndValue : subCacheUniquedGOTs->gotTargetsToOffsets )
-                sortedKeys.push_back(keyAndValue.first);
-
-            std::sort(sortedKeys.begin(), sortedKeys.end(), [](const Key& a, const Key& b) {
-                // sort all function-variants together at end
-                if ( a.isFunctionVariant != b.isFunctionVariant )
-                    return b.isFunctionVariant;
-                // sort first by impl dylib name
-                if ( a.targetDylibName != b.targetDylibName )
-                    return (a.targetDylibName < b.targetDylibName);
-                // if install names are the same, sort by symbol name
-                return a.targetSymbolName < b.targetSymbolName;
-            });
-
-            // Rewrite entries from their original offset to the new offset
-            std::unordered_map<uint32_t, uint32_t> oldToNewOffsetMap;
-            for ( uint32_t i = 0; i != sortedKeys.size(); ++i ) {
-                const Key& key = sortedKeys[i];
-                auto it = subCacheUniquedGOTs->gotTargetsToOffsets.find(key);
-                assert(it != subCacheUniquedGOTs->gotTargetsToOffsets.end());
-
-                uint32_t newCacheSectionOffset = i * pointerSize;
-
-                // Record the offset mapping for updating the dylibs
-                oldToNewOffsetMap[it->second] = newCacheSectionOffset;
-
-                const bool log = false;
-                if ( log ) {
-                    printf("%s[%d]: %s\n", sectionName.data(), newCacheSectionOffset, key.targetSymbolName.data());
-                }
-
-                it->second = newCacheSectionOffset;
-            }
-
-            // Also rewrite entries in each dylib
-            for ( DylibSectionCoalescer::OptimizedSection* dylibOptimizedSection : dylibOptimizedSections ) {
-                for ( auto& keyAndCacheOffset : dylibOptimizedSection->offsetMap ) {
-                    auto it = oldToNewOffsetMap.find(keyAndCacheOffset.second);
-                    assert(it != oldToNewOffsetMap.end());
-                    keyAndCacheOffset.second = it->second;
-                }
-            }
-
-            // Add the new chunks to the subCache
-            switch ( sectionKind ) {
-                case UniquedGOTKind::regular:
-                    subCache.uniquedGOTs                    = std::make_unique<UniquedGOTsChunk>();
-                    subCache.uniquedGOTs->cacheVMSize       = CacheVMSize((uint64_t)subCacheUniquedGOTs->gotTargetsToOffsets.size() * pointerSize);
-                    subCache.uniquedGOTs->subCacheFileSize  = CacheFileSize((uint64_t)subCacheUniquedGOTs->gotTargetsToOffsets.size() * pointerSize);
-
-                    region->chunks.push_back(subCache.uniquedGOTs.get());
-
-                    subCache.uniquedGOTsOptimizer.regularGOTs.cacheChunk                    = subCache.uniquedGOTs.get();
-                    break;
-                case UniquedGOTKind::authGot:
-                    subCache.uniquedAuthGOTs                    = std::make_unique<UniquedGOTsChunk>();
-                    subCache.uniquedAuthGOTs->cacheVMSize       = CacheVMSize((uint64_t)subCacheUniquedGOTs->gotTargetsToOffsets.size() * pointerSize);
-                    subCache.uniquedAuthGOTs->subCacheFileSize  = CacheFileSize((uint64_t)subCacheUniquedGOTs->gotTargetsToOffsets.size() * pointerSize);
-
-                    region->chunks.push_back(subCache.uniquedAuthGOTs.get());
-
-                    subCache.uniquedGOTsOptimizer.authGOTs.cacheChunk                    = subCache.uniquedAuthGOTs.get();
-                    break;
-                case UniquedGOTKind::authPtr:
-                    subCache.uniquedAuthPtrs                    = std::make_unique<UniquedGOTsChunk>();
-                    subCache.uniquedAuthPtrs->cacheVMSize       = CacheVMSize((uint64_t)subCacheUniquedGOTs->gotTargetsToOffsets.size() * pointerSize);
-                    subCache.uniquedAuthPtrs->subCacheFileSize  = CacheFileSize((uint64_t)subCacheUniquedGOTs->gotTargetsToOffsets.size() * pointerSize);
-
-                    region->chunks.push_back(subCache.uniquedAuthPtrs.get());
-
-                    subCache.uniquedGOTsOptimizer.authPtrs.cacheChunk                    = subCache.uniquedAuthPtrs.get();
-                    break;
-            }
+            subCacheUniquedGOTs->finalize(pointerSize, sectionName, config, subCache, *region);
 
             if ( this->config.log.printStats ) {
-                uint64_t totalSourceGOTs = 0;
-                for ( DylibSectionCoalescer::OptimizedSection* dylibOptimizedSection : dylibOptimizedSections ) {
-                    totalSourceGOTs += dylibOptimizedSection->offsetMap.size();
-                }
                 stats.add("  got uniquing: uniqued %lld %s GOTs to %lld GOTs\n",
-                          totalSourceGOTs, kindName, (uint64_t)subCacheUniquedGOTs->gotTargetsToOffsets.size());
+                          subCacheUniquedGOTs->numSourceGOTs(), kindName, subCacheUniquedGOTs->numCacheGOTs());
             }
         }
     }
@@ -4655,6 +4516,11 @@ void SharedCacheBuilder::sortSubCacheSegments()
     };
 
     auto tproConstSortOrder = [](const Chunk* a, const Chunk* b) -> bool {
+        // Sort uniqued GOTs before dylib TPRO_CONST.  This puts the uniqued
+        // GOTs before the libdyld TPRO_CONST, but should still be on the same page
+        if ( a->sortOrder() != b->sortOrder() )
+            return a->sortOrder() < b->sortOrder();
+
         const DylibSegmentChunk* dylibA = a->isTPROChunk();
         const DylibSegmentChunk* dylibB = b->isTPROChunk();
         // Note this shouldn't be possible, but best to be safe and avoid asserting
@@ -4830,7 +4696,7 @@ void SharedCacheBuilder::calculateCodeSignatureSize()
 
 void SharedCacheBuilder::printSubCaches() const
 {
-    const bool printSegments = this->config.log.printDebug;
+    const bool printSegments = this->config.log.printDebugCacheLayout;
 
     if ( !this->config.log.printStats )
         return;
@@ -5327,7 +5193,6 @@ Error SharedCacheBuilder::allocateSubCacheBuffers()
         const Region& lastRegion = subCache.regions.back();
         uint64_t      bufferSize = (lastRegion.subCacheFileOffset + lastRegion.subCacheFileSize).rawValue();
 
-#if SUPPORT_CACHE_BUILDER_MEMORY_BUFFERS
         // The MRM builder has no file system, so use an in-memory buffer
         vm_address_t fullAllocatedBuffer;
         if ( kern_return_t kr = vm_allocate(mach_task_self(), &fullAllocatedBuffer, bufferSize, VM_FLAGS_ANYWHERE); kr != 0 ) {
@@ -5337,47 +5202,6 @@ Error SharedCacheBuilder::allocateSubCacheBuffers()
         uint8_t *buffer = (uint8_t*)fullAllocatedBuffer;
         subCache.buffer     = buffer;
         subCache.bufferSize = bufferSize;
-#else
-        char pathTemplate[] = "/tmp/temp.XXXXXX";
-        int  fd             = mkstemp(pathTemplate);
-        if ( fd == -1 ) {
-            // Failed to create the file
-            return Error("could not create shared cache file because: %s", strerror(errno));
-        }
-
-        // Resize the file
-        if ( int result = ftruncate(fd, bufferSize); result == -1 ) {
-            // Failed to resize to the space we need
-            return Error("could not truncate shared cache file because: %s", strerror(errno));
-        }
-
-        void* buffer = mmap(nullptr, (vm_size_t)bufferSize, PROT_READ | PROT_WRITE, MAP_FILE | MAP_SHARED, fd, 0);
-        if ( buffer == MAP_FAILED ) {
-            // Failed to mmap the file
-            return Error("could not mmap shared cache file because: %s", strerror(errno));
-        }
-
-        // TODO: It would be great to unlink the file, so that it won't be there on disk if the builder crashes
-#if 0
-        // Unlink the file.  This way, it'll be removed if we crash
-        if ( int result = unlinkat(fd, pathTemplate, 0) ) {
-            // Failed to unlink the file
-            return Error("could not unlink shared cache file because: %s", strerror(errno));
-        }
-
-        // Close the file as we don't need it now that we have the mmapped buffer
-        if ( int result = close(fd) ) {
-            // Failed to close the file
-            return Error("could not close shared cache file because: %s", strerror(errno));
-        }
-#endif
-
-        subCache.buffer     = (uint8_t*)buffer;
-        subCache.bufferSize = bufferSize;
-        subCache.fd         = fd;
-        subCache.tempPath   = pathTemplate;
-
-#endif // SUPPORT_CACHE_BUILDER_MEMORY_BUFFERS
 
         if ( log ) {
             this->config.log.log("SubCache[%d] allocated (%p..%p)\n",
@@ -5419,7 +5243,7 @@ Error SharedCacheBuilder::allocateSubCacheBuffers()
     }
 
     // Add a watchpoint for anything we need to debug
-#if DEBUG
+#if 0
     {
         CacheVMAddress vmAddrToWatch(0x00007FFB40FB4D58ULL);
         for ( const SubCache& subCache : this->subCaches ) {
@@ -5433,6 +5257,31 @@ Error SharedCacheBuilder::allocateSubCacheBuffers()
                         continue;
                     VMOffset offsetInChunk = vmAddrToWatch - chunk->cacheVMAddress;
                     uint8_t* addrToWatch = chunk->subCacheBuffer + offsetInChunk.rawValue();
+                    printf("watchpoint set expression -w w -s 8 -- %p\n", addrToWatch);
+                    printf("");
+                }
+            }
+        }
+    }
+#endif
+
+
+    // Add a watchpoint for anything we need to debug
+#if 0
+    {
+        CacheFileOffset fileOffsetToWatch(0x0012bc0ULL);
+        std::string_view suffixToWatch = ".01";
+        for ( const SubCache& subCache : this->subCaches ) {
+            if ( subCache.fileSuffix != suffixToWatch )
+                continue;
+            for ( const Region& region : subCache.regions ) {
+                for ( const Chunk* chunk : region.chunks ) {
+                    if ( fileOffsetToWatch < chunk->subCacheFileOffset )
+                        continue;
+                    if ( fileOffsetToWatch >= (chunk->subCacheFileOffset + chunk->subCacheFileSize) )
+                        continue;
+                    uint64_t offsetInChunk = fileOffsetToWatch.rawValue() - chunk->subCacheFileOffset.rawValue();
+                    uint8_t* addrToWatch = chunk->subCacheBuffer + offsetInChunk;
                     printf("watchpoint set expression -w w -s 8 -- %p\n", addrToWatch);
                     printf("");
                 }
@@ -5491,7 +5340,6 @@ void SharedCacheBuilder::setupDylibLinkedit()
 
                 assert(segment.subCacheFileSize.rawValue() == 0);
                 segment.subCacheFileSize = region->subCacheFileSize;
-
             }
         }
 
@@ -5594,6 +5442,40 @@ void SharedCacheBuilder::setupSplitSegAdjustors()
 
         cacheDylib.adjustor = std::make_unique<DylibSegmentsAdjustor>(std::move(movedSegments), std::move(movedLinkeditChunks), nlistInfo);
 
+        return Error();
+    });
+
+    assert(!err.hasError());
+
+    // Now that we have an adjustor, use it to adjust the bindTargets
+    err = parallel::forEach(this->cacheDylibs, ^(size_t index, CacheDylib& cacheDylib) {
+        for ( CacheDylib::BindTarget& bindTarget : cacheDylib.bindTargets ) {
+            // Adjust the bind target.  We have a runtime offset for the target input dylib, but we need to know where that runtime Offset will
+            // map to in the target cache dylib
+            switch ( bindTarget.kind ) {
+                case CacheDylib::BindTarget::Kind::absolute:
+                    // Skip these.  They won't change due to shifting the input dylib in to the cache
+                    break;
+                case CacheDylib::BindTarget::Kind::inputImage: {
+                    // Convert from an input dylib offset to the cache dylib offset
+                    CacheDylib::BindTarget::InputImage inputImage = bindTarget.inputImage;
+                    InputDylibVMAddress    targetInputVMAddr = inputImage.targetDylib->inputLoadAddress + inputImage.targetRuntimeOffset;
+                    CacheVMAddress         targetCacheVMAddr = inputImage.targetDylib->adjustor->adjustVMAddr(targetInputVMAddr);
+
+                    // Actually change the bindTarget to reflect the new type
+                    bindTarget.kind = CacheDylib::BindTarget::Kind::cacheImage;
+                    bindTarget.inputImage.~InputImage();
+                    bindTarget.cacheImage = (CacheDylib::BindTarget::CacheImage) {
+                        VMOffset(targetCacheVMAddr - inputImage.targetDylib->cacheLoadAddress),
+                        inputImage.targetDylib, inputImage.isWeakDef,
+                        inputImage.isFunctionVariant, inputImage.functionVariantTableIndex
+                    };
+                    break;
+                }
+                case CacheDylib::BindTarget::Kind::cacheImage:
+                    return Error("Shouldn't see cacheImage fixups at this point");
+            }
+        }
         return Error();
     });
 
@@ -5706,11 +5588,34 @@ void SharedCacheBuilder::adjustObjCCategories()
     }
 }
 
+Error SharedCacheBuilder::calculatePatchTableSize()
+{
+    Stats        stats(this->config);
+    Timer::Scope timedScope(this->config, "calculatePatchTableSize time");
+    
+    PatchTableBuilder& builder = this->patchTableOptimizer.builder;
+    Error err = builder.prepare(this->cacheDylibs, this->patchTableOptimizer.patchInfos);
+    if ( err.hasError() )
+        return err;
+
+    uint64_t patchTableSize = builder.getPatchTableSize();
+
+    auto* patchTableChunk = this->patchTableOptimizer.patchTableChunk;
+    patchTableChunk->cacheVMSize = CacheVMSize(patchTableSize);
+    patchTableChunk->subCacheFileSize = CacheFileSize(patchTableSize);
+
+    if ( this->config.log.printStats ) {
+        stats.add("  patch table: used %lld bytes\n", patchTableSize);
+    }
+    
+    return Error();
+}
+
 Error SharedCacheBuilder::emitPatchTable()
 {
     Stats        stats(this->config);
     Timer::Scope timedScope(this->config, "emitPatchTable time");
-    
+
     // Skip this optimization on simulator until we've qualified it there
     __block PatchTableBuilder::PatchableClassesSet      patchableObjCClasses;
     __block PatchTableBuilder::PatchableSingletonsSet   patchableCFObj2;
@@ -5727,30 +5632,21 @@ Error SharedCacheBuilder::emitPatchTable()
             });
         }
     }
-    
-    PatchTableBuilder builder;
-    Error err = builder.build(this->cacheDylibs, this->patchTableOptimizer.patchInfos,
-                              patchableObjCClasses,
-                              patchableCFObj2,
-                              this->config.layout.cacheBaseAddress);
-    if ( err.hasError() )
-        return err;
-    
-    auto* patchTableChunk = this->patchTableOptimizer.patchTableChunk;
+
+    const auto* patchTableChunk = this->patchTableOptimizer.patchTableChunk;
     uint8_t* buffer = patchTableChunk->subCacheBuffer;
     uint64_t bufferSize = patchTableChunk->subCacheFileSize.rawValue();
     uint64_t patchInfoAddr = patchTableChunk->cacheVMAddress.rawValue();
+
+    PatchTableBuilder& builder = this->patchTableOptimizer.builder;
+    if ( Error error = builder.build(this->cacheDylibs, this->patchTableOptimizer.patchInfos, patchableObjCClasses, patchableCFObj2, this->config.layout.cacheBaseAddress) )
+        return error;
     if ( Error error = builder.write(buffer, bufferSize, patchInfoAddr); error.hasError() )
         return error;
-    
+
     // We don't need the patchInfos, so clear it to save memory
     this->patchTableOptimizer.patchInfos.clear();
 
-    if ( this->config.log.printStats ) {
-        uint64_t patchInfoSize = builder.getPatchTableSize();
-        stats.add("  patch table: used %lld out of %lld bytes of buffer\n", patchInfoSize, bufferSize);
-    }
-    
     return Error();
 }
 
@@ -6483,7 +6379,7 @@ Error SharedCacheBuilder::emitExecutablePrebuiltLoaders()
         KernelArgs       kernArgs(mainMF, { "test.exe" }, {}, {});
         SyscallDelegate  osDelegate;
         osDelegate._mappedOtherDylibs = otherMapping;
-        osDelegate._gradedArchs       = &this->options.archs;
+        osDelegate._gradedArchs       = &this->options.gradedArchs;
         //osDelegate._dyldCache           = dyldCache;
         STACK_ALLOCATOR(alloc, 0);
         ProcessConfig      processConfig(&kernArgs, osDelegate, alloc);
@@ -6492,7 +6388,7 @@ Error SharedCacheBuilder::emitExecutablePrebuiltLoaders()
         RuntimeState*      statePtr = &state;
         Diagnostics        launchDiag;
 
-        processConfig.reset(mainMF, exeFile->path.c_str(), nullptr);
+        processConfig.reset(mainMF, exeFile->path.c_str(), exeFile->size, nullptr);
         state.resetCachedDylibsArrays(cachedDylibsLoaderSet);
 
         // FIXME: This is terrible and needs to be a real reset method
@@ -6511,6 +6407,12 @@ Error SharedCacheBuilder::emitExecutablePrebuiltLoaders()
             processConfig.dyldCache.objcHeaderInfoROUnslidVMAddr = this->objcOptimizer.headerInfoReadOnlyChunk->cacheVMAddress.rawValue();
             processConfig.dyldCache.objcProtocolClassCacheOffset = objcProtocolClassCacheOffset.rawValue();
             processConfig.dyldCache.unslidLoadAddress = config.layout.cacheBaseAddress.rawValue();
+        }
+
+        // check if main executable is valid mach-o
+        if ( mach_o::Error lerr = state.config.process.mainExecutableHdr->valid(state.config.process.mainExecutableSliceSize) ) {
+            fprintf(stderr, "warning: can't build PrebuiltLoaderSet for '%s': %s\n", exeFile->path.c_str(), lerr.message());
+            return Error();
         }
 
         Loader::LoadOptions::Finder loaderFinder = ^(Diagnostics& diag, Platform plat, const char* loadPath, const dyld4::Loader::LoadOptions& loadOptions) {
@@ -6595,39 +6497,39 @@ Error SharedCacheBuilder::emitExecutablePrebuiltLoaders()
         return Error();
     });
 
+    const PrebuiltLoaderChunk* loaderChunk = this->prebuiltLoaderBuilder.executablesLoaderChunk;
+    const uint64_t loaderBufferSize = loaderChunk->subCacheFileSize.rawValue();
+
     assert(!err.hasError());
     std::map<std::string_view, const dyld4::PrebuiltLoaderSet*> prebuiltsMap;
     uint64_t prebuiltsSpace = 0;
+    uint64_t requiredPrebuiltsSpace = 0;
     for ( uint64_t i = 0; i != this->exeInputFiles.size(); ++i ) {
         const InputFile*                exeFile   = this->exeInputFiles[i];
         const dyld4::PrebuiltLoaderSet* loaderSet = executableLoaders[i];
         if ( loaderSet == nullptr )
             continue;
 
+        uint64_t requiredSpace = alignTo(loaderSet->size(), alignof(dyld4::PrebuiltLoaderSet));
+        requiredPrebuiltsSpace += requiredSpace;
+        if ( (prebuiltsSpace + requiredSpace) > loaderBufferSize ) {
+            // skip this loader if it doesn't fit
+            this->warning("cache buffer too small to hold executable PrebuiltLoaderSet '%s' (size=%lldKB)",
+                          exeFile->path.c_str(), requiredSpace / 1024);
+            continue;
+        }
+
         prebuiltsMap[exeFile->path.c_str()] = loaderSet;
-        prebuiltsSpace += alignTo(loaderSet->size(), alignof(dyld4::PrebuiltLoaderSet));
+        prebuiltsSpace += requiredSpace;
     }
 
-    const PrebuiltLoaderChunk* loaderChunk = this->prebuiltLoaderBuilder.executablesLoaderChunk;
-    uint64_t loaderBufferSize = loaderChunk->subCacheFileSize.rawValue();
+    if ( requiredPrebuiltsSpace != prebuiltsSpace ) {
+        this->warning("cache buffer too small to hold executable PrebuiltLoaderSet (prebuiltLoaderSet size=%lluKB, buffer size=%lldKB)",
+                      requiredPrebuiltsSpace / 1024, loaderBufferSize / 1024);
+    }
 
     if ( this->config.log.printStats ) {
         stats.add("  dyld4 executable Loader's : used %lld out of %lld bytes of buffer\n", prebuiltsSpace, loaderBufferSize);
-    }
-
-    if ( prebuiltsSpace > loaderBufferSize ) {
-        if ( dylibHasMissingDependency ) {
-            // At least one dylib was evicted.  If it was soemthing common, like UIKit/AppKit, then its going to
-            // end up being included in every executable loader and the buffer will overflow
-            this->warning("cache buffer too small to hold executable PrebuiltLoaderSet (prebuiltLoaderSet size=%lluKB, buffer size=%lldKB)",
-                          prebuiltsSpace / 1024, loaderBufferSize / 1024);
-
-            // For now, just empty the map.  That'll let us emit an empty Trie and PBLS
-            prebuiltsMap.clear();
-        } else {
-            return Error("cache buffer too small to hold executable PrebuiltLoaderSet (prebuiltLoaderSet size=%lluKB, buffer size=%lldKB)",
-                         prebuiltsSpace / 1024, loaderBufferSize / 1024);
-        }
     }
 
     // copy all PrebuiltLoaderSets into cache
@@ -7206,10 +7108,10 @@ void SharedCacheBuilder::optimizeTLVs()
     }
 
     // Find _tlv_get_addr function in libdyld.dylib
-    Image libdyldImg((void*)libdyldDylib->inputHdr, 0x40000, Image::MappingKind::wholeSliceMapped);
+    const Image& libdyldImg = *libdyldDylib->inputImage;
 
     Symbol tlvBootstrapSymbol;
-    if ( !libdyldImg.exportsTrie().hasExportedSymbol("__tlv_bootstrap", tlvBootstrapSymbol) ) {
+    if ( !libdyldImg.hasExportsTrie() || !libdyldImg.exportsTrie().hasExportedSymbol("__tlv_bootstrap", tlvBootstrapSymbol) ) {
         this->warning("Could not find '_tlv_get_addr' in libdyld");
         return;
     }
@@ -7445,32 +7347,24 @@ Error SharedCacheBuilder::emitUniquedGOTs()
             // Skip sections if their segment doesn't exist
             switch ( sectionKind ) {
                 case UniquedGOTKind::regular:
-                    if ( dataConstRegion == nullptr )
-                        continue;
-
                     region = dataConstRegion;
                     subCacheUniquedGOTs = &subCache.uniquedGOTsOptimizer.regularGOTs;
                     break;
                 case UniquedGOTKind::authGot:
-                    if ( authConstRegion == nullptr )
-                        continue;
-
                     region = authConstRegion;
                     subCacheUniquedGOTs = &subCache.uniquedGOTsOptimizer.authGOTs;
                     break;
                 case UniquedGOTKind::authPtr:
-                    if ( authConstRegion == nullptr )
-                        continue;
-
                     region = authConstRegion;
                     subCacheUniquedGOTs = &subCache.uniquedGOTsOptimizer.authPtrs;
                     break;
             }
 
-            if ( subCacheUniquedGOTs->cacheChunk == nullptr )
+            if ( region == nullptr )
                 continue;
 
-            UniquedGOTsChunk* subCacheGOTChunk = subCacheUniquedGOTs->cacheChunk->isUniquedGOTsChunk();
+            if ( subCacheUniquedGOTs->empty() )
+                continue;
 
             std::set<const void*> seenFixups;
             std::vector<PatchInfo::GOTInfo> gots;
@@ -7502,36 +7396,38 @@ Error SharedCacheBuilder::emitUniquedGOTs()
                             break;
                     }
 
+                    if ( bindUses.empty() )
+                        continue;
+
                     // For absolute binds, just set the pointers and move on
                     if ( bindTarget.kind == CacheDylib::BindTarget::Kind::absolute ) {
                         for ( const PatchInfo::GOTInfo& got : bindUses ) {
-                            CacheVMAddress gotVMAddr = got.patchInfo.cacheVMAddr;
-                            assert(gotVMAddr >= subCacheGOTChunk->cacheVMAddress);
-                            assert(gotVMAddr < (subCacheGOTChunk->cacheVMAddress + subCacheGOTChunk->cacheVMSize));
-                            VMOffset cacheSectionVMOffset = gotVMAddr - subCacheGOTChunk->cacheVMAddress;
-
-                            const void* fixupLoc = subCacheGOTChunk->subCacheBuffer + cacheSectionVMOffset.rawValue();
+                            CacheVMAddress gotVMAddr = got.useLocation.clientGOT->cacheVMAddress + got.useLocation.clientGOTOffset;
+                            const void* fixupLoc = subCacheUniquedGOTs->gotLocation(gotVMAddr);
+                            uint64_t targetValue = std::get<uint64_t>(got.targetValue);
                             if ( this->config.layout.is64 ) {
-                                *(uint64_t*)fixupLoc = got.targetValue.rawValue();
+                                *(uint64_t*)fixupLoc = targetValue;
                             } else {
-                                *(uint32_t*)fixupLoc = (uint32_t)got.targetValue.rawValue();
+                                *(uint32_t*)fixupLoc = (uint32_t)targetValue;
                             }
                         }
                         continue;
                     }
 
+                    assert(bindTarget.kind == CacheDylib::BindTarget::Kind::cacheImage);
                     gots.insert(gots.end(), bindUses.begin(), bindUses.end());
                 }
             }
 
             // Found all the GOTs/authGOTS for this subCache.  Now we need to emit them
             for ( const PatchInfo::GOTInfo& got : gots ) {
-                CacheVMAddress gotVMAddr = got.patchInfo.cacheVMAddr;
-                assert(gotVMAddr >= subCacheGOTChunk->cacheVMAddress);
-                assert(gotVMAddr < (subCacheGOTChunk->cacheVMAddress + subCacheGOTChunk->cacheVMSize));
-                VMOffset cacheSectionVMOffset = gotVMAddr - subCacheGOTChunk->cacheVMAddress;
+                CacheVMAddress gotVMAddr = got.useLocation.clientGOT->cacheVMAddress + got.useLocation.clientGOTOffset;
 
-                void* rawFixupLoc = subCacheGOTChunk->subCacheBuffer + cacheSectionVMOffset.rawValue();
+                // Function variants don't get emitted right now
+                if ( !subCacheUniquedGOTs->shouldEmitGOT(gotVMAddr) )
+                    continue;
+
+                void* rawFixupLoc = subCacheUniquedGOTs->gotLocation(gotVMAddr);
 
                 // Ignore dupes
                 if ( seenFixups.count(rawFixupLoc) )
@@ -7539,11 +7435,13 @@ Error SharedCacheBuilder::emitUniquedGOTs()
 
                 seenFixups.insert(rawFixupLoc);
 
-                CacheVMAddress targetVMAddr = config.layout.cacheBaseAddress + got.targetValue;
+                const DylibOffset& dylibOffset = std::get<DylibOffset>(got.targetValue);
+                InputDylibVMAddress inputVMAddr = dylibOffset.cacheDylib->inputLoadAddress + dylibOffset.vmOffset;
+                CacheVMAddress targetVMAddr = dylibOffset.cacheDylib->adjustor->adjustVMAddr(inputVMAddr);
                 if ( this->config.layout.is64 ) {
                     uint64_t high8 = 0;
                     uint64_t finalVMAddr = targetVMAddr.rawValue();
-                    if ( !got.patchInfo.authenticated ) {
+                    if ( !got.useLocation.authenticated ) {
                         high8 = (finalVMAddr >> 56);
                         if ( high8 != 0 ) {
                             // Remove high8 from the vmAddr
@@ -7554,16 +7452,16 @@ Error SharedCacheBuilder::emitUniquedGOTs()
                                                 rawFixupLoc,
                                                 CacheVMAddress(finalVMAddr),
                                                 high8,
-                                                got.patchInfo.discriminator,
-                                                got.patchInfo.usesAddressDiversity, got.patchInfo.key,
-                                                got.patchInfo.authenticated);
+                                                got.useLocation.discriminator,
+                                                got.useLocation.usesAddressDiversity, got.useLocation.key,
+                                                got.useLocation.authenticated);
                 } else {
                     Fixup::Cache32::setLocation(this->config.layout.cacheBaseAddress,
                                                 rawFixupLoc,
                                                 CacheVMAddress(targetVMAddr));
                 }
 
-                subCacheGOTChunk->tracker.add(rawFixupLoc);
+                subCacheUniquedGOTs->trackFixup(rawFixupLoc);
             }
         }
     }
@@ -8378,48 +8276,26 @@ void SharedCacheBuilder::emitFunctionVariants()
 {
     // find uniqued GOT slots in each subcache that point to function variants
     for ( SubCache& subCache : this->subCaches ) {
-        // look at regular GOTS
-        for (const auto& fv : subCache.uniquedGOTsOptimizer.regularGOTs.functionVariantIndexes) {
-            uint32_t offsetInGOTSection = subCache.uniquedGOTsOptimizer.regularGOTs.gotTargetsToOffsets.at(fv.first);
-            uint32_t targetDylibIndex   = fv.second.dylibIndex;
+        subCache.uniquedGOTsOptimizer.forEachFunctionVariant(^(const CoalescedGOTSection::FunctionVariantInfo& fv, uint64_t gotVMAddr,
+                                                               dyld3::MachOFile::PointerMetaData pmd) {
+            uint32_t targetDylibIndex = fv.dylibIndex;
             uint64_t fvTableVmAddr;
             uint64_t fvTableVmSize;
             getFunctionVariantTable(this->cacheDylibs[targetDylibIndex], fvTableVmAddr, fvTableVmSize);
             dyld_cache_function_variant_entry entry;
-            entry.fixupLocVmAddr               = subCache.uniquedGOTsOptimizer.regularGOTs.cacheChunk->cacheVMAddress.rawValue() + offsetInGOTSection;
+            entry.fixupLocVmAddr               = gotVMAddr;
             entry.functionVariantTableVmAddr   = fvTableVmAddr;
             entry.functionVariantTableSizeDiv4 = fvTableVmSize/4;
             entry.dylibHeaderVmAddr            = this->cacheDylibs[targetDylibIndex].cacheLoadAddress.rawValue();
-            entry.variantIndex                 = fv.second.variantIndex;
-            entry.pacAuth                      = false;
-            entry.pacAddress                   = 0;
-            entry.pacKey                       = 0;
-            entry.pacDiversity                 = 0;
+            entry.variantIndex                 = fv.variantIndex;
+            entry.pacAuth                      = pmd.authenticated;
+            entry.pacAddress                   = pmd.usesAddrDiversity;
+            entry.pacKey                       = pmd.key;
+            entry.pacDiversity                 = pmd.diversity;
             entry.targetDylibIndex             = targetDylibIndex;
-            assert(entry.variantIndex == fv.second.variantIndex);
+            assert(entry.variantIndex == fv.variantIndex);
             this->functionVariantsOptimizer.infos.push_back(entry);
-        }
-        // look at authGOTs
-        for (const auto& fv : subCache.uniquedGOTsOptimizer.authGOTs.functionVariantIndexes) {
-            uint32_t offsetInGOTSection = subCache.uniquedGOTsOptimizer.authGOTs.gotTargetsToOffsets.at(fv.first);
-            uint32_t targetDylibIndex   = fv.second.dylibIndex;
-            uint64_t fvTableVmAddr;
-            uint64_t fvTableVmSize;
-            getFunctionVariantTable(this->cacheDylibs[targetDylibIndex], fvTableVmAddr, fvTableVmSize);
-            dyld_cache_function_variant_entry entry;
-            entry.fixupLocVmAddr               = subCache.uniquedGOTsOptimizer.authGOTs.cacheChunk->cacheVMAddress.rawValue() + offsetInGOTSection;
-            entry.functionVariantTableVmAddr   = fvTableVmAddr;
-            entry.functionVariantTableSizeDiv4 = fvTableVmSize/4;
-            entry.dylibHeaderVmAddr            = this->cacheDylibs[targetDylibIndex].cacheLoadAddress.rawValue();
-            entry.variantIndex                 = fv.second.variantIndex;
-            entry.pacAuth                      = true;
-            entry.pacAddress                   = fv.first.pmd.usesAddrDiversity;
-            entry.pacKey                       = fv.first.pmd.key;
-            entry.pacDiversity                 = fv.first.pmd.diversity;
-            entry.targetDylibIndex             = targetDylibIndex;
-            assert(entry.variantIndex == fv.second.variantIndex);
-            this->functionVariantsOptimizer.infos.push_back(entry);
-        }
+        });
     }
 
     // make sure it fits in estimated size
@@ -8582,9 +8458,6 @@ Error SharedCacheBuilder::patchLinkedDylibs(CacheDylib& cacheDylib)
 {
     if ( swiftPrespecializedDylib == nullptr )
         return Error::none();
-
-    Timer::Scope timedScope(this->config, "patchLinkedDylibs time");
-    Timer::AggregateTimer aggregateTimerOwner(this->config);
 
     Diagnostics diag;
     if ( &cacheDylib == swiftPrespecializedDylib ) {
@@ -8778,15 +8651,15 @@ void SharedCacheBuilder::computeCacheHeaders()
 {
     Timer::Scope timedScope(this->config, "computeCacheHeaders time");
 
-    for ( SubCache& subCache : this->subCaches )
-        subCache.writeCacheHeader(this->options, this->config, this->cacheDylibs);
-
-    // Content for the first (main) subCache only
+    // Content for all subcaches
     __block uint32_t osVersion                  = 0;
     __block uint32_t altPlatform                = 0;
     __block uint32_t altOsVersion               = 0;
+
+    // Content for the first (main) subCache only
     CacheVMAddress   dyldInCacheUnslidAddr      = CacheVMAddress(0ULL);
     CacheVMAddress   dyldInCacheEntryUnslidAddr = CacheVMAddress(0ULL);
+
     {
         // look for libdyld.dylib and record OS verson info into cache header
         for ( const CacheDylib& cacheDylib : this->cacheDylibs ) {
@@ -8814,13 +8687,16 @@ void SharedCacheBuilder::computeCacheHeaders()
         }
     }
 
+    for ( SubCache& subCache : this->subCaches )
+        subCache.writeCacheHeader(this->options, this->config, this->cacheDylibs,
+                                  osVersion, altPlatform, altOsVersion);
+
     // Fill in info for the main caches.  This must be after addCacheHeaderImageInfo().
     for ( SubCache& subCache : this->subCaches ) {
         if ( subCache.isMainCache() )  {
             subCache.addMainCacheHeaderInfo(this->options, this->config,
                                             this->cacheDylibs,
                                             this->totalVMSize, getMaxSlide(),
-                                            osVersion, altPlatform, altOsVersion,
                                             dyldInCacheUnslidAddr, dyldInCacheEntryUnslidAddr,
                                             this->dylibTrieOptimizer,
                                             this->objcOptimizer, this->swiftOptimizer,
@@ -8921,18 +8797,14 @@ void SharedCacheBuilder::getResults(std::vector<CacheBuffer>& results, std::vect
         buffer.bufferSize = subCache.bufferSize;
 
         buffer.cdHash = cdHashToString(subCache.cdHash);
+        if ( this->config.codeSign.mode == CodeSign::Mode::agile )
+            buffer.agilecdHash = cdHashToString(subCache.agilecdHash);
         buffer.uuid   = subCache.uuidString;
 
         buffer.cacheFileSuffix = subCache.fileSuffix;
 
         buffer.usedByCustomerConfig = subCache.shouldKeepCache(false, true);
         buffer.usedByDevelopmentConfig = subCache.shouldKeepCache(true, false);
-
-        // The builder executable also passes back the fd.  This should typically be used instead of the data buffer
-#if !SUPPORT_CACHE_BUILDER_MEMORY_BUFFERS
-        buffer.fd       = subCache.fd;
-        buffer.tempPath = subCache.tempPath;
-#endif
 
         results.push_back(std::move(buffer));
         atlas = std::move(this->atlasData);
@@ -9013,7 +8885,7 @@ std::string SharedCacheBuilder::generateJSONMap(std::string_view disposition,
 
     cacheNode.map["version"].value = "1";
     cacheNode.map["disposition"].value = disposition;
-    cacheNode.map["arch"].value = this->options.archs.name();
+    cacheNode.map["arch"].value = this->options.arch.name();
     cacheNode.map["platform"].value = mach_o::Platform(this->options.platform).name();
     cacheNode.map["base-address"].value = json::hex(baseAddress);
     cacheNode.map["uuid"].value = mainSubCache.uuidString;
@@ -9140,4 +9012,220 @@ void SharedCacheBuilder::debug(const char* installName) const
     }
 
     fprintf(stderr, "Didn't find a dylib with install name: %s\n", installName);
+}
+
+// This name is used only to create a placeholder input file and determine the library order.
+const std::string_view swiftPrespecializedDylibInstallName = "/usr/lib/libswiftPrespecialized.dylib";
+
+bool SharedCacheBuilder::shouldBuildSwiftPrespecializedDylib()
+{
+    if ( options.platform == Platform::driverKit )
+        return false;
+
+    if ( options.platform.isExclaveKit() )
+        return false;
+
+    // build the dylib, only if the order file is defined
+    if ( options.swiftGenericMetadataFile.empty() )
+        return false;
+
+    // check if the metadata builder is available
+#if !BUILDING_CACHE_BUILDER_UNIT_TESTS && !BUILDING_SIM_CACHE_BUILDER
+    if ( swift_externalMetadataBuilder_create == nullptr )
+        return false;
+#endif // !BUILDING_CACHE_BUILDER_UNIT_TESTS
+
+    return true;
+}
+
+Error SharedCacheBuilder::buildSwiftPrespecializedDylibJSON()
+{
+#if !BUILDING_CACHE_BUILDER_UNIT_TESTS && !BUILDING_SIM_CACHE_BUILDER
+    Timer::Scope timedScope(this->config, "buildSwiftPrespecializedDylibJSON time");
+
+    SwiftExternalMetadataBuilder* builder = swift_externalMetadataBuilder_create(options.platform.value(), options.arch.name());
+    if ( !builder )
+        return Error("swift_externalMetadataBuilder_create failed");
+
+    for ( const CacheDylib& dylib : this->cacheDylibs ) {
+        if ( dylib.inputHdr == nullptr ) continue;
+
+        // TODO: rdar://132262275 (dyld shared cache builder should tell Swift Metadata builder also about dyld)
+        if ( dylib.inputHdr->isDylinker() ) continue;
+
+        if ( const char* err = swift_externalMetadataBuilder_addDylib(builder, dylib.inputHdr->installName(),
+                (const struct mach_header*)dylib.inputHdr, dylib.inputFile->size) )
+            return Error("swift_externalMetadataBuilder_addDylib failed: %s", err);
+    }
+
+    if ( const char* err = swift_externalMetadataBuilder_readNamesJSON(builder, options.swiftGenericMetadataFile.c_str()) )
+        return Error("swift_externalMetadataBuilder_readNamesJSON failed: %s", err);
+
+    if ( const char* err = swift_externalMetadataBuilder_buildMetadata(builder) )
+        return Error("swift_externalMetadataBuilder_buildMetadata failed: %s", err);
+
+    if ( const char* json = swift_externalMetadataBuilder_getMetadataJSON(builder) )
+        swiftPrespecializedDylibJSON = json;
+    else
+        return Error("swift_externalMetadataBuilder_getMetadataJSON returned an empty JSON");
+
+    const std::string_view placeholderVersion = R"("platformVersion": "1.0")";
+    // Patch platformVersion if it's 1.0 until rdar://122585868 is fixed
+    if ( auto pos = swiftPrespecializedDylibJSON.find(placeholderVersion);
+            pos != swiftPrespecializedDylibJSON.npos ) {
+
+        __block mach_o::Version32 newMinOS;
+        // determine new deployment target based on dyld's version
+        for ( const InputFile& inputFile : allInputFiles ) {
+            if ( !inputFile.mf )
+                continue;
+
+            if ( !endsWith(inputFile.path, "dyld") )
+                continue;
+
+            ((Header*)inputFile.mf)->platformAndVersions().unzip(^(mach_o::PlatformAndVersions pvs) {
+                if ( pvs.platform == options.platform )
+                    newMinOS = pvs.minOS;
+            });
+            break;
+        }
+
+        if ( newMinOS > mach_o::Version32(1, 0) ) {
+            char verStr[32];
+            newMinOS.toString(verStr);
+            std::string newVersion = "\"platformVersion\": \"";
+            newVersion += verStr;
+            newVersion += "\"";
+
+            swiftPrespecializedDylibJSON.replace(pos, placeholderVersion.size(), newVersion);
+        }
+    }
+
+    swift_externalMetadataBuilder_destroy(builder);
+
+    if ( options.debug ) {
+        std::string path;
+        if ( const char* dir = getenv("TMPDIR") )
+            path = dir;
+        if ( path.empty() )
+            path = "/tmp";
+        path += "/swift-prespecialized.json-XXXXXX";
+
+        int outFileFd = mkstemp(path.data());
+        if ( outFileFd != -1 ) {
+            write(outFileFd, swiftPrespecializedDylibJSON.data(), swiftPrespecializedDylibJSON.size());
+        }
+    }
+#endif // !BUILDING_CACHE_BUILDER_UNIT_TESTS
+
+    return Error::none();
+}
+
+bool SharedCacheBuilder::reserveSwiftPrespecializedInputFile()
+{
+    if ( !shouldBuildSwiftPrespecializedDylib() )
+        return false;
+
+    InputFile inputFile;
+    inputFile.mf = nullptr;
+    inputFile.inode = 0;
+    inputFile.mtime = 0;
+    inputFile.path = swiftPrespecializedDylibInstallName;
+    allInputFiles.push_back(std::move(inputFile));
+    cacheDylibs.push_back(CacheDylib(swiftPrespecializedDylibInstallName));
+    return true;
+}
+
+Error SharedCacheBuilder::createSwiftPrespecializedDylib()
+{
+    if ( !shouldBuildSwiftPrespecializedDylib() )
+        return Error::none();
+
+    if ( Error err = buildSwiftPrespecializedDylibJSON() )
+        return err;
+
+    Timer::Scope timedScope(this->config, "createSwiftPrespecializedDylib time");
+
+    InputFile* inputFile = nullptr;
+    if ( allInputFiles.empty() || allInputFiles.back().path != swiftPrespecializedDylibInstallName )
+        return Error("missing input file placeholder for Swift prespecialized dylib");
+    inputFile = &allInputFiles.back();
+
+    std::vector<const char*> dylibsList;
+    // the dylib list needs to be in order of objc dylibs
+    for ( const CacheDylib* dylib : this->objcOptimizer.objcDylibs )
+        dylibsList.push_back(CString::dup(dylib->installName).c_str());
+
+    // TODO: support in-memory file buffer
+    std::string path;
+    if ( const char* dir = getenv("TMPDIR") )
+        path = dir;
+    if ( path.empty() )
+        path = "/tmp";
+    path += "/libswiftPrespecialized.dylib-XXXXXX";
+
+    int outFileFd = mkstemp(path.data());
+    if ( outFileFd == -1 )
+        return Error("couldn't create a temporary file for Swift prespecialized dylib: %s", (const char*)strerror(errno));
+
+    close(outFileFd);
+    if ( const char* err = ldMakeDylibFromJSON(swiftPrespecializedDylibJSON, dylibsList, path.c_str()) )
+        return Error("%s", err);
+
+    // cleanup dylibs list
+    for ( const char* str : dylibsList )
+        free((void*)str);
+
+    // re-open output file
+    outFileFd = open(path.c_str(), O_RDONLY);
+    if ( outFileFd < 0 )
+        return Error("could not open swift dylib file because: %s", (const char*)strerror(errno));
+
+    struct stat stat_buf;
+    if (  fstat(outFileFd, &stat_buf) == -1 )
+        return Error("could not stat swift dylib file because: %s", (const char*)strerror(errno));
+
+    vm_size_t bufferSize = stat_buf.st_size;
+    void* buffer = mmap(nullptr, bufferSize, PROT_READ, MAP_FILE | MAP_SHARED, outFileFd, 0);
+    if ( buffer == MAP_FAILED ) {
+        // Failed to mmap the file
+        return Error("could not mmap swift dylib file because: %s", (const char*)strerror(errno));
+    }
+
+    Diagnostics diag;
+    uint64_t    sliceOffset = 0;
+    inputFile->mf = MachOFile::compatibleSlice(diag, sliceOffset, inputFile->size, buffer, bufferSize, path.data(),
+                                               this->options.platform, /* isOSBinary */ false,
+                                               this->options.gradedArchs);
+    if ( diag.hasError() )
+        return Error("%s", diag.errorMessageCStr());
+
+    // recreate cache dylib at the reserved slot
+    auto cacheDylibIt = std::find_if(cacheDylibs.begin(), cacheDylibs.end(), [](CacheDylib& dylib) {
+            return dylib.inputHdr == nullptr && dylib.installName == swiftPrespecializedDylibInstallName;
+    });
+    if ( cacheDylibIt == cacheDylibs.end() )
+        return Error("missing cache dylib slot for Swift prespecialized dylib");
+
+    // save previously computed cache index
+    uint32_t index = cacheDylibIt->cacheIndex;
+    // recreate cache dylib with the updated input file
+    *cacheDylibIt = CacheDylib(*inputFile);
+    cacheDylibIt->cacheIndex = index;
+    // rdar://122906481 (Shared cache builder - explicitly model dylibs without a need for a patch table)
+    cacheDylibIt->needsPatchTable = false;
+    this->swiftPrespecializedDylib = &*cacheDylibIt;
+
+    // sanity check Swift dylib compatibility
+    __block Error err = Error::none();
+    inputFile->mf->withFileLayout(diag, ^(const mach_o::Layout& layout) {
+        mach_o::SplitSeg splitSeg(layout);
+
+        if ( !splitSeg.isV2() )
+            err = Error("Swift prespecialized dylib must use split seg V2");
+    });
+    if ( !inputFile->mf->hasChainedFixups() )
+        err = Error("Swift prespecialized dylib must use chained fixups");
+
+    return std::move(err);
 }

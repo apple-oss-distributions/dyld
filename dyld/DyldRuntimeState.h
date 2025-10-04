@@ -32,6 +32,7 @@
 #if !TARGET_OS_EXCLAVEKIT
   #include <os/atomic_private.h>
   #include <os/lock_private.h>
+  #include <sys/kern_memorystatus.h>
 #endif
 #include "Defines.h"
 #include "MachOLoaded.h"
@@ -509,31 +510,72 @@ private:
     const char*                                             identifier = nullptr;    // PseudeDylib name from LC_ID_DYLIB.
 };
 
+struct VIS_HIDDEN AccountingBitmap {
+    using Allocator = lsl::Allocator;
+    AccountingBitmap()                                          = delete;
+    AccountingBitmap(const AccountingBitmap& other)             = default;
+    AccountingBitmap& operator=(const AccountingBitmap& other)  = default;
+    AccountingBitmap(AccountingBitmap&& other)                  = delete;
+    AccountingBitmap& operator=(AccountingBitmap&& other)       = delete;
+    AccountingBitmap(size_t size) : _size(size) {
+        size_t byteSize = ((_size+7)/8);
+        byteSize = ((byteSize + 7) & (-8));
+        void* buffer = MemoryManager::defaultAllocator().malloc(byteSize);
+        bzero(buffer, byteSize);
+        _bitmap = (std::byte*)buffer;
+    }
+    size_t size() const {
+        return _size;
+    }
+    size_t getBitCount() const {
+        assert((uintptr_t)_bitmap%8 == 0);
+        size_t wordCount = (((_size + 63) & (-64))/64);
+        size_t result = 0;
+        for (auto i = 0; i < wordCount; ++i) {
+            result += std::popcount(((uint64_t*)_bitmap)[i]);
+        }
+        return result;
+    }
+
+    void setBit(size_t bit) {
+        assert(bit < _size);
+        std::byte* byte = &_bitmap[bit/8];
+        (*byte) |= (std::byte)(1<<(bit%8));
+    }
+private:
+    // Note _bitmap is never freed as the only client of this lives for the whole process
+    std::byte*              _bitmap     = nullptr;
+    size_t                  _size       = 0;
+};
+
 //
 // Note: need to force vtable ptr auth so that libdyld.dylib from base OS and driverkit use same ABI
 //
 class [[clang::ptrauth_vtable_pointer(process_independent, address_discrimination, type_discrimination)]] RuntimeState
 {
 public:
-    const ProcessConfig&            config;
-    Allocator&                      persistentAllocator;
-    const Loader*                   mainExecutableLoader = nullptr;
-    Vector<ConstAuthLoader>         loaded;
-    Vector<ConstAuthLoader>         delayLoaded;
-    const Loader*                   libSystemLoader      = nullptr;
-    const Loader*                   libdyldLoader        = nullptr;
-    RuntimeLocks&                   locks;
-    dyld4::ProgramVars              vars;
-    LibSystemHelpersWrapper         libSystemHelpers;
-    Vector<InterposeTupleAll>       interposingTuplesAll;
-    Vector<InterposeTupleSpecific>  interposingTuplesSpecific;
-    Vector<InterposeTupleAll>       patchedObjCClasses;
-    Vector<ObjCClassReplacement>    objcReplacementClasses;
-    Vector<InterposeTupleAll>       patchedSingletons;
-    Vector<const char*>             prebuiltLoaderSetRealPaths;
-    size_t                          numSingletonObjectsPatched = 0;
-    uint64_t                        weakDefResolveSymbolCount = 0;
-    WeakDefMap*                     weakDefMap                = nullptr;
+    const ProcessConfig&                            config;
+    Allocator&                                      persistentAllocator;
+    const Loader*                                   mainExecutableLoader = nullptr;
+    Vector<ConstAuthLoader>                         loaded;
+    Vector<ConstAuthLoader>                         delayLoaded;
+    const Loader*                                   libSystemLoader      = nullptr;
+    const Loader*                                   libdyldLoader        = nullptr;
+    RuntimeLocks&                                   locks;
+    dyld4::ProgramVars                              vars;
+    LibSystemHelpersWrapper                         libSystemHelpers;
+    Vector<InterposeTupleAll>                       interposingTuplesAll;
+    Vector<InterposeTupleSpecific>                  interposingTuplesSpecific;
+#if DYLD_FEATURE_MEMORY_ACCOUNTING
+    Vector<std::pair<uint64_t,AccountingBitmap>>    patchedSharedCacheDataConstPages;
+#endif /* DYLD_FEATURE_MEMORY_ACCOUNTING */
+    Vector<InterposeTupleAll>                       patchedObjCClasses;
+    Vector<ObjCClassReplacement>                    objcReplacementClasses;
+    Vector<InterposeTupleAll>                       patchedSingletons;
+    Vector<const char*>                             prebuiltLoaderSetRealPaths;
+    size_t                                          numSingletonObjectsPatched = 0;
+    uint64_t                                        weakDefResolveSymbolCount = 0;
+    WeakDefMap*                                     weakDefMap                = nullptr;
 #if SUPPORT_PREBUILTLOADERS || BUILD_FOR_UNIT_TESTS
     // ObjC maps in the closure
     prebuilt_objc::ObjCSelectorMapOnDisk    objcSelectorMap;
@@ -561,6 +603,9 @@ public:
                                     loaded(alloc), delayLoaded(alloc),
                                     locks(locks),
                                     interposingTuplesAll(alloc), interposingTuplesSpecific(alloc),
+#if DYLD_FEATURE_MEMORY_ACCOUNTING
+                                    patchedSharedCacheDataConstPages(alloc),
+#endif /* DYLD_FEATURE_MEMORY_ACCOUNTING */
                                     patchedObjCClasses(alloc), objcReplacementClasses(alloc),
                                     patchedSingletons(alloc), prebuiltLoaderSetRealPaths(alloc),
 #if !TARGET_OS_EXCLAVEKIT
@@ -627,6 +672,9 @@ public:
     void                        notifyDebuggerUnload(const std::span<const Loader*>& removingLoaders);
     void                        notifyDtrace(const std::span<const Loader*>& newLoaders);
     bool                        libSystemInitialized() const { return _libSystemInitialized; }
+    void                        setLibSystemInitialized() { _libSystemInitialized = true; }
+    bool                        libdyldInitialized() const { return _libdyldInitialized; }
+    void                        setLibdyldInitialized() { _libdyldInitialized = true; }
     void                        partitionDelayLoads(std::span<const Loader*> newLoaders, std::span<const Loader*> rootLoaders, Vector<const Loader*>* newAndNotDelayed=nullptr);
     mach_o::Error               loadInsertedLibraries(dyld3::OverflowSafeArray<Loader*>& topLevelLoaders, const Loader* mainLoader);
 
@@ -648,6 +696,9 @@ public:
     bool                        didSavePrebuiltLoaderSet() const { return _wrotePrebuiltLoaderSet; }
 
     void                        setVMAccountingSuspending(bool mode);
+    void                        increaseJetsamLimit(uint32_t size);
+    uint32_t                    patchedDataConstPageCount() const;
+    void                        recordInDataConstBitmap(uint64_t vmAddress);
     bool                        hasOverriddenCachedDylib() { return _hasOverriddenCachedDylib; }
     void                        setHasOverriddenCachedDylib() { _hasOverriddenCachedDylib = true; }
     bool                        hasOverriddenUnzipperedTwin() { return _hasOverriddenUnzipperedTwin; }
@@ -819,6 +870,7 @@ private:
     bool                            _hasOverriddenUnzipperedTwin    = false;
     bool                            _wrotePrebuiltLoaderSet         = false;
     bool                            _libSystemInitialized           = false;
+    bool                            _libdyldInitialized             = false;
 #if TARGET_OS_IPHONE && !TARGET_OS_SIMULATOR
     bool                            _vmAccountingSuspended    = false;
 #endif // TARGET_OS_IPHONE && !TARGET_OS_SIMULATOR
