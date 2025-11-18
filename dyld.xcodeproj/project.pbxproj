@@ -592,6 +592,78 @@
 		C12D16992B66398800CD716F /* PerfectHash.cpp in Sources */ = {isa = PBXBuildFile; fileRef = C1DDC85125927712005949D1 /* PerfectHash.cpp */; };
 		C12D46B028079633009036F6 /* Utilities.cpp in Sources */ = {isa = PBXBuildFile; fileRef = DE86439327F7BD9E008F714A /* Utilities.cpp */; };
 		C1315E4D2785326B00C83F34 /* IMPCaches.cpp in Sources */ = {isa = PBXBuildFile; fileRef = F98B357924ED745900DE738B /* IMPCaches.cpp */; };
+		C131C6192E3862AD0069DE78 /* Linker.cpp in Sources */ = {isa = PBXBuildFile; fileRef = 2DC4C9CD2B339C0900746DC4 /* Linker.cpp */; };
+		C131C61B2E3862AD0069DE78 /* Atom.cpp in Sources */ = {isa = PBXBuildFile; fileRef = F9A2C20428959350006FE9A0 /* Atom.cpp */; };
+		C131C61C2E3862AD0069DE78 /* Fixup.cpp in Sources */ = {isa = PBXBuildFile; fileRef = F9B53F65289B16A700CEB2C0 /* Fixup.cpp */; };
+		C131C61D2E3862AD0069DE78 /* DynamicAtom.cpp in Sources */ = {isa = PBXBuildFile; fileRef = F9A2C2012894E2D8006FE9A0 /* DynamicAtom.cpp */; };
+		C131C61E2E3862AD0069DE78 /* AtomFileReaderWriter.cpp in Sources */ = {isa = PBXBuildFile; fileRef = C1CBFCDA2A1ED7F00083ACF2 /* AtomFileReaderWriter.cpp */; };
+		C131C61F2E3862AD0069DE78 /* PersistentAtom.cpp in Sources */ = {isa = PBXBuildFile; fileRef = F9A2C1FF28946DE4006FE9A0 /* PersistentAtom.cpp */; };
+		C131C6202E3862AD0069DE78 /* AtomFileConsolidator.cpp in Sources */ = {isa = PBXBuildFile; fileRef = F9A2C2082897A362006FE9A0 /* AtomFileConsolidator.cpp */; };
+		C131C6212E3862AD0069DE78 /* SymbolString.cpp in Sources */ = {isa = PBXBuildFile; fileRef = F9A2C1FD28946CD5006FE9A0 /* SymbolString.cpp */; };
+		C131C6222E3862AD0069DE78 /* AtomSymbolTable.cpp in Sources */ = {isa = PBXBuildFile; fileRef = F9A2C20B2897A862006FE9A0 /* AtomSymbolTable.cpp */; };
+		C131C6232E3862AD0069DE78 /* File.cpp in Sources */ = {isa = PBXBuildFile; fileRef = F9858D4A28CD9A1C00775E0D /* File.cpp */; };
+		C131C6242E3862AD0069DE78 /* Layout.cpp in Sources */ = {isa = PBXBuildFile; fileRef = F9B53F6B289B366400CEB2C0 /* Layout.cpp */; };
+		C131C6252E3862AD0069DE78 /* InputFiles.cpp in Sources */ = {isa = PBXBuildFile; fileRef = F98753D328A1A940005821ED /* InputFiles.cpp */; };
+		C131C6262E3862AD0069DE78 /* Snapshot.cpp in Sources */ = {isa = PBXBuildFile; fileRef = 2DC83BE82D95BB0100A0BC3A /* Snapshot.cpp */; };
+		C131C6272E3862AD0069DE78 /* LibrarySearch.cpp in Sources */ = {isa = PBXBuildFile; fileRef = 2DD37EED2934EED400A37F10 /* LibrarySearch.cpp */; };
+		C131C6282E3862AD0069DE78 /* Relocations.cpp in Sources */ = {isa = PBXBuildFile; fileRef = F98753DB28A47463005821ED /* Relocations.cpp */; };
+		C131C6292E3862AD0069DE78 /* Logging.cpp in Sources */ = {isa = PBXBuildFile; fileRef = 2D9F94DD28DB77F10087EFEC /* Logging.cpp */; };
+		C131C62A2E3862AD0069DE78 /* ScopedTimer.cpp in Sources */ = {isa = PBXBuildFile; fileRef = C1E56D3A2926E2C4009E9868 /* ScopedTimer.cpp */; };
+		C131C62B2E3862AD0069DE78 /* DependencyInfo.cpp in Sources */ = {isa = PBXBuildFile; fileRef = C18A62BA2992D2D300E4A91E /* DependencyInfo.cpp */; };
+		C131C62C2E3862AD0069DE78 /* TraceFile.cpp in Sources */ = {isa = PBXBuildFile; fileRef = 2D4B88052CB83550006D7F44 /* TraceFile.cpp */; };
+		C131C62D2E3862AD0069DE78 /* ExemptErrors.cpp in Sources */ = {isa = PBXBuildFile; fileRef = 2DED22372D7F4C8400ED669D /* ExemptErrors.cpp */; };
+		C131C62E2E3862AD0069DE78 /* ExemptInternalErrors.cpp in Sources */ = {isa = PBXBuildFile; fileRef = 2DC9F7BD2D6FDBE800447AC4 /* ExemptInternalErrors.cpp */; };
+		C131C62F2E3862AD0069DE78 /* Options.cpp in Sources */ = {isa = PBXBuildFile; fileRef = 2DD4C66B28D47AFC00CF5883 /* Options.cpp */; };
+		C131C6302E3862AD0069DE78 /* Options_Obsolete.cpp in Sources */ = {isa = PBXBuildFile; fileRef = 2D56F65328D887A2003962C0 /* Options_Obsolete.cpp */; };
+		C131C6312E3862AD0069DE78 /* Options_Input.cpp in Sources */ = {isa = PBXBuildFile; fileRef = 2DD4C66D28D47AFC00CF5883 /* Options_Input.cpp */; };
+		C131C6322E3862AD0069DE78 /* Options_Fixups.cpp in Sources */ = {isa = PBXBuildFile; fileRef = 2DD4C66E28D47AFC00CF5883 /* Options_Fixups.cpp */; };
+		C131C6332E3862AD0069DE78 /* Options_Debug.cpp in Sources */ = {isa = PBXBuildFile; fileRef = 2DD4C67028D47AFC00CF5883 /* Options_Debug.cpp */; };
+		C131C6342E3862AD0069DE78 /* Options_Output.cpp in Sources */ = {isa = PBXBuildFile; fileRef = 2DD4C67128D47AFC00CF5883 /* Options_Output.cpp */; };
+		C131C6352E3862AD0069DE78 /* Options_DylibOutput.cpp in Sources */ = {isa = PBXBuildFile; fileRef = 2D64BC1228D4A534005CF4B4 /* Options_DylibOutput.cpp */; };
+		C131C6362E3862AD0069DE78 /* Options_Optimizations.cpp in Sources */ = {isa = PBXBuildFile; fileRef = 2D56F65128D87C69003962C0 /* Options_Optimizations.cpp */; };
+		C131C6372E3862AD0069DE78 /* Options_Layout.cpp in Sources */ = {isa = PBXBuildFile; fileRef = 2DD4C67228D47AFC00CF5883 /* Options_Layout.cpp */; };
+		C131C6382E3862AD0069DE78 /* Options_LibrarySearch.cpp in Sources */ = {isa = PBXBuildFile; fileRef = 2D56F64D28D85446003962C0 /* Options_LibrarySearch.cpp */; };
+		C131C6392E3862AD0069DE78 /* Options_SplitSeg.cpp in Sources */ = {isa = PBXBuildFile; fileRef = 2DD4C66A28D47AFC00CF5883 /* Options_SplitSeg.cpp */; };
+		C131C63A2E3862AD0069DE78 /* Options_Symbols.cpp in Sources */ = {isa = PBXBuildFile; fileRef = 2DC5F3BF28D9CE00005DD63A /* Options_Symbols.cpp */; };
+		C131C63B2E3862AD0069DE78 /* Options_AtomInfo.cpp in Sources */ = {isa = PBXBuildFile; fileRef = 2DFAEC052C828BE2001DB560 /* Options_AtomInfo.cpp */; };
+		C131C63C2E3862AD0069DE78 /* BranchShims.cpp in Sources */ = {isa = PBXBuildFile; fileRef = 2DBDC8682D5542CB00278E1B /* BranchShims.cpp */; };
+		C131C63D2E3862AD0069DE78 /* Stubs.cpp in Sources */ = {isa = PBXBuildFile; fileRef = F9B53F62289A1D3200CEB2C0 /* Stubs.cpp */; };
+		C131C63E2E3862AD0069DE78 /* Softlinking.cpp in Sources */ = {isa = PBXBuildFile; fileRef = 2DEA10102AFAB498000687DE /* Softlinking.cpp */; };
+		C131C63F2E3862AD0069DE78 /* Dedup.cpp in Sources */ = {isa = PBXBuildFile; fileRef = 2DBAE7CD2A8C4B24006106C0 /* Dedup.cpp */; };
+		C131C6402E3862AD0069DE78 /* ObjC.cpp in Sources */ = {isa = PBXBuildFile; fileRef = C1F98A2B28D9404E0081A6EB /* ObjC.cpp */; };
+		C131C6412E3862AD0069DE78 /* ObjCStubs.cpp in Sources */ = {isa = PBXBuildFile; fileRef = F90B1C3A28BD4264000FB3C8 /* ObjCStubs.cpp */; };
+		C131C6422E3862AD0069DE78 /* DelayInitStubs.cpp in Sources */ = {isa = PBXBuildFile; fileRef = F94E8E562A58DF44008291E6 /* DelayInitStubs.cpp */; };
+		C131C6432E3862AD0069DE78 /* FunctionVariants.cpp in Sources */ = {isa = PBXBuildFile; fileRef = F9FD1FB32B5A0A3500983CD6 /* FunctionVariants.cpp */; };
+		C131C6442E3862AD0069DE78 /* Boundary.cpp in Sources */ = {isa = PBXBuildFile; fileRef = C138A01F2902055D0082CFB3 /* Boundary.cpp */; };
+		C131C6452E3862AD0069DE78 /* TLV.cpp in Sources */ = {isa = PBXBuildFile; fileRef = C149027C2915F40F00067BFD /* TLV.cpp */; };
+		C131C6462E3862AD0069DE78 /* DTrace.cpp in Sources */ = {isa = PBXBuildFile; fileRef = C1DBA6C32942A9760083EEB7 /* DTrace.cpp */; };
+		C131C6472E3862AD0069DE78 /* Inits.cpp in Sources */ = {isa = PBXBuildFile; fileRef = C15993D8294A5BFA005D1E9F /* Inits.cpp */; };
+		C131C6482E3862AD0069DE78 /* DynamicLookup.cpp in Sources */ = {isa = PBXBuildFile; fileRef = F9F6EA0129523D2F0052562C /* DynamicLookup.cpp */; };
+		C131C6492E3862AD0069DE78 /* Aliases.cpp in Sources */ = {isa = PBXBuildFile; fileRef = F90150292969171000011696 /* Aliases.cpp */; };
+		C131C64A2E3862AD0069DE78 /* BundleForClass.cpp in Sources */ = {isa = PBXBuildFile; fileRef = C1D1651C298C746D003EE60F /* BundleForClass.cpp */; };
+		C131C64B2E3862EA0069DE78 /* Utilities.cpp in Sources */ = {isa = PBXBuildFile; fileRef = DE86439327F7BD9E008F714A /* Utilities.cpp */; };
+		C131C64C2E3862FD0069DE78 /* TestLinker.mm in Sources */ = {isa = PBXBuildFile; fileRef = F9337C5D2A0D8C5200B1EF11 /* TestLinker.mm */; };
+		C131C64D2E3863120069DE78 /* ArchiveWriter.cpp in Sources */ = {isa = PBXBuildFile; fileRef = C10025C42C6D22420029E2B6 /* ArchiveWriter.cpp */; };
+		C131C64E2E3863120069DE78 /* BindOpcodesWriter.cpp in Sources */ = {isa = PBXBuildFile; fileRef = C10025A92C6D223E0029E2B6 /* BindOpcodesWriter.cpp */; };
+		C131C64F2E3863120069DE78 /* ChainedFixupsWriter.cpp in Sources */ = {isa = PBXBuildFile; fileRef = C10025B22C6D223F0029E2B6 /* ChainedFixupsWriter.cpp */; };
+		C131C6502E3863120069DE78 /* ChunkBumpAllocator.cpp in Sources */ = {isa = PBXBuildFile; fileRef = 2DEAECE629DFFA76005DD362 /* ChunkBumpAllocator.cpp */; };
+		C131C6512E3863120069DE78 /* CompactUnwindWriter.cpp in Sources */ = {isa = PBXBuildFile; fileRef = C10025C32C6D22420029E2B6 /* CompactUnwindWriter.cpp */; };
+		C131C6522E3863120069DE78 /* DataInCodeWriter.cpp in Sources */ = {isa = PBXBuildFile; fileRef = C10025CB2C6D22430029E2B6 /* DataInCodeWriter.cpp */; };
+		C131C6532E3863120069DE78 /* ExportsTrieWriter.cpp in Sources */ = {isa = PBXBuildFile; fileRef = C100259E2C6D223C0029E2B6 /* ExportsTrieWriter.cpp */; };
+		C131C6542E3863120069DE78 /* FunctionStartsWriter.cpp in Sources */ = {isa = PBXBuildFile; fileRef = C10025B92C6D22400029E2B6 /* FunctionStartsWriter.cpp */; };
+		C131C6552E3863120069DE78 /* FunctionVariantsWriter.cpp in Sources */ = {isa = PBXBuildFile; fileRef = F975D73C2C9379DB00CFE689 /* FunctionVariantsWriter.cpp */; };
+		C131C6562E3863120069DE78 /* HeaderWriter.cpp in Sources */ = {isa = PBXBuildFile; fileRef = C10025AE2C6D223F0029E2B6 /* HeaderWriter.cpp */; };
+		C131C6572E3863120069DE78 /* LinkerOptimizationHintsWriter.cpp in Sources */ = {isa = PBXBuildFile; fileRef = C10025B82C6D22400029E2B6 /* LinkerOptimizationHintsWriter.cpp */; };
+		C131C6582E3863120069DE78 /* NListSymbolTableWriter.cpp in Sources */ = {isa = PBXBuildFile; fileRef = C10025A02C6D223C0029E2B6 /* NListSymbolTableWriter.cpp */; };
+		C131C6592E3863120069DE78 /* RebaseOpcodesWriter.cpp in Sources */ = {isa = PBXBuildFile; fileRef = C10025C12C6D22420029E2B6 /* RebaseOpcodesWriter.cpp */; };
+		C131C65A2E3863120069DE78 /* SplitSegWriter.cpp in Sources */ = {isa = PBXBuildFile; fileRef = C10025C62C6D22430029E2B6 /* SplitSegWriter.cpp */; };
+		C131C65B2E3863120069DE78 /* UniversalWriter.cpp in Sources */ = {isa = PBXBuildFile; fileRef = C10025C92C6D22430029E2B6 /* UniversalWriter.cpp */; };
+		C131C65C2E38638A0069DE78 /* Algorithm.cpp in Sources */ = {isa = PBXBuildFile; fileRef = 2DD10D4B2970C8970001295E /* Algorithm.cpp */; };
+		C131C65D2E3863910069DE78 /* TargetPolicy.cpp in Sources */ = {isa = PBXBuildFile; fileRef = C1856DA92C82836D00C5E24D /* TargetPolicy.cpp */; };
+		C131C65E2E3863A30069DE78 /* ClosureFileSystemNull.cpp in Sources */ = {isa = PBXBuildFile; fileRef = F98B345F24EB729C00DE738B /* ClosureFileSystemNull.cpp */; };
+		C131C65F2E3863DC0069DE78 /* MachOLayout.cpp in Sources */ = {isa = PBXBuildFile; fileRef = C13CD4C027C95BA600A40377 /* MachOLayout.cpp */; };
+		C131C6602E3863EB0069DE78 /* TempFile.mm in Sources */ = {isa = PBXBuildFile; fileRef = F9B9E34228C8165A005B5987 /* TempFile.mm */; };
+		C131C6612E3863F90069DE78 /* TestToolchain.mm in Sources */ = {isa = PBXBuildFile; fileRef = DE1A82092BDAE71D00F113F9 /* TestToolchain.mm */; };
 		C13815E12C9520A60033F935 /* Test_ResultOutput.mm in Sources */ = {isa = PBXBuildFile; fileRef = C13815E02C9520A60033F935 /* Test_ResultOutput.mm */; };
 		C138A01E29008C600082CFB3 /* Test_Sections.mm in Sources */ = {isa = PBXBuildFile; fileRef = C138A01D29008C600082CFB3 /* Test_Sections.mm */; };
 		C138A0202902055D0082CFB3 /* Boundary.cpp in Sources */ = {isa = PBXBuildFile; fileRef = C138A01F2902055D0082CFB3 /* Boundary.cpp */; };
@@ -6231,7 +6303,79 @@
 			isa = PBXSourcesBuildPhase;
 			buildActionMask = 2147483647;
 			files = (
+				C131C65E2E3863A30069DE78 /* ClosureFileSystemNull.cpp in Sources */,
+				C131C64D2E3863120069DE78 /* ArchiveWriter.cpp in Sources */,
+				C131C64E2E3863120069DE78 /* BindOpcodesWriter.cpp in Sources */,
+				C131C64F2E3863120069DE78 /* ChainedFixupsWriter.cpp in Sources */,
+				C131C6502E3863120069DE78 /* ChunkBumpAllocator.cpp in Sources */,
+				C131C6512E3863120069DE78 /* CompactUnwindWriter.cpp in Sources */,
+				C131C6522E3863120069DE78 /* DataInCodeWriter.cpp in Sources */,
+				C131C6532E3863120069DE78 /* ExportsTrieWriter.cpp in Sources */,
+				C131C6542E3863120069DE78 /* FunctionStartsWriter.cpp in Sources */,
+				C131C6552E3863120069DE78 /* FunctionVariantsWriter.cpp in Sources */,
+				C131C6562E3863120069DE78 /* HeaderWriter.cpp in Sources */,
+				C131C6572E3863120069DE78 /* LinkerOptimizationHintsWriter.cpp in Sources */,
+				C131C6582E3863120069DE78 /* NListSymbolTableWriter.cpp in Sources */,
+				C131C6602E3863EB0069DE78 /* TempFile.mm in Sources */,
+				C131C6592E3863120069DE78 /* RebaseOpcodesWriter.cpp in Sources */,
+				C131C65A2E3863120069DE78 /* SplitSegWriter.cpp in Sources */,
+				C131C65B2E3863120069DE78 /* UniversalWriter.cpp in Sources */,
+				C131C65C2E38638A0069DE78 /* Algorithm.cpp in Sources */,
+				C131C6192E3862AD0069DE78 /* Linker.cpp in Sources */,
+				C131C61B2E3862AD0069DE78 /* Atom.cpp in Sources */,
+				C131C61C2E3862AD0069DE78 /* Fixup.cpp in Sources */,
+				C131C61D2E3862AD0069DE78 /* DynamicAtom.cpp in Sources */,
+				C131C61E2E3862AD0069DE78 /* AtomFileReaderWriter.cpp in Sources */,
+				C131C61F2E3862AD0069DE78 /* PersistentAtom.cpp in Sources */,
+				C131C6202E3862AD0069DE78 /* AtomFileConsolidator.cpp in Sources */,
+				C131C6212E3862AD0069DE78 /* SymbolString.cpp in Sources */,
+				C131C65D2E3863910069DE78 /* TargetPolicy.cpp in Sources */,
+				C131C6222E3862AD0069DE78 /* AtomSymbolTable.cpp in Sources */,
+				C131C6232E3862AD0069DE78 /* File.cpp in Sources */,
+				C131C6242E3862AD0069DE78 /* Layout.cpp in Sources */,
+				C131C6252E3862AD0069DE78 /* InputFiles.cpp in Sources */,
+				C131C6262E3862AD0069DE78 /* Snapshot.cpp in Sources */,
+				C131C6272E3862AD0069DE78 /* LibrarySearch.cpp in Sources */,
+				C131C64B2E3862EA0069DE78 /* Utilities.cpp in Sources */,
+				C131C6282E3862AD0069DE78 /* Relocations.cpp in Sources */,
+				C131C6292E3862AD0069DE78 /* Logging.cpp in Sources */,
+				C131C62A2E3862AD0069DE78 /* ScopedTimer.cpp in Sources */,
+				C131C62B2E3862AD0069DE78 /* DependencyInfo.cpp in Sources */,
+				C131C62C2E3862AD0069DE78 /* TraceFile.cpp in Sources */,
+				C131C62D2E3862AD0069DE78 /* ExemptErrors.cpp in Sources */,
+				C131C62E2E3862AD0069DE78 /* ExemptInternalErrors.cpp in Sources */,
+				C131C62F2E3862AD0069DE78 /* Options.cpp in Sources */,
+				C131C6302E3862AD0069DE78 /* Options_Obsolete.cpp in Sources */,
+				C131C6312E3862AD0069DE78 /* Options_Input.cpp in Sources */,
+				C131C6322E3862AD0069DE78 /* Options_Fixups.cpp in Sources */,
+				C131C6332E3862AD0069DE78 /* Options_Debug.cpp in Sources */,
+				C131C6342E3862AD0069DE78 /* Options_Output.cpp in Sources */,
+				C131C6352E3862AD0069DE78 /* Options_DylibOutput.cpp in Sources */,
+				C131C64C2E3862FD0069DE78 /* TestLinker.mm in Sources */,
+				C131C6362E3862AD0069DE78 /* Options_Optimizations.cpp in Sources */,
+				C131C6372E3862AD0069DE78 /* Options_Layout.cpp in Sources */,
+				C131C6382E3862AD0069DE78 /* Options_LibrarySearch.cpp in Sources */,
+				C131C6392E3862AD0069DE78 /* Options_SplitSeg.cpp in Sources */,
+				C131C63A2E3862AD0069DE78 /* Options_Symbols.cpp in Sources */,
+				C131C63B2E3862AD0069DE78 /* Options_AtomInfo.cpp in Sources */,
+				C131C6612E3863F90069DE78 /* TestToolchain.mm in Sources */,
+				C131C63C2E3862AD0069DE78 /* BranchShims.cpp in Sources */,
+				C131C63D2E3862AD0069DE78 /* Stubs.cpp in Sources */,
+				C131C63E2E3862AD0069DE78 /* Softlinking.cpp in Sources */,
+				C131C63F2E3862AD0069DE78 /* Dedup.cpp in Sources */,
+				C131C6402E3862AD0069DE78 /* ObjC.cpp in Sources */,
+				C131C6412E3862AD0069DE78 /* ObjCStubs.cpp in Sources */,
+				C131C6422E3862AD0069DE78 /* DelayInitStubs.cpp in Sources */,
+				C131C6432E3862AD0069DE78 /* FunctionVariants.cpp in Sources */,
+				C131C6442E3862AD0069DE78 /* Boundary.cpp in Sources */,
+				C131C6452E3862AD0069DE78 /* TLV.cpp in Sources */,
+				C131C6462E3862AD0069DE78 /* DTrace.cpp in Sources */,
+				C131C6472E3862AD0069DE78 /* Inits.cpp in Sources */,
+				C131C6482E3862AD0069DE78 /* DynamicLookup.cpp in Sources */,
+				C131C6492E3862AD0069DE78 /* Aliases.cpp in Sources */,
+				C131C64A2E3862AD0069DE78 /* BundleForClass.cpp in Sources */,
 				C11008B62BACC9B000221591 /* Test_MakeCacheJSON.mm in Sources */,
+				C131C65F2E3863DC0069DE78 /* MachOLayout.cpp in Sources */,
 				C13815E12C9520A60033F935 /* Test_ResultOutput.mm in Sources */,
 				C11008B52BACC7AD00221591 /* Diagnostics.cpp in Sources */,
 				C1949B472B1957EF0056CD72 /* SymbolsCache.cpp in Sources */,

@@ -340,7 +340,7 @@ PlatformAndVersions Header::platformAndVersions() const
     __block PlatformAndVersions pvs;
     forEachPlatformLoadCommand(^(Platform platform, Version32 minOS, Version32 sdk) {
         Error err = pvs.zip({ platform, minOS, sdk });
-        assert(err.noError());
+        // .zip() will not combine platforms if it is an invalid combo
     });
     return pvs;
 }

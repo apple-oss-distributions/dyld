@@ -40,8 +40,21 @@
  *  DYLD_INTERPOSE(my_open, open)
  */
 
+#if __has_feature(ptrauth_intrinsics) && __has_include(<ptrauth.h>)
+#include <ptrauth.h>
+  #define __DYLD_INTERPOSE_PTRAUTH_SCHEMA(_replacement, _replacee, _fieldname) \
+    __ptrauth(ptrauth_key_process_independent_code,\
+    /*address discriminated*/ 1, \
+    __builtin_ptrauth_string_discriminator("DYLD_INTERPOSE" __FILE_NAME__ #_replacement #_replacee "::" #_fieldname) \
+   )
+#else
+  #define __DYLD_INTERPOSE_PTRAUTH_SCHEMA(_replacement, _replacee, _fieldname)
+#endif
+
 #define DYLD_INTERPOSE(_replacement,_replacee) \
-   __attribute__((used)) static struct { const void* replacement; const void* replacee; } _interpose_##_replacee \
+   __attribute__((used)) static struct {\
+        const void* __DYLD_INTERPOSE_PTRAUTH_SCHEMA(_replacement, _replacee, replacement) replacement;\
+        const void* __DYLD_INTERPOSE_PTRAUTH_SCHEMA(_replacement, _replacee, replacee) replacee; } _interpose_##_replacee \
             __attribute__ ((section ("__DATA,__interpose,interposing"))) = { (const void*)(unsigned long)&_replacement, (const void*)(unsigned long)&_replacee };
 
 #endif

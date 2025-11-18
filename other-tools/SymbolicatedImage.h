@@ -80,6 +80,13 @@ public:
     SymbolicatedImage(const Image& im);
     ~SymbolicatedImage();
 
+    struct SymbolLoc
+    {
+        CString  name = "";
+        uint32_t inSymbolOffset=0;
+        bool     isThumb=false;
+    };
+
     const Image&    image() const   { return _image; }
     bool            is64() const    { return _is64; }
     uint8_t         ptrSize() const { return _ptrSize; }
@@ -108,7 +115,7 @@ public:
     const char*     selectorFromObjCStub(uint64_t sectionVmAdr, const uint8_t* sectionContent, uint32_t& offset) const;
 
     const uint8_t*  content(const Header::SectionInfo& sectInfo) const;
-    void            findClosestSymbol(uint64_t runtimeOffset, const char*& inSymbolName, uint32_t& inSymbolOffset) const;
+    SymbolLoc       findClosestSymbol(uint64_t runtimeOffset) const;
     const char*     symbolNameAt(uint64_t addr) const;
     const char*     cStringAt(uint64_t addr) const;
     bool            isBind(const void* location, const Fixup::BindTarget*& bindTarget) const;
@@ -120,8 +127,8 @@ public:
     size_t          fixupCount() const { return _fixups.size(); }
     uint8_t         fixupSectNum(size_t fixupIndex) const        { return _fixups[fixupIndex].sectNum; }
     uint64_t        fixupAddress(size_t fixupIndex) const        { return _fixups[fixupIndex].address; }
-    CString         fixupInSymbol(size_t fixupIndex) const       { return _fixups[fixupIndex].inSymbolName; }
-    uint32_t        fixupInSymbolOffset(size_t fixupIndex) const { return _fixups[fixupIndex].inSymbolOffset; }
+    CString         fixupInSymbol(size_t fixupIndex) const       { return _fixups[fixupIndex].loc.name; }
+    uint32_t        fixupInSymbolOffset(size_t fixupIndex) const { return _fixups[fixupIndex].loc.inSymbolOffset; }
     const char*     fixupTypeString(size_t fixupIndex) const;
     const char*     fixupTargetString(size_t fixupIndex, bool symbolic, char buffer[4096]) const;
     std::string_view    fixupSegment(size_t sectNum) const { return _sectionSymbols[sectNum-1].sectInfo.segmentName; }
@@ -137,6 +144,7 @@ public:
     const char*             lookupSymbol(uint64_t referencePC, uint64_t referenceValue, uint64_t& referenceType, const char*& referenceName);
     int                     opInfo(uint64_t pc, uint64_t offset, uint64_t opSize, /* uint64_t instSize, */int tagType, void* tagBuf);
     LLVMDisasmContextRef    llvmRef() const { return _llvmRef; }
+    LLVMDisasmContextRef    llvmThumbRef() const { return _llvmThumbRef; }
     const char*             targetTriple() const;
     void                    setSectionContentBias(const uint8_t* p) { _disasmSectContentBias = p; }
 #endif
@@ -146,16 +154,15 @@ protected:
     void            addFixup(const Fixup& fixup);
 
     struct SectionSymbols {
-        struct Sym { uint64_t offsetInSection; const char* name; };
+        struct Sym { uint64_t offsetInSection; const char* name; bool thumb=false; };
         std::string          sectStartName;
         Header::SectionInfo  sectInfo;
         std::vector<Sym>     symbols;
     };
     struct FixupInfo {
         Fixup           fixup;
+        SymbolLoc       loc;
         uint64_t        address             = 0;
-        CString         inSymbolName;
-        uint32_t        inSymbolOffset      = 0;
         uint32_t        sectNum             = 0;
     };
     const Image&                                 _image;
@@ -173,6 +180,7 @@ protected:
     const uint64_t                               _prefLoadAddress;
 #if HAVE_LIBLTO
     LLVMDisasmContextRef                         _llvmRef = nullptr;
+    LLVMDisasmContextRef                         _llvmThumbRef = nullptr;
     const uint8_t*                               _disasmSectContentBias = nullptr;
 #endif
 };

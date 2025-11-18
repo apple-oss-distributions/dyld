@@ -220,8 +220,8 @@ struct SymbolicatedCache
 
     SymbolicatedCache(const DyldSharedCache* cache, bool isCacheOnDisk);
 
-    std::optional<size_t>   findClosestRange(uint64_t addr) const;
-    void                    findClosestSymbol(uint64_t addr, const SymbolicatedImage*& image, const char*& inSymbolName, uint32_t& inSymbolOffset) const;
+    std::optional<size_t>        findClosestRange(uint64_t addr) const;
+    SymbolicatedImage::SymbolLoc findClosestSymbol(uint64_t addr, const SymbolicatedImage*& image) const;
 
     std::string symbolNameAt(uint64_t addr) const;
 
@@ -263,20 +263,18 @@ SymbolicatedCache::SymbolicatedCache(const DyldSharedCache* cache, bool isCacheO
 
 std::string SymbolicatedCache::symbolNameAt(uint64_t addr) const
 {
-    const char* name = nullptr;
-    uint32_t offset = 0;
     const SymbolicatedImage* image = nullptr;
-    findClosestSymbol(addr, image, name, offset);
-    if ( name == nullptr ) {
+    SymbolicatedImage::SymbolLoc loc = findClosestSymbol(addr, image);
+    if ( loc.name.empty() ) {
         if ( image ) {
-            return std::string(image->image().header()->installName()) + "+" + json::hex(offset);
+            return std::string(image->image().header()->installName()) + "+" + json::hex(loc.inSymbolOffset);
         }
         return json::hex( addr );
     }
 
-    std::string nameWithImage = std::string(image->image().header()->installName()) + "`" + std::string(name);
-    if ( offset != 0 )
-        return nameWithImage + "+" + json::hex(offset);
+    std::string nameWithImage = std::string(image->image().header()->installName()) + "`" + std::string(loc.name);
+    if ( loc.inSymbolOffset != 0 )
+        return nameWithImage + "+" + json::hex(loc.inSymbolOffset);
     return nameWithImage;
 }
 
@@ -298,31 +296,31 @@ std::optional<size_t> SymbolicatedCache::findClosestRange(uint64_t addr) const
     return std::distance(ranges.begin(), it);
 }
 
-void SymbolicatedCache::findClosestSymbol(uint64_t addr, const SymbolicatedImage*& image, const char*& inSymbolName, uint32_t& inSymbolOffset) const
+SymbolicatedImage::SymbolLoc SymbolicatedCache::findClosestSymbol(uint64_t addr, const SymbolicatedImage*& image) const
 {
-    inSymbolName = nullptr;
-    inSymbolOffset = 0;
+    SymbolicatedImage::SymbolLoc loc;
     image = nullptr;
     if ( ranges.empty() )
-        return;
+        return loc;
 
     std::optional<size_t> rangeIndex = findClosestRange(addr);
     if ( !rangeIndex )
-        return;
+        return loc;
 
     const Range& range = ranges[*rangeIndex];
     if ( range.imageIndex == std::nullopt )
-        return;
+        return loc;
 
     size_t imageIndex = *range.imageIndex;
     assert(imageIndex < images.size());
     //fprintf(stderr, "debug symbol lookup at offset: %llu, abs: 0x%llX, image: %s\n", runtimeOffset, addr, images[imageIndex].image().header()->installName());
     image = &images[imageIndex];
-    images[imageIndex].findClosestSymbol(addr, inSymbolName, inSymbolOffset);
+    loc = images[imageIndex].findClosestSymbol(addr);
 
-    if ( inSymbolName == nullptr ) {
-        inSymbolOffset = (uint32_t)(addr - image->prefLoadAddress());
+    if ( loc.name.empty() ) {
+        loc.inSymbolOffset = (uint32_t)(addr - image->prefLoadAddress());
     }
+    return loc;
 }
 
 

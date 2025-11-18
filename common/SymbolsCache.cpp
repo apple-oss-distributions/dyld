@@ -1391,7 +1391,7 @@ Error SymbolsCache::makeBinaries(const ArchPlatforms& archPlatforms,
         Platform platform = slice.platform;
         const char* sliceArch = mh->archName();
 
-        Image image(slice.sliceHeader, slice.sliceLength, Image::MappingKind::unknown);
+        Image image(slice.sliceHeader, slice.sliceLength, Image::MappingKind::wholeSliceMapped);
 
         // printf("Processing: %s", &path[0]);
 

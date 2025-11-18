@@ -276,27 +276,29 @@ static void printInitializers(const Image& image)
 
     // print +load methods
     // TODO: rdar://122190141 (Enable +load initializers in dyld_info)
-    //if ( image.header()->hasObjC() ) {
-    //    const SymbolicatedImage* symImagePtr = &symImage; // for no copy in block...
-    //    symImage.forEachDefinedObjCClass(^(uint64_t classVmAddr) {
-    //        const char*  classname       = symImagePtr->className(classVmAddr);
-    //        uint64_t     metaClassVmaddr = symImagePtr->metaClassVmAddr(classVmAddr);
-    //        symImagePtr->forEachMethodInClass(metaClassVmaddr, ^(const char* methodName, uint64_t implAddr) {
-    //            if ( strcmp(methodName, "load") == 0 )
-    //                printf("        0x%08llX  +[%s %s]\n", implAddr, classname, methodName);
-    //        });
-    //    });
-    //    symImage.forEachObjCCategory(^(uint64_t categoryVmAddr) {
-    //        const char* catname   = symImagePtr->categoryName(categoryVmAddr);
-    //        const char* classname = symImagePtr->categoryClassName(categoryVmAddr);
-    //        symImagePtr->forEachMethodInCategory(categoryVmAddr,
-    //                                             ^(const char* instanceMethodName, uint64_t implAddr) {},
-    //                                             ^(const char* classMethodName,    uint64_t implAddr) {
-    //            if ( strcmp(classMethodName, "load") == 0 )
-    //                printf("        0x%08llX  +[%s(%s) %s]\n", implAddr, classname, catname, classMethodName);
-    //        });
-    //    });
-    //}
+#if !INTERNAL_BUILD
+    if ( image.header()->hasObjC() ) {
+        const SymbolicatedImage* symImagePtr = &symImage; // for no copy in block...
+        symImage.forEachDefinedObjCClass(^(uint64_t classVmAddr) {
+            const char*  classname       = symImagePtr->className(classVmAddr);
+            uint64_t     metaClassVmaddr = symImagePtr->metaClassVmAddr(classVmAddr);
+            symImagePtr->forEachMethodInClass(metaClassVmaddr, ^(const char* methodName, uint64_t implAddr) {
+                if ( strcmp(methodName, "load") == 0 )
+                    printf("        0x%08llX  +[%s %s]\n", implAddr, classname, methodName);
+            });
+        });
+        symImage.forEachObjCCategory(^(uint64_t categoryVmAddr) {
+            const char* catname   = symImagePtr->categoryName(categoryVmAddr);
+            const char* classname = symImagePtr->categoryClassName(categoryVmAddr);
+            symImagePtr->forEachMethodInCategory(categoryVmAddr,
+                                                 ^(const char* instanceMethodName, uint64_t implAddr) {},
+                                                 ^(const char* classMethodName,    uint64_t implAddr) {
+                if ( strcmp(classMethodName, "load") == 0 )
+                    printf("        0x%08llX  +[%s(%s) %s]\n", implAddr, classname, catname, classMethodName);
+            });
+        });
+    }
+#endif
 }
 
 static void printChainInfo(const Image& image)
@@ -933,6 +935,8 @@ static void disassembleSection(SymbolicatedImage& symImage, const Header::Sectio
 #if HAVE_LIBLTO
     symImage.loadDisassembler();
     if ( symImage.llvmRef() != nullptr ) {
+        LLVMDisasmContextRef llvmThumbRef = symImage.llvmThumbRef();
+
         // disassemble content
         const uint8_t* sectionContent    = symImage.content(sectInfo);
         const uint8_t* sectionContentEnd = sectionContent + sectInfo.size;
@@ -941,10 +945,33 @@ static void disassembleSection(SymbolicatedImage& symImage, const Header::Sectio
         symImage.setSectionContentBias(sectionContent - sectInfo.address);
         while ( curContent < sectionContentEnd ) {
             // add label if there is one for this PC
-            if ( const char* symName = symImage.symbolNameAt(curPC) )
-                printf("%s:\n", symName);
+            bool isThumb = false;
+
+            {
+                const char* symName = nullptr;
+
+                if ( llvmThumbRef ) {
+                    // when we have a separate thumb disassembler find the symbol
+                    // name as well as its thumb flag
+                    SymbolicatedImage::SymbolLoc loc = symImage.findClosestSymbol(curPC);
+                    isThumb = loc.isThumb;
+
+                    if ( !loc.name.empty() && loc.inSymbolOffset == 0 )
+                        symName = loc.name.c_str();
+                } else {
+                    symName = symImage.symbolNameAt(curPC);
+                }
+
+                if ( symName )
+                    printf("%s:\n", symName);
+            }
             char line[256];
-            size_t len = LLVMDisasmInstruction(symImage.llvmRef(), (uint8_t*)curContent, sectInfo.size, curPC, line, sizeof(line));
+            size_t len;
+            if ( isThumb && llvmThumbRef ) {
+                len = LLVMDisasmInstruction(llvmThumbRef, (uint8_t*)curContent, sectInfo.size, curPC, line, sizeof(line));
+            } else {
+                len = LLVMDisasmInstruction(symImage.llvmRef(), (uint8_t*)curContent, sectInfo.size, curPC, line, sizeof(line));
+            }
             // llvm disassembler uses tabs to align operands, but that can look wonky, so convert to aligned spaces
             char instruction[16];
             char operands[256];

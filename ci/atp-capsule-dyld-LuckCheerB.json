@@ -1,0 +1,464 @@
+{
+  "id": "f2b81d90-627a-11f0-86c7-07049a54e454",
+  "teamId": "ab84dff0-fd81-11e7-9e55-1bb61fd968dc",
+  "name": "Dyld (LuckCheerB)",
+  "maintainers": [
+    {
+      "email": "dt-dyld@apple.com",
+      "name": "Dyld Team"
+    }
+  ],
+  "apiVersion": 7,
+  "data": {
+    "projects": [
+      {
+        "name": "dyld",
+        "enabledTrains": [
+          {
+            "name": "CheerB",
+            "ref": "refs/heads/rel/25.B-LuckCheerB",
+            "aliasRefs": []
+          },
+          {
+            "name": "CheerBridgeB",
+            "ref": "refs/heads/rel/25.B-LuckCheerB",
+            "aliasRefs": []
+          },
+          {
+            "name": "LuckB",
+            "ref": "refs/heads/rel/25.B-LuckCheerB",
+            "aliasRefs": []
+          },
+          {
+            "name": "NapiliB",
+            "ref": "refs/heads/rel/25.B-LuckCheerB",
+            "aliasRefs": []
+          },
+          {
+            "name": "CharismaB",
+            "ref": "refs/heads/rel/25.B-LuckCheerB",
+            "aliasRefs": []
+          },
+          {
+            "name": "DiscoveryB",
+            "ref": "refs/heads/rel/25.B-LuckCheerB",
+            "aliasRefs": []
+          }
+        ],
+        "annotateRadar": {
+          "setStateOnPrOpen": "Analyze/Review",
+          "setStateOnPrMerge": "Integrate",
+          "setResolutionOnPrMerge": "SoftwareChanged",
+          "commentWithLinks": true
+        },
+        "nonXbsProjectRepo": ""
+      }
+    ],
+    "trainGroups": [
+      {
+        "name": "macOS",
+        "trains": [
+          {
+            "name": "CheerB",
+            "role": "main",
+            "customTaskIntents": [],
+            "buildNumberOverride": ""
+          }
+        ]
+      },
+      {
+        "name": "macOSBridge",
+        "trains": [
+          {
+            "name": "CheerBridgeB",
+            "role": "main",
+            "customTaskIntents": [],
+            "buildNumberOverride": ""
+          }
+        ]
+      },
+      {
+        "name": "iOS",
+        "trains": [
+          {
+            "name": "LuckB",
+            "role": "main",
+            "customTaskIntents": [],
+            "buildNumberOverride": ""
+          }
+        ]
+      },
+      {
+        "name": "watchOS",
+        "trains": [
+          {
+            "name": "NapiliB",
+            "role": "main",
+            "customTaskIntents": [],
+            "buildNumberOverride": ""
+          }
+        ]
+      },
+      {
+        "name": "tvOS",
+        "trains": [
+          {
+            "name": "CharismaB",
+            "role": "main",
+            "customTaskIntents": [],
+            "buildNumberOverride": ""
+          }
+        ]
+      },
+      {
+        "name": "visionOS",
+        "trains": [
+          {
+            "name": "DiscoveryB",
+            "role": "main",
+            "customTaskIntents": [],
+            "buildNumberOverride": ""
+          }
+        ]
+      }
+    ],
+    "buildActions": [
+      {
+        "projects": [
+          {
+            "name": "dyld",
+            "xctestScheme": "ATP-UnitTests",
+            "parameterizedOverrides": [],
+            "aliases": []
+          }
+        ],
+        "role": "main",
+        "tokenizedOverrides": [],
+        "extraConfig": {}
+      }
+    ],
+    "workflows": [
+      {
+        "name": "PR Tests",
+        "trainGroups": [
+          {
+            "name": "macOS"
+          },
+          {
+            "name": "macOSBridge"
+          },
+          {
+            "name": "iOS"
+          },
+          {
+            "name": "watchOS"
+          },
+          {
+            "name": "tvOS"
+          },
+          {
+            "name": "visionOS"
+          }
+        ],
+        "resourceManagement": {
+          "requestedLane": "fast",
+          "account": "0056/5731"
+        },
+        "startConditions": {
+          "onSchedules": [],
+          "onNewBuilds": [],
+          "onGitEvents": [
+            {
+              "project": "dyld",
+              "onPr": "allRefs",
+              "onPrCommentMatching": "atp test now",
+              "onPush": "off"
+            }
+          ],
+          "disableAll": false
+        },
+        "buildOptions": {
+          "buildSystem": "luxon",
+          "packageMode": "default",
+          "dependencyBuildMode": ""
+        },
+        "tests": {
+          "storedJobs": [],
+          "xctests": [
+            {
+              "storedJob": null,
+              "name": "Run dyld unit tests",
+              "project": "dyld",
+              "roles": [
+                "main"
+              ],
+              "testPlanOverrides": [
+                "ATP-UnitTests"
+              ],
+              "devices": [
+                {
+                  "scope": "macOS",
+                  "preset": "macOS.vm.intel"
+                },
+                {
+                  "scope": "macOS",
+                  "preset": "macOS.deviceCompute.appleSilicon"
+                },
+                {
+                  "scope": "macOS",
+                  "preset": "macOS.fuzzball.appleSilicon"
+                },
+                {
+                  "scope": "iOS",
+                  "preset": "iOS.iPhone"
+                },
+                {
+                  "scope": "watchOS",
+                  "predicate": "hardwareModel IN {'n143bap','n143sap','n149bap','n149sap','n157bap','n157sap','n158bap','n158sap','n187bap','n187sap','n197bap','n197sap','n199ap'}"
+                },
+                {
+                  "scope": "watchOS",
+                  "preset": "watchOS.fuzzball.any"
+                },
+                {
+                  "scope": "tvOS",
+                  "predicate": "hardwareModel contains[c] 'j105aap'",
+                  "preset": "",
+                  "label": ""
+                },
+                {
+                  "scope": "tvOS",
+                  "predicate": "hardwareModel IN {'j255ap', 'j305ap'}",
+                  "preset": "",
+                  "label": ""
+                },
+                {
+                  "scope": "tvOS",
+                  "predicate": "",
+                  "preset": "tvOS.homePod",
+                  "label": ""
+                },
+                {
+                  "scope": "visionOS",
+                  "preset": "visionOS.visionPro"
+                }
+              ],
+              "noMatchingDevicesBehavior": "recommendDevices",
+              "osVariant": "",
+              "featureFlags": [],
+              "staticPayload": {}
+            }
+          ],
+          "labels": [],
+          "indexedTests": []
+        },
+        "notifications": {
+          "email": {
+            "onBuildFailure": {
+              "addresses": [],
+              "recipient": "initiatorOnly"
+            },
+            "onBuildSuccess": {
+              "addresses": [],
+              "recipient": "configuredOnly"
+            },
+            "onTestFailure": {
+              "addresses": [],
+              "recipient": "initiatorOnly"
+            },
+            "onTestSuccess": {
+              "addresses": [],
+              "recipient": "configuredOnly"
+            }
+          },
+          "radar": {
+            "fileOnBuildFailure": {
+              "component": "",
+              "version": ""
+            },
+            "fileOnTestFailure": {
+              "component": "",
+              "version": ""
+            },
+            "attachKits": "never",
+            "linkTestResults": false
+          },
+          "webhooks": [],
+          "slackMessages": [],
+          "pullRequests": {
+            "annotations": [
+              {
+                "project": "dyld"
+              }
+            ],
+            "comment": {
+              "projects": [],
+              "when": "always"
+            }
+          }
+        }
+      },
+      {
+        "name": "Integration",
+        "trainGroups": [
+          {
+            "name": "macOS"
+          },
+          {
+            "name": "macOSBridge"
+          },
+          {
+            "name": "iOS"
+          },
+          {
+            "name": "watchOS"
+          },
+          {
+            "name": "tvOS"
+          },
+          {
+            "name": "visionOS"
+          }
+        ],
+        "resourceManagement": {
+          "requestedLane": "basic",
+          "account": "0056/5731"
+        },
+        "startConditions": {
+          "onSchedules": [],
+          "onNewBuilds": [],
+          "onGitEvents": [
+            {
+              "project": "dyld",
+              "onPr": "off",
+              "onPrCommentMatching": "",
+              "onPush": "onlyPrimaryRef"
+            }
+          ],
+          "disableAll": false
+        },
+        "buildOptions": {
+          "buildSystem": "luxon",
+          "packageMode": "default",
+          "dependencyBuildMode": ""
+        },
+        "tests": {
+          "storedJobs": [],
+          "xctests": [
+            {
+              "storedJob": null,
+              "name": "Run dyld unit tests",
+              "project": "dyld",
+              "roles": [
+                "main"
+              ],
+              "testPlanOverrides": [
+                "ATP-UnitTests"
+              ],
+              "devices": [
+                {
+                  "scope": "macOS",
+                  "preset": "macOS.vm.intel"
+                },
+                {
+                  "scope": "macOS",
+                  "preset": "macOS.deviceCompute.appleSilicon"
+                },
+                {
+                  "scope": "macOS",
+                  "preset": "macOS.fuzzball.appleSilicon"
+                },
+                {
+                  "scope": "iOS",
+                  "preset": "iOS.iPhone"
+                },
+                {
+                  "scope": "watchOS",
+                  "predicate": "hardwareModel IN {'n143bap','n143sap','n149bap','n149sap','n157bap','n157sap','n158bap','n158sap','n187bap','n187sap','n197bap','n197sap','n199ap'}"
+                },
+                {
+                  "scope": "watchOS",
+                  "preset": "watchOS.fuzzball.any"
+                },
+                {
+                  "scope": "tvOS",
+                  "predicate": "hardwareModel contains[c] 'j105aap'",
+                  "preset": "",
+                  "label": ""
+                },
+                {
+                  "scope": "tvOS",
+                  "predicate": "hardwareModel IN {'j255ap', 'j305ap'}",
+                  "preset": "",
+                  "label": ""
+                },
+                {
+                  "scope": "tvOS",
+                  "predicate": "",
+                  "preset": "tvOS.homePod",
+                  "label": ""
+                },
+                {
+                  "scope": "visionOS",
+                  "preset": "visionOS.visionPro"
+                }
+              ],
+              "noMatchingDevicesBehavior": "recommendDevices",
+              "osVariant": "",
+              "featureFlags": [],
+              "staticPayload": {}
+            }
+          ],
+          "labels": [],
+          "indexedTests": []
+        },
+        "notifications": {
+          "email": {
+            "onBuildFailure": {
+              "addresses": [
+                "dt-dyld@group.apple.com"
+              ],
+              "recipient": "initiatorAndConfigured"
+            },
+            "onBuildSuccess": {
+              "addresses": [],
+              "recipient": "configuredOnly"
+            },
+            "onTestFailure": {
+              "addresses": [
+                "dt-dyld@group.apple.com"
+              ],
+              "recipient": "initiatorAndConfigured"
+            },
+            "onTestSuccess": {
+              "addresses": [],
+              "recipient": "configuredOnly"
+            }
+          },
+          "radar": {
+            "fileOnBuildFailure": {
+              "component": "",
+              "version": ""
+            },
+            "fileOnTestFailure": {
+              "component": "",
+              "version": ""
+            },
+            "attachKits": "never",
+            "linkTestResults": false
+          },
+          "webhooks": [],
+          "slackMessages": [],
+          "pullRequests": {
+            "annotations": [],
+            "comment": {
+              "projects": [],
+              "when": "always"
+            }
+          }
+        }
+      }
+    ],
+    "optInProjectSet": false
+  }
+}

@@ -98,13 +98,13 @@ SymbolicatedImage::SymbolicatedImage(const Image& im)
         // add symbols from nlist
         _image.symbolTable().forEachDefinedSymbol(^(const Symbol& symbol, uint32_t symbolIndex, bool& stop) {
             uint64_t absAddress;
-            if ( !symbol.isAbsolute(absAddress) && (symbol.implOffset() != 0) && symbol.sectionOrdinal() < _sectionSymbols.size() ) {
+            if ( !symbol.isAbsolute(absAddress) && (symbol.implOffset() != 0 || prefLoadAddress() == 0) && (symbol.sectionOrdinal()-1) < _sectionSymbols.size() ) {
                 const char* symName = symbol.name().c_str();
                 _symbolsMap[_prefLoadAddress+symbol.implOffset()] = symName;
 
                 SectionSymbols& ss = _sectionSymbols[symbol.sectionOrdinal()-1];
                 uint64_t offsetInSection = _prefLoadAddress+symbol.implOffset()-ss.sectInfo.address;
-                ss.symbols.push_back({offsetInSection, symName});
+                ss.symbols.push_back({offsetInSection, symName, symbol.isThumb()});
             }
             if ( symbol.scope() == Symbol::Scope::translationUnit )
                 hasLocalSymbols = true;
@@ -299,6 +299,8 @@ SymbolicatedImage::SymbolicatedImage(const Image& im)
     // sort symbols within section
     for (SectionSymbols& ss : _sectionSymbols) {
         std::sort(ss.symbols.begin(), ss.symbols.end(), [](const SectionSymbols::Sym& a, const SectionSymbols::Sym& b) {
+            if ( a.offsetInSection == b.offsetInSection )
+                return CString(a.name) < CString(b.name);
             return (a.offsetInSection < b.offsetInSection);
         });
     }
@@ -346,9 +348,7 @@ void SymbolicatedImage::addFixup(const Fixup& fixup)
     uint64_t    segOffset     = (uint8_t*)fixup.location - (uint8_t*)(fixup.segment->content);
     uint64_t    runtimeOffset = fixup.segment->runtimeOffset + segOffset;
     uint64_t    address       = _prefLoadAddress + runtimeOffset;
-    const char* inSymbolName;
-    uint32_t    inSymbolOffset;
-    this->findClosestSymbol(runtimeOffset, inSymbolName, inSymbolOffset);
+    SymbolLoc   symbolLoc = findClosestSymbol(address);
     uint32_t    sectNum = 1;
     for ( const SectionSymbols& ss : _sectionSymbols ) {
         if ( ss.sectInfo.segmentName == fixup.segment->segName ) {
@@ -357,7 +357,7 @@ void SymbolicatedImage::addFixup(const Fixup& fixup)
         }
         sectNum++;
     }
-    _fixups.push_back({fixup, address, inSymbolName, inSymbolOffset, sectNum});
+    _fixups.push_back({fixup, symbolLoc, address, sectNum});
 }
 
 
@@ -366,34 +366,40 @@ void SymbolicatedImage::addDyldCacheBasedFixups()
     // FIXME:
 }
 
-void SymbolicatedImage::findClosestSymbol(uint64_t runtimeOffset, const char*& inSymbolName, uint32_t& inSymbolOffset) const
+SymbolicatedImage::SymbolLoc SymbolicatedImage::findClosestSymbol(uint64_t runtimeOffset) const
 {
-    inSymbolName    = "";
-    inSymbolOffset  = 0;
+    SymbolLoc loc;
     for (const SectionSymbols& ss : _sectionSymbols) {
         if ( (runtimeOffset >= ss.sectInfo.address) && (runtimeOffset < ss.sectInfo.address+ss.sectInfo.size) ) {
+            if ( ss.symbols.empty() ) {
+                loc.name           = ss.sectStartName.c_str();
+                loc.inSymbolOffset = (uint32_t)(runtimeOffset - ss.sectInfo.address);
+                loc.isThumb = false;
+                continue;
+            }
+
             // find largest symbol address that is <= target address
             const uint64_t targetSectOffset = runtimeOffset-ss.sectInfo.address;
             auto it = std::lower_bound(ss.symbols.begin(), ss.symbols.end(), targetSectOffset, [](const SectionSymbols::Sym& sym, uint64_t sectOffset) -> bool {
                 return sym.offsetInSection <= sectOffset;
             });
             // lower_bound returns the symbol after the one we need
-            if ( (it != ss.symbols.end()) && (it != ss.symbols.begin()) ) {
+            if ( it != ss.symbols.begin() ) {
                 --it;
-                inSymbolName   = it->name;
-                inSymbolOffset = (uint32_t)(runtimeOffset - (ss.sectInfo.address+it->offsetInSection));
-            }
-            else if ( ss.symbols.empty() ) {
-                inSymbolName   = ss.sectStartName.c_str();
-                inSymbolOffset = (uint32_t)(runtimeOffset - ss.sectInfo.address);
+                loc.name           = it->name;
+                loc.inSymbolOffset = (uint32_t)(runtimeOffset - (ss.sectInfo.address+it->offsetInSection));
+                loc.isThumb        = it->thumb;
             }
             else {
-                inSymbolName   = ss.symbols.front().name;
-                inSymbolOffset = (uint32_t)(runtimeOffset - (ss.sectInfo.address + ss.symbols.front().offsetInSection));
+                const SectionSymbols::Sym& sym = ss.symbols.front();
+                loc.name           = sym.name;
+                loc.isThumb        = sym.thumb;
+                loc.inSymbolOffset = (uint32_t)(runtimeOffset - (ss.sectInfo.address + sym.offsetInSection));
             }
             break;
         }
     }
+    return loc;
 }
 
 const char* SymbolicatedImage::selectorFromObjCStub(uint64_t sectionVmAdr, const uint8_t* sectionContent, uint32_t& offset) const
@@ -920,18 +926,16 @@ const char* SymbolicatedImage::fixupTargetString(size_t fixupIndex, bool symboli
     }
     else {
         if ( symbolic ) {
-            const char* inSymbolName;
-            uint32_t    inSymbolOffset;
-            this->findClosestSymbol(fixup.rebase.targetVmOffset, inSymbolName, inSymbolOffset);
-            if ( strncmp(inSymbolName, "__TEXT,", 7) == 0 ) {
+            SymbolLoc loc = findClosestSymbol(fixup.rebase.targetVmOffset);
+            if ( loc.name.starts_with("__TEXT,") ) {
                 const char* str = this->cStringAt(_prefLoadAddress+fixup.rebase.targetVmOffset);
                 snprintf(buffer, 4096, "\"%s\"%s", str, authInfo);
             }
-            else if ( inSymbolOffset == 0 ) {
-                snprintf(buffer, 4096, "%s%s", inSymbolName, authInfo);
+            else if ( loc.inSymbolOffset == 0 ) {
+                snprintf(buffer, 4096, "%s%s", loc.name.c_str(), authInfo);
             }
             else {
-                snprintf(buffer, 4096, "%s+%u%s", inSymbolName, inSymbolOffset, authInfo);
+                snprintf(buffer, 4096, "%s+%u%s", loc.name.c_str(), loc.inSymbolOffset, authInfo);
             }
         }
         else {
@@ -947,6 +951,10 @@ SymbolicatedImage::~SymbolicatedImage()
     if ( _llvmRef != nullptr ) {
         LLVMDisasmDispose(_llvmRef);
         _llvmRef = nullptr;
+    }
+    if ( _llvmThumbRef != nullptr ) {
+        LLVMDisasmDispose(_llvmThumbRef);
+        _llvmThumbRef = nullptr;
     }
 #endif
 }
@@ -969,10 +977,18 @@ static int printDumpOpInfoCallback(void* di, uint64_t pc, uint64_t offset, uint6
 const char* SymbolicatedImage::targetTriple() const
 {
     Architecture arch = _image.header()->arch();
-    if ( arch.usesArm64Instructions() )
+    if ( arch.usesArm64AuthPointers() )
         return "arm64e-apple-darwin";
+    else if ( arch.usesArm64Instructions() )
+        return "arm64-apple-darwin";
     else if ( arch.usesx86_64Instructions() )
         return "x86_64h-apple-darwin";
+    else if ( arch.usesThumbInstructions() && !arch.usesArm32Instructions() )
+        return "thumbv7em-apple-darwin";
+    else if ( arch.usesArm32Instructions() )
+        return "armv7-apple-darwin";
+    else if ( arch == Architecture::i386 )
+        return "i386-apple-darwin";
     else
         return "unknown";
 }
@@ -994,6 +1010,13 @@ void SymbolicatedImage::loadDisassembler()
     _llvmRef = LLVMCreateDisasm(targetTriple(), this, 0, &printDumpOpInfoCallback, &printDumpSymbolCallback);
     if ( _llvmRef != nullptr )
         LLVMSetDisasmOptions(_llvmRef, LLVMDisassembler_Option_PrintImmHex);
+
+    Architecture arch = _image.header()->arch();
+    if ( arch.usesArm32Instructions() && arch.usesThumbInstructions() ) {
+        _llvmThumbRef = LLVMCreateDisasm("thumbv7em-apple-darwin", this, 0, &printDumpOpInfoCallback, &printDumpSymbolCallback);
+        if ( _llvmThumbRef != nullptr )
+            LLVMSetDisasmOptions(_llvmThumbRef, LLVMDisassembler_Option_PrintImmHex);
+    }
 }
 
 
