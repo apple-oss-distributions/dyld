@@ -22,7 +22,7 @@
  * @APPLE_LICENSE_HEADER_END@
  */
 
-#include "Cksum.h"
+#include "CRC32c.h"
 #include "AAREncoder.h"
 
 using lsl::Allocator;
@@ -47,8 +47,7 @@ uint16_t AAREncoder::headerSize(const File& file) const {
 }
 
 void AAREncoder::encodeFile(const File& file, ByteStream& output) const {
-    uint32_t checksum = cksum(file.data);
-    output.insert(output.end(), file.data.begin(), file.data.end());
+
 }
 
 uint16_t AAREncoder::headerSize(const Link& link) const {

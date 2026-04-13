@@ -63,6 +63,7 @@
 #include "DyldProcessConfig.h"
 #include "DyldRuntimeState.h"
 #include "Utilities.h"
+#include "ToolUtils.h"
 
 #include "objc-shared-cache.h"
 #include "OptimizerObjC.h"
@@ -73,7 +74,7 @@
 using namespace dyld4;
 
 using other_tools::SymbolicatedImage;
-using mach_o::Header;
+using mach_o::UnsafeHeader;
 using mach_o::Platform;
 using mach_o::Version32;
 
@@ -237,7 +238,7 @@ SymbolicatedCache::SymbolicatedCache(const DyldSharedCache* cache, bool isCacheO
 
     machoImages.reserve(cache->imagesCount());
     images.reserve(cache->imagesCount());
-    cache->forEachImage(^(const Header* hdr, const char* installName) {
+    cache->forEachImage(^(const UnsafeHeader* hdr, const char* installName) {
         machoImages.emplace_back((void*)hdr, (size_t)-1, isCacheOnDisk ? Image::MappingKind::dyldLoadedPreFixups : Image::MappingKind::dyldLoadedPostFixups);
     });
 
@@ -246,7 +247,7 @@ SymbolicatedCache::SymbolicatedCache(const DyldSharedCache* cache, bool isCacheO
 
     for ( size_t i = 0; i < images.size(); ++i ) {
         const SymbolicatedImage& im = images[i];
-        im.image().header()->forEachSection(^(const Header::SectionInfo& sectInfo, bool &stop) {
+        im.image().header()->forEachSection(^(const UnsafeHeader::SectionInfo& sectInfo, bool &stop) {
             if ( sectInfo.size == 0 )
                 return;
             ranges.push_back({ .imageIndex = i, .startAddr = sectInfo.address, .endAddr = sectInfo.address + sectInfo.size, .segmentName = sectInfo.segmentName, .sectName = sectInfo.sectionName });
@@ -339,10 +340,10 @@ static void sortSegmentInfo(std::vector<SegmentInfo>& segInfos)
     });
 }
 
-static void buildSegmentInfo(const Header* hdr, std::vector<SegmentInfo>& segInfos)
+static void buildSegmentInfo(const UnsafeHeader* hdr, std::vector<SegmentInfo>& segInfos)
 {
     const char* installName = hdr->installName();
-    hdr->forEachSegment(^(const Header::SegmentInfo& info, bool& stop) {
+    hdr->forEachSegment(^(const UnsafeHeader::SegmentInfo& info, bool& stop) {
         // Note, we subtract 1 from the vmSize so that lower_bound doesn't include the end of the segment
         // as being a match for a given address.
         segInfos.push_back({info.vmaddr, info.vmsize - 1, installName, info.segmentName});
@@ -351,7 +352,7 @@ static void buildSegmentInfo(const Header* hdr, std::vector<SegmentInfo>& segInf
 
 static void buildSegmentInfo(const DyldSharedCache* dyldCache, std::vector<SegmentInfo>& segInfos)
 {
-    dyldCache->forEachImage(^(const Header* hdr, const char* installName) {
+    dyldCache->forEachImage(^(const UnsafeHeader* hdr, const char* installName) {
         buildSegmentInfo(hdr, segInfos);
     });
     sortSegmentInfo(segInfos);
@@ -841,7 +842,7 @@ static bool findImageAndSegment(const DyldSharedCache* dyldCache, const std::vec
 
 static void dumpObjCClassLayout(const DyldSharedCache* dyldCache)
 {
-    dyldCache->forEachImage(^(const Header *hdr, const char *installName) {
+    dyldCache->forEachImage(^(const UnsafeHeader* hdr, const char *installName) {
         const dyld3::MachOAnalyzer* ma = (dyld3::MachOAnalyzer*)hdr;
         Diagnostics diag;
 
@@ -916,7 +917,7 @@ static void dumpObjCClassMethodLists(const DyldSharedCache* dyldCache)
     // Map from vmAddr to the category name for that address
 
     __block std::unordered_map<VMAddress, std::string, VMAddressHash, VMAddressEqual> categoryMap;
-    dyldCache->forEachImage(^(const Header *hdr, const char *installName) {
+    dyldCache->forEachImage(^(const UnsafeHeader* hdr, const char *installName) {
         const dyld3::MachOAnalyzer* ma = (dyld3::MachOAnalyzer*)hdr;
         Diagnostics diag;
 
@@ -969,7 +970,7 @@ static void dumpObjCClassMethodLists(const DyldSharedCache* dyldCache)
     });
 
     __block std::map<uint64_t, const char*> dylibVMAddrMap;
-    dyldCache->forEachImage(^(const Header *hdr, const char *installName) {
+    dyldCache->forEachImage(^(const UnsafeHeader* hdr, const char *installName) {
         if ( hdr->hasObjC() )
             dylibVMAddrMap[hdr->preferredLoadAddress()] = installName;
     });
@@ -1020,7 +1021,7 @@ static void dumpObjCClassMethodLists(const DyldSharedCache* dyldCache)
     };
 
     __block std::unordered_set<VMAddress, VMAddressHash, VMAddressEqual> seenCategories;
-    dyldCache->forEachImage(^(const Header *hdr, const char *installName) {
+    dyldCache->forEachImage(^(const UnsafeHeader* hdr, const char *installName) {
         const dyld3::MachOAnalyzer* ma = (dyld3::MachOAnalyzer*)hdr;
         Diagnostics diag;
 
@@ -1644,7 +1645,7 @@ int main (int argc, const char* argv[]) {
             exit(1);
         }
 
-        const Header* hdr = (const Header*)dyldCache->getIndexedImageEntry(imageIndex);
+        const UnsafeHeader* hdr = (const UnsafeHeader*)dyldCache->getIndexedImageEntry(imageIndex);
 
         __block std::vector<SegmentInfo> dylibSegInfo;
         buildSegmentInfo(hdr, dylibSegInfo);
@@ -1934,13 +1935,13 @@ int main (int argc, const char* argv[]) {
 
             uint64_t sharedCacheRelativeSelectorBaseVMAddress = dyldCache->sharedCacheRelativeSelectorBaseVMAddress();
 
-            dyldCache->forEachImage(^(const Header *hdr, const char *installName) {
+            dyldCache->forEachImage(^(const UnsafeHeader* hdr, const char *installName) {
                 __block std::unordered_set<std::string_view> seenStrings;
                 const dyld3::MachOAnalyzer* ma = (dyld3::MachOAnalyzer*)hdr;
                 int64_t slide = ma->getSlide();
                 uint32_t pointerSize = ma->pointerSize();
 
-                ((const Header*)ma)->forEachSection(^(const Header::SectionInfo& info, bool& stop) {
+                ((const UnsafeHeader*)ma)->forEachSection(^(const UnsafeHeader::SectionInfo& info, bool& stop) {
                     if ( ( (info.flags & SECTION_TYPE) == S_CSTRING_LITERALS ) ) {
                         const uint8_t* content = (uint8_t*)(info.address + slide);
                         const char* s   = (char*)content;
@@ -2020,7 +2021,7 @@ int main (int argc, const char* argv[]) {
         }
 
         if (printExports) {
-            dyldCache->forEachImage(^(const Header *hdr, const char *installName) {
+            dyldCache->forEachImage(^(const UnsafeHeader* hdr, const char *installName) {
                 const dyld3::MachOAnalyzer* ma = (dyld3::MachOAnalyzer*)hdr;
                 uint32_t exportTrieRuntimeOffset;
                 uint32_t exportTrieSize;
@@ -2046,9 +2047,9 @@ int main (int argc, const char* argv[]) {
     }
     else if ( options.mode == modeSectionSizes ) {
         __block std::map<std::string, uint64_t> sectionSizes;
-        dyldCache->forEachImage(^(const Header *hdr, const char *installName) {
+        dyldCache->forEachImage(^(const UnsafeHeader* hdr, const char *installName) {
             const dyld3::MachOAnalyzer* ma = (const dyld3::MachOAnalyzer*)hdr;
-            ((const Header*)ma)->forEachSection(^(const Header::SectionInfo &sectInfo, bool &stop) {
+            ((const UnsafeHeader*)ma)->forEachSection(^(const UnsafeHeader::SectionInfo &sectInfo, bool &stop) {
                 std::string section = std::string(sectInfo.segmentName) + " " + std::string(sectInfo.sectionName);
                 sectionSizes[section] += sectInfo.size;
             });
@@ -2088,7 +2089,7 @@ int main (int argc, const char* argv[]) {
         // Dump the objc indices
 
         __block std::map<uint64_t, const char*> dylibVMAddrMap;
-        dyldCache->forEachImage(^(const Header *hdr, const char *installName) {
+        dyldCache->forEachImage(^(const UnsafeHeader* hdr, const char *installName) {
             if ( hdr->hasObjC() )
                 dylibVMAddrMap[hdr->preferredLoadAddress()] = installName;
         });
@@ -2167,7 +2168,7 @@ int main (int argc, const char* argv[]) {
         }
 
         __block std::map<uint64_t, const char*> dylibVMAddrMap;
-        dyldCache->forEachImage(^(const Header *hdr, const char *installName) {
+        dyldCache->forEachImage(^(const UnsafeHeader* hdr, const char *installName) {
             if ( hdr->hasObjC() )
                 dylibVMAddrMap[hdr->preferredLoadAddress()] = installName;
         });
@@ -2290,7 +2291,7 @@ int main (int argc, const char* argv[]) {
         // name of the class they are attaching to
         __block std::unordered_map<uint64_t, const char*> classVMAddrToName;
         __block std::unordered_map<uint64_t, const char*> metaclassVMAddrToName;
-        dyldCache->forEachImage(^(const Header *mh, const char *installName) {
+        dyldCache->forEachImage(^(const UnsafeHeader* mh, const char *installName) {
             const dyld3::MachOAnalyzer* ma = (const dyld3::MachOAnalyzer*)mh;
 
             __block objc_visitor::Visitor visitor(dyldCache, ma, VMAddress(sharedCacheRelativeSelectorBaseVMAddress));
@@ -2441,7 +2442,7 @@ int main (int argc, const char* argv[]) {
             // are exported
             std::set<uint64_t> exportedSymbolVMAddrs;
             {
-                uint64_t loadAddress = ((const Header*)ma)->preferredLoadAddress();
+                uint64_t loadAddress = ((const UnsafeHeader*)ma)->preferredLoadAddress();
 
                 uint32_t exportTrieRuntimeOffset;
                 uint32_t exportTrieSize;
@@ -2737,7 +2738,7 @@ int main (int argc, const char* argv[]) {
 
         json::streamArrayBegin(needsComma);
 
-        dyldCache->forEachImage(^(const Header *mh, const char *installName) {
+        dyldCache->forEachImage(^(const UnsafeHeader* mh, const char *installName) {
             const dyld3::MachOAnalyzer* ma = (const dyld3::MachOAnalyzer*)mh;
 
             objc_visitor::Visitor visitor(dyldCache, ma, VMAddress(sharedCacheRelativeSelectorBaseVMAddress));
@@ -2908,7 +2909,7 @@ int main (int argc, const char* argv[]) {
     else if ( options.mode == modeSwiftProtocolConformances ) {
 #if 0
         // This would dump the conformances in each binary, not the table in the shared cache
-        dyldCache->forEachImage(^(const Header *mh, const char *installName) {
+        dyldCache->forEachImage(^(const UnsafeHeader* mh, const char *installName) {
             const dyld3::MachOAnalyzer* ma = (const dyld3::MachOAnalyzer*)mh;
 
             Diagnostics diag;
@@ -2936,7 +2937,7 @@ int main (int argc, const char* argv[]) {
         // Find all the symbols.  This maps from VM Addresses to symbol name
         __block std::unordered_map<uint64_t, std::string_view> symbols;
         __block std::unordered_map<uint64_t, std::string_view> dylibs;
-        dyldCache->forEachImage(^(const Header *mh, const char *installName) {
+        dyldCache->forEachImage(^(const UnsafeHeader* mh, const char *installName) {
             const dyld3::MachOAnalyzer* ma = (const dyld3::MachOAnalyzer*)mh;
             Diagnostics diag;
             ma->forEachGlobalSymbol(diag, ^(const char *symbolName, uint64_t n_value, uint8_t n_type, uint8_t n_sect, uint16_t n_desc, bool &stop) {
@@ -3000,10 +3001,10 @@ int main (int argc, const char* argv[]) {
 
         auto getDylibForAddress = ^(uint64_t vmAddress) {
             __block std::string_view dylibName;
-            dyldCache->forEachImage(^(const Header *mh, const char *installName) {
+            dyldCache->forEachImage(^(const UnsafeHeader* mh, const char *installName) {
                 if ( !dylibName.empty() )
                     return;
-                ((const Header*)mh)->forEachSegment(^(const Header::SegmentInfo &info, bool &stop) {
+                ((const UnsafeHeader*)mh)->forEachSegment(^(const UnsafeHeader::SegmentInfo &info, bool &stop) {
                     if ( (vmAddress >= info.vmaddr) && (vmAddress < (info.vmaddr + info.vmsize)) ) {
                         dylibName = installName;
                         stop = true;
@@ -3221,16 +3222,13 @@ int main (int argc, const char* argv[]) {
 
         SymbolicatedCache symbolicatedCache(dyldCache, cacheOnDisk);
 
-        while ( !vaString.empty() ) {
-            char* endptr = nullptr;
-            uint64_t addr = strtoull(vaString.c_str(), &endptr, 16);
-            if ( addr == 0 )
-                break;
+        std::vector<uint64_t> addrList;
+        if ( mach_o::Error err = parseHexAddrList(options.lookupVA, ',', "-lookup-va", addrList) ) {
+            fprintf(stderr, "%s\n", err.message());
+            return 1;
+        }
 
-            if ( endptr )
-                ++endptr;
-            vaString = endptr;
-
+        for ( uint64_t addr : addrList ) {
             printf("0x%llx\n", addr);
             std::optional<size_t> rangeIndexOpt = symbolicatedCache.findClosestRange(addr);
             if ( !rangeIndexOpt )
@@ -3272,7 +3270,7 @@ int main (int argc, const char* argv[]) {
         __block const void* objcCacheOffsets = nullptr;
         __block int impCachesVersion = 1;
         __block Diagnostics diag;
-        dyldCache->forEachImage(^(const Header* hdr, const char* installName) {
+        dyldCache->forEachImage(^(const UnsafeHeader* hdr, const char* installName) {
             if ( !strcmp(installName, "/usr/lib/libobjc.A.dylib") ) {
                 const dyld3::MachOAnalyzer* ma = (const dyld3::MachOAnalyzer*)hdr;
                 objcCacheOffsets = ma->findSectionContent("__DATA_CONST", "__objc_scoffs", objcCacheOffsetsSize);
@@ -3303,7 +3301,7 @@ int main (int argc, const char* argv[]) {
 
         uint64_t sharedCacheRelativeSelectorBaseVMAddress = dyldCache->sharedCacheRelativeSelectorBaseVMAddress();
 
-        dyldCache->forEachImage(^(const Header *mh, const char *installName) {
+        dyldCache->forEachImage(^(const UnsafeHeader* mh, const char *installName) {
             if (diag.hasError())
                 return;
 
@@ -3350,7 +3348,7 @@ int main (int argc, const char* argv[]) {
             return 1;
 
         __block bool anyBadEntry = false;
-        dyldCache->forEachImage(^(const Header *mh, const char *installName) {
+        dyldCache->forEachImage(^(const UnsafeHeader* mh, const char *installName) {
             if (diag.hasError())
                 return;
 
@@ -3495,8 +3493,8 @@ int main (int argc, const char* argv[]) {
                 break;
             }
             case modeListDylibsWithSection: {
-                dyldCache->forEachImage(^(const Header* hdr, const char* installName) {
-                    hdr->forEachSection(^(const Header::SectionInfo& sectInfo, bool& stop) {
+                dyldCache->forEachImage(^(const UnsafeHeader* hdr, const char* installName) {
+                    hdr->forEachSection(^(const UnsafeHeader::SectionInfo& sectInfo, bool& stop) {
                         if ( (sectInfo.sectionName == options.sectionName) && (sectInfo.segmentName == options.segmentName) ) {
                             printf("%s\n", installName);
                             stop = true;
@@ -3508,8 +3506,8 @@ int main (int argc, const char* argv[]) {
             case modeMap: {
                 __block std::map<uint64_t, const char*> dataSegNames;
                 __block std::map<uint64_t, uint64_t>    dataSegEnds;
-                dyldCache->forEachImage(^(const Header* hdr, const char* installName) {
-                    hdr->forEachSegment(^(const Header::SegmentInfo &info, bool &stop) {
+                dyldCache->forEachImage(^(const UnsafeHeader* hdr, const char* installName) {
+                    hdr->forEachSegment(^(const UnsafeHeader::SegmentInfo &info, bool &stop) {
                         printf("0x%08llX - 0x%08llX %.*s %s\n", info.vmaddr, info.vmaddr + info.vmsize,
                                (int)info.segmentName.size(), info.segmentName.data(),
                                installName);
@@ -3532,7 +3530,7 @@ int main (int argc, const char* argv[]) {
             }
             case modeDependencies: {
                 __block bool dependentTargetFound = false;
-                dyldCache->forEachImage(^(const Header* hdr, const char* installName) {
+                dyldCache->forEachImage(^(const UnsafeHeader* hdr, const char* installName) {
                     if ( strcmp(options.dependentsOfPath, installName) != 0 )
                         return;
                     dependentTargetFound = true;
@@ -3599,7 +3597,7 @@ int main (int argc, const char* argv[]) {
                     }
                 };
 
-                dyldCache->forEachImage(^(const Header* hdr, const char* installName) {
+                dyldCache->forEachImage(^(const UnsafeHeader* hdr, const char* installName) {
                     dyld3::MachOAnalyzer* ma = (dyld3::MachOAnalyzer*)hdr;
                     Diagnostics diag;
                     dyld3::MachOAnalyzer::LinkEditInfo leInfo;
@@ -3665,8 +3663,8 @@ int main (int argc, const char* argv[]) {
                     const char* path;
                 };
                 __block std::vector<TextInfo> textSegments;
-                dyldCache->forEachImage(^(const Header* hdr, const char* installName) {
-                    hdr->forEachSegment(^(const Header::SegmentInfo &info, bool &stop) {
+                dyldCache->forEachImage(^(const UnsafeHeader* hdr, const char* installName) {
+                    hdr->forEachSegment(^(const UnsafeHeader::SegmentInfo &info, bool &stop) {
                         if ( info.segmentName != "__TEXT" )
                             return;
                         textSegments.push_back({ info.fileSize, installName });
@@ -3683,7 +3681,7 @@ int main (int argc, const char* argv[]) {
             case modeFunctionVariants: {
                 printf("Function Variant table size: %lld bytes\n", dyldCache->header.functionVariantInfoSize);
                 uintptr_t cacheSlide = dyldCache->slide();
-                dyldCache->forEachFunctionVariantPatchLocation(^(const void* loc, PointerMetaData pmd, const mach_o::FunctionVariants& fvs, const mach_o::Header* dylibHdr, int variantIndex, bool& stop) {
+                dyldCache->forEachFunctionVariantPatchLocation(^(const void* loc, PointerMetaData pmd, const mach_o::FunctionVariants& fvs, const mach_o::UnsafeHeader* dylibHdr, int variantIndex, bool& stop) {
                     if ( pmd.authenticated ) {
                         printf("    fixup-loc=%p (key=%d, addr=%d, diversity=0x%04X), header-of-dylib-with-variant=%p, variant-index=%d\n",
                                (void*)((uintptr_t)loc - cacheSlide), pmd.key, pmd.usesAddrDiversity, pmd.diversity, (void*)((uintptr_t)dylibHdr - cacheSlide), variantIndex);
@@ -3703,7 +3701,7 @@ int main (int argc, const char* argv[]) {
                 __block uint32_t imageIndex = 0;
                 __block std::unordered_map<CString, PatchPageMetric> pagesPerSymbol;
 
-                dyldCache->forEachImage(^(const Header* hdr, const char* installName) {
+                dyldCache->forEachImage(^(const UnsafeHeader* hdr, const char* installName) {
                     printf("%s:\n", installName);
                     uint64_t dylibBaseAddress = hdr->preferredLoadAddress();
                     dyldCache->forEachPatchableExport(imageIndex, ^(uint32_t dylibVMOffsetOfImpl, const char* exportName,
@@ -3720,7 +3718,7 @@ int main (int argc, const char* argv[]) {
                             // Get the image so that we can convert from dylib offset to cache offset
                             uint64_t mTime;
                             uint64_t inode;
-                            const Header* imageHdr = (const Header*)(dyldCache->getIndexedImageEntry(userImageIndex, mTime, inode));
+                            const UnsafeHeader* imageHdr = (const UnsafeHeader*)(dyldCache->getIndexedImageEntry(userImageIndex, mTime, inode));
                             if ( imageHdr == nullptr )
                                 return;
 
@@ -3822,7 +3820,7 @@ int main (int argc, const char* argv[]) {
                 __block std::optional<uint32_t> rootImageIndex;
                 {
                     __block uint32_t imageIndex = 0;
-                    dyldCache->forEachImage(^(const Header* hdr, const char* installName) {
+                    dyldCache->forEachImage(^(const UnsafeHeader* hdr, const char* installName) {
                         if ( strcmp(installName, options.rootsCostOfDylib) == 0 )
                             rootImageIndex = imageIndex;
                         ++imageIndex;
@@ -3859,7 +3857,7 @@ int main (int argc, const char* argv[]) {
                             return;
 
                         SegmentInfo usageAt;
-                        const uint64_t patchLocVmAddr = ((const Header*)imageMA)->preferredLoadAddress() + userVMOffset;
+                        const uint64_t patchLocVmAddr = ((const UnsafeHeader*)imageMA)->preferredLoadAddress() + userVMOffset;
                         const uint64_t patchLocCacheOffset = patchLocVmAddr - cacheBaseAddress;
                         findImageAndSegment(dyldCache, segInfos, patchLocCacheOffset, &usageAt);
 
@@ -3921,7 +3919,7 @@ int main (int argc, const char* argv[]) {
                 };
 
                 printRow("magic", "arch", "filetype", "ncmds", "sizeofcmds", "flags", "installname");
-                dyldCache->forEachDylib(^(const Header *mh, const char *installName, uint32_t imageIndex, uint64_t inode, uint64_t mtime, bool &stop) {
+                dyldCache->forEachDylib(^(const UnsafeHeader* mh, const char *installName, uint32_t imageIndex, uint64_t inode, uint64_t mtime, bool &stop) {
                     const dyld3::MachOFile* mf = (const dyld3::MachOFile*)mh;
                     const char* magic = nullptr;
                     if ( mf->magic == MH_MAGIC )
@@ -4039,7 +4037,7 @@ int main (int argc, const char* argv[]) {
             }
             case modeDylibSymbols:
             {
-                dyldCache->forEachImage(^(const Header* hdr, const char* installName) {
+                dyldCache->forEachImage(^(const UnsafeHeader* hdr, const char* installName) {
                     const dyld3::MachOAnalyzer* ma = (dyld3::MachOAnalyzer*)hdr;
                     Diagnostics diag;
 
@@ -4059,7 +4057,7 @@ int main (int argc, const char* argv[]) {
                 break;
             }
             case modeFunctionStarts: {
-                dyldCache->forEachImage(^(const Header* hdr, const char* installName) {
+                dyldCache->forEachImage(^(const UnsafeHeader* hdr, const char* installName) {
                     printf("%s:\n", installName);
                     uint64_t loadAddress = hdr->preferredLoadAddress();
                     Diagnostics diag;
@@ -4083,7 +4081,7 @@ int main (int argc, const char* argv[]) {
             {
                 __block std::map<std::string, std::vector<const char*>> symbolsToInstallNames;
                 __block std::set<std::string>                           weakDefSymbols;
-                dyldCache->forEachImage(^(const Header* hdr, const char* installName) {
+                dyldCache->forEachImage(^(const UnsafeHeader* hdr, const char* installName) {
                     const dyld3::MachOAnalyzer* ma = (dyld3::MachOAnalyzer*)hdr;
                     uint32_t exportTrieRuntimeOffset;
                     uint32_t exportTrieSize;

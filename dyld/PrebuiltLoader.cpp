@@ -32,7 +32,7 @@
 #include <sys/fcntl.h>
 
 #include "Defines.h"
-#include "Header.h"
+#include "UnsafeHeader.h"
 #include "UUID.h"
 #include "Loader.h"
 #include "PrebuiltLoader.h"
@@ -48,7 +48,7 @@
 #include "objc-shared-cache.h"
 
 // mach_o
-#include "Header.h"
+#include "UnsafeHeader.h"
 
 #if SUPPORT_PREBUILTLOADERS || BUILDING_UNIT_TESTS || BUILDING_CACHE_BUILDER_UNIT_TESTS
 
@@ -65,9 +65,9 @@
 using dyld3::MachOAnalyzer;
 using dyld3::MachOFile;
 using dyld3::OverflowSafeArray;
-using mach_o::Header;
+using mach_o::UnsafeHeader;
 using mach_o::Platform;
-using mach_o::Header;
+using mach_o::UnsafeHeader;
 using mach_o::FunctionVariants;
 
 namespace dyld4 {
@@ -275,7 +275,7 @@ const char* PrebuiltLoader::installName(const RuntimeState& state) const
     // TODO: We could also check on-disk prebuilt loaders, but the benefit might be small
     // Either their path is equal to the install name, or we'd have recorded an altPath
     // which is the install name
-    const Header* hdr = (const Header*)this->mf(state);
+    const UnsafeHeader* hdr = (const UnsafeHeader*)this->mf(state);
     if ( hdr->isDylib() )
         return hdr->installName();
     return nullptr;
@@ -448,7 +448,7 @@ void PrebuiltLoader::loadDependents(Diagnostics& diag, RuntimeState& state, cons
             child->map(diag, state, options, true);
         else if ( state.config.log.searching ) {
             // prebuilt loader has recorded that this linked dylib should be missing
-            const Header* hdr       = (Header*)this->mf(state);
+            const UnsafeHeader* hdr       = (UnsafeHeader*)this->mf(state);
             const char*   childPath = hdr->linkedDylibLoadPath(depIndex);
             state.log("find path \"%s\"\n", childPath);
             state.log("  not found: weak-linked and pre-built-as-missing dylib\n");
@@ -1047,7 +1047,7 @@ void PrebuiltLoader::applyObjCFixups(RuntimeState& state) const
     }
 
     const dyld3::MachOAnalyzer::VMAddrConverter& vmAddrConverter = ma->makeVMAddrConverter(true);
-    const uint64_t loadAddress = ((const Header*)ma)->preferredLoadAddress();
+    const uint64_t loadAddress = ((const UnsafeHeader*)ma)->preferredLoadAddress();
 
     // Protocols.
     // If we have only a single definition of a protocol, then that definition should be fixed up.
@@ -1303,7 +1303,7 @@ void PrebuiltLoader::serialize(Diagnostics& diag, RuntimeState& state, const Jus
     const char* path = jitLoader.path(state);
     allocator.append(path, strlen(path) + 1);
     p->altPathOffset            = 0;
-    const char* installNamePath = ((Header*)mf)->installName();
+    const char* installNamePath = ((UnsafeHeader*)mf)->installName();
     if ( mf->isDylib() && (strcmp(installNamePath, path) != 0) ) {
         p->altPathOffset = allocator.size() - serializationStart;
         allocator.append(installNamePath, strlen(installNamePath) + 1);
@@ -1360,7 +1360,7 @@ void PrebuiltLoader::serialize(Diagnostics& diag, RuntimeState& state, const Jus
     if ( !jitLoader.dylibInDyldCache ) {
         uint32_t sigFileOffset;
         uint32_t sigSize;
-        if ( ((const Header*)mf)->hasCodeSignature(sigFileOffset, sigSize) ) {
+        if ( ((const UnsafeHeader*)mf)->hasCodeSignature(sigFileOffset, sigSize) ) {
             p->codeSignature.fileOffset = sigFileOffset;
             p->codeSignature.size       = sigSize;
         }
@@ -1393,7 +1393,7 @@ void PrebuiltLoader::serialize(Diagnostics& diag, RuntimeState& state, const Jus
     // add catalyst support info
     bool isMacOSOrCataylyst = (state.config.process.basePlatform == Platform::macOS) || (state.config.process.basePlatform == Platform::macCatalyst);
     bool buildingMacOSCache = jitLoader.dylibInDyldCache && isMacOSOrCataylyst;
-    p->supportsCatalyst     = buildingMacOSCache && ((mach_o::Header*)mf)->builtForPlatform(Platform::macCatalyst);
+    p->supportsCatalyst     = buildingMacOSCache && ((mach_o::UnsafeHeader*)mf)->builtForPlatform(Platform::macCatalyst);
     p->isCatalystOverride   = false;
     p->indexOfTwin          = kNoUnzipperedTwin;
     p->reserved1            = 0;
@@ -2263,7 +2263,7 @@ const PrebuiltLoaderSet* PrebuiltLoaderSet::makeLaunchSet(Diagnostics& diag, Run
     for ( const Loader* ldr : state.loaded ) {
         if ( ldr->dylibInDyldCache )
             break;
-        const Header* hdr = (const Header*)ldr->mf(state);
+        const UnsafeHeader* hdr = (const UnsafeHeader*)ldr->mf(state);
         if ( hdr->isDylib() && hdr->hasInterposingTuples() ) {
             diag.error("cannot make PrebuiltLoaderSet for program that using interposing");
             return nullptr;

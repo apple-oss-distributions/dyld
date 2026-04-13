@@ -35,7 +35,7 @@
 
 namespace mach_o {
 
-struct Header;
+struct UnsafeHeader;
 
 /// Returns true if (addLHS + addRHS) > b, or if the add overflowed
 template<typename T>
@@ -93,7 +93,7 @@ inline uint64_t readUnaligned64(const uint8_t* ptr)
 
 // used to walk fat/thin files and get all mach-o headers
 Error forEachHeader(std::span<const uint8_t> buffer, std::string_view path,
-                    void (^callback)(const Header* sliceHeader, size_t sliceLength, bool& stop)) VIS_HIDDEN;
+                    void (^callback)(const UnsafeHeader* sliceHeader, size_t sliceLength, bool& stop)) VIS_HIDDEN;
 
 } // namespace mach_o
 

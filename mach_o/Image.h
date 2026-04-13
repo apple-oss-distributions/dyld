@@ -26,8 +26,10 @@
 #define mach_o_Image_h
 
 #include "MachODefines.h"
+
+// mach_o
 #include "Error.h"
-#include "Header.h"
+#include "UnsafeHeader.h"
 #include "ExportsTrie.h"
 #include "NListSymbolTable.h"
 #include "RebaseOpcodes.h"
@@ -38,6 +40,7 @@
 #include "CompactUnwind.h"
 #include "SplitSeg.h"
 #include "FunctionVariants.h"
+#include "DataInCode.h"
 
 
 namespace mach_o {
@@ -62,7 +65,7 @@ public:
 
     Error                 validate() const;
 
-    const Header*         header() const         { return _buffer; }
+    const UnsafeHeader*         header() const         { return _buffer; }
     uint32_t              pageSize() const;
 
     void                  withSegments(void (^callback)(std::span<const MappedSegment> segments)) const;
@@ -81,6 +84,7 @@ public:
     bool                    hasFunctionStarts() const  { return (_functionStarts != nullptr); }
     bool                    hasCompactUnwind() const   { return (_compactUnwind != nullptr); }
     bool                    hasSplitSegInfo() const    { return (_splitSegInfo != nullptr); }
+    bool                    hasDataInCode() const      { return (_dataInCode != nullptr); }
     bool                    hasFunctionVariants() const      { return (_functionVariants != nullptr); }
     bool                    hasFunctionVariantFixups() const { return (_functionVariantFixups != nullptr); }
     bool                    hasFirmwareFixups() const        { return _buffer->hasFirmwareChainStarts(); }
@@ -94,16 +98,27 @@ public:
     const FunctionStarts&        functionStarts() const         { return *_functionStarts; }
     const CompactUnwind&         compactUnwind() const          { return *_compactUnwind; }
     const SplitSegInfo&          splitSegInfo() const           { return *_splitSegInfo; }
+    const DataInCode&            dataInCode() const             { return *_dataInCode; }
     const FunctionVariants&      functionVariants() const       { return *_functionVariants; }
     const FunctionVariantFixups& functionVariantFixups() const  { return *_functionVariantFixups; }
 
     std::span<const uint32_t> indirectSymbolTable() const;
     std::span<uint8_t>        atomInfo() const;
+    const void*               linkeditContentFromFileOffset(uint32_t fileOffset) const { return _linkeditBias+fileOffset; }
 
     uint32_t                segmentCount() const;
     MappedSegment           segment(uint32_t segIndex) const;
     void                    forEachInitializer(bool contentRebased, void (^callback)(uint32_t offset)) const;
     void                    forEachClassicTerminator(bool contentRebased, void (^callback)(uint32_t offset)) const;
+    void                    forEachLazyLoadDylib(void (^callback)(uint32_t* loadedFlag, CString dylibLoadPath, bool weakLink)) const;
+    struct PACInfo
+    {
+        bool        isAuth;     // PAC signed or not
+        bool        addrDiv;
+        uint8_t     key       :  2;
+        uint16_t    diversity;
+    };
+    void                    forEachLazyLoadDylibSymbol(uint32_t* loadedFlag, void (^callback)(CString symbolName, void* fixupLoc, PACInfo pac)) const;
 
 private:
     bool                inferIfZerofillExpanded() const;
@@ -121,11 +136,12 @@ private:
     void                makeFunctionStarts();
     void                makeCompactUnwind();
     void                makeSplitSegInfo();
+    void                makeDataInCode();
     void                makeFunctionVariants();
     void                makeFunctionVariantFixups();
 
 
-    const Header*       _buffer;
+    const UnsafeHeader*       _buffer;
     size_t              _bufferSize;
     const uint8_t*      _linkeditBias    = nullptr; // add LC file-offset to this to get linkedit content
     MappingKind         _mappingKind;
@@ -141,6 +157,7 @@ private:
     const FunctionStarts*        _functionStarts        = nullptr;
     const CompactUnwind*         _compactUnwind         = nullptr;
     const SplitSegInfo*          _splitSegInfo          = nullptr;
+    const DataInCode*            _dataInCode            = nullptr;
     const FunctionVariants*      _functionVariants      = nullptr;
     const FunctionVariantFixups* _functionVariantFixups = nullptr;
 
@@ -154,6 +171,7 @@ private:
     uint8_t                 _functionStartsSpace[sizeof(FunctionStarts)];
     uint8_t                 _compactUnwindSpace[sizeof(CompactUnwind)];
     uint8_t                 _splitSegSpace[sizeof(SplitSegInfo)];
+    uint8_t                 _dataInCodeSpace[sizeof(DataInCode)];
     uint8_t                 _functionVariantsSpace[sizeof(FunctionVariants)];
     uint8_t                 _functionVariantFixupsSpace[sizeof(FunctionVariantFixups)];
 };

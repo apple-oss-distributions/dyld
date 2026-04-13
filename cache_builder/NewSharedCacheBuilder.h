@@ -38,7 +38,7 @@
 #include "NewAdjustDylibSegments.h"
 #include "Optimizers.h"
 #include "OptimizerObjC.h"
-#include "PerfectHash.h"
+#include "PerfectHashWriter.h"
 #include "SectionCoalescer.h"
 #include "SubCache.h"
 #include "Timer.h"
@@ -65,7 +65,7 @@ struct CacheBuffer {
     uint8_t*        bufferData  = nullptr;
     size_t          bufferSize  = 0;
     std::string     cdHash      = "";
-    std::string     agilecdHash = ""; // if using agile signatures, this is the other signature
+
     std::string     uuid        = "";
 
     // Something like .development, .development.data, .symbols, etc
@@ -141,6 +141,7 @@ private:
     void            estimateIMPCaches();
     void            findObjCDylibs();
     void            findCanonicalObjCSelectors();
+    void            findCanonicalObjCTypes();
     void            findCanonicalObjCClassNames();
     void            findCanonicalObjCProtocolNames();
     void            findObjCClasses();
@@ -184,6 +185,7 @@ private:
 
     // Final passes to run, after dylib passes
     void            emitObjCSelectorStrings();
+    void            emitObjCTypeStrings();
     void            emitObjCClassNameStrings();
     void            emitObjCProtocolNameStrings();
     void            emitObjCSwiftDemangledNameStrings();
@@ -274,6 +276,7 @@ private:
     std::string                                     swiftPrespecializedDylibJSON;
     CacheDylib*                                     swiftPrespecializedDylib = nullptr;
     std::string                                     swiftPrespecializedDylibBuildError;
+    void*                                           swiftMetadataBuilderDlHandle = nullptr;
 
     // Some optimizers are run just once per cache, so live at the top level here
     ObjCOptimizer                        objcOptimizer;

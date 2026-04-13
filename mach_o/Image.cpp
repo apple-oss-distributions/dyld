@@ -40,11 +40,12 @@
 #include "Misc.h"
 #include "CompactUnwind.h"
 #include "TargetPolicy.h"
+#include "LazyLoadDylib.h"
 
 namespace mach_o {
 
 Image::Image(const void* buffer, size_t bufferSize, MappingKind kind)
-    : _buffer((Header*)buffer), _bufferSize(bufferSize), _mappingKind(kind), _hasZerofillExpansion(false)
+    : _buffer((UnsafeHeader*)buffer), _bufferSize(bufferSize), _mappingKind(kind), _hasZerofillExpansion(false)
 {
     // figure out location of LINKEDIT
     switch ( kind ) {
@@ -77,13 +78,14 @@ Image::Image(const void* buffer, size_t bufferSize, MappingKind kind)
     makeFunctionStarts();
     makeCompactUnwind();
     makeSplitSegInfo();
+    makeDataInCode();
     makeFunctionVariants();
     makeFunctionVariantFixups();
 }
 
 // for dyld loaded images only
 Image::Image(const mach_header* mh)
-: _buffer((Header*)mh), _bufferSize(0), _mappingKind(MappingKind::dyldLoadedPostFixups)
+: _buffer((UnsafeHeader*)mh), _bufferSize(0), _mappingKind(MappingKind::dyldLoadedPostFixups)
 {
     // this is a loaded image with segments mapped at their respective VM addresses
     _hasZerofillExpansion = true;
@@ -100,6 +102,7 @@ Image::Image(const mach_header* mh)
     makeFunctionStarts();
     makeCompactUnwind();
     makeSplitSegInfo();
+    makeDataInCode();
     makeFunctionVariants();
     makeFunctionVariantFixups();
 }
@@ -121,6 +124,7 @@ Image::Image(const Image&& other)
     makeFunctionStarts();
     makeCompactUnwind();
     makeSplitSegInfo();
+    makeDataInCode();
     makeFunctionVariants();
     makeFunctionVariantFixups();
 }
@@ -413,7 +417,7 @@ Error Image::validStructureLinkedit(const Policy& policy) const
     __block uint64_t linkeditFileOffsetEnd   = 0;
     if ( _buffer->isObjectFile() || _buffer->isPreload() ) {
         // .o  and -preload files don't have LINKEDIT, but the LINKEDIT content is still at the end of the file after the last section content
-        _buffer->forEachSection(^(const Header::SectionInfo& info, bool& stop) {
+        _buffer->forEachSection(^(const UnsafeHeader::SectionInfo& info, bool& stop) {
             uint8_t sectType = (info.flags & SECTION_TYPE);
             bool isZeroFill = ((sectType == S_ZEROFILL) || (sectType == S_THREAD_LOCAL_ZEROFILL));
             if ( isZeroFill )
@@ -531,7 +535,7 @@ Error Image::validInitializers(const Policy& policy) const
     __block Error   anErr;
 
     __block SegmentRanges executableSegments;
-    header()->forEachSegment(^(const Header::SegmentInfo& info, bool& stop) {
+    header()->forEachSegment(^(const UnsafeHeader::SegmentInfo& info, bool& stop) {
         if ( (info.initProt & VM_PROT_EXECUTE) != 0 ) {
             executableSegments.segments.push_back({ info.vmaddr, info.vmaddr + info.vmsize, (uint32_t)info.fileSize });
         }
@@ -561,7 +565,7 @@ Error Image::validInitializers(const Policy& policy) const
     });
 
     // validate any function pointers in __DATA,__mod_init_func section
-    header()->forEachSection(^(const Header::SectionInfo& sectInfo, bool& stop) {
+    header()->forEachSection(^(const UnsafeHeader::SectionInfo& sectInfo, bool& stop) {
         uint8_t sectType = (sectInfo.flags & SECTION_TYPE);
         if ( (sectType == S_MOD_INIT_FUNC_POINTERS) || (sectType == S_MOD_TERM_FUNC_POINTERS)  ) {
             if ( (sectInfo.size % header()->pointerSize()) != 0 ) {
@@ -636,7 +640,7 @@ Error Image::validInitializers(const Policy& policy) const
         return std::move(anErr);
 
     // validate offsets in __TEXT,__init_offsets
-    header()->forEachSection(^(const Header::SectionInfo& sectInfo, bool& stop) {
+    header()->forEachSection(^(const UnsafeHeader::SectionInfo& sectInfo, bool& stop) {
         if ( (sectInfo.flags & SECTION_TYPE) == S_INIT_FUNC_OFFSETS ) {
             const uint8_t* content = (uint8_t*)(sectInfo.address + slide);
             if ( sectInfo.segInitProt & VM_PROT_WRITE ) {
@@ -802,7 +806,7 @@ void Image::makeChainedFixups()
         return;
 
     if ( _chainedFixups == nullptr ) {
-        header()->forEachSection(^(const Header::SectionInfo& info, bool& stop) {
+        header()->forEachSection(^(const UnsafeHeader::SectionInfo& info, bool& stop) {
             if ( (info.sectionName == "__chain_fixups") && (info.segmentName == "__TEXT") ) {
                 const dyld_chained_fixups_header* fixupsHeader = (dyld_chained_fixups_header*)((uint8_t*)header() + info.fileOffset);
                 _chainedFixups = new (_chainedFixupsSpace) ChainedFixups(fixupsHeader, (size_t)info.size);
@@ -828,7 +832,7 @@ void Image::makeFunctionStarts()
 void Image::makeCompactUnwind()
 {
     // if image has an a compact unwind section, use placement new to build CompactUnwind object in _compactUnwindSpace
-    _buffer->forEachSection(^(const Header::SectionInfo& info, bool& stop) {
+    _buffer->forEachSection(^(const UnsafeHeader::SectionInfo& info, bool& stop) {
         if ( (info.sectionName == "__unwind_info") && info.segmentName.starts_with("__TEXT") ) {
             const uint8_t* sectionContent = (uint8_t*)_buffer + info.fileOffset;
             _compactUnwind = new (_compactUnwindSpace) CompactUnwind(_buffer->arch(), sectionContent, (size_t)info.size);
@@ -845,6 +849,19 @@ void Image::makeSplitSegInfo()
             const linkedit_data_command* splitSegCmd = (linkedit_data_command*)cmd;
             const uint8_t* startBytes = (uint8_t*)(_linkeditBias + splitSegCmd->dataoff);
             _splitSegInfo = new (_splitSegSpace) SplitSegInfo(startBytes, splitSegCmd->datasize);
+            stop = true;
+        }
+    });
+}
+
+void Image::makeDataInCode()
+{
+    // if image has a split seg info load command, use placement new to build SplitSegInfo object in _splitSegInfoSpace
+    (void)_buffer->forEachLoadCommand(^(const load_command* cmd, bool& stop) {
+        if ( cmd->cmd == LC_DATA_IN_CODE ) {
+            const linkedit_data_command* dicCmd = (linkedit_data_command*)cmd;
+            const uint8_t* startBytes = (uint8_t*)(_linkeditBias + dicCmd->dataoff);
+            _dataInCode = new (_dataInCodeSpace) DataInCode({startBytes, dicCmd->datasize});
             stop = true;
         }
     });
@@ -975,6 +992,7 @@ void Image::forEachFixup(std::span<const MappedSegment> segments, void (^callbac
     uint16_t           fwPointerFormat;
     uint32_t           fwStartsCount;
     const uint32_t*    fwStarts;
+    uint32_t           fwStartsFlags;
     if ( this->hasChainedFixups() ) {
         const ChainedFixups& chainedFixups = this->chainedFixups();
         // userland binary with LC_DYLD_CHAINED_FIXUPS or firmware with __chain_fixups section
@@ -992,23 +1010,38 @@ void Image::forEachFixup(std::span<const MappedSegment> segments, void (^callbac
             pf.forEachFixupLocationInChain(chainStart, prefLoadAddr, &segments[segIndex], segOffsetTable, pageIndex, pageSize, callback);
         });
     }
-    else if ( this->header()->hasFirmwareChainStarts(&fwPointerFormat, &fwStartsCount, &fwStarts) ) {
+    else if ( this->header()->hasFirmwareChainStarts(&fwPointerFormat, &fwStartsCount, &fwStarts, &fwStartsFlags) ) {
         // firmware binary with __TEXT,__chain_starts section
+        bool startOffsetsAreFileOffsets = true;
+
         // Note: for historical reasons firmware __chain_starts section use file-offsets from the start of __TEXT
         // but that can be changed with -fixup_chains_section_vm linker option. But which option is used is not
         // encoded in the binary, so we need a heuristic here.
-        bool startOffsetsAreFileOffsets = true;
         if ( (fwStartsCount > 0) && (segments.back().fileOffset + segments.back().runtimeSize < fwStarts[fwStartsCount-1]) )
             startOffsetsAreFileOffsets = false;
 
+        // rdar://156010088 (Fix dyld_info -fixups output for fw binaries with zerofill sections linked with -fixup_chains_section_vm)
+        if ( fwStartsFlags == DYLD_CHAINED_STARTS_USE_FILE_OFFSET )
+            startOffsetsAreFileOffsets = true;
+        if ( fwStartsFlags == DYLD_CHAINED_STARTS_USE_VM_OFFSET )
+            startOffsetsAreFileOffsets = false;
+
+        uint32_t firstSegment = 0;
+        if ( segments.size() > 1 && (segments.front().segName == "__PAGEZERO" || !segments.front().readable) )
+            firstSegment = 1;
+
+        const uint64_t baseFileOffset = segments[firstSegment].fileOffset;
+        const uint8_t* fileEnd = (uint8_t*)header() + header()->fileSize();
+
         const ChainedFixups::PointerFormat& pf = ChainedFixups::PointerFormat::make(fwPointerFormat);
         for (uint32_t i=0; i < fwStartsCount; ++i) {
-            const void*    chainStart = nullptr;
+            const void* chainStart = nullptr;
+
             if ( startOffsetsAreFileOffsets ) {
-                chainStart = ((uint8_t*)this->header()) + segments[0].fileOffset + fwStarts[i];
-            }
-            else {
-                for (const MappedSegment& seg : segments) {
+                chainStart = ((uint8_t*)this->header()) + baseFileOffset + fwStarts[i];
+            } else {
+                for ( size_t s=firstSegment; s < segments.size(); ++s ) {
+                    const MappedSegment& seg = segments[s];
                     uint32_t startOffset = fwStarts[i];
                     if ( (seg.runtimeOffset <= startOffset) && (startOffset < seg.runtimeOffset+seg.runtimeSize) ) {
                         uint64_t vmOffsetInSegment = startOffset - seg.runtimeOffset;
@@ -1017,16 +1050,24 @@ void Image::forEachFixup(std::span<const MappedSegment> segments, void (^callbac
                     }
                 }
             }
+
+            if ( !chainStart || chainStart >= fileEnd )
+                assert("could not process firmware chains");
+
             pf.forEachFixupLocationInChain(chainStart, prefLoadAddr, nullptr, {}, 0, 0, ^(const Fixup& fixup, bool& stop) {
                 Fixup     fixupWithSeg = fixup;
                 uint64_t  chainOffset  = (uint8_t*)fixup.location - ((uint8_t*)this->header());
+
                 // Note: firmware chains can cross segments, so we cannot pre-compute 'seg'
-                for (size_t s=0; s < segments.size(); ++s) {
+                for (size_t s=firstSegment; s < segments.size(); ++s) {
                     if ( (segments[s].fileOffset <= chainOffset) && (chainOffset < segments[s].fileOffset+segments[s].runtimeSize) ) {
                         fixupWithSeg.segment = &segments[s];
                         break;
                     }
                 }
+
+                if ( !fixupWithSeg.segment )
+                    assert("could not process firmware chains");
                 callback(fixupWithSeg, stop);
             });
         }
@@ -1109,10 +1150,10 @@ std::span<uint8_t> Image::atomInfo() const
     return std::span<uint8_t>();
 }
 
-static void forEachPointerInSection(const Header* hdr, uint8_t sectionType, uint64_t prefLoadAddress,
+static void forEachPointerInSection(const UnsafeHeader* hdr, uint8_t sectionType, uint64_t prefLoadAddress,
                                     bool contentRebased, void (^callback)(uint32_t offset))
 {
-    hdr->forEachSection(^(const Header::SectionInfo& sectInfo, bool& stop) {
+    hdr->forEachSection(^(const UnsafeHeader::SectionInfo& sectInfo, bool& stop) {
         if ( (sectInfo.flags & SECTION_TYPE) == sectionType ) {
             const uint8_t* sectionContent = (uint8_t*)hdr + sectInfo.fileOffset;
             if ( hdr->inDyldCache() )
@@ -1153,7 +1194,7 @@ static void forEachPointerInSection(const Header* hdr, uint8_t sectionType, uint
 
 void Image::forEachInitializer(bool contentRebased, void (^callback)(uint32_t offset)) const
 {
-    const Header*   hdr             = header();
+    const UnsafeHeader*   hdr             = header();
     uint64_t        prefLoadAddress = hdr->preferredLoadAddress();
 
     // if dylib linked with -init linker option, that initializer is first
@@ -1174,7 +1215,7 @@ void Image::forEachInitializer(bool contentRebased, void (^callback)(uint32_t of
     forEachPointerInSection(hdr, S_MOD_INIT_FUNC_POINTERS, prefLoadAddress, contentRebased, callback);
 
     // next any function pointers in __TEXT,__init_offsets
-    hdr->forEachSection(^(const Header::SectionInfo& sectInfo, bool& stop) {
+    hdr->forEachSection(^(const UnsafeHeader::SectionInfo& sectInfo, bool& stop) {
         if ( (sectInfo.flags & SECTION_TYPE) == S_INIT_FUNC_OFFSETS ) {
             const uint8_t* sectionContent = (uint8_t*)hdr + sectInfo.fileOffset;
             if ( hdr->inDyldCache() )
@@ -1197,6 +1238,41 @@ void Image::forEachClassicTerminator(bool contentRebased, void (^callback)(uint3
     forEachPointerInSection(header(), S_MOD_TERM_FUNC_POINTERS, prefLoadAddress, contentRebased, callback);
 }
 
+void Image::forEachLazyLoadDylib(void (^callback)(uint32_t* loadedFlag, CString path, bool weakLink)) const
+{
+    const UnsafeHeader* hdr = this->header();
+    hdr->forEachLazyLoadDylib(^(uint32_t fileOffset, uint32_t size) {
+        std::span<const uint8_t> leBlob{(const uint8_t*)linkeditContentFromFileOffset(fileOffset), size};
+        LazyLoadDylib lld(leBlob);
+        callback(lld.imageLoadedFlag((mach_header*)hdr), lld.dylibLoadPath(), lld.dylibMayBeMissing());
+    });
+}
+
+void Image::forEachLazyLoadDylibSymbol(uint32_t* loadedFlag, void (^callback)(CString symbolName, void* fixupLoc, PACInfo pac)) const
+{
+    const UnsafeHeader* hdr = this->header();
+    hdr->forEachLazyLoadDylib(^(uint32_t fileOffset, uint32_t size) {
+        std::span<const uint8_t> leBlob{(const uint8_t*)linkeditContentFromFileOffset(fileOffset), size};
+        LazyLoadDylib lld(leBlob);
+        if ( lld.imageLoadedFlag((mach_header*)hdr) == loadedFlag ) {
+            const void* chain = lld.chainStart((mach_header*)hdr);
+            const ChainedFixups::PointerFormat& pf = ChainedFixups::PointerFormat::make(lld.pointerFormat());
+            while ( chain != nullptr ) {
+                Fixup fixup = pf.parseChainEntry(chain, nullptr);
+                const void* next = pf.nextLocation(chain); // save off next location in case callback overwrites loc with real pointer
+                if ( fixup.isBind ) {
+                    PACInfo pacInfo;
+                    pacInfo.isAuth    = fixup.authenticated;
+                    pacInfo.addrDiv   = fixup.auth.usesAddrDiversity;
+                    pacInfo.key       = fixup.auth.key;
+                    pacInfo.diversity = fixup.auth.diversity;
+                    callback(lld.symbol(fixup.bind.bindOrdinal), (void*)chain, pacInfo);
+                }
+                chain = next;
+            }
+        }
+    });
+}
 
 
 } // namespace mach_o

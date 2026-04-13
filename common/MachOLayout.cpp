@@ -22,7 +22,7 @@
  */
 
 #include "Array.h"
-#include "Header.h"
+#include "UnsafeHeader.h"
 #include "MachOLayout.h"
 #include "MachOFile.h"
 
@@ -75,7 +75,7 @@ std::optional<uint32_t> Layout::getObjcInfoFlags() const
     };
 
     __block std::optional<uint32_t> flags;
-    ((const Header*)this->mf)->forEachSection(^(const Header::SegmentInfo& segInfo, const Header::SectionInfo& sectInfo, bool& stop) {
+    ((const UnsafeHeader*)this->mf)->forEachSection(^(const UnsafeHeader::SegmentInfo& segInfo, const UnsafeHeader::SectionInfo& sectInfo, bool& stop) {
         if ( (sectInfo.sectionName.starts_with("__objc_imageinfo")) && sectInfo.segmentName.starts_with("__DATA") ) {
             uint64_t segmentOffset = sectInfo.fileOffset - segInfo.fileOffset;
             objc_image_info* info =  (objc_image_info*)(this->segments[sectInfo.segIndex].buffer + segmentOffset);
@@ -89,7 +89,7 @@ std::optional<uint32_t> Layout::getObjcInfoFlags() const
 bool Layout::hasSection(std::string_view segmentName, std::string_view sectionName) const
 {
     __block bool result = false;
-    ((const Header*)this->mf)->forEachSection(^(const Header::SectionInfo& sectInfo, bool& stop) {
+    ((const UnsafeHeader*)this->mf)->forEachSection(^(const UnsafeHeader::SectionInfo& sectInfo, bool& stop) {
         if ( (sectInfo.segmentName == segmentName) && (sectInfo.sectionName == sectionName) ) {
             result = true;
             stop = true;
@@ -643,7 +643,7 @@ void Fixups::withThreadedRebaseAsChainStarts(Diagnostics& diag, void (^callback)
 #if SUPPORT_OLD_ARM64E_FORMAT
     // don't want this code in non-arm64e dyld because it causes a stack protector which dereferences a GOT pointer before GOT is set up
     // old arm64e binary, create a dyld_chained_starts_in_image for caller
-    uint64_t baseAddress = ((const Header*)this->layout.mf)->preferredLoadAddress();
+    uint64_t baseAddress = ((const UnsafeHeader*)this->layout.mf)->preferredLoadAddress();
     uint64_t imagePageCount = this->layout.mf->mappedSize()/0x4000;
     size_t bufferSize = this->layout.linkedit.regularBindOpcodes.bufferSize + (size_t)imagePageCount*sizeof(uint16_t) + 512;
     BLOCK_ACCCESSIBLE_ARRAY(uint8_t, buffer, bufferSize);
@@ -1634,7 +1634,7 @@ void Fixups::forEachIndirectPointer(Diagnostics& diag, bool supportPrivateExtern
     if ( (indirectSymbolTableCount == 0) && this->layout.mf->isKextBundle() )
         return;
 
-    ((const Header*)this->layout.mf)->forEachSection(^(const Header::SectionInfo& sectInfo, bool& sectionStop) {
+    ((const UnsafeHeader*)this->layout.mf)->forEachSection(^(const UnsafeHeader::SectionInfo& sectInfo, bool& sectionStop) {
         uint8_t  sectionType  = (sectInfo.flags & SECTION_TYPE);
         bool selfModifyingStub = (sectionType == S_SYMBOL_STUBS) && (sectInfo.flags & S_ATTR_SELF_MODIFYING_CODE) && (sectInfo.reserved2 == 5) && (this->layout.mf->cputype == CPU_TYPE_I386);
         if ( (sectionType != S_LAZY_SYMBOL_POINTERS) && (sectionType != S_NON_LAZY_SYMBOL_POINTERS) && !selfModifyingStub )
@@ -1724,13 +1724,13 @@ uint64_t Fixups::externalRelocBaseAddress() const
 {
     // Dyld caches are too large for a raw r_address, so everything is an offset from the base address
     if ( this->layout.mf->inDyldCache() ) {
-        return ((const Header*)this->layout.mf)->preferredLoadAddress();
+        return ((const UnsafeHeader*)this->layout.mf)->preferredLoadAddress();
     }
 
 #if BUILDING_APP_CACHE_UTIL || BUILDING_DYLDINFO
     if ( this->layout.mf->isKextBundle() ) {
         // for kext bundles the reloc base address starts at __TEXT segment
-        return ((const Header*)this->layout.mf)->preferredLoadAddress();
+        return ((const UnsafeHeader*)this->layout.mf)->preferredLoadAddress();
     }
 #endif
 
@@ -1845,7 +1845,7 @@ void SplitSeg::forEachReferenceV2(Diagnostics& diag, ReferenceCallbackV2 callbac
             for (uint64_t k=0; k < fromOffsetCount; ++k) {
                 uint64_t kind = dyld3::MachOFile::read_uleb128(diag, p, infoEnd);
                 if ( kind > 13 ) {
-                    diag.error("bad kind (%llu) value in %s\n", kind, ((const Header*)this->layout.mf)->installName());
+                    diag.error("bad kind (%llu) value in %s\n", kind, ((const UnsafeHeader*)this->layout.mf)->installName());
                 }
                 uint64_t fromSectDeltaCount = dyld3::MachOFile::read_uleb128(diag, p, infoEnd);
                 uint64_t fromSectionOffset = 0;
@@ -1868,7 +1868,7 @@ void SplitSeg::forEachSplitSegSection(void (^callback)(std::string_view segmentN
                                                        uint64_t sectionVMAddr)) const
 {
     callback("mach header", "", 0);
-    ((const Header*)this->layout.mf)->forEachSection(^(const Header::SectionInfo &sectInfo, bool &stop) {
+    ((const UnsafeHeader*)this->layout.mf)->forEachSection(^(const UnsafeHeader::SectionInfo &sectInfo, bool &stop) {
         callback(sectInfo.segmentName, sectInfo.sectionName, sectInfo.address);
     });
 }

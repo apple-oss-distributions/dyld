@@ -27,7 +27,7 @@
 // mach_o
 #include "Archive.h"
 #include "Error.h"
-#include "Header.h"
+#include "UnsafeHeader.h"
 #include "Universal.h"
 
 #include <fcntl.h>
@@ -41,28 +41,76 @@
 
 using mach_o::Archive;
 using mach_o::Error;
-using mach_o::Header;
+using mach_o::UnsafeHeader;
 using mach_o::Universal;
+using mach_o::Architecture;
 
 namespace other_tools
 {
 
-bool withReadOnlyMappedFile(const char* path, void (^handler)(std::span<const uint8_t>))
+std::span<const uint8_t> mapFileReadOnly(CString path, struct stat* statBuf)
 {
-    struct stat statbuf;
-    if ( ::stat(path, &statbuf) == -1 )
-        return false;
-    int fd = ::open(path, O_RDONLY, 0);
+    int fd = ::open(path.c_str(), O_RDONLY, 0);
     if ( fd == -1 )
-        return false;
-    const void* mapping = ::mmap(nullptr, (size_t)statbuf.st_size, PROT_READ, MAP_PRIVATE, fd, 0);
+        return std::span<const uint8_t>();
+    struct stat localStatBuf;
+    if (statBuf == nullptr)
+        statBuf = &localStatBuf;
+    if ( ::fstat(fd, statBuf) == -1 )
+        return std::span<const uint8_t>();
+    const void* mapping = ::mmap(nullptr, (size_t)statBuf->st_size, PROT_READ, MAP_PRIVATE, fd, 0);
     ::close(fd);
     if ( mapping == MAP_FAILED )
+        return std::span<const uint8_t>();
+
+    return std::span((uint8_t*)mapping, (size_t)statBuf->st_size);
+}
+
+Error mapFileReadOnly(CString path, std::span<const uint8_t>& mappedBuffer, struct stat* statBuf)
+{
+    int fd = ::open(path.c_str(), O_RDONLY, 0);
+    if ( fd == -1 ) {
+        int en = errno;
+        if ( en == ENOENT )
+            return Error("file not found '%s'", path.c_str());
+        return Error("cannot open() '%s', errno=%d", path.c_str(), en);
+    }
+    struct stat localStatBuf;
+    if (statBuf == nullptr)
+        statBuf = &localStatBuf;
+    if ( ::fstat(fd, statBuf) == -1 )
+        return Error("cannot stat('%s'), errno=%d", path.c_str(), errno);
+    const void* mapping = ::mmap(nullptr, (size_t)statBuf->st_size, PROT_READ, MAP_PRIVATE, fd, 0);
+    ::close(fd);
+    if ( mapping == MAP_FAILED )
+        return Error("cannot mmap() file '%s', errno=%d", path.c_str(), errno);
+
+    mappedBuffer = std::span((uint8_t*)mapping, (size_t)statBuf->st_size);
+    return Error::none();
+}
+
+
+void unmapFile(std::span<const uint8_t> buffer)
+{
+    ::munmap((void*)buffer.data(), buffer.size());
+}
+
+bool withReadOnlyMappedFile(const char* path, void (^handler)(std::span<const uint8_t>))
+{
+    return withReadOnlyMappedFile(path, ^(std::span<const uint8_t> buffer, struct stat &statBuf) {
+        handler(buffer);
+    });
+}
+
+bool withReadOnlyMappedFile(const char* path, void (^handler)(std::span<const uint8_t>, struct stat &statBuf))
+{
+    struct stat statBuf;
+    std::span<const uint8_t> buf = mapFileReadOnly(path, &statBuf);
+    if ( buf.empty() )
         return false;
 
-    handler(std::span((uint8_t*)mapping, (size_t)statbuf.st_size));
-
-    ::munmap((void*)mapping, (size_t)statbuf.st_size);
+    handler(buf, statBuf);
+    unmapFile(buf);
     return true;
 }
 
@@ -77,61 +125,97 @@ static bool inStringVector(const std::span<const char*>& vect, const char* targe
 }
 
 void forSelectedSliceInPaths(std::span<const char*> paths, std::span<const char*> archFilter,
-                             void (^handler)(const char* path, const Header* slice, size_t len))
+                             void (^handler)(const char* path, const UnsafeHeader* slice, size_t len))
 {
     forSelectedSliceInPaths(paths, archFilter, /* dyld cache */ nullptr, handler);
 }
 
-void forSelectedSliceInPaths(std::span<const char*> paths, std::span<const char*> archFilter, const DyldSharedCache* dyldCache,
-                             void (^handler)(const char* path, const Header* slice, size_t len))
-{
-    const auto handleArchive = [handler](const char* path, const Archive& ar) {
-        Error err1 = ar.forEachMachO(^(const Archive::Member& m, const mach_o::Header * header, bool &stop) {
-            char objPath[PATH_MAX];
-            snprintf(objPath, sizeof(objPath), "%s(%s)", path, m.name.data());
-            handler(objPath, header, m.contents.size());
-        });
-        if ( err1.hasError() )
-            fprintf(stderr, "malformed archive '%s': %s\n", path, err1.message());
-    };
 
-    for (const char* path : paths) {
-        bool found = withReadOnlyMappedFile(path, ^(std::span<const uint8_t> buffer) {
-            if ( const Universal* uni = Universal::isUniversal(buffer) ) {
-                uni->forEachSlice(^(Universal::Slice slice, bool& stopSlice) {
-                    const char* sliceArchName = slice.arch.name();
-                    if ( archFilter.empty() || inStringVector(archFilter, sliceArchName) ) {
-                        if ( std::optional<Archive> ar = Archive::isArchive(slice.buffer) ) {
-                            handleArchive(path, *ar);
-                        }
-                        else if ( Header::isMachO(slice.buffer) ) {
-                            handler(path, (Header*)slice.buffer.data(), slice.buffer.size());
-                        }
-                        else {
-                            fprintf(stderr, "%s slice in %s is not a mach-o\n", sliceArchName, path);
-                        }
+void forSelectedSliceInPaths(std::span<const char*> paths, std::span<const char*> archFilter, const DyldSharedCache* dyldCache,
+                             void (^handler)(const char* path, const UnsafeHeader* slice, size_t len))
+{
+    const size_t pathCount = paths.size();
+    CString      cpaths[pathCount];
+    for ( size_t i=0; i < pathCount; ++i )
+        cpaths[i] = paths[i];
+    forEachFileGetSlices(std::span<CString>(cpaths, pathCount), dyldCache, ^(CString slicePath, const struct stat& statBuf, std::span<const Universal::Slice> slices) {
+        for (const Universal::Slice& slice : slices ) {
+            const char* sliceArchName = slice.arch.name();
+            if ( archFilter.empty() || inStringVector(archFilter, sliceArchName) ) {
+                if ( const UnsafeHeader* hdr = UnsafeHeader::isMachO(slice.buffer) ) {
+                    handler(slicePath.c_str(), hdr, slice.buffer.size());
+                }
+                else if ( std::optional<Archive> ar = Archive::isArchive(slice.buffer) ) {
+                    Error err = ar->forEachMachO(^(const Archive::Member& m, unsigned memberIndex, const mach_o::UnsafeHeader* mhdr, bool& stop) {
+                        char memberPath[PATH_MAX];
+                        snprintf(memberPath, sizeof(memberPath), "%s(%s)", slicePath.c_str(), m.name.data());
+                        handler(memberPath, mhdr, m.contents.size());
+                    });
+                    if ( err.hasError() )
+                        fprintf(stderr, "malformed archive '%s': %s\n", slicePath.c_str(), err.message());
+                }
+                else {
+                    fprintf(stderr, "non-mach-o in fat file '%s'\n", slicePath.c_str());
+                }
+            }
+        }
+    });
+}
+
+void forEachFileGetSlices(std::span<const CString> paths, const DyldSharedCache* dyldCache,
+                          void (^callback)(CString slicePath, const struct stat& statBuf, std::span<const mach_o::Universal::Slice> slices))
+{
+    for (CString path : paths) {
+        struct stat statBuf;
+        std::span<const uint8_t> fileBuffer = mapFileReadOnly(path.c_str(), &statBuf);
+        if ( !fileBuffer.empty() ) {
+            if ( const Universal* uni = Universal::isUniversal(fileBuffer) ) {
+                // if fat file, call handler with all slices
+                Universal::Slice    slicesArray[16];
+                Universal::Slice*   slices = slicesArray; // work around blocks bugs
+                __block size_t      sliceCount = 0;
+                uni->forEachSlice(^(Universal::Slice slice, bool& stop) {
+                    slices[sliceCount++] = slice;
+                });
+                callback(path, statBuf, std::span<const Universal::Slice>(slicesArray, sliceCount));
+            }
+            else if ( const UnsafeHeader* mh = UnsafeHeader::isMachO(fileBuffer) ) {
+                // if thin mach-o file, call handler with the one slice
+                Universal::Slice slice{ mh->arch(), fileBuffer };
+                callback(path, statBuf, std::span<const Universal::Slice>(&slice, 1));
+            }
+            else if ( std::optional<Archive> ar = Archive::isArchive(fileBuffer) ) {
+                // if static library, call handler with whole library
+                __block Architecture staticLibArch;
+                Error err = ar->forEachMember(^(const Archive::Member& member, unsigned memberIndex, uint64_t memberFileOffset, bool& stop) {
+                    if ( const UnsafeHeader* hdr = UnsafeHeader::isMachO(member.contents) ) {
+                        staticLibArch = hdr->arch();
+                        stop = true;
                     }
                 });
+                Universal::Slice slice{ staticLibArch, fileBuffer };
+                callback(path, statBuf, std::span<const Universal::Slice>(&slice, 1));
             }
-            else if ( const Header* mh = Header::isMachO(buffer) ) {
-                if ( archFilter.empty() || inStringVector(archFilter, mh->archName()) )
-                    handler(path, (Header*)buffer.data(), buffer.size());
+            else {
+                // unknown file type
+                Universal::Slice slice{ Architecture(), fileBuffer };
+                callback(path, statBuf, std::span<const Universal::Slice>(&slice, 1));
             }
-            else if ( std::optional<Archive> ar = Archive::isArchive(buffer) ) {
-                handleArchive(path, *ar);
-            }
-        });
 
-        // dyld_for_each_installed_shared_cache() only available in macOS 12 aligned platforms
-        // and we only build this code for earlier versions on macOS
-        if ( !found ) {
+            // Done with the buffer
+            unmapFile(fileBuffer);
+        }
+        else {
+            // if path not found, check if the path is in the dyld cache
+            bool                             found = false;
             size_t                           cacheLen;
             if ( dyldCache == nullptr )
                 dyldCache   = (DyldSharedCache*)_dyld_get_shared_cache_range(&cacheLen);
 #if !TARGET_OS_OSX || (MAC_OS_X_VERSION_MIN_REQUIRED >= 120000)
             __block const DyldSharedCache*  dyldCacheDK = nullptr;
             __block const char*             currentArch = dyldCache->archName();
-            if ( strncmp(path, "/System/DriverKit/", 18) == 0 ) {
+            bzero(&statBuf, sizeof(statBuf)); // dylibs in shared cache have no stat() info
+            if ( path.starts_with("/System/DriverKit/") ) {
                 if ( dyldCacheDK == nullptr ) {
                     dyld_for_each_installed_shared_cache(^(dyld_shared_cache_t cacheRef) {
                         //__block bool firstCacheFile = false;
@@ -154,9 +238,11 @@ void forSelectedSliceInPaths(std::span<const char*> paths, std::span<const char*
                 }
                 if ( dyldCacheDK != nullptr ) {
                     uint32_t imageIndex;
-                    if ( dyldCacheDK->hasImagePath(path, imageIndex) ) {
-                        const mach_header* mh = dyldCacheDK->getIndexedImageEntry(imageIndex);
-                        handler(path, (Header*)mh, (size_t)(-1));
+                    if ( dyldCacheDK->hasImagePath(path.c_str(), imageIndex) ) {
+                        const UnsafeHeader* hdr = (UnsafeHeader*)dyldCacheDK->getIndexedImageEntry(imageIndex);
+                        Universal::Slice slice{ hdr->arch(), std::span<const uint8_t>((uint8_t*)hdr, 0xF0000000) };
+                        callback(path, statBuf, std::span<const Universal::Slice>(&slice, 1));
+                        found = true;
                     }
                 }
             }
@@ -166,10 +252,17 @@ void forSelectedSliceInPaths(std::span<const char*> paths, std::span<const char*
             if ( dyldCache != nullptr ) {
                 // see if path is in current dyld shared cache
                 uint32_t imageIndex;
-                if ( dyldCache->hasImagePath(path, imageIndex) ) {
-                    const mach_header* mh = dyldCache->getIndexedImageEntry(imageIndex);
-                    handler(path, (Header*)mh, (size_t)(-1));
+                if ( dyldCache->hasImagePath(path.c_str(), imageIndex) ) {
+                    const UnsafeHeader* hdr = (UnsafeHeader*)dyldCache->getIndexedImageEntry(imageIndex);
+                    Universal::Slice slice{ hdr->arch(), std::span<const uint8_t>((uint8_t*)hdr, 0xF0000000) };
+                    callback(path, statBuf, std::span<const Universal::Slice>(&slice, 1));
+                    found = true;
                 }
+            }
+            // do callback with an empty buffer to signify path not found
+            if ( !found ) {
+                Universal::Slice emptySlice{ Architecture(), std::span<const uint8_t>() };
+                callback(path, statBuf, std::span<const Universal::Slice>(&emptySlice, 1));
             }
         }
     }

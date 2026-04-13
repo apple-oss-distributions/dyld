@@ -157,7 +157,9 @@ private:
         static constinit const Epoch    spring2024;
         static constinit const Epoch      fall2024;
         static constinit const Epoch    spring2025;
-        static constinit const Epoch      fall2025;
+        static constinit const Epoch      fall2025; // macOS/iOS/watchOS/tvOS 26.0
+        static constinit const Epoch    spring2026;
+        static constinit const Epoch      fall2026; // macOS/iOS/watchOS/tvOS 27.0
 
     private:
         friend class PlatformInfo; // to get access to year()

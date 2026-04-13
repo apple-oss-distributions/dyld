@@ -32,7 +32,7 @@
 
 #include "Architecture.h"
 #include "GradedArchitectures.h"
-#include "Header.h"
+#include "UnsafeHeader.h"
 
 namespace mach_o {
 
@@ -49,6 +49,8 @@ struct VIS_HIDDEN Universal
     {
         Architecture             arch;
         std::span<const uint8_t> buffer;
+        uint64_t                 fileOffset = 0;
+        uint8_t                  alignment  = 0; // power of 2
     };
 
     // for examining universal files
@@ -56,15 +58,17 @@ struct VIS_HIDDEN Universal
     Error                   valid(uint64_t fileSize) const;
     void                    forEachSlice(void (^callback)(Slice slice, bool& stop)) const;
     bool                    bestSlice(const GradedArchitectures& ga, bool osBinary, Slice& slice) const;
+    uint32_t                sliceCount() const;
     const char*             archNames(char strBuf[256]) const;
     const char*             archAndPlatformNames(char strBuf[512]) const;
+    static uint8_t          defaultAlignment(std::span<const uint8_t> fileContent);
 
 protected:
     Error                   validSlice(Architecture sliceArch, uint64_t sliceOffset, uint64_t sliceLen) const;
-    void                    forEachSlice(void (^callback)(Architecture arch, uint64_t sliceOffset, uint64_t sliceSize, bool& stop)) const;
+    void                    forEachSlice(void (^callback)(Architecture arch, uint64_t sliceOffset, uint64_t sliceSize, uint8_t sliceAlignment, bool& stop)) const;
 
                             Universal();
-    void                    addMachO(const Header*);
+    void                    addMachO(const UnsafeHeader*);
     enum { kMaxSliceCount = 16 };
 
 protected:

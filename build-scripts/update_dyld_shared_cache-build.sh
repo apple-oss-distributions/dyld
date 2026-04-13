@@ -27,17 +27,6 @@ then
         # HACK: somehow the toolchain TBD is missing even though we copy the dylib.  Make another TBD
         xcodebuild installapi -target libKernelCollectionBuilder OBJROOT="${OBJROOT_BDR}" SDKROOT="${SDKROOT}" MACOSX_DEPLOYMENT_TARGET=${MACOSX_DEPLOYMENT_TARGET} SRCROOT="${SRCROOT}" DSTROOT="${DSTROOT}" SYMROOT="${SYMROOT}" RC_ProjectSourceVersion="${RC_ProjectSourceVersion}"  DISABLE_SDK_METADATA_PARSING=YES  KERNEL_LINKER_INSTALL_PATH="${DT_TOOLCHAIN_DIR}/usr/lib/" KERNEL_LINKER_INSTALL_NAME="@rpath/libKernelCollectionBuilder.dylib" RC_ARCHS="arm64 arm64e x86_64"
     fi
-
-    # copy performance files from SDK to platform
-    if [ -r "${SDKROOT}/AppleInternal/DirtyDataFiles/dirty-data-segments-order.txt" ]; then
-        mkdir -p "${DSTROOT}/usr/local/bin"
-        cp "${SDKROOT}/AppleInternal/DirtyDataFiles/dirty-data-segments-order.txt"  "${DSTROOT}/usr/local/bin"
-    fi
-    if [ -r "${SDKROOT}/AppleInternal/OrderFiles/dylib-order.txt" ]; then
-        mkdir -p "${DSTROOT}/usr/local/bin"
-        cp "${SDKROOT}/AppleInternal/OrderFiles/dylib-order.txt"  "${DSTROOT}/usr/local/bin"
-    fi
-
 else
     # for iOS/tvOS/watchOS/bridgeOS platform, build "host" tools
     TC=$(basename $TOOLCHAIN_DIR)
@@ -69,18 +58,5 @@ else
         cp -R "${DSTROOT}/usr" "${DSTROOT}/${RC_PLATFORM_INSTALL_PATH}/"
         rm -r "${DSTROOT}/usr"
     fi
-
-    # copy performance files from SDK to platform
-    if [ -r "${ARM_SDK}/AppleInternal/DirtyDataFiles/dirty-data-segments-order.txt" ];
-    then
-        mkdir -p "${DSTROOT}/${RC_PLATFORM_INSTALL_PATH}/usr/local/bin"
-        cp "${ARM_SDK}/AppleInternal/DirtyDataFiles/dirty-data-segments-order.txt"  "${DSTROOT}/${RC_PLATFORM_INSTALL_PATH}/usr/local/bin"
-    fi
-    if [ -r "${ARM_SDK}/AppleInternal/OrderFiles/dylib-order.txt" ];
-    then
-        mkdir -p "${DSTROOT}/${RC_PLATFORM_INSTALL_PATH}/usr/local/bin"
-        cp "${ARM_SDK}/AppleInternal/OrderFiles/dylib-order.txt"  "${DSTROOT}/${RC_PLATFORM_INSTALL_PATH}/usr/local/bin"
-    fi
-
 fi
 

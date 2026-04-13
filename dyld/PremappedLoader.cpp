@@ -27,12 +27,12 @@
 #include "JustInTimeLoader.h"
 
 // mach_o
-#include "Header.h"
+#include "UnsafeHeader.h"
 #include "Version32.h"
 
 #include "PremappedLoader.h"
 
-using mach_o::Header;
+using mach_o::UnsafeHeader;
 using mach_o::Version32;
 
 namespace dyld4 {
@@ -73,10 +73,10 @@ bool PremappedLoader::beginInitializers(RuntimeState&)
 
 //////////////////////// private functions  /////////////////////////////////
 
-static bool hasDataConst(const Header* mh)
+static bool hasDataConst(const UnsafeHeader* mh)
 {
     __block bool result = false;
-    mh->forEachSegment(^(const Header::SegmentInfo& info, bool& stop) {
+    mh->forEachSegment(^(const UnsafeHeader::SegmentInfo& info, bool& stop) {
         if ( info.readOnlyData() )
             result = true;
     });
@@ -97,16 +97,16 @@ PremappedLoader* PremappedLoader::make(RuntimeState& state, const MachOFile* mh,
     Loader::InitialOptions options;
     options.inDyldCache     = DyldSharedCache::inDyldCache(state.config.dyldCache.addr, mh);
     options.hasObjc         = mh->hasObjC();
-    options.mayHavePlusLoad = ((const Header*)mh)->hasPlusLoadMethod();
-    options.roData          = hasDataConst((const Header*)mh);
+    options.mayHavePlusLoad = ((const UnsafeHeader*)mh)->hasPlusLoadMethod();
+    options.roData          = hasDataConst((const UnsafeHeader*)mh);
     options.neverUnloaded   = willNeverUnload;
     options.leaveMapped     = true;
     options.roObjC          = options.hasObjc && mh->hasSection("__DATA_CONST", "__objc_selrefs");
     options.pre2022Binary   = true;
-    options.hasUUID         = ((const Header*)mh)->getUuid(uuid);
+    options.hasUUID         = ((const UnsafeHeader*)mh)->getUuid(uuid);
     options.hasWeakDefs     = mh->hasWeakDefs();
-    options.hasTLVs         = ((Header*)mh)->hasThreadLocalVariables();
-    options.belowLibSystem  = mh->isDylib() && (strncmp(((const Header*)mh)->installName(), "/usr/lib/system/lib", 19) == 0);
+    options.hasTLVs         = ((UnsafeHeader*)mh)->hasThreadLocalVariables();
+    options.belowLibSystem  = mh->isDylib() && (strncmp(((const UnsafeHeader*)mh)->installName(), "/usr/lib/system/lib", 19) == 0);
 
     PremappedLoader* p = new (storage) PremappedLoader(mh, options, layout);
 
@@ -117,7 +117,7 @@ PremappedLoader* PremappedLoader::make(RuntimeState& state, const MachOFile* mh,
     p->fixUpsApplied    = false;
     p->inited           = false;
     p->hidden           = false;
-    p->altInstallName   = mh->isDylib() && (strcmp(((const Header*)mh)->installName(), path) != 0);;
+    p->altInstallName   = mh->isDylib() && (strcmp(((const UnsafeHeader*)mh)->installName(), path) != 0);;
     p->allDepsAreNormal = allDepsAreNormal;
     p->padding          = 0;
 
@@ -130,7 +130,7 @@ PremappedLoader* PremappedLoader::make(RuntimeState& state, const MachOFile* mh,
 
     p->cpusubtype   = mh->cpusubtype;
 
-    parseSectionLocations((const Header*)mh, p->sectionLocations);
+    parseSectionLocations((const UnsafeHeader*)mh, p->sectionLocations);
 
     if ( !mh->hasExportTrie(p->exportsTrieRuntimeOffset, p->exportsTrieSize) ) {
         p->exportsTrieRuntimeOffset = 0;

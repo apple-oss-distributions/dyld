@@ -76,17 +76,17 @@ struct AuthenticatedValue<T*>
         this->value = (void*)ptrauth_sign_unauthenticated(other, ptrauth_key_process_dependent_data, this);
         return *this;
     }
-    bool operator==(T* other) const {
+    bool operator==(const T* other) const {
         return ptrauth_auth_data(this->value, ptrauth_key_process_dependent_data, this) == other;
     }
-    bool operator!=(T* other) const {
+    bool operator!=(const T* other) const {
         return ptrauth_auth_data(this->value, ptrauth_key_process_dependent_data, this) != other;
     }
 
-    bool operator==(T* other) {
+    bool operator==(const T* other) {
         return ptrauth_auth_data(this->value, ptrauth_key_process_dependent_data, this) == other;
     }
-    bool operator!=(T* other) {
+    bool operator!=(const T* other) {
         return ptrauth_auth_data(this->value, ptrauth_key_process_dependent_data, this) != other;
     }
 

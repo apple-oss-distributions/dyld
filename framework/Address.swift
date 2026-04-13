@@ -24,12 +24,16 @@
 
 // Provide type safe address primitives
 
-protocol Address: Comparable, Strideable, CustomStringConvertible {
+public protocol Address: Comparable, Strideable, CustomStringConvertible, Hashable, ExpressibleByIntegerLiteral {
+    init(integerLiteral value: UInt64)
     var value: UInt64 { get }
     init(_ : UInt64)
 }
 
-extension Address {
+public extension Address {
+    init(integerLiteral value: UInt64) {
+        self.init(value)
+    }
     static func < (lhs: Self, rhs: Self) -> Bool {
         return lhs.value < rhs.value
     }
@@ -44,16 +48,23 @@ extension Address {
     var description: String {
         return "0x\(String(self.value, radix: 16, uppercase: true))"
     }
+    
+    static func == (lhs: Self, rhs: Self) -> Bool {
+        return (lhs.value == rhs.value)
+    }
+    func hash(into hasher: inout Hasher) {
+        hasher.combine(value)
+    }
 }
 
-struct PreferredAddress: Address {
+public struct PreferredAddress: Address {
+    public let value: UInt64
     init(_ value: Int64) {
         self.value = UInt64(bitPattern:value)
     }
-    init(_ value: UInt64) {
+    public init(_ value: UInt64) {
         self.value = value
     }
-    let value: UInt64
     static func +(left: PreferredAddress, right: UInt64) -> PreferredAddress {
         return PreferredAddress(left.value + right)
     }
@@ -66,7 +77,8 @@ struct PreferredAddress: Address {
     }
 }
 
-struct RebasedAddress: Address {
+public struct RebasedAddress: Address {
+    public let value: UInt64
     init(_ value: Int64) {
         self.value = UInt64(bitPattern:value)
     }
@@ -74,13 +86,12 @@ struct RebasedAddress: Address {
         guard let value else { return nil }
         self.value = UInt64(bitPattern:value)
     }
-    init(_ value: UInt64) {
+    public init(_ value: UInt64) {
         self.value = value
     }
     init(_ value: UInt32) {
         self.value = UInt64(value)
     }
-    let value: UInt64
     
     static func -(left: RebasedAddress, right: PreferredAddress) -> Slide {
         // It is possible (but rare) for the preferred load addres to be above the rebased address, resulting in a negative slide, so allow overflow
@@ -88,9 +99,12 @@ struct RebasedAddress: Address {
     }
 }
 
-struct Slide {
+struct Slide: ExpressibleByIntegerLiteral {
     init(_ value:UInt64) {
         self.value = value
+    }
+    init(integerLiteral value: UInt64) {
+        self.init(value)
     }
     let value: UInt64
 }

@@ -26,6 +26,7 @@
 
 #include <stdio.h>
 #include <stdint.h>
+#include <span>
 
 #include "Defines.h"
 
@@ -54,5 +55,17 @@ void escapeCStringLiteral(const char* s, char* b, size_t bufferLength, char**end
 VIS_HIDDEN
 uint64_t signPointer(uint64_t unsignedAddr, void* loc, bool addrDiv, uint16_t diversity, ptrauth_key key);
 #endif
+
+// utility to write files > 2GB
+ssize_t write64(int fd, const void* buf, size_t nbyte) VIS_HIDDEN;
+
+
+#if !TARGET_OS_EXCLAVEKIT
+VIS_HIDDEN
+void sha256(std::span<const uint8_t> inputBuffer, std::span<uint8_t,32> result);
+#endif
+
+
+
 
 #endif /* Utilities_h */

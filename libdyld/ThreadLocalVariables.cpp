@@ -24,7 +24,7 @@
 #include <stdint.h>
 
 #include "Defines.h"
-#include "Header.h"
+#include "UnsafeHeader.h"
 #include "Error.h"
 #include "LibSystemHelpers.h"
 #include "ThreadLocalVariables.h"
@@ -40,7 +40,7 @@ namespace dyld {
 
 
 // call by dyld via libSystemHelpers->setUpThreadLocals() at launch and during dlopen()
-Error ThreadLocalVariables::setUpImage(const DyldSharedCache* cache, const Header* hdr)
+Error ThreadLocalVariables::setUpImage(const DyldSharedCache* cache, const UnsafeHeader* hdr)
 {
 // driverkit and main OS use same dyld, but driverkit process do not support thread locals
 #if __has_feature(tls)
@@ -59,7 +59,7 @@ Error ThreadLocalVariables::setUpImage(const DyldSharedCache* cache, const Heade
 }
 
 #if __has_feature(tls)
-void ThreadLocalVariables::findInitialContent(const Header* hdr, std::span<const uint8_t>& initialContent, bool& allZeroFill)
+void ThreadLocalVariables::findInitialContent(const UnsafeHeader* hdr, std::span<const uint8_t>& initialContent, bool& allZeroFill)
 {
     allZeroFill = true;
 #if BUILDING_UNIT_TESTS
@@ -68,7 +68,7 @@ void ThreadLocalVariables::findInitialContent(const Header* hdr, std::span<const
 #else
     // find initial content for all TLVs in image
     intptr_t slide = (intptr_t)hdr->getSlide();
-    hdr->forEachSection(^(const Header::SectionInfo& sectInfo, bool& stop) {
+    hdr->forEachSection(^(const UnsafeHeader::SectionInfo& sectInfo, bool& stop) {
         switch (sectInfo.flags & SECTION_TYPE) {
             case S_THREAD_LOCAL_REGULAR:
                 allZeroFill = false;
@@ -90,7 +90,7 @@ void ThreadLocalVariables::findInitialContent(const Header* hdr, std::span<const
 }
 
 // most images have just one __thread_vars section, but some have one in __DATA and one in __DATA_DIRTY
-Error ThreadLocalVariables::forEachThunkSpan(const Header* hdr, Error (^visit)(std::span<Thunk>))
+Error ThreadLocalVariables::forEachThunkSpan(const UnsafeHeader* hdr, Error (^visit)(std::span<Thunk>))
 {
 #if BUILDING_UNIT_TESTS
     return visit(_thunks);
@@ -99,7 +99,7 @@ Error ThreadLocalVariables::forEachThunkSpan(const Header* hdr, Error (^visit)(s
     // find section with array of TLV thunks
     // and also initial content for all TLVs in image
     intptr_t                         slide   = (intptr_t)hdr->getSlide();
-    hdr->forEachSection(^(const Header::SectionInfo& sectInfo, bool& stop) {
+    hdr->forEachSection(^(const UnsafeHeader::SectionInfo& sectInfo, bool& stop) {
         if ( (sectInfo.flags & SECTION_TYPE) == S_THREAD_LOCAL_VARIABLES ) {
             if ( sectInfo.size % sizeof(Thunk) != 0) {
                 setUpErr = Error("size (%llu) of thread-locals section %.*s is not a multiple of %lu",
@@ -135,7 +135,7 @@ void ThreadLocalVariables::initialize()
     dyld_thread_key_create(&_terminatorsKey, &finalizeListTLV);
 }
 
-Error ThreadLocalVariables::initializeThunksFromDisk(const Header* hdr)
+Error ThreadLocalVariables::initializeThunksFromDisk(const UnsafeHeader* hdr)
 {
     // each dylib gets a new key used for all thread-locals in that dylib
     dyld_thread_key_t key;
@@ -198,7 +198,7 @@ Error ThreadLocalVariables::initializeThunksFromDisk(const Header* hdr)
     return err;
 }
 
-Error ThreadLocalVariables::initializeThunksInDyldCache(const DyldSharedCache* cache, const Header* hdr)
+Error ThreadLocalVariables::initializeThunksInDyldCache(const DyldSharedCache* cache, const UnsafeHeader* hdr)
 {
     // if cache builder runs out of static keys, it leaves the thunks looking like they do on disk (key == 0)
     __block bool notOptimized = false;
@@ -357,7 +357,7 @@ void* ThreadLocalVariables::instantiateVariable(const Thunk& thunk)
         // in non-zerofill case, machHeaderDelta is delta to mach_header
         key    = thunkv2->key;
         std::span<const uint8_t> bytes((uint8_t*)&thunkv2->machHeaderDelta + thunkv2->machHeaderDelta, -thunkv2->machHeaderDelta);
-        if ( const Header* hdr = Header::isMachO(bytes) ) {
+        if ( const UnsafeHeader* hdr = UnsafeHeader::isMachO(bytes) ) {
             std::span<const uint8_t>  initialContent;
             bool                      allZeroFill;
             findInitialContent(hdr, initialContent, allZeroFill);

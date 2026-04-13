@@ -305,9 +305,13 @@ FuncLookup LibSystemHelpers::legacyDyldFuncLookup() const
     return &legacyDyldLookup4OldBinaries;
 }
 
-mach_o::Error LibSystemHelpers::setUpThreadLocals(const DyldSharedCache* cache, const Header* hdr) const
+mach_o::Error LibSystemHelpers::setUpThreadLocals(const DyldSharedCache* cache, const UnsafeHeader* hdr) const
 {
+#if BUILDING_UNIT_TESTS
+    return mach_o::Error::none();
+#else
     return dyld::sThreadLocalVariables.setUpImage(cache, hdr);
+#endif
 }
 
 

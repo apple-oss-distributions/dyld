@@ -244,6 +244,8 @@ static Disposition stringToDisposition(Diagnostics& diags, const std::string& st
         return InternalMinDevelopment;
     if (str == "SymbolsCache")
         return SymbolsCache;
+    if (str == "InternalDevelopmentPlusAOT")
+        return InternalDevelopmentPlusAOT;
     return Unknown;
 }
 
@@ -323,6 +325,7 @@ struct SharedCacheBuilderOptions {
     std::string                 dylibCacheDir;
     std::string                 artifactDir;
     std::string                 release;
+    std::string                 swiftGenericMetadataBuilderPath;
     bool                        emitDevCaches = true;
     bool                        emitCustomerCaches = true;
     bool                        emitElidedDylibs = true;
@@ -349,10 +352,19 @@ struct SharedCacheBuilderOptions {
 
 typedef std::tuple<std::string, std::string, FileFlags, std::string> InputFile;
 
-static void loadMRMFiles(Diagnostics& diags,
-                         MRMSharedCacheBuilder* sharedCacheBuilder,
+static void printErrors(MRMSharedCacheBuilder* sharedCacheBuilder)
+{
+    uint64_t errorCount = 0;
+    if (const char* const* errors = getErrors(sharedCacheBuilder, &errorCount)) {
+        for (uint64_t i = 0, e = errorCount; i != e; ++i) {
+            const char* errorMessage = errors[i];
+            fprintf(stderr, "ERROR: %s\n", errorMessage);
+        }
+    }
+}
+
+static bool loadMRMFiles(MRMSharedCacheBuilder* sharedCacheBuilder,
                          const std::vector<InputFile>& inputFiles,
-                         std::vector<std::pair<const void*, size_t>>& mappedFiles,
                          const std::set<std::string>& baselineCacheFiles) {
 
     for (const InputFile& inputFile : inputFiles) {
@@ -361,49 +373,21 @@ static void loadMRMFiles(Diagnostics& diags,
         FileFlags          fileFlags   = std::get<2>(inputFile);
         const std::string& projectName = std::get<3>(inputFile);
 
-        struct stat stat_buf;
-        int fd = ::open(buildPath.c_str(), O_RDONLY, 0);
-        if (fd == -1) {
-            if (baselineCacheFiles.count(runtimePath)) {
-                diags.error("can't open file '%s', errno=%d\n", buildPath.c_str(), errno);
-                return;
-            } else {
-                // Don't spam with paths we know will be missing
-                if ( buildPath.starts_with("./System/Library/Templates/Data/") )
-                    continue;
-                diags.verbose("can't open file '%s', errno=%d\n", buildPath.c_str(), errno);
-                continue;
-            }
-        }
+        // If paths were in the baseline cache, we need them here too
+        if ( (fileFlags == NoFlags) && !baselineCacheFiles.count(runtimePath) )
+            fileFlags = CanBeMissing;
 
-        if (fstat(fd, &stat_buf) == -1) {
-            if (baselineCacheFiles.count(runtimePath)) {
-                diags.error("can't stat open file '%s', errno=%d\n", buildPath.c_str(), errno);
-                ::close(fd);
-                return;
-            } else {
-                diags.verbose("can't stat open file '%s', errno=%d\n", buildPath.c_str(), errno);
-                ::close(fd);
-                continue;
-            }
-        }
+        bool success = addOnDiskFile_v1(sharedCacheBuilder, runtimePath.c_str(), buildPath.c_str(),
+                                        fileFlags, projectName.c_str());
 
-        const void* buffer = mmap(NULL, (size_t)stat_buf.st_size, PROT_READ, MAP_PRIVATE, fd, 0);
-        if (buffer == MAP_FAILED) {
-            diags.error("mmap() for file at %s failed, errno=%d\n", buildPath.c_str(), errno);
-            ::close(fd);
-        }
-        ::close(fd);
+        if ( success )
+            continue;
 
-        mappedFiles.emplace_back(buffer, (size_t)stat_buf.st_size);
-
-        addFile_v2(sharedCacheBuilder, runtimePath.c_str(), (uint8_t*)buffer, (size_t)stat_buf.st_size, fileFlags, projectName.c_str());
+        printErrors(sharedCacheBuilder);
+        return false;
     }
-}
 
-static void unloadMRMFiles(std::vector<std::pair<const void*, size_t>>& mappedFiles) {
-    for (auto mappedFile : mappedFiles)
-        ::munmap((void*)mappedFile.first, mappedFile.second);
+    return true;
 }
 
 static ssize_t write64(int fildes, const void *buf, size_t nbyte)
@@ -464,15 +448,8 @@ static void printRemovedFiles(bool cacheBuildSuccess, MRMSharedCacheBuilder* sha
 static void writeMRMResults(bool cacheBuildSuccess, MRMSharedCacheBuilder* sharedCacheBuilder,
                             const SharedCacheBuilderOptions& options)
 {
-    if (!cacheBuildSuccess) {
-        uint64_t errorCount = 0;
-        if (const char* const* errors = getErrors(sharedCacheBuilder, &errorCount)) {
-            for (uint64_t i = 0, e = errorCount; i != e; ++i) {
-                const char* errorMessage = errors[i];
-                fprintf(stderr, "ERROR: %s\n", errorMessage);
-            }
-        }
-    }
+    if ( !cacheBuildSuccess )
+        printErrors(sharedCacheBuilder);
 
     // Now emit each cache we generated, or the errors for them.
     uint64_t cacheResultCount = 0;
@@ -753,6 +730,7 @@ static void buildCacheFromJSONManifest(Diagnostics& diags, const SharedCacheBuil
             // Nothing we can do here as we can't assume what caches are built here.
             break;
         case InternalDevelopment:
+        case InternalDevelopmentPlusAOT:
             if (!options.emitDevCaches && !options.emitCustomerCaches) {
                 diags.error("both -no_customer_cache and -no_development_cache passed\n");
                 break;
@@ -789,6 +767,37 @@ static void buildCacheFromJSONManifest(Diagnostics& diags, const SharedCacheBuil
     if (filesNode.array.empty()) {
         diags.error("Build options files node is not an array\n");
         return;
+    }
+
+    if ( options.swiftGenericMetadataBuilderPath.empty() ) {
+        // note: builder uses chdir, so the path needs to be relative to the dylib cache image
+        std::string builderPath = "usr/local/lib/swift/libswiftGenericMetadataBuilder.dylib";
+        if ( access(builderPath.c_str(), X_OK) != 0 ) {
+            std::string xcodePlatformName;
+            switch ( buildOptions.platform ) {
+                case Platform::iOS:
+                    xcodePlatformName = "iPhoneOS";
+                    break;
+                case Platform::watchOS:
+                    xcodePlatformName = "WatchOS";
+                    break;
+                case Platform::tvOS:
+                    xcodePlatformName = "AppleTVOS";
+                    break;
+                case Platform::visionOS:
+                    xcodePlatformName = "XROS";
+                    break;
+                default:
+                    break;
+            }
+            if ( !xcodePlatformName.empty() )
+                builderPath = "Applications/Xcode.app/Contents/Developer/Platforms/" + xcodePlatformName + ".platform/" + builderPath;
+        }
+
+        if ( access(builderPath.c_str(), X_OK) == 0 )
+            addPlugin(sharedCacheBuilder, builderPath.c_str(), FileFlags::PluginSwiftGenericMetadataBuilder);
+    } else {
+        addPlugin(sharedCacheBuilder, options.swiftGenericMetadataBuilderPath.c_str(), FileFlags::PluginSwiftGenericMetadataBuilder);
     }
 
     std::vector<InputFile> inputFiles;
@@ -843,11 +852,13 @@ static void buildCacheFromJSONManifest(Diagnostics& diags, const SharedCacheBuil
             case MustBeInCache:
             case ShouldBeExcludedFromCacheIfUnusedLeaf:
             case RequiredClosure:
+            case CanBeMissing:
             case DylibOrderFile:
             case DirtyDataOrderFile:
             case ObjCOptimizationsFile:
             case SwiftGenericMetadataFile:
             case OptimizationFile:
+            case PluginSwiftGenericMetadataBuilder:
                 buildPath = "." + buildPath;
                 break;
         }
@@ -875,16 +886,18 @@ static void buildCacheFromJSONManifest(Diagnostics& diags, const SharedCacheBuil
         }
     }
 
-    std::vector<std::pair<const void*, size_t>> mappedFiles;
     {
         uint64_t startTimeNanos = clock_gettime_nsec_np(CLOCK_UPTIME_RAW);
-        loadMRMFiles(diags, sharedCacheBuilder, inputFiles, mappedFiles, baselineCaches.unionBaselineDylibs());
+        bool success = loadMRMFiles(sharedCacheBuilder, inputFiles, baselineCaches.unionBaselineDylibs());
         uint64_t endTimeNanos = clock_gettime_nsec_np(CLOCK_UPTIME_RAW);
 
         if ( options.timePasses ) {
             uint64_t timeMillis = (endTimeNanos - startTimeNanos) / 1000000;
             fprintf(stderr, "loadMRMFiles: time = %lldms\n", timeMillis);
         }
+
+        if ( !success )
+            return;
     }
 
     if (diags.hasError())
@@ -1022,8 +1035,6 @@ static void buildCacheFromJSONManifest(Diagnostics& diags, const SharedCacheBuil
 
     destroySharedCacheBuilder(sharedCacheBuilder);
 
-    unloadMRMFiles(mappedFiles);
-
     // On failure, add an error to the diagnostic so that the caller can see that the build failed
     if ( !cacheBuildSuccess ) {
         diags.error("see other errors");
@@ -1078,6 +1089,8 @@ int main(int argc, const char* argv[])
                 options.copyRoots = true;
             } else if (strcmp(arg, "-dylib_cache") == 0) {
                 options.dylibCacheDir = realPathOrExit("-dylib_cache", argv[++i]);
+            } else if (strcmp(arg, "-swift_metadata_builder") == 0) {
+                options.swiftGenericMetadataBuilderPath = realPathOrExit("-swift_metadata_builder", argv[++i]);
             } else if (strcmp(arg, "-artifact") == 0) {
                 options.artifactDir = realPathOrExit("-artifact", argv[++i]);
             } else if (strcmp(arg, "-no_overflow_dylibs") == 0) {

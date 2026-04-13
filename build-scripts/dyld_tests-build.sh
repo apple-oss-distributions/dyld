@@ -26,7 +26,7 @@ DK_SYSTEM_HEADER_SEARCH_PATHS="${DK_SDKROOT}/System/DriverKit/Runtime/usr/includ
 DERIVED_FILES_DIR=${DERIVED_FILES_DIR}
 LDFLAGS="-L$BUILT_PRODUCTS_DIR"
 
-xcodebuild install -target libdyld_driverkit OBJROOT="${OBJROOT_DRIVERKIT}" SYMROOT="${SYMROOT_DRIVERKIT}" DSTROOT="$BUILT_PRODUCTS_DIR-driverkit" -sdk $DK_SDK
+xcodebuild install -target libdyld.dylib OBJROOT="${OBJROOT_DRIVERKIT}" SYMROOT="${SYMROOT_DRIVERKIT}" DSTROOT="$BUILT_PRODUCTS_DIR-driverkit" -sdk $DK_SDK
 DK_LDFLAGS="-L$BUILT_PRODUCTS_DIR-driverkit/System/DriverKit/usr/lib/system/"
 
 #LLBUILD=$(xcrun --sdk $SDKROOT --find llbuild 2> /dev/null)

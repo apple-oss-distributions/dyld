@@ -34,7 +34,7 @@
 // mach_o
 #include "ChainedFixups.h"
 #include "Error.h"
-#include "Header.h"
+#include "UnsafeHeader.h"
 #include "Fixups.h"
 
 namespace mach_o {

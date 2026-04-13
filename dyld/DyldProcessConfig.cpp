@@ -100,7 +100,7 @@ extern "C" int amfi_check_dyld_policy_self(uint64_t input_flags, uint64_t* outpu
 #include "Utilities.h"
 
 // mach_o
-#include "Header.h"
+#include "UnsafeHeader.h"
 #include "Image.h"
 
 #if BUILDING_DYLD && SUPPORT_IGNITION
@@ -114,13 +114,13 @@ using dyld3::MachOFile;
 using mach_o::FunctionVariants;
 using mach_o::FunctionVariantsRuntimeTable;
 using mach_o::GradedArchitectures;
-using mach_o::Header;
+using mach_o::UnsafeHeader;
 using mach_o::Image;
 using mach_o::Platform;
 using mach_o::Version32;
 
 
-extern const Header __dso_handle;
+extern const UnsafeHeader __dso_handle;
 
 namespace dyld4 {
 
@@ -288,7 +288,7 @@ void ProcessConfig::reset(const MachOFile* mainExe, const char* mainPath, uint64
 #else
     process.mainExecutableMF      = (const MachOAnalyzer*)mainExe;
 #endif
-    process.mainExecutableHdr     = (const Header*)mainExe;
+    process.mainExecutableHdr     = (const UnsafeHeader*)mainExe;
     process.mainExecutableSliceSize = mainSliceSize;
     dyldCache.addr                = cache;
 #if SUPPORT_VM_LAYOUT
@@ -306,7 +306,7 @@ void ProcessConfig::scanForRoots() const
     DyldCommPage commPage = this->process.commPage;
 
     __block bool foundRoot = false;
-    this->dyldCache.addr->forEachImage(^(const Header *hdr, const char *installName) {
+    this->dyldCache.addr->forEachImage(^(const UnsafeHeader* hdr, const char* installName) {
         if ( foundRoot )
             return;
 
@@ -453,7 +453,7 @@ ProcessConfig::Process::Process(const KernelArgs* kernArgs, SyscallDelegate& sys
     this->sharedCacheFileEnabled = kernArgs->dyldSharedCacheEnabled;
     this->preMappedFiles      = parseExclaveMappingDescriptor((const char*)startupPtr);
     this->mainExecutableMF      = (MachOAnalyzer*)this->preMappedFiles[0].loadAddress;
-    this->mainExecutableHdr      = (const Header*)this->preMappedFiles[0].loadAddress;
+    this->mainExecutableHdr      = (const UnsafeHeader*)this->preMappedFiles[0].loadAddress;
     this->mainExecutablePath  = this->preMappedFiles[0].path;
     if ( this->sharedCacheFileEnabled ) {
         this->preMappedCache      = (void*)this->preMappedFiles[this->preMappedFiles.count()-1].loadAddress;
@@ -468,7 +468,7 @@ ProcessConfig::Process::Process(const KernelArgs* kernArgs, SyscallDelegate& sys
     this->apple               = NULL;
 #else
     this->mainExecutableMF                                          = kernArgs->mainExecutable;
-    this->mainExecutableHdr                                         = (const Header*)kernArgs->mainExecutable;
+    this->mainExecutableHdr                                         = (const UnsafeHeader*)kernArgs->mainExecutable;
     this->argc                                                      = (int)kernArgs->argc;
     this->argv                                                      = kernArgs->findArgv();
     this->envp                                                      = kernArgs->findEnvp();
@@ -616,6 +616,7 @@ std::pair<uint64_t, uint64_t> ProcessConfig::Process::getDyldFileID() {
 
 #if TARGET_OS_SIMULATOR
 std::pair<uint64_t, uint64_t> ProcessConfig::Process::getDyldSimFileID(SyscallDelegate& sys) {
+#if !BUILDING_UNIT_TESTS
     const char* rootPath = this->environ("DYLD_ROOT_PATH");
     char simDyldPath[PATH_MAX];
     strlcpy(simDyldPath, rootPath, PATH_MAX);
@@ -624,6 +625,7 @@ std::pair<uint64_t, uint64_t> ProcessConfig::Process::getDyldSimFileID(SyscallDe
     if (sys.stat(simDyldPath, &stat_buf) == 0) {
         return {stat_buf.st_dev, stat_buf.st_ino};
     }
+#endif // !BUILDING_UNIT_TESTS
     return {0,0};
 }
 #endif
@@ -1111,13 +1113,15 @@ struct CacheFinder
                 SyscallDelegate& syscall);
     ~CacheFinder();
 
-    int cacheDirFD = -1;
-    SyscallDelegate& syscall;
-
+    int                 cacheDirFD        = -1;
+    SyscallDelegate&    syscall;
+#if BUILDING_DYLD && TARGET_OS_SIMULATOR
+    bool                prebuiltDyldCache = false;
+#endif
 #if BUILDING_DYLD && SUPPORT_IGNITION
-    ignition_payload_t ignitionPayload = IGNITION_PAYLOAD_INIT;
-    bool usesIgnition = false;
-    int ignitionRootFD = -1;
+    ignition_payload_t  ignitionPayload   = IGNITION_PAYLOAD_INIT;
+    bool                usesIgnition      = false;
+    int                 ignitionRootFD    = -1;
 #endif
 };
 
@@ -1127,6 +1131,33 @@ CacheFinder::CacheFinder(const ProcessConfig::Process& process,
     : syscall(syscall)
 {
 #if BUILDING_DYLD
+
+#if TARGET_OS_SIMULATOR
+    #if __x86_64__
+        #define ARCH_NAME            "x86_64"
+    #elif __arm64__
+        #define ARCH_NAME            "arm64"
+    #endif
+    // first try looking in the sim runtime root for B&I built dyld cache
+    if ( const char* runtimeRootPath = process.environ("DYLD_ROOT_PATH") ) {
+        const char* pathInRuntime = getSystemCacheDir(process.platform);
+        char dirPath[PATH_MAX];
+        strlcpy(dirPath, runtimeRootPath, sizeof(dirPath));
+        strlcat(dirPath, pathInRuntime, sizeof(dirPath));
+        this->cacheDirFD = this->syscall.open(dirPath, O_RDONLY, 0);
+        if ( this->cacheDirFD != -1 ) {
+            char fullPath[PATH_MAX];
+            strlcpy(fullPath, dirPath, sizeof(dirPath));
+            strlcat(fullPath, DYLD_SHARED_CACHE_BASE_NAME ARCH_NAME, sizeof(dirPath));
+            struct stat statBuf;
+            if ( dyld3::stat(fullPath, &statBuf) == 0 ) {
+                this->prebuiltDyldCache = true;
+                //fprintf(stderr, "use B&I built dyld cache at '%s'\n", fullPath);
+                return;
+            }
+        }
+    }
+#endif
     if ( const char* overrideDir = process.environ("DYLD_SHARED_CACHE_DIR") ) {
         this->cacheDirFD = this->syscall.open(overrideDir, O_RDONLY, 0);
 
@@ -1372,9 +1403,17 @@ ProcessConfig::DyldCache::DyldCache(Process& process, const Security& security, 
     this->development             = true;
 #endif // !TARGET_OS_EXCLAVEKIT
 
-#if TARGET_OS_SIMULATOR
-    // only support DYLD_SHARED_REGION=avoid on simulator
-    if ( (cacheMode == nullptr) || (strcmp(cacheMode, "avoid") != 0) ) {
+#if TARGET_OS_SIMULATOR && BUILDING_DYLD
+    // only support DYLD_SHARED_REGION=avoid on simulator with local built caches
+    bool avoidMode = (cacheMode != nullptr) && (strcmp(cacheMode, "avoid") == 0);
+    if ( avoidMode ) {
+        // can't use avoid mode with B&I built dyld cache where dylibs are removed
+        if ( cacheFinder.prebuiltDyldCache ) {
+            fprintf(stderr, "DYLD_SHARED_REGION=avoid not supported for simulator\n");
+            avoidMode = false;
+        }
+    }
+    if ( !avoidMode ) {
 #endif
         dyld3::SharedCacheLoadInfo loadInfo;
         bool isSimHost = false;
@@ -1515,7 +1554,7 @@ ProcessConfig::DyldCache::DyldCache(Process& process, const Security& security, 
             halt("dyld shared cache could not be mapped\n");
 #endif // !TARGET_OS_EXCLAVEKIT
         }
-#if TARGET_OS_SIMULATOR
+#if TARGET_OS_SIMULATOR && BUILDING_DYLD
     }
 #endif
 
@@ -1553,7 +1592,7 @@ void ProcessConfig::DyldCache::setPlatformOSVersion(const Process& proc)
     else {
         // for older caches, need to find and inspect libdyld.dylib
         const char* libdyldPath = (proc.platform == Platform::driverKit) ? "/System/DriverKit/usr/lib/system/libdyld.dylib" : "/usr/lib/system/libdyld.dylib";
-        if ( const Header* libdyldMH = this->addr->getImageFromPath(libdyldPath) ) {
+        if ( const UnsafeHeader* libdyldMH = this->addr->getImageFromPath(libdyldPath) ) {
             libdyldMH->platformAndVersions().unzip(^(mach_o::PlatformAndVersions pvs) {
                 if ( pvs.platform == proc.platform ) {
                     this->platform  = pvs.platform;
@@ -1585,7 +1624,7 @@ bool ProcessConfig::DyldCache::uuidOfFileMatchesDyldCache(const Process& proc, c
         }
     }
     // get UUID of dylib in cache
-    if ( const Header* cacheMH = this->addr->getImageFromPath(installName.data()) ) {
+    if ( const UnsafeHeader* cacheMH = this->addr->getImageFromPath(installName.data()) ) {
         uuid_t cacheUUID;
         if ( !cacheMH->getUuid(cacheUUID) )
             return false;
@@ -1598,7 +1637,7 @@ bool ProcessConfig::DyldCache::uuidOfFileMatchesDyldCache(const Process& proc, c
         sys.withReadOnlyMappedFile(diag, dylibPath, false, ^(const void* mapping, size_t mappedSize, bool isOSBinary, const FileID& fileID, const char* canonicalPath, int fileDescriptor) {
             uint64_t sliceOffset = 0;
             uint64_t sliceSize = 0;
-            if ( const Header* diskMH = (const Header*)MachOFile::compatibleSlice(diag, sliceOffset, sliceSize, mapping, mappedSize, dylibPath, proc.platform, isOSBinary, *proc.archs) ) {
+            if ( const UnsafeHeader* diskMH = (const UnsafeHeader*)MachOFile::compatibleSlice(diag, sliceOffset, sliceSize, mapping, mappedSize, dylibPath, proc.platform, isOSBinary, *proc.archs) ) {
                 diskUuidFound = diskMH->getUuid(diskUUIDPtr);
             }
         });
@@ -1684,7 +1723,7 @@ bool ProcessConfig::DyldCache::indexOfPath(const char* dylibPath, uint32_t& dyli
     assert(!cacheBuilderDylibs->empty());
     for ( uint32_t i = 0; i != cacheBuilderDylibs->size(); ++i ) {
         const CacheDylib& cacheDylib = (*cacheBuilderDylibs)[i];
-        if ( !strcmp(((Header*)cacheDylib.mf)->installName(), dylibPath) ) {
+        if ( !strcmp(((UnsafeHeader*)cacheDylib.mf)->installName(), dylibPath) ) {
             dylibIndex = i;
             return true;
         }
@@ -1758,7 +1797,7 @@ bool ProcessConfig::DyldCache::isAlwaysOverridablePath(const char* dylibPath)
 
 bool ProcessConfig::DyldCache::isProtectedLibSystemPath(const char* dylibPath)
 {
-    static constinit const char* protectedPaths[] = {
+    static constinit const char* const protectedPaths[] = {
         "/usr/lib/libSystem.B.dylib",
         "/usr/lib/system/libsystem_secinit.dylib",
         "/usr/lib/system/libsystem_sandbox.dylib",
@@ -1804,7 +1843,7 @@ const char* ProcessConfig::DyldCache::getIndexedImagePath(uint32_t dylibIndex) c
     // The cache builder doesn't have a real cache, and instead uses the list of dylibs
     assert(!cacheBuilderDylibs->empty());
     const CacheDylib& cacheDylib = (*cacheBuilderDylibs)[dylibIndex];
-    return ((Header*)cacheDylib.mf)->installName();
+    return ((UnsafeHeader*)cacheDylib.mf)->installName();
 #else
     return this->addr->getIndexedImagePath(dylibIndex);
 #endif
@@ -1898,7 +1937,7 @@ ProcessConfig::PathOverrides::PathOverrides(const Process& process, const Securi
 #if !TARGET_OS_EXCLAVEKIT
 void ProcessConfig::PathOverrides::checkVersionedPath(SyscallDelegate& sys, const DyldCache& cache, Allocator& allocator, const char* path, Platform platform, const GradedArchitectures& archs)
 {
-    static bool verbose = false;
+    static const bool verbose = false;
     if (verbose) console("checkVersionedPath(%s)\n", path);
     uint32_t foundDylibVersion;
     char     foundDylibTargetOverridePath[PATH_MAX];
@@ -1915,7 +1954,7 @@ void ProcessConfig::PathOverrides::checkVersionedPath(SyscallDelegate& sys, cons
         else if ( cache.indexOfPath(foundDylibTargetOverridePath, dylibIndex) )  {
             uint64_t unusedMTime = 0;
             uint64_t unusedINode = 0;
-            const Header* cacheHdr = (const Header*)cache.getIndexedImageEntry(dylibIndex, unusedMTime, unusedINode);
+            const UnsafeHeader* cacheHdr = (const UnsafeHeader*)cache.getIndexedImageEntry(dylibIndex, unusedMTime, unusedINode);
             const char* dylibInstallName;
             Version32   compatVersion;
             Version32   currentVersion;
@@ -2110,7 +2149,7 @@ void ProcessConfig::PathOverrides::addEnvVar(const Process& proc, const Security
                    }
                 }
                 else {
-                    ::strlcpy(expandedPaths, proc.mainExecutablePath, bufferSize);
+                    ::strlcat(expandedPaths, aValue, bufferSize);
                     needColon = true;
                 }
             });

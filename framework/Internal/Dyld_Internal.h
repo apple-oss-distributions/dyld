@@ -26,12 +26,13 @@
 #define Dyld_Internal_h
 
 #include "SnapshotShared.h"
-#include "dyld_priv.h"
-#include "dyld_cache_format.h"
 #include "dyld_process_info_internal.h"
 #include "ProcessScavenger.h"
+#include "CRC32c.h"
 
-#include "Introspection.h"
+#include <Dyld/Introspection.h>
 #include "SafeVMPrimitives.h"
+
+VIS_HIDDEN mach_vm_address_t gAllImageInfoAddress;
 
 #endif /* Dyld_Internal_h */

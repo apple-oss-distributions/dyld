@@ -39,7 +39,7 @@
 #include "PropertyList.h"
 #include "ProcessScavenger.h"
 #include "SnapshotShared.h"
-#include "Header.h"
+#include "UnsafeHeader.h"
 #include "DyldSharedCache.h"
 #include "Vector.h"
 #include "SafeVMPrimitives.h"
@@ -54,7 +54,7 @@
 using lsl::Allocator;
 using lsl::UniquePtr;
 using lsl::Vector;
-using mach_o::Header;
+using mach_o::UnsafeHeader;
 using UUID          = PropertyList::UUID;
 using Array         = PropertyList::Array;
 using Data          = PropertyList::Data;
@@ -222,9 +222,9 @@ private:
 };
 
 static
-void addSegmentArray(PropertyList::Dictionary& image, const Header* header) {
+void addSegmentArray(PropertyList::Dictionary& image, const UnsafeHeader* header) {
     __block Array* segments = nullptr;
-    header->forEachSegment(^(const mach_o::Header::SegmentInfo& info, bool& stop) {
+    header->forEachSegment(^(const mach_o::UnsafeHeader::SegmentInfo& info, bool& stop) {
         if (info.segmentName == "__PAGEZERO") {
             return;
         }
@@ -284,7 +284,7 @@ bool scavengeProcessFromRegions(Allocator& allocator, task_read_t task, ByteStre
         if (!map) {
             continue;
         }
-        auto mf = Header::isMachO(map.span());
+        auto mf = UnsafeHeader::isMachO(map.span());
         if (!mf) {
             continue;
         }
@@ -296,7 +296,7 @@ bool scavengeProcessFromRegions(Allocator& allocator, task_read_t task, ByteStre
             if (!map) {
                 continue;
             }
-            mf = Header::isMachO(map.span());
+            mf = UnsafeHeader::isMachO(map.span());
             if (!mf) {
                 continue;
             }

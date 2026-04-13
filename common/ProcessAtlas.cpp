@@ -50,7 +50,7 @@
 #include "dyld_process_info_internal.h" // For dyld_all_image_infos_{32,64}
 
 #include "Defines.h"
-#include "Header.h"
+#include "UnsafeHeader.h"
 #include "DyldSharedCache.h"
 #include "PVLEInt64.h"
 #include "MachOLoaded.h"
@@ -62,7 +62,6 @@
 #include "UUID.h"
 #include "Bitmap.h"
 
-using lsl::CRC32c;
 using lsl::Allocator;
 using lsl::emitPVLEUInt64;
 using lsl::readPVLEUInt64;
@@ -70,7 +69,7 @@ using lsl::Bitmap;
 
 using dyld3::FatFile;
 
-using mach_o::Header;
+using mach_o::UnsafeHeader;
 // TODO: forEach shared cache needs to filter out subcaches and skip them
 
 // The allocations made by a snapshot need to last for the life of a spanshot. In libdyld that is under the caller control
@@ -384,14 +383,14 @@ SharedPtr<Mapper> Mapper::mapperForMachO(Allocator& _ephemeralAllocator, FileRec
     }
 
     // if fat file, pick matching slice
-    __block const Header*    mf         = nullptr;
+    __block const UnsafeHeader*    mf         = nullptr;
     const FatFile*              ff         = FatFile::isFatFile(tempMapping);
     __block uint64_t            fileOffset = 0;
     if (ff) {
         uint64_t                fileLength = sb.st_size;
         Diagnostics             diag;
         ff->forEachSlice(diag, fileLength, ^(uint32_t sliceCpuType, uint32_t sliceCpuSubType, const void *sliceStart, uint64_t sliceSize, bool &stop) {
-            auto slice = (Header*)sliceStart;
+            auto slice = (UnsafeHeader*)sliceStart;
             uuid_t sliceUUIDRaw;
             slice->getUuid(sliceUUIDRaw);
             auto sliceUUID = UUID(sliceUUIDRaw);
@@ -405,7 +404,7 @@ SharedPtr<Mapper> Mapper::mapperForMachO(Allocator& _ephemeralAllocator, FileRec
         diag.clearError();
     }
     if (!mf) {
-        auto slice =  Header::isMachO({(uint8_t*)tempMapping, (size_t)sb.st_size});
+        auto slice =  UnsafeHeader::isMachO({(uint8_t*)tempMapping, (size_t)sb.st_size});
         if (slice) {
             uuid_t sliceUUID;
             slice->getUuid(sliceUUID);
@@ -421,7 +420,7 @@ SharedPtr<Mapper> Mapper::mapperForMachO(Allocator& _ephemeralAllocator, FileRec
     }
     __block Vector<Mapper::Mapping> mappings(_transactionalAllocator);
     __block uint64_t slide = 0;
-    mf->forEachSegment(^(const Header::SegmentInfo &info, bool &stop) {
+    mf->forEachSegment(^(const UnsafeHeader::SegmentInfo &info, bool &stop) {
         if ( info.segmentName == "__TEXT" ) {
             slide = (uint64_t)baseAddress - info.vmaddr;
         }
@@ -636,7 +635,7 @@ const MachOLoaded* Image::ml() const {
 const UUID& Image::uuid() const {
     if (!_uuidLoaded) {
         uuid_t fileUUID;
-        const Header* mh = (Header*)ml();
+        const UnsafeHeader* mh = (UnsafeHeader*)ml();
         if (mh && mh->hasMachOMagic()) {
             if (mh->getUuid(fileUUID))
                 _uuid = UUID(fileUUID);
@@ -654,7 +653,7 @@ SafePointer Image::rebasedAddress() const {
 const char* Image::installname() const {
     if (!_installnameLoaded) {
         if (ml()) {
-            _installname = ((const Header*)ml())->installName();
+            _installname = ((const UnsafeHeader*)ml())->installName();
         }
         _installnameLoaded = true;
     }
@@ -684,8 +683,8 @@ uint32_t Image::pointerSize() {
 
 bool Image::forEachSegment(void (^block)(const char* segmentName, uint64_t vmAddr, uint64_t vmSize, int perm)) {
     if (!ml()) { return false; }
-    __block uint64_t slide = (uint64_t)_rebasedAddress - ((const Header*)ml())->preferredLoadAddress();
-    ((const Header*)ml())->forEachSegment(^(const Header::SegmentInfo &info, bool &stop) {
+    __block uint64_t slide = (uint64_t)_rebasedAddress - ((const UnsafeHeader*)ml())->preferredLoadAddress();
+    ((const UnsafeHeader*)ml())->forEachSegment(^(const UnsafeHeader::SegmentInfo &info, bool &stop) {
         uint64_t vmAddr = 0x0;
         if ( _sharedCacheSlide.has_value() ) {
             vmAddr = info.vmaddr + _sharedCacheSlide.value();
@@ -703,8 +702,8 @@ bool Image::forEachSegment(void (^block)(const char* segmentName, uint64_t vmAdd
 
 bool Image::forEachSection(void (^block)(const char* segmentName, const char* sectionName, uint64_t vmAddr, uint64_t vmSize)) {
     if (!ml()) { return false; }
-    __block uint64_t slide = (uint64_t)_rebasedAddress - ((const Header*)ml())->preferredLoadAddress();
-    ((const Header*)ml())->forEachSection(^(const Header::SectionInfo &info, bool &stop) {
+    __block uint64_t slide = (uint64_t)_rebasedAddress - ((const UnsafeHeader*)ml())->preferredLoadAddress();
+    ((const UnsafeHeader*)ml())->forEachSection(^(const UnsafeHeader::SectionInfo &info, bool &stop) {
         uint64_t sectAddr = 0x0;
         if ( _sharedCacheSlide.has_value() ) {
             sectAddr = info.address + _sharedCacheSlide.value();
@@ -719,8 +718,8 @@ bool Image::forEachSection(void (^block)(const char* segmentName, const char* se
 bool Image::contentForSegment(const char* segmentName, void (^contentReader)(const void* content, uint64_t vmAddr, uint64_t vmSize)) {
     if (!ml()) { return false; }
     __block bool result = false;
-    __block uint64_t slide = (uint64_t)_rebasedAddress - ((const Header*)ml())->preferredLoadAddress();
-    ((const Header*)ml())->forEachSegment(^(const Header::SegmentInfo &info, bool &stop) {
+    __block uint64_t slide = (uint64_t)_rebasedAddress - ((const UnsafeHeader*)ml())->preferredLoadAddress();
+    ((const UnsafeHeader*)ml())->forEachSegment(^(const UnsafeHeader::SegmentInfo &info, bool &stop) {
         if ( segmentName != info.segmentName ) { return; }
         uint64_t vmAddr = 0;
         if ( _sharedCacheSlide.has_value() ) {
@@ -748,8 +747,8 @@ bool Image::contentForSegment(const char* segmentName, void (^contentReader)(con
 bool Image::contentForSection(const char* segmentName, const char* sectionName,
                               void (^contentReader)(const void* content, uint64_t vmAddr, uint64_t vmSize)) {
     __block bool result = false;
-    __block uint64_t slide = (uint64_t)_rebasedAddress - ((const Header*)ml())->preferredLoadAddress();
-    ((const Header*)ml())->forEachSection(^(const Header::SectionInfo &info, bool &stop) {
+    __block uint64_t slide = (uint64_t)_rebasedAddress - ((const UnsafeHeader*)ml())->preferredLoadAddress();
+    ((const UnsafeHeader*)ml())->forEachSection(^(const UnsafeHeader::SectionInfo &info, bool &stop) {
         if ( segmentName != info.segmentName ) { return; }
         if ( sectionName != info.sectionName ) { return; }
         uint64_t sectAddr = 0;
@@ -1231,7 +1230,7 @@ UniquePtr<ProcessSnapshot> Process::synthesizeSnapshot(kern_return_t *kr) {
                 BLEND_KERN_RETURN_LOCATION(*kr, 0xe8);
                 return;
             }
-            auto mh = Header::isMachO({(const uint8_t*)unsafeBytes, (size_t)readSize});
+            auto mh = UnsafeHeader::isMachO({(const uint8_t*)unsafeBytes, (size_t)readSize});
             if (!mh) {
                 return;
             }
@@ -2016,9 +2015,8 @@ Vector<std::byte> ProcessSnapshot::Serializer::serialize() {
     while(result.size()%16 != 0) {
         emit<uint8_t>(0, result);
     }
-    CRC32c checksumer;
-    checksumer(result);
-    *((uint32_t*)&result[32]) = checksumer;
+    uint32_t crc = crc32c(result);
+    *((uint32_t*)&result[32]) = crc;
     return result;
 }
 
@@ -2042,11 +2040,15 @@ bool ProcessSnapshot::Serializer::deserialize(const std::span<std::byte> data) {
     if (_version != 0) {
         return false;
     }
-    CRC32c checksumer;
-    checksumer(std::span(&data[0], 32));
-    checksumer((uint32_t)0); // Zero out the actual checksum
-    checksumer(std::span(&data[36], data.size() - 36));
-    if (_crc32c != checksumer) {
+    auto crcBuffer = (std::byte*)_ephemeralAllocator.malloc(data.size());
+    std::memcpy(crcBuffer, data.data(), data.size());
+    // Zero out crc field
+    crcBuffer[32] = std::byte{0};
+    crcBuffer[33] = std::byte{0};
+    crcBuffer[34] = std::byte{0};
+    crcBuffer[35] = std::byte{0};
+    uint32_t calculatedCRC32c = crc32c(std::span(crcBuffer, data.size()));
+    if (_crc32c != calculatedCRC32c) {
         return false;
     }
     uint64_t volumeUUIDCount = 0;

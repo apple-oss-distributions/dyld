@@ -174,7 +174,7 @@ public:
     // When "kind == sub", sets the suffix on this subCache
     // This has to be done after creating things like stubs sub caches, which might move the indices
     void setSuffix(mach_o::Platform platform, bool forceDevelopmentSubCacheSuffix,
-                   size_t subCacheIndex);
+                   size_t subCacheIndex, mach_o::Architecture arch);
 
     void setCodeSignatureSize(const BuilderOptions& options, const BuilderConfig& config,
                               CacheFileSize estimatedSize);
@@ -283,7 +283,7 @@ public:
     uint64_t            bufferSize  = 0;
     CacheVMAddress      subCacheVMAddress;
     uint8_t             cdHash[20];
-    uint8_t             agilecdHash[20];  // if using agile signatures, this is the sha256
+
     uuid_string_t       uuidString;
     std::string         fileSuffix;
 

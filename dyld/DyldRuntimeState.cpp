@@ -71,13 +71,13 @@ extern "C" int amfi_check_dyld_policy_self(uint64_t input_flags, uint64_t* outpu
 #endif
 
 #include "Defines.h"
-#include "Header.h"
+#include "UnsafeHeader.h"
 #include "MachOLoaded.h"
 #include "DyldSharedCache.h"
 #include "SharedCacheRuntime.h"
 #include "Tracing.h"
 #include "Loader.h"
-#include "Header.h"
+#include "UnsafeHeader.h"
 #include "Error.h"
 #include "PrebuiltLoader.h"
 #include "DyldRuntimeState.h"
@@ -102,7 +102,7 @@ using lsl::Lock;
 using dyld3::MachOAnalyzer;
 using dyld3::MachOFile;
 using mach_o::Error;
-using mach_o::Header;
+using mach_o::UnsafeHeader;
 using mach_o::Platform;
 using mach_o::Error;
 
@@ -116,6 +116,7 @@ char error_string[1024] = "dyld: launch, loading dependent libraries";
 extern "C" struct mach_header __dso_handle; // mach_header of dyld itself
 
 namespace dyld4 {
+Metrics gMetrics;
 
 PseudoDylib* PseudoDylib::create(Allocator &A, const char* identifier, void* addr, size_t size, PseudoDylibCallbacks* callbacks, void* context) {
     assert(addr && "addr cannot be null");
@@ -190,6 +191,7 @@ RuntimeLocks::RuntimeLocks()
     #if !TARGET_OS_SIMULATOR
     logSerializer   = OS_LOCK_UNFAIR_INIT;
     #endif // !TARGET_OS_SIMULATOR
+    lazyLoadLock    = OS_LOCK_UNFAIR_INIT;
   #else
     _loadersLock   = _LIBLIBC_MTX_RECURSIVE_INIT;
     _notifiersLock = _LIBLIBC_MTX_RECURSIVE_INIT;
@@ -197,6 +199,7 @@ RuntimeLocks::RuntimeLocks()
 
     allocatorLock  = _LIBLIBC_MTX_INIT;
     logSerializer  = _LIBLIBC_MTX_INIT;
+    lazyLoadLock   = _LIBLIBC_MTX_INIT;
   #endif // !TARGET_OS_EXCLAVEKIT
 #endif // BUILDING_DYLD
 }
@@ -245,6 +248,7 @@ void RuntimeLocks::takeLockBeforeFork()
 #if !TARGET_OS_SIMULATOR
             this->_libSystemHelpers.os_unfair_lock_lock_with_options(&logSerializer, OS_UNFAIR_LOCK_NONE);
 #endif // !TARGET_OS_SIMULATOR
+            this->_libSystemHelpers.os_unfair_lock_lock_with_options(&lazyLoadLock, OS_UNFAIR_LOCK_NONE);
         }
     }
 #endif // BUILDING_DYLD && !TARGET_OS_EXCLAVEKIT
@@ -262,6 +266,7 @@ void RuntimeLocks::releaseLockInForkParent()
 #if !TARGET_OS_SIMULATOR
             this->_libSystemHelpers.os_unfair_lock_unlock(&logSerializer);
 #endif // !TARGET_OS_SIMULATOR
+            this->_libSystemHelpers.os_unfair_lock_unlock(&lazyLoadLock);
         }
     }
 #endif // BUILDING_DYLD && !TARGET_OS_EXCLAVEKIT
@@ -278,6 +283,7 @@ void RuntimeLocks::resetLockInForkChild()
 #if !TARGET_OS_SIMULATOR
         logSerializer    = OS_LOCK_UNFAIR_INIT;
 #endif // !TARGET_OS_SIMULATOR
+        lazyLoadLock     = OS_LOCK_UNFAIR_INIT;
     }
 #endif // BUILDING_DYLD && !TARGET_OS_EXCLAVEKIT
 }
@@ -411,7 +417,7 @@ void RuntimeState::add(const Loader* ldr)
         installName = ldr->path(*this);
     }
     else {
-        const Header* hdr = (const Header*)ldr->mf(*this);
+        const UnsafeHeader* hdr = (const UnsafeHeader*)ldr->mf(*this);
         if ( hdr->isDylib() )
             installName = hdr->installName();
     }
@@ -561,7 +567,7 @@ void RuntimeState::partitionDelayLoads(std::span<const Loader*> newLoaders, std:
         ) {
         for (const Loader* ldr : newLoaders) {
              // only non-cache dylibs can have interposing tuples
-             const Header* hdr = (const Header*)ldr->mf(*this);
+             const UnsafeHeader* hdr = (const UnsafeHeader*)ldr->mf(*this);
              if ( !ldr->dylibInDyldCache && hdr->isDylib() && hdr->hasInterposingTuples() ) {
                  if ( config.log.libraries )
                      log("has interposing tuples so cannot be delayed: %s\n", ldr->leafName(*this));
@@ -679,8 +685,8 @@ void RuntimeState::setMainLoader(const Loader* ldr)
         this->log("Kernel mapped %s\n", this->config.process.mainExecutablePath);
         uintptr_t        slide    = ma->getSlide();
         __block uint32_t segIndex = 0;
-        const Header* mh = (const Header*)ma;
-        mh->forEachSegment(^(const Header::SegmentInfo& segInfo, bool& stop) {
+        const UnsafeHeader* mh = (const UnsafeHeader*)ma;
+        mh->forEachSegment(^(const UnsafeHeader::SegmentInfo& segInfo, bool& stop) {
             uint8_t  permissions = segInfo.initProt;
             uint64_t segAddr     = segInfo.vmaddr + slide;
             uint64_t segSize     = round_page(segInfo.fileSize);
@@ -917,7 +923,7 @@ RuntimeState::PermanentRanges* RuntimeState::PermanentRanges::make(RuntimeState&
         const uintptr_t      slide        = ma->getSlide();
         __block uintptr_t    lastSegEnd   = 0;
         __block uint8_t      lastPerms    = 0;
-        ((const Header*)ldr->loadAddress(state))->forEachSegment(^(const Header::SegmentInfo& segInfo, bool& stop) {
+        ((const UnsafeHeader*)ldr->loadAddress(state))->forEachSegment(^(const UnsafeHeader::SegmentInfo& segInfo, bool& stop) {
             uintptr_t segStart = (uintptr_t)(segInfo.vmaddr + slide);
             uintptr_t segEnd   = segStart + (uintptr_t)segInfo.vmsize;
             if ( (segStart == lastSegEnd) && (segInfo.initProt == lastPerms) && !tempRanges.empty() ) {
@@ -1171,7 +1177,7 @@ void RuntimeState::appendInterposingTuples(const Loader* ldr, const uint8_t* raw
             });
             if ( diag.hasError() )
                 return;
-            const uintptr_t prefLoadAddresss = (uintptr_t)((const Header*)ma)->preferredLoadAddress();
+            const uintptr_t prefLoadAddresss = (uintptr_t)((const UnsafeHeader*)ma)->preferredLoadAddress();
             ma->forEachFixupInAllChains(diag, starts, false, ^(MachOLoaded::ChainedFixupPointerOnDisk* fixupLoc, const dyld_chained_starts_in_segment* segInfo, bool& stop) {
                 if ( ((uintptr_t*)fixupLoc >= rawStart) && ((uintptr_t*)fixupLoc < rawEnd) ) {
                     uintptr_t index      = ((uintptr_t*)fixupLoc - rawStart) / 2;
@@ -1198,7 +1204,7 @@ void RuntimeState::appendInterposingTuples(const Loader* ldr, const uint8_t* raw
     }
     else {
         // rebase
-        intptr_t slide = (uintptr_t)ma - (uintptr_t)((const Header*)ma)->preferredLoadAddress();
+        intptr_t slide = (uintptr_t)ma - (uintptr_t)((const UnsafeHeader*)ma)->preferredLoadAddress();
         ma->forEachRebase(diag, false, ^(uint64_t runtimeOffset, bool& stop) {
             uintptr_t* fixupLoc = (uintptr_t*)((uint64_t)ma + runtimeOffset);
             if ( (fixupLoc >= rawStart) && (fixupLoc < rawEnd) ) {
@@ -1282,13 +1288,13 @@ void RuntimeState::buildInterposingTables()
     __block uint32_t tupleCount  = 0;
     STACK_ALLOC_OVERFLOW_SAFE_ARRAY(const Loader*, dylibsWithTuples, 8);
     for ( const Loader* ldr : loaded ) {
-        const Header* hdr = (const Header*)ldr->analyzer(*this);
+        const UnsafeHeader* hdr = (const UnsafeHeader*)ldr->analyzer(*this);
         // dylibs in dyld cache cannot have interposing tuples
         if ( ldr->dylibInDyldCache )
             continue;
         if ( !hdr->isDylib() )
             continue;
-        hdr->forEachInterposingSection(^(const Header::SectionInfo& info, bool& stop) {
+        hdr->forEachInterposingSection(^(const UnsafeHeader::SectionInfo& info, bool& stop) {
             tupleCount += (info.size / (2 * pointerSize));
             dylibsWithTuples.push_back(ldr);
         });
@@ -1300,8 +1306,8 @@ void RuntimeState::buildInterposingTables()
     interposingTuplesAll.reserve(tupleCount);
     interposingTuplesSpecific.reserve(tupleCount);
     for ( const Loader* ldr : dylibsWithTuples ) {
-        const Header* hdr = (const Header*)ldr->analyzer(*this);
-        hdr->forEachInterposingSection(^(const Header::SectionInfo& info, bool& stop) {
+        const UnsafeHeader* hdr = (const UnsafeHeader*)ldr->analyzer(*this);
+        hdr->forEachInterposingSection(^(const UnsafeHeader::SectionInfo& info, bool& stop) {
             const uint8_t* rawDylibTuples = (const uint8_t*)hdr + info.address - hdr->preferredLoadAddress();
             this->appendInterposingTuples(ldr, rawDylibTuples, (uint32_t)(info.size / (2 * pointerSize)));
         });
@@ -1513,8 +1519,8 @@ void Reaper::finalizeDeadImages()
             const MachOAnalyzer* ma = lu.loader->analyzer(_state);
             if ( lu.loader->dylibInDyldCache )
                 continue;
-            const Header* mh = (const Header*)ma;
-            mh->forEachSegment(^(const Header::SegmentInfo& segInfo, bool& stop) {
+            const UnsafeHeader* mh = (const UnsafeHeader*)ma;
+            mh->forEachSegment(^(const UnsafeHeader::SegmentInfo& segInfo, bool& stop) {
                 if ( segInfo.executable() ) {
                     __cxa_range_t range;
                     range.addr   = (void*)(segInfo.vmaddr + ma->getSlide());
@@ -1758,39 +1764,48 @@ void RuntimeState::notifyLoad(const std::span<const Loader*>& newLoaders)
 
     // call each _dyld_register_func_for_add_image function with each image
     locks.withNotifiersReadLock(^{
-        for ( NotifyFunc func : _notifyAddImage ) {
-            for ( const Loader* ldr : newLoaders ) {
-                const MachOLoaded* ml = ldr->loadAddress(*this);
-                dyld3::ScopedTimer timer(DBG_DYLD_TIMING_FUNC_FOR_ADD_IMAGE, (uint64_t)ml, (uint64_t)func, 0);
+        Metrics::assignDuration(gMetrics.localNotifierCummulativeDuration, [&]{
+            // rdar://168015696 Use operator[] instead of iterators to avoid iterator invalidation due to inits registering new notifiers
+            uint64_t addImageCount = _notifyAddImage.size();
+            for ( uint64_t i = 0; i < addImageCount; ++i ) {
+                NotifyFunc func = _notifyAddImage[i];
+                for ( const Loader* ldr : newLoaders ) {
+                    const MachOLoaded* ml = ldr->loadAddress(*this);
+                    dyld3::ScopedTimer timer(DBG_DYLD_TIMING_FUNC_FOR_ADD_IMAGE, (uint64_t)ml, (uint64_t)func, 0);
+                    if ( this->config.log.notifications )
+                        this->log("notifier %p called with mh=%p\n", func.raw(), ml);
+                    if ( ldr->dylibInDyldCache )
+                        func(ml, this->config.dyldCache.slide);
+                    else
+                        func(ml, ml->getSlide());
+                }
+            }
+            uint64_t loadImageCount = _notifyLoadImage.size();
+            for ( uint64_t i = 0; i < loadImageCount; ++i ) {
+                LoadNotifyFunc func = _notifyLoadImage[i];
+                for ( const Loader* ldr : newLoaders ) {
+                    const MachOLoaded* ml = ldr->loadAddress(*this);
+                    dyld3::ScopedTimer timer(DBG_DYLD_TIMING_FUNC_FOR_ADD_IMAGE, (uint64_t)ml, (uint64_t)func, 0);
+                    if ( this->config.log.notifications )
+                        this->log("notifier %p called with mh=%p\n", func.raw(), ml);
+                    func(ml, ldr->path(*this), !ldr->neverUnload);
+                }
+            }
+            uint64_t bulkLoadCount = _notifyBulkLoadImage.size();
+            for ( uint64_t i = 0; i < bulkLoadCount; ++i ) {
+                BulkLoadNotifier func = _notifyBulkLoadImage[i];
+                const mach_header* mhs[count];
+                const char*        paths[count];
+                for ( unsigned j = 0; j < count; ++j ) {
+                    mhs[j]   = newLoaders[j]->loadAddress(*this);
+                    paths[j] = newLoaders[j]->path(*this);
+                }
+                dyld3::ScopedTimer timer(DBG_DYLD_TIMING_FUNC_FOR_ADD_IMAGE, (uint64_t)mhs[0], (uint64_t)func, 0);
                 if ( this->config.log.notifications )
-                    this->log("notifier %p called with mh=%p\n", func.raw(), ml);
-                if ( ldr->dylibInDyldCache )
-                    func(ml, this->config.dyldCache.slide);
-                else
-                    func(ml, ml->getSlide());
+                    this->log("bulk notifier %p called with %d images\n", func.raw(), count);
+                func(count, (const mach_header**)mhs, (const char**)paths);
             }
-        }
-        for ( LoadNotifyFunc func : _notifyLoadImage ) {
-            for ( const Loader* ldr : newLoaders ) {
-                const MachOLoaded* ml = ldr->loadAddress(*this);
-                dyld3::ScopedTimer timer(DBG_DYLD_TIMING_FUNC_FOR_ADD_IMAGE, (uint64_t)ml, (uint64_t)func, 0);
-                if ( this->config.log.notifications )
-                    this->log("notifier %p called with mh=%p\n", func.raw(), ml);
-                func(ml, ldr->path(*this), !ldr->neverUnload);
-            }
-        }
-        for ( BulkLoadNotifier func : _notifyBulkLoadImage ) {
-            const mach_header* mhs[count];
-            const char*        paths[count];
-            for ( unsigned i = 0; i < count; ++i ) {
-                mhs[i]   = newLoaders[i]->loadAddress(*this);
-                paths[i] = newLoaders[i]->path(*this);
-            }
-            dyld3::ScopedTimer timer(DBG_DYLD_TIMING_FUNC_FOR_ADD_IMAGE, (uint64_t)mhs[0], (uint64_t)func, 0);
-            if ( this->config.log.notifications )
-                this->log("bulk notifier %p called with %d images\n", func.raw(), count);
-            func(count, (const mach_header**)mhs, (const char**)paths);
-        }
+        });
     });
 
     // notify objc about images that use objc
@@ -1870,18 +1885,23 @@ void RuntimeState::notifyUnload(const std::span<const Loader*>& loadersToRemove)
 #if BUILDING_DYLD
     // call each _dyld_register_func_for_remove_image function with each image
     locks.withNotifiersReadLock(^{
-        for ( NotifyFunc func : _notifyRemoveImage ) {
-            for ( const Loader* ldr : loadersToRemove ) {
-                const MachOLoaded* ml = ldr->loadAddress(*this);
-                dyld3::ScopedTimer timer(DBG_DYLD_TIMING_FUNC_FOR_REMOVE_IMAGE, (uint64_t)ml, (uint64_t)func, 0);
-                if ( this->config.log.notifications )
-                    this->log("remove notifier %p called with mh=%p\n", func.raw(), ml);
-                if ( ldr->dylibInDyldCache )
-                    func(ml, this->config.dyldCache.slide);
-                else
-                    func(ml, ml->getSlide());
+        Metrics::assignDuration(gMetrics.localNotifierCummulativeDuration, [&]{
+            // rdar://168015696 Use operator[] instead of iterators to avoid iterator invalidation due to inits registering new notifiers
+            uint64_t removeImageCount = _notifyRemoveImage.size();
+            for ( uint64_t i = 0; i < removeImageCount; ++i ) {
+                NotifyFunc func = _notifyRemoveImage[i];
+                for ( const Loader* ldr : loadersToRemove ) {
+                    const MachOLoaded* ml = ldr->loadAddress(*this);
+                    dyld3::ScopedTimer timer(DBG_DYLD_TIMING_FUNC_FOR_REMOVE_IMAGE, (uint64_t)ml, (uint64_t)func, 0);
+                    if ( this->config.log.notifications )
+                        this->log("remove notifier %p called with mh=%p\n", func.raw(), ml);
+                    if ( ldr->dylibInDyldCache )
+                        func(ml, this->config.dyldCache.slide);
+                    else
+                        func(ml, ml->getSlide());
+                }
             }
-        }
+        });
     });
 
     // call objc about images going away
@@ -2257,7 +2277,7 @@ void RuntimeState::initialize()
     // if images have thread locals, set them up
     for (const Loader* ldr : this->loaded) {
         if ( ldr->hasTLVs ) {
-            const Header* hdr = ldr->header(*this);
+            const UnsafeHeader* hdr = ldr->header(*this);
             if ( Error err = this->libSystemHelpers.setUpThreadLocals(config.dyldCache.addr, hdr) ) {
                 Error fullMsg("failed to set up thread local variables for '%s': %s", ldr->path(*this), err.message());
 #if TARGET_OS_WATCH
@@ -2395,7 +2415,7 @@ bool RuntimeState::buildBootToken(dyld3::Array<uint8_t>& bootToken) const
                 bootToken.push_back(programHash[i]);
             // dyld'd uuid
             uuid_t dyldUuid;
-            if ( ((const Header*)&__dso_handle)->getUuid(dyldUuid) ) {
+            if ( ((const UnsafeHeader*)&__dso_handle)->getUuid(dyldUuid) ) {
                 for ( size_t i = 0; i < sizeof(dyldUuid); ++i )
                     bootToken.push_back(dyldUuid[i]);
             }

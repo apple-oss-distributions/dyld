@@ -35,7 +35,7 @@
 #include "SupportedArchs.h"
 #include "Universal.h"
 #include "Archive.h"
-#include "Header.h"
+#include "UnsafeHeader.h"
 
 namespace mach_o {
 
@@ -118,16 +118,16 @@ uint32_t uleb128_size(uint64_t value)
 }
 
 Error forEachHeader(std::span<const uint8_t> buffer, std::string_view path,
-                    void (^callback)(const Header* sliceHeader, size_t sliceLength, bool& stop)) {
+                    void (^callback)(const UnsafeHeader* sliceHeader, size_t sliceLength, bool& stop)) {
     if ( const mach_o::Universal* universal = mach_o::Universal::isUniversal(buffer) ) {
         if ( mach_o::Error err = universal->valid(buffer.size()) )
             return Error("error in file '%s': %s", path.data(), err.message());
         universal->forEachSlice(^(mach_o::Universal::Slice slice, bool &stop) {
-            if ( const mach_o::Header* mh = mach_o::Header::isMachO(slice.buffer) ) {
+            if ( const mach_o::UnsafeHeader* mh = mach_o::UnsafeHeader::isMachO(slice.buffer) ) {
                 callback(mh, slice.buffer.size(), stop);
             }
         });
-    } else if ( const mach_o::Header* mh = mach_o::Header::isMachO(buffer) ) {
+    } else if ( const mach_o::UnsafeHeader* mh = mach_o::UnsafeHeader::isMachO(buffer) ) {
         bool stop = false;
         callback(mh, buffer.size(), stop);
     }

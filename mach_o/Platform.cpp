@@ -109,6 +109,8 @@ constinit const Platform::Epoch Platform::Epoch::spring2024(2024, true);
 constinit const Platform::Epoch Platform::Epoch::fall2024(2024);
 constinit const Platform::Epoch Platform::Epoch::spring2025(2025, true);
 constinit const Platform::Epoch Platform::Epoch::fall2025(2025);
+constinit const Platform::Epoch Platform::Epoch::spring2026(2026, true);
+constinit const Platform::Epoch Platform::Epoch::fall2026(2026);
 
 
 
@@ -159,7 +161,7 @@ public:
 
 protected:
     friend class Platform;
-    static constinit const PlatformInfo* knownPlatformInfos[];
+    static constinit const PlatformInfo* const knownPlatformInfos[];
 
     void yearForMajorVersion(Version32 vers, uint16_t& year, bool& spring) const {
         // version is >= 11.0
@@ -559,7 +561,7 @@ const PlatformInfo_visionOS_exclaveKit          PlatformInfo_visionOS_exclaveKit
 
 
 // for constructing a Platform() by value
-constinit const PlatformInfo* PlatformInfo::knownPlatformInfos[] = {
+constinit const PlatformInfo* const PlatformInfo::knownPlatformInfos[] = {
     &PlatformInfo_macOS::singleton,
     &PlatformInfo_iOS::singleton,
     &PlatformInfo_tvOS::singleton,

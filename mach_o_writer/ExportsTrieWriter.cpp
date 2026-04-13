@@ -33,7 +33,7 @@
 #include "Symbol.h"
 #include "Misc.h"
 #include "Algorithm.h"
-#include "Header.h"
+#include "UnsafeHeader.h"
 
 // mach_o_writer
 #include "ChunkBumpAllocator.h"
@@ -773,6 +773,8 @@ ExportsTrieWriter::ExportsTrieWriter(std::span<const Symbol> exports, bool write
             exp.offset = sym.implOffset();
             exp.flags  = 0;
         }
+        if ( sym.isThumb() )
+            exp.offset |= 0b1;
         return exportToEntry(exp, allocator);
     });
     buildNodes(entries);

@@ -1,6 +1,6 @@
-/* -*- mode: C++; c-basic-offset: 4; tab-width: 4 -*-
+/* -*- mode: C++; c-basic-offset: 4; tab-width: 4 -*- vim: ft=cpp et ts=4 sw=4:
  *
- * Copyright (c) 2021 Apple Inc. All rights reserved.
+ * Copyright (c) 2023 Apple Inc. All rights reserved.
  *
  * @APPLE_LICENSE_HEADER_START@
  *
@@ -22,33 +22,15 @@
  * @APPLE_LICENSE_HEADER_END@
  */
 
-#ifndef CRC32c_h
-#define CRC32c_h
+@_implementationOnly import Dyld_Internal
 
-#include <span>
-#include <cstdint>
+// The C++ is faster than the native swift one, and if we want to use HW intrinsics we need to drop to C for now anyway, so this is just a shim.
+extension RawSpan {
+    var crc32c: UInt32 {
+        return withUnsafeBytes {
+            return Dyld_Internal.crc32c($0.baseAddress!, $0.count)
+        }
+    }
+}
 
-#include "Defines.h"
-
-namespace lsl {
-struct CRC32cImpl;
-struct VIS_HIDDEN CRC32c {
-    CRC32c();
-    CRC32c(CRC32cImpl&);
-    operator uint32_t();
-    void operator()(uint8_t);
-    void operator()(uint16_t);
-    void operator()(uint32_t);
-    void operator()(uint64_t);
-    void operator()(const std::span<std::byte>);
-    void reset();
-    static CRC32c softwareChecksumer();
-    static CRC32c hardwareChecksumer();
-    static bool hasHardwareChecksumer();
-private:
-    CRC32cImpl& _impl;
-    uint32_t    _crc = 0xffffffff;
-};
-};
-
-#endif /* CRC32c_h */
+let crc32cMagicResidue: UInt32 = 0x48674bc7

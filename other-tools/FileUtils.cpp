@@ -46,6 +46,7 @@
 #include "StringUtils.h"
 #include "Diagnostics.h"
 #include "JSONReader.h"
+#include "Utilities.h"
 
 #if BUILDING_CACHE_BUILDER || BUILDING_CACHE_BUILDER_UNIT_TESTS
 #include "BuilderOptions.h"
@@ -105,21 +106,29 @@ void iterateDirectoryTree(const std::string& pathPrefix, const std::string& path
 }
 
 
-bool safeSave(const void* buffer, size_t bufferLen, const std::string& path)
+bool safeSave(const void* buffer, size_t bufferLen, CString path, uint32_t permissions)
 {
-    std::string pathTemplate = path + "-XXXXXX";
+    std::string pathTemplate = path.c_str();
+    pathTemplate += "-XXXXXX";
     size_t templateLen = strlen(pathTemplate.c_str())+2;
     char pathTemplateSpace[templateLen];
     strlcpy(pathTemplateSpace, pathTemplate.c_str(), templateLen);
     int fd = mkstemp(pathTemplateSpace);
     if ( fd != -1 ) {
-        ssize_t writtenSize = pwrite(fd, buffer, bufferLen, 0);
+        ssize_t writtenSize = write64(fd, buffer, bufferLen);
         if ( (size_t)writtenSize == bufferLen ) {
-            ::fchmod(fd, S_IRUSR|S_IWUSR|S_IRGRP|S_IROTH); // mkstemp() makes file "rw-------", switch it to "rw-r--r--"
+            mode_t umask = ::umask(0);
+            ::umask(umask); // put back the original umask
+            permissions &= ~umask;
+
+            ::fchmod(fd, permissions); // set file permissions
             if ( ::rename(pathTemplateSpace, path.c_str()) == 0) {
                 ::close(fd);
                 return true; // success
             }
+        }
+        else {
+            fprintf(stderr, "write64() failed, returned %ld expected %lu, errno=%d\n", writtenSize, bufferLen, errno);
         }
         ::close(fd);
         ::unlink(pathTemplateSpace);

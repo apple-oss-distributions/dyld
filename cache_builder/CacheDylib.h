@@ -88,9 +88,9 @@ struct CacheDylib
     void bind(Diagnostics& diag, const BuilderConfig& config, Timer::AggregateTimer& timer,
               PatchInfo& dylibPatchInfo, FunctionVariantsOptimizer& functionVariantsOptimizer);
     void updateObjCSelectorReferences(Diagnostics& diag, const BuilderConfig& config, Timer::AggregateTimer& timer,
-                                      ObjCSelectorOptimizer& objcSelectorOptimizer);
+                                      const ObjCSelectorOptimizer& objcSelectorOptimizer);
     void convertObjCMethodListsToOffsets(Diagnostics& diag, const BuilderConfig& config, Timer::AggregateTimer& timer,
-                                         const Chunk* selectorStringsChunk);
+                                         const ObjCSelectorOptimizer& objcSelectorOptimizer);
     void sortObjCMethodLists(Diagnostics& diag, const BuilderConfig& config, Timer::AggregateTimer& timer,
                              const Chunk* selectorStringsChunk);
     void optimizeLoadsFromConstants(const BuilderConfig& config, Timer::AggregateTimer& timer,
@@ -270,14 +270,14 @@ private:
 public:
     InputFile*                              inputFile               = nullptr;
     const dyld3::MachOFile*                 inputMF                 = nullptr;
-    const mach_o::Header*                   inputHdr                = nullptr;
+    const mach_o::UnsafeHeader*                   inputHdr                = nullptr;
     std::unique_ptr<mach_o::Image>          inputImage              = nullptr;
     InputDylibVMAddress                     inputLoadAddress;
     std::string_view                        installName;
     uint32_t                                cacheIndex;
     bool                                    needsPatchTable         = true;
     dyld3::MachOFile*                       cacheMF                 = nullptr;
-    const mach_o::Header*                   cacheHdr                = nullptr;
+    const mach_o::UnsafeHeader*                   cacheHdr                = nullptr;
     CacheVMAddress                          cacheLoadAddress;
     std::vector<DylibSegmentChunk>          segments;
     // This is a list due to iterator invalidation, ie, calculateSubCacheSymbolStrings() deletes

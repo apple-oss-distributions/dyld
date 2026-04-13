@@ -31,11 +31,13 @@
 
 // mach_o
 #include "Archive.h"
-#include "Header.h"
+#include "UnsafeHeader.h"
+
+struct ranlib;
+struct ranlib_64;
+
 
 namespace mach_o {
-
-using namespace mach_o;
 
 /*!
  * @class ArchiveWriter
@@ -46,14 +48,32 @@ using namespace mach_o;
 class VIS_HIDDEN ArchiveWriter : public Archive
 {
 public:
-    // for building
+    class VIS_HIDDEN Entry : Archive::Entry
+    {
+    public:
+        static uint64_t      entrySize(bool extendedFormatNames, std::string_view name, uint64_t contentSize);
+        static size_t        write(std::span<uint8_t> buffer, bool extendedFormatNames, std::string_view name,
+                                   std::span<const uint8_t> content, uint64_t mtime,
+                                   uint32_t uid, uint32_t gid, uint32_t perms);
+    private:
+        static uint64_t      extendedFormatNameSize(std::string_view name);
+    };
+
     static size_t   size(std::span<const Member> members, bool extendedFormatNames = true);
     static Error    make(std::span<uint8_t> buffer, std::span<const Member> members, bool extendedFormatNames = true);
 
-private:
-
-    ArchiveWriter(std::span<const uint8_t> buffer) : Archive(buffer) {}
+    // magic file added to archive that contains a table mapping symbol names to .o files in the archive
+    struct ToC
+    {
+        struct NameAndValue { CString name; uint64_t value; };
+        static size_t   size(std::span<const NameAndValue> symbolNamesAndMemberIndexes, bool toc64);
+        static Error    make(std::span<const NameAndValue> symbolNamesAndMemberIndexes, bool preferSorted, bool toc64, std::span<uint8_t> result, CString& filename);
+        static Error    update(std::string_view tocFileName, std::span<const uint64_t> memberIndexToOffsets, std::span<uint8_t> toc);
+        static Error    forEachSymbol(  std::span<const uint8_t> toc, void (^handler)(CString symbol, ranlib*));
+        static Error    forEachSymbol64(std::span<const uint8_t> toc, void (^handler)(CString symbol, ranlib_64*));
+   };
 };
-}
+
+} // namespace mach_o
 
 #endif // mach_o_writer_Archive_h

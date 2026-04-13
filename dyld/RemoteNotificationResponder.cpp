@@ -26,8 +26,9 @@
 
 #if !TARGET_OS_EXCLAVEKIT
 
-#include "Header.h"
+#include "UnsafeHeader.h"
 #include "dyld_process_info_internal.h"
+#include "DyldRuntimeState.h"
 
 #include "RemoteNotificationResponder.h"
 
@@ -97,8 +98,10 @@ void RemoteNotificationResponder::sendMessage(mach_msg_id_t msgId, mach_msg_size
         msg->msgh_remote_port  = _names[i];
         msg->msgh_reserved     = 0;
         msg->msgh_size         = sendSize;
-        kr = mach_msg_overwrite(msg, MACH_SEND_MSG | MACH_RCV_MSG, msg->msgh_size, sizeof(replyBuffer), replyPort, 0, MACH_PORT_NULL,
-                                 (mach_msg_header_t*)&replyBuffer[0], 0);
+        dyld4::Metrics::assignDuration(gMetrics.remoteNotifierCummulativeDuration, [&]{
+            kr = mach_msg_overwrite(msg, MACH_SEND_MSG | MACH_RCV_MSG, msg->msgh_size, sizeof(replyBuffer), replyPort, 0, MACH_PORT_NULL,
+                                    (mach_msg_header_t*)&replyBuffer[0], 0);
+        });
         if (kr != KERN_SUCCESS) {
             // Send failed, we may have been psuedo recieved. destroy the message
             (void)mach_msg_destroy(msg);
@@ -155,7 +158,7 @@ void RemoteNotificationResponder::notifyMonitorOfImageListChanges(bool unloading
         strcpy(pathPool, imagePaths[j]);
         uint32_t len = (uint32_t)strlen(pathPool);
         bzero(entries->uuid, 16);
-        mach_o::Header* mh = (mach_o::Header*)loadAddresses[j];
+        mach_o::UnsafeHeader* mh = (mach_o::UnsafeHeader*)loadAddresses[j];
         mh->getUuid(entries->uuid);
         entries->loadAddress = (uint64_t)loadAddresses[j];
         entries->pathStringOffset = (uint32_t)(pathPool - pathPoolStart);

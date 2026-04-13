@@ -156,16 +156,16 @@ const GradedArchitectures& GradedArchitectures::forName(std::string_view archNam
 }
 
 // This is all goop to allow these to be statically compiled down (no initializer needed)
-static const Architecture* archs_mac[]                  = { &Architecture::x86_64 };
-static const Architecture* archs_macHaswell[]           = { &Architecture::x86_64h, &Architecture::x86_64 };
-static const Architecture* archs_arm64[]                = { &Architecture::arm64, &Architecture::arm64_alt };
-static const Architecture* archs_arm64e[]               = { &Architecture::arm64e };
-static const Architecture* archs_arm64e_kernel[]        = { &Architecture::arm64e_kernel };
-static const Architecture* archs_arm64e_keysOff[]       = { &Architecture::arm64e, &Architecture::arm64e_v1, &Architecture::arm64, &Architecture::arm64_alt };
-static const Architecture* archs_watchSeries3[]         = { &Architecture::armv7k };
-static const Architecture* archs_watchSeries4[]         = { &Architecture::arm64_32 };
-static const Architecture* archs_AppleSilicon[]         = { &Architecture::arm64e, &Architecture::arm64, &Architecture::x86_64 };
-static const Architecture* archs_iOS[]                  = { &Architecture::arm64e, &Architecture::arm64e_v1, &Architecture::arm64, &Architecture::arm64_alt};
+static const Architecture* const archs_mac[]                  = { &Architecture::x86_64 };
+static const Architecture* const archs_macHaswell[]           = { &Architecture::x86_64h, &Architecture::x86_64 };
+static const Architecture* const archs_arm64[]                = { &Architecture::arm64, &Architecture::arm64_alt };
+static const Architecture* const archs_arm64e[]               = { &Architecture::arm64e };
+static const Architecture* const archs_arm64e_kernel[]        = { &Architecture::arm64e_kernel };
+static const Architecture* const archs_arm64e_keysOff[]       = { &Architecture::arm64e, &Architecture::arm64e_v1, &Architecture::arm64, &Architecture::arm64_alt };
+static const Architecture* const archs_watchSeries3[]         = { &Architecture::armv7k };
+static const Architecture* const archs_watchSeries4[]         = { &Architecture::arm64_32 };
+static const Architecture* const archs_AppleSilicon[]         = { &Architecture::arm64e, &Architecture::arm64, &Architecture::x86_64 };
+static const Architecture* const archs_iOS[]                  = { &Architecture::arm64e, &Architecture::arm64e_v1, &Architecture::arm64, &Architecture::arm64_alt};
 
 
 constinit const GradedArchitectures GradedArchitectures::load_mac(                        archs_mac,            sizeof(archs_mac));

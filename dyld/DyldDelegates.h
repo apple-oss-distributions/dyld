@@ -220,6 +220,7 @@ public:
 #if !BUILDING_DYLD
     PathToPathList          _dirMap;
     const DyldSharedCache*  _dyldCache       = nullptr;
+    const char*             _dyldCachePath   = nullptr;
     PathToDylibInfo         _dylibInfoMap;
     FileIDsToPath           _fileIDsToPath;
 #endif

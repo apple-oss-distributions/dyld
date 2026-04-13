@@ -11,3 +11,8 @@ HEADER_SEARCH_PATHS             = $inherited ${PROJECT_DIR}/shared_cache_runtime
 // TODO: Clean these up.  They were moved from the build settings
 COPY_PHASE_STRIP = NO
 MACOSX_DEPLOYMENT_TARGET = 15.0
+
+PRODUCT_NAME                    = SharedCacheRuntime
+
+OTHER_SWIFT_FLAGS = $(inherited) -vfsoverlay "$(PROJECT_TEMP_DIR)/dyld-overlay.yaml" -Xcc -ivfsoverlay -Xcc "$(PROJECT_TEMP_DIR)/dyld-overlay.yaml"
+OTHER_CFLAGS = $(inherited) -ivfsoverlay "$(PROJECT_TEMP_DIR)/dyld-overlay.yaml"

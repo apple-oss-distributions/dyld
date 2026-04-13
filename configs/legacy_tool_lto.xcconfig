@@ -1,0 +1,18 @@
+#include "legacy_tool.xcconfig"
+
+LD_RUNPATH_SEARCH_PATHS                              =
+LD_RUNPATH_SEARCH_PATHS[sdk=macosx*]                 = @executable_path/../lib/
+LD_RUNPATH_SEARCH_PATHS[config=Debug][sdk=macosx*]   = @executable_path/../lib/ /var/select/developer_dir/Toolchains/XcodeDefault.xctoolchain/usr/lib/
+
+
+SYSTEM_HEADER_SEARCH_PATHS  = $(TOOLCHAIN_DIR)/usr/local/include
+
+
+OTHER_LDFLAGS_0                =
+OTHER_LDFLAGS_1                = -L$(TOOLCHAIN_DIR)/usr/lib/ $(TOOLCHAIN_DIR)/usr/lib/libLTO.dylib
+OTHER_LDFLAGS                  = $(OTHER_LDFLAGS_$(BUILDING_FOR_TOOLCHAIN_VALUE)) $(inherited)
+
+VERSION_INFO_STRING = "@(#)PROGRAM:libtool PROJECT:ld-$(CURRENT_PROJECT_VERSION)"
+
+// since this links with libLTO.dylib it can only have the archs that libLTO.dylib has
+ARCHS                     = arm64 x86_64

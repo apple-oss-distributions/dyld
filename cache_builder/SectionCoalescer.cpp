@@ -336,7 +336,7 @@ void OptimizedSection::addUnoptimizedOffset(uint32_t sourceSectionOffset)
     this->unoptimizedOffsets.insert(sourceSectionOffset);
 }
 
-void OptimizedSection::setSourceSectionInfo(const mach_o::Header::SectionInfo& info)
+void OptimizedSection::setSourceSectionInfo(const mach_o::UnsafeHeader::SectionInfo& info)
 {
     assert(!this->sourceSectionInfo.has_value());
     this->sourceSectionInfo = info;

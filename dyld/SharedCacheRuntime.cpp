@@ -685,7 +685,7 @@ static bool mapSplitCachePrivate(const SharedCacheOptions& options, SharedCacheL
 #endif // !TARGET_OS_EXCLAVEKIT
         }
     }
-    
+
     infoArray[0] = firstFileInfo;
     
 #if !TARGET_OS_EXCLAVEKIT

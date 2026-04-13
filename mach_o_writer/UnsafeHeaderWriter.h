@@ -25,7 +25,7 @@
 #ifndef mach_o_writer_Header_h
 #define mach_o_writer_Header_h
 
-#include "Header.h"
+#include "UnsafeHeader.h"
 
 #include <vector>
 
@@ -34,17 +34,17 @@ namespace mach_o {
 using namespace mach_o;
 
 /*!
- * @class HeaderWriter
+ * @class UnsafeHeaderWriter
  *
  * @abstract
- *      The HeaderWriter constructor can be used to build a mach-o file dynamically for unit tests
+ *      The UnsafeHeaderWriter constructor can be used to build a mach-o file dynamically for unit tests
  */
-struct VIS_HIDDEN HeaderWriter : public Header
+struct VIS_HIDDEN UnsafeHeaderWriter : public UnsafeHeader
 {
-    HeaderWriter() = delete; // we never allocate a HeaderWriter directly, always getting one from casting a buffer
+    UnsafeHeaderWriter() = delete; // we never allocate a UnsafeHeaderWriter directly, always getting one from casting a buffer
 
     // for building
-    static HeaderWriter*  make(std::span<uint8_t> buffer, uint32_t filetype, uint32_t flags, Architecture, bool addImplicitTextSegment=true);
+    static UnsafeHeaderWriter*  make(std::span<uint8_t> buffer, uint32_t filetype, uint32_t flags, Architecture, bool addImplicitTextSegment=true);
     
     void            save(char savedPath[PATH_MAX]) const;
     load_command*   findLoadCommand(uint32_t cmd);
@@ -63,6 +63,7 @@ struct VIS_HIDDEN HeaderWriter : public Header
     void            addLinkedDylib(const char* path, LinkedDylibAttributes kind=LinkedDylibAttributes::regular, Version32 compatVers=Version32(1,0), Version32 currentVersion=Version32(1,0));
     void            setLinkedDylib(load_command* cmd, const char* path, LinkedDylibAttributes kind, Version32 compatVers, Version32 currentVersion);
     void            addLibSystem();
+    void            addLazyLoadDylib(uint32_t offset, uint32_t size);
     void            addDylibId(CString name, Version32 compatVers, Version32 currentVersion);
     void            addDyldID();
     void            addDynamicLinker();
@@ -97,7 +98,7 @@ struct VIS_HIDDEN HeaderWriter : public Header
     void            setAtomInfo(uint32_t offset, uint32_t size);
     void            setLinkerOptimizationHints(uint32_t offset, uint32_t size);
 
-    void            updateRelocatableSegmentSize(uint64_t vmSize, uint32_t fileSize);
+    void            updateRelocatableSegmentSize(uint64_t vmSize, uint32_t fileOffset, uint32_t fileSize);
     void            setRelocatableSectionCount(uint32_t sectionCount);
     void            setRelocatableSectionInfo(uint32_t sectionIndex, const char* segName, const char* sectName, uint32_t flags, uint64_t address,
                                               uint64_t size, uint32_t fileOffset, uint16_t alignment, uint32_t relocsOffset, uint32_t relocsCount);
@@ -122,7 +123,7 @@ struct VIS_HIDDEN HeaderWriter : public Header
     static uint32_t relocatableHeaderAndLoadCommandsSize(bool is64, uint32_t sectionCount, uint32_t platformsCount,
                                                          std::span<const LinkerOption> linkerOptions);
 
-    using Header::findLoadCommand;
+    using UnsafeHeader::findLoadCommand;
 
 private:
 

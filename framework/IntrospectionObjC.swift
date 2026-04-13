@@ -25,6 +25,7 @@ import System
 import Foundation
 @_implementationOnly import Dyld_Internal
 
+
 @objc @implementation
 extension _DYSegment {
     @objc var name:                 String  { return impl.name }
@@ -32,29 +33,10 @@ extension _DYSegment {
     @objc var vmsize:               UInt64  { return impl.vmSize }
     @objc var address:              UInt64  { return impl.address.value }
     @objc var preferredLoadAddress: UInt64  { return impl.preferredLoadAddress.value }
-
-    @objc func getFastPathData(_ data: UnsafeMutablePointer<_DYSegmentFastPathData>) {
-        let info = impl.info
-        switch info.name {
-        case .asciiBuffer(let buffer):
-            data.pointee.segmentNamePtr     = buffer.baseAddress!
-            data.pointee.segmentNameSize    = UInt64(buffer.count)
-        default: break
-        }
-        data.pointee.fileSize           = info.fileSize
-        data.pointee.vmSize             = info.vmSize
-        data.pointee.address            = info.address
-        data.pointee.preferredAddress   = info.preferredAddress
-        data.pointee.permissions        = info.permissions
-    }
-
-    func withSegmentData(_ block:(@escaping (Data) -> Void)) -> Bool {
-        do {
-            try impl.withSegmentData(block)
-            return true
-        } catch {
-            return false
-        }
+    @inline(__always)
+    @objc var data:                 dispatch_data_t?   {
+        guard let memoryBuffer = try? impl.memoryBuffer else { return nil }
+        return memoryBuffer.data() as dispatch_data_t
     }
 
     @objc private override init() {
@@ -83,33 +65,6 @@ extension _DYImage {
             return nil
         }
         return _DYSharedCache(sharedCache)
-    }
-    @objc func getFastPathData(_ data: UnsafeMutablePointer<_DYImageFastPathData>) {
-        switch impl.info.installname {
-        case .asciiBuffer(let buffer):
-            data.pointee.installNamePtr = buffer.baseAddress!
-            data.pointee.installNameSize = UInt64(buffer.count)
-        case .bplist:
-            data.pointee.unicodeInstallname = true
-        case .none:
-            break
-        }
-        switch impl.info.filePath {
-        case .asciiBuffer(let buffer):
-            data.pointee.filePathPtr = buffer.baseAddress!
-            data.pointee.filePathSize = UInt64(buffer.count)
-        case .bplist:
-            data.pointee.unicodeFilePath = true
-        case .none:
-            break
-        }
-        if let uuid = impl.uuid {
-            data.pointee.uuid = uuid.uuid
-        }
-        data.pointee.address = impl.address.value
-        if impl.sharedCache != nil {
-            data.pointee.sharedCacheImage = true
-        }
     }
 
     @objc lazy var segments: [_DYSegment] = {
@@ -148,10 +103,14 @@ extension _DYEnvironment {
 
 @objc @implementation
 extension _DYAOTImage {
-    @objc var x86Address:   UInt64  { return impl.x86Address.value }
-    @objc var aotAddress:   UInt64  { return impl.aotAddress.value }
-    @objc var aotSize:      UInt64  { return impl.aotSize }
-    @objc var aotImageKey:  Data    { return impl.aotImageKey }
+    @objc var x86Address:   UInt64                  { return impl.x86Address.value }
+    @objc var aotAddress:   UInt64                  { return impl.aotAddress.value }
+    @objc var aotSize:      UInt64                  { return impl.aotSize }
+    @objc var aotImageKey:  Data                    {
+        impl.aotImageKey.span.withUnsafeBytes {
+            return Data($0)
+        }
+    }
 
     @objc private override init() {
         fatalError("init() not supported")
@@ -168,8 +127,21 @@ extension _DYAOTImage {
 
 @objc @implementation
 extension _DYSubCache {
-    func withVMLayoutData(_ block:(@escaping (Data) -> Void)) -> Bool {
-        return impl.withVMLayoutData(block)
+    func withVMLayoutBytes(_ block:((UnsafeRawPointer, size_t) -> Void)) -> Bool {
+        do throws {
+            let bytes = unsafe _overrideLifetime(try impl.bytes, copying:self)
+            return bytes.withUnsafeBytes {
+                block($0.baseAddress!, $0.count)
+                return true
+            }
+        } catch {
+            switch error as! MemoryMapError {
+            case .zeroLengthSegment(let start):
+                block(start, 0)
+                return true
+            case .inaccessibleFile, .outOfRange:     return false
+            }
+        }
     }
     @objc private override init() {
         fatalError("init() not supported")
@@ -195,7 +167,17 @@ extension _DYSharedCache {
     @objc var aotUuid:              UUID?       { return impl.aotUuid }
     @objc var aotAddress:           UInt64      { return impl.aotAddress?.value ?? 0 }
     @objc var localSymbolPath:      String?     { return impl.localSymbolPath }
-    @objc var localSymbolData:      Data?       { return impl.localSymbolData }
+    func withLocalSymbolData(_ block:((UnsafeRawPointer, size_t) -> Void)) -> Bool {
+        do {
+            return try impl.withLocalSymbolFileBytes {
+                guard let baseAddress = $0.baseAddress else { return false }
+                block(baseAddress, $0.count)
+                return true
+            }
+        } catch {
+            return false
+        }
+    }
 
     @objc lazy var images: [_DYImage] = {
         return impl.images.map { _DYImage($0) }
@@ -209,11 +191,14 @@ extension _DYSharedCache {
     @objc lazy var subCaches: [_DYSubCache] = {
         return impl.subCaches.map { _DYSubCache($0) }
     }()
-    @objc class func installedSharedCaches() -> [_DYSharedCache] {
-        return SharedCache.installedSharedCaches().map { _DYSharedCache($0) }
+    @objc class func systemSharedCaches() -> [_DYSharedCache] {
+        return SharedCache.systemSharedCaches().map { _DYSharedCache($0) }
     }
-    @objc(installedSharedCachesForSystemPath:)  class func installedSharedCaches(systemPath: String) -> [_DYSharedCache] {
-        return SharedCache.installedSharedCaches(systemPath:FilePath(systemPath)).map { _DYSharedCache($0) }
+    @objc(systemSharedCachesForSystemPath:) class func systemSharedCaches(path: String) -> [_DYSharedCache] {
+        return SharedCache.systemSharedCaches(path:FilePath(path)).map { _DYSharedCache($0) }
+    }
+    @objc(installedSharedCaches) class func installedSharedCaches() -> [_DYSharedCache] {
+        return SharedCache.installedSharedCaches().map { _DYSharedCache($0) }
     }
 
     @objc private override init() {
@@ -235,15 +220,21 @@ extension _DYSharedCache {
 
 @objc @implementation
 extension _DYSnapshot {
-    @objc var pid:                  pid_t           { return impl.pid }
-    @objc var pageSize:             size_t          { return impl.pageSize }
-    @objc var images:               [_DYImage]!     { return impl.images.map { _DYImage($0) } }
-    @objc var aotImages:            [_DYAOTImage]?  { return impl.aotImages?.map { _DYAOTImage($0) } }
-    @objc var timestamp:            UInt64          { return impl.timestamp }
-    @objc var initialImageCount:    UInt64          { return impl.initialImageCount }
-    @objc var state:                UInt8           { return impl.state }
-    @objc var platform:             UInt64          { return impl.platform }
-    @objc var environment:          _DYEnvironment? { return _DYEnvironment(impl.environment) }
+    @objc var pid:                  pid_t               { return impl.pid }
+    @objc var pageSize:             size_t              { return impl.pageSize }
+    @objc var images:               [_DYImage]!         { return impl.images.map { _DYImage($0) } }
+    @objc var aotImages:            [_DYAOTImage]?      { return impl.aotImages?.map { _DYAOTImage($0) } }
+    @objc var timestamp:            UInt64              { return impl.timestamp }
+    @objc var initialImageCount:    UInt64              { return impl.initialImageCount }
+    @objc var state:                UInt8               { return impl.state }
+    @objc var platform:             UInt64              { return impl.platform }
+    @objc var environment:          _DYEnvironment?     { return _DYEnvironment(impl.environment) }
+    @objc lazy var metrics:         [String:NSNumber]?  = {
+        return impl.metrics?.reduce(into: [String:NSNumber]()) { result, element in
+            result[element.0] = NSNumber(value: element.1)
+        }
+    }()
+
     @objc lazy var sharedCache: _DYSharedCache? = {
         guard let sharedCache = impl.sharedCache else {
             return nil
@@ -322,11 +313,11 @@ extension _DYProcess {
     }
 
     @objc(unregisterForEvent:) func unregister(event: _DYEventHandlerToken) {
-        impl.unregister(event:event.value);
+        impl.unregister(handle:event.value);
     }
         
     @objc(getCurrentSnapshotAndReturnError:) func getCurrentSnapshot() throws -> _DYSnapshot {
-        return _DYSnapshot(impl.getCurrentSnapshot())
+        return _DYSnapshot(try impl.getCurrentSnapshot())
     }
 
     @objc private override init() {
@@ -340,5 +331,16 @@ extension _DYProcess {
         self.impl = impl
     }
     @nonobjc private var impl: Process!
+}
+
+extension Data {
+    init(bytes: RawSpan) {
+        let newBytes = malloc(bytes.byteCount)
+        let newBuffer = UnsafeMutableRawBufferPointer(start:newBytes, count: bytes.byteCount)
+        bytes.withUnsafeBytes { src in
+            newBuffer.copyMemory(from:src)
+        }
+        self.init(bytesNoCopy:newBuffer.baseAddress!, count:newBuffer.count, deallocator:.free)
+    }
 }
 

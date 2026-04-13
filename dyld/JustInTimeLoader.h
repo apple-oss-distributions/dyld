@@ -94,7 +94,7 @@ public:
     static void         handleStrongWeakDefOverrides(RuntimeState& state, DyldCacheDataConstLazyScopedWriter& cacheDataConst);
 #endif
 
-    static void         parseSectionLocations(const mach_o::Header* hdr, SectionLocations& metadata);
+    static void         parseSectionLocations(const mach_o::UnsafeHeader* hdr, SectionLocations& metadata);
 
     // Wehn patching an iOSMac dylib, we may need an additional patch table for the macOS twin. This returns that patch table
     const DylibPatch*   getCatalystMacTwinPatches() const;

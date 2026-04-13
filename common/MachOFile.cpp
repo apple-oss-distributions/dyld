@@ -65,7 +65,7 @@ extern "C" {
 
 #include "Architecture.h"
 #include "Array.h"
-#include "Header.h"
+#include "UnsafeHeader.h"
 #include "MachOFile.h"
 #include "Platform.h"
 #include "SupportedArchs.h"
@@ -83,7 +83,7 @@ extern "C" {
 #endif
 
 using mach_o::GradedArchitectures;
-using mach_o::Header;
+using mach_o::UnsafeHeader;
 using mach_o::Platform;
 using mach_o::Universal;
 using mach_o::Version32;
@@ -540,7 +540,7 @@ void MachOFile::removeLoadCommand(Diagnostics& diag, void (^callback)(const load
 bool MachOFile::hasObjC() const
 {
     __block bool result = false;
-    forEachSection(^(const Header::SectionInfo& info, bool& stop) {
+    forEachSection(^(const UnsafeHeader::SectionInfo& info, bool& stop) {
         if ( (info.sectionName == "__objc_imageinfo") && info.segmentName.starts_with("__DATA") ) {
             result = true;
             stop = true;
@@ -564,7 +564,7 @@ bool MachOFile::hasConstObjCSection() const
 bool MachOFile::hasSection(const char* segName, const char* sectName) const
 {
     __block bool result = false;
-    forEachSection(^(const Header::SectionInfo& info, bool& stop) {
+    forEachSection(^(const UnsafeHeader::SectionInfo& info, bool& stop) {
         if ( (info.segmentName == segName) && (info.sectionName == sectName) ) {
             result = true;
             stop = true;
@@ -605,7 +605,7 @@ void MachOFile::forEachDependentDylib(void (^callback)(const char* loadPath, boo
     if ( (count == 0) && !stopped ) {
         // The dylibs that make up libSystem can link with nothing
         // except for dylibs in libSystem.dylib which are ok to link with nothing (they are on bottom)
-        const Header* hdr = (const Header*)this;
+        const UnsafeHeader* hdr = (const UnsafeHeader*)this;
 #if TARGET_OS_EXCLAVEKIT
         if ( !this->isDylib() || (strncmp(hdr->installName(), "/System/ExclaveKit/usr/lib/system/", 34) != 0) )
             callback("/System/ExclaveKit/usr/lib/libSystem.dylib", false, false, false, 0x00010000, 0x00010000, stopped);
@@ -666,14 +666,14 @@ uint64_t MachOFile::entryAddrFromThreadCmd(const thread_command* cmd) const
     return use64BitEntryRegs() ? regs64[index] : regs32[index];
 }
 
-void MachOFile::forEachSection(void (^callback)(const Header::SectionInfo&, bool& stop)) const
+void MachOFile::forEachSection(void (^callback)(const UnsafeHeader::SectionInfo&, bool& stop)) const
 {
-    ((const Header*)this)->forEachSection(callback);
+    ((const UnsafeHeader*)this)->forEachSection(callback);
 }
 
-void MachOFile::forEachSection(void (^callback)(const Header::SegmentInfo&, const Header::SectionInfo&, bool& stop)) const
+void MachOFile::forEachSection(void (^callback)(const UnsafeHeader::SegmentInfo&, const UnsafeHeader::SectionInfo&, bool& stop)) const
 {
-    ((const Header*)this)->forEachSection(callback);
+    ((const UnsafeHeader*)this)->forEachSection(callback);
 }
 
 bool MachOFile::hasWeakDefs() const
@@ -756,7 +756,7 @@ static bool platformExcludesSharedCache(Platform platform, const char* installNa
 bool MachOFile::addendsExceedPatchTableLimit(Diagnostics& diag, mach_o::Fixups fixups) const
 {
     // rdar://122906481 (Shared cache builder - explicitly model dylibs without a need for a patch table)
-    if ( strcmp(((const Header*)this)->installName(), "/usr/lib/libswiftPrespecialized.dylib") == 0 )
+    if ( strcmp(((const UnsafeHeader*)this)->installName(), "/usr/lib/libswiftPrespecialized.dylib") == 0 )
         return false;
 
     const bool     is64bit = is64();
@@ -860,7 +860,7 @@ bool MachOFile::addendsExceedPatchTableLimit(Diagnostics& diag, mach_o::Fixups f
 
 bool MachOFile::canBePlacedInDyldCache(const char* path, bool checkObjC, void (^failureReason)(const char* format, ...)) const
 {
-    if ( !Header::isSharedCacheEligiblePath(path) ) {
+    if ( !UnsafeHeader::isSharedCacheEligiblePath(path) ) {
         // Dont spam the user with an error about paths when we know these are never eligible.
         return false;
     }
@@ -872,7 +872,7 @@ bool MachOFile::canBePlacedInDyldCache(const char* path, bool checkObjC, void (^
     }
 
 
-    const char* dylibName = ((const Header*)this)->installName();
+    const char* dylibName = ((const UnsafeHeader*)this)->installName();
     if ( dylibName[0] != '/' ) {
         failureReason("install name not an absolute path");
         // Don't continue as we don't want to spam the log with errors we don't need.
@@ -891,7 +891,7 @@ bool MachOFile::canBePlacedInDyldCache(const char* path, bool checkObjC, void (^
         return false;
     }
 
-    mach_o::PlatformAndVersions pvs = ((const Header*)this)->platformAndVersions();
+    mach_o::PlatformAndVersions pvs = ((const UnsafeHeader*)this)->platformAndVersions();
     bool platformExcludedFile = platformExcludesSharedCache(pvs.platform, dylibName);
     
     if ( platformExcludedFile ) {
@@ -958,7 +958,7 @@ bool MachOFile::canBePlacedInDyldCache(const char* path, bool checkObjC, void (^
         // Skip weak links.  They are allowed to be missing
         if ( isWeak )
             return;
-        if ( !Header::isSharedCacheEligiblePath(loadPath) ) {
+        if ( !UnsafeHeader::isSharedCacheEligiblePath(loadPath) ) {
             badDep = loadPath;
             stop = true;
         }
@@ -970,13 +970,13 @@ bool MachOFile::canBePlacedInDyldCache(const char* path, bool checkObjC, void (^
     }
 
     // dylibs with interposing info cannot be in cache
-    if ( ((const Header*)this)->hasInterposingTuples() ) {
+    if ( ((const UnsafeHeader*)this)->hasInterposingTuples() ) {
         failureReason("Has interposing tuples");
         return false;
     }
 
     // Temporarily kick out swift binaries out of dyld cache on watchOS simulators as they have missing split seg
-    if ( (this->cputype == CPU_TYPE_I386) && ((const Header*)this)->builtForPlatform(Platform::watchOS_simulator) ) {
+    if ( (this->cputype == CPU_TYPE_I386) && ((const UnsafeHeader*)this)->builtForPlatform(Platform::watchOS_simulator) ) {
         if ( strncmp(dylibName, "/usr/lib/swift/", 15) == 0 ) {
             failureReason("i386 swift binary");
             return false;
@@ -1015,7 +1015,7 @@ bool MachOFile::canBePlacedInDyldCache(const char* path, bool checkObjC, void (^
         if ( splitSeg.isV1() ) {
             // Split seg v1 can only support 1 __DATA, and no other writable segments
             __block bool foundBadSegment = false;
-            ((const Header*)this)->forEachSegment(^(const Header::SegmentInfo& info, bool& stop) {
+            ((const UnsafeHeader*)this)->forEachSegment(^(const UnsafeHeader::SegmentInfo& info, bool& stop) {
                 if ( info.initProt == (VM_PROT_READ | VM_PROT_WRITE) ) {
                     if ( info.segmentName == "__DATA" )
                         return;
@@ -1040,7 +1040,7 @@ bool MachOFile::canBePlacedInDyldCache(const char* path, bool checkObjC, void (^
 
         if ( (isArch("x86_64") || isArch("x86_64h")) ) {
             __block bool rebasesOk = true;
-            uint64_t startVMAddr = ((const Header*)this)->preferredLoadAddress();
+            uint64_t startVMAddr = ((const UnsafeHeader*)this)->preferredLoadAddress();
             uint64_t endVMAddr = startVMAddr + mappedSize();
             fixups.forEachRebase(diag, ^(uint64_t runtimeOffset, uint64_t rebasedValue, bool &stop) {
                 // We allow TBI for x86_64 dylibs, but then require that the remainder of the offset
@@ -1132,7 +1132,7 @@ bool MachOFile::canBePlacedInDyldCache(const char* path, bool checkObjC, void (^
 
             __block uint64_t classListStartOffset = 0;
             __block uint64_t classListEndOffset = 0;
-            this->forEachSection(^(const Header::SectionInfo& sectInfo, bool& stop) {
+            this->forEachSection(^(const UnsafeHeader::SectionInfo& sectInfo, bool& stop) {
                 if ( sectInfo.segmentName != "__DATA_CONST" )
                     return;
                 if ( sectInfo.sectionName != "__objc_classlist" )
@@ -1161,7 +1161,7 @@ bool MachOFile::canBePlacedInDyldCache(const char* path, bool checkObjC, void (^
     if ( checkObjC ) {
         typedef std::pair<VMAddress, VMAddress> Range;
         __block std::vector<Range> constRanges;
-        ((const Header*)this)->forEachSegment(^(const Header::SegmentInfo& info, bool& stop) {
+        ((const UnsafeHeader*)this)->forEachSegment(^(const UnsafeHeader::SegmentInfo& info, bool& stop) {
             if ( info.vmsize == 0 )
                 return;
             if ( info.segmentName == "__DATA_CONST" || info.segmentName == "__AUTH_CONST" )
@@ -1222,7 +1222,7 @@ bool MachOFile::canBePlacedInDyldCache(const char* path, bool checkObjC, void (^
 #if BUILDING_CACHE_BUILDER || BUILDING_CACHE_BUILDER_UNIT_TESTS
 objc_visitor::Visitor MachOFile::makeObjCVisitor(Diagnostics& diag) const
 {
-    VMAddress dylibBaseAddress(((const Header*)this)->preferredLoadAddress());
+    VMAddress dylibBaseAddress(((const UnsafeHeader*)this)->preferredLoadAddress());
 
     __block std::vector<metadata_visitor::Segment> segments;
     __block std::vector<uint64_t> bindTargets;
@@ -1367,7 +1367,7 @@ bool MachOFile::canBePlacedInKernelCollection(const char* path, void (^failureRe
 
         // xnu kernel cannot have a page zero
         __block bool foundPageZero = false;
-        ((const Header*)this)->forEachSegment(^(const Header::SegmentInfo &segmentInfo, bool &stop) {
+        ((const UnsafeHeader*)this)->forEachSegment(^(const UnsafeHeader::SegmentInfo &segmentInfo, bool &stop) {
             if ( segmentInfo.segmentName == "__PAGEZERO" ) {
                 foundPageZero = true;
                 stop = true;
@@ -1424,7 +1424,7 @@ bool MachOFile::canBePlacedInKernelCollection(const char* path, void (^failureRe
     }
 
     // dylibs with interposing info cannot be in cache
-    if ( ((const Header*)this)->hasInterposingTuples() ) {
+    if ( ((const UnsafeHeader*)this)->hasInterposingTuples() ) {
         failureReason("Has interposing tuples");
         return false;
     }
@@ -1432,7 +1432,7 @@ bool MachOFile::canBePlacedInKernelCollection(const char* path, void (^failureRe
     // Only x86_64 is allowed to have RWX segments
     if ( !isArch("x86_64") && !isArch("x86_64h") ) {
         __block bool foundBadSegment = false;
-        ((const Header*)this)->forEachSegment(^(const Header::SegmentInfo &info, bool &stop) {
+        ((const UnsafeHeader*)this)->forEachSegment(^(const UnsafeHeader::SegmentInfo &info, bool &stop) {
             if ( (info.initProt & (VM_PROT_WRITE | VM_PROT_EXECUTE)) == (VM_PROT_WRITE | VM_PROT_EXECUTE) ) {
                 failureReason("Segments are not allowed to be both writable and executable");
                 foundBadSegment = true;
@@ -1770,7 +1770,7 @@ static void getArchNames(const GradedArchitectures& archs, bool isOSBinary, char
  
 const MachOFile* MachOFile::compatibleSlice(Diagnostics& diag, uint64_t& sliceOffsetOut, uint64_t& sliceLenOut, const void* fileContent, size_t contentSize, const char* path, Platform platform, bool isOSBinary, const GradedArchitectures& archs, bool internalInstall)
 {
-    const Header* hdr = nullptr;
+    const UnsafeHeader* hdr = nullptr;
     std::span<const uint8_t> content = { (const uint8_t*)fileContent, contentSize };
     if ( const Universal* uni = Universal::isUniversal(content) ) {
         if ( mach_o::Error err = uni->valid(content.size()) ) {
@@ -1779,7 +1779,7 @@ const MachOFile* MachOFile::compatibleSlice(Diagnostics& diag, uint64_t& sliceOf
         }
         Universal::Slice slice;
         if ( uni->bestSlice(archs, isOSBinary, slice) ) {
-            hdr = (const Header*)slice.buffer.data();
+            hdr = (const UnsafeHeader*)slice.buffer.data();
             sliceLenOut = slice.buffer.size();
             sliceOffsetOut = slice.buffer.data() - content.data();
         }
@@ -1792,13 +1792,13 @@ const MachOFile* MachOFile::compatibleSlice(Diagnostics& diag, uint64_t& sliceOf
         }
     }
     else {
-        hdr = (const Header*)fileContent;
+        hdr = (const UnsafeHeader*)fileContent;
         sliceLenOut = contentSize;
         sliceOffsetOut = 0;
     }
 
     std::span<const uint8_t> contents{(uint8_t*)hdr, (size_t)sliceLenOut};
-    if ( !Header::isMachO(contents) ) {
+    if ( !UnsafeHeader::isMachO(contents) ) {
         diag.error("slice is not valid mach-o file");
         return nullptr;
     }
@@ -1914,8 +1914,8 @@ bool MachOFile::inCodeSection(uint32_t runtimeOffset) const
         return false;
 
     __block bool result = false;
-    uint64_t baseAddress = ((const Header*)this)->preferredLoadAddress();
-    this->forEachSection(^(const Header::SectionInfo& sectInfo, bool& stop) {
+    uint64_t baseAddress = ((const UnsafeHeader*)this)->preferredLoadAddress();
+    this->forEachSection(^(const UnsafeHeader::SectionInfo& sectInfo, bool& stop) {
         if ( ((sectInfo.address-baseAddress) <= runtimeOffset) && (runtimeOffset < (sectInfo.address+sectInfo.size-baseAddress)) ) {
             result = ( (sectInfo.flags & S_ATTR_PURE_INSTRUCTIONS) || (sectInfo.flags & S_ATTR_SOME_INSTRUCTIONS) );
             stop = true;
@@ -1984,7 +1984,7 @@ bool MachOFile::hasInitializer(Diagnostics& diag) const
     if ( result )
         return true;
 
-    forEachSection(^(const Header::SectionInfo& info, bool& stop) {
+    forEachSection(^(const UnsafeHeader::SectionInfo& info, bool& stop) {
         if ( (info.flags & SECTION_TYPE) != S_INIT_FUNC_OFFSETS )
             return;
         result = true;
@@ -1997,8 +1997,8 @@ bool MachOFile::hasInitializer(Diagnostics& diag) const
 void MachOFile::forEachInitializerPointerSection(Diagnostics& diag, void (^callback)(uint32_t sectionOffset, uint32_t sectionSize, bool& stop)) const
 {
     const unsigned ptrSize     = pointerSize();
-    const uint64_t baseAddress = ((const Header*)this)->preferredLoadAddress();
-    forEachSection(^(const Header::SectionInfo& info, bool& sectStop) {
+    const uint64_t baseAddress = ((const UnsafeHeader*)this)->preferredLoadAddress();
+    forEachSection(^(const UnsafeHeader::SectionInfo& info, bool& sectStop) {
         if ( (info.flags & SECTION_TYPE) == S_MOD_INIT_FUNC_POINTERS ) {
             if ( (info.size % ptrSize) != 0 ) {
                 diag.error("initializer section %.*s/%.*s has bad size",
@@ -2033,7 +2033,7 @@ void MachOFile::analyzeSegmentsLayout(uint64_t& vmSpace, bool& hasZeroFill) cons
     __block uint64_t lowestVmAddr   = 0xFFFFFFFFFFFFFFFFULL;
     __block uint64_t highestVmAddr  = 0;
     __block uint64_t sumVmSizes     = 0;
-    ((const Header*)this)->forEachSegment(^(const Header::SegmentInfo& segmentInfo, bool& stop) {
+    ((const UnsafeHeader*)this)->forEachSegment(^(const UnsafeHeader::SegmentInfo& segmentInfo, bool& stop) {
         if ( segmentInfo.segmentName == "__PAGEZERO" )
             return;
         if ( segmentInfo.writable() && (segmentInfo.fileSize !=  segmentInfo.vmsize) )
@@ -2057,7 +2057,7 @@ void MachOFile::analyzeSegmentsLayout(uint64_t& vmSpace, bool& hasZeroFill) cons
     // The aux KC may have __DATA first, in which case we always want to vm_copy to the right place
     bool hasOutOfOrderSegments = false;
 #if BUILDING_APP_CACHE_UTIL || BUILDING_DYLDINFO
-    uint64_t textSegVMAddr = ((const Header*)this)->preferredLoadAddress();
+    uint64_t textSegVMAddr = ((const UnsafeHeader*)this)->preferredLoadAddress();
     hasOutOfOrderSegments = textSegVMAddr != lowestVmAddr;
 #endif
 
@@ -2067,7 +2067,7 @@ void MachOFile::analyzeSegmentsLayout(uint64_t& vmSpace, bool& hasZeroFill) cons
 
 void MachOFile::forEachDOFSection(Diagnostics& diag, void (^callback)(uint32_t offset)) const
 {
-    forEachSection(^(const Header::SegmentInfo& segInfo, const Header::SectionInfo& info, bool &stop) {
+    forEachSection(^(const UnsafeHeader::SegmentInfo& segInfo, const UnsafeHeader::SectionInfo& info, bool &stop) {
         if ( (info.flags & SECTION_TYPE) == S_DTRACE_DOF ) {
             callback((uint32_t)(info.address - segInfo.vmaddr));
         }
@@ -2079,7 +2079,7 @@ bool MachOFile::hasExportTrie(uint32_t& runtimeOffset, uint32_t& size) const
     __block uint64_t textUnslidVMAddr   = 0;
     __block uint64_t linkeditUnslidVMAddr   = 0;
     __block uint64_t linkeditFileOffset     = 0;
-    ((const Header*)this)->forEachSegment(^(const Header::SegmentInfo& info, bool& stop) {
+    ((const UnsafeHeader*)this)->forEachSegment(^(const UnsafeHeader::SegmentInfo& info, bool& stop) {
         if ( info.segmentName == "__TEXT" ) {
             textUnslidVMAddr = info.vmaddr;
         } else if ( info.segmentName == "__LINKEDIT" ) {
@@ -2188,7 +2188,7 @@ void MachOFile::forEachCodeDirectoryBlob(const void* codeSigStart, size_t codeSi
 
     // Note: The kernel sometimes chooses sha1 on watchOS, and sometimes sha256.
     // Embed all of them so that we just need to match any of them
-    const bool isWatchOS = ((const Header*)this)->builtForPlatform(Platform::watchOS);
+    const bool isWatchOS = ((const UnsafeHeader*)this)->builtForPlatform(Platform::watchOS);
     const bool isMainExecutable = this->isMainExecutable();
     auto hashRankFn = isWatchOS ? &hash_rank_watchOS_dylibs : &hash_rank;
 
@@ -2559,9 +2559,9 @@ void MachOFile::withFileLayout(Diagnostics &diag, void (^callback)(const mach_o:
         return;
     }
 
-    uint32_t numSegments = ((const Header*)this)->segmentCount();
+    uint32_t numSegments = ((const UnsafeHeader*)this)->segmentCount();
     BLOCK_ACCCESSIBLE_ARRAY(mach_o::SegmentLayout, segmentLayout, numSegments);
-    ((const Header*)this)->forEachSegment(^(const Header::SegmentInfo &info, bool &stop) {
+    ((const UnsafeHeader*)this)->forEachSegment(^(const UnsafeHeader::SegmentInfo &info, bool &stop) {
         mach_o::SegmentLayout segment;
         segment.vmAddr      = info.vmaddr;
         segment.vmSize      = info.vmsize;
@@ -2662,7 +2662,7 @@ bool MachOFile::enforceFormat(Malformed kind) const
 #endif
 
     __block bool result = false;
-    mach_o::PlatformAndVersions pvs = ((const Header*)this)->platformAndVersions();
+    mach_o::PlatformAndVersions pvs = ((const UnsafeHeader*)this)->platformAndVersions();
     pvs.unzip(^(mach_o::PlatformAndVersions p) {
         if ( p.platform == Platform::macOS ) {
             switch (kind) {
@@ -2859,7 +2859,7 @@ bool MachOFile::validSegments(Diagnostics& diag, const char* path, size_t fileLe
     __block bool badSize        = false;
     __block bool hasTEXT        = false;
     __block bool hasLINKEDIT    = false;
-    ((const Header*)this)->forEachSegment(^(const Header::SegmentInfo& info, bool& stop) {
+    ((const UnsafeHeader*)this)->forEachSegment(^(const UnsafeHeader::SegmentInfo& info, bool& stop) {
         if ( info.segmentName == "__TEXT" ) {
             if ( (info.initProt != (VM_PROT_READ|VM_PROT_EXECUTE)) && enforceFormat(Malformed::textPermissions) ) {
                 diag.error("in '%s' __TEXT segment permissions is not 'r-x'", path);
@@ -2918,10 +2918,10 @@ bool MachOFile::validSegments(Diagnostics& diag, const char* path, size_t fileLe
 
     // check for overlapping segments
     __block bool badSegments = false;
-    ((const Header*)this)->forEachSegment(^(const Header::SegmentInfo& info1, bool& stop1) {
+    ((const UnsafeHeader*)this)->forEachSegment(^(const UnsafeHeader::SegmentInfo& info1, bool& stop1) {
         uint64_t seg1vmEnd   = info1.vmaddr + info1.vmsize;
         uint64_t seg1FileEnd = info1.fileOffset + info1.fileSize;
-        ((const Header*)this)->forEachSegment(^(const Header::SegmentInfo& info2, bool& stop2) {
+        ((const UnsafeHeader*)this)->forEachSegment(^(const UnsafeHeader::SegmentInfo& info2, bool& stop2) {
             if ( info1.segmentIndex == info2.segmentIndex )
                 return;
             uint64_t seg2vmEnd   = info2.vmaddr + info2.vmsize;

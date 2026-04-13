@@ -28,7 +28,7 @@
 #include "Chunk.h"
 #include "CodeSigningTypes.h"
 #include "DyldSharedCache.h"
-#include "Header.h"
+#include "UnsafeHeader.h"
 #include "SubCache.h"
 #include "JSONWriter.h"
 
@@ -40,7 +40,7 @@
 
 using dyld3::MachOFile;
 
-using mach_o::Header;
+using mach_o::UnsafeHeader;
 using mach_o::Platform;
 
 using error::Error;
@@ -416,7 +416,7 @@ static bool hasLinkeditRegion(std::span<Region> regions)
     return false;
 }
 
-void SubCache::setSuffix(Platform platform, bool forceDevelopmentSubCacheSuffix, size_t subCacheIndex)
+void SubCache::setSuffix(Platform platform, bool forceDevelopmentSubCacheSuffix, size_t subCacheIndex, mach_o::Architecture arch)
 {
     assert(this->isSubCache() || this->isStubsCache());
     assert(subCacheIndex > 0);
@@ -426,8 +426,8 @@ void SubCache::setSuffix(Platform platform, bool forceDevelopmentSubCacheSuffix,
     const char* readonlySuffix = forceDevelopmentSubCacheSuffix ? ".development.dyldreadonly" : ".dyldreadonly";
     const char* subCacheSuffix = forceDevelopmentSubCacheSuffix ? ".development" : "";
 
-    if ( (platform == Platform::macOS) || platform.isSimulator() ) {
-        // macOS/sims never has a .development suffix
+    if ( platform.isSimulator() || arch.usesx86_64Instructions()) {
+        // sims never has a .development suffix
         this->fileSuffix = "." + json::decimal(subCacheIndex);
     } else if ( platform == Platform::driverKit ) {
         // driverKit never has a .development suffix
@@ -472,7 +472,6 @@ static std::string getCodeSigningIdentifier(const BuilderOptions& options)
 struct CodeSignatureLayout
 {
     // These fields configure the code signature
-    bool     agile              = false;
     uint8_t  dscHashType        = 0;
     uint8_t  dscHashSize        = 0;
     uint32_t dscDigestFormat    = 0;
@@ -483,13 +482,10 @@ struct CodeSignatureLayout
     uint32_t xSlotCount         = 0;
     size_t   idOffset           = 0;
     size_t   hashOffset         = 0;
-    size_t   hash256Offset      = 0;
     size_t   cdSize             = 0;
-    size_t   cd256Size          = 0;
     size_t   reqsSize           = 0;
     size_t   cmsSize            = 0;
     size_t   cdOffset           = 0;
-    size_t   cd256Offset        = 0;
     size_t   reqsOffset         = 0;
     size_t   cmsOffset          = 0;
     size_t   sbSize             = 0;
@@ -505,46 +501,25 @@ static CodeSignatureLayout getCodeSignatureLayout(const BuilderOptions& options,
     const uint32_t pageSize = config.codeSign.pageSize;
     assert((subCacheSize.rawValue() % pageSize) == 0);
 
-    layout.agile = false;
-
-    // select which codesigning hash
-    switch ( config.codeSign.mode ) {
-        case CodeSign::Mode::agile:
-            layout.agile = true;
-            // Fall through to SHA1, because the main code directory remains SHA1 for compatibility.
-            [[clang::fallthrough]];
-        case CodeSign::Mode::onlySHA1:
-#pragma clang diagnostic push
-#pragma clang diagnostic ignored "-Wdeprecated-declarations"
-            layout.dscHashType     = CS_HASHTYPE_SHA1;
-            layout.dscHashSize     = CS_HASH_SIZE_SHA1;
-            layout.dscDigestFormat = kCCDigestSHA1;
-#pragma clang diagnostic pop
-            break;
-        case CodeSign::Mode::onlySHA256:
-            layout.dscHashType     = CS_HASHTYPE_SHA256;
-            layout.dscHashSize     = CS_HASH_SIZE_SHA256;
-            layout.dscDigestFormat = kCCDigestSHA256;
-            break;
-    }
+    // Only SHA256 is supported
+    layout.dscHashType     = CS_HASHTYPE_SHA256;
+    layout.dscHashSize     = CS_HASH_SIZE_SHA256;
+    layout.dscDigestFormat = kCCDigestSHA256;
 
     std::string cacheIdentifier = getCodeSigningIdentifier(options);
 
     // layout code signature contents
     size_t idSize            = cacheIdentifier.size()+1; // +1 for terminating 0
-    layout.blobCount         = layout.agile ? 4 : 3;
+    layout.blobCount         = 3;
     layout.slotCount         = (uint32_t)(subCacheSize.rawValue() / pageSize);
     layout.xSlotCount        = CSSLOT_REQUIREMENTS;
     layout.idOffset          = offsetof(CS_CodeDirectory, end_withExecSeg);
     layout.hashOffset        = layout.idOffset + idSize + layout.dscHashSize * layout.xSlotCount;
-    layout.hash256Offset     = layout.idOffset + idSize + CS_HASH_SIZE_SHA256 * layout.xSlotCount;
     layout.cdSize            = layout.hashOffset + (layout.slotCount * layout.dscHashSize);
-    layout.cd256Size         = layout.agile ? layout.hash256Offset + (layout.slotCount * CS_HASH_SIZE_SHA256) : 0;
     layout.reqsSize          = 12;
     layout.cmsSize           = sizeof(CS_Blob);
     layout.cdOffset          = sizeof(CS_SuperBlob) + layout.blobCount * sizeof(CS_BlobIndex);
-    layout.cd256Offset       = layout.cdOffset + layout.cdSize;
-    layout.reqsOffset        = layout.cd256Offset + layout.cd256Size; // equals cdOffset + cdSize if not agile
+    layout.reqsOffset        = layout.cdOffset + layout.cdSize;
     layout.cmsOffset         = layout.reqsOffset + layout.reqsSize;
     layout.sbSize            = layout.cmsOffset + layout.cmsSize;
     layout.sigSize           = alignPage(layout.sbSize);       // keep whole cache 16KB aligned
@@ -594,10 +569,6 @@ void SubCache::codeSign(Diagnostics& diag, const BuilderOptions& options, const 
     sb->index[1].offset = htonl(layout.reqsOffset);
     sb->index[2].type   = htonl(CSSLOT_CMS_SIGNATURE);
     sb->index[2].offset = htonl(layout.cmsOffset);
-    if ( layout.agile ) {
-        sb->index[3].type   = htonl(CSSLOT_ALTERNATE_CODEDIRECTORIES + 0);
-        sb->index[3].offset = htonl(layout.cd256Offset);
-    }
 
     // fill in empty requirements
     CS_RequirementsBlob* reqs = (CS_RequirementsBlob*)(((char*)sb) + layout.reqsOffset);
@@ -648,52 +619,6 @@ void SubCache::codeSign(Diagnostics& diag, const BuilderOptions& options, const 
     uint8_t* reqsHashSlot = &hashSlot[-CSSLOT_REQUIREMENTS * layout.dscHashSize];
     CCDigest(layout.dscDigestFormat, (uint8_t*)reqs, sizeof(CS_RequirementsBlob), reqsHashSlot);
 
-    CS_CodeDirectory* cd256;
-    uint8_t*          hash256Slot;
-    uint8_t*          reqsHash256Slot;
-    if ( layout.agile ) {
-        // Note that the assumption here is that the size up to the hashes is the same as for
-        // sha1 code directory, and that they come last, after everything else.
-
-        cd256                = (CS_CodeDirectory*)(((char*)sb) + layout.cd256Offset);
-        cd256->magic         = htonl(CSMAGIC_CODEDIRECTORY);
-        cd256->length        = htonl(layout.cd256Size);
-        cd256->version       = htonl(0x20400); // supports exec segment
-        cd256->flags         = htonl(kSecCodeSignatureAdhoc);
-        cd256->hashOffset    = htonl(layout.hash256Offset);
-        cd256->identOffset   = htonl(layout.idOffset);
-        cd256->nSpecialSlots = htonl(layout.xSlotCount);
-        cd256->nCodeSlots    = htonl(layout.slotCount);
-        cd256->codeLimit     = htonl(subCacheBufferSize);
-        cd256->hashSize      = CS_HASH_SIZE_SHA256;
-        cd256->hashType      = CS_HASHTYPE_SHA256;
-        cd256->platform      = 0;                       // not platform binary
-        cd256->pageSize      = __builtin_ctz(pageSize); // log2(CS_PAGE_SIZE);
-        cd256->spare2        = 0;                       // unused (must be zero)
-        cd256->scatterOffset = 0;                       // not supported anymore
-        cd256->teamOffset    = 0;                       // no team ID
-        cd256->spare3        = 0;                       // unused (must be zero)
-        cd256->codeLimit64   = 0;                       // falls back to codeLimit
-
-        // executable segment info
-        cd256->execSegBase  = cd->execSegBase;
-        cd256->execSegLimit = cd->execSegLimit;
-        cd256->execSegFlags = cd->execSegFlags;
-
-        // initialize dynamic fields of Code Directory
-        strcpy((char*)cd256 + layout.idOffset, cacheIdentifier.c_str());
-
-        // add special slot hashes
-        hash256Slot     = (uint8_t*)cd256 + layout.hash256Offset;
-        reqsHash256Slot = &hash256Slot[-CSSLOT_REQUIREMENTS * CS_HASH_SIZE_SHA256];
-        CCDigest(kCCDigestSHA256, (uint8_t*)reqs, sizeof(CS_RequirementsBlob), reqsHash256Slot);
-    }
-    else {
-        cd256           = NULL;
-        hash256Slot     = NULL;
-        reqsHash256Slot = NULL;
-    }
-
     // fill in empty CMS blob for ad-hoc signing
     CS_Blob* cms = (CS_Blob*)(((char*)sb) + layout.cmsOffset);
     cms->magic   = htonl(CSMAGIC_BLOBWRAPPER);
@@ -710,10 +635,6 @@ void SubCache::codeSign(Diagnostics& diag, const BuilderOptions& options, const 
         const uint8_t* code = this->buffer + (pageIndex * pageSize);
 
         CCDigest(layout.dscDigestFormat, code, pageSize, hashSlot + (pageIndex * layout.dscHashSize));
-
-        if ( layout.agile ) {
-            CCDigest(kCCDigestSHA256, code, pageSize, hash256Slot + (pageIndex * CS_HASH_SIZE_SHA256));
-        }
     };
 
     // compute hashes
@@ -742,14 +663,6 @@ void SubCache::codeSign(Diagnostics& diag, const BuilderOptions& options, const 
     CCDigest(layout.dscDigestFormat, (const uint8_t*)cd, layout.cdSize, fullCdHash);
     // Note: cdHash is defined as first 20 bytes of hash
     memcpy(this->cdHash, fullCdHash, 20);
-
-    if ( layout.agile ) {
-        // hash of entire code directory (cdHash) uses same hash as each page
-        uint8_t altfullCdHash[CS_HASH_SIZE_SHA256];
-        CCDigest(kCCDigestSHA256, (const uint8_t*)cd256, layout.cd256Size, altfullCdHash);
-        // Note: cdHash is defined as first 20 bytes of hash
-        memcpy(this->agilecdHash, altfullCdHash, 20);
-    }
 
     // Set the UUID string in the subcache
     uuid_unparse_upper(dyldCacheHeader->uuid, this->uuidString);
@@ -1101,8 +1014,9 @@ void SubCache::addObjCImageInfoChunk(const BuilderConfig& config, ObjCOptimizer&
 void SubCache::addObjCSelectorStringsChunk(const BuilderConfig& config, ObjCSelectorOptimizer& objCSelectorOptimizer)
 {
     this->objcSelectorStrings = std::make_unique<ObjCStringsChunk>();
-    this->objcSelectorStrings->cacheVMSize      = CacheVMSize(objCSelectorOptimizer.selectorStringsTotalByteSize);
-    this->objcSelectorStrings->subCacheFileSize = CacheFileSize(objCSelectorOptimizer.selectorStringsTotalByteSize);
+    uint64_t totalSize = objCSelectorOptimizer.selectorStringsTotalByteSize + objCSelectorOptimizer.typeStringsTotalByteSize;
+    this->objcSelectorStrings->cacheVMSize      = CacheVMSize(totalSize);
+    this->objcSelectorStrings->subCacheFileSize = CacheFileSize(totalSize);
 
     objCSelectorOptimizer.selectorStringsChunk = this->objcSelectorStrings.get();
 

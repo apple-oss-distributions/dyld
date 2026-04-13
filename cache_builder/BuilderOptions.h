@@ -84,6 +84,7 @@ struct BuilderOptions
     std::unordered_map<std::string, unsigned>   dylibOrdering;
     std::unordered_map<std::string, unsigned>   dirtyDataSegmentOrdering;
     json::Node                                  objcOptimizations;
+    std::string                                 swiftGenericMetadataBuilderPath;
     std::string                                 swiftGenericMetadataFile;
     std::string                                 prewarmingOptimizations;
 };

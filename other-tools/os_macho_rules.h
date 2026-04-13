@@ -28,7 +28,7 @@
 #include <span>
 
 // mach_o
-#include "Header.h"
+#include "UnsafeHeader.h"
 #include "Error.h"
 
 // common

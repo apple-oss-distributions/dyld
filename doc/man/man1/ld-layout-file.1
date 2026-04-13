@@ -35,7 +35,7 @@ The permissions of the region. The string has a value that is combination of the
   'x' : execute
   '-' : no access
 
-Every region entry must specify one of the two following attributes:
+Every region entry must specify one of the two following mutually exclusive attributes:
 .Ss "vmAddress": <int>
 The virtual start address for the region.
 .Ss "previous": <string>
@@ -48,7 +48,9 @@ The maximum memory size of the region.
 .Ss "textSeg": <string>
 The name of the underlying text segment. The default value for the segment follows the format "REGION_T", where "REGION" is the name of the region. The name of the segment can have a most 16 characters.
 .Ss "dataSeg": string>
-The name of the underlying text segment. The default value for the segment follows the format "REGION_D", where "REGION" is the name of the region. The name of the segment can have a most 16 characters.
+The name of the underlying data segment. The default value for the segment follows the format "REGION_D", where "REGION" is the name of the region. The name of the segment can have a most 16 characters.
+.Ss "segment": <string>
+If the permissions of the region are "rwx", the region can specify a single unified underlying segment. The attribute's' usage is mutually exclusive with "textSeg" and "dataSeg", and cannot be used with the "default" region.
 
 .Ss "inputs": <array>
 Regions of type "default" must specify this attribute. It represents the set of symbols that should be placed in that region by the linker.
@@ -92,6 +94,19 @@ The layout file must specify a version number.
 .Ss "version": <int>
  The latest version number of the layout file format is 0.
 
+ .Sh ZERO-FILL
+The layout file might specify custom behaviour for the zero-fill sections in the executable.
+The root node of the file contains the following attribute:
+.Ss "zeroFill": <dict>
+The dictionary might define the following attribute:
+.Ss "merge": <string>
+The name of the section that all zero-fill sections will be merged into.
+
+ .Sh LOGGING
+The layout file might specify a boolean entry, so that the linker log how the inputs are assigned. It will print the elements, why they were assigned to a region, and all the regions that were attempted before that.
+.Ss "verbose": <bool>
+The default value is false.
+
 .El
 .Sh EXAMPLES
 {
@@ -114,7 +129,7 @@ The layout file must specify a version number.
         {
             name      : "LAST",
             kind      : { type : "default",  permissions : "r-x" },
-            previous  : "RAM",
+            previous  : "SINGLE",
             vmSize    : 0x2000,
             inputs    : [
                 {
@@ -131,6 +146,19 @@ The layout file must specify a version number.
             inputs    : [
                 {
                     section : { segName  : "*", sectName : "__data" },
+                    symbols : [ "*" ]
+                }
+            ]
+        },
+        {
+            name      : "SINGLE",
+            kind      : { type : "default",  permissions : "rwx" },
+            previous  : "RAM",
+            vmSize    : 0x1000,
+            segment   : "CUSTOMSEG",
+            inputs    : [
+                {
+                    section : { segName  : "__TEXT", sectName : "*" },
                     symbols : [ "*" ]
                 }
             ]

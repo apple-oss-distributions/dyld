@@ -34,9 +34,9 @@
 #include "dsc_iterator.h"
 #define NO_ULEB
 #include "DyldSharedCache.h"
-#include "Header.h"
+#include "UnsafeHeader.h"
 
-using mach_o::Header;
+using mach_o::UnsafeHeader;
 
 
 static void forEachDylibInCache(const void* shared_cache_file, void (^handler)(const dyld_cache_image_info* cachedDylibInfo, bool isAlias))
@@ -74,7 +74,7 @@ extern int dyld_shared_cache_iterate(const void* shared_cache_file, uint32_t sha
     __block int      result = 0;
     forEachDylibInCache(shared_cache_file, ^(const dyld_cache_image_info* cachedDylibInfo, bool isAlias) {
         uint64_t                    imageCacheOffset = cachedDylibInfo->address - unslideLoadAddress;
-        const Header*               mh               = (Header*)((uint8_t*)shared_cache_file + imageCacheOffset);
+        const UnsafeHeader*               mh               = (UnsafeHeader*)((uint8_t*)shared_cache_file + imageCacheOffset);
         const char*                 dylibPath        = (char*)shared_cache_file + cachedDylibInfo->pathFileOffset;
 
         dyld_shared_cache_dylib_info dylibInfo;
@@ -87,7 +87,7 @@ extern int dyld_shared_cache_iterate(const void* shared_cache_file, uint32_t sha
         dylibInfo.isAlias    = isAlias;
         mh->getUuid(uuid);
         dylibInfo.uuid       = &uuid;
-        mh->forEachSegment(^(const Header::SegmentInfo& info, bool& stop) {
+        mh->forEachSegment(^(const UnsafeHeader::SegmentInfo& info, bool& stop) {
             if ( info.fileSize > info.vmsize ) {
                 stop = true;
                 return;

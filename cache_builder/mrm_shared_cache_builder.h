@@ -48,17 +48,19 @@ enum Platform {
     tvOS_simulator      = 8,    // PLATFORM_TVOSSIMULATOR
     watchOS_simulator   = 9,    // PLATFORM_WATCHOSSIMULATOR
     driverKit           = 10,   // PLATFORM_DRIVERKIT
+    visionOS            = 11,   // PLATFORM_VISIONOS
     macOSExclaveKit     = 16,   // PLATFORM_MACOS_EXCLAVEKIT
     iOSExclaveKit       = 18,   // PLATFORM_IOS_EXCLAVEKIT
 };
 
 enum Disposition
 {
-    Unknown                 = 0,
-    InternalDevelopment     = 1,
-    Customer                = 2,
-    InternalMinDevelopment  = 3,
-    SymbolsCache            = 4
+    Unknown                     = 0,
+    InternalDevelopment         = 1,
+    Customer                    = 2,
+    InternalMinDevelopment      = 3,
+    SymbolsCache                = 4,
+    InternalDevelopmentPlusAOT  = 5     // generate Rosetta AOT cache, otherwise same as InternalDevelopment
 };
 
 enum FileFlags
@@ -68,12 +70,16 @@ enum FileFlags
     MustBeInCache                               = 1,
     ShouldBeExcludedFromCacheIfUnusedLeaf       = 2,
     RequiredClosure                             = 3,
+    CanBeMissing                                = 4,
 
     // These are for the order files
     DylibOrderFile                              = 100,
     DirtyDataOrderFile                          = 101,
     ObjCOptimizationsFile                       = 102,
     SwiftGenericMetadataFile                    = 103,
+
+    // These are for dynamically loaded plugins
+    PluginSwiftGenericMetadataBuilder           = 110,
 
     // This replaces all the magic JSON files and order files, ie, 100..103 above
     // The path (or some field in the file if its JSON) will be used later to work
@@ -187,13 +193,22 @@ bool addFile(struct MRMSharedCacheBuilder* builder, const char* path, uint8_t* d
 __API_AVAILABLE(macos(10.12))
 bool addFile_v2(struct MRMSharedCacheBuilder* builder, const char* path, uint8_t* data, uint64_t size, enum FileFlags fileFlags, const char* projectName);
 
+// Add a file.  Returns true on success.
+// Available in API version 1.11 and later
+__API_AVAILABLE(macos(10.12))
+bool addOnDiskFile_v1(struct MRMSharedCacheBuilder* builder, const char* onDevicePath, const char* filePath, enum FileFlags fileFlags, const char* projectName);
+
 // Add an on-disk file (ie, a file which won't be removed by MRM).  Returns true on success.
 __API_AVAILABLE(macos(10.12))
-bool addOnDiskFile(struct MRMSharedCacheBuilder* builder, const char* path, uint8_t* data, uint64_t size, enum FileFlags fileFlags,
-                   uint64_t inode, uint64_t modTime);
+bool addSimCacheOnDiskFile(struct MRMSharedCacheBuilder* builder, const char* path, uint8_t* data, uint64_t size, enum FileFlags fileFlags,
+                           uint64_t inode, uint64_t modTime);
 
 __API_AVAILABLE(macos(10.12))
 bool addSymlink(struct MRMSharedCacheBuilder* builder, const char* fromPath, const char* toPath);
+
+// Available in API version 1.9 and later
+__API_AVAILABLE(macos(10.12))
+bool addPlugin(struct MRMSharedCacheBuilder* builder, const char* path, enum FileFlags fileFlags);
 
 __API_AVAILABLE(macos(10.12))
 bool runSharedCacheBuilder(struct MRMSharedCacheBuilder* builder);

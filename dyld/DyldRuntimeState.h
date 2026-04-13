@@ -33,6 +33,7 @@
   #include <os/atomic_private.h>
   #include <os/lock_private.h>
   #include <sys/kern_memorystatus.h>
+  #include <mach/mach_time.h>
 #endif
 #include "Defines.h"
 #include "MachOLoaded.h"
@@ -343,8 +344,9 @@ private:
 public:
     dyld_mutex         allocatorLock;
 #if !TARGET_OS_SIMULATOR
-    dyld_mutex          logSerializer;
-    #endif // !TARGET_OS_SIMULATOR
+    dyld_mutex         logSerializer;
+#endif // !TARGET_OS_SIMULATOR
+    dyld_mutex         lazyLoadLock;
 #endif // BUILDING_DYLD
 };
 
@@ -547,6 +549,54 @@ private:
     std::byte*              _bitmap     = nullptr;
     size_t                  _size       = 0;
 };
+
+struct VIS_HIDDEN Metrics {
+    uint64_t                initalExecutionTimestamp            = 0;
+    uint64_t                mainExecutionTimestamp              = 0;
+    std::atomic<uint64_t>   remoteNotifierCummulativeDuration   = 0;
+    std::atomic<uint64_t>   localNotifierCummulativeDuration    = 0;
+    std::atomic<uint64_t>   debuggerNotifierCummulativeDuration = 0;
+    std::atomic<uint64_t>   dlopenCount                         = 0;
+    std::atomic<uint64_t>   dlopenLibraryCount                  = 0;
+    std::atomic<uint64_t>   insertedLibraryCount                = 0;
+    std::atomic<uint64_t>   insertedLibraryLoadDuration         = 0;
+    //TODO: Closure flags
+    template<typename F>
+    ALWAYS_INLINE static uint64_t measureDuration(F work) {
+#if !TARGET_OS_EXCLAVEKIT && !TARGET_OS_SIMULATOR
+        uint64_t start = mach_continuous_time();
+        work();
+        uint64_t end = mach_continuous_time();
+        return end - start;
+#else
+        work();
+        return 0;
+#endif
+    }
+
+    template<typename F>
+    ALWAYS_INLINE static void assignDuration(std::atomic<uint64_t>& budget, F work) {
+        uint64_t duration = measureDuration(work);
+        budget.fetch_add(duration, std::memory_order_relaxed);
+    }
+
+    template<typename F>
+    ALWAYS_INLINE void assignDurationExcludingNotifiers(std::atomic<uint64_t>& budget, F work) {
+        uint64_t startingNotifierDuration = remoteNotifierCummulativeDuration.load(std::memory_order_relaxed)
+                                            + localNotifierCummulativeDuration.load(std::memory_order_relaxed)
+                                            + debuggerNotifierCummulativeDuration.load(std::memory_order_relaxed);
+        uint64_t duration = measureDuration(work);
+        uint64_t endingNotifierDuration = remoteNotifierCummulativeDuration.load(std::memory_order_relaxed)
+                                            + localNotifierCummulativeDuration.load(std::memory_order_relaxed)
+                                            + debuggerNotifierCummulativeDuration.load(std::memory_order_relaxed);
+        uint64_t adjustedDuration = duration - (endingNotifierDuration - startingNotifierDuration);
+        budget.fetch_add(adjustedDuration, std::memory_order_relaxed);
+    }
+};
+
+// Metrics are stored outside the runtime state in normal data so we can update them without changing memory permissions.
+// Since no code in dyld uses them for any buisness logic this is not a security issue
+extern Metrics gMetrics;
 
 //
 // Note: need to force vtable ptr auth so that libdyld.dylib from base OS and driverkit use same ABI

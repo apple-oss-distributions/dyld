@@ -31,7 +31,7 @@
 #include "dyld_cache_format.h"
 
 // mach_o
-#include "Header.h"
+#include "UnsafeHeader.h"
 
 #include <string>
 #include <unordered_map>
@@ -182,7 +182,7 @@ public:
     // their original binary
     bool sectionWillBeRemoved;
 
-    void setSourceSectionInfo(const mach_o::Header::SectionInfo& info);
+    void setSourceSectionInfo(const mach_o::UnsafeHeader::SectionInfo& info);
 
     // Gets the cache VM address for the value at the given section offset in the original section
     virtual std::optional<uint64_t> cacheVMAddress(uint32_t originalDylibSectionOffset) const = 0;
@@ -215,7 +215,7 @@ protected:
 
     const char* name;
 
-    std::optional<mach_o::Header::SectionInfo> sourceSectionInfo;
+    std::optional<mach_o::UnsafeHeader::SectionInfo> sourceSectionInfo;
 };
 
 class OptimizedStringSection : public OptimizedSection

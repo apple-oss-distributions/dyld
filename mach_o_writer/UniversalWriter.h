@@ -33,7 +33,7 @@
 // mach_o
 #include "Architecture.h"
 #include "GradedArchitectures.h"
-#include "Header.h"
+#include "UnsafeHeader.h"
 #include "Universal.h"
 
 namespace mach_o {
@@ -49,11 +49,13 @@ using namespace mach_o;
 struct VIS_HIDDEN UniversalWriter : public Universal
 {
     // for building
-    static const UniversalWriter*   make(std::span<const Header*>, bool forceFat64=false, bool arm64offEnd=false);
+    static const UniversalWriter*   make(std::span<const UnsafeHeader*>, bool forceFat64=false, bool arm64offEnd=false);
 
     static const UniversalWriter*   make(std::span<const Slice>, bool forceFat64=false, bool arm64offEnd=false);
     void                            save(char savedPath[PATH_MAX]) const;
+    bool                            saveToPath(const char* path, uint32_t permissions=0644) const;
     uint64_t                        size() const;
+    std::span<const uint8_t>        content() const;
     void                            free() const;   // only called on object allocated by make()
 };
 

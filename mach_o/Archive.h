@@ -30,33 +30,17 @@
 
 // Darwin
 #include <ar.h>
+#include <sys/stat.h>
 
 // stl
 #include <string_view>
 #include <optional>
 
 // mach_o
-#include "Header.h"
+#include "UnsafeHeader.h"
 
 namespace mach_o {
 
-class Entry : ar_hdr
-{
-public:
-    void                        getName(char *, int) const;
-    uint64_t                    modificationTime() const;
-    Error                       content(std::span<const uint8_t>& content) const;
-    Error                       next(Entry*& next) const;
-    Error                       valid() const;
-
-    static uint64_t             extendedFormatNameSize(std::string_view name);
-    static uint64_t             entrySize(bool extendedFormatNames, std::string_view name, uint64_t contentSize);
-    static size_t               write(std::span<uint8_t> buffer, bool extendedFormatNames, std::string_view name, uint64_t mktime, std::span<const uint8_t> content);
-
-private:
-    bool                        hasLongName() const;
-    uint64_t                    getLongNameSpace() const;
-};
 
 // if a member file in a static library has this name, then force load it
 #define ALWAYS_LOAD_MEMBER_NAME "__ALWAYS_LOAD.o"
@@ -75,24 +59,48 @@ public:
     {
         std::string_view            name;
         std::span<const uint8_t>    contents;
-        uint64_t                    mtime;
-        unsigned                    memberIndex;
-    };
+        uint64_t                    mtime     = 0;
+        uint32_t                    uid       = 0;
+        uint32_t                    gid       = 0;
+        uint32_t                    perms     = 0;
+
+        void            setFileInfo(const struct stat& statBuf);
+        void            setReproducible(); // zero out some fields
+      };
 
     static std::optional<Archive>   isArchive(std::span<const uint8_t> buffer);
 
-    mach_o::Error   forEachMember(void (^handler)(const Member&, bool& stop)) const;
-    mach_o::Error   forEachMachO(void (^handler)(const Member&, const mach_o::Header*, bool& stop)) const;
+    mach_o::Error   forEachMember(void (^handler)(const Member& member, unsigned memberIndex, uint64_t memberFileOffset, bool& stop)) const;
+    enum class MisalignHandling { warn, error, ignore };
+    mach_o::Error   forEachMachO( void (^handler)(const Member& member, unsigned memberIndex, const mach_o::UnsafeHeader*, bool& stop),
+                                  MisalignHandling misAligned=MisalignHandling::error) const;
 
     std::span<const uint8_t> buffer;
 
     constexpr static std::string_view archive_magic = "!<arch>\n";
 
 protected:
+    class Entry : public ar_hdr
+    {
+    public:
+        std::string_view            name() const;
+        uint64_t                    modificationTime() const;
+        uint32_t                    uid() const;
+        uint32_t                    gid() const;
+        uint32_t                    perms() const;
+        Error                       content(std::span<const uint8_t>& content) const;
+        Error                       next(Entry*& next) const;
+        Error                       valid() const;
+
+    private:
+        bool                        hasLongName() const;
+        uint64_t                    getLongNameSpace() const;
+    };
 
     Archive(std::span<const uint8_t> buffer): buffer(buffer) {}
 };
-}
+
+} // namespace mach_o
 
 #endif // !TARGET_OS_EXCLAVEKIT
 

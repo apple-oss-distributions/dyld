@@ -48,7 +48,7 @@
 
 #define NO_ULEB
 #include "Architectures.hpp"
-#include "Header.h"
+#include "UnsafeHeader.h"
 #include "MachOFileAbstraction.hpp"
 
 #include "dsc_iterator.h"
@@ -68,9 +68,12 @@
 #include <dispatch/dispatch.h>
 #include <optional>
 
-using mach_o::Header;
+using mach_o::UnsafeHeader;
 
 asm(".linker_option \"-lCrashReporterClient\"");
+
+namespace dsc_extractor
+{
 
 static int sharedCacheIsValid(const void* mapped_cache, uint64_t size) {
     // First check that the size is good.
@@ -998,6 +1001,10 @@ void SharedCacheDylibExtractor::extractCache(SharedCacheExtractor &context) {
     close(fd);
 }
 
+} // namespace dsc_extractor
+
+using namespace dsc_extractor;
+
 int dyld_shared_cache_extract_dylibs_progress(const char* shared_cache_file_path, const char* extraction_root_path,
                                               progress_block progress)
 {
@@ -1048,8 +1055,8 @@ int dyld_shared_cache_extract_dylibs_progress(const char* shared_cache_file_path
         return result;
     }
 
-    mapped_cache->forEachImage(^(const Header *hdr, const char *installName) {
-        hdr->forEachSegment(^(const Header::SegmentInfo &info, bool &stop) {
+    mapped_cache->forEachImage(^(const UnsafeHeader* hdr, const char *installName) {
+        hdr->forEachSegment(^(const UnsafeHeader::SegmentInfo &info, bool &stop) {
             map[installName].push_back(seg_info(info.segmentName, info.vmaddr - mapped_cache->unslidLoadAddress(), info.vmsize));
         });
     });

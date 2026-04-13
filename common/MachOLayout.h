@@ -81,8 +81,8 @@ struct VIS_HIDDEN MachOFileRef
         return (dyld3::MachOFile*)this->mf;
     }
     
-    explicit operator const mach_o::Header*() const {
-        return (const mach_o::Header*)this->mf;
+    explicit operator const mach_o::UnsafeHeader*() const {
+        return (const mach_o::UnsafeHeader*)this->mf;
     }
 
     const uint8_t* getOffsetInToFile(uint64_t offset) const

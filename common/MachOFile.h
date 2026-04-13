@@ -35,7 +35,7 @@
 
 #include "Defines.h"
 #include "GradedArchitectures.h"
-#include "Header.h"
+#include "UnsafeHeader.h"
 #include "UUID.h"
 #include "Diagnostics.h"
 #include "MachOLayout.h"
@@ -269,8 +269,8 @@ protected:
     // On all other platforms this always returns a single best cd hash (ranked to match the kernel).
     // Note the callback parameter is really a CS_CodeDirectory.
     void    forEachCodeDirectoryBlob(const void* codeSigStart, size_t codeSignLen, void (^callback)(const void* cd)) const;
-    void    forEachSection(void (^callback)(const mach_o::Header::SectionInfo&, bool& stop)) const;
-    void    forEachSection(void (^callback)(const mach_o::Header::SegmentInfo&, const mach_o::Header::SectionInfo&, bool& stop)) const;
+    void    forEachSection(void (^callback)(const mach_o::UnsafeHeader::SectionInfo&, bool& stop)) const;
+    void    forEachSection(void (^callback)(const mach_o::UnsafeHeader::SegmentInfo&, const mach_o::UnsafeHeader::SectionInfo&, bool& stop)) const;
 };
 
 

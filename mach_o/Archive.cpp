@@ -25,8 +25,6 @@
 
 #if !TARGET_OS_EXCLAVEKIT
 
-#include "Archive.h"
-
 // stl
 #include <string_view>
 
@@ -34,7 +32,12 @@
 #include <ar.h>
 #include <mach-o/ranlib.h>
 #include <mach/mach.h>
-#include <mach/vm_map.h>
+
+// mach_o
+#include "Archive.h"
+#include "Universal.h"
+#include "UnsafeHeader.h"
+
 
 namespace mach_o {
 
@@ -46,92 +49,39 @@ static inline uint64_t align(uint64_t addr, uint8_t p2)
     return (addr + mask - 1) & (-mask);
 }
 
-uint64_t Entry::extendedFormatNameSize(std::string_view name)
-{
-    // In extended format the name is stored after the member header.
-    // It's always \0 terminated, it's padded to 8 bytes and also contains
-    // an extra padding for the member header. This makes sure that member
-    // contents are always 8 bytes aligned.
-    return align(name.size() + 1, 3) + align(sizeof(Entry), 3) - sizeof(Entry);
-}
-
-uint64_t Entry::entrySize(bool extendedFormatNames, std::string_view name, uint64_t contentSize)
-{
-    if ( extendedFormatNames ) {
-        return sizeof(Entry) + extendedFormatNameSize(name) + align(contentSize, 3);
-    }
-    return sizeof(Entry) + align(contentSize, 3);
-}
-
-size_t Entry::write(std::span<uint8_t> buffer, bool extendedFormatNames, std::string_view name, uint64_t mktime, std::span<const uint8_t> content)
-{
-    Entry* entry = (Entry*)buffer.data();
-
-    const uint64_t alignedNameSize       = extendedFormatNames ? extendedFormatNameSize(name) : 0;
-    // Content is 8-bytes aligned and padded with \n characters.
-    const uint64_t alignedContentSize   = align(content.size(), 3);
-    const uint64_t headerSize           = sizeof(Entry) + alignedNameSize;
-    const uint64_t totalSize            = headerSize + alignedContentSize;
-    assert(totalSize == entrySize(extendedFormatNames, name, content.size()));
-    assert(buffer.size() >= (totalSize));
-    bzero(buffer.data(), (size_t)headerSize);
-
-    snprintf(entry->ar_date, sizeof(Entry::ar_date), "%llu", mktime);
-    memcpy(entry->ar_fmag, ARFMAG, sizeof(Entry::ar_fmag));
-
-    if ( extendedFormatNames ) {
-        snprintf(entry->ar_size, sizeof(Entry::ar_size), "%llu", alignedContentSize + alignedNameSize);
-        snprintf(entry->ar_name, sizeof(Entry::ar_name), AR_EFMT1 "%llu", alignedNameSize);
-
-        char* nameBuffer = (char*)(entry + 1);
-        memcpy(nameBuffer, name.data(), name.size());
-        nameBuffer[name.size()] = 0;
-    } else {
-        snprintf(entry->ar_size, sizeof(Entry::ar_size), "%llu", alignedContentSize);
-
-        // Note that the truncated name doesn't need to be \0 terminated
-        std::string_view shortName = name.substr(0, sizeof(Entry::ar_name));
-        memcpy(entry->ar_name, shortName.data(), shortName.size());
-    }
-
-    uint8_t* contentStart = buffer.data() + sizeof(Entry) + alignedNameSize;
-    memcpy(contentStart, content.data(), content.size());
-    // Pad content alignment with \n characters
-    if ( content.size() != alignedContentSize )
-        memset(contentStart + content.size(), '\n', (size_t)alignedContentSize - content.size());
-
-    return (size_t)totalSize;
-}
-
-bool Entry::hasLongName() const
+bool Archive::Entry::hasLongName() const
 {
     return std::string_view(ar_name, AR_EFMT1_SV.size()) == AR_EFMT1_SV;
 }
 
-uint64_t Entry::getLongNameSpace() const
+uint64_t Archive::Entry::getLongNameSpace() const
 {
     char* endptr;
     return strtoull(&ar_name[AR_EFMT1_SV.size()], &endptr, 10);
 }
 
-void Entry::getName(char *buf, int bufsz) const
+std::string_view Archive::Entry::name() const
 {
-  if ( hasLongName() ) {
-      uint64_t len = getLongNameSpace();
-      assert(bufsz >= len+1);
-      strncpy(buf, ((char*)this)+sizeof(ar_hdr), (size_t)len);
-      buf[len] = '\0';
-  } else {
-      assert(bufsz >= 16+1);
-      strncpy(buf, ar_name, 16);
-      buf[16] = '\0';
-      char* space = strchr(buf, ' ');
-      if ( space != NULL )
-          *space = '\0';
-  }
+    if ( hasLongName() ) {
+        const char* start = ((char*)this) + sizeof(ar_hdr);
+        uint64_t space = getLongNameSpace();
+        // long file name may not be zero terminated in `ar`
+        std::string_view nm = std::string_view(start, (size_t)space);
+        while ( !nm.empty() && nm.back() == '\0' )
+            nm = nm.substr(0, nm.size()-1);
+        return nm;
+    }
+    else {
+        // traditional ar_name is right-filled with ' '
+        const char* start = this->ar_name;
+        size_t      len   = 15;
+        while ( start[len] == ' ')
+            --len;
+        return std::string_view(start, len+1);
+    }
 }
 
-uint64_t Entry::modificationTime() const
+uint64_t Archive::Entry::modificationTime() const
 {
     char temp[14];
     strncpy(temp, ar_date, 12);
@@ -140,7 +90,34 @@ uint64_t Entry::modificationTime() const
     return strtoull(temp, &endptr, 10);
 }
 
-Error Entry::content(std::span<const uint8_t>& content) const
+uint32_t Archive::Entry::uid() const
+{
+    char temp[8];
+    strncpy(temp, ar_uid, 6);
+    temp[6] = '\0';
+    char* endptr;
+    return (uint32_t)strtoull(temp, &endptr, 10);
+}
+
+uint32_t Archive::Entry::gid() const
+{
+    char temp[8];
+    strncpy(temp, ar_gid, 6);
+    temp[6] = '\0';
+    char* endptr;
+    return (uint32_t)strtoull(temp, &endptr, 10);
+}
+
+uint32_t Archive::Entry::perms() const
+{
+    char temp[16];
+    strncpy(temp, ar_mode, 8);
+    temp[8] = '\0';
+    char* endptr;
+    return (uint32_t)strtoull(temp, &endptr, 8);
+}
+
+Error Archive::Entry::content(std::span<const uint8_t>& content) const
 {
     char temp[12];
     strncpy(temp, ar_size, 10);
@@ -165,7 +142,7 @@ Error Entry::content(std::span<const uint8_t>& content) const
     return Error::none();
 }
 
-Error Entry::next(Entry*& next) const
+Error Archive::Entry::next(Entry*& next) const
 {
     next = nullptr;
     std::span<const uint8_t> content;
@@ -173,12 +150,14 @@ Error Entry::next(Entry*& next) const
         return err;
 
     const uint8_t* p = content.data() + content.size();
-    p = (uint8_t*)align((uint64_t)p, 2); // 4-byte align
+    // Note: for long name format, this is already aligned
+    p = (uint8_t*)align((uint64_t)p, 1); // 2-byte align
+
     next = (Entry*)p;
     return Error::none();
 }
 
-Error Entry::valid() const
+Error Archive::Entry::valid() const
 {
     if ( memcmp(ar_fmag, ARFMAG, sizeof(ar_fmag)) == 0 ) {
         return Error::none();
@@ -196,12 +175,11 @@ std::optional<Archive> Archive::isArchive(std::span<const uint8_t> buffer)
     return std::nullopt;
 }
 
-Error Archive::forEachMember(void (^handler)(const Member&, bool& stop)) const
+Error Archive::forEachMember(void (^handler)(const Member&, unsigned memberIndex, uint64_t memberFileOffset, bool& stop)) const
 {
     const Entry* current = (Entry*)(buffer.data() + archive_magic.size());
     const Entry* const end = (Entry*)(buffer.data() + buffer.size());
 
-    std::array<char, 256> nameBuffer;
     bool stop = false;
     unsigned memberIndex = 1;
     while ( !stop && current < end ) {
@@ -221,8 +199,16 @@ Error Archive::forEachMember(void (^handler)(const Member&, bool& stop)) const
         if ( next > end )
             return Error("malformed archive, member exceeds file size");
 
-        current->getName(nameBuffer.data(), nameBuffer.size());
-        handler(Member{ nameBuffer.data(), content, current->modificationTime(), memberIndex }, stop);
+        uint64_t fileOffset = (long)current - (long)buffer.data();
+        Member member;
+        member.name     = current->name();
+        member.contents = content;
+        member.mtime    = current->modificationTime();
+        member.uid      = current->uid();
+        member.gid      = current->gid();
+        member.perms    = current->perms();
+        handler(member, memberIndex, fileOffset, stop);
+
         current = next;
         memberIndex++;
     }
@@ -230,26 +216,54 @@ Error Archive::forEachMember(void (^handler)(const Member&, bool& stop)) const
     return Error::none();
 }
 
-static bool isBitCodeHeader(std::span<const uint8_t> contents)
+Error Archive::forEachMachO(void (^handler)(const Member&, unsigned memberIndex, const mach_o::UnsafeHeader*, bool& stop), MisalignHandling misAlignedMember) const
 {
-    return (contents[0] == 0xDE) && (contents[1] == 0xC0) && (contents[2] == 0x17) && (contents[3] == 0x0B);
-}
-
-Error Archive::forEachMachO(void (^handler)(const Member&, const mach_o::Header*, bool& stop)) const
-{
-    __block Error err = Error::none();
-    __block bool hadSymdefFile = false;
-
-    Error iterErr = forEachMember(^(const Member& member, bool &stop) {
-        if ( const Header* header = Header::isMachO(member.contents) ) {
-            handler(std::move(member), header, stop);
+    __block Error  err           = Error::none();
+    __block bool   hadSymdefFile = false;
+    Error iterErr = forEachMember(^(const Member& member, unsigned memberIndex, uint64_t memberFileOffset, bool& stop) {
+        if ( const UnsafeHeader* hdr = UnsafeHeader::isMachO(member.contents) ) {
+            bool misAligned = false;
+            if ( hdr->is64() )
+                misAligned = ( ((long)member.contents.data() & 7) != 0 );
+            else
+                misAligned = ( ((long)member.contents.data() & 3) != 0 );
+            if ( misAligned ) {
+                // static libs made with `ar` may have unaligned members, but `libtool` should always make aligned members
+                switch ( misAlignedMember ) {
+                    case MisalignHandling::error:
+                        if ( hdr->is64() )
+                            err = Error("64-bit mach-o member '%.*s' not 8-byte aligned", (int)member.name.size(), member.name.data());
+                        else
+                            err = Error("32-bit mach-o member '%.*s' not 4-byte aligned", (int)member.name.size(), member.name.data());
+                        break;
+                    case MisalignHandling::ignore:
+                        handler(std::move(member), memberIndex, hdr, stop);
+                        break;
+                    case MisalignHandling::warn:
+                        if ( hdr->is64() )
+                            fprintf(stderr, "warning: 64-bit mach-o member '%.*s' not 8-byte aligned\n", (int)member.name.size(), member.name.data());
+                        else
+                            fprintf(stderr, "warning: 32-bit mach-o member '%.*s' not 4-byte aligned\n", (int)member.name.size(), member.name.data());
+                        handler(std::move(member), memberIndex, hdr, stop);
+                        break;
+                }
+            }
+            else {
+                handler(std::move(member), memberIndex, hdr, stop);
+            }
         }
-        else if ( isBitCodeHeader(member.contents) ) {
-            handler(std::move(member), nullptr, stop);
+        else if ( UnsafeHeader::isBitCodeHeader(member.contents) ) {
+            handler(std::move(member), memberIndex, nullptr, stop);
+        }
+        else if ( const Universal* uni = Universal::isUniversal(member.contents) ) {
+            // Note: a fat .o file in a static library is malformed,
+            // but some makefile base systems use `ar` to create the static lib from fat .o files
+            // then run `ranlib` which needs to normalize the static lib
+            handler(std::move(member), memberIndex, nullptr, stop);
         }
         else {
-            if ( member.name == SYMDEF || member.name == SYMDEF_SORTED ||
-                    member.name == SYMDEF_64 || member.name == SYMDEF_64_SORTED ) {
+            if ( member.name == SYMDEF    || member.name == SYMDEF_SORTED ||
+                 member.name == SYMDEF_64 || member.name == SYMDEF_64_SORTED ) {
                 if ( hadSymdefFile ) {
                     err = Error("multiple SYMDEF member files found in an archive");
                 } else {
@@ -257,7 +271,7 @@ Error Archive::forEachMachO(void (^handler)(const Member&, const mach_o::Header*
                     return;
                 }
             } else {
-                err = Error("archive member '%s' not a mach-o file", member.name.data()) ;
+                err = Error("archive member '%.*s' not a mach-o file", (int)member.name.size(), member.name.data()) ;
             }
             stop = true;
         }
@@ -269,6 +283,23 @@ Error Archive::forEachMachO(void (^handler)(const Member&, const mach_o::Header*
     return std::move(err);
 }
 
+void Archive::Member::setFileInfo(const struct stat& statBuf)
+{
+    this->uid   = statBuf.st_uid;
+    this->gid   = statBuf.st_gid;
+    this->mtime = statBuf.st_mtime;
+    this->perms = statBuf.st_mode & (S_IRWXU | S_IRWXG | S_IRWXO);
 }
+
+// zero out some fields for reproducible builds
+void Archive::Member::setReproducible()
+{
+    this->uid   = 0;
+    this->gid   = 0;
+    this->mtime = 0;
+}
+
+
+} // namespace mach_o
 
 #endif // !TARGET_OS_EXCLAVEKIT

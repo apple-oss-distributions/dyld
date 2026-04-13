@@ -178,8 +178,12 @@ uint16_t Policy::chainedFixupsFormat() const
         if ( isDynamicFirmware() )
             return DYLD_CHAINED_PTR_ARM64E_USERLAND24;
 
-        if ( !dyldLoadsOutput() )
+        if ( !dyldLoadsOutput() ) {
+            if ( _pvs.platform.isExclaveCore() )
+                return DYLD_CHAINED_PTR_ARM64E_USERLAND24;
+
             return DYLD_CHAINED_PTR_ARM64E_KERNEL;
+        }
 
         // 24-bit binds supported since iOS 15.0 and aligned releases
         if ( _featureEpoch >= Platform::Epoch::fall2021 )
@@ -314,6 +318,12 @@ bool Policy::canUseDelayInit() const
 {
     // runtime support added in Fall 2024
     return ( _featureEpoch >= Platform::Epoch::fall2024 );
+}
+
+bool Policy::canLazyLoad() const
+{
+    // runtime support added in Fall 2026
+    return ( _featureEpoch >= Platform::Epoch::fall2026 );
 }
 
 bool Policy::useProtectedStack() const

@@ -45,6 +45,7 @@
 #define kDyldAtlasSnapshotPlatformTypeKey       ("plat")
 #define kDyldAtlasSnapshotState                 ("stat")
 #define kDyldAtlasSnapshotEnvironmentVarsKey    ("envp")
+#define kDyldAtlasMetricsKey                    ("metr")
 
 #pragma mark -
 #pragma make Environment keys
@@ -135,6 +136,19 @@ typedef DYLD_ATLAS_FLAGS(SharedCacheFlags) {
 #define kDyldAtlasSegmentFileSizeKey                ("fsze")
 #define kDyldAtlasSegmentSizeKey                    ("size")
 #define kDyldAtlasSegmentPermissionsKey             ("perm")
+
+#pragma mark -
+#pragma make Metric Keys
+
+#define kDyldAtlasMetricsInitialTimestamp               ("init")
+#define kDyldAtlasMetricsMainTimestamp                  ("main")
+#define kDyldAtlasMetricsLocalNotifiersDuration         ("lcln")
+#define kDyldAtlasMetricsRemoteNotifiersDuration        ("rmtn")
+#define kDyldAtlasMetricsDebugNotifiersDuration         ("dbgn")
+#define kDyldAtlasMetricsDlopenCount                    ("dlo#")
+#define kDyldAtlasMetricsDlopenLibraryCount             ("dll#")
+#define kDyldAtlasMetricsInsertedLibraryCount           ("ist#")
+#define kDyldAtlasMetricsInsertedLibraryLoadDuration    ("istd")
 
 #pragma mark -
 #pragma make AOT Image Keys

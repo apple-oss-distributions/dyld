@@ -32,7 +32,6 @@ enum MachOError: Error {
 //
 
 enum MachO {
-    case notMachO
     case thinMachO(MachO.File)
     case universalMachO(MachO.UniversalFile)
     init(_ buffer: UnsafeRawBufferPointer) throws(MachOError) {
@@ -46,7 +45,7 @@ enum MachO {
         case 0xCAFE_BABE, 0xCAFE_BABF, 0xBEBA_FECA, 0xBFBA_FECA:
             self = .universalMachO(try MachO.UniversalFile(buffer))
         default:
-            self = .notMachO
+            throw .badMagic(magic)
         }
     }
 }

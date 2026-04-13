@@ -13,8 +13,8 @@ SUPPORTED_PLATFORMS             = macosx iphoneos xros watchos appletvos bridgeo
 HEADER_SEARCH_PATHS         =
 
 // clang search paths
-SYSTEM_HEADER_SEARCH_PATHS  = /usr/local/include $(inherited)
-USER_HEADER_SEARCH_PATHS    = $(SRCROOT)/framework $(SRCROOT)/framework/Internal $(inherited)
+SYSTEM_HEADER_SEARCH_PATHS      = /usr/local/include $(inherited)
+USER_HEADER_SEARCH_PATHS        = $(SRCROOT)/framework $(SRCROOT)/framework/Internal $(inherited)
 
 // Support for ASi
 OTHER_LDFLAGS = $(inherited) -lCrashReporterClient
@@ -25,15 +25,16 @@ SWIFT_OBJC_INTEROP_MODE         = objc
 BUILD_LIBRARY_FOR_DISTRIBUTION  = YES
 SUPPORTS_TEXT_BASED_API         = YES
 CLANG_ENABLE_MODULES            = YES
-_EXPERIMENTAL_SWIFT_EXPLICIT_MODULES = YES
+SWIFT_COMPILATION_MODE[config=Release] = wholemodule
+LLVM_LTO[config=Release] = YES
 
 // Temporary list to prevent users linking to us prior to a stable interface
-LD_DYLIB_ALLOWABLE_CLIENTS = libdyld.dylib UnitTests-framework
+LD_DYLIB_ALLOWABLE_CLIENTS = libdyld.dylib UnitTests-framework PerfTests-framework
 
 CODE_SIGN_IDENTITY = $(TRUSTED_CODE_SIGN_IDENTITY)
 
 // Use this when testing back deployment issues
-MACOSX_DEPLOYMENT_TARGET = 15.5
+MACOSX_DEPLOYMENT_TARGET = 26.0
 
 ENABLE_TESTABILITY[config=Debug] = YES
 
@@ -61,3 +62,8 @@ PRODUCT_BUNDLE_IDENTIFIER = com.apple.dyld.dyld-framework
 PRODUCT_NAME = Dyld
 SKIP_INSTALL = NO
 VERSION_INFO_PREFIX =
+
+IS_ZIPPERED = YES
+
+OTHER_SWIFT_FLAGS = $(inherited) -vfsoverlay "$(PROJECT_TEMP_DIR)/dyld-overlay.yaml" -Xcc -ivfsoverlay -Xcc "$(PROJECT_TEMP_DIR)/dyld-overlay.yaml"
+OTHER_CFLAGS = $(inherited) -ivfsoverlay "$(PROJECT_TEMP_DIR)/dyld-overlay.yaml"

@@ -61,7 +61,11 @@ public:
     bool                    sameCpu(const Architecture& other) const { return (_cputype == other._cputype); }
     bool                    is64() const;
     bool                    isBigEndian() const;
+    bool                    empty() const { return (_cputype == 0) && (_cpusubtype == 0); }
     const char*             name() const; // returns static string
+    const char*             baseName() const; // returns static string ("arm64e" for all arm64e variants)
+    const char*             cpuTypeName() const; // returns static string
+    const char*             cpuSubtypeName() const; // returns static string
     int                     kernelGrade() const;
     void                    set(mach_header&) const;
     void                    set(fat_arch&) const;
@@ -93,6 +97,7 @@ public:
     static constinit const Architecture arm64e_kernel_v1; // wrong ABI version (for testing)
     static constinit const Architecture arm64e_kernel_v2; // wrong ABI version (for testing)
     static constinit const Architecture arm64_32;
+    static constinit const Architecture armv4t;
     static constinit const Architecture armv6;
     static constinit const Architecture armv6m;
     static constinit const Architecture armv7k;

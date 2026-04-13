@@ -36,7 +36,7 @@
 #include "Error.h"
 #include "File.h"
 #include "FileUtils.h"
-#include "Header.h"
+#include "UnsafeHeader.h"
 #include "Image.h"
 #include "StringUtils.h"
 #include "SymbolsCache.h"
@@ -45,7 +45,7 @@
 using mach_o::LinkedDylibAttributes;
 using mach_o::Error;
 using mach_o::Fixup;
-using mach_o::Header;
+using mach_o::UnsafeHeader;
 using mach_o::Image;
 using mach_o::Symbol;
 using mach_o::Universal;
@@ -164,6 +164,7 @@ int main(int argc, const char* argv[], const char* envp[], const char* apple[])
     bool building = false;
     bool bniOutput = false;
     SymbolsCache::ExecutableMode executableMode = SymbolsCache::ExecutableMode::off;
+    SymbolsCache::RollbacksMode rollbacksMode = SymbolsCache::RollbacksMode::off;
     bool checkForChangedExports = false;
     bool verifyIndividually = false;
     const char* detailsLogPath = nullptr;
@@ -265,6 +266,7 @@ int main(int argc, const char* argv[], const char* envp[], const char* apple[])
         }
         else if ( strcmp(arg, "-bni") == 0 ) {
             bniOutput = true;
+            rollbacksMode = SymbolsCache::RollbacksMode::on;
         }
         else if ( strcmp(arg, "-verify_executables") == 0 ) {
             executableMode = SymbolsCache::ExecutableMode::error;
@@ -569,7 +571,7 @@ int main(int argc, const char* argv[], const char* envp[], const char* apple[])
     for ( SymbolsCache& cache : caches ) {
         if ( verifyIndividually ) {
             for ( const SymbolsCacheBinary& binary : newBinaries ) {
-                if ( Error verifyErr = cache.checkNewBinaries(warnOnRemovedSymbols, executableMode,
+                if ( Error verifyErr = cache.checkNewBinaries(warnOnRemovedSymbols, executableMode, rollbacksMode,
                                                               { binary }, verifyProjects,
                                                               verifyResults, internalWarnings,
                                                               exportsChangedPtr) ) {
@@ -578,7 +580,7 @@ int main(int argc, const char* argv[], const char* envp[], const char* apple[])
                 }
             }
         } else {
-            if ( Error verifyErr = cache.checkNewBinaries(warnOnRemovedSymbols, executableMode,
+            if ( Error verifyErr = cache.checkNewBinaries(warnOnRemovedSymbols, executableMode, rollbacksMode,
                                                           std::move(newBinaries), verifyProjects,
                                                           verifyResults, internalWarnings,
                                                           exportsChangedPtr) ) {

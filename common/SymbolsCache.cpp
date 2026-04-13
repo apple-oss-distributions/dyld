@@ -80,7 +80,7 @@ const uint32_t MaxSupportedSchemaVersion = 1;
 
 using mach_o::Error;
 using mach_o::Fixup;
-using mach_o::Header;
+using mach_o::UnsafeHeader;
 using mach_o::Image;
 using mach_o::Platform;
 using mach_o::PlatformAndVersions;
@@ -1009,7 +1009,7 @@ namespace {
 
 struct Slice
 {
-    const Header*   sliceHeader;
+    const UnsafeHeader*   sliceHeader;
     size_t          sliceLength;
     Platform        platform;
 };
@@ -1037,7 +1037,7 @@ static Error getSlicesToAdd(const SymbolsCache::ArchPlatforms& archPlatforms,
         return Error::none();
 
     Error parseErr = mach_o::forEachHeader({ (uint8_t*)buffer, bufferSize }, path,
-                                           ^(const Header *hdr, size_t sliceLength, bool &stop) {
+                                           ^(const UnsafeHeader* hdr, size_t sliceLength, bool &stop) {
         std::span<const Platform> supportedPlatforms;
         if ( archPlatforms.empty() ) {
             // support all platforms if there are no archs
@@ -1159,6 +1159,10 @@ static mach_o::Error makeBinaryFromJSON(const SymbolsCache::ArchPlatforms& archP
         return Error::none();
     }
 
+    // HACK: Use the static archive measurement entry as a way to know this is libtool not ld
+    if ( json::getOptionalValue(diags, rootNode, "measure-sha256") )
+        return Error::none();
+
     // Skip binaries which aren't cache eligible
     const Node* sharedCacheEligibleNode = json::getOptionalValue(diags, rootNode, "shared-cache-eligible");
     if ( diags.hasError() )
@@ -1273,7 +1277,7 @@ static mach_o::Error makeBinaryFromJSON(const SymbolsCache::ArchPlatforms& archP
             if ( diags.hasError() )
                 return Error("Could not parse JSON '%s' because: %s", path.data(), diags.errorMessageCStr());
 
-            if ( !Header::isSharedCacheEligiblePath(targetInstallName.data()) )
+            if ( !UnsafeHeader::isSharedCacheEligiblePath(targetInstallName.data()) )
                 continue;
 
             const Node& importedSymbolsNode = json::getRequiredValue(diags, linkedDylibNode, "imported-symbols");
@@ -1301,7 +1305,7 @@ static mach_o::Error makeBinaryFromJSON(const SymbolsCache::ArchPlatforms& archP
     }
 
     __block std::vector<std::string> exportedSymbols;
-    if ( !installName.empty() && Header::isSharedCacheEligiblePath(installName.data()) ) {
+    if ( !installName.empty() && UnsafeHeader::isSharedCacheEligiblePath(installName.data()) ) {
         const Node* exportedSymbolsNode = json::getOptionalValue(diags, rootNode, "exports");
         if ( diags.hasError() )
             return Error("Could not parse JSON '%s' because: %s", path.data(), diags.errorMessageCStr());
@@ -1387,7 +1391,7 @@ Error SymbolsCache::makeBinaries(const ArchPlatforms& archPlatforms,
         return Error::none();
 
     for ( const Slice& slice : slices ) {
-        const Header* mh = slice.sliceHeader;
+        const UnsafeHeader* mh = slice.sliceHeader;
         Platform platform = slice.platform;
         const char* sliceArch = mh->archName();
 
@@ -1983,6 +1987,56 @@ static Error getUsesOfExport(sqlite3* symbolsDB, int64_t binaryID,
     return Error::none();
 }
 
+static Error hasImport(sqlite3* symbolsDB, int64_t refBinaryID, int64_t defBinaryID, std::string_view exportedSymbol,
+                       bool& foundSymbol)
+{
+    const char* selectQuery = "SELECT COUNT(*) "
+    "FROM SYMBOL_REF "
+    "WHERE SYMBOL_REF.REF_BINARY_ID = ? AND SYMBOL_REF.DEF_BINARY_ID = ? AND SYMBOL_REF.SYMBOL_NAME = ?";
+    sqlite3_stmt *statement = nullptr;
+    if ( int result = sqlite3_prepare_v2(symbolsDB, selectQuery, -1, &statement, 0) ) {
+        Error err = Error("Could not prepare statement for join 'BINARY/REEXPORT' because: %s", (const char*)strerror(result));
+        return err;
+    }
+
+    if ( int result = sqlite3_bind_int64(statement, 1, refBinaryID) ) {
+        Error err = Error("Could not bind int for join 'SYMBOL_REF' because: %s", (const char*)strerror(result));
+        return err;
+    }
+
+    if ( int result = sqlite3_bind_int64(statement, 2, defBinaryID) ) {
+        Error err = Error("Could not bind int for join 'SYMBOL_REF' because: %s", (const char*)strerror(result));
+        return err;
+    }
+
+    if ( int result = sqlite3_bind_text(statement, 3, exportedSymbol.data(), -1, SQLITE_TRANSIENT) ) {
+        Error err = Error("Could not bind text for join 'SYMBOL_REF' because: %s", (const char*)strerror(result));
+        return err;
+    }
+
+    // Get results
+    std::vector<int64_t> results;
+    while( sqlite3_step(statement) == SQLITE_ROW ) {
+        results.push_back(sqlite3_column_int64(statement, 0));
+    }
+
+    sqlite3_finalize(statement);
+
+    if ( results.empty() )
+        return Error::none();
+
+    if ( results.size() > 1 ) {
+        return Error("Too many binary results for hasImport()");
+    }
+
+    if ( results.front() == 0 )
+        return Error::none();
+
+    foundSymbol = true;
+
+    return Error::none();
+}
+
 struct BinaryKey
 {
     std::string_view installNameOrPath;
@@ -2013,6 +2067,7 @@ struct std::hash<BinaryKey>
 } // namespace std
 
 Error SymbolsCache::checkNewBinaries(bool warnOnRemovedSymbols, ExecutableMode executableMode,
+                                     RollbacksMode rollbacksMode,
                                      std::vector<SymbolsCacheBinary>&& binaries,
                                      const BinaryProjects& binaryProjects,
                                      std::vector<ResultBinary>& results,
@@ -2026,7 +2081,42 @@ Error SymbolsCache::checkNewBinaries(bool warnOnRemovedSymbols, ExecutableMode e
     std::unordered_map<BinaryKey, SymbolsCacheBinary*>  osDylibMap;
     std::unordered_map<BinaryKey, SymbolsCacheBinary*>  newClientsMap;
 
+    // When checking the simultor, the simulator support dylibs aren't real
+    // We need to skip them, and anything which re-exports them
+    std::unordered_set<BinaryKey> badBinaries;
+
     for ( SymbolsCacheBinary& binary : binaries ) {
+        // HACK!: A few B&I projects build multiple copies of the same binary, and those are confused for each other
+        // For now skip errors from these projects until we can handle them.  They'll still be caught when using a mach-o, just not JSON
+        if ( binary.inputFileName.ends_with(".json") ) {
+            if ( binary.installName == "/System/Library/Frameworks/AudioToolbox.framework/AudioToolbox" )
+                continue;
+            if ( binary.installName == "/usr/lib/libNFC_HAL.dylib" )
+                continue;
+            if ( binary.installName == "/System/Library/PrivateFrameworks/WiFiPeerToPeer.framework/WiFiPeerToPeer" )
+                continue;
+            if ( binary.installName == "/usr/lib/libz.1.dylib" )
+                continue;
+
+            // Filter out LAR and _tests projects
+            // Note project name looks something like: dyld_tests-version.json
+            if ( binary.inputFileName.find("_tests-") != std::string_view::npos )
+                continue;
+            if ( binary.inputFileName.find("Tests-") != std::string_view::npos )
+                continue;
+            if ( binary.inputFileName.find("_lar-") != std::string_view::npos )
+                continue;
+
+            if ( binary.inputFileName.find("Interposition_Sim-") != std::string_view::npos ) {
+                badBinaries.insert({ binary.path, binary.platform, binary.arch });
+                continue;
+            }
+            if ( binary.inputFileName.find("Libsystem_Sim-") != std::string_view::npos ) {
+                badBinaries.insert({ binary.path, binary.platform, binary.arch });
+                continue;
+            }
+        }
+
         if ( binary.installName.starts_with('/') )
             osDylibs.push_back(binary);
         else
@@ -2144,6 +2234,10 @@ Error SymbolsCache::checkNewBinaries(bool warnOnRemovedSymbols, ExecutableMode e
                     binary->exportedSymbols.insert(binary->exportedSymbols.end(),
                                                    it->second->exportedSymbols.begin(), it->second->exportedSymbols.end());
                 }
+
+                // If the dep was bad, we are too
+                if ( badBinaries.count({ reexport, binary->platform, binary->arch }) )
+                    badBinaries.insert({ binary->installName, binary->platform, binary->arch });
             }
             processedBinaries[{ binary->installName, binary->platform, binary->arch }] = binary;
         }
@@ -2285,28 +2379,6 @@ Error SymbolsCache::checkNewBinaries(bool warnOnRemovedSymbols, ExecutableMode e
             continue;
         }
 
-        // HACK!: A few B&I projects build multiple copies of the same binary, and those are confused for each other
-        // For now skip errors from these projects until we can handle them.  They'll still be caught when using a mach-o, just not JSON
-        if ( binary.inputFileName.ends_with(".json") ) {
-            if ( binary.installName == "/System/Library/Frameworks/AudioToolbox.framework/AudioToolbox" )
-                continue;
-            if ( binary.installName == "/usr/lib/libNFC_HAL.dylib" )
-                continue;
-            if ( binary.installName == "/System/Library/PrivateFrameworks/WiFiPeerToPeer.framework/WiFiPeerToPeer" )
-                continue;
-            if ( binary.installName == "/usr/lib/libz.1.dylib" )
-                continue;
-
-            // Filter out LAR and _tests projects
-            // Note project name looks something like: dyld_tests-version.json
-            if ( binary.inputFileName.find("_tests-") != std::string_view::npos )
-                continue;
-            if ( binary.inputFileName.find("Tests-") != std::string_view::npos )
-                continue;
-            if ( binary.inputFileName.find("_lar-") != std::string_view::npos )
-                continue;
-        }
-
         // If we removed exports, now we need to see if they have uses
         for ( std::string_view exp : removedExports ) {
             std::vector<std::string> clientPaths;
@@ -2341,7 +2413,7 @@ Error SymbolsCache::checkNewBinaries(bool warnOnRemovedSymbols, ExecutableMode e
 
                     bool isCacheEligible = false;
                     if ( !clientInstallName.empty() ) {
-                        isCacheEligible = Header::isSharedCacheEligiblePath(clientInstallName.data());
+                        isCacheEligible = UnsafeHeader::isSharedCacheEligiblePath(clientInstallName.data());
                     }
 
                     switch ( executableMode ) {
@@ -2411,7 +2483,113 @@ Error SymbolsCache::checkNewBinaries(bool warnOnRemovedSymbols, ExecutableMode e
                 result.client.projectName = clientProject;
                 result.client.symbolName = exp;
 
+                result.bothBinaryAndClientAreRoots = false;
+
                 results.push_back(std::move(result));
+            }
+        }
+    }
+
+    if ( rollbacksMode == RollbacksMode::off )
+        return Error::none();
+
+    // For each dylib, also compare its imports to the database.  If the dylib imports something it didn't before
+    // then those new imports might not work. That can happen if the project they link to was also rebuilt
+    for ( SymbolsCacheBinary& clientBinary : osDylibs ) {
+        std::optional<int64_t> clientBinaryID;
+        if ( Error err = getDylibID(this->symbolsDB, clientBinary.installName, clientBinary.platform, clientBinary.arch,
+                                    clientBinaryID) ) {
+            internalWarnings.push_back(Error("Skipping binary due to getDylibID(): %s", err.message()));
+            continue;
+        }
+
+        // Its ok to skip binaries the database doesn't know about.
+        if ( !clientBinaryID.has_value() ) {
+            if ( verbose )
+                printf("Skipping binary as it doesn't exist in the database: %s\n", clientBinary.installName.c_str());
+            continue;
+        }
+
+        std::string clientProject;
+        if ( Error err = getBinaryProject(this->symbolsDB, clientBinary.installName, clientBinary.platform, clientBinary.arch,
+                                          clientProject) ) {
+            // No project is ok. We can continue without it
+        }
+
+        // Walk the new imports and see if any are actually new
+        for ( const SymbolsCacheBinary::ImportedSymbol& imp : clientBinary.importedSymbols ) {
+            if ( const std::string* targetBinaryName = std::get_if<std::string>(&imp.targetBinary) ) {
+                // For now we are just looking at rollback issues, so only process this further if its a newly built client
+                if ( auto clientIt = newClientsMap.find({ *targetBinaryName, clientBinary.platform, clientBinary.arch });
+                    clientIt != newClientsMap.end() ) {
+                    // FIXME: Do we need a map?
+                    SymbolsCacheBinary* targetBinary = clientIt->second;
+
+                    // Skip the target binary if its bad. We can't use it
+                    if ( badBinaries.count({ targetBinary->installName, targetBinary->platform, targetBinary->arch }) )
+                        continue;
+
+                    auto exportIt = std::find_if(targetBinary->exportedSymbols.begin(),
+                                                 targetBinary->exportedSymbols.end(),
+                                                 [&](std::string_view exportedSymbol) {
+                        if ( imp.symbolName == exportedSymbol )
+                            return true;
+                        return false;
+                    });
+                    if ( exportIt != targetBinary->exportedSymbols.end() ) {
+                        // Found the symbol, so can skip it
+                        continue;
+                    }
+
+                    // Didn't find the symbol.  Check if this is a new import or not
+                    {
+                        std::optional<int64_t> targetBinaryID;
+                        if ( Error err = getDylibID(this->symbolsDB, targetBinary->installName, targetBinary->platform, targetBinary->arch,
+                                                    targetBinaryID) ) {
+                            internalWarnings.push_back(Error("Skipping binary due to getDylibID(): %s", err.message()));
+                            continue;
+                        }
+
+                        bool foundImport = false;
+                        if ( Error err = ::hasImport(this->symbolsDB, clientBinaryID.value(), targetBinaryID.value(), imp.symbolName,
+                                                     foundImport) ) {
+                            internalWarnings.push_back(Error("Skipping binary due to hasImport(): %s", err.message()));
+                            continue;
+                        }
+
+                        if ( foundImport ) {
+                            // Original import exists, we don't want to check existing imports, just new ones
+                            continue;
+                        }
+                    }
+
+                    std::string targetProject;
+                    if ( Error err = getBinaryProject(this->symbolsDB, *targetBinaryName, clientBinary.platform, clientBinary.arch,
+                                                      targetProject) ) {
+                        // No project is ok. We can continue without it
+                    }
+
+                    ResultBinary result;
+                    result.installName = *targetBinaryName;
+                    result.arch = clientBinary.arch;
+                    result.uuid = targetBinary->uuid;
+                    result.rootPath = targetBinary->rootPath;
+                    result.projectName = targetProject;
+
+                    result.client.path = clientBinary.path;
+                    result.client.uuid = clientBinary.uuid;
+                    result.client.rootPath = clientBinary.rootPath;
+                    result.client.projectName = clientProject;
+                    result.client.symbolName = imp.symbolName;
+
+                    result.bothBinaryAndClientAreRoots = true;
+
+                    results.push_back(std::move(result));
+                }
+                continue;
+            } else {
+                // FIXME: Look up the target binary by ID
+                continue;
             }
         }
     }
@@ -2489,7 +2667,7 @@ void printResultSummary(std::span<ResultBinary> verifyResults, bool bniOutput,
         if ( result.warn )
             continue;
 
-        if ( result.client.projectName.empty())
+        if ( result.client.projectName.empty() )
             continue;
 
         errorClientProjects.insert(result.client.projectName);
@@ -2500,7 +2678,7 @@ void printResultSummary(std::span<ResultBinary> verifyResults, bool bniOutput,
         if ( !result.warn )
             continue;
 
-        if ( result.client.projectName.empty())
+        if ( result.client.projectName.empty() )
             continue;
 
         // Skip projects also in the error list
@@ -2520,7 +2698,7 @@ void printResultSummary(std::span<ResultBinary> verifyResults, bool bniOutput,
     else
         fprintf(summaryLogFile, "Warning: some projects have removed symbols\n\n");
 
-    fprintf(summaryLogFile, "Expected resolution is to rebuild dependencies\n\n");
+    fprintf(summaryLogFile, "Expected resolution is to rebuild dependents\n\n");
 
     auto printProjects = [&](const std::set<std::string>& clientProjects) {
         if ( bniOutput ) {
@@ -2547,6 +2725,27 @@ void printResultSummary(std::span<ResultBinary> verifyResults, bool bniOutput,
 
     if ( !warnClientProjects.empty() )
         printProjects(warnClientProjects);
+
+    std::map<std::string, std::set<std::string>> potentialOrderingIssues;
+    for ( const ResultBinary& result : verifyResults ) {
+        if ( !result.bothBinaryAndClientAreRoots )
+            continue;
+
+        std::string projectName = result.projectName.empty() ? "<unknown project>" : result.projectName;
+        std::string clientProjectName = result.client.projectName.empty() ? "<unknown project>" : result.client.projectName;
+        potentialOrderingIssues[projectName].insert(clientProjectName);
+    }
+
+    if ( !potentialOrderingIssues.empty() ) {
+        fprintf(stderr, "Error: some rebuilt projects have removed symbols from other rebuilt projects\n");
+
+        for ( const std::pair<const std::string, std::set<std::string>>& projectAndClients : potentialOrderingIssues ) {
+            fprintf(stderr, "  Project '%s' potentially rebuilt after client(s):", projectAndClients.first.c_str());
+            for ( std::string_view project : projectAndClients.second )
+                fprintf(stderr, " %s", project.data());
+        }
+        fprintf(stderr, "\n\n");
+    }
 }
 
 void printResultsSymbolDetails(std::span<ResultBinary> verifyResults, FILE* detailsLogFile)
@@ -2687,8 +2886,8 @@ void printResultsJSON(std::span<ResultBinary> verifyResults,
             else
                 needsComma = true;
 
-            bool defInSharedCache = Header::isSharedCacheEligiblePath(binary.installName.c_str());
-            bool useInSharedCache = Header::isSharedCacheEligiblePath(binary.client.path.c_str());
+            bool defInSharedCache = UnsafeHeader::isSharedCacheEligiblePath(binary.installName.c_str());
+            bool useInSharedCache = UnsafeHeader::isSharedCacheEligiblePath(binary.client.path.c_str());
 
             fprintf(jsonFile, "    {\n");
 
@@ -2724,7 +2923,7 @@ void printResultsJSON(std::span<ResultBinary> verifyResults,
             else
                 needsComma = true;
 
-            bool inSharedCache = Header::isSharedCacheEligiblePath(binary.installName.c_str());
+            bool inSharedCache = UnsafeHeader::isSharedCacheEligiblePath(binary.installName.c_str());
 
             fprintf(jsonFile, "    {\n");
 
@@ -2754,7 +2953,7 @@ void printResultsJSON(std::span<ResultBinary> verifyResults,
             else
                 needsComma = true;
 
-            bool inSharedCache = Header::isSharedCacheEligiblePath(binary.installName.c_str());
+            bool inSharedCache = UnsafeHeader::isSharedCacheEligiblePath(binary.installName.c_str());
 
             fprintf(jsonFile, "    {\n");
 

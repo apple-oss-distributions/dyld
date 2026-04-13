@@ -22,8 +22,8 @@
  */
 
 
-#ifndef mach_o_Header_h
-#define mach_o_Header_h
+#ifndef mach_o_UnsafeHeader_h
+#define mach_o_UnsafeHeader_h
 
 #include <array>
 #include <span>
@@ -53,6 +53,11 @@
 #ifndef LC_FUNCTION_VARIANT_FIXUPS
   #define LC_FUNCTION_VARIANT_FIXUPS      0x38
 #endif
+
+#ifndef LC_LAZY_LOAD_DYLIB_INFO
+  #define LC_LAZY_LOAD_DYLIB_INFO      0x3A
+#endif
+
 
 #ifndef EXPORT_SYMBOL_FLAGS_FUNCTION_VARIANT
   #define EXPORT_SYMBOL_FLAGS_FUNCTION_VARIANT  0x20
@@ -138,16 +143,18 @@ VIS_HIDDEN inline bool operator==(const LinkedDylibAttributes& a, LinkedDylibAtt
 
 
 /*!
- * @class Header
+ * @class UnsafeHeader
  *
  * @abstract
- *      A mapped mach-o file can be cast to a Header*, then these methods used to parse/validate it.
- *      The Header constructor can be used to build a mach-o file dynamically for unit tests
+ *      A mapped mach-o file can be cast to a UnsafeHeader*, then these methods used to parse/validate it.
+ *      The UnsafeHeader constructor can be used to build a mach-o file dynamically for unit tests
  */
-struct VIS_HIDDEN Header
+struct VIS_HIDDEN UnsafeHeader
 {
-    static bool             isSharedCacheEligiblePath(const char* path);
-    static const Header*    isMachO(std::span<const uint8_t> content);
+    static bool                 isSharedCacheEligiblePath(const char* path);
+    static const UnsafeHeader*  isMachO(std::span<const uint8_t> content);
+    static bool                 isBigEndianMachO(std::span<const uint8_t> content);
+    static bool                 isBitCodeHeader(std::span<const uint8_t> content);
 
     Error           valid(uint64_t fileSize) const;
 
@@ -157,6 +164,8 @@ struct VIS_HIDDEN Header
     Architecture    arch() const;
     uint32_t        pointerSize() const;
     uint32_t        ncmds() const;
+    uint32_t        cputype() const { return mh.cputype; }
+    uint32_t        cpusubtype() const { return mh.cpusubtype; }
     bool            uses16KPages() const;
     bool            is64() const;
     bool            isDyldManaged() const;
@@ -172,6 +181,7 @@ struct VIS_HIDDEN Header
     bool            isObjectFile() const;
     bool            isFileSet() const;
     bool            isPreload() const;
+    bool            isDSYM() const;
     bool            isPIE() const;
     bool            usesTwoLevelNamespace() const;
     bool            isArch(const char* archName) const;
@@ -193,6 +203,7 @@ struct VIS_HIDDEN Header
     void                forEachLoadCommandSafe(void (^callback)(const load_command* cmd, bool& stop)) const; //asserts if error
     void                forDyldEnv(void (^callback)(const char* envVar, bool& stop)) const;
     void                forEachRPath(void (^callback)(const char* rPath, bool& stop)) const;
+    bool                hasRPaths() const;
     void                forEachLinkerOption(void (^callback)(const char* opt, bool& stop)) const;
     void                forAllowableClient(void (^callback)(const char* clientName, bool& stop)) const;
     PlatformAndVersions platformAndVersions() const;
@@ -212,6 +223,7 @@ struct VIS_HIDDEN Header
     bool                canBeFairPlayEncrypted() const;
     bool                hasEncryptionInfo(uint32_t& cryptId, uint32_t& textOffset, uint32_t& size) const;
     bool                isFairPlayEncrypted(uint32_t& textOffset, uint32_t& size) const;
+    void                forEachLazyLoadDylib(void (^callback)(uint32_t fileOffset, uint32_t size)) const;
     bool                hasChainedFixups() const;
     bool                hasChainedFixupsLoadCommand() const;
     bool                hasOpcodeFixups() const;
@@ -291,6 +303,8 @@ struct VIS_HIDDEN Header
         uint32_t            relocsCount     = 0;
         uint32_t            reserved1       = 0;
         uint32_t            reserved2       = 0;
+
+        bool isZeroFill() const;
     };
     void             forEachSection(void (^callback)(const SectionInfo&, bool& stop)) const;
     void             forEachSection(void (^callback)(const SegmentInfo&, const SectionInfo&, bool& stop)) const;
@@ -307,10 +321,15 @@ struct VIS_HIDDEN Header
     bool             hasZerofillExpansion() const;
     uint64_t         zerofillExpansionAmount() const;
     bool             hasCustomStackSize(uint64_t& size) const;
-    bool             hasFirmwareChainStarts(uint16_t* pointerFormat=nullptr, uint32_t* startsCount=nullptr, const uint32_t** starts=nullptr) const;
+    bool             hasFirmwareChainStarts(uint16_t* pointerFormat=nullptr, uint32_t* startsCount=nullptr, const uint32_t** starts=nullptr, uint32_t* sectFlags=nullptr) const;
     bool             hasFirmwareRebaseRuns() const;
     bool             forEachFirmwareRebaseRuns(void (^callback)(uint32_t offset, bool& stop)) const;
     static const char* protectionString(uint32_t flags, char str[8]);
+    static bool      isSimulatorSupportDylibPath(CString path);
+    void             forEachPlatformLoadCommand(void (^callback)(Platform platform, Version32 minOS, Version32 sdk)) const;
+
+protected:
+    static std::string_view        name16(const char name[16]);
 
 private:
     friend class Image;
@@ -322,7 +341,6 @@ private:
     bool            entryAddrFromThreadCmd(const thread_command* cmd, uint64_t& addr) const;
 
     bool            hasLoadCommand(uint32_t lc) const;
-    void            forEachPlatformLoadCommand(void (^callback)(Platform platform, Version32 minOS, Version32 sdk)) const;
     Error           validSemanticsPlatform() const;
     Error           validSemanticsInstallName(const Policy& policy) const;
     Error           validSemanticsLinkedDylibs(const Policy& policy) const;
@@ -335,8 +353,6 @@ private:
 
     template <typename SG, typename SC>
     Error           validSegment(const Policy& policy, uint64_t wholeFileSize, const SG* seg) const;
-
-    static std::string_view        name16(const char name[16]);
 
     const encryption_info_command* findFairPlayEncryptionLoadCommand() const;
 
@@ -353,4 +369,4 @@ protected:
 
 } // namespace mach_o
 
-#endif /* mach_o_Header_h */
+#endif /* mach_o_UnsafeHeader_h */

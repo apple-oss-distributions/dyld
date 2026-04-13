@@ -52,7 +52,7 @@
 #define NO_ULEB
 #include "MachOLoaded.h"
 #include "DyldSharedCache.h"
-#include "Header.h"
+#include "UnsafeHeader.h"
 #include "Trie.hpp"
 #include "StringUtils.h"
 #if !TARGET_OS_EXCLAVEKIT
@@ -74,7 +74,7 @@ using dyld3::MachOAnalyzer;
 using dyld4::PrebuiltLoader;
 using dyld4::PrebuiltLoaderSet;
 
-using mach_o::Header;
+using mach_o::UnsafeHeader;
 using mach_o::Platform;
 
 
@@ -255,7 +255,7 @@ void DyldSharedCache::forEachRange(void (^handler)(const char* mappingName,
     });
 }
 
-void DyldSharedCache::forEachDylib(void (^handler)(const Header* mh, const char* installName, uint32_t imageIndex, uint64_t inode, uint64_t mtime, bool& stop)) const
+void DyldSharedCache::forEachDylib(void (^handler)(const UnsafeHeader* mh, const char* installName, uint32_t imageIndex, uint64_t inode, uint64_t mtime, bool& stop)) const
 {
     const dyld_cache_image_info*   dylibs   = (dyld_cache_image_info*)((char*)this + header.imagesOffset);
     const dyld_cache_mapping_info* mappings = (dyld_cache_mapping_info*)((char*)this + header.mappingOffset);
@@ -270,7 +270,7 @@ void DyldSharedCache::forEachDylib(void (^handler)(const Header* mh, const char*
         const char* dylibPath  = (char*)this + dylibs[i].pathFileOffset;
         const mach_header* mh = (mach_header*)((char*)this + offset);
         bool stop = false;
-        handler((const Header*)mh, dylibPath, i, dylibs[i].inode, dylibs[i].modTime, stop);
+        handler((const UnsafeHeader*)mh, dylibPath, i, dylibs[i].inode, dylibs[i].modTime, stop);
         if ( stop )
             break;
     }
@@ -386,13 +386,13 @@ const char* DyldSharedCache::getIndexedImagePath(uint32_t index) const
 }
 
 
-const mach_o::Header* DyldSharedCache::getImageFromPath(const char* dylibPath) const
+const mach_o::UnsafeHeader* DyldSharedCache::getImageFromPath(const char* dylibPath) const
 {
     const dyld_cache_image_info*   dylibs   = images();
     const dyld_cache_mapping_info* mappings = (dyld_cache_mapping_info*)((char*)this + header.mappingOffset);
     uint32_t dyldCacheImageIndex;
     if ( hasImagePath(dylibPath, dyldCacheImageIndex) )
-        return (mach_o::Header*)((uintptr_t)this + dylibs[dyldCacheImageIndex].address - mappings[0].address);
+        return (mach_o::UnsafeHeader*)((uintptr_t)this + dylibs[dyldCacheImageIndex].address - mappings[0].address);
     return nullptr;
 }
 
@@ -418,10 +418,10 @@ uint64_t DyldSharedCache::mappedSize() const
 }
 
 bool DyldSharedCache::inDyldCache(const DyldSharedCache* cache, const dyld3::MachOFile* mf) {
-    return inDyldCache(cache, (const mach_o::Header*)mf);
+    return inDyldCache(cache, (const mach_o::UnsafeHeader*)mf);
 }
 
-bool DyldSharedCache::inDyldCache(const DyldSharedCache* cache, const mach_o::Header* header) {
+bool DyldSharedCache::inDyldCache(const DyldSharedCache* cache, const mach_o::UnsafeHeader* header) {
     return header->inDyldCache() && (cache != nullptr) && ((uintptr_t)header >= (uintptr_t)cache) && ((uintptr_t)header < ((uintptr_t)cache + cache->mappedSize()));
 }
 
@@ -434,12 +434,12 @@ const objc_opt::objc_opt_t* DyldSharedCache::oldObjcOpt() const
 const objc_opt::objc_opt_t* DyldSharedCache::oldObjcOpt() const
 {
     // Find the objc image
-    __block const Header* objcHdr = nullptr;
+    __block const UnsafeHeader* objcHdr = nullptr;
     uint32_t imageIndex;
     if ( this->hasImagePath("/usr/lib/libobjc.A.dylib", imageIndex) ) {
         uint64_t mTime;
         uint64_t inode;
-        objcHdr = (const Header*)(this->getIndexedImageEntry(imageIndex, mTime, inode));
+        objcHdr = (const UnsafeHeader*)(this->getIndexedImageEntry(imageIndex, mTime, inode));
     }
 
     if ( objcHdr == nullptr )
@@ -448,7 +448,7 @@ const objc_opt::objc_opt_t* DyldSharedCache::oldObjcOpt() const
     // If we found the objc image, then try to find the read-only data inside.
     __block const objc_opt::objc_opt_t* objcROContent = nullptr;
     int64_t slide = objcHdr->getSlide();
-    objcHdr->forEachSection(^(const Header::SectionInfo& info, bool& stop) {
+    objcHdr->forEachSection(^(const UnsafeHeader::SectionInfo& info, bool& stop) {
         if ( info.segmentName != "__TEXT" )
             return;
         if ( info.sectionName != "__objc_opt_ro" )
@@ -610,7 +610,7 @@ void DyldSharedCache::forEachPatchableUseOfExport(uint32_t imageIndex, uint32_t 
             return;
 
         uint64_t cacheUnslidAddress = unslidLoadAddress();
-        uint32_t cacheOffsetOfImpl = (uint32_t)((((const Header*)imageMA)->preferredLoadAddress() - cacheUnslidAddress) + dylibVMOffsetOfImpl);
+        uint32_t cacheOffsetOfImpl = (uint32_t)((((const UnsafeHeader*)imageMA)->preferredLoadAddress() - cacheUnslidAddress) + dylibVMOffsetOfImpl);
 
         // Loading a new cache so get the data from the cache header
         const dyld_cache_patch_info_v1* patchInfo = getAddrField<dyld_cache_patch_info_v1*>(header.patchInfoAddr);
@@ -646,7 +646,7 @@ void DyldSharedCache::forEachPatchableUseOfExport(uint32_t imageIndex, uint32_t 
 
     // V2/V3 and newer structs
     auto getDylibAddress = ^(uint32_t dylibImageIndex) {
-        auto* clientHdr = (const Header*)(this->getIndexedImageEntry(dylibImageIndex));
+        auto* clientHdr = (const UnsafeHeader*)(this->getIndexedImageEntry(dylibImageIndex));
         if ( clientHdr == nullptr )
             return 0ULL;
         return clientHdr->preferredLoadAddress();
@@ -674,7 +674,7 @@ void DyldSharedCache::forEachPatchableExport(uint32_t imageIndex, void (^handler
         if ( imageMA == nullptr )
             return;
 
-        uint64_t imageLoadAddress = ((const Header*)imageMA)->preferredLoadAddress();
+        uint64_t imageLoadAddress = ((const UnsafeHeader*)imageMA)->preferredLoadAddress();
         uint64_t cacheUnslidAddress = unslidLoadAddress();
 
         const dyld_cache_patch_info_v1* patchInfo = getAddrField<dyld_cache_patch_info_v1*>(header.patchInfoAddr);
@@ -739,7 +739,7 @@ void DyldSharedCache::forEachPatchableUseOfExportInImage(uint32_t imageIndex, ui
             return;
 
         uint64_t cacheUnslidAddress = unslidLoadAddress();
-        uint32_t cacheOffsetOfImpl = (uint32_t)((((const Header*)imageMA)->preferredLoadAddress() - cacheUnslidAddress) + dylibVMOffsetOfImpl);
+        uint32_t cacheOffsetOfImpl = (uint32_t)((((const UnsafeHeader*)imageMA)->preferredLoadAddress() - cacheUnslidAddress) + dylibVMOffsetOfImpl);
 
         // Loading a new cache so get the data from the cache header
         const dyld_cache_patch_info_v1* patchInfo = getAddrField<dyld_cache_patch_info_v1*>(header.patchInfoAddr);
@@ -758,7 +758,7 @@ void DyldSharedCache::forEachPatchableUseOfExportInImage(uint32_t imageIndex, ui
             uint64_t cacheOffsetEnd;
         };
         STACK_ALLOC_OVERFLOW_SAFE_ARRAY(DataRange, dataRanges, 8);
-        __block const Header* userDylib = nullptr;
+        __block const UnsafeHeader* userDylib = nullptr;
         __block uint32_t userDylibImageIndex = ~0U;
 
         const dyld_cache_patchable_export_v1* patchExports = getAddrField<dyld_cache_patchable_export_v1*>(patchInfo->patchExportArrayAddr);
@@ -791,8 +791,8 @@ void DyldSharedCache::forEachPatchableUseOfExportInImage(uint32_t imageIndex, ui
                     userDylib = nullptr;
                     userDylibImageIndex = ~0U;
                     dataRanges.clear();
-                    forEachDylib(^(const Header* hdr, const char* dylibPath, uint32_t cacheImageIndex, uint64_t, uint64_t, bool& stopImage) {
-                        hdr->forEachSegment(^(const Header::SegmentInfo& info, bool& stopSegment) {
+                    forEachDylib(^(const UnsafeHeader* hdr, const char* dylibPath, uint32_t cacheImageIndex, uint64_t, uint64_t, bool& stopImage) {
+                        hdr->forEachSegment(^(const UnsafeHeader::SegmentInfo& info, bool& stopSegment) {
                             if ( info.writable() )
                                 dataRanges.push_back({ info.vmaddr - cacheUnslidAddress, info.vmaddr + info.vmsize - cacheUnslidAddress });
                         });
@@ -841,6 +841,17 @@ void DyldSharedCache::forEachPatchableUseOfExportInImage(uint32_t imageIndex, ui
     PatchTable patchTable(this->patchTable(), header.patchInfoAddr);
     patchTable.forEachPatchableUseOfExportInImage(imageIndex, dylibVMOffsetOfImpl,
                                                   userImageIndex, handler);
+}
+
+std::span<const dyld_subcache_entry> DyldSharedCache::subCaches() const
+{
+    if (header.mappingOffset <= offsetof(dyld_cache_header, cacheSubType) ) {
+        // old v1 struct.  Just ignore it now
+        return { };
+    } else {
+        const dyld_subcache_entry* subCacheEntries = (dyld_subcache_entry*)((uintptr_t)this + header.subCacheArrayOffset);
+        return { subCacheEntries, header.subCacheArrayCount };
+    }
 }
 
 
@@ -941,7 +952,7 @@ bool DyldSharedCache::isAlias(const char* path) const {
     return path < ((char*)mappings[0].address + slide);
 }
 
-void DyldSharedCache::forEachImage(void (^handler)(const Header* hdr, const char* installName)) const
+void DyldSharedCache::forEachImage(void (^handler)(const UnsafeHeader* hdr, const char* installName)) const
 {
     const dyld_cache_image_info*   dylibs   = images();
     const dyld_cache_mapping_info* mappings = (dyld_cache_mapping_info*)((char*)this + header.mappingOffset);
@@ -959,7 +970,7 @@ void DyldSharedCache::forEachImage(void (^handler)(const Header* hdr, const char
         if ( dylibs[i].pathFileOffset < firstImageOffset)
             continue;
 #endif
-        const Header* hdr = (const Header*)((char*)this + offset);
+        const UnsafeHeader* hdr = (const UnsafeHeader*)((char*)this + offset);
         handler(hdr, dylibPath);
     }
 }
@@ -1141,9 +1152,9 @@ std::string DyldSharedCache::mapFile() const
     // TODO:  add linkedit breakdown
     result += "\n\n";
 
-    forEachImage(^(const Header* hdr, const char* installName) {
+    forEachImage(^(const UnsafeHeader* hdr, const char* installName) {
         result += std::string(installName) + "\n";
-        hdr->forEachSegment(^(const Header::SegmentInfo& info, bool& stop) {
+        hdr->forEachSegment(^(const UnsafeHeader::SegmentInfo& info, bool& stop) {
             char lineBuffer[256];
             snprintf(lineBuffer, sizeof(lineBuffer), "\t%16.*s 0x%08llX -> 0x%08llX\n",
                      (int)info.segmentName.size(), info.segmentName.data(), info.vmaddr, info.vmaddr+info.vmsize);
@@ -1400,7 +1411,7 @@ void DyldSharedCache::forEachDylibPath(void (^handler)(const char* dylibPath, ui
     }
 }
 
-void DyldSharedCache::forEachFunctionVariantPatchLocation(void (^handler)(const void* loc, PointerMetaData pmd, const mach_o::FunctionVariants& fvs, const mach_o::Header* dylibHdr, int variantIndex, bool& stop)) const
+void DyldSharedCache::forEachFunctionVariantPatchLocation(void (^handler)(const void* loc, PointerMetaData pmd, const mach_o::FunctionVariants& fvs, const mach_o::UnsafeHeader* dylibHdr, int variantIndex, bool& stop)) const
 {
     // check for old cache
     if ( header.mappingOffset <= __offsetof(dyld_cache_header, functionVariantInfoSize) )
@@ -1426,7 +1437,7 @@ void DyldSharedCache::forEachFunctionVariantPatchLocation(void (^handler)(const 
         pmd.usesAddrDiversity = entry.pacAddress;
         pmd.diversity         = entry.pacDiversity;
         pmd.high8             = 0;
-        handler((void*)(entry.fixupLocVmAddr + slide), pmd, fvs, (mach_o::Header*)(entry.dylibHeaderVmAddr+slide), entry.variantIndex, stop);
+        handler((void*)(entry.fixupLocVmAddr + slide), pmd, fvs, (mach_o::UnsafeHeader*)(entry.dylibHeaderVmAddr+slide), entry.variantIndex, stop);
         if ( stop )
             break;
     }
@@ -1473,7 +1484,7 @@ void DyldSharedCache::forEachPatchableUseOfExport(uint32_t imageIndex, uint32_t 
             return;
 
         uint64_t cacheUnslidAddress = unslidLoadAddress();
-        uint32_t cacheOffsetOfImpl = (uint32_t)((((const Header*)imageMA)->preferredLoadAddress() - cacheUnslidAddress) + dylibVMOffsetOfImpl);
+        uint32_t cacheOffsetOfImpl = (uint32_t)((((const UnsafeHeader*)imageMA)->preferredLoadAddress() - cacheUnslidAddress) + dylibVMOffsetOfImpl);
 
         // Loading a new cache so get the data from the cache header
         const dyld_cache_patch_info_v1* patchInfo = getAddrField<dyld_cache_patch_info_v1*>(header.patchInfoAddr);
@@ -1492,7 +1503,7 @@ void DyldSharedCache::forEachPatchableUseOfExport(uint32_t imageIndex, uint32_t 
             uint64_t cacheOffsetEnd;
         };
         STACK_ALLOC_OVERFLOW_SAFE_ARRAY(DataRange, dataRanges, 8);
-        __block const Header* userDylib = nullptr;
+        __block const UnsafeHeader* userDylib = nullptr;
         __block uint32_t userImageIndex = ~0U;
 
         const dyld_cache_patchable_export_v1* patchExports = getAddrField<dyld_cache_patchable_export_v1*>(patchInfo->patchExportArrayAddr);
@@ -1525,8 +1536,8 @@ void DyldSharedCache::forEachPatchableUseOfExport(uint32_t imageIndex, uint32_t 
                     userDylib = nullptr;
                     userImageIndex = ~0U;
                     dataRanges.clear();
-                    forEachDylib(^(const Header* hdr, const char* dylibPath, uint32_t cacheImageIndex, uint64_t, uint64_t, bool& stopImage) {
-                        hdr->forEachSegment(^(const Header::SegmentInfo& info, bool& stopSegment) {
+                    forEachDylib(^(const UnsafeHeader* hdr, const char* dylibPath, uint32_t cacheImageIndex, uint64_t, uint64_t, bool& stopImage) {
+                        hdr->forEachSegment(^(const UnsafeHeader::SegmentInfo& info, bool& stopSegment) {
                             if ( info.writable() )
                                 dataRanges.push_back({ info.vmaddr - cacheUnslidAddress, info.vmaddr + info.vmsize - cacheUnslidAddress });
                         });
@@ -1588,7 +1599,7 @@ std::string DyldSharedCache::generateJSONMap(const char* disposition, uuid_t cac
     cacheNode.map["uuid"].value = cache_uuidStr;
 
     __block json::Node imagesNode;
-    forEachImage(^(const Header *hdr, const char *installName) {
+    forEachImage(^(const UnsafeHeader* hdr, const char *installName) {
         json::Node imageNode;
         imageNode.map["path"].value = installName;
         uuid_t uuid;
@@ -1599,7 +1610,7 @@ std::string DyldSharedCache::generateJSONMap(const char* disposition, uuid_t cac
         }
 
         __block json::Node segmentsNode;
-        hdr->forEachSegment(^(const Header::SegmentInfo &info, bool &stop) {
+        hdr->forEachSegment(^(const UnsafeHeader::SegmentInfo &info, bool &stop) {
             json::Node segmentNode;
             segmentNode.map["name"].value = info.segmentName;
             segmentNode.map["start-vmaddr"].value = json::hex(info.vmaddr);
@@ -1608,7 +1619,7 @@ std::string DyldSharedCache::generateJSONMap(const char* disposition, uuid_t cac
             // Add sections in verbose mode
             if ( verbose ) {
                 __block json::Node sectionsNode;
-                hdr->forEachSection(^(const Header::SectionInfo& sectInfo, bool& stopSection) {
+                hdr->forEachSection(^(const UnsafeHeader::SectionInfo& sectInfo, bool& stopSection) {
                     if ( sectInfo.segmentName == info.segmentName ) {
                         json::Node sectionNode;
                         sectionNode.map["name"].value = sectInfo.sectionName;
@@ -1875,12 +1886,12 @@ const uint8_t* DyldSharedCache::legacyCacheDataRegionBuffer() const
 const void* DyldSharedCache::objcOptPtrs() const
 {
     // Find the objc image
-    const Header* objcHdr = nullptr;
+    const UnsafeHeader* objcHdr = nullptr;
     uint32_t imageIndex;
     if ( this->hasImagePath("/usr/lib/libobjc.A.dylib", imageIndex) ) {
         uint64_t mTime;
         uint64_t inode;
-        objcHdr = (const Header*)this->getIndexedImageEntry(imageIndex, mTime, inode);
+        objcHdr = (const UnsafeHeader*)this->getIndexedImageEntry(imageIndex, mTime, inode);
     }
     else {
         return nullptr;
@@ -1890,7 +1901,7 @@ const void* DyldSharedCache::objcOptPtrs() const
     __block const void* objcPointersContent = nullptr;
     int64_t slide = objcHdr->getSlide();
     uint32_t pointerSize = objcHdr->pointerSize();
-    objcHdr->forEachSection(^(const Header::SectionInfo& info, bool& stop) {
+    objcHdr->forEachSection(^(const UnsafeHeader::SectionInfo& info, bool& stop) {
         if ( !info.segmentName.starts_with("__DATA") && !info.segmentName.starts_with("__AUTH") )
             return;
         if ( info.sectionName != "__objc_opt_ptrs" )
@@ -1948,6 +1959,22 @@ uint64_t DyldSharedCache::sharedCacheRelativeSelectorBaseVMAddress() const {
 
     uint64_t vmOffset = (uint64_t)value - (uint64_t)this;
     return this->unslidLoadAddress() + vmOffset;
+}
+
+uint64_t DyldSharedCache::sharedCacheRelativeSelectorBufferSize() const {
+    if ( const ObjCOptimizationHeader* opts = this->objcOpts() ) {
+        if ( opts->version >= 2 )
+            return opts->relativeMethodSelectorBufferSize;
+    }
+    return 0;
+}
+
+uint64_t DyldSharedCache::sharedCacheRelativeTypesBufferSize() const {
+    if ( const ObjCOptimizationHeader* opts = this->objcOpts() ) {
+        if ( opts->version >= 2 )
+            return opts->relativeMethodTypesBufferSize;
+    }
+    return 0;
 }
 #endif
 
@@ -2035,7 +2062,7 @@ const char* DyldSharedCache::getCanonicalPath(const char *path) const
 
 #if !(BUILDING_LIBDYLD || BUILDING_DYLD)
 void DyldSharedCache::fillMachOAnalyzersMap(std::unordered_map<std::string,dyld3::MachOAnalyzer*> & dylibAnalyzers) const {
-    forEachImage(^(const Header *hdr, const char *iteratedInstallName) {
+    forEachImage(^(const UnsafeHeader* hdr, const char *iteratedInstallName) {
         dylibAnalyzers[std::string(iteratedInstallName)] = (dyld3::MachOAnalyzer*)hdr;
     });
 }
@@ -2059,7 +2086,7 @@ void DyldSharedCache::computeReverseDependencyMap(std::unordered_map<std::string
     std::unordered_map<std::string,dyld3::MachOAnalyzer*> dylibAnalyzers;
 
     fillMachOAnalyzersMap(dylibAnalyzers);
-    forEachImage(^(const Header *hdr, const char *installName) {
+    forEachImage(^(const UnsafeHeader* hdr, const char *installName) {
         computeReverseDependencyMapForDylib(reverseDependencyMap, dylibAnalyzers, std::string(installName));
     });
 }
@@ -2095,7 +2122,7 @@ void DyldSharedCache::findDependentsRecursively(std::unordered_map<std::string, 
 void DyldSharedCache::computeTransitiveDependents(std::unordered_map<std::string, std::set<std::string>> & transitiveDependents) const {
     std::unordered_map<std::string, std::set<std::string>> reverseDependencyMap;
     computeReverseDependencyMap(reverseDependencyMap);
-    forEachImage(^(const Header *hdr, const char *installName) {
+    forEachImage(^(const UnsafeHeader* hdr, const char *installName) {
         std::set<std::string> visited;
         findDependentsRecursively(transitiveDependents, reverseDependencyMap, visited, std::string(installName));
     });

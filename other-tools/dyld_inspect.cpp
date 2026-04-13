@@ -14,7 +14,7 @@
 
 static void usage()
 {
-    fprintf(stderr, "Usage: dyld_inspect <options>* [ -p pid | -all | -all_installed_caches ]\n"
+    fprintf(stderr, "Usage: d <options>* [ -p pid | -all | -all_installed_caches ]\n"
             "\t-shared_cache_uuid       print shared cache UUID\n"
             "\t-shared_cache_address    print shared cache base address\n"
             //"\t-shared_cache_path       print shared cache path\n"

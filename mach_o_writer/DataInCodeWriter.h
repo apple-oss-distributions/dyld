@@ -25,10 +25,11 @@
 #ifndef mach_o_writer_DataInCode_h
 #define mach_o_writer_DataInCode_h
 
-#include <span>
 #include <stdint.h>
-#include <vector>
-#include <unordered_map>
+#include <mach-o/loader.h>
+
+// stl
+#include <span>
 
 // mach_o
 #include "DataInCode.h"
@@ -49,14 +50,13 @@ class VIS_HIDDEN DataInCodeWriter : public DataInCode
 public:
                         // used build data in code
                         DataInCodeWriter(std::span<const Entry> entries);
-    static size_t       estimateDataInCodeSize(std::span<const Entry> entries);
+    Error               valid(uint32_t textEndOffset);
 
     std::span<const uint8_t>  bytes() const { return _bytes; }
 
 private:
-    std::vector<uint8_t> _bytes;
-    Error                _buildError;
-    static const bool    _verbose = false;
+    std::vector<data_in_code_entry>     _dices;
+    Error                               _buildError;
 };
 
 

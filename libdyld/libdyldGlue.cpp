@@ -54,6 +54,10 @@
 #include "DyldAPIs.h"
 #include "ThreadLocalVariables.h"
 
+#if !TARGET_OS_EXCLAVEKIT
+#include "DyldLegacyInterfaceGlue.h"
+#endif // !TARGET_OS_EXCLAVEKIT
+
 namespace dyld4 {
     // dyld finds this section by name and stuffs a pointer to its API object into this section
     // libdyld then uses this gAPIs object to call into dyld
@@ -591,6 +595,19 @@ VIS_HIDDEN void _tlv_bootstrap_error()
 int dyld_shared_cache_iterate_text(const uuid_t cacheUuid, void (^callback)(const dyld_shared_cache_dylib_text_info* info))
 {
     checkTPROState();
+#if !TARGET_OS_DRIVERKIT && !TARGET_OS_EXCLAVEKIT
+#if !TARGET_OS_SIMULATOR
+// rdar://166655606 (26.x simulators need to back deploy to 15.2)
+// While that is technically not a supported config, it turns out that is what Guardian is currently using so it
+// needs to work. We can force these interface back to the old implementation, which means it will lose the ability
+// to search for installed simulator caches, but that is only necessary for host dyld's
+    if ( const IntrospectionVtable* vtable = dyldFrameworkIntrospectionVtable()) {
+        if (vtable->version >= 1) {
+            return vtable->dyld_shared_cache_iterate_text(cacheUuid, callback);
+        }
+    }
+#endif // !TARGET_OS_SIMULATOR
+#endif // !TARGET_OS_DRIVERKIT && !TARGET_OS_EXCLAVEKIT
     return gAPIs->dyld_shared_cache_iterate_text(cacheUuid, callback);
 }
 
@@ -604,6 +621,12 @@ const char* dyld_shared_cache_file_path()
 {
     checkTPROState();
     return gAPIs->dyld_shared_cache_file_path();
+}
+
+bool _dyld_shared_cache_file_path_containing_address(const void* addr, char path[PATH_MAX], uint64_t* fileOffset)
+{
+    checkTPROState();
+    return gAPIs->_dyld_shared_cache_file_path_containing_address(addr, path, fileOffset);
 }
 
 #if TARGET_OS_WATCH
@@ -652,10 +675,21 @@ bool _dyld_is_memory_immutable(const void* addr, size_t length)
 int  dyld_shared_cache_find_iterate_text(const uuid_t cacheUuid, const char* extraSearchDirs[], void (^callback)(const dyld_shared_cache_dylib_text_info* info))
 {
     checkTPROState();
+#if !TARGET_OS_DRIVERKIT && !TARGET_OS_EXCLAVEKIT
+#if !TARGET_OS_SIMULATOR
+// rdar://166655606 (26.x simulators need to back deploy to 15.2)
+// While that is technically not a supported config, it turns out that is what Guardian is currently using so it
+// needs to work. We can force these interface back to the old implementation, which means it will lose the ability
+// to search for installed simulator caches, but that is only necessary for host dyld's
+    if ( const IntrospectionVtable* vtable = dyldFrameworkIntrospectionVtable()) {
+        if (vtable->version >= 1) {
+            return vtable->dyld_shared_cache_find_iterate_text(cacheUuid, extraSearchDirs, callback);
+        }
+    }
+#endif // !TARGET_OS_SIMULATOR
+#endif // !TARGET_OS_DRIVERKIT && !TARGET_OS_EXCLAVEKIT
     return gAPIs->dyld_shared_cache_find_iterate_text(cacheUuid, extraSearchDirs, callback);
 }
-
-
 
 //
 // MARK: --- APIs iOS 11, macOS 10.13, bridgeOS 2.0 ---
@@ -1146,10 +1180,27 @@ void _dyld_for_each_prewarming_range(void (*callback)(const void* base, size_t s
     gAPIs->_dyld_for_each_prewarming_range(callback);
 }
 
-
 void _dyld_call_with_writable_tpro_memory(void (*func)(void*), void* ctx) {
     checkTPROState();
     gAPIs->_dyld_call_with_writable_tpro_memory(func, ctx);
+}
+
+
+//
+// MARK: --- APIs added iOS 27, macOS 27 ---
+//
+
+extern "C" void _dyld_lazy_load_internal(uint32_t* flag, const mach_header* mh) VIS_HIDDEN; // called from assembly
+void _dyld_lazy_load_internal(uint32_t* flag, const mach_header* mh)
+{
+    checkTPROState();
+    gAPIs->_dyld_lazy_load(flag, mh);
+}
+
+const struct mach_header* _dyld_get_dyld_header()
+{
+    checkTPROState();
+    return gAPIs->_dyld_get_dyld_header();
 }
 
 //

@@ -333,13 +333,6 @@ const char* const neverStubEliminateSymbols[] = {
     "_xpc_connection_send_message_with_reply_sync",
     "__dyld_register_func_for_add_image",
     "__dyld_register_func_for_remove_image",
-    // <rdar://problem/22050956> always use stubs for C++ symbols that can be overridden
-    "__ZdaPv",
-    "__ZdlPv",
-    "__Znam",
-    "__Znwm",
-    "__ZnwmSt19__type_descriptor_t",
-    "__ZnamSt19__type_descriptor_t",
 
     nullptr
 };
@@ -348,6 +341,11 @@ void StubOptimizer::addDefaultSymbols()
 {
     for (const char* const* p=neverStubEliminateSymbols; *p != nullptr; ++p)
         neverStubEliminate.insert(*p);
+
+    // <rdar://problem/22050956> always use stubs for C++ symbols that can be overridden
+    dyld3::MachOFile::forEachTreatAsWeakDef(^(const char* symbolName) {
+        neverStubEliminate.insert(symbolName);
+    });
 }
 
 

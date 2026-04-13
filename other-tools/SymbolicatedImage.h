@@ -22,10 +22,10 @@
  * @APPLE_LICENSE_HEADER_END@
  */
 
-#include "Header.h"
+#include "UnsafeHeader.h"
 #include "Image.h"
 
-using mach_o::Header;
+using mach_o::UnsafeHeader;
 using mach_o::Image;
 using mach_o::MappedSegment;
 using mach_o::Symbol;
@@ -82,9 +82,10 @@ public:
 
     struct SymbolLoc
     {
-        CString  name = "";
-        uint32_t inSymbolOffset=0;
-        bool     isThumb=false;
+        CString         name = "";
+        uint32_t        inSymbolOffset=0;
+        bool            isThumb=false;
+        const UnsafeHeader::SectionInfo* section=nullptr;
     };
 
     const Image&    image() const   { return _image; }
@@ -113,10 +114,12 @@ public:
                                             void (^optionalInstanceCallback)(const char* methodName),
                                             void (^optionalClassCallback)(const char* methodName)) const;
     const char*     selectorFromObjCStub(uint64_t sectionVmAdr, const uint8_t* sectionContent, uint32_t& offset) const;
+    void            forEachStub(void (^callback)(uint64_t stubVmAddr, const char* stubName)) const;
 
-    const uint8_t*  content(const Header::SectionInfo& sectInfo) const;
+    const uint8_t*  content(const UnsafeHeader::SectionInfo& sectInfo) const;
     SymbolLoc       findClosestSymbol(uint64_t runtimeOffset) const;
     const char*     symbolNameAt(uint64_t addr) const;
+    decltype(auto)  symbolNamesAt(uint64_t addr) const { return _symbolsMap.equal_range(addr); }
     const char*     cStringAt(uint64_t addr) const;
     bool            isBind(const void* location, const Fixup::BindTarget*& bindTarget) const;
     bool            isRebase(const void* location, uint64_t& rebaseTargetVmAddr) const;
@@ -137,10 +140,10 @@ public:
 
     const char*     libOrdinalName(int libraryOrdinal, char buffer[128]) const { return libOrdinalName(image().header(), libraryOrdinal, buffer); }
 
-    static const char* libOrdinalName(const Header* header, int libraryOrdinal, char buffer[128]);
+    static const char* libOrdinalName(const UnsafeHeader* header, int libraryOrdinal, char buffer[128]);
 
 #if HAVE_LIBLTO
-    void                    loadDisassembler();
+    void                    loadDisassembler(bool useColor);
     const char*             lookupSymbol(uint64_t referencePC, uint64_t referenceValue, uint64_t& referenceType, const char*& referenceName);
     int                     opInfo(uint64_t pc, uint64_t offset, uint64_t opSize, /* uint64_t instSize, */int tagType, void* tagBuf);
     LLVMDisasmContextRef    llvmRef() const { return _llvmRef; }
@@ -152,11 +155,13 @@ public:
 protected:
     void            addDyldCacheBasedFixups();
     void            addFixup(const Fixup& fixup);
+    void            sortSymbols();
+    void            addStubSymbols();
 
     struct SectionSymbols {
         struct Sym { uint64_t offsetInSection; const char* name; bool thumb=false; };
         std::string          sectStartName;
-        Header::SectionInfo  sectInfo;
+        UnsafeHeader::SectionInfo  sectInfo;
         std::vector<Sym>     symbols;
     };
     struct FixupInfo {
@@ -165,23 +170,23 @@ protected:
         uint64_t        address             = 0;
         uint32_t        sectNum             = 0;
     };
-    const Image&                                 _image;
-    std::vector<SectionSymbols>                  _sectionSymbols;
-    std::vector<Fixup::BindTarget>               _fixupTargets;
-    std::vector<FixupInfo>                       _fixups;
-    std::unordered_map<const void*,size_t>       _fixupsMap;
-    std::unordered_map<uint64_t, const char*>    _symbolsMap;
-    std::unordered_map<uint64_t, const char*>    _stringLiteralsMap;
-    std::vector<MappedSegment>                   _mappedSegments;
-    uint64_t                                     _fairplayEncryptedStartAddr = 0;
-    uint64_t                                     _fairplayEncryptedEndAddr   = 0;
-    const bool                                   _is64;
-    const size_t                                 _ptrSize;
-    const uint64_t                               _prefLoadAddress;
+    const Image&                                    _image;
+    std::vector<SectionSymbols>                     _sectionSymbols;
+    std::vector<Fixup::BindTarget>                  _fixupTargets;
+    std::vector<FixupInfo>                          _fixups;
+    std::unordered_map<const void*,size_t>          _fixupsMap;
+    std::unordered_multimap<uint64_t, const char*>  _symbolsMap;
+    std::unordered_map<uint64_t, const char*>       _stringLiteralsMap;
+    std::vector<MappedSegment>                      _mappedSegments;
+    uint64_t                                        _fairplayEncryptedStartAddr = 0;
+    uint64_t                                        _fairplayEncryptedEndAddr   = 0;
+    const bool                                      _is64;
+    const size_t                                    _ptrSize;
+    const uint64_t                                  _prefLoadAddress;
 #if HAVE_LIBLTO
-    LLVMDisasmContextRef                         _llvmRef = nullptr;
-    LLVMDisasmContextRef                         _llvmThumbRef = nullptr;
-    const uint8_t*                               _disasmSectContentBias = nullptr;
+    LLVMDisasmContextRef                            _llvmRef = nullptr;
+    LLVMDisasmContextRef                            _llvmThumbRef = nullptr;
+    const uint8_t*                                  _disasmSectContentBias = nullptr;
 #endif
 };
 } // namespace other_tools

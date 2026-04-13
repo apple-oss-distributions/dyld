@@ -1,4 +1,4 @@
-.Dd July 24, 2024
+.Dd May 5, 2025
 .Dt dyld_info 1
 .Os Darwin
 .Sh NAME
@@ -21,6 +21,8 @@
 .Op Fl symbolic_fixups
 .Op Fl opcodes
 .Op Fl uuid
+.Op Fl dlopens
+.Op Fl dlsyms
 .Op Fl disassemble
 .Op Fl section Ar segment-name Ar section-name
 .Op Fl all_sections
@@ -78,6 +80,10 @@ Display the load commands in the binary.
 Display the UUID of the binary.
 .It Fl function_variants
 Display info about function variants in the binary.
+.It Fl dlopens
+Display calls to dlopen() in the binary and if possible the path string used.
+.It Fl dlsyms
+Display calls to dlsym() in the binary and if possible the symbol string used.
 .It Fl disassemble
 Display a disassemble of all code sections.
 .It Fl section Ar segment-name Ar section-name

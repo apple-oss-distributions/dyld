@@ -545,13 +545,16 @@ struct DyldCachePatchableGOTLocation
     DyldCachePatchableGOTLocation& operator=(const DyldCachePatchableGOTLocation&) = default;
     DyldCachePatchableGOTLocation& operator=(DyldCachePatchableGOTLocation&&) = default;
 
-    bool operator==(const DyldCachePatchableGOTLocation& other) const = default;
+    bool operator==(const DyldCachePatchableGOTLocation& other) const;
 
     // When building the patch table, we might not know the final address of the locations, but we do know
     // where they are in a given GOT, so record that on all fixups and adjust them later to VMAddrs
     const Chunk*        clientGOT;
     VMOffset            clientGOTOffset;
-    uint64_t            high7                   : 7,
+
+    union {
+        struct {
+            uint64_t    high7                   : 7,
                         unused                  : 4,
                         isWeakImport            : 1,
                         authenticated           : 1,
@@ -559,6 +562,9 @@ struct DyldCachePatchableGOTLocation
                         key                     : 2,
                         discriminator           : 16,
                         addend                  : 32;
+        };
+        uint64_t        raw;
+    };
 };
 
 struct DylibOffset

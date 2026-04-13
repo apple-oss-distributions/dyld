@@ -104,7 +104,7 @@ private:
         uint64_t                        sectSize;
     };
 
-    std::optional<Visitor::Section> findSection(std::span<const char*> altSegNames,
+    std::optional<Visitor::Section> findSection(std::span<const char* const> altSegNames,
                                                 const char *sectionName) const;
     std::optional<Visitor::Section> findObjCDataSection(const char *sectionName) const;
     std::optional<Visitor::Section> findObjCTextSection(const char *sectionName) const;
@@ -124,7 +124,11 @@ struct Method
 
         // All fields are relative.  The name field is an offset from the start
         // of the selector strings buffer.
-        relativeDirect,
+        relativeDirectSelectors,
+
+        // All fields are relative.  The name and types fields are an offset from the start
+        // of the selector strings buffer.
+        relativeDirectSelectorsAndTypes,
 
         // All fields are pointers
         pointer
@@ -156,6 +160,7 @@ struct Method
 #endif
 
     void convertNameToOffset(const Visitor& objcVisitor, uint32_t nameOffset);
+    void convertTypesToOffset(const Visitor& objcVisitor, uint32_t nameOffset);
 
     static uint32_t getSize(bool is64);
 
@@ -203,6 +208,7 @@ struct MethodList
         methodListIsUniqued             = 0x1,
         methodListIsSorted              = 0x2,
 
+        methodListUsesTypeOffsets       = 0x20000000,
         methodListUsesSelectorOffsets   = 0x40000000,
         methodListIsRelative            = 0x80000000,
 
@@ -221,6 +227,10 @@ struct MethodList
             return this->entsize & MethodList::methodListSizeMask;
         }
 
+        uint32_t getRawSizeAndFlags() const {
+            return this->entsize;
+        }
+
         uint32_t getMethodCount() const {
             return this->count;
         }
@@ -233,6 +243,12 @@ struct MethodList
         // This returns true if a method list has been converted to this form
         bool usesOffsetsFromSelectorBuffer() const {
             return (entsize & methodListUsesSelectorOffsets) != 0;
+        }
+
+        // The shared cache changes types to be offsets from a base pointer
+        // This returns true if a method list has been converted to this form
+        bool usesOffsetsFromTypeBuffer() const {
+            return (entsize & methodListUsesTypeOffsets) != 0;
         }
 
         // Returns true if this is a relative method list.  False if its pointer based
@@ -255,6 +271,11 @@ struct MethodList
             this->entsize |= methodListUsesSelectorOffsets;
         }
 
+        void setUsesOffsetsFromTypeBuffer()
+        {
+            this->entsize |= methodListUsesTypeOffsets;
+        }
+
     private:
         uint32_t    entsize;
         uint32_t    count;
@@ -270,13 +291,17 @@ struct MethodList
     uint32_t methodSize() const;
 
     bool usesOffsetsFromSelectorBuffer() const;
+    bool usesOffsetsFromTypeBuffer() const;
     bool usesRelativeOffsets() const;
+
+    uint32_t getRawSizeAndFlags() const;
 
     Method getMethod(const Visitor& objcVisitor, uint32_t i) const;
 
     void setIsUniqued();
     void setIsSorted();
     void setUsesOffsetsFromSelectorBuffer();
+    void setUsesOffsetsFromTypeBuffer();
 
     // Creates an empty shared cache method list (one that is fixed up), and returns
     // its size

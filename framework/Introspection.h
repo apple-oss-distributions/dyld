@@ -32,36 +32,13 @@
 
 NS_HEADER_AUDIT_BEGIN(nullability, sendability)
 
-struct _DYImageFastPathData {
-    void* installNamePtr;
-    uint64_t    installNameSize;
-    void*       filePathPtr;
-    uint64_t    filePathSize;
-    uuid_t      uuid;
-    uint64_t    address;
-    bool        sharedCacheImage;
-    bool        unicodeInstallname;
-    bool        unicodeFilePath;
-};
-
-struct _DYSegmentFastPathData {
-    void * _Nullable segmentNamePtr;
-    uint64_t segmentNameSize;
-    uint64_t vmSize;
-    uint64_t fileSize;
-    uint64_t address;
-    uint64_t preferredAddress;
-    uint64_t permissions;
-};
-
 @interface _DYSegment : NSObject
 @property(nonatomic, readonly) NSString* name;
 @property(nonatomic, readonly) uint64_t vmsize;
 @property(nonatomic, readonly) uint64_t permissions;
 @property(nonatomic, readonly) uint64_t address;
 @property(nonatomic, readonly) uint64_t preferredLoadAddress;
-- (BOOL)withSegmentData:(void (^_Nonnull)(NSData * _Nonnull))block;
-    - (void) getFastPathData:(struct _DYSegmentFastPathData*)data;
+@property(nonatomic, readonly, nullable) dispatch_data_t data;
 @end
 
 @interface _DYEnvironment : NSObject
@@ -81,7 +58,7 @@ struct _DYSegmentFastPathData {
 @property(nonatomic, readonly, nullable) _DYSharedCache* sharedCache;
 @property(nonatomic, readonly) uint64_t pointerSize; //FIXME: This should be on the process, but needs to be here to support
 
-- (void) getFastPathData:(struct _DYImageFastPathData*)data;
+//- (void) getFastPathData:(struct _DYImageFastPathData*)data;
 @end
 
 //FIXME: These should be properties of _DYImage, but the way they are implemented in `dyld` makes that inconvenient for now
@@ -94,7 +71,7 @@ struct _DYSegmentFastPathData {
 
 // FIXME: Only here to support dyld_shared_cache_for_each_subcache4Rosetta
 @interface _DYSubCache : NSObject
-- (BOOL)withVMLayoutData:(void (^_Nonnull)(NSData * _Nonnull))block;
+- (BOOL)withVMLayoutBytes:(NS_NOESCAPE void (^_Nonnull)(const void* _Nonnull buffer, size_t size))block;
 @end
 
 @interface _DYSharedCache : NSObject
@@ -109,13 +86,15 @@ struct _DYSegmentFastPathData {
 @property(nonatomic, readonly) NSArray<NSString *>* filePaths;
 @property(nonatomic, readonly) NSArray<_DYSubCache *>* subCaches; // FIXME: Only here to support dyld_shared_cache_for_each_subcache4Rosetta
 @property(nonatomic, readonly, nullable) NSString* localSymbolPath;
-@property(nonatomic, readonly, nullable) NSData* localSymbolData;
+- (BOOL)withLocalSymbolData:(NS_NOESCAPE void (^_Nonnull)(const void* _Nonnull buffer, size_t size))block;
 - (BOOL)pinMappings;
 - (void)unpinMappings;
 
++ (NSArray<_DYSharedCache *> *) systemSharedCaches;
++ (NSArray<_DYSharedCache *> *) systemSharedCachesForSystemPath:(NSString*)path NS_SWIFT_NAME(systemSharedCaches(path:));
 + (NSArray<_DYSharedCache *> *) installedSharedCaches;
-+ (NSArray<_DYSharedCache *> *) installedSharedCachesForSystemPath:(NSString*)path NS_SWIFT_NAME(installedSharedCaches(systemPath:));
 - (instancetype _Nullable) initWithPath:(NSString*)path error:(NSError  * _Nullable * _Nullable)error;
+
 @end
 
 @interface _DYSnapshot : NSObject
@@ -132,6 +111,7 @@ struct _DYSegmentFastPathData {
 @property(nonatomic, readonly, nullable) NSArray<_DYAOTImage *>* aotImages;
 @property(nonatomic, readonly, nullable) _DYSharedCache* sharedCache;
 @property(nonatomic, readonly, nullable) _DYEnvironment* environment;
+@property(nonatomic, readonly, nullable) NSDictionary<NSString*, NSNumber*>* metrics;
 @end
 
 @interface _DYEventHandlerToken : NSObject

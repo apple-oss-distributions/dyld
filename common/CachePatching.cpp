@@ -1098,6 +1098,16 @@ void PatchTableBuilder::calculateRequiredSpace(const std::span<CacheDylib>& cach
                     continue;
 
                 // Many dylibs will all add the same GOT use.  Remove duplicates
+                std::sort(uses.begin(), uses.end(), [](const DyldCachePatchableGOTLocation& a, const DyldCachePatchableGOTLocation& b) {
+                    if ( a.clientGOT != b.clientGOT ) {
+                        // Note this is not stable, but thats ok. Later we'll sort for real once we have addresses
+                        return a.clientGOT < b.clientGOT;
+                    }
+                    if ( a.clientGOTOffset != b.clientGOTOffset )
+                        return a.clientGOTOffset < b.clientGOTOffset;
+                    return a.raw < b.raw;
+                });
+
                 uses.erase(std::unique(uses.begin(), uses.end()), uses.end());
 
                 // We have uses in this client->location->uses list.  Track them
@@ -1307,10 +1317,20 @@ void PatchTableBuilder::calculatePatchTable(const std::span<CacheDylib>& cacheDy
                 const CacheVMAddress exportCacheDylibVMAddr = cacheAndInputAddress.first;
                 const InputDylibVMAddress exportInputDylibVMAddr = cacheAndInputAddress.second;
 
-                const std::span<const DyldCachePatchableGOTLocation> uses = dylibClientData.gotClient.uses.at(exportInputDylibVMAddr);
+                std::span<DyldCachePatchableGOTLocation> uses = dylibClientData.gotClient.uses.at(exportInputDylibVMAddr);
 
                 if ( uses.empty() )
                     continue;
+
+                // sort again now we have addresses
+                std::sort(uses.begin(), uses.end(), [](const DyldCachePatchableGOTLocation& a, const DyldCachePatchableGOTLocation& b) {
+                    if ( a.clientGOT != b.clientGOT ) {
+                        return a.clientGOT->cacheVMAddress < b.clientGOT->cacheVMAddress;
+                    }
+                    if ( a.clientGOTOffset != b.clientGOTOffset )
+                        return a.clientGOTOffset < b.clientGOTOffset;
+                    return a.raw < b.raw;
+                });
 
                 // We should have an export already, from the previous scan to size the tables
                 uint32_t imageExportIndex = dylibClientData.findExportIndex(exportCacheDylibVMAddr);
@@ -1544,6 +1564,17 @@ DyldCachePatchableGOTLocation::DyldCachePatchableGOTLocation(const Chunk* client
     // check for truncations
     assert(this->addend == addend);
     assert((this->high7 << 1) == pmd.high8);
+}
+
+bool DyldCachePatchableGOTLocation::operator==(const DyldCachePatchableGOTLocation& other) const
+{
+    if ( this->clientGOT != other.clientGOT )
+        return false;
+    if ( this->clientGOTOffset != other.clientGOTOffset )
+        return false;
+    if ( this->raw != other.raw )
+        return false;
+    return true;
 }
 
 

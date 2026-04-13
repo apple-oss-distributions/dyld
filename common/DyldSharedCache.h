@@ -45,7 +45,7 @@
 #include "CachePatching.h"
 #include "Diagnostics.h"
 #include "MachOAnalyzer.h"
-#include "Header.h"
+#include "UnsafeHeader.h"
 
 #if !(BUILDING_LIBDYLD || BUILDING_DYLD)
 #include "JSON.h"
@@ -87,6 +87,10 @@ struct VIS_HIDDEN ObjCOptimizationHeader
     uint64_t classHashTableCacheOffset;
     uint64_t protocolHashTableCacheOffset;
     uint64_t relativeMethodSelectorBaseAddressOffset;
+
+    // Added in version 2
+    uint64_t relativeMethodSelectorBufferSize;
+    uint64_t relativeMethodTypesBufferSize; // this buffer starts at the end of the selectors buffer
 };
 
 // convenience tuple for tracking file by fs/inode
@@ -125,13 +129,6 @@ public:
         std::string             aliasPath;
     };
 
-    enum CodeSigningDigestMode
-    {
-        SHA256only = 0,
-        SHA1only   = 1,
-        Agile      = 2
-    };
-
     enum class LocalSymbolsMode {
         keep,
         unmap,
@@ -148,7 +145,6 @@ public:
         uint64_t                                    cacheConfiguration;
         bool                                        optimizeDyldDlopens;
         bool                                        optimizeDyldLaunches;
-        CodeSigningDigestMode                       codeSigningDigestMode;
         bool                                        dylibsRemovedDuringMastering;
         bool                                        inodesAreSameAsRuntime;
         bool                                        cacheSupportsASLR;
@@ -267,8 +263,8 @@ public:
     //
     // Iterates over each dylib in the cache
     //
-    void                forEachImage(void (^handler)(const mach_o::Header* hdr, const char* installName)) const;
-    void                forEachDylib(void (^handler)(const mach_o::Header* hdr, const char* installName, uint32_t imageIndex, uint64_t inode, uint64_t mtime, bool& stop)) const;
+    void                forEachImage(void (^handler)(const mach_o::UnsafeHeader* hdr, const char* installName)) const;
+    void                forEachDylib(void (^handler)(const mach_o::UnsafeHeader* hdr, const char* installName, uint32_t imageIndex, uint64_t inode, uint64_t mtime, bool& stop)) const;
 
 
     //
@@ -325,7 +321,7 @@ public:
     //
     // If path is a dylib in the cache, return is mach_header
     //
-    const mach_o::Header* getImageFromPath(const char* dylibPath) const;
+    const mach_o::UnsafeHeader* getImageFromPath(const char* dylibPath) const;
 
     //
     // Get image path from index
@@ -400,6 +396,11 @@ public:
     // Gets uuid of the subCache
     //
     void            getSubCacheUuid(uint8_t index, uint8_t uuid[]) const;
+
+    //
+    // Returns the dyld_subcache_entry[] from the cache header
+    //
+    std::span<const dyld_subcache_entry> subCaches() const;
 
     //
     // Returns the vmOffset of the subCache
@@ -515,7 +516,7 @@ public:
     //
     // Iterates over function variant pointers in the dyld cache
     //
-    void forEachFunctionVariantPatchLocation(void (^handler)(const void* loc, PointerMetaData pmd, const mach_o::FunctionVariants& fvs, const mach_o::Header* dylibHdr, int variantIndex, bool& stop)) const;
+    void forEachFunctionVariantPatchLocation(void (^handler)(const void* loc, PointerMetaData pmd, const mach_o::FunctionVariants& fvs, const mach_o::UnsafeHeader* dylibHdr, int variantIndex, bool& stop)) const;
 
     //
     // searches cache for PrebuiltLoader for program by cdHash
@@ -559,6 +560,17 @@ public:
     // Returns the VM address of that selector, if it exists
     //
     uint64_t sharedCacheRelativeSelectorBaseVMAddress() const;
+
+    // Returns the size of the selectors buffer, if the header is new enough for this information
+    //
+    uint64_t sharedCacheRelativeSelectorBufferSize() const;
+
+    // Returns the size of the types buffer, if the header is new enough for this information
+    // Note this should be added to the selector buffer end as the types could be in the selectors
+    // buffer but also some types are after the selectors range.  This allows accurately determining if
+    // a selector is for sure in the selectors buffer, which is good for range checks
+    //
+    uint64_t sharedCacheRelativeTypesBufferSize() const;
 #endif
 
     //
@@ -640,7 +652,7 @@ public:
     // Returns true if the given MachO is in the shared cache range.
     // Returns false if the cache is null.
     static bool inDyldCache(const DyldSharedCache* cache, const dyld3::MachOFile* mf);
-    static bool inDyldCache(const DyldSharedCache* cache, const mach_o::Header* header);
+    static bool inDyldCache(const DyldSharedCache* cache, const mach_o::UnsafeHeader* header);
 
     // Returns ture if the given path is a subCache filepath.
     static bool isSubCachePath(const char* leafName);

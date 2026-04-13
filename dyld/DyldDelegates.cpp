@@ -100,7 +100,7 @@ extern "C" int amfi_check_dyld_policy_self(uint64_t input_flags, uint64_t* outpu
 #endif // !TARGET_OS_EXCLAVEKIT
 
 #include "Defines.h"
-#include "Header.h"
+#include "UnsafeHeader.h"
 #include "MachOLoaded.h"
 #include "MachOAnalyzer.h"
 #include "DyldSharedCache.h"
@@ -129,7 +129,7 @@ using dyld3::MachOFile;
 using dyld3::MachOAnalyzer;
 using dyld3::FatFile;
 
-using mach_o::Header;
+using mach_o::UnsafeHeader;
 using mach_o::Universal;
 using mach_o::Version32;
 
@@ -177,6 +177,10 @@ void SyscallDelegate::getDyldCache(const dyld3::SharedCacheOptions& opts, dyld3:
         if ( _dyldCache->header.cacheType == kDyldSharedCacheTypeUniversal)
             universalDevelopment = _dyldCache->header.cacheSubType == kDyldSharedCacheTypeDevelopment;
         loadInfo.development = _dyldCache->header.cacheType == kDyldSharedCacheTypeDevelopment || universalDevelopment;
+
+        if ( _dyldCachePath != nullptr ) {
+            loadInfo.cacheFileID = { _dyldCachePath };
+        }
     }
     else {
         loadInfo.loadAddress = nullptr;
@@ -442,16 +446,16 @@ bool SyscallDelegate::getDylibInfo(const char* dylibPath, mach_o::Platform platf
     __block Diagnostics diag;
     __block bool        result = false;
     this->withReadOnlyMappedFile(diag, dylibPath, false, ^(const void* mapping, size_t mappedSize, bool isOSBinary, const FileID&, const char*, const int) {
-        const Header* hdr = nullptr;
+        const UnsafeHeader* hdr = nullptr;
         std::span<const uint8_t> content = { (const uint8_t*)mapping, mappedSize };
         if ( const Universal* uni = Universal::isUniversal(content) ) {
             Universal::Slice slice;
             if ( uni->bestSlice(archs, isOSBinary, slice) ) {
-                hdr = (const Header*)slice.buffer.data();
+                hdr = (const UnsafeHeader*)slice.buffer.data();
             }
         }
         else {
-            hdr = Header::isMachO(content);
+            hdr = UnsafeHeader::isMachO(content);
         }
         
         if ( hdr == nullptr )

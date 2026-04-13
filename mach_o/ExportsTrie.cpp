@@ -33,7 +33,7 @@
 #include "ExportsTrie.h"
 #include "Symbol.h"
 #include "Misc.h"
-#include "Header.h"
+#include "UnsafeHeader.h"
 
 namespace mach_o {
 
@@ -305,8 +305,11 @@ Error ExportsTrie::terminalPayloadToSymbol(const Entry& entry, Symbol& symInfo) 
         const char* importName = entry.name.data();
         if ( *p != '\0' ) {
             importName = (char*)p;
-            while (*p != '\0')
+            while (*p != '\0') {
                 ++p;
+                if ( p >= end )
+                    return Error("re-export name change not nul terminated");
+            }
         }
         ++p;
         symInfo = Symbol::makeReExport(entry.name.data(), (int)value, importName);

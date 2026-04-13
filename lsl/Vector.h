@@ -40,12 +40,19 @@
 #include "BitUtils.h"
 #include "Allocator.h"
 
+#if __has_feature(ptrauth_calls)
+    #include <ptrauth.h>
+    #define __ptrauth_vector_ptr __ptrauth(ptrauth_key_process_dependent_data, 1, ptrauth_string_discriminator("vector"))
+#else
+    #define __ptrauth_vector_ptr
+#endif // __has_feature(ptrauth_calls)
+
 
 namespace lsl {
 
 template<typename T>
 requires std::is_trivially_destructible_v<T>
-struct TRIVIAL_ABI Vector {
+struct Vector {
 #pragma mark -
 #pragma mark Typedefs
     using value_type        = T;
@@ -324,10 +331,10 @@ private:
             }
         }
     }
-    Allocator*  _allocator      = nullptr;
-    value_type* _buffer         = nullptr;
-    uint64_t    _size           = 0;
-    uint64_t    _capacity       = 0;
+    Allocator*  __ptrauth_vector_ptr _allocator = nullptr;
+    value_type* __ptrauth_vector_ptr _buffer    = nullptr;
+    uint64_t    _size                           = 0;
+    uint64_t    _capacity                       = 0;
 };
 
 } // namespace lsl

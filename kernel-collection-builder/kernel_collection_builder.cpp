@@ -579,7 +579,6 @@ bool runKernelCollectionBuilder(struct KernelCollectionBuilder* builder) {
     builderOptions.cacheConfiguration = kDyldSharedCacheTypeProduction;
     builderOptions.optimizeDyldDlopens = false;
     builderOptions.optimizeDyldLaunches = false;
-    builderOptions.codeSigningDigestMode = DyldSharedCache::CodeSigningDigestMode::SHA256only;
     builderOptions.dylibsRemovedDuringMastering = true;
     builderOptions.inodesAreSameAsRuntime = false;
     builderOptions.cacheSupportsASLR = true;

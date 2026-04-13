@@ -1,0 +1,31 @@
+#include "unittests.xcconfig"
+
+SUPPORTED_PLATFORMS = macosx iphoneos appletvos iphonesimulator watchos xros
+
+USER_HEADER_SEARCH_PATHS = $(SRCROOT)/testing/framework-unit-tests $(inherited)
+
+// Swift and modules
+SWIFT_INSTALL_OBJC_HEADER       = NO
+SWIFT_OBJC_INTEROP_MODE         = objc
+CLANG_ENABLE_MODULES            = YES
+
+CODE_SIGN_IDENTITY = $(TRUSTED_CODE_SIGN_IDENTITY)
+
+USES_XCTRUNNER                  = YES
+XCTRUNNER_LAUNCH_AS_TOOL        = YES
+ENABLE_APP_SANDBOX              = NO
+
+OTHER_CODE_SIGN_FLAGS           = -o library
+CODE_SIGN_ENTITLEMENTS          = testing/framework-unit-tests/framework_tests_entitlements.plist
+
+// TODO: Clean these up.  They were moved from the build settings
+CLANG_ENABLE_MODULES = YES
+CLANG_ENABLE_OBJC_ARC = YES
+CLANG_ENABLE_OBJC_WEAK = YES
+COPY_PHASE_STRIP = NO
+MACOSX_DEPLOYMENT_TARGET = 26.0
+PRODUCT_BUNDLE_IDENTIFIER = com.apple.dyld.dyld-frameworkUnitTests
+TARGETED_DEVICE_FAMILY = 1,2,3,4,5,6,7
+
+OTHER_SWIFT_FLAGS = $(inherited) -vfsoverlay "$(PROJECT_TEMP_DIR)/dyld-overlay.yaml" -Xcc -ivfsoverlay -Xcc "$(PROJECT_TEMP_DIR)/dyld-overlay.yaml"
+OTHER_CFLAGS = $(inherited) -ivfsoverlay "$(PROJECT_TEMP_DIR)/dyld-overlay.yaml"

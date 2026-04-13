@@ -33,22 +33,22 @@
 namespace cache_builder
 {
 
-constexpr uint64_t operator"" _KB(uint64_t v)
+constexpr uint64_t operator""_KB(uint64_t v)
 {
     return (1ULL << 10) * v;
 }
 
-constexpr uint64_t operator"" _MB(uint64_t v)
+constexpr uint64_t operator""_MB(uint64_t v)
 {
     return (1ULL << 20) * v;
 }
 
-constexpr uint64_t operator"" _GB(uint64_t v)
+constexpr uint64_t operator""_GB(uint64_t v)
 {
     return (1ULL << 30) * v;
 }
 
-constexpr uint64_t operator"" _GB(long double v)
+constexpr uint64_t operator""_GB(long double v)
 {
     return (1ULL << 30) * v;
 }
@@ -132,11 +132,11 @@ struct Layout
     // Fields for all layouts
     CacheVMAddress          cacheBaseAddress;
     CacheVMSize             cacheSize;
-    std::optional<uint64_t> cacheMaxSlide;
     std::optional<uint64_t> cacheFixedSlide;
     const bool              is64;
     const bool              hasAuthRegion;
     const bool              tproIsInData;
+    const bool              supportsSplitCache;
     const uint32_t          pageSize;
     const uint32_t          machHeaderAlignment = 4096;
 
@@ -171,20 +171,19 @@ struct CodeSign
 {
     CodeSign(const BuilderOptions& options);
 
-    enum class Mode
-    {
-        onlySHA256,
-        onlySHA1,
-        agile
-    };
-
-    const Mode      mode;
     const uint32_t  pageSize;
 };
 
 struct BuilderConfig
 {
     BuilderConfig(const BuilderOptions& options);
+
+    // FIXME: Enable this all the time once support has landed in objc/lldb
+#if BUILDING_CACHE_BUILDER_UNIT_TESTS
+    static constexpr bool convertMethodListTypesToOffsets = true;
+#else
+    static constexpr bool convertMethodListTypesToOffsets = false;
+#endif
 
     Logger      log;
     Timer       timer;

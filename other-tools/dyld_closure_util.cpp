@@ -251,12 +251,12 @@ int main(int argc, const char* argv[])
             state.setMainLoader(mainLoader);
 
             // platform was a guess from libSystem.dylib, now we have the actual binary loaded, use its platform
-            mach_o::PlatformAndVersions pvs = ((mach_o::Header*)mainLoader->loadAddress(state))->platformAndVersions();
+            mach_o::PlatformAndVersions pvs = ((mach_o::UnsafeHeader*)mainLoader->loadAddress(state))->platformAndVersions();
             config.process.platform = pvs.platform;
 
             // now that main executable is loaded, use its actual platform as the global platform
             if ( state.config.process.platform == mach_o::Platform::macOS ) {
-                mach_o::PlatformAndVersions pvsExe = ((mach_o::Header*)mainLoader->loadAddress(state))->platformAndVersions();
+                mach_o::PlatformAndVersions pvsExe = ((mach_o::UnsafeHeader*)mainLoader->loadAddress(state))->platformAndVersions();
                 config.process.platform = pvsExe.platform;
             }
             __block MissingPaths missingPaths;

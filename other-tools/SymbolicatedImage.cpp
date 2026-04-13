@@ -34,7 +34,12 @@
 #if HAVE_LIBLTO
     extern "C" void lto_initialize_disassembler();  // from libLTO.dylib but not in Disassembler.h
     extern "C" int LLVMSetDisasmOptions(LLVMDisasmContextRef context, uint64_t options);\
+    extern "C" LLVMDisasmContextRef LLVMCreateDisasmCPU(const char *Triple, const char *CPU,
+                                                        void *DisInfo, int TagType,
+                                                        LLVMOpInfoCallback GetOpInfo,
+                                                        LLVMSymbolLookupCallback SymbolLookUp);
     WEAK_LINK_FORCE_IMPORT(LLVMCreateDisasm);
+    WEAK_LINK_FORCE_IMPORT(LLVMCreateDisasmCPU);
     WEAK_LINK_FORCE_IMPORT(LLVMDisasmDispose);
     WEAK_LINK_FORCE_IMPORT(LLVMDisasmInstruction);
     WEAK_LINK_FORCE_IMPORT(LLVMSetDisasmOptions);
@@ -57,6 +62,9 @@
     #ifndef LLVMDisassembler_Option_PrintImmHex
         #define LLVMDisassembler_Option_PrintImmHex 2
     #endif
+    #ifndef LLVMDisassembler_Option_Color
+        #define LLVMDisassembler_Option_Color 32
+    #endif
     asm(".linker_option \"-lLTO\"");
 #endif
 
@@ -69,7 +77,7 @@ SymbolicatedImage::SymbolicatedImage(const Image& im)
 : _image(im), _is64(im.header()->is64()), _ptrSize(_is64 ? 8 : 4), _prefLoadAddress(im.header()->preferredLoadAddress())
 {
     // build list of sections
-    _image.header()->forEachSection(^(const Header::SectionInfo& sectInfo, bool& stop) {
+    _image.header()->forEachSection(^(const UnsafeHeader::SectionInfo& sectInfo, bool& stop) {
         std::string sectName(sectInfo.segmentName);
         sectName += ",";
         sectName += sectInfo.sectionName;
@@ -84,59 +92,29 @@ SymbolicatedImage::SymbolicatedImage(const Image& im)
         _fairplayEncryptedEndAddr   = _fairplayEncryptedStartAddr + fairplaySize;
     }
 
-    // add entries for all functions for function-starts table
-    if ( _image.hasFunctionStarts() ) {
-        _image.functionStarts().forEachFunctionStart(0, ^(uint64_t funcAddr) {
-            //printf("addr: 0x%08llX\n", funcAddr);
-            char* label;
-            asprintf(&label, "<anon-%08llX>", funcAddr);
-            _symbolsMap[funcAddr] = label;
-        });
-    }
     __block bool hasLocalSymbols = false;
     if ( _image.hasSymbolTable() ) {
         // add symbols from nlist
         _image.symbolTable().forEachDefinedSymbol(^(const Symbol& symbol, uint32_t symbolIndex, bool& stop) {
             uint64_t absAddress;
-            if ( !symbol.isAbsolute(absAddress) && (symbol.implOffset() != 0 || prefLoadAddress() == 0) && (symbol.sectionOrdinal()-1) < _sectionSymbols.size() ) {
-                const char* symName = symbol.name().c_str();
-                _symbolsMap[_prefLoadAddress+symbol.implOffset()] = symName;
+            bool isAbsolute = symbol.isAbsolute(absAddress);
+            const char* symName = symbol.name().c_str();
+            if ( !isAbsolute && (symbol.implOffset() != 0 || prefLoadAddress() == 0) && (symbol.sectionOrdinal()-1) < _sectionSymbols.size() ) {
+                _symbolsMap.emplace(_prefLoadAddress+symbol.implOffset(), symName);
 
                 SectionSymbols& ss = _sectionSymbols[symbol.sectionOrdinal()-1];
                 uint64_t offsetInSection = _prefLoadAddress+symbol.implOffset()-ss.sectInfo.address;
                 ss.symbols.push_back({offsetInSection, symName, symbol.isThumb()});
+            } else if ( isAbsolute ) {
+                _symbolsMap.emplace(absAddress, symName);
+            } else {
+                // mh_execute_header is attributed to __text in some configurations
+                // but it's not actually within the range of the text section
+                uint64_t addr = prefLoadAddress() + symbol.implOffset();
+                _symbolsMap.emplace(addr, symName);
             }
             if ( symbol.scope() == Symbol::Scope::translationUnit )
                 hasLocalSymbols = true;
-        });
-        // add stubs and cstring literals
-        std::span<const uint32_t> indirectTable = _image.indirectSymbolTable();
-        __block std::vector<const char*> symbolNames;
-        symbolNames.resize(_image.symbolTable().totalCount());
-        _image.symbolTable().forEachSymbol(^(const char* symbolName, uint64_t n_value, uint8_t n_type, uint8_t n_sect, uint16_t n_desc, uint32_t symbolIndex, bool& stop) {
-            symbolNames[symbolIndex] = symbolName;
-        });
-        _image.header()->forEachSection(^(const Header::SectionInfo& sectInfo, bool& stop) {
-            uint32_t type = (sectInfo.flags & SECTION_TYPE);
-            if ( type == S_SYMBOL_STUBS ) {
-                const int stubSize          = sectInfo.reserved2;
-                int stubsIndirectStartIndex = sectInfo.reserved1;
-                int stubsIndirectCount      = (int)(sectInfo.size / stubSize);
-                for (int i=0; i < stubsIndirectCount; ++i) {
-                    uint32_t symbolIndex = indirectTable[stubsIndirectStartIndex+i];
-                    if ( (symbolIndex & (INDIRECT_SYMBOL_LOCAL|INDIRECT_SYMBOL_ABS)) == 0 && symbolIndex < symbolNames.size() )
-                        _symbolsMap[sectInfo.address + stubSize*i] = symbolNames[symbolIndex];
-                }
-            }
-            else if ( type == S_NON_LAZY_SYMBOL_POINTERS ) {
-                int gotsIndirectStartIndex = sectInfo.reserved1;
-                int gotsIndirectCount      = (int)(sectInfo.size / 8);  // FIXME: arm64_32
-                for (int i=0; i < gotsIndirectCount; ++i) {
-                    uint32_t symbolIndex = indirectTable[gotsIndirectStartIndex+i];
-                    if ( (symbolIndex & (INDIRECT_SYMBOL_LOCAL|INDIRECT_SYMBOL_ABS)) == 0 && symbolIndex < symbolNames.size() )
-                        _symbolsMap[sectInfo.address + 8*i] = symbolNames[symbolIndex];
-                }
-            }
         });
     }
     // options like -T in strip removes global Swift symbols from the nlist, but they'll
@@ -152,21 +130,27 @@ SymbolicatedImage::SymbolicatedImage(const Image& im)
             uint64_t addr = _prefLoadAddress+symbol.implOffset();
             for ( SectionSymbols& sect : _sectionSymbols ) {
                 if ( addr >= sect.sectInfo.address && addr < (sect.sectInfo.address+sect.sectInfo.size) ) {
-                    if ( auto it = _symbolsMap.find(addr); it == _symbolsMap.end() ) {
-                        const char* copiedSym = strdup(symbol.name().c_str());
-                        sect.symbols.push_back({ addr-sect.sectInfo.address, copiedSym });
-                        _symbolsMap[addr] = copiedSym;
-                    } else if ( CString(it->second) != symbol.name() ) {
-                        // different symbol names at the same location
-                        sect.symbols.push_back({ addr-sect.sectInfo.address, strdup(symbol.name().c_str()) });
+                    bool hasEntry = false;
+                    auto range = _symbolsMap.equal_range(addr);
+                    for (auto it = range.first; it != range.second; ++it) {
+                        if ( strcmp(it->second, symbol.name().c_str()) == 0 ) {
+                            hasEntry = true;
+                            break;
+                        }
                     }
+
+                    if ( hasEntry )
+                        continue;
+                    const char* copiedSym = strdup(symbol.name().c_str());
+                    sect.symbols.push_back({ addr-sect.sectInfo.address, copiedSym });
+                    _symbolsMap.emplace(addr, copiedSym);
                 }
             }
         });
     }
 
     // add c-string labels
-    _image.header()->forEachSection(^(const Header::SectionInfo& sectInfo, bool& stop) {
+    _image.header()->forEachSection(^(const UnsafeHeader::SectionInfo& sectInfo, bool& stop) {
         uint32_t type = (sectInfo.flags & SECTION_TYPE);
         if ( type == S_CSTRING_LITERALS ) {
             const char* sectionContent  = (char*)content(sectInfo);
@@ -200,8 +184,10 @@ SymbolicatedImage::SymbolicatedImage(const Image& im)
         _image.forEachBindTarget(^(const Fixup::BindTarget& target, bool& stop) {
             _fixupTargets.push_back(target);
         });
-        _image.forEachFixup(^(const Fixup& fixup, bool& stop) {
-            this->addFixup(fixup);
+        _image.withSegments(^(std::span<const MappedSegment> segments) {
+            _image.forEachFixup(segments, ^(const Fixup& fixup, bool& stop) {
+                this->addFixup(fixup);
+            });
         });
     }
     // if has ObjC and stripped
@@ -209,21 +195,21 @@ SymbolicatedImage::SymbolicatedImage(const Image& im)
         // add back stripped class and method names
         this->forEachDefinedObjCClass(^(uint64_t classVmAddr) {
             const char* classname       = this->className(classVmAddr);
-            _symbolsMap[classVmAddr] = classname;
+            _symbolsMap.emplace(classVmAddr, classname);
             this->forEachMethodInClass(classVmAddr, ^(const char* methodName, uint64_t implAddr) {
                 char* label;
                 asprintf(&label, "-[%s %s]", classname, methodName);
-                _symbolsMap[implAddr] = label;
+                _symbolsMap.emplace(implAddr, label);
             });
             uint64_t    metaClassVmaddr = this->metaClassVmAddr(classVmAddr);
             this->forEachMethodInClass(metaClassVmaddr, ^(const char* methodName, uint64_t implAddr) {
                 char* label;
                 asprintf(&label, "+[%s %s]", classname, methodName);
-                _symbolsMap[implAddr] = label;
+                _symbolsMap.emplace(implAddr, label);
             });
         });
         // add back objc stub names
-        _image.header()->forEachSection(^(const Header::SectionInfo& sectInfo, bool& stop) {
+        _image.header()->forEachSection(^(const UnsafeHeader::SectionInfo& sectInfo, bool& stop) {
             if ( (sectInfo.sectionName == "__objc_stubs") && sectInfo.segmentName.starts_with("__TEXT") ) {
                 const uint8_t* sectionContent = content(sectInfo);
                 uint64_t       sectionVmAdr   = sectInfo.address;
@@ -232,7 +218,7 @@ SymbolicatedImage::SymbolicatedImage(const Image& im)
                     const char* stubSelector = this->selectorFromObjCStub(sectionVmAdr, sectionContent, offset);
                     char* label;
                     asprintf(&label, "_objc_msgSend$%s", stubSelector);
-                    _symbolsMap[labelAddr] = label;
+                    _symbolsMap.emplace(labelAddr, label);
                 }
             }
         });
@@ -250,7 +236,7 @@ SymbolicatedImage::SymbolicatedImage(const Image& im)
                         if ( const char* selector = this->cStringAt(_prefLoadAddress + fixup.rebase.targetVmOffset) ) {
                             char* label;
                             asprintf(&label, "selector \"%s\"", selector);
-                            _symbolsMap[ss.sectInfo.address+sectOff] = label;
+                            _symbolsMap.emplace(ss.sectInfo.address+sectOff, label);
                         }
                     }
                 }
@@ -270,7 +256,7 @@ SymbolicatedImage::SymbolicatedImage(const Image& im)
                         if ( symbolPos != _symbolsMap.end() ) {
                             char* label;
                             asprintf(&label, "super %s", symbolPos->second);
-                            _symbolsMap[ss.sectInfo.address+sectOff] = label;
+                            _symbolsMap.emplace(ss.sectInfo.address+sectOff, label);
                         }
                     }
                 }
@@ -285,25 +271,35 @@ SymbolicatedImage::SymbolicatedImage(const Image& im)
                     if ( const char* str = this->cStringAt(stringVmAddr) ) {
                         char* label;
                         asprintf(&label, "@\"%s\"", str);
-                        _symbolsMap[ss.sectInfo.address+sectOff] = label;
+                        _symbolsMap.emplace(ss.sectInfo.address+sectOff, label);
                     }
                     else if ( *((uint32_t*)(&curContent[3*cfStringSize/4])) == 0 ) {
                         // empty string has no cstring
-                        _symbolsMap[ss.sectInfo.address+sectOff] = "@\"\"";
+                        _symbolsMap.emplace(ss.sectInfo.address+sectOff, "@\"\"");
                     }
                 }
             }
         }
     }
 
-    // sort symbols within section
-    for (SectionSymbols& ss : _sectionSymbols) {
-        std::sort(ss.symbols.begin(), ss.symbols.end(), [](const SectionSymbols::Sym& a, const SectionSymbols::Sym& b) {
-            if ( a.offsetInSection == b.offsetInSection )
-                return CString(a.name) < CString(b.name);
-            return (a.offsetInSection < b.offsetInSection);
+    // add entries for all functions from the function-starts table
+    // that are missing symbol names
+    if ( _image.hasFunctionStarts() ) {
+        _image.functionStarts().forEachFunctionStart(0, ^(uint64_t funcAddr) {
+            if ( _symbolsMap.find(funcAddr) == _symbolsMap.end() ) {
+                char* label;
+                asprintf(&label, "<anon-%08llX>", funcAddr);
+                _symbolsMap.emplace(funcAddr, label);
+            }
         });
     }
+
+    // sort symbols
+    sortSymbols();
+
+    // add stubs after all the other symbols, they use by-address lookup
+    addStubSymbols();
+
     // for any sections that don't have a symbol at start, add seg/sect synthetic symbol
     for (SectionSymbols& ss : _sectionSymbols) {
         if ( ss.symbols.empty() || (ss.symbols[0].offsetInSection != 0) ) {
@@ -314,6 +310,109 @@ SymbolicatedImage::SymbolicatedImage(const Image& im)
             ss.symbols.insert(ss.symbols.begin(), {0, str->c_str()});
         }
     }
+}
+
+void SymbolicatedImage::sortSymbols()
+{
+    for (SectionSymbols& ss : _sectionSymbols) {
+        std::sort(ss.symbols.begin(), ss.symbols.end(), [](const SectionSymbols::Sym& a, const SectionSymbols::Sym& b) {
+            if ( a.offsetInSection == b.offsetInSection )
+                return CString(a.name) < CString(b.name);
+            return (a.offsetInSection < b.offsetInSection);
+        });
+    }
+}
+
+void SymbolicatedImage::addStubSymbols()
+{
+    std::span<const uint32_t> indirectTable = _image.indirectSymbolTable();
+    __block std::vector<const char*> symbolNames;
+    symbolNames.resize(_image.symbolTable().totalCount());
+    _image.symbolTable().forEachSymbol(^(const char* symbolName, uint64_t n_value, uint8_t n_type, uint8_t n_sect, uint16_t n_desc, uint32_t symbolIndex, bool& stop) {
+        symbolNames[symbolIndex] = symbolName;
+    });
+    __block size_t nthSect = 0;
+    _image.header()->forEachSection(^(const UnsafeHeader::SectionInfo& sectInfo, bool& stop) {
+        SectionSymbols& sectSymbols = _sectionSymbols[nthSect++];
+
+        uint32_t type = (sectInfo.flags & SECTION_TYPE);
+        // -preload -no_pie binaries don't have the indirect symbol table, but they
+        // might still have GOTs to local symbols
+        // this is useful for binary diffing and symbolication
+        bool isNlp = (type == S_NON_LAZY_SYMBOL_POINTERS) || (sectInfo.sectionName == "__nl_symbol_ptr")
+            || (sectInfo.sectionName == "__got");
+        if ( type == S_SYMBOL_STUBS ) {
+            const int stubSize          = sectInfo.reserved2;
+            int stubsIndirectStartIndex = sectInfo.reserved1;
+            int stubsIndirectCount      = (int)(sectInfo.size / stubSize);
+            for (int i=0; i < stubsIndirectCount; ++i) {
+                uint32_t symbolIndex = indirectTable[stubsIndirectStartIndex+i];
+                if ( (symbolIndex & (INDIRECT_SYMBOL_LOCAL|INDIRECT_SYMBOL_ABS)) == 0 && symbolIndex < symbolNames.size() ) {
+                    _symbolsMap.emplace(sectInfo.address + stubSize*i, symbolNames[symbolIndex]);
+                    sectSymbols.symbols.push_back({ (uint64_t)stubSize*i, symbolNames[symbolIndex] });
+                }
+            }
+        }
+        else if ( isNlp ) {
+            uint32_t gotsIndirectStartIndex = sectInfo.reserved1;
+            uint32_t gotsIndirectCount      = (int)(sectInfo.size / _ptrSize);
+            std::span<const uint8_t> sectContent = _image.header()->findSectionContent(std::string(sectInfo.segmentName), std::string(sectInfo.sectionName), /* vmoffset */ false);
+            bool hasFixups = _image.header()->hasFirmwareChainStarts()
+                || _image.header()->hasFirmwareRebaseRuns();
+
+            for (uint32_t i=0; i < gotsIndirectCount; ++i) {
+                size_t sectOffset = i * _ptrSize;
+                if ( (sectOffset+_ptrSize) > sectContent.size() )
+                    continue;
+
+                // binaries without the indirect symbol table (-preload)
+                if ( !indirectTable.empty() ) {
+                    uint32_t indirectIndex = gotsIndirectStartIndex+i;
+                    if ( indirectIndex >= indirectTable.size() )
+                        continue;
+
+                    uint32_t symbolIndex = indirectTable[indirectIndex];
+                    if ( (symbolIndex & (INDIRECT_SYMBOL_LOCAL|INDIRECT_SYMBOL_ABS)) == 0 ) {
+                        if ( symbolIndex < symbolNames.size() ) {
+                            char* formatted = nullptr;
+                            asprintf(&formatted, "%s@got", symbolNames[symbolIndex]);
+                            _symbolsMap.emplace(sectInfo.address+sectOffset, formatted);
+                            sectSymbols.symbols.push_back({ (uint64_t)sectOffset, formatted });
+                        }
+                        continue;
+                    }
+                }
+
+                if ( sectContent.empty() )
+                    continue;
+
+                // in case of fixups, chained fixups in particular, we can't read
+                // the raw bytes, because it's not just the address
+                if ( hasFixups )
+                    continue;
+
+                const uint8_t* ptr = (sectContent.data() + sectOffset);
+                uint64_t addr = _ptrSize == 4 ? *(uint32_t*)ptr : *(uint64_t*)ptr;
+
+                SymbolLoc loc = findClosestSymbol(addr);
+                if ( loc.isThumb )
+                    loc.inSymbolOffset &= (-2); // clear thumb bit
+
+                char* formatted = nullptr;
+                if ( loc.inSymbolOffset )
+                    asprintf(&formatted, "(%s+%d)@got", loc.name.c_str(), loc.inSymbolOffset);
+                else
+                    asprintf(&formatted, "%s@got", loc.name.c_str());
+                _symbolsMap.emplace(sectInfo.address+sectOffset, formatted);
+                sectSymbols.symbols.push_back({ (uint64_t)sectOffset, formatted });
+                continue;
+            }
+        } else {
+            return;
+        }
+
+        sortSymbols();
+    });
 }
 
 bool SymbolicatedImage::fairplayEncryptsSomeObjcStrings() const
@@ -331,9 +430,9 @@ bool SymbolicatedImage::fairplayEncryptsSomeObjcStrings() const
 }
 
 
-const uint8_t* SymbolicatedImage::content(const Header::SectionInfo& sectInfo) const
+const uint8_t* SymbolicatedImage::content(const UnsafeHeader::SectionInfo& sectInfo) const
 {
-    const Header* header = image().header();
+    const UnsafeHeader* header = image().header();
     if ( header->inDyldCache() ) {
         return (uint8_t*)(sectInfo.address + header->getSlide());
     }
@@ -389,15 +488,21 @@ SymbolicatedImage::SymbolLoc SymbolicatedImage::findClosestSymbol(uint64_t runti
                 loc.name           = it->name;
                 loc.inSymbolOffset = (uint32_t)(runtimeOffset - (ss.sectInfo.address+it->offsetInSection));
                 loc.isThumb        = it->thumb;
+                loc.section        = &ss.sectInfo;
             }
             else {
                 const SectionSymbols::Sym& sym = ss.symbols.front();
                 loc.name           = sym.name;
                 loc.isThumb        = sym.thumb;
                 loc.inSymbolOffset = (uint32_t)(runtimeOffset - (ss.sectInfo.address + sym.offsetInSection));
+                loc.section        = &ss.sectInfo;
             }
             break;
         }
+    }
+    if ( loc.name.empty() ) {
+        // might be an absolute symbol, they don't belong to any section
+        loc.name = symbolNameAt(runtimeOffset);
     }
     return loc;
 }
@@ -808,7 +913,7 @@ void SymbolicatedImage::forEachMethodInList(uint64_t methodListVmAddr, void (^ca
 
 void SymbolicatedImage::forEachDefinedObjCClass(void (^callback)(uint64_t classVmAddr)) const
 {
-    _image.header()->forEachSection(^(const Header::SectionInfo& sectInfo, bool& stop) {
+    _image.header()->forEachSection(^(const UnsafeHeader::SectionInfo& sectInfo, bool& stop) {
         if ( (sectInfo.sectionName == "__objc_classlist") && sectInfo.segmentName.starts_with("__DATA") ) {
             const uint8_t* sectionContent    = content(sectInfo);
             const uint8_t* sectionContentEnd = sectionContent + sectInfo.size;
@@ -834,7 +939,7 @@ void SymbolicatedImage::forEachDefinedObjCClass(void (^callback)(uint64_t classV
 
 void SymbolicatedImage::forEachObjCCategory(void (^callback)(uint64_t categoryVmAddr)) const
 {
-    _image.header()->forEachSection(^(const Header::SectionInfo& sectInfo, bool& stop) {
+    _image.header()->forEachSection(^(const UnsafeHeader::SectionInfo& sectInfo, bool& stop) {
         if ( (sectInfo.sectionName == "__objc_catlist") && sectInfo.segmentName.starts_with("__DATA") ) {
             const uint8_t* sectionContent    = content(sectInfo);
             const uint8_t* sectionContentEnd = sectionContent + sectInfo.size;
@@ -851,7 +956,7 @@ void SymbolicatedImage::forEachObjCCategory(void (^callback)(uint64_t categoryVm
 
 void SymbolicatedImage::forEachObjCProtocol(void (^callback)(uint64_t protocolVmAddr)) const
 {
-    _image.header()->forEachSection(^(const Header::SectionInfo& sectInfo, bool& stop) {
+    _image.header()->forEachSection(^(const UnsafeHeader::SectionInfo& sectInfo, bool& stop) {
         if ( sectInfo.sectionName == "__objc_protolist" ) {
             const uint8_t* sectionContent    = content(sectInfo);
             const uint8_t* sectionContentEnd = sectionContent + sectInfo.size;
@@ -866,7 +971,7 @@ void SymbolicatedImage::forEachObjCProtocol(void (^callback)(uint64_t protocolVm
     });
 }
 
-const char* SymbolicatedImage::libOrdinalName(const Header* header, int libOrdinal, char buffer[128])
+const char* SymbolicatedImage::libOrdinalName(const UnsafeHeader* header, int libOrdinal, char buffer[128])
 {
     CString name = header->libOrdinalName(libOrdinal);
     // convert:
@@ -926,16 +1031,40 @@ const char* SymbolicatedImage::fixupTargetString(size_t fixupIndex, bool symboli
     }
     else {
         if ( symbolic ) {
-            SymbolLoc loc = findClosestSymbol(fixup.rebase.targetVmOffset);
-            if ( loc.name.starts_with("__TEXT,") ) {
-                const char* str = this->cStringAt(_prefLoadAddress+fixup.rebase.targetVmOffset);
-                snprintf(buffer, 4096, "\"%s\"%s", str, authInfo);
+            SymbolLoc loc = findClosestSymbol(_prefLoadAddress+fixup.rebase.targetVmOffset);
+            if ( loc.section && ((loc.section->flags & SECTION_TYPE) == S_CSTRING_LITERALS) ) {
+                std::string_view str;
+                if ( const char* cstr = this->cStringAt(_prefLoadAddress+fixup.rebase.targetVmOffset) )
+                    str = cstr;
+
+                const char* strSuffix = "\"";
+
+                // trim new-line breaks and long strings for consistent format
+                for ( int i = 0; i < str.size(); ++i ) {
+                    char c = str[i];
+                    if ( !isascii(c) || c == '\n' || c == '\r' ) {
+                        bool lastChar = (i+1) == str.size();
+                        str = str.substr(0, i);
+                        if ( !lastChar )
+                            strSuffix = " ...\"";
+                        break;
+                    }
+                }
+                if ( str.size() > 60 ) {
+                    str = str.substr(0, 60);
+                    strSuffix = " ...\"";
+                }
+
+                snprintf(buffer, 4096, "\"%.*s%s%s", (int)str.size(), str.data(), strSuffix, authInfo);
             }
-            else if ( loc.inSymbolOffset == 0 ) {
-                snprintf(buffer, 4096, "%s%s", loc.name.c_str(), authInfo);
+            else if ( !loc.name.empty() ) {
+                if ( loc.inSymbolOffset == 0 )
+                    snprintf(buffer, 4096, "%s%s", loc.name.c_str(), authInfo);
+                else
+                    snprintf(buffer, 4096, "%s+%u%s", loc.name.c_str(), loc.inSymbolOffset, authInfo);
             }
             else {
-                snprintf(buffer, 4096, "%s+%u%s", loc.name.c_str(), loc.inSymbolOffset, authInfo);
+                snprintf(buffer, 4096, "0x%08llX%s",_prefLoadAddress+fixup.rebase.targetVmOffset, authInfo);
             }
         }
         else {
@@ -957,6 +1086,25 @@ SymbolicatedImage::~SymbolicatedImage()
         _llvmThumbRef = nullptr;
     }
 #endif
+}
+
+
+void SymbolicatedImage::forEachStub(void (^callback)(uint64_t stubVmAddr, const char* stubName)) const
+{
+    for (const SectionSymbols& ss : _sectionSymbols) {
+        if ( (ss.sectInfo.flags & SECTION_TYPE) == S_SYMBOL_STUBS ) {
+            const int stubSize        = ss.sectInfo.reserved2;
+            const int stubsCount      = (int)(ss.sectInfo.size / stubSize);
+            for (int i=0; i < stubsCount; ++i) {
+                uint64_t stubVmAddr = ss.sectInfo.address + stubSize*i;
+                const auto& pos = _symbolsMap.find(stubVmAddr);
+                if ( pos != _symbolsMap.end() )
+                    callback(stubVmAddr, pos->second);
+                else
+                    callback(stubVmAddr, "????");
+            }
+        }
+    }
 }
 
 
@@ -993,7 +1141,7 @@ const char* SymbolicatedImage::targetTriple() const
         return "unknown";
 }
 
-void SymbolicatedImage::loadDisassembler()
+void SymbolicatedImage::loadDisassembler(bool useColor)
 {
     // libLTO is weak linked, need to bail out if libLTO.dylib not loaded
     if ( &lto_initialize_disassembler == nullptr )
@@ -1007,15 +1155,25 @@ void SymbolicatedImage::loadDisassembler()
     }
 
     // instantiate llvm disassembler object
-    _llvmRef = LLVMCreateDisasm(targetTriple(), this, 0, &printDumpOpInfoCallback, &printDumpSymbolCallback);
-    if ( _llvmRef != nullptr )
+    const char* triple = targetTriple();
+    if ( strstr(triple, "arm64") )
+        _llvmRef = LLVMCreateDisasmCPU(triple, "apple-latest", this, 0, &printDumpOpInfoCallback, &printDumpSymbolCallback);
+    else
+        _llvmRef = LLVMCreateDisasm(triple, this, 0, &printDumpOpInfoCallback, &printDumpSymbolCallback);
+    if ( _llvmRef != nullptr ) {
         LLVMSetDisasmOptions(_llvmRef, LLVMDisassembler_Option_PrintImmHex);
+        if ( useColor )
+            LLVMSetDisasmOptions(_llvmRef, LLVMDisassembler_Option_Color);
+    }
 
     Architecture arch = _image.header()->arch();
     if ( arch.usesArm32Instructions() && arch.usesThumbInstructions() ) {
         _llvmThumbRef = LLVMCreateDisasm("thumbv7em-apple-darwin", this, 0, &printDumpOpInfoCallback, &printDumpSymbolCallback);
-        if ( _llvmThumbRef != nullptr )
+        if ( _llvmThumbRef != nullptr ) {
             LLVMSetDisasmOptions(_llvmThumbRef, LLVMDisassembler_Option_PrintImmHex);
+            if ( useColor )
+                LLVMSetDisasmOptions(_llvmThumbRef, LLVMDisassembler_Option_Color);
+        }
     }
 }
 

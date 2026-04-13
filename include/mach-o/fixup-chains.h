@@ -77,6 +77,12 @@ enum {
     DYLD_CHAINED_PTR_START_LAST   = 0x8000, // used in chain_starts[] to denote last start in list for page
 };
 
+// these values are set in the reserved1 field of the __chain_starts section
+enum {
+    DYLD_CHAINED_STARTS_USE_FILE_OFFSET = 0x1, // denotes chain starts linked with -fixup_chains_section
+    DYLD_CHAINED_STARTS_USE_VM_OFFSET   = 0x2, // denotes chain starts linked with -fixup_chains_section_vm
+};
+
 // This struct is embedded in __TEXT,__chain_starts section in firmware
 struct dyld_chained_starts_offsets
 {
@@ -90,7 +96,7 @@ struct dyld_chained_starts_offsets
 enum {
     DYLD_CHAINED_PTR_ARM64E                 =  1,    // stride 8, unauth target is vmaddr
     DYLD_CHAINED_PTR_64                     =  2,    // target is vmaddr
-    DYLD_CHAINED_PTR_32                     =  3,
+    DYLD_CHAINED_PTR_32                     =  3,    // target is vmaddr
     DYLD_CHAINED_PTR_32_CACHE               =  4,
     DYLD_CHAINED_PTR_32_FIRMWARE            =  5,
     DYLD_CHAINED_PTR_64_OFFSET              =  6,    // target is vm offset

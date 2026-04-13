@@ -217,8 +217,8 @@ static void loadMRMFiles(Diagnostics& diags, struct MRMSharedCacheBuilder* share
 
         mappedFiles.push_back(mappedFile.value());
 
-        addOnDiskFile(sharedCacheBuilder, path, (uint8_t*)mappedFile->buffer, mappedFile->bufferSize,
-                      NoFlags, mappedFile->inode, mappedFile->mtime);
+        addSimCacheOnDiskFile(sharedCacheBuilder, path, (uint8_t*)mappedFile->buffer, mappedFile->bufferSize,
+                              NoFlags, mappedFile->inode, mappedFile->mtime);
     }
 
     // Find files by walking the RuntimeRoot
@@ -262,7 +262,7 @@ static void loadMRMFiles(Diagnostics& diags, struct MRMSharedCacheBuilder* share
             uint64_t mtime = statBuf.st_mtime;
             mappedFiles.push_back((MappedFile){ path, inode, mtime, buffer, (size_t)statBuf.st_size });
 
-            addOnDiskFile(sharedCacheBuilder, path.c_str(), (uint8_t*)buffer, (size_t)statBuf.st_size, NoFlags, inode, mtime);
+            addSimCacheOnDiskFile(sharedCacheBuilder, path.c_str(), (uint8_t*)buffer, (size_t)statBuf.st_size, NoFlags, inode, mtime);
         });
     }
 }
@@ -419,13 +419,13 @@ static mach_o::Platform getPlatform(Diagnostics& diags, std::string_view rootPat
         const dyld3::FatFile* ff = (dyld3::FatFile*)mappedFile->buffer;
         ff->forEachSlice(diags, mappedFile->bufferSize,
                          ^(uint32_t sliceCpuType, uint32_t sliceCpuSubType, const void* sliceStart, uint64_t sliceSize, bool& stop) {
-            const mach_o::Header* mh = (mach_o::Header*)sliceStart;
+            const mach_o::UnsafeHeader* mh = (mach_o::UnsafeHeader*)sliceStart;
             mach_o::PlatformAndVersions pvs = mh->platformAndVersions();
             if ( platform.empty() )
                 platform = pvs.platform;
         });
     } else {
-        const mach_o::Header* mh = (mach_o::Header*)mappedFile->buffer;
+        const mach_o::UnsafeHeader* mh = (mach_o::UnsafeHeader*)mappedFile->buffer;
         if ( mh->valid(mappedFile->bufferSize).noError() ) {
             mach_o::PlatformAndVersions pvs = mh->platformAndVersions();
             if ( platform.empty() )

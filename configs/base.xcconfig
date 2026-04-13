@@ -5,6 +5,9 @@
 GCC_C_LANGUAGE_STANDARD = c2x
 CLANG_CXX_LANGUAGE_STANDARD = c++20
 SWIFT_VERSION = 5.0
+OTHER_SWIFT_FLAGS = -enable-experimental-feature BorrowingSwitch -enable-experimental-feature Lifetimes -enable-experimental-feature LifetimeDependence $(inherited)
+// rdar://158170741 (Disable CVW in Dyld.framework)
+OTHER_SWIFT_FLAGS[sdk=watch*] = -Xfrontend -disable-layout-string-value-witnesses -Xfrontend -disable-layout-string-value-witnesses-instantiation $(inherited)
 
 // clang warnings
 CLANG_WARN_EMPTY_BODY = YES
@@ -18,11 +21,9 @@ GCC_WARN_FOUR_CHARACTER_CONSTANTS = NO
 GCC_WARN_ABOUT_MISSING_PROTOTYPES = YES
 GCC_WARN_UNINITIALIZED_AUTOS = YES
 ENABLE_ATP_WERROR_9999099099000000 = -Werror // Hack to enable -Werror in ATP
-WARNING_CFLAGS = $(ENABLE_ATP_WERROR_$(RC_ProjectCanonicalSourceVersion)) -Wmost -Wimplicit-fallthrough -Wno-unknown-pragmas -Wno-assume -Wformat-nonliteral -Wno-vla-extension -Wundef-prefix=SUPPORT_ -Wundef-prefix=TARGET_OS_ -Wno-unused-but-set-variable
+WARNING_CFLAGS = $(ENABLE_ATP_WERROR_$(RC_ProjectCanonicalSourceVersion)) -Wmost -Wimplicit-fallthrough -Wno-unknown-pragmas -Wno-assume -Wformat-nonliteral -Wno-vla-extension -Wundef-prefix=SUPPORT_ -Wundef-prefix=TARGET_OS_ -Wno-unused-but-set-variable -Wno-reorder-init-list -Wno-c99-designator
 
-// #ifndef __OPEN_SOURCE__
-OTHER_CFLAGS[arch=arm64e] = -Xclang -target-feature -Xclang +mte $(inherited)
-// #endif
+OTHER_CFLAGS[arch=arm64*] = -Xclang -target-feature -Xclang +mte $(inherited)
 
 // clang optimization level
 GCC_OPTIMIZATION_LEVEL[config=Debug] = 0
@@ -78,12 +79,12 @@ STRIPFLAGS                       = -S
 
 DYLD_SIGNING_IDENTITY_ = -
 DYLD_SIGNING_IDENTITY_NO = -
-DYLD_SIGNING_IDENTITY_YES[sdk=macos*] = Apple Engineer:
 DYLD_SIGNING_IDENTITY_YES[sdk=*] = -
+DYLD_SIGNING_IDENTITY_YES[sdk=macos*] = Apple Engineer:
 TRUSTED_CODE_SIGN_IDENTITY = $(DYLD_SIGNING_IDENTITY_$(DYLD_USE_AMFI_TRUSTED_KEYS))
 
 CODE_SIGN_IDENTITY = -
-CODE_SIGN_STYLE = Automatic
+CODE_SIGN_STYLE = Manual
 
 SDKROOT = macosx.internal
 

@@ -126,6 +126,8 @@ Architecture Architecture::byName(std::string_view name)
         return arm64e_kernel_v2;
     else if ( name == "arm64_32" )
         return arm64_32;
+    else if ( name == "armv4t" )
+        return armv4t;
     else if ( name == "armv6" )
         return armv6;
     else if ( (name == "armv6m")  || (name == "thumbv6m") )
@@ -177,6 +179,8 @@ const char* Architecture::name() const
         return "arm64e";
     else if ( *this == arm64_32 )
         return "arm64_32";
+    else if ( *this == armv4t )
+        return "armv4t";
     else if ( *this == armv6 )
         return "armv6";
     else if ( *this == armv6m )
@@ -214,6 +218,93 @@ const char* Architecture::name() const
     return "unknown";
 }
 
+// returns static string ("arm64e" for all arm64e ABI versions)
+const char* Architecture::baseName() const
+{
+    // returns "arm64e" for all arm64e versions
+    if ( (_cputype == CPU_TYPE_ARM64) && ((_cpusubtype & ~CPU_SUBTYPE_MASK) == CPU_SUBTYPE_ARM64E) )
+        return "arm64e";
+    return this->name();
+}
+
+const char* Architecture::cpuTypeName() const
+{
+    switch (_cputype) {
+        case CPU_TYPE_ARM64:
+            return "CPU_TYPE_ARM64";
+        case CPU_TYPE_ARM:
+            return "CPU_TYPE_ARM";
+        case CPU_TYPE_ARM64_32:
+            return "CPU_TYPE_ARM64_32";
+        case CPU_TYPE_X86_64:
+            return "CPU_TYPE_X86_64";
+        default:
+            return "unknown cputype";
+   }
+}
+
+const char* Architecture::cpuSubtypeName() const
+{
+    switch (_cputype) {
+        case CPU_TYPE_ARM64:
+            switch (_cpusubtype & ~CPU_SUBTYPE_MASK) {
+                case CPU_SUBTYPE_ARM64_ALL:
+                    return "CPU_SUBTYPE_ARM64_ALL";
+                case CPU_SUBTYPE_ARM64_V8:
+                    return "CPU_SUBTYPE_ARM64_V8";
+                case CPU_SUBTYPE_ARM64E:
+                    return "CPU_SUBTYPE_ARM64E";
+                default:
+                    return "unknown arm64 cpusubtype";
+            }
+            break;
+        case CPU_TYPE_ARM:
+            switch (_cpusubtype & ~CPU_SUBTYPE_MASK) {
+                case CPU_SUBTYPE_ARM_ALL:
+                    return "CPU_SUBTYPE_ARM_ALL";
+                case CPU_SUBTYPE_ARM_V6:
+                    return "CPU_SUBTYPE_ARM_V6";
+                case CPU_SUBTYPE_ARM_V7:
+                    return "CPU_SUBTYPE_ARM_V7";
+                case CPU_SUBTYPE_ARM64_32_V8:
+                    return "CPU_SUBTYPE_ARM64_32_V8";
+                case CPU_SUBTYPE_ARM_V6M:
+                    return "CPU_SUBTYPE_ARM_V6M";
+                case CPU_SUBTYPE_ARM_V7M:
+                    return "CPU_SUBTYPE_ARM_V7M";
+                case CPU_SUBTYPE_ARM_V7K:
+                    return "CPU_SUBTYPE_ARM_V7K";
+                case CPU_SUBTYPE_ARM_V7EM:
+                    return "CPU_SUBTYPE_ARM_V7EM";
+                default:
+                    return "unknown arm cpusubtype";
+            }
+            break;
+        case CPU_TYPE_ARM64_32:
+            switch (_cpusubtype & ~CPU_SUBTYPE_MASK) {
+                case CPU_SUBTYPE_ARM64_32_ALL:
+                    return "CPU_SUBTYPE_ARM64_32_ALL";
+                case CPU_SUBTYPE_ARM64_32_V8:
+                    return "CPU_SUBTYPE_ARM64_32_V8";
+                default:
+                    return "unknown arm64_32 cpusubtype";
+            }
+            break;
+        case CPU_TYPE_X86_64:
+            switch (_cpusubtype & ~CPU_SUBTYPE_MASK) {
+                case CPU_SUBTYPE_X86_ALL:
+                    return "CPU_SUBTYPE_X86_ALL";
+                case CPU_SUBTYPE_X86_64_H:
+                    return "CPU_SUBTYPE_X86_64_H";
+                default:
+                    return "unknown cputype";
+            }
+            break;
+        default:
+            return "unknown cputype";
+   }
+}
+
 const constinit Architecture Architecture::ppc(     CPU_TYPE_POWERPC,  CPU_SUBTYPE_POWERPC_ALL);
 const constinit Architecture Architecture::i386(    CPU_TYPE_I386,     CPU_SUBTYPE_I386_ALL);
 const constinit Architecture Architecture::x86_64(  CPU_TYPE_X86_64,   CPU_SUBTYPE_X86_64_ALL);
@@ -223,6 +314,7 @@ const constinit Architecture Architecture::armv7s(  CPU_TYPE_ARM,      CPU_SUBTY
 const constinit Architecture Architecture::arm64(   CPU_TYPE_ARM64,    CPU_SUBTYPE_ARM64_ALL);
 const constinit Architecture Architecture::arm64e(  CPU_TYPE_ARM64,    CPU_SUBTYPE_ARM64E | 0x80000000);
 const constinit Architecture Architecture::arm64_32(CPU_TYPE_ARM64_32, CPU_SUBTYPE_ARM64_32_V8);
+const constinit Architecture Architecture::armv4t(  CPU_TYPE_ARM,      CPU_SUBTYPE_ARM_V4T);
 const constinit Architecture Architecture::armv6(   CPU_TYPE_ARM,      CPU_SUBTYPE_ARM_V6);
 const constinit Architecture Architecture::armv6m(  CPU_TYPE_ARM,      CPU_SUBTYPE_ARM_V6M);
 const constinit Architecture Architecture::armv7k(  CPU_TYPE_ARM,      CPU_SUBTYPE_ARM_V7K);

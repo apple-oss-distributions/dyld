@@ -26,111 +26,117 @@ import os
 import System
 @_implementationOnly import Dyld_Internal
 
-@available(macOS 13.0, *)
 struct AtlasCache {
-    var uuidMap = [UUID : BPList.UnsafeRawDictionary]()
-    var pathMap = [String : BPList.UnsafeRawDictionary]()
-    var buffers = [Data]()
-    let lock = OSAllocatedUnfairLock()
-    mutating func getCachePlist(uuid: UUID?, path: FilePath?, forceScavenge: Bool) -> BPList.UnsafeRawDictionary? {
-        return try? lock.withLockUnchecked { () -> BPList.UnsafeRawDictionary? in
-            //FIXME: Delegate support
+    struct State : Sendable {
+        var uuidMap:    [UUID : (MemoryBuffer,BPList.UnsafeObject)]     = [:]
+        var pathMap:    [String : (MemoryBuffer,BPList.UnsafeObject)]   = [:]
+
+        fileprivate func lookup(uuid: UUID?, path:String) ->  (MemoryBuffer,BPList.UnsafeObject)? {
             if let uuid, let result = uuidMap[uuid] {
                 return result
             }
-            guard let path else {
-                return nil
-            }
-            if !forceScavenge, let result = pathMap[path.string] {
+            if let result = pathMap[path] {
                 return result
             }
-            guard let atlasFileName = path.lastComponent?.stem.appending(".atlas") else {
-                return  nil
-            }
-            var embeddedData = try? Data(contentsOf:URL(fileURLWithPath:path.removingLastComponent().appending(atlasFileName).string), options:.mappedIfSafe)
-            var scavengedData: Data? = nil
-            if forceScavenge || embeddedData == nil {
-                embeddedData = nil
-                var scavengedBufferSize = UInt64(0)
-                if let scavegedBuffer =  scavengeCache(path.string, &scavengedBufferSize) {
-                    scavengedData = Data(bytesNoCopy:scavegedBuffer, count:Int(scavengedBufferSize), deallocator:.free)
-                }
-            }
-            let data = embeddedData ?? scavengedData
-            guard let data else { return nil }
-            buffers.append(data)
-            var archive  = try AARDecoder(data:data)
-            let archivePath = uuid?.cacheAtlasArchivePath ?? "caches/names/\(path.lastComponent!.string).plist"
-            guard let plistData = try? archive.data(path: archivePath),
-                  let atlasesDict = try? BPList(data:plistData).asDictionary(),
-                  let byNameDict = try atlasesDict[.string("names")]?.asDictionary(),
-                  let byUuidDict = try atlasesDict[.string("uuids")]?.asDictionary() else {
-                return nil
-            }
-            var skipValidation = false
-            if scavengedData == nil {
-                for prefix in SharedCache.sharedCachePaths {
-                    if path.string.hasPrefix(prefix) {
-                        // The shared cache is coming from snapshot protected storage, skip validation
-                        skipValidation = true
-                        break
-                    }
-                }
-            }
-            if !skipValidation {
-                do {
-                    for (_,atlas) in byNameDict {
-                        guard let atlasDict = try? atlas.asDictionary() else {
-                            throw AtlasError.placeHolder
-                        }
-                        try SharedCache.Impl.validate(bplist:atlasDict)
-                    }
-                    for (_,atlas) in byUuidDict {
-                        guard let atlasDict = try? atlas.asDictionary() else {
-                            throw AtlasError.placeHolder
-                        }
-                        try SharedCache.Impl.validate(bplist:atlasDict)
-                    }
-                } catch {
-                    return nil
-                }
-            }
-            for (key,atlas) in byUuidDict {
-                guard let atlasUUID = UUID(uuidString: key.asString()) else {
-                    continue
-                }
-                if uuidMap[atlasUUID] == nil {
-                    uuidMap[atlasUUID] = try! atlas.asDictionary()
-                }
-            }
-            let dirname = path.removingLastComponent()
-            for (atlasName,atlas) in byNameDict {
-                let fullPath = dirname.appending(atlasName.asString()).string
-                let atlasDict = try! atlas.asDictionary()
-                if pathMap[fullPath] == nil {
-                    pathMap[fullPath] = atlasDict
-                }
-            }
-            if let uuid {
-                return uuidMap[uuid]
-            }
-            return pathMap[path.string]
+            return nil
         }
     }
-}
+    var state: OSAllocatedUnfairLock = .init(initialState:State())
 
-@available(macOS 13.0, *)
-fileprivate var bufferCache = AtlasCache()
+    private func archivePath(path: FilePath?, uuid: UUID?) -> String? {
+        if let uuid {
+            return "caches/uuids/\(uuid.uuidString.uppercased()).plist"
+        }
+        if let path {
+            return "caches/names/\(path.lastComponent!.string).plist"
+        }
 
-internal extension Snapshot {
-    static func findCacheBPlist(uuid: UUID?, path: FilePath?, forceScavenge: Bool = false) -> BPList.UnsafeRawDictionary? {
-        if #available(macOS 13.0, *) {
-            guard let plist = bufferCache.getCachePlist(uuid:uuid, path:path, forceScavenge:forceScavenge) else {
+        return nil
+    }
+
+    private func atlasPath(filePath: FilePath) -> String? {
+        var result = filePath.string
+        if let suffix = filePath.extension {
+            result.removeLast(suffix.count + 1)
+        }
+        return "\(result).atlas"
+    }
+
+    func getCachePlist(uuid: UUID?, path: FilePath, forceScavenge: Bool) -> (MemoryBuffer, BPList.UnsafeObject)? {
+        do {
+            if !forceScavenge, let earlyResult = state.withLock({ return $0.lookup(uuid:uuid, path:path.string) }) {
+                return earlyResult
+            }
+            guard let atlasFullPath = atlasPath(filePath:path) else {
+                return  nil
+            }
+
+            var skipValidation = false
+            for prefix in SharedCache.sharedCachePaths {
+                if atlasFullPath.hasPrefix(prefix) {
+                    // The shared cache is coming from snapshot protected storage, skip validation
+                    skipValidation = true
+                    break
+                }
+            }
+
+            var buffer = MemoryBuffer(path: atlasFullPath, decompress:true)
+            if forceScavenge || buffer == nil {
+                buffer = nil
+                var scavengedBufferSize = UInt64(0)
+                if let scavegedBuffer =  scavengeCache(path.string, &scavengedBufferSize) {
+                    buffer = MemoryBuffer(malloced:scavegedBuffer, count:Int(scavengedBufferSize))
+                }
+                skipValidation = false
+            }
+
+            guard   let buffer,
+                    var archive     = try? AppleArchive(bytes:buffer.bytes, preValidated:skipValidation),
+                    let archivePath = archivePath(path:path, uuid: uuid),
+                    let plistBytes  = try? archive.bytes(path:archivePath),
+                    let plist       = try? BPList(bytes:plistBytes) else {
                 return nil
             }
-            return plist
-        } else {
-            fatalError("This is not supported for backdeployment, but needs to build with a reduced minOS in some environments")
+            var byNameDict: BPList.UnsafeObject?
+            var byUuidDict: BPList.UnsafeObject?
+            try plist.topObject.asDictionary().forEach { key, value in
+                switch key {
+                case "names": byNameDict = value.asUnsafeObject()
+                case "uuids": byUuidDict = value.asUnsafeObject()
+                default: return
+                }
+            }
+            guard let byNameDict, let byUuidDict else { return nil }
+
+            if !skipValidation {
+                try byUuidDict.object.asDictionary().forEach { _, atlas in
+                    try SharedCache.Impl.validate(bplist:atlas)
+                }
+            }
+
+            return try state.withLock { state in
+                try byUuidDict.object.asDictionary().forEach { key, atlas in
+                    guard let atlasUUID = UUID(uuidString: key.stringValue) else {
+                        return
+                    }
+                    if state.uuidMap[atlasUUID] == nil {
+                        state.uuidMap[atlasUUID] = (buffer, atlas.asUnsafeObject())
+                    }
+                }
+                let dirname = path.removingLastComponent()
+                try byNameDict.object.asDictionary().forEach { key, atlas in
+                    let fullPath = dirname.appending(key.stringValue).string
+                    if state.pathMap[fullPath] == nil {
+                        state.pathMap[fullPath] = (buffer, atlas.asUnsafeObject())
+                    }
+                }
+                if let uuid {
+                    return state.uuidMap[uuid]
+                }
+                return state.pathMap[path.string]
+            }
+        } catch {
+            return nil
         }
     }
 }

@@ -1,0 +1,7 @@
+#include "base.xcconfig"
+
+INSTALL_PATH= /usr/appleinternal/bin
+PRODUCT_NAME= dyld-$(TARGET_NAME)
+
+OTHER_SWIFT_FLAGS = $(inherited) -vfsoverlay "$(PROJECT_TEMP_DIR)/dyld-overlay.yaml" -Xcc -ivfsoverlay -Xcc "$(PROJECT_TEMP_DIR)/dyld-overlay.yaml"
+OTHER_CFLAGS = $(inherited) -ivfsoverlay "$(PROJECT_TEMP_DIR)/dyld-overlay.yaml"

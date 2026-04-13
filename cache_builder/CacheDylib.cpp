@@ -29,7 +29,7 @@
 #include "Chunk.h"
 #include "MachOFile.h"
 #include "MachOFileAbstraction.hpp"
-#include "Header.h"
+#include "UnsafeHeader.h"
 #include "ObjCVisitor.h"
 #include "Optimizers.h"
 #include "OptimizerObjC.h"
@@ -37,7 +37,7 @@
 #include "Trie.hpp"
 
 // mach_o
-#include "Header.h"
+#include "UnsafeHeader.h"
 #include "Image.h"
 #include "FunctionVariants.h"
 
@@ -49,7 +49,7 @@
 #include <vector>
 
 // mach_o_writer
-#include "HeaderWriter.h"
+#include "UnsafeHeaderWriter.h"
 
 // FIXME: We should get this from cctools
 #define DYLD_CACHE_ADJ_V2_FORMAT 0x7F
@@ -71,7 +71,7 @@
 using namespace cache_builder;
 using dyld3::MachOFile;
 using error::Error;
-using mach_o::Header;
+using mach_o::UnsafeHeader;
 using mach_o::Version32;
 using mach_o::Image;
 using mach_o::FunctionVariantFixups;
@@ -89,7 +89,7 @@ CacheDylib::CacheDylib()
 CacheDylib::CacheDylib(InputFile& inputFile)
     : inputFile(&inputFile)
     , inputMF(inputFile.mf)
-    , inputHdr((const Header*)inputFile.mf)
+    , inputHdr((const UnsafeHeader*)inputFile.mf)
     , inputLoadAddress(this->inputHdr->preferredLoadAddress())
     , installName(this->inputHdr->installName())
 {
@@ -213,7 +213,7 @@ static const bool segmentHasAuthFixups(const MachOFile* mf, uint32_t segmentInde
         // This allows new method lists added by the category optimizer to be signed.
         // Note the linker eagerly moves these sections to AUTH, as of rdar://111858154,
         // so it is not expected that this code ever finds anything to move, but we'll keep it to be safe
-        ((const Header*)mf)->forEachSection(^(const Header::SegmentInfo &segInfo, const Header::SectionInfo &sectInfo, bool &stop) {
+        ((const UnsafeHeader*)mf)->forEachSection(^(const UnsafeHeader::SegmentInfo &segInfo, const UnsafeHeader::SectionInfo &sectInfo, bool &stop) {
             if ( segInfo.segmentIndex != segmentIndexToSearch )
                 return;
             if ( (sectInfo.sectionName == "__objc_const") || (sectInfo.sectionName == "__objc_data") ) {
@@ -230,7 +230,7 @@ void CacheDylib::categorizeSegments(const BuilderConfig& config,
                                     objc_visitor::Visitor& objcVisitor)
 {
     bool hasUnalignedFixups = ::hasUnalignedFixups(this->inputMF);
-    this->inputHdr->forEachSegment(^(const Header::SegmentInfo& info, uint64_t sizeOfSections, uint32_t maxAlignOfSections, bool& stop) {
+    this->inputHdr->forEachSegment(^(const UnsafeHeader::SegmentInfo& info, uint64_t sizeOfSections, uint32_t maxAlignOfSections, bool& stop) {
         auto addSegment = [&](DylibSegmentChunk::Kind kind) {
             // TODO: Cache VMSize/fileSize might be less than input VMSize if we deduplicate strings for example
             uint64_t inputFileSize = std::min((uint64_t)info.fileSize, sizeOfSections);
@@ -244,12 +244,22 @@ void CacheDylib::categorizeSegments(const BuilderConfig& config,
                 vmSize        = 0;
             }
 
-            uint64_t minAlignment = 1 << maxAlignOfSections;
+            __block uint64_t minAlignment = 1 << maxAlignOfSections;
             // Always align __TEXT to a page as split seg can't handle less
             if ( info.segmentName == "__TEXT" )
                 minAlignment = config.layout.machHeaderAlignment;
             else if ( hasUnalignedFixups )
                 minAlignment = (this->inputHdr->uses16KPages() ? 0x4000 : 0x1000);
+
+            // To make testing very large caches easier, allow tset cases to specify huge alignments
+#if BUILDING_CACHE_BUILDER_UNIT_TESTS
+            this->inputHdr->forEachSection(^(const UnsafeHeader::SectionInfo& sectInfo, bool& stopSection) {
+                if ( sectInfo.segIndex == info.segmentIndex ) {
+                    if ( sectInfo.sectionName == "__aligned_1gb" )
+                        minAlignment = 1_GB;
+                }
+            });
+#endif // BUILDING_CACHE_BUILDER_UNIT_TESTS
 
             DylibSegmentChunk segment(kind, minAlignment);
             segment.segmentName     = info.segmentName;
@@ -682,8 +692,8 @@ void CacheDylib::updateSymbolTables(Diagnostics& diag, const BuilderConfig& conf
         // is the correct size
         uint64_t newTableSize = this->indirectSymbolTable.size() * sizeof(uint32_t);
         if ( newTableSize != chunk.cacheVMSize.rawValue() ) {
-            diag.error("Wrong indirect symbol table size (%lld != %lld)",
-                       newTableSize, chunk.cacheVMSize.rawValue());
+            diag.error("Wrong indirect symbol table size (%lld != %lld) in %s",
+                       newTableSize, chunk.cacheVMSize.rawValue(), this->inputFile->path.c_str());
             return;
         }
 
@@ -715,7 +725,7 @@ std::optional<CacheDylib::BindTargetAndName> CacheDylib::findDyldMagicSymbolAddr
 
         __block std::optional<VMAddress> vmAddr;
 
-        this->inputHdr->forEachSegment(^(const Header::SegmentInfo& info, bool& stop) {
+        this->inputHdr->forEachSegment(^(const UnsafeHeader::SegmentInfo& info, bool& stop) {
             if ( info.segmentName == segmentName ) {
                 if ( isStart )
                     vmAddr = VMAddress(info.vmaddr);
@@ -1289,7 +1299,7 @@ void CacheDylib::bindWithOpcodeFixups(Diagnostics& diag, const BuilderConfig& co
     }
 
     // The cache segments don't have the permissions.  Get that from the load commands
-    this->cacheHdr->forEachSegment(^(const Header::SegmentInfo& info, bool& stop) {
+    this->cacheHdr->forEachSegment(^(const UnsafeHeader::SegmentInfo& info, bool& stop) {
         segmentLayout[info.segmentIndex].protections = info.initProt;
     });
 
@@ -1528,7 +1538,7 @@ void CacheDylib::bind(Diagnostics& diag, const BuilderConfig& config, Timer::Agg
 }
 
 void CacheDylib::updateObjCSelectorReferences(Diagnostics& diag, const BuilderConfig& config,
-                                              Timer::AggregateTimer& timer, ObjCSelectorOptimizer& objcSelectorOptimizer)
+                                              Timer::AggregateTimer& timer, const ObjCSelectorOptimizer& objcSelectorOptimizer)
 {
     if ( !this->inputHdr->hasObjC() )
         return;
@@ -1545,8 +1555,8 @@ void CacheDylib::updateObjCSelectorReferences(Diagnostics& diag, const BuilderCo
         const char* selString = (const char*)objcVisitor.resolveRebase(selRefValue).value();
 
         // Find the selector in the map
-        auto it = objcSelectorOptimizer.selectorsMap.find(selString);
-        assert(it != objcSelectorOptimizer.selectorsMap.end());
+        auto it = objcSelectorOptimizer.stringsMap.find(selString);
+        assert(it != objcSelectorOptimizer.stringsMap.end());
 
         VMOffset newSelBufferOffset = it->second;
         assert(newSelBufferOffset.rawValue() < objcSelectorOptimizer.selectorStringsChunk->cacheVMSize.rawValue());
@@ -1574,8 +1584,8 @@ void CacheDylib::updateObjCSelectorReferences(Diagnostics& diag, const BuilderCo
             const char* selString = (const char*)objcVisitor.resolveRebase(nameRef).value();
 
             // Find the selector in the map
-            auto it = objcSelectorOptimizer.selectorsMap.find(selString);
-            assert(it != objcSelectorOptimizer.selectorsMap.end());
+            auto it = objcSelectorOptimizer.stringsMap.find(selString);
+            assert(it != objcSelectorOptimizer.stringsMap.end());
 
             VMOffset       newSelBufferOffset   = it->second;
             CacheVMAddress newSelCacheVMAddress = objcSelectorOptimizer.selectorStringsChunk->cacheVMAddress + newSelBufferOffset;
@@ -1739,13 +1749,14 @@ static void sortObjCPointerMethodList(const BuilderConfig&                      
 
 void CacheDylib::convertObjCMethodListsToOffsets(Diagnostics& diag, const BuilderConfig& config,
                                                  Timer::AggregateTimer& timer,
-                                                 const Chunk*           selectorStringsChunk)
+                                                 const ObjCSelectorOptimizer& objcSelectorOptimizer)
 {
     if ( !this->inputHdr->hasObjC() )
         return;
 
     Timer::AggregateTimer::Scope timedScope(timer, "dylib convertObjCMethodListsToOffsets time");
 
+    const Chunk* selectorStringsChunk = objcSelectorOptimizer.selectorStringsChunk;
     __block objc_visitor::Visitor objcVisitor = this->makeCacheObjCVisitor(config, selectorStringsChunk, nullptr, nullptr);
 
     // protocols can be listed multiple times in the _objc_protolist section, so we'll visit them multiple times here
@@ -1767,15 +1778,32 @@ void CacheDylib::convertObjCMethodListsToOffsets(Diagnostics& diag, const Builde
         for ( uint32_t i = 0; i != numMethods; ++i ) {
             objc_visitor::Method objcMethod = objcMethodList.getMethod(objcVisitor, i);
 
-            const char* selString = objcMethod.getName(objcVisitor);
+            {
+                const char* selString = objcMethod.getName(objcVisitor);
 
-            uint64_t nameOffset = (uint64_t)selString - (uint64_t)selectorStringsChunk->subCacheBuffer;
-            assert((uint32_t)nameOffset == nameOffset);
+                uint64_t nameOffset = (uint64_t)selString - (uint64_t)selectorStringsChunk->subCacheBuffer;
+                assert((uint32_t)nameOffset == nameOffset);
 
-            objcMethod.convertNameToOffset(objcVisitor, (uint32_t)nameOffset);
+                objcMethod.convertNameToOffset(objcVisitor, (uint32_t)nameOffset);
+            }
+
+            if ( config.convertMethodListTypesToOffsets ) {
+                const char* typeString = objcMethod.getTypes(objcVisitor);
+
+                // Find the canonical type string
+                auto it = objcSelectorOptimizer.stringsMap.find(typeString);
+                assert(it != objcSelectorOptimizer.stringsMap.end());
+
+                uint64_t typesOffset = it->second.rawValue();
+                assert((uint32_t)typesOffset == typesOffset);
+
+                objcMethod.convertTypesToOffset(objcVisitor, (uint32_t)typesOffset);
+            }
         }
 
         objcMethodList.setUsesOffsetsFromSelectorBuffer();
+        if ( config.convertMethodListTypesToOffsets )
+            objcMethodList.setUsesOffsetsFromTypeBuffer();
     });
 }
 
@@ -1818,7 +1846,7 @@ void CacheDylib::forEachReferenceToASelRef(Diagnostics &diags,
     __block uint64_t selRefSectionVMAddr = 0;
     // The mach_header is section 0
     __block uint32_t sectionIndex = 1;
-    this->cacheHdr->forEachSection(^(const Header::SegmentInfo &segInfo, const Header::SectionInfo &sectInfo, bool &stop) {
+    this->cacheHdr->forEachSection(^(const UnsafeHeader::SegmentInfo &segInfo, const UnsafeHeader::SectionInfo &sectInfo, bool &stop) {
         if ( (sectInfo.segmentName == "__TEXT" ) && (sectInfo.sectionName == "__text") ) {
             textSectionIndex = sectionIndex;
             VMOffset sectionOffsetInSegment(sectInfo.address - segInfo.vmaddr);
@@ -1886,7 +1914,7 @@ void CacheDylib::optimizeLoadsFromConstants(const BuilderConfig& config,
     __block CacheVMAddress textSectionVMAddr;
     __block const uint8_t* selRefSectionContent = nullptr;
     __block CacheVMAddress selRefSectionVMAddr;
-    this->cacheHdr->forEachSection(^(const Header::SegmentInfo &segInfo, const Header::SectionInfo &sectInfo, bool &stop) {
+    this->cacheHdr->forEachSection(^(const UnsafeHeader::SegmentInfo &segInfo, const UnsafeHeader::SectionInfo &sectInfo, bool &stop) {
         VMOffset sectionOffsetInSegment(sectInfo.address - segInfo.vmaddr);
         if ( ( sectInfo.segmentName == "__TEXT" ) && (sectInfo.sectionName == "__text") ) {
             textSectionContent = this->segments[sectInfo.segIndex].subCacheBuffer;
@@ -2359,7 +2387,7 @@ CacheDylib::OldToNewStubMap CacheDylib::buildStubMaps(const BuilderConfig& confi
     };
 
     // Walk all the stubs in the stubs sections
-    this->cacheHdr->forEachSection(^(const Header::SegmentInfo &segInfo, const Header::SectionInfo &sectInfo, bool &stop) {
+    this->cacheHdr->forEachSection(^(const UnsafeHeader::SegmentInfo &segInfo, const UnsafeHeader::SectionInfo &sectInfo, bool &stop) {
         unsigned sectionType = (sectInfo.flags & SECTION_TYPE);
         if ( sectionType != S_SYMBOL_STUBS )
             return;
@@ -2509,7 +2537,7 @@ void CacheDylib::forEachCallSiteToAStub(Diagnostics& diag, const CallSiteHandler
     {
         // Section #0 is the mach_header
         __block uint32_t sectionIndex = 1;
-        this->cacheHdr->forEachSection(^(const Header::SegmentInfo &segInfo, const Header::SectionInfo &sectInfo, bool &stop) {
+        this->cacheHdr->forEachSection(^(const UnsafeHeader::SegmentInfo &segInfo, const UnsafeHeader::SectionInfo &sectInfo, bool &stop) {
             if ( sectInfo.segmentName == "__TEXT" ) {
                 if ( sectInfo.sectionName == "__text" ) {
                     textSectionIndex = sectionIndex;
@@ -2705,7 +2733,7 @@ static void addObjcSegments(Diagnostics& diag, const dyld3::MachOFile* objcMF,
                             CacheFileOffset readWriteFileOffset)
 {
     // validate there is enough free space to add the load commands
-    uint32_t freeSpace = ((const Header*)objcMF)->loadCommandsFreeSpace();
+    uint32_t freeSpace = ((const UnsafeHeader*)objcMF)->loadCommandsFreeSpace();
     const uint32_t segSize = sizeof(macho_segment_command<P>);
     if ( freeSpace < 2*segSize ) {
         diag.warning("not enough space in libojbc.dylib to add load commands for objc optimization regions");
@@ -2715,7 +2743,7 @@ static void addObjcSegments(Diagnostics& diag, const dyld3::MachOFile* objcMF,
     // find location of LINKEDIT LC_SEGMENT load command, we need to insert new segments before it
     uint32_t linkeditIndex = 0;
     uint8_t* linkeditSeg = nullptr;
-    linkeditSeg = (uint8_t*)((mach_o::Header*)objcMF)->findLoadCommand(linkeditIndex, ^bool(const load_command *lc) {
+    linkeditSeg = (uint8_t*)((mach_o::UnsafeHeader*)objcMF)->findLoadCommand(linkeditIndex, ^bool(const load_command *lc) {
         CString segmentName;
         if ( lc->cmd == LC_SEGMENT )
             segmentName = ((const segment_command*)lc)->segname;
@@ -2820,10 +2848,10 @@ void CacheDylib::addObjcSegments(Diagnostics& diag, Timer::AggregateTimer& timer
 
 void CacheDylib::removeLinkedDylibs(Diagnostics& diag)
 {
-    mach_o::HeaderWriter* header = (mach_o::HeaderWriter*)cacheHdr;
+    mach_o::UnsafeHeaderWriter* header = (mach_o::UnsafeHeaderWriter*)cacheHdr;
     uint32_t        lcLibSystemIndex = 0;
     if ( !header->findLoadCommand(lcLibSystemIndex, ^bool(const load_command *lc) {
-        const dylib_command* dyliblc = mach_o::Header::isDylibLoadCommand(lc);
+        const dylib_command* dyliblc = mach_o::UnsafeHeader::isDylibLoadCommand(lc);
         if ( !dyliblc ) return false;
 
         const char* loadPath = (char*)dyliblc + dyliblc->dylib.name.offset;
@@ -2836,7 +2864,7 @@ void CacheDylib::removeLinkedDylibs(Diagnostics& diag)
     uint32_t lcDylibStart = 0;
     uint32_t lcDylibEnd = 0;
     header->findLoadCommandRange(lcDylibStart, lcDylibEnd, ^bool(const load_command *lc) {
-        return mach_o::Header::isDylibLoadCommand(lc) != nullptr;
+        return mach_o::UnsafeHeader::isDylibLoadCommand(lc) != nullptr;
     });
     // libSystem was found, so the range of dylib load commands also must not be empty
     assert(lcDylibStart != lcDylibEnd);
@@ -2864,9 +2892,9 @@ void CacheDylib::addLinkedDylib(Diagnostics& diag, const CacheDylib& dylib)
     uint32_t lcLoadStart = 0;
     uint32_t lcLoadEnd = 0;
 
-    mach_o::HeaderWriter* header = (mach_o::HeaderWriter*)this->cacheHdr;
+    mach_o::UnsafeHeaderWriter* header = (mach_o::UnsafeHeaderWriter*)this->cacheHdr;
     header->findLoadCommandRange(lcLoadStart, lcLoadEnd, ^bool(const load_command *lc) {
-        return mach_o::Header::isDylibLoadCommand(lc) != nullptr;
+        return mach_o::UnsafeHeader::isDylibLoadCommand(lc) != nullptr;
     });
 
     if ( lcLoadEnd == 0 ) {
@@ -3045,7 +3073,7 @@ void CacheDylib::forEachCacheSection(void (^callback)(std::string_view segmentNa
                                                       CacheVMSize sectionVMSize,
                                                       bool& stop))
 {
-    this->inputHdr->forEachSection(^(const Header::SegmentInfo &segInfo, const Header::SectionInfo &sectInfo,
+    this->inputHdr->forEachSection(^(const UnsafeHeader::SegmentInfo &segInfo, const UnsafeHeader::SectionInfo &sectInfo,
                                     bool &stop) {
         const DylibSegmentChunk& segment = this->segments[sectInfo.segIndex];
 

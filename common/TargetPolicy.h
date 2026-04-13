@@ -30,10 +30,10 @@
 // FIXME: Share this with another file
 #define VIS_HIDDEN      __attribute__((visibility("hidden")))
 
-// True if mach_o::Header adds an implicit platform to binaries if they don't have
+// True if mach_o::UnsafeHeader adds an implicit platform to binaries if they don't have
 extern VIS_HIDDEN const bool gHeaderAddImplicitPlatform;
 
-// True if mach_o::Header is allows files to have no platform
+// True if mach_o::UnsafeHeader is allows files to have no platform
 extern VIS_HIDDEN const bool gHeaderAllowEmptyPlatform;
 
 // True if mach_o::Image should validate initializers

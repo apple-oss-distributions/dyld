@@ -29,7 +29,7 @@
 
 #include "Defines.h"
 #include "Error.h"
-#include "Header.h"
+#include "UnsafeHeader.h"
 
 // cannot include LibSystemHelpers.h because that will introduce a cycle
 namespace dyld4 {
@@ -40,7 +40,7 @@ class DyldSharedCache;
 
 namespace dyld {
 
-using mach_o::Header;
+using mach_o::UnsafeHeader;
 
 /*
               * * * How thread-local variables work on Apple platforms * * *
@@ -126,7 +126,7 @@ public:
     void                    exit();
 
     // called by dyld when image with thread-locals is first loaded
-    mach_o::Error           setUpImage(const DyldSharedCache* cache, const Header* hdr);
+    mach_o::Error           setUpImage(const DyldSharedCache* cache, const UnsafeHeader* hdr);
 
     // called by pthreads when a thread goes away
     void                    finalizeList(void* list);
@@ -139,8 +139,8 @@ public:
 #endif
 
     // internal routines to prepare the thunks in an image
-    mach_o::Error           initializeThunksFromDisk(const Header* hdr);
-    mach_o::Error           initializeThunksInDyldCache(const DyldSharedCache* cache, const Header* hdr);
+    mach_o::Error           initializeThunksFromDisk(const UnsafeHeader* hdr);
+    mach_o::Error           initializeThunksInDyldCache(const DyldSharedCache* cache, const UnsafeHeader* hdr);
 
     // runtime structure of 64-bit arch thread-local thunk
     struct TLV_Thunkv2
@@ -167,11 +167,11 @@ public:
 
 private:
 #if BUILDING_UNIT_TESTS
-    void                            findInitialContent(const Header* hdr, std::span<const uint8_t>& initialContent, bool& allZeroFill);
+    void                            findInitialContent(const UnsafeHeader* hdr, std::span<const uint8_t>& initialContent, bool& allZeroFill);
 #else
-    static void                     findInitialContent(const Header* hdr, std::span<const uint8_t>& initialContent, bool& allZeroFill);
+    static void                     findInitialContent(const UnsafeHeader* hdr, std::span<const uint8_t>& initialContent, bool& allZeroFill);
 #endif
-    mach_o::Error                   forEachThunkSpan(const Header* hdr, mach_o::Error (^visit)(std::span<Thunk>));
+    mach_o::Error                   forEachThunkSpan(const UnsafeHeader* hdr, mach_o::Error (^visit)(std::span<Thunk>));
 
     // used to record _tlv_atexit() entries to clean up on thread exit
     struct Terminator

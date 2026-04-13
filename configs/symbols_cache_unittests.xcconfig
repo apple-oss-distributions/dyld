@@ -2,3 +2,5 @@
 
 ARCHS[sdk=macosx*] = x86_64 arm64
 EXCLUDED_ARCHS = arm64e
+
+LD_RUNPATH_SEARCH_PATHS = @loader_path/../Frameworks

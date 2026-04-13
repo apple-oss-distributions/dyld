@@ -1,6 +1,6 @@
-/* -*- mode: C++; c-basic-offset: 4; tab-width: 4 -*- vim: ft=cpp et ts=4 sw=4:
+/* -*- mode: C++; c-basic-offset: 4; tab-width: 4 -*-
  *
- * Copyright (c) 2023 Apple Inc. All rights reserved.
+ * Copyright (c) 2021 Apple Inc. All rights reserved.
  *
  * @APPLE_LICENSE_HEADER_START@
  *
@@ -22,14 +22,26 @@
  * @APPLE_LICENSE_HEADER_END@
  */
 
-#ifndef CRC_h
-#define CRC_h
+#ifndef CRC32c_h
+#define CRC32c_h
 
-#include <span>
-#include <cstddef>
+#include <stddef.h>
+#include <stdint.h>
 
 #include "Defines.h"
-// This implements the cksum algorithm, matching the output of the cksum command
-VIS_HIDDEN uint32_t cksum(const std::span<std::byte> bytes);
 
+#if __cplusplus
+#include <span>
+VIS_HIDDEN uint32_t crc32c(const std::span<std::byte> bytes);
+
+extern "C" {
+#endif
+
+VIS_HIDDEN
+uint32_t crc32c(const void* start, size_t size);
+
+#if __cplusplus
+};
+#endif
 #endif /* CRC_h */
+

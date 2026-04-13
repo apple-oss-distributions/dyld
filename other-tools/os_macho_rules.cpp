@@ -46,7 +46,7 @@
 #include <string>
 
 // mach_o
-#include "Header.h"
+#include "UnsafeHeader.h"
 #include "Version32.h"
 #include "Universal.h"
 #include "Architecture.h"
@@ -67,7 +67,7 @@
 #include "MiscFileUtils.h"
 #include "os_macho_rules.h"
 
-using mach_o::Header;
+using mach_o::UnsafeHeader;
 using mach_o::Version32;
 using mach_o::Image;
 using mach_o::Fixup;
@@ -226,7 +226,7 @@ static void verifyiOSMac(const Image& image, CString installLocationInDstRoot, s
 
 static void checkDylib(const Image& image, CString installLocationInDstRoot, CString verifierDstRoot, std::vector<VerifierError>& errors)
 {
-    if ( Header::isSharedCacheEligiblePath(installLocationInDstRoot.c_str()) ) {
+    if ( UnsafeHeader::isSharedCacheEligiblePath(installLocationInDstRoot.c_str()) ) {
         verifyOSDylibInstallName(image, installLocationInDstRoot, verifierDstRoot, errors);
         verifyOSDylibNoRpaths(image, errors);
         verifyOSDylibDoesNotExportMain(image, errors);

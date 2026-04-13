@@ -86,10 +86,17 @@ static uint32_t supportsTPROMapping(Architecture arch)
     return !arch.sameCpu(Architecture::x86_64);
 }
 
+static bool requiresSingleCacheFile(Platform platform, mach_o::Architecture arch)
+{
+    // TODO: driverKit should work as well, but needs to be qualified
+    return platform.isExclaveKit() || platform == Platform::driverKit || arch.usesx86_64Instructions() || platform.isSimulator();
+}
+
 cache_builder::Layout::Layout(const BuilderOptions& options)
 : is64(options.arch.is64())
     , hasAuthRegion(::hasAuthRegion(options.arch))
     , tproIsInData(!::supportsTPROMapping(options.arch))
+    , supportsSplitCache(!::requiresSingleCacheFile(options.platform, options.arch))
     , pageSize(defaultPageSize(options.arch))
 {
     if ( options.arch.sameCpu(Architecture::x86_64) ) {
@@ -133,7 +140,13 @@ cache_builder::Layout::Layout(const BuilderOptions& options)
         // Limit the max slide for arm64 based caches to 512MB.  Combined with large
         // caches putting 1.5GB of TEXT in the first cache region, this will ensure that
         // this 1.5GB of TEXT will stay in the same 2GB region.  <rdar://problem/49852839>
-        cacheMaxSlide = 512_MB;
+        if ( options.platform == mach_o::Platform::macOS ) {
+            this->cacheFixedSlide = 256_MB;
+        } else {
+            this->cacheFixedSlide = 512_MB;
+        }
+
+        layout.cacheSize -= this->cacheFixedSlide.value();
     } else if ( options.arch == Architecture::arm64_32 ) {
         layout.baseAddress = ARM64_32_SHARED_REGION_START;
         layout.cacheSize = 2_GB;
@@ -206,13 +219,6 @@ SlideInfo::SlideInfo(const BuilderOptions& options, const Layout& layout)
 // MARK: --- cache_builder::CodeSign methods ---
 //
 
-static cache_builder::CodeSign::Mode platformCodeSigningDigestMode(Platform platform)
-{
-    if ( platform == Platform::watchOS )
-        return cache_builder::CodeSign::Mode::agile;
-    return cache_builder::CodeSign::Mode::onlySHA256;
-}
-
 static uint32_t codeSigningPageSize(Platform platform, Architecture arch)
 {
     if ( (arch == Architecture::arm64e) || (arch == Architecture::arm64_32) )
@@ -233,8 +239,7 @@ static uint32_t codeSigningPageSize(Platform platform, Architecture arch)
 }
 
 cache_builder::CodeSign::CodeSign(const BuilderOptions& options)
-    : mode(platformCodeSigningDigestMode(options.platform))
-    , pageSize(codeSigningPageSize(options.platform, options.arch))
+    : pageSize(codeSigningPageSize(options.platform, options.arch))
 {
 }
 

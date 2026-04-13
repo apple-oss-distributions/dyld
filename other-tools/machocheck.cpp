@@ -31,7 +31,7 @@
 #include <vector>
 
 // mach_o
-#include "Header.h"
+#include "UnsafeHeader.h"
 #include "Error.h"
 #include "Universal.h"
 
@@ -42,7 +42,7 @@
 #include "MiscFileUtils.h"
 #include "os_macho_rules.h"
 
-using mach_o::Header;
+using mach_o::UnsafeHeader;
 using mach_o::Error;
 using mach_o::Universal;
 
@@ -100,7 +100,7 @@ int main(int argc, const char* argv[])
             if ( const Universal* uni = Universal::isUniversal(buffer) ) {
                 uni->forEachSlice(^(Universal::Slice slice, bool& stopSlice) {
                     const char* sliceArchName = slice.arch.name();
-                    if ( Header::isMachO(slice.buffer) ) {
+                    if ( UnsafeHeader::isMachO(slice.buffer) ) {
                         os_macho_verifier(path, slice.buffer, verifierDstRoot, mergeRootPaths, errors);
                     }
                     else {
@@ -108,7 +108,7 @@ int main(int argc, const char* argv[])
                     }
                 });
             }
-            else if ( Header::isMachO(buffer) ) {
+            else if ( UnsafeHeader::isMachO(buffer) ) {
                 os_macho_verifier(path, buffer, verifierDstRoot, mergeRootPaths, errors);
             }
         });

@@ -101,6 +101,8 @@ static Atom::ContentType contentTypeFromString(CString str)
         return Atom::ContentType::objcData;
     if ( str == "objcConst" )
         return Atom::ContentType::objcConst;
+    if ( str == "function" )
+        return Atom::ContentType::function;
     if ( str == "custom" )
         return Atom::ContentType::custom;
     // ld-prime doesn't need to understand these content types (yet)
@@ -155,7 +157,7 @@ static void parseHeader(Diagnostics& diag, JSONHeader& header, const Node& rootN
     header.pvs.sdk      = ver;
 
     header.atoms  = &getRequiredValue(diag, rootNode, "atoms");
-    header.dylibs = &getRequiredValue(diag, rootNode, "dylibs");
+    header.dylibs = getOptionalValue(diag, rootNode, "dylibs");
     header.customSections = getOptionalValue(diag, rootNode, "customSections");
 
     if ( const Node* node = getOptionalValue(diag, rootNode, "options") ) {
@@ -464,20 +466,22 @@ Error linkerMakeFromJSON(Linker& linker, std::span<const char> jsonData, std::sp
     baseOrdinal = baseOrdinal.nextFileListOrdinal();
     File::Ordinal reservedLibSystemOrdinal = baseOrdinal;
 
-    for ( const Node& dylib : header.dylibs->array ) {
-        baseOrdinal = baseOrdinal.nextFileListOrdinal();
+    if ( header.dylibs ) {
+        for ( const Node& dylib : header.dylibs->array ) {
+            baseOrdinal = baseOrdinal.nextFileListOrdinal();
 
-        DynamicAtomFile* dylibAf = addDylib(jsonDiag, baseOrdinal, af->atomsGroup(), dylib);
-        if ( jsonDiag.hasError() )
-            return jsonDiag.toError();
+            DynamicAtomFile* dylibAf = addDylib(jsonDiag, baseOrdinal, af->atomsGroup(), dylib);
+            if ( jsonDiag.hasError() )
+                return jsonDiag.toError();
 
-        assert(dylibAf);
-        linker.addAtomFile(dylibAf);
+            assert(dylibAf);
+            linker.addAtomFile(dylibAf);
 
-        if ( const DylibFileInfo* dylibInfo = dylibAf->dylibFileInfo() )
-            hasLibSystem |= dylibInfo->installName().contains("libSystem");
+            if ( const DylibFileInfo* dylibInfo = dylibAf->dylibFileInfo() )
+                hasLibSystem |= dylibInfo->installName().contains("libSystem");
+        }
     }
-
+    
     // always link with libSystem
     if ( !hasLibSystem ) {
         DynamicAtomFile* libSystem = new DynamicAtomFile(reservedLibSystemOrdinal, "/usr/lib/libSystem.B.dylib", af->atomsGroup());

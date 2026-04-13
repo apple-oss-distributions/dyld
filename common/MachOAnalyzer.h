@@ -33,7 +33,7 @@
 #include "MachOLoaded.h"
 #include "Array.h"
 #include "GradedArchitectures.h"
-#include "Header.h"
+#include "UnsafeHeader.h"
 #include "Platform.h"
 
 #if !TARGET_OS_EXCLAVEKIT
@@ -144,9 +144,9 @@ struct VIS_HIDDEN MachOAnalyzer : public MachOLoaded
                                                                         bool weakImport, bool lazyBind, uint64_t addend, bool& stop),
                                     void (^strongHandler)(const char* symbolName)) const;
     void                forEachChainedFixupTarget(Diagnostics& diag, void (^callback)(int libOrdinal, const char* symbolName, uint64_t addend, bool weakImport, bool& stop)) const;
-    void                forEachRebase(Diagnostics& diag, void (^handler)(const char* opcodeName, const LinkEditInfo& leInfo, const mach_o::Header::SegmentInfo segments[],
+    void                forEachRebase(Diagnostics& diag, void (^handler)(const char* opcodeName, const LinkEditInfo& leInfo, const mach_o::UnsafeHeader::SegmentInfo segments[],
                                                                              bool segIndexSet, uint32_t pointerSize, uint8_t segmentIndex, uint64_t segmentOffset, Rebase kind, bool& stop)) const;
-    void                forEachBind(Diagnostics& diag, void (^handler)(const char* opcodeName, const LinkEditInfo& leInfo, const mach_o::Header::SegmentInfo segments[],
+    void                forEachBind(Diagnostics& diag, void (^handler)(const char* opcodeName, const LinkEditInfo& leInfo, const mach_o::UnsafeHeader::SegmentInfo segments[],
                                                                        bool segIndexSet,  bool libraryOrdinalSet, uint32_t dylibCount, int libOrdinal,
                                                                        uint32_t pointerSize, uint8_t segmentIndex, uint64_t segmentOffset,
                                                                        uint8_t type, const char* symbolName, bool weakImport, bool lazyBind, uint64_t addend, bool& stop),
@@ -410,19 +410,19 @@ struct VIS_HIDDEN MachOAnalyzer : public MachOLoaded
     bool                    getLinkeditLayout(Diagnostics& diag, uint64_t linkeditFileOffset,
                                               const uint8_t* linkeditStartAddr, mach_o::LinkeditLayout& layout) const;
     void                    withVMLayout(Diagnostics &diag, void (^callback)(const mach_o::Layout& layout)) const;
-    void                    getAllSegmentsInfos(Diagnostics& diag, mach_o::Header::SegmentInfo segments[]) const;
+    void                    getAllSegmentsInfos(Diagnostics& diag, mach_o::UnsafeHeader::SegmentInfo segments[]) const;
 
-    typedef void (^BindDetailedHandler)(const char* opcodeName, const LinkEditInfo& leInfo, const mach_o::Header::SegmentInfo segments[],
+    typedef void (^BindDetailedHandler)(const char* opcodeName, const LinkEditInfo& leInfo, const mach_o::UnsafeHeader::SegmentInfo segments[],
                                 bool segIndexSet,  bool libraryOrdinalSet, uint32_t dylibCount, int libOrdinal,
                                 uint32_t pointerSize, uint8_t segmentIndex, uint64_t segmentOffset,
                                 uint8_t type, const char* symbolName, bool weakImport, bool lazyBind,
                                 uint64_t addend, bool targetOrAddendChanged, bool& stop);
-    typedef void (^RebaseDetailHandler)(const char* opcodeName, const LinkEditInfo& leInfo, const mach_o::Header::SegmentInfo segments[],
+    typedef void (^RebaseDetailHandler)(const char* opcodeName, const LinkEditInfo& leInfo, const mach_o::UnsafeHeader::SegmentInfo segments[],
                                         bool segIndexSet, uint32_t pointerSize, uint8_t segmentIndex, uint64_t segmentOffset, Rebase kind, bool& stop);
-    bool                forEachBind_OpcodesLazy(Diagnostics& diag, const LinkEditInfo& leInfo, const mach_o::Header::SegmentInfo segments[], BindDetailedHandler) const;
-    bool                forEachBind_OpcodesWeak(Diagnostics& diag, const LinkEditInfo& leInfo, const mach_o::Header::SegmentInfo segments[], BindDetailedHandler,  void (^strongHandler)(const char* symbolName)) const;
-    bool                forEachBind_OpcodesRegular(Diagnostics& diag, const LinkEditInfo& leInfo, const mach_o::Header::SegmentInfo segments[], BindDetailedHandler) const;
-    bool                forEachRebase_Opcodes(Diagnostics& diag, const LinkEditInfo& leInfo, const mach_o::Header::SegmentInfo segments[], RebaseDetailHandler) const;
+    bool                forEachBind_OpcodesLazy(Diagnostics& diag, const LinkEditInfo& leInfo, const mach_o::UnsafeHeader::SegmentInfo segments[], BindDetailedHandler) const;
+    bool                forEachBind_OpcodesWeak(Diagnostics& diag, const LinkEditInfo& leInfo, const mach_o::UnsafeHeader::SegmentInfo segments[], BindDetailedHandler,  void (^strongHandler)(const char* symbolName)) const;
+    bool                forEachBind_OpcodesRegular(Diagnostics& diag, const LinkEditInfo& leInfo, const mach_o::UnsafeHeader::SegmentInfo segments[], BindDetailedHandler) const;
+    bool                forEachRebase_Opcodes(Diagnostics& diag, const LinkEditInfo& leInfo, const mach_o::UnsafeHeader::SegmentInfo segments[], RebaseDetailHandler) const;
 
 private:
     void                forEachBindUnified_Opcodes(Diagnostics& diag, bool allowLazyBinds,
@@ -435,9 +435,9 @@ private:
     void                forEachBindTarget_ChainedFixups(Diagnostics& diag, void (^handler)(const BindTargetInfo& info, bool& stop)) const;
     void                forEachBindTarget_Relocations(Diagnostics& diag, void (^handler)(const BindTargetInfo& info, bool& stop)) const;
 
-    bool                forEachBind_Relocations(Diagnostics& diag, const LinkEditInfo& leInfo, const mach_o::Header::SegmentInfo segments[],
+    bool                forEachBind_Relocations(Diagnostics& diag, const LinkEditInfo& leInfo, const mach_o::UnsafeHeader::SegmentInfo segments[],
                                                 bool supportPrivateExternsWorkaround, BindDetailedHandler) const;
-    bool                forEachRebase_Relocations(Diagnostics& diag, const LinkEditInfo& leInfo, const mach_o::Header::SegmentInfo segments[], RebaseDetailHandler) const;
+    bool                forEachRebase_Relocations(Diagnostics& diag, const LinkEditInfo& leInfo, const mach_o::UnsafeHeader::SegmentInfo segments[], RebaseDetailHandler) const;
 
     struct SegmentStuff
     {
@@ -460,9 +460,9 @@ private:
     bool                    validChainedFixupsInfo(Diagnostics& diag, const char* path) const;
     bool                    validChainedFixupsInfoOldArm64e(Diagnostics& diag, const char* path) const;
 
-    bool                    invalidRebaseState(Diagnostics& diag, const char* opcodeName, const char* path, const LinkEditInfo& leInfo, const mach_o::Header::SegmentInfo segments[],
+    bool                    invalidRebaseState(Diagnostics& diag, const char* opcodeName, const char* path, const LinkEditInfo& leInfo, const mach_o::UnsafeHeader::SegmentInfo segments[],
                                               bool segIndexSet, uint32_t pointerSize, uint8_t segmentIndex, uint64_t segmentOffset, Rebase kind) const;
-    bool                    invalidBindState(Diagnostics& diag, const char* opcodeName, const char* path, const LinkEditInfo& leInfo, const mach_o::Header::SegmentInfo segments[],
+    bool                    invalidBindState(Diagnostics& diag, const char* opcodeName, const char* path, const LinkEditInfo& leInfo, const mach_o::UnsafeHeader::SegmentInfo segments[],
                                               bool segIndexSet,  bool libraryOrdinalSet, uint32_t dylibCount, int libOrdinal, uint32_t pointerSize,
                                               uint8_t segmentIndex, uint64_t segmentOffset, uint8_t type, const char* symbolName) const;
     bool                    doLocalReloc(Diagnostics& diag, uint32_t r_address, bool& stop, void (^callback)(uint32_t dataSegIndex, uint64_t dataSegOffset, uint8_t type, bool& stop)) const;
@@ -473,12 +473,12 @@ private:
                                                              uint64_t addend, const char* symbolName, bool weakImport, bool lazy, bool& stop)) const;
 
     bool                    segmentHasTextRelocs(uint32_t segIndex) const;
-    uint64_t                localRelocBaseAddress(const mach_o::Header::SegmentInfo segmentsInfos[], uint32_t segCount) const;
-    uint64_t                externalRelocBaseAddress(const mach_o::Header::SegmentInfo segmentsInfos[], uint32_t segCount) const;
-    bool                    segIndexAndOffsetForAddress(uint64_t addr, const mach_o::Header::SegmentInfo segmentsInfos[], uint32_t segCount, uint32_t& segIndex, uint64_t& segOffset) const;
+    uint64_t                localRelocBaseAddress(const mach_o::UnsafeHeader::SegmentInfo segmentsInfos[], uint32_t segCount) const;
+    uint64_t                externalRelocBaseAddress(const mach_o::UnsafeHeader::SegmentInfo segmentsInfos[], uint32_t segCount) const;
+    bool                    segIndexAndOffsetForAddress(uint64_t addr, const mach_o::UnsafeHeader::SegmentInfo segmentsInfos[], uint32_t segCount, uint32_t& segIndex, uint64_t& segOffset) const;
     void                    parseOrgArm64eChainedFixups(Diagnostics& diag, void (^targetCount)(uint32_t totalTargets, bool& stop),
-                                                                           void (^addTarget)(const LinkEditInfo& leInfo, const mach_o::Header::SegmentInfo segments[], bool libraryOrdinalSet, uint32_t dylibCount, int libOrdinal, uint8_t type, const char* symbolName, uint64_t addend, bool weakImport, bool& stop),
-                                                                           void (^addChainStart)(const LinkEditInfo& leInfo, const mach_o::Header::SegmentInfo segments[], uint8_t segmentIndex, bool segIndexSet, uint64_t segmentOffset, uint16_t format, bool& stop)) const;
+                                                                           void (^addTarget)(const LinkEditInfo& leInfo, const mach_o::UnsafeHeader::SegmentInfo segments[], bool libraryOrdinalSet, uint32_t dylibCount, int libOrdinal, uint8_t type, const char* symbolName, uint64_t addend, bool weakImport, bool& stop),
+                                                                           void (^addChainStart)(const LinkEditInfo& leInfo, const mach_o::UnsafeHeader::SegmentInfo segments[], uint8_t segmentIndex, bool segIndexSet, uint64_t segmentOffset, uint16_t format, bool& stop)) const;
     bool                    contentIsRegularStub(const uint8_t* helperContent) const;
     void                    recurseTrie(Diagnostics& diag, const uint8_t* const start, const uint8_t* p, const uint8_t* const end,
                                         OverflowSafeArray<char>& cummulativeString, int curStrOffset, bool& stop, MachOAnalyzer::ExportsCallback callback) const;

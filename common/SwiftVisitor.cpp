@@ -35,7 +35,7 @@
 #include <assert.h>
 
 using namespace metadata_visitor;
-using mach_o::Header;
+using mach_o::UnsafeHeader;
 
 //
 // MARK: --- SwiftVisitor methods ---
@@ -77,7 +77,7 @@ std::optional<SwiftVisitor::SectionContent> SwiftVisitor::findSection(const char
 #endif
 
     __block std::optional<SwiftVisitor::SectionContent> sectionContent;
-    ((const Header*)mf)->forEachSection(^(const Header::SegmentInfo& segInfo, const Header::SectionInfo& sectInfo, bool& stop) {
+    ((const UnsafeHeader*)mf)->forEachSection(^(const UnsafeHeader::SegmentInfo& segInfo, const UnsafeHeader::SectionInfo& sectInfo, bool& stop) {
         if ( sectInfo.segmentName != segmentName )
             return;
         if ( sectInfo.sectionName != sectionName )

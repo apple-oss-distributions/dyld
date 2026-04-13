@@ -38,7 +38,7 @@
 // mach_o
 #include "FunctionVariants.h"
 #include "GradedArchitectures.h"
-#include "Header.h"
+#include "UnsafeHeader.h"
 #include "Platform.h"
 
 // common
@@ -69,7 +69,7 @@ using lsl::Allocator;
 using dyld3::MachOFile;
 using dyld3::MachOLoaded;
 using dyld3::MachOAnalyzer;
-using mach_o::Header;
+using mach_o::UnsafeHeader;
 using mach_o::FunctionVariants;
 using mach_o::GradedArchitectures;
 
@@ -186,7 +186,7 @@ public:
 #else
         mach_o::MachOFileRef        mainExecutableMF = { nullptr };
 #endif
-        const mach_o::Header*       mainExecutableHdr;
+        const mach_o::UnsafeHeader* mainExecutableHdr;
         const char*                 mainExecutablePath;
         const char*                 mainUnrealPath;             // raw path used to launch
         uint64_t                    mainExecutableFSID;
@@ -200,7 +200,7 @@ public:
         mach_o::Platform            basePlatform;
         mach_o::Platform            platform;
         const char*                 dyldPath;
-        const Header*               dyldHdr;
+        const UnsafeHeader*         dyldHdr;
         uint64_t                    dyldFSID;
         uint64_t                    dyldObjID;
 #if TARGET_OS_SIMULATOR
@@ -445,6 +445,7 @@ public:
 
 #if BUILDING_UNIT_TESTS
         void                            setCryptexRootPath(const char* path) { this->_cryptexRootPath = path; }
+        const char*                     frameworkPathOverridesExeLC() const { return _frameworkPathOverridesExeLC; }
 #endif
 
         static const char*              getLibraryLeafName(const char* path);

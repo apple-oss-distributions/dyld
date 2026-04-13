@@ -33,7 +33,7 @@
 #include "Allocator.h"
 #include "PropertyList.h"
 #include "SnapshotShared.h"
-#include "Header.h"
+#include "UnsafeHeader.h"
 #include "DyldSharedCache.h"
 #include "Vector.h"
 
@@ -167,7 +167,7 @@ void scavengeCache(const char* path, ByteStream& byteStream) {
     cacheAtlas->addObjectForKey<Integer>(kDyldAtlasSharedCacheVMSizeKey, cacheHeader->sharedRegionSize);
     if (!uuid_is_null(cacheHeader->symbolFileUUID)) {
         cacheAtlas->addObjectForKey<String>(kDyldAtlasSharedCacheSymbolFileName, cacheName + ".symbols");
-        cacheAtlas->addObjectForKey<PropertyList::UUID>(kDyldAtlasSharedCacheSymbolFileName, cacheHeader->symbolFileUUID);
+        cacheAtlas->addObjectForKey<PropertyList::UUID>(kDyldAtlasSharedCacheSymbolFileUUIDKey, cacheHeader->symbolFileUUID);
     }
     // We only support scavenging on `macOS`, and all caches on macOS have 8 byte pointers
     cacheAtlas->addObjectForKey<Integer>("psze", 8);
@@ -191,7 +191,7 @@ void scavengeCache(const char* path, ByteStream& byteStream) {
         for (auto i = 0; i < cacheHeader->subCacheArrayCount; ++i) {
             auto subCacheMapping = mapFile(dir, cacheName + subCacheEntries[i].fileSuffix);
             dyld_cache_header* subCacheHeader = (dyld_cache_header*)subCacheMapping.address;
-            addSubCacheFileInfo(cacheHeader->sharedRegionStart, files, subCacheHeader, subCacheMapping, subCacheEntries[i].fileSuffix);
+            addSubCacheFileInfo(cacheHeader->sharedRegionStart, files, subCacheHeader, subCacheMapping, cacheName + subCacheEntries[i].fileSuffix);
             cacheMappings.push_back(subCacheMapping);
         }
     }
@@ -220,8 +220,8 @@ void scavengeCache(const char* path, ByteStream& byteStream) {
         uint64_t subcacheImageOffset = imageAddress - mapping->preferredLoadAddress;
         uint8_t* machHeaderAddress = (uint8_t*)mapping->address + subcacheImageOffset;
         std::span<uint8_t> machHeaderSpan = std::span(machHeaderAddress,  (uint8_t*)mapping->address + mapping->fileSize);
-        const mach_o::Header* mh = mach_o::Header::isMachO(machHeaderSpan);
-        mh->forEachSegment(^(const mach_o::Header::SegmentInfo &info, bool &stop) {
+        const mach_o::UnsafeHeader* mh = mach_o::UnsafeHeader::isMachO(machHeaderSpan);
+        mh->forEachSegment(^(const mach_o::UnsafeHeader::SegmentInfo &info, bool &stop) {
             auto& segment = segments.addObject<Dictionary>();
             segment.addObjectForKey<String>(kDyldAtlasSegmentNameKey, info.segmentName);
             segment.addObjectForKey<Integer>(kDyldAtlasSegmentPreferredLoadAddressKey, info.vmaddr);

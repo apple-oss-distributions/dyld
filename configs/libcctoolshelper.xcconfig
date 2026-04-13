@@ -1,5 +1,7 @@
 #include "ld_base.xcconfig"
 
+GCC_SYMBOLS_PRIVATE_EXTERN  = YES
+
 // TODO: Clean these up.  They were moved from the build settings
 COPY_PHASE_STRIP = NO
 ENABLE_USER_SCRIPT_SANDBOXING = YES

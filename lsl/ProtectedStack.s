@@ -96,21 +96,41 @@ mov       x16, sp
 stp       x1, x8,   [sp, #0x00]    // save prevStackPtr and its old target value to the TPRO stack
 mov       x16, sp
 pacdb     x16, x17                 // sign the old sp
-sub       x17, x17, #0x20          // subtract space from stack
+sub       x17, x17, #0x70          // subtract space from stack
 stp       xzr, x16, [x17, #0x00]   // save old sp
-stp       x29, x30, [x17, #0x10]   // save fp, lr
+stp       x28, x27, [x17, #0x10]
+stp       x26, x25, [x17, #0x20]
+stp       x24, x23, [x17, #0x30]
+stp       x22, x21, [x17, #0x40]
+stp       x20, x19, [x17, #0x50]
+stp       x29, x30, [x17, #0x60]   // save fp, lr
 mov       sp, x17                  // switch to new stack
-add       x29, x17, #0x10          // switch to new frame
+add       x29, x17, #0x60          // switch to new frame
 .cfi_def_cfa w29, 16
 .cfi_offset w30, -8                // lr
 .cfi_offset w29, -16               // fp
+.cfi_offset w19, -24
+.cfi_offset w20, -32
+.cfi_offset w21, -40
+.cfi_offset w22, -48
+.cfi_offset w23, -56
+.cfi_offset w24, -64
+.cfi_offset w25, -72
+.cfi_offset w26, -80
+.cfi_offset w27, -88
+.cfi_offset w28, -96
 mov       x0, x2                   // move the block pointer to x0 as blocks requires it for context
 add       x2, x0, #16              // get the address of the block pointer to auth later
 ldr       x1, [x0, #16]            // load the function pointer from the block
 blraa     x1, x2                   // call the function
-ldp       x29, x30, [sp, #0x10]    // restore fp, lr
+ldp       x29, x30, [sp, #0x60]    // restore fp, lr
+ldp       x20, x19, [sp, #0x50]
+ldp       x22, x21, [sp, #0x40]
+ldp       x24, x23, [sp, #0x30]
+ldp       x26, x25, [sp, #0x20]
+ldp       x28, x27, [sp, #0x10]
 ldp       xzr, x16, [sp, #0x00]    // load old sp
-add       sp, sp, #0x20            // move the stack back up before the auth
+add       sp, sp, #0x70            // move the stack back up before the auth
 autdb     x16, sp                  // auth old sp
 mov       sp, x16                  // restore old sp
 ldp       x1, x8,   [sp, #0x00]    // load prevStackPtr and its current value when we started this function

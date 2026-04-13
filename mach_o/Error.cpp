@@ -126,7 +126,8 @@ void Error::append(const char* format, ...)
    vsnprintf(&_strBuf[len], sizeof(_strBuf)-len, format, list);
    va_end(list);
 #else
-    assert(_buffer != nullptr);
+    if ( _buffer == nullptr )
+        _buffer = _simple_salloc();
     _simple_sresize(_buffer);   // move insertion point to end of existing string in buffer
     va_list list;
     va_start(list, format);

@@ -7,10 +7,8 @@ OTHER_CODE_SIGN_FLAGS[sdk=*simulator*]   = --entitlements $(SRCROOT)/dyld/dyld_s
 OTHER_CODE_SIGN_FLAGS[sdk=iphoneos*]     =
 OTHER_CODE_SIGN_FLAGS[sdk=macosx*]       =
 
+PRODUCT_NAME                  = dyld
 PRODUCT_NAME[sdk=*simulator*] = dyld_sim
-PRODUCT_NAME[sdk=iphoneos*]   = dyld
-PRODUCT_NAME[sdk=macosx*]     = dyld
-PRODUCT_NAME[sdk=exclavekit*] = dyld
 
 INSTALL_PATH   = /usr/lib
 INSTALL_PATH[sdk=exclavekit*]   = $(SYSTEM_PREFIX)/usr/lib
@@ -38,7 +36,7 @@ DIRTY                    = -Wl,-dirty_data_list,$(DERIVED_SOURCES_DIR)/dyld.dirt
 LLDB_SUPPORT = -Wl,-exported_symbol,_lldb_image_notifier -Wl,-exported_symbol,_dyld_all_image_infos
 LLDB_SUPPORT[sdk=*simulator*] =
 
-OTHER_LDFLAGS = -e $(ENTRY_NAME) -Wl,-exported_symbol,$(ENTRY_NAME) $(LLDB_SUPPORT) -Wl,-no_inits @$(DERIVED_SOURCES_DIR)/archives.txt -nostdlib -Wl,-dylinker -Wl,-dylinker_install_name,/usr/lib/dyld $(ALIGNMENT) -Wl,-fixup_chains -Wl,-data_const -fapple-link-rtlib $(DIRTY) -Wl,-section_order,__TPRO_CONST,__data:__allocator
+OTHER_LDFLAGS = -e $(ENTRY_NAME) -Wl,-exported_symbol,$(ENTRY_NAME) $(LLDB_SUPPORT) -Wl,-no_inits @$(DERIVED_SOURCES_DIR)/archives.txt -nostdlib -Wl,-dylinker -Wl,-dylinker_install_name,/usr/lib/dyld $(ALIGNMENT) -Wl,-fixup_chains -Wl,-data_const -fapple-link-rtlib $(DIRTY) -Wl,-section_order,__TPRO_CONST,__data:__auth_got:__allocator
 
 CODE_SIGN_IDENTITY = $(TRUSTED_CODE_SIGN_IDENTITY)
 

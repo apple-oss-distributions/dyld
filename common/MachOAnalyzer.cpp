@@ -46,13 +46,13 @@
 #include "MachOAnalyzer.h"
 #include "CodeSigningTypes.h"
 #include "Array.h"
-#include "Header.h"
+#include "UnsafeHeader.h"
 #include "Universal.h"
 
 // FIXME: We should get this from cctools
 #define DYLD_CACHE_ADJ_V2_FORMAT 0x7F
 
-using mach_o::Header;
+using mach_o::UnsafeHeader;
 using mach_o::Platform;
 using mach_o::GradedArchitectures;
 using mach_o::Universal;
@@ -178,7 +178,7 @@ bool MachOAnalyzer::isOSBinary(int fd, uint64_t sliceOffset, uint64_t sliceSize)
 
     uint32_t sigOffset;
     uint32_t sigSize;
-    if ( !((const Header*)this)->hasCodeSignature(sigOffset, sigSize) )
+    if ( !((const UnsafeHeader*)this)->hasCodeSignature(sigOffset, sigSize) )
         return false;
 
     // register code signature
@@ -238,7 +238,7 @@ bool MachOAnalyzer::validMachOForArchAndPlatform(Diagnostics& diag, size_t slice
         return false;
     }
 
-    if ( !archs.isCompatible(((const Header*)this)->arch(), isOSBinary) ) {
+    if ( !archs.isCompatible(((const UnsafeHeader*)this)->arch(), isOSBinary) ) {
         diag.error("could not use '%s' because it is not a compatible arch", path);
         return false;
     }
@@ -280,7 +280,7 @@ bool MachOAnalyzer::validMachOForArchAndPlatform(Diagnostics& diag, size_t slice
 #if BUILDING_DYLDINFO || BUILDING_APP_CACHE_UTIL
     if ( isFileSet() ) {
         // A statically linked kernel collection should contain a 0 platform
-        mach_o::PlatformAndVersions pvs = ((const Header*)this)->platformAndVersions();
+        mach_o::PlatformAndVersions pvs = ((const UnsafeHeader*)this)->platformAndVersions();
         if ( !pvs.platform.empty() ) {
             diag.error("could not use '%s' because is has the wrong platform", path);
             return false;
@@ -290,7 +290,7 @@ bool MachOAnalyzer::validMachOForArchAndPlatform(Diagnostics& diag, size_t slice
         // to the kernel binary and can infer its platform
     } else
 #endif
-    if ( !((const Header*)this)->loadableIntoProcess(reqPlatform, path, internalInstall) ) {
+    if ( !((const UnsafeHeader*)this)->loadableIntoProcess(reqPlatform, path, internalInstall) ) {
         diag.error("could not use '%s' because it was not built for platform %s", path, reqPlatform.name().c_str());
         return false;
     }
@@ -373,7 +373,7 @@ bool MachOAnalyzer::validLoadCommands(Diagnostics& diag, const char* path, size_
 
     // check load commands fit in TEXT segment
     __block bool foundTEXT    = false;
-    ((const Header*)this)->forEachSegment(^(const Header::SegmentInfo& info, bool& stop) {
+    ((const UnsafeHeader*)this)->forEachSegment(^(const UnsafeHeader::SegmentInfo& info, bool& stop) {
         if ( info.segmentName == "__TEXT" ) {
             foundTEXT = true;
             if ( this->sizeofcmds + machHeaderSize() > info.fileSize ) {
@@ -411,15 +411,15 @@ const MachOAnalyzer* MachOAnalyzer::remapIfZeroFill(Diagnostics& diag, const clo
 #if BUILDING_APP_CACHE_UTIL
         // The auxKC is mapped with __DATA first, so we need to get either the __DATA or __TEXT depending on what is earliest
         __block uint64_t baseAddress = ~0ULL;
-        ((const Header*)this)->forEachSegment(^(const Header::SegmentInfo& segmentInfo, bool& stop) {
+        ((const UnsafeHeader*)this)->forEachSegment(^(const UnsafeHeader::SegmentInfo& segmentInfo, bool& stop) {
             baseAddress = std::min(baseAddress, segmentInfo.vmaddr);
         });
-        uint64_t textSegVMAddr = ((const Header*)this)->preferredLoadAddress();
+        uint64_t textSegVMAddr = ((const UnsafeHeader*)this)->preferredLoadAddress();
 #else
-        uint64_t baseAddress = ((const Header*)this)->preferredLoadAddress();
+        uint64_t baseAddress = ((const UnsafeHeader*)this)->preferredLoadAddress();
 #endif
 
-        ((const Header*)this)->forEachSegment(^(const Header::SegmentInfo& segmentInfo, bool& stop) {
+        ((const UnsafeHeader*)this)->forEachSegment(^(const UnsafeHeader::SegmentInfo& segmentInfo, bool& stop) {
             if ( (segmentInfo.fileSize != 0) && (segmentInfo.vmsize != 0) ) {
                 kern_return_t r = vm_copy(mach_task_self(), (vm_address_t)((long)info.fileContent+segmentInfo.fileOffset), (vm_size_t)segmentInfo.fileSize, (vm_address_t)(newMappedAddr+segmentInfo.vmaddr-baseAddress));
                 if ( r != KERN_SUCCESS ) {
@@ -440,9 +440,9 @@ const MachOAnalyzer* MachOAnalyzer::remapIfZeroFill(Diagnostics& diag, const clo
                 info.unload = [](const closure::LoadedFileInfo& info) {
                     // Unloading binaries where __DATA is first requires working out the real range of the binary
                     // The fileContent points at the mach_header, not the actaul start of the file content, unfortunately.
-                    const Header* hdr = (const Header*)info.fileContent;
+                    const UnsafeHeader* hdr = (const UnsafeHeader*)info.fileContent;
                     __block uint64_t baseAddress = ~0ULL;
-                    hdr->forEachSegment(^(const Header::SegmentInfo& segInfo, bool& stop) {
+                    hdr->forEachSegment(^(const UnsafeHeader::SegmentInfo& segInfo, bool& stop) {
                         baseAddress = std::min(baseAddress, segInfo.vmaddr);
                     });
                     uint64_t textSegVMAddr = hdr->preferredLoadAddress();
@@ -583,7 +583,7 @@ bool MachOAnalyzer::validEmbeddedPaths(Diagnostics& diag, Platform platform, con
 
     // all new binaries must link with something else
     if ( (dependentsCount == 0) && enforceFormat(Malformed::noLinkedDylibs) ) {
-        const Header *hdr = (const Header*)this;
+        const UnsafeHeader* hdr = (const UnsafeHeader*)this;
         const char* libSystemDir = hdr->builtForPlatform(Platform::driverKit, true) ? "/System/DriverKit/usr/lib/system/" : "/usr/lib/system/";
         // except for dylibs in libSystem.dylib which are ok to link with nothing (they are on bottom)
         bool isNotLibSystem = (installName == nullptr) || (strncmp(installName, libSystemDir, strlen(libSystemDir)) != 0);
@@ -624,10 +624,10 @@ bool MachOAnalyzer::validMain(Diagnostics& diag, const char* path) const
             case LC_MAIN: {
                 ++mainCount;
                 entry_point_command* mainCmd = (entry_point_command*)cmd;
-                uint64_t startAddress = ((const Header*)this)->preferredLoadAddress() + mainCmd->entryoff;
+                uint64_t startAddress = ((const UnsafeHeader*)this)->preferredLoadAddress() + mainCmd->entryoff;
 
                 __block bool foundSegment = false;
-                ((const Header*)this)->forEachSegment(^(const Header::SegmentInfo& info, bool& stopSegment) {
+                ((const UnsafeHeader*)this)->forEachSegment(^(const UnsafeHeader::SegmentInfo& info, bool& stopSegment) {
                     // Skip segments which don't contain this address
                     if ( (startAddress < info.vmaddr) || (startAddress >= info.vmaddr+info.vmsize) )
                         return;
@@ -650,7 +650,7 @@ bool MachOAnalyzer::validMain(Diagnostics& diag, const char* path) const
                     stop = true;
                 } else {
                     __block bool foundSegment = false;
-                    ((const Header*)this)->forEachSegment(^(const Header::SegmentInfo& info, bool& stopSegment) {
+                    ((const UnsafeHeader*)this)->forEachSegment(^(const UnsafeHeader::SegmentInfo& info, bool& stopSegment) {
                         // Skip segments which don't contain this address
                         if ( (startAddress < info.vmaddr) || (startAddress >= info.vmaddr+info.vmsize) )
                             return;
@@ -673,7 +673,7 @@ bool MachOAnalyzer::validMain(Diagnostics& diag, const char* path) const
     if ( diag.hasError() )
         return false;
 
-    if ( ((const Header*)this)->builtForPlatform(Platform::driverKit) ) {
+    if ( ((const UnsafeHeader*)this)->builtForPlatform(Platform::driverKit) ) {
         if ( mainCount + threadCount == 0 )
             return true;
         diag.error("LC_MAIN not allowed for driverkit");
@@ -731,7 +731,7 @@ bool MachOAnalyzer::validLinkeditLayout(Diagnostics& diag, const char* path) con
 
 
 
-bool MachOAnalyzer::invalidRebaseState(Diagnostics& diag, const char* opcodeName, const char* path, const LinkEditInfo& leInfo, const Header::SegmentInfo segments[],
+bool MachOAnalyzer::invalidRebaseState(Diagnostics& diag, const char* opcodeName, const char* path, const LinkEditInfo& leInfo, const UnsafeHeader::SegmentInfo segments[],
                                       bool segIndexSet, uint32_t ptrSize, uint8_t segmentIndex, uint64_t segmentOffset, Rebase kind) const
 {
     if ( !segIndexSet ) {
@@ -777,9 +777,9 @@ bool MachOAnalyzer::invalidRebaseState(Diagnostics& diag, const char* opcodeName
 }
 
 
-void MachOAnalyzer::getAllSegmentsInfos(Diagnostics& diag, Header::SegmentInfo segments[]) const
+void MachOAnalyzer::getAllSegmentsInfos(Diagnostics& diag, UnsafeHeader::SegmentInfo segments[]) const
 {
-    ((const Header*)this)->forEachSegment(^(const Header::SegmentInfo& info, bool& stop) {
+    ((const UnsafeHeader*)this)->forEachSegment(^(const UnsafeHeader::SegmentInfo& info, bool& stop) {
         segments[info.segmentIndex] = info;
     });
 }
@@ -787,7 +787,7 @@ void MachOAnalyzer::getAllSegmentsInfos(Diagnostics& diag, Header::SegmentInfo s
 
 bool MachOAnalyzer::validRebaseInfo(Diagnostics& diag, const char* path) const
 {
-    forEachRebase(diag, ^(const char* opcodeName, const LinkEditInfo& leInfo, const Header::SegmentInfo segments[],
+    forEachRebase(diag, ^(const char* opcodeName, const LinkEditInfo& leInfo, const UnsafeHeader::SegmentInfo segments[],
                           bool segIndexSet, uint32_t ptrSize, uint8_t segmentIndex, uint64_t segmentOffset, Rebase kind, bool& stop) {
         if ( invalidRebaseState(diag, opcodeName, path, leInfo, segments, segIndexSet, ptrSize, segmentIndex, segmentOffset, kind) )
             stop = true;
@@ -800,7 +800,7 @@ void MachOAnalyzer::forEachTextRebase(Diagnostics& diag, void (^handler)(uint64_
 {
     __block bool     startVmAddrSet = false;
     __block uint64_t startVmAddr    = 0;
-    forEachRebase(diag, ^(const char* opcodeName, const LinkEditInfo& leInfo, const Header::SegmentInfo segments[],
+    forEachRebase(diag, ^(const char* opcodeName, const LinkEditInfo& leInfo, const UnsafeHeader::SegmentInfo segments[],
                           bool segIndexSet, uint32_t ptrSize, uint8_t segmentIndex, uint64_t segmentOffset, Rebase kind, bool& stop) {
         if ( kind != Rebase::textAbsolute32 )
             return;
@@ -827,7 +827,7 @@ void MachOAnalyzer::forEachRebase(Diagnostics& diag, void (^callback)(uint64_t r
     __block uint64_t lpEndVmAddr    = 0;
     __block uint64_t shVmAddr       = 0;
     __block uint64_t shEndVmAddr    = 0;
-    forEachSection(^(const Header::SectionInfo& info, bool &stop) {
+    forEachSection(^(const UnsafeHeader::SectionInfo& info, bool &stop) {
         if ( (info.flags & SECTION_TYPE) == S_LAZY_SYMBOL_POINTERS ) {
             lpVmAddr    = info.address;
             lpEndVmAddr = info.address + info.size;
@@ -837,7 +837,7 @@ void MachOAnalyzer::forEachRebase(Diagnostics& diag, void (^callback)(uint64_t r
             shEndVmAddr = info.address + info.size;
         }
     });
-    forEachRebase(diag, ^(const char* opcodeName, const LinkEditInfo& leInfo, const Header::SegmentInfo segments[],
+    forEachRebase(diag, ^(const char* opcodeName, const LinkEditInfo& leInfo, const UnsafeHeader::SegmentInfo segments[],
                           bool segIndexSet, uint32_t ptrSize, uint8_t segmentIndex, uint64_t segmentOffset, Rebase kind, bool& stop) {
         switch ( kind ) {
             case Rebase::unknown:
@@ -915,7 +915,7 @@ bool MachOAnalyzer::contentIsRegularStub(const uint8_t* helperContent) const
 
 
 void MachOAnalyzer::forEachRebase(Diagnostics& diag,
-                                 void (^handler)(const char* opcodeName, const LinkEditInfo& leInfo, const Header::SegmentInfo segments[],
+                                 void (^handler)(const char* opcodeName, const LinkEditInfo& leInfo, const UnsafeHeader::SegmentInfo segments[],
                                                  bool segIndexSet, uint32_t ptrSize, uint8_t segmentIndex, uint64_t segmentOffset,
                                                  Rebase kind, bool& stop)) const
 {
@@ -924,7 +924,7 @@ void MachOAnalyzer::forEachRebase(Diagnostics& diag,
     if ( diag.hasError() )
         return;
 
-    BLOCK_ACCCESSIBLE_ARRAY(Header::SegmentInfo, segmentsInfo, leInfo.layout.lastSegIndex+1);
+    BLOCK_ACCCESSIBLE_ARRAY(UnsafeHeader::SegmentInfo, segmentsInfo, leInfo.layout.lastSegIndex+1);
     getAllSegmentsInfos(diag, segmentsInfo);
     if ( diag.hasError() )
         return;
@@ -1110,7 +1110,7 @@ void MachOAnalyzer::forEachRebase(Diagnostics& diag,
 #endif // SUPPORT_CLASSIC_RELOCS
 }
 
-bool MachOAnalyzer::segIndexAndOffsetForAddress(uint64_t addr, const Header::SegmentInfo segmentsInfos[], uint32_t segCount, uint32_t& segIndex, uint64_t& segOffset) const
+bool MachOAnalyzer::segIndexAndOffsetForAddress(uint64_t addr, const UnsafeHeader::SegmentInfo segmentsInfos[], uint32_t segCount, uint32_t& segIndex, uint64_t& segOffset) const
 {
     for (uint32_t i=0; i < segCount; ++i) {
         if ( (segmentsInfos[i].vmaddr <= addr) && (addr < segmentsInfos[i].vmaddr+segmentsInfos[i].vmsize) ) {
@@ -1122,7 +1122,7 @@ bool MachOAnalyzer::segIndexAndOffsetForAddress(uint64_t addr, const Header::Seg
     return false;
 }
 
-uint64_t MachOAnalyzer::localRelocBaseAddress(const Header::SegmentInfo segmentsInfos[], uint32_t segCount) const
+uint64_t MachOAnalyzer::localRelocBaseAddress(const UnsafeHeader::SegmentInfo segmentsInfos[], uint32_t segCount) const
 {
     if ( isArch("x86_64") || isArch("x86_64h") ) {
 #if BUILDING_APP_CACHE_UTIL || BUILDING_DYLDINFO
@@ -1144,17 +1144,17 @@ uint64_t MachOAnalyzer::localRelocBaseAddress(const Header::SegmentInfo segments
         return segmentsInfos[0].vmaddr;
 }
 
-uint64_t MachOAnalyzer::externalRelocBaseAddress(const Header::SegmentInfo segmentsInfos[], uint32_t segCount) const
+uint64_t MachOAnalyzer::externalRelocBaseAddress(const UnsafeHeader::SegmentInfo segmentsInfos[], uint32_t segCount) const
 {
     // Dyld caches are too large for a raw r_address, so everything is an offset from the base address
     if ( inDyldCache() ) {
-        return ((const Header*)this)->preferredLoadAddress();
+        return ((const UnsafeHeader*)this)->preferredLoadAddress();
     }
 
 #if BUILDING_APP_CACHE_UTIL || BUILDING_DYLDINFO
     if ( isKextBundle() ) {
         // for kext bundles the reloc base address starts at __TEXT segment
-        return ((const Header*)this)->preferredLoadAddress();
+        return ((const UnsafeHeader*)this)->preferredLoadAddress();
     }
 #endif
 
@@ -1198,7 +1198,7 @@ void MachOAnalyzer::forEachIndirectPointer(Diagnostics& diag, bool supportPrivat
     if ( (indirectSymbolTableCount == 0) && isKextBundle() )
         return;
 
-    forEachSection(^(const Header::SectionInfo& sectInfo, bool& sectionStop) {
+    forEachSection(^(const UnsafeHeader::SectionInfo& sectInfo, bool& sectionStop) {
         uint8_t  sectionType  = (sectInfo.flags & SECTION_TYPE);
         bool selfModifyingStub = (sectionType == S_SYMBOL_STUBS) && (sectInfo.flags & S_ATTR_SELF_MODIFYING_CODE) && (sectInfo.reserved2 == 5) && (this->cputype == CPU_TYPE_I386);
         if ( (sectionType != S_LAZY_SYMBOL_POINTERS) && (sectionType != S_NON_LAZY_SYMBOL_POINTERS) && !selfModifyingStub )
@@ -1290,7 +1290,7 @@ int MachOAnalyzer::libOrdinalFromDesc(uint16_t n_desc) const
 
 bool MachOAnalyzer::validBindInfo(Diagnostics& diag, const char* path) const
 {
-    forEachBind(diag, ^(const char* opcodeName, const LinkEditInfo& leInfo, const Header::SegmentInfo segments[],
+    forEachBind(diag, ^(const char* opcodeName, const LinkEditInfo& leInfo, const UnsafeHeader::SegmentInfo segments[],
                          bool segIndexSet, bool libraryOrdinalSet, uint32_t dylibCount, int libOrdinal,
                          uint32_t ptrSize, uint8_t segmentIndex, uint64_t segmentOffset,
                          uint8_t type, const char* symbolName, bool weakImport, bool lazyBind, uint64_t addend, bool& stop) {
@@ -1303,7 +1303,7 @@ bool MachOAnalyzer::validBindInfo(Diagnostics& diag, const char* path) const
     return diag.noError();
 }
 
-bool MachOAnalyzer::invalidBindState(Diagnostics& diag, const char* opcodeName, const char* path, const LinkEditInfo& leInfo, const Header::SegmentInfo segments[],
+bool MachOAnalyzer::invalidBindState(Diagnostics& diag, const char* opcodeName, const char* path, const LinkEditInfo& leInfo, const UnsafeHeader::SegmentInfo segments[],
                                     bool segIndexSet,  bool libraryOrdinalSet, uint32_t dylibCount, int libOrdinal, uint32_t ptrSize,
                                     uint8_t segmentIndex, uint64_t segmentOffset, uint8_t type, const char* symbolName) const
 {
@@ -1381,7 +1381,7 @@ void MachOAnalyzer::forEachBind(Diagnostics& diag, void (^handler)(uint64_t runt
 {
     __block bool     startVmAddrSet = false;
     __block uint64_t startVmAddr    = 0;
-    forEachBind(diag, ^(const char* opcodeName, const LinkEditInfo& leInfo, const Header::SegmentInfo segments[],
+    forEachBind(diag, ^(const char* opcodeName, const LinkEditInfo& leInfo, const UnsafeHeader::SegmentInfo segments[],
                         bool segIndexSet, bool libraryOrdinalSet, uint32_t dylibCount, int libOrdinal,
                         uint32_t ptrSize, uint8_t segmentIndex, uint64_t segmentOffset,
                         uint8_t type, const char* symbolName, bool weakImport, bool lazyBind, uint64_t addend, bool& stop) {
@@ -1413,7 +1413,7 @@ void MachOAnalyzer::forEachBind(Diagnostics& diag, void (^handler)(uint64_t runt
 }
 
 void MachOAnalyzer::forEachBind(Diagnostics& diag,
-                                 void (^handler)(const char* opcodeName, const LinkEditInfo& leInfo, const Header::SegmentInfo segments[],
+                                 void (^handler)(const char* opcodeName, const LinkEditInfo& leInfo, const UnsafeHeader::SegmentInfo segments[],
                                                  bool segIndexSet,  bool libraryOrdinalSet, uint32_t dylibCount, int libOrdinal,
                                                  uint32_t ptrSize, uint8_t segmentIndex, uint64_t segmentOffset, uint8_t type,
                                                  const char* symbolName, bool weakImport, bool lazyBind, uint64_t addend, bool& stop),
@@ -1427,7 +1427,7 @@ void MachOAnalyzer::forEachBind(Diagnostics& diag,
     if ( diag.hasError() )
         return;
 
-    BLOCK_ACCCESSIBLE_ARRAY(Header::SegmentInfo, segmentsInfo, leInfo.layout.lastSegIndex+1);
+    BLOCK_ACCCESSIBLE_ARRAY(UnsafeHeader::SegmentInfo, segmentsInfo, leInfo.layout.lastSegIndex+1);
     getAllSegmentsInfos(diag, segmentsInfo);
     if ( diag.hasError() )
         return;
@@ -1808,7 +1808,7 @@ bool MachOAnalyzer::validChainedFixupsInfo(Diagnostics& diag, const char* path) 
     if ( diag.hasError() )
         return false;
 
-    BLOCK_ACCCESSIBLE_ARRAY(Header::SegmentInfo, segmentsInfo, leInfo.layout.lastSegIndex+1);
+    BLOCK_ACCCESSIBLE_ARRAY(UnsafeHeader::SegmentInfo, segmentsInfo, leInfo.layout.lastSegIndex+1);
     getAllSegmentsInfos(diag, segmentsInfo);
     if ( diag.hasError() )
         return false;
@@ -1868,7 +1868,7 @@ bool MachOAnalyzer::validChainedFixupsInfo(Diagnostics& diag, const char* path) 
         uint32_t numExtraSegments = (leInfo.layout.lastSegIndex + 1) - startsInfo->seg_count;
         for (unsigned i = 0; i != numExtraSegments; ++i) {
             // Check each extra segment before linkedit
-            const Header::SegmentInfo& segInfo = segmentsInfo[leInfo.layout.linkeditSegIndex - (i + 1)];
+            const UnsafeHeader::SegmentInfo& segInfo = segmentsInfo[leInfo.layout.linkeditSegIndex - (i + 1)];
             if ( segInfo.vmsize == 0 )
                 ++numNoRelocSegments;
         }
@@ -1878,7 +1878,7 @@ bool MachOAnalyzer::validChainedFixupsInfo(Diagnostics& diag, const char* path) 
             return false;
         }
     }
-    const uint64_t baseAddress = ((const Header*)this)->preferredLoadAddress();
+    const uint64_t baseAddress = ((const UnsafeHeader*)this)->preferredLoadAddress();
     uint32_t maxValidPointerSeen = 0;
     uint16_t pointer_format_for_all = 0;
     bool pointer_format_found = false;
@@ -2012,7 +2012,7 @@ bool MachOAnalyzer::validChainedFixupsInfoOldArm64e(Diagnostics& diag, const cha
         ^(uint32_t totalTargets, bool& stop) {
             maxTargetCount = totalTargets;
         },
-        ^(const LinkEditInfo& leInfo, const Header::SegmentInfo segments[], bool libraryOrdinalSet, uint32_t dylibCount, int libOrdinal, uint8_t type, const char* symbolName, uint64_t addend, bool weakImport, bool& stop) {
+        ^(const LinkEditInfo& leInfo, const UnsafeHeader::SegmentInfo segments[], bool libraryOrdinalSet, uint32_t dylibCount, int libOrdinal, uint8_t type, const char* symbolName, uint64_t addend, bool weakImport, bool& stop) {
            if ( symbolName == NULL ) {
                 diag.error("in '%s' missing BIND_OPCODE_SET_SYMBOL_TRAILING_FLAGS_IMM", path);
             }
@@ -2035,7 +2035,7 @@ bool MachOAnalyzer::validChainedFixupsInfoOldArm64e(Diagnostics& diag, const cha
             if ( diag.hasError() )
                 stop = true;
         },
-        ^(const LinkEditInfo& leInfo, const Header::SegmentInfo segments[], uint8_t segmentIndex, bool segIndexSet, uint64_t segmentOffset, uint16_t format, bool& stop) {
+        ^(const LinkEditInfo& leInfo, const UnsafeHeader::SegmentInfo segments[], uint8_t segmentIndex, bool segIndexSet, uint64_t segmentOffset, uint16_t format, bool& stop) {
            if ( !segIndexSet ) {
                 diag.error("in '%s' missing BIND_OPCODE_SET_SEGMENT_AND_OFFSET_ULEB", path);
             }
@@ -2062,8 +2062,8 @@ bool MachOAnalyzer::validChainedFixupsInfoOldArm64e(Diagnostics& diag, const cha
 
 
 void MachOAnalyzer::parseOrgArm64eChainedFixups(Diagnostics& diag, void (^targetCount)(uint32_t totalTargets, bool& stop),
-                                                                   void (^addTarget)(const LinkEditInfo& leInfo, const Header::SegmentInfo segments[], bool libraryOrdinalSet, uint32_t dylibCount, int libOrdinal, uint8_t type, const char* symbolName, uint64_t addend, bool weakImport, bool& stop),
-                                                                   void (^addChainStart)(const LinkEditInfo& leInfo, const Header::SegmentInfo segments[], uint8_t segmentIndex, bool segIndexSet, uint64_t segmentOffset, uint16_t format, bool& stop)) const
+                                                                   void (^addTarget)(const LinkEditInfo& leInfo, const UnsafeHeader::SegmentInfo segments[], bool libraryOrdinalSet, uint32_t dylibCount, int libOrdinal, uint8_t type, const char* symbolName, uint64_t addend, bool weakImport, bool& stop),
+                                                                   void (^addChainStart)(const LinkEditInfo& leInfo, const UnsafeHeader::SegmentInfo segments[], uint8_t segmentIndex, bool segIndexSet, uint64_t segmentOffset, uint16_t format, bool& stop)) const
 {
     bool            stop    = false;
 
@@ -2072,7 +2072,7 @@ void MachOAnalyzer::parseOrgArm64eChainedFixups(Diagnostics& diag, void (^target
     if ( diag.hasError() )
         return;
 
-    BLOCK_ACCCESSIBLE_ARRAY(Header::SegmentInfo, segmentsInfo, leInfo.layout.lastSegIndex+1);
+    BLOCK_ACCCESSIBLE_ARRAY(UnsafeHeader::SegmentInfo, segmentsInfo, leInfo.layout.lastSegIndex+1);
     getAllSegmentsInfos(diag, segmentsInfo);
     if ( diag.hasError() )
         return;
@@ -2178,13 +2178,13 @@ void MachOAnalyzer::forEachChainedFixupTarget(Diagnostics& diag, void (^callback
     if ( diag.hasError() )
         return;
 
-    BLOCK_ACCCESSIBLE_ARRAY(Header::SegmentInfo, segmentsInfo, leInfo.layout.lastSegIndex+1);
+    BLOCK_ACCCESSIBLE_ARRAY(UnsafeHeader::SegmentInfo, segmentsInfo, leInfo.layout.lastSegIndex+1);
     getAllSegmentsInfos(diag, segmentsInfo);
     if ( diag.hasError() )
         return;
 
     if ( leInfo.dyldInfo != nullptr ) {
-        parseOrgArm64eChainedFixups(diag, nullptr, ^(const LinkEditInfo& leInfo2, const Header::SegmentInfo segments[], bool libraryOrdinalSet, uint32_t dylibCount,
+        parseOrgArm64eChainedFixups(diag, nullptr, ^(const LinkEditInfo& leInfo2, const UnsafeHeader::SegmentInfo segments[], bool libraryOrdinalSet, uint32_t dylibCount,
                                                     int libOrdinal, uint8_t type, const char* symbolName, uint64_t fixAddend, bool weakImport, bool& stopChain) {
             callback(libOrdinal, symbolName, fixAddend, weakImport, stopChain);
         }, nullptr);
@@ -2299,7 +2299,7 @@ uint64_t MachOAnalyzer::VMAddrConverter::convertToVMAddr(uint64_t v) const
 
 MachOAnalyzer::VMAddrConverter MachOAnalyzer::makeVMAddrConverter(bool contentRebased) const {
     MachOAnalyzer::VMAddrConverter vmAddrConverter;
-    vmAddrConverter.preferredLoadAddress   = ((const Header*)this)->preferredLoadAddress();
+    vmAddrConverter.preferredLoadAddress   = ((const UnsafeHeader*)this)->preferredLoadAddress();
     vmAddrConverter.slide                  = getSlide();
     vmAddrConverter.chainedPointerFormat   = hasChainedFixups() ? chainedPointerFormat() : 0;
     vmAddrConverter.contentRebased         = contentRebased;
@@ -2333,7 +2333,7 @@ public:
 void MachOAnalyzer::forEachInitializer(Diagnostics& diag, const VMAddrConverter& vmAddrConverter, void (^callback)(uint32_t offset), const void* dyldCache) const
 {
     __block SegmentRanges executableSegments;
-    ((const Header*)this)->forEachSegment(^(const Header::SegmentInfo& info, bool& stop) {
+    ((const UnsafeHeader*)this)->forEachSegment(^(const UnsafeHeader::SegmentInfo& info, bool& stop) {
         if ( (info.initProt & VM_PROT_EXECUTE) != 0 ) {
             executableSegments.segments.push_back({ info.vmaddr, info.vmaddr + info.vmsize, (uint32_t)info.fileSize });
         }
@@ -2344,7 +2344,7 @@ void MachOAnalyzer::forEachInitializer(Diagnostics& diag, const VMAddrConverter&
         return;
     }
 
-    uint64_t loadAddress = ((const Header*)this)->preferredLoadAddress();
+    uint64_t loadAddress = ((const UnsafeHeader*)this)->preferredLoadAddress();
     intptr_t slide = getSlide();
 
     // if dylib linked with -init linker option, that initializer is first
@@ -2399,7 +2399,7 @@ void MachOAnalyzer::forEachInitializer(Diagnostics& diag, const VMAddrConverter&
         }
     });
 
-    forEachSection(^(const Header::SectionInfo& info, bool& stop) {
+    forEachSection(^(const UnsafeHeader::SectionInfo& info, bool& stop) {
         if ( (info.flags & SECTION_TYPE) != S_INIT_FUNC_OFFSETS )
             return;
         const uint8_t* content = (uint8_t*)(info.address + slide);
@@ -2450,7 +2450,7 @@ bool MachOAnalyzer::hasTerminators(Diagnostics& diag, const VMAddrConverter& vmA
 void MachOAnalyzer::forEachTerminator(Diagnostics& diag, const VMAddrConverter& vmAddrConverter, void (^callback)(uint32_t offset)) const
 {
     __block SegmentRanges executableSegments;
-    ((const Header*)this)->forEachSegment(^(const Header::SegmentInfo& info, bool& stop) {
+    ((const UnsafeHeader*)this)->forEachSegment(^(const UnsafeHeader::SegmentInfo& info, bool& stop) {
         if ( (info.initProt & VM_PROT_EXECUTE) != 0 ) {
             executableSegments.segments.push_back({ info.vmaddr, info.vmaddr + info.vmsize, (uint32_t)info.fileSize });
         }
@@ -2461,12 +2461,12 @@ void MachOAnalyzer::forEachTerminator(Diagnostics& diag, const VMAddrConverter& 
         return;
     }
 
-    uint64_t loadAddress = ((const Header*)this)->preferredLoadAddress();
+    uint64_t loadAddress = ((const UnsafeHeader*)this)->preferredLoadAddress();
     intptr_t slide = getSlide();
 
     // next any function pointers in mod-term section
     const unsigned ptrSize          = pointerSize();
-    forEachSection(^(const Header::SectionInfo& info, bool& stop) {
+    forEachSection(^(const UnsafeHeader::SectionInfo& info, bool& stop) {
         if ( (info.flags & SECTION_TYPE) == S_MOD_TERM_FUNC_POINTERS ) {
             const uint8_t* content;
             content = (uint8_t*)(info.address + slide);
@@ -2530,7 +2530,7 @@ bool MachOAnalyzer::hasSwiftOrObjC(bool* hasSwift) const
 
     uintptr_t slide = getSlide();
     __block bool result = false;
-    forEachSection(^(const Header::SectionInfo& sectInfo, bool& stop) {
+    forEachSection(^(const UnsafeHeader::SectionInfo& sectInfo, bool& stop) {
         if ( (sectInfo.sectionName == "__objc_imageinfo") && sectInfo.segmentName.starts_with("__DATA") ) {
             if ( hasSwift != nullptr ) {
                 objc_image_info* info =  (objc_image_info*)((uintptr_t)sectInfo.address + slide);
@@ -2560,9 +2560,9 @@ bool MachOAnalyzer::hasSwift() const {
 bool MachOAnalyzer::usesObjCGarbageCollection() const
 {
     __block bool result = false;
-    forEachSection(^(const Header::SectionInfo& info, bool& stop) {
+    forEachSection(^(const UnsafeHeader::SectionInfo& info, bool& stop) {
         if ( (info.sectionName == "__objc_imageinfo") && info.segmentName.starts_with("__DATA") ) {
-            const uint64_t  slide = (uint64_t)this - ((const Header*)this)->preferredLoadAddress();
+            const uint64_t  slide = (uint64_t)this - ((const UnsafeHeader*)this)->preferredLoadAddress();
             const uint32_t* flags = (uint32_t*)(info.address + slide);
             if ( flags[1] & 4 )
                 result = true;
@@ -2649,7 +2649,7 @@ uint64_t MachOAnalyzer::segAndOffsetToRuntimeOffset(uint8_t targetSegIndex, uint
 {
     __block uint64_t textVmAddr = 0;
     __block uint64_t result     = 0;
-    ((const Header*)this)->forEachSegment(^(const Header::SegmentInfo& info, bool& stop) {
+    ((const UnsafeHeader*)this)->forEachSegment(^(const UnsafeHeader::SegmentInfo& info, bool& stop) {
         if ( info.segmentName == "__TEXT" )
             textVmAddr = info.vmaddr;
         if ( info.segmentIndex == targetSegIndex ) {
@@ -2662,9 +2662,9 @@ uint64_t MachOAnalyzer::segAndOffsetToRuntimeOffset(uint8_t targetSegIndex, uint
 bool MachOAnalyzer::hasLazyPointers(uint32_t& runtimeOffset, uint32_t& size) const
 {
     size = 0;
-    forEachSection(^(const Header::SectionInfo& info, bool &stop) {
+    forEachSection(^(const UnsafeHeader::SectionInfo& info, bool &stop) {
         if ( (info.flags & SECTION_TYPE) == S_LAZY_SYMBOL_POINTERS ) {
-            runtimeOffset = (uint32_t)(info.address - ((const Header*)this)->preferredLoadAddress());
+            runtimeOffset = (uint32_t)(info.address - ((const UnsafeHeader*)this)->preferredLoadAddress());
             size          = (uint32_t)info.size;
             stop = true;
         }
@@ -2883,7 +2883,7 @@ bool MachOAnalyzer::canBePlacedInKernelCollection(const char* path, void (^failu
         __block bool foundHIB = false;
         __block uint64_t hibernateVMAddr = 0;
         __block uint64_t hibernateVMSize = 0;
-        ((const Header*)this)->forEachSegment(^(const Header::SegmentInfo &segmentInfo, bool &stop) {
+        ((const UnsafeHeader*)this)->forEachSegment(^(const UnsafeHeader::SegmentInfo &segmentInfo, bool &stop) {
             if ( segmentInfo.segmentName == "__TEXT" ) {
                 foundText = true;
             }
@@ -2911,7 +2911,7 @@ bool MachOAnalyzer::canBePlacedInKernelCollection(const char* path, void (^failu
 
         // The hibernate segment should be mapped before the base address
         if ( foundHIB ) {
-            uint64_t baseAddress = ((const Header*)this)->preferredLoadAddress();
+            uint64_t baseAddress = ((const UnsafeHeader*)this)->preferredLoadAddress();
             if ( greaterThanAddOrOverflow(hibernateVMAddr, hibernateVMSize, baseAddress) ) {
                 failureReason("__HIB segment should be mapped before base address");
                 return false;
@@ -2920,7 +2920,7 @@ bool MachOAnalyzer::canBePlacedInKernelCollection(const char* path, void (^failu
     }
 
     // Don't allow kext's to have load addresses
-    if ( isKextBundle() && (((const Header*)this)->preferredLoadAddress() != 0) ) {
+    if ( isKextBundle() && (((const UnsafeHeader*)this)->preferredLoadAddress() != 0) ) {
         failureReason("Has load address");
         return false;
     }
@@ -3033,10 +3033,10 @@ bool MachOAnalyzer::canBePlacedInKernelCollection(const char* path, void (^failu
             // range of the number of bits we have
             if ( isStaticExecutable() ) {
                 __block uint64_t baseAddress = ~0ULL;
-                ((const Header*)this)->forEachSegment(^(const Header::SegmentInfo& sinfo, bool& segStop) {
+                ((const UnsafeHeader*)this)->forEachSegment(^(const UnsafeHeader::SegmentInfo& sinfo, bool& segStop) {
                     baseAddress = std::min(baseAddress, sinfo.vmaddr);
                 });
-                uint64_t textSegVMAddr = ((const Header*)this)->preferredLoadAddress();
+                uint64_t textSegVMAddr = ((const UnsafeHeader*)this)->preferredLoadAddress();
                 runtimeOffset = (textSegVMAddr + runtimeOffset) - baseAddress;
             }
 #endif
@@ -3147,7 +3147,7 @@ void MachOAnalyzer::withChainStarts(Diagnostics& diag, uint64_t startsStructOffs
     // don't want this code in non-arm64e dyld because it causes a stack protector which dereferences a GOT pointer before GOT is set up
     else if ( (leInfo.dyldInfo != nullptr) && (this->cputype == CPU_TYPE_ARM64) && (this->maskedCpuSubtype() == CPU_SUBTYPE_ARM64E) ) {
         // old arm64e binary, create a dyld_chained_starts_in_image for caller
-        uint64_t baseAddress = ((const Header*)this)->preferredLoadAddress();
+        uint64_t baseAddress = ((const UnsafeHeader*)this)->preferredLoadAddress();
         uint64_t imagePageCount = this->mappedSize()/0x1000;
         size_t bufferSize = leInfo.dyldInfo->bind_size + (size_t)imagePageCount*sizeof(uint16_t) + 512;
         BLOCK_ACCCESSIBLE_ARRAY(uint8_t, buffer, bufferSize);
@@ -3158,7 +3158,7 @@ void MachOAnalyzer::withChainStarts(Diagnostics& diag, uint64_t startsStructOffs
             header->seg_info_offset[i] = 0;
         __block uint8_t curSegIndex = 0;
         __block dyld_chained_starts_in_segment* curSeg = (dyld_chained_starts_in_segment*)(&(header->seg_info_offset[header->seg_count]));
-        parseOrgArm64eChainedFixups(diag, nullptr, nullptr, ^(const LinkEditInfo& leInfo2, const Header::SegmentInfo segments[], uint8_t segmentIndex,
+        parseOrgArm64eChainedFixups(diag, nullptr, nullptr, ^(const LinkEditInfo& leInfo2, const UnsafeHeader::SegmentInfo segments[], uint8_t segmentIndex,
                                                               bool segIndexSet, uint64_t segmentOffset, uint16_t format, bool& stop) {
             uint32_t pageIndex = (uint32_t)(segmentOffset/0x1000);
             if ( segmentIndex != curSegIndex ) {
@@ -3310,7 +3310,7 @@ MachOAnalyzer::ObjCInfo MachOAnalyzer::getObjCInfo() const
     result.protocolDefCount = 0;
 
     const uint32_t ptrSize  = pointerSize();
-    forEachSection(^(const Header::SectionInfo& sectInfo, bool& stop) {
+    forEachSection(^(const UnsafeHeader::SectionInfo& sectInfo, bool& stop) {
         if ( sectInfo.segmentName.starts_with("__DATA") ) {
             if ( sectInfo.sectionName == "__objc_selrefs" )
                 result.selRefCount += (sectInfo.size/ptrSize);
@@ -3406,14 +3406,14 @@ const char* MachOAnalyzer::getPrintableString(uint64_t stringVMAddr, MachOAnalyz
     uint32_t fairplayTextOffsetStart;
     uint32_t fairplayTextOffsetEnd;
     uint32_t fairplaySize;
-    if ( ((const Header*)this)->isFairPlayEncrypted(fairplayTextOffsetStart, fairplaySize) ) {
+    if ( ((const UnsafeHeader*)this)->isFairPlayEncrypted(fairplayTextOffsetStart, fairplaySize) ) {
         fairplayTextOffsetEnd = fairplayTextOffsetStart + fairplaySize;
     } else {
         fairplayTextOffsetEnd = 0;
     }
 
     result = PrintableStringResult::UnknownSection;
-    forEachSection(^(const Header::SegmentInfo& segInfo, const Header::SectionInfo &sectInfo, bool &stop) {
+    forEachSection(^(const UnsafeHeader::SegmentInfo& segInfo, const UnsafeHeader::SectionInfo &sectInfo, bool &stop) {
         if ( stringVMAddr < sectInfo.address ) {
             return;
         }
@@ -3545,7 +3545,7 @@ void MachOAnalyzer::forEachObjCClass(Diagnostics& diag, const VMAddrConverter& v
                                      ClassCallback& callback) const {
     uint64_t classListRuntimeOffset;
     uint64_t classListSize;
-    bool foundSection = ((const Header*)this)->findObjCDataSection("__objc_classlist", classListRuntimeOffset, classListSize);
+    bool foundSection = ((const UnsafeHeader*)this)->findObjCDataSection("__objc_classlist", classListRuntimeOffset, classListSize);
     if ( !foundSection )
         return;
 
@@ -3740,7 +3740,7 @@ void MachOAnalyzer::forEachObjCCategory(Diagnostics& diag, const VMAddrConverter
                                         CategoryCallback& callback) const {
     uint64_t categoryListRuntimeOffset;
     uint64_t categoryListSize;
-    bool foundSection = ((const Header*)this)->findObjCDataSection("__objc_catlist", categoryListRuntimeOffset, categoryListSize);
+    bool foundSection = ((const UnsafeHeader*)this)->findObjCDataSection("__objc_catlist", categoryListRuntimeOffset, categoryListSize);
     if ( !foundSection )
         return;
 
@@ -3835,7 +3835,7 @@ void MachOAnalyzer::forEachObjCProtocol(Diagnostics& diag, const VMAddrConverter
                                         ProtocolCallback& callback) const {
     uint64_t protocolListRuntimeOffset;
     uint64_t protocolListSize;
-    bool foundSection = ((const Header*)this)->findObjCDataSection("__objc_protolist", protocolListRuntimeOffset, protocolListSize);
+    bool foundSection = ((const UnsafeHeader*)this)->findObjCDataSection("__objc_protolist", protocolListRuntimeOffset, protocolListSize);
     if ( !foundSection )
         return;
 
@@ -4222,7 +4222,7 @@ void MachOAnalyzer::forEachObjCProtocol(uint64_t protocolListVMAddr, const VMAdd
 void MachOAnalyzer::forEachObjCSelectorReference(uint64_t selRefsRuntimeOffset, uint64_t selRefsCount, const VMAddrConverter& vmAddrConverter,
                                                  void (^handler)(uint64_t selRefVMAddr, uint64_t selRefTargetVMAddr, bool& stop)) const
 {
-    uint64_t baseAddress = ((const Header*)this)->preferredLoadAddress();
+    uint64_t baseAddress = ((const UnsafeHeader*)this)->preferredLoadAddress();
     const uint64_t ptrSize = pointerSize();
     const uint8_t* selRefs = (uint8_t*)this + selRefsRuntimeOffset;
     if ( ptrSize == 8 ) {
@@ -4254,7 +4254,7 @@ void MachOAnalyzer::forEachObjCSelectorReference(Diagnostics& diag, const VMAddr
 {
     uint64_t selRefsRuntimeOffset;
     uint64_t selRefsSize;
-    bool foundSection = ((const Header*)this)->findObjCDataSection("__objc_selrefs", selRefsRuntimeOffset, selRefsSize);
+    bool foundSection = ((const UnsafeHeader*)this)->findObjCDataSection("__objc_selrefs", selRefsRuntimeOffset, selRefsSize);
     if ( !foundSection )
         return;
 
@@ -4269,7 +4269,7 @@ void MachOAnalyzer::forEachObjCSelectorReference(Diagnostics& diag, const VMAddr
 
 void MachOAnalyzer::forEachObjCMethodName(void (^handler)(const char* methodName)) const {
     intptr_t slide = getSlide();
-    forEachSection(^(const Header::SegmentInfo& segInfo, const Header::SectionInfo& sectInfo, bool& stop) {
+    forEachSection(^(const UnsafeHeader::SegmentInfo& segInfo, const UnsafeHeader::SectionInfo& sectInfo, bool& stop) {
         if ( sectInfo.sectionName != "__TEXT" )
             return;
         if ( sectInfo.sectionName != "__objc_methname" )
@@ -4325,7 +4325,7 @@ const MachOAnalyzer::ObjCImageInfo* MachOAnalyzer::objcImageInfo() const {
 
     __block bool foundInvalidObjCImageInfo = false;
     __block const ObjCImageInfo* imageInfo = nullptr;
-    forEachSection(^(const Header::SectionInfo& sectionInfo, bool& stop) {
+    forEachSection(^(const UnsafeHeader::SectionInfo& sectionInfo, bool& stop) {
         if ( !sectionInfo.segmentName.starts_with("__DATA") )
             return;
         if ( sectionInfo.sectionName != "__objc_imageinfo" )
@@ -4349,7 +4349,7 @@ const MachOAnalyzer::ObjCImageInfo* MachOAnalyzer::objcImageInfo() const {
 
 void MachOAnalyzer::forEachWeakDef(Diagnostics& diag,
                                    void (^handler)(const char* symbolName, uint64_t imageOffset, bool isFromExportTrie)) const {
-    uint64_t baseAddress = ((const Header*)this)->preferredLoadAddress();
+    uint64_t baseAddress = ((const UnsafeHeader*)this)->preferredLoadAddress();
     forEachGlobalSymbol(diag, ^(const char *symbolName, uint64_t n_value, uint8_t n_type, uint8_t n_sect, uint16_t n_desc, bool &stop) {
         if ( (n_desc & N_WEAK_DEF) != 0 ) {
             handler(symbolName, n_value - baseAddress, false);
@@ -4400,7 +4400,7 @@ void MachOAnalyzer::forEachBindUnified_Opcodes(Diagnostics& diag, bool allowLazy
     if ( diag.hasError() )
         return;
 
-    BLOCK_ACCCESSIBLE_ARRAY(Header::SegmentInfo, segmentsInfo, leInfo.layout.lastSegIndex+1);
+    BLOCK_ACCCESSIBLE_ARRAY(UnsafeHeader::SegmentInfo, segmentsInfo, leInfo.layout.lastSegIndex+1);
     getAllSegmentsInfos(diag, segmentsInfo);
     if ( diag.hasError() )
         return;
@@ -4408,7 +4408,7 @@ void MachOAnalyzer::forEachBindUnified_Opcodes(Diagnostics& diag, bool allowLazy
     {
         __block unsigned         targetIndex = 0;
         __block BindTargetInfo   targetInfo;
-        BindDetailedHandler binder =  ^(const char* opcodeName, const LinkEditInfo&, const Header::SegmentInfo segments[],
+        BindDetailedHandler binder =  ^(const char* opcodeName, const LinkEditInfo&, const UnsafeHeader::SegmentInfo segments[],
                                         bool segIndexSet,  bool libraryOrdinalSet, uint32_t dylibCount, int libOrdinal,
                                         uint32_t pointerSize, uint8_t segmentIndex, uint64_t segmentOffset,
                                         uint8_t type, const char* symbolName, bool weakImport, bool lazyBind,
@@ -4439,7 +4439,7 @@ void MachOAnalyzer::forEachBindUnified_Opcodes(Diagnostics& diag, bool allowLazy
     {
         __block unsigned         weakTargetIndex = 0;
         __block BindTargetInfo   weakTargetInfo;
-        BindDetailedHandler weakBinder =  ^(const char* opcodeName, const LinkEditInfo&, const Header::SegmentInfo segments[],
+        BindDetailedHandler weakBinder =  ^(const char* opcodeName, const LinkEditInfo&, const UnsafeHeader::SegmentInfo segments[],
                                             bool segIndexSet,  bool libraryOrdinalSet, uint32_t dylibCount, int libOrdinal,
                                             uint32_t pointerSize, uint8_t segmentIndex, uint64_t segmentOffset,
                                             uint8_t type, const char* symbolName, bool weakImport, bool lazyBind,
@@ -4527,14 +4527,14 @@ void MachOAnalyzer::forEachBindTarget_Relocations(Diagnostics& diag, void (^hand
     if ( diag.hasError() )
         return;
 
-    BLOCK_ACCCESSIBLE_ARRAY(Header::SegmentInfo, segmentsInfo, leInfo.layout.lastSegIndex+1);
+    BLOCK_ACCCESSIBLE_ARRAY(UnsafeHeader::SegmentInfo, segmentsInfo, leInfo.layout.lastSegIndex+1);
     getAllSegmentsInfos(diag, segmentsInfo);
     if ( diag.hasError() )
         return;
 
     __block unsigned targetIndex = 0;
     this->forEachBind_Relocations(diag, leInfo, segmentsInfo, true,
-                                  ^(const char* opcodeName, const LinkEditInfo&, const Header::SegmentInfo segments[],
+                                  ^(const char* opcodeName, const LinkEditInfo&, const UnsafeHeader::SegmentInfo segments[],
                                     bool segIndexSet,  bool libraryOrdinalSet, uint32_t dylibCount, int libOrdinal,
                                     uint32_t pointerSize, uint8_t segmentIndex, uint64_t segmentOffset,
                                     uint8_t type, const char* symbolName, bool weakImport, bool lazyBind,
@@ -4562,14 +4562,14 @@ void MachOAnalyzer::forEachBindLocation_Relocations(Diagnostics& diag, void (^ha
     if ( diag.hasError() )
         return;
 
-    BLOCK_ACCCESSIBLE_ARRAY(Header::SegmentInfo, segmentsInfo, leInfo.layout.lastSegIndex+1);
+    BLOCK_ACCCESSIBLE_ARRAY(UnsafeHeader::SegmentInfo, segmentsInfo, leInfo.layout.lastSegIndex+1);
     getAllSegmentsInfos(diag, segmentsInfo);
     if ( diag.hasError() )
         return;
 
     __block int targetIndex = -1;
     this->forEachBind_Relocations(diag, leInfo, segmentsInfo, false,
-                                  ^(const char* opcodeName, const LinkEditInfo&, const Header::SegmentInfo segments[],
+                                  ^(const char* opcodeName, const LinkEditInfo&, const UnsafeHeader::SegmentInfo segments[],
                                     bool segIndexSet,  bool libraryOrdinalSet, uint32_t dylibCount, int libOrdinal,
                                     uint32_t pointerSize, uint8_t segmentIndex, uint64_t segmentOffset,
                                     uint8_t type, const char* symbolName, bool weakImport, bool lazyBind,
@@ -4583,7 +4583,7 @@ void MachOAnalyzer::forEachBindLocation_Relocations(Diagnostics& diag, void (^ha
 }
 
 #if SUPPORT_CLASSIC_RELOCS
-bool MachOAnalyzer::forEachBind_Relocations(Diagnostics& diag, const LinkEditInfo& leInfo, const Header::SegmentInfo segmentsInfo[],
+bool MachOAnalyzer::forEachBind_Relocations(Diagnostics& diag, const LinkEditInfo& leInfo, const UnsafeHeader::SegmentInfo segmentsInfo[],
                                             bool supportPrivateExternsWorkaround, BindDetailedHandler handler) const
 {
     // Firmare binaries won't have a dynSymTab
@@ -4707,7 +4707,7 @@ void MachOAnalyzer::forEachBindLocation_Opcodes(Diagnostics& diag, void (^handle
     });
 }
 
-bool MachOAnalyzer::forEachBind_OpcodesLazy(Diagnostics& diag, const LinkEditInfo& leInfo, const Header::SegmentInfo segmentsInfo[], BindDetailedHandler handler) const
+bool MachOAnalyzer::forEachBind_OpcodesLazy(Diagnostics& diag, const LinkEditInfo& leInfo, const UnsafeHeader::SegmentInfo segmentsInfo[], BindDetailedHandler handler) const
 {
     if ( (leInfo.dyldInfo == nullptr) || (leInfo.dyldInfo->lazy_bind_size == 0) )
         return false;
@@ -4794,7 +4794,7 @@ bool MachOAnalyzer::forEachBind_OpcodesLazy(Diagnostics& diag, const LinkEditInf
 
 
 
-bool MachOAnalyzer::forEachBind_OpcodesWeak(Diagnostics& diag, const LinkEditInfo& leInfo, const Header::SegmentInfo segmentsInfo[], BindDetailedHandler handler,  void (^strongHandler)(const char* symbolName)) const
+bool MachOAnalyzer::forEachBind_OpcodesWeak(Diagnostics& diag, const LinkEditInfo& leInfo, const UnsafeHeader::SegmentInfo segmentsInfo[], BindDetailedHandler handler,  void (^strongHandler)(const char* symbolName)) const
 {
    if ( (leInfo.dyldInfo == nullptr) || (leInfo.dyldInfo->weak_bind_size == 0) )
         return false;
@@ -4893,7 +4893,7 @@ bool MachOAnalyzer::forEachBind_OpcodesWeak(Diagnostics& diag, const LinkEditInf
     return stop;
 }
 
-bool MachOAnalyzer::forEachBind_OpcodesRegular(Diagnostics& diag, const LinkEditInfo& leInfo, const Header::SegmentInfo segmentsInfo[], BindDetailedHandler handler) const
+bool MachOAnalyzer::forEachBind_OpcodesRegular(Diagnostics& diag, const LinkEditInfo& leInfo, const UnsafeHeader::SegmentInfo segmentsInfo[], BindDetailedHandler handler) const
 {
     if ( (leInfo.dyldInfo == nullptr) || (leInfo.dyldInfo->bind_size == 0) )
         return false;
@@ -5009,12 +5009,12 @@ bool MachOAnalyzer::forEachRebaseLocation_Opcodes(Diagnostics& diag, void (^hand
     if ( diag.hasError() )
         return false;
 
-    BLOCK_ACCCESSIBLE_ARRAY(Header::SegmentInfo, segmentsInfo, leInfo.layout.lastSegIndex+1);
+    BLOCK_ACCCESSIBLE_ARRAY(UnsafeHeader::SegmentInfo, segmentsInfo, leInfo.layout.lastSegIndex+1);
     getAllSegmentsInfos(diag, segmentsInfo);
     if ( diag.hasError() )
         return false;
 
-    return this->forEachRebase_Opcodes(diag, leInfo, segmentsInfo, ^(const char* opcodeName, const LinkEditInfo& rleInfo, const Header::SegmentInfo segments[],
+    return this->forEachRebase_Opcodes(diag, leInfo, segmentsInfo, ^(const char* opcodeName, const LinkEditInfo& rleInfo, const UnsafeHeader::SegmentInfo segments[],
                                         bool segIndexSet, uint32_t pointerSize, uint8_t segmentIndex, uint64_t segmentOffset, Rebase kind, bool& stop) {
         uint64_t rebaseVmOffset = segments[segmentIndex].vmaddr + segmentOffset;
         uint64_t runtimeOffset  = rebaseVmOffset - leInfo.layout.textUnslidVMAddr;
@@ -5022,7 +5022,7 @@ bool MachOAnalyzer::forEachRebaseLocation_Opcodes(Diagnostics& diag, void (^hand
     });
 }
 
-bool MachOAnalyzer::forEachRebase_Opcodes(Diagnostics& diag, const LinkEditInfo& leInfo, const Header::SegmentInfo segmentsInfo[], RebaseDetailHandler handler) const
+bool MachOAnalyzer::forEachRebase_Opcodes(Diagnostics& diag, const LinkEditInfo& leInfo, const UnsafeHeader::SegmentInfo segmentsInfo[], RebaseDetailHandler handler) const
 {
     const Rebase pointerRebaseKind = is64() ? Rebase::pointer64 : Rebase::pointer32;
     assert(leInfo.dyldInfo != nullptr);
@@ -5124,12 +5124,12 @@ bool MachOAnalyzer::forEachRebaseLocation_Relocations(Diagnostics& diag, void (^
     if ( diag.hasError() )
         return false;
 
-    BLOCK_ACCCESSIBLE_ARRAY(Header::SegmentInfo, segmentsInfo, leInfo.layout.lastSegIndex+1);
+    BLOCK_ACCCESSIBLE_ARRAY(UnsafeHeader::SegmentInfo, segmentsInfo, leInfo.layout.lastSegIndex+1);
     getAllSegmentsInfos(diag, segmentsInfo);
     if ( diag.hasError() )
         return false;
 
-    return this->forEachRebase_Relocations(diag, leInfo, segmentsInfo, ^(const char* opcodeName, const LinkEditInfo& rleInfo, const Header::SegmentInfo segments[],
+    return this->forEachRebase_Relocations(diag, leInfo, segmentsInfo, ^(const char* opcodeName, const LinkEditInfo& rleInfo, const UnsafeHeader::SegmentInfo segments[],
                                            bool segIndexSet, uint32_t pointerSize, uint8_t segmentIndex, uint64_t segmentOffset, Rebase kind, bool& stop) {
         uint64_t rebaseVmOffset = segments[segmentIndex].vmaddr + segmentOffset;
         uint64_t runtimeOffset  = rebaseVmOffset - leInfo.layout.textUnslidVMAddr;
@@ -5168,8 +5168,11 @@ void MachOAnalyzer::sortRelocations(Array<relocation_info>& relocs) const
 }
 
 
-bool MachOAnalyzer::forEachRebase_Relocations(Diagnostics& diag, const LinkEditInfo& leInfo, const Header::SegmentInfo segmentsInfo[], RebaseDetailHandler handler) const
+bool MachOAnalyzer::forEachRebase_Relocations(Diagnostics& diag, const LinkEditInfo& leInfo, const UnsafeHeader::SegmentInfo segmentsInfo[], RebaseDetailHandler handler) const
 {
+    if ( leInfo.dynSymTab == NULL )
+        return false; // no indirect symbol table, so no local relocs
+
     // old binary, walk relocations
     const uint64_t                  relocsStartAddress = localRelocBaseAddress(segmentsInfo, leInfo.layout.linkeditSegIndex);
     const relocation_info* const    relocsStart = (relocation_info*)getLinkEditContent(leInfo.layout, leInfo.dynSymTab->locreloff);
@@ -5452,10 +5455,10 @@ void MachOAnalyzer::withVMLayout(Diagnostics &diag, void (^callback)(const mach_
     __block uint64_t linkeditFileOffset = 0;
     __block const uint8_t* linkeditStartAddr = nullptr;
 
-    const Header* hdr       = ((const Header*)this);
+    const UnsafeHeader* hdr       = ((const UnsafeHeader*)this);
     uint32_t numSegments    = hdr->segmentCount();
     BLOCK_ACCCESSIBLE_ARRAY(mach_o::SegmentLayout, segmentLayout, numSegments);
-    hdr->forEachSegment(^(const Header::SegmentInfo &info, bool &stop) {
+    hdr->forEachSegment(^(const UnsafeHeader::SegmentInfo &info, bool &stop) {
         mach_o::SegmentLayout segment;
         segment.vmAddr      = info.vmaddr;
         segment.vmSize      = info.vmsize;

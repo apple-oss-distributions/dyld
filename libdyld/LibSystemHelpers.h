@@ -74,9 +74,9 @@
 
 // mach_o
 #include "Error.h"
-#include "Header.h"
+#include "UnsafeHeader.h"
 
-using mach_o::Header;
+using mach_o::UnsafeHeader;
 
 
 namespace dyld4 {
@@ -135,7 +135,7 @@ struct VIS_HIDDEN  [[clang::ptrauth_vtable_pointer(process_independent, address_
     // Added in version 7
     virtual void            setDefaultProgramVars(ProgramVars& vars) const;
     virtual FuncLookup      legacyDyldFuncLookup() const;  // only works on x86_64 macOS
-    virtual mach_o::Error   setUpThreadLocals(const DyldSharedCache* cache, const Header* hdr) const;
+    virtual mach_o::Error   setUpThreadLocals(const DyldSharedCache* cache, const UnsafeHeader* hdr) const;
 };
 
 // __DATA_CONST,__helper section in libdyld.dylib
@@ -341,7 +341,7 @@ struct LibSystemHelpersWrapper
     }
 
     // Note, an error result here was strdup()ed and should be free()d
-    mach_o::Error setUpThreadLocals(const DyldSharedCache* cache, const Header* hdr) const
+    mach_o::Error setUpThreadLocals(const DyldSharedCache* cache, const UnsafeHeader* hdr) const
     {
         char* result = this->memoryManager->withReadOnlyTPROMemory([&] {
             mach_o::Error error = this->helpers->setUpThreadLocals(cache, hdr);

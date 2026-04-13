@@ -37,7 +37,7 @@
 // mach_o
 #include "FunctionVariants.h"
 #include "Image.h"
-#include "Header.h"
+#include "UnsafeHeader.h"
 #include "Platform.h"
 #include "ChainedFixups.h"
 
@@ -110,7 +110,7 @@ using dyld3::MachOFile;
 using mach_o::FunctionVariants;
 using mach_o::FunctionVariantsRuntimeTable;
 using mach_o::Image;
-using mach_o::Header;
+using mach_o::UnsafeHeader;
 using mach_o::Platform;
 using mach_o::ChainedFixups;
 
@@ -552,9 +552,9 @@ const MachOAnalyzer* Loader::analyzer(const RuntimeState& state) const
     return (MachOAnalyzer*)loadAddress(state);
 }
 
-const mach_o::Header* Loader::header(const RuntimeState& state) const
+const mach_o::UnsafeHeader* Loader::header(const RuntimeState& state) const
 {
-    return (mach_o::Header*)loadAddress(state);
+    return (mach_o::UnsafeHeader*)loadAddress(state);
 }
 #endif
 
@@ -670,7 +670,7 @@ const Loader* Loader::makeDyldCacheLoader(Diagnostics& diag, RuntimeState& state
     // rdar://76406035 (simulator cache paths need prefix)
     const PrebuiltLoader* result = state.findPrebuiltLoader(path);
     if ( result != nullptr ) {
-        if ( ((const Header *)result->mf(state))->loadableIntoProcess(state.config.process.platform, path, state.config.security.isInternalOS) ) {
+        if ( ((const UnsafeHeader*)result->mf(state))->loadableIntoProcess(state.config.process.platform, path, state.config.security.isInternalOS) ) {
             if ( state.config.log.searching )
                 state.log("  found: prebuilt-dylib-from-cache: (0x%04X) \"%s\"\n", dylibIndex, path);
             return result;
@@ -960,6 +960,21 @@ const Loader* Loader::getLoader(Diagnostics& diag, RuntimeState& state, const ch
                                     possiblePathOverridesCache = possiblePathHasFileOnDisk && originalPathIsOverridableInDyldCache;
                                 }
                             }
+#if TARGET_OS_SIMULATOR
+                            else if ( (state.config.dyldCache.addr != nullptr) && !state.config.dyldCache.addr->header.dylibsExpectedOnDisk
+                                      && originalPathIsInDyldCache && (possiblePath == loadPath) ) {
+                                // don't look on macOS file system for override of dylib that is in sim dyld cache
+                                if ( UnsafeHeader::isSimulatorSupportDylibPath(possiblePath) ) {
+                                    // except for magic three libsystem dylibs that come from host
+                                    possiblePathHasFileOnDisk = state.config.fileExists(possiblePath, &possiblePathFileID, &possiblePathOnDiskErrNo);
+                                    possiblePathOverridesCache = possiblePathHasFileOnDisk;
+                                }
+                                else {
+                                    // use the dylib in the sim dyld cache
+                                    possiblePathIsInDyldCache = true;
+                                }
+                            }
+#endif
                             else {
                                 // for dev caches, always stat() and check cache
                                 possiblePathHasFileOnDisk = state.config.fileExists(possiblePath, &possiblePathFileID, &possiblePathOnDiskErrNo);
@@ -1044,6 +1059,25 @@ const Loader* Loader::getLoader(Diagnostics& diag, RuntimeState& state, const ch
                                                 }
                                             }
                                         }
+                                    }
+                                }
+                            }
+                            else if ( (state.config.dyldCache.addr != nullptr) && !state.config.dyldCache.addr->header.dylibsExpectedOnDisk ) {
+                                if ( const char* simRoot = state.config.pathOverrides.simRootPath() ) {
+                                    // For pre-built simulator dyld caches, if path starts with simRoot, try removing and see if in dyld cache
+                                    size_t simRootLen = strlen(simRoot);
+                                    const char* possiblePathInSimDyldCache = nullptr;
+                                    if ( strncmp(possiblePath, simRoot, simRootLen) == 0 ) {
+                                        // looks like a dylib in the sim Runtime root, see if partial path is in the dyld cache
+                                        possiblePathInSimDyldCache = &possiblePath[simRootLen];
+                                        if ( state.config.dyldCache.indexOfPath(possiblePathInSimDyldCache, dylibInCacheIndex) ) {
+                                            // don't use stub dylibs for magic three system dylibs
+                                            if ( strncmp(possiblePathInSimDyldCache, "/usr/lib/system/", 16) != 0 ) {
+                                                possiblePathHasFileOnDisk = false;
+                                                possiblePathIsInDyldCache = true;
+                                                possiblePath = possiblePathInSimDyldCache;
+                                            }
+                                         }
                                     }
                                 }
                             }
@@ -1179,7 +1213,7 @@ const Loader* Loader::getLoader(Diagnostics& diag, RuntimeState& state, const ch
             if ( isRPath ) {
                 __block bool hasRPath = false;
                 for ( const LoadChain* link = options.rpathStack; (link != nullptr) && !hasRPath; link = link->previous ) {
-                    const Header* hdr = (const Header*)link->image->mf(state);
+                    const UnsafeHeader* hdr = (const UnsafeHeader*)link->image->mf(state);
                     hdr->forEachRPath(^(const char* rPath, bool& innerStop) {
                         hasRPath = true;
                         innerStop = true;
@@ -1317,7 +1351,7 @@ void Loader::forEachResolvedAtPathVar(RuntimeState& state, const char* loadPath,
             const MachOAnalyzer*  orgMA       = orgLoader->analyzer(state);
             if ( orgMA->isDylib() && !orgMA->enforceFormat(MachOAnalyzer::Malformed::loaderPathsAreReal) ) {
                 const char*           fullPath    = orgLoader->path(state);
-                const char*           installPath = ((const Header*)orgMA)->installName();
+                const char*           installPath = ((const UnsafeHeader*)orgMA)->installName();
                 if ( const char* installLeaf = strrchr(installPath, '/') ) {
                     size_t leafLen = strlen(installLeaf);
                     size_t fullLen = strlen(fullPath);
@@ -1355,7 +1389,7 @@ void Loader::forEachResolvedAtPathVar(RuntimeState& state, const char* loadPath,
         // rpath is expansion is a stack of rpath dirs built starting with main executable and pushing
         // LC_RPATHS from each dylib as they are recursively loaded.  options.rpathStack is a linnked list of that stack.
         for ( const LoadChain* link = options.rpathStack; (link != nullptr) && !stop; link = link->previous ) {
-            const Header* hdr = (const Header*)link->image->mf(state);
+            const UnsafeHeader* hdr = (const UnsafeHeader*)link->image->mf(state);
             hdr->forEachRPath(^(const char* rPath, bool& innerStop) {
                 if ( state.config.log.searching )
                     state.log("  LC_RPATH '%s' from '%s'\n", rPath, link->image->path(state));
@@ -1523,12 +1557,12 @@ static bool getUuidFromFd(RuntimeState& state, int fd, uint64_t sliceOffset, cha
     strlcpy(uuidStr, "no uuid", 64);
     mach_header mh;
     if ( state.config.syscall.pread(fd, &mh, sizeof(mh), (size_t)sliceOffset) == sizeof(mh) ) {
-        if ( ((Header*)&mh)->hasMachOMagic() ) {
+        if ( ((UnsafeHeader*)&mh)->hasMachOMagic() ) {
             size_t headerAndLoadCommandsSize = mh.sizeofcmds+sizeof(mach_header_64);
             uint8_t buffer[headerAndLoadCommandsSize];
             if ( state.config.syscall.pread(fd, buffer, sizeof(buffer), (size_t)sliceOffset) == headerAndLoadCommandsSize ) {
                 uuid_t uuid;
-                if ( ((Header*)buffer)->getUuid(uuid) ) {
+                if ( ((UnsafeHeader*)buffer)->getUuid(uuid) ) {
                     Loader::uuidToStr(uuid, uuidStr);
                     return true;
                 }
@@ -1682,7 +1716,7 @@ const MachOAnalyzer* Loader::mapSegments(Diagnostics& diag, RuntimeState& state,
         // tell kernel about fairplay encrypted regions
         uint32_t fpTextOffset;
         uint32_t fpSize;
-        const Header* hdr = (const Header*)loadAddress;
+        const UnsafeHeader* hdr = (const UnsafeHeader*)loadAddress;
         // FIXME: record if FP info in PrebuiltLoader
         if ( hdr->isFairPlayEncrypted(fpTextOffset, fpSize) ) {
             int result = state.config.syscall.mremap_encrypted((void*)(loadAddress + fpTextOffset), fpSize, 1, hdr->arch().cpuType(), hdr->arch().cpuSubtype());
@@ -2073,9 +2107,9 @@ void Loader::setUpPageInLinking(Diagnostics& diag, RuntimeState& state, uintptr_
     STACK_ALLOC_OVERFLOW_SAFE_ARRAY(PageInLinkingRange, dyldPageInRegionInfo, 8);
     ma->withChainStarts(diag, ma->chainStartsOffset(), ^(const dyld_chained_starts_in_image* startsInfo) {
         // build mwl_region array and compute page starts size
-        const Header* mh = (const Header*)ma;
+        const UnsafeHeader* mh = (const UnsafeHeader*)ma;
         __block const dyld_chained_starts_in_segment* lastSegChainInfo = nullptr;
-        mh->forEachSegment(^(const Header::SegmentInfo& segInfo, bool& stop) {
+        mh->forEachSegment(^(const UnsafeHeader::SegmentInfo& segInfo, bool& stop) {
             if ( segInfo.segmentIndex < startsInfo->seg_count ) {
                 if ( startsInfo->seg_info_offset[segInfo.segmentIndex] == 0 ) {
                     return;
@@ -2141,7 +2175,7 @@ void Loader::setUpPageInLinking(Diagnostics& diag, RuntimeState& state, uintptr_
 #endif // !TARGET_OS_SIMULATOR && !TARGET_OS_EXCLAVEKIT
 
 
-static uintptr_t targetValue(Diagnostics& diag, const Header* hdr, const mach_o::Fixup& fixupInfo, const Array<const void*>& bindTargets)
+static uintptr_t targetValue(Diagnostics& diag, const UnsafeHeader* hdr, const mach_o::Fixup& fixupInfo, const Array<const void*>& bindTargets)
 {
     uintptr_t newValue = 0;
     if ( fixupInfo.isBind ) {
@@ -2399,8 +2433,8 @@ void Loader::applyFixupsGeneric(Diagnostics& diag, RuntimeState& state, uint64_t
             uint16_t            overriddenDylibIndex;
             const DylibPatch*   patches;
             if ( this->overridesDylibInCache(patches, overriddenDylibIndex) ) {
-                const mach_o::Header* dyldMH = (const Header*)ma;
-                dyldMH->forEachSegment(^(const Header::SegmentInfo& segInfo, bool& stop) {
+                const mach_o::UnsafeHeader* dyldMH = (const UnsafeHeader*)ma;
+                dyldMH->forEachSegment(^(const UnsafeHeader::SegmentInfo& segInfo, bool& stop) {
                     if ( segInfo.readOnlyData() ) {
                         dataConstSize += segInfo.vmsize + (uint32_t)PAGE_SIZE;
                     }
@@ -2505,7 +2539,7 @@ void Loader::applyFunctionVariantFixups(Diagnostics& diag, const RuntimeState& s
     // dylibs in cache have adjustments done in adjustFunctionVariantsInDyldCache()
     if ( this->dylibInDyldCache || !this->hasFuncVarFixups )
         return;
-    const Header* hdr = this->header(state);
+    const UnsafeHeader* hdr = this->header(state);
     Image         image((mach_header*)hdr);
     if ( !image.hasFunctionVariantFixups() )
         return;
@@ -2534,10 +2568,11 @@ void Loader::findAndRunAllInitializers(RuntimeState& state) const
         void *func = (void *)((uint8_t*)ma + offset);
         if ( state.config.log.initializers )
             state.log("running initializer %p in %s\n", func, this->path(state));
+        // Note we send the tracing event with the unauthenticated pointer
+        dyld3::ScopedTimer timer(DBG_DYLD_TIMING_STATIC_INITIALIZER, (uint64_t)ma, (uint64_t)func, 0);
 #if __has_feature(ptrauth_calls)
         func = __builtin_ptrauth_sign_unauthenticated(func, ptrauth_key_asia, 0);
 #endif
-        dyld3::ScopedTimer timer(DBG_DYLD_TIMING_STATIC_INITIALIZER, (uint64_t)ma, (uint64_t)func, 0);
         MemoryManager::withReadOnlyMemory([&]{
             ((Initializer)func)(state.config.process.argc, state.config.process.argv, state.config.process.envp, state.config.process.apple, &state.vars);
         });
@@ -2563,7 +2598,7 @@ void Loader::findAndRunAllInitializers(RuntimeState& state) const
 // use the visitedDelayed set to track if the image was already visited.  If the image is not delayed, we use
 // beginInitializers() to mark the image visited.
 // We have to recurse into delayed dylibs because they may need to be initialized because they have weak-defs or interposing tuples.
-void Loader::runInitializersBottomUp(RuntimeState& state, Vector<const Loader*>& danglingUpwards, Vector<const Loader*>& visitedDelayed) const
+void Loader::runInitializersBottomUp(RuntimeState& state, Vector<ConstAuthLoader>& danglingUpwards, Vector<ConstAuthLoader>& visitedDelayed) const
 {
     // don't run initializers in images that are in delayInit state
     // but continue down graph and run initializers in children if needed
@@ -2571,8 +2606,10 @@ void Loader::runInitializersBottomUp(RuntimeState& state, Vector<const Loader*>&
 
     // do nothing if already visited
     if ( delayed ) {
-        if ( std::ranges::find(visitedDelayed, this) != visitedDelayed.end() )
-            return;
+        for ( const ConstAuthLoader& ldr : visitedDelayed ) {
+            if ( ldr == this )
+                return;
+        }
         // use 'visitedDelayed' to mark we have already handled his image
         visitedDelayed.push_back(this);
     }
@@ -2613,15 +2650,15 @@ void Loader::runInitializersBottomUpPlusUpwardLinks(RuntimeState& state) const
 {
     //state.log("runInitializersBottomUpPlusUpwardLinks() %s\n", this->path());
     MemoryManager::withWritableMemory([&]{
-        Vector<const Loader*> danglingUpwards(state.persistentAllocator);
-        Vector<const Loader*> visitedDelayed(state.persistentAllocator);
+        Vector<ConstAuthLoader> danglingUpwards(state.persistentAllocator);
+        Vector<ConstAuthLoader> visitedDelayed(state.persistentAllocator);
         // recursively run all initializers
         this->runInitializersBottomUp(state, danglingUpwards, visitedDelayed);
 
         //state.log("runInitializersBottomUpPlusUpwardLinks(%s), found %d dangling upwards\n", this->path(), danglingUpwards.count());
 
         // go back over all images that were upward linked, and recheck they were initialized (might be danglers)
-        Vector<const Loader*> extraDanglingUpwards(state.persistentAllocator);
+        Vector<ConstAuthLoader> extraDanglingUpwards(state.persistentAllocator);
         for ( const Loader* ldr : danglingUpwards ) {
             //state.log("running initializers for dangling upward link %s\n", ldr->path());
             ldr->runInitializersBottomUp(state, extraDanglingUpwards, visitedDelayed);
@@ -2689,7 +2726,7 @@ void Loader::forEachBindTarget(Diagnostics& diag, RuntimeState& state, CacheWeak
 uint64_t Loader::functionVariantTableVMOffset(const RuntimeState& state) const
 {
     uint64_t      result = 0;
-    const Header* hdr    = (Header*)(this->mf(state));
+    const UnsafeHeader* hdr    = (UnsafeHeader*)(this->mf(state));
     if ( hdr->hasFunctionsVariantTable(result) )
         return result;
 
@@ -2706,7 +2743,7 @@ void Loader::makeSegmentsReadOnly(RuntimeState& state) const
 {
     const MachOAnalyzer* ma    = this->analyzer(state);
     uintptr_t            slide = ma->getSlide();
-    ((const Header *)ma)->forEachSegment(^(const Header::SegmentInfo& segInfo, bool& stop) {
+    ((const UnsafeHeader*)ma)->forEachSegment(^(const UnsafeHeader::SegmentInfo& segInfo, bool& stop) {
         if ( segInfo.readOnlyData() ) {
     #if TARGET_OS_EXCLAVEKIT
             //TODO: EXCLAVES
@@ -2726,7 +2763,7 @@ void Loader::makeSegmentsReadWrite(RuntimeState& state) const
 {
     const MachOAnalyzer* ma    = this->analyzer(state);
     uintptr_t            slide = ma->getSlide();
-    ((const Header *)ma)->forEachSegment(^(const Header::SegmentInfo& segInfo, bool& stop) {
+    ((const UnsafeHeader*)ma)->forEachSegment(^(const UnsafeHeader::SegmentInfo& segInfo, bool& stop) {
         if ( segInfo.readOnlyData() ) {
     #if TARGET_OS_EXCLAVEKIT
             //TODO: EXCLAVES
@@ -2746,7 +2783,7 @@ void Loader::logSegmentsFromSharedCache(RuntimeState& state) const
 {
     state.log("Using mapping in dyld cache for %s\n", this->path(state));
     uint64_t cacheSlide = state.config.dyldCache.slide;
-    ((const Header *)this->loadAddress(state))->forEachSegment(^(const Header::SegmentInfo& info, bool& stop) {
+    ((const UnsafeHeader*)this->loadAddress(state))->forEachSegment(^(const UnsafeHeader::SegmentInfo& info, bool& stop) {
         state.log("%14.*s (%c%c%c) 0x%012llX->0x%012llX \n",
                   (int)info.segmentName.size(), info.segmentName.data(),
                   (info.readable() ? 'r' : '.'), (info.writable() ? 'w' : '.'), (info.executable() ? 'x' : '.'),
@@ -2766,7 +2803,7 @@ void Loader::addWeakDefsToMap(RuntimeState& state, const std::span<const Loader*
 
         // NOTE: using the nlist is faster to scan for weak-def exports, than iterating the exports trie
         Diagnostics diag;
-        uint64_t    baseAddress = ((const Header*)ma)->preferredLoadAddress();
+        uint64_t    baseAddress = ((const UnsafeHeader*)ma)->preferredLoadAddress();
         ma->forEachGlobalSymbol(diag, ^(const char* symbolName, uint64_t n_value, uint8_t n_type, uint8_t n_sect, uint16_t n_desc, bool& stop) {
             if ( (n_desc & N_WEAK_DEF) != 0 ) {
                 // only add if not already in map
@@ -2989,7 +3026,7 @@ Loader::ResolvedSymbol Loader::resolveSymbol(Diagnostics& diag, RuntimeState& st
                     // We have already found the impl which we want all clients to use.
                     // But, later in load order we see something in the dyld cache that also implements
                     // this symbol, so we need to change all caches uses of that to use the found one instead.
-                    const Header* cacheHdr = (const Header*)cacheResult.targetLoader->mf(state);
+                    const UnsafeHeader* cacheHdr = (const UnsafeHeader*)cacheResult.targetLoader->mf(state);
                     uint32_t         cachedOverriddenDylibIndex;
                     if ( state.config.dyldCache.findMachHeaderImageIndex((const mach_header*)cacheHdr, cachedOverriddenDylibIndex) ) {
                         // Use VMAddr's as the cache may not exist if we are in the builder
@@ -3117,9 +3154,9 @@ Loader::ResolvedSymbol Loader::resolveSymbol(Diagnostics& diag, RuntimeState& st
 // if the binary for this Loader is newer than dyld, then we are trying to run a too new binary
 void Loader::tooNewErrorAddendum(Diagnostics& diag, RuntimeState& state) const
 {
-    mach_o::PlatformAndVersions dyldpvs = ((mach_o::Header*)(&__dso_handle))->platformAndVersions();
+    mach_o::PlatformAndVersions dyldpvs = ((mach_o::UnsafeHeader*)(&__dso_handle))->platformAndVersions();
 
-    ((mach_o::Header*)this->mf(state))->platformAndVersions().unzip(^(mach_o::PlatformAndVersions pvs) {
+    ((mach_o::UnsafeHeader*)this->mf(state))->platformAndVersions().unzip(^(mach_o::PlatformAndVersions pvs) {
         if ( (pvs.platform == dyldpvs.platform) && (pvs.minOS > dyldpvs.minOS) ) {
             char versionString[32];
             diag.error(" (built for %s %s which is newer than running OS)",
@@ -3315,7 +3352,7 @@ bool Loader::hasExportedSymbol(Diagnostics& diag, RuntimeState& state, const cha
                     if ( strcmp(n_name, symbolName) == 0 ) {
                         result->targetLoader            = this;
                         result->targetSymbolName        = symbolName;
-                        result->targetRuntimeOffset     = (uintptr_t)(n_value - ((const Header*)fileRef)->preferredLoadAddress());
+                        result->targetRuntimeOffset     = (uintptr_t)(n_value - ((const UnsafeHeader*)fileRef)->preferredLoadAddress());
                         result->kind                    = ResolvedSymbol::Kind::bindToImage;
                         result->isCode                  = false; // only used for arm64e which uses trie not nlist
                         result->isWeakDef               = (n_desc & N_WEAK_DEF);
@@ -3483,13 +3520,13 @@ uintptr_t Loader::interpose(RuntimeState& state, uintptr_t value, const Loader* 
 }
 
 #if BUILDING_DYLD && !TARGET_OS_EXCLAVEKIT
-bool Loader::overriddenCacheHeader(RuntimeState& state, const mach_o::Header* dylibHdr)
+bool Loader::overriddenCacheHeader(RuntimeState& state, const mach_o::UnsafeHeader* dylibHdr)
 {
     // convert dylibHdr to cacheDylibIndex
     const DyldSharedCache* dyldCache = state.config.dyldCache.addr;
     __block uint32_t cacheDylibIndex = 0;
     __block bool     found           = false;
-    dyldCache->forEachDylib(^(const mach_o::Header* hdr, const char* installName, uint32_t imageIndex, uint64_t inode, uint64_t mtime, bool& stop) {
+    dyldCache->forEachDylib(^(const mach_o::UnsafeHeader* hdr, const char* installName, uint32_t imageIndex, uint64_t inode, uint64_t mtime, bool& stop) {
         if ( hdr == dylibHdr ) {
             cacheDylibIndex = imageIndex;
             found = true;
@@ -3527,9 +3564,9 @@ void Loader::adjustFunctionVariantsInDyldCache(RuntimeState& state)
     // If dylibs in dyld cache have any function-variants, select which variant to use.
     // Requires DATA_CONST to be writable, and function-variant flags to be setup.
     if ( dyldCache != nullptr ) {
-        __block const mach_o::Header* lastDylibHdr          = nullptr;
+        __block const mach_o::UnsafeHeader* lastDylibHdr          = nullptr;
         __block bool                  lastDylibIsOverridden = false;
-        dyldCache->forEachFunctionVariantPatchLocation(^(const void* loc, PointerMetaData pmd, const mach_o::FunctionVariants& fvs, const mach_o::Header* dylibHdr, int variantIndex, bool& stop) {
+        dyldCache->forEachFunctionVariantPatchLocation(^(const void* loc, PointerMetaData pmd, const mach_o::FunctionVariants& fvs, const mach_o::UnsafeHeader* dylibHdr, int variantIndex, bool& stop) {
             // need special handling if there are roots installed
             if ( state.hasOverriddenCachedDylib() ) {
                 // if dylibHdr is for a cache dylib that has been overridden, do not patch function variant uses that point into it
@@ -3589,7 +3626,7 @@ void Loader::applyInterposingToDyldCache(RuntimeState& state)
         // Convert from a cache offset to an image offset
         uint64_t mTime;
         uint64_t inode;
-        const Header* imageHdr = (const Header*)(dyldCache->getIndexedImageEntry(imageIndex, mTime, inode));
+        const UnsafeHeader* imageHdr = (const UnsafeHeader*)(dyldCache->getIndexedImageEntry(imageIndex, mTime, inode));
         if ( imageHdr == nullptr )
             continue;
 

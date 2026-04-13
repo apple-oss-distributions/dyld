@@ -90,6 +90,7 @@ public:
     Usage       useEntryPointLoadCommand() const;
     bool        keepDwarfUnwind() const;
     bool        canInferEmptySignedClassROs() const;
+    bool        canLazyLoad() const;
 
     // restrictions
     bool        enforceReadOnlyLinkedit() const;

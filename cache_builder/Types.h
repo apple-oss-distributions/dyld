@@ -609,6 +609,11 @@ static inline bool operator==(const VMOffset& a, const VMOffset& b)
     return a.rawValue() == b.rawValue();
 }
 
+static inline bool operator<(const VMOffset& a, const VMOffset& b)
+{
+    return a.rawValue() < b.rawValue();
+}
+
 
 #if BUILDING_CACHE_BUILDER || BUILDING_CACHE_BUILDER_UNIT_TESTS
 // for maps of CacheVMAddress

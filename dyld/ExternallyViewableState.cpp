@@ -32,14 +32,14 @@
   #include <mach/mach_time.h> // mach_absolute_time()
   #include <mach-o/loader.h> // include to avoid type issues betewen mach_header and dyld4::mach_header
   #include <sys/fsgetpath.h>
-  #include "Header.h"
+  #include "UnsafeHeader.h"
 #endif // !TARGET_OS_EXCLAVEKIT
 
 #include <mach-o/dyld_images.h>
 #include <stdint.h>
 #include "dyld_process_info.h"
 #include "DyldProcessConfig.h"
-#include "Header.h"
+#include "UnsafeHeader.h"
 #include "Tracing.h"
 
 #include "ExternallyViewableState.h"
@@ -56,7 +56,7 @@
 #endif /* DYLD_FEATURE_ATLAS_GENERATION */
 
 using lsl::Allocator;
-using mach_o::Header;
+using mach_o::UnsafeHeader;
 using mach_o::Platform;
 using lsl::Vector;
 
@@ -117,6 +117,8 @@ struct dyld_all_image_infos dyld_all_image_infos __attribute__ ((section ("__DAT
 
 // if rare case that we switch to dyld-in-cache but cannot transfer to using dyld_all_image_infos from cache
 static struct dyld_all_image_infos* sProcessInfo = &dyld_all_image_infos;
+#else
+static struct dyld_all_image_infos* sProcessInfo = nullptr;
 #endif // !TARGET_OS_SIMULATOR
 
 
@@ -140,7 +142,7 @@ Vector<std::byte> ExternallyViewableState::generateCompactInfo(Allocator& alloca
     }
 
     std::span<const uint8_t> dyldHeaderSpan((const uint8_t*)&__dso_handle, sizeof(mach_header));
-    const mach_o::Header* dyldHeader = mach_o::Header::isMachO(dyldHeaderSpan);
+    const mach_o::UnsafeHeader* dyldHeader = mach_o::UnsafeHeader::isMachO(dyldHeaderSpan);
     if (dyldHeader->inDyldCache()) {
         snapshot.addSharedCacheImage((const struct mach_header*)&__dso_handle);
     } else {
@@ -192,6 +194,9 @@ ExternallyViewableState::ExternallyViewableState(Allocator& allocator) : _persis
 ExternallyViewableState::ExternallyViewableState(Allocator& allocator, const dyld::SyscallHelpers* syscalls): ExternallyViewableState(allocator) {
     _syscallHelpers = syscalls;
     // make old all_image_infos, using all_image_info from host dyld
+    if (!sProcessInfo) {
+        sProcessInfo = (struct dyld_all_image_infos*)(_syscallHelpers->getProcessInfo());
+    }
     _allImageInfo = (struct dyld_all_image_infos*)(_syscallHelpers->getProcessInfo());
     _imageInfos     = Vector<dyld_image_info>::make(*_persistentAllocator);
     _imageUUIDs     = Vector<dyld_uuid_info>::make(*_persistentAllocator);
@@ -236,11 +241,7 @@ void ExternallyViewableState::setDyldState(uint8_t dyldState) {
 // also used for dyld_process_info_create to get dyld_all_image_infos for current process
 struct dyld_all_image_infos* ExternallyViewableState::getProcessInfo()
 {
-#if TARGET_OS_SIMULATOR
-    return nullptr; // FIXME: 
-#else
     return sProcessInfo;
-#endif
 }
 
 #if DYLD_FEATURE_SIMULATOR_NOTIFICATION_HOST_SUPPORT
@@ -302,7 +303,7 @@ void ExternallyViewableState::createMinimalInfo(Allocator& resultAllocator, uint
     _imageUUIDs->clear();
     dyld_uuid_info  dyldUuidInfo;
     std::span<const uint8_t> dyldHeaderSpan((const uint8_t*)dyldLoadAddress, sizeof(mach_header));
-    const mach_o::Header* dyldHeader = mach_o::Header::isMachO(dyldHeaderSpan);
+    const mach_o::UnsafeHeader* dyldHeader = mach_o::UnsafeHeader::isMachO(dyldHeaderSpan);
     if (!dyldHeader->getUuid(dyldUuidInfo.imageUUID)) {
         halt("dyld must have a UUID");
     }
@@ -323,7 +324,7 @@ void ExternallyViewableState::createMinimalInfo(Allocator& resultAllocator, uint
     dyld_uuid_info  mainUuidInfo;
     dyld_image_info mainImageInfo;
     std::span<const uint8_t> mainHeaderSpan((const uint8_t*)mainExecutableAddress, sizeof(mach_header));
-    const mach_o::Header* mainHeader = mach_o::Header::isMachO(mainHeaderSpan);
+    const mach_o::UnsafeHeader* mainHeader = mach_o::UnsafeHeader::isMachO(mainHeaderSpan);
     if (mainHeader->getUuid(mainUuidInfo.imageUUID)) {
         mainUuidInfo.imageLoadAddress =  (const struct mach_header*)mainExecutableAddress;;
         _imageUUIDs->push_back(mainUuidInfo);
@@ -374,7 +375,7 @@ void ExternallyViewableState::createMinimalInfo(Allocator& resultAllocator, uint
 
     auto mainFile = fileManager.fileRecordForPath(ephemeralAllocator, dyldPath);
     lsl::UUID mainUUID;
-    if (((Header*)mainExecutableAddress)->getUuid(rawUUID)) {
+    if (((UnsafeHeader*)mainExecutableAddress)->getUuid(rawUUID)) {
         mainUUID = rawUUID;
         Atlas::Image dyldImage(ephemeralAllocator, std::move(mainFile), snapshot.identityMapper(), (uint64_t)mainExecutableAddress, mainUUID);
         snapshot.addImage(std::move(dyldImage));
@@ -463,7 +464,7 @@ void ExternallyViewableState::addImages(lsl::Allocator& persistentAllocator, lsl
     newImageList.insert(newImageList.begin(), _imageInfos->begin(), _imageInfos->end());
     newUuidList.insert(newUuidList.begin(), _imageUUIDs->begin(), _imageUUIDs->end());
     for (const ImageInfo& imageInfo : imageInfos) {
-        const Header* mh = (const Header*)imageInfo.loadAddress;
+        const UnsafeHeader* mh = (const UnsafeHeader*)imageInfo.loadAddress;
         //fprintf(stderr, "ExternallyViewableState::addImages(): mh=%p, path=%s\n", mf, imageInfo.path);
         newImageList.push_back({(mach_header*)imageInfo.loadAddress, imageInfo.path, 0});
         if ( !imageInfo.inSharedCache ) {
@@ -606,31 +607,33 @@ void ExternallyViewableState::triggerNotifications(enum dyld_image_mode mode, ui
     }
 #endif /* DYLD_FEATURE_SIMULATOR_NOTIFICATIONS */
 #if DYLD_FEATURE_BREAKPOINT_NOTIFICATIONS
+    dyld4::Metrics::assignDuration(gMetrics.debuggerNotifierCummulativeDuration, [&]{
 #if TARGET_OS_SIMULATOR
-    if (_syscallHelpers->version < 18) {
-        // Newer dylds call the break point function on dyld_sims behalf, so only call it if this is an old dyld
-        _allImageInfo->notification(mode, infoCount, info);
-    }
+        if (_syscallHelpers->version < 18) {
+            // Newer dylds call the break point function on dyld_sims behalf, so only call it if this is an old dyld
+            _allImageInfo->notification(mode, infoCount, info);
+        }
 #else
 #if DYLD_FEATURE_SIMULATOR_NOTIFICATION_HOST_SUPPORT
-    if (_allImageInfo->notification == lldb_image_notifier_sim_trap) {
-        // We set the simulator to the trap, but we need to switch it back before we trigger the notification so LLDB
-        // does not update the notifier when it reads the all image infos. Compiler barriers are necessary to prevent
-        // the compiler from optimizing these away, as the order must be observable to an external agent (lldb).
-        _allImageInfo->notification = &lldb_image_notifier;
-        os_compiler_barrier();
-        // Call the real notifier
-        _allImageInfo->notification(mode, infoCount, info);
-        os_compiler_barrier();
-        // Switch back to the trap
-        _allImageInfo->notification = &lldb_image_notifier_sim_trap;
-    } else {
-        _allImageInfo->notification(mode, infoCount, info);
-    }
+        if (_allImageInfo->notification == lldb_image_notifier_sim_trap) {
+            // We set the simulator to the trap, but we need to switch it back before we trigger the notification so LLDB
+            // does not update the notifier when it reads the all image infos. Compiler barriers are necessary to prevent
+            // the compiler from optimizing these away, as the order must be observable to an external agent (lldb).
+            _allImageInfo->notification = &lldb_image_notifier;
+            os_compiler_barrier();
+            // Call the real notifier
+            _allImageInfo->notification(mode, infoCount, info);
+            os_compiler_barrier();
+            // Switch back to the trap
+            _allImageInfo->notification = &lldb_image_notifier_sim_trap;
+        } else {
+            _allImageInfo->notification(mode, infoCount, info);
+        }
 #else
-    _allImageInfo->notification(mode, infoCount, info);
+        _allImageInfo->notification(mode, infoCount, info);
 #endif /* DYLD_FEATURE_SIMULATOR_NOTIFICATION_HOST_SUPPORT */
 #endif /* TARGET_OS_SIMULATOR */
+    });
 #endif /* DYLD_FEATURE_BREAKPOINT_NOTIFICATIONS */
 #if DYLD_FEATURE_MACH_PORT_NOTIFICATIONS || DYLD_FEATURE_LEGACY_MACH_PORT_NOTIFICATIONS
     RemoteNotificationResponder responder(_allImageInfo->notifyPorts[0]);
@@ -657,6 +660,35 @@ void ExternallyViewableState::triggerNotifications(enum dyld_image_mode mode, ui
 // removing the all image infos. The one exception for now is Rosetta AOT infos, which is not currently represented
 // in the loaders.
 #if DYLD_FEATURE_ATLAS_GENERATION || DYLD_FEATURE_COMPACT_INFO_GENERATION
+#if !TARGET_OS_SIMULATOR && !TARGET_OS_EXCLAVEKIT
+void ExternallyViewableState::recordMetrics(PropertyList::Dictionary &rootDictionary) {
+    auto& metrics                        = rootDictionary.addObjectForKey<PropertyList::Dictionary>(kDyldAtlasMetricsKey);
+    // Do not include the timestamps if we don't have them yet
+    if (gMetrics.initalExecutionTimestamp) {
+        metrics.addObjectForKey<PropertyList::Integer>(kDyldAtlasMetricsInitialTimestamp,           gMetrics.initalExecutionTimestamp);
+    }
+    if (gMetrics.mainExecutionTimestamp) {
+        metrics.addObjectForKey<PropertyList::Integer>(kDyldAtlasMetricsMainTimestamp,               gMetrics.mainExecutionTimestamp);
+    }
+    // Always include the other metrics (even if zero) as they are durations and counts, so zero is a valid value
+    metrics.addObjectForKey<PropertyList::Integer>(kDyldAtlasMetricsLocalNotifiersDuration,         gMetrics.localNotifierCummulativeDuration.load(std::memory_order::acquire));
+    metrics.addObjectForKey<PropertyList::Integer>(kDyldAtlasMetricsRemoteNotifiersDuration,        gMetrics.remoteNotifierCummulativeDuration.load(std::memory_order::acquire));
+    metrics.addObjectForKey<PropertyList::Integer>(kDyldAtlasMetricsDebugNotifiersDuration,         gMetrics.debuggerNotifierCummulativeDuration.load(std::memory_order::acquire));
+    metrics.addObjectForKey<PropertyList::Integer>(kDyldAtlasMetricsDlopenCount,                    gMetrics.dlopenCount.load(std::memory_order::acquire));
+    metrics.addObjectForKey<PropertyList::Integer>(kDyldAtlasMetricsDlopenLibraryCount,             gMetrics.dlopenLibraryCount.load(std::memory_order::acquire));
+    metrics.addObjectForKey<PropertyList::Integer>(kDyldAtlasMetricsInsertedLibraryCount,           gMetrics.insertedLibraryCount.load(std::memory_order::acquire));
+    metrics.addObjectForKey<PropertyList::Integer>(kDyldAtlasMetricsInsertedLibraryLoadDuration,    gMetrics.insertedLibraryLoadDuration.load(std::memory_order::acquire));
+//    fprintf(stderr, "dlopenCount = %llu\n", gMetrics.dlopenCount.load(std::memory_order::acquire));
+//    fprintf(stderr, "dlopenLibraryCount = %llu\n", gMetrics.dlopenLibraryCount.load(std::memory_order::acquire));
+//    fprintf(stderr, "insertedLibraryCount = %llu\n", gMetrics.insertedLibraryCount.load(std::memory_order::acquire));
+//    fprintf(stderr, "insertedLibraryLoadDuration = %llu\n", gMetrics.insertedLibraryLoadDuration.load(std::memory_order::acquire));
+//
+//    fprintf(stderr, "localNotifierCummulativeDuration = %llu\n", gMetrics.localNotifierCummulativeDuration.load(std::memory_order::acquire));
+//    fprintf(stderr, "remoteNotifierCummulativeDuration = %llu\n", gMetrics.remoteNotifierCummulativeDuration.load(std::memory_order::acquire));
+//    fprintf(stderr, "debuggerNotifierCummulativeDuration = %llu\n", gMetrics.debuggerNotifierCummulativeDuration.load(std::memory_order::acquire));
+}
+#endif // !TARGET_OS_SIMULATOR && !TARGET_OS_EXCLAVEKIT
+
 ByteStream ExternallyViewableState::generateAtlas(Allocator& allocator) {
     ByteStream outputStream(allocator);
     AAREncoder aarEncoder(allocator);
@@ -675,6 +707,9 @@ ByteStream ExternallyViewableState::generateAtlas(Allocator& allocator) {
     auto& images                        = rootDictionary.addObjectForKey<Array>(kDyldAtlasSnapshotImagesArrayKey);
     const DyldSharedCache* cache        = _runtimeState->config.dyldCache.addr;
     PropertyList::Bitmap* cacheBitmap   = gatherAtlasProcessInfo((uint64_t)_runtimeState->config.process.mainExecutableMF, cache, rootDictionary);
+#if !TARGET_OS_SIMULATOR && !TARGET_OS_EXCLAVEKIT
+    recordMetrics(rootDictionary);
+#endif // !TARGET_OS_SIMULATOR && !TARGET_OS_EXCLAVEKIT
     std::span<const dyld_cache_image_text_info> textInfos;
     if (cache) {
         uint64_t sharedCacheLoadAddress = (uint64_t)cache;
@@ -805,7 +840,7 @@ void ExternallyViewableState::atlasAddImage(PropertyList::Dictionary& image, uin
 
     image.addObjectForKey<String>(kDyldAtlasImageFilePathKey, filePath);
     std::span<const uint8_t> headerSpan((const uint8_t*)loadAddress, sizeof(mach_header));
-    const mach_o::Header* header = mach_o::Header::isMachO(headerSpan);
+    const mach_o::UnsafeHeader* header = mach_o::UnsafeHeader::isMachO(headerSpan);
     if (!header || header->inDyldCache()) {
         return;
     }
@@ -823,7 +858,7 @@ void ExternallyViewableState::atlasAddImage(PropertyList::Dictionary& image, uin
         image.addObjectForKey<UUID>(kDyldAtlasImageUUIDKey, uuid);
     }
     __block Array* segments = nullptr;
-    header->forEachSegment(^(const mach_o::Header::SegmentInfo& info, bool& stop) {
+    header->forEachSegment(^(const mach_o::UnsafeHeader::SegmentInfo& info, bool& stop) {
         if (info.segmentName == "__PAGEZERO") {
             return;
         }
@@ -856,7 +891,7 @@ PropertyList::Bitmap* ExternallyViewableState::gatherAtlasProcessInfo(uint64_t m
         // The runtime state is not available yet, infer the the process type from the main executable. For certain types of processes this may change
         // shortly after bootstrap (in particular, those that use `DYLD_FORCE_PLATFORM`)
         std::span<const uint8_t> mainHeaderSpan((const uint8_t*)mainExecutableAddress, sizeof(mach_header));
-        const mach_o::Header* mainHeader = mach_o::Header::isMachO(mainHeaderSpan);
+        const mach_o::UnsafeHeader* mainHeader = mach_o::UnsafeHeader::isMachO(mainHeaderSpan);
         rootDictionary.addObjectForKey<PropertyList::Integer>(kDyldAtlasSnapshotPlatformTypeKey,  (int64_t)mainHeader->platformAndVersions().platform.value());
     }
 
@@ -882,7 +917,7 @@ PropertyList::Bitmap* ExternallyViewableState::gatherAtlasProcessInfo(uint64_t m
 #if SUPPORT_ROSETTA
         if (_allImageInfo->aotSharedCacheBaseAddress) {
             cacheAtlas.addObjectForKey<PropertyList::Integer>(kDyldAtlasSharedCacheAotLoadAddressKey, _allImageInfo->aotSharedCacheBaseAddress);
-            cacheAtlas.addObjectForKey<PropertyList::UUID>(kDyldAtlasSharedCacheAotLoadAddressKey, _allImageInfo->aotSharedCacheUUID);
+            cacheAtlas.addObjectForKey<PropertyList::UUID>(kDyldAtlasSharedCacheAotUUIDKey, _allImageInfo->aotSharedCacheUUID);
         }
 #endif /* SUPPORT_ROSETTA */
     }
@@ -1223,7 +1258,7 @@ void ExternallyViewableState::removeRosettaImages(std::span<const mach_header*>&
 
 #if !TARGET_OS_SIMULATOR && !TARGET_OS_EXCLAVEKIT
 // called from disk based dyld before jumping into dyld in the cache
-void ExternallyViewableState::prepareInCacheDyldAllImageInfos(const Header* dyldInCacheMH)
+void ExternallyViewableState::prepareInCacheDyldAllImageInfos(const UnsafeHeader* dyldInCacheMH)
 {
     const dyld3::MachOLoaded* dyldInCacheML = (const dyld3::MachOLoaded*)dyldInCacheMH;
     sProcessInfo->dyldImageLoadAddress = (const struct mach_header*)dyldInCacheMH;
@@ -1255,21 +1290,25 @@ void ExternallyViewableState::prepareInCacheDyldAllImageInfos(const Header* dyld
     sProcessInfo->dyldImageLoadAddress              = (const struct mach_header*)dyldInCacheMH;
     dyld_image_info info = { (const struct mach_header*)dyldInCacheMH, "/usr/lib/dyld", 0 };
     if ( proc_set_dyld_all_image_info((void*)newProcessInfo, sizeof(dyld_all_image_infos)) == 0 ) {
-        sProcessInfo->notification(dyld_image_dyld_moved, 1, &info);
         // FIXME: LLDB/dyld interop issue
         // Breakpoints here are broken. The will usually trigger, but with no image list.
         // It appears the way LLDB is using the existing interfaces has an issue since, kicking the noitifier
         // with no struct change is sufficient to bring breakpoints back online. It is possible it is a defect in
         // the interface and they need more data, so it may be a cross functional fix, but we can live with a one line
         // of code observability gap for now.
-        newProcessInfo->notification(dyld_image_adding, sProcessInfo->infoArrayCount, sProcessInfo->infoArray);
+        dyld4::Metrics::assignDuration(gMetrics.debuggerNotifierCummulativeDuration, [&]{
+            sProcessInfo->notification(dyld_image_dyld_moved, 1, &info);
+            newProcessInfo->notification(dyld_image_adding, sProcessInfo->infoArrayCount, sProcessInfo->infoArray);
+        });
         // Breakpoints work again!!
     } else {
         // Moving process info failed, 0 out new process info to signal to in cache dyld its all image info is not the real one
         newProcessInfo->notifyPorts[0] = 0;
         newProcessInfo->compact_dyld_image_info_size = 0;                       // Use a size of 0 to indicate we failed
         __typeof(&lldb_image_notifier) prevNotifyLLDB = sProcessInfo->notification;
-        sProcessInfo->notification = newProcessInfo->notification;
+        dyld4::Metrics::assignDuration(gMetrics.debuggerNotifierCummulativeDuration, [&]{
+            sProcessInfo->notification = newProcessInfo->notification;
+        });
         prevNotifyLLDB(dyld_image_dyld_moved, 1, &info);
     }
 

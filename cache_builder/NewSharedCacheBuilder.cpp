@@ -57,7 +57,7 @@
 
 // mach_o
 #include "ExportsTrie.h"
-#include "Header.h"
+#include "UnsafeHeader.h"
 #include "Image.h"
 #include "Misc.h"
 
@@ -85,7 +85,7 @@ using dyld4::RuntimeLocks;
 
 using lsl::Allocator;
 
-using mach_o::Header;
+using mach_o::UnsafeHeader;
 using mach_o::Platform;
 using mach_o::Image;
 using mach_o::ExportsTrie;
@@ -185,7 +185,7 @@ static DylibSizes getDylibSizes(std::span<const SubCache> subCaches,
 
     // segment sizes
     for ( const CacheDylib& cacheDylib : cacheDylibs ) {
-        cacheDylib.cacheHdr->forEachSegment(^(const Header::SegmentInfo& info, bool& stop) {
+        cacheDylib.cacheHdr->forEachSegment(^(const UnsafeHeader::SegmentInfo& info, bool& stop) {
             if ( info.segmentName == "__TEXT" )
                 dylibSizes.textSegment += info.vmsize;
             else if ( info.segmentName == "__DATA" )
@@ -209,7 +209,7 @@ static DylibSizes getDylibSizes(std::span<const SubCache> subCaches,
 
     // section sizes
     for ( const CacheDylib& cacheDylib : cacheDylibs ) {
-        cacheDylib.cacheHdr->forEachSection(^(const Header::SectionInfo& info, bool& stop) {
+        cacheDylib.cacheHdr->forEachSection(^(const UnsafeHeader::SectionInfo& info, bool& stop) {
             if ( (info.segmentName == "__TEXT") && (info.sectionName == "__text") )
                 dylibSizes.textSection += info.size;
         });
@@ -272,7 +272,7 @@ std::string SharedCacheBuilder::stats(uint64_t startTimeNanos) const
     result += std::string("  \"objc-selector-hash-table-size\": ") + std::to_string(this->objcSelectorOptimizer.selectorHashTableTotalByteSize) + ",\n";
     result += std::string("  \"objc-class-hash-table-size\": ") + std::to_string(this->objcClassOptimizer.classHashTableTotalByteSize) + ",\n";
     result += std::string("  \"objc-protocol-hash-table-size\": ") + std::to_string(this->objcProtocolOptimizer.protocolHashTableTotalByteSize) + ",\n";
-    result += std::string("  \"objc-selectors-count\": ") + std::to_string(this->objcSelectorOptimizer.selectorsMap.size()) + ",\n";
+    result += std::string("  \"objc-selectors-count\": ") + std::to_string(this->objcSelectorOptimizer.selectorsArray.size()) + ",\n";
     result += std::string("  \"objc-classes-count\": ") + std::to_string(this->objcClassOptimizer.namesMap.size()) + ",\n";
     result += std::string("  \"objc-protocols-count\": ") + std::to_string(this->objcProtocolOptimizer.namesMap.size()) + ",\n";
 
@@ -339,7 +339,7 @@ void SharedCacheBuilder::addFile(const void* buffer, size_t bufferSize, std::str
         __block bool isDylib = false;
         const std::span<uint8_t> bufferSpan = { (uint8_t*)buffer, bufferSize };
         mach_o::Error parseErr = mach_o::forEachHeader(bufferSpan, path,
-                                                       ^(const mach_o::Header* mh, size_t sliceHeader, bool& stop) {
+                                                       ^(const mach_o::UnsafeHeader* mh, size_t sliceHeader, bool& stop) {
             if ( mh->isDylib() ) {
                 isDylib = true;
                 stop = true;
@@ -428,6 +428,7 @@ Error SharedCacheBuilder::estimateGlobalOptimizations()
 {
     this->estimateIMPCaches();
     this->findCanonicalObjCSelectors();
+    this->findCanonicalObjCTypes();
     this->findCanonicalObjCClassNames();
     this->findCanonicalObjCProtocolNames();
     this->findObjCClasses();
@@ -543,6 +544,7 @@ Error SharedCacheBuilder::preDylibEmitChunks()
     // Note this could be after dylib passes, but having the strings emitted now makes
     // it easier to debug the ObjC dylib passes
     this->emitObjCSelectorStrings();
+    this->emitObjCTypeStrings();
     this->emitObjCClassNameStrings();
     this->emitObjCProtocolNameStrings();
     this->emitObjCSwiftDemangledNameStrings();
@@ -591,7 +593,7 @@ Error SharedCacheBuilder::runDylibPasses()
             if ( diag.hasError() )
                 return Error("%s", diag.errorMessageCStr());
 
-            cacheDylib.convertObjCMethodListsToOffsets(diag, this->config, aggregateTimer, this->objcSelectorOptimizer.selectorStringsChunk);
+            cacheDylib.convertObjCMethodListsToOffsets(diag, this->config, aggregateTimer, this->objcSelectorOptimizer);
             if ( diag.hasError() )
                 return Error("%s", diag.errorMessageCStr());
 
@@ -791,7 +793,7 @@ void SharedCacheBuilder::categorizeInputs()
             if ( inputFile.mf == nullptr ) continue;
 
             // only process valid images
-            if ( ((Header*)inputFile.mf)->isDyldManaged() ) {
+            if ( ((UnsafeHeader*)inputFile.mf)->isDyldManaged() ) {
                 // don't try to validate kernel or firmware mach-o binaries
                 Image image(inputFile.mf, inputFile.size, Image::MappingKind::wholeSliceMapped);
                 if ( mach_o::Error err = image.validate() ) {
@@ -811,7 +813,7 @@ void SharedCacheBuilder::categorizeInputs()
                     free(output_string);
                 };
 
-                std::string_view installName = ((const Header*)inputFile.mf)->installName();
+                std::string_view installName = ((const UnsafeHeader*)inputFile.mf)->installName();
                 std::string_view dylibPath = inputFile.path;
                 if ( (installName != dylibPath) && ((this->options.platform == Platform::macOS) || startsWith(dylibPath, "/System/Cryptexes/OS/")) ) {
                     // We now typically require that install names and paths match.  However symlinks may allow us to bring in a path which
@@ -894,7 +896,7 @@ void SharedCacheBuilder::verifySelfContained()
         if ( inputFile.mf == nullptr ) {
             // Add the file if its path looks like it might be cache eligible. This is
             // better than getting no errors at all later
-            if ( inputFile.hasError() && Header::isSharedCacheEligiblePath(inputFile.path.data()) ) {
+            if ( inputFile.hasError() && UnsafeHeader::isSharedCacheEligiblePath(inputFile.path.data()) ) {
                 allDylibs.insert({ inputFile.path, &inputFile });
                 badDylibs.insert(inputFile.path);
             }
@@ -902,7 +904,7 @@ void SharedCacheBuilder::verifySelfContained()
         }
 
         if ( inputFile.mf->isDylib() )
-            allDylibs.insert({ ((const Header*)inputFile.mf)->installName(), &inputFile });
+            allDylibs.insert({ ((const UnsafeHeader*)inputFile.mf)->installName(), &inputFile });
     }
 
     __block std::unordered_set<std::string_view> potentialCacheDylibs;
@@ -1402,6 +1404,30 @@ static void forEachObjCMethodName(const CacheDylib& cacheDylib,
     });
 }
 
+static void forEachObjCMethodType(const CacheDylib& cacheDylib,
+                                  void (^callback)(const char* str))
+{
+    __block objc_visitor::Visitor objcVisitor = makeInputDylibObjCVisitor(cacheDylib);
+
+    auto visitMethodList = ^(const objc_visitor::MethodList& methodList) {
+        if ( methodList.numMethods() == 0 )
+            return;
+
+        uint32_t numMethods = methodList.numMethods();
+        for ( uint32_t i = 0; i != numMethods; ++i ) {
+            const objc_visitor::Method& method = methodList.getMethod(objcVisitor, i);
+            const char* typeString = method.getTypes(objcVisitor);
+            callback(typeString);
+        }
+    };
+
+    // classes/categories/protocols/swift generics
+    objcVisitor.forEachMethodList(^(objc_visitor::MethodList& objcMethodList,
+                                    std::optional<metadata_visitor::ResolvedValue> extendedMethodTypes) {
+        visitMethodList(objcMethodList);
+    });
+}
+
 struct FoundSymbol
 {
     const CacheDylib* foundInDylib = nullptr;
@@ -1830,13 +1856,13 @@ void SharedCacheBuilder::estimateIMPCaches()
     // We could try have an IMP cache selectors buffer and a regular selectors buffer, but that complicates
     // a bunch of code, such as choosing canonical selectors, as we'd have 2 places to look
     // We expect to run before the selectors pass, as the IMP cache selectors have to be placed first
-    assert(this->objcSelectorOptimizer.selectorsMap.empty());
+    assert(this->objcSelectorOptimizer.stringsMap.empty());
     assert(this->objcSelectorOptimizer.selectorsArray.empty());
 
     // First push the selectors in to the array in any order.  We'll sort by offset later
     this->objcIMPCachesOptimizer.builder->forEachSelector(^(std::string_view str, uint32_t bufferOffset) {
         this->objcSelectorOptimizer.selectorsArray.emplace_back(str, bufferOffset);
-        this->objcSelectorOptimizer.selectorsMap[str] = VMOffset((uint64_t)bufferOffset);
+        this->objcSelectorOptimizer.stringsMap[str] = VMOffset((uint64_t)bufferOffset);
     });
 
     std::sort(this->objcSelectorOptimizer.selectorsArray.begin(),
@@ -1898,7 +1924,7 @@ void SharedCacheBuilder::estimateIMPCaches()
     }
 
     if ( this->config.log.printStats ) {
-        stats.add("  objc: found %lld imp cache selectors\n", (uint64_t)this->objcSelectorOptimizer.selectorsMap.size());
+        stats.add("  objc: found %lld imp cache selectors\n", (uint64_t)this->objcSelectorOptimizer.selectorsArray.size());
         stats.add("  objc: using %lld bytes\n", this->objcSelectorOptimizer.selectorStringsTotalByteSize);
     }
 }
@@ -1981,7 +2007,7 @@ void SharedCacheBuilder::findCanonicalObjCSelectors()
 
     // Reserve space for 2m selectors, as we have 1.4m as of writing
     const uint32_t numSelectorsToReserve = 1 << 21;
-    this->objcSelectorOptimizer.selectorsMap.reserve(numSelectorsToReserve);
+    this->objcSelectorOptimizer.stringsMap.reserve(numSelectorsToReserve);
     this->objcSelectorOptimizer.selectorsArray.reserve(numSelectorsToReserve);
 
     // Process the magic selector first, so that we know its the base of all other strings
@@ -1993,10 +2019,10 @@ void SharedCacheBuilder::findCanonicalObjCSelectors()
         assert(firstString.first == magicSelector);
         assert(firstString.second == 0);
     } else {
-        assert(this->objcSelectorOptimizer.selectorsMap.empty());
+        assert(this->objcSelectorOptimizer.stringsMap.empty());
         assert(this->objcSelectorOptimizer.selectorsArray.empty());
         assert(this->objcSelectorOptimizer.selectorStringsTotalByteSize == 0);
-        this->objcSelectorOptimizer.selectorsMap.insert({ magicSelector, VMOffset((uint64_t)this->objcSelectorOptimizer.selectorStringsTotalByteSize) });
+        this->objcSelectorOptimizer.stringsMap.insert({ magicSelector, VMOffset((uint64_t)this->objcSelectorOptimizer.selectorStringsTotalByteSize) });
         this->objcSelectorOptimizer.selectorsArray.emplace_back(magicSelector, this->objcSelectorOptimizer.selectorStringsTotalByteSize);
         this->objcSelectorOptimizer.selectorStringsTotalByteSize += magicSelector.size() + 1;
     }
@@ -2004,7 +2030,7 @@ void SharedCacheBuilder::findCanonicalObjCSelectors()
     for ( uint32_t i = 0; i != cacheDylibs.size(); ++i ) {
         const std::vector<std::string_view>& strings = dylibSelectors[i];
         for ( const std::string_view& string : strings ) {
-            auto itAndInserted = this->objcSelectorOptimizer.selectorsMap.insert({ string, VMOffset((uint64_t)this->objcSelectorOptimizer.selectorStringsTotalByteSize) });
+            auto itAndInserted = this->objcSelectorOptimizer.stringsMap.insert({ string, VMOffset((uint64_t)this->objcSelectorOptimizer.selectorStringsTotalByteSize) });
             if ( itAndInserted.second ) {
                 // We inserted the string, so push the string in to the vector
                 this->objcSelectorOptimizer.selectorsArray.emplace_back(string, this->objcSelectorOptimizer.selectorStringsTotalByteSize);
@@ -2020,6 +2046,94 @@ void SharedCacheBuilder::findCanonicalObjCSelectors()
 
         stats.add("  objc: found %lld unique selectors\n", (uint64_t)this->objcSelectorOptimizer.selectorsArray.size());
         stats.add("  objc: from %lld input selectors\n", total);
+    }
+}
+
+// Walk all the dylibs and build a map of canonical types
+void SharedCacheBuilder::findCanonicalObjCTypes()
+{
+    if ( this->objcOptimizer.objcDylibs.empty() )
+        return;
+
+    // It is only efficient to do this optimization if we know we will later dedupe the types
+    // Otherwise we are just wasting VM space.
+    // For now key off the new relative types check as we know that is required for dedupe anyway
+    if ( !this->config.convertMethodListTypesToOffsets )
+        return;
+
+    Stats        stats(this->config);
+    Timer::Scope timedScope(this->config, "findCanonicalObjCTypes time");
+
+    BLOCK_ACCCESSIBLE_ARRAY(std::vector<std::string_view>, dylibTypes, cacheDylibs.size());
+    Error err = parallel::forEach(this->cacheDylibs, ^(size_t index, CacheDylib& cacheDylib) {
+        std::vector<std::string_view>& strings = dylibTypes[index];
+
+        __block std::unordered_set<const void*> seenStrings;
+        forEachObjCMethodType(cacheDylib, ^(const char* str) {
+            auto itAndInserted = seenStrings.insert(str);
+            if ( itAndInserted.second )
+                strings.push_back(str);
+        });
+
+        // sort strings as we used to walk the __objc_methtypes section in order, so by sorting we
+        // should get close to possible to the old order
+        std::sort(strings.begin(), strings.end(), [](const std::string_view& a, const std::string_view& b) {
+            // note pointer comparison as we want the string location in the binary not its contents
+            return a.data() < b.data();
+        });
+
+        return Error();
+    });
+
+    assert(!err.hasError());
+
+    // Merge the results in serial
+
+    // Reserve space for 500k strings
+    const uint32_t numStringsToReserve = 1 << 19;
+    this->objcSelectorOptimizer.typesArray.reserve(numStringsToReserve);
+
+    // Process the magic selector first, so that we know its the base of all other strings
+    // This is used later for relative method lists
+    // Note this will have been added by IMP caches or findCanonicalObjCSelectors()
+    constexpr std::string_view magicSelector = "\xf0\x9f\xa4\xaf";
+    assert(!this->objcSelectorOptimizer.selectorsArray.empty());
+    {
+        const objc::ObjCString& firstString = this->objcSelectorOptimizer.selectorsArray.front();
+        assert(firstString.first == magicSelector);
+        assert(firstString.second == 0);
+    }
+
+    // Types start after the selectors array
+    assert(this->objcSelectorOptimizer.typeStringsTotalByteSize == 0);
+    uint64_t nextOffset = this->objcSelectorOptimizer.selectorStringsTotalByteSize;
+
+    uint64_t dylibTypesSize = 0;
+    uint64_t cacheTypesSize = 0;
+    for ( uint32_t i = 0; i != cacheDylibs.size(); ++i ) {
+        const std::vector<std::string_view>& strings = dylibTypes[i];
+        for ( const std::string_view& string : strings ) {
+            dylibTypesSize += string.size() + 1;
+            auto itAndInserted = this->objcSelectorOptimizer.stringsMap.insert({ string, VMOffset(nextOffset) });
+            if ( itAndInserted.second ) {
+                // We inserted the string, so push the string in to the vector
+                this->objcSelectorOptimizer.typesArray.emplace_back(string, nextOffset);
+                nextOffset += string.size() + 1;
+                cacheTypesSize += string.size() + 1;
+            }
+        }
+    }
+
+    this->objcSelectorOptimizer.typeStringsTotalByteSize = nextOffset - this->objcSelectorOptimizer.selectorStringsTotalByteSize;
+
+    if ( this->config.log.printStats ) {
+        uint64_t total = 0;
+        for ( uint32_t i = 0; i != cacheDylibs.size(); ++i )
+            total += dylibTypes[i].size();
+
+        stats.add("  objc: deduplicated %lld type strings to %lld.  %lldMB -> %lldMB\n",
+                  total, (uint64_t)this->objcSelectorOptimizer.typesArray.size(),
+                  dylibTypesSize >> 20, cacheTypesSize >> 20);
     }
 }
 
@@ -2914,7 +3028,7 @@ void SharedCacheBuilder::estimateCacheLoadersSize()
         // Assumes that cdHash strings at runtime use lowercase a-f digits
         uint32_t codeSignFileOffset = 0;
         uint32_t codeSignFileSize   = 0;
-        if ( ((const Header*)inputFile->mf)->hasCodeSignature(codeSignFileOffset, codeSignFileSize) ) {
+        if ( ((const UnsafeHeader*)inputFile->mf)->hasCodeSignature(codeSignFileOffset, codeSignFileSize) ) {
             auto handler = ^(const uint8_t cdHash[20]) {
                 std::string cdHashStr = "/cdhash/";
                 cdHashStr.reserve(24);
@@ -3084,7 +3198,7 @@ void SharedCacheBuilder::addFinalChunksToSubCache(SubCache& subCache)
     subCache.addCodeSignatureChunk();
 }
 
-static std::optional<Header::SectionInfo> getStubsSection(const DylibSegmentChunk* dylibChunk)
+static std::optional<UnsafeHeader::SectionInfo> getStubsSection(const DylibSegmentChunk* dylibChunk)
 {
     if ( dylibChunk == nullptr )
         return std::nullopt;
@@ -3092,8 +3206,8 @@ static std::optional<Header::SectionInfo> getStubsSection(const DylibSegmentChun
         return std::nullopt;
 
     const MachOFile* mf = dylibChunk->inputFile->mf;
-    __block std::optional<Header::SectionInfo> stubsSection;
-    ((const Header*)mf)->forEachSection(^(const Header::SectionInfo &sectInfo, bool &stop) {
+    __block std::optional<UnsafeHeader::SectionInfo> stubsSection;
+    ((const UnsafeHeader*)mf)->forEachSection(^(const UnsafeHeader::SectionInfo &sectInfo, bool &stop) {
         if ( dylibChunk->segmentName != sectInfo.segmentName )
             return;
 
@@ -3134,7 +3248,7 @@ static void addStubsChunks(const std::unordered_map<const InputFile*, CacheDylib
         if ( textChunk == nullptr )
             continue;
 
-        std::optional<Header::SectionInfo> sectInfo = getStubsSection(textChunk);
+        std::optional<UnsafeHeader::SectionInfo> sectInfo = getStubsSection(textChunk);
         if ( !sectInfo )
             continue;
 
@@ -3164,7 +3278,7 @@ static void addStubsChunks(const std::unordered_map<const InputFile*, CacheDylib
 static void splitSubCachesWithStubs(const BuilderOptions& options,
                                     CacheVMSize stubsLimit,
                                     const std::unordered_map<const InputFile*, CacheDylib*>& fileToDylibMap,
-                                    std::list<SubCache>& subCaches)
+                                    std::list<SubCache>& subCaches, CacheKind cacheKind)
 {
     std::list<SubCache> newSubCaches;
     while ( !subCaches.empty() ) {
@@ -3186,40 +3300,43 @@ static void splitSubCachesWithStubs(const BuilderOptions& options,
             madeNewSubCache = false;
 
             CacheVMSize subCacheTextSize = CacheVMSize(0ULL);
-            for ( uint64_t i = 0, e = textRegion.chunks.size(); i != e; ++i ) {
-                const Chunk* chunk = textRegion.chunks[i];
-                CacheVMSize textSize = chunk->cacheVMSize;
-
-                // If we exceed the current limit, then the current subCache is complete and
-                // we need to start a new one
-                if ( (subCacheTextSize + textSize) > stubsLimit ) {
-                    // Create a new subCache
-                    newSubCaches.push_back(SubCache::makeSubCache(options));
-                    SubCache& newTextSubCache = newSubCaches.back();
-
-                    // Move all text from [0..i) to the new subCache
-                    Region& newTextRegion = newTextSubCache.regions[(uint32_t)Region::Kind::text];
-
-                    auto startIt = textRegion.chunks.begin();
-                    auto endIt = startIt + i;
-                    newTextRegion.chunks.insert(newTextRegion.chunks.end(), startIt, endIt);
-                    textRegion.chunks.erase(startIt, endIt);
-
-                    // Add dev/customer stubs subCache's
-                    newSubCaches.push_back(SubCache::makeStubsCache(options, true));
-                    auto &devStubsSubCache = newSubCaches.back();
-
-                    newSubCaches.push_back(SubCache::makeStubsCache(options, false));
-                    auto &customerStubsSubCache = newSubCaches.back();
-
-                    addStubsChunks(fileToDylibMap, devStubsSubCache, customerStubsSubCache,
-                                   newTextSubCache);
-
-                    madeNewSubCache = true;
-                    break;
+            // Only split on stubs if it is a universal cache
+            if ( cacheKind == CacheKind::universal ) {
+                for ( uint64_t i = 0, e = textRegion.chunks.size(); i != e; ++i ) {
+                    const Chunk* chunk = textRegion.chunks[i];
+                    CacheVMSize textSize = chunk->cacheVMSize;
+                    
+                    // If we exceed the current limit, then the current subCache is complete and
+                    // we need to start a new one
+                    if ( (subCacheTextSize + textSize) > stubsLimit ) {
+                        // Create a new subCache
+                        newSubCaches.push_back(SubCache::makeSubCache(options));
+                        SubCache& newTextSubCache = newSubCaches.back();
+                        
+                        // Move all text from [0..i) to the new subCache
+                        Region& newTextRegion = newTextSubCache.regions[(uint32_t)Region::Kind::text];
+                        
+                        auto startIt = textRegion.chunks.begin();
+                        auto endIt = startIt + i;
+                        newTextRegion.chunks.insert(newTextRegion.chunks.end(), startIt, endIt);
+                        textRegion.chunks.erase(startIt, endIt);
+                        
+                        // Add dev/customer stubs subCache's
+                        newSubCaches.push_back(SubCache::makeStubsCache(options, true));
+                        auto &devStubsSubCache = newSubCaches.back();
+                        
+                        newSubCaches.push_back(SubCache::makeStubsCache(options, false));
+                        auto &customerStubsSubCache = newSubCaches.back();
+                        
+                        addStubsChunks(fileToDylibMap, devStubsSubCache, customerStubsSubCache,
+                                       newTextSubCache);
+                        
+                        madeNewSubCache = true;
+                        break;
+                    }
+                    
+                    subCacheTextSize += textSize;
                 }
-
-                subCacheTextSize += textSize;
             }
         }
 
@@ -3234,15 +3351,18 @@ static void splitSubCachesWithStubs(const BuilderOptions& options,
             Region& newTextRegion = newTextSubCache.regions[(uint32_t)Region::Kind::text];
             newTextRegion.chunks = std::move(textRegion.chunks);
 
-            // Add dev/customer stubs subCache's
-            newSubCaches.push_back(SubCache::makeStubsCache(options, true));
-            auto &devStubsSubCache = newSubCaches.back();
+            // Only have to add stubs back for universal caches
+            if ( cacheKind == CacheKind::universal ) {
+                // Add dev/customer stubs subCache's
+                newSubCaches.push_back(SubCache::makeStubsCache(options, true));
+                auto &devStubsSubCache = newSubCaches.back();
 
-            newSubCaches.push_back(SubCache::makeStubsCache(options, false));
-            auto &customerStubsSubCache = newSubCaches.back();
+                newSubCaches.push_back(SubCache::makeStubsCache(options, false));
+                auto &customerStubsSubCache = newSubCaches.back();
 
-            addStubsChunks(fileToDylibMap, devStubsSubCache, customerStubsSubCache,
-                           newTextSubCache);
+                addStubsChunks(fileToDylibMap, devStubsSubCache, customerStubsSubCache,
+                               newTextSubCache);
+            }
         }
 
         // Also split the current file so that DATA/LINKEDIT are in their own files
@@ -3405,13 +3525,24 @@ void SharedCacheBuilder::makeLargeLayoutSubCaches(SubCache* firstSubCache,
 
                 // The One Cache stubs will also be included in this limit so account for them too
                 // See addStubsChunks()
-                if ( std::optional<Header::SectionInfo> sectInfo = getStubsSection(&segmentInfo) )
+                if ( std::optional<UnsafeHeader::SectionInfo> sectInfo = getStubsSection(&segmentInfo) )
                     textDataSize += CacheVMSize(sectInfo->size);
             }
 
+            bool makeNewSubCache = (subCacheTextDataSize + textDataSize) > subCacheTextDataLimit;
+
+            // For tests, make it possible to force some dylibs to be in their own subcache file
+#if BUILDING_CACHE_BUILDER_UNIT_TESTS
+            if ( cacheDylib.installName.find("libsharedcache-loner") != std::string_view::npos ) {
+                if ( !currentSubCache->regions.front().chunks.empty() )
+                    makeNewSubCache = true;
+            }
+#endif // #if BUILDING_CACHE_BUILDER_UNIT_TESTS
+
+
             // If we exceed the current limit, then the current subCache is complete and we need
             // to start a new one
-            if ( (subCacheTextDataSize + textDataSize) > subCacheTextDataLimit ) {
+            if ( makeNewSubCache ) {
                 // Create a new subCache
                 otherCaches.push_back(SubCache::makeSubCache(this->options));
                 currentSubCache = &otherCaches.back();
@@ -3456,7 +3587,7 @@ void SharedCacheBuilder::setSubCacheNames()
         size_t subCacheIndex = 1;
         for ( SubCache* subCache : mainDevelopmentCache->subCaches ) {
             subCache->setSuffix(this->options.platform, this->options.forceDevelopmentSubCacheSuffix,
-                                subCacheIndex);
+                                subCacheIndex, this->options.arch);
             ++subCacheIndex;
         }
     }
@@ -3465,7 +3596,7 @@ void SharedCacheBuilder::setSubCacheNames()
         size_t subCacheIndex = 1;
         for ( SubCache* subCache : mainCustomerCache->subCaches ) {
             subCache->setSuffix(this->options.platform, this->options.forceDevelopmentSubCacheSuffix,
-                                subCacheIndex);
+                                subCacheIndex, this->options.arch);
             ++subCacheIndex;
         }
     }
@@ -3476,13 +3607,29 @@ void SharedCacheBuilder::computeLargeSubCache()
     // Keeps track of any subCaches we add after the main cache
     std::list<SubCache> allSubCaches;
 
+    std::unordered_map<const InputFile*, CacheDylib*> fileToDylibMap;
+    
     // Split in to multple files.  Where each file gets its own TEXT/DATA*/LINKEDIT
     switch ( this->options.kind ) {
         case CacheKind::development: {
             // The first file in a development configuration is the main cache, and also some
             // amount of text and maybe data
             allSubCaches.push_back(SubCache::makeMainCache(this->options, true));
-            makeLargeLayoutSubCaches(&allSubCaches.back(), allSubCaches);
+            
+            // If the platform is not exclaves or driverkit we split the cache, if it is use
+            // the old cache method
+            if ( this->config.layout.supportsSplitCache ) {
+                allSubCaches.push_back(SubCache::makeSubCache(this->options));
+                makeLargeLayoutSubCaches(&allSubCaches.back(), allSubCaches);
+                
+                // We don't split stubs for development caches, so devLimit will go unused
+                // within the function
+                CacheVMSize devLimit = CacheVMSize(0ULL);
+                splitSubCachesWithStubs(this->options, devLimit, fileToDylibMap, allSubCaches, this->options.kind);
+            }
+            else {
+                makeLargeLayoutSubCaches(&allSubCaches.back(), allSubCaches);
+            }
             break;
         }
         case CacheKind::universal: {
@@ -3498,11 +3645,11 @@ void SharedCacheBuilder::computeLargeSubCache()
 
             // Make a map of input file -> cache dylib, as the text chunks we walk
             // only know about the input file
-            std::unordered_map<const InputFile*, CacheDylib*> fileToDylibMap;
+            
             for ( CacheDylib& cacheDylib : cacheDylibs )
                 fileToDylibMap[cacheDylib.inputFile] = &cacheDylib;
 
-            splitSubCachesWithStubs(this->options, stubsLimit, fileToDylibMap, allSubCaches);
+            splitSubCachesWithStubs(this->options, stubsLimit, fileToDylibMap, allSubCaches, this->options.kind);
             break;
         }
     }
@@ -4014,9 +4161,12 @@ Error SharedCacheBuilder::calculateSubCacheSymbolStrings()
         // Update the indirect symbol table for any dylib which had moved symbols
         for ( uint32_t i = 0; i != this->cacheDylibs.size(); ++i ) {
             CacheDylib& cacheDylib = this->cacheDylibs[i];
-            const OldToNewIndicesMap& oldToNewIndicesMap = oldToNewIndicesMaps[i];
-            if ( oldToNewIndicesMap.empty() )
+            // Note: calculateSubCacheSymbolStrings() is called multiple times in large caches,
+            // and we only want to rewrite the indirect symbol table once
+            if ( !cacheDylib.indirectSymbolTable.empty() )
                 continue;
+            const OldToNewIndicesMap& oldToNewIndicesMap = oldToNewIndicesMaps[i];
+            // Note: oldToNewIndicesMap might be empty, but we still need to process indirects (rdar://153799281)
 
             // Walk the table on the dylib, and update any entries
             __block Diagnostics diag;
@@ -4098,7 +4248,7 @@ static CString getActualSymbolImplDylib(CString symbolName, CString boundDylibNa
         }
         else {
             // check if symbol is from re-exported dylib
-            const Header* targetHdr = (Header*)targetDylib->inputMF;
+            const UnsafeHeader* targetHdr = (UnsafeHeader*)targetDylib->inputMF;
             targetHdr->forEachLinkedDylib(^(const char* loadPath, LinkedDylibAttributes kind, Version32 compatVersion, Version32 curVersion, bool synthesizedLink, bool &stop) {
                 if ( kind.reExport ) {
                     betterDylib = getActualSymbolImplDylib(symbolName, loadPath, installNameToDylibMap, symbolImplIsFunctionVariant, functionVariantIndex);
@@ -4170,9 +4320,9 @@ static void parseGOTs(const CacheDylib* dylib, const DylibSegmentChunk* chunk,
         return;
 
     // Dylib segment is eligible.  Walk the GOTs
-    __block std::optional<std::pair<Header::SegmentInfo, Header::SectionInfo>> gotSectionInfo;
+    __block std::optional<std::pair<UnsafeHeader::SegmentInfo, UnsafeHeader::SectionInfo>> gotSectionInfo;
     __block uint16_t chainedFixupFormat = 0;
-    dylib->inputHdr->forEachSection(^(const Header::SegmentInfo& segInfo, const Header::SectionInfo& sectInfo, bool& stop) {
+    dylib->inputHdr->forEachSection(^(const UnsafeHeader::SegmentInfo& segInfo, const UnsafeHeader::SectionInfo& sectInfo, bool& stop) {
         if ( sectInfo.segmentName != segmentName )
             return;
         if ( sectInfo.sectionName != sectionName)
@@ -4330,8 +4480,8 @@ static void parseGOTs(const CacheDylib* dylib, const DylibSegmentChunk* chunk,
 // This pass takes all the GOTs and deduplicates them for the given SubCache DATA/AUTH region
 Error SharedCacheBuilder::calculateUniqueGOTs()
 {
-    // Skip this optimiation on simulator until we've qualified it there
-    if ( this->options.isSimulator() )
+    // Skip this optimiation on simulator until we've qualified it for on-mac sim cache builds
+    if ( this->options.isSimulator() && !this->options.dylibsRemovedFromDisk )
         return Error();
 
     Stats        stats(this->config);
@@ -4817,6 +4967,16 @@ Error SharedCacheBuilder::computeSubCacheContiguousVMLayout()
                 if ( (prevRegion != nullptr) && prevRegion->needsRegionPadding(region) )
                     vmAddress += this->config.layout.contiguous->regionPadding;
 
+#if BUILDING_CACHE_BUILDER_UNIT_TESTS
+                // To make it easier ro test very large subcaches, we allow them to override
+                // alignment to force the region to be padded
+                for ( Chunk* section : region.chunks ) {
+                    if ( section->alignment() == 1_GB ) {
+                        vmAddress = alignTo(vmAddress, section->alignment());
+                    }
+                }
+#endif // BUILDING_CACHE_BUILDER_UNIT_TESTS
+
                 region.subCacheVMAddress = vmAddress;
                 vmAddress += region.subCacheVMSize;
 
@@ -4862,6 +5022,16 @@ Error SharedCacheBuilder::computeSubCacheContiguousVMLayout()
                 // Add padding before this region (normally) if we change permissions
                 if ( (prevRegion != nullptr) && prevRegion->needsRegionPadding(region) )
                     vmAddress += this->config.layout.contiguous->regionPadding;
+
+#if BUILDING_CACHE_BUILDER_UNIT_TESTS
+                // To make it easier ro test very large subcaches, we allow them to override
+                // alignment to force the region to be padded
+                for ( Chunk* section : region.chunks ) {
+                    if ( section->alignment() == 1_GB ) {
+                        vmAddress = alignTo(vmAddress, section->alignment());
+                    }
+                }
+#endif // BUILDING_CACHE_BUILDER_UNIT_TESTS
 
                 if ( subCache->isSubCache() || subCache->isSymbolsCache()  ) {
                     assert(region.subCacheVMAddress == vmAddress);
@@ -5227,7 +5397,7 @@ Error SharedCacheBuilder::allocateSubCacheBuffers()
         assert(!cacheDylib.segments.empty());
         assert(cacheDylib.segments[0].kind == cache_builder::DylibSegmentChunk::Kind::dylibText);
         cacheDylib.cacheMF          = (MachOFile*)cacheDylib.segments[0].subCacheBuffer;
-        cacheDylib.cacheHdr         = (const Header*)cacheDylib.segments[0].subCacheBuffer;
+        cacheDylib.cacheHdr         = (const UnsafeHeader*)cacheDylib.segments[0].subCacheBuffer;
         cacheDylib.cacheLoadAddress = cacheDylib.segments[0].cacheVMAddress;
     }
 
@@ -5616,10 +5786,10 @@ Error SharedCacheBuilder::emitPatchTable()
     Stats        stats(this->config);
     Timer::Scope timedScope(this->config, "emitPatchTable time");
 
-    // Skip this optimization on simulator until we've qualified it there
+    // Skip this optimization for on-mac simulator cache builds until we've qualified it there
     __block PatchTableBuilder::PatchableClassesSet      patchableObjCClasses;
     __block PatchTableBuilder::PatchableSingletonsSet   patchableCFObj2;
-    if ( !this->options.isSimulator() ) {
+    if ( !this->options.isSimulator() || this->options.dylibsRemovedFromDisk ) {
         for ( const CacheDylib& cacheDylib : this->cacheDylibs ) {
             __block objc_visitor::Visitor objcVisitor = makeInputDylibObjCVisitor(cacheDylib);
             objcVisitor.forEachClassAndMetaClass(^(const objc_visitor::Class& objcClass, bool& stopClass) {
@@ -5912,7 +6082,7 @@ LayoutBuilder::LayoutBuilder(std::span<CacheDylib> cacheDylibs, std::span<InputF
             }
 
             // The cache segments don't have the permissions.  Get that from the load commands
-            cacheDylib.cacheHdr->forEachSegment(^(const Header::SegmentInfo& info, bool& stop) {
+            cacheDylib.cacheHdr->forEachSegment(^(const UnsafeHeader::SegmentInfo& info, bool& stop) {
                 segments[info.segmentIndex].protections = info.initProt;
             });
             this->dylibSegmentLayout.push_back(std::move(segments));
@@ -5970,7 +6140,7 @@ LayoutBuilder::LayoutBuilder(std::span<CacheDylib> cacheDylibs, std::span<InputF
         this->executableSegmentLayout.reserve(executableFiles.size());
         for ( const InputFile* executableFile : executableFiles ) {
             __block std::vector<mach_o::SegmentLayout> segments;
-            ((const Header*)executableFile->mf)->forEachSegment(^(const Header::SegmentInfo& info, bool& stop) {
+            ((const UnsafeHeader*)executableFile->mf)->forEachSegment(^(const UnsafeHeader::SegmentInfo& info, bool& stop) {
                 // Note file layout here, not VM layout
                 uint8_t*              segmentBuffer = (uint8_t*)executableFile->mf + info.fileOffset;
                 mach_o::SegmentLayout segment;
@@ -6225,7 +6395,7 @@ static Error findProtocolClass(const BuilderConfig& config,
             __block InputDylibVMAddress inputOptPtrsVMAddress;
             __block uint64_t            sectionSize = 0;
             __block bool                found       = false;
-            cacheDylib->inputHdr->forEachSection(^(const Header::SectionInfo& sectInfo, bool& stop) {
+            cacheDylib->inputHdr->forEachSection(^(const UnsafeHeader::SectionInfo& sectInfo, bool& stop) {
                 if ( !sectInfo.segmentName.starts_with("__DATA") && !sectInfo.segmentName.starts_with("__AUTH") )
                     return;
                 if ( sectInfo.sectionName != "__objc_opt_ptrs" )
@@ -6344,7 +6514,7 @@ Error SharedCacheBuilder::emitExecutablePrebuiltLoaders()
 
         // Assume last segment file size is the overall file size
         __block uint32_t fileSize = 0;
-        ((const Header*)inputFile->mf)->forEachSegment(^(const Header::SegmentInfo& info, bool& stop) {
+        ((const UnsafeHeader*)inputFile->mf)->forEachSegment(^(const UnsafeHeader::SegmentInfo& info, bool& stop) {
             fileSize = std::max(fileSize, info.fileOffset + info.fileSize);
         });
         otherMapping[inputFile->path] = { inputFile->mf, fileSize };
@@ -6685,6 +6855,26 @@ void SharedCacheBuilder::emitObjCSelectorStrings()
     }
 }
 
+void SharedCacheBuilder::emitObjCTypeStrings()
+{
+    if ( this->objcOptimizer.objcDylibs.empty() )
+        return;
+
+    Timer::Scope timedScope(this->config, "emitObjCTypeStrings time");
+
+    // Find the subCache with the strings
+    for ( SubCache& subCache : this->subCaches ) {
+        if ( !subCache.objcSelectorStrings )
+            continue;
+
+        uint8_t* const pos = subCache.objcSelectorStrings->subCacheBuffer;
+        for ( const objc::ObjCString& stringAndOffset : this->objcSelectorOptimizer.typesArray ) {
+            const std::string_view& str = stringAndOffset.first;
+            memcpy(pos + stringAndOffset.second, str.data(), str.size());
+        }
+    }
+}
+
 void SharedCacheBuilder::emitObjCClassNameStrings()
 {
     if ( this->objcOptimizer.objcDylibs.empty() )
@@ -6988,7 +7178,7 @@ void SharedCacheBuilder::emitObjCOptsHeader()
 
     assert(headerChunk->subCacheFileSize.rawValue() == sizeof(ObjCOptimizationHeader));
     ObjCOptimizationHeader* header                  = (ObjCOptimizationHeader*)headerChunk->subCacheBuffer;
-    header->version                                 = 1;
+    header->version                                 = 2;
     header->flags                                   = headerFlags;
     header->headerInfoROCacheOffset                 = 0;
     header->headerInfoRWCacheOffset                 = 0;
@@ -6996,6 +7186,8 @@ void SharedCacheBuilder::emitObjCOptsHeader()
     header->classHashTableCacheOffset               = 0;
     header->protocolHashTableCacheOffset            = 0;
     header->relativeMethodSelectorBaseAddressOffset = 0;
+    header->relativeMethodSelectorBufferSize        = 0;
+    header->relativeMethodTypesBufferSize           = 0;
 
     // TODO: Do we need to check if these sections have content?
     header->headerInfoROCacheOffset                 = (this->objcOptimizer.headerInfoReadOnlyChunk->cacheVMAddress - cacheBaseAddress).rawValue();
@@ -7004,6 +7196,8 @@ void SharedCacheBuilder::emitObjCOptsHeader()
     header->classHashTableCacheOffset               = (this->objcClassOptimizer.classHashTableChunk->cacheVMAddress - cacheBaseAddress).rawValue();
     header->protocolHashTableCacheOffset            = (this->objcProtocolOptimizer.protocolHashTableChunk->cacheVMAddress - cacheBaseAddress).rawValue();
     header->relativeMethodSelectorBaseAddressOffset = (this->objcSelectorOptimizer.selectorStringsChunk->cacheVMAddress - cacheBaseAddress).rawValue();
+    header->relativeMethodSelectorBufferSize        = this->objcSelectorOptimizer.selectorStringsTotalByteSize;
+    header->relativeMethodTypesBufferSize           = this->objcSelectorOptimizer.typeStringsTotalByteSize;
 
     // Also fill in the fields in the objc section.
     // FIXME: Remove this once libobjc and lldb can use SPI or the above shared cache struct
@@ -7011,7 +7205,7 @@ void SharedCacheBuilder::emitObjCOptsHeader()
         if ( cacheDylib.installName != "/usr/lib/libobjc.A.dylib" )
             continue;
 
-        cacheDylib.cacheHdr->forEachSection(^(const Header::SegmentInfo &segInfo, const Header::SectionInfo &sectInfo, bool &stop) {
+        cacheDylib.cacheHdr->forEachSection(^(const UnsafeHeader::SegmentInfo &segInfo, const UnsafeHeader::SectionInfo &sectInfo, bool &stop) {
             if ( sectInfo.segmentName != "__TEXT" )
                 return;
             if ( sectInfo.sectionName != "__objc_opt_ro" )
@@ -7079,6 +7273,15 @@ void SharedCacheBuilder::optimizeTLVs()
 {
     // driverkit does not support thread-locals, all other platforms do
     if ( options.platform == Platform::driverKit )
+        return;
+
+    // The way TLV optimization works in the dyld cache is that the cache builder looks into
+    // libsystem_pthread.dylib and finds the values in the globals variables __pthread_tsd_shared_cache_*
+    // and uses that range for static pthread keys.
+    // But when simulator caches are built in B&I, we use a stub for libsystem_pthread.dylib which is
+    // patched into the cache at launch of each sim process.  There is no way to know in B&I what the
+    // value static key range will be (may vary depending on host mac simulator is run on).
+    if ( options.dylibsRemovedFromDisk && options.platform.isSimulator() )
         return;
 
     Stats        stats(this->config);
@@ -7193,7 +7396,7 @@ void SharedCacheBuilder::optimizeTLVs()
         __block bool        initialContentNonZero = false;
         __block uint64_t    initialContentAddr    = 0;
         __block size_t      initialContentSize    = 0;
-        cacheDylib.cacheHdr->forEachSection(^(const Header::SectionInfo& sectInfo, bool& stop) {
+        cacheDylib.cacheHdr->forEachSection(^(const UnsafeHeader::SectionInfo& sectInfo, bool& stop) {
             switch ( sectInfo.flags & SECTION_TYPE ) {
                 case S_THREAD_LOCAL_REGULAR:
                     initialContentNonZero = true;
@@ -7212,7 +7415,7 @@ void SharedCacheBuilder::optimizeTLVs()
             }
         });
 
-        cacheDylib.cacheHdr->forEachSection(^(const Header::SegmentInfo &segInfo, const Header::SectionInfo& sectInfo, bool& stop) {
+        cacheDylib.cacheHdr->forEachSection(^(const UnsafeHeader::SegmentInfo &segInfo, const UnsafeHeader::SectionInfo& sectInfo, bool& stop) {
             if ( (sectInfo.flags & SECTION_TYPE) != S_THREAD_LOCAL_VARIABLES )
                 return;
 
@@ -8391,49 +8594,11 @@ uint64_t SharedCacheBuilder::getMaxSlide() const
         return maxSlide.rawValue();
     }
 
-    // We must be a largeContiguous cache. Others were dealt with above in the x86_64 and/or sim cases
+    // We must be a contiguous cache. Others were dealt with above in the x86_64 and/or sim cases
     assert(this->config.layout.contiguous.has_value());
+    assert(this->config.layout.cacheFixedSlide.has_value());
 
-    // Some caches have a fixed max slide
-    if ( this->config.layout.cacheFixedSlide.has_value() ) {
-        return this->config.layout.cacheFixedSlide.value();
-    }
-
-    // Start off making sure we can't slide past the end of the cache
-    CacheVMAddress maxVMAddress(0ULL);
-    for ( const Region& region : this->subCaches.back().regions ) {
-        if ( !region.needsSharedCacheReserveAddressSpace() )
-            continue;
-
-        CacheVMAddress endOfRegion = region.subCacheVMAddress + region.subCacheVMSize;
-        maxVMAddress = std::max(maxVMAddress, endOfRegion);
-    }
-
-    CacheVMAddress endOfSharedRegion = this->config.layout.cacheBaseAddress + this->config.layout.cacheSize;
-    maxSlide = CacheVMSize((endOfSharedRegion - maxVMAddress).rawValue());
-
-    // <rdar://problem/49852839> branch predictor on arm64 currently only looks at low 32-bits,
-    // so try not slide cache more than 2GB
-    CacheVMAddress endOfText(0ULL);
-    for ( const SubCache& subCache : this->subCaches ) {
-        for ( const Region& region : subCache.regions ) {
-            if ( region.kind != Region::Kind::text )
-                continue;
-
-            endOfText = region.subCacheVMAddress + region.subCacheVMSize;
-        }
-    }
-
-    const uint64_t twoGB = 0x80000000ULL;
-    uint64_t sizeUpToTextEnd = (endOfText - this->config.layout.cacheBaseAddress).rawValue();
-    if ( sizeUpToTextEnd <= twoGB )
-        maxSlide = CacheVMSize(twoGB - sizeUpToTextEnd);
-
-    if ( this->config.layout.cacheMaxSlide.has_value() ) {
-        maxSlide = std::min(maxSlide, CacheVMSize(this->config.layout.cacheMaxSlide.value()));
-    }
-
-    return maxSlide.rawValue();
+    return this->config.layout.cacheFixedSlide.value();
 }
 
 void SharedCacheBuilder::addObjcSegments()
@@ -8523,7 +8688,7 @@ void SharedCacheBuilder::addCacheAtlasInfo(PropertyList::Dictionary *cacheAtlas,
 
     if (!uuid_is_null(cacheHeader->symbolFileUUID)) {
         cacheAtlas->addObjectForKey<String>(kDyldAtlasSharedCacheSymbolFileName, options.mainCacheFileName + ".symbols");
-        cacheAtlas->addObjectForKey<PropertyList::UUID>(kDyldAtlasSharedCacheSymbolFileName, cacheHeader->symbolFileUUID);
+        cacheAtlas->addObjectForKey<PropertyList::UUID>(kDyldAtlasSharedCacheSymbolFileUUIDKey, cacheHeader->symbolFileUUID);
     }
 
     auto& files = cacheAtlas->addObjectForKey<Array>("dscs");
@@ -8797,8 +8962,6 @@ void SharedCacheBuilder::getResults(std::vector<CacheBuffer>& results, std::vect
         buffer.bufferSize = subCache.bufferSize;
 
         buffer.cdHash = cdHashToString(subCache.cdHash);
-        if ( this->config.codeSign.mode == CodeSign::Mode::agile )
-            buffer.agilecdHash = cdHashToString(subCache.agilecdHash);
         buffer.uuid   = subCache.uuidString;
 
         buffer.cacheFileSuffix = subCache.fileSuffix;
@@ -8902,7 +9065,7 @@ std::string SharedCacheBuilder::generateJSONMap(std::string_view disposition,
         }
 
         __block json::Node segmentsNode;
-        cacheDylib.cacheHdr->forEachSegment(^(const Header::SegmentInfo &info, bool &stop) {
+        cacheDylib.cacheHdr->forEachSegment(^(const UnsafeHeader::SegmentInfo &info, bool &stop) {
             json::Node segmentNode;
             segmentNode.map["name"].value = info.segmentName;
             segmentNode.map["start-vmaddr"].value = json::hex(info.vmaddr);
@@ -9017,8 +9180,42 @@ void SharedCacheBuilder::debug(const char* installName) const
 // This name is used only to create a placeholder input file and determine the library order.
 const std::string_view swiftPrespecializedDylibInstallName = "/usr/lib/libswiftPrespecialized.dylib";
 
+template<typename T>
+static void SetDlsymFn(T& fnPtr, Error& err, void* handle, const char* name)
+{
+     fnPtr = (T)dlsym(handle, name);
+     if ( !fnPtr )
+         err = Error("dlsym(%s): %s", name, dlerror());
+}
+
+struct SwiftGenericMetadataBuilderVtable
+{
+    decltype(&swift_externalMetadataBuilder_create)          create;
+    decltype(&swift_externalMetadataBuilder_addDylib)        addDylib;
+    decltype(&swift_externalMetadataBuilder_readNamesJSON)   readNamesJSON;
+    decltype(&swift_externalMetadataBuilder_buildMetadata)   buildMetadata;
+    decltype(&swift_externalMetadataBuilder_getMetadataJSON) getMetadataJSON;
+    decltype(&swift_externalMetadataBuilder_destroy)         destroy;
+};
+
+static Error makeSwiftGenericMetadataBuilderVtable(SwiftGenericMetadataBuilderVtable& vtable, void* handle)
+{
+    if ( !handle )
+        return Error("External Swift metadata dylib not loaded");
+
+    Error err;
+    SetDlsymFn(vtable.create,          err, handle, "swift_externalMetadataBuilder_create");
+    SetDlsymFn(vtable.addDylib,        err, handle, "swift_externalMetadataBuilder_addDylib");
+    SetDlsymFn(vtable.readNamesJSON,   err, handle, "swift_externalMetadataBuilder_readNamesJSON");
+    SetDlsymFn(vtable.buildMetadata,   err, handle, "swift_externalMetadataBuilder_buildMetadata");
+    SetDlsymFn(vtable.getMetadataJSON, err, handle, "swift_externalMetadataBuilder_getMetadataJSON");
+    SetDlsymFn(vtable.destroy,         err, handle, "swift_externalMetadataBuilder_destroy");
+    return err;
+}
+
 bool SharedCacheBuilder::shouldBuildSwiftPrespecializedDylib()
 {
+#if !BUILDING_CACHE_BUILDER_UNIT_TESTS && !BUILDING_SIM_CACHE_BUILDER
     if ( options.platform == Platform::driverKit )
         return false;
 
@@ -9029,13 +9226,29 @@ bool SharedCacheBuilder::shouldBuildSwiftPrespecializedDylib()
     if ( options.swiftGenericMetadataFile.empty() )
         return false;
 
-    // check if the metadata builder is available
-#if !BUILDING_CACHE_BUILDER_UNIT_TESTS && !BUILDING_SIM_CACHE_BUILDER
-    if ( swift_externalMetadataBuilder_create == nullptr )
-        return false;
-#endif // !BUILDING_CACHE_BUILDER_UNIT_TESTS
+    if ( swiftMetadataBuilderDlHandle == nullptr ) {
+        if ( !options.swiftGenericMetadataBuilderPath.empty() )
+            swiftMetadataBuilderDlHandle = dlopen(options.swiftGenericMetadataBuilderPath.c_str(), RTLD_NOW);
 
-    return true;
+        if ( swiftMetadataBuilderDlHandle == nullptr ) {
+            static const char* builderPaths[] = {
+                "libswiftGenericMetadataBuilder.dylib",
+                "../lib/swift/libswiftGenericMetadataBuilder.dylib",
+            };
+
+            for ( const char* path : builderPaths ) {
+                swiftMetadataBuilderDlHandle = dlopen(path, RTLD_NOW);
+                if ( swiftMetadataBuilderDlHandle != nullptr )
+                    break;
+            }
+        }
+    }
+
+    // check if the metadata builder is available
+    return swiftMetadataBuilderDlHandle != nullptr;
+#else
+    return false;
+#endif // !BUILDING_CACHE_BUILDER_UNIT_TESTS && !BUILDING_SIM_CACHE_BUILDER
 }
 
 Error SharedCacheBuilder::buildSwiftPrespecializedDylibJSON()
@@ -9043,7 +9256,11 @@ Error SharedCacheBuilder::buildSwiftPrespecializedDylibJSON()
 #if !BUILDING_CACHE_BUILDER_UNIT_TESTS && !BUILDING_SIM_CACHE_BUILDER
     Timer::Scope timedScope(this->config, "buildSwiftPrespecializedDylibJSON time");
 
-    SwiftExternalMetadataBuilder* builder = swift_externalMetadataBuilder_create(options.platform.value(), options.arch.name());
+    SwiftGenericMetadataBuilderVtable vtable;
+    if ( Error err = makeSwiftGenericMetadataBuilderVtable(vtable, swiftMetadataBuilderDlHandle) )
+        return err;
+
+    SwiftExternalMetadataBuilder* builder = vtable.create(options.platform.value(), options.arch.name());
     if ( !builder )
         return Error("swift_externalMetadataBuilder_create failed");
 
@@ -9053,18 +9270,18 @@ Error SharedCacheBuilder::buildSwiftPrespecializedDylibJSON()
         // TODO: rdar://132262275 (dyld shared cache builder should tell Swift Metadata builder also about dyld)
         if ( dylib.inputHdr->isDylinker() ) continue;
 
-        if ( const char* err = swift_externalMetadataBuilder_addDylib(builder, dylib.inputHdr->installName(),
+        if ( const char* err = vtable.addDylib(builder, dylib.inputHdr->installName(),
                 (const struct mach_header*)dylib.inputHdr, dylib.inputFile->size) )
             return Error("swift_externalMetadataBuilder_addDylib failed: %s", err);
     }
 
-    if ( const char* err = swift_externalMetadataBuilder_readNamesJSON(builder, options.swiftGenericMetadataFile.c_str()) )
+    if ( const char* err = vtable.readNamesJSON(builder, options.swiftGenericMetadataFile.c_str()) )
         return Error("swift_externalMetadataBuilder_readNamesJSON failed: %s", err);
 
-    if ( const char* err = swift_externalMetadataBuilder_buildMetadata(builder) )
+    if ( const char* err = vtable.buildMetadata(builder) )
         return Error("swift_externalMetadataBuilder_buildMetadata failed: %s", err);
 
-    if ( const char* json = swift_externalMetadataBuilder_getMetadataJSON(builder) )
+    if ( const char* json = vtable.getMetadataJSON(builder) )
         swiftPrespecializedDylibJSON = json;
     else
         return Error("swift_externalMetadataBuilder_getMetadataJSON returned an empty JSON");
@@ -9083,7 +9300,7 @@ Error SharedCacheBuilder::buildSwiftPrespecializedDylibJSON()
             if ( !endsWith(inputFile.path, "dyld") )
                 continue;
 
-            ((Header*)inputFile.mf)->platformAndVersions().unzip(^(mach_o::PlatformAndVersions pvs) {
+            ((UnsafeHeader*)inputFile.mf)->platformAndVersions().unzip(^(mach_o::PlatformAndVersions pvs) {
                 if ( pvs.platform == options.platform )
                     newMinOS = pvs.minOS;
             });
@@ -9101,7 +9318,7 @@ Error SharedCacheBuilder::buildSwiftPrespecializedDylibJSON()
         }
     }
 
-    swift_externalMetadataBuilder_destroy(builder);
+    vtable.destroy(builder);
 
     if ( options.debug ) {
         std::string path;
@@ -9116,7 +9333,7 @@ Error SharedCacheBuilder::buildSwiftPrespecializedDylibJSON()
             write(outFileFd, swiftPrespecializedDylibJSON.data(), swiftPrespecializedDylibJSON.size());
         }
     }
-#endif // !BUILDING_CACHE_BUILDER_UNIT_TESTS
+#endif // !BUILDING_CACHE_BUILDER_UNIT_TESTS && !BUILDING_SIM_CACHE_BUILDER
 
     return Error::none();
 }
@@ -9138,6 +9355,7 @@ bool SharedCacheBuilder::reserveSwiftPrespecializedInputFile()
 
 Error SharedCacheBuilder::createSwiftPrespecializedDylib()
 {
+#if !BUILDING_CACHE_BUILDER_UNIT_TESTS && !BUILDING_SIM_CACHE_BUILDER
     if ( !shouldBuildSwiftPrespecializedDylib() )
         return Error::none();
 
@@ -9228,4 +9446,7 @@ Error SharedCacheBuilder::createSwiftPrespecializedDylib()
         err = Error("Swift prespecialized dylib must use chained fixups");
 
     return std::move(err);
+#else
+    return Error::none();
+#endif // !BUILDING_CACHE_BUILDER_UNIT_TESTS && !BUILDING_SIM_CACHE_BUILDER
 }

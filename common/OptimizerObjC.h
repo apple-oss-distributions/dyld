@@ -31,6 +31,10 @@
 #include "MachOAnalyzer.h"
 #include "PerfectHash.h"
 
+#if BUILDING_CACHE_BUILDER || BUILDING_UNIT_TESTS || BUILDING_CACHE_BUILDER_UNIT_TESTS
+#include "PerfectHashWriter.h"
+#endif // BUILDING_CACHE_BUILDER || BUILDING_UNIT_TESTS || BUILDING_CACHE_BUILDER_UNIT_TESTS
+
 namespace objc {
 
 struct objc_image_info {

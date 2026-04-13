@@ -354,6 +354,8 @@ Causes all zero-fill sections in the __DATA segment to be merged into one __zero
 Disables linker creation of branch islands which allows images to be created that are larger than the
 maximum branch distance. Useful with -preload when code is in multiple sections but all are within
 the branch range.
+.It Fl verbose_branch_islands
+Prints size information about the inserted branch islands and their code size overhead.
 .It Fl O0
 Disables certain optimizations and layout algorithms to optimize build time. This option should be used
 with debug builds to speed up incremental development. The exact implementation might change
@@ -635,6 +637,9 @@ Do not warn if the output contains any static initializers
 Warn if the input contains duplicate library options.
 .It Fl no_warn_duplicate_libraries
 Do not warn if the input contains duplicate library options.
+.It Fl no_warn_reduced_section_align
+Do not warn when an input section's alignment exceeds its segment's maximum alignment
+and is reduced to match the segment alignment.
 .It Fl debug_variant
 Do not warn about issues that are only problems for binaries shipping to customers.
 .It Fl unaligned_pointers Ar treatment
@@ -679,6 +684,14 @@ and lastly and -rename_segment options.
 This is the same as -trace_symbol_layout, but accepts a
 .Ar symbol_layout_file_path
 to write the trace data to.
+.It Fl trace_implicit_libraries
+Debug option to track down unexpected library dependencies. Logs libraries linked implicitly
+through auto-linking hints (showing which input files contain the hints) and indirect
+libraries re-exported by explicitly linked libraries.
+.It Fl trace_implicit_library Ar name_substring
+This is the same as -trace_implicit_libraries, but accepts a
+.Ar name_substring
+to trace only a subset of libraries.
 .It Fl section_order Ar segname Ar colon_separated_section_list
 Only for use with -preload, -dylinker, -static, or with -platform_version "firmware"/"sepOS".  Specifies the order in which the linker should lay out the sections for the specified segment.
 For example: "-section_order __ROM __text:__const:__cstring".

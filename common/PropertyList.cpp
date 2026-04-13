@@ -94,7 +94,7 @@ void sortUniqueAndRedirect(Allocator& allocator, Vector<T>& objects, Vector<uint
     // we set lastUniqueObject to the new object, increment the object index, and emit it to the output stream
     for (auto i = 0; i < objects.size(); ++i) {
         if (lastObject && (*objects[i] == *lastObject)) {
-            objects[i]->convertToRedirect(lastObject->index());
+            objects[i]->setRedirect(lastObject);
         } else {
             objects[i]->setIndex(lastObjectIndex++);
             lastObject = objects[i];
@@ -125,34 +125,31 @@ static void emitUnsignedPlistEncodedInteger(uint64_t _value, ByteStream &bytes) 
 
 #pragma mark Base Object
 
-void PropertyList::Object::convertToRedirect(uint64_t index) {
-    deallocate();
-    _isRedirect = true;
-    _index = index;
+void PropertyList::Object::setRedirect(Object* redirect) {
+    _redirect = redirect;
 }
+
 void PropertyList::Object::setIndex(uint64_t index) {
     _index = index;
 };
+
 uint64_t PropertyList::Object::index() const {
-    return _index;
+    auto activeObject = this;
+    while (activeObject->_redirect) {
+        activeObject = activeObject->_redirect;
+    }
+    return activeObject->_index;
 };
 
 PropertyList::Object::Type PropertyList::Object::type() const {
     return Type(_type);
 }
 
-bool PropertyList::Object::processed() const {
-    return _processed;
-}
-
-void PropertyList::Object::setProcessed() {
-    _processed = true;
-}
-
 #pragma mark Integer
 
-PropertyList::Integer::Integer(int64_t value) : Object(Type::Integer), _value(value) {}
-PropertyList::Integer::Integer(Allocator& allocator, int64_t value) : Object(Type::Integer), _value(value) {}
+PropertyList::Integer::Integer(PropertyList& propertyList, int64_t value) : Object(propertyList, Type::Integer), _value(value) {
+    _propertyList._integers.push_back(this);
+}
 
 bool PropertyList::Integer::operator==(const PropertyList::Integer& other) const {
     return (*this <=> other) == std::strong_ordering::equal;
@@ -161,9 +158,7 @@ bool PropertyList::Integer::operator==(const PropertyList::Integer& other) const
 void PropertyList::Integer::emit(uint8_t objectIndexSize, ByteStream& bytes) {
     // int    0001 0nnn    ...        // # of bytes is 2^nnn, big-endian bytes
     emitPlistEncodedInteger(_value, bytes);
-
 }
-void PropertyList::Integer::deallocate() {}
 
 std::strong_ordering PropertyList::Integer::operator<=>(const Integer& other) const {
     return (_value <=> other._value);
@@ -183,10 +178,6 @@ void PropertyList::Data::emit(uint8_t objectIndexSize, ByteStream& bytes) {
     std::copy(_value.begin(), _value.end(), std::back_inserter(bytes));
 }
 
-void PropertyList::Data::deallocate() {
-    _value.resize(0);
-}
-
 std::strong_ordering PropertyList::Data::operator<=>(const PropertyList::Data& other) const {
     std::strong_ordering order = _value.size() <=> other._value.size();
     if (order == std::strong_ordering::equal) {
@@ -199,18 +190,19 @@ bool PropertyList::Data::operator==(const Data& other) const {
     return (*this <=> other) == std::strong_ordering::equal;
 }
 
-PropertyList::Data::Data(Allocator& allocator,  uint64_t size) : Object(Type::Data), _value(allocator) {
+PropertyList::Data::Data(PropertyList& propertyList,  uint64_t size) : Object(propertyList, Type::Data), _value(propertyList.allocator()) {
     _value.insert(_value.begin(), size, std::byte{0});
+    propertyList._datas.push_back(this);
 }
 
-PropertyList::Data::Data(Allocator& allocator, std::span<std::byte> value) : Object(Type::Data), _value(allocator) {
+PropertyList::Data::Data(PropertyList& propertyList, std::span<std::byte> value) : Object(propertyList, Type::Data), _value(propertyList.allocator()) {
     _value.insert(_value.begin(), value.begin(), value.end());
+    propertyList._datas.push_back(this);
 }
 
 std::span<std::byte> PropertyList::Data::bytes() {
     return _value;
 }
-
 
 #pragma mark String
 
@@ -287,14 +279,14 @@ bool PropertyList::String::emitUnicode(uint8_t objectIndexSize, uint64_t stringS
         bytes.push_back(std::byte{0x60} | (std::byte)utf16chars.size());
     } else {
         bytes.push_back(std::byte{0x6f});
-        PropertyList::Integer encodedSize(utf16chars.size());
-        encodedSize.emit(objectIndexSize, bytes);
+        emitPlistEncodedInteger(utf16chars.size(), bytes);
     }
     for (auto& utf16char : utf16chars) {
         bytes.push_back((uint16_t)utf16char);
     }
     return true;
 }
+
 
 void PropertyList::String::emit(uint8_t objectIndexSize, ByteStream& bytes) {
     uint64_t size = strlen(_value);
@@ -308,16 +300,9 @@ void PropertyList::String::emit(uint8_t objectIndexSize, ByteStream& bytes) {
         bytes.push_back(std::byte{0x50} | (std::byte)size);
     } else {
         bytes.push_back(std::byte{0x5f});
-        PropertyList::Integer encodedSize(size);
-        encodedSize.emit(objectIndexSize, bytes);
+        emitPlistEncodedInteger(size, bytes);
     }
     std::copy((std::byte*)_value, (std::byte*)_value+size, std::back_inserter(bytes));
-}
-
-void PropertyList::String::deallocate() {
-    if (_isRedirect) { return; }
-    Allocator::freeObject((void*)_value);
-    _value = nullptr;
 }
 
 std::strong_ordering PropertyList::String::operator<=>(const PropertyList::String& other) const {
@@ -327,23 +312,25 @@ bool PropertyList::String::operator==(const String& other) const {
     return (*this <=> other) == std::strong_ordering::equal;
 }
 
-PropertyList::String::String(Allocator& allocator, std::string_view value) : Object(Type::String) {
-    char* p = (char*)allocator.malloc(value.size()+1);
+PropertyList::String::String(PropertyList& propertyList, std::string_view value) : Object(propertyList, Type::String) {
+    char* p = (char*)_propertyList.allocator().malloc(value.size()+1);
     memcpy(p, value.data(), value.size());
     p[value.size()] = '\0';
     _value = p;
+    _propertyList._strings.push_back(this);
 }
 
 PropertyList::String::~String() {
-    if (_isRedirect) { return; }
     if (_value) {
-        Allocator::freeObject((void*)_value);
+        _propertyList.allocator().free((void*)_value);
     }
 }
 
 #pragma mark  Array
 
-PropertyList::Array::Array(Allocator& allocator) : Object(Type::Array), _values(allocator) {}
+PropertyList::Array::Array(PropertyList& propertyList) : Object(propertyList, Type::Array), _values(_propertyList.allocator()) {
+    propertyList._collections.push_back(this);
+}
 
 std::span<PropertyList::Object*> PropertyList::Array::values() {
     return _values;
@@ -363,16 +350,16 @@ void  PropertyList::Array::emit(uint8_t objectIndexSize, ByteStream& bytes) {
     }
 }
 
-void PropertyList::Array::deallocate() {
-    if (_isRedirect) { return; }
-    for (auto element : _values) {
-        element->deallocate();
-    }
+PropertyList::Array::~Array() {
+    _values.clear();
 }
 
 #pragma mark Dictionary
 
-PropertyList::Dictionary::Dictionary(Allocator& allocator) : Object(Type::Dictionary), _keys(allocator), _values(allocator) {}
+PropertyList::Dictionary::Dictionary(PropertyList& propertyList) : Object(propertyList, Type::Dictionary),
+                                        _keys(_propertyList.allocator()), _values(_propertyList.allocator()) {
+                                            propertyList._collections.push_back(this);
+                                        }
 
 std::span<PropertyList::Object*> PropertyList::Dictionary::keys() {
     return _keys;
@@ -388,8 +375,7 @@ void PropertyList::Dictionary::emit(uint8_t objectIndexSize, ByteStream& bytes) 
         bytes.push_back(std::byte{0xd0} | (std::byte)size);
     } else {
         bytes.push_back(std::byte{0xdf});
-        PropertyList::Integer encodedSize(size);
-        encodedSize.emit(objectIndexSize, bytes);
+        emitPlistEncodedInteger(size, bytes);
     }
     for (auto i = 0; i < size; ++i) {
         bytes.push_back(objectIndexSize, _keys[i]->index());
@@ -399,24 +385,19 @@ void PropertyList::Dictionary::emit(uint8_t objectIndexSize, ByteStream& bytes) 
     }
 }
 
-void PropertyList::Dictionary::deallocate() {
-    if (_isRedirect) { return; }
-    for (auto element : _keys) {
-        element->deallocate();
-    }
-    for (auto element : _values) {
-        element->deallocate();
-    }
+PropertyList::Dictionary::~Dictionary() {
+    _keys.clear();
+    _values.clear();
 }
 
 #pragma mark UUID
 
-PropertyList::UUID::UUID(Allocator& allocator, uuid_t uuid) : Data(allocator, std::span((std::byte*)&uuid[0], 16)) {}
+PropertyList::UUID::UUID(PropertyList& propertyList, uuid_t uuid) : Data(propertyList, std::span((std::byte*)&uuid[0], 16)) {}
 
-#pragma mark Botmap
+#pragma mark Bitmap
 
 // Need to round up to the next multiple 8 since we used 8 bit bytes
-PropertyList::Bitmap::Bitmap(Allocator& allocator, uint64_t size) : PropertyList::Data(allocator, ((size + 7) & (-8))/8) {}
+PropertyList::Bitmap::Bitmap(PropertyList& propertyList, uint64_t size) : PropertyList::Data(propertyList, ((size + 7) & (-8))/8) {}
 void PropertyList::Bitmap::setBit(uint64_t bit) {
     assert(bit < bytes().size()*8);
     std::byte* bitmap = bytes().data();
@@ -430,78 +411,54 @@ void PropertyList::Bitmap::setBit(uint64_t bit) {
 // limitations, such as only usng strings for keys, etc. Its goal is to work in the dyld runtime environment
 // with enough functionality to emit the process info and nothing more.
 
-PropertyList::PropertyList(Allocator& allocator) :  _allocator(allocator), _rootDictionary(allocator) {}
+PropertyList::PropertyList(Allocator& allocator) :  _allocator(allocator), _strings(_allocator),
+                                                    _integers(_allocator), _datas(_allocator), _collections(_allocator) {
+                                                        void* rootDictStorage = allocator.aligned_alloc(alignof(Dictionary), sizeof(Dictionary));
+                                                        _rootDictionary = new (rootDictStorage) Dictionary(*this);
+                                                    }
+
+PropertyList::~PropertyList() {
+    for(auto object : _integers) {
+        object->deallocate();
+    }
+    for(auto object : _strings) {
+        object->deallocate();
+    }
+    for(auto object : _datas) {
+        object->deallocate();
+    }
+    for(auto object : _collections) {
+        object->deallocate();
+    }
+}
 
 void PropertyList::encode(ByteStream& bytes) {
     Vector<uint64_t>        offsets(bytes.allocator());
     uint64_t                offsetTableOffset   = 0;
     uint64_t                numObjects          = 0;
-    uint64_t                topObject           = 0;
     uint8_t                 offsetSize          = 0;
     uint8_t                 objectIndexSize     = 0;
-
-    Vector<String*>     strings(_allocator);
-    Vector<Integer*>    integers(_allocator);
-    Vector<Data*>       datas(_allocator);
-    Vector<Object*>     collections(_allocator);
-    Vector<Object*>     objectsToProcess(_allocator);
-
-    // First we sort out all the integers, strings, data for uniquing, while pull out the collections to flatten
-    objectsToProcess.push_back(&_rootDictionary);
-    while(!objectsToProcess.empty()) {
-        Vector<Object*> newObjects(_allocator);
-        for (auto i : objectsToProcess) {
-            if (i->processed()) { continue; }
-            i->setProcessed();
-            switch(i->type()) {
-                case Object::Type::String:
-                    strings.push_back(reinterpret_cast<String*>(i));
-                    break;
-                case Object::Type::Integer:
-                    integers.push_back(reinterpret_cast<Integer*>(i));
-                    break;
-                case Object::Type::Data:
-                    datas.push_back(reinterpret_cast<Data*>(i));
-                    break;
-                case Object::Type::Array: {
-                    Array* array = reinterpret_cast<Array*>(i);
-                    collections.push_back(i);
-                    std::copy(array->values().begin(), array->values().end(), std::back_inserter(newObjects));
-                } break;
-                case Object::Type::Dictionary: {
-                    Dictionary* dict = reinterpret_cast<Dictionary*>(i);
-                    collections.push_back(i);
-                    // Since this is a collection its children need to be processed, add them to newObjects so they will be handled,
-                    // next time we loop around.
-                    std::copy(dict->keys().begin(), dict->keys().end(), std::back_inserter(newObjects));
-                    std::copy(dict->values().begin(), dict->values().end(), std::back_inserter(newObjects));
-                } break;
-            }
-        }
-        objectsToProcess = newObjects;
-    }
 
     //Write header
     bytes.setEndian(ByteStream::Endian::Big);
     bytes.push_back("bplist00");
 
     // Sort, unique, and write out each type
-    sortUniqueAndRedirect(_allocator, strings, offsets, bytes);
-    sortUniqueAndRedirect(_allocator, integers, offsets, bytes);
-    sortUniqueAndRedirect(_allocator, datas, offsets, bytes);
+    sortUniqueAndRedirect(_allocator, _strings, offsets, bytes);
+    sortUniqueAndRedirect(_allocator, _integers, offsets, bytes);
+    sortUniqueAndRedirect(_allocator, _datas, offsets, bytes);
 
-    topObject = offsets.size();
-    numObjects = offsets.size() + collections.size();
+    numObjects = offsets.size() + _collections.size();
     objectIndexSize = bytesNeededForIntegerValue(numObjects);
 
     //emit collections
     uint64_t currentIndex = offsets.size();
-    for (auto i : collections) {
+    for (auto i : _collections) {
         i->setIndex(currentIndex++);
     }
 
     //emit collections
-    for (auto i : collections) {
+    for (auto i : _collections) {
         offsets.push_back(bytes.size());
         i->emit(objectIndexSize, bytes);
     }
@@ -524,11 +481,11 @@ void PropertyList::encode(ByteStream& bytes) {
     bytes.push_back((uint8_t)objectIndexSize);
 
     bytes.push_back((uint64_t)numObjects);
-    bytes.push_back((uint64_t)topObject); // Root dictionary is always the first collection
+    bytes.push_back((uint64_t)_rootDictionary->index()); // Root dictionary is always the first collection
     bytes.push_back((uint64_t)offsetTableOffset);
 }
 
 PropertyList::Dictionary& PropertyList::rootDictionary() {
-    return _rootDictionary;
+    return *_rootDictionary;
 }
 

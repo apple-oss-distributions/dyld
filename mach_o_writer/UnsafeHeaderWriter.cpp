@@ -44,7 +44,7 @@
 #include "Version32.h"
 
 // mach_o_writer
-#include "HeaderWriter.h"
+#include "UnsafeHeaderWriter.h"
 
 #if TARGET_OS_EXCLAVEKIT
 #ifndef VM_PROT_READ
@@ -72,13 +72,13 @@ namespace mach_o {
 // MARK: --- methods that create and modify ---
 //
 
-HeaderWriter* HeaderWriter::make(std::span<uint8_t> buffer, uint32_t filetype, uint32_t flags, Architecture arch, bool addImplicitTextSegment)
+UnsafeHeaderWriter* UnsafeHeaderWriter::make(std::span<uint8_t> buffer, uint32_t filetype, uint32_t flags, Architecture arch, bool addImplicitTextSegment)
 {
     const size_t minHeaderAlignment = filetype == MH_OBJECT ? 8 : getpagesize();
     assert(((uint64_t)buffer.data() & (minHeaderAlignment - 1)) == 0);
     assert(buffer.size() >= sizeof(mach_header_64));
     bzero(buffer.data(), buffer.size());
-    HeaderWriter& header = *(HeaderWriter*)buffer.data();
+    UnsafeHeaderWriter& header = *(UnsafeHeaderWriter*)buffer.data();
     mach_header& mh = header.mh;
     if ( arch.isBigEndian() ) {
         mh.magic      = arch.is64() ? MH_CIGAM_64 : MH_CIGAM;
@@ -105,7 +105,7 @@ HeaderWriter* HeaderWriter::make(std::span<uint8_t> buffer, uint32_t filetype, u
     return &header;
 }
 
-void HeaderWriter::save(char savedPath[PATH_MAX]) const
+void UnsafeHeaderWriter::save(char savedPath[PATH_MAX]) const
 {
     ::strcpy(savedPath, "/tmp/mocko-XXXXXX");
     int fd = ::mkstemp(savedPath);
@@ -116,7 +116,7 @@ void HeaderWriter::save(char savedPath[PATH_MAX]) const
     }
 }
 
-load_command* HeaderWriter::firstLoadCommand()
+load_command* UnsafeHeaderWriter::firstLoadCommand()
 {
     if ( mh.magic == MH_MAGIC )
         return (load_command*)((uint8_t*)this + sizeof(mach_header));
@@ -125,7 +125,7 @@ load_command* HeaderWriter::firstLoadCommand()
 }
 
 // creates space for a new load command, but does not fill in its payload
-load_command* HeaderWriter::appendLoadCommand(uint32_t cmd, uint32_t cmdSize)
+load_command* UnsafeHeaderWriter::appendLoadCommand(uint32_t cmd, uint32_t cmdSize)
 {
     load_command* thisCmd = (load_command*)((uint8_t*)firstLoadCommand() + mh.sizeofcmds);
     thisCmd->cmd          = cmd;
@@ -137,7 +137,7 @@ load_command* HeaderWriter::appendLoadCommand(uint32_t cmd, uint32_t cmdSize)
 }
 
 // copies a new load command from another
-void HeaderWriter::appendLoadCommand(const load_command* lc)
+void UnsafeHeaderWriter::appendLoadCommand(const load_command* lc)
 {
     load_command* thisCmd = (load_command*)((uint8_t*)firstLoadCommand() + mh.sizeofcmds);
     ::memcpy(thisCmd, lc, lc->cmdsize);
@@ -145,7 +145,7 @@ void HeaderWriter::appendLoadCommand(const load_command* lc)
     mh.sizeofcmds += lc->cmdsize;
 }
 
-void HeaderWriter::addBuildVersion(Platform platform, Version32 minOS, Version32 sdk, std::span<const build_tool_version> tools)
+void UnsafeHeaderWriter::addBuildVersion(Platform platform, Version32 minOS, Version32 sdk, std::span<const build_tool_version> tools)
 {
     assert(platform != Platform::zippered && "can't add a build command for Platform::zippered, it must be split");
     uint32_t               lcSize = (uint32_t)(sizeof(build_version_command) + tools.size() * sizeof(build_tool_version));
@@ -158,7 +158,7 @@ void HeaderWriter::addBuildVersion(Platform platform, Version32 minOS, Version32
         memcpy((uint8_t*)bv + sizeof(build_version_command), &tools[0], tools.size() * sizeof(build_tool_version));
 }
 
-void HeaderWriter::addMinVersion(Platform platform, Version32 minOS, Version32 sdk)
+void UnsafeHeaderWriter::addMinVersion(Platform platform, Version32 minOS, Version32 sdk)
 {
     version_min_command vc;
     vc.cmdsize = sizeof(version_min_command);
@@ -177,49 +177,49 @@ void HeaderWriter::addMinVersion(Platform platform, Version32 minOS, Version32 s
     appendLoadCommand((load_command*)&vc);
 }
 
-void HeaderWriter::setHasThreadLocalVariables()
+void UnsafeHeaderWriter::setHasThreadLocalVariables()
 {
     assert(mh.filetype != MH_OBJECT);
     mh.flags |= MH_HAS_TLV_DESCRIPTORS;
 }
 
-void HeaderWriter::setHasWeakDefs()
+void UnsafeHeaderWriter::setHasWeakDefs()
 {
     assert(mh.filetype != MH_OBJECT);
     mh.flags |= MH_WEAK_DEFINES;
 }
 
-void HeaderWriter::setUsesWeakDefs()
+void UnsafeHeaderWriter::setUsesWeakDefs()
 {
     assert(mh.filetype != MH_OBJECT);
     mh.flags |= MH_BINDS_TO_WEAK;
 }
 
-void HeaderWriter::setAppExtensionSafe()
+void UnsafeHeaderWriter::setAppExtensionSafe()
 {
     assert(mh.filetype == MH_DYLIB || mh.filetype == MH_DYLIB_STUB);
     mh.flags |= MH_APP_EXTENSION_SAFE;
 }
 
-void HeaderWriter::setSimSupport()
+void UnsafeHeaderWriter::setSimSupport()
 {
     assert(mh.filetype == MH_DYLIB || mh.filetype == MH_DYLIB_STUB);
     mh.flags |= MH_SIM_SUPPORT;
 }
 
-void HeaderWriter::setNoReExportedDylibs()
+void UnsafeHeaderWriter::setNoReExportedDylibs()
 {
     assert(mh.filetype == MH_DYLIB || mh.filetype == MH_DYLIB_STUB);
     mh.flags |= MH_NO_REEXPORTED_DYLIBS;
 }
 
-void HeaderWriter::setNoDynamicAccess()
+void UnsafeHeaderWriter::setNoDynamicAccess()
 {
     assert(mh.filetype == MH_DYLIB || mh.filetype == MH_DYLIB_STUB || mh.filetype == MH_EXECUTE);
     mh.flags |= MH_NO_DYNAMIC_ACCESS;
 }
 
-void HeaderWriter::addPlatformInfo(Platform platform, Version32 minOS, Version32 sdk, std::span<const build_tool_version> tools)
+void UnsafeHeaderWriter::addPlatformInfo(Platform platform, Version32 minOS, Version32 sdk, std::span<const build_tool_version> tools)
 {
     Architecture arch(&mh);
     Policy policy(arch, { platform, minOS, sdk }, mh.filetype);
@@ -239,7 +239,7 @@ void HeaderWriter::addPlatformInfo(Platform platform, Version32 minOS, Version32
     }
 }
 
-void HeaderWriter::addNullUUID()
+void UnsafeHeaderWriter::addNullUUID()
 {
     uuid_command uc;
     uc.cmd     = LC_UUID;
@@ -248,7 +248,7 @@ void HeaderWriter::addNullUUID()
     appendLoadCommand((load_command*)&uc);
 }
 
-void HeaderWriter::addUniqueUUID(uuid_t copyOfUUID)
+void UnsafeHeaderWriter::addUniqueUUID(uuid_t copyOfUUID)
 {
     uuid_command uc;
     uc.cmd     = LC_UUID;
@@ -259,7 +259,7 @@ void HeaderWriter::addUniqueUUID(uuid_t copyOfUUID)
         memcpy(copyOfUUID, uc.uuid, sizeof(uuid_t));
 }
 
-void HeaderWriter::updateUUID(uuid_t uuid)
+void UnsafeHeaderWriter::updateUUID(uuid_t uuid)
 {
     __block bool found = false;
     forEachLoadCommandSafe(^(const load_command *cmd, bool &stop) {
@@ -272,7 +272,7 @@ void HeaderWriter::updateUUID(uuid_t uuid)
     assert(found && "updateUUID called without a LC_UUID command");
 }
 
-void HeaderWriter::addSegment(const SegmentInfo& info, std::span<const char* const> sectionNames)
+void UnsafeHeaderWriter::addSegment(const SegmentInfo& info, std::span<const char* const> sectionNames)
 {
     if ( is64() ) {
         uint32_t            lcSize = (uint32_t)(sizeof(segment_command_64) + sectionNames.size() * sizeof(section_64));
@@ -316,16 +316,16 @@ void HeaderWriter::addSegment(const SegmentInfo& info, std::span<const char* con
     }
 }
 
-void HeaderWriter::updateSection(const SectionInfo& info)
+void UnsafeHeaderWriter::updateSection(const SectionInfo& info)
 {
     forEachLoadCommandSafe(^(const load_command* cmd, bool& stop) {
         if ( cmd->cmd == LC_SEGMENT_64 ) {
             segment_command_64* segCmd = (segment_command_64*)cmd;
-            if (info.segmentName == segCmd->segname) {
+            if (info.segmentName == name16(segCmd->segname)) {
                 section_64* const  sectionsStart = (section_64*)((char*)segCmd + sizeof(struct segment_command_64));
                 section_64* const  sectionsEnd   = &sectionsStart[segCmd->nsects];
                 for ( section_64* sect=sectionsStart; sect < sectionsEnd; ++sect ) {
-                    if ( strncmp(info.sectionName.begin(), sect->sectname, 16) == 0 ) {
+                    if ( info.sectionName == name16(sect->sectname) ) {
                         sect->addr      = info.address;
                         sect->size      = info.size;
                         sect->offset    = info.fileOffset;
@@ -344,11 +344,11 @@ void HeaderWriter::updateSection(const SectionInfo& info)
         }
         else if ( cmd->cmd == LC_SEGMENT ) {
             segment_command* segCmd = (segment_command*)cmd;
-            if (info.segmentName == segCmd->segname) {
+            if (info.segmentName == name16(segCmd->segname)) {
                 section* const  sectionsStart = (section*)((char*)segCmd + sizeof(struct segment_command));
                 section* const  sectionsEnd   = &sectionsStart[segCmd->nsects];
                 for ( section* sect=sectionsStart; sect < sectionsEnd; ++sect ) {
-                    if ( strncmp(info.sectionName.begin(), sect->sectname, 16) == 0 ) {
+                    if ( info.sectionName == name16(sect->sectname) ) {
                         sect->addr      = (uint32_t)info.address;
                         sect->size      = (uint32_t)info.size;
                         sect->offset    = info.fileOffset;
@@ -367,12 +367,12 @@ void HeaderWriter::updateSection(const SectionInfo& info)
     });
 }
 
-void HeaderWriter::updateSegment(const SegmentInfo& info)
+void UnsafeHeaderWriter::updateSegment(const SegmentInfo& info)
 {
     forEachLoadCommandSafe(^(const load_command* cmd, bool& stop) {
         if ( cmd->cmd == LC_SEGMENT_64 ) {
             segment_command_64* segCmd = (segment_command_64*)cmd;
-            if (info.segmentName == segCmd->segname) {
+            if (info.segmentName == name16(segCmd->segname)) {
                 segCmd->vmaddr             = info.vmaddr;
                 segCmd->vmsize             = info.vmsize;
                 segCmd->fileoff            = info.fileOffset;
@@ -386,7 +386,7 @@ void HeaderWriter::updateSegment(const SegmentInfo& info)
         }
         else if ( cmd->cmd == LC_SEGMENT ) {
             segment_command* segCmd = (segment_command*)cmd;
-            if (info.segmentName == segCmd->segname) {
+            if (info.segmentName == name16(segCmd->segname)) {
                 segCmd->vmaddr             = (uint32_t)info.vmaddr;
                 segCmd->vmsize             = (uint32_t)info.vmsize;
                 segCmd->fileoff            = info.fileOffset;
@@ -401,7 +401,7 @@ void HeaderWriter::updateSegment(const SegmentInfo& info)
     });
 }
 
-Error HeaderWriter::removeLoadCommands(uint32_t index, uint32_t endIndex)
+Error UnsafeHeaderWriter::removeLoadCommands(uint32_t index, uint32_t endIndex)
 {
     if ( index == endIndex )
         return Error::none();
@@ -438,7 +438,7 @@ Error HeaderWriter::removeLoadCommands(uint32_t index, uint32_t endIndex)
     return Error::none();
 }
 
-load_command* HeaderWriter::insertLoadCommand(uint32_t atIndex, uint32_t cmdSize)
+load_command* UnsafeHeaderWriter::insertLoadCommand(uint32_t atIndex, uint32_t cmdSize)
 {
     if ( loadCommandsFreeSpace() < cmdSize )
         return nullptr;
@@ -479,7 +479,7 @@ load_command* HeaderWriter::insertLoadCommand(uint32_t atIndex, uint32_t cmdSize
     return lcOut;
 }
 
-void HeaderWriter::addInstallName(const char* name, Version32 compatVers, Version32 currentVersion)
+void UnsafeHeaderWriter::addInstallName(const char* name, Version32 compatVers, Version32 currentVersion)
 {
     uint32_t       alignedSize      = pointerAligned((uint32_t)(sizeof(dylib_command) + strlen(name) + 1));
     dylib_command* ic               = (dylib_command*)appendLoadCommand(LC_ID_DYLIB, alignedSize);
@@ -489,7 +489,7 @@ void HeaderWriter::addInstallName(const char* name, Version32 compatVers, Versio
     strcpy((char*)ic + ic->dylib.name.offset, name);
 }
 
-void HeaderWriter::addLinkedDylib(const char* path, LinkedDylibAttributes depAttrs, Version32 compatVers, Version32 currentVersion)
+void UnsafeHeaderWriter::addLinkedDylib(const char* path, LinkedDylibAttributes depAttrs, Version32 compatVers, Version32 currentVersion)
 {
     uint32_t cmd  = 0;
     uint32_t size = sizeForLinkedDylibCommand(path, depAttrs, cmd);
@@ -498,7 +498,17 @@ void HeaderWriter::addLinkedDylib(const char* path, LinkedDylibAttributes depAtt
     setLinkedDylib(lc, path, depAttrs, compatVers, currentVersion);
 }
 
-void HeaderWriter::setLinkedDylib(load_command* lc, const char* path, LinkedDylibAttributes depAttrs, Version32 compatVers, Version32 currentVersion)
+void UnsafeHeaderWriter::addLazyLoadDylib(uint32_t fileOffset, uint32_t size)
+{
+    linkedit_data_command lc;
+    lc.cmd       = LC_LAZY_LOAD_DYLIB_INFO;
+    lc.cmdsize   = sizeof(linkedit_data_command);
+    lc.dataoff   = fileOffset;
+    lc.datasize  = size;
+    appendLoadCommand((load_command*)&lc);
+}
+
+void UnsafeHeaderWriter::setLinkedDylib(load_command* lc, const char* path, LinkedDylibAttributes depAttrs, Version32 compatVers, Version32 currentVersion)
 {
     uint32_t cmd = 0;
     uint32_t size = sizeForLinkedDylibCommand(path, depAttrs, cmd);
@@ -531,12 +541,12 @@ void HeaderWriter::setLinkedDylib(load_command* lc, const char* path, LinkedDyli
     }
 }
 
-void HeaderWriter::addLibSystem()
+void UnsafeHeaderWriter::addLibSystem()
 {
     addLinkedDylib("/usr/lib/libSystem.B.dylib");
 }
 
-void HeaderWriter::addDylibId(CString name, Version32 compatVers, Version32 currentVersion)
+void UnsafeHeaderWriter::addDylibId(CString name, Version32 compatVers, Version32 currentVersion)
 {
     uint32_t       alignedSize          = pointerAligned((uint32_t)(sizeof(dylib_command) + name.size() + 1));
     dylib_command* dc                   = (dylib_command*)appendLoadCommand(LC_ID_DYLIB, alignedSize);
@@ -547,7 +557,7 @@ void HeaderWriter::addDylibId(CString name, Version32 compatVers, Version32 curr
     strcpy((char*)dc + dc->dylib.name.offset, name.c_str());
 }
 
-void HeaderWriter::addDyldID()
+void UnsafeHeaderWriter::addDyldID()
 {
     const char* path = "/usr/lib/dyld";
     uint32_t       alignedSize = pointerAligned((uint32_t)(sizeof(dylinker_command) + strlen(path) + 1));
@@ -556,7 +566,7 @@ void HeaderWriter::addDyldID()
     strcpy((char*)dc + dc->name.offset, path);
 }
 
-void HeaderWriter::addDynamicLinker()
+void UnsafeHeaderWriter::addDynamicLinker()
 {
     const char* path = "/usr/lib/dyld";
     uint32_t       alignedSize = pointerAligned((uint32_t)(sizeof(dylinker_command) + strlen(path) + 1));
@@ -565,7 +575,7 @@ void HeaderWriter::addDynamicLinker()
     strcpy((char*)dc + dc->name.offset, path);
 }
 
-void HeaderWriter::addFairPlayEncrypted(uint32_t offset, uint32_t size)
+void UnsafeHeaderWriter::addFairPlayEncrypted(uint32_t offset, uint32_t size)
 {
     if ( is64() ) {
         encryption_info_command_64 en64;
@@ -588,7 +598,7 @@ void HeaderWriter::addFairPlayEncrypted(uint32_t offset, uint32_t size)
     }
 }
 
-void HeaderWriter::addRPath(const char* path)
+void UnsafeHeaderWriter::addRPath(const char* path)
 {
     uint32_t       alignedSize = pointerAligned((uint32_t)(sizeof(rpath_command) + strlen(path) + 1));
     rpath_command* rc          = (rpath_command*)appendLoadCommand(LC_RPATH, alignedSize);
@@ -596,7 +606,7 @@ void HeaderWriter::addRPath(const char* path)
     strcpy((char*)rc + rc->path.offset, path);
 }
 
-void HeaderWriter::setTargetTriple(const char* triple)
+void UnsafeHeaderWriter::setTargetTriple(const char* triple)
 {
     uint32_t               alignedSize = pointerAligned((uint32_t)(sizeof(target_triple_command) + strlen(triple) + 1));
     target_triple_command* rc          = (target_triple_command*)appendLoadCommand(LC_TARGET_TRIPLE, alignedSize);
@@ -604,7 +614,7 @@ void HeaderWriter::setTargetTriple(const char* triple)
     strcpy((char*)rc + rc->triple.offset, triple);
 }
 
-void HeaderWriter::addDyldEnvVar(const char* path)
+void UnsafeHeaderWriter::addDyldEnvVar(const char* path)
 {
     uint32_t          alignedSize = pointerAligned((uint32_t)(sizeof(dylinker_command) + strlen(path) + 1));
     dylinker_command* dc          = (dylinker_command*)appendLoadCommand(LC_DYLD_ENVIRONMENT, alignedSize);
@@ -612,7 +622,7 @@ void HeaderWriter::addDyldEnvVar(const char* path)
     strcpy((char*)dc + dc->name.offset, path);
 }
 
-void HeaderWriter::addAllowableClient(const char* clientName)
+void UnsafeHeaderWriter::addAllowableClient(const char* clientName)
 {
     uint32_t            alignedSize = pointerAligned((uint32_t)(sizeof(sub_client_command) + strlen(clientName) + 1));
     sub_client_command* ac          = (sub_client_command*)appendLoadCommand(LC_SUB_CLIENT, alignedSize);
@@ -620,7 +630,7 @@ void HeaderWriter::addAllowableClient(const char* clientName)
     strcpy((char*)ac + ac->client.offset, clientName);
 }
 
-void HeaderWriter::addUmbrellaName(const char* umbrellaName)
+void UnsafeHeaderWriter::addUmbrellaName(const char* umbrellaName)
 {
     uint32_t            alignedSize = pointerAligned((uint32_t)(sizeof(sub_framework_command) + strlen(umbrellaName) + 1));
     sub_framework_command* ac       = (sub_framework_command*)appendLoadCommand(LC_SUB_FRAMEWORK, alignedSize);
@@ -628,7 +638,7 @@ void HeaderWriter::addUmbrellaName(const char* umbrellaName)
     strcpy((char*)ac + ac->umbrella.offset, umbrellaName);
 }
 
-void HeaderWriter::addSourceVersion(Version64 vers)
+void UnsafeHeaderWriter::addSourceVersion(Version64 vers)
 {
     source_version_command svc;
     svc.cmd       = LC_SOURCE_VERSION;
@@ -637,7 +647,7 @@ void HeaderWriter::addSourceVersion(Version64 vers)
     appendLoadCommand((load_command*)&svc);
 }
 
-void HeaderWriter::setMain(uint32_t offset)
+void UnsafeHeaderWriter::setMain(uint32_t offset)
 {
     entry_point_command ec;
     ec.cmd       = LC_MAIN;
@@ -647,7 +657,7 @@ void HeaderWriter::setMain(uint32_t offset)
     appendLoadCommand((load_command*)&ec);
 }
 
-void HeaderWriter::setCustomStackSize(uint64_t stackSize) {
+void UnsafeHeaderWriter::setCustomStackSize(uint64_t stackSize) {
     __block bool found = false;
     forEachLoadCommandSafe(^(const load_command* cmd, bool& stop) {
         if (cmd->cmd == LC_MAIN) {
@@ -660,7 +670,7 @@ void HeaderWriter::setCustomStackSize(uint64_t stackSize) {
     assert(found);
 }
 
-void HeaderWriter::setUnixEntry(uint64_t startAddr, bool entryIsThumb, uint64_t sp)
+void UnsafeHeaderWriter::setUnixEntry(uint64_t startAddr, bool entryIsThumb, uint64_t sp)
 {
     // FIXME: support other archs
     if ( (mh.cputype == CPU_TYPE_ARM64) || (mh.cputype == CPU_TYPE_ARM64_32) ) {
@@ -697,7 +707,7 @@ void HeaderWriter::setUnixEntry(uint64_t startAddr, bool entryIsThumb, uint64_t 
     }
 }
 
-void HeaderWriter::addCodeSignature(uint32_t fileOffset, uint32_t fileSize)
+void UnsafeHeaderWriter::addCodeSignature(uint32_t fileOffset, uint32_t fileSize)
 {
     linkedit_data_command lc;
     lc.cmd       = LC_CODE_SIGNATURE;
@@ -707,7 +717,7 @@ void HeaderWriter::addCodeSignature(uint32_t fileOffset, uint32_t fileSize)
     appendLoadCommand((load_command*)&lc);
 }
 
-void HeaderWriter::setBindOpcodesInfo(uint32_t rebaseOffset, uint32_t rebaseSize,
+void UnsafeHeaderWriter::setBindOpcodesInfo(uint32_t rebaseOffset, uint32_t rebaseSize,
                                       uint32_t bindsOffset, uint32_t bindsSize,
                                       uint32_t weakBindsOffset, uint32_t weakBindsSize,
                                       uint32_t lazyBindsOffset, uint32_t lazyBindsSize,
@@ -729,7 +739,7 @@ void HeaderWriter::setBindOpcodesInfo(uint32_t rebaseOffset, uint32_t rebaseSize
     appendLoadCommand((load_command*)&lc);
 }
 
-void HeaderWriter::setChainedFixupsInfo(uint32_t cfOffset, uint32_t cfSize)
+void UnsafeHeaderWriter::setChainedFixupsInfo(uint32_t cfOffset, uint32_t cfSize)
 {
     linkedit_data_command lc;
     lc.cmd       = LC_DYLD_CHAINED_FIXUPS;
@@ -739,7 +749,7 @@ void HeaderWriter::setChainedFixupsInfo(uint32_t cfOffset, uint32_t cfSize)
     appendLoadCommand((load_command*)&lc);
 }
 
-void HeaderWriter::setExportTrieInfo(uint32_t offset, uint32_t size)
+void UnsafeHeaderWriter::setExportTrieInfo(uint32_t offset, uint32_t size)
 {
     linkedit_data_command lc;
     lc.cmd       = LC_DYLD_EXPORTS_TRIE;
@@ -749,7 +759,7 @@ void HeaderWriter::setExportTrieInfo(uint32_t offset, uint32_t size)
     appendLoadCommand((load_command*)&lc);
 }
 
-void HeaderWriter::setFunctionVariants(uint32_t offset, uint32_t size)
+void UnsafeHeaderWriter::setFunctionVariants(uint32_t offset, uint32_t size)
 {
     linkedit_data_command lc;
     lc.cmd       = LC_FUNCTION_VARIANTS;
@@ -759,7 +769,7 @@ void HeaderWriter::setFunctionVariants(uint32_t offset, uint32_t size)
     appendLoadCommand((load_command*)&lc);
 }
 
-void HeaderWriter::setFunctionVariantFixups(uint32_t offset, uint32_t size)
+void UnsafeHeaderWriter::setFunctionVariantFixups(uint32_t offset, uint32_t size)
 {
     linkedit_data_command lc;
     lc.cmd       = LC_FUNCTION_VARIANT_FIXUPS;
@@ -769,7 +779,7 @@ void HeaderWriter::setFunctionVariantFixups(uint32_t offset, uint32_t size)
     appendLoadCommand((load_command*)&lc);
 }
 
-void HeaderWriter::setSplitSegInfo(uint32_t offset, uint32_t size)
+void UnsafeHeaderWriter::setSplitSegInfo(uint32_t offset, uint32_t size)
 {
     linkedit_data_command lc;
     lc.cmd       = LC_SEGMENT_SPLIT_INFO;
@@ -779,7 +789,7 @@ void HeaderWriter::setSplitSegInfo(uint32_t offset, uint32_t size)
     appendLoadCommand((load_command*)&lc);
 }
 
-void HeaderWriter::setDataInCode(uint32_t offset, uint32_t size)
+void UnsafeHeaderWriter::setDataInCode(uint32_t offset, uint32_t size)
 {
     linkedit_data_command lc;
     lc.cmd       = LC_DATA_IN_CODE;
@@ -789,7 +799,7 @@ void HeaderWriter::setDataInCode(uint32_t offset, uint32_t size)
     appendLoadCommand((load_command*)&lc);
 }
 
-void HeaderWriter::setFunctionStarts(uint32_t offset, uint32_t size)
+void UnsafeHeaderWriter::setFunctionStarts(uint32_t offset, uint32_t size)
 {
     linkedit_data_command lc;
     lc.cmd       = LC_FUNCTION_STARTS;
@@ -799,7 +809,7 @@ void HeaderWriter::setFunctionStarts(uint32_t offset, uint32_t size)
     appendLoadCommand((load_command*)&lc);
 }
 
-void HeaderWriter::setAtomInfo(uint32_t offset, uint32_t size)
+void UnsafeHeaderWriter::setAtomInfo(uint32_t offset, uint32_t size)
 {
     linkedit_data_command lc;
     lc.cmd       = LC_ATOM_INFO;
@@ -809,7 +819,7 @@ void HeaderWriter::setAtomInfo(uint32_t offset, uint32_t size)
     appendLoadCommand((load_command*)&lc);
 }
 
-void HeaderWriter::setLinkerOptimizationHints(uint32_t offset, uint32_t size)
+void UnsafeHeaderWriter::setLinkerOptimizationHints(uint32_t offset, uint32_t size)
 {
     linkedit_data_command lc;
     lc.cmd       = LC_LINKER_OPTIMIZATION_HINT;
@@ -819,7 +829,7 @@ void HeaderWriter::setLinkerOptimizationHints(uint32_t offset, uint32_t size)
     appendLoadCommand((load_command*)&lc);
 }
 
-void HeaderWriter::setSymbolTable(uint32_t nlistOffset, uint32_t nlistCount, uint32_t stringPoolOffset, uint32_t stringPoolSize,
+void UnsafeHeaderWriter::setSymbolTable(uint32_t nlistOffset, uint32_t nlistCount, uint32_t stringPoolOffset, uint32_t stringPoolSize,
                                   uint32_t localsCount, uint32_t globalsCount, uint32_t undefCount, uint32_t indOffset, uint32_t indCount, bool dynSymtab,
                                   uint32_t locrelOffset, uint32_t locrelCount, uint32_t extrelOffset, uint32_t extrelCount)
 {
@@ -853,7 +863,7 @@ void HeaderWriter::setSymbolTable(uint32_t nlistOffset, uint32_t nlistCount, uin
     }
 }
 
-void HeaderWriter::addLinkerOption(std::span<uint8_t> buffer, uint32_t count)
+void UnsafeHeaderWriter::addLinkerOption(std::span<uint8_t> buffer, uint32_t count)
 {
     uint32_t cmdSize = pointerAligned(sizeof(linker_option_command) + (uint32_t)buffer.size());
 
@@ -864,7 +874,7 @@ void HeaderWriter::addLinkerOption(std::span<uint8_t> buffer, uint32_t count)
     memcpy((uint8_t*)(lc + 1), buffer.data(), buffer.size());
 }
 
-HeaderWriter::LinkerOption HeaderWriter::LinkerOption::make(std::span<CString> opts)
+UnsafeHeaderWriter::LinkerOption UnsafeHeaderWriter::LinkerOption::make(std::span<CString> opts)
 {
     LinkerOption out;
     out.count = (uint32_t)opts.size();
@@ -879,7 +889,7 @@ HeaderWriter::LinkerOption HeaderWriter::LinkerOption::make(std::span<CString> o
     return out;
 }
 
-load_command* HeaderWriter::findLoadCommand(uint32_t cmdNum)
+load_command* UnsafeHeaderWriter::findLoadCommand(uint32_t cmdNum)
 {
     __block load_command* result = nullptr;
     forEachLoadCommandSafe(^(const load_command* cmd, bool& stop) {
@@ -891,7 +901,7 @@ load_command* HeaderWriter::findLoadCommand(uint32_t cmdNum)
     return result;
 }
 
-void HeaderWriter::removeLoadCommand(void (^callback)(const load_command* cmd, bool& remove, bool& stop))
+void UnsafeHeaderWriter::removeLoadCommand(void (^callback)(const load_command* cmd, bool& remove, bool& stop))
 {
     bool                stop      = false;
     const load_command* startCmds = nullptr;
@@ -938,7 +948,7 @@ void HeaderWriter::removeLoadCommand(void (^callback)(const load_command* cmd, b
         ::bzero(cmd, bytesRemaining);
 }
 
-uint32_t HeaderWriter::relocatableHeaderAndLoadCommandsSize(bool is64, uint32_t sectionCount, uint32_t platformsCount, std::span<const LinkerOption> linkerOptions)
+uint32_t UnsafeHeaderWriter::relocatableHeaderAndLoadCommandsSize(bool is64, uint32_t sectionCount, uint32_t platformsCount, std::span<const LinkerOption> linkerOptions)
 {
     uint32_t size =  0;
     if ( is64 ) {
@@ -962,7 +972,7 @@ uint32_t HeaderWriter::relocatableHeaderAndLoadCommandsSize(bool is64, uint32_t 
     return size;
 }
 
-void HeaderWriter::setRelocatableSectionCount(uint32_t sectionCount)
+void UnsafeHeaderWriter::setRelocatableSectionCount(uint32_t sectionCount)
 {
     assert(mh.filetype == MH_OBJECT);
     if ( is64() ) {
@@ -984,9 +994,9 @@ void HeaderWriter::setRelocatableSectionCount(uint32_t sectionCount)
         segment_command* sc = (segment_command*)appendLoadCommand(LC_SEGMENT, lcSize);
         sc->segname[0]         = '\0';   // MH_OBJECT has one segment with no name
         sc->vmaddr             = 0;
-        sc->vmsize             = 0x1000; // FIXME: need dynamic segment layout
+        sc->vmsize             = 0;   // adjusted in updateRelocatableSegmentSize()
         sc->fileoff            = 0;
-        sc->filesize           = 0x1000;
+        sc->filesize           = 0;   // adjusted in updateRelocatableSegmentSize()
         sc->maxprot            = 7;
         sc->initprot           = 7;
         sc->nsects             = sectionCount;
@@ -995,18 +1005,20 @@ void HeaderWriter::setRelocatableSectionCount(uint32_t sectionCount)
     }
 }
 
-void HeaderWriter::updateRelocatableSegmentSize(uint64_t vmSize, uint32_t fileSize)
+void UnsafeHeaderWriter::updateRelocatableSegmentSize(uint64_t vmSize, uint32_t fileOffset, uint32_t fileSize)
 {
     forEachLoadCommandSafe(^(const load_command* cmd, bool& stop) {
         if ( cmd->cmd == LC_SEGMENT ) {
             segment_command* sc = (segment_command*)cmd;
             sc->vmsize   = (uint32_t)vmSize;
+            sc->fileoff  = fileOffset;
             sc->filesize = fileSize;
             stop = true;
         }
         else if ( cmd->cmd == LC_SEGMENT_64 ) {
             segment_command_64* sc = (segment_command_64*)cmd;
             sc->vmsize   = vmSize;
+            sc->fileoff  = fileOffset;
             sc->filesize = fileSize;
             stop = true;
         }
@@ -1014,7 +1026,7 @@ void HeaderWriter::updateRelocatableSegmentSize(uint64_t vmSize, uint32_t fileSi
 }
 
 
-void HeaderWriter::setRelocatableSectionInfo(uint32_t sectionIndex, const char* segName, const char* sectName,
+void UnsafeHeaderWriter::setRelocatableSectionInfo(uint32_t sectionIndex, const char* segName, const char* sectName,
                                              uint32_t flags, uint64_t address, uint64_t size, uint32_t fileOffset,
                                              uint16_t alignment, uint32_t relocsOffset, uint32_t relocsCount)
 {

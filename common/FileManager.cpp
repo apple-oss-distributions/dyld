@@ -213,6 +213,7 @@ ssize_t FileManager::fsgetpath(char result[], size_t resultBufferSize, uint64_t 
 #if BUILDING_DYLD
     return _syscall->fsgetpath(result, resultBufferSize, fsID, objID);
 #else
+    (void)_syscall;
     fsid_t      fsid  = *reinterpret_cast<fsid_t*>(&fsID);
     return ::fsgetpath(result, resultBufferSize, &fsid, objID);
 #endif

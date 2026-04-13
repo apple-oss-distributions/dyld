@@ -25,6 +25,8 @@
 #ifndef DyldLegacyInterfaceGlue_h
 #define DyldLegacyInterfaceGlue_h
 
+#include <dispatch/dispatch.h>
+
 #include "Defines.h"
 
 #if BUILDING_DYLD_FRAMEWORK
@@ -49,6 +51,7 @@ typedef struct dyld_process_snapshot_s*     dyld_process_snapshot_t;
 typedef struct dyld_shared_cache_s*         dyld_shared_cache_t;
 typedef struct dyld_image_s*                dyld_image_t;
 typedef const struct dyld_process_info_notify_base* dyld_process_info_notify;
+typedef const struct __CFDictionary * CFDictionaryRef;
 
 extern "C" GLUE_VISIBILITY dyld_process_t dyld_process_create_for_task(task_t task, kern_return_t *kr);
 extern "C" GLUE_VISIBILITY dyld_process_t dyld_process_create_for_current_task();
@@ -103,6 +106,14 @@ extern "C" GLUE_VISIBILITY void  _dyld_process_info_notify_main(dyld_process_inf
 extern "C" GLUE_VISIBILITY void  _dyld_process_info_notify_release(dyld_process_info_notify object);
 extern "C" GLUE_VISIBILITY void  _dyld_process_info_notify_retain(dyld_process_info_notify object);
 
+extern "C" GLUE_VISIBILITY void dyld_image_retain_4HWTrace(dyld_image_t image);
+extern "C" GLUE_VISIBILITY void dyld_image_release_4HWTrace(dyld_image_t image);
+extern "C" GLUE_VISIBILITY dispatch_data_t dyld_image_segment_data_4HWTrace(dyld_image_t image, const char* segmentName);
+extern "C" GLUE_VISIBILITY void* dyld_process_snapshot_create_metrics(dyld_process_snapshot_t snapshot);
+
+extern "C" GLUE_VISIBILITY void dyld_for_each_installed_shared_cache_ex(bool includeNonSystemCaches, void (^block)(dyld_shared_cache_t cache, bool* stop));
+
+
 
 #define DYLD_INTROSPECTION_VTABLE_ENTRY(x) __typeof__ (x) *x
 struct IntrospectionVtable
@@ -156,12 +167,20 @@ struct IntrospectionVtable
     DYLD_INTROSPECTION_VTABLE_ENTRY(_dyld_process_info_notify_main);
     DYLD_INTROSPECTION_VTABLE_ENTRY(_dyld_process_info_notify_retain);
     DYLD_INTROSPECTION_VTABLE_ENTRY(_dyld_process_info_notify_release);
+    DYLD_INTROSPECTION_VTABLE_ENTRY(dyld_image_retain_4HWTrace);
+    DYLD_INTROSPECTION_VTABLE_ENTRY(dyld_image_release_4HWTrace);
+    DYLD_INTROSPECTION_VTABLE_ENTRY(dyld_image_segment_data_4HWTrace);
+    DYLD_INTROSPECTION_VTABLE_ENTRY(dyld_shared_cache_iterate_text);
+    DYLD_INTROSPECTION_VTABLE_ENTRY(dyld_shared_cache_find_iterate_text);
+    DYLD_INTROSPECTION_VTABLE_ENTRY(dyld_for_each_installed_shared_cache_ex);
+    DYLD_INTROSPECTION_VTABLE_ENTRY(dyld_process_snapshot_create_metrics);
+    mach_vm_address_t* allImageInfos;
 #pragma clang diagnostic pop
 };
 
 extern "C" struct IntrospectionVtable _dyld_legacy_introspection_vtable;
 
-VIS_HIDDEN IntrospectionVtable* dyldFrameworkIntrospectionVtable();
+VIS_HIDDEN const IntrospectionVtable* dyldFrameworkIntrospectionVtable();
 
 #endif /* DyldLegacyInterfaceGlue_h */
 

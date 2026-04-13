@@ -5,8 +5,15 @@ BUILDING_FOR_TOOLCHAIN_                 = 0
 BUILDING_FOR_TOOLCHAIN_ld               = 1
 BUILDING_FOR_TOOLCHAIN_dyld_executables = 0
 BUILDING_FOR_TOOLCHAIN_VALUE            = $(BUILDING_FOR_TOOLCHAIN_$(RC_ProjectName))
+BUILDING_FOR_TOOLCHAIN_VALUE[sdk=macosx*][config=Debug] = 1
 
 GCC_PREPROCESSOR_DEFINITIONS = $(inherited) BUILDING_DYLDINFO=1 BUILDING_FOR_TOOLCHAIN=$(BUILDING_FOR_TOOLCHAIN_VALUE)
+
+ARCHS_FOR_TOOLCHAIN_0      = $(ARCHS_STANDARD)
+ARCHS_FOR_TOOLCHAIN_1      = x86_64 arm64
+ARCHS_FOR_TOOLCHAIN_VALUE  = $(ARCHS_FOR_TOOLCHAIN_$(BUILDING_FOR_TOOLCHAIN_VALUE))
+
+ARCHS = $(ARCHS_FOR_TOOLCHAIN_VALUE)
 
 // dyld_info as part of RC_ProjectName=ld, builds into toolchain and links with libLTO.dylib
 // other dyld_info builds do not use libLTO.dylib and installs into /usr/local/bin/
@@ -27,3 +34,4 @@ OTHER_LDFLAGS = $(inherited) -lCrashReporterClient
 
 // TODO: Clean these up.  They were moved from the build settings
 LIBRARY_SEARCH_PATHS = $(TOOLCHAIN_DIR)/usr/lib/
+

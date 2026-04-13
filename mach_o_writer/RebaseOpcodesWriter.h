@@ -31,7 +31,7 @@
 #include <vector>
 
 #include "Error.h"
-#include "Header.h"
+#include "UnsafeHeader.h"
 #include "Fixups.h"
 
 // mach_o

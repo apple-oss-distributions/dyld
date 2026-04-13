@@ -105,9 +105,9 @@ __ZN5dyld412gotoAppStartEmPKNS_10KernelArgsE:
 // switch to dyld in the dyld cache
 // Note: all archs pass parameters in registers.  dyldOnDisk is in second param register and flows through to start()
     .text
-    .globl __ZN5dyld422restartWithDyldInCacheEPKNS_10KernelArgsEPKN6mach_o6HeaderEPK15DyldSharedCachePv
-__ZN5dyld422restartWithDyldInCacheEPKNS_10KernelArgsEPKN6mach_o6HeaderEPK15DyldSharedCachePv:
-    // void restartWithDyldInCache(const KernelArgs* kernArgs, const Header* dyldOnDisk, void* dyldStart);
+    .globl __ZN5dyld422restartWithDyldInCacheEPKNS_10KernelArgsEPKN6mach_o12UnsafeHeaderEPK15DyldSharedCachePvy
+__ZN5dyld422restartWithDyldInCacheEPKNS_10KernelArgsEPKN6mach_o12UnsafeHeaderEPK15DyldSharedCachePvy:
+    // void restartWithDyldInCache(const KernelArgs* kernArgs, const UnsafeHeader* dyldOnDisk, void* dyldStart, uint64_t launchTimestamp);
 #if __x86_64__
     movq    %rdi, %rsp      # reset SP to original kernel args
     jmp     *%rcx           # jump into dyld in cache

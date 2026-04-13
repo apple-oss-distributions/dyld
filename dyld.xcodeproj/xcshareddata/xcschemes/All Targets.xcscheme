@@ -1,6 +1,6 @@
 <?xml version="1.0" encoding="UTF-8"?>
 <Scheme
-   LastUpgradeVersion = "1600"
+   LastUpgradeVersion = "2630"
    version = "1.7">
    <BuildAction
       parallelizeBuildables = "YES"
@@ -17,7 +17,7 @@
                BuildableIdentifier = "primary"
                BlueprintIdentifier = "F9ED4C970630A76000DF4E74"
                BuildableName = "dyld"
-               BlueprintName = "dyld"
+               BlueprintName = "dyld-mighty"
                ReferencedContainer = "container:dyld.xcodeproj">
             </BuildableReference>
          </BuildActionEntry>
@@ -240,8 +240,8 @@
             <BuildableReference
                BuildableIdentifier = "primary"
                BlueprintIdentifier = "F91B35BA2794F1F5006DB55F"
-               BuildableName = "dyld_nm"
-               BlueprintName = "dyld_nm"
+               BuildableName = "nm"
+               BlueprintName = "nm"
                ReferencedContainer = "container:dyld.xcodeproj">
             </BuildableReference>
          </BuildActionEntry>
@@ -327,7 +327,7 @@
             BuildableIdentifier = "primary"
             BlueprintIdentifier = "F9ED4C970630A76000DF4E74"
             BuildableName = "dyld"
-            BlueprintName = "dyld"
+            BlueprintName = "dyld-mighty"
             ReferencedContainer = "container:dyld.xcodeproj">
          </BuildableReference>
       </BuildableProductRunnable>
@@ -344,7 +344,7 @@
             BuildableIdentifier = "primary"
             BlueprintIdentifier = "F9ED4C970630A76000DF4E74"
             BuildableName = "dyld"
-            BlueprintName = "dyld"
+            BlueprintName = "dyld-mighty"
             ReferencedContainer = "container:dyld.xcodeproj">
          </BuildableReference>
       </BuildableProductRunnable>

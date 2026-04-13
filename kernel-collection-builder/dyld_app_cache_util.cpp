@@ -39,7 +39,7 @@
 #include "kernel_collection_builder.h"
 #include "ClosureFileSystemPhysical.h"
 #include "FileUtils.h"
-#include "Header.h"
+#include "UnsafeHeader.h"
 #include "GradedArchitectures.h"
 #include "JSONWriter.h"
 #include "MachOAppCache.h"
@@ -53,7 +53,7 @@ using dyld3::MachOAppCache;
 using json::Node;
 
 using mach_o::GradedArchitectures;
-using mach_o::Header;
+using mach_o::UnsafeHeader;
 using mach_o::Platform;
 
 __attribute__((__noreturn__))
@@ -377,7 +377,7 @@ static int dumpAppCache(const DumpOptions& options) {
         // Add the segments for the app cache
         __block Node appCacheSegmentsNode;
         __block bool hasError = false;
-        ((const Header*)appCacheMA)->forEachSegment(^(const Header::SegmentInfo &info, bool &stopSegment) {
+        ((const UnsafeHeader*)appCacheMA)->forEachSegment(^(const UnsafeHeader::SegmentInfo &info, bool &stopSegment) {
             Node segmentNode;
             segmentNode.map["name"] = makeNode(info.segmentName.data());
             segmentNode.map["vmAddr"] = makeNode(hex(info.vmaddr));
@@ -409,7 +409,7 @@ static int dumpAppCache(const DumpOptions& options) {
             }
 
             __block Node sectionsNode;
-            ((const Header*)appCacheMA)->forEachSection(^(const Header::SectionInfo &sectInfo, bool &stopSection) {
+            ((const UnsafeHeader*)appCacheMA)->forEachSection(^(const UnsafeHeader::SectionInfo &sectInfo, bool &stopSection) {
                 if ( sectInfo.segmentName != info.segmentName )
                     return;
 
@@ -445,7 +445,7 @@ static int dumpAppCache(const DumpOptions& options) {
         __block Node dylibsNode;
         appCacheMA->forEachDylib(diag, ^(const MachOAnalyzer *ma, const char *name, bool &stop) {
             __block Node segmentsNode;
-            ((const Header*)ma)->forEachSegment(^(const Header::SegmentInfo &info, bool &stopSegment) {
+            ((const UnsafeHeader*)ma)->forEachSegment(^(const UnsafeHeader::SegmentInfo &info, bool &stopSegment) {
                 Node segmentNode;
                 segmentNode.map["name"] = makeNode(info.segmentName.data());
                 segmentNode.map["vmAddr"] = makeNode(hex(info.vmaddr));
@@ -475,7 +475,7 @@ static int dumpAppCache(const DumpOptions& options) {
                 }
 
                 __block Node sectionsNode;
-                ((const Header*)ma)->forEachSection(^(const Header::SectionInfo &sectInfo, bool &stopSection) {
+                ((const UnsafeHeader*)ma)->forEachSection(^(const UnsafeHeader::SectionInfo &sectInfo, bool &stopSection) {
                     if ( sectInfo.segmentName != info.segmentName )
                         return;
 
@@ -518,8 +518,8 @@ static int dumpAppCache(const DumpOptions& options) {
         uint64_t    entryOffset;
         bool        usesCRT;
         Node        entryPointNode;
-        if ( ((const Header*)appCacheMA)->getEntry(entryOffset, usesCRT) ) {
-            entryPointNode.value = hex(((const Header*)appCacheMA)->preferredLoadAddress() + entryOffset);
+        if ( ((const UnsafeHeader*)appCacheMA)->getEntry(entryOffset, usesCRT) ) {
+            entryPointNode.value = hex(((const UnsafeHeader*)appCacheMA)->preferredLoadAddress() + entryOffset);
         }
 
         topNode.map["entrypoint"] = entryPointNode;
@@ -531,11 +531,11 @@ static int dumpAppCache(const DumpOptions& options) {
         __block Node topNode;
 
         __block uint64_t baseAddress = ~0ULL;
-        ((const Header*)appCacheMA)->forEachSegment(^(const Header::SegmentInfo& info, bool& stop) {
+        ((const UnsafeHeader*)appCacheMA)->forEachSegment(^(const UnsafeHeader::SegmentInfo& info, bool& stop) {
             baseAddress = std::min(baseAddress, info.vmaddr);
         });
         uint64_t cacheBaseAddress = baseAddress;
-        uint64_t textSegVMAddr = ((const Header*)appCacheMA)->preferredLoadAddress();
+        uint64_t textSegVMAddr = ((const UnsafeHeader*)appCacheMA)->preferredLoadAddress();
 
         auto getFixupsNode = [cacheBaseAddress, textSegVMAddr](const dyld3::MachOAnalyzer* ma) {
             __block Node fixupsNode;
@@ -587,7 +587,7 @@ static int dumpAppCache(const DumpOptions& options) {
             diag.assertNoError();
 
             ma->forEachRebase(diag, ^(const char *opcodeName, const dyld3::MachOAnalyzer::LinkEditInfo &leInfo,
-                                      const Header::SegmentInfo *segments,
+                                      const UnsafeHeader::SegmentInfo *segments,
                                       bool segIndexSet, uint32_t pointerSize, uint8_t segmentIndex,
                                       uint64_t segmentOffset, dyld3::MachOAnalyzer::Rebase kind, bool &stop) {
                 uint64_t rebaseVmAddr  = segments[segmentIndex].vmaddr + segmentOffset;
@@ -690,7 +690,7 @@ static int dumpAppCache(const DumpOptions& options) {
         // add uuid
         Node appUUIDNode;
         uuid_t appUUID = {};
-        if ( ((Header*)appCacheMA)->getUuid(appUUID) ) {
+        if ( ((UnsafeHeader*)appCacheMA)->getUuid(appUUID) ) {
             uuid_string_t uuidString;
             uuid_unparse_upper(appUUID, uuidString);
             appUUIDNode.value = uuidString;
@@ -816,7 +816,7 @@ static int dumpAppCache(const DumpOptions& options) {
                 ma->forEachLocalSymbol(diag, ^(const char* aSymbolName, uint64_t n_value, uint8_t n_type,
                                                uint8_t n_sect, uint16_t n_desc, bool& stopSymbols) {
                     if ( strcmp(aSymbolName, "_kmod_info") == 0 ) {
-                        kmodInfoVMOffset = n_value - ((const Header*)ma)->preferredLoadAddress();
+                        kmodInfoVMOffset = n_value - ((const UnsafeHeader*)ma)->preferredLoadAddress();
                         found = true;
                         stopSymbols = true;
                     }
@@ -887,7 +887,7 @@ static int dumpAppCache(const DumpOptions& options) {
         auto getStartsNode = [](const dyld3::MachOAnalyzer* ma) {
             __block Node functionStartsNode;
 
-            uint64_t loadAddress = ((const Header*)ma)->preferredLoadAddress();
+            uint64_t loadAddress = ((const UnsafeHeader*)ma)->preferredLoadAddress();
             ma->forEachFunctionStart(^(uint64_t runtimeOffset) {
                 Node functionStart = makeNode(hex(loadAddress + runtimeOffset));
                 functionStartsNode.array.push_back(functionStart);

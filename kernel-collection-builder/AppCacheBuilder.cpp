@@ -37,10 +37,10 @@
 #include <CommonCrypto/CommonDigestSPI.h>
 
 #include "Architecture.h"
-#include "Header.h"
+#include "UnsafeHeader.h"
 
 using mach_o::Architecture;
-using mach_o::Header;
+using mach_o::UnsafeHeader;
 
 AppCacheBuilder::AppCacheBuilder(const DyldSharedCache::CreateOptions& options,
                                  const Options& appCacheOptions,
@@ -344,7 +344,7 @@ void AppCacheBuilder::parseStubs()
 
         // Find __TEXT_EXEC __auth_stubs, and remove it if we have it
         __block bool lastSectionWasAuthStubs = false;
-        ((const Header*)ma)->forEachSection(^(const Header::SectionInfo& sectInfo, bool& stop) {
+        ((const UnsafeHeader*)ma)->forEachSection(^(const UnsafeHeader::SectionInfo& sectInfo, bool& stop) {
             if ( sectInfo.segmentName != "__TEXT_EXEC" )
                 return;
             lastSectionWasAuthStubs = false;
@@ -366,17 +366,17 @@ void AppCacheBuilder::assignSegmentRegionsAndOffsets()
     // so first make space for all the cache location objects so that we get the order the same
     // as the LC_SEGMENTs
     for (DylibInfo& dylib : sortedDylibs) {
-        ((const Header*)dylib.input->mappedFile.mh)->forEachSegment(^(const Header::SegmentInfo& segInfo, bool& stop) {
+        ((const UnsafeHeader*)dylib.input->mappedFile.mh)->forEachSegment(^(const UnsafeHeader::SegmentInfo& segInfo, bool& stop) {
             dylib.cacheLocation.push_back({});
         });
     }
 
     // If we are building the kernel collection, then inherit the base address of the statically linked kernel
-    const Header* kernelHdr = nullptr;
+    const UnsafeHeader* kernelHdr = nullptr;
     if ( appCacheOptions.cacheKind == Options::AppCacheKind::kernel ) {
         for (DylibInfo& dylib : sortedDylibs) {
             if ( dylib.input->mappedFile.mh->isStaticExecutable() ) {
-                kernelHdr = (const Header*)dylib.input->mappedFile.mh;
+                kernelHdr = (const UnsafeHeader*)dylib.input->mappedFile.mh;
                 break;
             }
         }
@@ -396,7 +396,7 @@ void AppCacheBuilder::assignSegmentRegionsAndOffsets()
         minimumSegmentAlignmentP2 = 12;
     }
 
-    auto getMinAlignment = ^(const Header* hdr) {
+    auto getMinAlignment = ^(const UnsafeHeader* hdr) {
         // The kernel wants to be able to unmap its own segments so always align it.
         // And align the pageable KC as each kext can be mapped individually
         if ( hdr == kernelHdr )
@@ -415,7 +415,7 @@ void AppCacheBuilder::assignSegmentRegionsAndOffsets()
                 continue;
 
             __block uint64_t textSegVmAddr = 0;
-            ((const Header*)dylib.input->mappedFile.mh)->forEachSegment(^(const Header::SegmentInfo& segInfo, uint64_t sizeOfSections, uint32_t maxAlignOfSections, bool& stop) {
+            ((const UnsafeHeader*)dylib.input->mappedFile.mh)->forEachSegment(^(const UnsafeHeader::SegmentInfo& segInfo, uint64_t sizeOfSections, uint32_t maxAlignOfSections, bool& stop) {
                 if ( segInfo.segmentName == "__TEXT" )
                     textSegVmAddr = segInfo.vmaddr;
                 if ( segInfo.initProt != (VM_PROT_READ) )
@@ -430,7 +430,7 @@ void AppCacheBuilder::assignSegmentRegionsAndOffsets()
                 if ( segInfo.segmentName == "__LINKINFO" )
                     return;
 
-                uint32_t minAlignmentP2 = getMinAlignment((const Header*)dylib.input->mappedFile.mh);
+                uint32_t minAlignmentP2 = getMinAlignment((const UnsafeHeader*)dylib.input->mappedFile.mh);
                 size_t copySize = std::min((size_t)segInfo.fileSize, (size_t)sizeOfSections);
                 uint64_t dstCacheSegmentSize = align(sizeOfSections, minAlignmentP2);
 
@@ -472,19 +472,34 @@ void AppCacheBuilder::assignSegmentRegionsAndOffsets()
     // __TEXT segments with r/x permissions
     {
         // __TEXT segments with r/x permissions
+
+        // Note we do a custom sort here to try keep xnu code at the end and close to TEXT_BOOT_EXEC
+        std::vector<AppCacheDylibInfo*> textSortedDylibs;
+        for ( AppCacheDylibInfo& dylib : sortedDylibs ) {
+            textSortedDylibs.push_back(&dylib);
+        }
+        std::stable_partition(textSortedDylibs.begin(), textSortedDylibs.end(), [](const AppCacheDylibInfo* a) {
+            // Sort static exe last, kexts first
+            const UnsafeHeader* hdr = (const UnsafeHeader*)a->input->mappedFile.mh;
+            return hdr->isKextBundle();
+        });
+
         __block uint64_t offsetInRegion = 0;
-        for (AppCacheDylibInfo& dylib : sortedDylibs) {
-            bool canBePacked = dylib.input->mappedFile.mh->hasSplitSeg();
+        for ( AppCacheDylibInfo* dylib : textSortedDylibs ) {
+            const UnsafeHeader* hdr = (const UnsafeHeader*)dylib->input->mappedFile.mh;
+
+            bool unusedSplitSegMarker = false;
+            bool canBePacked = hdr->hasSplitSegInfo(unusedSplitSegMarker);
             if (!canBePacked)
                 continue;
 
             __block uint64_t textSegVmAddr = 0;
-            ((const Header*)dylib.input->mappedFile.mh)->forEachSegment(^(const Header::SegmentInfo& segInfo, uint64_t segSizeOfSections, uint32_t maxAlignOfSections, bool& stop) {
+            hdr->forEachSegment(^(const UnsafeHeader::SegmentInfo& segInfo, uint64_t segSizeOfSections, uint32_t maxAlignOfSections, bool& stop) {
                 if ( segInfo.segmentName == "__TEXT" )
                     textSegVmAddr = segInfo.vmaddr;
                 if ( segInfo.segmentName == "__HIB" )
                     return;
-                if ( (segInfo.segmentName == "__TEXT_BOOT_EXEC" ) && dylib.input->mappedFile.mh->isStaticExecutable() )
+                if ( (segInfo.segmentName == "__TEXT_BOOT_EXEC" ) && hdr->isStaticExecutable() )
                     return;
                 if ( segInfo.initProt != (VM_PROT_READ | VM_PROT_EXECUTE) )
                    return;
@@ -492,10 +507,10 @@ void AppCacheBuilder::assignSegmentRegionsAndOffsets()
                 // We may have coalesced the sections at the end of this segment.  In that case, shrink the segment to remove them.
                 __block size_t sizeOfSections = 0;
                 __block bool foundRemovedSection = false;
-                ((const Header*)dylib.input->mappedFile.mh)->forEachSection(^(const Header::SectionInfo &sectInfo, bool &stopSection) {
+                hdr->forEachSection(^(const UnsafeHeader::SectionInfo &sectInfo, bool &stopSection) {
                     if ( sectInfo.segmentName != segInfo.segmentName )
                         return;
-                    if ( dylib._coalescer.sectionWasObliterated(segInfo.segmentName, sectInfo.sectionName) ) {
+                    if ( dylib->_coalescer.sectionWasObliterated(segInfo.segmentName, sectInfo.sectionName) ) {
                         foundRemovedSection = true;
                     } else {
                         sizeOfSections = sectInfo.address + sectInfo.size - segInfo.vmaddr;
@@ -507,13 +522,13 @@ void AppCacheBuilder::assignSegmentRegionsAndOffsets()
                 // kxld packs __TEXT_EXEC so we will do
                 // Note we align to at least 16-bytes as LDR's can scale up to 16 from their address
                 // and aligning them less than 16 would break that
-                uint32_t minAlignmentP2 = getMinAlignment((const Header*)dylib.input->mappedFile.mh);
+                uint32_t minAlignmentP2 = getMinAlignment(hdr);
                 offsetInRegion = align(offsetInRegion, std::max(maxAlignOfSections, 4U));
                 offsetInRegion = align(offsetInRegion, minAlignmentP2);
                 size_t copySize = std::min((size_t)segInfo.fileSize, (size_t)sizeOfSections);
                 uint64_t dstCacheSegmentSize = align(sizeOfSections, minAlignmentP2);
                 SegmentMappingInfo loc;
-                loc.srcSegment             = (uint8_t*)dylib.input->mappedFile.mh + segInfo.vmaddr - textSegVmAddr;
+                loc.srcSegment             = (uint8_t*)dylib->input->mappedFile.mh + segInfo.vmaddr - textSegVmAddr;
                 loc.segName                = segInfo.segmentName;
                 loc.dstSegment             = nullptr;
                 loc.dstCacheUnslidAddress  = offsetInRegion; // This will be updated later once we've assigned addresses
@@ -523,7 +538,7 @@ void AppCacheBuilder::assignSegmentRegionsAndOffsets()
                 loc.copySegmentSize        = (uint32_t)copySize;
                 loc.srcSegmentIndex        = segInfo.segmentIndex;
                 loc.parentRegion           = &readExecuteRegion;
-                dylib.cacheLocation[segInfo.segmentIndex] = loc;
+                dylib->cacheLocation[segInfo.segmentIndex] = loc;
                 offsetInRegion += loc.dstCacheSegmentSize;
             });
         }
@@ -558,7 +573,7 @@ void AppCacheBuilder::assignSegmentRegionsAndOffsets()
                 continue;
 
             __block uint64_t textSegVmAddr = 0;
-            ((const Header*)dylib.input->mappedFile.mh)->forEachSegment(^(const Header::SegmentInfo& segInfo, uint64_t segSizeOfSections, uint32_t maxAlignOfSections, bool& stop) {
+            ((const UnsafeHeader*)dylib.input->mappedFile.mh)->forEachSegment(^(const UnsafeHeader::SegmentInfo& segInfo, uint64_t segSizeOfSections, uint32_t maxAlignOfSections, bool& stop) {
                 if ( segInfo.segmentName == "__TEXT" )
                     textSegVmAddr = segInfo.vmaddr;
                 if ( segInfo.segmentName != "__TEXT_BOOT_EXEC" )
@@ -569,7 +584,7 @@ void AppCacheBuilder::assignSegmentRegionsAndOffsets()
                 // We may have coalesced the sections at the end of this segment.  In that case, shrink the segment to remove them.
                 __block size_t sizeOfSections = 0;
                 __block bool foundRemovedSection = false;
-                ((const Header*)dylib.input->mappedFile.mh)->forEachSection(^(const Header::SectionInfo &sectInfo, bool &stopSection) {
+                ((const UnsafeHeader*)dylib.input->mappedFile.mh)->forEachSection(^(const UnsafeHeader::SectionInfo &sectInfo, bool &stopSection) {
                     if ( sectInfo.segmentName != segInfo.segmentName )
                         return;
                     if ( dylib._coalescer.sectionWasObliterated(segInfo.segmentName, sectInfo.sectionName)) {
@@ -584,7 +599,7 @@ void AppCacheBuilder::assignSegmentRegionsAndOffsets()
                 // kxld packs __TEXT_EXEC so we will do
                 // Note we align to at least 16-bytes as LDR's can scale up to 16 from their address
                 // and aligning them less than 16 would break that
-                uint32_t minAlignmentP2 = getMinAlignment((const Header*)dylib.input->mappedFile.mh);
+                uint32_t minAlignmentP2 = getMinAlignment((const UnsafeHeader*)dylib.input->mappedFile.mh);
                 offsetInRegion = align(offsetInRegion, std::max(maxAlignOfSections, 4U));
                 offsetInRegion = align(offsetInRegion, minAlignmentP2);
                 size_t copySize = std::min((size_t)segInfo.fileSize, (size_t)sizeOfSections);
@@ -621,7 +636,7 @@ void AppCacheBuilder::assignSegmentRegionsAndOffsets()
                 continue;
 
             __block uint64_t textSegVmAddr = 0;
-            ((const Header*)dylib.input->mappedFile.mh)->forEachSegment(^(const Header::SegmentInfo& segInfo, uint64_t sizeOfSections, uint32_t maxAlignOfSections, bool& stop) {
+            ((const UnsafeHeader*)dylib.input->mappedFile.mh)->forEachSegment(^(const UnsafeHeader::SegmentInfo& segInfo, uint64_t sizeOfSections, uint32_t maxAlignOfSections, bool& stop) {
                 if ( segInfo.segmentName == "__TEXT" )
                     textSegVmAddr = segInfo.vmaddr;
                 if ( (segInfo.initProt & VM_PROT_EXECUTE) != 0 )
@@ -633,7 +648,7 @@ void AppCacheBuilder::assignSegmentRegionsAndOffsets()
                 if ( segInfo.segmentName == "__LATE_CONST" )
                     return;
                 // kxld packs __DATA_CONST so we will do
-                uint32_t minAlignmentP2 = getMinAlignment((const Header*)dylib.input->mappedFile.mh);
+                uint32_t minAlignmentP2 = getMinAlignment((const UnsafeHeader*)dylib.input->mappedFile.mh);
                 offsetInRegion = align(offsetInRegion, maxAlignOfSections);
                 offsetInRegion = align(offsetInRegion, minAlignmentP2);
                 size_t copySize = std::min((size_t)segInfo.fileSize, (size_t)sizeOfSections);
@@ -670,7 +685,7 @@ void AppCacheBuilder::assignSegmentRegionsAndOffsets()
                 continue;
 
             __block uint64_t textSegVmAddr = 0;
-            ((const Header*)dylib.input->mappedFile.mh)->forEachSegment(^(const Header::SegmentInfo& segInfo, uint64_t sizeOfSections, uint32_t maxAlignOfSections, bool& stop) {
+            ((const UnsafeHeader*)dylib.input->mappedFile.mh)->forEachSegment(^(const UnsafeHeader::SegmentInfo& segInfo, uint64_t sizeOfSections, uint32_t maxAlignOfSections, bool& stop) {
                 if ( segInfo.segmentName == "__TEXT" )
                     textSegVmAddr = segInfo.vmaddr;
                 if ( (segInfo.initProt & VM_PROT_EXECUTE) != 0 )
@@ -678,7 +693,7 @@ void AppCacheBuilder::assignSegmentRegionsAndOffsets()
                 if ( segInfo.segmentName != "__LATE_CONST" )
                     return;
                 // pack __LATE_CONST
-                uint32_t minAlignmentP2 = getMinAlignment((const Header*)dylib.input->mappedFile.mh);
+                uint32_t minAlignmentP2 = getMinAlignment((const UnsafeHeader*)dylib.input->mappedFile.mh);
                 offsetInRegion = align(offsetInRegion, maxAlignOfSections);
                 offsetInRegion = align(offsetInRegion, minAlignmentP2);
                 size_t copySize = std::min((size_t)segInfo.fileSize, (size_t)sizeOfSections);
@@ -715,14 +730,14 @@ void AppCacheBuilder::assignSegmentRegionsAndOffsets()
                 continue;
 
             __block uint64_t textSegVmAddr = 0;
-            ((const Header*)dylib.input->mappedFile.mh)->forEachSegment(^(const Header::SegmentInfo& segInfo, uint64_t sizeOfSections, uint32_t maxAlignOfSections, bool& stop) {
+            ((const UnsafeHeader*)dylib.input->mappedFile.mh)->forEachSegment(^(const UnsafeHeader::SegmentInfo& segInfo, uint64_t sizeOfSections, uint32_t maxAlignOfSections, bool& stop) {
                 if ( segInfo.segmentName == "__TEXT" )
                     textSegVmAddr = segInfo.vmaddr;
                 if ( (segInfo.initProt & VM_PROT_EXECUTE) != 0 )
                     return;
                 if ( segInfo.segmentName != "__DATA_SPTM" )
                     return;
-                uint32_t minAlignmentP2 = getMinAlignment((const Header*)dylib.input->mappedFile.mh);
+                uint32_t minAlignmentP2 = getMinAlignment((const UnsafeHeader*)dylib.input->mappedFile.mh);
                 offsetInRegion = align(offsetInRegion, maxAlignOfSections);
                 offsetInRegion = align(offsetInRegion, minAlignmentP2);
                 size_t copySize = std::min((size_t)segInfo.fileSize, (size_t)sizeOfSections);
@@ -770,7 +785,7 @@ void AppCacheBuilder::assignSegmentRegionsAndOffsets()
                 continue;
 
             __block uint64_t textSegVmAddr = 0;
-            ((const Header*)dylib.input->mappedFile.mh)->forEachSegment(^(const Header::SegmentInfo& segInfo, uint64_t sizeOfSections, uint32_t maxAlignOfSections, bool& stop) {
+            ((const UnsafeHeader*)dylib.input->mappedFile.mh)->forEachSegment(^(const UnsafeHeader::SegmentInfo& segInfo, uint64_t sizeOfSections, uint32_t maxAlignOfSections, bool& stop) {
                 if ( segInfo.segmentName == "__TEXT" )
                     textSegVmAddr = segInfo.vmaddr;
                 if ( segInfo.segmentName == "__HIB" )
@@ -783,7 +798,7 @@ void AppCacheBuilder::assignSegmentRegionsAndOffsets()
                 if ( segInfo.initProt != (VM_PROT_READ | VM_PROT_WRITE) )
                     return;
                 // kxld packs __DATA so we will do
-                uint32_t minAlignmentP2 = getMinAlignment((const Header*)dylib.input->mappedFile.mh);
+                uint32_t minAlignmentP2 = getMinAlignment((const UnsafeHeader*)dylib.input->mappedFile.mh);
                 offsetInRegion = align(offsetInRegion, maxAlignOfSections);
                 offsetInRegion = align(offsetInRegion, minAlignmentP2);
                 size_t copySize = std::min((size_t)segInfo.fileSize, (size_t)sizeOfSections);
@@ -821,7 +836,7 @@ void AppCacheBuilder::assignSegmentRegionsAndOffsets()
 
             __block uint64_t textSegVmAddr = 0;
             __block uint64_t hibernateAddress = 0;
-            ((const Header*)dylib.input->mappedFile.mh)->forEachSegment(^(const Header::SegmentInfo& segInfo, uint64_t sizeOfSections, uint32_t maxAlignOfSections, bool& stop) {
+            ((const UnsafeHeader*)dylib.input->mappedFile.mh)->forEachSegment(^(const UnsafeHeader::SegmentInfo& segInfo, uint64_t sizeOfSections, uint32_t maxAlignOfSections, bool& stop) {
                 if ( segInfo.segmentName == "__TEXT" )
                     textSegVmAddr = segInfo.vmaddr;
                 if ( segInfo.segmentName != "__HIB" )
@@ -878,7 +893,7 @@ void AppCacheBuilder::assignSegmentRegionsAndOffsets()
                 continue;
 
             __block uint64_t textSegVmAddr = 0;
-            ((const Header*)dylib.input->mappedFile.mh)->forEachSegment(^(const Header::SegmentInfo& segInfo, bool& stop) {
+            ((const UnsafeHeader*)dylib.input->mappedFile.mh)->forEachSegment(^(const UnsafeHeader::SegmentInfo& segInfo, bool& stop) {
                 if ( segInfo.segmentName == "__TEXT" )
                     textSegVmAddr = segInfo.vmaddr;
                 if ( segInfo.segmentName == "__LINKEDIT" )
@@ -994,7 +1009,7 @@ void AppCacheBuilder::assignSegmentRegionsAndOffsets()
             // Use the size of the TEXT sections in the cache.  This is required as we pack segments
             __block uint64_t textSegSize = 0;
             if ( info.ma != nullptr ) {
-                ((const Header*)info.ma)->forEachSegment(^(const Header::SegmentInfo& segInfo, uint64_t sizeOfSections, uint32_t maxAlignOfSections, bool& stop) {
+                ((const UnsafeHeader*)info.ma)->forEachSegment(^(const UnsafeHeader::SegmentInfo& segInfo, uint64_t sizeOfSections, uint32_t maxAlignOfSections, bool& stop) {
                     if ( segInfo.segmentName == "__TEXT" )
                         textSegSize = sizeOfSections == 0 ? segInfo.fileSize : sizeOfSections;
                 });
@@ -1070,7 +1085,7 @@ void AppCacheBuilder::assignSegmentRegionsAndOffsets()
         // The pageable/aux KCs should embed the UUID of the base kernel collection
         if ( existingKernelCollection != nullptr ) {
             uuid_t uuid = {};
-            bool foundUUID = ((mach_o::Header*)existingKernelCollection)->getUuid(uuid);
+            bool foundUUID = ((mach_o::UnsafeHeader*)existingKernelCollection)->getUuid(uuid);
             if ( !foundUUID ) {
                 _diagnostics.error("Could not find UUID in base kernel collection");
                 return;
@@ -1083,7 +1098,7 @@ void AppCacheBuilder::assignSegmentRegionsAndOffsets()
         // The aux KC should embed the UUID of the pageable kernel collection if we have one
         if ( pageableKernelCollection != nullptr ) {
             uuid_t uuid = {};
-            bool foundUUID = ((mach_o::Header*)pageableKernelCollection)->getUuid(uuid);
+            bool foundUUID = ((mach_o::UnsafeHeader*)pageableKernelCollection)->getUuid(uuid);
             if ( !foundUUID ) {
                 _diagnostics.error("Could not find UUID in pageable kernel collection");
                 return;
@@ -1121,7 +1136,7 @@ void AppCacheBuilder::assignSegmentRegionsAndOffsets()
     __block uint64_t offsetInRegion = 0;
     for (DylibInfo& dylib : sortedDylibs) {
         __block uint64_t textSegVmAddr = 0;
-        ((const Header*)dylib.input->mappedFile.mh)->forEachSegment(^(const Header::SegmentInfo& segInfo, uint64_t sizeOfSections, uint32_t maxAlignOfSections, bool& stop) {
+        ((const UnsafeHeader*)dylib.input->mappedFile.mh)->forEachSegment(^(const UnsafeHeader::SegmentInfo& segInfo, uint64_t sizeOfSections, uint32_t maxAlignOfSections, bool& stop) {
             if ( segInfo.segmentName == "__TEXT" )
                 textSegVmAddr = segInfo.vmaddr;
             if ( segInfo.initProt != VM_PROT_READ )
@@ -1154,7 +1169,7 @@ void AppCacheBuilder::assignSegmentRegionsAndOffsets()
     // Do all __LINKEDIT, regardless of split seg
     for (DylibInfo& dylib : sortedDylibs) {
         __block uint64_t textSegVmAddr = 0;
-        ((const Header*)dylib.input->mappedFile.mh)->forEachSegment(^(const Header::SegmentInfo& segInfo, uint64_t sizeOfSections, uint32_t maxAlignOfSections, bool& stop) {
+        ((const UnsafeHeader*)dylib.input->mappedFile.mh)->forEachSegment(^(const UnsafeHeader::SegmentInfo& segInfo, uint64_t sizeOfSections, uint32_t maxAlignOfSections, bool& stop) {
             if ( segInfo.segmentName == "__TEXT" )
                 textSegVmAddr = segInfo.vmaddr;
             if ( segInfo.initProt != VM_PROT_READ )
@@ -1205,7 +1220,7 @@ void AppCacheBuilder::assignSegmentRegionsAndOffsets()
         uint64_t numChainedFixupHeaders = 0;
         if ( fixupsArePerKext() ) {
             for (DylibInfo& dylib : sortedDylibs) {
-                numSegmentsForChainedFixups += ((const Header*)dylib.input->mappedFile.mh)->segmentCount();
+                numSegmentsForChainedFixups += ((const UnsafeHeader*)dylib.input->mappedFile.mh)->segmentCount();
             }
             numChainedFixupHeaders = sortedDylibs.size();
 
@@ -1598,7 +1613,7 @@ void VTablePatcher::findMetaclassDefinitions(std::map<std::string, DylibSymbols>
     DylibSymbols& kernelDylibSymbols = dylibsToSymbols[kernelID];
     SymbolLocation symbolLocation = findVTablePatchingSymbol("__ZTV11OSMetaClass", kernelDylibSymbols);
     if ( symbolLocation.found() ) {
-        baseMetaClassVTableLoc = (uint8_t*)kernelMA + (symbolLocation.vmAddr - ((const Header*)kernelMA)->preferredLoadAddress());
+        baseMetaClassVTableLoc = (uint8_t*)kernelMA + (symbolLocation.vmAddr - ((const UnsafeHeader*)kernelMA)->preferredLoadAddress());
 
         VTable& vtable = vtables[baseMetaClassVTableLoc];
         vtable.ma                   = kernelMA;
@@ -1640,7 +1655,7 @@ void VTablePatcher::findExistingFixups(Diagnostics& diags,
 
         // And add classic if we have them
         existingKernelCollection->forEachRebase(diags, ^(const char *opcodeName, const dyld3::MachOAnalyzer::LinkEditInfo &leInfo,
-                                                                const Header::SegmentInfo *segments,
+                                                                const UnsafeHeader::SegmentInfo *segments,
                                                                 bool segIndexSet, uint32_t ptrSize, uint8_t segmentIndex,
                                                                 uint64_t segmentOffset, dyld3::MachOAnalyzer::Rebase kind, bool &stop) {
             uint64_t rebaseVmAddr  = segments[segmentIndex].vmaddr + segmentOffset;
@@ -1709,7 +1724,7 @@ void VTablePatcher::findBaseKernelVTables(Diagnostics& diags, const dyld3::MachO
 
     bool kernelUsesClassicRelocs = existingKernelCollection->usesClassicRelocationsInKernelCollection();
     existingKernelCollection->forEachDylib(diags, ^(const dyld3::MachOAnalyzer *ma, const char *dylibID, bool &stop) {
-        uint64_t loadAddress = ((const Header*)ma)->preferredLoadAddress();
+        uint64_t loadAddress = ((const UnsafeHeader*)ma)->preferredLoadAddress();
 
         auto visitBaseKernelCollectionSymbols = ^(const char *symbolName, uint64_t n_value) {
             if ( strstr(symbolName, superMetaclassPointerToken) == nullptr )
@@ -1930,7 +1945,7 @@ void VTablePatcher::findPageableKernelVTables(Diagnostics& diags, const dyld3::M
     }
 
     pageableKernelCollection->forEachDylib(diags, ^(const dyld3::MachOAnalyzer *ma, const char *dylibID, bool &stop) {
-        uint64_t loadAddress = ((const Header*)ma)->preferredLoadAddress();
+        uint64_t loadAddress = ((const UnsafeHeader*)ma)->preferredLoadAddress();
         auto visitPageableKernelCollectionSymbols = ^(const char *symbolName, uint64_t n_value) {
             if ( strstr(symbolName, superMetaclassPointerToken) == nullptr )
                 return;
@@ -2163,7 +2178,7 @@ void VTablePatcher::findVTables(uint8_t currentLevel, const dyld3::MachOAnalyzer
         Diagnostics&                dylibDiags          = *dylib.diags;
         const std::vector<std::string>& dependencies    = dylib.dependencies;
 
-        uint64_t loadAddress = ((const Header*)ma)->preferredLoadAddress();
+        uint64_t loadAddress = ((const UnsafeHeader*)ma)->preferredLoadAddress();
         bool alreadyPatched = (ma == kernelMA);
         auto visitSymbols = ^(const char *symbolName, uint64_t n_value) {
             if ( strstr(symbolName, superMetaclassPointerToken) == nullptr )
@@ -2970,7 +2985,7 @@ void DylibFixups::processFixups(const std::map<std::string, DylibSymbols>& dylib
     __block bool foundUseOfMagicSymbol = false;
     __block bool foundMissingWeakImport = false;
 
-    const uint64_t loadAddress = ((const Header*)ma)->preferredLoadAddress();
+    const uint64_t loadAddress = ((const UnsafeHeader*)ma)->preferredLoadAddress();
     ma->forEachBind(dylibDiag, ^(uint64_t runtimeOffset, int libOrdinal, uint8_t bindType,
                                  const char *symbolName, bool weakImport, bool lazyBind, uint64_t addend, bool &stop) {
         // printf("Bind at 0x%llx to '%s'\n", runtimeOffset, symbolName);
@@ -3249,7 +3264,7 @@ void AppCacheBuilder::patchVTables(const dyld3::MachOAnalyzer* kernelMA,
                                    std::map<const uint8_t*, const VTableBindSymbol>& missingBindLocations)
 {
     // We only patch vtables on macOS.  Luckily the platform is in the kernel binary
-    if ( !((mach_o::Header*)kernelMA)->builtForPlatform(mach_o::Platform::macOS) )
+    if ( !((mach_o::UnsafeHeader*)kernelMA)->builtForPlatform(mach_o::Platform::macOS) )
         return;
 
     auto vtablePatcherOwner = std::make_unique<VTablePatcher>(numFixupLevels);
@@ -3263,13 +3278,13 @@ void AppCacheBuilder::patchVTables(const dyld3::MachOAnalyzer* kernelMA,
         // The kernel base address is still __TEXT, even if __DATA or __HIB is mapped prior to that.
         // The loader may have loaded something before __TEXT, but the existingKernelCollection pointer still corresponds to __TEXT
         __block uint64_t baseAddress = ~0ULL;
-        ((const Header*)existingKernelCollection)->forEachSegment(^(const Header::SegmentInfo& info, bool& stop) {
+        ((const UnsafeHeader*)existingKernelCollection)->forEachSegment(^(const UnsafeHeader::SegmentInfo& info, bool& stop) {
             baseAddress = std::min(baseAddress, info.vmaddr);
         });
 
         // The existing collection is a pointer to the mach_header for the baseKC, but __HIB and other segments may be before that
         // Offset those here
-        uint64_t basePointerOffset = ((const Header*)existingKernelCollection)->preferredLoadAddress() - baseAddress;
+        uint64_t basePointerOffset = ((const UnsafeHeader*)existingKernelCollection)->preferredLoadAddress() - baseAddress;
         const uint8_t* basePointer = (uint8_t*)existingKernelCollection - basePointerOffset;
 
         vtablePatcher.addKernelCollection(existingKernelCollection, Options::AppCacheKind::kernel,
@@ -3281,13 +3296,13 @@ void AppCacheBuilder::patchVTables(const dyld3::MachOAnalyzer* kernelMA,
         // The kernel base address is still __TEXT, even if __DATA or __HIB is mapped prior to that.
         // The loader may have loaded something before __TEXT, but the existingKernelCollection pointer still corresponds to __TEXT
         __block uint64_t baseAddress = ~0ULL;
-        ((const Header*)pageableKernelCollection)->forEachSegment(^(const Header::SegmentInfo& info, bool& stop) {
+        ((const UnsafeHeader*)pageableKernelCollection)->forEachSegment(^(const UnsafeHeader::SegmentInfo& info, bool& stop) {
             baseAddress = std::min(baseAddress, info.vmaddr);
         });
 
         // The existing collection is a pointer to the mach_header for the baseKC, but __HIB and other segments may be before that
         // Offset those here
-        uint64_t basePointerOffset = ((const Header*)pageableKernelCollection)->preferredLoadAddress() - baseAddress;
+        uint64_t basePointerOffset = ((const UnsafeHeader*)pageableKernelCollection)->preferredLoadAddress() - baseAddress;
         const uint8_t* basePointer = (uint8_t*)pageableKernelCollection - basePointerOffset;
 
         vtablePatcher.addKernelCollection(pageableKernelCollection, Options::AppCacheKind::pageableKC,
@@ -3827,7 +3842,7 @@ void AppCacheBuilder::processFixups()
             }
 
             // Emit branch stubs
-            const uint64_t loadAddress = ((const Header*)dylibFixup.ma)->preferredLoadAddress();
+            const uint64_t loadAddress = ((const UnsafeHeader*)dylibFixup.ma)->preferredLoadAddress();
             for (const DylibFixups::BranchStubData& branchData : dylibFixup.branchStubs) {
                 // Branching from the auxKC to baseKC.  ld64 doesn't emit a stub in x86_64 kexts
                 // so we need to synthesize one now
@@ -3898,7 +3913,7 @@ void AppCacheBuilder::processFixups()
         forEachCacheDylib(^(const dyld3::MachOAnalyzer *ma, const std::string &dylibID, DylibStripMode stripMode,
                             const std::vector<std::string> &dependencies, Diagnostics& dylibDiag, bool &stopDylib) {
             intptr_t slide = ma->getSlide();
-            ((const Header*)ma)->forEachSection(^(const Header::SectionInfo &sectInfo,
+            ((const UnsafeHeader*)ma)->forEachSection(^(const UnsafeHeader::SectionInfo &sectInfo,
                                  bool &stopSection) {
                 const uint8_t* content  = (uint8_t*)(sectInfo.address + slide);
                 const uint8_t* start    = (uint8_t*)content;
@@ -3987,9 +4002,9 @@ void AppCacheBuilder::writeFixups()
     if ( header.dynSymbolTable != nullptr ) {
         classicRelocsBufferStart = byteBuffer.begin();
 
-        const Header* cacheMH = (const Header*)header.header;
+        const UnsafeHeader* cacheMH = (const UnsafeHeader*)header.header;
         __block uint64_t localRelocBaseAddress = 0;
-        cacheMH->forEachSegment(^(const Header::SegmentInfo &info, bool &stop) {
+        cacheMH->forEachSegment(^(const UnsafeHeader::SegmentInfo &info, bool &stop) {
             if ( info.initProt & VM_PROT_WRITE ) {
                 localRelocBaseAddress = info.vmaddr;
                 stop = true;
@@ -3998,8 +4013,8 @@ void AppCacheBuilder::writeFixups()
 
         const std::vector<void*> allRebaseTargets = _aslrTracker.getRebaseTargets();
 
-        const Header* kernelMH = (const Header*)getKernelStaticExecutableFromCache();
-        kernelMH->forEachSegment(^(const Header::SegmentInfo &info, bool &stop) {
+        const UnsafeHeader* kernelMH = (const UnsafeHeader*)getKernelStaticExecutableFromCache();
+        kernelMH->forEachSegment(^(const UnsafeHeader::SegmentInfo &info, bool &stop) {
             std::vector<void*> segmentRebaseTargets;
             uint64_t segmentVMOffset = info.vmaddr - cacheBaseAddress;
             const uint8_t* segmentStartAddr = (const uint8_t*)(_fullAllocatedBuffer + segmentVMOffset);
@@ -4058,7 +4073,7 @@ void AppCacheBuilder::writeFixups()
         assert(existingKernelCollection != nullptr);
         // The auxKC is mapped with __DATA first, so we need to get either the __DATA or __TEXT depending on what is earliest
         __block uint64_t baseAddress = ~0ULL;
-        ((const Header*)existingKernelCollection)->forEachSegment(^(const Header::SegmentInfo& info, bool& stop) {
+        ((const UnsafeHeader*)existingKernelCollection)->forEachSegment(^(const UnsafeHeader::SegmentInfo& info, bool& stop) {
             baseAddress = std::min(baseAddress, info.vmaddr);
         });
         levelBaseAddresses[0] = baseAddress;
@@ -4067,7 +4082,7 @@ void AppCacheBuilder::writeFixups()
     if ( pageableKernelCollection != nullptr ) {
         // We may have __DATA first, so we need to get either the __DATA or __TEXT depending on what is earliest
         __block uint64_t baseAddress = ~0ULL;
-        ((const Header *)pageableKernelCollection)->forEachSegment(^(const Header::SegmentInfo& info, bool& stop) {
+        ((const UnsafeHeader*)pageableKernelCollection)->forEachSegment(^(const UnsafeHeader::SegmentInfo& info, bool& stop) {
             baseAddress = std::min(baseAddress, info.vmaddr);
         });
         uint8_t fixupLevel = getFixupLevel(Options::AppCacheKind::pageableKC);
@@ -4215,11 +4230,11 @@ void AppCacheBuilder::writeFixups()
         forEachCacheDylib(^(const dyld3::MachOAnalyzer *ma, const std::string &dylibID,
                             DylibStripMode stripMode, const std::vector<std::string> &dependencies,
                             Diagnostics& dylibDiag, bool &stop) {
-            uint64_t loadAddress = ((const Header*)ma)->preferredLoadAddress();
+            uint64_t loadAddress = ((const UnsafeHeader*)ma)->preferredLoadAddress();
 
             __block uint64_t                    numSegments = 0;
             __block std::vector<SegmentFixups>  segmentFixups;
-            ((const Header*)ma)->forEachSegment(^(const Header::SegmentInfo &info, bool &stopSegments) {
+            ((const UnsafeHeader*)ma)->forEachSegment(^(const UnsafeHeader::SegmentInfo &info, bool &stopSegments) {
                 // Third party kexts have writable __TEXT, so we need to add starts for all segments
                 // other than LINKEDIT
                 bool segmentCanHaveFixups = false;
@@ -4261,7 +4276,7 @@ void AppCacheBuilder::writeFixups()
                 assert(_is64);
                 typedef Pointer64<LittleEndian> P;
 
-                uint32_t freeSpace = ((const Header*)ma)->loadCommandsFreeSpace();
+                uint32_t freeSpace = ((const UnsafeHeader*)ma)->loadCommandsFreeSpace();
                 assert(freeSpace >= sizeof(macho_linkedit_data_command<P>));
                 uint8_t* endOfLoadCommands = (uint8_t*)ma + sizeof(macho_header<P>) + ma->sizeofcmds;
 
@@ -4573,7 +4588,7 @@ void AppCacheBuilder::allocateBuffer()
 
     const thread_command* unixThread = nullptr;
     if (const DylibInfo* dylib = getKernelStaticExecutableInputFile()) {
-        unixThread = ((const Header*)dylib->input->mappedFile.mh)->unixThreadLoadCommand();
+        unixThread = ((const UnsafeHeader*)dylib->input->mappedFile.mh)->unixThreadLoadCommand();
     }
 
     if (_is64) {
@@ -4830,7 +4845,7 @@ void AppCacheBuilder::generateCacheHeader() {
         if ( header.unixThread != nullptr ) {
             const DylibInfo* dylib = getKernelStaticExecutableInputFile();
             const dyld3::MachOAnalyzer* ma = dylib->input->mappedFile.mh;
-            ((const Header*)ma)->forEachSegment(^(const Header::SegmentInfo &info, bool &stop) {
+            ((const UnsafeHeader*)ma)->forEachSegment(^(const UnsafeHeader::SegmentInfo &info, bool &stop) {
                 uint64_t startAddress = dylib->input->mappedFile.mh->entryAddrFromThreadCmd(header.unixThread);
                 if ( (startAddress < info.vmaddr) || (startAddress >= (info.vmaddr + info.vmsize)) )
                     return;
@@ -5098,7 +5113,7 @@ void AppCacheBuilder::generatePrelinkInfo() {
         // Skip codeless kext's
         if ( ma == nullptr )
             continue;
-        uint64_t loadAddress = ((const Header*)ma)->preferredLoadAddress();
+        uint64_t loadAddress = ((const UnsafeHeader*)ma)->preferredLoadAddress();
 
         // _PrelinkExecutableLoadAddr
         CFNumberRef loadAddrRef = CFNumberCreate(kCFAllocatorDefault, kCFNumberLongLongType, &loadAddress);
@@ -5150,7 +5165,7 @@ void AppCacheBuilder::generatePrelinkInfo() {
             }
             __block uint64_t textSegmnentVMAddr = 0;
             __block uint64_t textSegmnentVMSize = 0;
-            ((const Header*)ma)->forEachSegment(^(const Header::SegmentInfo &info, bool &stop) {
+            ((const UnsafeHeader*)ma)->forEachSegment(^(const UnsafeHeader::SegmentInfo &info, bool &stop) {
                 if ( info.segmentName == "__TEXT" ) {
                     textSegmnentVMAddr = info.vmaddr;
                     textSegmnentVMSize = info.vmsize;
@@ -5541,11 +5556,11 @@ static void getSectionLayout(const dyld3::MachOAnalyzer* ma,
                              uint32_t& authStubSectionIndex)
 {
     // section index 0 refers to mach_header
-    sectionAddresses.push_back(((const Header*)ma)->preferredLoadAddress());
+    sectionAddresses.push_back(((const UnsafeHeader*)ma)->preferredLoadAddress());
     sectionBuffers.push_back(nullptr);
 
     intptr_t slide = ma->getSlide();
-    ((const Header*)ma)->forEachSection(^(const Header::SectionInfo& sectInfo, bool& stop) {
+    ((const UnsafeHeader*)ma)->forEachSection(^(const UnsafeHeader::SectionInfo& sectInfo, bool& stop) {
         if ( (sectInfo.segmentName == "__TEXT_EXEC") && (sectInfo.sectionName == "__auth_stubs") )
             authStubSectionIndex = (uint32_t)sectionAddresses.size();
         sectionAddresses.push_back(sectInfo.address);

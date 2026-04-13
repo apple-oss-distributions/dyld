@@ -3,3 +3,5 @@
 OTHER_LDFLAGS = $(inherited) -lCrashReporterClient
 
 GCC_PREPROCESSOR_DEFINITIONS = $(inherited) BUILDING_CACHE_BUILDER=1 BUILDING_APP_CACHE_UTIL=1
+
+OTHER_LDFLAGS = -lCrashReporterClient

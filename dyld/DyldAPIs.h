@@ -39,7 +39,7 @@ namespace dyld4 {
 
 struct RuntimeLocks;
 
-#if BUILDING_DYLD
+#if BUILDING_DYLD || BUILDING_UNIT_TESTS
 #define RUNTIME_STATE_INHERITANCE public
 #else
 #define RUNTIME_STATE_INHERITANCE private
@@ -295,10 +295,6 @@ public:
     // Added iOS 18.4, macOS 15.4
     //
     virtual void                                    _dyld_for_each_prewarming_range(PrewarmingDataFunc callback);
-
-    //
-    // Added iOS 18.4, macOS 15.4
-    //
     virtual struct dyld_all_image_infos*            _dyld_all_image_infos_TEMP();
 #if SUPPPORT_PRE_LC_MAIN
     virtual MainFunc                                _dyld_get_main_func();
@@ -309,9 +305,21 @@ public:
     virtual void                                    _dyld_stack_range(const void** stack_bottom, const void** stack_top);
 
     //
-    // Added iOS 19.0, macOS 16.0
+    // Added iOS 26.0, macOS 26.0
     //
     virtual void                                    _dyld_call_with_writable_tpro_memory(void (*func)(void*), void* ctx);
+
+    //
+    // Added macOS 26.4
+    //
+    virtual bool                                    _dyld_shared_cache_file_path_containing_address(const void* addr, char path[PATH_MAX], uint64_t* fileOffset);
+    virtual void                                    _dyld_lazy_load(uint32_t* flag, const mach_header* mh);
+
+
+    //
+    // Added macOS 26.4
+    //
+    virtual const mach_header*                      _dyld_get_dyld_header();
 
 private:
 
@@ -324,16 +332,16 @@ private:
     // internal helpers
     uint32_t                    getSdkVersion(const mach_header* mh);
     dyld_build_version_t        mapFromVersionSet(dyld_build_version_t version, mach_o::Platform platform);
-    mach_o::Version32           linkedDylibVersion(const mach_o::Header* header, const char* installname);
-    mach_o::Version32           deriveVersionFromDylibs(const mach_o::Header* header);
-    mach_o::PlatformAndVersions getPlatformAndVersions(const mach_o::Header* header);
+    mach_o::Version32           linkedDylibVersion(const mach_o::UnsafeHeader* header, const char* installname);
+    mach_o::Version32           deriveVersionFromDylibs(const mach_o::UnsafeHeader* header);
+    mach_o::PlatformAndVersions getPlatformAndVersions(const mach_o::UnsafeHeader* header);
     bool                        findImageMappedAt(const void* addr, const MachOLoaded** ml, bool* neverUnloads = nullptr, const char** path = nullptr, const void** segAddr = nullptr, uint64_t* segSize = nullptr, uint8_t* segPerms = nullptr, const Loader** loader = nullptr);
     void                        clearErrorString() API_UNAVAILABLE(driverkit);
     void                        setErrorString(const char* format, ...) __attribute__((format(printf, 2, 3))) API_UNAVAILABLE(driverkit);
     const Loader*               findImageContaining(const void* addr);
     bool                        flatFindSymbol(const char* symbolName, void** symbolAddress, const mach_header** foundInImageAtLoadAddress);
     bool                        validLoader(const Loader* maybeLoader);
-    mach_o::PlatformAndVersions getImagePlatformAndVersions(const mach_o::Header* hdr);
+    mach_o::PlatformAndVersions getImagePlatformAndVersions(const mach_o::UnsafeHeader* hdr);
     bool                        addressLookupsDisabled(const char* symbolName=nullptr) const;
 };
 

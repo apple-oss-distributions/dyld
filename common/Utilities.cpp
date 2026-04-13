@@ -24,9 +24,16 @@
 
 #include <string.h>
 #include <assert.h>
+#include <unistd.h>
+#include <TargetConditionals.h>
 #if __has_feature(ptrauth_calls)
     #include <ptrauth.h>
 #endif
+
+extern "C" {
+#include <corecrypto/ccdigest.h>
+#include <corecrypto/ccsha2.h>
+}
 
 #include "Utilities.h"
 
@@ -107,6 +114,62 @@ uint64_t signPointer(uint64_t unsignedAddr, void* loc, bool addrDiv, uint16_t di
         default:
             assert(0 && "invalid signing key");
     }
+}
+#endif
+
+
+#if !TARGET_OS_EXCLAVEKIT
+ssize_t write64(int fd, const void* buf, size_t nbyte)
+{
+    const uint8_t* uchars = (uint8_t*)buf;
+    ssize_t        total  = 0;
+
+    while (nbyte)
+    {
+        /*
+         * If we were writing socket- or stream-safe code we'd chuck the
+         * entire buf to write(2) and then gracefully re-request bytes that
+         * didn't get written. But write(2) will return EINVAL if you ask it to
+         * write more than 2^31-1 bytes. So instead we actually need to throttle
+         * the input to write.
+         *
+         * Historically code using write(2) to write to disk will assert that
+         * that all of the requested bytes were written. It seems harmless to
+         * re-request bytes as one does when writing to streams, with the
+         * compromise that we will return immediately when write(2) returns 0
+         * bytes written.
+         */
+        size_t limit   = 0x7FFFFFFF;
+        size_t towrite = nbyte < limit ? nbyte : limit;
+        ssize_t wrote  = ::write(fd, uchars, towrite);
+        if ( wrote == -1) {
+            // failure
+            return -1;
+        }
+        else if ( wrote == 0 ) {
+            // done
+            break;
+        }
+        else {
+            nbyte  -= wrote;
+            uchars += wrote;
+            total  += wrote;
+        }
+    }
+
+    return total;
+}
+#endif
+
+#if !TARGET_OS_EXCLAVEKIT
+void sha256(std::span<const uint8_t> inputBuffer, std::span<uint8_t,32> result)
+{
+    const struct ccdigest_info* di = ccsha256_di();
+    ccdigest_di_decl(di, tempBuf); // declares tempBuf array in stack
+    ccdigest_init(di, tempBuf);
+    ccdigest_update(di, tempBuf, inputBuffer.size(), inputBuffer.data());
+    ccdigest_final(di, tempBuf, result.data());
+    ccdigest_di_clear(di, tempBuf);
 }
 #endif
 

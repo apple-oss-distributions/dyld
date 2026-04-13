@@ -47,6 +47,7 @@ typedef uint32_t dyld_platform_t;
 
 #define DYLD_MACOS_12_ALIGNED_SPI SPI_AVAILABLE(macos(12.0), ios(15.0), tvos(15.0), watchos(8.0), bridgeos(6.0))
 #define DYLD_MACOS_13_ALIGNED_SPI SPI_AVAILABLE(macos(13.0), ios(16.0), tvos(16.0), watchos(9.0), bridgeos(7.0))
+#define DYLD_MACOS_26_4_ALIGNED_SPI SPI_AVAILABLE(macos(26.4), ios(26.4), tvos(26.4), watchos(26.4), bridgeos(10.4), visionos(26.4))
 
 #if BUILDING_CACHE_BUILDER || ENABLE_DYLD_STATIC_ROSETTA_RUNTIME_SUPPORT
 #define DYLD_MACOS_12_ALIGNED_AND_STATIC_SPI
@@ -188,6 +189,19 @@ DYLD_MACOS_12_ALIGNED_SPI
 extern void dyld_for_each_installed_shared_cache(void (^block)(dyld_shared_cache_t cache));
 
 /*
+ * dyld_for_each_installed_shared_cache_ex
+ *   Iterates over each shared cache provided by the operating system and calls block with the dyld_shared_cache_t for that shared cache
+ *   The dyld_shared_cache_t is only valid for the body of the block. As the caches are not used in a live process their base_address will be
+ *   set as if the cache was mapped with no ASLR slide, and all dyld_image_t's will have their vmAddr's set as though they are unslid.
+ *
+ *   This is extended interface enabled early returns via a block parameter, and will optionally scan for shared caches provides by simulators
+ *
+ */
+DYLD_MACOS_26_4_ALIGNED_SPI
+extern void dyld_for_each_installed_shared_cache_ex(bool includeNonSystemCaches, void (^block)(dyld_shared_cache_t cache, bool* stop));
+
+
+/*
  * dyld_for_each_installed_shared_cache_with_system_path
  *   Iterates over each shared cache provided by the operating system installed at root_path, and calls block with the dyld_shared_cache_t for
  *   that shared cache The dyld_shared_cache_t is only valid for the body of the block. As the caches are not used in a live process their
@@ -281,7 +295,7 @@ extern void dyld_shared_cache_for_each_image(dyld_shared_cache_t cache, void (^b
  *   Returns true if a UUID was returned, false if not
  */
 DYLD_MACOS_12_ALIGNED_SPI
-extern bool dyld_image_copy_uuid(dyld_image_t cache, uuid_t* uuid);
+extern bool dyld_image_copy_uuid(dyld_image_t image, uuid_t* uuid);
 
 /*
  * dyld_image_get_installname
@@ -350,6 +364,33 @@ DYLD_MACOS_12_ALIGNED_SPI
 extern bool dyld_image_local_nlist_content_4Symbolication(dyld_image_t image,
                                                  void (^contentReader)(const void* nlistStart, uint64_t nlistCount,
                                                                        const char* stringTable));
+
+// DO NOT USE
+// TThese are private interfaces intended only for use by HWTrace. They depend on the new underluing implementation
+// of `dyld_image_t` present in `dyld` framework to allow us to extend the lifetme of the objects beyond what the original
+// SPIs could provide, so they only work in certain configs.
+DYLD_MACOS_26_4_ALIGNED_SPI extern void dyld_image_retain_4HWTrace(dyld_image_t image);
+DYLD_MACOS_26_4_ALIGNED_SPI extern void dyld_image_release_4HWTrace(dyld_image_t image);
+DYLD_MACOS_26_4_ALIGNED_SPI extern dispatch_data_t dyld_image_segment_data_4HWTrace(dyld_image_t image, const char* segmentName);
+DYLD_MACOS_26_4_ALIGNED_SPI extern bool _dyld_framework_HWTrace_spis_enabled(void);
+
+/*
+ * dyld_process_snapshot_create_metrics
+ *   Creates a dictionary of metrics for the given process snapshot.
+ *
+ *   IMPLEMENTATION NOTE: This function returns void* to avoid CFDictionaryRef dependency issues.
+ *   The returned pointer should be cast to CFDictionaryRef by the caller. This hack prevents
+ *   module conflicts and build failures that occur when CFDictionaryRef is used directly in
+ *   this header, as it can cause conflicting definitions across different projects that use
+ *   this API. The actual return value is a retained CFDictionaryRef that the caller is
+ *   responsible for releasing.
+ *
+ *   Usage:
+ *     CFDictionaryRef metrics = (CFDictionaryRef)dyld_process_snapshot_create_metrics(snapshot);
+ *     // ... use metrics ...
+ *     CFRelease(metrics);
+ */
+DYLD_MACOS_26_4_ALIGNED_SPI void* dyld_process_snapshot_create_metrics(dyld_process_snapshot_t snapshot);
 
 
 #ifdef __cplusplus

@@ -26,8 +26,6 @@
 
 #if !TARGET_OS_EXCLAVEKIT
 
-#include <System/sys/csr.h> // For csr_check()
-
 #include "dyld_introspection.h"
 #include "dyld_cache_format.h"
 #include "ProcessAtlas.h"
@@ -77,50 +75,15 @@ FileManager& defaultFileManager() {
 #if BUILDING_LIBDYLD
 #include <libgen.h>
 extern int _NSGetExecutablePath(char* buf, uint32_t* bufsize);
-IntrospectionVtable* dyldFrameworkIntrospectionVtable() {
+const IntrospectionVtable* dyldFrameworkIntrospectionVtable() {
     static IntrospectionVtable* vtable = nullptr;
     static dispatch_once_t onceToken;
     dispatch_once(&onceToken, ^{
         bool useAtlas = true;
-        char pathBuffer[4096];
-        uint32_t legnth = 4096;
-        _NSGetExecutablePath(&pathBuffer[0], &legnth);
-        const char* baseName = basename(pathBuffer);
-        if (strcmp(baseName, "ReportCrash") == 0) {
-            bool internalInstall = false;
-#if TARGET_OS_IPHONE && !TARGET_OS_SIMULATOR
-            uint32_t devFlags = *((uint32_t*)_COMM_PAGE_DEV_FIRM);
-            if ((devFlags & 1) == 1) {
-                internalInstall = true;
-            }
-#elif TARGET_OS_OSX
-            if (::csr_check(CSR_ALLOW_APPLE_INTERNAL) == 0) {
-                internalInstall = true;
-            }
-#endif
-            // Get a value 0..<100
-            uint32_t randValue = arc4random_uniform(100);
-            // Increase this up to 99 for all runs
-            if (!internalInstall || (randValue > 20)) {
-                useAtlas = false;
-            }
-        }
-        if ((strcmp(baseName, "com.apple.dt.instruments.dtsecurity") == 0)
-            || (strcmp(baseName, "DTServiceHub") == 0)
-            || (strcmp(baseName, "trace") == 0)
-            || (strcmp(baseName, "trace_internal") == 0)
-            || (strcmp(baseName, "apple-hwtrace") == 0)
-            || (strcmp(baseName, "Xcode") == 0)) {
-            useAtlas = false;
-        }
 #if !TARGET_OS_EXCLAVEKIT
         // Check boot-args after builtin overrides so they take precedence
         if (gAPIs->_dyld_commpage().disableAtlasUsage) {
             useAtlas = false;
-        }
-        // CHheck enablement secons so that if both  disable and enable bits are set it defaults to enabled
-        if (gAPIs->_dyld_commpage().enableAtlasUsage) {
-            useAtlas = true;
         }
 #endif
         if (!useAtlas) {
@@ -128,16 +91,10 @@ IntrospectionVtable* dyldFrameworkIntrospectionVtable() {
         }
         // We want to use the atlas, so try to open up Dyld.framework
         void* handle = dlopen("/System/Library/PrivateFrameworks/Dyld.framework/Dyld", RTLD_LOCAL);
-#if TARGET_OS_OSX
-        // One OS X with versioned paths if the library is not n the cache the symlink will be in
-        // base system and the dylib will be in the cryptex which will result in the above dlopen()
-        // failing. Once this gets through a single build and is in the cache that will be never be an issue
-        //FIXME: We can remove this after the first submission, once the paths have been added
-        if (!handle) {
-            handle = dlopen("/System/Library/PrivateFrameworks/Dyld.framework/Versions/A/Dyld", RTLD_LOCAL);
-        }
-#endif
         vtable = (IntrospectionVtable*)dlsym(handle, "_dyld_legacy_introspection_vtable");
+        if (vtable->version >= 3) {
+            *(vtable->allImageInfos) = (mach_vm_address_t)gAPIs->_dyld_all_image_infos_TEMP();
+        }
     });
     return vtable;
 }
@@ -353,6 +310,17 @@ void dyld_for_each_installed_shared_cache_with_system_path(const char* root_path
     });
 }
 
+extern void dyld_for_each_installed_shared_cache_ex(bool includeNonSystemCaches, void (^block)(dyld_shared_cache_t cache, bool* stop)) {
+#if BUILDING_LIBDYLD
+    if ( const IntrospectionVtable* vtable = dyldFrameworkIntrospectionVtable() ) {
+        return vtable->dyld_for_each_installed_shared_cache_ex(includeNonSystemCaches, block);
+    }
+#endif /* BUILDING_LIBDYLD */
+    assert(0 && "dyld_for_each_installed_shared_cache_ex is not supported in legacy mode");
+}
+
+
+
 void dyld_for_each_installed_shared_cache(void (^block)(dyld_shared_cache_t cache)) {
 #if BUILDING_LIBDYLD
     if ( const IntrospectionVtable* vtable = dyldFrameworkIntrospectionVtable() ) {
@@ -392,6 +360,56 @@ bool dyld_image_content_for_segment(dyld_image_t image, const char* segmentName,
 #endif /* BUILDING_LIBDYLD */
     return ((Image*)image)->contentForSegment(segmentName, contentReader);
 }
+
+void dyld_image_retain_4HWTrace(dyld_image_t image) {
+#if BUILDING_LIBDYLD
+    if ( const IntrospectionVtable* vtable = dyldFrameworkIntrospectionVtable() ) {
+        vtable->dyld_image_retain_4HWTrace(image);
+        return;
+    }
+#endif /* BUILDING_LIBDYLD */
+    assert(0 &&"dyld_image_retain4ProcessTrace is not supported in legacy mode");
+}
+
+void dyld_image_release_4HWTrace(dyld_image_t image) {
+#if BUILDING_LIBDYLD
+    if ( const IntrospectionVtable* vtable = dyldFrameworkIntrospectionVtable() ) {
+        vtable->dyld_image_release_4HWTrace(image);
+        return;
+    }
+#endif /* BUILDING_LIBDYLD */
+    assert(0 &&" dyld_image_release_4HWTrace is not supported in legacy mode");
+}
+
+dispatch_data_t dyld_image_segment_data_4HWTrace(dyld_image_t image, const char* segmentName) {
+#if BUILDING_LIBDYLD
+    if ( const IntrospectionVtable* vtable = dyldFrameworkIntrospectionVtable() ) {
+        return vtable->dyld_image_segment_data_4HWTrace(image, segmentName);
+    }
+#endif /* BUILDING_LIBDYLD */
+    assert(0 && "dyld_image_segment_data_4HWTrace is not supported in legacy mode");
+    return NULL;
+}
+
+bool _dyld_framework_HWTrace_spis_enabled(void) {
+#if BUILDING_LIBDYLD
+    if ( const IntrospectionVtable* vtable = dyldFrameworkIntrospectionVtable() ) {
+        return true;
+    }
+#endif /* BUILDING_LIBDYLD */
+    return false;
+}
+
+void* dyld_process_snapshot_create_metrics(dyld_process_snapshot_t snapshot) {
+#if BUILDING_LIBDYLD
+    if ( const IntrospectionVtable* vtable = dyldFrameworkIntrospectionVtable() ) {
+        return vtable->dyld_process_snapshot_create_metrics(snapshot);
+    }
+#endif /* BUILDING_LIBDYLD */
+    return NULL;
+}
+
+
 
 bool dyld_image_content_for_section(dyld_image_t image, const char* segmentName, const char* sectionName,
                                     void (^contentReader)(const void* content, uint64_t vmAddr, uint64_t vmSize)) {

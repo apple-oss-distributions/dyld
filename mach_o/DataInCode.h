@@ -43,21 +43,24 @@ class VIS_HIDDEN DataInCode
 {
 public:
                         // construct from a chunk of LINKEDIT
-                        DataInCode(const uint8_t* start, size_t size);
+                        DataInCode(std::span<const uint8_t> bytes);
 
     struct Entry
     {
-        // TODO: Implement this
+        enum Kind { generic=1, jumpTable8, jumpTable16, jumpTable32, jumpTableAbs32 };
+
+        Kind        kind;
+        uint32_t    startOffset;  // delta from mach_header to start of data-in-code range
+        uint32_t    length;       // length of data-in-code range
+
+        bool operator==(const Entry&) const = default;
     };
 
-    Error   valid() const;
-
-    static uint32_t     dataInCodeSize(bool is64);
+    Error   valid(uint32_t textEndOffset) const;
+    void    forEachEntry(void (^callback)(const Entry&)) const;
 
 protected:
-
-    const uint8_t*       _dataInCodeStart;
-    const uint8_t*       _dataInCodeEnd;
+    std::span<const uint8_t> _bytes;
 };
 
 

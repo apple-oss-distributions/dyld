@@ -124,6 +124,8 @@
 #include "Optimizers.h"
 #include "NewSharedCacheBuilder.h"
 #include "objc-shared-cache.h"
+
+#include "PerfectHashWriter.h"
 #endif
 
 using metadata_visitor::ResolvedValue;
@@ -627,17 +629,16 @@ static void findProtocolConformances(Diagnostics& diags,
 static void make_perfect(const lsl::Vector<SwiftTypeProtocolConformanceLocationKey>& targets,
                          objc::PerfectHash& phash)
 {
-    dyld3::OverflowSafeArray<objc::PerfectHash::key> keys;
+    std::vector<objc::PerfectHash::SwiftStrings> keys;
 
     /* read in the list of keywords */
     keys.reserve(targets.size());
     for (const SwiftTypeProtocolConformanceLocationKey& target : targets) {
-        objc::PerfectHash::key mykey;
-        mykey.name1_k = (uint8_t*)target.key1Buffer(nullptr);
-        mykey.len1_k  = (uint32_t)target.key1Size();
-        mykey.name2_k = (uint8_t*)target.key2Buffer(nullptr);
-        mykey.len2_k  = (uint32_t)target.key2Size();
-        keys.push_back(mykey);
+        objc::PerfectHash::SwiftStrings key = {
+            .key1 = { (uint8_t*)target.key1Buffer(nullptr), target.key1Size() },
+            .key2 = { (uint8_t*)target.key2Buffer(nullptr), target.key2Size() },
+        };
+        keys.push_back(key);
     }
 
     objc::PerfectHash::make_perfect(keys, phash);
@@ -690,17 +691,16 @@ static void emitTypeHashTable(Diagnostics& diag, lsl::Allocator& allocator,
 static void make_perfect(const lsl::Vector<SwiftMetadataProtocolConformanceLocationKey>& targets,
                          objc::PerfectHash& phash)
 {
-    dyld3::OverflowSafeArray<objc::PerfectHash::key> keys;
+    std::vector<objc::PerfectHash::SwiftStrings> keys;
 
     /* read in the list of keywords */
     keys.reserve(targets.size());
     for (const SwiftMetadataProtocolConformanceLocationKey& target : targets) {
-        objc::PerfectHash::key mykey;
-        mykey.name1_k = (uint8_t*)target.key1Buffer(nullptr);
-        mykey.len1_k  = (uint32_t)target.key1Size();
-        mykey.name2_k = (uint8_t*)target.key2Buffer(nullptr);
-        mykey.len2_k  = (uint32_t)target.key2Size();
-        keys.push_back(mykey);
+        objc::PerfectHash::SwiftStrings key = {
+            .key1 = { (uint8_t*)target.key1Buffer(nullptr), target.key1Size() },
+            .key2 = { (uint8_t*)target.key2Buffer(nullptr), target.key2Size() },
+        };
+        keys.push_back(key);
     }
 
     objc::PerfectHash::make_perfect(keys, phash);
@@ -754,17 +754,16 @@ static void make_perfect(const lsl::Vector<SwiftForeignTypeProtocolConformanceLo
                          const std::unordered_map<uint64_t, std::string_view>& foundForeignNames,
                          objc::PerfectHash& phash)
 {
-    dyld3::OverflowSafeArray<objc::PerfectHash::key> keys;
+    std::vector<objc::PerfectHash::SwiftStrings> keys;
 
     /* read in the list of keywords */
     keys.reserve(targets.size());
     for (const SwiftForeignTypeProtocolConformanceLookupKey& target : targets) {
-        objc::PerfectHash::key mykey;
-        mykey.name1_k = (uint8_t*)target.foreignDescriptorName.data();
-        mykey.len1_k  = (uint32_t)target.foreignDescriptorName.size();
-        mykey.name2_k = (uint8_t*)&target.protocolCacheOffset;
-        mykey.len2_k  = (uint32_t)sizeof(target.protocolCacheOffset);
-        keys.push_back(mykey);
+        objc::PerfectHash::SwiftStrings key = {
+            .key1 = { (uint8_t*)target.foreignDescriptorName.data(), target.foreignDescriptorName.size() },
+            .key2 = { (uint8_t*)&target.protocolCacheOffset, sizeof(target.protocolCacheOffset) },
+        };
+        keys.push_back(key);
     }
 
     objc::PerfectHash::make_perfect(keys, phash);
@@ -831,17 +830,16 @@ static void emitForeignTypeHashTable(Diagnostics& diag, lsl::Allocator& allocato
 static void make_perfect(const lsl::Vector<PointerHashTableBuilderKey>& targets,
                          objc::PerfectHash& phash)
 {
-    dyld3::OverflowSafeArray<objc::PerfectHash::key> keys;
+    std::vector<objc::PerfectHash::SwiftStrings> keys;
 
     /* read in the list of keywords */
     keys.reserve(targets.size());
     for (const PointerHashTableBuilderKey& target : targets) {
-        objc::PerfectHash::key mykey;
-        mykey.name1_k = (uint8_t*)target.key1Buffer();
-        mykey.len1_k  = target.key1Size();
-        mykey.name2_k = (uint8_t*)target.key2Buffer();
-        mykey.len2_k  = target.key2Size();
-        keys.push_back(mykey);
+        objc::PerfectHash::SwiftStrings key = {
+            .key1 = { (uint8_t*)target.key1Buffer(), target.key1Size() },
+            .key2 = { (uint8_t*)target.key2Buffer(), target.key2Size() },
+        };
+        keys.push_back(key);
     }
 
     objc::PerfectHash::make_perfect(keys, phash);

@@ -29,7 +29,7 @@
 #include "Chunk.h"
 #include "ImpCachesBuilder.h"
 #include "Map.h"
-#include "PerfectHash.h"
+#include "PerfectHashWriter.h"
 #include "SectionCoalescer.h"
 
 #include <list>
@@ -217,16 +217,20 @@ struct ObjCIMPCachesOptimizer
 
 struct ObjCSelectorOptimizer
 {
-    // Map from selector string to offset in to the selector buffer
-    StringMap<VMOffset>                 selectorsMap;
+    // Map from selector/type string to offset in to the selector buffer
+    StringMap<VMOffset>                 stringsMap;
 
     // Holds all the selectors in the order they'll be emitted in to the final binary.
     // This is to give a deterministic input to the perfect hash
     // to the perfect hash
     std::vector<objc::ObjCString>       selectorsArray;
 
-    // How much space we need for all the selectors in the new contiguous buffer
+    // Holds all the type in the order they'll be emitted in to the final binary.
+    std::vector<objc::ObjCString>       typesArray;
+
+    // How much space we need for all the selectors/types in the new contiguous buffer
     uint64_t                            selectorStringsTotalByteSize = 0;
+    uint64_t                            typeStringsTotalByteSize     = 0;
 
     // The Chunk in a SubCache which will contain the selector strings
     const ObjCStringsChunk*             selectorStringsChunk = nullptr;

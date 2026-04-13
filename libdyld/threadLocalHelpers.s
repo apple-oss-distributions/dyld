@@ -197,7 +197,7 @@ _features_lo32:		.long 0
 _features_hi32:		.long 0
 _bufferSize32:		.long 0
 _hasXSave:			.long 0
-
+    .text
 #endif // __x86_64__
 
 #if __arm64__
@@ -318,6 +318,105 @@ __ZNSt3__122__libcpp_verbose_abortEPKcz:
 #endif
 #endif // DEBUG
 
+
+#if !BUILDING_UNIT_TESTS
+// Saves all registers and calls __dyld_lazy_load_internal.
+// This is necessary because the linker inserts calls to dyld_lazy_load
+// at places the compiler does not expect function calls.
+    .globl __dyld_lazy_load
+__dyld_lazy_load:
+#if __x86_64__
+    push   %rax // extra push/pop to keep stack 16-byte aligned
+    push   %rax
+    push   %rbx
+    push   %rcx
+    push   %rdx
+    push   %r8
+    push   %r9
+    push   %r10
+    push   %r11
+    push   %r12
+    push   %r13
+    push   %r14
+    push   %r15
+    call  __dyld_lazy_load_internal
+    pop    %r15
+    pop    %r14
+    pop    %r13
+    pop    %r12
+    pop    %r11
+    pop    %r10
+    pop    %r9
+    pop    %r8
+    pop    %rdx
+    pop    %rcx
+    pop    %rbx
+    pop    %rax
+    pop    %rax
+    ret
+#else
+  #if __arm64e__
+    pacibsp
+  #endif
+    stp    x14, x15, [sp, #-0x10]!
+    stp    x12, x13, [sp, #-0x10]!
+    stp    x10, x11, [sp, #-0x10]!
+    stp    x8,  x9,  [sp, #-0x10]!
+    stp    x6,  x7,  [sp, #-0x10]!
+    stp    x4,  x5,  [sp, #-0x10]!
+    stp    x2,  x3,  [sp, #-0x10]!
+    stp    x29, x30, [sp, #-0x10]!
+    mov    x29, sp
+    sub    sp, sp, 0x200
+    stp    q31, q30, [sp, #0x000]
+    stp    q29, q28, [sp, #0x020]
+    stp    q27, q26, [sp, #0x040]
+    stp    q25, q24, [sp, #0x060]
+    stp    q23, q22, [sp, #0x080]
+    stp    q21, q20, [sp, #0x0a0]
+    stp    q19, q18, [sp, #0x0c0]
+    stp    q17, q16, [sp, #0x0e0]
+    stp    q15, q14, [sp, #0x100]
+    stp    q13, q12, [sp, #0x120]
+    stp    q11, q10, [sp, #0x140]
+    stp    q9,  q8,  [sp, #0x160]
+    stp    q7,  q6,  [sp, #0x180]
+    stp    q5,  q4,  [sp, #0x1a0]
+    stp    q3,  q2,  [sp, #0x1c0]
+    stp    q1,  q0,  [sp, #0x1e0]
+    bl     __dyld_lazy_load_internal
+    ldp    q1,  q0,  [sp, #0x1e0]
+    ldp    q3,  q2,  [sp, #0x1c0]
+    ldp    q5,  q4,  [sp, #0x1a0]
+    ldp    q7,  q6,  [sp, #0x180]
+    ldp    q9,  q8,  [sp, #0x160]
+    ldp    q11, q10, [sp, #0x140]
+    ldp    q13, q12, [sp, #0x120]
+    ldp    q15, q14, [sp, #0x100]
+    ldp    q17, q16, [sp, #0x0e0]
+    ldp    q19, q18, [sp, #0x0c0]
+    ldp    q21, q20, [sp, #0x0a0]
+    ldp    q23, q22, [sp, #0x080]
+    ldp    q25, q24, [sp, #0x060]
+    ldp    q27, q26, [sp, #0x040]
+    ldp    q29, q28, [sp, #0x020]
+    ldp    q31, q30, [sp, #0x000]
+    add    sp, sp, 0x200
+    ldp    x29, x30, [sp], #0x10
+    ldp    x2,  x3,  [sp], #0x10
+    ldp    x4,  x5,  [sp], #0x10
+    ldp    x6,  x7,  [sp], #0x10
+    ldp    x8,  x9,  [sp], #0x10
+    ldp    x10, x11, [sp], #0x10
+    ldp    x12, x13, [sp], #0x10
+    ldp    x14, x15, [sp], #0x10
+  #if __arm64e__
+    retab
+  #else
+    ret
+  #endif // __arm64e__
+#endif
+#endif // !BUILDING_UNIT_TESTS
 
 	.subsections_via_symbols
 	

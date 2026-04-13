@@ -39,12 +39,12 @@
 #include "DyldRuntimeState.h"
 
 // mach_o
-#include "Header.h"
+#include "UnsafeHeader.h"
 #include "Version32.h"
 
 using dyld3::MachOAnalyzer;
 using dyld3::MachOFile;
-using mach_o::Header;
+using mach_o::UnsafeHeader;
 using mach_o::Platform;
 using mach_o::Version32;
 
@@ -75,7 +75,7 @@ const char* JustInTimeLoader::path(const RuntimeState& state) const
 
 const char* JustInTimeLoader::installName(const RuntimeState& state) const
 {
-    mach_o::Header* mh = (mach_o::Header*)this->mf(state);
+    mach_o::UnsafeHeader* mh = (mach_o::UnsafeHeader*)this->mf(state);
     if ( mh->isDylib() )
         return mh->installName();
     return nullptr;
@@ -102,11 +102,11 @@ bool JustInTimeLoader::contains(RuntimeState& state, const void* addr, const voi
     }
 
     __block bool         result     = false;
-    const Header*        hdr         = (const Header*)this->mappedAddress;
+    const UnsafeHeader*        hdr         = (const UnsafeHeader*)this->mappedAddress;
     uint64_t             vmTextAddr = hdr->preferredLoadAddress();
     uint64_t             slide      = (uintptr_t)hdr - vmTextAddr;
     uint64_t             targetAddr = (uint64_t)addr;
-    hdr->forEachSegment(^(const Header::SegmentInfo& info, bool& stop) {
+    hdr->forEachSegment(^(const UnsafeHeader::SegmentInfo& info, bool& stop) {
         if ( ((info.vmaddr + slide) <= targetAddr) && (targetAddr < (info.vmaddr + slide + info.vmsize)) ) {
             *segAddr  = (void*)(info.vmaddr + slide);
             *segSize  = info.vmsize;
@@ -124,7 +124,7 @@ bool JustInTimeLoader::matchesPath(const RuntimeState& state, const char* path) 
     if ( strcmp(path, this->path(state)) == 0 )
         return true;
     if ( this->altInstallName ) {
-        if ( strcmp(path, ((const Header*)this->mappedAddress)->installName()) == 0 )
+        if ( strcmp(path, ((const UnsafeHeader*)this->mappedAddress)->installName()) == 0 )
             return true;
     }
     if ( pd ) {
@@ -196,7 +196,7 @@ static void getObjCPatchClasses(const dyld3::MachOAnalyzer* ma, PointerSet& clas
     // Find the classlist and see which entries are binds to self
     uint64_t classListRuntimeOffset;
     uint64_t classListSize;
-    bool foundSection = ((const Header*)ma)->findObjCDataSection("__objc_classlist", classListRuntimeOffset, classListSize);
+    bool foundSection = ((const UnsafeHeader*)ma)->findObjCDataSection("__objc_classlist", classListRuntimeOffset, classListSize);
     if ( !foundSection )
         return;
 
@@ -289,7 +289,7 @@ static void getObjCPatchClasses(const dyld3::MachOAnalyzer* ma, PointerSet& clas
 
 // A singleton object can only be patched if it matches the layout/authentication expected by the patcher
 // This finds all eligible singleton classes
-static void getSingletonPatches(const Header* hdr, PointerSet& objectPointers)
+static void getSingletonPatches(const UnsafeHeader* hdr, PointerSet& objectPointers)
 {
     hdr->forEachSingletonPatch(^(uint64_t runtimeOffset) {
         void* value = (uint8_t*)hdr + runtimeOffset;
@@ -351,7 +351,7 @@ const Loader::DylibPatch* JustInTimeLoader::makePatchTable(RuntimeState& state, 
             getObjCPatchClasses(this->analyzer(), eligibleClasses);
 
         __block PointerSet eligibleSingletons;
-        getSingletonPatches(((const Header*)this->analyzer()), eligibleSingletons);
+        getSingletonPatches(((const UnsafeHeader*)this->analyzer()), eligibleSingletons);
 
         patchTable.forEachPatchableExport(indexOfOverriddenCachedDylib, ^(uint32_t dylibVMOffsetOfImpl, const char* exportName,
                                                                           PatchKind patchKind) {
@@ -429,7 +429,7 @@ const Loader::DylibPatch* JustInTimeLoader::makePatchTable(RuntimeState& state, 
         // record in Loader
         return table;
 #else
-        CacheVMAddress thisVMAddr(((const Header*)this->mf(state))->preferredLoadAddress());
+        CacheVMAddress thisVMAddr(((const UnsafeHeader*)this->mf(state))->preferredLoadAddress());
 
         // The cache builder doesn't lay out dylibs in VM layout, so we need to use VMAddr/VMOffset everywhere
         patchTable.forEachPatchableExport(indexOfOverriddenCachedDylib, ^(uint32_t dylibVMOffsetOfImpl, const char* exportName,
@@ -439,7 +439,7 @@ const Loader::DylibPatch* JustInTimeLoader::makePatchTable(RuntimeState& state, 
             if ( this->hasExportedSymbol(exportDiag, state, exportName, staticLink, skipResolver, &foundSymbolInfo) ) {
                 if ( extra )
                     state.log("   will patch cache uses of '%s' %s\n", exportName, PatchTable::patchKindName(patchKind));
-                CacheVMAddress implBaseVMAddr(((const Header*)foundSymbolInfo.targetLoader->mf(state))->preferredLoadAddress());
+                CacheVMAddress implBaseVMAddr(((const UnsafeHeader*)foundSymbolInfo.targetLoader->mf(state))->preferredLoadAddress());
                 CacheVMAddress newImplVMAddr = implBaseVMAddr + VMOffset(foundSymbolInfo.targetRuntimeOffset);
 
                 // note: we are saving a signed 64-bit offset to the impl.  This is to support re-exported symbols
@@ -470,7 +470,7 @@ void JustInTimeLoader::loadDependents(Diagnostics& diag, RuntimeState& state, co
     // add first level of dependents
     __block int                 depIndex = 0;
     const mach_o::MachOFileRef& mf  = this->mappedAddress;
-    const Header*               hdr = (const Header*)(mf); // Better way?
+    const UnsafeHeader*               hdr = (const UnsafeHeader*)(mf); // Better way?
     hdr->forEachLinkedDylib(^(const char* loadPath, LinkedDylibAttributes depAttrs, Version32 compatVersion, Version32 curVersion, bool synthesizedLink, bool& stop) {
         // fix illegal combinations of dylib attributes
         if ( depAttrs.reExport && depAttrs.delayInit )
@@ -859,7 +859,7 @@ void JustInTimeLoader::applyFixups(Diagnostics& diag, RuntimeState& state, DyldC
     if ( (state.config.process.platform == Platform::macOS) && (state.libdyldLoader != nullptr) && (this != state.mainExecutableLoader) ) {
         const MachOAnalyzer* ma = this->analyzer();
         if ( !ma->inDyldCache() ) {
-            ((mach_o::Header*)ma)->platformAndVersions().unzip(^(mach_o::PlatformAndVersions pvs) {
+            ((mach_o::UnsafeHeader*)ma)->platformAndVersions().unzip(^(mach_o::PlatformAndVersions pvs) {
                 // rdar://84760053 (SEED: Web: Crash in libobjc.A.dylib's load_images when loading certain bundles in Monterey)
                 if ( (pvs.platform == Platform::macOS) && (pvs.minOS <= Version32(0x000A0900)) ) {
                     struct DATAdyld { void* dyldLazyBinder; FuncLookup dyldFuncLookup; };
@@ -869,7 +869,7 @@ void JustInTimeLoader::applyFixups(Diagnostics& diag, RuntimeState& state, DyldC
                         // dyld and libdyld have not been wired together yet, so peek into libdyld
                         // if libdyld.dylib is a root, it may not have been rebased yet
                         if ( state.libdyldLoader->hasBeenFixedUp(state) || state.libdyldLoader->dylibInDyldCache ) {
-                            const Header*               libdyldHdr    = state.libdyldLoader->header(state);
+                            const UnsafeHeader*               libdyldHdr    = state.libdyldLoader->header(state);
                             std::span<const uint8_t>    helperSection = libdyldHdr->findSectionContent("__DATA_CONST", "__helper", true/*vm layout*/);
                             if ( helperSection.size() == sizeof(void*) ) {
                                 const LibdyldHelperSection* section = (LibdyldHelperSection*)helperSection.data();
@@ -972,10 +972,10 @@ void JustInTimeLoader::setDelayInit(RuntimeState&, bool value) const
 
 ////////////////////////  other functions /////////////////////////////////
 
-static bool hasDataConst(const Header* hdr)
+static bool hasDataConst(const UnsafeHeader* hdr)
 {
     __block bool result = false;
-    hdr->forEachSegment(^(const Header::SegmentInfo& info, bool& stop) {
+    hdr->forEachSegment(^(const UnsafeHeader::SegmentInfo& info, bool& stop) {
         if ( info.readOnlyData() )
             result = true;
     });
@@ -994,7 +994,7 @@ JustInTimeLoader* JustInTimeLoader::make(RuntimeState& state, const MachOFile* m
 {
     //state.log("JustInTimeLoader::make(%s) willNeverUnload=%d\n", path, willNeverUnload);
     // use malloc and placement new to create object big enough for all info
-    const Header*          hdr                  = (Header*)mh;
+    const UnsafeHeader*          hdr                  = (UnsafeHeader*)mh;
     bool                   allDepsAreNormal     = true;
     uint32_t               depCount             = hdr->linkedDylibCount(&allDepsAreNormal);
     uint32_t               minDepCount          = (depCount ? depCount - 1 : 1);
@@ -1032,7 +1032,7 @@ JustInTimeLoader* JustInTimeLoader::make(RuntimeState& state, const MachOFile* m
     p->fixUpsApplied        = false;
     p->inited               = false;
     p->hidden               = false;
-    p->altInstallName       = ((Header*)mh)->isDylib() && (strcmp(((Header*)mh)->installName(), path) != 0);
+    p->altInstallName       = ((UnsafeHeader*)mh)->isDylib() && (strcmp(((UnsafeHeader*)mh)->installName(), path) != 0);
     p->lateLeaveMapped      = false;
     p->allDepsAreNormal     = allDepsAreNormal;
     p->padding              = 0;
@@ -1047,7 +1047,7 @@ JustInTimeLoader* JustInTimeLoader::make(RuntimeState& state, const MachOFile* m
 
     p->cpusubtype   = mh->cpusubtype;
 
-    parseSectionLocations((const Header*)mh, p->sectionLocations);
+    parseSectionLocations((const UnsafeHeader*)mh, p->sectionLocations);
 
     if ( !mh->hasExportTrie(p->exportsTrieRuntimeOffset, p->exportsTrieSize) ) {
         p->exportsTrieRuntimeOffset = 0;
@@ -1085,7 +1085,7 @@ JustInTimeLoader* JustInTimeLoader::make(RuntimeState& state, const MachOFile* m
     return p;
 }
 
-void JustInTimeLoader::parseSectionLocations(const Header* hdr, SectionLocations& metadata)
+void JustInTimeLoader::parseSectionLocations(const UnsafeHeader* hdr, SectionLocations& metadata)
 {
     for ( uint32_t i = 0; i < SectionLocations::count; ++i ) {
         metadata.offsets[i] = 0;
@@ -1093,13 +1093,13 @@ void JustInTimeLoader::parseSectionLocations(const Header* hdr, SectionLocations
     }
 
     uint64_t baseAddress = hdr->preferredLoadAddress();
-    auto setSectionOffset = ^(uint32_t sectionKind, const Header::SectionInfo& sectInfo) {
+    auto setSectionOffset = ^(uint32_t sectionKind, const UnsafeHeader::SectionInfo& sectInfo) {
         uint64_t sectionOffset = sectInfo.address - baseAddress;
         metadata.offsets[sectionKind] = sectionOffset;
         metadata.sizes[sectionKind] = sectInfo.size;
     };
 
-    hdr->forEachSection(^(const Header::SectionInfo& sectInfo, bool& stop) {
+    hdr->forEachSection(^(const UnsafeHeader::SectionInfo& sectInfo, bool& stop) {
         if ( sectInfo.segmentName == "__TEXT" ) {
             if ( sectInfo.sectionName == "__swift5_protos" )
                 setSectionOffset(_dyld_section_location_text_swift5_protos, sectInfo);
@@ -1174,7 +1174,7 @@ Loader::FileValidationInfo JustInTimeLoader::getFileValidationInfo(RuntimeState&
         uint32_t codeSignFileOffset = 0;
         uint32_t codeSignFileSize   = 0;
         const mach_o::MachOFileRef& ref = this->mappedAddress;
-        if ( ((const Header*)ref)->hasCodeSignature(codeSignFileOffset, codeSignFileSize) ) {
+        if ( ((const UnsafeHeader*)ref)->hasCodeSignature(codeSignFileOffset, codeSignFileSize) ) {
             ref->forEachCDHashOfCodeSignature(ref.getOffsetInToFile(codeSignFileOffset), codeSignFileSize,
                                               ^(const uint8_t aCdHash[20]) {
                 result.checkCdHash = true;
@@ -1197,11 +1197,11 @@ const Loader::DylibPatch* JustInTimeLoader::getCatalystMacTwinPatches() const
 
 void JustInTimeLoader::withRegions(const MachOFile* mf, void (^callback)(const Array<Region>& regions))
 {
-    const Header* hdr   = (const Header*)mf;
+    const UnsafeHeader* hdr   = (const UnsafeHeader*)mf;
     uint64_t vmTextAddr = hdr->preferredLoadAddress();
     uint32_t segCount   = hdr->segmentCount();
     STACK_ALLOC_ARRAY(Region, regions, segCount * 2);
-    hdr->forEachSegment(^(const Header::SegmentInfo& segInfo, bool& stop) {
+    hdr->forEachSegment(^(const UnsafeHeader::SegmentInfo& segInfo, bool& stop) {
         Region region;
         if ( !segInfo.hasZeroFill() || (segInfo.fileSize != 0) ) {
             // add region for content that is not wholely zerofill
@@ -1259,15 +1259,22 @@ Loader* JustInTimeLoader::makeJustInTimeLoaderDyldCache(Diagnostics& diag, Runti
 {
     uint64_t mtime = 0;
     uint64_t inode = 0;
-    const Header* cacheMH = (const Header*)state.config.dyldCache.getIndexedImageEntry(dylibCacheIndex, mtime, inode);
+    const UnsafeHeader* cacheMH = (const UnsafeHeader*)state.config.dyldCache.getIndexedImageEntry(dylibCacheIndex, mtime, inode);
 
     bool fileIDValid = state.config.dyldCache.dylibsExpectedOnDisk;
     uint64_t device = 0;
 
 #if TARGET_OS_SIMULATOR
+    char realPath[PATH_MAX];
     if ( fileIDValid ) {
         // We need to get the simulator dylib device ID.  This is required if we later want to match this loader by fileID
         device = state.config.process.dyldSimFSID;
+    }
+    else {
+        // with B&I built sim dyld caches, we want the path to where the dylib would be in the sim RuntimeRoot
+        strlcpy(realPath, state.config.pathOverrides.simRootPath(), sizeof(realPath));
+        strlcat(realPath, loadPath, sizeof(realPath));
+        loadPath = realPath;
     }
 #endif
 
@@ -1345,7 +1352,7 @@ Loader* JustInTimeLoader::makeJustInTimeLoaderDisk(Diagnostics& diag, RuntimeSta
 #endif
                 return result;
             }
-            const Header* hdr = (Header*)mf;
+            const UnsafeHeader* hdr = (UnsafeHeader*)mf;
             if ( hdr->noDynamicAccess() && !options.staticLinkage ) {
                 diag.error("cannot dlopen() image marked for no dynamic access '%s'", loadPath);
 #if !BUILDING_CACHE_BUILDER
@@ -1384,11 +1391,11 @@ Loader* JustInTimeLoader::makeJustInTimeLoaderDisk(Diagnostics& diag, RuntimeSta
 
             // Check code signature
             CodeSignatureInFile  codeSignature;
-            bool hasCodeSignature = ((const Header*)ma)->hasCodeSignature(codeSignature.fileOffset, codeSignature.size);
+            bool hasCodeSignature = ((const UnsafeHeader*)ma)->hasCodeSignature(codeSignature.fileOffset, codeSignature.size);
 #if BUILDING_DYLD
             if ( hasCodeSignature && codeSignature.size != 0 ) {
                 uuid_t uuid;
-                ((Header*)ma)->getUuid(uuid);
+                ((UnsafeHeader*)ma)->getUuid(uuid);
                 char uuidStr[64];
                 uuidToStr(uuid, uuidStr);
                 if ( !state.config.syscall.registerSignature(diag, realerPath, uuidStr, fileDescriptor, fileValidation.sliceOffset, codeSignature.fileOffset, codeSignature.size) ) {
@@ -1469,7 +1476,7 @@ Loader* JustInTimeLoader::makeLaunchLoader(Diagnostics& diag, RuntimeState& stat
 #endif // !SUPPORT_CREATING_PREMAPPEDLOADERS
 
 const Loader* JustInTimeLoader::makePseudoDylibLoader(Diagnostics& diag, RuntimeState &state, const char* path, const LoadOptions& options, const PseudoDylib* pd) {
-    const Header* pseudoDylibMH = (const Header*)pd->getAddress();
+    const UnsafeHeader* pseudoDylibMH = (const UnsafeHeader*)pd->getAddress();
     FileID fileID = FileID::none();
     if (!pseudoDylibMH->loadableIntoProcess(state.config.process.platform, path)) {
         diag.error("wrong platform to load into process");

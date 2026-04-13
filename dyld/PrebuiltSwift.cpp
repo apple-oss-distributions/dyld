@@ -30,11 +30,11 @@
 #include "OptimizerObjC.h"
 #include "PrebuiltSwift.h"
 #include "SwiftVisitor.h"
-#include "Header.h"
+#include "UnsafeHeader.h"
 
 #if SUPPORT_PREBUILTLOADERS || BUILDING_UNIT_TESTS || BUILDING_CACHE_BUILDER_UNIT_TESTS
 
-using mach_o::Header;
+using mach_o::UnsafeHeader;
 using metadata_visitor::ResolvedValue;
 using metadata_visitor::SwiftPointer;
 using metadata_visitor::SwiftVisitor;
@@ -47,7 +47,7 @@ static bool getBindTarget(RuntimeState& state, const uint64_t vmAddr, PrebuiltLo
     bool found = false;
     for (const Loader* ldr : state.loaded) {
         const mach_o::MachOFileRef mf = ldr->mf(state);
-        uint64_t baseAddress = ((const Header*)mf)->preferredLoadAddress();
+        uint64_t baseAddress = ((const UnsafeHeader*)mf)->preferredLoadAddress();
         uint64_t mappedSize = mf->mappedSize();
 
         if ( vmAddr < baseAddress )
@@ -128,7 +128,7 @@ static void getFixupTargets(RuntimeState& state, Diagnostics& diag, const JustIn
     ldr->withLayout(diag, state, ^(const mach_o::Layout &layout) {
         mach_o::Fixups fixups(layout);
 
-        uint64_t loadAddress = ((const Header*)mf)->preferredLoadAddress();
+        uint64_t loadAddress = ((const UnsafeHeader*)mf)->preferredLoadAddress();
         if ( mf->hasChainedFixups() ) {
             // walk all chains
             auto handler = ^(dyld3::MachOFile::ChainedFixupPointerOnDisk *fixupLocation,
@@ -286,7 +286,7 @@ static SwiftVisitor makeSwiftVisitor(Diagnostics& diag, RuntimeState& state,
     return swiftVisitor;
 #else
     const dyld3::MachOFile* mf = ldr->mf(state);
-    VMAddress dylibBaseAddress(((const Header*)mf)->preferredLoadAddress());
+    VMAddress dylibBaseAddress(((const UnsafeHeader*)mf)->preferredLoadAddress());
 
     __block std::vector<metadata_visitor::Segment> segments;
     __block std::vector<uint64_t> bindTargets;
@@ -395,7 +395,7 @@ bool PrebuiltSwift::findProtocolConformances(Diagnostics& diag, PrebuiltObjC& pr
             continue;
 
         const mach_o::MachOFileRef mf = ldr->mf(state);
-        const uint64_t loadAddress = ((const Header*)mf)->preferredLoadAddress();
+        const uint64_t loadAddress = ((const UnsafeHeader*)mf)->preferredLoadAddress();
 
 #if BUILDING_CACHE_BUILDER || BUILDING_CLOSURE_UTIL || BUILDING_CACHE_BUILDER_UNIT_TESTS
         const JustInTimeLoader* jitLoader = (const JustInTimeLoader*)ldr;
@@ -563,7 +563,7 @@ bool PrebuiltSwift::findProtocolConformances(Diagnostics& diag, PrebuiltObjC& pr
                     } else {
                         // A different loader, so make a visitor for it.
                         SwiftVisitor otherVisitor = makeSwiftVisitor(diag, state, typeBindTarget->loader);
-                        VMAddress otherLoadAddress(((const Header*)typeBindTarget->loader->mf(state))->preferredLoadAddress());
+                        VMAddress otherLoadAddress(((const UnsafeHeader*)typeBindTarget->loader->mf(state))->preferredLoadAddress());
                         VMAddress typeDescVMAddr = otherLoadAddress + VMOffset(typeBindTarget->runtimeOffset);
                         ResolvedValue typeDescValue = otherVisitor.getValueFor(typeDescVMAddr);
                         TypeContextDescriptor typeDesc(typeDescValue);
@@ -591,7 +591,7 @@ bool PrebuiltSwift::findProtocolConformances(Diagnostics& diag, PrebuiltObjC& pr
 
                         PrebuiltLoader::BindTarget foreignBindTarget;
                         foreignBindTarget.loader = ldr;
-                        foreignBindTarget.runtimeOffset = nameVMAddr.rawValue() - ((const Header*)ldr->mf(state))->preferredLoadAddress();
+                        foreignBindTarget.runtimeOffset = nameVMAddr.rawValue() - ((const UnsafeHeader*)ldr->mf(state))->preferredLoadAddress();
 
                         SwiftForeignTypeProtocolConformanceDiskLocationKey protoLocKey = {
                             (uint64_t)fullName.data(),

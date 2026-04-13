@@ -36,7 +36,7 @@
 #include "ByteStream.h"
 #include "Vector.h"
 #include "Platform.h"
-#include "Header.h"
+#include "UnsafeHeader.h"
 #include "AAREncoder.h"
 
 
@@ -181,7 +181,7 @@ public:
     void        notifyMonitorOfMainCalled();
     void        notifyMonitorOfDyldBeforeInitializers();
 
-    void        prepareInCacheDyldAllImageInfos(const mach_o::Header* dyldInCacheMF);
+    void        prepareInCacheDyldAllImageInfos(const mach_o::UnsafeHeader* dyldInCacheMF);
     bool        completeAllImageInfoTransition(Allocator& allocator, const dyld3::MachOFile* dyldInCacheMF);
 
     void        storeProcessInfoPointer(dyld_all_image_infos**); // sets value in __dyld4 section
@@ -194,6 +194,9 @@ public:
     std::byte*  swapActiveAtlas(std::byte* begin, std::byte* end, struct dyld_all_image_infos* allImageInfos);
 #endif /* DYLD_FEATURE_ATLAS_GENERATION || DYLD_FEATURE_COMPACT_INFO_GENERATION */
     lsl::Vector<std::byte>   generateCompactInfo(Allocator& allocator, AAREncoder& encoder);
+#if !TARGET_OS_SIMULATOR && !TARGET_OS_EXCLAVEKIT
+    void recordMetrics(PropertyList::Dictionary &rootDictionary);
+#endif // !TARGET_OS_SIMULATOR && !TARGET_OS_EXCLAVEKIT
     ByteStream          generateAtlas(Allocator& allocator);
 #if DYLD_FEATURE_ATLAS_GENERATION
     PropertyList::Bitmap* gatherAtlasProcessInfo(uint64_t mainExecutableAddress, const DyldSharedCache *cache, PropertyList::Dictionary &rootDictionary);

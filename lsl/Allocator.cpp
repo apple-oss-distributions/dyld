@@ -400,45 +400,75 @@ void MemoryManager::writeProtect(bool protect) {
     if ( !protect )
         perms |= VM_PROT_WRITE;
 
+    // Track whether we need to update _didInitialProtCopy, but don't write to it yet
+    // since the memory might currently be readonly
+    bool needsInitialProtCopy = !this->_didInitialProtCopy;
     int sharedCacheExtraPerms = 0;
-    if ( !this->_didInitialProtCopy ) {
+    if ( needsInitialProtCopy ) {
         sharedCacheExtraPerms |= VM_PROT_COPY;
-        this->_didInitialProtCopy = true;
     }
 
-    // First (un)lock dyld's __TPRO_CONST segment if it is not part of the shared cache
     const mach_header* dyldMH = (const mach_header*)&__dso_handle;
-    if (!(dyldMH->flags & MH_DYLIB_IN_CACHE)) {
-        size_t tproConstSize = (size_t)&tproConstEnd - (size_t)&tproConstStart;
-        kern_return_t kr = ::vm_protect(mach_task_self(), (vm_address_t)&tproConstStart, (vm_size_t)tproConstSize, false, perms);
-        if (kr != KERN_SUCCESS) {
-            // fprintf(stderr, "FAILED: %d", kr);
-        }
-    }
-    // Next if there is a configured shared cache (un)lock it's __TPRO_CONST segment
-    if (_sharedCache && ((dyld_cache_header*)_sharedCache)->mappingOffset > offsetof(dyld_cache_header, tproMappingsCount)) {
-        uint8_t* cacheBuffer = (uint8_t*)_sharedCache;
-        dyld_cache_header* cacheHeader = (dyld_cache_header*)_sharedCache;
-        dyld_cache_tpro_mapping_info* mappings = (dyld_cache_tpro_mapping_info*)&cacheBuffer[cacheHeader->tproMappingsOffset];
-        uint64_t    slide = (uint64_t)_sharedCache - cacheHeader->sharedRegionStart;
-        for (auto i = 0; i < cacheHeader->tproMappingsCount; ++i) {
-            void* addr = (void*)(mappings[i].unslidAddress + slide);
-            kern_return_t kr = ::vm_protect(mach_task_self(), (vm_address_t)addr, (vm_size_t)mappings[i].size, false,
-                                            perms | sharedCacheExtraPerms);
+
+    // Lambda to apply vm_protect to all TPRO regions
+    auto applyProtection = [&](int permissions, int cacheExtraPerms) {
+        // First (un)lock dyld's __TPRO_CONST segment if it is not part of the shared cache
+        if (!(dyldMH->flags & MH_DYLIB_IN_CACHE)) {
+            size_t tproConstSize = (size_t)&tproConstEnd - (size_t)&tproConstStart;
+            kern_return_t kr = ::vm_protect(mach_task_self(), (vm_address_t)&tproConstStart, (vm_size_t)tproConstSize, false, permissions);
             if (kr != KERN_SUCCESS) {
                 // fprintf(stderr, "FAILED: %d", kr);
             }
         }
-    }
-    // Finally if there are any vm_allocated tpro protected regions (un)lock them
-    if (_defaultAllocator) {
-        _defaultAllocator->forEachVMAllocatedBuffer(^(const Buffer& buffer) {
-            kern_return_t kr = ::vm_protect(mach_task_self(), (vm_address_t)buffer.address, (vm_size_t)buffer.size, false,
-                                            VM_PROT_READ | (protect ? 0 : VM_PROT_WRITE ));
-            if (kr != KERN_SUCCESS) {
-                // fprintf(stderr, "FAILED: %d", kr);
+        // Next if there is a configured shared cache (un)lock it's __TPRO_CONST segment
+        if (_sharedCache && ((dyld_cache_header*)_sharedCache)->mappingOffset > offsetof(dyld_cache_header, tproMappingsCount)) {
+            uint8_t* cacheBuffer = (uint8_t*)_sharedCache;
+            dyld_cache_header* cacheHeader = (dyld_cache_header*)_sharedCache;
+            dyld_cache_tpro_mapping_info* mappings = (dyld_cache_tpro_mapping_info*)&cacheBuffer[cacheHeader->tproMappingsOffset];
+            uint64_t    slide = (uint64_t)_sharedCache - cacheHeader->sharedRegionStart;
+            for (auto i = 0; i < cacheHeader->tproMappingsCount; ++i) {
+                void* addr = (void*)(mappings[i].unslidAddress + slide);
+                kern_return_t kr = ::vm_protect(mach_task_self(), (vm_address_t)addr, (vm_size_t)mappings[i].size, false,
+                                                permissions | cacheExtraPerms);
+                if (kr != KERN_SUCCESS) {
+                    // fprintf(stderr, "FAILED: %d", kr);
+                }
             }
-        });
+        }
+        // Finally if there are any vm_allocated tpro protected regions (un)lock them
+        if (_defaultAllocator) {
+            _defaultAllocator->forEachVMAllocatedBuffer(^(const Buffer& buffer) {
+                kern_return_t kr = ::vm_protect(mach_task_self(), (vm_address_t)buffer.address, (vm_size_t)buffer.size, false,
+                                                permissions);
+                if (kr != KERN_SUCCESS) {
+                    // fprintf(stderr, "FAILED: %d", kr);
+                }
+            });
+        }
+    };
+
+    // If we're making memory readonly (protect=true) and need to update _didInitialProtCopy,
+    // we must write to it BEFORE making memory readonly. Since we don't know the current state,
+    // we need to temporarily make it writable first.
+    if ( needsInitialProtCopy && protect ) {
+        // Make writable (including VM_PROT_COPY for the initial flip)
+        applyProtection(VM_PROT_READ | VM_PROT_WRITE, sharedCacheExtraPerms);
+
+        // Now safe to write to _didInitialProtCopy
+        this->_didInitialProtCopy = true;
+
+        // Now make readonly (no longer need VM_PROT_COPY since we just did it)
+        applyProtection(VM_PROT_READ, 0);
+        return;
+    }
+
+    // Normal path: apply the requested protection
+    applyProtection(perms, sharedCacheExtraPerms);
+
+    // If we're making memory writable and haven't written _didInitialProtCopy yet, do it now
+    // (after the memory has been made writable)
+    if ( needsInitialProtCopy && !protect ) {
+        this->_didInitialProtCopy = true;
     }
 #endif // !TARGET_OS_EXCLAVEKIT && BUILDING_DYLD
 }
@@ -1157,7 +1187,7 @@ void ProtectedStack::allocateStack()
     mach_vm_address_t bufferResult = 0;
     kern_return_t kr = vm_allocate(mach_task_self(), (vm_address_t*)&bufferResult, vmSize, VM_FLAGS_ANYWHERE | VM_MAKE_TAG(VM_MEMORY_DYLD));
     if ( kr != KERN_SUCCESS ) {
-#if BUILDING_ALLOCATOR_UNIT_TESTS
+#if BUILDING_LIBDYLD || BUILDING_ALLOCATOR_UNIT_TESTS
         assert(0 && "failed to allocate stack");
 #else
         dyld4::halt("failed to allocate stack");
@@ -1167,7 +1197,7 @@ void ProtectedStack::allocateStack()
     void* guardPageStart = (void*)bufferResult;
     void* guardPageResult = ::mmap(guardPageStart, this->guardPageSize, VM_PROT_NONE, MAP_ANON | MAP_FIXED | MAP_PRIVATE, -1, 0);
     if ( guardPageResult == MAP_FAILED ) {
-#if BUILDING_ALLOCATOR_UNIT_TESTS
+#if BUILDING_LIBDYLD || BUILDING_ALLOCATOR_UNIT_TESTS
         assert(0 && "failed to protect guard page");
 #else
         dyld4::halt("failed to protect guard page");
@@ -1177,7 +1207,7 @@ void ProtectedStack::allocateStack()
     void* stackPageStart = (void*)(bufferResult + this->guardPageSize);
     void* stackPageResult = ::mmap(stackPageStart, this->stackSize, VM_PROT_READ | VM_PROT_WRITE, MAP_ANON | MAP_FIXED | MAP_PRIVATE | MAP_TPRO, -1, 0);
     if ( stackPageResult == MAP_FAILED ) {
-#if BUILDING_ALLOCATOR_UNIT_TESTS
+#if BUILDING_LIBDYLD || BUILDING_ALLOCATOR_UNIT_TESTS
         assert(0 && "failed to mmap ");
 #else
         dyld4::halt("failed to mmap ");

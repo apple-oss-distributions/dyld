@@ -1,0 +1,3 @@
+#include "base.xcconfig"
+
+INSTALLHDRS_SCRIPT_PHASE = YES

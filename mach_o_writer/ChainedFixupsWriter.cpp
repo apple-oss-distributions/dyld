@@ -25,7 +25,6 @@
 #include <assert.h>
 #include <limits.h>
 #include <stdlib.h>
-#include <string.h>
 #include <mach-o/loader.h>
 #include <mach-o/nlist.h>
 
@@ -121,19 +120,7 @@ size_t ChainedFixupsWriter::linkeditSize(std::span<const Fixup::BindTarget> bind
 
 size_t ChainedFixupsWriter::startsSectionSize( std::span<const SegmentFixupsInfo> segments, const PointerFormat& pointerFormat)
 {
-    uint64_t expectedDelta = 0;
-    switch ( pointerFormat.value() ) {
-        case DYLD_CHAINED_PTR_ARM64E_KERNEL:
-            expectedDelta = 0x1FFF;
-            break;
-        case DYLD_CHAINED_PTR_64_OFFSET:
-        case DYLD_CHAINED_PTR_ARM64E_SEGMENTED:
-            expectedDelta = 0x3FFF;
-            break;
-        default:
-            assert(false && "unknown pointer format for chain starts");
-            break;
-    }
+    uint64_t expectedDelta = pointerFormat.maxNext();
     // allocate space in _bytes for full dyld_chained_starts_offsets data structure
     size_t chainsCount = 0;
     for (const SegmentFixupsInfo& segment : segments) {
@@ -147,16 +134,14 @@ size_t ChainedFixupsWriter::startsSectionSize( std::span<const SegmentFixupsInfo
         for (const Fixup& fixup : segFixups) {
             uint64_t curFixupLoc = (uint64_t)fixup.location;
             uint64_t delta = curFixupLoc - lastFixupLoc;
-            if ( delta >= expectedDelta )
+            if ( delta > expectedDelta )
                 segChains++;
             lastFixupLoc = curFixupLoc;
             //fprintf(stderr, "fixup: 0x%llx\n", (uint64_t)fixup.location);
         }
         chainsCount += segChains;
     }
-    size_t maxBytesNeeded = offsetof(dyld_chained_starts_offsets,chain_starts[chainsCount]);
-    maxBytesNeeded = align8(maxBytesNeeded);
-    return maxBytesNeeded;
+    return offsetof(dyld_chained_starts_offsets,chain_starts[chainsCount]);
 }
 
 void ChainedFixupsWriter::calculateSegmentPageExtras(std::span<SegmentFixupsInfo> segments,
@@ -720,6 +705,15 @@ void ChainedFixupsWriter::buildStartsSectionFixups(std::span<const SegmentFixups
         mappedSegmentsBuffer.push_back(&segInfo.mappedSegment);
     std::span<const MappedSegment*> mappedSegments = mappedSegmentsBuffer;
 
+    uint64_t baseFileOffset = 0;
+    for (const SegmentFixupsInfo& segmentFixups : segments) {
+        const MappedSegment& segment = segmentFixups.mappedSegment;
+        if ( !segment.readable )
+            continue;
+        baseFileOffset = segment.fileOffset;
+        break;
+    }
+
     std::vector<uint32_t> startsOffsets;
     for (const SegmentFixupsInfo& segmentFixups : segments) {
         const MappedSegment& segment = segmentFixups.mappedSegment;
@@ -728,25 +722,15 @@ void ChainedFixupsWriter::buildStartsSectionFixups(std::span<const SegmentFixups
         if ( !segment.writable || (segment.runtimeSize == 0) || fixups.empty() )
             continue;
 
-        uint64_t maxDelta = 0;
-        switch ( pointerFormat.value() ) {
-            case DYLD_CHAINED_PTR_ARM64E_KERNEL:
-                maxDelta = 0x1FFF;
-                break;
-            case DYLD_CHAINED_PTR_64_OFFSET:
-                maxDelta = 0x3FFF;
-                break;
-            default:
-                assert(false && "unknown pointer format for chain starts");
-                break;
-        }
+        uint64_t maxDelta = pointerFormat.maxNext();
         const Fixup* prevFixup = nullptr;
         for (const Fixup& fixup : fixups) {
             // -fixup_chains_section_vm
             uint64_t segmentOffset = segment.runtimeOffset;
             if ( useFileOffsets ) {
                 // -fixup_chains_section
-                segmentOffset = segment.fileOffset;
+                assert(segment.fileOffset >= baseFileOffset);
+                segmentOffset = segment.fileOffset - baseFileOffset;
             }
             uint64_t offsetInSegment = (uint64_t)fixup.location - (uint64_t)segment.content;
             uint64_t fixupOffset = segmentOffset + offsetInSegment;
@@ -760,14 +744,14 @@ void ChainedFixupsWriter::buildStartsSectionFixups(std::span<const SegmentFixups
             }
             uint8_t* chain = (uint8_t*)fixup.location;
             uint64_t delta = (uint64_t)chain - (uint64_t)(prevFixup->location);
-            if ( delta < maxDelta ) {
-                if ( Error err = pointerFormat.writeChainEntry(*prevFixup, chain, 0 /* preferedLoadAddress */, mappedSegments) ) {
+            if ( delta <= maxDelta ) {
+                if ( Error err = pointerFormat.writeChainEntry(*prevFixup, chain, preferredLoadAddress, mappedSegments) ) {
                     _buildError = std::move(err);
                     break;
                 }
             } else {
                 // prev/next are too far apart for chain to span, instead terminate chain at prevFixup
-                if ( Error err = pointerFormat.writeChainEntry(*prevFixup, nullptr /* nextLoc */, 0 /* preferedLoadAddress */, mappedSegments) ) {
+                if ( Error err = pointerFormat.writeChainEntry(*prevFixup, nullptr /* nextLoc */, preferredLoadAddress, mappedSegments) ) {
                     _buildError = std::move(err);
                     break;
                 }
@@ -776,18 +760,20 @@ void ChainedFixupsWriter::buildStartsSectionFixups(std::span<const SegmentFixups
             prevFixup = &fixup;
         }
         // Terminate last chain
-        if ( Error err = pointerFormat.writeChainEntry(*prevFixup, nullptr /* nextLoc */, 0 /* preferedLoadAddress */, mappedSegments) ) {
+        if ( Error err = pointerFormat.writeChainEntry(*prevFixup, nullptr /* nextLoc */, preferredLoadAddress, mappedSegments) ) {
             _buildError = std::move(err);
             return;
         }
 
-        uint32_t startsCount = (uint32_t)startsOffsets.size();
-        assert(startsCount == startsOffsets.size());
-        header->starts_count = startsCount;
-        for (uint32_t i = 0; i < startsCount; i++) {
-            header->chain_starts[i] = startsOffsets[i];
-        }
     }
+
+    uint32_t startsCount = (uint32_t)startsOffsets.size();
+    assert(startsCount == startsOffsets.size());
+    header->starts_count = startsCount;
+    for (uint32_t i = 0; i < startsCount; i++) {
+        header->chain_starts[i] = startsOffsets[i];
+    }
+
     _chainStartsHeader = (dyld_chained_starts_offsets*)(&_bytes[0]);
     _fixupsSize = _bytes.size();
 }

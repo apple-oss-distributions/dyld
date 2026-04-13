@@ -27,19 +27,19 @@
 #include <unistd.h>
 
 // mach_o
-#include "Header.h"
+#include "UnsafeHeader.h"
 #include "Architecture.h"
 
 // mach_o_writer
-#include "HeaderWriter.h"
+#include "UnsafeHeaderWriter.h"
 
 #include "MemoryBuffer.h"
 
 #include "cctools_helpers.h"
 
 
-using mach_o::Header;
-using mach_o::HeaderWriter;
+using mach_o::UnsafeHeader;
+using mach_o::UnsafeHeaderWriter;
 using mach_o::Error;
 using mach_o::Architecture;
 
@@ -53,13 +53,13 @@ void make_obj_file_with_linker_options(uint32_t cpu_type, uint32_t cpu_subtype,
     Architecture arch(cpu_type, cpu_subtype);
     uint32_t size = sizeof(mach_header_64);
     for (uint32_t i=0; i < libHintCount; ++i)
-        size += Header::pointerAligned(arch.is64(), (uint32_t)(sizeof(linker_option_command) + strlen(libNames[i]) + 3));
+        size += UnsafeHeader::pointerAligned(arch.is64(), (uint32_t)(sizeof(linker_option_command) + strlen(libNames[i]) + 3));
     for (uint32_t i=0; i < frameworkHintCount; ++i)
-        size += Header::pointerAligned(arch.is64(), (uint32_t)(sizeof(linker_option_command) + strlen(frameworkNames[i]) + 12));
+        size += UnsafeHeader::pointerAligned(arch.is64(), (uint32_t)(sizeof(linker_option_command) + strlen(frameworkNames[i]) + 12));
     size_t allocationSize = (size + 0x3FFF) & (-0x4000);
-    // create HeaderWriter
+    // create UnsafeHeaderWriter
     WritableMemoryBuffer mhBuffer = WritableMemoryBuffer::allocate(allocationSize);
-    HeaderWriter* mh = HeaderWriter::make(mhBuffer, MH_OBJECT, 0, arch, false);
+    UnsafeHeaderWriter* mh = UnsafeHeaderWriter::make(mhBuffer, MH_OBJECT, 0, arch, false);
     // add all auto-linking load commands
     for (uint32_t i=0; i < libHintCount; ++i) {
         const char* libName     = libNames[i];

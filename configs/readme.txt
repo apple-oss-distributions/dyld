@@ -32,6 +32,8 @@ base
             ld_unittests
                 kernel_linker_unittests
             libcctoolshelper
+        legacy_tool
+            legacy_tool_lto
         machocheck
         nocr
         shared_cache_builder_base

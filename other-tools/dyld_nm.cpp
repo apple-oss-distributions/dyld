@@ -45,7 +45,7 @@
 
 
 using mach_o::Universal;
-using mach_o::Header;
+using mach_o::UnsafeHeader;
 using mach_o::Image;
 using mach_o::Architecture;
 using mach_o::Error;
@@ -349,7 +349,7 @@ int main(int argc, const char* argv[])
     }
 
     __block bool sliceFound = false;
-    other_tools::forSelectedSliceInPaths(files, cmdLineArchs, ^(const char* path, const Header* header, size_t sliceLen) {
+    other_tools::forSelectedSliceInPaths(files, cmdLineArchs, ^(const char* path, const UnsafeHeader* header, size_t sliceLen) {
         sliceFound = true;
         printf("%s [%s]:\n", path, header->archName());
         Image image((void*)header, sliceLen, (header->inDyldCache() ? Image::MappingKind::dyldLoadedPostFixups : Image::MappingKind::wholeSliceMapped));
@@ -365,7 +365,7 @@ int main(int argc, const char* argv[])
 
             // build table of info about each section
             __block std::vector<SectionInfo> sectionInfos;
-            header->forEachSection(^(const Header::SectionInfo& info, bool &stop) {
+            header->forEachSection(^(const UnsafeHeader::SectionInfo& info, bool &stop) {
                 uint8_t sectionType = (info.flags & SECTION_TYPE);
                 sectionInfos.emplace_back(info.segmentName, info.sectionName, sectionType);
             });

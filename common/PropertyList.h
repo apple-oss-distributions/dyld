@@ -65,6 +65,10 @@ struct VIS_HIDDEN PropertyList {
     using ObjectVector = lsl::Vector<Object*>;
 
     PropertyList(Allocator&);
+    ~PropertyList();
+    Allocator& allocator() const{
+        return _allocator;
+    }
     void encode(ByteStream&);
     struct Object {
         Object() = delete;
@@ -76,29 +80,42 @@ struct VIS_HIDDEN PropertyList {
             Data        = 4
         };
 
-        void            convertToRedirect(uint64_t index);
         void            setIndex(uint64_t index);
+        void            setRedirect(Object* redirect);
         uint64_t        index() const;
         Type            type() const;
-        bool            processed() const;
-        void            setProcessed();
         virtual void    emit(uint8_t objectIndexSize, ByteStream& bytes) = 0;
-        virtual void    deallocate() = 0;
+        void            deallocate() {
+            switch (type()) {
+                case String:
+                    reinterpret_cast<struct String*>(this)->PropertyList::String::~String();
+                    break;
+                case Array:
+                    reinterpret_cast<struct Array*>(this)->PropertyList::Array::~Array();
+                    break;
+                case Dictionary:
+                    reinterpret_cast<struct Dictionary*>(this)->PropertyList::Dictionary::~Dictionary();
+                    break;
+                case Data:
+                    reinterpret_cast<struct Data*>(this)->PropertyList::Data::~Data();
+                    break;
+                default: break;
+            }
+            _propertyList.allocator().free((void*)this);
+        }
     protected:
-        Object(Type type) : _type(type) {}
-        uint64_t    _index      : 59    = ~1ULL;
+        Object(PropertyList& propertyList, Type type) : _propertyList(propertyList), _type(type) {}
+        PropertyList&   _propertyList;
+        uint64_t    _index      : 61    = ~1ULL;
         uint64_t    _type       : 3     = 0;
-        uint64_t    _processed  : 1     = 0;
-        uint64_t    _isRedirect : 1     = 0;
+        Object*     _redirect           = nullptr;
     };
 
     struct Data : Object {
         Data() = delete;
-        ~Data();
-        Data(Allocator& allocator,  uint64_t size);
-        Data(Allocator& allocator,  std::span<std::byte> value);
+        Data(PropertyList& propertyyList,  uint64_t size);
+        Data(PropertyList& propertyyList,  std::span<std::byte> value);
         virtual void            emit(uint8_t objectIndexSize, ByteStream& bytes) override;
-        virtual void            deallocate() override;
         bool                    operator==(const Data& other) const;
         std::strong_ordering    operator<=>(const Data& other) const;
         std::span<std::byte>    bytes();
@@ -110,11 +127,10 @@ struct VIS_HIDDEN PropertyList {
         String() = delete;
         ~String();
         String(const String&) = delete;
-        String(Allocator& allocator, std::string_view value);   // Note: no constructor from "const char*"
+        String(PropertyList& propertyyList, std::string_view value);   // Note: no constructor from "const char*"
 
         virtual void            emit(uint8_t objectIndexSize, ByteStream& bytes) override;
         bool                    emitUnicode(uint8_t objectIndexSize, uint64_t stringSize, ByteStream& bytes) const;
-        virtual void            deallocate() override;
         bool                    operator==(const String& other) const;
         std::strong_ordering    operator<=>(const String& other) const;
     private:
@@ -123,18 +139,17 @@ struct VIS_HIDDEN PropertyList {
 
     struct Array : Object {
         Array() = delete;
-        Array(Allocator& allocator);
+        Array(PropertyList& propertyyList);
         ~Array();
 
         std::span<Object*>  values();
         virtual void        emit(uint8_t objectIndexSize, ByteStream& bytes) override;
-        virtual void        deallocate() override;
 
         template<typename T, class... Args>
         T& addObject(Args&&... args) {
-            Allocator& allocator = *_values.allocator();
+            Allocator& allocator = _propertyList.allocator();
             void* storage = allocator.aligned_alloc(alignof(T), sizeof(T));
-            T* result = new (storage) T(allocator, std::forward<Args>(args)...);
+            T* result = new (storage) T(_propertyList, std::forward<Args>(args)...);
             _values.push_back(result);
             return *result;
         }
@@ -144,27 +159,27 @@ struct VIS_HIDDEN PropertyList {
 
     struct Dictionary : Object {
         Dictionary()  = delete;
-        Dictionary(Allocator& allocator);
+        Dictionary(PropertyList& propertyyList);
+        ~Dictionary();
 
         std::span<Object*>  keys();
         std::span<Object*>  values();
         virtual void        emit(uint8_t objectIndexSize, ByteStream& bytes) override;
-        virtual void        deallocate() override;
 
         template<typename T, class... Args>
         T& addObjectForKey(std::string_view key, Args&&... args) {
-            Allocator& allocator = *_values.allocator();
+            Allocator& allocator = _propertyList.allocator();
             void* keyStorage = allocator.aligned_alloc(alignof(struct String), sizeof(struct String));
-            _keys.push_back(new (keyStorage) struct String(allocator, key));
+            _keys.push_back(new (keyStorage) struct String(_propertyList, key));
             void* storage = allocator.aligned_alloc(alignof(T), sizeof(T));
-            T* result = new (storage) T(allocator, std::forward<Args>(args)...);
+            T* result = new (storage) T(_propertyList, std::forward<Args>(args)...);
             _values.push_back(result);
             return *result;
         }
         void insertObjectForKey(std::string_view key, Object& object) {
-            Allocator& allocator = *_values.allocator();
+            Allocator& allocator = _propertyList.allocator();
             void* keyStorage = allocator.aligned_alloc(alignof(struct String), sizeof(struct String));
-            _keys.push_back(new (keyStorage) struct String(allocator, key));
+            _keys.push_back(new (keyStorage) struct String(_propertyList, key));
             _values.push_back(&object);
         }
     private:
@@ -174,11 +189,9 @@ struct VIS_HIDDEN PropertyList {
 
     struct Integer : Object {
         Integer() = delete;
-        Integer(int64_t value);
-        Integer(Allocator& allocator, int64_t value);
+        Integer(PropertyList& propertyyList, int64_t value);
 
         virtual void            emit(uint8_t objectIndexSize, ByteStream& bytes) override;
-        virtual void            deallocate() override;
         bool                    operator==(const Integer& other) const;
         std::strong_ordering    operator<=>(const Integer& other) const;
     protected:
@@ -186,17 +199,17 @@ struct VIS_HIDDEN PropertyList {
     };
 
     struct UUID : Data {
-        UUID(Allocator& allocator, uuid_t uuid);
+        UUID(PropertyList& PropertyList, uuid_t uuid);
     };
 
     struct Bitmap : Data {
-        Bitmap(Allocator& allocator, uint64_t size);
+        Bitmap(PropertyList& properyList, uint64_t size);
         void setBit(uint64_t bit);
     };
 
     template<typename T>
     struct Flags : PropertyList::Integer {
-        Flags(Allocator& allocator) : PropertyList::Integer(allocator, 0) {}
+        Flags(PropertyList& propertyList) : PropertyList::Integer(propertyList, 0) {}
         void setFlag(T flag, bool value = true) {
             assert(flag <= 62); // FIXME: deal with signed integers in PropertyList::Integer
             if (value) {
@@ -209,8 +222,12 @@ struct VIS_HIDDEN PropertyList {
 
     Dictionary& rootDictionary();
 private:
-    Allocator&  _allocator;
-    Dictionary  _rootDictionary;
+    Allocator&              _allocator;
+    lsl::Vector<String*>    _strings;
+    lsl::Vector<Integer*>   _integers;
+    lsl::Vector<Data*>      _datas;
+    lsl::Vector<Object*>    _collections;
+    Dictionary              *_rootDictionary;
 };
 
 #endif /* PropertyList_h */

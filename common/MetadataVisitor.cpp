@@ -47,7 +47,7 @@ typedef cache_builder::Fixup::Cache32 Cache32;
 typedef cache_builder::Fixup::Cache64 Cache64;
 #endif
 
-using mach_o::Header;
+using mach_o::UnsafeHeader;
 
 //
 // MARK: --- ResolvedValue methods ---
@@ -110,7 +110,7 @@ VMAddress ResolvedValue::vmAddress() const
 
 Visitor::Visitor(const DyldSharedCache* dyldCache, const dyld3::MachOAnalyzer* dylibMA,
                  std::optional<VMAddress> selectorStringsBaseAddress)
-    : dylibMA(dylibMA), dylibBaseAddress(((const Header*)dylibMA)->preferredLoadAddress()),
+    : dylibMA(dylibMA), dylibBaseAddress(((const UnsafeHeader*)dylibMA)->preferredLoadAddress()),
       selectorStringsBaseAddress(selectorStringsBaseAddress)
 {
     pointerSize = dylibMA->pointerSize();
@@ -153,7 +153,7 @@ Visitor::Visitor(const DyldSharedCache* dyldCache, const dyld3::MachOAnalyzer* d
 #elif SUPPORT_VM_LAYOUT
 
 Visitor::Visitor(const dyld3::MachOAnalyzer* dylibMA)
-    : dylibMA(dylibMA), dylibBaseAddress(((const Header*)dylibMA)->preferredLoadAddress())
+    : dylibMA(dylibMA), dylibBaseAddress(((const UnsafeHeader*)dylibMA)->preferredLoadAddress())
 {
     pointerSize = dylibMA->pointerSize();
 }
@@ -214,9 +214,9 @@ const dyld3::MachOFile* Visitor::mf() const
     return this->dylibMF;
 }
 
-const Header* Visitor::hdr() const
+const UnsafeHeader* Visitor::hdr() const
 {
-    return (const Header*)this->dylibMF;
+    return (const UnsafeHeader*)this->dylibMF;
 }
 
 

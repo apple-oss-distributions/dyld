@@ -23,6 +23,7 @@
  */
 
 @_implementationOnly import Dyld_Internal
+@_implementationOnly import MachO.dyld_images
 
 // We implement this a ~Copyable even though it ref counted because the ref count are syscalls, and thus very expensive. When we do need to copy
 // we will do it explicitly via a borrowing constructor.
@@ -54,6 +55,28 @@ struct MachTask: ~Copyable {
 
 extension MachTask {
     func dyldInfo() throws(AtlasError) -> task_dyld_info_data_t {
+        // Fast path: if reading from mach_task_self_ and gAllImageInfoAddress is initialized, use it directly
+        if self.port == mach_task_self_ && gAllImageInfoAddress != 0 {
+#if arch(arm64_32)
+            return task_dyld_info_data_t(all_image_info_addr:gAllImageInfoAddress,
+                                         all_image_info_size:UInt64(MemoryLayout<dyld_all_image_infos>.size),
+                                         all_image_info_format:TASK_DYLD_ALL_IMAGE_INFO_32)
+#else
+            return task_dyld_info_data_t(all_image_info_addr:gAllImageInfoAddress,
+                                         all_image_info_size:UInt64(MemoryLayout<dyld_all_image_infos>.size),
+                                         all_image_info_format:TASK_DYLD_ALL_IMAGE_INFO_64)
+#endif
+        }
+
+        // Slow path: use task_info syscall
+        // This happens when:
+        // 1. Reading a remote task (always uses syscall)
+        // 2. Reading mach_task_self_ when gAllImageInfoAddress is uninitialized (e.g., unit tests where
+        //    Dyld.framework is directly linked rather than dlopen'd by libdyld)
+        //
+        // NOTE: This syscall may trigger sandbox violations for new local clients (case 2). However, new
+        // local clients should configure their sandboxes appropriately. Remote clients (case 1) already
+        // have permissive sandboxes and are unaffected.
         var result              = task_dyld_info_data_t();
         var dyldTaskInfoCount   = Int32(5 /* TASK_DYLD_INFO_COUNT */)
         let kr = withUnsafeMutablePointer(to: &result) {
@@ -64,6 +87,13 @@ extension MachTask {
         guard kr == KERN_SUCCESS else {
             throw AtlasError.machError(kr)
         }
+
+        // Lazy initialization: if reading mach_task_self_ and gAllImageInfoAddress was uninitialized,
+        // cache the result so subsequent calls can use the fast path
+        if self.port == mach_task_self_ && gAllImageInfoAddress == 0 {
+            gAllImageInfoAddress = result.all_image_info_addr
+        }
+
         return result
     }
     func readStruct<T>(address: RemoteAddress) throws(AtlasError) -> T {
@@ -74,16 +104,16 @@ extension MachTask {
             throw AtlasError.machError(kr)
         }
         defer {
-            vm_deallocate(mach_task_self_, bufferPtrScalar, vm_size_t(vmSize))
+            free(UnsafeMutableRawPointer(bitPattern:UInt(bufferPtrScalar)))
         }
         guard vmSize >= MemoryLayout<T>.size else {
-            throw AtlasError.placeHolder
+            throw AtlasError.vmReadTooSmall(UInt64(vmSize), UInt64(MemoryLayout<T>.size))
         }
         let bufferPtr = UnsafeMutableRawPointer(bitPattern: Int(bitPattern: UInt(bufferPtrScalar)))
         let buffer = UnsafeMutableRawBufferPointer(start:bufferPtr, count:Int(MemoryLayout<T>.size))
-        return buffer.load(as:T.self)
+        return buffer.loadUnaligned(as:T.self)
     }
-    func readData(address: RemoteAddress, size: UInt64) throws(AtlasError) -> Data {
+    func readData(address: RemoteAddress, size: UInt64) throws(AtlasError) -> MemoryBuffer {
         var vmSize = mach_msg_type_number_t(0)
         var bufferPtrScalar: vm_offset_t = 0
         let kr = vm_read_safe(self.port, address.value, size, &bufferPtrScalar, &vmSize)
@@ -92,6 +122,6 @@ extension MachTask {
         }
         let bufferPtr = UnsafeMutableRawPointer(bitPattern: Int(bitPattern: UInt(bufferPtrScalar)))
 
-        return Data(bytesNoCopy:bufferPtr!, count:Int(vmSize), deallocator:.virtualMemory)
+        return MemoryBuffer(malloced:bufferPtr, count: Int(vmSize))
     }
 }

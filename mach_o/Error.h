@@ -53,6 +53,8 @@ public:
                     Error(Error&&); // can move
                     Error& operator=(const Error&) = delete; //  can't copy assign
                     Error& operator=(Error&&); // can move
+                    // this is to avoid integer literal conversion to const char* format
+                    Error(int) = delete;
                     ~Error();
 
 

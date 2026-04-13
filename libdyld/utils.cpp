@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2021 Apple Inc. All rights reserved.
+ * Copyright (c) 2021-2026 Apple Inc. All rights reserved.
  *
  * @APPLE_LICENSE_HEADER_START@
  *
@@ -43,7 +43,7 @@
 #include "Error.h"
 #include "Fixup.h"
 #include "GradedArchitectures.h"
-#include "Header.h"
+#include "UnsafeHeader.h"
 #include "Image.h"
 #include "Symbol.h"
 #include "Universal.h"
@@ -54,7 +54,7 @@ using mach_o::Architecture;
 using mach_o::Error;
 using mach_o::Fixup;
 using mach_o::GradedArchitectures;
-using mach_o::Header;
+using mach_o::UnsafeHeader;
 using mach_o::Image;
 using mach_o::LinkedDylibAttributes;
 using mach_o::Platform;
@@ -135,7 +135,7 @@ int macho_for_each_slice_in_fd(int fd, void (^callback)(const struct mach_header
     if ( ((statbuf.st_mode & (S_IRUSR|S_IROTH)) == 0) && (geteuid() == 0) )
         return EACCES;
 
-    const void* mappedFile = ::mmap(nullptr, (size_t)statbuf.st_size, PROT_READ, MAP_PRIVATE, fd, 0);
+    const void* mappedFile = ::mmap(nullptr, (size_t)statbuf.st_size, PROT_READ, MAP_PRIVATE|MAP_RESILIENT_CODESIGN, fd, 0);
     if ( mappedFile == MAP_FAILED )
         return errno;
 
@@ -153,7 +153,7 @@ int macho_for_each_slice_in_fd(int fd, void (^callback)(const struct mach_header
             }
         });
     }
-    else if ( const Header* hdr = Header::isMachO(content) ) {
+    else if ( const UnsafeHeader* hdr = UnsafeHeader::isMachO(content) ) {
         bool stop;
         if ( callback )
             callback((const mach_header*)hdr, 0, content.size(), &stop);
@@ -180,7 +180,7 @@ int macho_best_slice(const char* path, void (^bestSlice)(const struct mach_heade
     return result;
 }
 
-static bool launchableOnCurrentPlatform(const Header* hdr)
+static bool launchableOnCurrentPlatform(const UnsafeHeader* hdr)
 {
 #if TARGET_OS_OSX
     // macOS is special and can launch macOS, catalyst, and iOS apps
@@ -199,7 +199,7 @@ int macho_best_slice_fd_internal(int fd, Platform platform, const GradedArchitec
         return errno;
 
     // FIXME: possible that mmap() of the whole file will fail on memory constrainted devices (e.g. watch), so may need to read() instead
-    const void* mappedFile = ::mmap(nullptr, (size_t)statbuf.st_size, PROT_READ, MAP_PRIVATE, fd, 0);
+    const void* mappedFile = ::mmap(nullptr, (size_t)statbuf.st_size, PROT_READ, MAP_PRIVATE|MAP_RESILIENT_CODESIGN, fd, 0);
     if ( mappedFile == MAP_FAILED )
         return errno;
  
@@ -213,8 +213,8 @@ int macho_best_slice_fd_internal(int fd, Platform platform, const GradedArchitec
         Universal::Slice launchSlice, dylibSlice;
         uni->bestSlice(launchArchs, isOSBinary, launchSlice);
         uni->bestSlice(dylibArchs, isOSBinary, dylibSlice);
-        const Header* exe = Header::isMachO(launchSlice.buffer);
-        const Header* dylib = Header::isMachO(dylibSlice.buffer);
+        const UnsafeHeader* exe = UnsafeHeader::isMachO(launchSlice.buffer);
+        const UnsafeHeader* dylib = UnsafeHeader::isMachO(dylibSlice.buffer);
         if ( exe && exe->isMainExecutable() ) {
             if ( bestSlice ) {
                 uint64_t fileOffset = launchSlice.buffer.data() - content.data();
@@ -230,7 +230,7 @@ int macho_best_slice_fd_internal(int fd, Platform platform, const GradedArchitec
         else
             result = EBADARCH;
     }
-    else if ( const Header* hdr = Header::isMachO(content) ) {
+    else if ( const UnsafeHeader* hdr = UnsafeHeader::isMachO(content) ) {
         if (    hdr->isMainExecutable()
             &&  (launchArchs.isCompatible(hdr->arch(), isOSBinary) != 0) && launchableOnCurrentPlatform(hdr) )  {
             // the "best" of a main executable must pass grading and be a launchable
@@ -294,7 +294,7 @@ int macho_best_slice_in_fd(int fd, void (^bestSlice)(const struct mach_header* s
 ///
 const char* _Nullable macho_dylib_install_name(const struct mach_header* _Nonnull mh) DYLD_EXCLAVEKIT_UNAVAILABLE
 {
-    const Header* hdr = (const Header*)mh;
+    const UnsafeHeader* hdr = (const UnsafeHeader*)mh;
     if ( hdr->hasMachOMagic() )
         return hdr->installName();
 
@@ -360,7 +360,7 @@ int macho_for_each_imported_symbol(const struct mach_header* _Nonnull mh, size_t
 {
     if ( mappedSize == 0 ) {
         // Image loaded by dyld, but sanity check
-        if ( !((Header*)mh)->hasMachOMagic() )
+        if ( !((UnsafeHeader*)mh)->hasMachOMagic() )
             return EFTYPE;
         Image image(mh);
         iterateImportedSymbols(image, callback);
@@ -410,7 +410,7 @@ int macho_for_each_exported_symbol(const struct mach_header* _Nonnull mh, size_t
 {
     if ( mappedSize == 0 ) {
         // Image loaded by dyld, but sanity check
-        if ( !((Header*)mh)->hasMachOMagic() )
+        if ( !((UnsafeHeader*)mh)->hasMachOMagic() )
             return EFTYPE;
         Image image(mh);
         iterateExportedSymbols(image, callback);
@@ -454,7 +454,7 @@ int macho_for_each_defined_rpath(const struct mach_header* _Nonnull mh, size_t m
 
 bool macho_source_version(const struct mach_header* _Nonnull mh, uint64_t* _Nonnull version)
 {
-    Header* header = (Header*)mh;
+    UnsafeHeader* header = (UnsafeHeader*)mh;
     if ( !header->hasMachOMagic() )
         return false;
     
@@ -592,6 +592,8 @@ void macho_for_each_runnable_arch_name(void (^ _Nonnull callback)(const char* _N
   #endif
 #elif __x86_64__
     callback("x86_64", &stop);
+#else
+#error "Unknown arch"
 #endif
 }
 

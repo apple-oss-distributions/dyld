@@ -39,7 +39,7 @@
 
 using namespace objc_visitor;
 using ResolvedValue = metadata_visitor::ResolvedValue;
-using mach_o::Header;
+using mach_o::UnsafeHeader;
 
 #if !SUPPORT_VM_LAYOUT
 using metadata_visitor::Segment;
@@ -961,6 +961,32 @@ bool MethodList::usesOffsetsFromSelectorBuffer() const
     return methodList->usesOffsetsFromSelectorBuffer();
 }
 
+bool MethodList::usesOffsetsFromTypeBuffer() const
+{
+    if ( !methodListPos.has_value() )
+        return false;
+
+    const ResolvedValue& methodListValue = this->methodListPos.value();
+
+    const method_list_t* methodList = (const method_list_t*)methodListValue.value();
+    assert(methodList != nullptr);
+
+    return methodList->usesOffsetsFromTypeBuffer();
+}
+
+uint32_t MethodList::getRawSizeAndFlags() const
+{
+    if ( !methodListPos.has_value() )
+        return false;
+
+    const ResolvedValue& methodListValue = this->methodListPos.value();
+
+    const method_list_t* methodList = (const method_list_t*)methodListValue.value();
+    assert(methodList != nullptr);
+
+    return methodList->getRawSizeAndFlags();
+}
+
 void MethodList::setIsUniqued()
 {
     if ( !methodListPos.has_value() )
@@ -1012,6 +1038,19 @@ void MethodList::setUsesOffsetsFromSelectorBuffer()
     methodList->setUsesOffsetsFromSelectorBuffer();
 }
 
+void MethodList::setUsesOffsetsFromTypeBuffer()
+{
+    if ( !methodListPos.has_value() )
+        return;
+
+    const ResolvedValue& methodListValue = this->methodListPos.value();
+
+    method_list_t* methodList = (method_list_t*)methodListValue.value();
+    assert(methodList != nullptr);
+
+    methodList->setUsesOffsetsFromTypeBuffer();
+}
+
 bool MethodList::isListOfLists() const
 {
     if ( !methodListPos.has_value() )
@@ -1038,9 +1077,13 @@ std::optional<VMAddress> MethodList::getVMAddress() const
 static Method::Kind getKind(const MethodList::method_list_t* methodList)
 {
     typedef Method::Kind Kind;
-    if ( methodList->usesRelativeOffsets() )
-        return methodList->usesOffsetsFromSelectorBuffer() ? Kind::relativeDirect : Kind::relativeIndirect;
-    else
+    if ( methodList->usesRelativeOffsets() ) {
+        if ( methodList->usesOffsetsFromTypeBuffer() )
+            return Kind::relativeDirectSelectorsAndTypes;
+        if ( methodList->usesOffsetsFromSelectorBuffer() )
+            return Kind::relativeDirectSelectors;
+        return Kind::relativeIndirect;
+    } else
         return Kind::pointer;
 }
 
@@ -1096,7 +1139,10 @@ ResolvedValue Method::getNameField(const Visitor& objcVisitor) const
         case Kind::relativeIndirect: {
             assert(0);
         }
-        case Kind::relativeDirect: {
+        case Kind::relativeDirectSelectors: {
+            assert(0);
+        }
+        case Kind::relativeDirectSelectorsAndTypes: {
             assert(0);
         }
         case Kind::pointer: {
@@ -1111,7 +1157,10 @@ ResolvedValue Method::getTypesField(const Visitor& objcVisitor) const
         case Kind::relativeIndirect: {
             assert(0);
         }
-        case Kind::relativeDirect: {
+        case Kind::relativeDirectSelectors: {
+            assert(0);
+        }
+        case Kind::relativeDirectSelectorsAndTypes: {
             assert(0);
         }
         case Kind::pointer: {
@@ -1126,7 +1175,10 @@ ResolvedValue Method::getIMPField(const Visitor& objcVisitor) const
         case Kind::relativeIndirect: {
             assert(0);
         }
-        case Kind::relativeDirect: {
+        case Kind::relativeDirectSelectors: {
+            assert(0);
+        }
+        case Kind::relativeDirectSelectorsAndTypes: {
             assert(0);
         }
         case Kind::pointer: {
@@ -1150,8 +1202,9 @@ const char* Method::getName(const Visitor& objcVisitor) const
             ResolvedValue nameSelRefValue = objcVisitor.getValueFor(nameSelRefVMAddr);
             return (const char*)objcVisitor.resolveRebase(nameSelRefValue).value();
         }
-        case Kind::relativeDirect: {
-#if BUILDING_SHARED_CACHE_UTIL
+        case Kind::relativeDirectSelectors:
+        case Kind::relativeDirectSelectorsAndTypes: {
+#if BUILDING_SHARED_CACHE_UTIL || BUILDING_CACHE_BUILDER_UNIT_TESTS
             const uint8_t* fieldPos = (const uint8_t*)&((const relative_method_t*)this->methodPos.value())->nameOffset;
             uint32_t nameOffsetInBuffer = *(uint32_t*)fieldPos;
 
@@ -1184,8 +1237,21 @@ const char* Method::getTypes(const Visitor& objcVisitor) const
             ResolvedValue typeValue = objcVisitor.getValueFor(typeVMAddr);
             return (const char*)typeValue.value();
         }
-        case Kind::relativeDirect: {
+        case Kind::relativeDirectSelectors: {
             assert(0);
+        }
+        case Kind::relativeDirectSelectorsAndTypes: {
+#if BUILDING_SHARED_CACHE_UTIL || BUILDING_CACHE_BUILDER_UNIT_TESTS
+            const uint8_t* fieldPos = (const uint8_t*)&((const relative_method_t*)this->methodPos.value())->typesOffset;
+            uint32_t typesOffsetInBuffer = *(uint32_t*)fieldPos;
+
+            VMAddress typeVMAddr = objcVisitor.sharedCacheSelectorStringsBaseAddress() + VMOffset((uint64_t)typesOffsetInBuffer);
+            ResolvedValue typeValue = objcVisitor.getValueFor(typeVMAddr);
+            return (const char*)typeValue.value();
+#else
+            // dyld should never walk direct methods as the objc closure optimizations skip cache dylibs
+            assert(0);
+#endif
         }
         case Kind::pointer: {
             ResolvedValue typesField = this->getTypesField(objcVisitor);
@@ -1208,7 +1274,10 @@ const void* Method::getIMP(const Visitor& objcVisitor) const
             ResolvedValue impValue = objcVisitor.getValueFor(impVMAddr);
             return (const char*)impValue.value();
         }
-        case Kind::relativeDirect: {
+        case Kind::relativeDirectSelectors: {
+            assert(0);
+        }
+        case Kind::relativeDirectSelectorsAndTypes: {
             assert(0);
         }
         case Kind::pointer: {
@@ -1235,7 +1304,8 @@ VMAddress Method::getNameVMAddr(const Visitor& objcVisitor) const
             ResolvedValue nameSelRefValue = objcVisitor.getValueFor(nameSelRefVMAddr);
             return objcVisitor.resolveRebase(nameSelRefValue).vmAddress();
         }
-        case Kind::relativeDirect: {
+        case Kind::relativeDirectSelectors:
+        case Kind::relativeDirectSelectorsAndTypes: {
 #if BUILDING_DYLD || BUILDING_CLOSURE_UTIL || BUILDING_UNIT_TESTS
             // dyld should never walk direct methods as the objc closure optimizations skip cache dylibs
             assert(0);
@@ -1257,7 +1327,7 @@ VMAddress Method::getTypesVMAddr(const Visitor& objcVisitor) const
 {
     switch ( this->kind ) {
         case Kind::relativeIndirect:
-        case Kind::relativeDirect: {
+        case Kind::relativeDirectSelectors: {
             const uint8_t* fieldPos = (const uint8_t*)&((const relative_method_t*)this->methodPos.value())->typesOffset;
             int32_t relativeOffsetFromField = *(int32_t*)fieldPos;
             VMOffset relativeOffsetFromMethod((uint64_t)offsetof(relative_method_t, typesOffset) + relativeOffsetFromField);
@@ -1265,6 +1335,17 @@ VMAddress Method::getTypesVMAddr(const Visitor& objcVisitor) const
             VMAddress methodVMAddr = this->methodPos.vmAddress();
             VMAddress typeVMAddr = methodVMAddr + relativeOffsetFromMethod;
             return typeVMAddr;
+        }
+        case Kind::relativeDirectSelectorsAndTypes: {
+#if BUILDING_DYLD || BUILDING_CLOSURE_UTIL || BUILDING_UNIT_TESTS
+            // dyld should never walk direct methods as the objc closure optimizations skip cache dylibs
+            assert(0);
+#else
+            const uint8_t* fieldPos = (const uint8_t*)&((const relative_method_t*)this->methodPos.value())->typesOffset;
+            uint32_t typesOffsetInBuffer = *(uint32_t*)fieldPos;
+
+            return objcVisitor.sharedCacheSelectorStringsBaseAddress() + VMOffset((uint64_t)typesOffsetInBuffer);
+#endif
         }
         case Kind::pointer: {
             ResolvedValue typesRefValue = this->getTypesField(objcVisitor);
@@ -1277,7 +1358,8 @@ std::optional<VMAddress> Method::getIMPVMAddr(const Visitor& objcVisitor) const
 {
     switch ( this->kind ) {
         case Kind::relativeIndirect:
-        case Kind::relativeDirect:  {
+        case Kind::relativeDirectSelectors:
+        case Kind::relativeDirectSelectorsAndTypes:  {
             const uint8_t* fieldPos = (const uint8_t*)&((const relative_method_t*)this->methodPos.value())->impOffset;
             int32_t relativeOffsetFromField = *(int32_t*)fieldPos;
 
@@ -1315,7 +1397,10 @@ VMAddress Method::getNameSelRefVMAddr(const Visitor& objcVisitor) const
             ResolvedValue nameSelRefValue = objcVisitor.getValueFor(nameSelRefVMAddr);
             return nameSelRefValue.vmAddress();
         }
-        case Kind::relativeDirect: {
+        case Kind::relativeDirectSelectors: {
+            assert(0);
+        }
+        case Kind::relativeDirectSelectorsAndTypes: {
             assert(0);
         }
         case Kind::pointer: {
@@ -1331,7 +1416,8 @@ void Method::setName(const Visitor& objcVisitor, VMAddress nameVMAddr)
         case Kind::relativeIndirect: {
             assert(0);
         }
-        case Kind::relativeDirect: {
+        case Kind::relativeDirectSelectors:
+        case Kind::relativeDirectSelectorsAndTypes: {
             const uint8_t* fieldPos = (const uint8_t*)&((const relative_method_t*)this->methodPos.value())->nameOffset;
 
             VMOffset nameOffsetInBuffer = nameVMAddr - objcVisitor.sharedCacheSelectorStringsBaseAddress();
@@ -1352,7 +1438,7 @@ void Method::setTypes(const Visitor& objcVisitor, VMAddress typesVMAddr)
 {
     switch ( this->kind ) {
         case Kind::relativeIndirect:
-        case Kind::relativeDirect: {
+        case Kind::relativeDirectSelectors: {
             VMAddress methodVMAddr = this->methodPos.vmAddress();
             VMAddress typesFieldVMAddr = methodVMAddr + VMOffset((uint64_t)offsetof(relative_method_t, typesOffset));
 
@@ -1362,6 +1448,16 @@ void Method::setTypes(const Visitor& objcVisitor, VMAddress typesVMAddr)
             const uint8_t* fieldPos = (const uint8_t*)&((const relative_method_t*)this->methodPos.value())->typesOffset;
             assert((int32_t)relativeOffset == relativeOffset);
             *(int32_t*)fieldPos = (int32_t)relativeOffset;
+            break;
+        }
+        case Kind::relativeDirectSelectorsAndTypes: {
+            const uint8_t* fieldPos = (const uint8_t*)&((const relative_method_t*)this->methodPos.value())->typesOffset;
+
+            VMOffset typesOffsetInBuffer = typesVMAddr - objcVisitor.sharedCacheSelectorStringsBaseAddress();
+            uint64_t relativeOffset = (uint64_t)typesOffsetInBuffer.rawValue();
+
+            assert((uint32_t)relativeOffset == relativeOffset);
+            *(uint32_t*)fieldPos = (uint32_t)relativeOffset;
             break;
         }
         case Kind::pointer: {
@@ -1375,7 +1471,8 @@ void Method::setIMP(const Visitor& objcVisitor, std::optional<VMAddress> impVMAd
 {
     switch ( this->kind ) {
         case Kind::relativeIndirect:
-        case Kind::relativeDirect: {
+        case Kind::relativeDirectSelectors:
+        case Kind::relativeDirectSelectorsAndTypes: {
             if ( !impVMAddr.has_value() ) {
                 // A NULL imp is probably a protocol, and is expected.  Every other IMP in the
                 // protocol is also going to be NULL, so just make sure this one matches
@@ -1418,7 +1515,34 @@ void Method::convertNameToOffset(const Visitor& objcVisitor, uint32_t nameOffset
             // FIXME: Should we convert the kind field on this method to relativeDirect?
             break;
         }
-        case Kind::relativeDirect: {
+        case Kind::relativeDirectSelectors: {
+            // This shouldn't happen
+            assert(0);
+        }
+        case Kind::relativeDirectSelectorsAndTypes: {
+            // This shouldn't happen
+            assert(0);
+        }
+        case Kind::pointer: {
+            // This shouldn't happen
+            assert(0);
+        }
+    }
+}
+
+void Method::convertTypesToOffset(const Visitor& objcVisitor, uint32_t typesOffset)
+{
+    switch ( this->kind ) {
+        case Kind::relativeIndirect: {
+            // We are always looking at an indirect method when converting a name to an offset
+            uint8_t* fieldPos = (uint8_t*)&((const relative_method_t*)this->methodPos.value())->typesOffset;
+            *(uint32_t*)fieldPos = (uint32_t)typesOffset;
+
+            // FIXME: Should we convert the kind field on this method to relativeDirect?
+            break;
+        }
+        case Kind::relativeDirectSelectors:
+        case Kind::relativeDirectSelectorsAndTypes: {
             // This shouldn't happen
             assert(0);
         }
@@ -1748,7 +1872,7 @@ const char* Property::getAttributes(const Visitor& objcVisitor) const
 // MARK: --- Visitor::Section methods ---
 //
 
-std::optional<Visitor::Section> Visitor::findSection(std::span<const char*> altSegNames, const char *sectionName) const
+std::optional<Visitor::Section> Visitor::findSection(std::span<const char* const> altSegNames, const char* sectionName) const
 {
 #if SUPPORT_VM_LAYOUT
     const dyld3::MachOFile* mf = this->dylibMA;
@@ -1757,7 +1881,7 @@ std::optional<Visitor::Section> Visitor::findSection(std::span<const char*> altS
 #endif
 
     __block std::optional<Visitor::Section> objcDataSection;
-    ((const Header*)mf)->forEachSection(^(const Header::SegmentInfo& segInfo, const Header::SectionInfo& sectInfo, bool& stop) {
+    ((const UnsafeHeader*)mf)->forEachSection(^(const UnsafeHeader::SegmentInfo& segInfo, const UnsafeHeader::SectionInfo& sectInfo, bool& stop) {
         bool segMatch = std::any_of(altSegNames.begin(), altSegNames.end(), [&sectInfo](const char* segName) {
             return sectInfo.segmentName == segName;
         });
@@ -1782,7 +1906,7 @@ std::optional<Visitor::Section> Visitor::findSection(std::span<const char*> altS
 
 std::optional<Visitor::Section> Visitor::findObjCDataSection(const char *sectionName) const
 {
-    static const char* objcDataSegments[] = {
+    static const char* const objcDataSegments[] = {
         "__DATA", "__DATA_CONST", "__DATA_DIRTY"
     };
     return findSection(objcDataSegments, sectionName);
@@ -1790,7 +1914,7 @@ std::optional<Visitor::Section> Visitor::findObjCDataSection(const char *section
 
 std::optional<Visitor::Section> Visitor::findObjCTextSection(const char *sectionName) const
 {
-    static const char* objcTextSegments[] = {
+    static const char* const objcTextSegments[] = {
         "__TEXT"
     };
     return findSection(objcTextSegments, sectionName);

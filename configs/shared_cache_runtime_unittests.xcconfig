@@ -15,3 +15,5 @@ SUPPORTED_PLATFORMS = macosx
 SUPPORTS_MACCATALYST = NO
 USER_HEADER_SEARCH_PATHS =
 
+OTHER_SWIFT_FLAGS = $(inherited) -vfsoverlay "$(PROJECT_TEMP_DIR)/dyld-overlay.yaml" -Xcc -ivfsoverlay -Xcc "$(PROJECT_TEMP_DIR)/dyld-overlay.yaml"
+OTHER_CFLAGS = $(inherited) -ivfsoverlay "$(PROJECT_TEMP_DIR)/dyld-overlay.yaml"

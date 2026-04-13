@@ -37,9 +37,10 @@
 #endif // !TARGET_OS_EXCLAVEKIT
 
 #include "Universal.h"
-#include "Header.h"
+#include "UnsafeHeader.h"
 #include "Misc.h"
 #include "Architecture.h"
+#include "Archive.h"
 
 namespace mach_o {
 
@@ -90,7 +91,7 @@ Error Universal::valid(uint64_t fileSize) const
     __block Architecture*  archsCurrent  = archsBuffer;
     __block SliceRange*    slicesCurrent = sliceRanges;
     __block bool           strictLayout  = true;
-    this->forEachSlice(^(Architecture sliceArch, uint64_t sliceOffset, uint64_t sliceSize, bool& stop) {
+    this->forEachSlice(^(Architecture sliceArch, uint64_t sliceOffset, uint64_t sliceSize, uint8_t sliceAlignment, bool& stop) {
         *slicesCurrent++ = {sliceOffset, sliceOffset+sliceSize};
         if ( greaterThanAddOrOverflow(sliceOffset, sliceSize, fileSize) ) {
             sliceError = Error("%s slice extends beyond end of file", sliceArch.name());
@@ -134,21 +135,26 @@ Error Universal::valid(uint64_t fileSize) const
 
 Error Universal::validSlice(Architecture sliceArch, uint64_t sliceOffset, uint64_t sliceLen) const
 {
-    if ( const Header* mh = Header::isMachO({(uint8_t*)this+sliceOffset, (size_t)sliceLen}) ) {
-        uint32_t pageSizeMask = (mh->uses16KPages() && !mh->isObjectFile()) ? 0x3FFF : 0xFFF;
-        if ( (sliceOffset & pageSizeMask) != 0 ) {
-            // slice not page aligned
-            return Error("slice is not page aligned");
+    if ( const UnsafeHeader* hdr = UnsafeHeader::isMachO({(uint8_t*)this+sliceOffset, (size_t)sliceLen}) ) {
+        if ( !hdr->isDSYM() && !hdr->isObjectFile() ) {
+            uint32_t pageSizeMask = (hdr->uses16KPages() && !hdr->isObjectFile()) ? 0x3FFF : 0xFFF;
+            if ( (sliceOffset & pageSizeMask) != 0 ) {
+                // slice not page aligned
+                return Error("slice is not page aligned");
+            }
         }
-        Architecture machHeaderArch = mh->arch();
-        if ( machHeaderArch != sliceArch )
-            return Error("cpu type/subtype in slice (%s) does not match fat header (%s)", machHeaderArch.name(), sliceArch.name());
+        Architecture machHeaderArch = hdr->arch();
+        if ( machHeaderArch != sliceArch ) {
+            // for historical loosely match arm64e
+            if ( !machHeaderArch.usesArm64AuthPointers() || !sliceArch.usesArm64AuthPointers() )
+                return Error("cpu type/subtype in slice (%s) does not match fat header (%s)", machHeaderArch.name(), sliceArch.name());
+        }
     }
     return Error::none();
 }
 
 
-void Universal::forEachSlice(void (^callback)(Architecture arch, uint64_t sliceOffset, uint64_t sliceSize, bool& stop)) const
+void Universal::forEachSlice(void (^callback)(Architecture arch, uint64_t sliceOffset, uint64_t sliceSize, uint8_t sliceAlignment, bool& stop)) const
 {
     bool           stop     = false;
     const uint32_t numArchs = OSSwapBigToHostInt32(this->fh.nfat_arch);
@@ -158,18 +164,20 @@ void Universal::forEachSlice(void (^callback)(Architecture arch, uint64_t sliceO
             Architecture arch(&archs[i]);
             uint32_t sliceOffset     = OSSwapBigToHostInt32(archs[i].offset);
             uint32_t sliceLen        = OSSwapBigToHostInt32(archs[i].size);
-            if ( arch == Architecture::arm64e_old ) {
+            uint32_t sliceAlign      = OSSwapBigToHostInt32(archs[i].align);
+           if ( arch == Architecture::arm64e_old ) {
                 // FIXME: hack libtool built fat headers are missing ABI info for arm64e slices
                 arch = Architecture::arm64e;
             }
-            callback(arch, sliceOffset, sliceLen, stop);
+            callback(arch, sliceOffset, sliceLen, sliceAlign, stop);
         }
         // Look for one more slice for arm64ageddon
         Architecture arch(&archs[numArchs]);
         if ( arch == Architecture::arm64 ) {
             uint32_t sliceOffset = OSSwapBigToHostInt32(archs[numArchs].offset);
             uint32_t sliceLen    = OSSwapBigToHostInt32(archs[numArchs].size);
-            callback(arch, sliceOffset, sliceLen, stop);
+            uint32_t sliceAlign  = OSSwapBigToHostInt32(archs[numArchs].align);
+            callback(arch, sliceOffset, sliceLen, sliceAlign, stop);
         }
     }
     else if ( this->fh.magic == OSSwapBigToHostInt32(FAT_MAGIC_64) ) {
@@ -178,15 +186,16 @@ void Universal::forEachSlice(void (^callback)(Architecture arch, uint64_t sliceO
             Architecture arch(&archs[i]);
             uint64_t sliceOffset     = OSSwapBigToHostInt64(archs[i].offset);
             uint64_t sliceLen        = OSSwapBigToHostInt64(archs[i].size);
-            callback(arch, sliceOffset, sliceLen, stop);
+            uint32_t sliceAlign      = OSSwapBigToHostInt32(archs[i].align);
+            callback(arch, sliceOffset, sliceLen, sliceAlign, stop);
         }
     }
 }
 
 void Universal::forEachSlice(void (^callback)(Slice slice, bool& stop)) const
 {
-    this->forEachSlice(^(Architecture sliceArch, uint64_t sliceOffset, uint64_t sliceSize, bool& stop) {
-        callback(Slice{sliceArch, std::span((uint8_t*)this+sliceOffset, (size_t)sliceSize)}, stop);
+    this->forEachSlice(^(Architecture sliceArch, uint64_t sliceOffset, uint64_t sliceSize, uint8_t sliceAlignment, bool& stop) {
+        callback(Slice{sliceArch, std::span((uint8_t*)this+sliceOffset, (size_t)sliceSize), sliceOffset, sliceAlignment}, stop);
     });
 }
 
@@ -195,7 +204,7 @@ const char* Universal::archNames(char strBuf[256]) const
 {
     strBuf[0] = '\0';
     __block bool  needComma = false;
-    this->forEachSlice(^(Architecture sliceArch, uint64_t sliceOffset, uint64_t sliceSize, bool& stop) {
+    this->forEachSlice(^(Architecture sliceArch, uint64_t sliceOffset, uint64_t sliceSize, uint8_t sliceAlignment, bool& stop) {
         if ( needComma )
             strlcat(strBuf, ",", 256);
         strlcat(strBuf, sliceArch.name(), 256);
@@ -209,11 +218,11 @@ const char* Universal::archAndPlatformNames(char strBuf[512]) const
 {
     strBuf[0] = '\0';
     __block bool  needComma = false;
-    this->forEachSlice(^(Architecture sliceArch, uint64_t sliceOffset, uint64_t sliceSize, bool& stop) {
+    this->forEachSlice(^(Architecture sliceArch, uint64_t sliceOffset, uint64_t sliceSize, uint8_t sliceAlignment, bool& stop) {
         if ( needComma )
             strlcat(strBuf, ",", 512);
         strlcat(strBuf, sliceArch.name(), 512);
-        const Header* mh = (Header*)((uint8_t*)this+sliceOffset);
+        const UnsafeHeader* mh = (UnsafeHeader*)((uint8_t*)this+sliceOffset);
         strlcat(strBuf, ":", 512);
         strlcat(strBuf, mh->platformAndVersions().platform.name().c_str(), 512);
         needComma = true;
@@ -241,6 +250,47 @@ bool Universal::bestSlice(const GradedArchitectures& gradedArchs, bool isOSBinar
     }
 
     return false;
+}
+
+uint32_t Universal::sliceCount() const
+{
+    __block uint32_t count = 0;
+    this->forEachSlice(^(Architecture arch, uint64_t sliceOffset, uint64_t sliceSize, uint8_t sliceAlignment, bool& stop) {
+        ++count;
+    });
+    return count;
+}
+
+uint8_t Universal::defaultAlignment(std::span<const uint8_t> fileContent)
+{
+    if ( const UnsafeHeader* hdr = UnsafeHeader::isMachO(fileContent) ) {
+        // .o slices only need to be 8-byte align in fat .o files
+        if ( hdr->isObjectFile() )
+            return 3; // 8-byte aligned
+
+        // dSYM slices only need to be 32-byte align in fat .dSYM files
+        if ( hdr->isDSYM() )
+            return 5; // 32-byte aligned
+
+        // all old final images are 4KB aligned
+        if ( hdr->arch().usesx86_64Instructions() )
+            return 12; // 4KB aligned
+        if ( hdr->arch().usesArm32Instructions() || hdr->arch().usesThumbInstructions() )
+            return 12; // 4KB aligned
+        if ( hdr->arch() == Architecture::i386 )
+            return 12; // 4KB aligned
+    }
+    else if ( UnsafeHeader::isBitCodeHeader(fileContent) ) {
+        // .o bit codes slices only need to be 8-byte align in fat .o files
+        return 3; // 8-byte aligned
+    }
+#if !TARGET_OS_EXCLAVEKIT
+    else if ( Archive::isArchive(fileContent) ) {
+        return 3; // 8-byte aligned
+    }
+#endif
+    // everything thing else is 16KB aligned slices in fat files
+    return 14; // 16KB aligned
 }
 
 

@@ -36,7 +36,7 @@
 #include "Vector.h"
 
 // mach_o
-#include "Header.h"
+#include "UnsafeHeader.h"
 
 // For _dyld_section_location_kind.  Note we want our copy, not the copy in the SDK
 #include "dyld_priv.h"
@@ -81,6 +81,24 @@ struct SectionLocations
     uint64_t offsets[count];
     uint64_t sizes[count];
 };
+
+class Loader;
+
+#if __has_feature(ptrauth_calls)
+    typedef AuthenticatedValue<Loader*> AuthLoader;
+    typedef AuthenticatedValue<const Loader*> ConstAuthLoader;
+#else
+    typedef Loader* AuthLoader;
+    typedef const Loader* ConstAuthLoader;
+#endif
+
+#if __has_feature(ptrauth_calls)
+    typedef AuthenticatedValue<PseudoDylib*> AuthPseudoDylib;
+    typedef AuthenticatedValue<const PseudoDylib*> ConstAuthPseudoDylib;
+#else
+    typedef PseudoDylib* AuthPseudoDylib;
+    typedef const PseudoDylib* ConstAuthPseudoDylib;
+#endif
 
 //
 //  At runtime there is one Loader object for each mach-o image loaded.
@@ -260,7 +278,7 @@ public:
     const char*             leafName(const RuntimeState&) const;
 #if SUPPORT_VM_LAYOUT
     const MachOAnalyzer*    analyzer(const RuntimeState& state) const;
-    const mach_o::Header*   header(const RuntimeState& state) const;
+    const mach_o::UnsafeHeader*   header(const RuntimeState& state) const;
 #endif
     bool                    hasExportedSymbol(Diagnostics& diag, RuntimeState&, const char* symbolName, ExportedSymbolMode mode,
                                               ResolverMode resolverMode, ResolvedSymbol* result,
@@ -272,7 +290,7 @@ public:
     void                    makeSegmentsReadWrite(RuntimeState& state) const;
     ResolvedSymbol          resolveSymbol(Diagnostics& diag, RuntimeState&, int libOrdinal, const char* symbolName, bool weakImport,
                                           bool lazyBind, CacheWeakDefOverride patcher, bool buildingCache=false) const;
-    void                    runInitializersBottomUp(RuntimeState&, lsl::Vector<const Loader*>& danglingUpwards, lsl::Vector<const Loader*>& visitedDelayed) const;
+    void                    runInitializersBottomUp(RuntimeState&, lsl::Vector<ConstAuthLoader>& danglingUpwards, lsl::Vector<ConstAuthLoader>& visitedDelayed) const;
     void                    runInitializersBottomUpPlusUpwardLinks(RuntimeState&) const;
     void                    findAndRunAllInitializers(RuntimeState&) const;
     bool                    hasMagic() const;
@@ -306,7 +324,7 @@ public:
     static void             uuidToStr(const uuid_t uuid, char  uuidStr[64]);
     static void             applyInterposingToDyldCache(RuntimeState& state);
     static void             adjustFunctionVariantsInDyldCache(RuntimeState& state);
-    static bool             overriddenCacheHeader(RuntimeState& state, const mach_o::Header* dylibHdr);
+    static bool             overriddenCacheHeader(RuntimeState& state, const mach_o::UnsafeHeader* dylibHdr);
 
 
     static uintptr_t        interpose(RuntimeState& state, uintptr_t value, const Loader* forLoader=nullptr);
@@ -406,22 +424,6 @@ protected:
 };
 
 static_assert(sizeof(Loader) == 32, "Invalid size");
-
-#if __has_feature(ptrauth_calls)
-    typedef AuthenticatedValue<Loader*> AuthLoader;
-    typedef AuthenticatedValue<const Loader*> ConstAuthLoader;
-#else
-    typedef Loader* AuthLoader;
-    typedef const Loader* ConstAuthLoader;
-#endif
-
-#if __has_feature(ptrauth_calls)
-    typedef AuthenticatedValue<PseudoDylib*> AuthPseudoDylib;
-    typedef AuthenticatedValue<const PseudoDylib*> ConstAuthPseudoDylib;
-#else
-    typedef PseudoDylib* AuthPseudoDylib;
-    typedef const PseudoDylib* ConstAuthPseudoDylib;
-#endif
 
 }
 

@@ -40,17 +40,42 @@ kern_return_t vm_read_safe(vm_map_read_t target_task,
                    mach_vm_size_t size,
                    vm_offset_t *data,
                    mach_msg_type_number_t *dataCnt) {
-    vm_offset_t bounceBuffer;
+    // Allocate a copy buffer we can move bytes into in case the VM decides to share pages behind our backs
+    *data = (vm_offset_t)malloc((size_t)size);
+    if (*data == 0) {
+        return KERN_MEMORY_FAILURE;
+    }
+
     // Mask out TBI bits
-    mach_vm_address_t mask = 0x00ff'ffff'ffff'ffffUL;
+    // So it turns out `mach_vm_read` semantics are a bit of nightmare here:
+    // 1. If you are an MTE process reading a different MTE process tag checking will be disabled, and you
+    //    you can pass in either the canonical or the non-canonical pointer
+    // 2. If you are an MTE process reading your own memory then tag checking is enforced by design to avoid vm_read
+    //    being used a TCO like bypass, so the actual pointer must be used
+    // 3. If you are a non-MTE process and pass in a pointer with the TBI bits set you will get an error even if
+    //    you are reading a remote process that is MTE enabled, so you need to canonicalize the pointer.
+    //
+    // Reading the above canonical pointers work in all cases but 2, which is explicitly the mach_task_self() case
+    // so we should canonicalize all pointers unless we are reading mach_task_self(), in which case we should bypass
+    // the syscall and just do a memcpy.
+    //
+    // Since
+    // 1. For the mach_task_self() case it needs to have the tag correct to handle the library code reads
+    // 2. Pass the canonicalized pointer if we are a non-MTE process
+    //   a. For non-MTE processes everything will always be zero
+    //   b. For MTE processes the kernel will strip the tags when the pages are mapped in
+    if (target_task == mach_task_self()) {
+        memcpy((void*)*data, (const void*)address, (size_t)size);
+        *dataCnt = (mach_msg_type_number_t)size;
+        return KERN_SUCCESS;
+    }
+    const mach_vm_address_t mask = 0x00ff'ffff'ffff'ffffUL;
+
+    vm_offset_t bounceBuffer = 0;
     kern_return_t kr = mach_vm_read(target_task, mask & address, size, &bounceBuffer, dataCnt);
     if (kr != KERN_SUCCESS) {
-        return kr;
-    }
-    // Allocate a copy buffer we can move bytes into in case the VM decides to share pages behind our backs
-    kr = vm_allocate(mach_task_self(), (vm_address_t *)data, *dataCnt, VM_FLAGS_ANYWHERE);
-    if (kr != KERN_SUCCESS) {
-        (void)vm_deallocate(mach_task_self(), (vm_address_t)bounceBuffer, *dataCnt);
+        free((void*)*data);
+        *data = (vm_offset_t)NULL;
         return kr;
     }
     // Copy the memory with hooks for audit builds
@@ -72,7 +97,7 @@ SafeRemoteBuffer::SafeRemoteBuffer(vm_map_read_t target_task, mach_vm_address_t 
 SafeRemoteBuffer::~SafeRemoteBuffer() {
     if (_buffer == 0) { return; }
     if (_bufferSize == 0) { return; }
-    (void)vm_deallocate(mach_task_self(), _buffer, _bufferSize);
+    free((void*)_buffer);
 }
 
 std::span<std::byte> SafeRemoteBuffer::data() {

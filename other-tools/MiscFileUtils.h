@@ -26,7 +26,9 @@
 #define other_tools_MiscFileUtils_h
 
 // mach_o
-#include "Header.h"
+#include "UnsafeHeader.h"
+#include "Error.h"
+#include "Universal.h"
 
 #include "DyldSharedCache.h"
 
@@ -35,14 +37,25 @@
 // FIXME: Maybe this should be something like tools_common?
 namespace other_tools {
 
+std::span<const uint8_t> mapFileReadOnly(CString path, struct stat* statBuf=nullptr) VIS_HIDDEN;
+mach_o::Error            mapFileReadOnly(CString path, std::span<const uint8_t>& mappedBuffer, struct stat* statBuf=nullptr) VIS_HIDDEN;
+void                     unmapFile(std::span<const uint8_t>) VIS_HIDDEN;
+
 bool withReadOnlyMappedFile(const char* path, void (^handler)(std::span<const uint8_t>)) VIS_HIDDEN;
+bool withReadOnlyMappedFile(const char* path, void (^handler)(std::span<const uint8_t>, struct stat& statBuf)) VIS_HIDDEN;
 
 // used by command line tools to process files that may be on disk or in dyld cache
 void forSelectedSliceInPaths(std::span<const char*> paths, std::span<const char*> archFilter, const DyldSharedCache* dyldCache,
-                             void (^callback)(const char* slicePath, const mach_o::Header* sliceHeader, size_t sliceLength)) VIS_HIDDEN;
+                             void (^callback)(const char* slicePath, const mach_o::UnsafeHeader* sliceHeader, size_t sliceLength)) VIS_HIDDEN;
 
 void forSelectedSliceInPaths(std::span<const char*> paths, std::span<const char*> archFilter,
-                             void (^callback)(const char* slicePath, const mach_o::Header* sliceHeader, size_t sliceLength)) VIS_HIDDEN;
+                             void (^callback)(const char* slicePath, const mach_o::UnsafeHeader* sliceHeader, size_t sliceLength)) VIS_HIDDEN;
+
+// For each supplied path, walk each slice of a fat file and each member of a static library.
+// The buffers used in the callback remain until after finish() is called
+void forEachFileGetSlices(std::span<const CString> paths, const DyldSharedCache* dyldCache,
+                          void (^callback)(CString slicePath, const struct stat& statBuf, std::span<const mach_o::Universal::Slice> slices)) VIS_HIDDEN;
+
 
 } // namespace other_tools
 

@@ -62,7 +62,7 @@ void iterateDirectoryTree(const std::string& pathPrefix, const std::string& path
 // writes the buffer to a temp file, then renames the file to the final path
 // returns true on success
 //
-bool safeSave(const void* buffer, size_t bufferLen, const std::string& path);
+bool safeSave(const void* buffer, size_t bufferLen, CString path, uint32_t permissions=0644);
 
 
 const void* mapFileReadOnly(const char* path, size_t& mappedSize);

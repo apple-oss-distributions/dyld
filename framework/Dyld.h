@@ -22,6 +22,4 @@
  * @APPLE_LICENSE_HEADER_END@
  */
 
-#import <Foundation/Foundation.h>
-
-//TODO: Add includes to the ObjC interface
+#import <Dyld/Introspection.h>

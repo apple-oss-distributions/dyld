@@ -973,7 +973,7 @@ public:
         if ( bindPtr->bind )
             return Fixup(loc, seg, bindPtr->ordinal, bindPtr->addend);
         else
-            return Fixup(loc, seg, rebasePtr->target);
+            return Fixup(loc, seg, rebasePtr->target - preferedLoadAddress);
     }
 
     Error            writeChainEntry(const Fixup& fixup, const void* nextLoc, uint64_t preferedLoadAddress, std::span<const MappedSegment*>) const override {
@@ -1066,7 +1066,7 @@ public:
     bool             is64() const override                                       { return false; }
     bool             supportsAuth() const override                               { return false; }
     uint32_t         minNext() const override                                    { return 4; }
-    uint32_t         maxNext() const override                                    { return 4*0x1F; }
+    uint32_t         maxNext() const override                                    { return 4*0x3F; } // 6-bits with 4 bytes stride
     uint64_t         maxRebaseTargetOffset(bool authenticated) const override    { return 0x03FFFFFF; }
     uint32_t         maxBindOrdinal(bool authenticated) const override           { return 0x000FFFFF; }
     int32_t          bindMaxEmbeddableAddend(bool authenticated) const override  { return 0; }
@@ -1089,10 +1089,12 @@ public:
         intptr_t delta = (nextLoc == nullptr) ? 0 : ((uint8_t*)nextLoc - (uint8_t*)fixup.location);
         dyld_chained_ptr_32_firmware_rebase*  rebasePtr = (dyld_chained_ptr_32_firmware_rebase*)fixup.location;
         rebasePtr->next     = (uint32_t)(delta/4);
-        rebasePtr->target   = (uint32_t)fixup.rebase.targetVmOffset;
+        // target is vmaddr
+        uint64_t target = preferedLoadAddress + fixup.rebase.targetVmOffset;
+        rebasePtr->target   = (uint32_t)target;
         if ( rebasePtr->next*4 != delta )
             return badChainDistance(fixup, delta);
-        if ( rebasePtr->target != fixup.rebase.targetVmOffset )
+        if ( rebasePtr->target != target )
             return badVmOffset(fixup);
         return Error::none();
     }
@@ -1309,9 +1311,9 @@ const ChainedFixups::PointerFormat& ChainedFixups::PointerFormat::make(uint16_t 
             return p6;
         case DYLD_CHAINED_PTR_ARM64E_KERNEL:
             return p7;
-        case DYLD_CHAINED_PTR_ARM64E_USERLAND:
-            return p8;
         case DYLD_CHAINED_PTR_64_KERNEL_CACHE:
+            return p8;
+        case DYLD_CHAINED_PTR_ARM64E_USERLAND:
             return p9;
         case DYLD_CHAINED_PTR_ARM64E_FIRMWARE:
             return p10;

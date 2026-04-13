@@ -99,6 +99,10 @@ struct ResultBinary
 
     // defaults to erroring out, but can change to just a warning
     bool            warn = false;
+
+    // Some errors are new binaries being compared to the database, while others are new binaries
+    // being compared to each other. Distinguish them here.
+    bool bothBinaryAndClientAreRoots;
 };
 
 // Represents a binary for which exports changed
@@ -153,12 +157,19 @@ public:
         error
     };
 
+    enum class RollbacksMode
+    {
+        off,
+        on
+    };
+
     // This is the main method that drives verification of new content in the build.
     // We parse them in to the input here, then this method checks if the database will
     // have new missing symbol errors as a result of applying these binaries to the database
     // Note the return value is an error if there was some issue querying the database, while
     // the output 'errors' is about errors on binaries themselves, not database errors
     mach_o::Error checkNewBinaries(bool warnOnRemovedSymbols, ExecutableMode executableMode,
+                                   RollbacksMode rollbacksMode,
                                    std::vector<SymbolsCacheBinary>&& binaries,
                                    const BinaryProjects& binaryProjects,
                                    std::vector<ResultBinary>& results,

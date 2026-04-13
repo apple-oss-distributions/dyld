@@ -30,7 +30,7 @@
 #include <sys/types.h>
 
 #include "Defines.h"
-#include "Header.h"
+#include "UnsafeHeader.h"
 #include "Loader.h"
 #include "PrebuiltLoader.h"
 #include "JustInTimeLoader.h"
@@ -44,7 +44,7 @@
 #include "PrebuiltObjC.h"
 #include "objc-shared-cache.h"
 
-using mach_o::Header;
+using mach_o::UnsafeHeader;
 
 #if SUPPORT_PREBUILTLOADERS || BUILDING_UNIT_TESTS || BUILDING_CACHE_BUILDER_UNIT_TESTS
 using dyld3::OverflowSafeArray;
@@ -477,12 +477,12 @@ static void optimizeObjCSelectors(RuntimeState& state,
                                   ObjCOptimizerImage&                image)
 {
 
-    const Header*   hdr         = (const Header*)image.jitLoader->mf(state);
+    const UnsafeHeader*   hdr         = (const UnsafeHeader*)image.jitLoader->mf(state);
     uint32_t        pointerSize = hdr->pointerSize();
 
     // The legacy (objc1) codebase uses a bunch of sections we don't want to reason about.  If we see them just give up.
     __block bool foundBadSection = false;
-    hdr->forEachSection(^(const Header::SectionInfo& sectInfo, bool& stop) {
+    hdr->forEachSection(^(const UnsafeHeader::SectionInfo& sectInfo, bool& stop) {
         if ( sectInfo.segmentName != "__OBJC" )
             return;
         if ( sectInfo.sectionName == "__module_info" ) {
@@ -1167,10 +1167,10 @@ void PrebuiltObjC::forEachSelectorReferenceToUnique(RuntimeState&           stat
 }
 
 static std::optional<VMOffset> getImageInfo(Diagnostics& diag, RuntimeState& state,
-                                            const Loader* ldr, const Header* hdr)
+                                            const Loader* ldr, const UnsafeHeader* hdr)
 {
     __block std::optional<VMOffset> objcImageInfoRuntimeOffset;
-    hdr->forEachSection(^(const Header::SectionInfo& sectionInfo, bool& stop) {
+    hdr->forEachSection(^(const UnsafeHeader::SectionInfo& sectionInfo, bool& stop) {
         if ( !sectionInfo.segmentName.starts_with("__DATA") )
             return;
         if ( sectionInfo.sectionName != "__objc_imageinfo" )
@@ -1269,7 +1269,7 @@ void PrebuiltObjC::make(Diagnostics& diag, RuntimeState& state)
     // classes/protocols are always preferred over the app ones, so a shared cache image being delayed or not
     // impacts the choice of classes/protocols.  See protocolIsInSharedCache() for example.
     for ( const Loader* ldr : state.loaded ) {
-        const Header* hdr = (const Header*)ldr->mf(state);
+        const UnsafeHeader* hdr = (const UnsafeHeader*)ldr->mf(state);
         uint32_t pointerSize = hdr->pointerSize();
 
         std::optional<VMOffset> objcImageInfoRuntimeOffset = getImageInfo(diag, state, ldr, hdr);
@@ -1306,7 +1306,7 @@ void PrebuiltObjC::make(Diagnostics& diag, RuntimeState& state)
             return;
 
         __block bool hasProtectedSegment = false;
-        hdr->forEachSegment(^(const Header::SegmentInfo& segInfo, bool& stop) {
+        hdr->forEachSegment(^(const UnsafeHeader::SegmentInfo& segInfo, bool& stop) {
             if ( segInfo.isProtected() ) {
                 hasProtectedSegment = true;
                 stop                = true;
