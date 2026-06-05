@@ -53,12 +53,12 @@ const uint8_t* ChainedFixupsWriter::bytes(size_t& size) const
 }
 
 Error ChainedFixupsWriter::valid(uint64_t preferredLoadAddress, std::span<const MappedSegment> segments,
-                           bool startsInSection) const
+                           bool is64, bool startsInSection) const
 {
     if ( _buildError.hasError() )
         return Error("%s", _buildError.message());
 
-    return ChainedFixups::valid(preferredLoadAddress, segments, startsInSection);
+    return ChainedFixups::valid(preferredLoadAddress, segments, is64, startsInSection);
 }
 
 template <typename T>

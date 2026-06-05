@@ -234,7 +234,7 @@ Error Image::validLinkedit(const Policy& policy) const
 
     // if image has chained fixups
     if ( this->hasChainedFixups() ) {
-        if ( Error err = this->chainedFixups().valid(_buffer->preferredLoadAddress(), segSpan) )
+        if ( Error err = this->chainedFixups().valid(_buffer->preferredLoadAddress(), segSpan, header()->is64()) )
             return err;
     }
 

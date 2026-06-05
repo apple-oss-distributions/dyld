@@ -170,15 +170,29 @@ internal func dyld_shared_cache_find_iterate_text_swift(
         return 0
     }
 
+    return searchExtraDirsForCache(extraSearchDirs, requestedUuid: requestedUuid, requestedUuidKey: requestedUuidKey, callback: callback)
+}
+
+/// Search extra directories for a shared cache matching the requested UUID.
+/// Returns 0 on success (found and iterated), -1 if not found.
+internal func searchExtraDirsForCache(
+    _ extraSearchDirs: UnsafePointer<UnsafePointer<CChar>?>,
+    requestedUuid: uuid_t,
+    requestedUuidKey: UUID,
+    callback: IterateTextCallback
+) -> Int32 {
     var p = extraSearchDirs
     while let dirPtr = p.pointee {
-        let path = String(cString: dirPtr)
-        if let cache = try? SharedCache(path: FilePath(path)),
-           requestedUuid == cache.uuid.uuid {
-            // Get or create cached info and iterate
-            if let cachedInfo = getOrCreateCachedTextInfo(for: cache, uuidKey: requestedUuidKey) {
-                iterateCacheTextsFromMemoryMap(cached: cachedInfo, callback: callback)
-                return 0
+        let dirPath = FilePath(String(cString: dirPtr))
+        for child in (dirPath.children ?? []) {
+            guard child.isPontentialSharedCache else { continue }
+            if let cache = try? SharedCache(path: child),
+               requestedUuid == cache.uuid.uuid {
+                // Get or create cached info and iterate
+                if let cachedInfo = getOrCreateCachedTextInfo(for: cache, uuidKey: requestedUuidKey) {
+                    iterateCacheTextsFromMemoryMap(cached: cachedInfo, callback: callback)
+                    return 0
+                }
             }
         }
         p = p.advanced(by: 1)

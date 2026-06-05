@@ -115,6 +115,11 @@ RecursiveAutoLock::~RecursiveAutoLock()
         _runtimeLocks.releaseDlopenLockInForkParent();
 }
 
+bool RecursiveAutoLock::couldLock()
+{
+    return _runtimeLocks.couldDlopenLock();
+}
+
 static void* handleFromLoader(const Loader* ldr, bool firstOnly)
 {
     uintptr_t dyldStart  = (uintptr_t)&__dso_handle;
@@ -1364,6 +1369,14 @@ void* APIs::dlopen_from(const char* path, int mode, void* addressInCaller)
     bool skipApiLock = (mode & RTLD_NOLOAD);
     RecursiveAutoLock  apiLock(*this, skipApiLock);
 
+    // If we are not taking the lock (becuase this is RTLD_NOLOAD)
+    // then peek to see if we could have taken the lock.
+    // If we can't that means another thread is in dlopen(), so we should
+    // be conservative about if images in the loaded list are ready for use.
+    // If we can take the lock, we might be in a static initializer calling dlopen() or
+    // there are no other threads in dyld.
+    bool conservativeNoLoad = skipApiLock && !apiLock.couldLock();
+    
     // some aspect of dlopen depend on who called it
     const Loader* caller = findImageContaining(addressInCaller);
 
@@ -1405,6 +1418,7 @@ void* APIs::dlopen_from(const char* path, int mode, void* addressInCaller)
 #endif
             options.forceUnloadable  = (mode & RTLD_UNLOADABLE);
             options.requestorNeedsFallbacks = caller ? caller->pre2022Binary : false;
+            options.conservativeNoLoad = conservativeNoLoad;
             options.rpathStack       = (caller ? &loadChainCaller : &loadChainMain);
             options.finder           = nullptr;
             topLoader = Loader::getLoader(diag, *this, path, options);

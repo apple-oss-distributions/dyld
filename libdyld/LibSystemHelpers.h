@@ -136,6 +136,9 @@ struct VIS_HIDDEN  [[clang::ptrauth_vtable_pointer(process_independent, address_
     virtual void            setDefaultProgramVars(ProgramVars& vars) const;
     virtual FuncLookup      legacyDyldFuncLookup() const;  // only works on x86_64 macOS
     virtual mach_o::Error   setUpThreadLocals(const DyldSharedCache* cache, const UnsafeHeader* hdr) const;
+
+    // Added in version 8
+    virtual bool            os_unfair_recursive_lock_trylock(dyld_recursive_mutex_t) const;
 };
 
 // __DATA_CONST,__helper section in libdyld.dylib
@@ -191,6 +194,9 @@ struct LibSystemHelpersWrapper
     }
     void os_unfair_lock_unlock(dyld_mutex_t lock) const {
         return helpers->os_unfair_lock_unlock(lock);
+    }
+    bool os_unfair_recursive_lock_trylock(dyld_recursive_mutex_t lock) const {
+        return helpers->os_unfair_recursive_lock_trylock(lock);
     }
 
     // Normal helpers, all of which need to be read-only during calls

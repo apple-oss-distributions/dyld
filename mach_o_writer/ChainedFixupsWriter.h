@@ -87,7 +87,7 @@ public:
                                                        const PointerFormat& pointerFormat,
                                                        uint32_t pageSize);
 
-    Error           valid(uint64_t preferredLoadAddress, std::span<const MappedSegment> segments, bool startsInSection=false) const;
+    Error           valid(uint64_t preferredLoadAddress, std::span<const MappedSegment> segments, bool is64, bool startsInSection=false) const;
 
     const uint8_t*  bytes(size_t& size) const;
 

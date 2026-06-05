@@ -52,7 +52,7 @@ extension AtlasSchemaValidator {
             throw .bplistError(error)
         }
         guard validatedKeys.isSuperset(of:Self.requiredKeys) else {
-            throw .missingRequiredPlistField
+            throw .missingRequiredPlistField(String(reflecting: type(of: Self.self)), validatedKeys, Self.requiredKeys)
         }
         try checkComplexKeyRelationships(keys:validatedKeys)
     }
@@ -318,7 +318,7 @@ struct SubCacheMapping: AtlasSchemaValidator {
 }
 
 extension Image.Impl: AtlasSchemaValidator {
-    static var requiredKeys: ValidatorKeys { return [.segs] }
+    static var requiredKeys: ValidatorKeys { return [] }
     
     struct ValidatorKeys: OptionSet {
         let rawValue: UInt64

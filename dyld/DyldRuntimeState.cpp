@@ -309,6 +309,24 @@ void RuntimeLocks::releaseDlopenLockInForkParent()
 #endif // BUILDING_DYLD && !TARGET_OS_EXCLAVEKIT
 }
 
+bool RuntimeLocks::couldDlopenLock()
+{
+#if BUILDING_DYLD && !TARGET_OS_EXCLAVEKIT
+    if ( this->_libSystemHelpers != nullptr ) {
+        if ( this->_libSystemHelpers.os_unfair_recursive_lock_trylock(&_apiLock) ) {
+            // Successfully acquired the recursive lock, immediately release
+            this->_libSystemHelpers.os_unfair_recursive_lock_unlock(&_apiLock);
+            return true;
+        }
+        else {
+            // Lock is held by another thread
+            return false;
+        }
+    }
+#endif // BUILDING_DYLD && !TARGET_OS_EXCLAVEKIT
+    return false;
+}
+
 void RuntimeLocks::resetDlopenLockInForkChild()
 {
 #if BUILDING_DYLD && !TARGET_OS_EXCLAVEKIT

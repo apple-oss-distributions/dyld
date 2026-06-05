@@ -246,7 +246,7 @@ public struct SharedCache {
     }
 }
 
-fileprivate extension FilePath {
+internal extension FilePath {
     var isPontentialSharedCache: Bool {
         let fileName = self.lastComponent!.stem
         let fileExtension = self.extension

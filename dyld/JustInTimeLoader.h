@@ -81,6 +81,7 @@ public:
     void                        runInitializers(RuntimeState&) const;
     bool                        isDelayInit(RuntimeState&) const;
     void                        setDelayInit(RuntimeState&, bool value) const;
+    bool                        initializersDone() const { return this->finishedInits; }
 
     bool                shouldLeaveMapped() const { return this->leaveMapped || this->lateLeaveMapped; }
     void                setLateLeaveMapped() { this->lateLeaveMapped = true; }
@@ -158,7 +159,8 @@ protected:
                          overrideIndex      : 15,
                          depCount           : 16,
                          delayInit          :  1,
-                         padding            :  8;
+                         finishedInits      :  1,
+                         padding            :  7;
     uint64_t             sliceOffset                    = 0;
     FileID               fileIdent;
     const DylibPatch*    overridePatches                = nullptr;

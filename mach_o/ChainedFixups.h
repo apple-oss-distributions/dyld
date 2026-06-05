@@ -90,9 +90,9 @@ public:
         Error                    badSegIndexOrOffset(const Fixup& fixup, uint8_t  segIndex, uint64_t segOffset) const;
   };
 
-    Error                   validLinkedit(uint64_t preferredLoadAddress, std::span<const MappedSegment> segments) const;
+    Error                   validLinkedit(uint64_t preferredLoadAddress, bool is64, std::span<const MappedSegment> segments) const;
     Error                   validStartsSection(std::span<const MappedSegment> segments) const;
-    Error                   valid(uint64_t preferredLoadAddress, std::span<const MappedSegment> segments, bool startsInSection=false) const;
+    Error                   valid(uint64_t preferredLoadAddress, std::span<const MappedSegment> segments, bool is64, bool startsInSection=false) const;
     uint32_t                pageSize() const;
     void                    forEachFixupChainStartLocation(std::span<const MappedSegment> segments,
                                                            void (^callback)(const void* chainStart, uint32_t segIndex, uint32_t pageIndex,

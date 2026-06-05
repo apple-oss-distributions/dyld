@@ -314,6 +314,15 @@ mach_o::Error LibSystemHelpers::setUpThreadLocals(const DyldSharedCache* cache, 
 #endif
 }
 
+// Added in version 8
+bool LibSystemHelpers::os_unfair_recursive_lock_trylock(dyld_recursive_mutex_t lock) const
+{
+#if !TARGET_OS_EXCLAVEKIT
+    return ::os_unfair_recursive_lock_trylock(lock);
+#else
+    return false;
+#endif
+}
 
 } // namespace dyld4
 

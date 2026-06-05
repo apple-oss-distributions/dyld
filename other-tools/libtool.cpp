@@ -448,7 +448,8 @@ std::vector<CString> libtool::getObjectGlobalSymbols(const Input& input) const
         }
 #endif
     }
-    if ( _warnNoSymbols && results.empty() && (input.memberInfo.name != ALWAYS_LOAD_MEMBER_NAME) )
+    // warn about .o files with no global symbols, unless in ranlib mode, or .o file is special auto link file
+    if ( _warnNoSymbols && results.empty() && (input.memberInfo.name != ALWAYS_LOAD_MEMBER_NAME) && !_ranlibMode )
         fprintf(stderr, "%s: warning: '%s' has no symbols\n", __progname, input.path.leafName().c_str());
 
     return results;
@@ -586,7 +587,8 @@ Error libtool::makeThinStaticLib(std::span<const Input*> inputs, std::span<const
 
     // write TRACE_SYMBOLS_FILE if requested
     if ( !_traceSymbolsFilePath.empty() ) {
-        Error traceErr = writeTraceSymbolsFile(inputs[0]->slice.arch, libBuffer, symbolAndMemberIndexes);
+        Architecture traceArch = inputs.empty() ? Architecture::invalid : inputs[0]->slice.arch;
+        Error traceErr = writeTraceSymbolsFile(traceArch, libBuffer, symbolAndMemberIndexes);
         if ( traceErr )
             fprintf(stderr, "%s: warning: %s\n", __progname, traceErr.message());
     }
@@ -616,7 +618,8 @@ Error libtool::writeTraceSymbolsFile(Architecture arch, std::span<const uint8_t>
     jsonEntry += " \"version\":\"2\",";
     jsonEntry += " \"minor-version\":1,";
     jsonEntry += " \"name\":\"" + std::string(_outPath.leafName()) + "\",";
-    jsonEntry += " \"arch\":\"" + std::string(arch.name()) + "\",";
+    CString archName = (arch == Architecture::invalid ? "none" : arch.name());
+    jsonEntry += " \"arch\":\"" + std::string(archName) + "\",";
     // if mach-o, record the platform (skip for bitcode files)
     if ( std::optional<Archive> ar = Archive::isArchive(fileBuffer) ) {
         __block std::set<std::string> seenPlatformVersions;

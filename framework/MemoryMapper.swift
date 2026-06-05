@@ -134,8 +134,9 @@ internal final class MachOMapper: Mapper {
             default: return
             }
         }
-        let slide = address - preferredAddress
-        
+        // It is possible (but rare) for the preferred load address to be above the rebased address, resulting in a negative slide
+        let slide = address &- preferredAddress
+
         try! unsafeSegmentArray.object.asArray().forEach { segment in
             var vmSize:         UInt64!
             var fileSize:       UInt64!
@@ -150,7 +151,7 @@ internal final class MachOMapper: Mapper {
             }
             mappingRanges.append(MemoryMap.Mapping(source:.file(0),
                                                    sourceStart:currentfileOffset,
-                                                   destStart:segmentAddress + slide,
+                                                   destStart:segmentAddress &+ slide,
                                                    size:vmSize))
             currentfileOffset += fileSize
         }
@@ -217,7 +218,8 @@ struct SharedCacheMapper: Mapper {
             default: return
             }
         }
-        let slide = address - preferredLoadAddress
+        // It is possible (but rare) for the preferred load address to be above the rebased address, resulting in a negative slide
+        let slide = address &- preferredLoadAddress
         let localCacheUUID = localCacheUUID()
         var localCacheSize = size_t(0)
         let localCacheAddress = UInt64(UInt(bitPattern:_dyld_get_shared_cache_range(&localCacheSize)))
@@ -250,12 +252,12 @@ struct SharedCacheMapper: Mapper {
                 if uuid == localCacheUUID, prot == (PROT_READ | PROT_EXEC) {
                     mappingRanges.append(MemoryMap.Mapping(source:.localMemory,
                                                            sourceStart:localCacheAddress + vmOffset + fileOffset,
-                                                           destStart:preferredAddress + slide,
+                                                           destStart:preferredAddress &+ slide,
                                                            size:vmSize))
                 } else {
                     mappingRanges.append(MemoryMap.Mapping(source:.file(files.count),
                                                            sourceStart:fileOffset,
-                                                           destStart:preferredAddress + slide,
+                                                           destStart:preferredAddress &+ slide,
                                                            size:vmSize))
                 }
             }

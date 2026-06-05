@@ -190,7 +190,7 @@ void ChainedFixups::forEachFixupChainStartLocation(std::span<const MappedSegment
 }
 
 
-Error ChainedFixups::validLinkedit(uint64_t preferredLoadAddress, std::span<const MappedSegment> segments) const
+Error ChainedFixups::validLinkedit(uint64_t preferredLoadAddress, bool is64, std::span<const MappedSegment> segments) const
 {
     // validate dyld_chained_fixups_header
     if ( _fixupsHeader->fixups_version != 0 )
@@ -252,6 +252,8 @@ Error ChainedFixups::validLinkedit(uint64_t preferredLoadAddress, std::span<cons
             return Error("chained fixups, page_size not 4KB or 16KB in segment #%d", i);
         if ( !PointerFormat::valid(segInfo->pointer_format) )
             return Error("chained fixups, unknown pointer_format in segment #%d", i);
+        if ( PointerFormat::make(segInfo->pointer_format).is64() != is64 )
+            return Error("chained fixups, pointer_format=%d in segment #%d does not match pointer size", segInfo->pointer_format, i);
         if ( !pointer_format_found ) {
             pointer_format_for_all = segInfo->pointer_format;
             pointer_format_found = true;
@@ -281,13 +283,16 @@ Error ChainedFixups::validLinkedit(uint64_t preferredLoadAddress, std::span<cons
                     return Error("chained fixups, in segment #%d page_start[%d]=0x%04X exceeds page size", i, pageIndex, offsetInPage);
                 }
             }
+            else if ( is64 ) {
+                return Error("chained fixups, in segment #%d page_start[%d]=0x%04X multi-start chains not supported in 64-bit archs", i, pageIndex, offsetInPage);
+            }
             else {
                 // this is actually an index into chain_starts[]
                 uint32_t overflowIndex = offsetInPage & ~DYLD_CHAINED_PTR_START_MULTI;
                 // now verify all starts are within the page and in ascending order
                 uint16_t lastOffsetInPage = 0;
                 do {
-                    if ( overflowIndex > maxOverflowIndex )
+                    if ( overflowIndex >= maxOverflowIndex )
                         return Error("chain overflow index out of range %d (max=%d) in segment #%d", overflowIndex, maxOverflowIndex, i);
                     offsetInPage = (segInfo->page_start[overflowIndex] & ~DYLD_CHAINED_PTR_START_LAST);
                     if ( offsetInPage > segInfo->page_size )
@@ -296,6 +301,8 @@ Error ChainedFixups::validLinkedit(uint64_t preferredLoadAddress, std::span<cons
                         return Error("chained fixups, in segment #%d overflow page_start[%d]=0x%04X is before previous at 0x%04X\n", i, overflowIndex, offsetInPage, lastOffsetInPage);
                     lastOffsetInPage = offsetInPage;
                     ++overflowIndex;
+                    if ( overflowIndex >= maxOverflowIndex )
+                        return Error("chain overflow index out of range %d (max=%d) in segment #%d", overflowIndex, maxOverflowIndex, i);
                 } while ( (segInfo->page_start[overflowIndex] & DYLD_CHAINED_PTR_START_LAST) == 0 );
             }
         }
@@ -328,12 +335,12 @@ Error ChainedFixups::validStartsSection(std::span<const MappedSegment> segments)
 }
 
 Error ChainedFixups::valid(uint64_t preferredLoadAddress, std::span<const MappedSegment> segments,
-                           bool startsInSection) const
+                           bool is64, bool startsInSection) const
 {
     if ( startsInSection ) {
         return validStartsSection(segments);
     } else {
-        return validLinkedit(preferredLoadAddress, segments);
+        return validLinkedit(preferredLoadAddress, is64, segments);
     }
 }
 const char* ChainedFixups::importsFormatName(uint32_t format)

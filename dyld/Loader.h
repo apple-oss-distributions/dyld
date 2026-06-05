@@ -170,6 +170,7 @@ public:
         bool        canBeExecutable     = false;
         bool        forceUnloadable     = false;
         bool        requestorNeedsFallbacks = false;
+        bool        conservativeNoLoad  = false;
         LoadChain*  rpathStack          = nullptr;
         Finder      finder              = nullptr;
         Missing     pathNotFoundHandler = nullptr;

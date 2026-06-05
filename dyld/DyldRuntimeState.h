@@ -332,6 +332,7 @@ public:
     void                    takeDlopenLockBeforeFork();
     void                    releaseDlopenLockInForkParent();
     void                    resetDlopenLockInForkChild();
+    bool                    couldDlopenLock();
     void                    setHelpers(LibSystemHelpersWrapper helpers) { _libSystemHelpers = helpers; }
 
 private:
@@ -996,6 +997,8 @@ class VIS_HIDDEN RecursiveAutoLock
 public:
     RecursiveAutoLock(RuntimeState& state, bool skip=false);
     ~RecursiveAutoLock();
+    
+    bool                couldLock();
 private:
     RuntimeLocks&       _runtimeLocks;
     bool                _skip;

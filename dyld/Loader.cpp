@@ -858,6 +858,20 @@ const Loader* Loader::getLoader(Diagnostics& diag, RuntimeState& state, const ch
                                     continue;
                                 for ( const Loader* ldr : *list ) {
                                     if ( ldr->matchesPath(state, possiblePath) ) {
+                                        if ( options.rtldNoLoad && options.conservativeNoLoad ) {
+                                            // don't return handle in RTLD_NOLOAD mode until all initializers have been run
+#if SUPPORT_PREBUILTLOADERS
+                                            if ( const PrebuiltLoader* pbl = ldr->isPrebuiltLoader() ) {
+                                                if ( !pbl->isInitialized(state) )
+                                                    continue;
+                                            }
+                                            else
+#endif
+                                            if ( const JustInTimeLoader* jl = ldr->isJustInTimeLoader() ) {
+                                                if ( !jl->initializersDone() )
+                                                    continue;
+                                            }
+                                        }
                                         result = ldr;
                                         stop   = true;
                                         diag.clearError(); // found dylib, so clear any errors from previous paths tried
@@ -886,6 +900,20 @@ const Loader* Loader::getLoader(Diagnostics& diag, RuntimeState& state, const ch
                                         continue;
                                     for ( const Loader* ldr : *list ) {
                                         if ( ldr->representsCachedDylibIndex(possibleCacheIndex) ) {
+                                            if ( options.rtldNoLoad && options.conservativeNoLoad ) {
+                                                // don't return handle in RTLD_NOLOAD mode until all initializers have been run
+#if SUPPORT_PREBUILTLOADERS
+                                                if ( const PrebuiltLoader* pbl = ldr->isPrebuiltLoader() ) {
+                                                    if ( !pbl->isInitialized(state) )
+                                                        continue;
+                                                }
+                                                else
+#endif
+                                                if ( const JustInTimeLoader* jl = ldr->isJustInTimeLoader() ) {
+                                                    if ( !jl->initializersDone() )
+                                                        continue;
+                                                }
+                                            }
                                             result = ldr;
                                             stop   = true;
                                             diag.clearError(); // found dylib, so clear any errors from previous paths tried
@@ -2564,16 +2592,16 @@ void Loader::findAndRunAllInitializers(RuntimeState& state) const
     Diagnostics                           diag;
     const MachOAnalyzer*                  ma              = this->analyzer(state);
     dyld3::MachOAnalyzer::VMAddrConverter vmAddrConverter = ma->makeVMAddrConverter(true);
-    ma->forEachInitializer(diag, vmAddrConverter, ^(uint32_t offset) {
-        void *func = (void *)((uint8_t*)ma + offset);
-        if ( state.config.log.initializers )
-            state.log("running initializer %p in %s\n", func, this->path(state));
-        // Note we send the tracing event with the unauthenticated pointer
-        dyld3::ScopedTimer timer(DBG_DYLD_TIMING_STATIC_INITIALIZER, (uint64_t)ma, (uint64_t)func, 0);
+    MemoryManager::withReadOnlyMemory([&] {
+        ma->forEachInitializer(diag, vmAddrConverter, ^(uint32_t offset) {
+            void *func = (void *)((uint8_t*)ma + offset);
+            if ( state.config.log.initializers )
+                state.log("running initializer %p in %s\n", func, this->path(state));
+            // Note we send the tracing event with the unauthenticated pointer
+            dyld3::ScopedTimer timer(DBG_DYLD_TIMING_STATIC_INITIALIZER, (uint64_t)ma, (uint64_t)func, 0);
 #if __has_feature(ptrauth_calls)
-        func = __builtin_ptrauth_sign_unauthenticated(func, ptrauth_key_asia, 0);
+            func = __builtin_ptrauth_sign_unauthenticated(func, ptrauth_key_asia, 0);
 #endif
-        MemoryManager::withReadOnlyMemory([&]{
             ((Initializer)func)(state.config.process.argc, state.config.process.argv, state.config.process.envp, state.config.process.apple, &state.vars);
         });
     });

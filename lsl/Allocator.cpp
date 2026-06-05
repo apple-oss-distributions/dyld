@@ -670,6 +670,10 @@ void Allocator::free(void* ptr) {
 #if !DYLD_FEATURE_USE_INTERNAL_ALLOCATOR
     ::free(ptr);
 #else
+#if !TARGET_OS_EXCLAVEKIT
+    auto& memoryManager =  MemoryManager::memoryManager();
+    __unused auto lock = memoryManager.lockGuard();
+#endif
     ALLOCATOR_LOG("ALLOCATOR(0x%llx/%llu)\tfree:          (0x%llx)\n", (uint64_t)this, +_logID++, (uint64_t)ptr);
     ALLOCATOR_TRACE("allocator.free(alloc%llu);\n", (uint64_t)ptr);
     AllocationMetadata* metadata = AllocationMetadata::forPtr(ptr);
@@ -684,6 +688,10 @@ bool Allocator::realloc(void* ptr, uint64_t size) {
     return false;
 #else
     if (!ptr) { return false; }
+#if !TARGET_OS_EXCLAVEKIT
+    auto& memoryManager =  MemoryManager::memoryManager();
+    __unused auto lock = memoryManager.lockGuard();
+#endif
     AllocationMetadata* metadata = AllocationMetadata::forPtr(ptr);
     const uint64_t targetSize = (std::max<uint64_t>(size, 16ULL) + (15ULL) & -16ULL);
     const uint64_t currentSize = metadata->size();

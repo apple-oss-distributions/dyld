@@ -26,6 +26,7 @@
 #include <string>
 #include <sys/mman.h>
 #include <sys/stat.h>
+#include <sys/sysctl.h>
 
 #include "FileUtils.h"
 #include "StringUtils.h"
@@ -314,8 +315,22 @@ static ssize_t write64(int fildes, const void *buf, size_t nbyte)
     return total;
 }
 
+// Returns true if the host macOS version is older than major.minor
+static bool hostOlderThan(unsigned major, unsigned minor)
+{
+    char osversion[32];
+    size_t osversionSize = sizeof(osversion);
+    if ( sysctlbyname("kern.osproductversion", osversion, &osversionSize, nullptr, 0) != 0 )
+        return false;
+    unsigned hostMajor = 0, hostMinor = 0;
+    sscanf(osversion, "%u.%u", &hostMajor, &hostMinor);
+    if ( hostMajor != major )
+        return hostMajor < major;
+    return hostMinor < minor;
+}
+
 static bool writeMRMResults(bool cacheBuildSuccess, MRMSharedCacheBuilder* sharedCacheBuilder,
-                            const std::string& dstRoot, bool verbose) {
+                            const std::string& dstRoot, bool verbose, bool skipAtlas) {
     if (!cacheBuildSuccess) {
         uint64_t errorCount = 0;
         if (const char* const* errors = getErrors(sharedCacheBuilder, &errorCount)) {
@@ -364,6 +379,12 @@ static bool writeMRMResults(bool cacheBuildSuccess, MRMSharedCacheBuilder* share
                 case ChangeFile:
                     continue;
             }
+
+            // On hosts older than macOS 26.4 the atlas file is incompatible
+            // with the host dyld, causing slow debug-session startup (rdar://173557792).
+            // Skip writing it so the debugger falls back to scavenging.
+            if ( skipAtlas && endsWith(std::string_view(fileResult.path), std::string_view(".atlas")) )
+                continue;
 
             if ( fileResult.data != nullptr ) {
                 const std::string path = dstRoot + "/" + fileResult.path;
@@ -621,13 +642,25 @@ int main(int argc, const char* argv[], const char* envp[])
 
     // check if cache is already up to date
     if ( !force ) {
-        if ( allCachesUpToDate(buildArchs, cacheDir, mappedFiles, verbose) )
+        if ( allCachesUpToDate(buildArchs, cacheDir, mappedFiles, verbose) ) {
+            // Even when the cache is current, remove any stale atlas files left
+            // by a previous tool that didn't have this fix (rdar://173557792).
+            if ( hostOlderThan(26, 4) ) {
+                for ( const char* arch : buildArchs ) {
+                    std::string atlasPath = cacheDir + "/" + "dyld_sim_shared_cache_" + arch + ".atlas";
+                    ::unlink(atlasPath.c_str());
+                }
+            }
             return 0;
+        }
     }
 
     bool cacheBuildSuccess = runSharedCacheBuilder(sharedCacheBuilder);
 
-    bool cacheWriteSuccess = writeMRMResults(cacheBuildSuccess, sharedCacheBuilder, cacheDir, verbose);
+    // On hosts older than macOS 26.4 the atlas is incompatible, skip writing it (rdar://173557792)
+    bool skipAtlas = hostOlderThan(26, 4);
+
+    bool cacheWriteSuccess = writeMRMResults(cacheBuildSuccess, sharedCacheBuilder, cacheDir, verbose, skipAtlas);
 
     destroySharedCacheBuilder(sharedCacheBuilder);
 

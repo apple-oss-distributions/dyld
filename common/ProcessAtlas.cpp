@@ -258,10 +258,10 @@ SharedPtr<Mapper> Mapper::mapperForSharedCache(Allocator& _ephemeralAllocator, F
                 snprintf(&subCachePath[0], sizeof(subCachePath), "%s%s", basePath, subCaches[i].fileSuffix);
             }
             fd = open(subCachePath, O_RDONLY);
-            fds.insert(fd);
             if ( fd == -1 ) {
                 break;
             }
+            fds.insert(fd);
             // TODO: We should check we have enough space, but for now just allocate a page
             uint8_t firstSubPage[kCachePeekSize];
             const dyld_cache_header* subCache = cacheFilePeek(fd, &firstSubPage[0]);

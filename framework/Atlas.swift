@@ -64,7 +64,7 @@ enum AtlasError: Error, BPListErrorWrapper {
     case truncatedUuid
     case truncatedData
     case missingPlist
-    case missingRequiredPlistField
+    case missingRequiredPlistField(String, any OptionSet, any OptionSet)
     case missingAddressField
     case missingFileError
     case memoryUpdateError
@@ -142,7 +142,7 @@ internal extension Image {
         let preferredAddress:       PreferredAddress?
         let address:                RebasedAddress
         let sharedCache:            Bool
-        let segments:               BPList.UnsafeObject // ArrayGuts
+        let segments:               BPList.UnsafeObject? // ArrayGuts
         init(unsafeBPListObject: BPList.UnsafeObject, context:(Snapshot.DecoderContext,Slide?)) {
             self.context = context.0
             var uuid:                   UUID?
@@ -229,7 +229,9 @@ extension Image {
         lazy var segments: [Segment.Impl] = {
             let slide = address - preferredLoadAddress
             let context = info.resolved.context
-            let segmentArrayObject = info.resolved.segments
+            guard let segmentArrayObject = info.resolved.segments else {
+                return []
+            }
             return try! segmentArrayObject.object.asArray().map { plistObject in
                 return Segment.Impl(unsafeBPListObject:plistObject.asUnsafeObject(), context:context, slide: slide)
             }

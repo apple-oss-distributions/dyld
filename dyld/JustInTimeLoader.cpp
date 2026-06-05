@@ -937,6 +937,7 @@ bool JustInTimeLoader::beginInitializers(RuntimeState&)
 void JustInTimeLoader::runInitializers(RuntimeState& state) const
 {
     this->findAndRunAllInitializers(state);
+    this->finishedInits = true;
     // FIXME: Should we run "JIT" initializers *after* regular initializers, or
     //        should it be either/or?
     // The main use-case for extending an existing image with JIT'd code is the
@@ -1066,6 +1067,7 @@ JustInTimeLoader* JustInTimeLoader::make(RuntimeState& state, const MachOFile* m
     strlcpy(((char*)p) + p->pathOffset, path, PATH_MAX);
     //state.log("JustInTimeLoader::make(%p, %s) => %p\n", ma, path, p);
     p->delayInit       = false;
+    p->finishedInits   = false;
 
     state.add(p);
 #if BUILDING_DYLD
